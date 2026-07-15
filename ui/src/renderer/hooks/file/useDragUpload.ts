@@ -10,12 +10,13 @@ import { Message } from '@arco-design/web-react';
 import type { FileMetadata } from '@renderer/services/FileService';
 import { isSupportedFile, FileService } from '@renderer/services/FileService';
 import type { UploadSource } from '@renderer/hooks/file/useUploadState';
+import type { ConversationId } from '@/common/types/ids';
 
 export interface UseDragUploadOptions {
   supportedExts?: string[];
   onFilesAdded?: (files: FileMetadata[]) => void;
   /** Conversation ID for WebUI file uploads */
-  conversation_id?: string;
+  conversation_id?: ConversationId;
   /** Upload surface used for progress scoping (defaults to 'sendbox') */
   source?: UploadSource;
 }

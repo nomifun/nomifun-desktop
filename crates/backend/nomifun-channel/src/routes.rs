@@ -11,7 +11,10 @@ use nomifun_api_types::{
     DisablePluginRequest, EnablePluginRequest, PairingRequestResponse, PluginStatusResponse, RejectPairingRequest,
     RevokeUserRequest, SyncChannelSettingsRequest, TestPluginRequest, TestPluginResponse,
 };
-use nomifun_common::AppError;
+use nomifun_common::{
+    AppError, ChannelId, ChannelSessionId, ChannelUserId, CompanionId, ConversationId,
+    PublicAgentId,
+};
 use nomifun_db::IChannelRepository;
 use nomifun_extension::{ExtensionRegistry, ResolvedChannelPlugin};
 use serde::{Deserialize, Serialize};
@@ -95,9 +98,9 @@ pub fn channel_routes(state: ChannelRouterState) -> Router {
 
 /// `GET /api/channel/plugins` — get status of all registered plugins.
 ///
-/// Returns one entry per channel row (multiple bots may share a platform
-/// type), plus a placeholder per builtin platform that has no rows yet and
-/// per extension plugin that was never configured.
+/// Returns one entry per persisted channel row (multiple bots may share a
+/// platform type). Platform/extension discovery is metadata, not an entity,
+/// and therefore never appears here as a fake `plugin_id`.
 async fn get_plugin_status(
     State(state): State<ChannelRouterState>,
 ) -> Result<Json<ApiResponse<Vec<ChannelPluginStatusView>>>, AppError> {
@@ -127,8 +130,6 @@ async fn get_plugin_status(
 
     // Rows are keyed by their own id — two lark bots are two entries.
     let mut views: Vec<ChannelPluginStatusView> = Vec::new();
-    let mut seen_types: std::collections::HashSet<String> = std::collections::HashSet::new();
-
     for status in statuses {
         let plugin_type = status.plugin_type.clone();
         let is_extension = !builtin_types.contains(plugin_type.as_str());
@@ -137,25 +138,12 @@ async fn get_plugin_status(
             continue;
         }
 
-        seen_types.insert(plugin_type.clone());
         views.push(ChannelPluginStatusView::from_manager_status(
             status,
             is_extension
                 .then(|| extension_map.get(&plugin_type).map(ChannelExtensionMetaView::from))
                 .flatten(),
         ));
-    }
-
-    for plugin in extension_map.values() {
-        if !seen_types.contains(&plugin.id) {
-            views.push(ChannelPluginStatusView::extension_placeholder(plugin));
-        }
-    }
-
-    for (plugin_type, display_name) in builtin_names {
-        if !seen_types.contains(plugin_type) {
-            views.push(ChannelPluginStatusView::builtin_placeholder(plugin_type, display_name));
-        }
     }
 
     views.sort_by(|left, right| {
@@ -238,49 +226,6 @@ impl ChannelPluginStatusView {
         }
     }
 
-    fn extension_placeholder(plugin: &ResolvedChannelPlugin) -> Self {
-        Self {
-            plugin_id: plugin.id.clone(),
-            plugin_type: plugin.id.clone(),
-            name: plugin.name.clone(),
-            enabled: false,
-            status: Some("stopped".to_string()),
-            last_connected: None,
-            companion_id: None,
-            public_agent_id: None,
-            bot_key: None,
-            created_at: None,
-            updated_at: None,
-            connected: false,
-            has_token: false,
-            bot_username: None,
-            active_users: 0,
-            is_extension: Some(true),
-            extension_meta: Some(ChannelExtensionMetaView::from(plugin)),
-        }
-    }
-
-    fn builtin_placeholder(plugin_type: &str, display_name: &str) -> Self {
-        Self {
-            plugin_id: plugin_type.to_string(),
-            plugin_type: plugin_type.to_string(),
-            name: display_name.to_string(),
-            enabled: false,
-            status: Some("stopped".to_string()),
-            last_connected: None,
-            companion_id: None,
-            public_agent_id: None,
-            bot_key: None,
-            created_at: None,
-            updated_at: None,
-            connected: false,
-            has_token: false,
-            bot_username: None,
-            active_users: 0,
-            is_extension: Some(false),
-            extension_meta: None,
-        }
-    }
 }
 
 impl From<&ResolvedChannelPlugin> for ChannelExtensionMetaView {
@@ -297,9 +242,9 @@ impl From<&ResolvedChannelPlugin> for ChannelExtensionMetaView {
 
 /// `POST /api/channel/plugins/enable` — enable a bot channel with config.
 ///
-/// `plugin_id` updates an existing channel row (legacy callers pass the
-/// platform name); absent `plugin_id` + `plugin_type` creates a new bot
-/// channel. `companion_id` binds the bot to a companion (validated against the live
+/// A canonical `plugin_id` updates an existing channel row; absent `plugin_id`
+/// plus `plugin_type` creates a new bot channel.
+/// `companion_id` binds the bot to a companion (validated against the live
 /// roster).
 async fn enable_plugin(
     State(state): State<ChannelRouterState>,
@@ -307,16 +252,17 @@ async fn enable_plugin(
 ) -> Result<Json<ApiResponse<BridgeResponse>>, AppError> {
     let Json(req) = body.map_err(|e| AppError::BadRequest(e.to_string()))?;
 
-    if let Some(plugin_id) = req.plugin_id.as_deref()
-        && let Some(extension_plugin) = resolve_extension_channel_plugin(&state, plugin_id).await
+    if req.plugin_id.is_none()
+        && let Some(plugin_type) = req.plugin_type.as_deref()
+        && let Some(extension_plugin) = resolve_extension_channel_plugin(&state, plugin_type).await
     {
         let config = build_extension_config(&extension_plugin, &req.config)?;
         match state
             .manager
-            .enable_extension_plugin(plugin_id, &extension_plugin.name, &config)
+            .enable_extension_plugin(plugin_type, &extension_plugin.name, &config)
             .await
         {
-            Ok(()) => {
+            Ok(_) => {
                 return Ok(Json(ApiResponse::ok(BridgeResponse {
                     success: true,
                     message: Some("Plugin enabled".into()),
@@ -324,7 +270,7 @@ async fn enable_plugin(
                 })));
             }
             Err(e) => {
-                warn!(plugin_id = %plugin_id, error = %e, "enable extension plugin failed");
+                warn!(plugin_type = %plugin_type, error = %e, "enable extension plugin failed");
                 return Ok(Json(ApiResponse::ok(BridgeResponse {
                     success: false,
                     message: None,
@@ -334,27 +280,38 @@ async fn enable_plugin(
         }
     }
 
+    if let Some(plugin_id) = req.plugin_id.as_deref() {
+        ChannelId::parse(plugin_id)
+            .map_err(|error| AppError::BadRequest(format!("invalid plugin_id: {error}")))?;
+    }
+
     // A typo'd or already-deleted companion id must fail here instead of being
     // persisted onto the channel row.
-    if let Some(companion_id) = req.companion_id.as_deref().filter(|s| !s.is_empty())
-        && let Some(profile) = &state.channel_agent_profile
-        && !profile.companion_exists(companion_id).await
-    {
-        return Err(AppError::BadRequest(format!("companion '{companion_id}' not found")));
+    if let Some(companion_id) = req.companion_id.as_deref() {
+        CompanionId::parse(companion_id)
+            .map_err(|error| AppError::BadRequest(format!("invalid companion_id: {error}")))?;
+        if let Some(profile) = &state.channel_agent_profile
+            && !profile.companion_exists(companion_id).await
+        {
+            return Err(AppError::BadRequest(format!("companion '{companion_id}' not found")));
+        }
     }
 
     // A non-empty public_agent_id must name a LIVE public agent (validated
     // against the roster, mirroring the companion check). Row-level mutual
     // exclusivity (public agent clears companion) is applied in the manager.
-    if let Some(public_agent_id) = req.public_agent_id.as_deref().filter(|s| !s.is_empty())
-        && let Some(profile) = &state.channel_agent_profile
-        && !profile.public_agent_exists(public_agent_id).await
-    {
-        return Err(AppError::BadRequest(format!("public agent '{public_agent_id}' not found")));
+    if let Some(public_agent_id) = req.public_agent_id.as_deref() {
+        PublicAgentId::parse(public_agent_id)
+            .map_err(|error| AppError::BadRequest(format!("invalid public_agent_id: {error}")))?;
+        if let Some(profile) = &state.channel_agent_profile
+            && !profile.public_agent_exists(public_agent_id).await
+        {
+            return Err(AppError::BadRequest(format!("public agent '{public_agent_id}' not found")));
+        }
     }
 
     let spec = EnableChannelSpec {
-        plugin_id: req.plugin_id.clone().filter(|s| !s.is_empty()),
+        plugin_id: req.plugin_id.clone(),
         plugin_type: req.plugin_type.clone(),
         companion_id: req.companion_id.clone(),
         public_agent_id: req.public_agent_id.clone(),
@@ -423,16 +380,6 @@ async fn disable_plugin(
 ) -> Result<Json<ApiResponse<BridgeResponse>>, AppError> {
     let Json(req) = body.map_err(|e| AppError::BadRequest(e.to_string()))?;
 
-    if resolve_extension_channel_plugin(&state, &req.plugin_id).await.is_some()
-        && state.repo.get_plugin(&req.plugin_id).await?.is_none()
-    {
-        return Ok(Json(ApiResponse::ok(BridgeResponse {
-            success: true,
-            message: Some("Plugin disabled".into()),
-            error: None,
-        })));
-    }
-
     match state.manager.disable_plugin(&req.plugin_id).await {
         Ok(()) => Ok(Json(ApiResponse::ok(BridgeResponse {
             success: true,
@@ -484,7 +431,7 @@ async fn test_plugin(
 ) -> Result<Json<ApiResponse<TestPluginResponse>>, AppError> {
     let Json(req) = body.map_err(|e| AppError::BadRequest(e.to_string()))?;
 
-    if let Some(extension_plugin) = resolve_extension_channel_plugin(&state, &req.plugin_id).await {
+    if let Some(extension_plugin) = resolve_extension_channel_plugin(&state, &req.plugin_type).await {
         let _config = build_extension_test_config(&extension_plugin, &req)?;
         return Ok(Json(ApiResponse::ok(TestPluginResponse {
             success: true,
@@ -497,7 +444,7 @@ async fn test_plugin(
 
     match state
         .manager
-        .test_plugin(&req.plugin_id, config, state.plugin_factory.as_ref())
+        .test_plugin(&req.plugin_type, config, state.plugin_factory.as_ref())
         .await
     {
         Ok(bot_username) => Ok(Json(ApiResponse::ok(TestPluginResponse {
@@ -524,16 +471,23 @@ async fn get_pending_pairings(
     let rows = state.pairing_service.get_pending_pairings().await?;
     let responses: Vec<PairingRequestResponse> = rows
         .into_iter()
-        .map(|r| PairingRequestResponse {
-            code: r.code,
-            platform_user_id: r.platform_user_id,
-            platform_type: r.platform_type,
-            channel_id: r.channel_id,
-            display_name: r.display_name,
-            requested_at: r.requested_at,
-            expires_at: r.expires_at,
+        .map(|r| {
+            if let Some(id) = r.channel_id.as_deref() {
+                ChannelId::parse(id).map_err(|error| {
+                    corrupt_channel_id("channel_pairing_codes.channel_id", id, error)
+                })?;
+            }
+            Ok(PairingRequestResponse {
+                code: r.code,
+                platform_user_id: r.platform_user_id,
+                platform_type: r.platform_type,
+                channel_id: r.channel_id,
+                display_name: r.display_name,
+                requested_at: r.requested_at,
+                expires_at: r.expires_at,
+            })
         })
-        .collect();
+        .collect::<Result<_, AppError>>()?;
     Ok(Json(ApiResponse::ok(responses)))
 }
 
@@ -580,16 +534,24 @@ async fn get_authorized_users(
     let rows = state.repo.get_all_users().await?;
     let responses: Vec<ChannelUserResponse> = rows
         .into_iter()
-        .map(|r| ChannelUserResponse {
-            id: r.id,
-            platform_user_id: r.platform_user_id,
-            platform_type: r.platform_type,
-            channel_id: r.channel_id,
-            display_name: r.display_name,
-            authorized_at: r.authorized_at,
-            last_active: r.last_active,
+        .map(|r| {
+            ChannelUserId::parse(&r.id)
+                .map_err(|error| corrupt_channel_id("channel_users.id", &r.id, error))?;
+            if let Some(id) = r.channel_id.as_deref() {
+                ChannelId::parse(id)
+                    .map_err(|error| corrupt_channel_id("channel_users.channel_id", id, error))?;
+            }
+            Ok(ChannelUserResponse {
+                id: r.id,
+                platform_user_id: r.platform_user_id,
+                platform_type: r.platform_type,
+                channel_id: r.channel_id,
+                display_name: r.display_name,
+                authorized_at: r.authorized_at,
+                last_active: r.last_active,
+            })
         })
-        .collect();
+        .collect::<Result<_, AppError>>()?;
     Ok(Json(ApiResponse::ok(responses)))
 }
 
@@ -626,18 +588,35 @@ async fn get_active_sessions(
     let rows = state.session_manager.get_active_sessions().await?;
     let responses: Vec<ChannelSessionResponse> = rows
         .into_iter()
-        .map(|r| ChannelSessionResponse {
-            id: r.id,
-            user_id: r.user_id,
-            agent_type: r.agent_type,
-            conversation_id: r.conversation_id,
-            workspace: r.workspace,
-            chat_id: r.chat_id,
-            channel_id: r.channel_id,
-            created_at: r.created_at,
-            last_activity: r.last_activity,
+        .map(|r| {
+            ChannelSessionId::parse(&r.id)
+                .map_err(|error| corrupt_channel_id("channel_sessions.id", &r.id, error))?;
+            ChannelUserId::parse(&r.user_id).map_err(|error| {
+                corrupt_channel_id("channel_sessions.user_id", &r.user_id, error)
+            })?;
+            if let Some(id) = r.conversation_id.as_deref() {
+                ConversationId::parse(id).map_err(|error| {
+                    corrupt_channel_id("channel_sessions.conversation_id", id, error)
+                })?;
+            }
+            if let Some(id) = r.channel_id.as_deref() {
+                ChannelId::parse(id).map_err(|error| {
+                    corrupt_channel_id("channel_sessions.channel_id", id, error)
+                })?;
+            }
+            Ok(ChannelSessionResponse {
+                id: r.id,
+                user_id: r.user_id,
+                agent_type: r.agent_type,
+                conversation_id: r.conversation_id,
+                workspace: r.workspace,
+                chat_id: r.chat_id,
+                channel_id: r.channel_id,
+                created_at: r.created_at,
+                last_activity: r.last_activity,
+            })
         })
-        .collect();
+        .collect::<Result<_, AppError>>()?;
     Ok(Json(ApiResponse::ok(responses)))
 }
 
@@ -672,15 +651,15 @@ async fn sync_channel_settings(
 ///
 /// `plugin_id` set → rebind one bot channel (the multi-bot path; only that
 /// channel's sessions are cleared). `platform` set → platform-level
-/// binding (key `channels.{platform}.companionId`, clears all sessions).
+/// binding (key `channels.{platform}.companion_id`, clears all sessions).
 /// `companion_id: None` / empty string clears the binding.
 #[derive(Debug, Deserialize)]
 struct SetChannelCompanionRequest {
-    #[serde(default, alias = "pluginId")]
+    #[serde(default)]
     plugin_id: Option<String>,
     #[serde(default)]
     platform: Option<String>,
-    #[serde(default, alias = "companionId")]
+    #[serde(default)]
     companion_id: Option<String>,
 }
 
@@ -697,20 +676,25 @@ async fn set_channel_companion(
 ) -> Result<Json<ApiResponse<BridgeResponse>>, AppError> {
     let Json(req) = body.map_err(|e| AppError::BadRequest(e.to_string()))?;
 
-    // Validate a non-empty binding against the live companion roster: a typo'd or
+    // Validate a binding against the live companion roster: a typo'd or
     // already-deleted companion id must 400 here instead of being persisted and
     // silently leaving subsequent sessions without a live owner. Clearing the
-    // binding (None / empty string) needs no validation.
-    if let Some(companion_id) = req.companion_id.as_deref().filter(|s| !s.is_empty())
-        && let Some(profile) = &state.channel_agent_profile
-        && !profile.companion_exists(companion_id).await
-    {
-        return Err(AppError::BadRequest(format!("companion '{companion_id}' not found")));
+    // binding (`None`) needs no validation.
+    if let Some(companion_id) = req.companion_id.as_deref() {
+        CompanionId::parse(companion_id)
+            .map_err(|error| AppError::BadRequest(format!("invalid companion_id: {error}")))?;
+        if let Some(profile) = &state.channel_agent_profile
+            && !profile.companion_exists(companion_id).await
+        {
+            return Err(AppError::BadRequest(format!("companion '{companion_id}' not found")));
+        }
     }
 
-    let companion_id = req.companion_id.as_deref().map(str::trim).filter(|s| !s.is_empty());
+    let companion_id = req.companion_id.as_deref();
 
-    if let Some(plugin_id) = req.plugin_id.as_deref().filter(|s| !s.is_empty()) {
+    if let Some(plugin_id) = req.plugin_id.as_deref() {
+        ChannelId::parse(plugin_id)
+            .map_err(|error| AppError::BadRequest(format!("invalid plugin_id: {error}")))?;
         state.manager.rebind_channel_companion(plugin_id, companion_id).await?;
         return Ok(Json(ApiResponse::ok(BridgeResponse {
             success: true,
@@ -747,20 +731,20 @@ async fn set_channel_companion(
 ///
 /// Rebinds one bot channel's 对外伙伴 (public agent) — writes
 /// `channel_plugins.public_agent_id` and clears only that channel's sessions.
-/// `public_agent_id: None` / empty string clears the binding (unbinds). Mirrors
+/// `public_agent_id: None` clears the binding (unbinds). Mirrors
 /// the per-bot companion binding; row-level mutually exclusive with it.
 #[derive(Debug, Deserialize)]
 struct SetChannelPublicAgentRequest {
-    #[serde(default, alias = "pluginId")]
+    #[serde(default)]
     plugin_id: String,
-    #[serde(default, alias = "publicAgentId")]
+    #[serde(default)]
     public_agent_id: Option<String>,
 }
 
 /// `POST /api/channel/settings/public-agent` — bind (or clear) the 对外伙伴
 /// (public agent) that serves a bot channel. A non-null id is validated against
 /// the live roster and, on success, clears that bot's companion binding (row-level
-/// mutual exclusivity, enforced in the repository layer). `null`/empty unbinds.
+/// mutual exclusivity, enforced in the repository layer). `null` unbinds.
 /// Clears the channel's sessions so the next inbound message recreates
 /// conversations under the new binding.
 async fn set_channel_public_agent(
@@ -769,22 +753,24 @@ async fn set_channel_public_agent(
 ) -> Result<Json<ApiResponse<BridgeResponse>>, AppError> {
     let Json(req) = body.map_err(|e| AppError::BadRequest(e.to_string()))?;
 
-    let plugin_id = req.plugin_id.trim();
-    if plugin_id.is_empty() {
-        return Err(AppError::BadRequest("plugin_id is required".into()));
-    }
+    let plugin_id = req.plugin_id.as_str();
+    ChannelId::parse(plugin_id)
+        .map_err(|error| AppError::BadRequest(format!("invalid plugin_id: {error}")))?;
 
-    // Validate a non-empty binding against the live public-agent roster: a typo'd
+    // Validate a binding against the live public-agent roster: a typo'd
     // or already-deleted id must 400 here instead of being persisted. Clearing
-    // (null / empty) needs no validation. Skipped when no profile is wired.
-    if let Some(public_agent_id) = req.public_agent_id.as_deref().map(str::trim).filter(|s| !s.is_empty())
-        && let Some(profile) = &state.channel_agent_profile
-        && !profile.public_agent_exists(public_agent_id).await
-    {
-        return Err(AppError::BadRequest(format!("public agent '{public_agent_id}' not found")));
+    // (`null`) needs no validation. Skipped when no profile is wired.
+    if let Some(public_agent_id) = req.public_agent_id.as_deref() {
+        PublicAgentId::parse(public_agent_id)
+            .map_err(|error| AppError::BadRequest(format!("invalid public_agent_id: {error}")))?;
+        if let Some(profile) = &state.channel_agent_profile
+            && !profile.public_agent_exists(public_agent_id).await
+        {
+            return Err(AppError::BadRequest(format!("public agent '{public_agent_id}' not found")));
+        }
     }
 
-    let public_agent_id = req.public_agent_id.as_deref().map(str::trim).filter(|s| !s.is_empty());
+    let public_agent_id = req.public_agent_id.as_deref();
     state.manager.rebind_channel_public_agent(plugin_id, public_agent_id).await?;
 
     Ok(Json(ApiResponse::ok(BridgeResponse {
@@ -828,7 +814,7 @@ async fn start_weixin_login(State(state): State<ChannelRouterState>) -> Json<Api
 fn build_test_config(req: &TestPluginRequest) -> PluginConfig {
     let mut credentials = PluginCredentials::default();
 
-    match req.plugin_id.as_str() {
+    match req.plugin_type.as_str() {
         "lark" => {
             if let Some(ref extra) = req.extra_config {
                 credentials.app_id = extra.app_id.clone();
@@ -989,6 +975,16 @@ fn field_key(value: &serde_json::Value) -> Option<&str> {
     value.get("key").and_then(serde_json::Value::as_str)
 }
 
+fn corrupt_channel_id(
+    field: &str,
+    value: &str,
+    error: nomifun_common::PrefixedIdError,
+) -> AppError {
+    AppError::Internal(format!(
+        "stored {field} contains noncanonical entity ID '{value}': {error}"
+    ))
+}
+
 fn field_default_entry(value: &serde_json::Value) -> Option<(&str, serde_json::Value)> {
     let key = field_key(value)?;
     let default = value.get("default")?;
@@ -1007,7 +1003,7 @@ mod tests {
     #[test]
     fn build_test_config_telegram() {
         let req = TestPluginRequest {
-            plugin_id: "telegram".into(),
+            plugin_type: "telegram".into(),
             token: "bot123:ABC".into(),
             extra_config: None,
         };
@@ -1018,7 +1014,7 @@ mod tests {
     #[test]
     fn build_test_config_lark() {
         let req = TestPluginRequest {
-            plugin_id: "lark".into(),
+            plugin_type: "lark".into(),
             token: "xxx".into(),
             extra_config: Some(TestPluginExtraConfig {
                 app_id: Some("cli_abc".into()),
@@ -1035,7 +1031,7 @@ mod tests {
     #[test]
     fn build_test_config_dingtalk() {
         let req = TestPluginRequest {
-            plugin_id: "dingtalk".into(),
+            plugin_type: "dingtalk".into(),
             token: "client_id_123".into(),
             extra_config: Some(TestPluginExtraConfig {
                 app_id: None,
@@ -1051,7 +1047,7 @@ mod tests {
     #[test]
     fn build_test_config_weixin() {
         let req = TestPluginRequest {
-            plugin_id: "weixin".into(),
+            plugin_type: "weixin".into(),
             token: "bot_token_xyz".into(),
             extra_config: Some(TestPluginExtraConfig {
                 app_id: Some("account_abc".into()),

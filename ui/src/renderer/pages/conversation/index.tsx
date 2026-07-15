@@ -8,13 +8,13 @@ import ChatConversation from './components/ChatConversation';
 import MessageListSkeleton from './Messages/components/MessageListSkeleton';
 import { useAutoTitle } from '@/renderer/hooks/chat/useAutoTitle';
 import { getConversationOrNull } from '@/renderer/pages/conversation/utils/conversationCache';
+import { parseConversationId } from '@/common/types/ids';
 
 const ChatConversationIndex: React.FC = () => {
   const { id } = useParams();
-  // `id` arrives as a route string. Coerce once at the boundary to the numeric
-  // conversation id used by the cache/API/event layers (numeric-id spec §1).
-  // The string `id` is still used for the SWR key and route templates below.
-  const conversationId = id != null ? Number(id) : undefined;
+  // Validate the route string once at the boundary; every downstream layer
+  // keeps the same canonical conversation entity ID.
+  const conversationId = id != null ? parseConversationId(id) : undefined;
   const { t } = useTranslation();
   const navigate = useNavigate();
   const { syncTitleFromHistory } = useAutoTitle();

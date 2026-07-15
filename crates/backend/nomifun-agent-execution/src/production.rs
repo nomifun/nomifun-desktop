@@ -11,7 +11,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use nomifun_ai_agent::AgentRuntimeRegistry;
 use nomifun_api_types::{AgentExecutionDetail, SendMessageRequest};
-use nomifun_common::{AppError, ProviderWithModel};
+use nomifun_common::AppError;
 use nomifun_conversation::{AgentExecutionConversationPort, ConversationService};
 use nomifun_db::{
     IAgentExecutionRepository, IAgentExecutionTemplateRepository, IProviderRepository,
@@ -50,26 +50,22 @@ struct ProductionConversationEffects {
 
 #[async_trait]
 impl ConversationEffects for ProductionConversationEffects {
-    async fn cancel_attempt(&self, owner_id: &str, conversation_id: i64) -> Result<(), AppError> {
+    async fn cancel_attempt(&self, owner_id: &str, conversation_id: &str) -> Result<(), AppError> {
         self.conversation
-            .cancel_for_execution(
-                owner_id,
-                &conversation_id.to_string(),
-                &self.runtime_registry,
-            )
+            .cancel_for_execution(owner_id, conversation_id, &self.runtime_registry)
             .await
     }
     async fn steer_attempt(
         &self,
         owner_id: &str,
-        conversation_id: i64,
+        conversation_id: &str,
         operation_id: &str,
         text: &str,
     ) -> Result<(), AppError> {
         self.execution_port
             .steer_turn(
                 owner_id,
-                &conversation_id.to_string(),
+                conversation_id,
                 operation_id,
                 SendMessageRequest {
                     content: text.to_owned(),
@@ -86,15 +82,11 @@ impl ConversationEffects for ProductionConversationEffects {
     async fn stop_attempt_turn(
         &self,
         owner_id: &str,
-        conversation_id: i64,
+        conversation_id: &str,
         _operation_id: &str,
     ) -> Result<(), AppError> {
         self.conversation
-            .cancel_for_execution(
-                owner_id,
-                &conversation_id.to_string(),
-                &self.runtime_registry,
-            )
+            .cancel_for_execution(owner_id, conversation_id, &self.runtime_registry)
             .await
     }
     async fn report_lead(
@@ -103,7 +95,7 @@ impl ConversationEffects for ProductionConversationEffects {
         detail: &AgentExecutionDetail,
         operation_id: &str,
     ) -> Result<(), AppError> {
-        let Some(conversation_id) = detail.execution.lead_conversation_id else {
+        let Some(conversation_id) = detail.execution.lead_conversation_id.as_deref() else {
             return Ok(());
         };
         let result = detail
@@ -118,7 +110,7 @@ impl ConversationEffects for ProductionConversationEffects {
         self.conversation
             .project_assistant_message_idempotent(
                 owner_id,
-                &conversation_id.to_string(),
+                conversation_id,
                 operation_id,
                 result,
                 "agent_execution_report",
@@ -136,18 +128,13 @@ impl AgentExecutionEngine {
             config.conversation.clone(),
             config.runtime_registry.clone(),
         ));
-        // The immutable participant snapshot supplies the actual lead model.
-        // An empty fallback reaches provider resolution only for invalid data
-        // and then fails explicitly.
+        // The immutable participant snapshot supplies the actual lead model;
+        // absence stays typed and fails explicitly in the planner.
         let planner: Arc<dyn PlanProducer> = Arc::new(LlmPlanProducer::new(
             config.provider_repository.clone(),
             config.encryption_key,
             config.workspace_root.clone(),
-            ProviderWithModel {
-                provider_id: String::new(),
-                model: String::new(),
-                use_model: None,
-            },
+            None,
         ));
         let execution_port = config
             .conversation

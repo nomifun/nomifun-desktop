@@ -11,25 +11,27 @@ use crate::models::User;
 pub trait IUserRepository: Send + Sync {
     /// Returns `true` if at least one user with a non-empty password exists.
     ///
-    /// The system default user (empty password_hash) does not count.
+    /// The uninitialized installation owner (empty password_hash) does not count.
     async fn has_users(&self) -> Result<bool, DbError>;
 
-    /// Returns the system default user (`id = "system_default_user"`).
+    /// Returns the canonical installation owner selected by
+    /// `installation_identity`.
     async fn get_system_user(&self) -> Result<Option<User>, DbError>;
 
     /// Returns the primary WebUI user.
     ///
-    /// Priority: system default user first, then falls back to a user named "admin".
+    /// This is the installation owner; usernames are mutable presentation data
+    /// and are never used as an identity fallback.
     async fn get_primary_webui_user(&self) -> Result<Option<User>, DbError>;
 
-    /// Updates the system default user's username and password hash.
+    /// Updates the installation owner's username and password hash.
     ///
     /// Unconditional overwrite — used by local-mode credential management
     /// (desktop). For first-run provisioning prefer
     /// [`set_system_user_credentials_if_uninitialized`](Self::set_system_user_credentials_if_uninitialized).
     async fn set_system_user_credentials(&self, username: &str, password_hash: &str) -> Result<(), DbError>;
 
-    /// Atomically sets the system default user's credentials ONLY if it has not
+    /// Atomically sets the installation owner's credentials ONLY if it has not
     /// been initialised yet (empty / NULL `password_hash`).
     ///
     /// Returns `Ok(true)` when the credentials were written, `Ok(false)` when an
@@ -42,7 +44,7 @@ pub trait IUserRepository: Send + Sync {
         password_hash: &str,
     ) -> Result<bool, DbError>;
 
-    /// Sets the system default user's password hash ONLY if it is currently
+    /// Sets the installation owner's password hash ONLY if it is currently
     /// empty/NULL, and NEVER touches the username.
     ///
     /// This is the desktop LAN-provisioning primitive: it must fill in a

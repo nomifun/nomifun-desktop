@@ -21,10 +21,11 @@ import type { CompareFlowNode } from '../model';
 import { KIND_META } from '../model';
 import { upstreamPrimary } from './upstream';
 import { HoverToolbar, NodeCard, NodeHandles, ResizeFrame, ToolButton } from './nodeShared';
+import type { AssetId } from '@/common/types/ids';
 
 const clamp01 = (v: number): number => Math.min(1, Math.max(0, v));
 
-const MediaLayer: React.FC<{ assetId: string | null; kind: 'image' | 'video' | undefined }> = ({ assetId, kind }) => {
+const MediaLayer: React.FC<{ assetId: AssetId | null; kind: 'image' | 'video' | undefined }> = ({ assetId, kind }) => {
   const media = useWorkshopMedia(kind === 'image' || kind === 'video' ? assetId : null);
   if (media.status !== 'ready') {
     return (

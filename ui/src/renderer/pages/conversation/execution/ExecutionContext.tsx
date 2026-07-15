@@ -1,3 +1,4 @@
+import type { ConversationId, ExecutionId, ExecutionStepId } from '@/common/types/ids';
 import type { TChatConversation } from '@/common/config/storage';
 import type { TAgentExecutionDetail } from '@/common/types/agentExecution/agentExecutionTypes';
 import React, { createContext, useCallback, useContext, useEffect, useMemo, useState } from 'react';
@@ -6,13 +7,13 @@ import type { LeadThinkingState } from './useLeadThinking';
 import { useConversationExecution } from './useConversationExecution';
 
 export interface ExecutionContextValue {
-  conversationId: number;
-  executionId: string | null;
+  conversationId: ConversationId;
+  executionId: ExecutionId | null;
   detail: TAgentExecutionDetail | null;
   refetch: () => Promise<void>;
   leadThinking: LeadThinkingState;
   loading: boolean;
-  projectedStepId: string | null;
+  projectedStepId: ExecutionStepId | null;
   projectedPayload: OpenStepPayload | null;
   projectStep: (payload: OpenStepPayload) => void;
   returnToMain: () => void;

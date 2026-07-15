@@ -224,6 +224,7 @@ fn prefix_variants(old_root: &str, new_root: &str) -> Vec<(String, String)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use nomifun_common::{ConversationId, TerminalId};
     use nomifun_db::sqlx;
 
     const OLD: &str = r"C:\Users\u\AppData\Local\Temp\nomifun-data\Nomi";
@@ -252,19 +253,21 @@ mod tests {
             .unwrap()
     }
 
-    async fn insert_conversation(pool: &nomifun_db::SqlitePool, id: i64, extra: &str) {
+    async fn insert_conversation(pool: &nomifun_db::SqlitePool, id: &str, extra: &str) {
+        let installation_owner = nomifun_db::installation_owner_id(pool).await.unwrap();
         sqlx::query(
             "INSERT INTO conversations (id, user_id, name, type, extra, created_at, updated_at) \
-             VALUES (?, 'system_default_user', 'c', 'chat', ?, 0, 0)",
+             VALUES (?, ?, 'c', 'chat', ?, 0, 0)",
         )
         .bind(id)
+        .bind(installation_owner)
         .bind(extra)
         .execute(pool)
         .await
         .unwrap();
     }
 
-    async fn conversation_extra(pool: &nomifun_db::SqlitePool, id: i64) -> serde_json::Value {
+    async fn conversation_extra(pool: &nomifun_db::SqlitePool, id: &str) -> serde_json::Value {
         let raw: String = sqlx::query_scalar("SELECT extra FROM conversations WHERE id = ?")
             .bind(id)
             .fetch_one(pool)
@@ -273,19 +276,21 @@ mod tests {
         serde_json::from_str(&raw).unwrap()
     }
 
-    async fn insert_terminal(pool: &nomifun_db::SqlitePool, id: i64, cwd: &str) {
+    async fn insert_terminal(pool: &nomifun_db::SqlitePool, id: &str, cwd: &str) {
+        let installation_owner = nomifun_db::installation_owner_id(pool).await.unwrap();
         sqlx::query(
             "INSERT INTO terminal_sessions (id, name, cwd, command, created_at, updated_at, user_id) \
-             VALUES (?, 't', ?, 'sh', 0, 0, 'system_default_user')",
+             VALUES (?, 't', ?, 'sh', 0, 0, ?)",
         )
         .bind(id)
         .bind(cwd)
+        .bind(installation_owner)
         .execute(pool)
         .await
         .unwrap();
     }
 
-    async fn terminal_cwd(pool: &nomifun_db::SqlitePool, id: i64) -> String {
+    async fn terminal_cwd(pool: &nomifun_db::SqlitePool, id: &str) -> String {
         sqlx::query_scalar("SELECT cwd FROM terminal_sessions WHERE id = ?")
             .bind(id)
             .fetch_one(pool)
@@ -320,37 +325,45 @@ mod tests {
     async fn rewrites_conversation_workspace_keeping_other_keys() {
         let db = nomifun_db::init_database_memory().await.unwrap();
         let pool = db.pool();
+        let first = ConversationId::new().into_string();
+        let second = ConversationId::new().into_string();
+        let third = ConversationId::new().into_string();
 
         let extra = serde_json::json!({
             "workspace": format!(r"{OLD}\conversations\conv_1"),
             "cronJobId": "cj_1",
         });
-        insert_conversation(pool, 1, &extra.to_string()).await;
-        insert_conversation(pool, 2, "{}").await;
+        insert_conversation(pool, &first, &extra.to_string()).await;
+        insert_conversation(pool, &second, "{}").await;
         let unrelated = serde_json::json!({ "workspace": r"D:\projects\mine" });
-        insert_conversation(pool, 3, &unrelated.to_string()).await;
+        insert_conversation(pool, &third, &unrelated.to_string()).await;
 
         rewrite_path_prefixes(pool, OLD, NEW).await.unwrap();
 
-        let rewritten = conversation_extra(pool, 1).await;
+        let rewritten = conversation_extra(pool, &first).await;
         assert_eq!(rewritten["workspace"], format!(r"{NEW}\conversations\conv_1"));
         assert_eq!(rewritten["cronJobId"], "cj_1");
-        assert_eq!(conversation_extra(pool, 2).await, serde_json::json!({}));
-        assert_eq!(conversation_extra(pool, 3).await, unrelated);
+        assert_eq!(conversation_extra(pool, &second).await, serde_json::json!({}));
+        assert_eq!(conversation_extra(pool, &third).await, unrelated);
     }
 
     #[tokio::test]
     async fn rewrites_terminal_cwd() {
         let db = nomifun_db::init_database_memory().await.unwrap();
         let pool = db.pool();
+        let first = TerminalId::new().into_string();
+        let second = TerminalId::new().into_string();
 
-        insert_terminal(pool, 1, &format!(r"{OLD}\conversations\conv_9")).await;
-        insert_terminal(pool, 2, r"C:\repos\work").await;
+        insert_terminal(pool, &first, &format!(r"{OLD}\conversations\conv_9")).await;
+        insert_terminal(pool, &second, r"C:\repos\work").await;
 
         rewrite_path_prefixes(pool, OLD, NEW).await.unwrap();
 
-        assert_eq!(terminal_cwd(pool, 1).await, format!(r"{NEW}\conversations\conv_9"));
-        assert_eq!(terminal_cwd(pool, 2).await, r"C:\repos\work");
+        assert_eq!(
+            terminal_cwd(pool, &first).await,
+            format!(r"{NEW}\conversations\conv_9")
+        );
+        assert_eq!(terminal_cwd(pool, &second).await, r"C:\repos\work");
     }
 
     /// P4: Windows paths are case-insensitive — a row whose stored prefix
@@ -404,21 +417,24 @@ mod tests {
     async fn invalid_json_extra_does_not_poison_the_rewrite() {
         let db = nomifun_db::init_database_memory().await.unwrap();
         let pool = db.pool();
+        let invalid_id = ConversationId::new().into_string();
+        let valid_id = ConversationId::new().into_string();
 
         sqlx::query("DROP INDEX idx_conversations_cron_job_id")
             .execute(pool)
             .await
             .unwrap();
-        insert_conversation(pool, 1, "not json {").await;
+        insert_conversation(pool, &invalid_id, "not json {").await;
         let extra = serde_json::json!({ "workspace": format!(r"{OLD}\conversations\conv_ok") });
-        insert_conversation(pool, 2, &extra.to_string()).await;
+        insert_conversation(pool, &valid_id, &extra.to_string()).await;
 
         let rows = rewrite_path_prefixes(pool, OLD, NEW).await.unwrap();
         assert_eq!(rows, 1);
 
-        let rewritten = conversation_extra(pool, 2).await;
+        let rewritten = conversation_extra(pool, &valid_id).await;
         assert_eq!(rewritten["workspace"], format!(r"{NEW}\conversations\conv_ok"));
-        let raw_bad: String = sqlx::query_scalar("SELECT extra FROM conversations WHERE id = 1")
+        let raw_bad: String = sqlx::query_scalar("SELECT extra FROM conversations WHERE id = ?")
+            .bind(&invalid_id)
             .fetch_one(pool)
             .await
             .unwrap();

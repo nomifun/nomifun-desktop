@@ -3,8 +3,10 @@
  * Copyright 2025-2026 NomiFun (nomifun.com)
  * SPDX-License-Identifier: Apache-2.0
  */
+import type { ConversationId } from '@/common/types/ids';
 
 import type { IDirOrFile } from '@/common/adapter/ipcBridge';
+import type { SessionTarget } from '@/common/types/ids';
 import type { Message } from '@arco-design/web-react';
 import type { ReactNode } from 'react';
 
@@ -16,7 +18,7 @@ export type MessageApi = Required<ReturnType<typeof Message.useMessage>[0]>;
  */
 export interface WorkspaceProps {
   workspace: string;
-  conversation_id: number;
+  conversation_id: ConversationId;
   /**
    * Authoritative "is this an auto-provisioned temporary workspace" flag.
    * Sourced from `conversation.extra.is_temporary_workspace` on the API
@@ -104,13 +106,16 @@ export interface SelectedFile {
  * Source-agnostic tree data provider. Drives lazy-loaded tree state in
  * `useWorkspaceTree` without any knowledge of conversations or terminals.
  *
- * - `key` is the cache-reset identity (conversation id string, or a cwd path).
- *   Changing it resets the tree and is the id carried on the has-files event.
+ * - `key` is the local cache-reset identity. Changing it resets the tree.
+ * - `target` is the namespaced owning session carried on global workspace
+ *   events, preventing a conversation and terminal with the same legacy ID from
+ *   receiving each other's signals.
  * - `listRoot` loads the top level (optionally filtered by `search`).
  * - `listChildren` lazily loads one node's direct children (the tree `loadMore`).
  */
 export interface WorkspaceTreeSource {
   key: string;
+  target: SessionTarget;
   listRoot: (search?: string) => Promise<IDirOrFile[]>;
   listChildren: (node: { fullPath: string; relativePath: string }) => Promise<IDirOrFile[]>;
 }
@@ -130,7 +135,7 @@ export interface WorkspaceUploadConfig {
    * Stable identity used to scope/track in-flight uploads (the conversation id
    * string for WebUI HTTP uploads + paste-service registration).
    */
-  trackingKey: string;
+  trackingKey: ConversationId;
 }
 
 export interface WorkspaceExtraTab {

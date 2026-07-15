@@ -25,6 +25,7 @@ import { Descriptions, Drawer, Spin } from '@arco-design/web-react';
 import { Edit } from '@icon-park/react';
 import { ipcBridge } from '@/common';
 import type { IRequirement } from '@/common/adapter/ipcBridge';
+import type { RequirementId } from '@/common/types/ids';
 import { useArcoMessage } from '@renderer/utils/ui/useArcoMessage';
 import CopyFullIdButton from '@/renderer/components/base/CopyFullIdButton';
 import FilePreview from '@/renderer/components/media/FilePreview';
@@ -35,7 +36,7 @@ interface RequirementDrawerProps {
   open: boolean;
   mode: 'view' | 'edit' | 'create';
   /** Required for view / edit; ignored in create. */
-  requirementId?: number;
+  requirementId?: RequirementId;
   onClose: () => void;
   /** Notify the host to refresh its list / board after a create or update. */
   onSaved: () => void;
@@ -240,11 +241,10 @@ const RequirementDrawer: React.FC<RequirementDrawerProps> = ({
                   { label: t('requirements.detail.completedAt'), value: fmtTime(data.completed_at) },
                   {
                     label: t('requirements.detail.session'),
-                    value: data.owner_session_id ? (
-                      <CopyFullIdButton id={data.owner_session_id} />
-                    ) : (
-                      '-'
-                    ),
+                    value: (() => {
+                      const ownerId = data.owner_conversation_id ?? data.owner_terminal_id;
+                      return ownerId ? <CopyFullIdButton id={ownerId} /> : '-';
+                    })(),
                   },
                 ]}
               />

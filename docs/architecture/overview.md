@@ -15,6 +15,7 @@ This document is the map. The sibling documents drill into the parts:
 - [`frontend.md`](frontend.md) — the React SPA, adapter layer, routing.
 - [`communication.md`](communication.md) — HTTP / WebSocket / Tauri IPC / ACP / MCP.
 - [`data-and-storage.md`](data-and-storage.md) — SQLite, workspaces, runtimes.
+- [`id-system.md`](id-system.md) — canonical entity IDs, typed IDs, and prefix registry.
 
 ## The two-host model
 

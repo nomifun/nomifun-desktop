@@ -1,4 +1,4 @@
-use nomifun_common::TimestampMs;
+use nomifun_common::{ConnectorCredentialId, TimestampMs};
 use serde::{Deserialize, Serialize};
 
 /// Row in `connector_credentials` — encrypted credentials for a source connector
@@ -8,7 +8,8 @@ use serde::{Deserialize, Serialize};
 /// API responses expose only `id` / `kind` / `name`.
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct ConnectorCredentialRow {
-    pub id: String,
+    #[sqlx(try_from = "String")]
+    pub id: ConnectorCredentialId,
     /// Connector discriminator: "feishu", "notion", …
     pub kind: String,
     /// User-facing label.

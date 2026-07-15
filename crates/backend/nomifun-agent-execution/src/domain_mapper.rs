@@ -5,9 +5,11 @@ use nomifun_api_types::{
     ExecutionStep, ExecutionStepDependency, ParticipantConstraints,
 };
 use nomifun_common::{
-    AgentExecutionEventKind, AgentStepMode, AppError, ExecutionAttemptStatus, ExecutionStepKind,
-    ExecutionStepStatus, ParticipantAssignmentSource, StepFailurePolicy,
-    MAX_AGENT_EXECUTION_PARALLELISM,
+    AgentExecutionActorType, AgentExecutionAttemptId, AgentExecutionEventId,
+    AgentExecutionEventKind, AgentExecutionId, AgentExecutionParticipantId, AgentExecutionStepId,
+    AgentStepMode, AppError, CompanionId, ConversationId, EntityId, ExecutionAttemptStatus,
+    ExecutionStepKind, ExecutionStepStatus, MAX_AGENT_EXECUTION_PARALLELISM,
+    ParticipantAssignmentSource, ProviderId, StepFailurePolicy, UserId,
 };
 use nomifun_db::models::{
     AgentExecutionAttemptDetailRow, AgentExecutionDetailRows, AgentExecutionParticipantRow,
@@ -24,6 +26,21 @@ where
     T::Err: std::fmt::Display,
 {
     value.parse().map_err(|error| persisted_error(field, error))
+}
+
+fn require_id<T: EntityId>(field: &str, value: &str) -> Result<(), AppError> {
+    value
+        .parse::<T>()
+        .map(|_| ())
+        .map_err(|error| persisted_error(field, error))
+}
+
+fn require_optional_id<T: EntityId>(
+    field: &str,
+    value: Option<&str>,
+) -> Result<(), AppError> {
+    value.map(|value| require_id::<T>(field, value)).transpose()?;
+    Ok(())
 }
 
 pub(crate) fn event_kind(value: &str) -> Result<AgentExecutionEventKind, AppError> {
@@ -45,8 +62,13 @@ fn parse_optional_json<T: DeserializeOwned>(
 
 pub(crate) fn execution(
     row: AgentExecutionRow,
-    lead_conversation_id: Option<i64>,
+    lead_conversation_id: Option<String>,
 ) -> Result<AgentExecution, AppError> {
+    require_id::<AgentExecutionId>("execution.id", &row.id)?;
+    require_optional_id::<ConversationId>(
+        "execution.lead_conversation_id",
+        lead_conversation_id.as_deref(),
+    )?;
     if !(1..=MAX_AGENT_EXECUTION_PARALLELISM).contains(&row.max_parallel) {
         return Err(persisted_error(
             "max_parallel",
@@ -77,6 +99,21 @@ pub(crate) fn execution(
 pub(crate) fn participant(
     row: AgentExecutionParticipantRow,
 ) -> Result<ExecutionParticipant, AppError> {
+    require_id::<AgentExecutionParticipantId>("participant.id", &row.id)?;
+    require_id::<AgentExecutionId>("participant.execution_id", &row.execution_id)?;
+    match (row.provider_id.as_deref(), row.model.as_deref()) {
+        (Some(provider_id), Some(model))
+            if ProviderId::try_from(provider_id).is_ok()
+                && !model.is_empty()
+                && model.trim() == model => {}
+        (None, None) => {}
+        _ => {
+            return Err(persisted_error(
+                "participant provider/model",
+                "must be absent together or contain a canonical provider_id and trimmed model",
+            ));
+        }
+    }
     let constraints: Option<ParticipantConstraints> =
         parse_optional_json("participant.constraints", row.constraints)?;
     if let Some(constraints) = constraints.as_ref() {
@@ -111,6 +148,12 @@ pub(crate) fn participant(
 }
 
 pub(crate) fn step(row: AgentExecutionStepRow) -> Result<ExecutionStep, AppError> {
+    require_id::<AgentExecutionStepId>("step.id", &row.id)?;
+    require_id::<AgentExecutionId>("step.execution_id", &row.execution_id)?;
+    require_optional_id::<AgentExecutionParticipantId>(
+        "step.assigned_participant_id",
+        row.assigned_participant_id.as_deref(),
+    )?;
     Ok(ExecutionStep {
         id: row.id,
         execution_id: row.execution_id,
@@ -152,20 +195,34 @@ pub(crate) fn step(row: AgentExecutionStepRow) -> Result<ExecutionStep, AppError
 
 pub(crate) fn dependency(
     row: AgentExecutionStepDependencyRow,
-) -> ExecutionStepDependency {
-    ExecutionStepDependency {
+) -> Result<ExecutionStepDependency, AppError> {
+    require_id::<AgentExecutionId>("dependency.execution_id", &row.execution_id)?;
+    require_id::<AgentExecutionStepId>("dependency.blocker_step_id", &row.blocker_step_id)?;
+    require_id::<AgentExecutionStepId>("dependency.blocked_step_id", &row.blocked_step_id)?;
+    Ok(ExecutionStepDependency {
         execution_id: row.execution_id,
         blocker_step_id: row.blocker_step_id,
         blocked_step_id: row.blocked_step_id,
         introduced_in_revision: row.introduced_in_revision,
         superseded_in_revision: row.superseded_in_revision,
-    }
+    })
 }
 
 pub(crate) fn attempt(
     row: AgentExecutionAttemptDetailRow,
 ) -> Result<ExecutionAttempt, AppError> {
     let attempt = row.attempt;
+    require_id::<AgentExecutionAttemptId>("attempt.id", &attempt.id)?;
+    require_id::<AgentExecutionId>("attempt.execution_id", &attempt.execution_id)?;
+    require_id::<AgentExecutionStepId>("attempt.step_id", &attempt.step_id)?;
+    require_optional_id::<AgentExecutionParticipantId>(
+        "attempt.participant_id",
+        attempt.participant_id.as_deref(),
+    )?;
+    require_optional_id::<ConversationId>(
+        "attempt.conversation_id",
+        row.conversation_id.as_deref(),
+    )?;
     Ok(ExecutionAttempt {
         id: attempt.id,
         execution_id: attempt.execution_id,
@@ -200,7 +257,11 @@ pub(crate) fn detail(rows: AgentExecutionDetailRows) -> Result<AgentExecutionDet
             .map(participant)
             .collect::<Result<_, _>>()?,
         steps: rows.steps.into_iter().map(step).collect::<Result<_, _>>()?,
-        dependencies: rows.dependencies.into_iter().map(dependency).collect(),
+        dependencies: rows
+            .dependencies
+            .into_iter()
+            .map(dependency)
+            .collect::<Result<_, _>>()?,
         attempts: rows
             .attempts
             .into_iter()
@@ -210,6 +271,69 @@ pub(crate) fn detail(rows: AgentExecutionDetailRows) -> Result<AgentExecutionDet
 }
 
 pub(crate) fn event(row: AgentExecutionEventRow) -> Result<AgentExecutionEvent, AppError> {
+    require_id::<AgentExecutionEventId>("event.id", &row.id)?;
+    require_id::<AgentExecutionId>("event.execution_id", &row.execution_id)?;
+    require_optional_id::<AgentExecutionStepId>("event.step_id", row.step_id.as_deref())?;
+    require_optional_id::<AgentExecutionAttemptId>(
+        "event.attempt_id",
+        row.attempt_id.as_deref(),
+    )?;
+    require_optional_id::<ConversationId>(
+        "event.actor_conversation_id",
+        row.actor_conversation_id.as_deref(),
+    )?;
+    require_optional_id::<AgentExecutionAttemptId>(
+        "event.actor_attempt_id",
+        row.actor_attempt_id.as_deref(),
+    )?;
+    require_id::<UserId>("event.on_behalf_of_user_id", &row.on_behalf_of_user_id)?;
+    let actor_type = parse_enum("event.actor_type", &row.actor_type)?;
+    match actor_type {
+        AgentExecutionActorType::System => {
+            if row.actor_id.is_some()
+                || row.actor_conversation_id.is_some()
+                || row.actor_attempt_id.is_some()
+            {
+                return Err(persisted_error(
+                    "event actor",
+                    "system actors must not carry durable actor IDs",
+                ));
+            }
+        }
+        AgentExecutionActorType::User => {
+            let actor_id = row
+                .actor_id
+                .as_deref()
+                .ok_or_else(|| persisted_error("event.actor_id", "user actor ID is missing"))?;
+            require_id::<UserId>("event.actor_id", actor_id)?;
+            if row.actor_conversation_id.is_some() || row.actor_attempt_id.is_some() {
+                return Err(persisted_error(
+                    "event actor context",
+                    "user actors must not carry Agent conversation/attempt IDs",
+                ));
+            }
+        }
+        AgentExecutionActorType::Agent => {
+            let actor_id = row
+                .actor_id
+                .as_deref()
+                .ok_or_else(|| persisted_error("event.actor_id", "Agent actor ID is missing"))?;
+            if ConversationId::try_from(actor_id).is_err()
+                && CompanionId::try_from(actor_id).is_err()
+            {
+                return Err(persisted_error(
+                    "event.actor_id",
+                    "expected a canonical ConversationId or CompanionId",
+                ));
+            }
+            if row.actor_attempt_id.is_some() && row.actor_conversation_id.is_none() {
+                return Err(persisted_error(
+                    "event.actor_attempt_id",
+                    "attempt context requires an Agent conversation",
+                ));
+            }
+        }
+    }
     Ok(AgentExecutionEvent {
         id: row.id,
         execution_id: row.execution_id,
@@ -217,7 +341,7 @@ pub(crate) fn event(row: AgentExecutionEventRow) -> Result<AgentExecutionEvent, 
         event_type: event_kind(&row.event_type)?,
         step_id: row.step_id,
         attempt_id: row.attempt_id,
-        actor_type: parse_enum("event.actor_type", &row.actor_type)?,
+        actor_type,
         actor_id: row.actor_id,
         actor_conversation_id: row.actor_conversation_id,
         actor_attempt_id: row.actor_attempt_id,
@@ -233,8 +357,8 @@ mod tests {
 
     fn event_row(event_type: &str) -> AgentExecutionEventRow {
         AgentExecutionEventRow {
-            id: "event_1".to_owned(),
-            execution_id: "execution_1".to_owned(),
+            id: "aevt_0190f5fe-7c00-7a00-8000-000000000001".to_owned(),
+            execution_id: "exec_0190f5fe-7c00-7a00-8000-000000000001".to_owned(),
             sequence: 1,
             event_type: event_type.to_owned(),
             step_id: None,
@@ -243,7 +367,7 @@ mod tests {
             actor_id: None,
             actor_conversation_id: None,
             actor_attempt_id: None,
-            on_behalf_of_user_id: "owner_1".to_owned(),
+            on_behalf_of_user_id: "user_0190f5fe-7c00-7a00-8000-000000000001".to_owned(),
             payload: "{}".to_owned(),
             created_at: 1,
             published_at: None,
@@ -261,5 +385,13 @@ mod tests {
         let error = event(event_row("worker_changed")).unwrap_err();
         assert!(error.to_string().contains("event.event_type"));
         assert!(error.to_string().contains("worker_changed"));
+    }
+
+    #[test]
+    fn persisted_event_rejects_noncanonical_entity_ids() {
+        let mut row = event_row("step_changed");
+        row.execution_id = "execution_1".to_owned();
+        let error = event(row).unwrap_err();
+        assert!(error.to_string().contains("event.execution_id"));
     }
 }

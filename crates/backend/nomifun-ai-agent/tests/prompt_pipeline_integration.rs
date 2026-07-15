@@ -105,7 +105,7 @@ async fn fixture_params_with_knowledge(backend: &str) -> Arc<AcpSessionParams> {
     let config = AcpBuildExtra {
         backend: Some(backend.to_owned()),
         knowledge_mounts: vec![nomifun_api_types::KnowledgeMountInfo {
-            id: "kb_1".into(),
+            id: nomifun_common::KnowledgeBaseId::new(),
             name: "领域知识".into(),
             description: "团队约定".into(),
             rel_path: ".nomi/knowledge/领域知识".into(),

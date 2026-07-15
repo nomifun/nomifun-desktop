@@ -24,6 +24,8 @@ struct TestApp {
     services: AppServices,
 }
 
+const TEST_USER_ID: &str = "user_0190f5fe-7c00-7a00-8000-000000000017";
+
 async fn start_app() -> TestApp {
     let db = nomifun_db::init_database_memory().await.unwrap();
     let services = AppServices::from_config(db, &AppConfig::default()).await.unwrap();
@@ -40,8 +42,11 @@ async fn start_app() -> TestApp {
 }
 
 /// Sign a valid JWT token for testing.
-fn sign_token(app: &TestApp, user_id: &str) -> String {
-    app.services.jwt_service.sign(user_id, "testuser").unwrap()
+fn sign_token(app: &TestApp) -> String {
+    app.services
+        .jwt_service
+        .sign(TEST_USER_ID, "testuser")
+        .unwrap()
 }
 
 /// Connect with an Authorization: Bearer header.
@@ -206,7 +211,7 @@ fn ws_manager(app: &TestApp) -> &Arc<WebSocketManager> {
 #[tokio::test]
 async fn t1_1_valid_bearer_token_connects() {
     let app = start_app().await;
-    let token = sign_token(&app, "user1");
+    let token = sign_token(&app);
 
     let (_tx, _rx) = connect_bearer(app.addr, &token).await;
     tokio::time::sleep(Duration::from_millis(50)).await;
@@ -240,7 +245,7 @@ async fn t1_3_invalid_token_sends_auth_expired_then_closes() {
 #[tokio::test]
 async fn t1_4_token_from_cookie() {
     let app = start_app().await;
-    let token = sign_token(&app, "user1");
+    let token = sign_token(&app);
 
     let (_tx, _rx) = connect_cookie(app.addr, &token).await;
     tokio::time::sleep(Duration::from_millis(50)).await;
@@ -251,7 +256,7 @@ async fn t1_4_token_from_cookie() {
 #[tokio::test]
 async fn t1_5_token_from_sec_websocket_protocol() {
     let app = start_app().await;
-    let token = sign_token(&app, "user1");
+    let token = sign_token(&app);
 
     let (_tx, _rx) = connect_protocol(app.addr, &token).await;
     tokio::time::sleep(Duration::from_millis(50)).await;
@@ -266,7 +271,7 @@ async fn t1_5_token_from_sec_websocket_protocol() {
 #[tokio::test]
 async fn t3_1_valid_json_message_accepted() {
     let app = start_app().await;
-    let token = sign_token(&app, "user1");
+    let token = sign_token(&app);
 
     let (mut tx, _rx) = connect_bearer(app.addr, &token).await;
     tokio::time::sleep(Duration::from_millis(50)).await;
@@ -283,7 +288,7 @@ async fn t3_1_valid_json_message_accepted() {
 #[tokio::test]
 async fn t3_2_invalid_json_returns_error() {
     let app = start_app().await;
-    let token = sign_token(&app, "user1");
+    let token = sign_token(&app);
 
     let (mut tx, mut rx) = connect_bearer(app.addr, &token).await;
     tokio::time::sleep(Duration::from_millis(50)).await;
@@ -298,7 +303,7 @@ async fn t3_2_invalid_json_returns_error() {
 #[tokio::test]
 async fn t3_3_missing_fields_returns_error() {
     let app = start_app().await;
-    let token = sign_token(&app, "user1");
+    let token = sign_token(&app);
 
     let (mut tx, mut rx) = connect_bearer(app.addr, &token).await;
     tokio::time::sleep(Duration::from_millis(50)).await;
@@ -316,7 +321,7 @@ async fn t3_3_missing_fields_returns_error() {
 #[tokio::test]
 async fn t4_1_broadcast_reaches_all_clients() {
     let app = start_app().await;
-    let token = sign_token(&app, "user1");
+    let token = sign_token(&app);
 
     let (_, mut rx1) = connect_bearer(app.addr, &token).await;
     let (_, mut rx2) = connect_bearer(app.addr, &token).await;
@@ -339,7 +344,7 @@ async fn t4_2_unicast_reaches_only_target() {
     use nomifun_realtime::ConnectionId;
 
     let app = start_app().await;
-    let token = sign_token(&app, "user1");
+    let token = sign_token(&app);
 
     let (_, mut rx1) = connect_bearer(app.addr, &token).await;
     let (_, mut rx2) = connect_bearer(app.addr, &token).await;
@@ -361,7 +366,7 @@ async fn t4_2_unicast_reaches_only_target() {
 #[tokio::test]
 async fn t4_3_broadcast_after_disconnect_no_error() {
     let app = start_app().await;
-    let token = sign_token(&app, "user1");
+    let token = sign_token(&app);
 
     let (mut tx1, _rx1) = connect_bearer(app.addr, &token).await;
     let (_, mut rx2) = connect_bearer(app.addr, &token).await;
@@ -390,7 +395,7 @@ async fn t4_3_broadcast_after_disconnect_no_error() {
 #[tokio::test]
 async fn t5_1_pong_does_not_generate_response() {
     let app = start_app().await;
-    let token = sign_token(&app, "user1");
+    let token = sign_token(&app);
 
     let (mut tx, mut rx) = connect_bearer(app.addr, &token).await;
     tokio::time::sleep(Duration::from_millis(50)).await;
@@ -405,7 +410,7 @@ async fn t5_1_pong_does_not_generate_response() {
 #[tokio::test]
 async fn t5_2_subscribe_show_open_file_mode() {
     let app = start_app().await;
-    let token = sign_token(&app, "user1");
+    let token = sign_token(&app);
 
     let (mut tx, mut rx) = connect_bearer(app.addr, &token).await;
     tokio::time::sleep(Duration::from_millis(50)).await;
@@ -426,7 +431,7 @@ async fn t5_2_subscribe_show_open_file_mode() {
 #[tokio::test]
 async fn t5_3_subscribe_show_open_directory_mode() {
     let app = start_app().await;
-    let token = sign_token(&app, "user1");
+    let token = sign_token(&app);
 
     let (mut tx, mut rx) = connect_bearer(app.addr, &token).await;
     tokio::time::sleep(Duration::from_millis(50)).await;
@@ -446,7 +451,7 @@ async fn t5_3_subscribe_show_open_directory_mode() {
 #[tokio::test]
 async fn t5_4_subscribe_show_open_mixed_mode() {
     let app = start_app().await;
-    let token = sign_token(&app, "user1");
+    let token = sign_token(&app);
 
     let (mut tx, mut rx) = connect_bearer(app.addr, &token).await;
     tokio::time::sleep(Duration::from_millis(50)).await;
@@ -470,7 +475,7 @@ async fn t5_4_subscribe_show_open_mixed_mode() {
 #[tokio::test]
 async fn t6_1_client_close_removes_from_manager() {
     let app = start_app().await;
-    let token = sign_token(&app, "user1");
+    let token = sign_token(&app);
 
     let (mut tx, _rx) = connect_bearer(app.addr, &token).await;
     tokio::time::sleep(Duration::from_millis(50)).await;
@@ -489,7 +494,7 @@ async fn t6_1_client_close_removes_from_manager() {
 #[tokio::test]
 async fn t7_1_multiple_concurrent_connections() {
     let app = start_app().await;
-    let token = sign_token(&app, "user1");
+    let token = sign_token(&app);
 
     let mut handles = Vec::new();
     for _ in 0..10 {
@@ -514,7 +519,7 @@ async fn t7_1_multiple_concurrent_connections() {
 #[tokio::test]
 async fn t7_2_blacklisted_token_rejected() {
     let app = start_app().await;
-    let token = sign_token(&app, "user1");
+    let token = sign_token(&app);
 
     // Blacklist the token
     app.services.jwt_service.blacklist_token(&token);

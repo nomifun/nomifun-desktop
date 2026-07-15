@@ -23,10 +23,14 @@ use nomifun_api_types::{
     UpdateAgentExecutionTemplateRequest, WorkspaceEntry,
 };
 use nomifun_common::{
-    AgentExecutionActor, AgentExecutionEventKind, AgentExecutionStatus, AppError, DecisionPolicy,
-    ExecutionAttemptStatus, ExecutionStepKind, ExecutionStepStatus, MAX_AGENT_EXECUTION_PARALLELISM,
-    MAX_AGENT_EXECUTION_MODELS, MAX_AGENT_EXECUTION_PARTICIPANTS, MAX_AGENT_EXECUTION_STEPS,
-    ParticipantAssignmentSource, PlanGate, generate_prefixed_id, now_ms,
+    AgentExecutionActor, AgentExecutionAttemptId, AgentExecutionEventKind, AgentExecutionId,
+    AgentExecutionParticipantId, AgentExecutionStatus, AgentExecutionStepId,
+    AgentExecutionTemplateId, AgentExecutionTemplateParticipantId, AppError, ConversationId,
+    DecisionPolicy, EntityId, ExecutionAttemptStatus, ExecutionStepKind, ExecutionStepStatus,
+    MAX_AGENT_EXECUTION_MODELS,
+    MAX_AGENT_EXECUTION_PARALLELISM, MAX_AGENT_EXECUTION_PARTICIPANTS,
+    MAX_AGENT_EXECUTION_STEPS, ParticipantAssignmentSource, PlanGate, ProviderId,
+    generate_prefixed_id, now_ms,
 };
 use nomifun_db::{
     AdoptAgentExecutionStepOutputParams, AppendAgentExecutionStepsFromAttemptParams,
@@ -225,7 +229,7 @@ impl AgentExecutionEngine {
         conversation: &ConversationResponse,
         request: CreateAgentExecutionRequest,
     ) -> Result<AgentExecution, AppError> {
-        if request.lead_conversation_id != Some(conversation.id) {
+        if request.lead_conversation_id.as_deref() != Some(conversation.id.as_str()) {
             return Err(AppError::BadRequest(
                 "execution lead does not match the authenticated calling conversation".to_owned(),
             ));
@@ -286,7 +290,7 @@ impl AgentExecutionEngine {
         template_id: &str,
         request: CreateExecutionFromTemplateRequest,
     ) -> Result<AgentExecution, AppError> {
-        if request.lead_conversation_id != Some(conversation.id) {
+        if request.lead_conversation_id.as_deref() != Some(conversation.id.as_str()) {
             return Err(AppError::BadRequest(
                 "execution lead does not match the authenticated calling conversation".to_owned(),
             ));
@@ -309,13 +313,10 @@ impl AgentExecutionEngine {
         request: CreateExecutionFromTemplateRequest,
         lead_preset: Option<&ResolvedPresetSnapshot>,
     ) -> Result<AgentExecution, AppError> {
-        let template_id = template_id.trim();
-        if template_id.is_empty() {
-            return Err(AppError::BadRequest("template_id must not be empty".to_owned()));
-        }
+        let template_id = canonical_id::<AgentExecutionTemplateId>("template_id", template_id)?;
         let rows = self
             .template_repository
-            .get_template(owner_id, template_id)
+            .get_template(owner_id, &template_id)
             .await?
             .ok_or_else(|| AppError::NotFound(format!("Agent Execution Template {template_id}")))?;
         if rows.participants.len() > MAX_AGENT_EXECUTION_PARTICIPANTS {
@@ -400,6 +401,9 @@ impl AgentExecutionEngine {
         participants: Vec<NewAgentExecutionParticipant>,
         supplemental_context: Option<serde_json::Value>,
     ) -> Result<AgentExecution, AppError> {
+        if let Some(conversation_id) = request.lead_conversation_id.as_deref() {
+            canonical_id::<ConversationId>("lead_conversation_id", conversation_id)?;
+        }
         let goal = non_empty("goal", request.goal)?;
         let max_parallel = validate_max_parallel(request.max_parallel)?;
         if participants.is_empty() || participants.len() > MAX_AGENT_EXECUTION_PARTICIPANTS {
@@ -446,7 +450,7 @@ impl AgentExecutionEngine {
                     delegation_policy: request.delegation_policy,
                     max_parallel,
                     work_dir,
-                    lead_conversation_id: request.lead_conversation_id,
+                    lead_conversation_id: request.lead_conversation_id.clone(),
                     initial_plan_input,
                 },
                 &participants,
@@ -488,7 +492,7 @@ impl AgentExecutionEngine {
         owner_id: &str,
         template_id: &str,
     ) -> Result<AgentExecutionTemplateDetail, AppError> {
-        let template_id = non_empty("template_id", template_id.to_owned())?;
+        let template_id = canonical_id::<AgentExecutionTemplateId>("template_id", template_id)?;
         let rows = self
             .template_repository
             .get_template(owner_id, &template_id)
@@ -537,7 +541,7 @@ impl AgentExecutionEngine {
         template_id: &str,
         request: UpdateAgentExecutionTemplateRequest,
     ) -> Result<AgentExecutionTemplateDetail, AppError> {
-        let template_id = non_empty("template_id", template_id.to_owned())?;
+        let template_id = canonical_id::<AgentExecutionTemplateId>("template_id", template_id)?;
         if let Some(Some(max_parallel)) = request.max_parallel {
             validate_max_parallel(Some(max_parallel))?;
         }
@@ -584,7 +588,7 @@ impl AgentExecutionEngine {
         template_id: &str,
         expected_version: i64,
     ) -> Result<(), AppError> {
-        let template_id = non_empty("template_id", template_id.to_owned())?;
+        let template_id = canonical_id::<AgentExecutionTemplateId>("template_id", template_id)?;
         if self
             .template_repository
             .delete_template(owner_id, &template_id, expected_version)
@@ -695,10 +699,13 @@ impl AgentExecutionEngine {
         });
         let (provider_id, model) = match (provider_id, model, snapshot_model) {
             (Some(provider_id), Some(model), _) => (
-                Some(non_empty("provider_id", provider_id)?),
-                Some(non_empty("model", model)?),
+                Some(canonical_provider_id("provider_id", provider_id)?),
+                Some(canonical_model_name("model", model)?),
             ),
-            (None, None, Some((provider_id, model))) => (Some(provider_id), Some(model)),
+            (None, None, Some((provider_id, model))) => (
+                Some(canonical_provider_id("resolved provider_id", provider_id)?),
+                Some(canonical_model_name("resolved model", model)?),
+            ),
             (None, None, None) => {
                 return Err(AppError::BadRequest(
                     "template participant must resolve a concrete provider and model".to_owned(),
@@ -796,8 +803,9 @@ impl AgentExecutionEngine {
     pub async fn execution_for_attempt_conversation(
         &self,
         owner_id: &str,
-        conversation_id: i64,
+        conversation_id: &str,
     ) -> Result<Option<String>, AppError> {
+        canonical_id::<ConversationId>("conversation_id", conversation_id)?;
         let mut links = self
             .repository
             .resolve_conversation_link(owner_id, conversation_id)
@@ -826,12 +834,13 @@ impl AgentExecutionEngine {
         &self,
         owner_id: &str,
         actor: &AgentExecutionActor,
-        conversation_id: i64,
+        conversation_id: &str,
         goal: String,
         model_pool: ExecutionModelPool,
         requested_model_pool: Option<ExecutionModelPool>,
         explicit_steps: Option<Vec<nomifun_api_types::PlannedExecutionStep>>,
     ) -> Result<(AgentExecutionDetail, Vec<String>), AppError> {
+        canonical_id::<ConversationId>("conversation_id", conversation_id)?;
         let goal = non_empty("goal", goal)?;
         if explicit_steps.as_ref().is_some_and(Vec::is_empty) {
             return Err(AppError::BadRequest(
@@ -843,7 +852,7 @@ impl AgentExecutionEngine {
                 conversation_id: Some(actor_conversation_id),
                 attempt_id: Some(actor_attempt_id),
                 ..
-            } if *actor_conversation_id == conversation_id => actor_attempt_id,
+            } if actor_conversation_id == conversation_id => actor_attempt_id,
             _ => {
                 return Err(AppError::NotFound(
                     "active execution Attempt for Agent caller".to_owned(),
@@ -940,7 +949,7 @@ impl AgentExecutionEngine {
                 AppError::NotFound(format!("Execution attempt {caller_attempt_id}"))
             })?;
         if caller_attempt.status != ExecutionAttemptStatus::Running
-            || caller_attempt.conversation_id != Some(conversation_id)
+            || caller_attempt.conversation_id.as_deref() != Some(conversation_id)
         {
             return Err(AppError::Conflict(
                 "delegation requires the running linked Attempt".to_owned(),
@@ -977,7 +986,7 @@ impl AgentExecutionEngine {
                 &detail.execution.id,
                 &AppendAgentExecutionStepsFromAttemptParams {
                     operation_id,
-                    caller_conversation_id: conversation_id,
+                    caller_conversation_id: conversation_id.to_owned(),
                     caller_step_id: caller_step_id.clone(),
                     caller_attempt_id: caller_attempt_id.clone(),
                     expected_caller_step_version: caller_step.version,
@@ -1017,8 +1026,10 @@ impl AgentExecutionEngine {
         &self,
         owner_id: &str,
         execution_id: &str,
-        conversation_id: i64,
+        conversation_id: &str,
     ) -> Result<AgentExecutionActor, AppError> {
+        canonical_id::<AgentExecutionId>("execution_id", execution_id)?;
+        canonical_id::<ConversationId>("conversation_id", conversation_id)?;
         let links = self
             .repository
             .resolve_conversation_link(owner_id, conversation_id)
@@ -1079,8 +1090,9 @@ impl AgentExecutionEngine {
     pub async fn agent_caller_for_delegation(
         &self,
         owner_id: &str,
-        conversation_id: i64,
+        conversation_id: &str,
     ) -> Result<AgentExecutionActor, AppError> {
+        canonical_id::<ConversationId>("conversation_id", conversation_id)?;
         let mut attempts = self
             .repository
             .resolve_conversation_link(owner_id, conversation_id)
@@ -1122,7 +1134,7 @@ impl AgentExecutionEngine {
             let lead = links
                 .iter()
                 .find(|link| link.active && link.relation == "lead")
-                .map(|link| link.conversation_id);
+                .map(|link| link.conversation_id.clone());
             executions.push(domain_mapper::execution(row, lead)?);
         }
         Ok(executions)
@@ -1707,6 +1719,7 @@ impl AgentExecutionEngine {
         step_id: &str,
         request: ReassignExecutionStepRequest,
     ) -> Result<ExecutionStep, AppError> {
+        canonical_id::<AgentExecutionParticipantId>("participant_id", &request.participant_id)?;
         let detail = self.detail(owner_id, execution_id).await?;
         let step = require_pending_agent_step(&detail, step_id)?;
         let participant = detail
@@ -2028,11 +2041,11 @@ impl AgentExecutionEngine {
             .iter()
             .filter(|attempt| attempt.step_id == step_id)
             .max_by_key(|attempt| attempt.attempt_no)
-            .and_then(|attempt| attempt.conversation_id)
+            .and_then(|attempt| attempt.conversation_id.clone())
             .ok_or_else(|| AppError::BadRequest("step has no Agent conversation to adopt".to_owned()))?;
         let output = self
             .scheduler
-            .read_attempt_output(owner_id, conversation_id)
+            .read_attempt_output(owner_id, &conversation_id)
             .await
             .filter(|value| !value.trim().is_empty())
             .ok_or_else(|| AppError::BadRequest("Agent conversation has no final output".to_owned()))?;
@@ -2140,7 +2153,7 @@ impl AgentExecutionEngine {
             .scheduler
             .steer_conversation(
                 owner_id,
-                persisted.conversation_id,
+                &persisted.conversation_id,
                 &operation_id,
                 &text,
             )
@@ -2186,7 +2199,7 @@ impl AgentExecutionEngine {
         &self,
         owner_id: &str,
         actor: &AgentExecutionActor,
-        conversation_id: i64,
+        conversation_id: &str,
         question: String,
     ) -> Result<AgentExecutionDetail, AppError> {
         let question = non_empty("question", question)?;
@@ -2222,7 +2235,7 @@ impl AgentExecutionEngine {
                 agent_id: _,
                 conversation_id: actor_conversation_id,
                 attempt_id: actor_attempt_id,
-            } if *actor_conversation_id == Some(conversation_id)
+            } if actor_conversation_id.as_deref() == Some(conversation_id)
                 && actor_attempt_id.as_deref() == Some(attempt_id.as_str()) => {}
             _ => {
                 return Err(AppError::NotFound(
@@ -2349,6 +2362,9 @@ impl AgentExecutionEngine {
         attempt_id: &str,
         request: AnswerExecutionDecisionRequest,
     ) -> Result<AgentExecutionDetail, AppError> {
+        canonical_id::<AgentExecutionId>("execution_id", execution_id)?;
+        canonical_id::<AgentExecutionStepId>("step_id", step_id)?;
+        canonical_id::<AgentExecutionAttemptId>("attempt_id", attempt_id)?;
         let answer = non_empty("answer", request.answer)?;
         let waiting = self
             .repository
@@ -2393,7 +2409,7 @@ impl AgentExecutionEngine {
             .detail
             .current_attempt
             .ok_or_else(|| AppError::Internal("resumed attempt is missing".to_owned()))?;
-        if attempt.conversation_id != Some(resumed.conversation_id) {
+        if attempt.conversation_id.as_deref() != Some(resumed.conversation_id.as_str()) {
             return Err(AppError::Internal(
                 "resumed attempt conversation link changed inside its transaction".to_owned(),
             ));
@@ -2700,6 +2716,7 @@ impl AgentExecutionEngine {
         owner_id: &str,
         execution_id: &str,
     ) -> Result<AgentExecutionDetail, AppError> {
+        canonical_id::<AgentExecutionId>("execution_id", execution_id)?;
         let rows = self
             .repository
             .get_execution_detail(owner_id, execution_id)
@@ -2724,6 +2741,29 @@ fn non_empty(field: &str, value: String) -> Result<String, AppError> {
     let value = value.trim().to_owned();
     if value.is_empty() {
         Err(AppError::BadRequest(format!("{field} must not be empty")))
+    } else {
+        Ok(value)
+    }
+}
+
+fn canonical_id<T: EntityId>(field: &str, value: &str) -> Result<String, AppError> {
+    value
+        .parse::<T>()
+        .map(|id| id.as_str().to_owned())
+        .map_err(|error| AppError::BadRequest(format!("invalid {field}: {error}")))
+}
+
+fn canonical_provider_id(field: &str, value: String) -> Result<String, AppError> {
+    ProviderId::try_from(value.as_str())
+        .map(|_| value)
+        .map_err(|_| AppError::BadRequest(format!("{field} must be a canonical ProviderId")))
+}
+
+fn canonical_model_name(field: &str, value: String) -> Result<String, AppError> {
+    if value.is_empty() || value.trim() != value {
+        Err(AppError::BadRequest(format!(
+            "{field} must be trimmed and non-empty"
+        )))
     } else {
         Ok(value)
     }
@@ -2755,6 +2795,21 @@ fn validate_template_snapshot(snapshot: &ResolvedPresetSnapshot) -> Result<(), A
                 .to_owned(),
         ));
     }
+    if let Some(model) = snapshot.resolved_model.as_ref() {
+        if let Some(provider_id) = model.provider_id.as_deref()
+            && ProviderId::try_from(provider_id).is_err()
+        {
+            return Err(AppError::BadRequest(
+                "template participant preset_snapshot has a non-canonical provider_id"
+                    .to_owned(),
+            ));
+        }
+        if model.model.is_empty() || model.model.trim() != model.model {
+            return Err(AppError::BadRequest(
+                "template participant preset_snapshot has an invalid model".to_owned(),
+            ));
+        }
+    }
     Ok(())
 }
 
@@ -2777,6 +2832,14 @@ fn runtime_participants_from_template(
     let mut participants = Vec::with_capacity(rows.len());
     let mut distinct_models = HashSet::new();
     for row in rows {
+        canonical_id::<AgentExecutionTemplateParticipantId>(
+            "template participant id",
+            &row.id,
+        )?;
+        canonical_id::<AgentExecutionTemplateId>(
+            "template participant template_id",
+            &row.template_id,
+        )?;
         // Decode every structured field before copying it so corrupt authoring
         // data cannot become immutable runtime state. The exact serialized
         // snapshots are still copied verbatim; there is no lossy model-range
@@ -2855,8 +2918,7 @@ fn runtime_model_pair(
 ) -> Result<(String, String), AppError> {
     match (provider_id, model) {
         (Some(provider_id), Some(model))
-            if !provider_id.is_empty()
-                && provider_id.trim() == provider_id
+            if ProviderId::try_from(provider_id).is_ok()
                 && !model.is_empty()
                 && model.trim() == model =>
         {
@@ -2872,6 +2934,7 @@ fn runtime_model_pair(
 }
 
 fn map_template(row: AgentExecutionTemplateRow) -> Result<AgentExecutionTemplate, AppError> {
+    canonical_id::<AgentExecutionTemplateId>("template id", &row.id)?;
     Ok(AgentExecutionTemplate {
         id: row.id,
         name: row.name,
@@ -2892,6 +2955,16 @@ fn map_template(row: AgentExecutionTemplateRow) -> Result<AgentExecutionTemplate
 fn map_template_participant(
     row: AgentExecutionTemplateParticipantRow,
 ) -> Result<AgentExecutionTemplateParticipant, AppError> {
+    canonical_id::<AgentExecutionTemplateParticipantId>("template participant id", &row.id)?;
+    canonical_id::<AgentExecutionTemplateId>(
+        "template participant template_id",
+        &row.template_id,
+    )?;
+    let (provider_id, model) = runtime_model_pair(
+        row.provider_id.as_deref(),
+        row.model.as_deref(),
+        &row.id,
+    )?;
     Ok(AgentExecutionTemplateParticipant {
         id: row.id,
         source_agent_id: row.source_agent_id,
@@ -2902,8 +2975,8 @@ fn map_template_participant(
             .as_deref()
             .map(|raw| decode_json(raw, "template participant preset snapshot"))
             .transpose()?,
-        provider_id: row.provider_id,
-        model: row.model,
+        provider_id: Some(provider_id),
+        model: Some(model),
         role: row.role,
         capability: row
             .capability
@@ -2985,6 +3058,7 @@ fn participants_for_model_pool(
     detail: &AgentExecutionDetail,
     pool: &ExecutionModelPool,
 ) -> Result<Vec<ExecutionParticipant>, AppError> {
+    pool.validate().map_err(AppError::BadRequest)?;
     let active = active_participants(detail);
     let requested = match pool {
         ExecutionModelPool::Automatic => return Ok(active),
@@ -2996,16 +3070,7 @@ fn participants_for_model_pool(
             "delegation model pool must contain 1-{MAX_AGENT_EXECUTION_MODELS} models"
         )));
     }
-    let mut seen = HashSet::new();
     for model in &requested {
-        if model.provider_id.trim().is_empty()
-            || model.model.trim().is_empty()
-            || !seen.insert((model.provider_id.as_str(), model.model.as_str()))
-        {
-            return Err(AppError::BadRequest(
-                "delegation model pool contains an invalid or duplicate model".to_owned(),
-            ));
-        }
         if !active.iter().any(|participant| {
             participant.provider_id.as_deref() == Some(model.provider_id.as_str())
                 && participant.model.as_deref() == Some(model.model.as_str())
@@ -3046,6 +3111,7 @@ fn active_dependencies(detail: &AgentExecutionDetail) -> Vec<NewAgentExecutionSt
 }
 
 fn current_step<'a>(detail: &'a AgentExecutionDetail, step_id: &str) -> Result<&'a ExecutionStep, AppError> {
+    canonical_id::<AgentExecutionStepId>("step_id", step_id)?;
     detail
         .steps
         .iter()
@@ -3413,6 +3479,9 @@ mod tests {
     use nomifun_api_types::{ExecutionModelPool, ExecutionModelRef};
     use nomifun_common::MAX_AGENT_EXECUTION_PARALLELISM;
 
+    const PROVIDER_A: &str = "prov_0190f5fe-7c00-7a00-8000-000000000001";
+    const PROVIDER_OVERRIDE: &str = "prov_0190f5fe-7c00-7a00-8000-000000000002";
+
     #[test]
     fn initial_planning_command_round_trips_automatic_and_complete_explicit_input() {
         let automatic: InitialPlanningCommand =
@@ -3461,7 +3530,7 @@ mod tests {
     fn attempt_delegation_identity_is_server_derived_and_semantic() {
         let pool = ExecutionModelPool::Single {
             model: ExecutionModelRef {
-                provider_id: "provider-a".to_owned(),
+                provider_id: PROVIDER_A.to_owned(),
                 model: "model-a".to_owned(),
             },
         };
@@ -3512,22 +3581,22 @@ mod tests {
     #[test]
     fn persisted_template_participant_uses_only_its_concrete_model_binding() {
         assert_eq!(
-            runtime_model_pair(Some("provider-a"), Some("model-a"), "participant-a").unwrap(),
-            ("provider-a".to_owned(), "model-a".to_owned())
+            runtime_model_pair(Some(PROVIDER_A), Some("model-a"), "participant-a").unwrap(),
+            (PROVIDER_A.to_owned(), "model-a".to_owned())
         );
         assert_eq!(
             runtime_model_pair(
-                Some("provider-override"),
+                Some(PROVIDER_OVERRIDE),
                 Some("model-override"),
                 "participant-a",
             )
             .unwrap(),
-            ("provider-override".to_owned(), "model-override".to_owned())
+            (PROVIDER_OVERRIDE.to_owned(), "model-override".to_owned())
         );
         assert!(runtime_model_pair(None, None, "missing").is_err());
-        assert!(runtime_model_pair(Some("provider"), None, "unpaired").is_err());
-        assert!(runtime_model_pair(Some("provider"), Some("  "), "blank").is_err());
+        assert!(runtime_model_pair(Some(PROVIDER_A), None, "unpaired").is_err());
+        assert!(runtime_model_pair(Some(PROVIDER_A), Some("  "), "blank").is_err());
         assert!(runtime_model_pair(Some(" provider"), Some("model"), "provider-space").is_err());
-        assert!(runtime_model_pair(Some("provider"), Some("model "), "model-space").is_err());
+        assert!(runtime_model_pair(Some(PROVIDER_A), Some("model "), "model-space").is_err());
     }
 }

@@ -1,3 +1,4 @@
+import type { ConversationId, MessageId } from '@/common/types/ids';
 /**
  * @license
  * Copyright 2025-2026 NomiFun (nomifun.com)
@@ -13,7 +14,7 @@ export type TurnPreviewItem = {
   questionRaw: string;
   answerRaw: string;
   messageId?: string;
-  msgId?: string;
+  msgId?: MessageId;
 };
 
 export type MinimapVisualStyle = {
@@ -45,7 +46,7 @@ export const defaultVisualStyle: MinimapVisualStyle = {
 };
 
 export type ConversationTitleMinimapProps = {
-  conversation_id?: number;
+  conversation_id?: ConversationId;
   /** When true, hide the trigger button but keep the shortcut listener and panel active. */
   hideTrigger?: boolean;
 };

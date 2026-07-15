@@ -57,7 +57,7 @@ pub trait IKnowledgeRepository: Send + Sync {
         writeback_eagerness: &str,
         channel_write_enabled: bool,
         updated_at: nomifun_common::TimestampMs,
-    ) -> Result<i64, DbError>;
+    ) -> Result<String, DbError>;
 
     /// Delete the binding for a target (no-op when absent). Used by the
     /// conversation-delete hook so bindings don't accumulate as orphans. The

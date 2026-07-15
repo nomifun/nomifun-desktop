@@ -14,16 +14,16 @@
 //! Import mirrors the knowledge importer's hardening: component-sanitized
 //! entry paths (zip-slip), symlink rejection, a strict entry whitelist, and a
 //! manifest format/kind/version gate before anything is written. Memory
-//! import merges instead of replacing: active near-duplicates are skipped via
-//! the store's `find_similar_active`, identical rows (same id + kind +
-//! content, e.g. a re-imported archive) are skipped, and genuine cross-machine
-//! id collisions get a fresh id while every other field stays untouched.
+//! import is a merge that preserves globally unique IDs: active
+//! near-duplicates and byte-equivalent same-ID rows are idempotent, while a
+//! same-ID/different-content collision fails. Generating replacement IDs is
+//! reserved for an explicit clone import with a complete reference remap.
 
 use std::collections::HashSet;
 use std::io::Write;
 use std::path::{Component, Path, PathBuf};
 
-use nomifun_common::{AppError, TimestampMs, generate_prefixed_id, now_ms};
+use nomifun_common::{AppError, TimestampMs, now_ms};
 use serde::{Deserialize, Serialize};
 
 use crate::profile::CompanionProfileConfig;
@@ -414,7 +414,7 @@ async fn import_memory_bundle(
 
     let mut imported = 0u64;
     let mut skipped = 0u64;
-    for mut mem in memories {
+    for mem in memories {
         // Near-duplicate of an active local memory → skip.
         if store.find_similar_active(&mem.kind, &mem.content).await?.is_some() {
             skipped += 1;
@@ -428,9 +428,10 @@ async fn import_memory_bundle(
                 skipped += 1;
                 continue;
             }
-            // Genuine cross-machine id collision: fresh id, everything else
-            // verbatim.
-            mem.id = generate_prefixed_id("mem");
+            return Err(AppError::Conflict(format!(
+                "memory import ID collision for {}: local and imported content differ",
+                mem.id
+            )));
         }
         store.insert_memory_raw(&mem).await?;
         imported += 1;
@@ -710,6 +711,16 @@ mod tests {
     use super::*;
     use crate::registry::CompanionRegistry;
 
+    fn memory_fixture(sequence: u64) -> String {
+        let raw = format!("mem_0190f5fe-7c00-7a00-8abc-{sequence:012}");
+        nomifun_common::CompanionMemoryId::try_from(raw.as_str()).unwrap().into_string()
+    }
+
+    fn provider_fixture(sequence: u64) -> String {
+        let raw = format!("prov_0190f5fe-7c00-7a00-8abc-{sequence:012}");
+        nomifun_common::ProviderId::try_from(raw.as_str()).unwrap().into_string()
+    }
+
     /// Registry over `{root}/{companions}` with its seq-watermark state beside it
     /// at `{root}/{companions}-shared` (each test roster gets its own watermark).
     fn scan_registry(root: &Path, companions: &str) -> CompanionRegistry {
@@ -731,7 +742,7 @@ mod tests {
             updated_at: 2_222,
             last_reinforced_at: 3_333,
             scope_kind: "user".into(),
-            scope_companion_id: String::new(),
+            scope_companion_id: None,
         }
     }
 
@@ -767,17 +778,18 @@ mod tests {
 
         let store_a = CompanionStore::open_memory().await.unwrap();
         let mut originals = vec![
-            raw_memory("mem_aaa", "preference", "主人喜欢深色主题", "active"),
-            raw_memory("mem_bbb", "episode", "上周修了导出 bug", "archived"),
-            raw_memory("mem_ccc", "knowledge", "cargo test -p nomifun-companion 是门禁", "active"),
+            raw_memory(&memory_fixture(1), "preference", "主人喜欢深色主题", "active"),
+            raw_memory(&memory_fixture(2), "episode", "上周修了导出 bug", "archived"),
+            raw_memory(&memory_fixture(3), "knowledge", "cargo test -p nomifun-companion 是门禁", "active"),
         ];
         for m in &originals {
             store_a.insert_memory_raw(m).await.unwrap();
         }
         store_a.set_state("mood", "happy").await.unwrap();
+        let learn_run_id = nomifun_common::CompanionLearnRunId::new().into_string();
         store_a
             .insert_learn_run(&CompanionLearnRun {
-                id: "run_1".into(),
+                id: learn_run_id.clone(),
                 started_at: 10,
                 finished_at: Some(20),
                 status: "ok".into(),
@@ -821,7 +833,7 @@ mod tests {
         let mut restored = store_b.dump_memories_all().await.unwrap();
         assert_eq!(sorted_json(&mut restored), sorted_json(&mut originals));
         assert_eq!(store_b.get_state("mood").await.unwrap().as_deref(), Some("calm"));
-        assert!(store_b.learn_run_exists("run_1").await.unwrap());
+        assert!(store_b.learn_run_exists(&learn_run_id).await.unwrap());
         let landed = shared_b.join("events").join("2026-06-01.jsonl");
         assert_eq!(std::fs::read_to_string(&landed).unwrap(), format!("{event_line}\n"));
 
@@ -842,39 +854,33 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn memory_import_regenerates_id_on_genuine_collision() {
+    async fn memory_import_rejects_same_id_with_different_content() {
         let dir = tempfile::TempDir::new().unwrap();
         let shared_a = dir.path().join("shared-a");
         let store_a = CompanionStore::open_memory().await.unwrap();
+        let clashing_id = memory_fixture(10);
         store_a
-            .insert_memory_raw(&raw_memory("mem_clash", "knowledge", "来自源机器的知识", "active"))
+            .insert_memory_raw(&raw_memory(&clashing_id, "knowledge", "来自源机器的知识", "active"))
             .await
             .unwrap();
         let zip_path = dir.path().join("clash.zip");
         export_memory_bundle(&store_a, &shared_a, &zip_path, false).await.unwrap();
 
-        // Target machine already owns mem_clash with different content.
+        // Target machine already owns mem_clash with different content. Merge
+        // must fail rather than silently changing global identity.
         let store_b = CompanionStore::open_memory().await.unwrap();
         store_b
-            .insert_memory_raw(&raw_memory("mem_clash", "knowledge", "本机完全不同的知识", "active"))
+            .insert_memory_raw(&raw_memory(&clashing_id, "knowledge", "本机完全不同的知识", "active"))
             .await
             .unwrap();
         let roster_b = scan_registry(dir.path(), "companions-b");
-        let outcome = import_bundle(&store_b, &roster_b, &dir.path().join("shared-b"), &zip_path)
+        let error = import_bundle(&store_b, &roster_b, &dir.path().join("shared-b"), &zip_path)
             .await
-            .unwrap();
-        assert_eq!(
-            outcome,
-            ImportOutcome::Memory {
-                imported: 1,
-                skipped_duplicates: 0
-            }
-        );
+            .unwrap_err();
+        assert!(error.to_string().contains("memory import ID collision"));
         let all = store_b.dump_memories_all().await.unwrap();
-        assert_eq!(all.len(), 2);
-        let imported = all.iter().find(|m| m.content == "来自源机器的知识").unwrap();
-        assert_ne!(imported.id, "mem_clash", "collision must mint a fresh id");
-        assert_eq!(imported.created_at, 1_111, "other fields stay verbatim");
+        assert_eq!(all.len(), 1);
+        assert_eq!(all[0].id, clashing_id);
     }
 
     #[tokio::test]
@@ -883,12 +889,13 @@ mod tests {
         let store_a = CompanionStore::open_memory().await.unwrap();
         let reg_a = scan_registry(dir.path(), "companions-a");
         let created = reg_a.create("毛球", "ink").await.unwrap();
+        let provider_id = provider_fixture(1);
         let profile = reg_a
             .patch(
                 &created.id,
                 serde_json::json!({
                     "persona": {"preset": "sassy", "custom": "喜欢用颜文字"},
-                    "model": {"provider_id": "prov_x", "model": "claude-fable-5"},
+                    "model": {"provider_id": provider_id, "model": "claude-fable-5"},
                     "appearance": {"companion_enabled": true, "companion_x": 7, "quiet_start": "22:00", "quiet_end": "08:00"}
                 }),
             )
@@ -1040,7 +1047,7 @@ mod tests {
         let dir = tempfile::TempDir::new().unwrap();
         let store = CompanionStore::open_memory().await.unwrap();
         let roster = scan_registry(dir.path(), "companions");
-        let good = serde_json::to_string(&raw_memory("mem_ok", "knowledge", "好行", "active")).unwrap();
+        let good = serde_json::to_string(&raw_memory(&memory_fixture(20), "knowledge", "好行", "active")).unwrap();
 
         let corrupt = dir.path().join("corrupt.zip");
         write_test_zip(

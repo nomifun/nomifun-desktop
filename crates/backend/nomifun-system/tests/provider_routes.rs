@@ -12,6 +12,7 @@ use http_body_util::BodyExt;
 use serde_json::json;
 use tower::ServiceExt;
 
+use nomifun_common::ProviderId;
 use nomifun_db::{
     SqliteClientPreferenceRepository, SqliteProviderRepository, SqliteSettingsRepository, init_database_memory,
 };
@@ -280,8 +281,9 @@ async fn create_provider_success() {
 #[tokio::test]
 async fn create_provider_with_supplied_id() {
     let (app, _db) = setup().await;
+    let provider_id = ProviderId::new().into_string();
     let body = json!({
-        "id": "caller-id-123",
+        "id": provider_id.clone(),
         "platform": "openai",
         "name": "OpenAI",
         "base_url": "https://api.openai.com",
@@ -293,7 +295,7 @@ async fn create_provider_with_supplied_id() {
     assert_eq!(resp.status(), StatusCode::CREATED);
     let json = body_json(resp).await;
     let data = &json["data"];
-    assert_eq!(data["id"], "caller-id-123");
+    assert_eq!(data["id"], provider_id);
     assert_eq!(data["api_key"], "sk-test");
     assert_eq!(data["model_enabled"]["gpt-4"], true);
     assert_eq!(data["model_enabled"]["gpt-3.5"], false);
@@ -302,8 +304,9 @@ async fn create_provider_with_supplied_id() {
 #[tokio::test]
 async fn create_provider_with_duplicate_id_returns_conflict() {
     let (_app, db) = setup().await;
+    let provider_id = ProviderId::new().into_string();
     let body = json!({
-        "id": "dup-id",
+        "id": provider_id.clone(),
         "platform": "openai",
         "name": "OpenAI",
         "base_url": "https://api.openai.com",
@@ -482,8 +485,9 @@ async fn update_provider_api_key_returns_plaintext() {
 #[tokio::test]
 async fn update_provider_nonexistent() {
     let (app, _db) = setup().await;
+    let provider_id = ProviderId::new().into_string();
     let resp = app
-        .oneshot(json_request("PUT", "/api/providers/nonexistent", json!({"name": "X"})))
+        .oneshot(json_request("PUT", &format!("/api/providers/{provider_id}"), json!({"name": "X"})))
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
@@ -530,7 +534,11 @@ async fn delete_provider_then_list_excludes_deleted() {
 #[tokio::test]
 async fn delete_provider_nonexistent() {
     let (app, _db) = setup().await;
-    let resp = app.oneshot(delete_request("/api/providers/nonexistent")).await.unwrap();
+    let provider_id = ProviderId::new().into_string();
+    let resp = app
+        .oneshot(delete_request(&format!("/api/providers/{provider_id}")))
+        .await
+        .unwrap();
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 }
 

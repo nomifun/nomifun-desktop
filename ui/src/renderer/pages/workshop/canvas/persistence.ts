@@ -17,6 +17,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { putCanvasDoc } from '../api';
 import type { WorkshopCanvasDoc } from '../types';
+import type { CanvasId } from '@/common/types/ids';
 
 export type SaveState = 'idle' | 'saving' | 'saved' | 'error';
 
@@ -33,7 +34,7 @@ export interface DocPersistence {
 }
 
 export function useDocPersistence(
-  canvasId: string,
+  canvasId: CanvasId,
   getDoc: () => WorkshopCanvasDoc,
   onSaveStateChange?: (state: SaveState) => void
 ): DocPersistence {

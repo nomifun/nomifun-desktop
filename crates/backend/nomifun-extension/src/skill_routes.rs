@@ -373,10 +373,7 @@ async fn materialize_for_agent(
     body: Result<Json<MaterializeSkillsRequest>, JsonRejection>,
 ) -> Result<Json<ApiResponse<MaterializeSkillsResponse>>, AppError> {
     let Json(req) = body.map_err(|e| AppError::BadRequest(e.to_string()))?;
-    if req.conversation_id <= 0 {
-        return Err(AppError::BadRequest("conversationId must not be empty".into()));
-    }
-    let conversation_id = req.conversation_id.to_string();
+    let conversation_id = req.conversation_id.into_string();
     let resolved =
         skill_service::materialize_skills_for_agent(&state.skill_paths, &conversation_id, &req.skills).await?;
     let skills: Vec<MaterializedSkillRef> = resolved

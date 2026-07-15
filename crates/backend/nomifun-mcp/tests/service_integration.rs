@@ -9,6 +9,7 @@ use nomifun_api_types::{
     BatchImportMcpServersRequest, CreateMcpServerRequest, ImportMcpServerRequest, McpTransport, UpdateMcpServerRequest,
 };
 use nomifun_db::SqliteMcpServerRepository;
+use nomifun_common::McpServerId;
 use nomifun_mcp::{McpConfigService, McpError};
 
 async fn make_service() -> McpConfigService {
@@ -83,12 +84,12 @@ async fn create_and_get_stdio_server() {
     let resp = svc.add_server(stdio_req("test-stdio")).await.unwrap();
 
     // Host-local INTEGER primary key, surfaced as a number on the DTO.
-    assert!(resp.id > 0);
+    assert!(resp.id.as_str().starts_with("mcp_"));
     assert_eq!(resp.name, "test-stdio");
     assert!(!resp.enabled);
     assert_eq!(resp.description.as_deref(), Some("test"));
 
-    let found = svc.get_server(&resp.id.to_string()).await.unwrap();
+    let found = svc.get_server(&resp.id).await.unwrap();
     assert_eq!(found.id, resp.id);
 }
 
@@ -140,7 +141,7 @@ async fn list_returns_all() {
 #[tokio::test]
 async fn get_not_found() {
     let svc = make_service().await;
-    let err = svc.get_server("nonexistent").await.unwrap_err();
+    let err = svc.get_server(&McpServerId::new()).await.unwrap_err();
     assert!(matches!(err, McpError::NotFound(_)));
 }
 
@@ -155,7 +156,7 @@ async fn edit_name_is_rejected() {
 
     let err = svc
         .edit_server(
-            &created.id.to_string(),
+            &created.id,
             UpdateMcpServerRequest {
                 name: Some("new".into()),
                 description: None,
@@ -176,7 +177,7 @@ async fn edit_transport() {
 
     let updated = svc
         .edit_server(
-            &created.id.to_string(),
+            &created.id,
             UpdateMcpServerRequest {
                 name: None,
                 description: None,
@@ -204,7 +205,7 @@ async fn edit_clears_description() {
 
     let updated = svc
         .edit_server(
-            &created.id.to_string(),
+            &created.id,
             UpdateMcpServerRequest {
                 name: None,
                 description: Some(None),
@@ -223,7 +224,7 @@ async fn edit_not_found() {
     let svc = make_service().await;
     let err = svc
         .edit_server(
-            "nonexistent",
+            &McpServerId::new(),
             UpdateMcpServerRequest {
                 name: Some("x".into()),
                 description: None,
@@ -245,7 +246,7 @@ async fn edit_name_conflict() {
 
     let err = svc
         .edit_server(
-            &b.id.to_string(),
+            &b.id,
             UpdateMcpServerRequest {
                 name: Some("a".into()),
                 description: None,
@@ -267,10 +268,10 @@ async fn edit_name_conflict() {
 async fn delete_removes_server() {
     let svc = make_service().await;
     let created = svc.add_server(stdio_req("del")).await.unwrap();
-    let was_enabled = svc.delete_server(&created.id.to_string()).await.unwrap();
+    let was_enabled = svc.delete_server(&created.id).await.unwrap();
     assert!(!was_enabled);
 
-    let err = svc.get_server(&created.id.to_string()).await.unwrap_err();
+    let err = svc.get_server(&created.id).await.unwrap_err();
     assert!(matches!(err, McpError::NotFound(_)));
 }
 
@@ -278,16 +279,16 @@ async fn delete_removes_server() {
 async fn delete_enabled_returns_true() {
     let svc = make_service().await;
     let created = svc.add_server(stdio_req("del-en")).await.unwrap();
-    svc.toggle_server(&created.id.to_string()).await.unwrap();
+    svc.toggle_server(&created.id).await.unwrap();
 
-    let was_enabled = svc.delete_server(&created.id.to_string()).await.unwrap();
+    let was_enabled = svc.delete_server(&created.id).await.unwrap();
     assert!(was_enabled);
 }
 
 #[tokio::test]
 async fn delete_not_found() {
     let svc = make_service().await;
-    let err = svc.delete_server("nonexistent").await.unwrap_err();
+    let err = svc.delete_server(&McpServerId::new()).await.unwrap_err();
     assert!(matches!(err, McpError::NotFound(_)));
 }
 
@@ -301,10 +302,10 @@ async fn toggle_enables_then_disables() {
     let created = svc.add_server(stdio_req("tog")).await.unwrap();
     assert!(!created.enabled);
 
-    let toggled = svc.toggle_server(&created.id.to_string()).await.unwrap();
+    let toggled = svc.toggle_server(&created.id).await.unwrap();
     assert!(toggled.enabled);
 
-    let toggled_back = svc.toggle_server(&created.id.to_string()).await.unwrap();
+    let toggled_back = svc.toggle_server(&created.id).await.unwrap();
     assert!(!toggled_back.enabled);
 }
 

@@ -24,6 +24,7 @@ import { useTranslation } from 'react-i18next';
 import { Button } from '@arco-design/web-react';
 import { Down, Right } from '@icon-park/react';
 import type { INewAttachmentRef, IAttachment } from '@/common/adapter/ipcBridge';
+import type { AttachmentId } from '@/common/types/ids';
 import type { FileMetadata } from '@/renderer/services/FileService';
 import { FileService, getFileExtension, imageExts } from '@/renderer/services/FileService';
 import { useDragUpload } from '@renderer/hooks/file/useDragUpload';
@@ -39,7 +40,7 @@ interface AttachmentsFieldProps {
   onChange: (refs: INewAttachmentRef[]) => void;
   /** Already-persisted attachments (edit mode). */
   existing?: IAttachment[];
-  onRemoveExisting?: (id: string) => void;
+  onRemoveExisting?: (id: AttachmentId) => void;
   /** Lets the host disable submit while uploads are in flight. */
   onUploadingChange?: (uploading: boolean) => void;
 }

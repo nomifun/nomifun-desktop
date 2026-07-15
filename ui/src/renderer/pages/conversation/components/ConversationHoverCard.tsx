@@ -47,7 +47,7 @@ const ConversationHoverCard: React.FC<ConversationHoverCardProps> = ({ conversat
         <span className='text-12px text-t-tertiary'>{t('conversation.hoverCard.id')}</span>
         <div className='flex items-center gap-6px'>
           <span className='text-13px text-t-primary break-all font-mono leading-16px'>{conversation.id}</span>
-          <CopyIconButton text={String(conversation.id)} tooltip={t('common.copyFullId')} className='shrink-0 size-18px' />
+          <CopyIconButton text={conversation.id} tooltip={t('common.copyFullId')} className='shrink-0 size-18px' />
         </div>
       </div>
       <div className='flex flex-col gap-2px'>

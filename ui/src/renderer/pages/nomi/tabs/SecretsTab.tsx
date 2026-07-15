@@ -16,7 +16,7 @@ interface Props {
 }
 
 /**
- * 伙伴「浏览器凭据」(browser-use secrets) Tab —— per-pet 注册凭据。
+ * 伙伴「浏览器凭据」(browser-use secrets) Tab —— 全局共享凭据。
  *
  * 用户注册 `(name, value, allowed_origins)`：value 加密落机器绑定 vault，**永不**回前端/LLM
  * （列表只显 name + 绑定域）。在浏览器动作里以 `secret:NAME` 引用，仅在 origin 匹配 allowed_origins 时
@@ -25,8 +25,6 @@ interface Props {
 const SecretsTab: React.FC<Props> = ({ companion }) => {
   const { t } = useTranslation();
   const { profile } = companion;
-  const petId = profile?.id ?? '';
-
   const [secrets, setSecrets] = useState<ISecretListItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [addVisible, setAddVisible] = useState(false);
@@ -38,18 +36,17 @@ const SecretsTab: React.FC<Props> = ({ companion }) => {
   const refreshSeq = useRef(0);
 
   const refresh = useCallback(async () => {
-    if (!petId) return;
     const seq = ++refreshSeq.current;
     setLoading(true);
     try {
-      const list = await ipcBridge.browserSecret.list.invoke({ pet_id: petId });
+      const list = await ipcBridge.browserSecret.list.invoke();
       if (seq === refreshSeq.current) setSecrets(list);
     } catch (e) {
       if (seq === refreshSeq.current) Message.error(String(e));
     } finally {
       if (seq === refreshSeq.current) setLoading(false);
     }
-  }, [petId]);
+  }, []);
 
   useEffect(() => {
     void refresh();
@@ -83,7 +80,6 @@ const SecretsTab: React.FC<Props> = ({ companion }) => {
     setSaving(true);
     try {
       await ipcBridge.browserSecret.register.invoke({
-        pet_id: petId,
         name: trimmedName,
         value,
         allowed_origins: allowedOrigins,
@@ -98,19 +94,19 @@ const SecretsTab: React.FC<Props> = ({ companion }) => {
     } finally {
       setSaving(false);
     }
-  }, [name, value, origins, petId, refresh, t]);
+  }, [name, value, origins, refresh, t]);
 
   const remove = useCallback(
     async (secretName: string) => {
       try {
-        await ipcBridge.browserSecret.remove.invoke({ pet_id: petId, name: secretName });
+        await ipcBridge.browserSecret.remove.invoke({ name: secretName });
         Message.success(t('nomi.secrets.removed'));
         await refresh();
       } catch (e) {
         Message.error(String(e));
       }
     },
-    [petId, refresh, t]
+    [refresh, t]
   );
 
   if (!profile) {

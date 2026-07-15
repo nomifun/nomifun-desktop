@@ -5,6 +5,7 @@
  */
 
 import type { IModelFailoverCandidate, IModelFailoverConfig } from '@/common/adapter/ipcBridge';
+import type { ProviderId } from '@/common/types/ids';
 
 interface ModelFailoverSaveResult {
   config: IModelFailoverConfig;
@@ -14,7 +15,7 @@ interface ModelFailoverSaveResult {
 
 export function buildModelFailoverConfigForSave(
   config: IModelFailoverConfig,
-  draftProvider?: string,
+  draftProvider?: ProviderId,
   draftModel?: string
 ): ModelFailoverSaveResult {
   const queue = config.queue ?? [];

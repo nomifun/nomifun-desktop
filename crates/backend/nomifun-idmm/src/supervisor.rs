@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 
 use dashmap::DashMap;
 use nomifun_api_types::{AutoWorkTargetKind, IdmmConfig, IdmmState, IdmmTargetKind, InterventionRecord};
-use nomifun_common::{AppError, generate_prefixed_id, now_ms};
+use nomifun_common::{AppError, IdmmInterventionId, UserId, now_ms};
 use nomifun_db::IIdmmInterventionRepository;
 use nomifun_db::models::IdmmInterventionRow;
 use tracing::{debug, info, warn};
@@ -121,7 +121,7 @@ async fn run_supervisor_for_owner(
     // A target with no authoritative owner is not safe to supervise: publishing
     // to a guessed/default audience would expose private intervention state.
     let owner_id = match probe.describe().await {
-        Ok(description) if !description.user_id.trim().is_empty() => description.user_id,
+        Ok(description) if UserId::parse(&description.user_id).is_ok() => description.user_id,
         Ok(_) => {
             warn!(target_id, ?kind, "IDMM target has no owner — supervision not started");
             return;
@@ -708,7 +708,7 @@ async fn emit_intervention(
     let detail = extra.detail.map(truncate_detail);
 
     let rec = InterventionRecord {
-        id: generate_prefixed_id("idmmrec"),
+        id: IdmmInterventionId::new(),
         target_kind: target_kind.clone(),
         target_id: target_id.to_string(),
         watch: watch.clone(),
@@ -728,7 +728,7 @@ async fn emit_intervention(
     // the decision path — only warn. The DB is the sole source of truth for
     // `/log`; the supervisor itself keeps only live counters (count / last-at).
     let row = IdmmInterventionRow {
-        id: rec.id.clone(),
+        id: rec.id.clone().into_string(),
         user_id: owner_id.to_owned(),
         target_kind,
         target_id: target_id.to_string(),
@@ -839,12 +839,10 @@ pub trait ConfigReader: Send + Sync {
     ) -> Result<IdmmConfig, AppError>;
 }
 
-/// Domain-qualified key for the per-target supervisor maps. The integer
-/// conversation/terminal ids can collide numerically (`conv#5` vs `term#5`), so
-/// supervisor handles and shared state are keyed by `(kind, target_id)` — a bare
-/// id would let one domain's supervisor stomp the other's (spec §2.2 C3). The
-/// `api-types/idmm.rs` note that "ids never collide" referred to the old prefixed
-/// strings; this composite key makes that guarantee true again under integers.
+/// Domain-qualified key for the per-target supervisor maps. Canonical v2 IDs
+/// are already globally unique, while retaining `kind` in the runtime key keeps
+/// domain dispatch explicit and prevents a mismatched kind/ID pair from
+/// aliasing another supervisor (spec §2.2 C3).
 type IdmmKey = (IdmmTargetKind, String);
 
 /// Inner shared state, kept behind an `Arc` so the sync `IdmmHandle` seam can
@@ -910,7 +908,7 @@ impl IdmmInner {
         let Ok(description) = probe.describe().await else {
             return false;
         };
-        if description.user_id.trim().is_empty() || description.kind != kind {
+        if UserId::parse(&description.user_id).is_err() || description.kind != kind {
             return false;
         }
         let Ok(cfg) = self
@@ -932,7 +930,7 @@ impl IdmmInner {
         };
         let description = match probe.describe().await {
             Ok(description)
-                if description.kind == kind && !description.user_id.trim().is_empty() => description,
+                if description.kind == kind && UserId::parse(&description.user_id).is_ok() => description,
             Ok(_) => {
                 warn!(target_id, ?kind, "IDMM target has no valid owner — supervisor not armed");
                 return;
@@ -1087,8 +1085,8 @@ impl nomifun_conversation::ConversationSupervisionHook for IdmmManager {
 /// `ensure` task per keystroke. The supervisor stands down on PTY exit / Halt;
 /// the next activity (input / relaunch / create) re-arms it.
 impl nomifun_terminal::TerminalSupervisionHook for IdmmManager {
-    fn on_terminal_activity(&self, terminal_id: i64) {
-        if self.inner.is_supervising(IdmmTargetKind::Terminal, &terminal_id.to_string()) {
+    fn on_terminal_activity(&self, terminal_id: &str) {
+        if self.inner.is_supervising(IdmmTargetKind::Terminal, terminal_id) {
             return;
         }
         let inner = self.inner.clone();
@@ -1111,6 +1109,15 @@ mod tests {
     use nomifun_db::models::ClientPreference;
     use std::sync::Mutex;
     use tokio::sync::mpsc;
+
+    const TEST_USER_ID: &str = "user_0190f5fe-7c00-7a00-8000-000000000001";
+    const CONVERSATION_TARGET_ID: &str =
+        "conv_0190f5fe-7c00-7a00-8000-000000000002";
+    const TERMINAL_TARGET_ID: &str =
+        "term_0190f5fe-7c00-7a00-8000-000000000002";
+    const TEST_PROVIDER_ID: &str = "prov_0190f5fe-7c00-7a00-8000-000000000003";
+    const TEST_BYPASS_MODEL: &str =
+        "prov_0190f5fe-7c00-7a00-8000-000000000003/m";
 
     // ── Mock probe: scripted signal queue + captured injects ──
     struct MockProbe {
@@ -1140,7 +1147,11 @@ mod tests {
                 Arc::new(Self {
                     signals: Mutex::new(signals),
                     injected: injected.clone(),
-                    target_id: "t1".into(),
+                    target_id: match kind {
+                        IdmmTargetKind::Conversation => CONVERSATION_TARGET_ID,
+                        IdmmTargetKind::Terminal => TERMINAL_TARGET_ID,
+                    }
+                    .into(),
                     kind,
                     pending: Mutex::new(std::collections::VecDeque::new()),
                 }),
@@ -1194,7 +1205,7 @@ mod tests {
             Ok(SessionDescription {
                 kind: self.kind,
                 backend: Some("claude".into()),
-                user_id: "u".into(),
+                user_id: TEST_USER_ID.into(),
                 alive: true,
             })
         }
@@ -1326,7 +1337,10 @@ mod tests {
             .0
             .lock()
             .unwrap()
-            .insert(crate::sidecar::PREF_BACKUP_PROVIDER.into(), "prov".into());
+            .insert(
+                crate::sidecar::PREF_BACKUP_PROVIDER.into(),
+                TEST_PROVIDER_ID.into(),
+            );
         let comp = Arc::new(ScriptedCompleter(Mutex::new(responses)));
         let sidecar = Arc::new(SidecarClient::new(comp, prefs));
         let emitter = IdmmEventEmitter::new(Arc::new(NullBroadcaster));
@@ -1358,7 +1372,7 @@ mod tests {
         c.fault_watch.base.max_retries = 1;
         c.fault_watch.base.budget.min_interval_secs = 0;
         c.fault_watch.base.bypass_model = nomifun_api_types::BypassModelRef {
-            provider_id: Some("prov".into()),
+            provider_id: Some(TEST_PROVIDER_ID.into()),
             model: Some("m".into()),
         };
         c.decision_watch.base.enabled = true;
@@ -1366,7 +1380,7 @@ mod tests {
         c.decision_watch.base.max_retries = 1;
         c.decision_watch.base.budget.min_interval_secs = 0;
         c.decision_watch.base.bypass_model = nomifun_api_types::BypassModelRef {
-            provider_id: Some("prov".into()),
+            provider_id: Some(TEST_PROVIDER_ID.into()),
             model: Some("m".into()),
         };
         c.decision_watch.strategy.categories.option_decision.allow_unmarked_pick = false;
@@ -1440,9 +1454,9 @@ mod tests {
         assert_eq!(rows.len(), 1, "exactly one intervention should be persisted; got {rows:?}");
         let row = &rows[0];
         assert!(row.id.starts_with("idmmrec_"), "id must be idmmrec_-prefixed; got {}", row.id);
-        assert_eq!(row.user_id, "u");
+        assert_eq!(row.user_id, TEST_USER_ID);
         assert_eq!(row.target_kind, "conversation");
-        assert_eq!(row.target_id, "t1");
+        assert_eq!(row.target_id, CONVERSATION_TARGET_ID);
         assert_eq!(row.watch, "decision");
         assert_eq!(row.signal, "decision");
         assert_eq!(row.tier_used, "sidecar");
@@ -1451,7 +1465,7 @@ mod tests {
         assert_eq!(row.detail.as_deref(), Some("2) 方案B"));
         assert_eq!(row.reason.as_deref(), Some("B 更稳"));
         assert_eq!(row.confidence, Some(0.82_f32 as f64));
-        assert_eq!(row.bypass_model.as_deref(), Some("prov/m"));
+        assert_eq!(row.bypass_model.as_deref(), Some(TEST_BYPASS_MODEL));
         assert_eq!(row.outcome, "applied");
     }
 
@@ -1964,31 +1978,31 @@ mod tests {
             }),
             Arc::new(EnabledConfigReader(rule_cfg())),
         );
-        manager.ensure(IdmmTargetKind::Conversation, "t1").await;
+        manager
+            .ensure(IdmmTargetKind::Conversation, CONVERSATION_TARGET_ID)
+            .await;
         // Let the supervisor task run to its natural exit and clean up.
         for _ in 0..100 {
-            if !manager.is_supervising(IdmmTargetKind::Conversation, "t1") {
+            if !manager.is_supervising(IdmmTargetKind::Conversation, CONVERSATION_TARGET_ID) {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
         assert!(
-            !manager.is_supervising(IdmmTargetKind::Conversation, "t1"),
+            !manager.is_supervising(IdmmTargetKind::Conversation, CONVERSATION_TARGET_ID),
             "a naturally-exited supervisor must not be reported as supervising"
         );
     }
 
     // ── C3 (spec §2.2): cross-domain supervisor isolation ───────────────────
     //
-    // After integerization a conversation and a terminal can share a numeric
-    // target id ("5"). The supervisor handle/shared maps key on `(kind,
-    // target_id)`, so `conv#5` and `term#5` are supervised INDEPENDENTLY and
-    // stopping one must never tear down the other. (The `api-types/idmm.rs`
-    // "ids never collide" assumption was true only under the old prefixes; the
-    // composite key restores it.)
+    // Conversation and terminal IDs occupy distinct canonical domains. The
+    // supervisor handle/shared maps still key on `(kind, target_id)`, so both
+    // domains remain independently addressable and stopping one never tears
+    // down the other.
 
     #[tokio::test(start_paused = true)]
-    async fn c3_conv5_and_term5_are_supervised_independently() {
+    async fn c3_conversation_and_terminal_are_supervised_independently() {
         // Time is paused, so the spawned supervisor tasks do not advance to
         // their Exited cleanup during the assertions — both handles stay live.
         let (conversation_probe, _injected) = MockProbe::new(vec![]);
@@ -2003,28 +2017,31 @@ mod tests {
             Arc::new(EnabledConfigReader(rule_cfg())),
         );
 
-        // Arm BOTH domains at the same numeric id "5".
-        manager.ensure(IdmmTargetKind::Conversation, "5").await;
-        manager.ensure(IdmmTargetKind::Terminal, "5").await;
+        manager
+            .ensure(IdmmTargetKind::Conversation, CONVERSATION_TARGET_ID)
+            .await;
+        manager
+            .ensure(IdmmTargetKind::Terminal, TERMINAL_TARGET_ID)
+            .await;
 
         assert!(
-            manager.is_supervising(IdmmTargetKind::Conversation, "5"),
-            "conv#5 supervised"
+            manager.is_supervising(IdmmTargetKind::Conversation, CONVERSATION_TARGET_ID),
+            "conversation supervised"
         );
         assert!(
-            manager.is_supervising(IdmmTargetKind::Terminal, "5"),
-            "term#5 supervised — its handle did not collide with conv#5"
+            manager.is_supervising(IdmmTargetKind::Terminal, TERMINAL_TARGET_ID),
+            "terminal supervised independently"
         );
 
-        // Stop the conversation domain. The terminal #5 supervisor must remain.
-        manager.stop(IdmmTargetKind::Conversation, "5");
+        // Stop the conversation domain. The terminal supervisor must remain.
+        manager.stop(IdmmTargetKind::Conversation, CONVERSATION_TARGET_ID);
         assert!(
-            !manager.is_supervising(IdmmTargetKind::Conversation, "5"),
-            "conv#5 stopped"
+            !manager.is_supervising(IdmmTargetKind::Conversation, CONVERSATION_TARGET_ID),
+            "conversation stopped"
         );
         assert!(
-            manager.is_supervising(IdmmTargetKind::Terminal, "5"),
-            "term#5 must SURVIVE stopping conv#5 (no cross-domain teardown)"
+            manager.is_supervising(IdmmTargetKind::Terminal, TERMINAL_TARGET_ID),
+            "terminal must survive stopping the conversation"
         );
     }
 
@@ -2039,11 +2056,14 @@ mod tests {
             Arc::new(FixedProbeFactory(probe)),
             Arc::new(EnabledConfigReader(rule_cfg())),
         );
-        let conv_shared = manager.shared_for(IdmmTargetKind::Conversation, "5");
-        let term_shared = manager.shared_for(IdmmTargetKind::Terminal, "5");
+        let conv_shared = manager.shared_for(
+            IdmmTargetKind::Conversation,
+            CONVERSATION_TARGET_ID,
+        );
+        let term_shared = manager.shared_for(IdmmTargetKind::Terminal, TERMINAL_TARGET_ID);
         assert!(
             !Arc::ptr_eq(&conv_shared, &term_shared),
-            "conv#5 and term#5 must NOT share one SupervisorShared cell"
+            "conversation and terminal must not share one SupervisorShared cell"
         );
     }
 
@@ -2065,13 +2085,21 @@ mod tests {
         let menu = "1) 方案A\n2) 方案B\n请回复编号告诉我你的选择。";
         assert!(
             manager
-                .has_pending_decision(AutoWorkTargetKind::Conversation, "t1", menu)
+                .has_pending_decision(
+                    AutoWorkTargetKind::Conversation,
+                    CONVERSATION_TARGET_ID,
+                    menu,
+                )
                 .await
         );
         // …and plain prose with no question/menu is NOT a pending decision.
         assert!(
             !manager
-                .has_pending_decision(AutoWorkTargetKind::Conversation, "t1", "好的，已经实现完成。")
+                .has_pending_decision(
+                    AutoWorkTargetKind::Conversation,
+                    CONVERSATION_TARGET_ID,
+                    "好的，已经实现完成。",
+                )
                 .await
         );
     }
@@ -2093,7 +2121,11 @@ mod tests {
         let menu = "1) 方案A\n2) 方案B\n请回复编号告诉我你的选择。";
         assert!(
             !manager
-                .has_pending_decision(AutoWorkTargetKind::Conversation, "t1", menu)
+                .has_pending_decision(
+                    AutoWorkTargetKind::Conversation,
+                    CONVERSATION_TARGET_ID,
+                    menu,
+                )
                 .await
         );
     }

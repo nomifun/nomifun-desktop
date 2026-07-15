@@ -10,7 +10,9 @@
  * - `companion_id` 缺省（undefined/null）放行：兼容灰度期旧后端、以及将来真正的全局事件。
  * - 空串 `''` **不**放行：它永不等于真实 id，故 degenerate 空目标会抑制气泡而非复活风暴。
  */
+import type { CompanionId } from '@/common/types/ids';
+
 export const isForCompanion = (
-  evt: { companion_id?: string | null },
-  companionId: string | null
+  evt: { companion_id?: CompanionId | null },
+  companionId: CompanionId | null
 ): boolean => evt.companion_id == null || evt.companion_id === companionId;

@@ -1,3 +1,4 @@
+import type { ConversationId } from '@/common/types/ids';
 import { isSlashCommandListEnabled } from '@/common/chat/slash/availability';
 import type { SlashCommandItem } from '@/common/chat/slash/types';
 import { ipcBridge } from '@/common';
@@ -11,9 +12,9 @@ interface CacheEntry {
 const CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
 const MAX_CACHE_SIZE = 50;
 
-const slashCommandCache = new Map<number, CacheEntry>();
+const slashCommandCache = new Map<ConversationId, CacheEntry>();
 
-function getCachedCommands(conversation_id: number): SlashCommandItem[] | null {
+function getCachedCommands(conversation_id: ConversationId): SlashCommandItem[] | null {
   const entry = slashCommandCache.get(conversation_id);
   if (!entry) return null;
   if (Date.now() - entry.timestamp > CACHE_TTL_MS) {
@@ -23,7 +24,7 @@ function getCachedCommands(conversation_id: number): SlashCommandItem[] | null {
   return entry.commands;
 }
 
-function setCachedCommands(conversation_id: number, commands: SlashCommandItem[]): void {
+function setCachedCommands(conversation_id: ConversationId, commands: SlashCommandItem[]): void {
   // LRU eviction if cache is full
   if (slashCommandCache.size >= MAX_CACHE_SIZE) {
     const oldestKey = slashCommandCache.keys().next().value;
@@ -42,7 +43,7 @@ interface UseSlashCommandsOptions {
   agentStatus?: string | null;
 }
 
-export function useSlashCommands(conversation_id: number, options: UseSlashCommandsOptions = {}) {
+export function useSlashCommands(conversation_id: ConversationId, options: UseSlashCommandsOptions = {}) {
   const { conversation_type, codexStatus, agentStatus } = options;
   const canUseCachedCommands = isSlashCommandListEnabled({ conversation_type, codexStatus });
   const requestIdRef = useRef(0);

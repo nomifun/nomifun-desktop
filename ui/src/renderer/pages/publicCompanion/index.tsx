@@ -12,6 +12,7 @@ import { Headset, Lock, Plus, SafeRetrieval, Comments } from '@icon-park/react';
 import { usePublicAgents } from './usePublicAgents';
 import PublicAgentCard from './PublicAgentCard';
 import CreatePublicAgentModal from './CreatePublicAgentModal';
+import type { PublicAgentId } from '@/common/types/ids';
 
 /**
  * 对外伙伴（/public-companions）—— 面向陌生人的企业级客服控制台首页（花名册）。
@@ -25,7 +26,7 @@ const PublicCompanionRosterPage: React.FC = () => {
   const { agents, loading, create } = usePublicAgents();
   const [createOpen, setCreateOpen] = useState(false);
 
-  const openAgent = (id: string) => void navigate(`/public-companions/${id}`);
+  const openAgent = (id: PublicAgentId) => void navigate(`/public-companions/${id}`);
 
   return (
     <div className='w-full min-h-full box-border overflow-y-auto px-16px py-20px'>

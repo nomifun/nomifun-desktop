@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from 'react';
 import { ipcBridge } from '@/common';
 import { configService } from '@/common/config/configService';
 import type { IMcpServer } from '@/common/config/storage';
+import { parseMcpServerId } from '@/common/types/ids';
 import { ensureBackendMcpCatalog } from './catalog';
 
 /**
@@ -35,7 +36,7 @@ export const useMcpServers = () => {
         }
 
         const converted: IMcpServer[] = extServers.map((server) => ({
-          id: Number(server.id) || 0,
+          id: parseMcpServerId(server.id),
           name: String(server.name || ''),
           description: server.description as string | undefined,
           enabled: server.enabled !== false,

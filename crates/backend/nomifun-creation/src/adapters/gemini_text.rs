@@ -167,8 +167,18 @@ mod tests {
     #[test]
     fn body_carries_system_and_max_tokens_and_inputs() {
         let inputs = vec![
-            InputAsset { asset_id: "a".into(), role: "reference".into(), bytes: b"hi".to_vec(), mime: "image/png".into() },
-            InputAsset { asset_id: "b".into(), role: "reference".into(), bytes: b"notes".to_vec(), mime: "text/plain".into() },
+            InputAsset {
+                asset_id: nomifun_common::WorkshopAssetId::new().into_string(),
+                role: "reference".into(),
+                bytes: b"hi".to_vec(),
+                mime: "image/png".into(),
+            },
+            InputAsset {
+                asset_id: nomifun_common::WorkshopAssetId::new().into_string(),
+                role: "reference".into(),
+                bytes: b"notes".to_vec(),
+                mime: "text/plain".into(),
+            },
         ];
         let body = build_gemini_text_body(&json!({"prompt": "p", "system": " sys ", "max_tokens": 64}), &inputs);
         let parts = body["contents"][0]["parts"].as_array().unwrap();

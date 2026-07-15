@@ -1,4 +1,7 @@
-use nomifun_db::{init_database, init_database_memory};
+use nomifun_db::{
+    init_database, init_database_memory, init_database_memory_with_owner,
+    installation_owner_id,
+};
 use sqlx::Row;
 
 // -- T1.1 Initialization --
@@ -14,7 +17,7 @@ async fn init_creates_users_table() {
 
     assert!(
         count.0 >= 1,
-        "users table should exist and have at least the system user"
+        "users table should exist and have at least the installation owner"
     );
 }
 
@@ -144,33 +147,49 @@ fn migration_file_versions_are_unique() {
     );
 }
 
-// -- T1.5 System default user --
+// -- T1.5 Installation owner --
 
 #[tokio::test]
-async fn system_default_user_exists() {
+async fn installation_owner_is_a_canonical_user() {
     let db = init_database_memory().await.unwrap();
+    let owner = installation_owner_id(db.pool()).await.unwrap();
 
-    let row = sqlx::query("SELECT id, username, password_hash FROM users WHERE id = 'system_default_user'")
+    let row = sqlx::query("SELECT id, username, password_hash FROM users WHERE id = ?")
+        .bind(&owner)
         .fetch_one(db.pool())
         .await
         .unwrap();
 
-    assert_eq!(row.get::<String, _>("id"), "system_default_user");
+    assert_eq!(row.get::<String, _>("id"), owner);
+    nomifun_common::UserId::parse(row.get::<String, _>("id")).unwrap();
     assert_eq!(row.get::<String, _>("username"), "admin");
     assert_eq!(
         row.get::<String, _>("password_hash"),
         "",
-        "system user should have empty password hash"
+        "installation owner should have empty password hash"
     );
 }
 
 #[tokio::test]
-async fn system_user_has_valid_timestamps() {
+async fn deterministic_memory_fixture_records_the_requested_canonical_owner() {
+    let requested = nomifun_common::UserId::new();
+    let db = init_database_memory_with_owner(requested.clone()).await.unwrap();
+
+    assert_eq!(
+        installation_owner_id(db.pool()).await.unwrap(),
+        requested.as_str()
+    );
+}
+
+#[tokio::test]
+async fn installation_owner_has_valid_timestamps() {
     let before = nomifun_common::now_ms();
     let db = init_database_memory().await.unwrap();
     let after = nomifun_common::now_ms();
 
-    let row = sqlx::query("SELECT created_at, updated_at FROM users WHERE id = 'system_default_user'")
+    let owner = installation_owner_id(db.pool()).await.unwrap();
+    let row = sqlx::query("SELECT created_at, updated_at FROM users WHERE id = ?")
+        .bind(owner)
         .fetch_one(db.pool())
         .await
         .unwrap();
@@ -185,6 +204,60 @@ async fn system_user_has_valid_timestamps() {
         updated >= before && updated <= after,
         "updated_at should be within test window"
     );
+}
+
+#[tokio::test]
+async fn installation_identity_is_one_immutable_singleton() {
+    let db = init_database_memory().await.unwrap();
+    let owner = installation_owner_id(db.pool()).await.unwrap();
+
+    let rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM installation_identity")
+        .fetch_one(db.pool())
+        .await
+        .unwrap();
+    assert_eq!(rows, 1);
+
+    let replacement = nomifun_common::UserId::new().into_string();
+    sqlx::query(
+        "INSERT INTO users (id, username, password_hash, created_at, updated_at) \
+         VALUES (?, 'replacement-owner', '', 1, 1)",
+    )
+    .bind(&replacement)
+    .execute(db.pool())
+    .await
+    .unwrap();
+
+    assert!(
+        sqlx::query(
+            "UPDATE installation_identity SET owner_user_id = ? WHERE key = 'installation'",
+        )
+        .bind(&replacement)
+        .execute(db.pool())
+        .await
+        .is_err(),
+        "installation owner replacement must fail closed"
+    );
+    assert!(
+        sqlx::query("DELETE FROM installation_identity WHERE key = 'installation'")
+            .execute(db.pool())
+            .await
+            .is_err(),
+        "installation identity deletion must fail closed"
+    );
+    assert_eq!(installation_owner_id(db.pool()).await.unwrap(), owner);
+}
+
+#[tokio::test]
+async fn file_backed_reopen_preserves_installation_owner() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("nomifun-backend.db");
+    let first = init_database(&path).await.unwrap();
+    let owner_before = installation_owner_id(first.pool()).await.unwrap();
+    first.close().await;
+
+    let reopened = init_database(&path).await.unwrap();
+    let owner_after = installation_owner_id(reopened.pool()).await.unwrap();
+    assert_eq!(owner_after, owner_before);
 }
 
 // -- Schema validation --
@@ -277,7 +350,7 @@ async fn corruption_recovery_creates_backup() {
         .fetch_one(db.pool())
         .await
         .unwrap();
-    assert!(count.0 >= 1, "recovered DB should have system user");
+    assert!(count.0 >= 1, "recovered DB should have an installation owner");
 
     // Backup file should exist
     let has_backup = std::fs::read_dir(dir.path())
@@ -301,25 +374,25 @@ async fn creates_parent_directories() {
     db.close().await;
 }
 
-// -- Pre-baseline rebuild (pre-launch convenience; removed before release) --
+// -- Retired numeric-ID lineage quarantine (pre-release hard cut) --
 //
-// The 2026-06-12 clean-baseline refactor squashed migrations 001–021 into a
-// single 001_baseline.sql, resetting the migration chain. A dev database
-// carrying the old `_sqlx_migrations` history (mismatched checksum on
-// version 1, applied versions 2–N missing from the resolved set) must be
-// renamed to `*.pre-baseline.bak` and rebuilt empty instead of failing fast.
+// ID contract v2 starts from a clean migration lineage. A database carrying
+// the retired integer-ID migration history is moved aside as
+// `*.pre-id-v2.bak` and a clean database is created. Nothing is imported
+// row-by-row, but the complete old database remains available in quarantine.
 //
 // The forged "extra applied version" below is picked as ONE PAST the highest
 // applied migration so it represents a version absent from the resolved set
 // (a real version would collide with the already-applied row).
 
 #[tokio::test]
-async fn pre_baseline_database_is_renamed_and_rebuilt() {
+async fn retired_id_lineage_is_quarantined_and_rebuilt() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("nomifun-backend.db");
 
-    // Build a valid database, then forge a pre-baseline migration history:
-    // tamper the baseline checksum and record extra applied versions.
+    // Build a valid database, then forge a retired migration history by
+    // tampering with the clean-baseline checksum and recording an extra
+    // applied version.
     let db = init_database(&path).await.unwrap();
     sqlx::query("UPDATE _sqlx_migrations SET checksum = X'00'")
         .execute(db.pool())
@@ -338,10 +411,7 @@ async fn pre_baseline_database_is_renamed_and_rebuilt() {
     .execute(db.pool())
     .await
     .unwrap();
-    // Marker row that must NOT survive the rebuild. Empty password_hash makes it
-    // disposable dev data (no real credential), so the salvage guardrail allows
-    // the rebuild. (A row with a real password would be REFUSED — see the
-    // pre_baseline_rebuild_refused_* test below.)
+    // Marker row that must not enter the clean ID-v2 database.
     sqlx::query(
         "INSERT INTO users (id, username, password_hash, created_at, updated_at) \
          VALUES ('u_old', 'old_dev_user', '', 1, 1)",
@@ -360,25 +430,36 @@ async fn pre_baseline_database_is_renamed_and_rebuilt() {
         .unwrap();
     assert_eq!(old_user.0, 0, "rebuilt DB must be empty (old data renamed aside)");
 
-    let system_user: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM users WHERE id = 'system_default_user'")
+    let owner = installation_owner_id(db.pool()).await.unwrap();
+    let installation_owner: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM users WHERE id = ?")
+        .bind(owner)
         .fetch_one(db.pool())
         .await
         .unwrap();
-    assert_eq!(system_user.0, 1, "rebuilt DB should have the system user");
+    assert_eq!(
+        installation_owner.0,
+        1,
+        "rebuilt DB should have the installation owner"
+    );
 
-    let backup = dir.path().join("nomifun-backend.db.pre-baseline.bak");
-    assert!(backup.exists(), "old database should be preserved as .pre-baseline.bak");
+    let backup = dir.path().join("nomifun-backend.db.pre-id-v2.bak");
+    assert!(
+        backup.exists(),
+        "retired database should be preserved as .pre-id-v2.bak"
+    );
 
     db.close().await;
 }
 
 #[tokio::test]
-async fn pre_baseline_rebuild_refused_when_credential_present() {
+async fn retired_id_lineage_with_credentials_is_preserved_in_quarantine() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("nomifun-backend.db");
 
-    // Build a valid DB, seed a user with a REAL (non-empty) password, then forge
-    // a pre-baseline migration mismatch.
+    // Seed a real credential before forging a retired-lineage mismatch. The
+    // active database is still rebuilt because numeric entity IDs are not
+    // compatible with ID contract v2, but the original bytes must remain in
+    // quarantine rather than being destroyed.
     let db = init_database(&path).await.unwrap();
     sqlx::query(
         "INSERT INTO users (id, username, password_hash, created_at, updated_at) \
@@ -393,22 +474,24 @@ async fn pre_baseline_rebuild_refused_when_credential_present() {
         .unwrap();
     db.close().await;
 
-    // Re-init: the guardrail must REFUSE to rebuild (a real credential exists),
-    // returning an error and preserving the database in place.
-    let result = init_database(&path).await;
-    assert!(
-        result.is_err(),
-        "init must fail fast rather than wipe a database holding a real credential"
+    let rebuilt = init_database(&path).await.unwrap();
+    let active_count: (i64,) =
+        sqlx::query_as("SELECT COUNT(*) FROM users WHERE id = 'u_real'")
+            .fetch_one(rebuilt.pool())
+            .await
+            .unwrap();
+    assert_eq!(
+        active_count.0, 0,
+        "credential-bearing rows from the retired lineage must not leak into ID-v2"
     );
+    rebuilt.close().await;
 
-    // The original DB is preserved in place (NOT renamed aside), so the row survives.
-    assert!(path.exists(), "the real database file must be preserved in place");
+    let quarantine = dir.path().join("nomifun-backend.db.pre-id-v2.bak");
     assert!(
-        !dir.path().join("nomifun-backend.db.pre-baseline.bak").exists(),
-        "a credential-bearing DB must not be renamed to a .pre-baseline.bak"
+        quarantine.exists(),
+        "the credential-bearing retired database must be preserved in quarantine"
     );
-    // Confirm the credential row is still intact in the preserved file.
-    let pool = sqlx::SqlitePool::connect(&format!("sqlite://{}", path.display()))
+    let pool = sqlx::SqlitePool::connect(&format!("sqlite://{}", quarantine.display()))
         .await
         .unwrap();
     let survived: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM users WHERE id = 'u_real'")
@@ -416,16 +499,23 @@ async fn pre_baseline_rebuild_refused_when_credential_present() {
         .await
         .unwrap();
     pool.close().await;
-    assert_eq!(survived.0, 1, "the real credential row must survive the refusal");
+    assert_eq!(
+        survived.0, 1,
+        "the real credential row must survive in the quarantined database"
+    );
 }
 
 #[tokio::test]
-async fn pre_baseline_rebuild_numbers_subsequent_backups() {
+async fn retired_id_lineage_numbers_subsequent_quarantines() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("nomifun-backend.db");
 
-    // Occupy the primary backup name so the rebuild has to pick a suffix.
-    std::fs::write(dir.path().join("nomifun-backend.db.pre-baseline.bak"), b"earlier backup").unwrap();
+    // Occupy the primary quarantine name so the rebuild has to pick a suffix.
+    std::fs::write(
+        dir.path().join("nomifun-backend.db.pre-id-v2.bak"),
+        b"earlier backup",
+    )
+    .unwrap();
 
     let db = init_database(&path).await.unwrap();
     sqlx::query("UPDATE _sqlx_migrations SET checksum = X'00'")
@@ -435,8 +525,11 @@ async fn pre_baseline_rebuild_numbers_subsequent_backups() {
     db.close().await;
 
     let db = init_database(&path).await.unwrap();
-    let numbered = dir.path().join("nomifun-backend.db.pre-baseline.bak.1");
-    assert!(numbered.exists(), "second backup should get a numeric suffix");
+    let numbered = dir.path().join("nomifun-backend.db.pre-id-v2.bak.1");
+    assert!(
+        numbered.exists(),
+        "second quarantine should get a numeric suffix"
+    );
     db.close().await;
 }
 

@@ -3,6 +3,7 @@
  * Copyright 2025-2026 NomiFun (nomifun.com)
  * SPDX-License-Identifier: Apache-2.0
  */
+import type { ArtifactId, ConversationId } from '@/common/types/ids';
 
 import { ipcBridge } from '@/common';
 import type { IConversationArtifact, IConversationArtifactStatus } from '@/common/adapter/ipcBridge';
@@ -11,7 +12,7 @@ import React, { createContext, useCallback, useContext, useEffect, useMemo, useS
 type ConversationArtifactContextValue = {
   artifacts: IConversationArtifact[];
   upsertArtifact: (artifact: IConversationArtifact) => void;
-  updateArtifactStatus: (artifact_id: number, status: IConversationArtifactStatus) => void;
+  updateArtifactStatus: (artifact_id: ArtifactId, status: IConversationArtifactStatus) => void;
 };
 
 const ConversationArtifactContext = createContext<ConversationArtifactContextValue>({
@@ -39,11 +40,11 @@ export const useConversationArtifacts = (): IConversationArtifact[] =>
   useContext(ConversationArtifactContext).artifacts;
 
 export const useUpdateConversationArtifactStatus = (): ((
-  artifact_id: number,
+  artifact_id: ArtifactId,
   status: IConversationArtifactStatus
 ) => void) => useContext(ConversationArtifactContext).updateArtifactStatus;
 
-export const ConversationArtifactProvider: React.FC<React.PropsWithChildren<{ conversation_id: number }>> = ({
+export const ConversationArtifactProvider: React.FC<React.PropsWithChildren<{ conversation_id: ConversationId }>> = ({
   conversation_id,
   children,
 }) => {
@@ -53,7 +54,7 @@ export const ConversationArtifactProvider: React.FC<React.PropsWithChildren<{ co
     setArtifacts((current) => upsertArtifacts(current, artifact));
   }, []);
 
-  const updateArtifactStatus = useCallback((artifact_id: number, status: IConversationArtifactStatus) => {
+  const updateArtifactStatus = useCallback((artifact_id: ArtifactId, status: IConversationArtifactStatus) => {
     setArtifacts((current) =>
       current.map((artifact) =>
         artifact.id === artifact_id ? { ...artifact, status, updated_at: Date.now() } : artifact

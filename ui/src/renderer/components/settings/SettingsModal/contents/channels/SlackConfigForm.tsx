@@ -78,7 +78,7 @@ const SlackConfigForm: React.FC<SlackConfigFormProps> = ({ pluginStatus, channel
 
   const handleAutoEnable = async () => {
     const config = { credentials: { token: botToken.trim(), app_token: appToken.trim() } };
-    const result = await channel.enablePlugin.invoke(channelTarget ? { plugin_id: channelTarget.channelId, plugin_type: 'slack', ...(channelTarget.publicAgentId ? { public_agent_id: channelTarget.publicAgentId } : { companion_id: channelTarget.companionId }), config } : { plugin_id: 'slack', config });
+    const result = await channel.enablePlugin.invoke(channelTarget ? { plugin_id: channelTarget.channelId, plugin_type: 'slack', ...(channelTarget.publicAgentId ? { public_agent_id: channelTarget.publicAgentId } : { companion_id: channelTarget.companionId }), config } : { plugin_type: 'slack', config });
     if (!result.success) {
       throw new Error(result.error || result.message || t('nomi.settings.remoteEnableFailed', { defaultValue: 'Failed to enable channel' }));
     }
@@ -97,7 +97,7 @@ const SlackConfigForm: React.FC<SlackConfigFormProps> = ({ pluginStatus, channel
     }
     setTestLoading(true);
     try {
-      const result = await channel.testPlugin.invoke({ plugin_id: 'slack', token: botToken.trim(), extra_config: { app_token: appToken.trim() } });
+      const result = await channel.testPlugin.invoke({ plugin_type: 'slack', token: botToken.trim(), extra_config: { app_token: appToken.trim() } });
       if (result.success) {
         Message.success(t('settings.slack.connectionSuccess', { defaultValue: 'Connected! Bot: {{username}}', username: result.bot_username || 'unknown' }));
         await handleAutoEnable();
@@ -129,7 +129,7 @@ const SlackConfigForm: React.FC<SlackConfigFormProps> = ({ pluginStatus, channel
       Message.error(error instanceof Error ? error.message : String(error));
     }
   };
-  const handleRevokeUser = async (user_id: string) => {
+  const handleRevokeUser = async (user_id: import('@/common/types/ids').ChannelUserId) => {
     try {
       await channel.revokeUser.invoke({ user_id });
       await loadAuthorizedUsers();

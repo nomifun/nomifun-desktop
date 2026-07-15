@@ -13,9 +13,19 @@ use std::sync::Arc;
 
 use nomifun_common::now_ms;
 use nomifun_db::models::{CronJobRow, CronJobRunRow};
-use nomifun_db::{DbError, ICronRepository, SqliteCronRepository, UpdateCronJobParams, init_database_memory};
+use nomifun_db::{DbError, ICronRepository, SqliteCronRepository, UpdateCronJobParams};
 
-const INSTALLATION_OWNER: &str = "system_default_user";
+const INSTALLATION_OWNER: &str = "user_0190f5fe-7c00-7a00-8000-000000000001";
+const CONV_1: &str = "conv_0190f5fe-7c00-7a00-8abc-012345678901";
+const CONV_2: &str = "conv_0190f5fe-7c00-7a00-8abc-012345678902";
+
+async fn init_database_memory() -> Result<nomifun_db::Database, nomifun_db::DbError> {
+    nomifun_db::init_database_memory_with_owner(
+        nomifun_common::UserId::parse(INSTALLATION_OWNER.to_owned())
+            .expect("canonical fixture owner"),
+    )
+    .await
+}
 
 async fn repo() -> (Arc<dyn ICronRepository>, nomifun_db::Database) {
     let db = init_database_memory().await.unwrap();
@@ -25,8 +35,9 @@ async fn repo() -> (Arc<dyn ICronRepository>, nomifun_db::Database) {
     // owner; secondary model-only acceptance is covered by the authority tests.
     sqlx::query(
         "INSERT INTO conversations (id, user_id, name, type, created_at, updated_at) \
-         VALUES (1, ?1, 'Conv 1', 'normal', 0, 0)",
+         VALUES (?1, ?2, 'Conv 1', 'normal', 0, 0)",
     )
+    .bind(CONV_1)
     .bind(INSTALLATION_OWNER)
     .execute(db.pool())
     .await
@@ -53,7 +64,7 @@ fn make_job(id: &str) -> CronJobRow {
         preset_id: None,
         preset_revision: None,
         preset_snapshot: None,
-        conversation_id: Some(1),
+        conversation_id: Some(CONV_1.to_owned()),
         conversation_title: Some("Conv 1".into()),
         agent_type: "acp".into(),
         created_by: "user".into(),
@@ -91,7 +102,7 @@ async fn cj1_insert_returns_all_fields() {
     assert_eq!(found.schedule_value, "60000");
     assert_eq!(found.payload_message, "Run report");
     assert_eq!(found.execution_mode, "existing");
-    assert_eq!(found.conversation_id, Some(1));
+    assert_eq!(found.conversation_id.as_deref(), Some(CONV_1));
     assert_eq!(found.agent_type, "acp");
     assert_eq!(found.created_by, "user");
     assert_eq!(found.run_count, 0);
@@ -116,7 +127,7 @@ async fn repository_hides_crud_and_run_history_from_foreign_owners() {
     assert!(r.get_by_id("user_2", &job.id).await.unwrap().is_none());
     assert!(r.list_all("user_2").await.unwrap().is_empty());
     assert!(
-        r.list_by_conversation("user_2", 1)
+        r.list_by_conversation("user_2", CONV_1)
             .await
             .unwrap()
             .is_empty()
@@ -142,7 +153,7 @@ async fn repository_hides_crud_and_run_history_from_foreign_owners() {
         r.delete("user_2", &job.id).await,
         Err(DbError::NotFound(_))
     ));
-    assert_eq!(r.delete_by_conversation("user_2", 1).await.unwrap(), 0);
+    assert_eq!(r.delete_by_conversation("user_2", CONV_1).await.unwrap(), 0);
     assert!(r.get_by_id(INSTALLATION_OWNER, &job.id).await.unwrap().is_some());
     assert!(
         r.list_runs_by_job("user_2", &job.id, 7)
@@ -248,8 +259,9 @@ async fn cj7_list_by_conversation() {
 
     sqlx::query(
         "INSERT INTO conversations (id, user_id, name, type, created_at, updated_at) \
-         VALUES (2, ?1, 'Conv 2', 'normal', 0, 0)",
+         VALUES (?1, ?2, 'Conv 2', 'normal', 0, 0)",
     )
+    .bind(CONV_2)
     .bind(INSTALLATION_OWNER)
     .execute(db.pool())
     .await
@@ -259,13 +271,13 @@ async fn cj7_list_by_conversation() {
     r.insert(&make_job("cron_fc2")).await.unwrap();
 
     let mut other = make_job("cron_fc3");
-    other.conversation_id = Some(2);
+    other.conversation_id = Some(CONV_2.to_owned());
     r.insert(&other).await.unwrap();
 
-    let conv1 = r.list_by_conversation(INSTALLATION_OWNER, 1).await.unwrap();
+    let conv1 = r.list_by_conversation(INSTALLATION_OWNER, CONV_1).await.unwrap();
     assert_eq!(conv1.len(), 2);
 
-    let conv2 = r.list_by_conversation(INSTALLATION_OWNER, 2).await.unwrap();
+    let conv2 = r.list_by_conversation(INSTALLATION_OWNER, CONV_2).await.unwrap();
     assert_eq!(conv2.len(), 1);
 }
 
@@ -433,7 +445,7 @@ async fn cd1_delete_by_conversation_removes_all() {
     r.insert(&make_job("cron_cd1")).await.unwrap();
     r.insert(&make_job("cron_cd2")).await.unwrap();
 
-    let deleted = r.delete_by_conversation(INSTALLATION_OWNER, 1).await.unwrap();
+    let deleted = r.delete_by_conversation(INSTALLATION_OWNER, CONV_1).await.unwrap();
     assert_eq!(deleted, 2);
 
     let remaining = r.list_all(INSTALLATION_OWNER).await.unwrap();
@@ -444,7 +456,7 @@ async fn cd1_delete_by_conversation_removes_all() {
 async fn delete_by_conversation_no_match_returns_zero() {
     let (r, _db) = repo().await;
     let deleted = r
-        .delete_by_conversation(INSTALLATION_OWNER, 999)
+        .delete_by_conversation(INSTALLATION_OWNER, "conv_0190f5fe-7c00-7a00-8abc-012345679999")
         .await
         .unwrap();
     assert_eq!(deleted, 0);

@@ -6,6 +6,7 @@
 
 import { CUSTOM_CHARACTER_ID } from './index';
 import type { CustomFigureMeta } from './types';
+import { parseFigureId, type CompanionId, type FigureId } from '@/common/types/ids';
 
 /** Wire shape of `appearance.custom_figure` (snake_case, fields may be missing). */
 interface WireCustomFigure {
@@ -44,7 +45,7 @@ export function customFigureMetaOf(profile?: ProfileLike | null): CustomFigureMe
   const h = isFiniteNumber(hb.h) && hb.h > 0 ? hb.h : hb.w * cf.aspect;
   const sizeTier = cf.size_tier === 's' || cf.size_tier === 'l' ? cf.size_tier : 'm';
   const sizePx = isFiniteNumber(cf.size_px) && cf.size_px > 0 ? cf.size_px : undefined;
-  const figureId = typeof cf.figure_id === 'string' && cf.figure_id ? cf.figure_id : undefined;
+  const figureId = cf.figure_id == null ? undefined : parseFigureId(cf.figure_id);
   return { aspect: cf.aspect, headBox: { x: hb.x, y: hb.y, w: hb.w, h }, sizeTier, sizePx, figureId };
 }
 
@@ -55,7 +56,7 @@ export function customFigureMetaOf(profile?: ProfileLike | null): CustomFigureMe
  * every wizard confirmation changes it, so re-DIY busts mounted <img>/mesh
  * caches (the backend's ETag only helps once the browser re-requests).
  */
-export function customFigureUrlOf(baseUrl: string, companionId: string, meta: CustomFigureMeta): string {
+export function customFigureUrlOf(baseUrl: string, companionId: CompanionId, meta: CustomFigureMeta): string {
   const v = encodeURIComponent(`${meta.aspect}-${meta.headBox.x}-${meta.headBox.y}-${meta.headBox.w}-${meta.headBox.h}`);
   if (meta.figureId) {
     return `${baseUrl}/api/companion/figures/${meta.figureId}/image?v=${v}`;
@@ -64,7 +65,7 @@ export function customFigureUrlOf(baseUrl: string, companionId: string, meta: Cu
 }
 
 /** Figure image URL straight from a library figure id (picker thumbnails). */
-export function figureImageUrlOf(baseUrl: string, figureId: string, version?: string | number): string {
+export function figureImageUrlOf(baseUrl: string, figureId: FigureId, version?: string | number): string {
   const v = version != null ? `?v=${encodeURIComponent(String(version))}` : '';
   return `${baseUrl}/api/companion/figures/${figureId}/image${v}`;
 }

@@ -4,6 +4,7 @@ import type {
   TAgentExecutionTemplateDetail,
 } from '@/common/types/agentExecution/agentExecutionTemplateTypes';
 import type { TExecutionModelRef } from '@/common/types/agentExecution/agentExecutionTypes';
+import type { ExecutionTemplateId } from '@/common/types/ids';
 import {
   templateContainsModel,
   toAppliedCollaborationTemplate,
@@ -16,7 +17,7 @@ import { useTranslation } from 'react-i18next';
 
 type Props = {
   visible: boolean;
-  selectedTemplateId: string | null;
+  selectedTemplateId: ExecutionTemplateId | null;
   models: TExecutionModelRef[];
   mainModel?: TExecutionModelRef | null;
   workDir?: string;

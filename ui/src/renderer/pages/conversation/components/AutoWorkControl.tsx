@@ -13,6 +13,7 @@ import { ListAdd, Robot } from '@icon-park/react';
 import classNames from 'classnames';
 import { ipcBridge } from '@/common';
 import type { AutoWorkRunState, AutoWorkTargetKind, IAutoWorkState } from '@/common/adapter/ipcBridge';
+import type { ConversationId, TerminalId } from '@/common/types/ids';
 import { CAPABILITY_COLORS } from '@/renderer/components/capability/CapabilityIcon';
 import { AUTOWORK_STATUS_COLOR } from '@/renderer/components/capability/capabilityStatusColors';
 import { isLiveEventForTarget } from './liveEventMatch';
@@ -25,11 +26,9 @@ import {
   shouldFocusAutoWorkTagPickerAction,
 } from './AutoWorkControl.model';
 
-export interface AutoWorkTarget {
-  kind: AutoWorkTargetKind;
-  /** conversation/terminal session id — backend INTEGER (numeric-id spec §1). */
-  id: number;
-}
+export type AutoWorkTarget =
+  | { kind: Extract<AutoWorkTargetKind, 'conversation'>; id: ConversationId }
+  | { kind: Extract<AutoWorkTargetKind, 'terminal'>; id: TerminalId };
 
 /** Draft (pre-creation) AutoWork config: held by the parent and applied once
  * the conversation exists (e.g. Guid page applies it right after create). */

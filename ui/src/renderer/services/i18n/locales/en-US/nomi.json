@@ -54,7 +54,7 @@
   },
   "secrets": {
     "title": "Browser credentials",
-    "hint": "Stored credentials this companion's browser can inject by reference. The value is encrypted on this machine and never shown again or sent to the model — only injected when the page's domain matches the allowed origins. The allowed origins also limit which domains the browser may send data to.",
+    "hint": "Stored credentials are shared by your browser sessions and can be injected by reference. The value is encrypted on this machine and never shown again or sent to the model — only injected when the page's domain matches the allowed origins. The allowed origins also limit which domains the browser may send data to.",
     "add": "Add credential",
     "empty": "No credentials registered yet.",
     "register": "Register",

@@ -5,10 +5,11 @@
  */
 
 import { describe, expect, test } from 'bun:test';
+import { parseAssetId, parseProviderId } from '@/common/types/ids';
 import type { CreateTaskBody } from '../types';
 import {
   LOCAL_Z_IMAGE_MODEL_ID,
-  LOCAL_Z_IMAGE_PROVIDER_ID,
+  LOCAL_Z_IMAGE_PLATFORM,
   normalizeLocalZImageDimension,
   normalizeLocalZImageParams,
   validateLocalZImageRun,
@@ -16,7 +17,8 @@ import {
 } from './localZImage';
 
 const localTask = (patch: Partial<CreateTaskBody> = {}): CreateTaskBody => ({
-  provider_id: LOCAL_Z_IMAGE_PROVIDER_ID,
+  provider_id: parseProviderId('prov_019bef52-a123-7abc-8def-0123456789ab'),
+  provider_platform: LOCAL_Z_IMAGE_PLATFORM,
   model: LOCAL_Z_IMAGE_MODEL_ID,
   capability: 't2i',
   params: { prompt: 'a cat', width: 1024, height: 1024, count: 1 },
@@ -38,11 +40,11 @@ describe('local Z-Image frontend contract', () => {
   });
 
   test('accepts only text-to-image runs without resolved image inputs', () => {
-    const model = { providerId: LOCAL_Z_IMAGE_PROVIDER_ID, model: LOCAL_Z_IMAGE_MODEL_ID };
+    const model = { platform: LOCAL_Z_IMAGE_PLATFORM, model: LOCAL_Z_IMAGE_MODEL_ID };
     expect(validateLocalZImageRun(model, 't2i', [])).toBeNull();
     expect(validateLocalZImageRun(model, 'i2i', [])).toBe('text_to_image_only');
     expect(validateLocalZImageRun(model, 'inpaint', [])).toBe('text_to_image_only');
-    expect(validateLocalZImageRun(model, 't2i', [{ asset_id: 'image-1', role: 'reference' }])).toBe(
+    expect(validateLocalZImageRun(model, 't2i', [{ asset_id: parseAssetId('wsa_019bef52-a123-7abc-8def-0123456789ab'), role: 'reference' }])).toBe(
       'text_to_image_only'
     );
   });
@@ -62,11 +64,12 @@ describe('local Z-Image frontend contract', () => {
     expect(
       validateLocalZImageTask({
         ...localTask(),
-        provider_id: 'openai',
+        provider_id: parseProviderId('prov_019bef52-a123-7abc-8def-0123456789ac'),
+        provider_platform: 'openai',
         model: 'gpt-image-1',
         capability: 'i2i',
         params: { width: 4096, height: 4096, count: 4 },
-        inputs: [{ asset_id: 'image-1', role: 'reference' }],
+        inputs: [{ asset_id: parseAssetId('wsa_019bef52-a123-7abc-8def-0123456789ac'), role: 'reference' }],
       })
     ).toBeNull();
   });

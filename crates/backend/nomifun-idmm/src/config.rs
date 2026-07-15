@@ -3,6 +3,7 @@
 //! over them.
 
 use nomifun_api_types::{AgentErrorCode, IdmmConfig, WatchTier};
+use nomifun_common::ProviderId;
 
 /// Classify an `AgentErrorCode` as a provider fault IDMM should supervise
 /// (i.e. a single-vendor failure a backup model or a retry might overcome).
@@ -44,6 +45,22 @@ pub fn is_provider_fault(code: AgentErrorCode) -> bool {
 /// carries no requirements (users must always be able to turn a watch off, even
 /// from a half-filled model form).
 pub fn validate(cfg: &IdmmConfig, backup_resolvable: bool) -> Result<(), String> {
+    for (label, provider_id) in [
+        (
+            "fault_watch",
+            cfg.fault_watch.base.bypass_model.provider_id.as_deref(),
+        ),
+        (
+            "decision_watch",
+            cfg.decision_watch.base.bypass_model.provider_id.as_deref(),
+        ),
+    ] {
+        if let Some(provider_id) = provider_id {
+            ProviderId::parse(provider_id).map_err(|error| {
+                format!("{label} bypass provider_id is not canonical: {error}")
+            })?;
+        }
+    }
     let fault_needs_backup =
         cfg.fault_watch.base.enabled && cfg.fault_watch.base.tier == WatchTier::RulePlusModel;
     let decision_needs_backup =

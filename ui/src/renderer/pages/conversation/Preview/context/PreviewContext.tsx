@@ -6,6 +6,7 @@
 
 import { ipcBridge } from '@/common';
 import type { PreviewContentType } from '@/common/types/office/preview';
+import { getBrowserStorageGeneration } from '@/common/utils/browserStorageKey';
 import { emitter } from '@/renderer/utils/emitter';
 import React, { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
 
@@ -72,14 +73,14 @@ export interface PreviewContextValue {
 
 const PreviewContext = createContext<PreviewContextValue | null>(null);
 
-/** 默认持久化命名空间 / Default persistence namespace */
-const DEFAULT_PERSIST_NAMESPACE = 'conversation';
-
 // 持久化 key（按 persistNamespace 分桶，使不同表面的预览互不串扰）
 // Persistence keys (bucketed by persistNamespace so previews of different surfaces don't leak into each other)
-const previewTabsKey = (ns: string) => `nomifun_preview_tabs:${ns}`;
-const previewActiveTabIdKey = (ns: string) => `nomifun_preview_active_tab_id:${ns}`;
-const legacyPreviewStateKey = (ns: string) => `nomifun_preview_state:${ns}`;
+const previewPersistenceNamespace = (ns: string) =>
+  `${getBrowserStorageGeneration()}:${ns}`;
+const previewTabsKey = (ns: string) =>
+  `nomifun_preview_tabs:${previewPersistenceNamespace(ns)}`;
+const previewActiveTabIdKey = (ns: string) =>
+  `nomifun_preview_active_tab_id:${previewPersistenceNamespace(ns)}`;
 
 // 仅持久化小体积文本预览，避免大文本导致 localStorage 写入卡顿
 // Persist only lightweight text previews to avoid localStorage jank on large files
@@ -125,23 +126,8 @@ const parsePersistedTabs = (value: unknown): PreviewTab[] => {
 // Note: isOpen is not restored from localStorage, preview panel is closed by default for new sessions
 const loadPersistedState = (ns: string): { isOpen: boolean; tabs: PreviewTab[]; activeTabId: string | null } => {
   try {
-    let tabs = parsePersistedTabs(JSON.parse(localStorage.getItem(previewTabsKey(ns)) || '[]'));
+    const tabs = parsePersistedTabs(JSON.parse(localStorage.getItem(previewTabsKey(ns)) || '[]'));
     let activeTabId = localStorage.getItem(previewActiveTabIdKey(ns));
-
-    // 兼容旧版单 key 存储 / Backward compatibility for legacy single-key storage
-    if (tabs.length === 0) {
-      // 先尝试命名空间化的旧 key；对默认 'conversation' 命名空间再回退到更早的
-      // 无命名空间裸 key，避免老安装升级后丢失已持久化的预览 tab。
-      // Try the namespaced legacy key first; for the default 'conversation'
-      // namespace, also fall back to the older un-namespaced bare key so existing
-      // installs don't lose persisted preview tabs after upgrade.
-      const legacyStored = localStorage.getItem(legacyPreviewStateKey(ns)) || (ns === DEFAULT_PERSIST_NAMESPACE ? localStorage.getItem('nomifun_preview_state') : null);
-      if (legacyStored) {
-        const parsed = JSON.parse(legacyStored) as { tabs?: unknown; activeTabId?: unknown };
-        tabs = parsePersistedTabs(parsed.tabs);
-        activeTabId = typeof parsed.activeTabId === 'string' ? parsed.activeTabId : activeTabId;
-      }
-    }
 
     if (activeTabId && !tabs.some((tab) => tab.id === activeTabId)) {
       activeTabId = tabs[0]?.id || null;
@@ -161,13 +147,11 @@ const loadPersistedState = (ns: string): { isOpen: boolean; tabs: PreviewTab[]; 
 export const PreviewProvider: React.FC<{
   children: React.ReactNode;
   /**
-   * 持久化命名空间：localStorage key 按此分桶，使不同表面（会话 / 终端）的
-   * 预览 tab 互不串扰。不指定时默认 'conversation'，保持既有行为不变。
-   * Persistence namespace: localStorage keys are bucketed by this so previews of
-   * different surfaces (conversation / terminal) don't leak into each other.
-   * Defaults to 'conversation' to preserve existing behavior when unspecified.
+   * Persistence namespace: localStorage keys are bucketed by this exact entity
+   * identity. Callers must include the owning entity id, e.g.
+   * `conversation:42` or `terminal:17`.
    */
-  persistNamespace?: string;
+  persistNamespace: string;
   /**
    * 是否订阅全局 `preview.open` 事件（emitter + IPC），供 agent/MCP 主动打开预览。
    * 仅应有「主」表面（会话）订阅；否则一次打开会被多个 provider 重复处理。
@@ -178,7 +162,7 @@ export const PreviewProvider: React.FC<{
    * multiple providers. Defaults to true to preserve existing behavior.
    */
   subscribeGlobalOpen?: boolean;
-}> = ({ children, persistNamespace = DEFAULT_PERSIST_NAMESPACE, subscribeGlobalOpen = true }) => {
+}> = ({ children, persistNamespace, subscribeGlobalOpen = true }) => {
   // 从 localStorage 恢复初始状态 / Restore initial state from localStorage
   const persistedState = loadPersistedState(persistNamespace);
   const [isOpen, setIsOpen] = useState(persistedState.isOpen);
@@ -194,15 +178,6 @@ export const PreviewProvider: React.FC<{
     const timer = setTimeout(() => {
       try {
         localStorage.setItem(previewTabsKey(persistNamespace), JSON.stringify(sanitizeTabsForPersistence(tabs)));
-        // 迁移后清理旧 key，减少重复解析
-        // Remove legacy key after migration to avoid duplicate parsing
-        localStorage.removeItem(legacyPreviewStateKey(persistNamespace));
-        // 默认命名空间额外清理更早的无命名空间裸 key（已在 loadPersistedState 中回退读取）
-        // For the default namespace, also clear the older un-namespaced bare key
-        // (already read as a fallback in loadPersistedState).
-        if (persistNamespace === DEFAULT_PERSIST_NAMESPACE) {
-          localStorage.removeItem('nomifun_preview_state');
-        }
       } catch {
         // 忽略存储错误（如存储空间不足）/ Ignore storage errors (e.g., quota exceeded)
       }

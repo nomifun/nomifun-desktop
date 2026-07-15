@@ -5007,6 +5007,7 @@ dependencies = [
  "nomi-skills",
  "nomi-tools",
  "nomi-types",
+ "nomifun-common",
  "rstest",
  "schemars 1.2.1",
  "serde",
@@ -5483,6 +5484,7 @@ dependencies = [
  "tracing",
  "tracing-appender",
  "tracing-subscriber",
+ "uuid",
  "windows-sys 0.61.2",
  "wiremock",
 ]
@@ -5695,15 +5697,19 @@ version = "0.2.19"
 dependencies = [
  "async-trait",
  "fs2",
+ "hex",
+ "libc",
  "nomifun-common",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "sqlx",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
  "ts-rs",
+ "uuid",
 ]
 
 [[package]]
@@ -5715,6 +5721,7 @@ dependencies = [
  "junction",
  "keepawake",
  "nomifun-app",
+ "nomifun-common",
  "nomifun-runtime",
  "serde",
  "serde_json",
@@ -5986,6 +5993,7 @@ dependencies = [
  "axum",
  "futures",
  "nomifun-auth",
+ "nomifun-common",
  "nomifun-gateway",
  "reqwest 0.12.28",
  "rmcp",

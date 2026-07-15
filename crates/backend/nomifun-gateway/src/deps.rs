@@ -13,6 +13,7 @@ use nomifun_knowledge::KnowledgeService;
 use nomifun_requirement::{AutoWorkRunner, RequirementService};
 use nomifun_system::{ClientPrefService, ModelFetchService, ProviderService, SettingsService};
 use nomifun_terminal::TerminalService;
+use nomifun_common::{CompanionId, ConversationId, UserId};
 
 /// Everything the gateway tools need to operate the desktop.
 ///
@@ -120,19 +121,19 @@ pub struct GatewayDeps {
 
 /// Identity of the calling Agent session, reconstructed only from the validated
 /// signed Gateway child capability forwarded by the stdio bridge.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct CallerCtx {
     /// The conversation the calling agent lives in. Used for self-protection
     /// (a session may not message or delete itself) and as the default cron
     /// binding target.
-    pub conversation_id: String,
+    pub conversation_id: Option<ConversationId>,
     /// The desktop user every tool scopes its data access to.
-    pub user_id: String,
+    pub user_id: UserId,
     /// The companion the calling session is bound to (multi-companion upgrade). `None`
     /// for sessions without a companion binding — memory/requirement tools are
     /// deliberately companion-agnostic (memory is shared), so this is attribution
     /// context, not an access scope.
-    pub companion_id: Option<String>,
+    pub companion_id: Option<CompanionId>,
     /// IM platform when this is a Channel Agent session (e.g. "lark").
     /// `None` for plain companion/desktop sessions. Used to resolve the write
     /// surface (channel → write-disabled in P1).
@@ -145,4 +146,36 @@ pub struct CallerCtx {
     /// `false` so every existing (desktop/channel) construction site is
     /// unaffected.
     pub remote: bool,
+}
+
+impl Default for CallerCtx {
+    fn default() -> Self {
+        Self {
+            conversation_id: None,
+            user_id: UserId::new(),
+            companion_id: None,
+            channel_platform: None,
+            session_mode: None,
+            remote: false,
+        }
+    }
+}
+
+impl CallerCtx {
+    /// Build the identity context for an authenticated Remote caller.
+    ///
+    /// Both values cross process/network boundaries as strings, so they are
+    /// validated here before any capability can observe them.
+    pub fn try_remote(user_id: &str, companion_id: &str) -> Result<Self, String> {
+        Ok(Self {
+            conversation_id: None,
+            user_id: UserId::parse(user_id).map_err(|error| error.to_string())?,
+            companion_id: Some(
+                CompanionId::parse(companion_id).map_err(|error| error.to_string())?,
+            ),
+            channel_platform: None,
+            session_mode: None,
+            remote: true,
+        })
+    }
 }

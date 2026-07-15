@@ -4,12 +4,14 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import type { MessageId } from '@/common/types/ids';
+
 export type TurnDisclosureRole = 'user' | 'assistant' | 'process' | 'process_content' | 'other';
 export type TurnDisclosureProcessState = 'completed' | 'running' | 'waiting' | 'failed' | 'canceled';
 
 export interface TurnDisclosureInputItem {
   id: string;
-  turnId?: string;
+  turnId?: MessageId;
   role: TurnDisclosureRole;
   createdAt: number;
   processStartedAt?: number;
@@ -25,7 +27,7 @@ export type TurnDisclosureOutputItem =
   | {
       type: 'turn_disclosure';
       id: string;
-      turnId: string;
+      turnId: MessageId;
       processItemIds: string[];
       sourceMessageIds: string[];
       startAt: number;
@@ -49,11 +51,11 @@ const toProcessReceipt = (entry: TurnDisclosureInputItem): TurnDisclosureOutputI
 });
 
 export function assignTurnIdsFromUserRequests(items: TurnDisclosureInputItem[]): TurnDisclosureInputItem[] {
-  let currentTurnId: string | undefined;
+  let currentTurnId: MessageId | undefined;
 
   return items.map((entry) => {
     if (entry.role === 'user') {
-      currentTurnId = entry.turnId || entry.id;
+      currentTurnId = entry.turnId;
       return { ...entry, turnId: currentTurnId };
     }
 
@@ -99,7 +101,7 @@ const resolveDisclosureState = (
 };
 
 const buildEmptyRunningDisclosure = (
-  turnId: string,
+  turnId: MessageId,
   segment: TurnDisclosureInputItem[]
 ): TurnDisclosureOutputItem => {
   const startEntry = segment.findLast((entry) => entry.role === 'user') ?? segment[0];

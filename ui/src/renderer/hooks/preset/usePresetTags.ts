@@ -1,5 +1,10 @@
 import { ipcBridge } from '@/common';
-import type { PresetTag, PresetTagDimension, CreatePresetTagRequest } from '@/common/types/agent/presetTypes';
+import type {
+  PresetTag,
+  PresetTagDimension,
+  PresetTagReference,
+  CreatePresetTagRequest,
+} from '@/common/types/agent/presetTypes';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 
 /** Loads the merged tag vocabulary and exposes CRUD + per-dimension views. */
@@ -45,7 +50,7 @@ export const usePresetTags = () => {
   );
 
   const renameTag = useCallback(
-    async (key: string, label: string) => {
+    async (key: PresetTagReference, label: string) => {
       await ipcBridge.presetTags.update.invoke({ key, label });
       await loadTags();
     },
@@ -53,7 +58,7 @@ export const usePresetTags = () => {
   );
 
   const deleteTag = useCallback(
-    async (key: string) => {
+    async (key: PresetTagReference) => {
       await ipcBridge.presetTags.delete.invoke({ key });
       await loadTags();
     },

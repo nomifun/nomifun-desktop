@@ -5,7 +5,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use nomifun_common::{AppError, ProviderUsage, ProviderUsageFeature};
+use nomifun_common::{AppError, CompanionId, ProviderId, ProviderUsage, ProviderUsageFeature};
 use serde::Serialize;
 use tokio::sync::{Mutex, RwLock};
 
@@ -23,13 +23,11 @@ use crate::store::{CompanionThread, MemoryFilter, MemoryPage, MemoryScope, Compa
 use nomifun_extension::skill_service::{self, SkillPaths, SkillScope};
 use nomifun_extension::constants::SKILL_MANIFEST_FILE;
 
-/// Map a stored `scope_companion_id` ("" = shared) to a [`SkillScope`].
-fn scope_for(scope_companion_id: &str) -> SkillScope {
-    if scope_companion_id.is_empty() {
-        SkillScope::Shared
-    } else {
-        SkillScope::Companion(scope_companion_id.to_owned())
-    }
+/// Map the nullable stored owner to the extension skill scope.
+fn scope_for(scope_companion_id: Option<&str>) -> SkillScope {
+    scope_companion_id
+        .map(|id| SkillScope::Companion(id.to_owned()))
+        .unwrap_or(SkillScope::Shared)
 }
 
 /// A skill registry row + its SKILL.md `description` (frontmatter), flattened for the UI list.
@@ -56,8 +54,8 @@ pub struct CompanionSkillContent {
 
 #[derive(Debug, Serialize)]
 pub struct CompanionStatus {
-    /// Which companion this status describes (empty only on the no-companions fallback).
-    pub companion_id: String,
+    /// Which companion this status describes; `None` for the shared-only fallback.
+    pub companion_id: Option<String>,
     pub xp: i64,
     pub level: i64,
     pub mood: String,
@@ -210,14 +208,13 @@ impl CompanionService {
             .map(|s| s.trim().to_owned())
             .filter(|s| !s.is_empty())
         });
-        // Migration minted the first companion: claim legacy thread rows and
-        // move the global xp/active-thread kv into its per-companion slots. On
-        // failure the rows keep their empty companion_id and the runtime falls
-        // back to the default companion for attribution.
+        // Migration minted the first companion: move the legacy global XP into
+        // its per-companion slot. Ownerless legacy threads were quarantined by
+        // the v6 store migration and are never attributed through a fallback.
         if let Some(companion_id) = &first_companion_id
             && let Err(e) = store.backfill_first_companion(companion_id).await
         {
-            tracing::warn!(error = %e, companion_id, "first-companion backfill failed; legacy rows stay unattributed");
+            tracing::warn!(error = %e, companion_id, "first-companion XP backfill failed");
         }
         let emitter = CompanionEventEmitter::new(bus.clone(), authoritative_user_id.to_string());
 
@@ -326,7 +323,7 @@ impl CompanionService {
     }
 
     /// Build the `CompanionMemorySink` the agent factory needs — gives every
-    /// companionSession conversation the recall/save/recent-events tools.
+    /// companion_session conversation the recall/save/recent-events tools.
     pub fn memory_sink(&self) -> Arc<dyn nomifun_ai_agent::CompanionMemorySink> {
         Arc::new(crate::companion::CompanionStoreSink {
             store: self.store.clone(),
@@ -336,7 +333,7 @@ impl CompanionService {
         })
     }
 
-    /// Build the `CompanionSkillSink` the agent factory needs — gives companionSession
+    /// Build the `CompanionSkillSink` the agent factory needs — gives companion_session
     /// conversations the `companion_skill` tool + the per-turn when_to_use injection
     /// over this companion's self-evolved + shared skills (design §7).
     pub fn skill_sink(&self) -> Arc<dyn nomifun_ai_agent::CompanionSkillSink> {
@@ -361,15 +358,14 @@ impl CompanionService {
     }
 
     /// Every desktop-companion reference to `provider_id`: per-companion chat
-    /// model + the shared learn/evolve models. Empty ⇒ not used.
+    /// model + the shared learn/evolve models. Malformed provider IDs never match.
     pub async fn providers_in_use(&self, provider_id: &str) -> Vec<ProviderUsage> {
-        // An empty provider_id is the "unconfigured" sentinel; never match it.
-        if provider_id.is_empty() {
+        let Ok(provider_id) = ProviderId::try_from(provider_id) else {
             return Vec::new();
-        }
+        };
         let mut out = Vec::new();
         for p in self.list_companions().await {
-            if p.model.provider_id == provider_id {
+            if p.model.as_ref().is_some_and(|model| model.provider_id == provider_id.as_str()) {
                 out.push(ProviderUsage {
                     feature: ProviderUsageFeature::DesktopCompanion,
                     label: p.name.clone(),
@@ -378,14 +374,24 @@ impl CompanionService {
             }
         }
         let shared = self.get_config().await;
-        if shared.learn.model.provider_id == provider_id {
+        if shared
+            .learn
+            .model
+            .as_ref()
+            .is_some_and(|model| model.provider_id == provider_id.as_str())
+        {
             out.push(ProviderUsage {
                 feature: ProviderUsageFeature::DesktopCompanion,
                 label: "共享学习模型".into(),
                 target_id: None,
             });
         }
-        if shared.evolve.model.provider_id == provider_id {
+        if shared
+            .evolve
+            .model
+            .as_ref()
+            .is_some_and(|model| model.provider_id == provider_id.as_str())
+        {
             out.push(ProviderUsage {
                 feature: ProviderUsageFeature::DesktopCompanion,
                 label: "共享进化模型".into(),
@@ -401,8 +407,8 @@ impl CompanionService {
         let profile = self.registry.create(name, character).await?;
         let updated_shared = {
             let mut cfg = self.config.write().await;
-            if cfg.default_companion_id.is_empty() {
-                cfg.default_companion_id = profile.id.clone();
+            if cfg.default_companion_id.is_none() {
+                cfg.default_companion_id = Some(profile.id.clone());
                 if let Err(e) = cfg.save(&self.shared_dir) {
                     // The pointer survives in memory; warn rather than fail
                     // the creation (the companion itself is already persisted).
@@ -423,7 +429,7 @@ impl CompanionService {
         // a failure here must never fail companion creation — the session is lazily
         // ensured later when the UI calls POST .../companion/threads after a
         // model is set.
-        if profile.model.is_configured()
+        if profile.model.is_some()
             && let Ok(companion) = self.companion()
             && let Err(e) = companion.create(&profile.id, None).await
         {
@@ -484,16 +490,19 @@ impl CompanionService {
         // Snapshot the pre-patch model so we can tell whether this patch
         // actually changed it (RFC 7396 patches need not mention `model`).
         let prev = self.registry.get(id).await;
-        let prev_model = prev.as_ref().map(|p| p.model.clone());
+        let prev_model = prev.as_ref().and_then(|p| p.model.clone());
         let prev_name = prev.as_ref().map(|p| p.name.clone());
         let profile = self.registry.patch(id, patch).await?;
         self.emitter.emit_companion_updated(&profile.id, &profile);
 
-        let model_changed = prev_model.as_ref() != Some(&profile.model);
-        if model_changed && profile.model.is_configured() {
-            self.propagate_model_to_companion(&profile).await;
+        let model_changed = prev_model.as_ref() != profile.model.as_ref();
+        if model_changed {
+            if profile.model.is_some() {
+                self.propagate_model_to_companion(&profile).await;
+            }
             // 通知宿主：模型已切换（唯一事实源）。当前用于清理该伙伴绑定的
-            // IM 渠道会话，使其下轮重建拾取新模型。best-effort，不阻断 patch。
+            // IM 渠道会话，使其下轮重建拾取新模型（或正确地因未配置而拒绝）。
+            // best-effort，不阻断 patch。
             if let Some(hooks) = self.cleanup_hooks.get() {
                 for hook in hooks {
                     hook.on_companion_model_changed(&profile.id).await;
@@ -530,6 +539,7 @@ impl CompanionService {
     /// usable session). Swallows every error (companion may be unwired in
     /// tests); a failure here must not fail the patch that triggered it.
     async fn propagate_model_to_companion(&self, profile: &CompanionProfileConfig) {
+        let Some(model) = profile.model.as_ref() else { return };
         let Ok(companion) = self.companion() else { return };
         // Idempotent ensure: returns the existing session, or mints one now
         // that the model is configured. This also yields the conversation id
@@ -541,12 +551,7 @@ impl CompanionService {
                 return;
             }
         };
-        let model = nomifun_common::ProviderWithModel {
-            provider_id: profile.model.provider_id.clone(),
-            model: profile.model.model.clone(),
-            use_model: Some(profile.model.model.clone()),
-        };
-        if let Err(e) = companion.set_model(&profile.id, &conversation_id, &model).await {
+        if let Err(e) = companion.set_model(&profile.id, &conversation_id, model).await {
             tracing::warn!(error = %e, companion_id = %profile.id, "propagate model to companion conversation failed");
         }
     }
@@ -616,14 +621,13 @@ impl CompanionService {
         // Default pointer: hand it to the oldest surviving companion (or clear it).
         let updated_shared = {
             let mut cfg = self.config.write().await;
-            if cfg.default_companion_id == id {
+            if cfg.default_companion_id.as_deref() == Some(id) {
                 cfg.default_companion_id = self
                     .registry
                     .list()
                     .await
                     .first()
-                    .map(|p| p.id.clone())
-                    .unwrap_or_default();
+                    .map(|p| p.id.clone());
                 if let Err(e) = cfg.save(&self.shared_dir) {
                     tracing::warn!(error = %e, "save shared companion config (default_companion_id) failed");
                 }
@@ -646,7 +650,7 @@ impl CompanionService {
         let cfg = self.config.read().await.clone();
         let xp = self.store.get_companion_state_i64(id, "xp").await?;
         Ok(CompanionStatus {
-            companion_id: profile.id,
+            companion_id: Some(profile.id),
             xp,
             level: level_for_xp(xp),
             mood: self.store.get_state("mood").await?.unwrap_or_else(|| "content".into()),
@@ -654,7 +658,7 @@ impl CompanionService {
             memories_archived: self.store.count_memories("archived").await?,
             suggestions_new: self.store.count_suggestions("new").await?,
             skills_active: self.store.count_active_skills(id).await?,
-            model_configured: profile.model.is_configured(),
+            model_configured: profile.model.is_some(),
             collect_any_enabled: cfg.collect.any_enabled(),
             last_learn: self.store.list_learn_runs(1).await?.into_iter().next(),
         })
@@ -685,7 +689,9 @@ impl CompanionService {
     /// companion, else the oldest companion, else `None` (no companions at all).
     pub async fn default_companion_id(&self) -> Option<String> {
         let configured = self.config.read().await.default_companion_id.clone();
-        if !configured.is_empty() && self.registry.get(&configured).await.is_some() {
+        if let Some(configured) = configured
+            && self.registry.get(&configured).await.is_some()
+        {
             return Some(configured);
         }
         self.registry.list().await.first().map(|p| p.id.clone())
@@ -856,8 +862,7 @@ impl CompanionService {
     }
 
     pub async fn companion_active_thread(&self, companion_id: &str) -> Result<Option<String>, AppError> {
-        let id = self.companion()?.active_thread_id(companion_id).await?;
-        Ok(id.filter(|s| !s.is_empty()))
+        self.companion()?.active_thread_id(companion_id).await
     }
 
     // ----- shared config -----
@@ -975,7 +980,7 @@ impl CompanionService {
         }
         let cfg = self.config.read().await.clone();
         Ok(CompanionStatus {
-            companion_id: String::new(),
+            companion_id: None,
             xp: 0,
             level: level_for_xp(0),
             mood: self.store.get_state("mood").await?.unwrap_or_else(|| "content".into()),
@@ -1143,25 +1148,35 @@ impl CompanionService {
     /// then flips the registry row to `active` and emits `skill-learned`.
     /// Caller gates this inside the `newly` branch so it never runs twice.
     async fn materialize_create_skill(&self, action: &serde_json::Value) -> Result<(), AppError> {
-        let name = action.get("name").and_then(|v| v.as_str()).unwrap_or("");
-        let companion_id = action.get("companion_id").and_then(|v| v.as_str()).unwrap_or("");
-        if name.is_empty() || companion_id.is_empty() {
+        let Some(name) = action.get("name").and_then(|v| v.as_str()).filter(|name| !name.is_empty()) else {
             return Ok(()); // malformed action — nothing to materialize
-        }
+        };
+        let Some(companion_id) = action
+            .get("companion_id")
+            .and_then(|v| v.as_str())
+            .and_then(|id| CompanionId::try_from(id).ok())
+        else {
+            return Ok(());
+        };
         // Delegate to the single idempotent skill-decide path (also used by the
         // Skills-tab review UI). draft→active promote + emit happen there.
-        self.decide_companion_skill(companion_id, name, true, None).await.map(|_| ())
+        self.decide_companion_skill(companion_id.as_str(), name, true, None).await.map(|_| ())
     }
 
     /// Rejecting a create_skill suggestion → delegate to the single idempotent skill-decide
     /// path (accept=false), which archives the draft + records signature feedback (纠偏回流).
     async fn reject_create_skill(&self, action: &serde_json::Value) -> Result<(), AppError> {
-        let name = action.get("name").and_then(|v| v.as_str()).unwrap_or("");
-        let companion_id = action.get("companion_id").and_then(|v| v.as_str()).unwrap_or("");
-        if name.is_empty() || companion_id.is_empty() {
+        let Some(name) = action.get("name").and_then(|v| v.as_str()).filter(|name| !name.is_empty()) else {
             return Ok(());
-        }
-        self.decide_companion_skill(companion_id, name, false, None).await.map(|_| ())
+        };
+        let Some(companion_id) = action
+            .get("companion_id")
+            .and_then(|v| v.as_str())
+            .and_then(|id| CompanionId::try_from(id).ok())
+        else {
+            return Ok(());
+        };
+        self.decide_companion_skill(companion_id.as_str(), name, false, None).await.map(|_| ())
     }
 
     /// List a companion's skills for the UI (active/draft/archived). Each row gets its
@@ -1199,7 +1214,7 @@ impl CompanionService {
     async fn skill_views(&self, skills: Vec<CompanionSkill>) -> Vec<CompanionSkillView> {
         let mut out = Vec::with_capacity(skills.len());
         for skill in skills {
-            let scope = scope_for(&skill.scope_companion_id);
+            let scope = scope_for(skill.scope_companion_id.as_deref());
             let draft = skill.status == "draft";
             let description = match skill_service::skill_dir_for(&self.skill_paths, &scope, &skill.skill_name, draft) {
                 Ok(dir) => skill_service::read_skill_info(&dir).await.map(|(_, d)| d).unwrap_or_default(),
@@ -1221,7 +1236,7 @@ impl CompanionService {
             .get_skill(companion_id, name)
             .await?
             .ok_or_else(|| AppError::NotFound(format!("skill {name} not found")))?;
-        let scope = scope_for(&skill.scope_companion_id);
+        let scope = scope_for(skill.scope_companion_id.as_deref());
         let draft = skill.status == "draft";
         let dir = skill_service::skill_dir_for(&self.skill_paths, &scope, name, draft)
             .map_err(|e| AppError::Internal(format!("resolve skill dir: {e}")))?;
@@ -1244,7 +1259,7 @@ impl CompanionService {
             .get_skill(companion_id, name)
             .await?
             .ok_or_else(|| AppError::NotFound(format!("skill {name} not found")))?;
-        let scope = scope_for(&skill.scope_companion_id);
+        let scope = scope_for(skill.scope_companion_id.as_deref());
         let draft = skill.status == "draft";
         skill_service::write_skill(&self.skill_paths, &scope, draft, name, content)
             .await
@@ -1284,7 +1299,7 @@ impl CompanionService {
             self.emitter.emit_skill_learned(companion_id, name);
         } else {
             self.store.set_skill_status(companion_id, name, "archived").await?;
-            let fid = nomifun_common::generate_prefixed_id("evf");
+            let fid = nomifun_common::CompanionEvolutionFeedbackId::new().into_string();
             let sig = if skill.signature.is_empty() { None } else { Some(skill.signature.as_str()) };
             self.store
                 .record_feedback(&fid, name, sig, "reject", reason, nomifun_common::now_ms())
@@ -1311,8 +1326,9 @@ impl CompanionService {
                 continue;
             }
             let conv = ev.data.get("conversation_id");
-            let matches = conv.and_then(|c| c.as_str()).map(|s| s == conversation_id).unwrap_or(false)
-                || conv.and_then(|c| c.as_i64()).map(|n| n.to_string() == conversation_id).unwrap_or(false);
+            let matches = conv
+                .and_then(|value| value.as_str())
+                .is_some_and(|value| value == conversation_id);
             if !matches {
                 continue;
             }
@@ -1368,7 +1384,7 @@ impl CompanionService {
         let gifted = CompanionSkill {
             skill_name: name.to_owned(),
             scope_kind: "companion".into(),
-            scope_companion_id: to_id.to_owned(),
+            scope_companion_id: Some(to_id.to_owned()),
             status: "active".into(),
             source: "gifted".into(),
             confidence: src.confidence,
@@ -1412,7 +1428,7 @@ impl CompanionService {
 }
 
 /// The factory-facing persona prompt provider: Channel Agent sessions
-/// carry `companionSession` but no persisted `system_prompt`, so the nomi factory
+/// carry `companion_session` but no persisted `system_prompt`, so the nomi factory
 /// asks the bound companion for a fresh persona (with current memory snapshot) at
 /// every agent build. The persona is built **only** for an explicitly-bound, live
 /// companion; `companion_id: None` or a dead id yields no persona — an unbound
@@ -1421,7 +1437,8 @@ impl CompanionService {
 #[async_trait::async_trait]
 impl nomifun_ai_agent::CompanionPromptProvider for CompanionService {
     async fn build_system_prompt(&self, companion_id: Option<&str>, channel_platform: Option<&str>) -> Option<String> {
-        let profile = self.registry.get(companion_id.map(str::trim).filter(|id| !id.is_empty())?).await?;
+        let companion_id = CompanionId::try_from(companion_id?).ok()?;
+        let profile = self.registry.get(companion_id.as_str()).await?;
         let smart = self.config.read().await.smart_collaboration;
         Some(crate::companion::build_companion_system_prompt(&self.store, &profile, channel_platform, smart).await)
     }
@@ -1431,6 +1448,24 @@ impl nomifun_ai_agent::CompanionPromptProvider for CompanionService {
 mod tests {
     use super::*;
     use nomifun_realtime::BroadcastEventBus;
+
+    fn companion_fixture(sequence: u64) -> String {
+        let raw = format!("companion_0190f5fe-7c00-7a00-8abc-{sequence:012}");
+        nomifun_common::CompanionId::try_from(raw.as_str()).unwrap().into_string()
+    }
+
+    fn conversation_fixture(sequence: u64) -> String {
+        let raw = format!("conv_0190f5fe-7c00-7a00-8abc-{sequence:012}");
+        nomifun_common::ConversationId::try_from(raw.as_str()).unwrap().into_string()
+    }
+
+    fn provider_fixture(sequence: u64) -> String {
+        let raw = format!("prov_0190f5fe-7c00-7a00-8abc-{sequence:012}");
+        nomifun_common::ProviderId::try_from(raw.as_str()).unwrap().into_string()
+    }
+
+    const MALFORMED_COMPANION_ID: &str = "not-a-companion-id";
+    const MALFORMED_PROVIDER_ID: &str = "not-a-provider-id";
 
     struct NoopCompleter;
 
@@ -1476,19 +1511,21 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let svc = service(dir.path()).await;
         let cid = svc.registry.create("大聪明", "ink").await.unwrap().id;
-        svc.patch_companion(&cid, serde_json::json!({"model":{"provider_id":"prov_x","model":"m"}})).await.unwrap();
+        let provider_id = provider_fixture(1);
+        svc.patch_companion(&cid, serde_json::json!({"model":{"provider_id": provider_id,"model":"m"}})).await.unwrap();
 
-        let hits = svc.providers_in_use("prov_x").await;
+        let hits = svc.providers_in_use(&provider_id).await;
         assert!(hits.iter().any(|u| u.label == "大聪明" && u.target_id.as_deref() == Some(cid.as_str())));
-        assert!(svc.providers_in_use("prov_none").await.is_empty());
+        assert!(svc.providers_in_use(&provider_fixture(99)).await.is_empty());
     }
 
     #[tokio::test]
     async fn providers_in_use_detects_shared_learn_model() {
         let dir = tempfile::tempdir().unwrap();
         let svc = service(dir.path()).await;
-        svc.patch_config(serde_json::json!({"learn":{"model":{"provider_id":"prov_learn","model":"m"}}})).await.unwrap();
-        let hits = svc.providers_in_use("prov_learn").await;
+        let provider_id = provider_fixture(2);
+        svc.patch_config(serde_json::json!({"learn":{"model":{"provider_id": provider_id,"model":"m"}}})).await.unwrap();
+        let hits = svc.providers_in_use(&provider_id).await;
         assert!(hits.iter().any(|u| matches!(u.feature, nomifun_common::ProviderUsageFeature::DesktopCompanion)));
     }
 
@@ -1496,8 +1533,9 @@ mod tests {
     async fn providers_in_use_detects_shared_evolve_model() {
         let dir = tempfile::tempdir().unwrap();
         let svc = service(dir.path()).await;
-        svc.patch_config(serde_json::json!({"evolve":{"model":{"provider_id":"prov_evolve","model":"m"}}})).await.unwrap();
-        let hits = svc.providers_in_use("prov_evolve").await;
+        let provider_id = provider_fixture(3);
+        svc.patch_config(serde_json::json!({"evolve":{"model":{"provider_id": provider_id,"model":"m"}}})).await.unwrap();
+        let hits = svc.providers_in_use(&provider_id).await;
         assert!(
             hits.iter()
                 .any(|u| u.label == "共享进化模型" && u.target_id.is_none())
@@ -1505,13 +1543,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn providers_in_use_skips_empty_provider_id() {
+    async fn providers_in_use_rejects_malformed_provider_id() {
         let dir = tempfile::tempdir().unwrap();
         let svc = service(dir.path()).await;
-        // A default/unconfigured companion carries an empty provider_id; querying
-        // with "" must never false-match it.
-        svc.registry.create("空", "ink").await.unwrap();
-        assert!(svc.providers_in_use("").await.is_empty());
+        svc.registry.create("未配置", "ink").await.unwrap();
+        for malformed in ["", MALFORMED_PROVIDER_ID] {
+            assert!(svc.providers_in_use(malformed).await.is_empty());
+        }
     }
 
     #[tokio::test]
@@ -1537,7 +1575,7 @@ mod tests {
             .insert_skill(&crate::store::CompanionSkill {
                 skill_name: "demo".into(),
                 scope_kind: "companion".into(),
-                scope_companion_id: cid.clone(),
+                scope_companion_id: Some(cid.clone()),
                 status: "draft".into(),
                 source: "mined".into(),
                 confidence: 0.9,
@@ -1589,7 +1627,7 @@ mod tests {
             .insert_skill(&CompanionSkill {
                 skill_name: name.into(),
                 scope_kind: "companion".into(),
-                scope_companion_id: cid.to_owned(),
+                scope_companion_id: Some(cid.to_owned()),
                 status: "draft".into(),
                 source: "mined".into(),
                 confidence: 0.5,
@@ -1619,7 +1657,7 @@ mod tests {
             .insert_skill(&CompanionSkill {
                 skill_name: "beta".into(),
                 scope_kind: "companion".into(),
-                scope_companion_id: cid.clone(),
+                scope_companion_id: Some(cid.clone()),
                 status: "draft".into(),
                 source: "mined".into(),
                 confidence: 0.5,
@@ -1712,7 +1750,7 @@ mod tests {
             .insert_skill(&CompanionSkill {
                 skill_name: "rej-sig".into(),
                 scope_kind: "companion".into(),
-                scope_companion_id: cid.clone(),
+                scope_companion_id: Some(cid.clone()),
                 status: "draft".into(),
                 source: "mined".into(),
                 confidence: 0.5,
@@ -1746,7 +1784,7 @@ mod tests {
             .insert_skill(&CompanionSkill {
                 skill_name: "recent".into(),
                 scope_kind: "companion".into(),
-                scope_companion_id: cid.clone(),
+                scope_companion_id: Some(cid.clone()),
                 status: "active".into(),
                 source: "mined".into(),
                 confidence: 0.5,
@@ -1774,7 +1812,7 @@ mod tests {
         let svc = service(dir.path()).await;
         let cid = svc.registry.create("测试", "ink").await.unwrap().id;
         // No collected tool-call activity for this conversation → BadRequest, not a panic.
-        assert!(svc.draft_skill_from_session(&cid, "conv-none").await.is_err());
+        assert!(svc.draft_skill_from_session(&cid, &conversation_fixture(90)).await.is_err());
     }
 
     #[tokio::test]
@@ -1797,7 +1835,7 @@ mod tests {
             .insert_skill(&CompanionSkill {
                 skill_name: "share-me".into(),
                 scope_kind: "companion".into(),
-                scope_companion_id: a.clone(),
+                scope_companion_id: Some(a.clone()),
                 status: "active".into(),
                 source: "mined".into(),
                 confidence: 0.7,
@@ -1815,7 +1853,7 @@ mod tests {
             .unwrap();
         assert!(svc.gift_companion_skill(&a, "share-me", &a).await.is_err(), "self-gift rejected");
         let g = svc.gift_companion_skill(&a, "share-me", &b).await.unwrap();
-        assert_eq!(g.scope_companion_id, b);
+        assert_eq!(g.scope_companion_id.as_deref(), Some(b.as_str()));
         assert_eq!(g.source, "gifted");
         assert_eq!(svc.store.get_skill(&b, "share-me").await.unwrap().unwrap().status, "active");
         assert!(svc.skill_paths.user_skills_dir.join("companion").join(&b).join("share-me").join("SKILL.md").exists());
@@ -1847,10 +1885,11 @@ mod tests {
     async fn disable_all_turns_everything_off_but_keeps_models() {
         let dir = tempfile::tempdir().unwrap();
         let svc = service(dir.path()).await;
+        let provider_id = provider_fixture(4);
         svc.patch_config(serde_json::json!({
             "collect": { "tool_calls": true, "chat_user_messages": true, "companion_dialogues": true },
-            "learn": { "enabled": true, "interval_minutes": 30, "model": { "provider_id": "p", "model": "m" } },
-            "evolve": { "enabled": true, "model": { "provider_id": "p", "model": "m" } }
+            "learn": { "enabled": true, "interval_minutes": 30, "model": { "provider_id": provider_id, "model": "m" } },
+            "evolve": { "enabled": true, "model": { "provider_id": provider_id, "model": "m" } }
         }))
         .await
         .unwrap();
@@ -1863,9 +1902,9 @@ mod tests {
         assert!(!cfg.learn.enabled);
         assert!(!cfg.evolve.enabled);
         // models + interval preserved so re-enable needs no reconfig
-        assert_eq!(cfg.learn.model.provider_id, "p");
+        assert_eq!(cfg.learn.model.as_ref().unwrap().provider_id, provider_id);
         assert_eq!(cfg.learn.interval_minutes, 30);
-        assert_eq!(cfg.evolve.model.provider_id, "p");
+        assert_eq!(cfg.evolve.model.as_ref().unwrap().provider_id, provider_id);
     }
 
     #[tokio::test]
@@ -1920,7 +1959,7 @@ mod tests {
         // Boot numbered them oldest-first and persisted everything.
         let companions = svc.list_companions().await;
         assert_eq!(companions.iter().map(|p| p.seq).collect::<Vec<_>>(), vec![Some(1), Some(2)]);
-        assert_eq!(CompanionProfileConfig::load(&companions_dir.join(&older.id)).seq, Some(1));
+        assert_eq!(CompanionProfileConfig::load(&companions_dir.join(&older.id)).unwrap().seq, Some(1));
         let shared_dir = dir.path().join(crate::COMPANION_SHARED_REL_DIR);
         assert_eq!(crate::registry::CompanionSeqState::load(&shared_dir).last_companion_seq, 2);
 
@@ -1941,7 +1980,7 @@ mod tests {
         // A full-object PUT of the shared config (the route body simply has
         // no watermark field — it lives in the registry's own state file)…
         let put = SharedCompanionConfig {
-            default_companion_id: a.id.clone(),
+            default_companion_id: Some(a.id.clone()),
             ..SharedCompanionConfig::default()
         };
         svc.update_config(put).await.unwrap();
@@ -1970,15 +2009,15 @@ mod tests {
         assert_eq!(svc.default_companion_id().await, None);
 
         let first = svc.create_companion("毛球", "ink").await.unwrap();
-        assert_eq!(svc.get_config().await.default_companion_id, first.id);
+        assert_eq!(svc.get_config().await.default_companion_id.as_deref(), Some(first.id.as_str()));
         assert_eq!(svc.default_companion_id().await.as_deref(), Some(first.id.as_str()));
         // Persisted, not just in memory.
         let on_disk = SharedCompanionConfig::load(&dir.path().join(crate::COMPANION_SHARED_REL_DIR));
-        assert_eq!(on_disk.default_companion_id, first.id);
+        assert_eq!(on_disk.default_companion_id.as_deref(), Some(first.id.as_str()));
 
         // A second companion never steals the default.
         let second = svc.create_companion("墨墨", "boo").await.unwrap();
-        assert_eq!(svc.get_config().await.default_companion_id, first.id);
+        assert_eq!(svc.get_config().await.default_companion_id.as_deref(), Some(first.id.as_str()));
         assert_ne!(first.id, second.id);
         assert_eq!(svc.list_companions().await.len(), 2);
     }
@@ -1989,25 +2028,26 @@ mod tests {
         let svc = service(dir.path()).await;
         let a = svc.create_companion("甲", "ink").await.unwrap();
         let b = svc.create_companion("乙", "boo").await.unwrap();
-        assert_eq!(svc.get_config().await.default_companion_id, a.id);
+        assert_eq!(svc.get_config().await.default_companion_id.as_deref(), Some(a.id.as_str()));
 
         // Give A per-companion rows that must vanish with it.
         svc.store.add_companion_xp(&a.id, 42).await.unwrap();
-        svc.store.insert_companion_thread("conv_a", &a.id, "甲聊").await.unwrap();
+        let conversation = conversation_fixture(1);
+        svc.store.insert_companion_thread(&conversation, &a.id, "甲聊").await.unwrap();
         svc.store.add_companion_xp(&b.id, 7).await.unwrap();
 
         svc.delete_companion(&a.id).await.unwrap();
 
         assert!(matches!(svc.get_companion(&a.id).await, Err(AppError::NotFound(_))));
         assert_eq!(svc.store.get_companion_state_i64(&a.id, "xp").await.unwrap(), 0);
-        assert!(!svc.store.is_companion_thread("conv_a").await.unwrap());
+        assert!(!svc.store.is_companion_thread(&conversation).await.unwrap());
         // Default re-pointed to the survivor; survivor untouched.
-        assert_eq!(svc.get_config().await.default_companion_id, b.id);
+        assert_eq!(svc.get_config().await.default_companion_id.as_deref(), Some(b.id.as_str()));
         assert_eq!(svc.store.get_companion_state_i64(&b.id, "xp").await.unwrap(), 7);
 
         // Deleting the last companion clears the default entirely.
         svc.delete_companion(&b.id).await.unwrap();
-        assert_eq!(svc.get_config().await.default_companion_id, "");
+        assert_eq!(svc.get_config().await.default_companion_id, None);
         assert_eq!(svc.default_companion_id().await, None);
 
         assert!(matches!(svc.delete_companion(&a.id).await, Err(AppError::NotFound(_))));
@@ -2045,10 +2085,10 @@ mod tests {
         // the store still holds unclaimed legacy rows and the global kv.
         let legacy = dir.path().join(crate::COMPANION_REL_DIR);
         std::fs::create_dir_all(&legacy).unwrap();
-        std::fs::write(legacy.join(crate::migrate::MIGRATED_MARKER), "companion_first").unwrap();
+        let first_companion = companion_fixture(10);
+        std::fs::write(legacy.join(crate::migrate::MIGRATED_MARKER), &first_companion).unwrap();
         {
             let store = CompanionStore::open(&dir.path().join(crate::COMPANION_SHARED_REL_DIR)).await.unwrap();
-            store.insert_companion_thread("conv_l", "", "旧线程").await.unwrap();
             store.set_state("xp", "55").await.unwrap();
         }
 
@@ -2056,10 +2096,8 @@ mod tests {
         // the marker and retries the idempotent backfill.
         let svc = service(dir.path()).await;
 
-        assert_eq!(svc.store.get_companion_state_i64("companion_first", "xp").await.unwrap(), 55);
-        let threads = svc.store.list_companion_threads(Some("companion_first")).await.unwrap();
-        assert_eq!(threads.len(), 1);
-        assert_eq!(threads[0].conversation_id, "conv_l");
+        assert_eq!(svc.store.get_companion_state_i64(&first_companion, "xp").await.unwrap(), 55);
+        assert!(svc.store.list_companion_threads(Some(&first_companion)).await.unwrap().is_empty());
         // The global kv was consumed by the move.
         assert_eq!(svc.store.get_state("xp").await.unwrap(), None);
     }
@@ -2107,7 +2145,7 @@ mod tests {
 
         // No companions yet: zeroed fallback.
         let empty = svc.status().await.unwrap();
-        assert_eq!(empty.companion_id, "");
+        assert_eq!(empty.companion_id, None);
         assert_eq!(empty.xp, 0);
         assert_eq!(empty.level, 1);
         assert!(!empty.model_configured);
@@ -2115,16 +2153,16 @@ mod tests {
         let a = svc.create_companion("甲", "ink").await.unwrap();
         svc.store.add_companion_xp(&a.id, 150).await.unwrap();
         let status = svc.status().await.unwrap();
-        assert_eq!(status.companion_id, a.id);
+        assert_eq!(status.companion_id.as_deref(), Some(a.id.as_str()));
         assert_eq!(status.xp, 150);
         assert_eq!(status.level, 2);
 
         // Per-companion status for a second companion reads its own xp.
         let b = svc.create_companion("乙", "boo").await.unwrap();
         let sb = svc.companion_status(&b.id).await.unwrap();
-        assert_eq!(sb.companion_id, b.id);
+        assert_eq!(sb.companion_id.as_deref(), Some(b.id.as_str()));
         assert_eq!(sb.xp, 0);
-        assert!(matches!(svc.companion_status("companion_missing").await, Err(AppError::NotFound(_))));
+        assert!(matches!(svc.companion_status(MALFORMED_COMPANION_ID).await, Err(AppError::NotFound(_))));
     }
 
     #[tokio::test]
@@ -2135,7 +2173,7 @@ mod tests {
         let _b = svc.create_companion("乙", "boo").await.unwrap();
 
         // Point the shared config at a companion that does not exist.
-        svc.patch_config(serde_json::json!({"default_companion_id": "companion_ghost"}))
+        svc.patch_config(serde_json::json!({"default_companion_id": companion_fixture(999)}))
             .await
             .unwrap();
         assert_eq!(svc.default_companion_id().await.as_deref(), Some(a.id.as_str()));
@@ -2164,21 +2202,21 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let svc = service(dir.path()).await;
         let a = svc.create_companion("甲", "ink").await.unwrap();
-        assert!(!a.model.is_configured());
+        assert!(a.model.is_none());
+        let provider_id = provider_fixture(5);
 
         let patched = svc
-            .patch_companion(&a.id, serde_json::json!({"model": {"provider_id": "prov_x", "model": "claude-fable-5"}}))
+            .patch_companion(&a.id, serde_json::json!({"model": {"provider_id": provider_id, "model": "claude-fable-5"}}))
             .await
             .unwrap();
-        assert!(patched.model.is_configured());
-        assert_eq!(patched.model.provider_id, "prov_x");
-        assert_eq!(svc.get_companion(&a.id).await.unwrap().model.model, "claude-fable-5");
+        assert_eq!(patched.model.as_ref().unwrap().provider_id, provider_id);
+        assert_eq!(svc.get_companion(&a.id).await.unwrap().model.unwrap().model, "claude-fable-5");
 
         // A non-model patch on an already-configured companion also succeeds (no
         // spurious propagation path, model unchanged).
         let renamed = svc.patch_companion(&a.id, serde_json::json!({"name": "甲改"})).await.unwrap();
         assert_eq!(renamed.name, "甲改");
-        assert_eq!(renamed.model.provider_id, "prov_x");
+        assert_eq!(renamed.model.as_ref().unwrap().provider_id, provider_id);
     }
 
     #[tokio::test]
@@ -2225,7 +2263,7 @@ mod tests {
         let b_prompt = svc.build_system_prompt(Some(&b.id), None).await.unwrap();
         assert!(b_prompt.contains("你是 墨墨"));
         // Dead explicit id → NO persona (no default fallback).
-        assert!(svc.build_system_prompt(Some("companion_ghost"), None).await.is_none());
+        assert!(svc.build_system_prompt(Some(MALFORMED_COMPANION_ID), None).await.is_none());
         let _ = a;
     }
 

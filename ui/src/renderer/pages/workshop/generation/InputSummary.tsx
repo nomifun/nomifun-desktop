@@ -18,9 +18,10 @@ import { CloseSmall, FileText, Link, Pic, VideoTwo } from '@icon-park/react';
 import type { WorkshopFlowEdge, WorkshopFlowNode } from '../canvas/model';
 import type { WorkshopAssetKind } from '../types';
 import { collectNodeCandidates, parseMentionRef } from './pipeline';
+import type { WorkshopNodeId } from '@/common/types/ids';
 
 export interface InputSummaryProps {
-  selfId: string;
+  selfId: WorkshopNodeId;
   mentions: string[];
   onRemoveMention: (ref: string) => void;
 }
@@ -62,13 +63,16 @@ const InputSummary: React.FC<InputSummaryProps> = ({ selfId, mentions, onRemoveM
   }, [sources]);
 
   const mentionChips = useMemo(() => {
-    const labelMap = new Map<string, string>();
-    for (const cand of collectNodeCandidates(rf.getNodes(), selfId)) labelMap.set(cand.ref, cand.label);
+    const candidateMap = new Map<string, { label: string; kind: WorkshopAssetKind }>();
+    for (const cand of collectNodeCandidates(rf.getNodes(), selfId)) {
+      candidateMap.set(cand.ref, { label: cand.label, kind: cand.kind });
+    }
     return mentions.map((ref) => {
       const parsed = parseMentionRef(ref);
-      const kind = parsed?.kind ?? 'image';
+      const candidate = candidateMap.get(ref);
+      const kind: WorkshopAssetKind = parsed?.source === 'asset' ? parsed.kind : (candidate?.kind ?? 'image');
       const label =
-        labelMap.get(ref) ??
+        candidate?.label ??
         (parsed?.source === 'asset'
           ? t('workshopGeneration.mention.assetLabel', { defaultValue: '资产库素材' })
           : t('workshopGeneration.mention.missing', { defaultValue: '已失效' }));

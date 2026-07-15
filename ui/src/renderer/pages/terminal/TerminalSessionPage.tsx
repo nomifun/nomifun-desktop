@@ -11,6 +11,7 @@ import { Refresh, EditOne, Terminal } from '@icon-park/react';
 import { useTranslation } from 'react-i18next';
 import { ipcBridge } from '@/common';
 import type { ITerminalSession } from '@/common/adapter/ipcBridge';
+import { parseTerminalId, terminalTarget } from '@/common/types/ids';
 import AutoWorkControl from '@/renderer/pages/conversation/components/AutoWorkControl';
 import IdmmControl from '@/renderer/pages/conversation/components/IdmmControl';
 import KnowledgeControl from '@/renderer/pages/conversation/components/KnowledgeControl';
@@ -86,30 +87,35 @@ const TerminalRightRegion: React.FC<{ session: ITerminalSession }> = ({ session 
   // workspace button (WORKSPACE_TOGGLE_EVENT) toggles it and the titlebar icon
   // stays in sync (WORKSPACE_STATE_EVENT). Per-session preference key; not a
   // temp workspace, so it auto-expands once the cwd's files load.
+  const workspaceTarget = terminalTarget(session.id);
   const { rightSiderCollapsed, persistRightSiderCollapsed } = useWorkspaceCollapse({
     workspaceEnabled: true,
     isMobile,
-    preferenceKey: `terminal-${session.id}`,
+    target: workspaceTarget,
     isTemporaryWorkspace: false,
     autoExpandOnFiles: true,
-    workspaceEventKey: String(session.id),
   });
-  const { activeWorkspaceTab, setActiveWorkspaceTab } = useWorkspacePanelTabs(`terminal-${session.id}`);
+  const { activeWorkspaceTab, setActiveWorkspaceTab } = useWorkspacePanelTabs(workspaceTarget);
   const [workspaceChangeCount, setWorkspaceChangeCount] = useState(0);
 
   useEffect(() => {
     const handleMeta = (event: Event) => {
       const detail = (event as CustomEvent<WorkspacePanelMetaDetail>).detail;
-      if (detail?.sourceKey === String(session.id)) setWorkspaceChangeCount(detail.changeCount);
+      if (
+        detail?.target?.kind === workspaceTarget.kind &&
+        detail.target.id === workspaceTarget.id
+      ) {
+        setWorkspaceChangeCount(detail.changeCount);
+      }
     };
     window.addEventListener(WORKSPACE_PANEL_META_EVENT, handleMeta);
     return () => window.removeEventListener(WORKSPACE_PANEL_META_EVENT, handleMeta);
-  }, [session.id]);
+  }, [workspaceTarget.id, workspaceTarget.kind]);
 
   const selectWorkspaceTool = (tab: string) => {
     const clickingActivePanel = !rightSiderCollapsed && activeWorkspaceTab === tab;
     setActiveWorkspaceTab(tab);
-    dispatchWorkspacePanelTabEvent(tab, String(session.id));
+    dispatchWorkspacePanelTabEvent(tab, workspaceTarget);
     persistRightSiderCollapsed(clickingActivePanel);
   };
 
@@ -179,7 +185,7 @@ const TerminalRightRegion: React.FC<{ session: ITerminalSession }> = ({ session 
           <WorkspacePanelHeader
             showToggle={!isMacRuntime && !isWindowsRuntime}
             collapsed={rightSiderCollapsed}
-            onToggle={() => dispatchWorkspaceToggleEvent()}
+            onToggle={() => dispatchWorkspaceToggleEvent(workspaceTarget)}
             togglePlacement={isMobile ? 'left' : 'right'}
             workspacePath={session.cwd}
             activeTab={activeWorkspaceTab}
@@ -236,8 +242,7 @@ const TerminalSessionPage: React.FC = () => {
 
   useEffect(() => {
     if (!id) return;
-    // Route param is a string; the terminal session id is a numeric primary key.
-    const sessionId = Number(id);
+    const sessionId = parseTerminalId(id);
     let active = true;
     void ipcBridge.terminal.get
       .invoke({ id: sessionId })
@@ -358,10 +363,7 @@ const TerminalSessionPage: React.FC = () => {
 
   if (!id) return null;
 
-  // Numeric terminal session id for the numeric-id APIs and child views.
-  // KnowledgeControl also takes the numeric session id; its terminal binding
-  // resolves via a workpath key (not the numeric id) once the session is found.
-  const sessionId = Number(id);
+  const sessionId = parseTerminalId(id);
 
   const isExited = session?.last_status && session.last_status !== 'running';
 
@@ -387,8 +389,9 @@ const TerminalSessionPage: React.FC = () => {
     // SendBox with no provider in scope → "usePreviewContext must be used within
     // PreviewProvider" → white screen on terminal mount. subscribeGlobalOpen=
     // false keeps agent-driven global preview.open out of the terminal; the
-    // `terminal` namespace isolates persisted preview tabs from conversations.
-    <PreviewProvider persistNamespace='terminal' subscribeGlobalOpen={false}>
+    // The terminal id is part of the namespace so separate terminal sessions
+    // never restore or overwrite each other's preview tabs.
+    <PreviewProvider key={`terminal:${id}`} persistNamespace={`terminal:${id}`} subscribeGlobalOpen={false}>
     <div className='relative flex flex-row h-full min-h-0 bg-fill-1 overflow-hidden'>
       {/* Terminal column: header + xterm + composer. flex-1 with a floor so it
           never collapses when the preview / rail columns open. */}

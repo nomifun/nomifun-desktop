@@ -480,7 +480,7 @@ fn reconcile_companion_windows(
             }
             continue;
         }
-        let url = format!("index.html#/companion?companionId={}", spec.companion_id);
+        let url = format!("index.html#/companion?companion_id={}", spec.companion_id);
         let builder =
             tauri::WebviewWindowBuilder::new(&app, &label, tauri::WebviewUrl::App(url.into()))
                 // Placeholder title for the brief pre-load frame; the companion page

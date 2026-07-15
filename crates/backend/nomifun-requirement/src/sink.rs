@@ -57,7 +57,7 @@ impl RequirementSink for RequirementServiceSink {
     async fn complete(&self, requirement_id: &str, note: &str) -> Result<(), String> {
         let id = parse_req_id(requirement_id)?;
         self.service
-            .complete(id, Some(note.to_string()))
+            .complete(&id, Some(note.to_string()))
             .await
             .map(|_| ())
             .map_err(|e| e.to_string())
@@ -72,7 +72,7 @@ impl RequirementSink for RequirementServiceSink {
             other => return Err(format!("invalid status '{other}'")),
         };
         self.service
-            .set_status(id, parsed, note.map(|s| s.to_string()))
+            .set_status(&id, parsed, note.map(|s| s.to_string()))
             .await
             .map(|_| ())
             .map_err(|e| e.to_string())
@@ -83,9 +83,8 @@ impl RequirementSink for RequirementServiceSink {
 /// single-track per spec §2.3) — carried as a string across the agent-engine
 /// seam. A non-numeric id (e.g. a stale id replayed from a persisted transcript,
 /// spec §2.5/§7.4) is rejected explicitly rather than silently coerced.
-fn parse_req_id(requirement_id: &str) -> Result<i64, String> {
-    requirement_id
-        .trim()
-        .parse::<i64>()
-        .map_err(|_| format!("invalid requirement id '{requirement_id}' (expected an integer)"))
+fn parse_req_id(requirement_id: &str) -> Result<String, String> {
+    nomifun_common::RequirementId::try_from(requirement_id.trim())
+        .map(nomifun_common::RequirementId::into_string)
+        .map_err(|error| format!("invalid requirement id '{requirement_id}': {error}"))
 }

@@ -23,6 +23,8 @@ import { useParams } from 'react-router-dom';
 import { type NodeProps, useNodesData, useStore } from '@xyflow/react';
 import { AlignTextLeft, Cycle, DeleteFour, ListNumbers, Pause, Play, SortAmountDown } from '@icon-park/react';
 import { useTranslation } from 'react-i18next';
+import { parseCanvasId, parseWorkshopNodeId, tryParseEntityId } from '@/common/types/ids';
+import type { ProviderId } from '@/common/types/ids';
 import { useCanvasNode } from '../CanvasNodeContext';
 import type { LoopFlowNode, WorkshopFlowNode } from '../model';
 import { KIND_META } from '../model';
@@ -111,7 +113,8 @@ const ProgressRing: React.FC<{ completed: number; total: number; running: boolea
 function LoopNodeImpl({ id, data, selected }: NodeProps<LoopFlowNode>) {
   const { t } = useTranslation();
   const api = useCanvasNode();
-  const { id: canvasId = '' } = useParams<{ id: string }>();
+  const { id: canvasRouteId } = useParams<{ id: string }>();
+  const canvasId = parseCanvasId(canvasRouteId);
   const [hover, setHover] = useState(false);
 
   const config = useMemo(() => readLoopConfig(data), [data]);
@@ -121,7 +124,7 @@ function LoopNodeImpl({ id, data, selected }: NodeProps<LoopFlowNode>) {
     for (const e of s.edges) {
       if (e.source !== id) continue;
       const n = s.nodeLookup.get(e.target);
-      if (n && n.type === 'generator') return e.target;
+      if (n && n.type === 'generator') return tryParseEntityId('workshop-node', e.target);
     }
     return null;
   });
@@ -131,13 +134,13 @@ function LoopNodeImpl({ id, data, selected }: NodeProps<LoopFlowNode>) {
 
   const models = useGeneratorModels(targetMode);
   const effectiveModel = useMemo<ModelOption | null>(() => {
-    const td = targetData?.data as { providerId?: string; model?: string } | undefined;
+    const td = targetData?.data as { providerId?: ProviderId; model?: string } | undefined;
     const explicit = models.flat.find((m) => m.providerId === td?.providerId && m.model === td?.model);
     return explicit ?? models.flat[0] ?? null;
   }, [models.flat, targetData]);
 
   const { progress, running, canRun, start, stop } = useLoopRunner({
-    loopId: id,
+    loopId: parseWorkshopNodeId(id),
     targetId,
     canvasId,
     config,

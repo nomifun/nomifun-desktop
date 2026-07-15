@@ -127,7 +127,7 @@ impl ICronRepository for SqliteCronRepository {
         push_opt_str!(preset_id);
         push_opt_i64!(preset_revision);
         push_opt_str!(preset_snapshot);
-        push_opt_i64!(conversation_id);
+        push_opt_str!(conversation_id);
         push_opt_str!(conversation_title);
         push_str!(agent_type);
         push_opt_str!(skill_content);
@@ -229,7 +229,7 @@ impl ICronRepository for SqliteCronRepository {
     async fn list_by_conversation(
         &self,
         user_id: &str,
-        conversation_id: i64,
+        conversation_id: &str,
     ) -> Result<Vec<CronJobRow>, DbError> {
         let rows = sqlx::query_as::<_, CronJobRow>(
             "SELECT * FROM cron_jobs WHERE user_id = ? AND conversation_id = ? ORDER BY created_at ASC",
@@ -244,7 +244,7 @@ impl ICronRepository for SqliteCronRepository {
     async fn delete_by_conversation(
         &self,
         user_id: &str,
-        conversation_id: i64,
+        conversation_id: &str,
     ) -> Result<u64, DbError> {
         let result = sqlx::query(
             "DELETE FROM cron_jobs WHERE user_id = ? AND conversation_id = ?",
@@ -335,10 +335,16 @@ mod tests {
     use crate::init_database_memory;
     use crate::models::CronJobRunRow;
 
-    const INSTALLATION_OWNER: &str = "system_default_user";
+    const CONVERSATION_ID: &str =
+        "conv_019abcdef012-7abc-8abc-0123-456789abcdef";
+    const OTHER_CONVERSATION_ID: &str =
+        "conv_019abcdef012-7abc-8abc-0123-456789abcdee";
+    const MISSING_CONVERSATION_ID: &str =
+        "conv_019abcdef012-7abc-8abc-0123-456789abcded";
 
-    async fn setup() -> (SqliteCronRepository, crate::Database) {
+    async fn setup() -> (SqliteCronRepository, crate::Database, String) {
         let db = init_database_memory().await.expect("init db");
+        let installation_owner = crate::installation_owner_id(db.pool()).await.unwrap();
         let repo = SqliteCronRepository::new(db.pool().clone());
 
         // General Cron repository tests exercise the complete host-capable
@@ -346,21 +352,22 @@ mod tests {
         // to the installation owner seeded by the baseline migration.
         sqlx::query(
             "INSERT INTO conversations (id, user_id, name, type, created_at, updated_at) \
-             VALUES (1, ?1, 'Test Conv', 'normal', 0, 0)",
+             VALUES (?1, ?2, 'Test Conv', 'normal', 0, 0)",
         )
-        .bind(INSTALLATION_OWNER)
+        .bind(CONVERSATION_ID)
+        .bind(&installation_owner)
         .execute(db.pool())
         .await
         .unwrap();
 
-        (repo, db)
+        (repo, db, installation_owner)
     }
 
-    fn make_row(id: &str) -> CronJobRow {
+    fn make_row(id: &str, installation_owner: &str) -> CronJobRow {
         let now = now_ms();
         CronJobRow {
             id: id.into(),
-            user_id: INSTALLATION_OWNER.into(),
+            user_id: installation_owner.to_owned(),
             name: "Test Job".into(),
             enabled: true,
             schedule_kind: "every".into(),
@@ -373,7 +380,7 @@ mod tests {
             preset_id: None,
             preset_revision: None,
             preset_snapshot: None,
-            conversation_id: Some(1),
+            conversation_id: Some(CONVERSATION_ID.into()),
             conversation_title: Some("Test Conv".into()),
             agent_type: "acp".into(),
             created_by: "user".into(),
@@ -403,27 +410,27 @@ mod tests {
 
     #[tokio::test]
     async fn insert_run_pruned_keeps_latest_seven_per_job() {
-        let (repo, _db) = setup().await;
-        repo.insert(&make_row("cron_runs_a")).await.unwrap();
-        repo.insert(&make_row("cron_runs_b")).await.unwrap();
+        let (repo, _db, owner) = setup().await;
+        repo.insert(&make_row("cron_runs_a", &owner)).await.unwrap();
+        repo.insert(&make_row("cron_runs_b", &owner)).await.unwrap();
 
         for index in 0..10 {
-            repo.insert_run_pruned(INSTALLATION_OWNER, &make_run("cron_runs_a", index))
+            repo.insert_run_pruned(&owner, &make_run("cron_runs_a", index))
                 .await
                 .unwrap();
         }
         for index in 0..3 {
-            repo.insert_run_pruned(INSTALLATION_OWNER, &make_run("cron_runs_b", index))
+            repo.insert_run_pruned(&owner, &make_run("cron_runs_b", index))
                 .await
                 .unwrap();
         }
 
         let runs_a = repo
-            .list_runs_by_job(INSTALLATION_OWNER, "cron_runs_a", 20)
+            .list_runs_by_job(&owner, "cron_runs_a", 20)
             .await
             .unwrap();
         let runs_b = repo
-            .list_runs_by_job(INSTALLATION_OWNER, "cron_runs_b", 20)
+            .list_runs_by_job(&owner, "cron_runs_b", 20)
             .await
             .unwrap();
 
@@ -439,12 +446,12 @@ mod tests {
 
     #[tokio::test]
     async fn insert_and_get_by_id() {
-        let (repo, _db) = setup().await;
-        let row = make_row("cron_1");
+        let (repo, _db, owner) = setup().await;
+        let row = make_row("cron_1", &owner);
         repo.insert(&row).await.unwrap();
 
         let found = repo
-            .get_by_id(INSTALLATION_OWNER, "cron_1")
+            .get_by_id(&owner, "cron_1")
             .await
             .unwrap()
             .expect("found");
@@ -457,27 +464,27 @@ mod tests {
 
     #[tokio::test]
     async fn get_by_id_returns_none_for_missing() {
-        let (repo, _db) = setup().await;
-        let result = repo.get_by_id(INSTALLATION_OWNER, "cron_missing").await.unwrap();
+        let (repo, _db, owner) = setup().await;
+        let result = repo.get_by_id(&owner, "cron_missing").await.unwrap();
         assert!(result.is_none());
     }
 
     #[tokio::test]
     async fn list_all_returns_all_rows() {
-        let (repo, _db) = setup().await;
-        repo.insert(&make_row("cron_a")).await.unwrap();
-        repo.insert(&make_row("cron_b")).await.unwrap();
+        let (repo, _db, owner) = setup().await;
+        repo.insert(&make_row("cron_a", &owner)).await.unwrap();
+        repo.insert(&make_row("cron_b", &owner)).await.unwrap();
 
-        let all = repo.list_all(INSTALLATION_OWNER).await.unwrap();
+        let all = repo.list_all(&owner).await.unwrap();
         assert_eq!(all.len(), 2);
     }
 
     #[tokio::test]
     async fn list_enabled_filters_disabled() {
-        let (repo, _db) = setup().await;
-        repo.insert(&make_row("cron_e1")).await.unwrap();
+        let (repo, _db, owner) = setup().await;
+        repo.insert(&make_row("cron_e1", &owner)).await.unwrap();
 
-        let mut disabled = make_row("cron_e2");
+        let mut disabled = make_row("cron_e2", &owner);
         disabled.enabled = false;
         repo.insert(&disabled).await.unwrap();
 
@@ -488,34 +495,41 @@ mod tests {
 
     #[tokio::test]
     async fn list_by_conversation_filters_correctly() {
-        let (repo, db) = setup().await;
+        let (repo, db, owner) = setup().await;
         sqlx::query(
             "INSERT INTO conversations (id, user_id, name, type, created_at, updated_at) \
-             VALUES (2, ?1, 'Other', 'normal', 0, 0)",
+             VALUES (?1, ?2, 'Other', 'normal', 0, 0)",
         )
-        .bind(INSTALLATION_OWNER)
+        .bind(OTHER_CONVERSATION_ID)
+        .bind(&owner)
         .execute(db.pool())
         .await
         .unwrap();
 
-        repo.insert(&make_row("cron_c1")).await.unwrap();
-        let mut other = make_row("cron_c2");
-        other.conversation_id = Some(2);
+        repo.insert(&make_row("cron_c1", &owner)).await.unwrap();
+        let mut other = make_row("cron_c2", &owner);
+        other.conversation_id = Some(OTHER_CONVERSATION_ID.into());
         repo.insert(&other).await.unwrap();
 
-        let conv1_jobs = repo.list_by_conversation(INSTALLATION_OWNER, 1).await.unwrap();
+        let conv1_jobs = repo
+            .list_by_conversation(&owner, CONVERSATION_ID)
+            .await
+            .unwrap();
         assert_eq!(conv1_jobs.len(), 1);
         assert_eq!(conv1_jobs[0].id, "cron_c1");
 
-        let conv2_jobs = repo.list_by_conversation(INSTALLATION_OWNER, 2).await.unwrap();
+        let conv2_jobs = repo
+            .list_by_conversation(&owner, OTHER_CONVERSATION_ID)
+            .await
+            .unwrap();
         assert_eq!(conv2_jobs.len(), 1);
         assert_eq!(conv2_jobs[0].id, "cron_c2");
     }
 
     #[tokio::test]
     async fn update_partial_fields() {
-        let (repo, _db) = setup().await;
-        repo.insert(&make_row("cron_u1")).await.unwrap();
+        let (repo, _db, owner) = setup().await;
+        repo.insert(&make_row("cron_u1", &owner)).await.unwrap();
 
         let params = UpdateCronJobParams {
             name: Some("Renamed".into()),
@@ -523,10 +537,10 @@ mod tests {
             run_count: Some(42),
             ..Default::default()
         };
-        repo.update(INSTALLATION_OWNER, "cron_u1", &params).await.unwrap();
+        repo.update(&owner, "cron_u1", &params).await.unwrap();
 
         let updated = repo
-            .get_by_id(INSTALLATION_OWNER, "cron_u1")
+            .get_by_id(&owner, "cron_u1")
             .await
             .unwrap()
             .unwrap();
@@ -538,8 +552,8 @@ mod tests {
 
     #[tokio::test]
     async fn update_optional_nullable_fields() {
-        let (repo, _db) = setup().await;
-        repo.insert(&make_row("cron_u2")).await.unwrap();
+        let (repo, _db, owner) = setup().await;
+        repo.insert(&make_row("cron_u2", &owner)).await.unwrap();
 
         let params = UpdateCronJobParams {
             last_status: Some(Some("ok".into())),
@@ -547,10 +561,10 @@ mod tests {
             skill_content: Some(Some("---\nname: skill\n---\nDo it".into())),
             ..Default::default()
         };
-        repo.update(INSTALLATION_OWNER, "cron_u2", &params).await.unwrap();
+        repo.update(&owner, "cron_u2", &params).await.unwrap();
 
         let updated = repo
-            .get_by_id(INSTALLATION_OWNER, "cron_u2")
+            .get_by_id(&owner, "cron_u2")
             .await
             .unwrap()
             .unwrap();
@@ -564,12 +578,12 @@ mod tests {
             skill_content: Some(None),
             ..Default::default()
         };
-        repo.update(INSTALLATION_OWNER, "cron_u2", &clear_params)
+        repo.update(&owner, "cron_u2", &clear_params)
             .await
             .unwrap();
 
         let cleared = repo
-            .get_by_id(INSTALLATION_OWNER, "cron_u2")
+            .get_by_id(&owner, "cron_u2")
             .await
             .unwrap()
             .unwrap();
@@ -580,13 +594,13 @@ mod tests {
 
     #[tokio::test]
     async fn update_nonexistent_returns_not_found() {
-        let (repo, _db) = setup().await;
+        let (repo, _db, owner) = setup().await;
         let params = UpdateCronJobParams {
             name: Some("x".into()),
             ..Default::default()
         };
         let err = repo
-            .update(INSTALLATION_OWNER, "cron_nope", &params)
+            .update(&owner, "cron_nope", &params)
             .await
             .unwrap_err();
         assert!(matches!(err, DbError::NotFound(_)));
@@ -594,19 +608,19 @@ mod tests {
 
     #[tokio::test]
     async fn update_empty_params_is_noop() {
-        let (repo, _db) = setup().await;
-        repo.insert(&make_row("cron_noop")).await.unwrap();
+        let (repo, _db, owner) = setup().await;
+        repo.insert(&make_row("cron_noop", &owner)).await.unwrap();
 
         let before = repo
-            .get_by_id(INSTALLATION_OWNER, "cron_noop")
+            .get_by_id(&owner, "cron_noop")
             .await
             .unwrap()
             .unwrap();
-        repo.update(INSTALLATION_OWNER, "cron_noop", &UpdateCronJobParams::default())
+        repo.update(&owner, "cron_noop", &UpdateCronJobParams::default())
             .await
             .unwrap();
         let after = repo
-            .get_by_id(INSTALLATION_OWNER, "cron_noop")
+            .get_by_id(&owner, "cron_noop")
             .await
             .unwrap()
             .unwrap();
@@ -616,39 +630,42 @@ mod tests {
 
     #[tokio::test]
     async fn delete_removes_row() {
-        let (repo, _db) = setup().await;
-        repo.insert(&make_row("cron_d1")).await.unwrap();
+        let (repo, _db, owner) = setup().await;
+        repo.insert(&make_row("cron_d1", &owner)).await.unwrap();
 
-        repo.delete(INSTALLATION_OWNER, "cron_d1").await.unwrap();
-        let result = repo.get_by_id(INSTALLATION_OWNER, "cron_d1").await.unwrap();
+        repo.delete(&owner, "cron_d1").await.unwrap();
+        let result = repo.get_by_id(&owner, "cron_d1").await.unwrap();
         assert!(result.is_none());
     }
 
     #[tokio::test]
     async fn delete_nonexistent_returns_not_found() {
-        let (repo, _db) = setup().await;
-        let err = repo.delete(INSTALLATION_OWNER, "cron_nope").await.unwrap_err();
+        let (repo, _db, owner) = setup().await;
+        let err = repo.delete(&owner, "cron_nope").await.unwrap_err();
         assert!(matches!(err, DbError::NotFound(_)));
     }
 
     #[tokio::test]
     async fn delete_by_conversation_removes_all_related() {
-        let (repo, _db) = setup().await;
-        repo.insert(&make_row("cron_dc1")).await.unwrap();
-        repo.insert(&make_row("cron_dc2")).await.unwrap();
+        let (repo, _db, owner) = setup().await;
+        repo.insert(&make_row("cron_dc1", &owner)).await.unwrap();
+        repo.insert(&make_row("cron_dc2", &owner)).await.unwrap();
 
-        let deleted = repo.delete_by_conversation(INSTALLATION_OWNER, 1).await.unwrap();
+        let deleted = repo
+            .delete_by_conversation(&owner, CONVERSATION_ID)
+            .await
+            .unwrap();
         assert_eq!(deleted, 2);
 
-        let remaining = repo.list_all(INSTALLATION_OWNER).await.unwrap();
+        let remaining = repo.list_all(&owner).await.unwrap();
         assert!(remaining.is_empty());
     }
 
     #[tokio::test]
     async fn delete_by_conversation_returns_zero_for_no_match() {
-        let (repo, _db) = setup().await;
+        let (repo, _db, owner) = setup().await;
         let deleted = repo
-            .delete_by_conversation(INSTALLATION_OWNER, 999)
+            .delete_by_conversation(&owner, MISSING_CONVERSATION_ID)
             .await
             .unwrap();
         assert_eq!(deleted, 0);
@@ -656,8 +673,8 @@ mod tests {
 
     #[tokio::test]
     async fn update_schedule_fields() {
-        let (repo, _db) = setup().await;
-        repo.insert(&make_row("cron_s1")).await.unwrap();
+        let (repo, _db, owner) = setup().await;
+        repo.insert(&make_row("cron_s1", &owner)).await.unwrap();
 
         let params = UpdateCronJobParams {
             schedule_kind: Some("cron".into()),
@@ -667,10 +684,10 @@ mod tests {
             next_run_at: Some(Some(9999999)),
             ..Default::default()
         };
-        repo.update(INSTALLATION_OWNER, "cron_s1", &params).await.unwrap();
+        repo.update(&owner, "cron_s1", &params).await.unwrap();
 
         let updated = repo
-            .get_by_id(INSTALLATION_OWNER, "cron_s1")
+            .get_by_id(&owner, "cron_s1")
             .await
             .unwrap()
             .unwrap();
@@ -682,32 +699,32 @@ mod tests {
 
     #[tokio::test]
     async fn insert_all_schedule_kinds() {
-        let (repo, _db) = setup().await;
+        let (repo, _db, owner) = setup().await;
 
-        let mut at_job = make_row("cron_at");
+        let mut at_job = make_row("cron_at", &owner);
         at_job.schedule_kind = "at".into();
         at_job.schedule_value = "1700000000000".into();
         repo.insert(&at_job).await.unwrap();
 
-        let mut cron_job = make_row("cron_cron");
+        let mut cron_job = make_row("cron_cron", &owner);
         cron_job.schedule_kind = "cron".into();
         cron_job.schedule_value = "0 */5 * * * *".into();
         cron_job.schedule_tz = Some("UTC".into());
         repo.insert(&cron_job).await.unwrap();
 
-        let all = repo.list_all(INSTALLATION_OWNER).await.unwrap();
+        let all = repo.list_all(&owner).await.unwrap();
         assert_eq!(all.len(), 2);
     }
 
     #[tokio::test]
     async fn insert_with_skill_content() {
-        let (repo, _db) = setup().await;
-        let mut row = make_row("cron_sk");
+        let (repo, _db, owner) = setup().await;
+        let mut row = make_row("cron_sk", &owner);
         row.skill_content = Some("---\nname: My Skill\ndescription: A test\n---\nDo X".into());
         repo.insert(&row).await.unwrap();
 
         let found = repo
-            .get_by_id(INSTALLATION_OWNER, "cron_sk")
+            .get_by_id(&owner, "cron_sk")
             .await
             .unwrap()
             .unwrap();
@@ -716,13 +733,13 @@ mod tests {
 
     #[tokio::test]
     async fn insert_with_agent_config_json() {
-        let (repo, _db) = setup().await;
-        let mut row = make_row("cron_ac");
+        let (repo, _db, owner) = setup().await;
+        let mut row = make_row("cron_ac", &owner);
         row.agent_config = Some(r#"{"backend":"openai","name":"GPT","modelId":"gpt-4"}"#.into());
         repo.insert(&row).await.unwrap();
 
         let found = repo
-            .get_by_id(INSTALLATION_OWNER, "cron_ac")
+            .get_by_id(&owner, "cron_ac")
             .await
             .unwrap()
             .unwrap();
@@ -733,7 +750,7 @@ mod tests {
 
     #[tokio::test]
     async fn secondary_user_cron_accepts_model_only_shape_and_rejects_host_agent() {
-        let (repo, db) = setup().await;
+        let (repo, db, owner) = setup().await;
         const SECONDARY_USER: &str = "cron_secondary_user";
 
         sqlx::query(
@@ -760,18 +777,19 @@ mod tests {
             "INSERT INTO conversations \
                 (id, user_id, name, type, model, delegation_policy, created_at, updated_at) \
              VALUES \
-                (2, ?1, 'Model-only target', 'nomi', \
+                (?1, ?2, 'Model-only target', 'nomi', \
                  '{\"provider_id\":\"provider-test\",\"model\":\"model-test\"}', \
                  'disabled', 0, 0)",
         )
+        .bind(OTHER_CONVERSATION_ID)
         .bind(SECONDARY_USER)
         .execute(db.pool())
         .await
         .unwrap();
 
-        let mut allowed = make_row("cron_secondary_model_only");
+        let mut allowed = make_row("cron_secondary_model_only", &owner);
         allowed.user_id = SECONDARY_USER.into();
-        allowed.conversation_id = Some(2);
+        allowed.conversation_id = Some(OTHER_CONVERSATION_ID.into());
         allowed.conversation_title = Some("Model-only target".into());
         allowed.agent_type = "nomi".into();
         repo.insert(&allowed).await.unwrap();

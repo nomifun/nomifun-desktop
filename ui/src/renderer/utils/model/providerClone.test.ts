@@ -6,12 +6,15 @@
 
 import { describe, expect, test } from 'bun:test';
 import type { IProvider } from '@/common/config/storage';
+import { parseProviderId } from '@/common/types/ids';
 import { cloneProviderConfig } from './providerClone';
 
 describe('cloneProviderConfig', () => {
   test('copies provider configuration with a new id and without stale health state', () => {
+    const sourceId = parseProviderId('prov_0190f5fe-7c00-7a00-8000-000000000001');
+    const copyId = parseProviderId('prov_0190f5fe-7c00-7a00-8000-000000000002');
     const source: IProvider = {
-      id: 'prov_source',
+      id: sourceId,
       platform: 'openai',
       name: 'OpenRouter',
       base_url: 'https://openrouter.ai/api/v1',
@@ -32,11 +35,11 @@ describe('cloneProviderConfig', () => {
       is_full_url: false,
     };
 
-    const clone = cloneProviderConfig(source, 'prov_copy', '副本');
+    const clone = cloneProviderConfig(source, copyId, '副本');
 
     expect(clone).toMatchObject({
       ...source,
-      id: 'prov_copy',
+      id: copyId,
       name: 'OpenRouter 副本',
       model_health: undefined,
     });

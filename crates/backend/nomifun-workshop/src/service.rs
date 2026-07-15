@@ -194,15 +194,28 @@ impl WorkshopService {
         Ok(CanvasWithDoc { meta: row.into(), doc })
     }
 
-    /// Read + parse the canvas doc; a missing or corrupt file falls back to the
-    /// default empty doc (never fails the read).
+    /// Read + parse the canvas doc; a missing, corrupt, or identity-invalid
+    /// file falls back to the default empty doc (never fails the read).
+    ///
+    /// The document payload remains frontend-owned, but its durable identity
+    /// envelope is a backend invariant: every node/edge ID and every declared
+    /// node reference must be canonical before data is served back to clients.
     async fn read_doc(&self, id: &str) -> Value {
         let path = self.canvas_dir(id).join("canvas.json");
         match fsio::read_bytes_opt(&path).await {
-            Ok(Some(bytes)) => serde_json::from_slice(&bytes).unwrap_or_else(|e| {
-                tracing::warn!(id, error = %e, "workshop canvas doc unreadable; serving default");
-                default_doc_value()
-            }),
+            Ok(Some(bytes)) => match serde_json::from_slice(&bytes) {
+                Ok(doc) => match docscan::validate_canvas_doc_ids(&doc) {
+                    Ok(_) => doc,
+                    Err(error) => {
+                        tracing::warn!(id, %error, "workshop canvas doc has invalid durable ids; serving default");
+                        default_doc_value()
+                    }
+                },
+                Err(error) => {
+                    tracing::warn!(id, %error, "workshop canvas doc unreadable; serving default");
+                    default_doc_value()
+                }
+            },
             Ok(None) => default_doc_value(),
             Err(e) => {
                 tracing::warn!(id, error = %e, "workshop canvas doc read failed; serving default");
@@ -211,13 +224,20 @@ impl WorkshopService {
         }
     }
 
-    /// Persist an opaque doc (≤ [`MAX_DOC_BYTES`]), sync `node_count` from
-    /// `doc.nodes`, and return the new `updated_at`.
+    /// Persist a frontend-owned doc (≤ [`MAX_DOC_BYTES`]), sync `node_count`
+    /// from `doc.nodes`, and return the new `updated_at`.
+    ///
+    /// Although node payloads remain opaque, durable IDs are validated deeply:
+    /// `nodes[].id`/`groupId`, `edges[].id`/`from`/`to`, and `node:<id>` mention
+    /// references must all be canonical and internally resolvable.
     pub async fn save_doc(&self, id: &str, doc: &Value) -> Result<i64, AppError> {
         // Ensure the canvas exists before touching disk.
         if self.repo.get_canvas(id).await?.is_none() {
             return Err(AppError::NotFound(format!("workshop canvas {id} not found")));
         }
+        let node_count = docscan::validate_canvas_doc_ids(doc)
+            .map_err(|error| AppError::BadRequest(format!("invalid workshop canvas doc: {error}")))?
+            as i64;
         let bytes = serde_json::to_vec(doc).map_err(|e| AppError::BadRequest(format!("invalid doc json: {e}")))?;
         if bytes.len() > MAX_DOC_BYTES {
             return Err(AppError::BadRequest(format!(
@@ -225,11 +245,6 @@ impl WorkshopService {
                 bytes.len()
             )));
         }
-        let node_count = doc
-            .get("nodes")
-            .and_then(Value::as_array)
-            .map(|a| a.len() as i64)
-            .unwrap_or(0);
         fsio::save_bytes_atomic(&self.canvas_dir(id), "canvas.json", &bytes)
             .await
             .map_err(|e| AppError::Internal(format!("write canvas doc: {e}")))?;
@@ -894,6 +909,8 @@ impl WorkshopService {
             .ok_or_else(|| AppError::BadRequest("archive is missing canvas.json".into()))?;
         let mut doc: Value = serde_json::from_slice(canvas_raw)
             .map_err(|e| AppError::BadRequest(format!("canvas.json is not valid JSON: {e}")))?;
+        docscan::remap_canvas_doc_ids_for_clone(&mut doc)
+            .map_err(|error| AppError::BadRequest(format!("canvas.json has invalid durable ids: {error}")))?;
         let manifest: Value = extracted
             .get(archive::MANIFEST_ENTRY)
             .and_then(|b| serde_json::from_slice(b).ok())
@@ -1167,6 +1184,7 @@ fn classify_mime(mime: &str) -> Result<(&'static str, String), AppError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use nomifun_common::{WorkshopEdgeId, WorkshopNodeId};
     use nomifun_db::SqliteWorkshopRepository;
 
     async fn service() -> (Arc<WorkshopService>, tempfile::TempDir) {
@@ -1205,7 +1223,14 @@ mod tests {
         // default doc parses; save a doc with 2 nodes → node_count syncs.
         let read = svc.get_canvas(&meta.id).await.unwrap();
         assert_eq!(read.doc["schema"], 1);
-        let doc = serde_json::json!({"schema":1,"nodes":[{"id":"a"},{"id":"b"}],"edges":[]});
+        let doc = serde_json::json!({
+            "schema": 1,
+            "nodes": [
+                {"id": WorkshopNodeId::new().into_string()},
+                {"id": WorkshopNodeId::new().into_string()}
+            ],
+            "edges": []
+        });
         let updated_at = svc.save_doc(&meta.id, &doc).await.unwrap();
         assert!(updated_at >= meta.created_at);
         let all = svc.list_canvases().await.unwrap();
@@ -1226,6 +1251,85 @@ mod tests {
     async fn save_doc_rejects_oversize_and_unknown_canvas() {
         let (svc, _dir) = service().await;
         assert!(svc.save_doc("wsc_missing", &serde_json::json!({})).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn canvas_doc_save_enforces_canonical_ids_and_deep_references() {
+        let (svc, _dir) = service().await;
+        let canvas = svc.create_canvas(Some("identity contract".into())).await.unwrap();
+        let group_id = WorkshopNodeId::new().into_string();
+        let member_id = WorkshopNodeId::new().into_string();
+        let edge_id = WorkshopEdgeId::new().into_string();
+        let valid = serde_json::json!({
+            "schema": 1,
+            "nodes": [
+                {"id": group_id, "kind": "group", "data": {}},
+                {
+                    "id": member_id,
+                    "kind": "generator",
+                    "groupId": group_id,
+                    "data": {"mentions": [format!("node:{group_id}")]}
+                }
+            ],
+            "edges": [{"id": edge_id, "from": group_id, "to": member_id}]
+        });
+        svc.save_doc(&canvas.id, &valid).await.unwrap();
+
+        let mut wrong_node_prefix = valid.clone();
+        wrong_node_prefix["nodes"][0]["id"] = serde_json::json!(
+            "wsa_0190f5fe-7c00-7a00-8000-000000000001"
+        );
+        let mut duplicate_node = valid.clone();
+        let duplicated_id = duplicate_node["nodes"][0]["id"].clone();
+        duplicate_node["nodes"][1]["id"] = duplicated_id;
+        let mut missing_group = valid.clone();
+        missing_group["nodes"][1]["groupId"] =
+            serde_json::json!(WorkshopNodeId::new().into_string());
+        let mut legacy_mention = valid.clone();
+        legacy_mention["nodes"][1]["data"]["mentions"] = serde_json::json!(["node:legacy-node"]);
+        let mut wrong_edge_prefix = valid.clone();
+        wrong_edge_prefix["edges"][0]["id"] = serde_json::json!(WorkshopNodeId::new().into_string());
+        let mut missing_endpoint = valid.clone();
+        missing_endpoint["edges"][0]["to"] =
+            serde_json::json!(WorkshopNodeId::new().into_string());
+
+        for (case, invalid) in [
+            ("wrong node prefix", wrong_node_prefix),
+            ("duplicate node id", duplicate_node),
+            ("missing group", missing_group),
+            ("legacy mention", legacy_mention),
+            ("wrong edge prefix", wrong_edge_prefix),
+            ("missing endpoint", missing_endpoint),
+        ] {
+            let error = svc
+                .save_doc(&canvas.id, &invalid)
+                .await
+                .unwrap_err();
+            assert!(matches!(error, AppError::BadRequest(_)), "{case}: {error}");
+        }
+
+        // A rejected write must not replace the last valid document.
+        assert_eq!(svc.get_canvas(&canvas.id).await.unwrap().doc, valid);
+    }
+
+    #[tokio::test]
+    async fn canvas_doc_read_falls_back_when_disk_ids_are_not_canonical() {
+        let (svc, dir) = service().await;
+        let canvas = svc.create_canvas(Some("corrupt identity".into())).await.unwrap();
+        let path = dir
+            .path()
+            .join("workshop/canvases")
+            .join(&canvas.id)
+            .join("canvas.json");
+        tokio::fs::write(
+            path,
+            br#"{"schema":1,"nodes":[{"id":"legacy-node"}],"edges":[]}"#,
+        )
+        .await
+        .unwrap();
+
+        let read = svc.get_canvas(&canvas.id).await.unwrap();
+        assert_eq!(read.doc, default_doc_value());
     }
 
     #[tokio::test]
@@ -1415,19 +1519,24 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn export_import_roundtrip_rewrites_ids() {
+    async fn canvas_doc_export_import_roundtrip_rewrites_all_durable_ids() {
         let (svc, _dir) = service().await;
         let canvas = svc.create_canvas(Some("原始画布".into())).await.unwrap();
         let asset = upload_png(&svc, false).await; // canvas-internal
+        let image_node_id = WorkshopNodeId::new().into_string();
+        let generator_node_id = WorkshopNodeId::new().into_string();
+        let edge_id = WorkshopEdgeId::new().into_string();
         let doc = serde_json::json!({
             "schema": 1,
             "viewport": { "x": 0, "y": 0, "zoom": 1 },
             "background": "dots",
             "nodes": [
-                { "id": "n1", "kind": "image", "x": 0, "y": 0, "w": 10, "h": 10,
-                  "data": { "assetId": asset.id, "caption": "hi" } }
+                { "id": image_node_id, "kind": "image", "x": 0, "y": 0, "w": 10, "h": 10,
+                  "data": { "assetId": asset.id, "caption": "hi" } },
+                { "id": generator_node_id, "kind": "generator", "x": 20, "y": 20, "w": 10, "h": 10,
+                  "data": { "mentions": [format!("node:{image_node_id}")] } }
             ],
-            "edges": []
+            "edges": [{ "id": edge_id, "from": image_node_id, "to": generator_node_id }]
         });
         svc.save_doc(&canvas.id, &doc).await.unwrap();
 
@@ -1438,14 +1547,33 @@ mod tests {
         assert_ne!(imported.id, canvas.id);
         // title de-duplicated (base already exists)
         assert_eq!(imported.title, "原始画布 (2)");
-        assert_eq!(imported.node_count, 1);
+        assert_eq!(imported.node_count, 2);
 
-        // the imported doc references a NEW asset id, and that asset exists + serves
+        // The imported doc references a NEW asset id, and that asset exists + serves.
         let read = svc.get_canvas(&imported.id).await.unwrap();
         let new_asset_id = read.doc["nodes"][0]["data"]["assetId"].as_str().unwrap();
         assert_ne!(new_asset_id, asset.id);
         let served = svc.serve_file(new_asset_id, false).await.unwrap();
         assert_eq!(served.bytes, real_png(800, 600));
+
+        // Import is a clone: node/edge IDs and every nested node reference are
+        // rewritten, never shared between the source and the new canvas.
+        let new_image_node_id = read.doc["nodes"][0]["id"].as_str().unwrap();
+        let new_generator_node_id = read.doc["nodes"][1]["id"].as_str().unwrap();
+        let new_edge_id = read.doc["edges"][0]["id"].as_str().unwrap();
+        assert_ne!(new_image_node_id, image_node_id);
+        assert_ne!(new_generator_node_id, generator_node_id);
+        assert_ne!(new_edge_id, edge_id);
+        WorkshopNodeId::parse(new_image_node_id).unwrap();
+        WorkshopNodeId::parse(new_generator_node_id).unwrap();
+        WorkshopEdgeId::parse(new_edge_id).unwrap();
+        assert_eq!(read.doc["edges"][0]["from"].as_str(), Some(new_image_node_id));
+        assert_eq!(read.doc["edges"][0]["to"].as_str(), Some(new_generator_node_id));
+        let expected_mention = format!("node:{new_image_node_id}");
+        assert_eq!(
+            read.doc["nodes"][1]["data"]["mentions"][0].as_str(),
+            Some(expected_mention.as_str())
+        );
 
         // both the original and the imported asset now exist (2 image rows)
         let page = svc.list_assets(AssetQuery { page: 1, page_size: 50, ..Default::default() }).await.unwrap();
@@ -1457,8 +1585,9 @@ mod tests {
         let (svc, _dir) = service().await;
         // Asset referenced by two canvases; internal (in_library=0).
         let asset = upload_png(&svc, false).await;
+        let node_id = WorkshopNodeId::new().into_string();
         let doc = serde_json::json!({
-            "schema": 1, "nodes": [{ "id": "n", "kind": "image", "data": { "assetId": asset.id } }], "edges": []
+            "schema": 1, "nodes": [{ "id": node_id, "kind": "image", "data": { "assetId": asset.id } }], "edges": []
         });
         let c1 = svc.create_canvas(Some("c1".into())).await.unwrap();
         let c2 = svc.create_canvas(Some("c2".into())).await.unwrap();
@@ -1478,8 +1607,9 @@ mod tests {
     async fn delete_canvas_keeps_library_asset() {
         let (svc, _dir) = service().await;
         let asset = upload_png(&svc, true).await; // in_library=1
+        let node_id = WorkshopNodeId::new().into_string();
         let doc = serde_json::json!({
-            "schema": 1, "nodes": [{ "id": "n", "kind": "image", "data": { "assetId": asset.id } }], "edges": []
+            "schema": 1, "nodes": [{ "id": node_id, "kind": "image", "data": { "assetId": asset.id } }], "edges": []
         });
         let c = svc.create_canvas(Some("c".into())).await.unwrap();
         svc.save_doc(&c.id, &doc).await.unwrap();
@@ -1550,8 +1680,9 @@ mod tests {
         // but not have autosaved yet); a later full GC reclaims it once aged.
         let (svc, _dir) = service_with_gc_grace(GC_GRACE_MS).await;
         let asset = upload_png(&svc, false).await; // canvas-internal
+        let node_id = WorkshopNodeId::new().into_string();
         let doc = serde_json::json!({
-            "schema": 1, "nodes": [{ "id": "n", "kind": "image", "data": { "assetId": asset.id } }], "edges": []
+            "schema": 1, "nodes": [{ "id": node_id, "kind": "image", "data": { "assetId": asset.id } }], "edges": []
         });
         let c = svc.create_canvas(Some("c".into())).await.unwrap();
         svc.save_doc(&c.id, &doc).await.unwrap();
@@ -1728,7 +1859,7 @@ mod tests {
         let applied = svc
             .apply_agent_ops(
                 &canvas.id,
-                vec![AgentOp::DeleteNode { node_id: "wsn_x".into() }],
+                vec![AgentOp::DeleteNode { node_id: WorkshopNodeId::new().into_string() }],
                 "test",
             )
             .await
@@ -1736,10 +1867,11 @@ mod tests {
         assert_eq!(applied[0].disposition, OpDisposition::Queued);
 
         // An invalid op fails the whole batch (BadRequest).
+        let node_id = WorkshopNodeId::new().into_string();
         let bad = svc
             .apply_agent_ops(
                 &canvas.id,
-                vec![AgentOp::Connect { from_node_id: "a".into(), to_node_id: "a".into() }],
+                vec![AgentOp::Connect { from_node_id: node_id.clone(), to_node_id: node_id }],
                 "test",
             )
             .await;

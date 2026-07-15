@@ -6,6 +6,7 @@
 
 import { ipcBridge } from '@/common';
 import type { IMessageSearchItem } from '@/common/types/conversationSearch';
+import type { ConversationId, MessageId } from '@/common/types/ids';
 import NomiModal from '@/renderer/components/base/NomiModal';
 import { usePresetInfo } from '@/renderer/hooks/agent/usePresetInfo';
 import { getAgentLogo } from '@/renderer/utils/model/agentLogo';
@@ -269,7 +270,7 @@ const ConversationSearchPopover: React.FC<ConversationSearchPopoverProps> = ({
   // 统一的"跳转到会话"流程（关闭弹层 → 通知回调 → 路由跳转）。
   // targetMessageId 仅在全文检索命中时存在；按编号命中只跳会话本身，无消息可定位。
   const handleConversationNavigate = useCallback(
-    async (conversationId: number, targetMessageId?: string) => {
+    async (conversationId: ConversationId, targetMessageId?: MessageId) => {
       blockMobileInputFocus();
       blurActiveElement();
 

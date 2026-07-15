@@ -1,3 +1,5 @@
+import type { ConversationId } from '@/common/types/ids';
+import type { SessionTarget } from '@/common/types/ids';
 import WorkspacePanelHeader from './WorkspacePanelHeader';
 import { WORKSPACE_HEADER_HEIGHT } from '@/renderer/pages/conversation/utils/layoutCalc';
 import { dispatchWorkspaceToggleEvent } from '@/renderer/utils/workspace/workspaceEvents';
@@ -14,9 +16,10 @@ type MobileWorkspaceOverlayProps = {
   sider: React.ReactNode;
   workspacePath?: string;
   isTemporaryWorkspace?: boolean;
-  conversation_id?: number;
+  conversation_id?: ConversationId;
   activeTab?: WorkspaceTab;
   activeTitle?: React.ReactNode;
+  workspaceTarget: SessionTarget;
 };
 
 // Full-screen overlay + fixed workspace panel + floating collapse handle for mobile viewports
@@ -32,6 +35,7 @@ const MobileWorkspaceOverlay: React.FC<MobileWorkspaceOverlayProps> = ({
   conversation_id,
   activeTab = 'files',
   activeTitle,
+  workspaceTarget,
 }) => (
   <>
     {/* Backdrop */}
@@ -57,7 +61,7 @@ const MobileWorkspaceOverlay: React.FC<MobileWorkspaceOverlayProps> = ({
       <WorkspacePanelHeader
         showToggle
         collapsed={rightSiderCollapsed}
-        onToggle={() => dispatchWorkspaceToggleEvent()}
+        onToggle={() => dispatchWorkspaceToggleEvent(workspaceTarget)}
         togglePlacement='left'
         workspacePath={workspacePath}
         isTemporaryWorkspace={isTemporaryWorkspace}
@@ -90,7 +94,7 @@ const MobileWorkspaceOverlay: React.FC<MobileWorkspaceOverlayProps> = ({
           backgroundColor: 'var(--bg-2)',
           boxShadow: '0 8px 20px rgba(0, 0, 0, 0.12)',
         }}
-        onClick={() => dispatchWorkspaceToggleEvent()}
+        onClick={() => dispatchWorkspaceToggleEvent(workspaceTarget)}
         aria-label='Collapse workspace'
       >
         <span className='flex flex-col items-center justify-center gap-5px text-t-secondary'>

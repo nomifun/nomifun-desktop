@@ -85,18 +85,17 @@ async fn create_provider(
     app: &mut axum::Router,
     token: &str,
     csrf: &str,
-    id: &str,
+    name: &str,
     base_url: &str,
     api_key: &str,
     models: &[&str],
-) {
+) -> String {
     let req = json_with_token(
         "POST",
         "/api/providers",
         json!({
-            "id": id,
             "platform": "custom",
-            "name": id,
+            "name": name,
             "base_url": base_url,
             "api_key": api_key,
             "models": models,
@@ -108,6 +107,11 @@ async fn create_provider(
     );
     let resp = app.clone().oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::CREATED);
+    let body = body_json(resp).await;
+    body["data"]["id"]
+        .as_str()
+        .expect("created provider has a canonical id")
+        .to_owned()
 }
 
 // ===========================================================================
@@ -603,11 +607,11 @@ async fn st11_configured_provider_is_resolved_by_id() {
 
     let (mut app, services) = build_app_with_noop_opener().await;
     let (token, csrf) = setup_and_login(&mut app, &services, "admin", "StrongP@ss1").await;
-    create_provider(
+    let provider_id = create_provider(
         &mut app,
         &token,
         &csrf,
-        "speech-provider",
+        "Speech Provider",
         &mock_server.uri(),
         "sk-from-provider",
         &["whisper-1"],
@@ -620,7 +624,7 @@ async fn st11_configured_provider_is_resolved_by_id() {
         json!({
             "enabled": true,
             "provider": "openai",
-            "provider_id": "speech-provider",
+            "provider_id": provider_id,
             "model": "whisper-1",
             "language": "en"
         }),

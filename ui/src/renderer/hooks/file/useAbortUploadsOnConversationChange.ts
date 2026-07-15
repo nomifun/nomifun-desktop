@@ -6,6 +6,7 @@
 
 import { useEffect } from 'react';
 import { abortUploads, type UploadSource } from './useUploadState';
+import type { ConversationId } from '@/common/types/ids';
 
 /**
  * Aborts in-flight uploads when the active conversation changes (or when the
@@ -24,7 +25,7 @@ import { abortUploads, type UploadSource } from './useUploadState';
  *   given source is aborted on change.
  * @param source         Optional source to scope to (sendbox / workspace).
  */
-export function useAbortUploadsOnConversationChange(conversationId: string | undefined, source?: UploadSource): void {
+export function useAbortUploadsOnConversationChange(conversationId: ConversationId | undefined, source?: UploadSource): void {
   useEffect(() => {
     // On id transition, abort uploads bound to anything other than the new id.
     abortUploads({ source, exceptConversationId: conversationId ?? null });

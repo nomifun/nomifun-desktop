@@ -23,7 +23,7 @@ pub(super) async fn build(
     let resume_session_key = extra.session_key.clone();
     let row = deps
         .remote_agent_repo
-        .find_by_id(extra.remote_agent_id)
+        .find_by_id(&extra.remote_agent_id)
         .await
         .map_err(|e| AppError::Internal(format!("Failed to load remote agent config: {e}")))?
         .ok_or_else(|| AppError::NotFound(format!("Remote agent '{}' not found", extra.remote_agent_id)))?;
@@ -61,9 +61,8 @@ pub(super) async fn build(
         }
     };
     let config = RemoteAgentConfig {
-        // `RemoteAgentConfig.remote_agent_id` is an opaque in-memory label
-        // (logging/identity), not a DB key or wire id — stringify the i64 row id.
-        remote_agent_id: row.id.to_string(),
+        // The runtime keeps the canonical entity ID as its stable identity.
+        remote_agent_id: row.id.clone(),
         protocol: serde_json::from_value(serde_json::Value::String(row.protocol.clone()))
             .unwrap_or(RemoteAgentProtocol::Acp),
         url: row.url.clone(),
@@ -79,7 +78,7 @@ pub(super) async fn build(
     if let Some(device_token) = issued_device_token {
         let encrypted = nomifun_common::encrypt_string(&device_token, &deps.encryption_key)?;
         deps.remote_agent_repo
-            .update_device_token(row.id, Some(&encrypted))
+            .update_device_token(&row.id, Some(&encrypted))
             .await
             .map_err(|e| AppError::Internal(format!("Failed to persist remote device token: {e}")))?;
     }

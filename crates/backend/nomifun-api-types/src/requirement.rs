@@ -46,6 +46,7 @@ impl RequirementStatus {
 /// One attachment on a requirement (API view of an `attachments` row).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct AttachmentDto {
+    #[serde(deserialize_with = "crate::serde_util::deserialize_attachment_id")]
     pub id: String,
     pub file_name: String,
     pub mime: String,
@@ -69,7 +70,8 @@ pub struct NewAttachmentRef {
 /// Requirement response object (the API view of a `RequirementRow`).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Requirement {
-    pub id: i64,
+    #[serde(deserialize_with = "crate::serde_util::deserialize_requirement_id")]
+    pub id: String,
     pub title: String,
     pub content: String,
     pub tag: String,
@@ -80,12 +82,20 @@ pub struct Requirement {
     /// Executing session id: a conversation OR a terminal, discriminated by
     /// `owner_kind`. Replaces the former `conversation_id` (which assumed a
     /// single conversation domain).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub owner_session_id: Option<i64>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::serde_util::deserialize_optional_conversation_id"
+    )]
+    pub owner_conversation_id: Option<String>,
     /// `'conversation'` | `'terminal'` | None (when unowned). Paired with
     /// `owner_session_id` — both null together, both set together.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub owner_kind: Option<String>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::serde_util::deserialize_optional_terminal_id"
+    )]
+    pub owner_terminal_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub started_at: Option<TimestampMs>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -136,14 +146,15 @@ pub struct UpdateRequirementRequest {
     #[serde(default)]
     pub add_attachments: Vec<NewAttachmentRef>,
     /// Existing attachment ids to remove (rows + files).
-    #[serde(default)]
+    #[serde(default, deserialize_with = "crate::serde_util::deserialize_attachment_ids")]
     pub remove_attachment_ids: Vec<String>,
 }
 
 /// Bulk delete by id (used by the list page's batch-delete action).
 #[derive(Debug, Clone, Deserialize)]
 pub struct BatchDeleteRequest {
-    pub ids: Vec<i64>,
+    #[serde(deserialize_with = "crate::serde_util::deserialize_requirement_ids")]
+    pub ids: Vec<String>,
 }
 
 /// Result of a bulk delete.
@@ -158,8 +169,11 @@ pub struct ListRequirementsQuery {
     pub tag: Option<String>,
     #[serde(default)]
     pub status: Option<RequirementStatus>,
-    #[serde(default)]
-    pub conversation_id: Option<i64>,
+    #[serde(
+        default,
+        deserialize_with = "crate::serde_util::deserialize_optional_conversation_id"
+    )]
+    pub conversation_id: Option<String>,
     #[serde(default)]
     pub q: Option<String>,
     /// Sort column. Whitelisted server-side to `id | created_at | updated_at |
@@ -178,7 +192,8 @@ pub struct ListRequirementsQuery {
 #[derive(Debug, Clone, Deserialize)]
 pub struct ClaimRequest {
     pub tag: String,
-    pub conversation_id: i64,
+    #[serde(deserialize_with = "crate::serde_util::deserialize_conversation_id")]
+    pub conversation_id: String,
     #[serde(default)]
     pub lease_ms: Option<i64>,
 }
@@ -226,8 +241,8 @@ pub struct ResumeTagRequest {
     #[serde(default)]
     pub requeue_failed: bool,
     /// Re-queue these specific failed requirement ids back to pending.
-    #[serde(default)]
-    pub requeue_ids: Vec<i64>,
+    #[serde(default, deserialize_with = "crate::serde_util::deserialize_requirement_ids")]
+    pub requeue_ids: Vec<String>,
 }
 
 /// Broadcast (`autowork.tagPaused`) when AutoWork pauses a tag after a
@@ -236,7 +251,11 @@ pub struct ResumeTagRequest {
 pub struct TagPausedPayload {
     pub tag: String,
     pub reason: String,
-    pub requirement_id: Option<i64>,
+    #[serde(
+        default,
+        deserialize_with = "crate::serde_util::deserialize_optional_requirement_id"
+    )]
+    pub requirement_id: Option<String>,
 }
 
 /// Kanban board for a tag: requirements grouped by status.
@@ -301,13 +320,11 @@ fn default_conversation_kind() -> AutoWorkTargetKind {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct AutoWorkConfigRequest {
-    /// Defaults to `conversation` for backward compatibility with older clients.
+    /// Defaults to `conversation` when the caller omits the discriminator.
     #[serde(default = "default_conversation_kind")]
     pub kind: AutoWorkTargetKind,
-    /// Session id handle. Accepts both a JSON integer (what the frontend sends —
-    /// ids are numeric) and a JSON string; see
-    /// [`crate::serde_util::deserialize_target_id`].
-    #[serde(deserialize_with = "crate::serde_util::deserialize_target_id")]
+    /// Canonical `conv_*` or `term_*` session ID.
+    #[serde(deserialize_with = "crate::serde_util::deserialize_session_target_id")]
     pub target_id: String,
     pub enabled: bool,
     #[serde(default)]
@@ -326,13 +343,18 @@ pub struct AutoWorkConfigRequest {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct AutoWorkState {
     pub kind: AutoWorkTargetKind,
+    #[serde(deserialize_with = "crate::serde_util::deserialize_session_target_id")]
     pub target_id: String,
     pub enabled: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tag: Option<String>,
     pub running: bool,
     pub run_state: AutoWorkRunState,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::serde_util::deserialize_optional_requirement_id"
+    )]
     pub current_requirement_id: Option<String>,
     pub completed_count: u32,
 }
@@ -353,47 +375,75 @@ impl AutoWorkState {
 /// WS payload for `requirement.deleted`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct RequirementDeletedPayload {
-    pub id: i64,
+    #[serde(deserialize_with = "crate::serde_util::deserialize_requirement_id")]
+    pub id: String,
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// Regression: enabling 会话→自动工作 POSTs `target_id` as a JSON NUMBER
-    /// (the frontend models session ids numerically). The backend keeps it as a
-    /// String handle; deserialization must accept the integer instead of
-    /// rejecting it with "Failed to deserialize the JSON body into the target
-    /// object" (the 400 testers hit).
     #[test]
-    fn autowork_request_accepts_numeric_target_id() {
-        // This is the exact body shape the frontend sends; the integer value of
-        // `target_id` begins at column 36 — the column the failing 400 reported.
-        let body = r#"{"kind":"conversation","target_id":12345,"enabled":true,"tag":"t"}"#;
-        let req: AutoWorkConfigRequest = serde_json::from_str(body).expect("numeric target_id must deserialize");
-        assert_eq!(req.target_id, "12345");
-        assert_eq!(req.kind, AutoWorkTargetKind::Conversation);
-        assert!(req.enabled);
-        assert_eq!(req.tag.as_deref(), Some("t"));
+    fn durable_requirement_request_ids_are_strict() {
+        assert!(serde_json::from_str::<BatchDeleteRequest>(r#"{"ids":[7]}"#).is_err());
+        assert!(
+            serde_json::from_str::<BatchDeleteRequest>(r#"{"ids":["req_7"]}"#).is_err()
+        );
+        assert!(
+            serde_json::from_str::<UpdateRequirementRequest>(
+                r#"{"remove_attachment_ids":["att_7"]}"#
+            )
+            .is_err()
+        );
+        assert!(
+            serde_json::from_str::<ResumeTagRequest>(r#"{"requeue_ids":["req_7"]}"#)
+                .is_err()
+        );
     }
 
-    /// A string `target_id` (forward-compatible / other clients) still works.
+    #[test]
+    fn conversation_filters_and_claims_reject_noncanonical_ids() {
+        assert!(
+            serde_json::from_str::<ListRequirementsQuery>(r#"{"conversation_id":"7"}"#)
+                .is_err()
+        );
+        assert!(
+            serde_json::from_str::<ClaimRequest>(
+                r#"{"tag":"work","conversation_id":"conv_7"}"#
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn autowork_request_rejects_numeric_target_id() {
+        let body = r#"{"kind":"conversation","target_id":12345,"enabled":true,"tag":"t"}"#;
+        assert!(serde_json::from_str::<AutoWorkConfigRequest>(body).is_err());
+    }
+
     #[test]
     fn autowork_request_accepts_string_target_id() {
-        let body = r#"{"kind":"terminal","target_id":"term_7","enabled":false}"#;
+        let body = r#"{"kind":"terminal","target_id":"term_0190f5fe-7c00-7a00-8000-000000000007","enabled":false}"#;
         let req: AutoWorkConfigRequest = serde_json::from_str(body).expect("string target_id must deserialize");
-        assert_eq!(req.target_id, "term_7");
+        assert_eq!(
+            req.target_id,
+            "term_0190f5fe-7c00-7a00-8000-000000000007"
+        );
         assert_eq!(req.kind, AutoWorkTargetKind::Terminal);
         assert!(!req.enabled);
     }
 
-    /// `kind` still defaults to conversation when omitted (older clients), and a
-    /// numeric target_id coexists with that default.
     #[test]
-    fn autowork_request_defaults_kind_with_numeric_target_id() {
-        let body = r#"{"target_id":42,"enabled":true}"#;
+    fn autowork_request_rejects_non_canonical_entity_string() {
+        let body = r#"{"kind":"terminal","target_id":"term_7","enabled":false}"#;
+        assert!(serde_json::from_str::<AutoWorkConfigRequest>(body).is_err());
+    }
+
+    #[test]
+    fn autowork_request_defaults_kind_with_string_target_id() {
+        let body = r#"{"target_id":"conv_0190f5fe-7c00-7a00-8000-000000000042","enabled":true}"#;
         let req: AutoWorkConfigRequest = serde_json::from_str(body).expect("must deserialize");
-        assert_eq!(req.target_id, "42");
+        assert_eq!(req.target_id, "conv_0190f5fe-7c00-7a00-8000-000000000042");
         assert_eq!(req.kind, AutoWorkTargetKind::Conversation);
     }
 }

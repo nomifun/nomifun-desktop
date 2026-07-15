@@ -127,12 +127,12 @@ impl Learner {
             summary: None,
         };
 
-        if !model.is_configured() {
+        let Some(model) = model else {
             run.status = "model_unconfigured".into();
             run.finished_at = Some(now_ms());
             self.store.insert_learn_run(&run).await?;
             return Ok(run);
-        }
+        };
 
         let cursor = self.store.get_state_i64("learn_cursor_ts").await?;
         let (events, truncated) = read_events_since(&self.companion_dir, cursor, MAX_EVENTS_PER_RUN);
@@ -148,10 +148,12 @@ impl Learner {
         // 选项A：共享学习产出只由「默认体」窗口呈现，避免 N 个伙伴窗口同时弹气泡（提示风暴）。
         let target = {
             let did = { self.config.read().await.default_companion_id.clone() };
-            self.registry.resolve_default(&did).await
+            self.registry.resolve_default(did.as_deref()).await
         };
 
-        self.emitter.emit_learn_started(&target);
+        if let Some(target) = target.as_deref() {
+            self.emitter.emit_learn_started(target);
+        }
 
         // Existing-memory digest for reinforcement/conflict matching, plus
         // the pending suggestions so the model can avoid re-raising them.
@@ -218,7 +220,9 @@ impl Learner {
                 }
             }
             self.store.insert_learn_run(&run).await?;
-            self.emitter.emit_learn_finished(&target, &run);
+            if let Some(target) = target.as_deref() {
+                self.emitter.emit_learn_finished(target, &run);
+            }
             return Ok(run);
         };
         let _ = self.store.set_state("learn_parse_fail_streak", "0").await;
@@ -250,7 +254,9 @@ impl Learner {
                 )
                 .await?;
             run.suggestions_added += 1;
-            self.emitter.emit_suggestion_created(&target, &milestone);
+            if let Some(target) = target.as_deref() {
+                self.emitter.emit_suggestion_created(target, &milestone);
+            }
         }
         for s in output.suggestions.iter().take(3) {
             // Insert-side dedup backstop: even when the model ignores the
@@ -269,12 +275,16 @@ impl Learner {
                 .insert_suggestion(&s.kind, &s.title, &s.body, s.action.as_ref())
                 .await?;
             run.suggestions_added += 1;
-            self.emitter.emit_suggestion_created(&target, &created);
+            if let Some(target) = target.as_deref() {
+                self.emitter.emit_suggestion_created(target, &created);
+            }
         }
 
         if let Some(mood) = &output.mood {
             self.store.set_state("mood", mood).await?;
-            self.emitter.emit_mood_changed(&target, mood);
+            if let Some(target) = target.as_deref() {
+                self.emitter.emit_mood_changed(target, mood);
+            }
         }
         run.summary = output.diary;
 
@@ -292,7 +302,9 @@ impl Learner {
         self.store.set_state("learn_cursor_ts", &new_cursor.to_string()).await?;
         run.finished_at = Some(now_ms());
         self.store.insert_learn_run(&run).await?;
-        self.emitter.emit_learn_finished(&target, &run);
+        if let Some(target) = target.as_deref() {
+            self.emitter.emit_learn_finished(target, &run);
+        }
         Ok(run)
     }
 }
@@ -319,8 +331,11 @@ mod tests {
     /// grant has someone to land on). Returns the learner + that companion's id.
     async fn make_learner(dir: &std::path::Path, reply: &str) -> (Learner, String) {
         let mut config = SharedCompanionConfig::default();
-        config.learn.model.provider_id = "prov_t".into();
-        config.learn.model.model = "test-model".into();
+        config.learn.model = Some(nomifun_common::ProviderWithModel {
+            provider_id: nomifun_common::ProviderId::new().into_string(),
+            model: "test-model".into(),
+            use_model: None,
+        });
         let registry = Arc::new(CompanionRegistry::scan(dir.join("companions"), dir.join("shared")));
         let companion = registry.create("测试宠", "ink").await.unwrap();
         let learner = Learner {
@@ -453,12 +468,15 @@ mod tests {
             "mood":"content","diary":"今天陪主人修了 bug～"}"#;
 
         let mut config = SharedCompanionConfig::default();
-        config.learn.model.provider_id = "prov_t".into();
-        config.learn.model.model = "test-model".into();
+        config.learn.model = Some(nomifun_common::ProviderWithModel {
+            provider_id: nomifun_common::ProviderId::new().into_string(),
+            model: "test-model".into(),
+            use_model: None,
+        });
         let registry = Arc::new(CompanionRegistry::scan(dir.path().join("companions"), dir.path().join("shared")));
         let _a = registry.create("甲", "ink").await.unwrap();
         let b = registry.create("乙", "ink").await.unwrap();
-        config.default_companion_id = b.id.clone(); // 默认体 = 乙
+        config.default_companion_id = Some(b.id.clone()); // 默认体 = 乙
 
         let bc = Arc::new(RecordingBroadcaster::default());
         let learner = Learner {

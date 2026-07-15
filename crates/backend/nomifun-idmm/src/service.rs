@@ -4,15 +4,15 @@
 //! and read config lazily. No axum here.
 //!
 //! Construction is layered to avoid a cycle: `ProbeDeps` (probe build + config
-//! read) needs no manager → it backs the factory/config-reader → those back the
-//! `IdmmManager` → the `IdmmService` composes `ProbeDeps` + sidecar + manager.
+//! read) needs no manager; it backs the factory/config-reader, those back the
+//! `IdmmManager`, and the `IdmmService` composes `ProbeDeps` + sidecar + manager.
 
 use std::sync::Arc;
 
 use async_trait::async_trait;
 use nomifun_ai_agent::runtime_registry::AgentRuntimeRegistry;
 use nomifun_api_types::{IdmmConfig, IdmmSettings, IdmmState, IdmmTargetKind, InterventionRecord};
-use nomifun_common::AppError;
+use nomifun_common::{AppError, ConversationId, IdmmInterventionId, TerminalId, UserId};
 use nomifun_conversation::ConversationService;
 use nomifun_db::models::IdmmInterventionRow;
 use nomifun_db::{IClientPreferenceRepository, IConversationRepository, IIdmmInterventionRepository};
@@ -27,19 +27,23 @@ use crate::supervisor::{ConfigReader, IdmmManager, ProbeFactory, build_state};
 /// capped independently by the repository janitor.
 const MAX_ACTIVITY_READ_LIMIT: i64 = 500;
 
-/// Parse an IDMM string `target_id` (the kind-agnostic target handle on the
-/// IDMM DTO) into the integer key the conversation repo / terminal driver now
-/// use. A non-numeric id yields an explicit NotFound (spec §2.5/§7.4).
-fn parse_target_id(target_id: &str) -> Result<i64, AppError> {
-    target_id
-        .parse::<i64>()
-        .map_err(|_| AppError::NotFound(format!("session {target_id}")))
+/// Validate the kind-agnostic IDMM target handle in its declared entity domain.
+fn validate_target_id(kind: IdmmTargetKind, target_id: &str) -> Result<&str, AppError> {
+    let valid = match kind {
+        IdmmTargetKind::Conversation => ConversationId::try_from(target_id).is_ok(),
+        IdmmTargetKind::Terminal => TerminalId::try_from(target_id).is_ok(),
+    };
+    valid
+        .then_some(target_id)
+        .ok_or_else(|| AppError::NotFound(format!("session {target_id}")))
 }
 
 /// Map a persisted row to the API/WS `InterventionRecord` DTO.
-fn row_to_record(row: IdmmInterventionRow) -> InterventionRecord {
-    InterventionRecord {
-        id: row.id,
+fn row_to_record(row: IdmmInterventionRow) -> Result<InterventionRecord, AppError> {
+    let id = IdmmInterventionId::parse(row.id)
+        .map_err(|error| AppError::Internal(format!("stored IDMM intervention id is invalid: {error}")))?;
+    Ok(InterventionRecord {
+        id,
         target_kind: row.target_kind,
         target_id: row.target_id,
         watch: row.watch,
@@ -53,10 +57,10 @@ fn row_to_record(row: IdmmInterventionRow) -> InterventionRecord {
         reason: row.reason,
         confidence: row.confidence.map(|c| c as f32),
         bypass_model: row.bypass_model,
-    }
+    })
 }
 
-/// Collaborators needed to build probes + read config (NO manager → breaks the
+/// Collaborators needed to build probes + read config (NO manager; breaks the
 /// construction cycle). Shared by the factory, config-reader, and service.
 pub struct ProbeDeps {
     pub conversation_service: ConversationService,
@@ -70,7 +74,7 @@ impl ProbeDeps {
     pub async fn read_config(&self, kind: IdmmTargetKind, target_id: &str) -> Result<IdmmConfig, AppError> {
         let raw: Option<serde_json::Value> = match kind {
             IdmmTargetKind::Conversation => {
-                let Some(row) = self.conversation_repo.get(parse_target_id(target_id)?).await? else {
+                let Some(row) = self.conversation_repo.get(validate_target_id(kind, target_id)?).await? else {
                     return Ok(IdmmConfig::default());
                 };
                 let extra: serde_json::Value = serde_json::from_str(&row.extra).unwrap_or_default();
@@ -78,7 +82,7 @@ impl ProbeDeps {
             }
             IdmmTargetKind::Terminal => match self
                 .terminal_driver
-                .read_idmm(parse_target_id(target_id)?)
+                .read_idmm(validate_target_id(kind, target_id)?)
                 .await
                 .map_err(|e| AppError::Internal(format!("read_idmm failed: {e}")))?
             {
@@ -95,22 +99,21 @@ impl ProbeDeps {
         let owner_id = match kind {
             IdmmTargetKind::Conversation => self
                 .conversation_repo
-                .get(parse_target_id(target_id)?)
+                .get(validate_target_id(kind, target_id)?)
                 .await?
                 .ok_or_else(|| AppError::NotFound(format!("conversation {target_id} not found")))?
                 .user_id,
             IdmmTargetKind::Terminal => self
                 .terminal_driver
-                .describe(parse_target_id(target_id)?)
+                .describe(validate_target_id(kind, target_id)?)
                 .await
                 .map_err(|e| AppError::Internal(format!("describe failed: {e}")))?
                 .ok_or_else(|| AppError::NotFound(format!("terminal {target_id} not found")))?
                 .user_id,
         };
-        if owner_id.trim().is_empty() {
-            return Err(AppError::Forbidden("IDMM target has no owner".into()));
-        }
-        Ok(owner_id)
+        UserId::parse(&owner_id)
+            .map(UserId::into_string)
+            .map_err(|error| AppError::Internal(format!("IDMM target has invalid owner: {error}")))
     }
 
     async fn verify_target_owner(
@@ -127,17 +130,21 @@ impl ProbeDeps {
     }
 
     fn build_probe(&self, kind: IdmmTargetKind, target_id: &str) -> Option<Arc<dyn SessionProbe>> {
+        validate_target_id(kind, target_id).ok()?;
         match kind {
             IdmmTargetKind::Conversation => Some(Arc::new(ConversationProbe {
                 runtime_registry: self.runtime_registry.clone(),
                 conversation_service: self.conversation_service.clone(),
                 conversation_repo: self.conversation_repo.clone(),
-                conversation_id: target_id.to_string(),
+                conversation_id: ConversationId::parse(target_id).ok()?,
             })),
             IdmmTargetKind::Terminal => {
-                // A non-numeric terminal target cannot map to a PTY → no probe.
-                let id = target_id.parse::<i64>().ok()?;
-                Some(Arc::new(TerminalProbe::new(self.terminal_driver.clone(), id)))
+                // An invalid terminal target cannot map to a PTY, so no probe
+                // is constructed.
+                Some(Arc::new(TerminalProbe::new(
+                    self.terminal_driver.clone(),
+                    TerminalId::parse(target_id).ok()?,
+                )))
             }
         }
     }
@@ -194,7 +201,7 @@ impl IdmmService {
     }
 
     /// Whether the RulePlusModel tier has a resolvable bypass model: a per-watch
-    /// override / global default, OR — for a conversation target — the
+    /// override / global default, or, for a conversation target, the
     /// conversation's own selected model (which becomes the bypass model, so the
     /// model tier works with zero extra config on a plain chat). Terminals have
     /// no own callable model (their agent CLI owns the model), so they still need
@@ -202,7 +209,7 @@ impl IdmmService {
     /// `sidecar_provider_resolved` state flag the frontend gates its toggle on.
     ///
     /// Checks both watches' bypass models (either resolving satisfies the
-    /// requirement — `validate` only demands a backup when an enabled watch is on
+    /// requirement. `validate` only demands a backup when an enabled watch is on
     /// the model tier, and both watches resolve through the same global default).
     async fn sidecar_backup_resolvable(&self, kind: IdmmTargetKind, target_id: &str, cfg: &IdmmConfig) -> bool {
         if self.sidecar.backup_resolvable(&cfg.decision_watch.base.bypass_model).await
@@ -211,16 +218,16 @@ impl IdmmService {
             return true;
         }
         if kind == IdmmTargetKind::Conversation
-            && let Ok(id) = parse_target_id(target_id)
-            && let Ok(Some(row)) = self.probe_deps.conversation_repo.get(id).await
+            && let Ok(id) = ConversationId::try_from(target_id)
+            && let Ok(Some(row)) = self.probe_deps.conversation_repo.get(id.as_ref()).await
         {
-            let pm = nomifun_conversation::runtime_options::provider_model_from_conversation_row(&row);
-            return !pm.provider_id.trim().is_empty();
+            return nomifun_conversation::runtime_options::provider_model_from_conversation_row(&row)
+                .is_ok_and(|model| model.is_some());
         }
         false
     }
 
-    // ── Config persistence ──
+    // -- Config persistence -------------------------------------------------
 
     /// Validate + persist a per-session config, then arm/stop supervision.
     pub async fn save_config(
@@ -246,7 +253,7 @@ impl IdmmService {
                 let s = serde_json::to_string(cfg).map_err(|e| AppError::Internal(e.to_string()))?;
                 self.probe_deps
                     .terminal_driver
-                    .write_idmm(parse_target_id(target_id)?, Some(&s))
+                    .write_idmm(validate_target_id(kind, target_id)?, Some(&s))
                     .await
                     .map_err(|e| AppError::Internal(format!("write_idmm failed: {e}")))?;
             }
@@ -283,7 +290,12 @@ impl IdmmService {
     ) -> Result<Option<IdmmConfig>, AppError> {
         let raw: Option<serde_json::Value> = match kind {
             IdmmTargetKind::Conversation => {
-                let Some(row) = self.probe_deps.conversation_repo.get(parse_target_id(target_id)?).await? else {
+                let Some(row) = self
+                    .probe_deps
+                    .conversation_repo
+                    .get(validate_target_id(kind, target_id)?)
+                    .await?
+                else {
                     return Ok(None);
                 };
                 let extra: serde_json::Value = serde_json::from_str(&row.extra).unwrap_or_default();
@@ -292,7 +304,7 @@ impl IdmmService {
             IdmmTargetKind::Terminal => match self
                 .probe_deps
                 .terminal_driver
-                .read_idmm(parse_target_id(target_id)?)
+                .read_idmm(validate_target_id(kind, target_id)?)
                 .await
                 .map_err(|e| AppError::Internal(format!("read_idmm failed: {e}")))?
             {
@@ -328,7 +340,7 @@ impl IdmmService {
     }
 
     /// Recent intervention log for a target (most-recent-first), read from the
-    /// persisted audit table — the DB is the sole source of truth (the supervisor
+    /// persisted audit table; the DB is the sole source of truth (the supervisor
     /// itself keeps only live counters, not a record ring). `limit` caps the rows.
     pub async fn log(
         &self,
@@ -343,11 +355,11 @@ impl IdmmService {
             .records
             .list_for_target(user_id, kind.as_str(), target_id, limit)
             .await?;
-        Ok(rows.into_iter().map(row_to_record).collect())
+        rows.into_iter().map(row_to_record).collect()
     }
 
     /// Clear all persisted intervention records for a target. Returns the count
-    /// removed. (Manual "清空记录" + the session-delete cascade both route here.)
+    /// removed. Manual log clearing and the session-delete cascade both route here.
     pub async fn clear_log(
         &self,
         user_id: &str,
@@ -372,7 +384,7 @@ impl IdmmService {
             .records
             .list_recent(user_id, limit.clamp(1, MAX_ACTIVITY_READ_LIMIT))
             .await?;
-        Ok(rows.into_iter().map(row_to_record).collect())
+        rows.into_iter().map(row_to_record).collect()
     }
 
     /// Clear one owner's activity across all of their targets.
@@ -394,7 +406,7 @@ impl IdmmService {
         Ok(())
     }
 
-    // ── Global settings (client_preferences) ──
+    // -- Global settings (client_preferences) -------------------------------
 
     pub async fn get_settings(&self) -> Result<IdmmSettings, AppError> {
         let rows = self
@@ -404,7 +416,14 @@ impl IdmmService {
         let mut s = IdmmSettings::default();
         for r in rows {
             match r.key.as_str() {
-                PREF_BACKUP_PROVIDER if !r.value.trim().is_empty() => s.backup_provider_id = Some(r.value),
+                PREF_BACKUP_PROVIDER => {
+                    nomifun_common::ProviderId::parse(&r.value).map_err(|error| {
+                        AppError::Internal(format!(
+                            "stored IDMM backup provider id is invalid: {error}"
+                        ))
+                    })?;
+                    s.backup_provider_id = Some(r.value);
+                }
                 PREF_BACKUP_MODEL if !r.value.trim().is_empty() => s.backup_model = Some(r.value),
                 PREF_DEFAULT_STEERING => s.default_steering_prompt = r.value,
                 _ => {}
@@ -415,18 +434,18 @@ impl IdmmService {
 
     pub async fn set_settings(&self, settings: &IdmmSettings) -> Result<(), AppError> {
         let mut entries: Vec<(&str, &str)> = Vec::new();
-        let provider = settings
-            .backup_provider_id
-            .as_deref()
-            .map(str::trim)
-            .filter(|p| !p.is_empty());
+        let provider = settings.backup_provider_id.as_deref().map(|provider_id| {
+            nomifun_common::ProviderId::parse(provider_id).map_err(|error| {
+                AppError::BadRequest(format!("invalid backup provider id: {error}"))
+            })
+        }).transpose()?.map(|id| id.into_string());
         let model = settings
             .backup_model
             .as_deref()
             .map(str::trim)
             .filter(|m| !m.is_empty());
         let mut delete_keys: Vec<&str> = Vec::new();
-        if let Some(p) = provider {
+        if let Some(p) = provider.as_deref() {
             entries.push((PREF_BACKUP_PROVIDER, p));
         } else {
             delete_keys.push(PREF_BACKUP_PROVIDER);
@@ -466,10 +485,9 @@ impl IdmmService {
 }
 
 fn require_user_id(user_id: &str) -> Result<(), AppError> {
-    if user_id.trim().is_empty() {
-        return Err(AppError::Forbidden("missing IDMM owner identity".into()));
-    }
-    Ok(())
+    UserId::parse(user_id)
+        .map(|_| ())
+        .map_err(|_| AppError::Forbidden("invalid IDMM owner identity".into()))
 }
 
 // Service-level persistence + validation + settings are covered end-to-end by

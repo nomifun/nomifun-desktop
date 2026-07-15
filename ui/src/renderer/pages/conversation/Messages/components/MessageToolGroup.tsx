@@ -5,7 +5,7 @@
  */
 
 import { ipcBridge } from '@/common';
-import type { IMessageToolGroup } from '@/common/chat/chatLib';
+import { parseConfirmationCorrelationId, type IMessageToolGroup } from '@/common/chat/chatLib';
 import { optionalDisplayText, toDisplayText } from '@/common/chat/displayText';
 import { iconColors } from '@/renderer/styles/colors';
 import { Alert, Button, Image, Message, Radio, Tag, Tooltip } from '@arco-design/web-react';
@@ -526,7 +526,7 @@ const MessageToolGroup: React.FC<IMessageToolGroupProps> = ({ message }) => {
                 ipcBridge.conversation.confirmMessage
                   .invoke({
                     confirm_key: outcome,
-                    msg_id: message.id,
+                    msg_id: message.msg_id ?? parseConfirmationCorrelationId(message.id),
                     call_id: callIdText,
                     conversation_id: message.conversation_id,
                   })

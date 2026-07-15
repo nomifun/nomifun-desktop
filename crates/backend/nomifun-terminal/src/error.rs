@@ -40,7 +40,10 @@ mod tests {
 
     #[test]
     fn not_found_maps_to_not_found() {
-        let app: AppError = TerminalError::NotFound("term_1".into()).into();
+        let app: AppError = TerminalError::NotFound(
+            nomifun_common::TerminalId::new().into_string(),
+        )
+        .into();
         assert!(matches!(app, AppError::NotFound(_)));
     }
 

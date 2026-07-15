@@ -5,30 +5,31 @@
  */
 
 import { describe, expect, test } from 'bun:test';
-
 import { isLiveEventForTarget } from './liveEventMatch';
 
 describe('isLiveEventForTarget', () => {
-  test('matches when the event target_id (string, as the backend sends it) equals a numeric control id', () => {
-    // REGRESSION (header ↔ sidebar desync): the per-session header control froze
-    // because `s.target_id === id` was `"37" === 37` (string vs number) and never
-    // matched, so live status events were dropped. Coerced compare must match.
-    expect(isLiveEventForTarget('conversation', '37', 'conversation', 37)).toBe(true);
+  test('matches the same canonical target', () => {
+    expect(
+      isLiveEventForTarget(
+        'conversation',
+        'conv_0190f5fe-7c00-7a00-8000-000000000002',
+        'conversation',
+        'conv_0190f5fe-7c00-7a00-8000-000000000002',
+      ),
+    ).toBe(true);
   });
 
-  test('documents the old strict-=== bug this fixes', () => {
-    expect(('37' as unknown) === (37 as unknown)).toBe(false);
-  });
-
-  test('does not match a different target id', () => {
-    expect(isLiveEventForTarget('conversation', '38', 'conversation', 37)).toBe(false);
-  });
-
-  test('does not match a different kind even when ids collide (conversation vs terminal)', () => {
-    expect(isLiveEventForTarget('terminal', '37', 'conversation', 37)).toBe(false);
-  });
-
-  test('matches when both sides are strings', () => {
-    expect(isLiveEventForTarget('conversation', '37', 'conversation', '37')).toBe(true);
+  test('does not match another entity or kind', () => {
+    expect(
+      isLiveEventForTarget(
+        'conversation',
+        'conv_0190f5fe-7c00-7a00-8000-000000000003',
+        'conversation',
+        'conv_0190f5fe-7c00-7a00-8000-000000000002',
+      ),
+    ).toBe(false);
+    expect(
+      isLiveEventForTarget('terminal', 'term_test_live', 'conversation', 'term_test_live'),
+    ).toBe(false);
   });
 });

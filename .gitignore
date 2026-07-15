@@ -4,6 +4,7 @@
 # Task-scoped Cargo target dirs from local test/debug runs
 /build-task*/
 /build.noindex/
+/build.*.noindex/
 Cargo.lock.bak
 
 # Packaging / runtime artifacts

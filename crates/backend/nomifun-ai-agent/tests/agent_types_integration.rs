@@ -14,7 +14,7 @@ use nomifun_ai_agent::runtime_registry::AgentRuntimeFactory;
 use nomifun_ai_agent::types::{AgentRuntimeBuildOptions, NomiResolvedConfig, SendMessageData};
 use nomifun_ai_agent::*;
 use nomifun_ai_agent::{SkillIndex, build_system_instructions_with_skills_index};
-use nomifun_common::{AgentKillReason, AgentType, ConversationStatus, ProviderWithModel, TimestampMs, now_ms};
+use nomifun_common::{AgentKillReason, AgentType, ConversationStatus, TimestampMs, now_ms};
 use serde_json::json;
 use std::sync::atomic::{AtomicI64, Ordering};
 use tokio::sync::broadcast;
@@ -185,11 +185,7 @@ async fn collect_idle_ignores_non_acp_agent_types() {
         user_id: "test-user".into(),
         agent_type,
         workspace: "/tmp".into(),
-        model: ProviderWithModel {
-            provider_id: "p".into(),
-            model: "m".into(),
-            use_model: None,
-        },
+        model: None,
         conversation_id: id.into(),
         delegation_policy: Default::default(),
         conversation_created_at: None,

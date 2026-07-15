@@ -169,7 +169,7 @@ const WecomConfigForm: React.FC<WecomConfigFormProps> = ({
       const result = await channel.enablePlugin.invoke(
         channelTarget
           ? { plugin_id: channelTarget.channelId, plugin_type: 'wecom', ...(channelTarget.publicAgentId ? { public_agent_id: channelTarget.publicAgentId } : { companion_id: channelTarget.companionId }), config }
-          : { plugin_id: 'wecom', config }
+          : { plugin_type: 'wecom', config }
       );
       if (!result.success) {
         throw new Error(result.error || result.message || t('nomi.settings.remoteEnableFailed', { defaultValue: 'Failed to enable channel' }));
@@ -224,7 +224,7 @@ const WecomConfigForm: React.FC<WecomConfigFormProps> = ({
   };
 
   // Revoke user
-  const handleRevokeUser = async (user_id: string) => {
+  const handleRevokeUser = async (user_id: import('@/common/types/ids').ChannelUserId) => {
     try {
       await channel.revokeUser.invoke({ user_id });
       Message.success(t('settings.channels.userRevoked', 'User access revoked'));

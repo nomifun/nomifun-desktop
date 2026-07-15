@@ -149,24 +149,21 @@ impl ServerHandler for RemoteMcpHandler {
             .get::<axum::http::request::Parts>()
             .and_then(|parts| parts.extensions.get::<crate::router::RemoteCompanion>())
             .map(|rc| rc.0.clone());
-        if companion_id.is_none() {
-            // The companion_token_middleware always stashes a `RemoteCompanion`
-            // before the MCP service runs, so reaching dispatch with `None` means
-            // the rmcp `http::request::Parts` extension downcast broke (e.g. an
-            // rmcp/transport upgrade changed how the originating request is
-            // injected). Leave a trail instead of silently degrading every MCP
-            // caller to companion-less.
-            tracing::warn!(
-                tool = %request.name,
-                "remote MCP call resolved no companion_id from request extensions \
-                 (Parts→RemoteCompanion downcast failed); dispatching companion-less"
-            );
-        }
-        let caller = CallerCtx {
-            remote: true,
-            user_id: self.deps.authoritative_user_id.to_string(),
-            companion_id,
-            ..Default::default()
+        let Some(companion_id) = companion_id else {
+            return Ok(crate::result::build_tool_result(serde_json::json!({
+                "error": "authenticated Remote MCP request has no canonical companion identity"
+            })));
+        };
+        let caller = match CallerCtx::try_remote(
+            &self.deps.authoritative_user_id,
+            &companion_id,
+        ) {
+            Ok(caller) => caller,
+            Err(error) => {
+                return Ok(crate::result::build_tool_result(serde_json::json!({
+                    "error": format!("invalid authenticated identity: {error}")
+                })));
+            }
         };
         let result = match Registry::global()
             .dispatch_opt(self.deps.clone(), caller, &request.name, &args)

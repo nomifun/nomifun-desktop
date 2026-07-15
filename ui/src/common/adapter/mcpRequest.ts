@@ -5,9 +5,10 @@
  */
 
 import type { IMcpServer, IMcpServerTransport } from '@/common/config/storage';
+import type { McpServerId } from '@/common/types/ids';
 
 export interface McpConnectionTestRequest {
-  id?: number;
+  id?: McpServerId;
   name: string;
   transport: IMcpServerTransport;
 }
@@ -15,7 +16,7 @@ export interface McpConnectionTestRequest {
 export const buildMcpConnectionTestRequest = (
   server: Pick<IMcpServer, 'id' | 'name' | 'transport'>
 ): McpConnectionTestRequest => ({
-  ...(server.id > 0 ? { id: server.id } : {}),
+  id: server.id,
   name: server.name,
   transport: server.transport,
 });

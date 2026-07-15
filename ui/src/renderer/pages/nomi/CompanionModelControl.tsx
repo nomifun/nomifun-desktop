@@ -4,10 +4,11 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useMemo } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Select, Tooltip } from '@arco-design/web-react';
 import { useModelProviderList, useProvidersQuery } from '@renderer/hooks/agent/useModelProviderList';
+import type { ProviderId } from '@/common/types/ids';
 import type { useCompanion } from './useNomi';
 
 interface Props {
@@ -33,14 +34,19 @@ const CompanionModelControl: React.FC<Props> = ({ companion }) => {
   const { profile, patchCompanion } = companion;
   const { getAvailableModels } = useModelProviderList();
   const { data: rawProviders } = useProvidersQuery();
+  const [draftProviderId, setDraftProviderId] = useState<ProviderId | null>(null);
+
+  useEffect(() => {
+    setDraftProviderId(profile?.model?.provider_id ?? null);
+  }, [profile?.id, profile?.model?.provider_id]);
 
   // 所有已启用供应商（默认启用）。不按可用模型过滤，保证用户能看到自己的供应商，
   // 且已存储的当前供应商能被映射为名字（此前会被过滤掉而显示成生 id）。
   const enabledProviders = useMemo(() => (rawProviders ?? []).filter((p) => p.enabled !== false), [rawProviders]);
 
   const currentProvider = useMemo(
-    () => enabledProviders.find((p) => p.id === profile?.model.provider_id),
-    [enabledProviders, profile?.model.provider_id]
+    () => enabledProviders.find((p) => p.id === draftProviderId),
+    [draftProviderId, enabledProviders]
   );
 
   const availableModels = useMemo(
@@ -56,8 +62,8 @@ const CompanionModelControl: React.FC<Props> = ({ companion }) => {
 
   if (!profile) return null;
 
-  const providerId = profile.model.provider_id;
-  const selectedModel = profile.model.model;
+  const providerId = draftProviderId;
+  const selectedModel = profile.model?.provider_id === providerId ? profile.model.model : null;
   // 当前模型仅在其确实出现在该供应商的可用列表里时才算「有效」。
   const modelValid = Boolean(selectedModel && availableModels.includes(selectedModel));
   // 已存储的供应商 id 不在启用列表里（供应商被删）→ 供应商本身也已失效。
@@ -93,11 +99,11 @@ const CompanionModelControl: React.FC<Props> = ({ companion }) => {
           size='mini'
           style={{ width: 148 }}
           placeholder={t('nomi.chat.modelProvider')}
-          value={providerId || undefined}
-          onChange={(provider_id: string) => void patchCompanion({ model: { provider_id, model: '' } })}
+          value={providerId ?? undefined}
+          onChange={(provider_id: ProviderId) => setDraftProviderId(provider_id)}
         >
           {/* 供应商被删时，把生 id 作为禁用项展示，让用户看到失效来源。 */}
-          {providerStale && (
+          {providerStale && providerId && (
             <Select.Option key={providerId} value={providerId} disabled>
               {t('nomi.chat.modelUnavailableOption', { model: providerId })}
             </Select.Option>
@@ -114,10 +120,12 @@ const CompanionModelControl: React.FC<Props> = ({ companion }) => {
           placeholder={t('nomi.chat.modelName')}
           value={selectedModel || undefined}
           disabled={!currentProvider}
-          onChange={(model: string) => void patchCompanion({ model: { model } })}
+          onChange={(model: string) => {
+            if (providerId) void patchCompanion({ model: { provider_id: providerId, model } });
+          }}
         >
           {/* 失效的当前模型：禁用项，明确标注「(不可用)」，用户须改选有效模型。 */}
-          {showStaleModel && (
+          {showStaleModel && selectedModel && (
             <Select.Option key={selectedModel} value={selectedModel} disabled>
               {t('nomi.chat.modelUnavailableOption', { model: selectedModel })}
             </Select.Option>

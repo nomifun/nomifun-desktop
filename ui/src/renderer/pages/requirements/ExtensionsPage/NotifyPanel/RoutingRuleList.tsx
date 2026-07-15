@@ -1,3 +1,4 @@
+import type { WebhookId } from '@/common/types/ids';
 import React, { useCallback, useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Checkbox, Empty, Select, Table, Tag } from '@arco-design/web-react';
@@ -75,7 +76,7 @@ const RoutingRuleList: React.FC = () => {
     void loadData();
   }, [loadData]);
 
-  const handleChannelChange = async (tag: string, webhookId: number | undefined) => {
+  const handleChannelChange = async (tag: string, webhookId: WebhookId | undefined) => {
     try {
       const result = await ipcBridge.webhook.setTagSetting.invoke({
         tag,
@@ -155,7 +156,7 @@ const RoutingRuleList: React.FC = () => {
               value={boundId}
               style={{ width: 180 }}
               options={channelOptions}
-              onChange={(v) => void handleChannelChange(row.tag, v === -1 ? undefined : (v as number))}
+              onChange={(v) => void handleChannelChange(row.tag, v === undefined ? undefined : (v as WebhookId))}
             />
 
             {/* Gentle hint: bound channel but no events => never fires. */}

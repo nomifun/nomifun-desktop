@@ -10,6 +10,7 @@ pub(crate) use browser_stdio::bundled_chrome_dir;
 #[cfg(feature = "computer-use")]
 mod computer_stdio;
 mod ctl;
+mod backup;
 mod doctor;
 mod gateway_stdio;
 mod knowledge_stdio;
@@ -28,6 +29,7 @@ pub use browser_stdio::run_browser_stdio;
 #[cfg(feature = "computer-use")]
 pub use computer_stdio::run_computer_stdio;
 pub use ctl::{run_call, run_tools};
+pub use backup::{run_backup, run_restore};
 pub use doctor::run_doctor;
 pub use gateway_stdio::run_gateway_stdio;
 pub use knowledge_stdio::run_knowledge_stdio;

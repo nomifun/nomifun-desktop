@@ -3,6 +3,7 @@
  * Copyright 2025-2026 NomiFun (nomifun.com)
  * SPDX-License-Identifier: Apache-2.0
  */
+import type { ConversationId } from '@/common/types/ids';
 
 import { useAcpModelInfo } from '@/renderer/hooks/agent/useAcpModelInfo';
 import { useLayoutContext } from '@/renderer/hooks/context/LayoutContext';
@@ -25,7 +26,7 @@ import MarqueePillLabel from './MarqueePillLabel';
  * sheet can read from the same source.
  */
 const AcpModelSelector: React.FC<{
-  conversation_id: number;
+  conversation_id: ConversationId;
   /** ACP backend name for loading cached models (e.g., 'claude', 'qwen') */
   backend?: string;
   /** Pre-selected model ID from Guid page */

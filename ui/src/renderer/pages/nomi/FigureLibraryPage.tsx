@@ -16,6 +16,7 @@ import CustomFigureWizard from './CustomFigureWizard';
 import { FigureActionButton, FigureActionSurface, FigureActionVeil } from './FigureCardActions';
 import FigureEditModal from './FigureEditModal';
 import { useFigures, useFiguresInUse, type FigureUpdatePatch } from './useFigures';
+import type { FigureId } from '@/common/types/ids';
 
 /** One figure tile — thumbnail on a checker ground, inline rename, delete-on-hover. */
 const FigureTile: React.FC<{
@@ -23,7 +24,7 @@ const FigureTile: React.FC<{
   baseUrl: string;
   /** A companion currently uses this figure — deletion is blocked (would dangle). */
   inUse: boolean;
-  onUpdate: (id: string, patch: FigureUpdatePatch) => Promise<IFigureMeta>;
+  onUpdate: (id: FigureId, patch: FigureUpdatePatch) => Promise<IFigureMeta>;
   onDelete: (fig: IFigureMeta) => void;
 }> = ({ fig, baseUrl, inUse, onUpdate, onDelete }) => {
   const { t } = useTranslation();

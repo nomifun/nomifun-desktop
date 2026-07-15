@@ -5,6 +5,7 @@
  */
 
 import type { SessionEntry, SessionKind, WorkpathNode } from './workpathTree';
+import type { ConversationId, TerminalId } from '@/common/types/ids';
 
 export const WORKPATH_COLLAPSED_SESSION_LIMIT = 5;
 
@@ -14,8 +15,8 @@ export type VisibleWorkpathKindMeta = {
 };
 
 export type VisibleWorkpathEntries = {
-  interactive: SessionEntry[];
-  terminal: SessionEntry[];
+  interactive: Extract<SessionEntry, { kind: 'interactive' }>[];
+  terminal: Extract<SessionEntry, { kind: 'terminal' }>[];
   kindMeta: Record<SessionKind, VisibleWorkpathKindMeta>;
   hasOverflow: boolean;
   hiddenCount: number;
@@ -27,11 +28,11 @@ function isKindExpanded(expanded: ExpandedKinds, kind: SessionKind): boolean {
   return typeof expanded === 'boolean' ? expanded : !!expanded[kind];
 }
 
-function getVisibleKindEntries(
-  entries: SessionEntry[],
+function getVisibleKindEntries<T extends SessionEntry>(
+  entries: T[],
   expanded: boolean,
   limit: number
-): { entries: SessionEntry[]; meta: VisibleWorkpathKindMeta } {
+): { entries: T[]; meta: VisibleWorkpathKindMeta } {
   const hasOverflow = entries.length > limit;
 
   if (expanded || !hasOverflow) {
@@ -77,7 +78,12 @@ export function getVisibleWorkpathEntries(
   };
 }
 
-export function getWorkpathEntryDisplayIndex(node: WorkpathNode, entry: Pick<SessionEntry, 'kind' | 'id'>): number | null {
+export function getWorkpathEntryDisplayIndex(
+  node: WorkpathNode,
+  entry:
+    | { kind: 'interactive'; id: ConversationId }
+    | { kind: 'terminal'; id: TerminalId }
+): number | null {
   if (entry.kind === 'interactive') {
     const index = node.interactive.findIndex((item) => item.id === entry.id);
     return index === -1 ? null : index;

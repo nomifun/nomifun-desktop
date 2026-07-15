@@ -9,6 +9,7 @@ import { ipcBridge } from '@/common';
 import type { IFigureMeta, IFigureUpdatePatch } from '@/common/adapter/ipcBridge';
 import { CUSTOM_CHARACTER_ID } from '@renderer/pages/companion/characters';
 import { useCompanions } from './useNomi';
+import type { FigureId } from '@/common/types/ids';
 
 /**
  * Single module-level store for the custom-figure library, so every consumer —
@@ -53,18 +54,18 @@ async function refresh(): Promise<void> {
   return inFlight;
 }
 
-async function remove(id: string): Promise<void> {
+async function remove(id: FigureId): Promise<void> {
   await ipcBridge.companion.deleteFigure.invoke({ figure_id: id });
   // Optimistic local prune for instant UI, then reconcile with the backend.
   setState({ figures: state.figures.filter((f) => f.id !== id) });
   await refresh();
 }
 
-async function rename(id: string, name: string): Promise<IFigureMeta> {
+async function rename(id: FigureId, name: string): Promise<IFigureMeta> {
   return update(id, { name });
 }
 
-async function update(id: string, patch: FigureUpdatePatch): Promise<IFigureMeta> {
+async function update(id: FigureId, patch: FigureUpdatePatch): Promise<IFigureMeta> {
   const updated = await ipcBridge.companion.updateFigure.invoke({ figure_id: id, ...patch });
   setState({ figures: state.figures.map((f) => (f.id === id ? updated : f)) });
   return updated;
@@ -88,9 +89,9 @@ export interface FiguresApi {
   loading: boolean;
   loaded: boolean;
   refresh: () => Promise<void>;
-  remove: (id: string) => Promise<void>;
-  rename: (id: string, name: string) => Promise<IFigureMeta>;
-  update: (id: string, patch: FigureUpdatePatch) => Promise<IFigureMeta>;
+  remove: (id: FigureId) => Promise<void>;
+  rename: (id: FigureId, name: string) => Promise<IFigureMeta>;
+  update: (id: FigureId, patch: FigureUpdatePatch) => Promise<IFigureMeta>;
   add: (figure: IFigureMeta) => void;
 }
 
@@ -109,10 +110,10 @@ export function useFigures(): FiguresApi {
  * render blank. The backend enforces the same rule (409 Conflict); this hook
  * is the UI affordance so the user never reaches that error in normal use.
  */
-export function useFiguresInUse(): Set<string> {
+export function useFiguresInUse(): Set<FigureId> {
   const { companions } = useCompanions();
   return useMemo(() => {
-    const ids = new Set<string>();
+    const ids = new Set<FigureId>();
     for (const p of companions) {
       // Only a `custom` character actually renders its figure. A companion
       // switched to a built-in character can keep a stale `custom_figure.figure_id`
@@ -131,7 +132,7 @@ export function useFiguresInUse(): Set<string> {
  *  so a freshly (re)assigned figure starts at its tier's default height. */
 export const figureToCustomPatch = (
   f: IFigureMeta
-): { figure_id: string; aspect: number; head_box: { x: number; y: number; w: number; h?: number }; size_tier: 's' | 'm' | 'l'; size_px: number | null } => ({
+): { figure_id: FigureId; aspect: number; head_box: { x: number; y: number; w: number; h?: number }; size_tier: 's' | 'm' | 'l'; size_px: number | null } => ({
   figure_id: f.id,
   aspect: f.aspect,
   head_box: f.head_box,

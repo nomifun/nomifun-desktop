@@ -77,7 +77,7 @@ const NostrConfigForm: React.FC<NostrConfigFormProps> = ({ pluginStatus, channel
 
   const handleAutoEnable = async () => {
     const config = { credentials: { nostr_private_key: privateKey.trim(), nostr_relays: relays.trim() } };
-    const result = await channel.enablePlugin.invoke(channelTarget ? { plugin_id: channelTarget.channelId, plugin_type: 'nostr', ...(channelTarget.publicAgentId ? { public_agent_id: channelTarget.publicAgentId } : { companion_id: channelTarget.companionId }), config } : { plugin_id: 'nostr', config });
+    const result = await channel.enablePlugin.invoke(channelTarget ? { plugin_id: channelTarget.channelId, plugin_type: 'nostr', ...(channelTarget.publicAgentId ? { public_agent_id: channelTarget.publicAgentId } : { companion_id: channelTarget.companionId }), config } : { plugin_type: 'nostr', config });
     if (!result.success) {
       throw new Error(result.error || result.message || t('nomi.settings.remoteEnableFailed', { defaultValue: 'Failed to enable channel' }));
     }
@@ -96,7 +96,7 @@ const NostrConfigForm: React.FC<NostrConfigFormProps> = ({ pluginStatus, channel
     }
     setTestLoading(true);
     try {
-      const result = await channel.testPlugin.invoke({ plugin_id: 'nostr', token: privateKey.trim(), extra_config: { nostr_relays: relays.trim() } });
+      const result = await channel.testPlugin.invoke({ plugin_type: 'nostr', token: privateKey.trim(), extra_config: { nostr_relays: relays.trim() } });
       if (result.success) {
         Message.success(t('settings.nostr.connectionSuccess', { defaultValue: 'Key OK: {{username}}', username: result.bot_username || 'npub' }));
         await handleAutoEnable();
@@ -128,7 +128,7 @@ const NostrConfigForm: React.FC<NostrConfigFormProps> = ({ pluginStatus, channel
       Message.error(error instanceof Error ? error.message : String(error));
     }
   };
-  const handleRevokeUser = async (user_id: string) => {
+  const handleRevokeUser = async (user_id: import('@/common/types/ids').ChannelUserId) => {
     try {
       await channel.revokeUser.invoke({ user_id });
       await loadAuthorizedUsers();

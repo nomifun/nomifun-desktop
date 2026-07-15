@@ -154,9 +154,7 @@ export function useWorkspaceTree({ treeSource, onSelectFiles }: UseWorkspaceTree
           // actively collapse, which prevents flicker while a workspace is
           // still empty.
           if (hasFiles) {
-            // workspace-has-files is a string-keyed window CustomEvent channel; the
-            // source's `key` is the identity (conversation id string, or cwd).
-            dispatchWorkspaceHasFilesEvent(true, sourceRef.current.key, wasFirstLoad);
+            dispatchWorkspaceHasFilesEvent(sourceRef.current.target, true, wasFirstLoad);
           }
 
           return res;

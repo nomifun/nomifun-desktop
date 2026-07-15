@@ -38,14 +38,14 @@ fn main() -> Result<ExitCode> {
 
 async fn async_main(merged_path: String, cli: Cli) -> Result<ExitCode> {
     // MCP stdio helpers must not touch the database, logging setup, or `AppServices`.
-    match cli.command {
+    match &cli.command {
         Some(Command::McpRequirementStdio) => Ok(commands::run_requirement_stdio().await),
         Some(Command::McpKnowledgeStdio) => Ok(commands::run_knowledge_stdio().await),
         Some(Command::McpGatewayStdio) => Ok(commands::run_gateway_stdio().await),
         Some(Command::McpOpenStdio) => Ok(commands::run_open_stdio().await),
         Some(Command::McpComputerStdio) => Ok(commands::run_computer_stdio().await),
         Some(Command::McpBrowserStdio) => Ok(commands::run_browser_stdio().await),
-        Some(Command::TerminalHook { event }) => Ok(commands::run_terminal_hook(&event).await),
+        Some(Command::TerminalHook { event }) => Ok(commands::run_terminal_hook(event).await),
         Some(Command::Doctor) => commands::run_doctor(&cli, &merged_path).await,
         Some(Command::Tools) => Ok(commands::run_tools().await),
         Some(Command::Call {
@@ -53,7 +53,14 @@ async fn async_main(merged_path: String, cli: Cli) -> Result<ExitCode> {
             args,
             url,
             token,
-        }) => Ok(commands::run_call(&name, args.as_deref(), url, token).await),
+        }) => Ok(
+            commands::run_call(name, args.as_deref(), url.clone(), token.clone()).await,
+        ),
+        Some(Command::Backup { output }) => commands::run_backup(&cli, output.clone()).await,
+        Some(Command::Restore {
+            bundle,
+            destination_data_dir,
+        }) => commands::run_restore(bundle.clone(), destination_data_dir.clone()).await,
         None => {
             let env = bootstrap::init_environment(&cli, &merged_path)?;
             let database = bootstrap::init_data_layer(&env.config).await?;

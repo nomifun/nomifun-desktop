@@ -1,4 +1,4 @@
-use nomifun_common::TimestampMs;
+use nomifun_common::{RemoteAgentId, TimestampMs};
 
 use crate::error::DbError;
 use crate::models::RemoteAgentRow;
@@ -14,29 +14,29 @@ pub trait IRemoteAgentRepository: Send + Sync {
     async fn list(&self) -> Result<Vec<RemoteAgentRow>, DbError>;
 
     /// Finds a remote agent by ID, or `None` if not found.
-    async fn find_by_id(&self, id: i64) -> Result<Option<RemoteAgentRow>, DbError>;
+    async fn find_by_id(&self, id: &RemoteAgentId) -> Result<Option<RemoteAgentRow>, DbError>;
 
     /// Creates a new remote agent and returns the inserted row.
     async fn create(&self, params: CreateRemoteAgentParams<'_>) -> Result<RemoteAgentRow, DbError>;
 
     /// Updates an existing remote agent. Returns `DbError::NotFound` if the ID doesn't exist.
-    async fn update(&self, id: i64, params: UpdateRemoteAgentParams<'_>) -> Result<RemoteAgentRow, DbError>;
+    async fn update(&self, id: &RemoteAgentId, params: UpdateRemoteAgentParams<'_>) -> Result<RemoteAgentRow, DbError>;
 
     /// Deletes a remote agent by ID. Returns `DbError::NotFound` if the ID doesn't exist.
-    async fn delete(&self, id: i64) -> Result<(), DbError>;
+    async fn delete(&self, id: &RemoteAgentId) -> Result<(), DbError>;
 
     /// Updates only the connection status (and optionally last_connected_at).
     /// Returns `DbError::NotFound` if the ID doesn't exist.
     async fn update_status(
         &self,
-        id: i64,
+        id: &RemoteAgentId,
         status: &str,
         last_connected_at: Option<TimestampMs>,
     ) -> Result<(), DbError>;
 
     /// Stores the encrypted device token issued by an OpenClaw Gateway.
     /// Returns `DbError::NotFound` if the ID doesn't exist.
-    async fn update_device_token(&self, id: i64, device_token: Option<&str>) -> Result<(), DbError>;
+    async fn update_device_token(&self, id: &RemoteAgentId, device_token: Option<&str>) -> Result<(), DbError>;
 }
 
 /// Parameters for creating a new remote agent.

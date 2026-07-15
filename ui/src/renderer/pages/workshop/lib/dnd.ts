@@ -13,12 +13,13 @@
  */
 
 import type { WorkshopAssetKind } from '../types';
+import { parseAssetId, type AssetId } from '@/common/types/ids';
 
 /** DataTransfer MIME type for workshop asset drags. */
 export const WORKSHOP_ASSET_DND = 'application/x-nomifun-workshop-asset';
 
 export interface WorkshopAssetDragPayload {
-  asset_id: string;
+  asset_id: AssetId;
   kind: WorkshopAssetKind;
   title: string;
   width?: number | null;
@@ -35,7 +36,7 @@ export function readAssetDrag(dt: DataTransfer): WorkshopAssetDragPayload | null
   if (!raw) return null;
   try {
     const parsed = JSON.parse(raw) as WorkshopAssetDragPayload;
-    return typeof parsed?.asset_id === 'string' ? parsed : null;
+    return { ...parsed, asset_id: parseAssetId(parsed?.asset_id) };
   } catch {
     return null;
   }

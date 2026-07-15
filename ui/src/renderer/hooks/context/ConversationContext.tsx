@@ -3,6 +3,7 @@
  * Copyright 2025-2026 NomiFun (nomifun.com)
  * SPDX-License-Identifier: Apache-2.0
  */
+import type { ConversationId, CronJobId } from '@/common/types/ids';
 
 import type { IConversationMcpStatus } from '@/common/config/storage';
 import React, { createContext, useContext } from 'react';
@@ -16,7 +17,7 @@ export interface ConversationContextValue {
    * Conversation ID
    * 会话 ID
    */
-  conversation_id: number;
+  conversation_id: ConversationId;
 
   /**
    * Workspace directory path
@@ -33,7 +34,7 @@ export interface ConversationContextValue {
   /**
    * Cron job ID (if this conversation was created by a scheduled task)
    */
-  cron_job_id?: string;
+  cron_job_id?: CronJobId;
 
   /**
    * When true, platform chat components should hide the SendBox (for example, projected participant transcripts).

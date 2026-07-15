@@ -22,6 +22,7 @@ import { useTranslation } from 'react-i18next';
 import type { IRequirement, RequirementStatus } from '@/common/adapter/ipcBridge';
 import RequirementListRow from './RequirementListRow';
 import WorkspaceEmptyState from './WorkspaceEmptyState';
+import type { RequirementId } from '@/common/types/ids';
 
 interface RequirementListViewProps {
   items: IRequirement[];
@@ -32,12 +33,12 @@ interface RequirementListViewProps {
   loading?: boolean;
   error?: boolean;
   onRetry?: () => void;
-  selectedIds: Set<number>;
-  onToggleSelect: (id: number) => void;
-  onOpenDetail: (id: number) => void;
-  onStatusChange: (id: number, next: RequirementStatus) => void;
-  onEdit: (id: number) => void;
-  onDelete: (id: number) => void;
+  selectedIds: Set<RequirementId>;
+  onToggleSelect: (id: RequirementId) => void;
+  onOpenDetail: (id: RequirementId) => void;
+  onStatusChange: (id: RequirementId, next: RequirementStatus) => void;
+  onEdit: (id: RequirementId) => void;
+  onDelete: (id: RequirementId) => void;
   onCreate: () => void; // for empty state CTA
 }
 

@@ -25,25 +25,28 @@ impl UserEventSink for NoopBroadcaster {
 
 #[derive(Default)]
 struct RecordingNotifier {
-    ids: Mutex<Vec<i64>>,
+    ids: Mutex<Vec<String>>,
 }
 
 #[async_trait]
 impl CompletionNotifier for RecordingNotifier {
     async fn notify_completion(&self, requirement: &RequirementRow) {
-        self.ids.lock().unwrap().push(requirement.id);
+        self.ids.lock().unwrap().push(requirement.id.clone());
     }
 }
 
 async fn svc(notifier: Arc<RecordingNotifier>) -> RequirementService {
     let db = init_database_memory().await.unwrap();
+    let installation_owner = nomifun_db::installation_owner_id(db.pool()).await.unwrap();
     let repo: Arc<dyn IRequirementRepository> = Arc::new(SqliteRequirementRepository::new(db.pool().clone()));
     let emitter = RequirementEventEmitter::new(
         Arc::new(NoopBroadcaster),
-        Arc::from("system_default_user"),
+        Arc::from(installation_owner.as_str()),
     );
+    let service = RequirementService::new(repo, emitter)
+        .with_completion_notifier(notifier);
     Box::leak(Box::new(db));
-    RequirementService::new(repo, emitter).with_completion_notifier(notifier)
+    service
 }
 
 fn new_req(tag: &str) -> CreateRequirementRequest {
@@ -69,14 +72,14 @@ async fn fires_once_on_done() {
     let s = svc(notifier.clone()).await;
     let r = s.create(new_req("alpha")).await.unwrap();
 
-    s.set_status(r.id, RequirementStatus::Done, Some("note".into()))
+    s.set_status(&r.id, RequirementStatus::Done, Some("note".into()))
         .await
         .unwrap();
     settle().await;
     assert_eq!(notifier.ids.lock().unwrap().as_slice(), std::slice::from_ref(&r.id));
 
     // Re-setting the same terminal status is an idempotent no-op → no extra fire.
-    let _ = s.set_status(r.id, RequirementStatus::Done, None).await.unwrap();
+    let _ = s.set_status(&r.id, RequirementStatus::Done, None).await.unwrap();
     settle().await;
     assert_eq!(notifier.ids.lock().unwrap().len(), 1);
 }
@@ -86,7 +89,7 @@ async fn fires_on_failed() {
     let notifier = Arc::new(RecordingNotifier::default());
     let s = svc(notifier.clone()).await;
     let r = s.create(new_req("alpha")).await.unwrap();
-    s.set_status(r.id, RequirementStatus::Failed, Some("oops".into()))
+    s.set_status(&r.id, RequirementStatus::Failed, Some("oops".into()))
         .await
         .unwrap();
     settle().await;
@@ -98,7 +101,7 @@ async fn does_not_fire_on_non_terminal() {
     let notifier = Arc::new(RecordingNotifier::default());
     let s = svc(notifier.clone()).await;
     let r = s.create(new_req("alpha")).await.unwrap();
-    s.set_status(r.id, RequirementStatus::InProgress, None).await.unwrap();
+    s.set_status(&r.id, RequirementStatus::InProgress, None).await.unwrap();
     settle().await;
     assert!(notifier.ids.lock().unwrap().is_empty());
 }

@@ -31,7 +31,8 @@ use nomifun_ai_agent::{
 };
 use nomifun_app::{AppConfig, AppServices, create_router};
 use nomifun_common::{
-    AgentKillReason, AgentType, AppError, Confirmation, ConfirmationOption, ConversationStatus, TimestampMs, now_ms,
+    AgentKillReason, AgentType, AppError, Confirmation, ConfirmationOption, ConversationStatus,
+    ProviderId, TimestampMs, now_ms,
 };
 
 use common::{body_json, json_with_token, setup_and_login};
@@ -145,22 +146,51 @@ async fn build_app_blocked_on_confirmation() -> (axum::Router, AppServices, Arc<
     (router, services, confirmed)
 }
 
+/// Nomi conversations require a canonical persisted provider/model binding
+/// before the runtime factory seam is reached. Keep that production invariant
+/// intact in this intervention-focused fixture.
+async fn seed_mock_provider(services: &AppServices) -> String {
+    let provider_id = ProviderId::new().into_string();
+    nomifun_db::sqlx::query(
+        "INSERT INTO providers \
+         (id, platform, name, base_url, api_key_encrypted, models, enabled, \
+          capabilities, created_at, updated_at) \
+         VALUES (?, 'openai', 'IDMM intervention mock', 'https://example.invalid', \
+                 'encrypted', '[\"mock-model\"]', 1, '[]', 1, 1)",
+    )
+    .bind(&provider_id)
+    .execute(services.database.pool())
+    .await
+    .unwrap();
+    provider_id
+}
+
 #[tokio::test]
 async fn idmm_recovers_and_confirms_on_arm_pending_tool_confirmation() {
     let (mut app, services, confirmed) = build_app_blocked_on_confirmation().await;
     let (token, csrf) = setup_and_login(&mut app, &services, "admin", "StrongP@ss1").await;
+    let provider_id = seed_mock_provider(&services).await;
 
     // A plain desktop nomi conversation (no channel/companion markers, no
     // channel_chat_id → is_plain_desktop / not-routed → IDMM may auto-answer).
     let conv = {
-        let body = json!({ "type": "nomi", "name": "idmm-intervene", "extra": { "workspace": "/project" } });
+        let body = json!({
+            "type": "nomi",
+            "name": "idmm-intervene",
+            "model": {
+                "provider_id": provider_id,
+                "model": "mock-model",
+                "use_model": null
+            },
+            "extra": { "workspace": "/project" }
+        });
         let resp = app
             .clone()
             .oneshot(json_with_token("POST", "/api/conversations", body, &token, &csrf))
             .await
             .unwrap();
         assert!(resp.status().is_success(), "create conversation failed: {}", resp.status());
-        body_json(resp).await["data"]["id"].as_i64().unwrap().to_string()
+        body_json(resp).await["data"]["id"].as_str().unwrap().to_owned()
     };
 
     // Enable 决策值守 at the rule tier — a safe read-only confirmation is

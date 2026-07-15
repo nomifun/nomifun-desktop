@@ -10,7 +10,7 @@ use nomifun_api_types::{
 };
 use nomifun_common::{
     AppError, MAX_AGENT_EXECUTION_MODELS, MAX_AGENT_EXECUTION_PARTICIPANTS,
-    generate_prefixed_id,
+    ProviderId, generate_prefixed_id,
 };
 use nomifun_db::{IProviderRepository, NewAgentExecutionParticipant};
 use nomifun_preset::PresetService;
@@ -47,9 +47,9 @@ impl ParticipantResolver {
         let mut catalog = HashMap::new();
         let mut catalog_order = Vec::new();
         for provider in providers.iter().filter(|provider| provider.enabled) {
-            if provider.id.trim().is_empty() || provider.id.trim() != provider.id {
+            if ProviderId::try_from(provider.id.as_str()).is_err() {
                 return Err(AppError::Internal(
-                    "enabled provider has an invalid persisted id".to_owned(),
+                    "enabled provider has a non-canonical persisted id".to_owned(),
                 ));
             }
             let models: Vec<String> = serde_json::from_str(&provider.models).map_err(|error| {
@@ -139,12 +139,7 @@ impl ParticipantResolver {
         let mut seen = HashSet::new();
         let mut models = Vec::new();
         for model in requested {
-            let key = (model.provider_id.trim().to_owned(), model.model.trim().to_owned());
-            if key.0.is_empty() || key.1.is_empty() {
-                return Err(AppError::BadRequest(
-                    "execution model references require provider_id and model".to_owned(),
-                ));
-            }
+            let key = (model.provider_id, model.model);
             if !catalog.contains_key(&key) {
                 return Err(AppError::BadRequest(format!(
                     "model {}/{} is missing or disabled",
@@ -355,6 +350,11 @@ impl ParticipantResolver {
                         .to_owned(),
                 )
             })?;
+        ExecutionModelPool::Single {
+            model: model.clone(),
+        }
+        .validate()
+        .map_err(AppError::BadRequest)?;
         let matching_model_index = participants.iter().position(|participant| {
             participant.provider_id.as_deref() == Some(model.provider_id.as_str())
                 && participant.model.as_deref() == Some(model.model.as_str())
@@ -439,6 +439,11 @@ fn promote_model_to_front(
     participants: &mut Vec<NewAgentExecutionParticipant>,
     lead_model: &ExecutionModelRef,
 ) -> Result<(), AppError> {
+    ExecutionModelPool::Single {
+        model: lead_model.clone(),
+    }
+    .validate()
+    .map_err(AppError::BadRequest)?;
     let index = participants
         .iter()
         .position(|participant| {
@@ -514,6 +519,11 @@ mod tests {
     use super::*;
     use nomifun_api_types::{PresetKnowledgePolicy, PresetTarget};
 
+    const PROVIDER_1: &str = "prov_0190f5fe-7c00-7a00-8000-000000000001";
+    const PROVIDER_2: &str = "prov_0190f5fe-7c00-7a00-8000-000000000002";
+    const LEAD_PROVIDER: &str = "prov_0190f5fe-7c00-7a00-8000-000000000010";
+    const OUTSIDE_PROVIDER: &str = "prov_0190f5fe-7c00-7a00-8000-000000000099";
+
     fn participant(id: &str, provider_id: &str, model: &str, sort_order: i64) -> NewAgentExecutionParticipant {
         NewAgentExecutionParticipant {
             id: id.to_owned(),
@@ -557,13 +567,13 @@ mod tests {
     #[test]
     fn explicit_template_lead_is_promoted_without_widening_authority() {
         let mut participants = vec![
-            participant("first", "p1", "m1", 0),
-            participant("lead", "p2", "m2", 1),
+            participant("first", PROVIDER_1, "m1", 0),
+            participant("lead", PROVIDER_2, "m2", 1),
         ];
         promote_model_to_front(
             &mut participants,
             &ExecutionModelRef {
-                provider_id: "p2".to_owned(),
+                provider_id: PROVIDER_2.to_owned(),
                 model: "m2".to_owned(),
             },
         )
@@ -577,11 +587,11 @@ mod tests {
 
     #[test]
     fn explicit_template_lead_must_belong_to_the_template() {
-        let mut participants = vec![participant("first", "p1", "m1", 0)];
+        let mut participants = vec![participant("first", PROVIDER_1, "m1", 0)];
         let error = promote_model_to_front(
             &mut participants,
             &ExecutionModelRef {
-                provider_id: "outside".to_owned(),
+                provider_id: OUTSIDE_PROVIDER.to_owned(),
                 model: "m2".to_owned(),
             },
         )
@@ -594,14 +604,14 @@ mod tests {
     fn frozen_lead_replaces_a_matching_model_at_every_template_size() {
         for size in [2_usize, MAX_AGENT_EXECUTION_PARTICIPANTS] {
             let mut participants = vec![
-                participant("other", "p2", "m2", 0),
-                participant("replace-me", "lead-provider", "lead-model", 1),
+                participant("other", PROVIDER_2, "m2", 0),
+                participant("replace-me", LEAD_PROVIDER, "lead-model", 1),
             ];
             while participants.len() < size {
                 let index = participants.len();
                 participants.push(participant(
                     &format!("participant-{index}"),
-                    "p2",
+                    PROVIDER_2,
                     &format!("model-{index}"),
                     index as i64,
                 ));
@@ -611,7 +621,7 @@ mod tests {
                 &mut participants,
                 &snapshot(),
                 Some(&ExecutionModelRef {
-                    provider_id: "lead-provider".to_owned(),
+                    provider_id: LEAD_PROVIDER.to_owned(),
                     model: "lead-model".to_owned(),
                 }),
             )
@@ -627,15 +637,15 @@ mod tests {
     #[test]
     fn frozen_lead_replaces_the_first_same_model_participant_deterministically() {
         let mut participants = vec![
-            participant("first-same-model", "lead-provider", "lead-model", 0),
-            participant("second-same-model", "lead-provider", "lead-model", 1),
-            participant("other", "p2", "m2", 2),
+            participant("first-same-model", LEAD_PROVIDER, "lead-model", 0),
+            participant("second-same-model", LEAD_PROVIDER, "lead-model", 1),
+            participant("other", PROVIDER_2, "m2", 2),
         ];
         ParticipantResolver::prepend_frozen_lead(
             &mut participants,
             &snapshot(),
             Some(&ExecutionModelRef {
-                provider_id: "lead-provider".to_owned(),
+                provider_id: LEAD_PROVIDER.to_owned(),
                 model: "lead-model".to_owned(),
             }),
         )

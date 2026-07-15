@@ -6,6 +6,7 @@
 
 import { ipcBridge } from '@/common';
 import type { TChatConversation } from '@/common/config/storage';
+import { parseConversationId, parseTerminalId, type ConversationId, type TerminalId } from '@/common/types/ids';
 import BatchActionBar from '@/renderer/components/base/BatchActionBar';
 import DirectorySelectionModal from '@/renderer/components/settings/DirectorySelectionModal';
 import { useConversationHistoryContext } from '@/renderer/hooks/context/ConversationHistoryContext';
@@ -122,17 +123,14 @@ const WorkpathSessionList: React.FC<WorkpathSessionListProps> = ({
   );
   const workpathBranches = useWorkpathBranches(branchWorkpaths, displayPreferences.showGitBranch && !collapsed);
 
-  // Active session from the route — used for row selected state and for
-  // force-expanding the drawer that contains it (visual only, not persisted).
-  // useParams/route strings are always string → coerce the numeric session ids
-  // to number so `===` / Set / find comparisons stay on the number track.
+  // Active session from the route — used for row selected state and drawer expansion.
   const routeMatch = pathname.match(/^\/(conversation|terminal)\/([^/?#]+)/);
   const activeRouteKind = routeMatch ? routeMatch[1] : null;
-  // Coerce the route string id to the numeric session id once (route strings are
-  // always string). Drives row selected state + drawer force-expand.
-  const activeSessionId = routeMatch ? Number(routeMatch[2]) : null;
-  const activeConversationId = activeRouteKind === 'conversation' ? activeSessionId : null;
-  const activeTerminalId = activeRouteKind === 'terminal' ? activeSessionId : null;
+  const activeConversationId =
+    activeRouteKind === 'conversation' && routeMatch ? parseConversationId(routeMatch[2]) : null;
+  const activeTerminalId =
+    activeRouteKind === 'terminal' && routeMatch ? parseTerminalId(routeMatch[2]) : null;
+  const activeSessionId: ConversationId | TerminalId | null = activeConversationId ?? activeTerminalId;
 
   // Sync active-conversation bookkeeping + scroll it into view on route change
   // (carried over from GroupedHistory / useConversations).
@@ -159,7 +157,7 @@ const WorkpathSessionList: React.FC<WorkpathSessionListProps> = ({
 
   // Terminal selection — same semantics, kept locally (useTerminalBatchSelection
   // owns its own batchMode flag, which must stay unified with the prop here).
-  const [selectedTerminalIds, setSelectedTerminalIds] = useState<Set<number>>(new Set());
+  const [selectedTerminalIds, setSelectedTerminalIds] = useState<Set<TerminalId>>(new Set());
   useEffect(() => {
     if (!batchMode) setSelectedTerminalIds(new Set());
   }, [batchMode]);
@@ -172,7 +170,7 @@ const WorkpathSessionList: React.FC<WorkpathSessionListProps> = ({
     });
   }, [batchMode, terminals, selectedTerminalIds.size]);
 
-  const toggleSelectedTerminal = useCallback((id: number) => {
+  const toggleSelectedTerminal = useCallback((id: TerminalId) => {
     setSelectedTerminalIds((prev) => {
       const next = new Set(prev);
       if (next.has(id)) next.delete(id);
@@ -390,7 +388,7 @@ const WorkpathSessionList: React.FC<WorkpathSessionListProps> = ({
   // session into view (adapted from Sider/useRevealOnCreate: event-driven, never
   // fires on initial load; reveal waits until the row lands in the tree because
   // the workpath is only known after aggregation). Last-one-wins on bursts.
-  const pendingRevealRef = useRef<{ kind: SessionKind; id: number } | null>(null);
+  const pendingRevealRef = useRef<{ kind: SessionKind; id: ConversationId | TerminalId } | null>(null);
   const [revealTick, setRevealTick] = useState(0);
 
   useEffect(() => {
@@ -418,9 +416,9 @@ const WorkpathSessionList: React.FC<WorkpathSessionListProps> = ({
     const pending = pendingRevealRef.current;
     if (!pending) return;
     const node = tree.find((candidate) =>
-      (pending.kind === 'interactive' ? candidate.interactive : candidate.terminal).some(
-        (entry) => entry.id === pending.id
-      )
+      pending.kind === 'interactive'
+        ? candidate.interactive.some((entry) => entry.id === pending.id)
+        : candidate.terminal.some((entry) => entry.id === pending.id)
     );
     if (!node) return; // not aggregated yet (async list refresh) — retry on next data change
     pendingRevealRef.current = null;
@@ -479,7 +477,7 @@ const WorkpathSessionList: React.FC<WorkpathSessionListProps> = ({
   );
 
   const handleTerminalClick = useCallback(
-    (terminal_id: number) => {
+    (terminal_id: TerminalId) => {
       cleanupSiderTooltips();
       void navigate(`/terminal/${terminal_id}`);
       onSessionClick?.();

@@ -8,6 +8,7 @@ import type {
   CreatePresetTagRequest,
   ModelPreference,
   PresetKnowledgePolicy,
+  PresetReference,
   PresetTag,
   PresetTarget,
 } from '@/common/types/agent/presetTypes';
@@ -26,6 +27,9 @@ import { Close, Delete, Info, Plus, Robot } from '@icon-park/react';
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useNavigate } from 'react-router-dom';
+import { parseKnowledgeBaseId, parseProviderId, type KnowledgeBaseId } from '@/common/types/ids';
+
+const ANY_PROVIDER_TOKEN = '*';
 
 type PresetEditDrawerProps = {
   // Drawer visibility
@@ -55,8 +59,8 @@ type PresetEditDrawerProps = {
   setAutoSelectable: (v: boolean) => void;
   knowledgePolicy: PresetKnowledgePolicy;
   setKnowledgePolicy: (v: PresetKnowledgePolicy) => void;
-  knowledgeBaseIds: string[];
-  setKnowledgeBaseIds: (v: string[]) => void;
+  knowledgeBaseIds: KnowledgeBaseId[];
+  setKnowledgeBaseIds: (v: KnowledgeBaseId[]) => void;
 
   // Rules / prompt
   editContext: string;
@@ -92,7 +96,7 @@ type PresetEditDrawerProps = {
 
   // Active preset info
   activePreset: PresetListItem | null;
-  activePresetId: string | null;
+  activePresetId: PresetReference | null;
   isExtensionPreset: (preset: PresetListItem | null | undefined) => boolean;
 
   // Agent backend options
@@ -228,12 +232,12 @@ const PresetEditDrawer: React.FC<PresetEditDrawerProps> = ({
       }
     }
     for (const item of editModels) {
-      const value = `${item.provider_id ?? ''}::${item.model}`;
+      const value = `${item.provider_id ?? ANY_PROVIDER_TOKEN}::${item.model}`;
       if (!options.has(value)) options.set(value, { value, label: item.model });
     }
     return Array.from(options.values());
   }, [providers, getAvailableModels, editModels]);
-  const selectedModelValues = editModels.map((item) => `${item.provider_id ?? ''}::${item.model}`);
+  const selectedModelValues = editModels.map((item) => `${item.provider_id ?? ANY_PROVIDER_TOKEN}::${item.model}`);
   const { bases: knowledgeBases } = useKnowledgeBases();
 
   const targetOptions: Array<{ value: PresetTarget; label: string }> = [
@@ -500,7 +504,11 @@ const PresetEditDrawer: React.FC<PresetEditDrawerProps> = ({
                 setEditModels(
                   (value as string[]).map((item) => {
                     const [providerId, ...modelParts] = item.split('::');
-                    return { provider_id: providerId || undefined, model: modelParts.join('::'), required: false };
+                    return {
+                      provider_id: providerId === ANY_PROVIDER_TOKEN ? undefined : parseProviderId(providerId),
+                      model: modelParts.join('::'),
+                      required: false,
+                    };
                   })
                 )
               }
@@ -592,7 +600,7 @@ const PresetEditDrawer: React.FC<PresetEditDrawerProps> = ({
                 <NomiSelect
                   mode='multiple'
                   value={knowledgeBaseIds}
-                  onChange={(value) => setKnowledgeBaseIds(value as string[])}
+                  onChange={(value) => setKnowledgeBaseIds((value as unknown[]).map(parseKnowledgeBaseId))}
                   disabled={readOnly}
                   allowClear
                   showSearch

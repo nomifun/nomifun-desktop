@@ -32,6 +32,7 @@ import {
   WORKSHOP_UPLOAD_ABORTED,
 } from '../api';
 import { revokeWorkshopMedia } from '../lib/media';
+import type { AssetId } from '@/common/types/ids';
 import type {
   AssetSortKey,
   CreateTextAssetBody,
@@ -107,8 +108,8 @@ export interface UseAssetLibrary {
 
   // mutations
   createText: (body: Omit<CreateTextAssetBody, 'kind'>) => Promise<WorkshopAsset>;
-  patch: (id: string, patch: PatchAssetBody) => Promise<WorkshopAsset>;
-  remove: (id: string) => Promise<void>;
+  patch: (id: AssetId, patch: PatchAssetBody) => Promise<WorkshopAsset>;
+  remove: (id: AssetId) => Promise<void>;
 }
 
 export function useAssetLibrary(open: boolean): UseAssetLibrary {
@@ -263,7 +264,7 @@ export function useAssetLibrary(open: boolean): UseAssetLibrary {
     setTotal((n) => n + 1);
   }, []);
 
-  const removeFromList = useCallback((id: string) => {
+  const removeFromList = useCallback((id: AssetId) => {
     setItems((prev) => {
       if (!prev.some((a) => a.id === id)) return prev;
       setTotal((n) => Math.max(0, n - 1));
@@ -353,7 +354,7 @@ export function useAssetLibrary(open: boolean): UseAssetLibrary {
   );
 
   const patch = useCallback(
-    async (id: string, patchBody: PatchAssetBody) => {
+    async (id: AssetId, patchBody: PatchAssetBody) => {
       const asset = await apiPatchAsset(id, patchBody);
       // Moving out of the library removes it from this (library-scoped) list.
       if (asset.in_library === false) removeFromList(id);
@@ -364,7 +365,7 @@ export function useAssetLibrary(open: boolean): UseAssetLibrary {
   );
 
   const remove = useCallback(
-    async (id: string) => {
+    async (id: AssetId) => {
       await apiDeleteAsset(id);
       removeFromList(id);
       revokeWorkshopMedia(id);

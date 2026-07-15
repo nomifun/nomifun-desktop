@@ -29,7 +29,7 @@ async fn seed_test_provider(services: &nomifun_app::AppServices) {
         "INSERT INTO providers (\
             id, platform, name, base_url, api_key_encrypted, models, enabled, \
             capabilities, created_at, updated_at\
-         ) VALUES ('provider_test', 'openai', 'test', 'https://example.invalid', \
+         ) VALUES ('prov_0190f5fe-7c00-7a00-8000-000000000013', 'openai', 'test', 'https://example.invalid', \
                    'encrypted', '[\"model_test\"]', 1, '[]', 1, 1)",
     )
     .execute(services.database.pool())
@@ -72,6 +72,7 @@ async fn execution_routes_are_authenticated_and_legacy_routes_are_gone() {
 #[tokio::test]
 async fn repository_execution_round_trips_through_the_app_engine() {
     let (mut app, services) = build_app().await;
+    let installation_owner = services.authoritative_user_id.to_string();
     seed_test_provider(&services).await;
     let (token, csrf) =
         setup_and_login(&mut app, &services, "admin", "StrongP@ss1").await;
@@ -81,7 +82,7 @@ async fn repository_execution_round_trips_through_the_app_engine() {
     );
     let row = repository
         .create_execution_with_participants(
-            nomifun_auth::SYSTEM_USER_ID,
+            &installation_owner,
             &CreateAgentExecutionParams {
                 goal: "验证统一执行边界".to_owned(),
                 status: AgentExecutionStatus::Paused,
@@ -95,12 +96,12 @@ async fn repository_execution_round_trips_through_the_app_engine() {
                 initial_plan_input: r#"{"mode":"automatic"}"#.to_owned(),
             },
             &[NewAgentExecutionParticipant {
-                id: "participant_test".to_owned(),
+                id: "execpart_0190f5fe-7c00-7a00-8000-000000000014".to_owned(),
                 source_agent_id: "nomi".to_owned(),
                 preset_id: None,
                 preset_revision: None,
                 preset_snapshot: None,
-                provider_id: Some("provider_test".to_owned()),
+                provider_id: Some("prov_0190f5fe-7c00-7a00-8000-000000000013".to_owned()),
                 model: Some("model_test".to_owned()),
                 role: Some("tester".to_owned()),
                 capability: None,
@@ -116,7 +117,7 @@ async fn repository_execution_round_trips_through_the_app_engine() {
                 step_id: None,
                 attempt_id: None,
                 actor: nomifun_common::AgentExecutionActor::user(
-                    nomifun_auth::SYSTEM_USER_ID,
+                    &installation_owner,
                 ),
                 payload: serde_json::json!({"status":"paused"}).to_string(),
             },
@@ -205,7 +206,7 @@ async fn collaboration_template_routes_are_owner_scoped_crud() {
                 "context": {"ticket":"NOMI-37"},
                 "participants": [{
                     "source_agent_id": "reviewer",
-                    "provider_id": "provider_test",
+                    "provider_id": "prov_0190f5fe-7c00-7a00-8000-000000000013",
                     "model": "model_test",
                     "role": "reviewer"
                 }]

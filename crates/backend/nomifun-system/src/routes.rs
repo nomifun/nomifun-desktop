@@ -395,6 +395,9 @@ async fn refresh_free_models(
 ) -> Result<Json<ApiResponse<ManagedModelServiceStatus>>, AppError> {
     let status = managed_service(&state)?.refresh_free_models().await?;
     if status.last_error.is_none() {
+        let provider_id = status.provider_id.as_deref().ok_or_else(|| {
+            AppError::Internal("managed free-model status is missing its provider id".into())
+        })?;
         let models = status
             .models
             .iter()
@@ -403,8 +406,8 @@ async fn refresh_free_models(
         match state
             .model_profile_service
             .seed_missing_inferred(
-                crate::managed_model::FREE_MODEL_PROVIDER_ID,
-                crate::managed_model::FREE_MODEL_PROVIDER_ID,
+                provider_id,
+                crate::managed_model::FREE_MODEL_PLATFORM,
                 &models,
             )
             .await

@@ -10,7 +10,7 @@
 //! `list_documents` + `fetch_document`.
 
 use async_trait::async_trait;
-use nomifun_common::AppError;
+use nomifun_common::{AppError, ConnectorCredentialId};
 use serde::{Deserialize, Serialize};
 
 /// A decrypted connector credential, ready to authenticate against the remote.
@@ -18,7 +18,9 @@ use serde::{Deserialize, Serialize};
 /// for Feishu) decrypted by the service layer from `connector_credentials`.
 #[derive(Debug, Clone)]
 pub struct ConnectorCredential {
-    pub id: String,
+    /// Present only for a persisted credential. Validation probes are not
+    /// durable entities and therefore carry no synthetic/empty identifier.
+    pub id: Option<ConnectorCredentialId>,
     pub kind: String,
     pub name: String,
     pub payload: serde_json::Value,
@@ -184,7 +186,7 @@ mod tests {
     async fn trait_is_object_safe_and_defaults_apply() {
         let c: Arc<dyn KnowledgeConnector> = Arc::new(MockConnector);
         assert_eq!(c.kind(), "mock");
-        let cred = ConnectorCredential { id: "x".into(), kind: "mock".into(), name: "n".into(), payload: serde_json::json!({}) };
+        let cred = ConnectorCredential { id: None, kind: "mock".into(), name: "n".into(), payload: serde_json::json!({}) };
         assert_eq!(c.validate_credentials(&cred).await.unwrap().tenant_name.as_deref(), Some("Acme"));
         let page = c.list_documents(&cred, &ConnectorScope::default(), &SyncCursor::default(), None).await.unwrap();
         assert_eq!(page.docs.len(), 1);

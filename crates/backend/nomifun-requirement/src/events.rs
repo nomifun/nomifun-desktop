@@ -3,6 +3,7 @@
 use std::sync::Arc;
 
 use nomifun_api_types::{AutoWorkState, Requirement, RequirementDeletedPayload, TagPausedPayload, WebSocketMessage};
+use nomifun_common::{ConversationId, RequirementId, TerminalId, UserId};
 use nomifun_realtime::UserEventSink;
 use tracing::error;
 
@@ -36,11 +37,32 @@ impl RequirementEventEmitter {
         self.broadcast("requirement.statusChanged", req);
     }
 
-    pub fn emit_deleted(&self, id: i64) {
-        self.broadcast("requirement.deleted", &RequirementDeletedPayload { id });
+    pub fn emit_deleted(&self, id: &str) {
+        if let Err(error) = RequirementId::try_from(id) {
+            error!(id, error = %error, "Refusing to emit a requirement event with an invalid id");
+            return;
+        }
+        self.broadcast("requirement.deleted", &RequirementDeletedPayload { id: id.to_string() });
     }
 
     pub fn emit_autowork_changed(&self, state: &AutoWorkState) {
+        let target_valid = match state.kind {
+            nomifun_api_types::AutoWorkTargetKind::Conversation => {
+                ConversationId::try_from(state.target_id.as_str()).is_ok()
+            }
+            nomifun_api_types::AutoWorkTargetKind::Terminal => {
+                TerminalId::try_from(state.target_id.as_str()).is_ok()
+            }
+        };
+        if !target_valid
+            || state
+                .current_requirement_id
+                .as_deref()
+                .is_some_and(|id| RequirementId::try_from(id).is_err())
+        {
+            error!(target_id = %state.target_id, "Refusing to emit an AutoWork event with invalid durable ids");
+            return;
+        }
         self.broadcast("autowork.statusChanged", state);
     }
 
@@ -50,6 +72,10 @@ impl RequirementEventEmitter {
     }
 
     fn broadcast<T: serde::Serialize>(&self, event_name: &str, payload: &T) {
+        if let Err(error) = UserId::try_from(self.authoritative_user_id.as_ref()) {
+            error!(event_name, error = %error, "Refusing to emit a requirement event for an invalid user id");
+            return;
+        }
         let value = match serde_json::to_value(payload) {
             Ok(v) => v,
             Err(e) => {

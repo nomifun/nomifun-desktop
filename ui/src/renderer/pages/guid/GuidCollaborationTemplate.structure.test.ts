@@ -30,9 +30,9 @@ describe('Guid collaboration templates', () => {
     expect(picker.includes('!templateContainsModel(detail, mainModel)')).toBe(true);
     expect(page.includes('selectedCollaborationTemplate.models.some')).toBe(true);
     expect(bridge.includes('body.execution_template_id = p.execution_template_id')).toBe(true);
-    expect(storage.includes('execution_template_id?: string | null')).toBe(true);
+    expect(storage.includes('execution_template_id?: ExecutionTemplateId | null')).toBe(true);
     expect(searchMapper.includes('execution_template_id?: string | null')).toBe(true);
-    expect(conversation.includes('conversation.execution_template_id?.trim()')).toBe(true);
+    expect(conversation.includes('conversation.execution_template_id ?? null')).toBe(true);
     expect(conversation.includes('execution_template_id: next?.id ?? null')).toBe(true);
 
     const legacyExtraRead = /extra(?:\?\.|\.)execution_template_id|extra\[['"]execution_template_id['"]\]/;

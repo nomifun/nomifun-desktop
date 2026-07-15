@@ -11,7 +11,7 @@
 
 use std::sync::Arc;
 
-use nomifun_common::{AppError, ProviderUsage, ProviderUsageFeature};
+use nomifun_common::{AppError, ProviderId, ProviderUsage, ProviderUsageFeature};
 use nomifun_db::{
     IAgentExecutionRepository, IAgentExecutionTemplateRepository,
     IClientPreferenceRepository, IConversationRepository,
@@ -33,13 +33,8 @@ pub struct AppProviderDeletionCoordinator {
 #[async_trait::async_trait]
 impl ProviderDeletionCoordinator for AppProviderDeletionCoordinator {
     async fn usages(&self, provider_id: &str) -> Result<Vec<ProviderUsage>, AppError> {
-        // Central belt-and-suspenders guard: the empty provider_id is the
-        // "unconfigured" sentinel. The companion / public-agent scans already skip
-        // it, but bailing here also keeps the execution scan and the IDMM-backup
-        // preference compare from ever false-matching an unconfigured slot.
-        if provider_id.is_empty() {
-            return Ok(Vec::new());
-        }
+        ProviderId::parse(provider_id)
+            .map_err(|error| AppError::BadRequest(format!("invalid provider_id: {error}")))?;
 
         let mut out = Vec::new();
         out.extend(self.companion.providers_in_use(provider_id).await);
@@ -155,13 +150,14 @@ mod tests {
         dir: &std::path::Path,
     ) -> (AppProviderDeletionCoordinator, Arc<nomifun_db::Database>) {
         let db = Arc::new(init_database_memory().await.unwrap());
+        let installation_owner = nomifun_db::installation_owner_id(db.pool()).await.unwrap();
         for provider_id in [
-            "prov_conversation_lead",
-            "prov_in_use",
-            "prov_keep",
-            "prov_snapshot_audit_only",
-            "prov_template",
-            "prov_x",
+            "prov_0190f5fe-7c00-7a00-8000-000000000021",
+            "prov_0190f5fe-7c00-7a00-8000-000000000022",
+            "prov_0190f5fe-7c00-7a00-8000-000000000023",
+            "prov_0190f5fe-7c00-7a00-8000-000000000024",
+            "prov_0190f5fe-7c00-7a00-8000-000000000025",
+            "prov_0190f5fe-7c00-7a00-8000-000000000026",
         ] {
             nomifun_db::sqlx::query(
                 "INSERT INTO providers (\
@@ -179,7 +175,7 @@ mod tests {
         let companion = nomifun_companion::CompanionService::start(
             dir,
             Arc::new(nomifun_realtime::BroadcastEventBus::new(16)),
-            "system_default_user",
+            &installation_owner,
             Arc::new(NoopCompleter),
             Arc::new(nomifun_extension::skill_service::resolve_skill_paths(dir, dir)),
         )
@@ -213,42 +209,40 @@ mod tests {
         let (coord, _db) = coordinator(dir.path()).await;
         coord
             .client_prefs
-            .upsert_batch(&[(nomifun_idmm::sidecar::PREF_BACKUP_PROVIDER, "prov_x")])
+            .upsert_batch(&[(nomifun_idmm::sidecar::PREF_BACKUP_PROVIDER, "prov_0190f5fe-7c00-7a00-8000-000000000026")])
             .await
             .unwrap();
-        let usages = coord.usages("prov_x").await.unwrap();
+        let usages = coord.usages("prov_0190f5fe-7c00-7a00-8000-000000000026").await.unwrap();
         assert!(
             usages
                 .iter()
                 .any(|u| matches!(u.feature, ProviderUsageFeature::SmartDecision)),
             "global idmm backup provider should surface as a SmartDecision usage"
         );
-        assert!(coord.usages("prov_none").await.unwrap().is_empty());
+        assert!(coord.usages("prov_0190f5fe-7c00-7a00-8000-000000000027").await.unwrap().is_empty());
     }
 
     #[tokio::test]
-    async fn usages_skips_empty_provider_id() {
-        // Central belt-and-suspenders guard: even with a backup pref set, the empty
-        // "unconfigured" sentinel must never aggregate a usage (protects the
-        // execution scan + IDMM preference compare from false positives).
+    async fn usages_rejects_empty_provider_id() {
         let dir = tempfile::tempdir().unwrap();
         let (coord, _db) = coordinator(dir.path()).await;
         coord
             .client_prefs
-            .upsert_batch(&[(nomifun_idmm::sidecar::PREF_BACKUP_PROVIDER, "prov_x")])
+            .upsert_batch(&[(nomifun_idmm::sidecar::PREF_BACKUP_PROVIDER, "prov_0190f5fe-7c00-7a00-8000-000000000026")])
             .await
             .unwrap();
-        assert!(coord.usages("").await.unwrap().is_empty());
+        assert!(matches!(coord.usages("").await, Err(AppError::BadRequest(_))));
     }
 
     #[tokio::test]
     async fn aggregates_reopenable_agent_execution_usage() {
         let dir = tempfile::tempdir().unwrap();
         let (coord, db) = coordinator(dir.path()).await;
+        let installation_owner = nomifun_db::installation_owner_id(db.pool()).await.unwrap();
         let execution = coord
             .execution_repo
             .create_execution_with_participants(
-                nomifun_auth::SYSTEM_USER_ID,
+                &installation_owner,
                 &nomifun_db::CreateAgentExecutionParams {
                     goal: "正在使用受保护模型".into(),
                     status: AgentExecutionStatus::Paused,
@@ -267,7 +261,7 @@ mod tests {
                     preset_id: None,
                     preset_revision: None,
                     preset_snapshot: None,
-                    provider_id: Some("prov_in_use".into()),
+                    provider_id: Some("prov_0190f5fe-7c00-7a00-8000-000000000022".into()),
                     model: Some("model_in_use".into()),
                     role: None,
                     capability: None,
@@ -282,16 +276,14 @@ mod tests {
                     event_type: AgentExecutionEventKind::Created,
                     step_id: None,
                     attempt_id: None,
-                    actor: nomifun_common::AgentExecutionActor::user(
-                        nomifun_auth::SYSTEM_USER_ID,
-                    ),
+                    actor: nomifun_common::AgentExecutionActor::user(&installation_owner),
                     payload: "{}".into(),
                 },
             )
             .await
             .unwrap();
 
-        let usages = coord.usages("prov_in_use").await.unwrap();
+        let usages = coord.usages("prov_0190f5fe-7c00-7a00-8000-000000000022").await.unwrap();
         assert_eq!(usages.len(), 1);
         assert_eq!(usages[0].feature, ProviderUsageFeature::AgentExecution);
         assert_eq!(usages[0].label, "正在使用受保护模型");
@@ -308,7 +300,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(
-            coord.usages("prov_in_use").await.unwrap().len(),
+            coord.usages("prov_0190f5fe-7c00-7a00-8000-000000000022").await.unwrap().len(),
             1,
             "a completed execution can be reopened by retry/adopt and must retain its provider binding"
         );
@@ -324,7 +316,7 @@ mod tests {
             .await
             .unwrap();
         assert!(
-            coord.usages("prov_in_use").await.unwrap().is_empty(),
+            coord.usages("prov_0190f5fe-7c00-7a00-8000-000000000022").await.unwrap().is_empty(),
             "a cancelled execution can never reopen and must not retain a live provider binding"
         );
     }
@@ -332,11 +324,12 @@ mod tests {
     #[tokio::test]
     async fn aggregates_saved_agent_execution_template_usage() {
         let dir = tempfile::tempdir().unwrap();
-        let (coord, _db) = coordinator(dir.path()).await;
+        let (coord, db) = coordinator(dir.path()).await;
+        let installation_owner = nomifun_db::installation_owner_id(db.pool()).await.unwrap();
         let template = coord
             .execution_template_repo
             .create_template(
-                nomifun_auth::SYSTEM_USER_ID,
+                &installation_owner,
                 &nomifun_db::CreateAgentExecutionTemplateParams {
                     name: "长期协作方案".to_owned(),
                     description: None,
@@ -348,10 +341,10 @@ mod tests {
                         preset_id: Some("preset_template".to_owned()),
                         preset_revision: Some(1),
                         preset_snapshot: Some(
-                            r#"{"preset_id":"preset_template","preset_revision":1,"preset_name":"Template","target":"execution_step","resolved_model":{"provider_id":"prov_snapshot_audit_only","model":"snapshot_model","required":true}}"#
+                            r#"{"preset_id":"preset_template","preset_revision":1,"preset_name":"Template","target":"execution_step","resolved_model":{"provider_id":"prov_0190f5fe-7c00-7a00-8000-000000000024","model":"snapshot_model","required":true}}"#
                                 .to_owned(),
                         ),
-                        provider_id: Some("prov_template".to_owned()),
+                        provider_id: Some("prov_0190f5fe-7c00-7a00-8000-000000000025".to_owned()),
                         model: Some("model_template".to_owned()),
                         role: None,
                         capability: None,
@@ -367,7 +360,7 @@ mod tests {
             .await
             .unwrap();
 
-        let usages = coord.usages("prov_template").await.unwrap();
+        let usages = coord.usages("prov_0190f5fe-7c00-7a00-8000-000000000025").await.unwrap();
         assert_eq!(usages.len(), 1);
         assert_eq!(usages[0].feature, ProviderUsageFeature::AgentExecution);
         assert_eq!(usages[0].label, "长期协作方案");
@@ -377,7 +370,7 @@ mod tests {
         );
         assert!(
             coord
-                .usages("prov_snapshot_audit_only")
+                .usages("prov_0190f5fe-7c00-7a00-8000-000000000024")
                 .await
                 .unwrap()
                 .is_empty(),
@@ -395,12 +388,12 @@ mod tests {
         let mut cfg = get_global_failover_config(&coord.client_prefs).await;
         cfg.queue = vec![
             nomifun_common::ProviderWithModel {
-                provider_id: "prov_x".into(),
+                provider_id: "prov_0190f5fe-7c00-7a00-8000-000000000026".into(),
                 model: "m".into(),
                 use_model: None,
             },
             nomifun_common::ProviderWithModel {
-                provider_id: "prov_keep".into(),
+                provider_id: "prov_0190f5fe-7c00-7a00-8000-000000000023".into(),
                 model: "m2".into(),
                 use_model: None,
             },
@@ -409,13 +402,13 @@ mod tests {
             .await
             .unwrap();
 
-        nomifun_db::sqlx::query("DELETE FROM providers WHERE id = 'prov_x'")
+        nomifun_db::sqlx::query("DELETE FROM providers WHERE id = 'prov_0190f5fe-7c00-7a00-8000-000000000026'")
             .execute(db.pool())
             .await
             .unwrap();
         let after = get_global_failover_config(&coord.client_prefs).await;
         assert_eq!(after.queue.len(), 1);
-        assert_eq!(after.queue[0].provider_id, "prov_keep");
+        assert_eq!(after.queue[0].provider_id, "prov_0190f5fe-7c00-7a00-8000-000000000023");
     }
 
     #[tokio::test]
@@ -424,12 +417,13 @@ mod tests {
 
         let dir = tempfile::tempdir().unwrap();
         let (coord, db) = coordinator(dir.path()).await;
+        let installation_owner = nomifun_db::installation_owner_id(db.pool()).await.unwrap();
         let conversation_repo = SqliteConversationRepository::new(db.pool().clone());
         let now = nomifun_common::now_ms();
         let conversation_id = conversation_repo
             .create(&ConversationRow {
-                id: 0,
-                user_id: nomifun_auth::SYSTEM_USER_ID.into(),
+                id: nomifun_common::ConversationId::new().into_string(),
+                user_id: installation_owner,
                 name: "受保护主会话".into(),
                 r#type: "nomi".into(),
                 extra: "{}".into(),
@@ -439,7 +433,7 @@ mod tests {
                 execution_template_id: None,
                 model: Some(
                     serde_json::json!({
-                        "provider_id": "prov_conversation_lead",
+                        "provider_id": "prov_0190f5fe-7c00-7a00-8000-000000000021",
                         "model": "catalog-name",
                         "use_model": "effective-name"
                     })
@@ -460,7 +454,7 @@ mod tests {
             .await
             .unwrap();
 
-        let usages = coord.usages("prov_conversation_lead").await.unwrap();
+        let usages = coord.usages("prov_0190f5fe-7c00-7a00-8000-000000000021").await.unwrap();
         assert_eq!(usages.len(), 1);
         assert_eq!(usages[0].feature, ProviderUsageFeature::Conversation);
         assert_eq!(usages[0].label, "受保护主会话");
@@ -473,12 +467,13 @@ mod tests {
 
         let dir = tempfile::tempdir().unwrap();
         let (_coord, db) = coordinator(dir.path()).await;
+        let installation_owner = nomifun_db::installation_owner_id(db.pool()).await.unwrap();
         let conversation_repo = SqliteConversationRepository::new(db.pool().clone());
         let now = nomifun_common::now_ms();
         let conversation_id = conversation_repo
             .create(&ConversationRow {
-                id: 0,
-                user_id: "system_default_user".into(),
+                id: nomifun_common::ConversationId::new().into_string(),
+                user_id: installation_owner,
                 name: "cleanup target".into(),
                 r#type: "nomi".into(),
                 extra: serde_json::json!({
@@ -489,15 +484,15 @@ mod tests {
                 execution_model_pool: Some(serde_json::json!({
                     "mode": "range",
                     "models": [
-                        { "provider_id": "prov_x", "model": "gone" },
-                        { "provider_id": "prov_keep", "model": "live" }
+                        { "provider_id": "prov_0190f5fe-7c00-7a00-8000-000000000026", "model": "gone" },
+                        { "provider_id": "prov_0190f5fe-7c00-7a00-8000-000000000023", "model": "live" }
                     ]
                 }).to_string()),
                 decision_policy: "automatic".into(),
                 execution_template_id: None,
                 model: Some(
                     serde_json::json!({
-                        "provider_id": "prov_keep",
+                        "provider_id": "prov_0190f5fe-7c00-7a00-8000-000000000023",
                         "model": "live"
                     })
                     .to_string(),
@@ -517,12 +512,12 @@ mod tests {
             .await
             .unwrap();
 
-        nomifun_db::sqlx::query("DELETE FROM providers WHERE id = 'prov_x'")
+        nomifun_db::sqlx::query("DELETE FROM providers WHERE id = 'prov_0190f5fe-7c00-7a00-8000-000000000026'")
             .execute(db.pool())
             .await
             .unwrap();
 
-        let cleaned = conversation_repo.get(conversation_id).await.unwrap().unwrap();
+        let cleaned = conversation_repo.get(&conversation_id).await.unwrap().unwrap();
         let extra: serde_json::Value = serde_json::from_str(&cleaned.extra).unwrap();
         assert_eq!(extra["workspace"], "/keep");
         let model_pool: serde_json::Value = serde_json::from_str(
@@ -533,7 +528,7 @@ mod tests {
             model_pool,
             serde_json::json!({
                 "mode": "range",
-                "models": [{ "provider_id": "prov_keep", "model": "live" }]
+                "models": [{ "provider_id": "prov_0190f5fe-7c00-7a00-8000-000000000023", "model": "live" }]
             })
         );
     }

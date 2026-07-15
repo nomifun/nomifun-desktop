@@ -5,18 +5,22 @@
  */
 
 import { describe, expect, test } from 'bun:test';
+import { conversationTarget, terminalTarget } from '@/common/types/ids';
 import { resolveWorkspaceCollapseAfterHasFiles } from './useWorkspaceCollapse';
 
 describe('resolveWorkspaceCollapseAfterHasFiles', () => {
+  const conversation = conversationTarget('conv_0190f5fe-7c00-7a00-8000-000000000042');
+
   test('keeps the conversation workspace collapsed when file signals are not allowed to auto-expand it', () => {
     expect(
       resolveWorkspaceCollapseAfterHasFiles({
         currentCollapsed: true,
-        detail: { hasFiles: true, conversation_id: '42', isInitial: true },
+        detail: { target: conversation, hasFiles: true, isInitial: true },
         isMobile: false,
         autoExpandOnFiles: false,
         isTemporaryWorkspace: false,
         userPreference: null,
+        target: conversation,
       })
     ).toBe(true);
   });
@@ -25,11 +29,12 @@ describe('resolveWorkspaceCollapseAfterHasFiles', () => {
     expect(
       resolveWorkspaceCollapseAfterHasFiles({
         currentCollapsed: true,
-        detail: { hasFiles: true, conversation_id: '42', isInitial: false },
+        detail: { target: conversation, hasFiles: true, isInitial: false },
         isMobile: false,
         autoExpandOnFiles: false,
         isTemporaryWorkspace: true,
         userPreference: null,
+        target: conversation,
       })
     ).toBe(true);
   });
@@ -38,24 +43,27 @@ describe('resolveWorkspaceCollapseAfterHasFiles', () => {
     expect(
       resolveWorkspaceCollapseAfterHasFiles({
         currentCollapsed: true,
-        detail: { hasFiles: true, conversation_id: '42', isInitial: true },
+        detail: { target: conversation, hasFiles: true, isInitial: true },
         isMobile: false,
         autoExpandOnFiles: false,
         isTemporaryWorkspace: false,
         userPreference: 'expanded',
+        target: conversation,
       })
     ).toBe(false);
   });
 
   test('preserves terminal-style auto-expand when enabled explicitly', () => {
+    const terminal = terminalTarget('term_0190f5fe-7c00-7a00-8000-000000000001');
     expect(
       resolveWorkspaceCollapseAfterHasFiles({
         currentCollapsed: true,
-        detail: { hasFiles: true, conversation_id: 'terminal-1', isInitial: true },
+        detail: { target: terminal, hasFiles: true, isInitial: true },
         isMobile: false,
         autoExpandOnFiles: true,
         isTemporaryWorkspace: false,
         userPreference: null,
+        target: terminal,
       })
     ).toBe(false);
   });
@@ -64,26 +72,34 @@ describe('resolveWorkspaceCollapseAfterHasFiles', () => {
     expect(
       resolveWorkspaceCollapseAfterHasFiles({
         currentCollapsed: true,
-        detail: { hasFiles: true, conversation_id: 'other-workspace', isInitial: true },
+        detail: {
+          target: conversationTarget('conv_0190f5fe-7c00-7a00-8000-000000000043'),
+          hasFiles: true,
+          isInitial: true,
+        },
         isMobile: false,
         autoExpandOnFiles: true,
         isTemporaryWorkspace: false,
         userPreference: null,
-        workspaceEventKey: 'current-workspace',
+        target: conversation,
       })
     ).toBe(true);
   });
 
-  test('ignores unscoped file signals when the rail has a workspace event key', () => {
+  test('does not cross conversation and terminal namespaces for the same legacy id', () => {
     expect(
       resolveWorkspaceCollapseAfterHasFiles({
         currentCollapsed: true,
-        detail: { hasFiles: true, isInitial: true },
+        detail: {
+          target: terminalTarget('term_0190f5fe-7c00-7a00-8000-000000000042'),
+          hasFiles: true,
+          isInitial: true,
+        },
         isMobile: false,
         autoExpandOnFiles: true,
         isTemporaryWorkspace: false,
         userPreference: null,
-        workspaceEventKey: 'current-workspace',
+        target: conversation,
       })
     ).toBe(true);
   });

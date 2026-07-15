@@ -14,34 +14,7 @@ import { useNavigate } from 'react-router-dom';
 const MessageCronTrigger: React.FC<{ artifact: ICronTriggerArtifact }> = ({ artifact }) => {
   const { t } = useTranslation();
   const navigate = useNavigate();
-  const rawContent = artifact.payload as
-    | ICronTriggerArtifact['payload']
-    | {
-        cronJobId?: string;
-        cronJobName?: string;
-        triggeredAt?: number;
-      }
-    | string;
-  const parseContent = () => {
-    if (typeof rawContent !== 'string') {
-      return rawContent;
-    }
-    try {
-      return JSON.parse(rawContent) as
-        | ICronTriggerArtifact['payload']
-        | {
-            cronJobId?: string;
-            cronJobName?: string;
-            triggeredAt?: number;
-          };
-    } catch {
-      return {} as ICronTriggerArtifact['payload'];
-    }
-  };
-  const parsedContent = parseContent();
-  const cron_job_id = 'cron_job_id' in parsedContent ? parsedContent.cron_job_id : (parsedContent.cronJobId ?? '');
-  const cron_job_name =
-    'cron_job_name' in parsedContent ? parsedContent.cron_job_name : (parsedContent.cronJobName ?? '');
+  const { cron_job_id, cron_job_name } = artifact.payload;
 
   return (
     <div

@@ -27,32 +27,28 @@ impl IUserRepository for SqliteUserRepository {
     }
 
     async fn get_system_user(&self) -> Result<Option<User>, DbError> {
-        let user = sqlx::query_as::<_, User>("SELECT * FROM users WHERE id = 'system_default_user'")
-            .fetch_optional(&self.pool)
-            .await?;
+        let user = sqlx::query_as::<_, User>(
+            "SELECT users.* \
+             FROM installation_identity identity \
+             JOIN users ON users.id = identity.owner_user_id \
+             WHERE identity.key = 'installation'",
+        )
+        .fetch_optional(&self.pool)
+        .await?;
 
         Ok(user)
     }
 
     async fn get_primary_webui_user(&self) -> Result<Option<User>, DbError> {
-        // Priority: system default user first
-        if let Some(user) = self.get_system_user().await? {
-            return Ok(Some(user));
-        }
-
-        // Fallback: user named "admin"
-        let user = sqlx::query_as::<_, User>("SELECT * FROM users WHERE username = 'admin'")
-            .fetch_optional(&self.pool)
-            .await?;
-
-        Ok(user)
+        self.get_system_user().await
     }
 
     async fn set_system_user_credentials(&self, username: &str, password_hash: &str) -> Result<(), DbError> {
         let now = nomifun_common::now_ms();
         let result = sqlx::query(
             "UPDATE users SET username = ?, password_hash = ?, updated_at = ? \
-             WHERE id = 'system_default_user'",
+             WHERE id = (SELECT owner_user_id FROM installation_identity \
+                         WHERE key = 'installation')",
         )
         .bind(username)
         .bind(password_hash)
@@ -67,7 +63,9 @@ impl IUserRepository for SqliteUserRepository {
         })?;
 
         if result.rows_affected() == 0 {
-            return Err(DbError::NotFound("system_default_user not found".to_string()));
+            return Err(DbError::NotFound(
+                "installation owner user not found".to_string(),
+            ));
         }
 
         Ok(())
@@ -80,12 +78,14 @@ impl IUserRepository for SqliteUserRepository {
     ) -> Result<bool, DbError> {
         let now = nomifun_common::now_ms();
         // The WHERE clause is the gate: it matches only the freshly-seeded
-        // system user (empty/NULL password). SQLite serialises writers, so two
+        // installation owner (empty/NULL password). SQLite serialises writers, so two
         // concurrent first-run callers cannot both match — the second sees the
         // already-populated hash and updates 0 rows.
         let result = sqlx::query(
             "UPDATE users SET username = ?, password_hash = ?, updated_at = ? \
-             WHERE id = 'system_default_user' AND (password_hash = '' OR password_hash IS NULL)",
+             WHERE id = (SELECT owner_user_id FROM installation_identity \
+                         WHERE key = 'installation') \
+               AND (password_hash = '' OR password_hash IS NULL)",
         )
         .bind(username)
         .bind(password_hash)
@@ -109,7 +109,9 @@ impl IUserRepository for SqliteUserRepository {
         // the gate, so a second concurrent enable writes 0 rows.
         let result = sqlx::query(
             "UPDATE users SET password_hash = ?, updated_at = ? \
-             WHERE id = 'system_default_user' AND (password_hash = '' OR password_hash IS NULL)",
+             WHERE id = (SELECT owner_user_id FROM installation_identity \
+                         WHERE key = 'installation') \
+               AND (password_hash = '' OR password_hash IS NULL)",
         )
         .bind(password_hash)
         .bind(now)
@@ -120,14 +122,14 @@ impl IUserRepository for SqliteUserRepository {
     }
 
     async fn create_user(&self, username: &str, password_hash: &str) -> Result<User, DbError> {
-        let id = nomifun_common::generate_prefixed_id("user");
+        let id = nomifun_common::UserId::new();
         let now = nomifun_common::now_ms();
 
         sqlx::query(
             "INSERT INTO users (id, username, password_hash, created_at, updated_at) \
              VALUES (?, ?, ?, ?, ?)",
         )
-        .bind(&id)
+        .bind(id.as_str())
         .bind(username)
         .bind(password_hash)
         .bind(now)
@@ -369,21 +371,21 @@ mod tests {
 
     #[tokio::test]
     async fn get_system_user_returns_default() {
-        let (repo, _db) = setup().await;
+        let (repo, db) = setup().await;
+        let owner = crate::installation_owner_id(db.pool()).await.unwrap();
         let user = repo.get_system_user().await.unwrap().unwrap();
-        assert_eq!(user.id, "system_default_user");
+        assert_eq!(user.id.as_str(), owner);
         assert_eq!(user.username, "admin");
     }
 
     #[tokio::test]
     async fn get_primary_webui_user_returns_system_user_first() {
-        let (repo, _db) = setup().await;
-        // Can't use "admin" here: the seeded system_default_user already owns that
-        // username after the M6 default change. Any fresh user gets a different name.
+        let (repo, db) = setup().await;
+        let owner = crate::installation_owner_id(db.pool()).await.unwrap();
         repo.create_user("other", "hash").await.unwrap();
 
         let user = repo.get_primary_webui_user().await.unwrap().unwrap();
-        assert_eq!(user.id, "system_default_user");
+        assert_eq!(user.id.as_str(), owner);
     }
 
     #[tokio::test]
@@ -425,7 +427,7 @@ mod tests {
         repo.create_user("frank", "h").await.unwrap();
 
         let users = repo.list_users().await.unwrap();
-        // system_default_user + eve + frank
+        // installation owner + eve + frank
         assert_eq!(users.len(), 3);
     }
 
@@ -434,7 +436,7 @@ mod tests {
         let (repo, _db) = setup().await;
         repo.create_user("grace", "h").await.unwrap();
 
-        // system_default_user + grace
+        // installation owner + grace
         assert_eq!(repo.count_users().await.unwrap(), 2);
     }
 
@@ -525,10 +527,11 @@ mod tests {
 
     #[tokio::test]
     async fn set_system_user_password_if_uninitialized_preserves_username() {
-        let (repo, _db) = setup().await;
+        let (repo, db) = setup().await;
+        let owner = crate::installation_owner_id(db.pool()).await.unwrap();
 
         // User renamed the system account while its password was still empty.
-        repo.update_username("system_default_user", "bob").await.unwrap();
+        repo.update_username(&owner, "bob").await.unwrap();
 
         // Provisioning a password must fill the password WITHOUT touching the username.
         let wrote = repo

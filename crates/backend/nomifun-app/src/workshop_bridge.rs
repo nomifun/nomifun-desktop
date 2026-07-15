@@ -11,7 +11,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use nomifun_common::{generate_prefixed_id, now_ms};
+use nomifun_common::{WorkshopAssetId, now_ms};
 use nomifun_creation::{AssetSink, AssetSource, CreationError, LoadedAsset, PersistAsset};
 use nomifun_db::{IWorkshopRepository, WorkshopAssetRow};
 use nomifun_workshop::WORKSHOP_REL_DIR;
@@ -43,7 +43,7 @@ impl WorkshopAssetBridge {
         in_library: bool,
         origin: &Value,
     ) -> Result<String, CreationError> {
-        let id = generate_prefixed_id("wsa");
+        let id = WorkshopAssetId::new().into_string();
         let now = now_ms();
         let row = WorkshopAssetRow {
             id: id.clone(),
@@ -86,7 +86,7 @@ impl AssetSink for WorkshopAssetBridge {
             return self.persist_text(bytes, mime, in_library, &origin).await;
         }
 
-        let id = generate_prefixed_id("wsa");
+        let id = WorkshopAssetId::new().into_string();
         let ext = ext_for_mime(&mime);
         let disk_name = format!("{id}.{ext}");
         let rel_path = format!("{WORKSHOP_REL_DIR}/assets/{disk_name}");
@@ -140,6 +140,8 @@ impl AssetSink for WorkshopAssetBridge {
 #[async_trait]
 impl AssetSource for WorkshopAssetBridge {
     async fn load(&self, asset_id: &str) -> Result<LoadedAsset, CreationError> {
+        WorkshopAssetId::parse(asset_id)
+            .map_err(|error| CreationError::new("asset_id", format!("invalid input asset id: {error}")))?;
         let row = self
             .repo
             .get_asset(asset_id)
@@ -214,6 +216,7 @@ fn ext_for_mime(mime: &str) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use nomifun_common::{WorkshopCanvasId, WorkshopNodeId};
     use nomifun_db::{SqliteWorkshopRepository, init_database_memory};
     use serde_json::json;
 
@@ -230,11 +233,12 @@ mod tests {
 
     #[test]
     fn title_from_origin_truncates_or_falls_back() {
-        assert_eq!(title_from_origin(&json!({"prompt": "a fox"}), "wsa_1"), "a fox");
-        assert_eq!(title_from_origin(&json!({"prompt": "   "}), "wsa_1"), "wsa_1");
-        assert_eq!(title_from_origin(&json!({}), "wsa_1"), "wsa_1");
+        let fallback_id = WorkshopAssetId::new().into_string();
+        assert_eq!(title_from_origin(&json!({"prompt": "a fox"}), &fallback_id), "a fox");
+        assert_eq!(title_from_origin(&json!({"prompt": "   "}), &fallback_id), fallback_id);
+        assert_eq!(title_from_origin(&json!({}), &fallback_id), fallback_id);
         let long = "x".repeat(80);
-        assert_eq!(title_from_origin(&json!({"prompt": long}), "wsa_1").chars().count(), 60);
+        assert_eq!(title_from_origin(&json!({"prompt": long}), &fallback_id).chars().count(), 60);
     }
 
     async fn bridge() -> (WorkshopAssetBridge, tempfile::TempDir, nomifun_db::Database) {
@@ -250,8 +254,8 @@ mod tests {
         let (bridge, dir, _db) = bridge().await;
         let id = bridge
             .persist(PersistAsset {
-                canvas_id: Some("wsc_1".into()),
-                node_id: Some("n_1".into()),
+                canvas_id: Some(WorkshopCanvasId::new().into_string()),
+                node_id: Some(WorkshopNodeId::new().into_string()),
                 bytes: "generated story".as_bytes().to_vec(),
                 mime: "text/plain; charset=utf-8".into(),
                 in_library: true,

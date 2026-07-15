@@ -7,6 +7,7 @@
 import { ipcBridge } from '@/common';
 import type { IProvider, ModelProfile, ModelTask, ModelTrait } from '@/common/config/storage';
 import { prefixedId } from '@/common/utils';
+import { parseProviderId, type ProviderId } from '@/common/types/ids';
 import { Button, Checkbox, Collapse, Divider, Input, Message, Modal, Popconfirm, Popover, Select, Switch, Tag, Tooltip } from '@arco-design/web-react';
 import { useArcoMessage } from '@/renderer/utils/ui/useArcoMessage';
 import { Copy, DeleteFour, Info, Minus, Plus, Write, Heartbeat, Drag, TagOne } from '@icon-park/react';
@@ -375,12 +376,12 @@ const ModelModalityEditor: React.FC<{
   );
 };
 
-const providerSortableId = (providerId: string) => `provider:${providerId}`;
-const modelSortableId = (providerId: string, model: string) => `model:${providerId}:${model}`;
+const providerSortableId = (providerId: ProviderId) => `provider:${providerId}`;
+const modelSortableId = (providerId: ProviderId, model: string) => `model:${providerId}:${model}`;
 
 type SortableDragData =
-  | { type: 'provider'; providerId: string }
-  | { type: 'model'; providerId: string; model: string };
+  | { type: 'provider'; providerId: ProviderId }
+  | { type: 'model'; providerId: ProviderId; model: string };
 
 type SortableRenderProps = {
   attributes: ReturnType<typeof useSortable>['attributes'];
@@ -413,7 +414,7 @@ const SortableProviderCard: React.FC<{
 };
 
 const SortableModelRow: React.FC<{
-  providerId: string;
+  providerId: ProviderId;
   model: string;
   children: (props: SortableRenderProps) => React.ReactNode;
 }> = ({ providerId, model, children }) => {
@@ -534,7 +535,7 @@ const ModelModalContent: React.FC = () => {
       });
   };
 
-  const removePlatform = (id: string) => {
+  const removePlatform = (id: ProviderId) => {
     const nextArray = (data ?? []).filter((item: IProvider) => item.id !== id);
     void mutate(nextArray, false);
     ipcBridge.mode.deleteProvider
@@ -660,7 +661,7 @@ const ModelModalContent: React.FC = () => {
   const duplicatePlatform = (platform: IProvider) => {
     const copied = cloneProviderConfig(
       platform,
-      prefixedId('prov'),
+      parseProviderId(prefixedId('prov')),
       t('settings.providerCopySuffix', { defaultValue: '副本' })
     );
     updatePlatform(copied, () => {

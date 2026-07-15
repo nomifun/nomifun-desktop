@@ -2,7 +2,7 @@
 //! builders. Produced by `FactoryContext::resolve` at the top of
 //! `build_agent`, then passed into the per-agent `build(..)` functions.
 
-use nomifun_common::{AgentType, AppError};
+use nomifun_common::{AgentType, AppError, ConversationId, validate_prefixed_id};
 
 use crate::factory::AgentFactoryDeps;
 use crate::types::AgentRuntimeBuildOptions;
@@ -17,6 +17,8 @@ pub(super) struct FactoryContext {
 
 impl FactoryContext {
     pub async fn resolve(deps: &AgentFactoryDeps, options: &AgentRuntimeBuildOptions) -> Result<Self, AppError> {
+        ConversationId::parse(&options.conversation_id)
+            .map_err(|error| AppError::BadRequest(format!("invalid Agent runtime conversation id: {error}")))?;
         let conversation_id = options.conversation_id.clone();
 
         // `is_custom_workspace` is the authoritative signal for "user
@@ -24,16 +26,19 @@ impl FactoryContext {
         // managers that care (currently AcpAgentManager, for first-message
         // injection). Do NOT re-derive it from the workspace string later:
         // user paths may incidentally contain "conversations" or "-temp-".
-        let (workspace, is_custom_workspace) = if options.workspace.is_empty() {
-            // Fallback workspace path: kept in sync with
-            // ConversationService::create, which places auto-provisioned
-            // workspaces under `{work_dir}/conversations/{label}-temp-{token}/`.
-            // Reaching this branch means the caller did not supply an
-            // `extra.workspace`; construct the same `{label}-temp-{token}`
-            // layout so DB id reuse cannot land a new conversation in an old
-            // temp workspace.
+        //
+        // A canonical `temp_workspace_id` is the durable marker for a
+        // backend-managed workspace. Always rebase that workspace under this
+        // installation's current `work_dir`; the persisted absolute workspace
+        // may point at the source installation after restore/import.
+        let (workspace, is_custom_workspace) = if options
+            .extra
+            .get(TEMP_WORKSPACE_ID_EXTRA_KEY)
+            .is_some()
+            || options.workspace.trim().is_empty()
+        {
+            let temp_workspace_id = temp_workspace_id_for_options(options)?;
             let label = workspace_label(&options.agent_type, options.extra.get("backend"));
-            let temp_workspace_id = temp_workspace_id_for_options(options);
             let dir = deps
                 .work_dir
                 .join("conversations")
@@ -69,58 +74,98 @@ fn workspace_label(agent_type: &AgentType, backend: Option<&serde_json::Value>) 
     agent_type.serde_name().to_owned()
 }
 
-fn temp_workspace_id_for_options(options: &AgentRuntimeBuildOptions) -> String {
-    options
+fn temp_workspace_id_for_options(
+    options: &AgentRuntimeBuildOptions,
+) -> Result<&str, AppError> {
+    let value = options
         .extra
         .get(TEMP_WORKSPACE_ID_EXTRA_KEY)
         .and_then(serde_json::Value::as_str)
         .map(str::trim)
         .filter(|value| !value.is_empty())
-        .map(ToOwned::to_owned)
-        .unwrap_or_else(|| match options.conversation_created_at {
-            Some(created_at) => format!("legacy-{}-{created_at}", options.conversation_id),
-            None => format!("legacy-{}", options.conversation_id),
-        })
+        .ok_or_else(|| {
+            AppError::Internal(format!(
+                "conversation {} has no canonical temp_workspace_id for its managed workspace",
+                options.conversation_id
+            ))
+        })?;
+    validate_prefixed_id(value, "ws").map_err(|error| {
+        AppError::Internal(format!(
+            "conversation {} has invalid temp_workspace_id '{value}': {error}",
+            options.conversation_id
+        ))
+    })?;
+    Ok(value)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nomifun_common::ProviderWithModel;
     use serde_json::json;
 
-    fn options(extra: serde_json::Value, created_at: Option<i64>) -> AgentRuntimeBuildOptions {
+    const WORKSPACE_ID: &str = "ws_0190f5fe-7c00-7a00-8abc-012345678901";
+
+    fn options(extra: serde_json::Value) -> AgentRuntimeBuildOptions {
         AgentRuntimeBuildOptions {
-            user_id: "test-user".into(),
+            user_id: "user_0190f5fe-7c00-7a00-8000-000000000001".into(),
             agent_type: AgentType::Acp,
             workspace: String::new(),
-            model: ProviderWithModel {
-                provider_id: "p".into(),
-                model: "m".into(),
-                use_model: None,
-            },
-            conversation_id: "1".into(),
+            model: None,
+            conversation_id: "conv_0190f5fe-7c00-7a00-8abc-012345678901".into(),
             delegation_policy: Default::default(),
             extra,
-            conversation_created_at: created_at,
+            conversation_created_at: Some(10),
         }
     }
 
     #[test]
-    fn temp_workspace_id_prefers_backend_minted_token() {
-        let opts = options(json!({ "temp_workspace_id": "ws_abc", "backend": "claude" }), Some(10));
-        assert_eq!(temp_workspace_id_for_options(&opts), "ws_abc");
+    fn temp_workspace_id_accepts_backend_minted_canonical_token() {
+        let opts = options(json!({
+            "temp_workspace_id": WORKSPACE_ID,
+            "backend": "claude"
+        }));
+        assert_eq!(temp_workspace_id_for_options(&opts).unwrap(), WORKSPACE_ID);
     }
 
     #[test]
-    fn legacy_temp_workspace_id_includes_created_at_to_avoid_id_only_reuse() {
-        let first = options(json!({ "backend": "claude" }), Some(10));
-        let second = options(json!({ "backend": "claude" }), Some(20));
+    fn missing_or_malformed_temp_workspace_id_fails_closed() {
+        for extra in [
+            json!({ "backend": "claude" }),
+            json!({ "backend": "claude", "temp_workspace_id": "" }),
+            json!({ "backend": "claude", "temp_workspace_id": "ws_abc" }),
+            json!({ "backend": "claude", "temp_workspace_id": 7 }),
+        ] {
+            let error = temp_workspace_id_for_options(&options(extra)).unwrap_err();
+            assert!(matches!(error, AppError::Internal(message) if message.contains("temp_workspace_id")));
+        }
+    }
 
-        assert_ne!(
-            temp_workspace_id_for_options(&first),
-            temp_workspace_id_for_options(&second),
-            "legacy fallback must not be derived solely from reusable conversation_id"
+    #[test]
+    fn managed_workspace_path_rebases_under_current_work_dir() {
+        let work_dir =
+            std::env::temp_dir().join(format!("nomifun-factory-rebase-{}", nomifun_common::generate_id()));
+        let mut opts = options(json!({
+            "backend": "claude",
+            "temp_workspace_id": WORKSPACE_ID,
+            "workspace": "/source-install/conversations/claude-temp-stale"
+        }));
+        opts.workspace =
+            "/source-install/conversations/claude-temp-stale".to_owned();
+
+        let temp_workspace_id = temp_workspace_id_for_options(&opts).unwrap();
+        let workspace = work_dir
+            .join("conversations")
+            .join(format!(
+                "{}-temp-{temp_workspace_id}",
+                workspace_label(&opts.agent_type, opts.extra.get("backend"))
+            ));
+
+        assert_eq!(
+            workspace,
+            work_dir
+                .join("conversations")
+                .join(format!("claude-temp-{WORKSPACE_ID}"))
         );
+        assert!(!workspace.starts_with("/source-install"));
     }
 }

@@ -25,11 +25,12 @@ impl nomifun_realtime::UserEventSink for NoopBroadcaster {
 
 async fn build_service() -> (Arc<nomifun_knowledge::KnowledgeService>, tempfile::TempDir) {
     let db = nomifun_db::init_database_memory().await.expect("in-memory db");
+    let installation_owner = nomifun_db::installation_owner_id(db.pool()).await.unwrap();
     let repo = Arc::new(nomifun_db::SqliteKnowledgeRepository::new(db.pool().clone()));
     let tmp = tempfile::tempdir().unwrap();
     let emitter = nomifun_knowledge::KnowledgeEventEmitter::new(
         Arc::new(NoopBroadcaster),
-        Arc::from("system_default_user"),
+        Arc::from(installation_owner),
     );
     let svc = Arc::new(nomifun_knowledge::KnowledgeService::new(repo, tmp.path(), emitter));
     (svc, tmp)
@@ -39,7 +40,7 @@ async fn build_service() -> (Arc<nomifun_knowledge::KnowledgeService>, tempfile:
 async fn knowledge_search_tool_finds_topic_through_full_stack() {
     let (svc, _tmp) = build_service().await;
     let info = svc.create_base("运维手册", "", None, None).await.unwrap();
-    let root = svc.data_dir().join("knowledge").join(&info.id);
+    let root = svc.data_dir().join("knowledge").join(info.id.as_str());
     // The self-ignore the mount writes — must NOT blind the search.
     std::fs::write(root.join(".gitignore"), "*\n").unwrap();
     std::fs::write(root.join("rollback.md"), "# 回滚流程\n回滚分三步\n").unwrap();
@@ -58,7 +59,7 @@ async fn knowledge_search_tool_finds_topic_through_full_stack() {
 async fn knowledge_search_tool_reports_no_match_cleanly() {
     let (svc, _tmp) = build_service().await;
     let info = svc.create_base("库", "", None, None).await.unwrap();
-    let root = svc.data_dir().join("knowledge").join(&info.id);
+    let root = svc.data_dir().join("knowledge").join(info.id.as_str());
     std::fs::write(root.join("a.md"), "# A\nunrelated content\n").unwrap();
 
     let sink: Arc<dyn nomi_agent::knowledge_tools::KnowledgeRetrievalSink> =

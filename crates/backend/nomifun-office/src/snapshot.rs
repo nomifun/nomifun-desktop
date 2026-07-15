@@ -158,10 +158,8 @@ fn compute_target_hash(target: &PreviewHistoryTargetDto) -> String {
         }
         hasher.update(b"\0");
     }
-    // conversation_id is now an integer; fold its canonical decimal form into the
-    // hash so the snapshot key still varies per conversation.
-    if let Some(conv_id) = target.conversation_id {
-        hasher.update(conv_id.to_string().as_bytes());
+    if let Some(conv_id) = target.conversation_id.as_ref() {
+        hasher.update(conv_id.as_str().as_bytes());
     }
     hasher.update(b"\0");
 
@@ -275,6 +273,10 @@ mod tests {
 
     #[test]
     fn compute_hash_extra_fields_differ() {
+        let conversation_id = nomifun_common::ConversationId::try_from(
+            "conv_0190f5fe-7c00-7a00-8abc-012345678901",
+        )
+        .unwrap();
         let t1 = PreviewHistoryTargetDto {
             content_type: PreviewContentType::Code,
             file_path: Some("/x.rs".into()),
@@ -282,7 +284,7 @@ mod tests {
             file_name: None,
             title: None,
             language: None,
-            conversation_id: Some(1),
+            conversation_id: Some(conversation_id),
         };
         let t2 = PreviewHistoryTargetDto {
             content_type: PreviewContentType::Code,

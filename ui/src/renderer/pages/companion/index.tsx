@@ -7,6 +7,7 @@
 import React, { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { ipcBridge } from '@/common';
+import { parseCompanionId, type CompanionId, type ConversationId } from '@/common/types/ids';
 import { isBackendHttpError } from '@/common/adapter/httpBridge';
 import { isTauriRuntime } from '@/common/adapter/tauriRuntime';
 import type { ICompanionProfile, ICompanionSuggestion, IResponseMessage } from '@/common/adapter/ipcBridge';
@@ -93,13 +94,18 @@ const inQuietHours = (start: string, end: string): boolean => {
 };
 
 /** Owning companion id from the window URL (`index.html#/companion?companionId={companion_id}`). */
-const parseCompanionIdFromHash = (): string | null => {
+const parseCompanionIdFromHash = (): CompanionId | null => {
   if (typeof window === 'undefined') return null;
   const hash = window.location.hash; // "#/companion?companionId={companion_id}"
   const q = hash.indexOf('?');
   if (q === -1) return null;
-  const id = new URLSearchParams(hash.slice(q + 1)).get('companionId');
-  return id && id.trim() ? id.trim() : null;
+  const id = new URLSearchParams(hash.slice(q + 1)).get('companion_id');
+  if (!id) return null;
+  try {
+    return parseCompanionId(id);
+  } catch {
+    return null;
+  }
 };
 
 /**
@@ -112,7 +118,7 @@ const parseCompanionIdFromHash = (): string | null => {
  */
 const CompanionPage: React.FC = () => {
   const { t } = useTranslation();
-  const [companionId, setCompanionId] = useState<string | null>(parseCompanionIdFromHash);
+  const [companionId, setCompanionId] = useState<CompanionId | null>(parseCompanionIdFromHash);
   const [profile, setProfile] = useState<ICompanionProfile | null>(null);
   const [mood, setMood] = useState<RabbitMood>('content');
   const [activity, setActivity] = useState<RabbitActivity>('idle');
@@ -133,7 +139,7 @@ const CompanionPage: React.FC = () => {
   /** 已附加的图片文件绝对路径（粘贴或附件选择得到）。 */
   const [attachedFiles, setAttachedFiles] = useState<string[]>([]);
   /** 展开时预解析的会话 id（供粘贴上传关联；best-effort）。 */
-  const [composerThreadId, setComposerThreadId] = useState<number | null>(null);
+  const [composerThreadId, setComposerThreadId] = useState<ConversationId | null>(null);
   /** 拖拽图片到桌宠窗时的高亮态（由 Tauri 原生 onDragDropEvent 驱动）。 */
   const [dragOver, setDragOver] = useState(false);
   /** 正在拖动伙伴 / 刚拖完：冻结点击穿透轮询以根除拖动闪动。 */
@@ -154,7 +160,7 @@ const CompanionPage: React.FC = () => {
    *  doesn't snap the window back to a stale position. */
   const lastLocalMoveAt = useRef(0);
   /** Active companion thread (a real nomi conversation id). */
-  const activeThreadRef = useRef<number | null>(null);
+  const activeThreadRef = useRef<ConversationId | null>(null);
   /** True from send until finish/error/stall. NO LONGER gates rendering
    *  (that gate dropped badcase-3 replies); it now only drives the stall vs.
    *  dismiss timer choice in the stream handler. */
@@ -189,7 +195,7 @@ const CompanionPage: React.FC = () => {
    *  conversations bound to this companion; a newer turn replaces the slot). Kept
    *  separate from the local turn's segments so the two never clobber. */
   const remoteTurnRef = useRef<{
-    conversationId: number;
+    conversationId: ConversationId;
     platform: string;
     inbound: string;
     segments: Map<string, string>;
@@ -1188,7 +1194,7 @@ const CompanionPage: React.FC = () => {
    *  先读 getCompanionSession，有 id 直接用；否则 ensureCompanionSession 幂等创建。
    *  创建会要求 profile.model 已配置，否则后端返回 400 — 这里向上抛，由 sendChat
    *  捕获后给气泡一个简短提示并放弃本轮。多线程列表/新建/重命名/设活的旧 ipc 方法已废除。 */
-  const ensureThread = useCallback(async (): Promise<number> => {
+  const ensureThread = useCallback(async (): Promise<ConversationId> => {
     if (!companionId) throw new Error('companion id not resolved yet');
     const active = await ipcBridge.companion.getCompanionSession.invoke({ companion_id: companionId });
     if (active.conversation_id != null) {
@@ -1210,7 +1216,7 @@ const CompanionPage: React.FC = () => {
   }, []);
   const { onPaste: onComposerPaste, onFocus: onComposerFocus } = usePasteService({
     supportedExts: imageExts,
-    conversation_id: composerThreadId != null ? String(composerThreadId) : undefined,
+    conversation_id: composerThreadId ?? undefined,
     onFilesAdded: onPasteFilesAdded,
     source: 'sendbox',
   });

@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import type { ConversationId } from '@/common/types/ids';
 import { ipcBridge } from '@/common';
 import type { AgentStreamErrorInfo, IMessageThinking, IMessageTips, TMessage } from '@/common/chat/chatLib';
 import { toDisplayText } from '@/common/chat/displayText';
@@ -494,13 +495,13 @@ export const useAddOrUpdateMessage = () => {
   );
 };
 
-export const useKnowledgeWritebackEvents = (conversationId: number | undefined) => {
+export const useKnowledgeWritebackEvents = (conversationId: ConversationId | undefined) => {
   const addOrUpdateMessage = useAddOrUpdateMessage();
 
   useEffect(() => {
     if (!conversationId) return;
     return ipcBridge.conversation.knowledgeWriteback.on((event) => {
-      if (conversationId !== Number(event.conversation_id)) {
+      if (conversationId !== event.conversation_id) {
         return;
       }
       addOrUpdateMessage(transformKnowledgeWritebackEvent(event));
@@ -734,7 +735,7 @@ const preferThinkingMessageVersion = (
 export const mergeFetchedMessagesForConversation = (
   currentList: TMessage[],
   messages: TMessage[],
-  conversationId: number
+  conversationId: ConversationId
 ): TMessage[] => {
   if (!currentList.length) return messages;
   const sameConversation = currentList.filter((m) => m.conversation_id === conversationId);
@@ -788,7 +789,7 @@ export const mergeFetchedMessagesForConversation = (
  *    DOM. The returned `{ loadOlder, hasMore, loadingOlder }` is consumed by
  *    `MessageList` to drive the scroll-up trigger + a prepend scroll-anchor.
  */
-export const useMessageLstCache = (key: number, opts?: { windowed?: boolean }) => {
+export const useMessageLstCache = (key: ConversationId, opts?: { windowed?: boolean }) => {
   const windowed = opts?.windowed ?? false;
   const update = useUpdateMessageList();
   const setLoading = useUpdateMessageListLoading();

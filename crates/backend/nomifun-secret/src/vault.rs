@@ -1,4 +1,4 @@
-//! **P3-X2：secret vault 落盘持久化（per-pet）**（裁决⑦ / 收编 P2 X2）。
+//! **P3-X2：共享 secret vault 落盘持久化**（裁决⑦ / 收编 P2 X2）。
 //!
 //! E1 的 [`SecretStore`](crate::SecretStore) 是**纯内存** `HashMap`——注册的凭据进程退出即丢。X2 在
 //! 其上塞一层**磁盘 vault**，使注册的 secret **跨会话/重启**仍可用（`secret:NAME` 不再因空 store 恒
@@ -23,9 +23,7 @@
 //! ## 浏览器身份全局共享（用户决策：去 per-pet 隔离）
 //! vault 落**单一共享** [`SHARED_SECRET_DIR`] 子目录（`{data_dir}/browser-secrets/shared/secrets.json`）
 //! ——所有桌面伙伴 + 会话用**同一份**凭据保险库（与「多宠物统一记忆」一致），任一伙伴注册的 secret 在
-//! 任何会话/伙伴里共享可见。[`pet_vault_path`] 保留 `pet_id` 形参以兼容调用方签名，但**内部忽略**它恒
-//! 归一到 [`shared_vault_path`]。（历史 per-pet 隔离布局已退役；W4 引擎层 per-pet context 机制与此 vault
-//! 键无关，仍保留休眠。）
+//! 任何会话/伙伴里共享可见。历史 per-pet 路径签名已删除，所有调用方直接使用 [`shared_vault_path`]。
 //!
 //! ## 优雅降级（绝不 panic）
 //! [`load_secret_store`] 对**任何**读取/解析失败都返**空 store**（vault 不存在 = 首次、JSON 损坏 = 部分
@@ -74,25 +72,13 @@ pub const SHARED_SECRET_DIR: &str = "shared";
 /// **单一权威：解析共享 secret vault 的完整路径** `{data_dir}/browser-secrets/shared/secrets.json`。
 ///
 /// 用户决策（去 per-pet 键化）：浏览器身份全局共享——**所有伙伴/会话注册与解析走同一份 vault**，凭据
-/// 跨伙伴互见。这是 [`pet_vault_path`] 内部归一到的目标路径。
+/// 跨伙伴互见。
 ///
 /// **两端必须共用此份**：端点侧（`SecretService`，注册落盘）与会话侧（agent factory 构造
 /// `BrowserSecretSource`，加载）+ 网关 registry——全部命中同一文件，故任一伙伴注册的 secret 在任何会话/
 /// 伙伴里都看得见。
 pub fn shared_vault_path(data_dir: &Path) -> PathBuf {
     secret_vault_path(&data_dir.join(SECRETS_ROOT).join(SHARED_SECRET_DIR))
-}
-
-/// **解析 secret vault 路径**——历史上 per-pet 键化（`pet_id` 段），现归一到[共享单例](shared_vault_path)。
-///
-/// 用户决策：浏览器身份全局共享——`pet_id` 形参**保留以兼容现有调用方签名**（端点 URL/factory key/网关
-/// key 仍照传），但**内部忽略**它，恒路由到 [`shared_vault_path`]（`{data_dir}/browser-secrets/shared/
-/// secrets.json`）。故任一伙伴注册的 secret 在所有会话/伙伴里共享可见——这是「共享」的落点。
-///
-/// （per-pet 隔离的目录布局已退役；W4a 引擎层 per-pet context 机制仍保留休眠，与此 vault 键无关。）
-pub fn pet_vault_path(data_dir: &Path, _pet_id: &str) -> PathBuf {
-    // 用户决策：去 per-pet 键化，所有调用方归一到共享单例（pet_id 被忽略，仅保签名兼容）。
-    shared_vault_path(data_dir)
 }
 
 /// **把 [`SecretStore`] 持久化到磁盘 vault**（注册/删除后的「存」侧）。
@@ -175,37 +161,26 @@ mod tests {
     }
 
     #[test]
-    fn pet_vault_path_routes_to_shared_singleton() {
-        // 用户决策（去 per-pet 键化）：任意 pet_id 都归一到**同一份**共享 vault
-        // `{data_dir}/browser-secrets/shared/secrets.json`——浏览器身份全局共享。
+    fn shared_vault_path_is_the_singleton_location() {
         let data = Path::new("/data");
         let shared_tail = Path::new("browser-secrets").join("shared").join("secrets.json");
-        // 任意 pet_id（companion / conversation / 空 / 含分隔符）都落同一份共享 vault。
-        for id in ["companion-1", "conversation:5", "  ", "../../etc", ""] {
-            let p = pet_vault_path(data, id);
-            assert!(p.ends_with(&shared_tail), "pet_id {id:?} must route to the shared vault, got {p:?}");
-        }
-        // 共享单例：不同「pet」解析出**同一**路径（这是「共享」的硬证据，对比旧版 per-pet 互异）。
-        assert_eq!(pet_vault_path(data, "pet-a"), pet_vault_path(data, "pet-b"));
-        assert_eq!(pet_vault_path(data, "pet-a"), shared_vault_path(data));
+        let path = shared_vault_path(data);
+        assert!(path.ends_with(&shared_tail), "shared vault path must use the singleton location: {path:?}");
     }
 
     #[test]
     fn multiple_pets_share_one_store_credentials_visible_across() {
-        // **共享证据（纯逻辑）**：伙伴 A 在「自己的」pet_id 下注册 secret → 伙伴 B 用「另一个」pet_id
-        // 解析时（同 data_dir）命中同一共享 vault → 看得见 A 注册的凭据（凭据跨伙伴共享）。
+        // **共享证据（纯逻辑）**：任一入口注册 secret 后，其他会话从同一共享 vault 看得见。
         let dir = tempfile::tempdir().expect("tempdir");
         let data = dir.path();
 
-        // 伙伴 A 注册（端点侧落盘到「companion-A」键——内部归一到共享）。
-        let path_a = pet_vault_path(data, "companion-A");
+        let path_a = shared_vault_path(data);
         let mut store_a = load_secret_store(&path_a, KEY);
         store_a.register("pw", "shared-login-secret", vec!["x.com".into()]).unwrap();
         save_secret_store(&store_a, &path_a).expect("save A");
 
-        // 伙伴 B（不同 pet_id）加载 → 看得见 A 的凭据（共享单例，互见）。
-        let path_b = pet_vault_path(data, "companion-B");
-        assert_eq!(path_a, path_b, "去 per-pet 键化：两伙伴解析同一共享 vault 文件");
+        let path_b = shared_vault_path(data);
+        assert_eq!(path_a, path_b);
         let store_b = load_secret_store(&path_b, KEY);
         assert_eq!(
             store_b.resolve("pw", "https://x.com").unwrap().expose(),

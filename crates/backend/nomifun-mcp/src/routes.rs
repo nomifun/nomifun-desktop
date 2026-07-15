@@ -10,7 +10,7 @@ use nomifun_api_types::{
     McpConnectionTestErrorCode, McpServerResponse, OAuthCheckStatusRequest, OAuthLoginRequest, OAuthLoginResponse,
     OAuthLogoutRequest, OAuthStatusResponse, TestMcpConnectionRequest, UpdateMcpServerRequest,
 };
-use nomifun_common::AppError;
+use nomifun_common::{AppError, McpServerId};
 
 use crate::connection_test::McpConnectionTestService;
 use crate::oauth_service::McpOAuthService;
@@ -75,7 +75,7 @@ async fn list_servers(
 /// `GET /api/mcp/servers/:id` — get a single MCP server.
 async fn get_server(
     State(state): State<McpRouterState>,
-    Path(id): Path<String>,
+    Path(id): Path<McpServerId>,
 ) -> Result<Json<ApiResponse<McpServerResponse>>, AppError> {
     let server = state.config_service.get_server(&id).await?;
     Ok(Json(ApiResponse::ok(server)))
@@ -94,7 +94,7 @@ async fn add_server(
 /// `PUT /api/mcp/servers/:id` — partial update an MCP server.
 async fn edit_server(
     State(state): State<McpRouterState>,
-    Path(id): Path<String>,
+    Path(id): Path<McpServerId>,
     body: Result<Json<UpdateMcpServerRequest>, JsonRejection>,
 ) -> Result<Json<ApiResponse<McpServerResponse>>, AppError> {
     let Json(req) = body.map_err(|e| AppError::BadRequest(e.to_string()))?;
@@ -105,7 +105,7 @@ async fn edit_server(
 /// `DELETE /api/mcp/servers/:id` — delete an MCP server.
 async fn delete_server(
     State(state): State<McpRouterState>,
-    Path(id): Path<String>,
+    Path(id): Path<McpServerId>,
 ) -> Result<Json<ApiResponse<()>>, AppError> {
     state.config_service.delete_server(&id).await?;
     Ok(Json(ApiResponse::success()))
@@ -114,7 +114,7 @@ async fn delete_server(
 /// `POST /api/mcp/servers/:id/toggle` — toggle enabled state.
 async fn toggle_server(
     State(state): State<McpRouterState>,
-    Path(id): Path<String>,
+    Path(id): Path<McpServerId>,
 ) -> Result<Json<ApiResponse<McpServerResponse>>, AppError> {
     let server = state.config_service.toggle_server(&id).await?;
     Ok(Json(ApiResponse::ok(server)))
@@ -148,7 +148,7 @@ async fn test_connection(
         .test_connection(&req.name, &transport)
         .await;
     if let Some(server_id) = req.id {
-        state.config_service.persist_test_result(server_id, &result).await?;
+        state.config_service.persist_test_result(&server_id, &result).await?;
     }
     if result.success || result.needs_auth == Some(true) {
         return Ok(Json(ApiResponse::ok(result)).into_response());

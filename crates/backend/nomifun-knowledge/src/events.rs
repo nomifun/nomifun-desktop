@@ -3,6 +3,7 @@
 use std::sync::Arc;
 
 use nomifun_api_types::WebSocketMessage;
+use nomifun_common::KnowledgeBaseId;
 use nomifun_realtime::UserEventSink;
 
 #[derive(Clone)]
@@ -44,7 +45,7 @@ impl KnowledgeEventEmitter {
         self.broadcast("knowledge.base-updated", base);
     }
 
-    pub fn emit_base_deleted(&self, id: &str) {
+    pub fn emit_base_deleted(&self, id: &KnowledgeBaseId) {
         self.broadcast("knowledge.base-deleted", &serde_json::json!({ "id": id }));
     }
 

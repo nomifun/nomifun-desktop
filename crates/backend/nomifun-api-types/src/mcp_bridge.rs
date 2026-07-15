@@ -12,9 +12,10 @@ use std::fmt;
 use std::sync::Arc;
 
 use nomifun_common::{
+    CompanionId, ConversationId, KnowledgeBaseId,
     LoopbackCapabilityAccess, LoopbackCapabilityClaims, LoopbackCapabilityError,
     LoopbackCapabilityIssuer, LoopbackCapabilityLease,
-    LoopbackCapabilityRenewalRequest, LoopbackSessionBinding, LoopbackSessionKind,
+    LoopbackCapabilityRenewalRequest, LoopbackSessionBinding, LoopbackSessionKind, TerminalId,
 };
 use serde::{Deserialize, Serialize};
 
@@ -32,7 +33,7 @@ pub const KNOWLEDGE_WRITE_TOOL: &str = "knowledge_write";
 #[serde(deny_unknown_fields)]
 pub struct RequirementCapabilityScope {
     pub owner_kind: LoopbackSessionKind,
-    pub owner_session_id: i64,
+    pub owner_session_id: String,
 }
 
 impl RequirementCapabilityScope {
@@ -40,10 +41,12 @@ impl RequirementCapabilityScope {
         &self,
         session: &LoopbackSessionBinding,
     ) -> Result<(), LoopbackCapabilityError> {
-        if self.owner_session_id <= 0
-            || self.owner_kind != session.kind
-            || self.owner_session_id.to_string() != session.session_id
-        {
+        let typed_id_is_valid = match self.owner_kind {
+            LoopbackSessionKind::Conversation => ConversationId::try_from(self.owner_session_id.as_str()).is_ok(),
+            LoopbackSessionKind::Terminal => TerminalId::try_from(self.owner_session_id.as_str()).is_ok(),
+            LoopbackSessionKind::ExternalProcess => false,
+        };
+        if !typed_id_is_valid || self.owner_kind != session.kind || self.owner_session_id != session.session_id {
             return Err(LoopbackCapabilityError::InvalidIdentity);
         }
         Ok(())
@@ -59,7 +62,7 @@ pub type RequirementCapabilityClaims =
 #[serde(deny_unknown_fields)]
 pub struct KnowledgeCapabilityScope {
     pub workspace_path: String,
-    pub kb_ids: Vec<String>,
+    pub kb_ids: Vec<KnowledgeBaseId>,
 }
 
 impl KnowledgeCapabilityScope {
@@ -68,12 +71,8 @@ impl KnowledgeCapabilityScope {
             || self.workspace_path.trim() != self.workspace_path
             || self
                 .kb_ids
-                .iter()
-                .any(|id| id.is_empty() || id.trim() != id)
-            || self
-                .kb_ids
                 .windows(2)
-                .any(|pair| pair[0].as_str() >= pair[1].as_str())
+                .any(|pair| pair[0] >= pair[1])
         {
             return Err(LoopbackCapabilityError::InvalidIdentity);
         }
@@ -170,11 +169,11 @@ impl RequirementMcpConfig {
     pub fn issue_for_conversation(
         &self,
         user_id: &str,
-        conversation_id: i64,
+        conversation_id: &str,
     ) -> Result<RequirementMcpChildConfig, LoopbackCapabilityError> {
         self.issue(
             user_id,
-            LoopbackSessionBinding::conversation(conversation_id.to_string()),
+            LoopbackSessionBinding::conversation(conversation_id),
             conversation_id,
         )
     }
@@ -182,11 +181,11 @@ impl RequirementMcpConfig {
     pub fn issue_for_terminal(
         &self,
         user_id: &str,
-        terminal_id: i64,
+        terminal_id: &str,
     ) -> Result<RequirementMcpChildConfig, LoopbackCapabilityError> {
         self.issue(
             user_id,
-            LoopbackSessionBinding::terminal(terminal_id.to_string()),
+            LoopbackSessionBinding::terminal(terminal_id),
             terminal_id,
         )
     }
@@ -195,11 +194,11 @@ impl RequirementMcpConfig {
         &self,
         user_id: &str,
         session: LoopbackSessionBinding,
-        owner_session_id: i64,
+        owner_session_id: &str,
     ) -> Result<RequirementMcpChildConfig, LoopbackCapabilityError> {
         let scope = RequirementCapabilityScope {
             owner_kind: session.kind,
-            owner_session_id,
+            owner_session_id: owner_session_id.to_string(),
         };
         scope.validate(&session)?;
         let claims = RequirementCapabilityClaims::issue(
@@ -275,7 +274,7 @@ impl KnowledgeMcpConfig {
         user_id: &str,
         conversation_id: &str,
         workspace_path: &str,
-        kb_ids: &[String],
+        kb_ids: &[KnowledgeBaseId],
         allow_write: bool,
     ) -> Result<KnowledgeMcpChildConfig, LoopbackCapabilityError> {
         self.issue(
@@ -290,14 +289,14 @@ impl KnowledgeMcpConfig {
     pub fn issue_for_terminal(
         &self,
         user_id: &str,
-        terminal_id: i64,
+        terminal_id: &str,
         workspace_path: &str,
-        kb_ids: &[String],
+        kb_ids: &[KnowledgeBaseId],
         allow_write: bool,
     ) -> Result<KnowledgeMcpChildConfig, LoopbackCapabilityError> {
         self.issue(
             user_id,
-            LoopbackSessionBinding::terminal(terminal_id.to_string()),
+            LoopbackSessionBinding::terminal(terminal_id),
             workspace_path,
             kb_ids,
             allow_write,
@@ -312,7 +311,7 @@ impl KnowledgeMcpConfig {
         installation_owner_id: &str,
         process_session_id: &str,
         workspace_path: &str,
-        kb_ids: &[String],
+        kb_ids: &[KnowledgeBaseId],
         allow_write: bool,
     ) -> Result<KnowledgeMcpChildConfig, LoopbackCapabilityError> {
         self.issue(
@@ -329,7 +328,7 @@ impl KnowledgeMcpConfig {
         user_id: &str,
         session: LoopbackSessionBinding,
         workspace_path: &str,
-        kb_ids: &[String],
+        kb_ids: &[KnowledgeBaseId],
         allow_write: bool,
     ) -> Result<KnowledgeMcpChildConfig, LoopbackCapabilityError> {
         let mut kb_ids = kb_ids.to_vec();
@@ -389,7 +388,7 @@ pub const GATEWAY_CREATE_CONVERSATION_TOOL: &str = "nomi_create_conversation";
 #[serde(deny_unknown_fields)]
 pub struct GatewayCapabilityScope {
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub companion_id: Option<String>,
+    pub companion_id: Option<CompanionId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub channel_platform: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -409,8 +408,7 @@ impl GatewayCapabilityScope {
             value.is_none_or(canonical)
         }
 
-        if !canonical_optional(self.companion_id.as_deref())
-            || !canonical_optional(self.channel_platform.as_deref())
+        if !canonical_optional(self.channel_platform.as_deref())
             || !canonical_optional(self.session_mode.as_deref())
             || !canonical(&self.profile)
             || !GatewayMcpConfig::is_known_profile(&self.profile)
@@ -601,28 +599,19 @@ impl GatewayMcpConfig {
         session_mode: Option<&str>,
         excluded_tools: &[String],
     ) -> Result<GatewayMcpChildConfig, LoopbackCapabilityError> {
-        fn normalized_optional(value: Option<&str>) -> Option<String> {
-            value
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .map(str::to_owned)
-        }
-
-        let channel_platform = normalized_optional(channel_platform);
-        let mut excluded_tools: Vec<String> = excluded_tools
-            .iter()
-            .map(|name| name.trim())
-            .filter(|name| !name.is_empty())
-            .map(str::to_owned)
-            .collect();
+        let channel_platform = channel_platform.map(str::to_owned);
+        let mut excluded_tools: Vec<String> = excluded_tools.to_vec();
         excluded_tools.sort();
         excluded_tools.dedup();
 
         let scope = GatewayCapabilityScope {
-            companion_id: normalized_optional(companion_id),
+            companion_id: companion_id
+                .map(CompanionId::parse)
+                .transpose()
+                .map_err(|_| LoopbackCapabilityError::InvalidIdentity)?,
             profile: Self::default_profile_for_session(channel_platform.as_deref()).to_owned(),
             channel_platform,
-            session_mode: normalized_optional(session_mode),
+            session_mode: session_mode.map(str::to_owned),
             excluded_tools,
             instance_owner: user_id == self.authoritative_user_id.as_ref(),
         };
@@ -739,6 +728,16 @@ impl BrowserMcpConfig {
 mod tests {
     use super::*;
 
+    const TEST_USER_ID: &str = "user_0190f5fe-7c00-7a00-8000-000000000001";
+    const OTHER_USER_ID: &str = "user_0190f5fe-7c00-7a00-8000-000000000002";
+    const KB_A: &str = "kb_0190f5fe-7c00-7a00-8000-000000000001";
+    const KB_B: &str = "kb_0190f5fe-7c00-7a00-8000-000000000002";
+    const TEST_COMPANION_ID: &str = "companion_0190f5fe-7c00-7a00-8000-000000000001";
+
+    fn kb_id(value: &str) -> KnowledgeBaseId {
+        KnowledgeBaseId::parse(value).expect("canonical knowledge-base test ID")
+    }
+
     fn test_issuer() -> Arc<LoopbackCapabilityIssuer> {
         Arc::new(LoopbackCapabilityIssuer::random().unwrap())
     }
@@ -774,12 +773,12 @@ mod tests {
     #[test]
     fn requirement_child_is_short_lived_domain_and_session_bound() {
         let cfg = requirement_config(41234, "/bin/nomicore");
-        let child = cfg.issue_for_conversation("user-1", 42).unwrap();
+        let child = cfg.issue_for_conversation(TEST_USER_ID, "conv_0190f5fe-7c00-7a00-8abc-012345678901").unwrap();
         let access = &child.bootstrap.access;
         assert_eq!(child.bootstrap.port, 41234);
         assert_eq!(
             access.claims.session.conversation_id.as_deref(),
-            Some("42")
+            Some("conv_0190f5fe-7c00-7a00-8abc-012345678901")
         );
         assert!(access.claims.allows(REQUIREMENT_COMPLETE_TOOL));
         assert!(cfg
@@ -806,16 +805,16 @@ mod tests {
         let cfg = knowledge_config(41235, "/bin/nomicore");
         let readonly = cfg
             .issue_for_terminal(
-                "user-1",
-                7,
+                TEST_USER_ID,
+                "term_0190f5fe-7c00-7a00-8abc-012345678901",
                 "/workspace",
-                &["kb-b".into(), "kb-a".into()],
+                &[kb_id(KB_B), kb_id(KB_A)],
                 false,
             )
             .unwrap();
         assert_eq!(
             readonly.bootstrap.access.claims.scope.kb_ids,
-            vec!["kb-a", "kb-b"]
+            vec![kb_id(KB_A), kb_id(KB_B)]
         );
         assert_eq!(
             readonly.bootstrap.access.claims.scope.workspace_path,
@@ -828,7 +827,7 @@ mod tests {
             .allows(KNOWLEDGE_WRITE_TOOL));
 
         let writable = cfg
-            .issue_for_conversation("user-1", "42", "/workspace", &["kb-a".into()], true)
+            .issue_for_conversation(TEST_USER_ID, "conv_0190f5fe-7c00-7a00-8abc-012345678901", "/workspace", &[kb_id(KB_A)], true)
             .unwrap();
         assert!(writable
             .bootstrap
@@ -846,25 +845,25 @@ mod tests {
         let cfg = knowledge_config(41235, "/bin/nomicore");
         let child = cfg
             .issue_for_external_process(
-                "installation-owner",
+                TEST_USER_ID,
                 "external-random",
                 "/canonical/workspace",
-                &["kb-a".into()],
+                &[kb_id(KB_A)],
                 false,
             )
             .unwrap();
         let claims = &child.bootstrap.access.claims;
-        assert_eq!(claims.user_id, "installation-owner");
+        assert_eq!(claims.user_id.as_str(), TEST_USER_ID);
         assert_eq!(claims.session.kind, LoopbackSessionKind::ExternalProcess);
         assert_eq!(claims.session.session_id, "external-random");
         assert_eq!(claims.session.conversation_id, None);
         assert_eq!(claims.scope.workspace_path, "/canonical/workspace");
-        assert_eq!(claims.scope.kb_ids, vec!["kb-a"]);
+        assert_eq!(claims.scope.kb_ids, vec![kb_id(KB_A)]);
         assert!(!claims.allows(KNOWLEDGE_WRITE_TOOL));
 
         let empty = cfg
             .issue_for_external_process(
-                "installation-owner",
+                TEST_USER_ID,
                 "external-empty",
                 "/canonical/empty",
                 &[],
@@ -894,7 +893,11 @@ mod tests {
 
     #[test]
     fn gateway_issuer_is_redacted_and_build_extra_cannot_serialize_it() {
-        let cfg = gateway_config(41235, "/usr/bin/nomicore", "system_default_user");
+        let cfg = gateway_config(
+            41235,
+            "/usr/bin/nomicore",
+            "user_0190f5fe-7c00-7a00-8000-000000000001",
+        );
         let debug = format!("{cfg:?}");
         assert!(debug.contains("[REDACTED]"));
         assert!(!debug.contains("root-secret"));
@@ -910,21 +913,21 @@ mod tests {
 
     #[test]
     fn gateway_child_binds_operations_identity_surface_profile_and_exclusions() {
-        let cfg = gateway_config(41235, "/usr/bin/nomicore", "owner");
+        let cfg = gateway_config(41235, "/usr/bin/nomicore", TEST_USER_ID);
         let child = cfg.issue_for_conversation(
-            "secondary",
-            "conv-1",
-            Some("companion-a"),
+            OTHER_USER_ID,
+            "conv_0190f5fe-7c00-7a00-8abc-012345678901",
+            Some(TEST_COMPANION_ID),
             Some("lark"),
             Some("yolo"),
             &["nomi_delegate".into(), "nomi_delegate".into()],
         ).unwrap();
         let access = &child.bootstrap.access;
         assert_eq!(child.bootstrap.port, 41235);
-        assert_eq!(access.claims.user_id, "secondary");
+        assert_eq!(access.claims.user_id.as_str(), OTHER_USER_ID);
         assert_eq!(
             access.claims.session.conversation_id.as_deref(),
-            Some("conv-1")
+            Some("conv_0190f5fe-7c00-7a00-8abc-012345678901")
         );
         assert!(access.claims.allows(GATEWAY_LIST_TOOLS_OPERATION));
         assert!(access.claims.allows(GATEWAY_CALL_TOOL_OPERATION));
@@ -940,7 +943,7 @@ mod tests {
             .is_ok());
 
         let mut forged_user = access.claims.clone();
-        forged_user.user_id = "owner".into();
+        forged_user.user_id = nomifun_common::UserId::parse(TEST_USER_ID).unwrap();
         forged_user.scope.instance_owner = true;
         assert!(cfg
             .issuer
@@ -948,7 +951,7 @@ mod tests {
             .is_err());
 
         let mut forged_conversation = access.claims.clone();
-        forged_conversation.session = LoopbackSessionBinding::conversation("conv-2");
+        forged_conversation.session = LoopbackSessionBinding::conversation("conv_0190f5fe-7c00-7a00-8abc-012345678902");
         assert!(cfg
             .issuer
             .verify_access(
@@ -969,9 +972,9 @@ mod tests {
 
     #[test]
     fn gateway_scope_reserves_top_level_creation_for_companions() {
-        let cfg = gateway_config(41235, "/usr/bin/nomicore", "owner");
+        let cfg = gateway_config(41235, "/usr/bin/nomicore", TEST_USER_ID);
         let plain = cfg
-            .issue_for_conversation("owner", "conv-1", None, None, None, &[])
+            .issue_for_conversation(TEST_USER_ID, "conv_0190f5fe-7c00-7a00-8abc-012345678901", None, None, None, &[])
             .unwrap();
         assert!(
             plain
@@ -984,9 +987,9 @@ mod tests {
 
         let companion = cfg
             .issue_for_conversation(
-                "owner",
-                "conv-2",
-                Some("companion-1"),
+                TEST_USER_ID,
+                "conv_0190f5fe-7c00-7a00-8abc-012345678902",
+                Some(TEST_COMPANION_ID),
                 None,
                 None,
                 &[],
@@ -1004,9 +1007,9 @@ mod tests {
 
     #[test]
     fn gateway_correctly_signed_expired_claims_fail_closed() {
-        let cfg = gateway_config(41235, "/usr/bin/nomicore", "owner");
+        let cfg = gateway_config(41235, "/usr/bin/nomicore", TEST_USER_ID);
         let child = cfg
-            .issue_for_conversation("owner", "conv-1", None, None, None, &[])
+            .issue_for_conversation(TEST_USER_ID, "conv_0190f5fe-7c00-7a00-8abc-012345678901", None, None, None, &[])
             .unwrap();
         let now = nomifun_common::unix_time_secs();
         let expired = cfg
@@ -1030,7 +1033,7 @@ mod tests {
     #[test]
     fn dropping_unaccepted_child_config_revokes_its_renewable_lease() {
         let cfg = requirement_config(41234, "/bin/nomicore");
-        let child = cfg.issue_for_conversation("user-1", 42).unwrap();
+        let child = cfg.issue_for_conversation(TEST_USER_ID, "conv_0190f5fe-7c00-7a00-8abc-012345678901").unwrap();
         let renewal = child.bootstrap.renewal.clone();
 
         assert!(cfg

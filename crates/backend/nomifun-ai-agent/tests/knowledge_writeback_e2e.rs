@@ -29,11 +29,12 @@ impl nomifun_realtime::UserEventSink for NoopBroadcaster {
 
 async fn build_service() -> (Arc<nomifun_knowledge::KnowledgeService>, tempfile::TempDir) {
     let db = nomifun_db::init_database_memory().await.expect("in-memory db");
+    let installation_owner = nomifun_db::installation_owner_id(db.pool()).await.unwrap();
     let repo = Arc::new(nomifun_db::SqliteKnowledgeRepository::new(db.pool().clone()));
     let tmp = tempfile::tempdir().unwrap();
     let emitter = nomifun_knowledge::KnowledgeEventEmitter::new(
         Arc::new(NoopBroadcaster),
-        Arc::from("system_default_user"),
+        Arc::from(installation_owner),
     );
     let svc = Arc::new(nomifun_knowledge::KnowledgeService::new(repo, tmp.path(), emitter));
     (svc, tmp)

@@ -338,7 +338,7 @@ async fn materialize_for_agent_returns_source_path_for_auto_inject_skill() {
             "POST",
             "/api/skills/materialize-for-agent",
             json!({
-                "conversation_id": 1,
+                "conversation_id": "conv_0190f5fe-7c00-7a00-8abc-012345678901",
                 "skills": ["cron"],
             }),
             &fx.token,
@@ -378,8 +378,8 @@ async fn materialize_for_agent_returns_source_path_for_opt_in_skill() {
             "POST",
             "/api/skills/materialize-for-agent",
             json!({
-                "conversation_id": 1,
-                "enabled_skills": ["mermaid"],
+                "conversation_id": "conv_0190f5fe-7c00-7a00-8abc-012345678901",
+                "skills": ["mermaid"],
             }),
             &fx.token,
             &fx.csrf,
@@ -409,8 +409,8 @@ async fn materialize_for_agent_silently_skips_unknown_skill() {
             "POST",
             "/api/skills/materialize-for-agent",
             json!({
-                "conversation_id": 1,
-                "enabled_skills": ["this-does-not-exist"],
+                "conversation_id": "conv_0190f5fe-7c00-7a00-8abc-012345678901",
+                "skills": ["this-does-not-exist"],
             }),
             &fx.token,
             &fx.csrf,
@@ -437,7 +437,7 @@ async fn materialize_for_agent_does_not_touch_data_dir() {
         .oneshot(json_with_token(
             "POST",
             "/api/skills/materialize-for-agent",
-            json!({"conversation_id": 1, "enabled_skills": ["cron"]}),
+            json!({"conversation_id": "conv_0190f5fe-7c00-7a00-8abc-012345678901", "skills": ["cron"]}),
             &fx.token,
             &fx.csrf,
         ))
@@ -446,7 +446,7 @@ async fn materialize_for_agent_does_not_touch_data_dir() {
     assert_eq!(resp.status(), StatusCode::OK);
 
     assert!(!fx.data_dir.join("agent-skills").exists());
-    assert!(!fx.data_dir.join("conversations").join("1").exists());
+    assert!(!fx.data_dir.join("conversations").join("conv_0190f5fe-7c00-7a00-8abc-012345678901").exists());
 }
 
 #[tokio::test]
@@ -460,7 +460,7 @@ async fn materialize_for_agent_returns_sorted_list() {
             "POST",
             "/api/skills/materialize-for-agent",
             json!({
-                "conversation_id": 1,
+                "conversation_id": "conv_0190f5fe-7c00-7a00-8abc-012345678901",
                 "skills": ["mermaid", "cron"],
             }),
             &fx.token,
@@ -486,7 +486,7 @@ async fn materialize_for_agent_rejects_empty_conversation_id() {
         .oneshot(json_with_token(
             "POST",
             "/api/skills/materialize-for-agent",
-            json!({"conversation_id": "", "enabled_skills": []}),
+            json!({"conversation_id": "", "skills": []}),
             &fx.token,
             &fx.csrf,
         ))
@@ -505,7 +505,7 @@ async fn materialize_for_agent_rejects_traversal_in_conversation_id() {
         .oneshot(json_with_token(
             "POST",
             "/api/skills/materialize-for-agent",
-            json!({"conversation_id": "../evil", "enabled_skills": []}),
+            json!({"conversation_id": "../evil", "skills": []}),
             &fx.token,
             &fx.csrf,
         ))

@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import type { ConversationId } from '@/common/types/ids';
 import { ipcBridge } from '@/common';
 import type { IConversationMcpStatus, IProvider, TChatConversation, TProviderWithModel } from '@/common/config/storage';
 import addChatIcon from '@/renderer/assets/icons/add-chat.svg';
@@ -73,7 +74,7 @@ const buildConversationModelPool = (
   return models.length === 1 ? { mode: 'single', model: models[0] } : { mode: 'range', models };
 };
 
-const _AssociatedConversation: React.FC<{ conversation_id: number }> = ({ conversation_id }) => {
+const _AssociatedConversation: React.FC<{ conversation_id: ConversationId }> = ({ conversation_id }) => {
   const { data } = useSWR(['getAssociateConversation', conversation_id], () =>
     ipcBridge.conversation.getAssociateConversation.invoke({ conversation_id }),
   );
@@ -95,7 +96,7 @@ const _AssociatedConversation: React.FC<{ conversation_id: number }> = ({ conver
         >
           {list.map((conversation) => {
             return (
-              <Menu.Item key={String(conversation.id)}>
+              <Menu.Item key={conversation.id}>
                 <Typography.Ellipsis className={'max-w-300px'}>{conversation.name}</Typography.Ellipsis>
               </Menu.Item>
             );
@@ -138,26 +139,34 @@ const _AddNewConversation: React.FC<{ conversation: TChatConversation }> = ({ co
             // Fetch latest conversation from DB to ensure session_mode is current
             const latest = await getConversationOrNull(conversation.id);
             const source = latest || conversation;
-            // Conversations now use INTEGER AUTOINCREMENT primary keys minted by
-            // the backend (numeric-id spec §5). We must NOT mint the id on the
-            // frontend; strip the source id and let the clone endpoint assign a
-            // fresh one, then route to the real id the backend returns. This is
-            // the same server-mints-the-id pattern as `msg_id`.
+            // Strip the source entity ID and let the clone endpoint mint a
+            // fresh canonical ID, then route to the value returned by the backend.
             const { id: _sourceId, ...sourceWithoutId } = source;
+            const {
+              workspace: _sourceWorkspace,
+              custom_workspace: _sourceCustomWorkspace,
+              is_temporary_workspace: _sourceTemporaryWorkspace,
+              temp_workspace_id: _sourceTempWorkspaceId,
+              acp_session_id: _sourceAcpSessionId,
+              acp_session_conversation_id: _sourceAcpSessionConversationId,
+              acp_session_updated_at: _sourceAcpSessionUpdatedAt,
+              current_mode_id: _sourceCurrentModeId,
+              current_model_id: _sourceCurrentModelId,
+              cached_config_options: _sourceCachedConfigOptions,
+              pending_config_options: _sourcePendingConfigOptions,
+              runtimeValidation: _sourceRuntimeValidation,
+              sessionKey: _sourceSessionKey,
+              ...freshExtra
+            } = source.extra as TChatConversation['extra'] & Record<string, unknown>;
             const created = await ipcBridge.conversation.createWithConversation.invoke({
               conversation: {
                 ...sourceWithoutId,
                 created_at: Date.now(),
                 modified_at: Date.now(),
-                // Clear ACP session fields to prevent new conversation from inheriting old session context
-                extra:
-                  source.type === 'acp'
-                    ? {
-                        ...source.extra,
-                        acp_session_id: undefined,
-                        acp_session_updated_at: undefined,
-                      }
-                    : source.extra,
+                // This button creates an isolated conversation. Sharing the
+                // current workspace/session must be an explicit operation.
+                // The backend repeats this scrub as the authoritative boundary.
+                extra: freshExtra,
               } as TChatConversation,
             });
             seedConversationCache(created);
@@ -217,7 +226,7 @@ const NomiConversationLayout: React.FC<{
         workspace={conversation.extra.workspace}
         modelSelection={modelSelection}
         session_mode={conversation.extra?.session_mode}
-        cron_job_id={(conversation.extra as { cron_job_id?: string })?.cron_job_id}
+        cron_job_id={conversation.cron_job_id}
         loadedSkills={(conversation.extra as { skills?: string[] } | undefined)?.skills}
         loadedMcpServers={(conversation.extra as { mcp_servers?: string[] } | undefined)?.mcp_servers}
         loadedMcpStatuses={
@@ -253,7 +262,7 @@ const NomiConversationPanel: React.FC<{
     });
   }, [conversation.decision_policy, conversation.delegation_policy]);
 
-  const storedExecutionTemplateId = conversation.execution_template_id?.trim() || null;
+  const storedExecutionTemplateId = conversation.execution_template_id ?? null;
   useEffect(() => {
     if (!storedExecutionTemplateId) {
       setSelectedCollaborationTemplate(null);
@@ -305,7 +314,8 @@ const NomiConversationPanel: React.FC<{
         ..._provider,
         use_model: modelName,
       } as TProviderWithModel;
-      // Kill running agent on model switch — will be rebuilt with new model on next message
+      // Kill the running agent on model switch; it will be rebuilt with the
+      // new model on the next message.
       await ipcBridge.conversation.stop.invoke({
         conversation_id: conversation.id,
       });
@@ -335,7 +345,7 @@ const NomiConversationPanel: React.FC<{
     onSelectModel,
   });
 
-  // 主模型引用(range 的 models[0]),供协作选择器钉选与写回。
+  // Main model reference used by the collaboration selector.
   const mainModelRef = useMemo<TExecutionModelRef | null>(
     () =>
       modelSelection.current_model
@@ -382,7 +392,7 @@ const NomiConversationPanel: React.FC<{
     void persistModelPool(mainModelRef, collaboratorReconciliation.retained);
   }, [collaboratorReconciliation, collaborators, mainModelRef, persistModelPool]);
 
-  // 会话内「协作模型」选择器紧跟主模型选择器，保持主模型与协作者模型的关系清晰。
+  // Collaboration selector stays adjacent to the main model selector.
   const collaboratorSelectorNode = (
     <GuidCollaboratorSelector
       value={activeCollaborators}
@@ -459,7 +469,7 @@ const NomiConversationPanel: React.FC<{
         );
       }
     })();
-    // 仅在会话或供应商列表变化时评估
+    // Re-evaluate when the conversation or provider list changes.
   }, [
     activeCollaborators,
     conversation.id,
@@ -483,7 +493,7 @@ const NomiConversationPanel: React.FC<{
             header keeps the existing capability controls. */}
         <CronJobManager
           conversation_id={conversation.id}
-          cron_job_id={conversation.extra?.cron_job_id as string | undefined}
+          cron_job_id={conversation.cron_job_id}
           hasCronSkill={hasLoadedSkill(conversation, 'cron')}
         />
       </div>
@@ -517,8 +527,8 @@ const ChatConversation: React.FC<{
 
   const isNomiConversation = conversation?.type === 'nomi';
 
-  // 使用统一的 Hook 获取会话的设定快照（ACP/Codex 会话）
-  // Use unified hook for preset preset info (ACP/Codex conversations)
+  // Use the shared hook for preset snapshot information in ACP/Codex
+  // conversations.
   const acpConversation = isNomiConversation ? undefined : conversation;
   const { info: presetPresetInfo, isLoading: isLoadingPreset } = usePresetInfo(acpConversation);
 
@@ -542,7 +552,7 @@ const ChatConversation: React.FC<{
             initialModelId={extra.current_model_id}
             session_mode={conversation.extra?.session_mode}
             agent_name={presetDisplayName}
-            cron_job_id={(conversation.extra as { cron_job_id?: string })?.cron_job_id}
+            cron_job_id={conversation.cron_job_id}
             hideSendBox={hideSendBox}
             loadedSkills={(conversation.extra as { skills?: string[] } | undefined)?.skills}
             loadedMcpServers={(conversation.extra as { mcp_servers?: string[] } | undefined)?.mcp_servers}
@@ -555,9 +565,9 @@ const ChatConversation: React.FC<{
       case 'gemini':
         // Legacy Gemini conversation: the dedicated Gemini runtime has been
         // removed. The message history is still served by the shared messages
-        // table, so AcpChat renders it fine. The composer is left enabled —
-        // any send attempt will get a BadRequest from the factory branch in
-        // nomifun-common/src/enums.rs → factory.rs, surfacing a clear error
+        // table, so AcpChat renders it fine. The composer is left enabled; any
+        // send attempt will get a BadRequest from the factory branch in
+        // nomifun-common/src/enums.rs -> factory.rs, surfacing a clear error
         // to the user.
         return (
           <AcpChat
@@ -567,7 +577,7 @@ const ChatConversation: React.FC<{
             backend='gemini'
             initialModelId={(conversation.extra as { current_model_id?: string } | undefined)?.current_model_id}
             agent_name={presetDisplayName}
-            cron_job_id={(conversation.extra as { cron_job_id?: string })?.cron_job_id}
+            cron_job_id={conversation.cron_job_id}
             hideSendBox={hideSendBox}
             loadedSkills={(conversation.extra as { skills?: string[] } | undefined)?.skills}
             loadedMcpServers={(conversation.extra as { mcp_servers?: string[] } | undefined)?.mcp_servers}
@@ -599,7 +609,7 @@ const ChatConversation: React.FC<{
             key={conversation.id}
             conversation_id={conversation.id}
             workspace={conversation.extra?.workspace ?? ''}
-            cron_job_id={(conversation.extra as { cron_job_id?: string })?.cron_job_id}
+            cron_job_id={conversation.cron_job_id}
             hideSendBox={hideSendBox}
             loadedSkills={(conversation.extra as { skills?: string[] } | undefined)?.skills}
           />
@@ -610,7 +620,7 @@ const ChatConversation: React.FC<{
             key={conversation.id}
             conversation_id={conversation.id}
             workspace={conversation.extra?.workspace ?? ''}
-            cron_job_id={(conversation.extra as { cron_job_id?: string })?.cron_job_id}
+            cron_job_id={conversation.cron_job_id}
             hideSendBox={hideSendBox}
             loadedSkills={(conversation.extra as { skills?: string[] } | undefined)?.skills}
           />
@@ -621,7 +631,7 @@ const ChatConversation: React.FC<{
             key={conversation.id}
             conversation_id={conversation.id}
             workspace={conversation.extra?.workspace ?? ''}
-            cron_job_id={(conversation.extra as { cron_job_id?: string })?.cron_job_id}
+            cron_job_id={conversation.cron_job_id}
             hideSendBox={hideSendBox}
             loadedSkills={(conversation.extra as { skills?: string[] } | undefined)?.skills}
           />
@@ -675,9 +685,10 @@ const ChatConversation: React.FC<{
 
   if (conversation && conversation.type === 'nomi') {
     // 桌面伙伴的专属会话（单会话契约）走受限面板：保留锁定模型/隐藏高级控制/强制 yolo/
-    // 固定工作区（详见 CompanionChatPanel → CompanionConversation）。伙伴专属的
-    // 配置控制仍受限，但 linked AgentExecution 的进度、决策和生命周期不能被隐藏。
-    if (conversation.extra?.companionSession) {
+    // Companion sessions use a fixed workspace and restricted controls.
+    // Configuration controls remain limited for companion sessions, while
+    // linked execution progress and lifecycle state stay visible.
+    if (conversation.extra?.companion_session) {
       return (
         <ExecutionProvider conversation={conversation}>
           <CompanionChatPanel key={conversation.id} conversation={conversation} />
@@ -691,14 +702,14 @@ const ChatConversation: React.FC<{
     );
   }
 
-  // 如果有设定快照，使用快照中的 logo 和名称；加载中时不进入 fallback；否则使用 backend 的 logo
-  // If preset preset info exists, use preset logo/name; while loading, avoid fallback; otherwise use backend logo
+  // If preset snapshot info exists, use its logo/name. While loading, avoid
+  // falling back prematurely; otherwise use the backend logo.
   const chatLayoutProps = presetPresetInfo
     ? {
         preset: presetPresetInfo,
       }
     : isLoadingPreset
-      ? {} // Still loading custom agents — avoid showing backend logo prematurely
+      ? {} // Still loading custom agents; avoid showing the backend logo prematurely.
       : {
           backend:
             conversation?.type === 'acp'
@@ -728,7 +739,7 @@ const ChatConversation: React.FC<{
         <div className='shrink-0'>
           <CronJobManager
             conversation_id={conversation.id}
-            cron_job_id={conversation.extra?.cron_job_id as string | undefined}
+            cron_job_id={conversation.cron_job_id}
             hasCronSkill={hasLoadedSkill(conversation, 'cron')}
           />
         </div>

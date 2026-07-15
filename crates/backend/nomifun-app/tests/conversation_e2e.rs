@@ -8,6 +8,8 @@ use tower::ServiceExt;
 
 use common::{body_json, build_app, delete_with_token, get_request, get_with_token, json_with_token, setup_and_login};
 
+const MISSING_CONVERSATION_ID: &str = "conv_0190f5fe-7c00-7a00-8abc-012345679999";
+
 // ── Helpers ───────────────────────────────────────────────────────────
 
 fn create_body(name: &str) -> serde_json::Value {
@@ -60,7 +62,7 @@ async fn t1_1_create_conversation_success() {
     assert_eq!(data["status"], "pending");
     assert_eq!(data["source"], "nomifun");
     assert_eq!(data["pinned"], false);
-    assert!(data["id"].as_i64().is_some());
+    assert!(data["id"].as_str().is_some_and(|id| id.starts_with("conv_")));
     assert!(data["created_at"].as_i64().is_some());
     assert!(data["modified_at"].as_i64().is_some());
     assert_eq!(data["extra"]["workspace"], "/project");
@@ -113,7 +115,7 @@ async fn t1_4_create_missing_required_field() {
 
     // Missing type
     let body = json!({
-        "model": { "provider_id": "p1", "model": "m1" },
+        "model": { "provider_id": "prov_0190f5fe-7c00-7a00-8000-000000000010", "model": "m1" },
         "extra": {}
     });
     let req = json_with_token("POST", "/api/conversations", body, &token, &csrf);
@@ -129,7 +131,7 @@ async fn t1_4_create_missing_required_field() {
     // Missing extra
     let body = json!({
         "type": "nomi",
-        "model": { "provider_id": "p1", "model": "m1" }
+        "model": { "provider_id": "prov_0190f5fe-7c00-7a00-8000-000000000010", "model": "m1" }
     });
     let req = json_with_token("POST", "/api/conversations", body, &token, &csrf);
     let resp = app.oneshot(req).await.unwrap();
@@ -143,7 +145,7 @@ async fn t1_5_create_invalid_type() {
 
     let body = json!({
         "type": "invalid_type",
-        "model": { "provider_id": "p1", "model": "m1" },
+        "model": { "provider_id": "prov_0190f5fe-7c00-7a00-8000-000000000010", "model": "m1" },
         "extra": {}
     });
     let req = json_with_token("POST", "/api/conversations", body, &token, &csrf);
@@ -280,7 +282,7 @@ async fn t2_3_list_cursor_pagination() {
     assert_eq!(json["data"]["has_more"], true);
 
     // Second page using cursor
-    let cursor = items.last().unwrap()["id"].as_i64().unwrap();
+    let cursor = items.last().unwrap()["id"].as_str().unwrap().to_owned();
     let resp = app
         .clone()
         .oneshot(get_with_token(
@@ -295,7 +297,7 @@ async fn t2_3_list_cursor_pagination() {
     assert_eq!(json["data"]["has_more"], true);
 
     // Third page
-    let cursor2 = items2.last().unwrap()["id"].as_i64().unwrap();
+    let cursor2 = items2.last().unwrap()["id"].as_str().unwrap().to_owned();
     let resp = app
         .oneshot(get_with_token(
             &format!("/api/conversations?limit=2&cursor={cursor2}"),
@@ -351,7 +353,7 @@ async fn t2_5_list_pinned_filter() {
     let req = json_with_token("POST", "/api/conversations", create_body("Will Pin"), &token, &csrf);
     let resp = app.clone().oneshot(req).await.unwrap();
     let json = body_json(resp).await;
-    let pinned_id = json["data"]["id"].as_i64().unwrap();
+    let pinned_id = json["data"]["id"].as_str().unwrap().to_owned();
 
     // Pin one
     let req = json_with_token(
@@ -390,7 +392,7 @@ async fn t3_1_get_existing() {
     let req = json_with_token("POST", "/api/conversations", create_body("My Conv"), &token, &csrf);
     let resp = app.clone().oneshot(req).await.unwrap();
     let json = body_json(resp).await;
-    let id = json["data"]["id"].as_i64().unwrap();
+    let id = json["data"]["id"].as_str().unwrap().to_owned();
 
     let resp = app
         .oneshot(get_with_token(&format!("/api/conversations/{id}"), &token))
@@ -408,7 +410,10 @@ async fn t3_2_get_not_found() {
     let (token, _csrf) = setup_and_login(&mut app, &services, "admin", "StrongP@ss1").await;
 
     let resp = app
-        .oneshot(get_with_token("/api/conversations/non-existent-id", &token))
+        .oneshot(get_with_token(
+            &format!("/api/conversations/{MISSING_CONVERSATION_ID}"),
+            &token,
+        ))
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
@@ -431,7 +436,7 @@ async fn t4_1_update_name() {
     let req = json_with_token("POST", "/api/conversations", create_body("Original"), &token, &csrf);
     let resp = app.clone().oneshot(req).await.unwrap();
     let json = body_json(resp).await;
-    let id = json["data"]["id"].as_i64().unwrap();
+    let id = json["data"]["id"].as_str().unwrap().to_owned();
     let original_modified = json["data"]["modified_at"].as_i64().unwrap();
 
     let req = json_with_token(
@@ -457,7 +462,7 @@ async fn t4_2_update_pin_and_unpin() {
     let req = json_with_token("POST", "/api/conversations", create_body("Pin Test"), &token, &csrf);
     let resp = app.clone().oneshot(req).await.unwrap();
     let json = body_json(resp).await;
-    let id = json["data"]["id"].as_i64().unwrap();
+    let id = json["data"]["id"].as_str().unwrap().to_owned();
 
     // Pin
     let req = json_with_token(
@@ -498,7 +503,7 @@ async fn t4_3_update_extra_merge() {
     let req = json_with_token("POST", "/api/conversations", body, &token, &csrf);
     let resp = app.clone().oneshot(req).await.unwrap();
     let json = body_json(resp).await;
-    let id = json["data"]["id"].as_i64().unwrap();
+    let id = json["data"]["id"].as_str().unwrap().to_owned();
 
     // Merge update: change workspace, keep contextFileName
     let req = json_with_token(
@@ -517,32 +522,32 @@ async fn t4_3_update_extra_merge() {
 #[tokio::test]
 async fn t4_4_update_model() {
     let (mut app, services) = build_app().await;
-    seed_provider(&services, "p1", "m1").await;
-    seed_provider(&services, "p2", "new-model").await;
+    seed_provider(&services, "prov_0190f5fe-7c00-7a00-8000-000000000010", "m1").await;
+    seed_provider(&services, "prov_0190f5fe-7c00-7a00-8000-000000000011", "new-model").await;
     let (token, csrf) = setup_and_login(&mut app, &services, "admin", "StrongP@ss1").await;
 
     // nomi — only type that allows top-level model updates
     let create = json!({
         "type": "nomi",
         "name": "Model Test",
-        "model": { "provider_id": "p1", "model": "m1" },
+        "model": { "provider_id": "prov_0190f5fe-7c00-7a00-8000-000000000010", "model": "m1" },
         "extra": {}
     });
     let req = json_with_token("POST", "/api/conversations", create, &token, &csrf);
     let resp = app.clone().oneshot(req).await.unwrap();
     let json = body_json(resp).await;
-    let id = json["data"]["id"].as_i64().unwrap();
+    let id = json["data"]["id"].as_str().unwrap().to_owned();
 
     let req = json_with_token(
         "PATCH",
         &format!("/api/conversations/{id}"),
-        json!({"model": {"provider_id": "p2", "model": "new-model"}}),
+        json!({"model": {"provider_id": "prov_0190f5fe-7c00-7a00-8000-000000000011", "model": "new-model"}}),
         &token,
         &csrf,
     );
     let resp = app.oneshot(req).await.unwrap();
     let json = body_json(resp).await;
-    assert_eq!(json["data"]["model"]["provider_id"], "p2");
+    assert_eq!(json["data"]["model"]["provider_id"], "prov_0190f5fe-7c00-7a00-8000-000000000011");
     assert_eq!(json["data"]["model"]["model"], "new-model");
 }
 
@@ -553,7 +558,7 @@ async fn t4_5_update_not_found() {
 
     let req = json_with_token(
         "PATCH",
-        "/api/conversations/non-existent-id",
+        &format!("/api/conversations/{MISSING_CONVERSATION_ID}"),
         json!({"name": "X"}),
         &token,
         &csrf,
@@ -579,7 +584,7 @@ async fn t5_1_delete_conversation() {
     let req = json_with_token("POST", "/api/conversations", create_body("To Delete"), &token, &csrf);
     let resp = app.clone().oneshot(req).await.unwrap();
     let json = body_json(resp).await;
-    let id = json["data"]["id"].as_i64().unwrap();
+    let id = json["data"]["id"].as_str().unwrap().to_owned();
 
     let resp = app
         .clone()
@@ -602,7 +607,11 @@ async fn t5_2_delete_not_found() {
     let (token, csrf) = setup_and_login(&mut app, &services, "admin", "StrongP@ss1").await;
 
     let resp = app
-        .oneshot(delete_with_token("/api/conversations/non-existent-id", &token, &csrf))
+        .oneshot(delete_with_token(
+            &format!("/api/conversations/{MISSING_CONVERSATION_ID}"),
+            &token,
+            &csrf,
+        ))
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
@@ -667,12 +676,12 @@ async fn t7_1_reset_conversation() {
     let req = json_with_token("POST", "/api/conversations", create_body("Reset Test"), &token, &csrf);
     let resp = app.clone().oneshot(req).await.unwrap();
     let json = body_json(resp).await;
-    let id = json["data"]["id"].as_i64().unwrap();
+    let id = json["data"]["id"].as_str().unwrap().to_owned();
 
     // Insert a message directly via repo
     let repo = nomifun_db::SqliteConversationRepository::new(services.database.pool().clone());
     let msg = nomifun_db::models::MessageRow {
-        id: "msg-1".into(),
+        id: nomifun_common::MessageId::new().into_string(),
         conversation_id: id.clone(),
         msg_id: None,
         r#type: "text".into(),
@@ -722,7 +731,7 @@ async fn t7_2_reset_not_found() {
 
     let req = json_with_token(
         "POST",
-        "/api/conversations/non-existent-id/reset",
+        &format!("/api/conversations/{MISSING_CONVERSATION_ID}/reset"),
         json!({}),
         &token,
         &csrf,
@@ -756,7 +765,7 @@ async fn t10_1_associated_same_workspace() {
     let req = json_with_token("POST", "/api/conversations", body1, &token, &csrf);
     let resp = app.clone().oneshot(req).await.unwrap();
     let json = body_json(resp).await;
-    let id_a = json["data"]["id"].as_i64().unwrap();
+    let id_a = json["data"]["id"].as_str().unwrap().to_owned();
 
     let body2 = create_body_with_extra("Conv B", json!({"workspace": "/same"}));
     let req = json_with_token("POST", "/api/conversations", body2, &token, &csrf);
@@ -786,7 +795,7 @@ async fn t10_2_associated_none() {
     let req = json_with_token("POST", "/api/conversations", body, &token, &csrf);
     let resp = app.clone().oneshot(req).await.unwrap();
     let json = body_json(resp).await;
-    let id = json["data"]["id"].as_i64().unwrap();
+    let id = json["data"]["id"].as_str().unwrap().to_owned();
 
     let resp = app
         .oneshot(get_with_token(&format!("/api/conversations/{id}/associated"), &token))
@@ -802,7 +811,10 @@ async fn t10_3_associated_not_found() {
     let (token, _csrf) = setup_and_login(&mut app, &services, "admin", "StrongP@ss1").await;
 
     let resp = app
-        .oneshot(get_with_token("/api/conversations/non-existent-id/associated", &token))
+        .oneshot(get_with_token(
+            &format!("/api/conversations/{MISSING_CONVERSATION_ID}/associated"),
+            &token,
+        ))
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
@@ -878,7 +890,7 @@ async fn t12_3_concurrent_creates() {
         let resp = app.clone().oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::CREATED);
         let json = body_json(resp).await;
-        ids.push(json["data"]["id"].as_i64().unwrap());
+        ids.push(json["data"]["id"].as_str().unwrap().to_owned());
     }
 
     // All IDs should be unique
@@ -904,7 +916,7 @@ async fn full_conversation_lifecycle() {
     let resp = app.clone().oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::CREATED);
     let json = body_json(resp).await;
-    let id = json["data"]["id"].as_i64().unwrap();
+    let id = json["data"]["id"].as_str().unwrap().to_owned();
     assert_eq!(json["data"]["status"], "pending");
 
     // Read

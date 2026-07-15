@@ -1,4 +1,6 @@
+import type { ConversationId } from '@/common/types/ids';
 import { AgentLogoIcon } from '@/renderer/components/agent/AgentBadge';
+import { conversationTarget } from '@/common/types/ids';
 import type { PresetInfo } from '@/renderer/hooks/agent/usePresetInfo';
 import FlexFullContainer from '@/renderer/components/layout/FlexFullContainer';
 import { useLayoutContext } from '@/renderer/hooks/context/LayoutContext';
@@ -34,9 +36,10 @@ import {
   calcLayoutMetrics,
 } from '@/renderer/pages/conversation/utils/layoutCalc';
 import { Layout as ArcoLayout } from '@arco-design/web-react';
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { useTranslation } from 'react-i18next';
+import { uuid } from '@/renderer/utils/common';
 import type { WorkspaceExtraTab, WorkspaceTab } from '@/renderer/pages/conversation/Workspace/types';
 import './chat-layout.css';
 
@@ -73,18 +76,13 @@ export interface ChatLayoutProps {
   selfContainedWorkspaceToggle?: boolean;
   workspaceEnabled?: boolean;
   /** Conversation ID for mode switching */
-  conversation_id?: number;
+  conversation_id?: ConversationId;
   /** Custom tabs slot; when provided, replaces the default ConversationTabs */
   tabsSlot?: React.ReactNode;
   /** Workspace path for opening in external tools */
   workspacePath?: string;
   /** Authoritative temp-workspace flag from `conversation.extra.is_temporary_workspace`. */
   isTemporaryWorkspace?: boolean;
-  /**
-   * Stable key for persisting the workspace collapse preference. Defaults to
-   * `conversation_id` for single chats.
-   */
-  workspacePreferenceKey?: string;
   /** Custom rename handler; when provided, replaces the default conversation.update rename flow */
   onRenameTitle?: (new_name: string) => Promise<boolean>;
   /** Optional override for the leading icon shown before the title. */
@@ -105,7 +103,8 @@ export interface ChatLayoutProps {
 const ChatLayoutInner: React.FC<ChatLayoutProps> = (props) => {
   const { t } = useTranslation();
   const { conversation_id, workspacePath, isTemporaryWorkspace } = props;
-  const { backend, preset, agent_name, workspaceEnabled = true, workspacePreferenceKey } = props;
+  const workspaceTarget = conversation_id != null ? conversationTarget(conversation_id) : undefined;
+  const { backend, preset, agent_name, workspaceEnabled = true } = props;
   const layout = useLayoutContext();
   // Desktop-shell mac/win runtime. MUST gate on `isDesktopShell()` first
   // (matching Titlebar): the titlebar workspace toggle only exists in the
@@ -122,17 +121,15 @@ const ChatLayoutInner: React.FC<ChatLayoutProps> = (props) => {
   const { isOpen: isPreviewOpen } = usePreviewContext();
 
   // --- Hook A: workspace collapse ---
-  const workspacePanelPreferenceKey =
-    workspacePreferenceKey ?? (conversation_id != null ? String(conversation_id) : undefined);
   const { rightSiderCollapsed, setRightSiderCollapsed, persistRightSiderCollapsed } = useWorkspaceCollapse({
     workspaceEnabled,
     isMobile,
     conversation_id,
-    preferenceKey: workspacePanelPreferenceKey,
+    target: workspaceTarget,
     isTemporaryWorkspace,
     autoExpandOnFiles: false,
   });
-  const { activeWorkspaceTab, setActiveWorkspaceTab } = useWorkspacePanelTabs(workspacePanelPreferenceKey);
+  const { activeWorkspaceTab, setActiveWorkspaceTab } = useWorkspacePanelTabs(workspaceTarget);
 
   const activeWorkspaceTitle =
     activeWorkspaceTab === 'files'
@@ -146,7 +143,7 @@ const ChatLayoutInner: React.FC<ChatLayoutProps> = (props) => {
     const clickingActivePanel = !rightSiderCollapsed && activeWorkspaceTab === nextTab;
     if (props.workspaceCollaboration?.active) props.workspaceCollaboration.onClick();
     setActiveWorkspaceTab(nextTab);
-    dispatchWorkspacePanelTabEvent(nextTab, conversation_id != null ? String(conversation_id) : undefined);
+    if (workspaceTarget) dispatchWorkspacePanelTabEvent(nextTab, workspaceTarget);
     persistRightSiderCollapsed(clickingActivePanel);
   };
 
@@ -280,12 +277,19 @@ const ChatLayoutInner: React.FC<ChatLayoutProps> = (props) => {
     if (typeof window === 'undefined') return undefined;
     const handleWorkspaceMeta = (event: Event) => {
       const detail = (event as CustomEvent<WorkspacePanelMetaDetail>).detail;
-      if (!detail || (conversation_id != null && detail.sourceKey !== String(conversation_id))) return;
+      if (
+        !detail ||
+        !workspaceTarget ||
+        detail.target.kind !== workspaceTarget.kind ||
+        detail.target.id !== workspaceTarget.id
+      ) {
+        return;
+      }
       setWorkspaceChangeCount(detail.changeCount);
     };
     window.addEventListener(WORKSPACE_PANEL_META_EVENT, handleWorkspaceMeta);
     return () => window.removeEventListener(WORKSPACE_PANEL_META_EVENT, handleWorkspaceMeta);
-  }, [conversation_id]);
+  }, [workspaceTarget?.id, workspaceTarget?.kind]);
 
   const desktopHeader = (
     <ArcoLayout.Header
@@ -319,7 +323,7 @@ const ChatLayoutInner: React.FC<ChatLayoutProps> = (props) => {
         />
       </FlexFullContainer>
       <div className='flex items-center gap-12px shrink-0'>
-        {!props.hideAdvancedControls && conversation_id && (
+        {!props.hideAdvancedControls && conversation_id != null && (
           <>
             <AutoWorkControl target={{ kind: 'conversation', id: conversation_id }} />
             <IdmmControl target={{ kind: 'conversation', id: conversation_id }} />
@@ -416,7 +420,7 @@ const ChatLayoutInner: React.FC<ChatLayoutProps> = (props) => {
             className='workspace-tool-rail-mobile-trigger'
             onClick={() => {
               setActiveWorkspaceTab('files');
-              dispatchWorkspacePanelTabEvent('files', conversation_id != null ? String(conversation_id) : undefined);
+              if (workspaceTarget) dispatchWorkspacePanelTabEvent('files', workspaceTarget);
               persistRightSiderCollapsed(false);
             }}
             aria-label={t('conversation.workspace.changes.filesTab')}
@@ -445,7 +449,7 @@ const ChatLayoutInner: React.FC<ChatLayoutProps> = (props) => {
             <WorkspacePanelHeader
               showToggle={Boolean(props.selfContainedWorkspaceToggle) || (!isMacRuntime && !isWindowsRuntime)}
               collapsed={rightSiderCollapsed}
-              onToggle={() => dispatchWorkspaceToggleEvent()}
+              onToggle={() => workspaceTarget && dispatchWorkspaceToggleEvent(workspaceTarget)}
               togglePlacement={layout?.isMobile ? 'left' : 'right'}
               workspacePath={workspacePath}
               isTemporaryWorkspace={isTemporaryWorkspace}
@@ -491,7 +495,7 @@ const ChatLayoutInner: React.FC<ChatLayoutProps> = (props) => {
         )}
 
         {/* Mobile workspace overlay: backdrop + fixed panel + floating collapse handle */}
-        {workspaceEnabled && layout?.isMobile && (
+        {workspaceEnabled && layout?.isMobile && workspaceTarget && (
           <MobileWorkspaceOverlay
             rightSiderCollapsed={rightSiderCollapsed}
             setRightSiderCollapsed={setRightSiderCollapsed}
@@ -502,6 +506,7 @@ const ChatLayoutInner: React.FC<ChatLayoutProps> = (props) => {
             workspacePath={workspacePath}
             isTemporaryWorkspace={isTemporaryWorkspace}
             conversation_id={conversation_id}
+            workspaceTarget={workspaceTarget}
             activeTab={activeWorkspaceTab}
             activeTitle={activeWorkspaceTitle}
           />
@@ -519,14 +524,23 @@ const ChatLayoutInner: React.FC<ChatLayoutProps> = (props) => {
  * conversation index that have since been removed). The provider unmounts with
  * the surface, so cross-view leak can no longer happen.
  *
- * `persistNamespace="conversation"` keeps the existing localStorage bucket;
- * `subscribeGlobalOpen` lets agent/MCP `preview.open` events open a preview on
- * the conversation surface (the primary surface). A future terminal rail can
- * mount its own provider with a different namespace and `subscribeGlobalOpen={false}`.
+ * The persistence namespace includes the conversation id, so switching
+ * conversations restores only that conversation's tabs. `subscribeGlobalOpen`
+ * lets agent/MCP `preview.open` events open a preview on the conversation
+ * surface (the primary surface).
  */
 const ChatLayout: React.FC<ChatLayoutProps> = (props) => {
+  const pendingPreviewScope = useRef(`conversation-pending:${uuid()}`);
+  const previewScope = props.conversation_id
+    ? `conversation:${props.conversation_id}`
+    : pendingPreviewScope.current;
+
   return (
-    <PreviewProvider persistNamespace='conversation' subscribeGlobalOpen={true}>
+    <PreviewProvider
+      key={previewScope}
+      persistNamespace={previewScope}
+      subscribeGlobalOpen={true}
+    >
       <ChatLayoutInner {...props} />
     </PreviewProvider>
   );

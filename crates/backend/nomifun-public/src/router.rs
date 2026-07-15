@@ -16,6 +16,7 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use nomifun_auth::CompanionTokenValidator;
+use nomifun_common::CompanionId;
 use nomifun_gateway::GatewayDeps;
 use rmcp::transport::streamable_http_server::{
     StreamableHttpServerConfig, StreamableHttpService, session::local::LocalSessionManager,
@@ -28,7 +29,7 @@ use crate::handler::RemoteMcpHandler;
 /// (MCP via `RequestContext.extensions`→`http::request::Parts`; REST via
 /// `Extension<RemoteCompanion>`).
 #[derive(Clone, Debug)]
-pub struct RemoteCompanion(pub String);
+pub struct RemoteCompanion(pub CompanionId);
 
 /// State for the companion-token middleware.
 #[derive(Clone)]
@@ -119,8 +120,11 @@ mod tests {
     // before reaching the MCP service; a valid token resolves to its companion.
     #[tokio::test]
     async fn missing_token_is_unauthorized() {
-        let validator =
-            Arc::new(CompanionTokenValidator::new(vec![("comp".into(), token_sha256_hex("secret-token"))]));
+        let companion_id = CompanionId::new();
+        let validator = Arc::new(CompanionTokenValidator::new(vec![(
+            companion_id.clone(),
+            token_sha256_hex("secret-token"),
+        )]));
         // We can't easily build GatewayDeps in a unit test, so exercise the
         // middleware in isolation over a trivial inner router.
         let state = PublicMcpState { validator: validator.clone() };
@@ -147,7 +151,7 @@ mod tests {
         assert_eq!(ok.status(), StatusCode::OK);
 
         // Revocation closes it.
-        validator.remove_token("comp");
+        validator.remove_token(&companion_id);
         let res2 = Router::new()
             .route("/mcp", axum::routing::post(|| async { "ok" }))
             .layer(from_fn_with_state(PublicMcpState { validator }, companion_token_middleware))
@@ -167,9 +171,11 @@ mod tests {
         use axum::routing::get;
         use nomifun_auth::token_sha256_hex;
 
-        let validator = std::sync::Arc::new(
-            nomifun_auth::CompanionTokenValidator::new(vec![("comp-x".into(), token_sha256_hex("secret-tok"))]),
-        );
+        let companion_id = CompanionId::new();
+        let validator = std::sync::Arc::new(nomifun_auth::CompanionTokenValidator::new(vec![(
+            companion_id.clone(),
+            token_sha256_hex("secret-tok"),
+        )]));
         // A probe handler that echoes whether the extension is present + its value.
         async fn probe(ext: Option<axum::Extension<RemoteCompanion>>) -> String {
             match ext {
@@ -198,7 +204,8 @@ mod tests {
             .unwrap();
         assert_eq!(resp.status(), axum::http::StatusCode::OK);
         let body = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
-        assert_eq!(&body[..], b"companion=comp-x");
+        let expected = format!("companion={companion_id}");
+        assert_eq!(body.as_ref(), expected.as_bytes());
 
         // Bad token → 401.
         let resp = app

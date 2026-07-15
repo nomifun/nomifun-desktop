@@ -6,13 +6,14 @@ import { useCallback, useEffect, useMemo, useRef } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Message } from '@arco-design/web-react';
 import { uuid } from '@renderer/utils/common';
+import type { ConversationId } from '@/common/types/ids';
 
 interface UsePasteServiceProps {
   supportedExts: string[];
   onFilesAdded?: (files: FileMetadata[]) => void;
   onTextPaste?: (text: string) => void;
   /** Conversation ID for WebUI file uploads */
-  conversation_id?: string;
+  conversation_id?: ConversationId;
   source?: UploadSource;
 }
 

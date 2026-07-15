@@ -6,6 +6,7 @@
 
 import { buildBackendAuthHeaders, getBaseUrl } from '@/common/adapter/httpBridge';
 import { trackUpload, type UploadSource } from '@/renderer/hooks/file/useUploadState';
+import type { ConversationId } from '@/common/types/ids';
 
 /** Sentinel error message used when an upload is cancelled by the caller. */
 export const UPLOAD_ABORTED_ERROR = 'Upload aborted';
@@ -31,7 +32,7 @@ export interface UploadFileOptions {
  */
 export async function uploadFileViaHttp(
   file: File,
-  conversation_id?: string,
+  conversation_id?: ConversationId,
   onProgress?: (percent: number) => void,
   file_name?: string,
   options?: UploadFileOptions
@@ -249,7 +250,7 @@ class FileServiceClass {
    */
   async processDroppedFiles(
     files: FileList,
-    conversation_id?: string,
+    conversation_id?: ConversationId,
     source: UploadSource = 'sendbox'
   ): Promise<FileMetadata[]> {
     const processedFiles: FileMetadata[] = [];
@@ -270,11 +271,11 @@ class FileServiceClass {
         const tracker = trackUpload(file.size, {
           source,
           name: file.name,
-          conversationId: conversation_id || undefined,
+          conversationId: conversation_id,
           onAbort: () => controller.abort(),
         });
         try {
-          file_path = await uploadFileViaHttp(file, conversation_id || '', tracker.onProgress, undefined, {
+          file_path = await uploadFileViaHttp(file, conversation_id, tracker.onProgress, undefined, {
             signal: controller.signal,
           });
         } catch (error) {

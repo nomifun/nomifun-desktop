@@ -6,13 +6,17 @@
 
 import { describe, expect, it } from 'vitest';
 import { isForCompanion } from './eventScope';
+import { parseCompanionId } from '@/common/types/ids';
+
+const C1 = parseCompanionId('companion_019b0000-0000-7000-8000-000000000001');
+const C2 = parseCompanionId('companion_019b0000-0000-7000-8000-000000000002');
 
 describe('isForCompanion', () => {
-  it('命中本伙伴 id', () => expect(isForCompanion({ companion_id: 'c1' }, 'c1')).toBe(true));
-  it('拒绝其他伙伴 id', () => expect(isForCompanion({ companion_id: 'c2' }, 'c1')).toBe(false));
+  it('命中本伙伴 id', () => expect(isForCompanion({ companion_id: C1 }, C1)).toBe(true));
+  it('拒绝其他伙伴 id', () => expect(isForCompanion({ companion_id: C2 }, C1)).toBe(false));
   it('缺省(undefined/null)放行——兼容旧后端/全局事件', () => {
-    expect(isForCompanion({}, 'c1')).toBe(true);
-    expect(isForCompanion({ companion_id: null }, 'c1')).toBe(true);
+    expect(isForCompanion({}, C1)).toBe(true);
+    expect(isForCompanion({ companion_id: null }, C1)).toBe(true);
   });
-  it('空串目标抑制(不复活风暴)', () => expect(isForCompanion({ companion_id: '' }, 'c1')).toBe(false));
+  it('重复拒绝其他 canonical 目标', () => expect(isForCompanion({ companion_id: C2 }, C1)).toBe(false));
 });

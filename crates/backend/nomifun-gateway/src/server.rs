@@ -17,8 +17,7 @@ use nomifun_api_types::{
 };
 use nomifun_common::{
     LOOPBACK_CAPABILITY_RENEW_PATH, LOOPBACK_CAPABILITY_REVOKE_PATH,
-    LoopbackCapabilityIssuer, LoopbackCapabilityRenewalRequest,
-    LoopbackSessionKind,
+    LoopbackCapabilityIssuer, LoopbackCapabilityRenewalRequest, LoopbackSessionKind,
 };
 use serde_json::{Value, json};
 use tokio::net::TcpListener;
@@ -195,10 +194,15 @@ async fn handle_tool_request(
         .unwrap_or("")
         .to_owned();
     let args = body.get("args").cloned().unwrap_or(Value::Null);
+    let Ok(conversation_id) = nomifun_common::ConversationId::parse(&claims.session.session_id) else {
+        return (StatusCode::UNAUTHORIZED, Json(json!({"error": "invalid session identity"}))).into_response();
+    };
+    let user_id = claims.user_id.clone();
+    let companion_id = claims.scope.companion_id.clone();
     let ctx = CallerCtx {
-        conversation_id: claims.session.session_id.clone(),
-        user_id: claims.user_id.clone(),
-        companion_id: claims.scope.companion_id.clone(),
+        conversation_id: Some(conversation_id),
+        user_id,
+        companion_id,
         channel_platform: claims.scope.channel_platform.clone(),
         session_mode: claims.scope.session_mode.clone(),
         // This in-process server is the INWARD path (bundled agents on loopback);
@@ -214,7 +218,7 @@ async fn handle_tool_request(
         }
     };
 
-    let is_instance_owner = claims.user_id == deps.authoritative_user_id.as_ref();
+    let is_instance_owner = claims.user_id.as_str() == deps.authoritative_user_id.as_ref();
     if claims.scope.instance_owner != is_instance_owner {
         warn!(user_id = %claims.user_id, "Gateway MCP: signed owner classification disagrees with runtime authority");
         return (
@@ -239,7 +243,7 @@ async fn handle_tool_request(
         }));
     }
 
-    info!(tool, caller = %ctx.conversation_id, "Gateway MCP: dispatching tool");
+    info!(tool, caller = ?ctx.conversation_id, "Gateway MCP: dispatching tool");
 
     // The capability registry is the single authority: it owns every tool,
     // generates its schema, and enforces the danger-tier × surface permission
@@ -316,11 +320,7 @@ fn finish(body: Value) -> axum::response::Response {
 /// Every conversation-domain tool needs the calling user's identity to scope
 /// data access; refuse to operate without one.
 pub(crate) fn require_user(ctx: &CallerCtx) -> Result<&str, Value> {
-    if ctx.user_id.is_empty() {
-        Err(json!({"error": "missing caller user identity in signed gateway session"}))
-    } else {
-        Ok(&ctx.user_id)
-    }
+    Ok(ctx.user_id.as_str())
 }
 
 /// Wrap a serializable payload as a successful tool result.
@@ -334,6 +334,11 @@ pub(crate) fn ok<T: serde::Serialize>(payload: T) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use nomifun_common::UserId;
+
+    const TEST_OWNER_ID: &str = "user_0190f5fe-7c00-7a00-8000-000000000001";
+    const TEST_CONVERSATION_ID: &str = "conv_0190f5fe-7c00-7a00-8000-000000000001";
+    const OTHER_CONVERSATION_ID: &str = "conv_0190f5fe-7c00-7a00-8000-000000000002";
 
     fn child(
         server: &GatewayMcpServer,
@@ -341,7 +346,7 @@ mod tests {
         conversation_id: &str,
     ) -> nomifun_api_types::GatewayMcpChildConfig {
         server
-            .issuer_config("/bin/nomicore".into(), "system_default_user")
+            .issuer_config("/bin/nomicore".into(), TEST_OWNER_ID)
             .issue_for_conversation(user_id, conversation_id, None, None, None, &[])
             .unwrap()
     }
@@ -385,7 +390,7 @@ mod tests {
         assert!(server.http_port() > 0);
         let debug = format!(
             "{:?}",
-            server.issuer_config("/bin/nomicore".into(), "system_default_user")
+            server.issuer_config("/bin/nomicore".into(), TEST_OWNER_ID)
         );
         assert!(debug.contains("[REDACTED]"));
     }
@@ -394,8 +399,8 @@ mod tests {
     async fn each_start_uses_a_fresh_issuer_secret() {
         let a = GatewayMcpServer::start().await.unwrap();
         let b = GatewayMcpServer::start().await.unwrap();
-        let child_a = child(&a, "system_default_user", "1");
-        let child_b = child(&b, "system_default_user", "1");
+        let child_a = child(&a, TEST_OWNER_ID, TEST_CONVERSATION_ID);
+        let child_b = child(&b, TEST_OWNER_ID, TEST_CONVERSATION_ID);
         assert_ne!(
             child_a.bootstrap.renewal.renewal_proof,
             child_b.bootstrap.renewal.renewal_proof
@@ -424,7 +429,7 @@ mod tests {
     #[tokio::test]
     async fn renewal_restores_server_scope_and_revoke_ends_the_lease() {
         let server = GatewayMcpServer::start().await.unwrap();
-        let child = child(&server, "system_default_user", "1");
+        let child = child(&server, TEST_OWNER_ID, TEST_CONVERSATION_ID);
         let original = &child.bootstrap.access.claims;
 
         let (status, body) = post_capability(
@@ -464,7 +469,7 @@ mod tests {
     async fn missing_deps_returns_unavailable() {
         // Server started but set_deps never called.
         let server = GatewayMcpServer::start().await.unwrap();
-        let child = child(&server, "system_default_user", "1");
+        let child = child(&server, TEST_OWNER_ID, TEST_CONVERSATION_ID);
         let access = &child.bootstrap.access;
         let (status, body) = post_tool(
             server.http_port(),
@@ -482,11 +487,11 @@ mod tests {
     #[tokio::test]
     async fn tampered_cross_conversation_and_expired_claims_are_unauthorized() {
         let server = GatewayMcpServer::start().await.unwrap();
-        let child = child(&server, "system_default_user", "1");
+        let child = child(&server, TEST_OWNER_ID, TEST_CONVERSATION_ID);
         let access = &child.bootstrap.access;
 
         let mut forged = access.claims.clone();
-        forged.session = nomifun_common::LoopbackSessionBinding::conversation("2");
+        forged.session = nomifun_common::LoopbackSessionBinding::conversation(OTHER_CONVERSATION_ID);
         let (status, _) = post_tool(
             server.http_port(),
             Some(&access.token),
@@ -516,10 +521,12 @@ mod tests {
     #[tokio::test]
     async fn correctly_signed_terminal_binding_is_unauthorized() {
         let server = GatewayMcpServer::start().await.unwrap();
-        let child = child(&server, "system_default_user", "1");
+        let child = child(&server, TEST_OWNER_ID, TEST_CONVERSATION_ID);
         let claims = GatewayCapabilityClaims::issue(
-            "system_default_user",
-            nomifun_common::LoopbackSessionBinding::terminal("terminal-1"),
+            TEST_OWNER_ID,
+            nomifun_common::LoopbackSessionBinding::terminal(
+                "term_0190f5fe-7c00-7a00-8000-000000000001",
+            ),
             [
                 nomifun_api_types::GATEWAY_LIST_TOOLS_OPERATION,
                 GATEWAY_CALL_TOOL_OPERATION,
@@ -543,7 +550,7 @@ mod tests {
     #[tokio::test]
     async fn tools_call_requires_signed_operation_scope() {
         let server = GatewayMcpServer::start().await.unwrap();
-        let child = child(&server, "system_default_user", "1");
+        let child = child(&server, TEST_OWNER_ID, TEST_CONVERSATION_ID);
         let mut claims = child.bootstrap.access.claims.clone();
         claims.allowed_tools = vec![nomifun_api_types::GATEWAY_LIST_TOOLS_OPERATION.into()];
         let (token, _) = server
@@ -561,13 +568,17 @@ mod tests {
     }
 
     #[test]
-    fn require_user_rejects_empty_identity() {
+    fn require_user_returns_canonical_typed_identity() {
         let ctx = CallerCtx::default();
-        assert!(require_user(&ctx).is_err());
+        assert_eq!(require_user(&ctx).unwrap(), ctx.user_id.as_str());
         let ctx = CallerCtx {
-            user_id: "u1".into(),
+            user_id: UserId::parse("user_0190f5fe-7c00-7a00-8000-000000000001")
+                .unwrap(),
             ..Default::default()
         };
-        assert_eq!(require_user(&ctx).unwrap(), "u1");
+        assert_eq!(
+            require_user(&ctx).unwrap(),
+            "user_0190f5fe-7c00-7a00-8000-000000000001"
+        );
     }
 }

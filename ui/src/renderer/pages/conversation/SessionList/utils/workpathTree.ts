@@ -6,14 +6,12 @@
 
 import type { ITerminalSession } from '@/common/adapter/ipcBridge';
 import type { TChatConversation } from '@/common/config/storage';
+import type { ConversationId, TerminalId } from '@/common/types/ids';
 import { DEFAULT_WORKPATH_KEY, workpathKey } from './workpathKey';
 
 export type SessionKind = 'interactive' | 'terminal';
 
-export type SessionEntry = {
-  kind: SessionKind;
-  /** conversation.id / terminal.id — both backend-minted INTEGER (numeric-id spec). */
-  id: number;
+type SessionEntryBase = {
   name: string;
   pinned: boolean;
   /** 未置顶为 0 */
@@ -22,17 +20,27 @@ export type SessionEntry = {
   activityAt: number;
   /** conversation.created_at / terminal.created_at */
   createdAt: number;
-  conversation?: TChatConversation;
-  terminal?: ITerminalSession;
 };
+
+export type SessionEntry =
+  | (SessionEntryBase & {
+      kind: 'interactive';
+      id: ConversationId;
+      conversation: TChatConversation;
+    })
+  | (SessionEntryBase & {
+      kind: 'terminal';
+      id: TerminalId;
+      terminal: ITerminalSession;
+    });
 
 export type WorkpathNode = {
   key: string;
   displayName: string;
   pinned: boolean;
   activityAt: number;
-  interactive: SessionEntry[];
-  terminal: SessionEntry[];
+  interactive: Extract<SessionEntry, { kind: 'interactive' }>[];
+  terminal: Extract<SessionEntry, { kind: 'terminal' }>[];
 };
 
 /**

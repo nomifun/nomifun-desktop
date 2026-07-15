@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import type { ConversationId, MessageId } from '@/common/types/ids';
 import { ipcBridge } from '@/common';
 import AtFileMenu from '@/renderer/components/chat/AtFileMenu';
 import BtwOverlay from '@/renderer/components/chat/BtwOverlay';
@@ -176,7 +177,7 @@ const SendBox: React.FC<{
   /** When provided (Nomi only), enables "edit a sent message" mode: the message text is
    *  recalled into the composer via the `sendbox.edit` event and submitting calls this
    *  instead of onSend, which truncates the conversation and re-runs from that message. */
-  onEditResubmit?: (msgId: string, createdAt: number, message: string) => Promise<void>;
+  onEditResubmit?: (msgId: MessageId, createdAt: number, message: string) => Promise<void>;
   /** Clear the agent's conversation context (release model context). When set, a `/clear` builtin appears. */
   onClearContext?: () => void | Promise<void>;
   disabled?: boolean;
@@ -262,7 +263,7 @@ const SendBox: React.FC<{
   const singleLineWidthRef = useRef<number>(0);
   const measurementCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const mobileUserFocusIntentUntilRef = useRef(0);
-  const warmedConversationRef = useRef<number | undefined>(undefined);
+  const warmedConversationRef = useRef<ConversationId | undefined>(undefined);
   const warmupTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const latestInputRef = useLatestRef(input);
   const setInputRef = useLatestRef(setInput);
@@ -272,7 +273,7 @@ const SendBox: React.FC<{
   const [historyNavigationIndex, setHistoryNavigationIndex] = useState<number | null>(null);
   const historyDraftRef = useRef<string | null>(null);
   const [replyQuote, setReplyQuote] = useState<ReplyQuote | null>(null);
-  const [editingMsgId, setEditingMsgId] = useState<string | null>(null);
+  const [editingMsgId, setEditingMsgId] = useState<MessageId | null>(null);
   const editingCreatedAtRef = useRef<number>(0);
   const editPrevDraftRef = useRef<string | null>(null);
   const [caretPosition, setCaretPosition] = useState(0);
@@ -431,14 +432,14 @@ const SendBox: React.FC<{
     supportedExts,
     onFilesAdded,
     conversation_id:
-      conversationContext?.conversation_id != null ? String(conversationContext.conversation_id) : undefined,
+      conversationContext?.conversation_id != null ? conversationContext.conversation_id : undefined,
   });
 
   const { isUploading } = useUploadState('sendbox');
   // Bind sendbox uploads to the current conversation's lifecycle: switching
   // conversations or unmounting the SendBox aborts anything still in flight.
   useAbortUploadsOnConversationChange(
-    conversationContext?.conversation_id != null ? String(conversationContext.conversation_id) : undefined,
+    conversationContext?.conversation_id != null ? conversationContext.conversation_id : undefined,
     'sendbox'
   );
   const [message, context] = useArcoMessage();
@@ -1036,7 +1037,7 @@ const SendBox: React.FC<{
     supportedExts,
     onFilesAdded,
     conversation_id:
-      conversationContext?.conversation_id != null ? String(conversationContext.conversation_id) : undefined,
+      conversationContext?.conversation_id != null ? conversationContext.conversation_id : undefined,
     onTextPaste: (text: string) => {
       // 处理清理后的文本粘贴，在当前光标位置插入文本而不是替换整个内容
       const textarea = document.activeElement as HTMLTextAreaElement;

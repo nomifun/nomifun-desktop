@@ -19,10 +19,11 @@ import { useWorkshopMedia } from '../canvas/media';
 import type { WorkshopGeneratorBatch } from '../types';
 import type { GenMode } from './genTypes';
 import { loadWorkshopText } from './pipeline';
+import type { AssetId } from '@/common/types/ids';
 
 export interface ResultViewProps {
   mode: GenMode;
-  resultAssetIds: string[];
+  resultAssetIds: AssetId[];
   batch?: WorkshopGeneratorBatch;
   onContinueEdit?: (instruction: string) => void;
   onToTextNode: (content: string) => void;

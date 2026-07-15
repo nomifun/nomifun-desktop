@@ -9,8 +9,7 @@
  *
  * Addresses one channel row (`channel_plugins` row) for the per-owner
  * multi-bot flows:
- * - `channelId` present → update that row (`achn_` prefixed id, or a legacy
- *   platform-name id migrated from the single-bot era);
+ * - `channelId` present → update that canonical `chn_` row;
  * - `channelId` absent → create mode: the first enable creates a new row of
  *   the form's platform bound to its owner (backend rejects with 409 when the
  *   same bot is already bound to another owner).
@@ -20,13 +19,14 @@
  * (a channel bot serves a single object). The enable call forwards whichever
  * one is present as `companion_id` / `public_agent_id`.
  *
- * Forms that receive no `channelTarget` keep the legacy global-settings
- * behavior (one implicit row per platform, addressed by platform name).
+ * Forms that receive no `channelTarget` create an unbound row by platform.
  */
+import type { ChannelId, CompanionId, PublicAgentId } from '@/common/types/ids';
+
 export interface ChannelTarget {
-  channelId?: string;
-  companionId?: string;
-  publicAgentId?: string;
+  channelId?: ChannelId;
+  companionId?: CompanionId;
+  publicAgentId?: PublicAgentId;
 }
 
 /** Builtin IM platforms a companion can connect (the channel config forms cover this set). */

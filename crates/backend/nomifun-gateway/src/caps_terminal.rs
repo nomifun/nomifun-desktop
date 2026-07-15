@@ -12,6 +12,7 @@
 use std::sync::Arc;
 
 use nomifun_api_types::CreateTerminalRequest;
+use nomifun_common::KnowledgeBaseId;
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -55,7 +56,8 @@ struct CreateTerminalParams {
     /// (bind-on-create); they are mounted into `.nomi/knowledge/` inside the
     /// cwd when the terminal starts. Use nomi_knowledge_list_bases for ids.
     #[serde(default)]
-    knowledge_base_ids: Option<Vec<String>>,
+    #[schemars(with = "Option<Vec<String>>")]
+    knowledge_base_ids: Option<Vec<KnowledgeBaseId>>,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -68,7 +70,7 @@ struct ListTerminalsParams {
 // ─── Handlers ──────────────────────────────────────────────────────────────
 
 async fn create(deps: Arc<GatewayDeps>, ctx: CallerCtx, p: CreateTerminalParams) -> Value {
-    if ctx.user_id.is_empty() {
+    if nomifun_common::UserId::parse(ctx.user_id.as_str()).is_err() {
         return json!({"error": "missing caller user identity in signed Gateway capability"});
     }
     let user_id = ctx.user_id;
@@ -131,7 +133,7 @@ async fn create(deps: Arc<GatewayDeps>, ctx: CallerCtx, p: CreateTerminalParams)
         knowledge_base_ids: p.knowledge_base_ids,
     };
 
-    match deps.terminal_service.create(&user_id, req).await {
+    match deps.terminal_service.create(user_id.as_str(), req).await {
         Ok(resp) => ok(json!({
             "id": resp.id,
             "name": resp.name,
@@ -151,10 +153,10 @@ async fn create(deps: Arc<GatewayDeps>, ctx: CallerCtx, p: CreateTerminalParams)
 }
 
 async fn list(deps: Arc<GatewayDeps>, ctx: CallerCtx, p: ListTerminalsParams) -> Value {
-    if ctx.user_id.is_empty() {
+    if nomifun_common::UserId::parse(ctx.user_id.as_str()).is_err() {
         return json!({"error": "missing caller user identity in signed Gateway capability"});
     }
-    let user_id = &ctx.user_id;
+    let user_id = ctx.user_id.as_str();
 
     match deps.terminal_service.list(user_id).await {
         Ok(rows) => {
@@ -267,9 +269,14 @@ mod tests {
     #[test]
     fn knowledge_base_ids_deserialization() {
         // Valid: present with string array
-        let json_val = json!({"knowledge_base_ids": ["kb_a", "kb_b"]});
+        let first = nomifun_common::KnowledgeBaseId::new();
+        let second = nomifun_common::KnowledgeBaseId::new();
+        let json_val = json!({"knowledge_base_ids": [first, second]});
         let p: CreateTerminalParams = serde_json::from_value(json_val).unwrap();
-        assert_eq!(p.knowledge_base_ids, Some(vec!["kb_a".to_owned(), "kb_b".to_owned()]));
+        assert_eq!(
+            p.knowledge_base_ids,
+            Some(vec![first, second])
+        );
 
         // Valid: absent → None
         let json_val = json!({});
@@ -282,7 +289,7 @@ mod tests {
         assert_eq!(p.knowledge_base_ids, None);
 
         // Invalid: non-string elements are rejected at deserialization
-        let json_val = json!({"knowledge_base_ids": ["kb_a", 1]});
+        let json_val = json!({"knowledge_base_ids": ["kb_a"]});
         let result = serde_json::from_value::<CreateTerminalParams>(json_val);
         assert!(result.is_err());
     }

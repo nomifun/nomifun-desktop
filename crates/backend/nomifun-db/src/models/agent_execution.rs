@@ -119,7 +119,7 @@ pub struct AgentExecutionAttemptRow {
 #[derive(Debug, Clone, sqlx::FromRow, Serialize, Deserialize)]
 pub struct ConversationExecutionLinkRow {
     pub id: String,
-    pub conversation_id: i64,
+    pub conversation_id: String,
     pub execution_id: String,
     pub relation: String,
     pub step_id: Option<String>,
@@ -140,7 +140,7 @@ pub struct AgentExecutionEventRow {
     pub attempt_id: Option<String>,
     pub actor_type: String,
     pub actor_id: Option<String>,
-    pub actor_conversation_id: Option<i64>,
+    pub actor_conversation_id: Option<String>,
     pub actor_attempt_id: Option<String>,
     pub on_behalf_of_user_id: String,
     pub payload: String,
@@ -153,7 +153,7 @@ pub struct AgentExecutionEventRow {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentExecutionAttemptDetailRow {
     pub attempt: AgentExecutionAttemptRow,
-    pub conversation_id: Option<i64>,
+    pub conversation_id: Option<String>,
 }
 
 /// Owner-facing step view. Current attempt data is derived by attempt_no and
@@ -167,7 +167,7 @@ pub struct AgentExecutionStepDetailRow {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentExecutionDetailRows {
     pub execution: AgentExecutionRow,
-    pub lead_conversation_id: Option<i64>,
+    pub lead_conversation_id: Option<String>,
     pub participants: Vec<AgentExecutionParticipantRow>,
     pub steps: Vec<AgentExecutionStepRow>,
     pub dependencies: Vec<AgentExecutionStepDependencyRow>,

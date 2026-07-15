@@ -4,7 +4,7 @@ use nomifun_ai_agent::{
     AgentStreamEvent,
     protocol::events::{FinishEventData, ToolCallEventData, ToolCallStatus},
 };
-use nomifun_common::now_ms;
+use nomifun_common::{ConversationId, now_ms};
 use nomifun_conversation::stream_relay::StreamRelay;
 use nomifun_db::{
     IConversationRepository, SortOrder, SqliteConversationRepository, init_database_memory, models::ConversationRow,
@@ -13,13 +13,15 @@ use nomifun_realtime::WebSocketManager;
 use serde_json::json;
 use tokio::sync::broadcast;
 
-async fn setup_repo() -> (Arc<SqliteConversationRepository>, nomifun_db::Database) {
+async fn setup_repo() -> (Arc<SqliteConversationRepository>, nomifun_db::Database, String, String) {
     let db = init_database_memory().await.unwrap();
+    let installation_owner = nomifun_db::installation_owner_id(db.pool()).await.unwrap();
     let repo = Arc::new(SqliteConversationRepository::new(db.pool().clone()));
     let now = now_ms();
+    let conversation_id = ConversationId::new().into_string();
     repo.create(&ConversationRow {
-        id: 1,
-        user_id: "system_default_user".into(),
+        id: conversation_id.clone(),
+        user_id: installation_owner.clone(),
         name: "Tool call test".into(),
         r#type: "nomi".into(),
         extra: "{}".into(),
@@ -43,19 +45,19 @@ async fn setup_repo() -> (Arc<SqliteConversationRepository>, nomifun_db::Databas
     .await
     .unwrap();
 
-    (repo, db)
+    (repo, db, conversation_id, installation_owner)
 }
 
 #[tokio::test]
 async fn run_tool_call_with_empty_call_id_is_not_persisted() {
-    let (repo, _db) = setup_repo().await;
+    let (repo, _db, conversation_id, installation_owner) = setup_repo().await;
     let bus = Arc::new(WebSocketManager::new());
     let (tx, _) = broadcast::channel(64);
 
     let relay = StreamRelay::new(
-        "1".into(),
+        conversation_id.clone(),
         "asst-1".into(),
-        "system_default_user".into(),
+        installation_owner.into(),
         repo.clone(),
         bus,
         None,
@@ -76,7 +78,7 @@ async fn run_tool_call_with_empty_call_id_is_not_persisted() {
 
     relay.consume(rx).await;
 
-    let messages = repo.get_messages(1, 1, 100, SortOrder::Asc).await.unwrap();
+    let messages = repo.get_messages(&conversation_id, 1, 100, SortOrder::Asc).await.unwrap();
 
     assert!(
         messages.items.iter().all(|row| row.r#type != "tool_call"),

@@ -5,6 +5,7 @@ use std::sync::Arc;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use http_body_util::BodyExt;
+use nomifun_common::ProviderId;
 use nomifun_db::{
     SqliteClientPreferenceRepository, SqliteModelProfileRepository,
     SqliteProviderRepository, SqliteSettingsRepository, init_database_memory,
@@ -113,7 +114,7 @@ async fn free_and_local_status_match_wire_contracts() {
     assert_eq!(free.status(), StatusCode::OK);
     let free = json_body(free).await;
     assert_eq!(free["data"]["kind"], "free");
-    assert_eq!(free["data"]["providerId"], "nomifun-free-model");
+    ProviderId::parse(free["data"]["providerId"].as_str().unwrap()).unwrap();
     assert_eq!(free["data"]["protocolVersion"], "1");
     assert!(free["data"]["models"].as_array().is_some_and(|m| !m.is_empty()));
 
@@ -137,7 +138,7 @@ async fn free_and_local_status_match_wire_contracts() {
     assert_eq!(local.status(), StatusCode::OK);
     let local = json_body(local).await;
     assert_eq!(local["data"]["kind"], "local");
-    assert_eq!(local["data"]["providerId"], "nomifun-local-model");
+    ProviderId::parse(local["data"]["providerId"].as_str().unwrap()).unwrap();
     assert_eq!(local["data"]["enabled"], false);
     assert_eq!(local["data"]["ready"], false);
     assert!(local["data"]["activeModelId"].is_null());

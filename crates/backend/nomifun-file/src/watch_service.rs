@@ -8,7 +8,7 @@ use notify::{EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use tracing::warn;
 
 use nomifun_api_types::WebSocketMessage;
-use nomifun_common::AppError;
+use nomifun_common::{AppError, UserId};
 use nomifun_realtime::UserEventSink;
 
 use crate::types::{FileWatchEvent, OfficeFileAddedEvent};
@@ -313,11 +313,9 @@ impl crate::traits::IFileWatchService for FileWatchService {
 }
 
 fn require_owner(owner_id: &str) -> Result<(), AppError> {
-    if owner_id.trim().is_empty() {
-        Err(AppError::BadRequest("file watch owner is required".into()))
-    } else {
-        Ok(())
-    }
+    UserId::parse(owner_id)
+        .map(|_| ())
+        .map_err(|error| AppError::BadRequest(format!("invalid file watch owner: {error}")))
 }
 
 // ---------------------------------------------------------------------------

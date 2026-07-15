@@ -5,10 +5,15 @@
 
 use std::sync::Arc;
 
+use nomifun_common::McpServerId;
 use nomifun_db::{
     CreateMcpServerParams, DbError, IMcpServerRepository, SqliteMcpServerRepository, UpdateMcpServerParams,
     init_database_memory,
 };
+
+fn missing_id() -> McpServerId {
+    McpServerId::parse("mcp_0190f5fe-7c00-7a00-8000-000000000999").unwrap()
+}
 
 async fn repo() -> (Arc<dyn IMcpServerRepository>, nomifun_db::Database) {
     let db = init_database_memory().await.unwrap();
@@ -62,7 +67,7 @@ async fn create_stdio_server() {
     let (r, _db) = repo().await;
     let server = r.create(stdio_params()).await.unwrap();
 
-    assert!(server.id > 0);
+    assert!(server.id.as_str().starts_with("mcp_"));
     assert_eq!(server.name, "test-mcp");
     assert_eq!(server.description.as_deref(), Some("A test MCP server"));
     assert!(!server.enabled);
@@ -112,7 +117,7 @@ async fn find_by_id_returns_full_record() {
     let (r, _db) = repo().await;
     let created = r.create(stdio_params()).await.unwrap();
 
-    let found = r.find_by_id(created.id).await.unwrap().unwrap();
+    let found = r.find_by_id(&created.id).await.unwrap().unwrap();
     assert_eq!(found.id, created.id);
     assert_eq!(found.name, "test-mcp");
     assert_eq!(found.transport_type, "stdio");
@@ -122,7 +127,7 @@ async fn find_by_id_returns_full_record() {
 #[tokio::test]
 async fn find_by_id_nonexistent_returns_none() {
     let (r, _db) = repo().await;
-    assert!(r.find_by_id(999_999).await.unwrap().is_none());
+    assert!(r.find_by_id(&missing_id()).await.unwrap().is_none());
 }
 
 // -- Find by name --
@@ -174,7 +179,7 @@ async fn update_name_only_preserves_other_fields() {
 
     let updated = r
         .update(
-            created.id,
+            &created.id,
             UpdateMcpServerParams {
                 name: Some("renamed-mcp"),
                 ..Default::default()
@@ -197,7 +202,7 @@ async fn update_transport_type_and_config() {
 
     let updated = r
         .update(
-            created.id,
+            &created.id,
             UpdateMcpServerParams {
                 transport_type: Some("http"),
                 transport_config: Some(r#"{"url":"https://new.example.com"}"#),
@@ -218,7 +223,7 @@ async fn update_description() {
 
     let updated = r
         .update(
-            created.id,
+            &created.id,
             UpdateMcpServerParams {
                 description: Some(Some("new desc")),
                 ..Default::default()
@@ -236,7 +241,7 @@ async fn update_description() {
 async fn update_nonexistent_returns_not_found() {
     let (r, _db) = repo().await;
     let err = r
-        .update(999_999, UpdateMcpServerParams::default())
+        .update(&missing_id(), UpdateMcpServerParams::default())
         .await
         .unwrap_err();
     assert!(matches!(err, DbError::NotFound(_)));
@@ -252,7 +257,7 @@ async fn update_name_to_existing_name_returns_conflict() {
 
     let err = r
         .update(
-            s2.id,
+            &s2.id,
             UpdateMcpServerParams {
                 name: Some("test-mcp"),
                 ..Default::default()
@@ -274,7 +279,7 @@ async fn update_can_clear_optional_fields() {
 
     let updated = r
         .update(
-            created.id,
+            &created.id,
             UpdateMcpServerParams {
                 description: Some(None),
                 original_json: Some(None),
@@ -296,7 +301,7 @@ async fn update_persists_to_database() {
     let created = r.create(stdio_params()).await.unwrap();
 
     r.update(
-        created.id,
+        &created.id,
         UpdateMcpServerParams {
             enabled: Some(true),
             ..Default::default()
@@ -305,7 +310,7 @@ async fn update_persists_to_database() {
     .await
     .unwrap();
 
-    let found = r.find_by_id(created.id).await.unwrap().unwrap();
+    let found = r.find_by_id(&created.id).await.unwrap().unwrap();
     assert!(found.enabled);
 }
 
@@ -316,9 +321,9 @@ async fn delete_existing_removes_record() {
     let (r, _db) = repo().await;
     let created = r.create(stdio_params()).await.unwrap();
 
-    r.delete(created.id).await.unwrap();
-    assert!(r.find_by_id(created.id).await.unwrap().is_none());
-    let deleted = r.find_by_id_any(created.id).await.unwrap().unwrap();
+    r.delete(&created.id).await.unwrap();
+    assert!(r.find_by_id(&created.id).await.unwrap().is_none());
+    let deleted = r.find_by_id_any(&created.id).await.unwrap().unwrap();
     assert!(deleted.deleted_at.is_some());
     assert!(!deleted.enabled);
 }
@@ -326,7 +331,7 @@ async fn delete_existing_removes_record() {
 #[tokio::test]
 async fn delete_nonexistent_returns_not_found() {
     let (r, _db) = repo().await;
-    let err = r.delete(999_999).await.unwrap_err();
+    let err = r.delete(&missing_id()).await.unwrap_err();
     assert!(matches!(err, DbError::NotFound(_)));
 }
 
@@ -336,7 +341,7 @@ async fn delete_one_does_not_affect_others() {
     let s1 = r.create(stdio_params()).await.unwrap();
     let s2 = r.create(http_params()).await.unwrap();
 
-    r.delete(s1.id).await.unwrap();
+    r.delete(&s1.id).await.unwrap();
 
     let remaining = r.list().await.unwrap();
     assert_eq!(remaining.len(), 1);
@@ -348,10 +353,10 @@ async fn list_by_ids_any_includes_soft_deleted_rows() {
     let (r, _db) = repo().await;
     let active = r.create(stdio_params()).await.unwrap();
     let deleted = r.create(http_params()).await.unwrap();
-    r.delete(deleted.id).await.unwrap();
+    r.delete(&deleted.id).await.unwrap();
 
     let rows = r
-        .list_by_ids_any(&[deleted.id, active.id])
+        .list_by_ids_any(&[deleted.id.clone(), active.id.clone()])
         .await
         .unwrap();
 
@@ -424,9 +429,9 @@ async fn update_status_with_timestamp() {
     let created = r.create(stdio_params()).await.unwrap();
 
     let ts = nomifun_common::now_ms();
-    r.update_status(created.id, "connected", Some(ts)).await.unwrap();
+    r.update_status(&created.id, "connected", Some(ts)).await.unwrap();
 
-    let found = r.find_by_id(created.id).await.unwrap().unwrap();
+    let found = r.find_by_id(&created.id).await.unwrap().unwrap();
     assert_eq!(found.last_test_status, "connected");
     assert_eq!(found.last_connected, Some(ts));
 }
@@ -437,11 +442,11 @@ async fn update_status_without_timestamp_preserves_existing() {
     let created = r.create(stdio_params()).await.unwrap();
 
     let ts = nomifun_common::now_ms();
-    r.update_status(created.id, "connected", Some(ts)).await.unwrap();
+    r.update_status(&created.id, "connected", Some(ts)).await.unwrap();
 
-    r.update_status(created.id, "error", None).await.unwrap();
+    r.update_status(&created.id, "error", None).await.unwrap();
 
-    let found = r.find_by_id(created.id).await.unwrap().unwrap();
+    let found = r.find_by_id(&created.id).await.unwrap().unwrap();
     assert_eq!(found.last_test_status, "error");
     assert_eq!(found.last_connected, Some(ts));
 }
@@ -449,7 +454,7 @@ async fn update_status_without_timestamp_preserves_existing() {
 #[tokio::test]
 async fn update_status_nonexistent_returns_not_found() {
     let (r, _db) = repo().await;
-    let err = r.update_status(999_999, "connected", None).await.unwrap_err();
+    let err = r.update_status(&missing_id(), "connected", None).await.unwrap_err();
     assert!(matches!(err, DbError::NotFound(_)));
 }
 
@@ -461,9 +466,9 @@ async fn update_tools_sets_json() {
     let created = r.create(stdio_params()).await.unwrap();
 
     let tools_json = r#"[{"name":"read_file","description":"Read a file"}]"#;
-    r.update_tools(created.id, Some(tools_json)).await.unwrap();
+    r.update_tools(&created.id, Some(tools_json)).await.unwrap();
 
-    let found = r.find_by_id(created.id).await.unwrap().unwrap();
+    let found = r.find_by_id(&created.id).await.unwrap().unwrap();
     assert_eq!(found.tools.as_deref(), Some(tools_json));
 }
 
@@ -479,16 +484,16 @@ async fn update_tools_clears_to_null() {
         .unwrap();
     assert!(created.tools.is_some());
 
-    r.update_tools(created.id, None).await.unwrap();
+    r.update_tools(&created.id, None).await.unwrap();
 
-    let found = r.find_by_id(created.id).await.unwrap().unwrap();
+    let found = r.find_by_id(&created.id).await.unwrap().unwrap();
     assert!(found.tools.is_none());
 }
 
 #[tokio::test]
 async fn update_tools_nonexistent_returns_not_found() {
     let (r, _db) = repo().await;
-    let err = r.update_tools(999_999, Some("[]")).await.unwrap_err();
+    let err = r.update_tools(&missing_id(), Some("[]")).await.unwrap_err();
     assert!(matches!(err, DbError::NotFound(_)));
 }
 
@@ -503,13 +508,13 @@ async fn full_crud_lifecycle() {
     assert_eq!(created.name, "test-mcp");
 
     // Read
-    let found = r.find_by_id(created.id).await.unwrap().unwrap();
+    let found = r.find_by_id(&created.id).await.unwrap().unwrap();
     assert_eq!(found.id, created.id);
 
     // Update
     let updated = r
         .update(
-            created.id,
+            &created.id,
             UpdateMcpServerParams {
                 name: Some("renamed-mcp"),
                 enabled: Some(true),
@@ -526,15 +531,15 @@ async fn full_crud_lifecycle() {
     assert_eq!(by_name.id, created.id);
 
     // Update status
-    r.update_status(created.id, "connected", Some(nomifun_common::now_ms()))
+    r.update_status(&created.id, "connected", Some(nomifun_common::now_ms()))
         .await
         .unwrap();
-    let after_status = r.find_by_id(created.id).await.unwrap().unwrap();
+    let after_status = r.find_by_id(&created.id).await.unwrap().unwrap();
     assert_eq!(after_status.last_test_status, "connected");
 
     // Delete
-    r.delete(created.id).await.unwrap();
-    assert!(r.find_by_id(created.id).await.unwrap().is_none());
+    r.delete(&created.id).await.unwrap();
+    assert!(r.find_by_id(&created.id).await.unwrap().is_none());
     assert!(r.list().await.unwrap().is_empty());
 }
 

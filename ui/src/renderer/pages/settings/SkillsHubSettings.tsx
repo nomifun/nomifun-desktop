@@ -116,8 +116,8 @@ const SkillsHubSettings: React.FC<SkillsHubSettingsProps> = ({ withWrapper = tru
   // the management modal must not leave a stale key invisibly constraining a
   // facet. Mirrors PresetListPanel's guard.
   useEffect(() => {
-    const audKeys = new Set(tags.audienceTags.map((tag) => tag.key));
-    const scnKeys = new Set(tags.scenarioTags.map((tag) => tag.key));
+    const audKeys = new Set<string>(tags.audienceTags.map((tag) => tag.key));
+    const scnKeys = new Set<string>(tags.scenarioTags.map((tag) => tag.key));
     setTagFilter((prev) => {
       const audience = prev.audience.filter((k) => audKeys.has(k));
       const scenario = prev.scenario.filter((k) => scnKeys.has(k));

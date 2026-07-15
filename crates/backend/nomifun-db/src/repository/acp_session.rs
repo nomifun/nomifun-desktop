@@ -22,7 +22,7 @@ use crate::models::AcpSessionRow;
 /// it through [`IAcpSessionRepository::update_session_id`].
 #[derive(Debug, Clone)]
 pub struct CreateAcpSessionParams<'a> {
-    pub conversation_id: i64,
+    pub conversation_id: &'a str,
     pub agent_backend: &'a str,
     pub agent_source: &'a str,
     pub agent_id: &'a str,
@@ -68,7 +68,7 @@ impl SaveRuntimeStateParams<'_> {
 #[async_trait::async_trait]
 pub trait IAcpSessionRepository: Send + Sync {
     /// Fetch the full row by conversation id.
-    async fn get(&self, conversation_id: i64) -> Result<Option<AcpSessionRow>, DbError>;
+    async fn get(&self, conversation_id: &str) -> Result<Option<AcpSessionRow>, DbError>;
 
     /// Insert a fresh `acp_session` row. Called by `ConversationService`
     /// when an ACP-type conversation is created; primary-key conflict
@@ -77,7 +77,7 @@ pub trait IAcpSessionRepository: Send + Sync {
 
     /// Record the CLI-assigned `session_id` after `session/new` or
     /// `session/load` succeeds. Returns `true` when the row existed.
-    async fn update_session_id(&self, conversation_id: i64, session_id: &str) -> Result<bool, DbError>;
+    async fn update_session_id(&self, conversation_id: &str, session_id: &str) -> Result<bool, DbError>;
 
     /// Forget the CLI session for a conversation: NULL the `session_id`,
     /// reset `session_status` to `idle`, and drop the cached
@@ -85,24 +85,24 @@ pub trait IAcpSessionRepository: Send + Sync {
     /// fresh start. Used by the "clear context" flow — after this, the next
     /// prompt re-issues `session/new` instead of resuming. Returns `true`
     /// when the row existed.
-    async fn clear_session_id(&self, conversation_id: i64) -> Result<bool, DbError>;
+    async fn clear_session_id(&self, conversation_id: &str) -> Result<bool, DbError>;
 
     /// Delete the row. Called by the conversation delete hook — no DB
     /// foreign key, so this must be invoked explicitly.
-    async fn delete(&self, conversation_id: i64) -> Result<bool, DbError>;
+    async fn delete(&self, conversation_id: &str) -> Result<bool, DbError>;
 
     /// Decode and return the `session_config.runtime` sub-object.
     /// Returns `None` when the row does not exist or the JSON lacks a
     /// `runtime` key; returns `Some(Default::default())` when the key
     /// is present but empty.
-    async fn load_runtime_state(&self, conversation_id: i64) -> Result<Option<PersistedSessionState>, DbError>;
+    async fn load_runtime_state(&self, conversation_id: &str) -> Result<Option<PersistedSessionState>, DbError>;
 
     /// Merge a partial runtime update into `session_config.runtime`.
     /// Assumes the row exists (created alongside the conversation);
     /// returns `Ok(false)` when it does not.
     async fn save_runtime_state(
         &self,
-        conversation_id: i64,
+        conversation_id: &str,
         params: &SaveRuntimeStateParams<'_>,
     ) -> Result<bool, DbError>;
 }

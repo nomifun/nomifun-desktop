@@ -3,6 +3,7 @@
  * Copyright 2025-2026 NomiFun (nomifun.com)
  * SPDX-License-Identifier: Apache-2.0
  */
+import type { ConversationId } from '@/common/types/ids';
 
 import { getConversationOrNull } from '@/renderer/pages/conversation/utils/conversationCache';
 import { useEffect, useState } from 'react';
@@ -20,7 +21,7 @@ import { useEffect, useState } from 'react';
  * correctly anchors to its own start (the consumer falls back to mount time)
  * rather than reusing a stale previous-turn timestamp.
  */
-export function useProcessingStartedAt(conversation_id: number, running: boolean): number | undefined {
+export function useProcessingStartedAt(conversation_id: ConversationId, running: boolean): number | undefined {
   const [startedAt, setStartedAt] = useState<number | undefined>(undefined);
 
   useEffect(() => {

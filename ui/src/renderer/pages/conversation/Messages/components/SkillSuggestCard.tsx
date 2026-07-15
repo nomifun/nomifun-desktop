@@ -3,6 +3,7 @@
  * Copyright 2025-2026 NomiFun (nomifun.com)
  * SPDX-License-Identifier: Apache-2.0
  */
+import type { ArtifactId, ConversationId, CronJobId } from '@/common/types/ids';
 
 import { ipcBridge } from '@/common';
 import { iconColors } from '@/renderer/styles/colors';
@@ -16,10 +17,10 @@ import type { SkillSuggestion } from '@renderer/utils/chat/skillSuggestParser';
 import { MESSAGE_BODY_FONT_SIZE, MESSAGE_BODY_LINE_HEIGHT } from '../typography';
 
 interface SkillSuggestCardProps {
-  artifact_id: number;
-  conversation_id: number;
+  artifact_id: ArtifactId;
+  conversation_id: ConversationId;
   suggestion: SkillSuggestion;
-  cron_job_id: string;
+  cron_job_id: CronJobId;
 }
 
 const CODE_STYLE = { marginTop: 4, marginBlock: 4 };

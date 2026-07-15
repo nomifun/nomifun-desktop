@@ -149,6 +149,8 @@ pub fn validate_figure_source(source_path: &Path) -> Result<Vec<u8>, AppError> {
 /// The caller owns the companion-existence gate (the service 404s unknown companions
 /// before calling this, so `companion_id` is always a registry-vetted id).
 pub fn ingest_figure(companions_dir: &Path, companion_id: &str, source_path: &Path) -> Result<(), AppError> {
+    nomifun_common::CompanionId::try_from(companion_id)
+        .map_err(|error| AppError::BadRequest(format!("invalid companion_id: {error}")))?;
     let bytes = validate_figure_source(source_path)?;
     crate::fsio::save_bytes_atomic(&companions_dir.join(companion_id), FIGURE_FILE, &bytes)
         .map_err(|e| AppError::Internal(format!("save companion figure: {e}")))
@@ -157,6 +159,7 @@ pub fn ingest_figure(companions_dir: &Path, companion_id: &str, source_path: &Pa
 /// The stored figure bytes plus their mtime in unix seconds (the serve
 /// handler's ETag input). `None` when this companion has no figure.
 pub fn read_figure(companions_dir: &Path, companion_id: &str) -> Option<(Vec<u8>, u64)> {
+    nomifun_common::CompanionId::try_from(companion_id).ok()?;
     let path = companions_dir.join(companion_id).join(FIGURE_FILE);
     let mtime = std::fs::metadata(&path)
         .ok()?
@@ -172,6 +175,11 @@ pub fn read_figure(companions_dir: &Path, companion_id: &str) -> Option<(Vec<u8>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn companion_fixture(sequence: u64) -> String {
+        let raw = format!("companion_0190f5fe-7c00-7a00-8abc-{sequence:012}");
+        nomifun_common::CompanionId::try_from(raw.as_str()).unwrap().into_string()
+    }
 
     /// A unique scratch dir inside the allowed upload root
     /// (`{temp_dir}/nomifun`) — figure sources must live under it.
@@ -252,9 +260,9 @@ mod tests {
         let source = upload.path().join("cutout.webp");
         std::fs::write(&source, webp_bytes()).unwrap();
 
-        ingest_figure(companions.path(), "companion_a", &source).unwrap();
+        ingest_figure(companions.path(), &companion_fixture(1), &source).unwrap();
 
-        let companion_dir = companions.path().join("companion_a");
+        let companion_dir = companions.path().join(companion_fixture(1));
         assert_eq!(std::fs::read(companion_dir.join(FIGURE_FILE)).unwrap(), webp_bytes());
         // Exactly the figure — no half-written temp file left behind.
         assert_eq!(std::fs::read_dir(&companion_dir).unwrap().count(), 1);
@@ -262,8 +270,8 @@ mod tests {
         // PNG passes too (transparent originals skip re-encoding).
         let png = upload.path().join("cutout.png");
         std::fs::write(&png, png_bytes()).unwrap();
-        ingest_figure(companions.path(), "companion_b", &png).unwrap();
-        assert!(companions.path().join("companion_b").join(FIGURE_FILE).exists());
+        ingest_figure(companions.path(), &companion_fixture(2), &png).unwrap();
+        assert!(companions.path().join(companion_fixture(2)).join(FIGURE_FILE).exists());
     }
 
     #[test]
@@ -273,9 +281,9 @@ mod tests {
         let source = upload.path().join("fake.webp");
         std::fs::write(&source, b"GIF89a definitely not webp bytes").unwrap();
 
-        let err = ingest_figure(companions.path(), "companion_a", &source).unwrap_err();
+        let err = ingest_figure(companions.path(), &companion_fixture(1), &source).unwrap_err();
         assert!(matches!(err, AppError::BadRequest(_)), "unexpected error: {err}");
-        assert!(!companions.path().join("companion_a").join(FIGURE_FILE).exists());
+        assert!(!companions.path().join(companion_fixture(1)).join(FIGURE_FILE).exists());
     }
 
     #[test]
@@ -289,14 +297,14 @@ mod tests {
         let source = upload.path().join("wide.png");
         std::fs::write(&source, &bytes).unwrap();
 
-        let err = ingest_figure(companions.path(), "companion_a", &source).unwrap_err();
+        let err = ingest_figure(companions.path(), &companion_fixture(1), &source).unwrap_err();
         match &err {
             AppError::BadRequest(msg) => {
                 assert!(msg.contains("4097x100"), "message lacks actual size: {msg}");
             }
             other => panic!("unexpected error: {other}"),
         }
-        assert!(!companions.path().join("companion_a").join(FIGURE_FILE).exists());
+        assert!(!companions.path().join(companion_fixture(1)).join(FIGURE_FILE).exists());
     }
 
     #[test]
@@ -307,12 +315,12 @@ mod tests {
         let source = upload.path().join("opaque.webp");
         std::fs::write(&source, b"RIFF\x10\x00\x00\x00WEBPVP8 fake-payload").unwrap();
 
-        let err = ingest_figure(companions.path(), "companion_a", &source).unwrap_err();
+        let err = ingest_figure(companions.path(), &companion_fixture(1), &source).unwrap_err();
         match &err {
             AppError::BadRequest(msg) => assert!(msg.contains("无法解析图像尺寸"), "msg: {msg}"),
             other => panic!("unexpected error: {other}"),
         }
-        assert!(!companions.path().join("companion_a").join(FIGURE_FILE).exists());
+        assert!(!companions.path().join(companion_fixture(1)).join(FIGURE_FILE).exists());
     }
 
     #[test]
@@ -325,9 +333,9 @@ mod tests {
         let source = upload.path().join("huge.webp");
         std::fs::write(&source, &bytes).unwrap();
 
-        let err = ingest_figure(companions.path(), "companion_a", &source).unwrap_err();
+        let err = ingest_figure(companions.path(), &companion_fixture(1), &source).unwrap_err();
         assert!(matches!(err, AppError::BadRequest(_)), "unexpected error: {err}");
-        assert!(!companions.path().join("companion_a").join(FIGURE_FILE).exists());
+        assert!(!companions.path().join(companion_fixture(1)).join(FIGURE_FILE).exists());
     }
 
     #[test]
@@ -338,22 +346,22 @@ mod tests {
         let source = outside.path().join("escape.webp");
         std::fs::write(&source, webp_bytes()).unwrap();
 
-        let err = ingest_figure(companions.path(), "companion_a", &source).unwrap_err();
+        let err = ingest_figure(companions.path(), &companion_fixture(1), &source).unwrap_err();
         assert!(matches!(err, AppError::Forbidden(_)), "unexpected error: {err}");
-        assert!(!companions.path().join("companion_a").join(FIGURE_FILE).exists());
+        assert!(!companions.path().join(companion_fixture(1)).join(FIGURE_FILE).exists());
     }
 
     #[test]
     fn read_returns_bytes_and_mtime() {
         let upload = upload_scratch();
         let companions = tempfile::tempdir().unwrap();
-        assert!(read_figure(companions.path(), "companion_a").is_none());
+        assert!(read_figure(companions.path(), &companion_fixture(1)).is_none());
 
         let source = upload.path().join("cutout.webp");
         std::fs::write(&source, webp_bytes()).unwrap();
-        ingest_figure(companions.path(), "companion_a", &source).unwrap();
+        ingest_figure(companions.path(), &companion_fixture(1), &source).unwrap();
 
-        let (bytes, mtime) = read_figure(companions.path(), "companion_a").unwrap();
+        let (bytes, mtime) = read_figure(companions.path(), &companion_fixture(1)).unwrap();
         assert_eq!(bytes, webp_bytes());
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)

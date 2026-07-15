@@ -6,6 +6,7 @@
 
 import { useCallback, useState } from 'react';
 import { ipcBridge } from '@/common';
+import type { TerminalId } from '@/common/types/ids';
 
 /**
  * Batch select/delete for terminal sessions, mirroring the conversation
@@ -14,7 +15,7 @@ import { ipcBridge } from '@/common';
  */
 export function useTerminalBatchSelection() {
   const [batchMode, setBatchMode] = useState(false);
-  const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set());
+  const [selectedIds, setSelectedIds] = useState<Set<TerminalId>>(new Set());
 
   const toggleBatchMode = useCallback(() => {
     setBatchMode((on) => {
@@ -23,7 +24,7 @@ export function useTerminalBatchSelection() {
     });
   }, []);
 
-  const toggleSelected = useCallback((id: number) => {
+  const toggleSelected = useCallback((id: TerminalId) => {
     setSelectedIds((prev) => {
       const next = new Set(prev);
       if (next.has(id)) next.delete(id);
@@ -32,7 +33,7 @@ export function useTerminalBatchSelection() {
     });
   }, []);
 
-  const selectAll = useCallback((ids: number[]) => {
+  const selectAll = useCallback((ids: TerminalId[]) => {
     setSelectedIds(new Set(ids));
   }, []);
 

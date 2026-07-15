@@ -2,7 +2,7 @@ use std::collections::HashSet;
 
 use nomifun_common::{
     MAX_AGENT_EXECUTION_MODELS, MAX_AGENT_EXECUTION_PARALLELISM,
-    MAX_AGENT_EXECUTION_PARTICIPANTS, generate_prefixed_id, now_ms,
+    MAX_AGENT_EXECUTION_PARTICIPANTS, ProviderId, generate_prefixed_id, now_ms,
 };
 use serde_json::Value;
 use sqlx::{Sqlite, SqlitePool, Transaction};
@@ -67,7 +67,9 @@ fn validate_participant(
     match (&participant.provider_id, &participant.model) {
         (None, None) => {}
         (Some(provider_id), Some(model))
-            if !provider_id.trim().is_empty() && !model.trim().is_empty() => {}
+            if ProviderId::parse(provider_id).is_ok()
+                && !model.trim().is_empty()
+                && model.trim() == model => {}
         _ => {
             return Err(invalid(
                 "template participant provider_id and model must be a non-empty pair",
@@ -464,26 +466,12 @@ impl IAgentExecutionTemplateRepository for SqliteAgentExecutionTemplateRepositor
                        SELECT 1 \
                        FROM agent_execution_template_participants participant \
                        WHERE participant.template_id = ? \
-                         AND participant.provider_id = COALESCE( \
-                             json_extract(conversation.model, '$.provider_id'), \
-                             json_extract(conversation.model, '$.providerId'), \
-                             json_extract(conversation.model, '$.id') \
+                         AND participant.provider_id = \
+                             json_extract(conversation.model, '$.provider_id') \
+                         AND participant.model = COALESCE( \
+                             json_extract(conversation.model, '$.use_model'), \
+                             json_extract(conversation.model, '$.model') \
                          ) \
-                         AND participant.model = CASE \
-                             WHEN typeof(COALESCE( \
-                                      json_extract(conversation.model, '$.use_model'), \
-                                      json_extract(conversation.model, '$.useModel') \
-                                  )) = 'text' \
-                              AND trim(COALESCE( \
-                                      json_extract(conversation.model, '$.use_model'), \
-                                      json_extract(conversation.model, '$.useModel') \
-                                  )) <> '' \
-                             THEN COALESCE( \
-                                      json_extract(conversation.model, '$.use_model'), \
-                                      json_extract(conversation.model, '$.useModel') \
-                                  ) \
-                             ELSE json_extract(conversation.model, '$.model') \
-                         END \
                    )",
             )
             .bind(now)

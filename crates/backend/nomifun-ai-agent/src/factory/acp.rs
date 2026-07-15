@@ -247,17 +247,11 @@ pub(super) async fn build(
 /// Builtins are wired through other paths and are not loaded from the user MCP table.
 async fn load_user_mcp_servers(
     repo: &dyn IMcpServerRepository,
-    selected_ids: Option<&[String]>,
+    selected_ids: Option<&[nomifun_common::McpServerId]>,
     conversation_id: &str,
     capabilities: &AcpMcpCapabilities,
 ) -> Vec<McpServer> {
-    // MCP server ids are i64 since the primary-key rework. The build-extra
-    // carries them as a JSON string array (written by the conversation
-    // service), so parse to i64 here; unparseable entries can never match a
-    // row and are dropped.
-    let selected_ids: Option<Vec<i64>> =
-        selected_ids.map(|ids| ids.iter().filter_map(|id| id.parse::<i64>().ok()).collect());
-    let rows_result = match selected_ids.as_deref() {
+    let rows_result = match selected_ids {
         Some(ids) => repo.list_by_ids_any(ids).await,
         None => repo.list().await,
     };
@@ -276,7 +270,6 @@ async fn load_user_mcp_servers(
     let mut servers = Vec::with_capacity(rows.len());
     for row in rows {
         let selected = selected_ids
-            .as_deref()
             .map(|ids| ids.iter().any(|id| *id == row.id))
             .unwrap_or(row.enabled);
         if !selected || row.builtin {
@@ -504,7 +497,7 @@ mod tests {
     use super::*;
 
     fn make_row(
-        id: i64,
+        id: &nomifun_common::McpServerId,
         name: &str,
         transport_type: &str,
         transport_config: &str,
@@ -512,7 +505,7 @@ mod tests {
         builtin: bool,
     ) -> McpServerRow {
         McpServerRow {
-            id,
+            id: id.clone(),
             name: name.to_owned(),
             description: None,
             enabled,
@@ -532,7 +525,7 @@ mod tests {
     #[test]
     fn row_to_sdk_stdio_roundtrip() {
         let row = make_row(
-            1,
+            &nomifun_common::McpServerId::parse("mcp_0190f5fe-7c00-7a00-8000-000000000001").unwrap(),
             "ctx7",
             "stdio",
             r#"{"command":"npx","args":["-y","@upstash/context7-mcp"],"env":{"K":"V"}}"#,
@@ -569,7 +562,7 @@ mod tests {
     #[test]
     fn row_to_sdk_http_with_headers() {
         let row = make_row(
-            2,
+            &nomifun_common::McpServerId::parse("mcp_0190f5fe-7c00-7a00-8000-000000000002").unwrap(),
             "remote",
             "http",
             r#"{"url":"https://example.com/mcp","headers":{"Authorization":"Bearer tok"}}"#,
@@ -591,19 +584,19 @@ mod tests {
 
     #[test]
     fn row_to_sdk_unknown_transport_type_errors() {
-        let row = make_row(3, "bad", "websocket", "{}", true, false);
+        let row = make_row(&nomifun_common::McpServerId::parse("mcp_0190f5fe-7c00-7a00-8000-000000000003").unwrap(), "bad", "websocket", "{}", true, false);
         assert!(row_to_sdk_mcp_server(&row).is_err());
     }
 
     #[test]
     fn row_to_sdk_invalid_json_errors() {
-        let row = make_row(4, "bad", "stdio", "not-json", true, false);
+        let row = make_row(&nomifun_common::McpServerId::parse("mcp_0190f5fe-7c00-7a00-8000-000000000004").unwrap(), "bad", "stdio", "not-json", true, false);
         assert!(row_to_sdk_mcp_server(&row).is_err());
     }
 
     #[test]
     fn row_to_sdk_stdio_missing_command_errors() {
-        let row = make_row(5, "bad", "stdio", r#"{"args":[]}"#, true, false);
+        let row = make_row(&nomifun_common::McpServerId::parse("mcp_0190f5fe-7c00-7a00-8000-000000000005").unwrap(), "bad", "stdio", r#"{"args":[]}"#, true, false);
         assert!(row_to_sdk_mcp_server(&row).is_err());
     }
 
@@ -626,7 +619,7 @@ mod tests {
                 Ok(self.rows.clone())
             }
         }
-        async fn find_by_id(&self, _id: i64) -> Result<Option<McpServerRow>, nomifun_db::DbError> {
+        async fn find_by_id(&self, _id: &nomifun_common::McpServerId) -> Result<Option<McpServerRow>, nomifun_db::DbError> {
             unimplemented!()
         }
         async fn find_by_name(
@@ -637,7 +630,7 @@ mod tests {
         }
         async fn list_by_ids_any(
             &self,
-            ids: &[i64],
+            ids: &[nomifun_common::McpServerId],
         ) -> Result<Vec<McpServerRow>, nomifun_db::DbError> {
             if self.fail {
                 return Err(nomifun_db::DbError::Init("simulated".into()));
@@ -655,12 +648,12 @@ mod tests {
         }
         async fn update(
             &self,
-            _id: i64,
+            _id: &nomifun_common::McpServerId,
             _params: nomifun_db::UpdateMcpServerParams<'_>,
         ) -> Result<McpServerRow, nomifun_db::DbError> {
             unimplemented!()
         }
-        async fn delete(&self, _id: i64) -> Result<(), nomifun_db::DbError> {
+        async fn delete(&self, _id: &nomifun_common::McpServerId) -> Result<(), nomifun_db::DbError> {
             unimplemented!()
         }
         async fn batch_upsert(
@@ -671,7 +664,7 @@ mod tests {
         }
         async fn update_status(
             &self,
-            _id: i64,
+            _id: &nomifun_common::McpServerId,
             _status: &str,
             _last_connected: Option<nomifun_common::TimestampMs>,
         ) -> Result<(), nomifun_db::DbError> {
@@ -679,7 +672,7 @@ mod tests {
         }
         async fn update_tools(
             &self,
-            _id: i64,
+            _id: &nomifun_common::McpServerId,
             _tools: Option<&str>,
         ) -> Result<(), nomifun_db::DbError> {
             unimplemented!()
@@ -696,7 +689,7 @@ mod tests {
         let repo: Arc<dyn IMcpServerRepository> = Arc::new(MockRepo {
             rows: vec![
                 make_row(
-                    10,
+                    &nomifun_common::McpServerId::parse("mcp_0190f5fe-7c00-7a00-8000-000000000010").unwrap(),
                     "user-enabled",
                     "stdio",
                     r#"{"command":"npx","args":[],"env":{}}"#,
@@ -704,7 +697,7 @@ mod tests {
                     false,
                 ),
                 make_row(
-                    11,
+                    &nomifun_common::McpServerId::parse("mcp_0190f5fe-7c00-7a00-8000-000000000011").unwrap(),
                     "user-disabled",
                     "stdio",
                     r#"{"command":"npx","args":[],"env":{}}"#,
@@ -712,7 +705,7 @@ mod tests {
                     false,
                 ),
                 make_row(
-                    12,
+                    &nomifun_common::McpServerId::parse("mcp_0190f5fe-7c00-7a00-8000-000000000012").unwrap(),
                     "builtin",
                     "stdio",
                     r#"{"command":"img-gen","args":[],"env":{}}"#,
@@ -755,14 +748,14 @@ mod tests {
         let repo: Arc<dyn IMcpServerRepository> = Arc::new(MockRepo {
             rows: vec![
                 make_row(
-                    20,
+                    &nomifun_common::McpServerId::parse("mcp_0190f5fe-7c00-7a00-8000-000000000020").unwrap(),
                     "good",
                     "stdio",
                     r#"{"command":"npx","args":[],"env":{}}"#,
                     true,
                     false,
                 ),
-                make_row(21, "bad", "stdio", "not-json", true, false),
+                make_row(&nomifun_common::McpServerId::parse("mcp_0190f5fe-7c00-7a00-8000-000000000021").unwrap(), "bad", "stdio", "not-json", true, false),
             ],
             fail: false,
         });
@@ -784,7 +777,7 @@ mod tests {
         let repo: Arc<dyn IMcpServerRepository> = Arc::new(MockRepo {
             rows: vec![
                 make_row(
-                    30,
+                    &nomifun_common::McpServerId::parse("mcp_0190f5fe-7c00-7a00-8000-000000000030").unwrap(),
                     "enabled",
                     "stdio",
                     r#"{"command":"npx","args":[],"env":{}}"#,
@@ -792,7 +785,7 @@ mod tests {
                     false,
                 ),
                 make_row(
-                    31,
+                    &nomifun_common::McpServerId::parse("mcp_0190f5fe-7c00-7a00-8000-000000000031").unwrap(),
                     "disabled-picked",
                     "stdio",
                     r#"{"command":"uvx","args":[],"env":{}}"#,
@@ -803,7 +796,12 @@ mod tests {
             fail: false,
         });
 
-        let selected = vec!["31".to_owned()];
+        let selected = vec![
+            nomifun_common::McpServerId::parse(
+                "mcp_0190f5fe-7c00-7a00-8000-000000000031",
+            )
+            .unwrap(),
+        ];
         let servers = load_user_mcp_servers(repo.as_ref(), Some(&selected), "conv-1", &caps).await;
 
         assert_eq!(servers.len(), 1);
@@ -822,7 +820,7 @@ mod tests {
         };
         let repo: Arc<dyn IMcpServerRepository> = Arc::new(MockRepo {
             rows: vec![make_row(
-                40,
+                &nomifun_common::McpServerId::parse("mcp_0190f5fe-7c00-7a00-8000-000000000040").unwrap(),
                 "stdio-only",
                 "stdio",
                 r#"{"command":"npx","args":[],"env":{}}"#,

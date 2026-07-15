@@ -24,7 +24,7 @@ use crate::server::ok;
 /// exceed this).
 const DEDUP_SCAN_PAGE_SIZE: u32 = 200;
 
-// ─── Params structs ─────────────────────────────────────────────────────────
+// --- Params structs --------------------------------------------------------
 
 #[derive(Deserialize, JsonSchema)]
 struct RequirementListParams {
@@ -59,7 +59,7 @@ struct RequirementCreateParams {
 #[derive(Deserialize, JsonSchema)]
 struct RequirementUpdateParams {
     /// The id of the requirement to update (from nomi_requirement_list).
-    id: i64,
+    id: String,
     /// New title (omit to keep).
     #[serde(default)]
     title: Option<String>,
@@ -80,10 +80,10 @@ struct RequirementUpdateParams {
 #[derive(Deserialize, JsonSchema)]
 struct RequirementDeleteParams {
     /// The id of the requirement to delete. Confirm the target with the user first.
-    id: i64,
+    id: String,
 }
 
-// ─── Helpers ────────────────────────────────────────────────────────────────
+// --- Helpers ---------------------------------------------------------------
 
 /// Parse an optional status string into the typed enum, returning a structured
 /// error the LLM can self-correct from.
@@ -111,7 +111,7 @@ pub(crate) fn is_open_duplicate(
     ) && existing_title.trim().eq_ignore_ascii_case(new_title.trim())
 }
 
-// ─── Handlers ───────────────────────────────────────────────────────────────
+// --- Handlers --------------------------------------------------------------
 
 async fn list(deps: Arc<GatewayDeps>, p: RequirementListParams) -> Value {
     let status = match parse_status(p.status.as_deref()) {
@@ -141,7 +141,7 @@ async fn create(deps: Arc<GatewayDeps>, p: RequirementCreateParams) -> Value {
     let title = p.title;
     let tag = p.tag;
 
-    // ── T4 duplicate guard ───────────────────────────────────────────
+    // -- T4 duplicate guard -----------------------------------------------
     let dedup_query = ListRequirementsQuery {
         tag: Some(tag.clone()),
         status: None,
@@ -199,20 +199,20 @@ async fn update(deps: Arc<GatewayDeps>, p: RequirementUpdateParams) -> Value {
         add_attachments: vec![],
         remove_attachment_ids: vec![],
     };
-    match deps.requirement_service.update(p.id, req).await {
+    match deps.requirement_service.update(&p.id, req).await {
         Ok(requirement) => ok(requirement),
         Err(e) => json!({"error": e.to_string()}),
     }
 }
 
 async fn delete(deps: Arc<GatewayDeps>, p: RequirementDeleteParams) -> Value {
-    match deps.requirement_service.delete(p.id).await {
+    match deps.requirement_service.delete(&p.id).await {
         Ok(()) => json!({"result": format!("requirement {} deleted", p.id)}),
         Err(e) => json!({"error": e.to_string()}),
     }
 }
 
-// ─── Registration ───────────────────────────────────────────────────────────
+// --- Registration ----------------------------------------------------------
 
 /// Register the requirement-domain capabilities.
 pub(crate) fn register(out: &mut Vec<Capability>) {
@@ -254,7 +254,7 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
     ));
 }
 
-// ─── Tests ──────────────────────────────────────────────────────────────────
+// --- Tests -----------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {

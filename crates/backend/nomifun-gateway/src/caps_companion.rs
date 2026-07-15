@@ -11,6 +11,7 @@ use std::sync::Arc;
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::{Value, json};
+use nomifun_common::{CompanionId, CompanionSuggestionId};
 
 use crate::deps::GatewayDeps;
 use crate::registry::{Capability, CapabilityMeta, DangerTier, Surface};
@@ -26,7 +27,8 @@ struct CompanionListParams {}
 #[derive(Deserialize, JsonSchema)]
 struct CompanionGetParams {
     /// The companion id to retrieve (from nomi_companion_list).
-    id: String,
+    #[schemars(with = "String")]
+    id: CompanionId,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -41,7 +43,8 @@ struct CompanionCreateParams {
 #[derive(Deserialize, JsonSchema)]
 struct CompanionUpdateParams {
     /// The companion id to update (from nomi_companion_list).
-    id: String,
+    #[schemars(with = "String")]
+    id: CompanionId,
     /// RFC 7396 merge-patch object. Valid top-level keys: "name" (string),
     /// "character" (string), "persona" (object with "preset"/"custom"),
     /// "model" (object with "provider_id"/"model"),
@@ -54,14 +57,16 @@ struct CompanionUpdateParams {
 struct CompanionDeleteParams {
     /// The companion id to permanently delete. This removes all associated
     /// data (thread, memories attributed to this companion, figure binding).
-    id: String,
+    #[schemars(with = "String")]
+    id: CompanionId,
 }
 
 #[derive(Deserialize, JsonSchema)]
 struct CompanionStatusParams {
     /// The companion id. If omitted, returns the default companion's status.
     #[serde(default)]
-    id: Option<String>,
+    #[schemars(with = "Option<String>")]
+    id: Option<CompanionId>,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -89,11 +94,29 @@ struct CompanionListSuggestionsParams {
 #[derive(Deserialize, JsonSchema)]
 struct CompanionDecideSuggestionParams {
     /// The suggestion id to act on (from nomi_companion_list_suggestions).
-    id: String,
+    #[schemars(with = "String")]
+    id: CompanionSuggestionId,
     /// true = accept the suggestion (applies it and awards XP);
     /// false = dismiss it. The decision is idempotent — calling again with
     /// the same id is a no-op.
     accept: bool,
+}
+
+#[cfg(test)]
+mod id_contract_tests {
+    use super::*;
+
+    #[test]
+    fn companion_gateway_params_reject_noncanonical_ids() {
+        let id = CompanionId::new();
+        let parsed: CompanionGetParams = serde_json::from_value(json!({"id": id})).unwrap();
+        assert_eq!(parsed.id, id);
+        assert!(serde_json::from_value::<CompanionGetParams>(json!({"id": "1"})).is_err());
+        assert!(serde_json::from_value::<CompanionDecideSuggestionParams>(
+            json!({"id": id, "accept": true})
+        )
+        .is_err());
+    }
 }
 
 // ── handlers ──────────────────────────────────────────────────────────────

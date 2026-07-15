@@ -453,7 +453,7 @@ async fn sh7_target_field_combination_different_hash() {
         "content_type": "markdown",
         "file_path": "/a.md",
         "workspace": "/ws",
-        "conversation_id": 1
+        "conversation_id": "conv_0190f5fe-7c00-7a00-8000-000000000016"
     });
 
     let body = json!({"target": target_simple, "content": "simple"});

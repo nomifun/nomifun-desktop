@@ -7,6 +7,8 @@
 
 use std::process::ExitCode;
 
+use nomifun_common::TerminalId;
+
 /// Build the JSON body for the lifecycle hook POST.
 ///
 /// Pure function — maps the CLI `--event` kind, terminal_id (from env), and the
@@ -14,11 +16,11 @@ use std::process::ExitCode;
 /// `TerminalLifecycleServer` expects.
 pub(crate) fn build_hook_post(
     event: &str,
-    terminal_id: i64,
+    terminal_id: &TerminalId,
     stdin_json: serde_json::Value,
 ) -> serde_json::Value {
     serde_json::json!({
-        "terminal_id": terminal_id,
+        "terminal_id": terminal_id.as_str(),
         "kind": event,
         "payload": stdin_json,
     })
@@ -40,7 +42,7 @@ pub async fn run_terminal_hook(event: &str) -> ExitCode {
     ) else {
         return ExitCode::SUCCESS;
     };
-    let Ok(terminal_id) = id.parse::<i64>() else {
+    let Ok(terminal_id) = id.parse::<TerminalId>() else {
         return ExitCode::SUCCESS;
     };
 
@@ -52,7 +54,7 @@ pub async fn run_terminal_hook(event: &str) -> ExitCode {
     let stdin_json: serde_json::Value =
         serde_json::from_str(&buf).unwrap_or(serde_json::Value::Null);
 
-    let body = build_hook_post(event, terminal_id, stdin_json);
+    let body = build_hook_post(event, &terminal_id, stdin_json);
 
     // Reuse the bridge HTTP client (short-lived, no keepalive pool).
     let client = super::stdio_common::build_bridge_http_client();
@@ -80,16 +82,18 @@ mod tests {
     fn build_hook_post_maps_event_and_wraps_payload() {
         let stdin =
             serde_json::json!({"last_assistant_message": "done", "stop_hook_active": false});
-        let body = build_hook_post("turn_end", 42, stdin.clone());
-        assert_eq!(body["terminal_id"], 42);
+        let terminal_id = TerminalId::new();
+        let body = build_hook_post("turn_end", &terminal_id, stdin.clone());
+        assert_eq!(body["terminal_id"], terminal_id.as_str());
         assert_eq!(body["kind"], "turn_end");
         assert_eq!(body["payload"], stdin);
     }
 
     #[test]
     fn build_hook_post_null_payload() {
-        let body = build_hook_post("session_start", 7, serde_json::Value::Null);
-        assert_eq!(body["terminal_id"], 7);
+        let terminal_id = TerminalId::new();
+        let body = build_hook_post("session_start", &terminal_id, serde_json::Value::Null);
+        assert_eq!(body["terminal_id"], terminal_id.as_str());
         assert_eq!(body["kind"], "session_start");
         assert!(body["payload"].is_null());
     }

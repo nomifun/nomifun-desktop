@@ -52,6 +52,8 @@ import { loadWorkshopMedia, revokeWorkshopMedia } from '../lib/media';
 import { abortAllLoopRuns, abortLoopRun } from '../generation/loop';
 import { nodeContribution } from '../generation/pipeline';
 import type { WorkshopAsset, WorkshopCanvasBackground, WorkshopCanvasDoc, WorkshopGeneratorMode, WorkshopGeneratorNodeData } from '../types';
+import { parseWorkshopNodeId } from '@/common/types/ids';
+import type { AssetId, WorkshopEdgeId, WorkshopNodeId } from '@/common/types/ids';
 import { CanvasNodeContext, type CanvasNodeApi } from './CanvasNodeContext';
 import { useAgentOps, type AgentAddNodeOp, type AgentConnectOp } from './agentOps';
 import { useCanvasHistory } from './history';
@@ -106,9 +108,9 @@ interface MenuState {
   x: number;
   y: number;
   flow?: XY;
-  nodeId?: string;
-  edgeId?: string;
-  sourceId?: string;
+  nodeId?: WorkshopNodeId;
+  edgeId?: WorkshopEdgeId;
+  sourceId?: WorkshopNodeId;
 }
 
 function isEditableTarget(target: EventTarget | null): boolean {
@@ -119,7 +121,7 @@ function isEditableTarget(target: EventTarget | null): boolean {
 }
 
 export interface CanvasEditorProps {
-  canvasId: string;
+  canvasId: import('@/common/types/ids').CanvasId;
   initialDoc: WorkshopCanvasDoc;
   onSaveStateChange?: (state: SaveState) => void;
 }
@@ -144,7 +146,7 @@ const CanvasInner: React.FC<CanvasEditorProps> = ({ canvasId, initialDoc, onSave
   const [menu, setMenu] = useState<MenuState | null>(null);
   const [helpOpen, setHelpOpen] = useState(false);
   const [assetsOpen, setAssetsOpen] = useState(false);
-  const [preview, setPreview] = useState<{ assetIds: string[]; index: number } | null>(null);
+  const [preview, setPreview] = useState<{ assetIds: AssetId[]; index: number } | null>(null);
   const [dropActive, setDropActive] = useState(false);
 
   // Live-state mirrors so the imperative history / save closures never go stale.
@@ -159,7 +161,7 @@ const CanvasInner: React.FC<CanvasEditorProps> = ({ canvasId, initialDoc, onSave
   const interactingRef = useRef(false);
   const applyingRef = useRef(false);
   const initializedRef = useRef(false);
-  const connectSourceRef = useRef<string | null>(null);
+  const connectSourceRef = useRef<WorkshopNodeId | null>(null);
   const clipboardRef = useRef<{ nodes: WorkshopFlowNode[]; edges: WorkshopFlowEdge[] } | null>(null);
   const pasteCountRef = useRef(0);
 
@@ -262,7 +264,7 @@ const CanvasInner: React.FC<CanvasEditorProps> = ({ canvasId, initialDoc, onSave
   );
 
   const updateNodeData = useCallback(
-    (nodeId: string, patch: Record<string, unknown>) => {
+    (nodeId: WorkshopNodeId, patch: Record<string, unknown>) => {
       setNodes((ns) =>
         ns.map((n) => (n.id === nodeId ? ({ ...n, data: { ...(n.data as Record<string, unknown>), ...patch } } as WorkshopFlowNode) : n))
       );
@@ -271,14 +273,14 @@ const CanvasInner: React.FC<CanvasEditorProps> = ({ canvasId, initialDoc, onSave
   );
 
   const resizeNode = useCallback(
-    (nodeId: string, size: { width: number; height: number }) => {
+    (nodeId: WorkshopNodeId, size: { width: number; height: number }) => {
       setNodes((ns) => ns.map((n) => (n.id === nodeId ? ({ ...n, width: size.width, height: size.height } as WorkshopFlowNode) : n)));
     },
     [setNodes]
   );
 
   const removeNode = useCallback(
-    (nodeId: string) => {
+    (nodeId: WorkshopNodeId) => {
       // If this is a running loop node, stop its coordinator so it can't keep
       // spawning result nodes after deletion (harmless no-op for other kinds).
       abortLoopRun(nodeId);
@@ -289,7 +291,7 @@ const CanvasInner: React.FC<CanvasEditorProps> = ({ canvasId, initialDoc, onSave
   );
 
   const duplicateNode = useCallback(
-    (nodeId: string) => {
+    (nodeId: WorkshopNodeId) => {
       const node = nodesRef.current.find((n) => n.id === nodeId);
       if (!node) return;
       const { nodes: cloned } = cloneNodesWithEdges([node], [], { x: PASTE_OFFSET, y: PASTE_OFFSET }, nodesRef.current);
@@ -312,7 +314,7 @@ const CanvasInner: React.FC<CanvasEditorProps> = ({ canvasId, initialDoc, onSave
   }, [setNodes, message, t]);
 
   const ungroup = useCallback(
-    (groupId: string) => {
+    (groupId: WorkshopNodeId) => {
       const next = ungroupNodes(nodesRef.current, groupId);
       if (next) setNodes(next);
     },
@@ -320,7 +322,7 @@ const CanvasInner: React.FC<CanvasEditorProps> = ({ canvasId, initialDoc, onSave
   );
 
   const ungroupSelection = useCallback(() => {
-    const groupIds = new Set<string>();
+    const groupIds = new Set<WorkshopNodeId>();
     for (const n of nodesRef.current) {
       if (!n.selected) continue;
       if (n.type === 'group') groupIds.add(n.id);
@@ -336,7 +338,7 @@ const CanvasInner: React.FC<CanvasEditorProps> = ({ canvasId, initialDoc, onSave
   }, [setNodes]);
 
   const deleteGroupWithChildren = useCallback(
-    (groupId: string) => {
+    (groupId: WorkshopNodeId) => {
       const ids = new Set(groupMemberIds(nodesRef.current, groupId));
       for (const id of ids) abortLoopRun(id);
       setNodes((ns) => ns.filter((n) => !ids.has(n.id)));
@@ -367,12 +369,12 @@ const CanvasInner: React.FC<CanvasEditorProps> = ({ canvasId, initialDoc, onSave
 
   // ── Compare / preview helpers ────────────────────────────────────────────────
 
-  const openImagePreview = useCallback((assetIds: string[], startIndex = 0) => {
+  const openImagePreview = useCallback((assetIds: AssetId[], startIndex = 0) => {
     if (assetIds.length) setPreview({ assetIds, index: Math.max(0, Math.min(startIndex, assetIds.length - 1)) });
   }, []);
 
   /** Whether an image node has an upstream node that yields an image (drives the menu item). */
-  const upstreamImageSource = useCallback((nodeId: string): WorkshopFlowNode | null => {
+  const upstreamImageSource = useCallback((nodeId: WorkshopNodeId): WorkshopFlowNode | null => {
     for (const e of edgesRef.current) {
       if (e.target !== nodeId) continue;
       const src = nodesRef.current.find((n) => n.id === e.source);
@@ -382,7 +384,7 @@ const CanvasInner: React.FC<CanvasEditorProps> = ({ canvasId, initialDoc, onSave
   }, []);
 
   const compareWithUpstream = useCallback(
-    (imageNodeId: string) => {
+    (imageNodeId: WorkshopNodeId) => {
       const node = nodesRef.current.find((n) => n.id === imageNodeId);
       if (!node) return;
       const upstream = upstreamImageSource(imageNodeId);
@@ -419,7 +421,7 @@ const CanvasInner: React.FC<CanvasEditorProps> = ({ canvasId, initialDoc, onSave
   );
 
   const fillNodeFromFile = useCallback(
-    async (nodeId: string, file: File): Promise<void> => {
+    async (nodeId: WorkshopNodeId, file: File): Promise<void> => {
       const node = nodesRef.current.find((n) => n.id === nodeId);
       if (!node) return;
       const asset = await uploadFile(file);
@@ -439,18 +441,18 @@ const CanvasInner: React.FC<CanvasEditorProps> = ({ canvasId, initialDoc, onSave
   );
 
   const canvasImageAssetIds = useCallback(
-    (): string[] =>
+    (): AssetId[] =>
       nodesRef.current
         .filter((n) => n.type === 'image' && typeof (n.data as { assetId?: unknown }).assetId === 'string')
-        .map((n) => (n.data as { assetId: string }).assetId),
+        .map((n) => (n.data as { assetId: AssetId }).assetId),
     []
   );
 
   const previewImageNode = useCallback(
-    (nodeId: string) => {
+    (nodeId: WorkshopNodeId) => {
       const ids = canvasImageAssetIds();
       const node = nodesRef.current.find((n) => n.id === nodeId);
-      const assetId = node && (node.data as { assetId?: string }).assetId;
+      const assetId = node && (node.data as { assetId?: AssetId }).assetId;
       const index = assetId ? Math.max(0, ids.indexOf(assetId)) : 0;
       if (ids.length) setPreview({ assetIds: ids, index });
     },
@@ -458,7 +460,7 @@ const CanvasInner: React.FC<CanvasEditorProps> = ({ canvasId, initialDoc, onSave
   );
 
   const saveAssetToLibrary = useCallback(
-    async (assetId: string) => {
+    async (assetId: AssetId) => {
       try {
         await patchAsset(assetId, { in_library: true });
         message.success(t('workshopCanvas.toast.savedToLibrary', { defaultValue: '已存入资产库' }));
@@ -472,7 +474,7 @@ const CanvasInner: React.FC<CanvasEditorProps> = ({ canvasId, initialDoc, onSave
   );
 
   const downloadAsset = useCallback(
-    async (assetId: string, filename?: string) => {
+    async (assetId: AssetId, filename?: string) => {
       try {
         const url = await loadWorkshopMedia(assetId);
         const a = document.createElement('a');
@@ -493,10 +495,10 @@ const CanvasInner: React.FC<CanvasEditorProps> = ({ canvasId, initialDoc, onSave
   // ── Image editor hand-off (M5 provides the real modal) ──────────────────────
 
   const editImageNode = useCallback(
-    async (nodeId: string, mode: ImageEditorMode) => {
+    async (nodeId: WorkshopNodeId, mode: ImageEditorMode) => {
       const node = nodesRef.current.find((n) => n.id === nodeId);
       if (!node || node.type !== 'image') return;
-      const data = node.data as { assetId?: string; naturalWidth?: number; naturalHeight?: number };
+      const data = node.data as { assetId?: AssetId; naturalWidth?: number; naturalHeight?: number };
       if (!data.assetId) return;
       let src: string;
       try {
@@ -569,19 +571,27 @@ const CanvasInner: React.FC<CanvasEditorProps> = ({ canvasId, initialDoc, onSave
   // ── Connect handlers ────────────────────────────────────────────────────────
 
   const onConnectStart: OnConnectStart = useCallback((_, params) => {
-    connectSourceRef.current = params.nodeId ?? null;
+    connectSourceRef.current = params.nodeId == null ? null : parseWorkshopNodeId(params.nodeId);
   }, []);
 
   const onConnect = useCallback(
     (conn: Connection) => {
-      setEdges((es) => addEdge({ ...conn, id: newEdgeId() }, es));
+      if (!conn.source || !conn.target) return;
+      const edge: WorkshopFlowEdge = {
+        ...conn,
+        id: newEdgeId(),
+        source: parseWorkshopNodeId(conn.source),
+        target: parseWorkshopNodeId(conn.target),
+      };
+      setEdges((es) => addEdge(edge, es) as WorkshopFlowEdge[]);
     },
     [setEdges]
   );
 
   const onConnectEnd: OnConnectEnd = useCallback(
     (event, connectionState) => {
-      const source = connectionState.fromNode?.id ?? connectSourceRef.current;
+      const rawSource = connectionState.fromNode?.id;
+      const source = rawSource == null ? connectSourceRef.current : parseWorkshopNodeId(rawSource);
       connectSourceRef.current = null;
       if (connectionState.toNode || !source) return; // landed on a node → onConnect handled it
       const point = 'changedTouches' in event ? event.changedTouches[0] : (event as MouseEvent);
@@ -672,7 +682,7 @@ const CanvasInner: React.FC<CanvasEditorProps> = ({ canvasId, initialDoc, onSave
   );
 
   const createAndConnect = useCallback(
-    (factory: (pos: XY) => WorkshopFlowNode, pos: XY, sourceId: string | undefined) => {
+    (factory: (pos: XY) => WorkshopFlowNode, pos: XY, sourceId: WorkshopNodeId | undefined) => {
       const node = factory(pos);
       const newEdges = sourceId ? [{ id: newEdgeId(), source: sourceId, target: node.id }] : [];
       addNodes([node], newEdges);

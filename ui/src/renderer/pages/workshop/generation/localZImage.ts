@@ -10,17 +10,17 @@ import type { CreateTaskBody, CreationInput, MediaCapability } from '../types';
 import { IMAGE_SIZE_PRESETS, readImageParams } from './genConstants';
 import type { GenMode, ModelOption } from './genTypes';
 
-export const LOCAL_Z_IMAGE_PROVIDER_ID = 'nomifun-local-model';
+export const LOCAL_Z_IMAGE_PLATFORM = 'nomifun-local-model';
 export const LOCAL_Z_IMAGE_MODEL_ID = 'z-image-turbo-q3-k';
 
 export const LOCAL_Z_IMAGE_DIMENSION_MIN = 256;
 export const LOCAL_Z_IMAGE_DIMENSION_MAX = 2048;
 export const LOCAL_Z_IMAGE_DIMENSION_STEP = 8;
 
-type ModelIdentity = Pick<ModelOption, 'providerId' | 'model'>;
+type ModelIdentity = Pick<ModelOption, 'platform' | 'model'>;
 
 export function isLocalZImageModel(model: ModelIdentity | null | undefined): boolean {
-  return model?.providerId === LOCAL_Z_IMAGE_PROVIDER_ID && model.model === LOCAL_Z_IMAGE_MODEL_ID;
+  return model?.platform === LOCAL_Z_IMAGE_PLATFORM && model.model === LOCAL_Z_IMAGE_MODEL_ID;
 }
 
 export function normalizeLocalZImageDimension(value: unknown): number {
@@ -81,7 +81,7 @@ export type LocalZImageTaskIssue =
  * carry stale parameters.
  */
 export function validateLocalZImageTask(body: CreateTaskBody): LocalZImageTaskIssue | null {
-  if (!isLocalZImageModel({ providerId: body.provider_id, model: body.model })) return null;
+  if (!isLocalZImageModel({ platform: body.provider_platform ?? '', model: body.model })) return null;
   if (body.capability !== 't2i' || body.inputs.length !== 0) return 'text_to_image_only';
 
   const width = body.params.width ?? 1024;

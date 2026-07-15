@@ -3,6 +3,7 @@
  * Copyright 2025-2026 NomiFun (nomifun.com)
  * SPDX-License-Identifier: Apache-2.0
  */
+import type { ConversationId } from '@/common/types/ids';
 
 import type { PreviewMetadata } from '@renderer/pages/conversation/Preview/context/PreviewContext.tsx';
 import { usePreviewContext } from '@renderer/pages/conversation/Preview';
@@ -21,7 +22,7 @@ const STAR_OFFICE_DETECT_TIMEOUT_DEFAULT = 1200;
 const STAR_OFFICE_DETECT_TIMEOUT_RETRY = 2400;
 
 interface StarOfficeMonitorCardProps {
-  conversation_id?: number;
+  conversation_id?: ConversationId;
 }
 
 const normalizeUrl = (raw: string) => {
@@ -279,7 +280,7 @@ const StarOfficeMonitorCard: React.FC<StarOfficeMonitorCardProps> = ({ conversat
         : t('starOffice.monitor.installPrompt');
       // staroffice.* is a string-keyed local event bus (see OpenClawSendBox).
       emitter.emit('staroffice.install.request', {
-        conversation_id: String(conversation_id),
+        conversation_id,
         text,
         detectedUrl: detectedUrl || null,
       });
@@ -291,7 +292,7 @@ const StarOfficeMonitorCard: React.FC<StarOfficeMonitorCardProps> = ({ conversat
     if (conversation_id != null) {
       const text = t('starOffice.monitor.diagnosePrompt');
       emitter.emit('staroffice.install.request', {
-        conversation_id: String(conversation_id),
+        conversation_id,
         text,
         detectedUrl: detectedUrl || null,
       });
@@ -328,7 +329,7 @@ const StarOfficeMonitorCard: React.FC<StarOfficeMonitorCardProps> = ({ conversat
     ({ conversation_id: cid }) => {
       // cid arrives as the string-keyed event payload; compare against the
       // string form of our numeric conversation id.
-      if (conversation_id == null || cid !== String(conversation_id)) return;
+      if (conversation_id == null || cid !== conversation_id) return;
       handleOpenDetectedMonitor();
     },
     [conversation_id, handleOpenDetectedMonitor]

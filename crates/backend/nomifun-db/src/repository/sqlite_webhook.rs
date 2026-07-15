@@ -1,4 +1,5 @@
 use sqlx::SqlitePool;
+use nomifun_common::WebhookId;
 
 use crate::error::DbError;
 use crate::models::WebhookRow;
@@ -17,12 +18,13 @@ impl SqliteWebhookRepository {
 
 #[async_trait::async_trait]
 impl IWebhookRepository for SqliteWebhookRepository {
-    async fn insert(&self, row: &WebhookRow) -> Result<i64, DbError> {
-        let result = sqlx::query(
+    async fn insert(&self, row: &WebhookRow) -> Result<WebhookId, DbError> {
+        sqlx::query(
             "INSERT INTO webhooks (\
-                name, platform, url, secret, description, enabled, created_at, updated_at\
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                id, name, platform, url, secret, description, enabled, created_at, updated_at\
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
+        .bind(row.id.as_str())
         .bind(&row.name)
         .bind(&row.platform)
         .bind(&row.url)
@@ -33,7 +35,7 @@ impl IWebhookRepository for SqliteWebhookRepository {
         .bind(row.updated_at)
         .execute(&self.pool)
         .await?;
-        Ok(result.last_insert_rowid())
+        Ok(row.id.clone())
     }
 
     async fn update(&self, row: &WebhookRow) -> Result<(), DbError> {
@@ -49,7 +51,7 @@ impl IWebhookRepository for SqliteWebhookRepository {
         .bind(&row.description)
         .bind(row.enabled)
         .bind(row.updated_at)
-        .bind(&row.id)
+        .bind(row.id.as_str())
         .execute(&self.pool)
         .await?;
         if result.rows_affected() == 0 {
@@ -58,9 +60,9 @@ impl IWebhookRepository for SqliteWebhookRepository {
         Ok(())
     }
 
-    async fn delete(&self, id: i64) -> Result<(), DbError> {
+    async fn delete(&self, id: &WebhookId) -> Result<(), DbError> {
         let result = sqlx::query("DELETE FROM webhooks WHERE id = ?")
-            .bind(id)
+            .bind(id.as_str())
             .execute(&self.pool)
             .await?;
         if result.rows_affected() == 0 {
@@ -69,9 +71,9 @@ impl IWebhookRepository for SqliteWebhookRepository {
         Ok(())
     }
 
-    async fn get_by_id(&self, id: i64) -> Result<Option<WebhookRow>, DbError> {
+    async fn get_by_id(&self, id: &WebhookId) -> Result<Option<WebhookRow>, DbError> {
         let row = sqlx::query_as::<_, WebhookRow>("SELECT * FROM webhooks WHERE id = ?")
-            .bind(id)
+            .bind(id.as_str())
             .fetch_optional(&self.pool)
             .await?;
         Ok(row)

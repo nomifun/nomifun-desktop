@@ -3,6 +3,8 @@
  * Copyright 2025-2026 NomiFun (nomifun.com)
  * SPDX-License-Identifier: Apache-2.0
  */
+import { parseMessageId, type ConversationId } from '@/common/types/ids';
+import { prefixedId } from '@/common/utils/prefixedId';
 
 import type { TMessage } from '@/common/chat/chatLib';
 import { useAddOrUpdateMessage } from '@/renderer/pages/conversation/Messages/hooks';
@@ -31,14 +33,15 @@ declare global {
   }
 }
 
-const createSeedMessages = (conversationId: number, historyPairs: number): TMessage[] => {
+const createSeedMessages = (conversationId: ConversationId, historyPairs: number): TMessage[] => {
   const baseCreatedAt = Date.now() - 100_000;
   const messages: TMessage[] = [];
 
   for (let index = 0; index < historyPairs; index += 1) {
+    const userMessageId = parseMessageId(prefixedId('msg'));
     messages.push({
       id: `e2e-seed-user-${index}`,
-      msg_id: `e2e-seed-user-${index}`,
+      msg_id: userMessageId,
       conversation_id: conversationId,
       type: 'text',
       position: 'right',
@@ -48,9 +51,10 @@ const createSeedMessages = (conversationId: number, historyPairs: number): TMess
       },
     });
 
+    const assistantMessageId = parseMessageId(prefixedId('msg'));
     messages.push({
       id: `e2e-seed-assistant-${index}`,
-      msg_id: `e2e-seed-assistant-${index}`,
+      msg_id: assistantMessageId,
       conversation_id: conversationId,
       type: 'text',
       position: 'left',
@@ -61,9 +65,10 @@ const createSeedMessages = (conversationId: number, historyPairs: number): TMess
     });
   }
 
+  const finalUserMessageId = parseMessageId(prefixedId('msg'));
   messages.push({
     id: 'e2e-seed-user-final',
-    msg_id: 'e2e-seed-user-final',
+    msg_id: finalUserMessageId,
     conversation_id: conversationId,
     type: 'text',
     position: 'right',
@@ -84,7 +89,7 @@ const createStreamChunks = (lines: number): string[] => {
   );
 };
 
-const AcpE2EStreamInjector: React.FC<{ conversationId: number }> = ({ conversationId }) => {
+const AcpE2EStreamInjector: React.FC<{ conversationId: ConversationId }> = ({ conversationId }) => {
   const addOrUpdateMessage = useAddOrUpdateMessage();
 
   useEffect(() => {
@@ -101,7 +106,7 @@ const AcpE2EStreamInjector: React.FC<{ conversationId: number }> = ({ conversati
       runScenario: async (options?: RunScenarioOptions) => {
         const historyPairs = options?.historyPairs ?? 18;
         const lines = options?.lines ?? 160;
-        const streamMsgId = `e2e-stream-${Date.now()}`;
+        const streamMsgId = parseMessageId(prefixedId('msg'));
 
         if (historyPairs > 0) {
           createSeedMessages(conversationId, historyPairs).forEach((message) => addOrUpdateMessage(message, true));

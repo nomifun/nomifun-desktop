@@ -8,7 +8,8 @@ use nomifun_common::{
     AdaptationPolicy, AgentExecutionActorType, AgentExecutionEventKind, AgentExecutionStatus,
     AgentStepMode, AgentToolPolicy, DecisionPolicy, DelegationPolicy, ExecutionAttemptStatus,
     ExecutionStepKind, ExecutionStepStatus, MAX_AGENT_EXECUTION_MODELS,
-    MAX_AGENT_EXECUTION_PARALLELISM, ParticipantAssignmentSource, PlanGate, StepFailurePolicy,
+    MAX_AGENT_EXECUTION_PARALLELISM, ParticipantAssignmentSource, PlanGate, ProviderId,
+    StepFailurePolicy,
 };
 use serde::{Deserialize, Serialize};
 
@@ -18,6 +19,7 @@ use crate::webhook::double_option;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ExecutionModelRef {
+    #[serde(deserialize_with = "crate::serde_util::deserialize_provider_id")]
     pub provider_id: String,
     pub model: String,
 }
@@ -56,13 +58,13 @@ impl ExecutionModelPool {
 
         let mut seen = std::collections::HashSet::with_capacity(models.len());
         for model in models {
-            if model.provider_id.trim().is_empty()
-                || model.provider_id.trim() != model.provider_id
+            if ProviderId::try_from(model.provider_id.as_str()).is_err()
                 || model.model.trim().is_empty()
                 || model.model.trim() != model.model
             {
                 return Err(
-                    "execution model references require trimmed provider_id and model".to_owned(),
+                    "execution model references require a canonical provider_id and trimmed model"
+                        .to_owned(),
                 );
             }
             if !seen.insert((&model.provider_id, &model.model)) {
@@ -130,12 +132,18 @@ impl ParticipantConstraints {
 /// reusable team member and exposes no update endpoint.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExecutionParticipant {
+    #[serde(deserialize_with = "crate::serde_util::deserialize_execution_participant_id")]
     pub id: String,
+    #[serde(deserialize_with = "crate::serde_util::deserialize_execution_id")]
     pub execution_id: String,
     pub source_agent_id: String,
     pub preset_id: Option<String>,
     pub preset_revision: Option<i64>,
     pub preset_snapshot: Option<crate::ResolvedPresetSnapshot>,
+    #[serde(
+        default,
+        deserialize_with = "crate::serde_util::deserialize_optional_provider_id"
+    )]
     pub provider_id: Option<String>,
     pub model: Option<String>,
     pub role: Option<String>,
@@ -157,9 +165,14 @@ pub struct ExecutionParticipant {
 /// panel. `version` is the optimistic-concurrency token for every mutation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentExecution {
+    #[serde(deserialize_with = "crate::serde_util::deserialize_execution_id")]
     pub id: String,
     pub goal: String,
-    pub lead_conversation_id: Option<i64>,
+    #[serde(
+        default,
+        deserialize_with = "crate::serde_util::deserialize_optional_conversation_id"
+    )]
+    pub lead_conversation_id: Option<String>,
     pub work_dir: Option<String>,
     pub delegation_policy: DelegationPolicy,
     pub plan_gate: PlanGate,
@@ -221,7 +234,9 @@ pub enum StepControlPolicy {
 /// is not represented by a separate Assignment object.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExecutionStep {
+    #[serde(deserialize_with = "crate::serde_util::deserialize_execution_step_id")]
     pub id: String,
+    #[serde(deserialize_with = "crate::serde_util::deserialize_execution_id")]
     pub execution_id: String,
     pub title: String,
     pub spec: String,
@@ -236,6 +251,10 @@ pub struct ExecutionStep {
     pub fanout_group: Option<String>,
     pub control_policy: Option<StepControlPolicy>,
     pub failure_policy: StepFailurePolicy,
+    #[serde(
+        default,
+        deserialize_with = "crate::serde_util::deserialize_optional_execution_participant_id"
+    )]
     pub assigned_participant_id: Option<String>,
     pub assignment_source: Option<ParticipantAssignmentSource>,
     pub assignment_score: Option<f64>,
@@ -266,8 +285,11 @@ pub struct ExecutionStepProfile {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExecutionStepDependency {
+    #[serde(deserialize_with = "crate::serde_util::deserialize_execution_id")]
     pub execution_id: String,
+    #[serde(deserialize_with = "crate::serde_util::deserialize_execution_step_id")]
     pub blocker_step_id: String,
+    #[serde(deserialize_with = "crate::serde_util::deserialize_execution_step_id")]
     pub blocked_step_id: String,
     pub introduced_in_revision: i64,
     pub superseded_in_revision: Option<i64>,
@@ -277,12 +299,23 @@ pub struct ExecutionStepDependency {
 /// the prior transcript, output, error, token count, or actual participant.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExecutionAttempt {
+    #[serde(deserialize_with = "crate::serde_util::deserialize_execution_attempt_id")]
     pub id: String,
+    #[serde(deserialize_with = "crate::serde_util::deserialize_execution_id")]
     pub execution_id: String,
+    #[serde(deserialize_with = "crate::serde_util::deserialize_execution_step_id")]
     pub step_id: String,
     pub attempt_no: i64,
+    #[serde(
+        default,
+        deserialize_with = "crate::serde_util::deserialize_optional_execution_participant_id"
+    )]
     pub participant_id: Option<String>,
-    pub conversation_id: Option<i64>,
+    #[serde(
+        default,
+        deserialize_with = "crate::serde_util::deserialize_optional_conversation_id"
+    )]
+    pub conversation_id: Option<String>,
     pub status: ExecutionAttemptStatus,
     pub trigger_reason: String,
     pub effective_config: serde_json::Value,
@@ -312,16 +345,35 @@ pub struct AgentExecutionDetail {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentExecutionEvent {
+    #[serde(deserialize_with = "crate::serde_util::deserialize_execution_event_id")]
     pub id: String,
+    #[serde(deserialize_with = "crate::serde_util::deserialize_execution_id")]
     pub execution_id: String,
     pub sequence: i64,
     pub event_type: AgentExecutionEventKind,
+    #[serde(
+        default,
+        deserialize_with = "crate::serde_util::deserialize_optional_execution_step_id"
+    )]
     pub step_id: Option<String>,
+    #[serde(
+        default,
+        deserialize_with = "crate::serde_util::deserialize_optional_execution_attempt_id"
+    )]
     pub attempt_id: Option<String>,
     pub actor_type: AgentExecutionActorType,
     pub actor_id: Option<String>,
-    pub actor_conversation_id: Option<i64>,
+    #[serde(
+        default,
+        deserialize_with = "crate::serde_util::deserialize_optional_conversation_id"
+    )]
+    pub actor_conversation_id: Option<String>,
+    #[serde(
+        default,
+        deserialize_with = "crate::serde_util::deserialize_optional_execution_attempt_id"
+    )]
     pub actor_attempt_id: Option<String>,
+    #[serde(deserialize_with = "crate::serde_util::deserialize_user_id")]
     pub on_behalf_of_user_id: String,
     pub payload: serde_json::Value,
     pub created_at: i64,
@@ -332,6 +384,7 @@ pub struct AgentExecutionEvent {
 /// `change_kind` is the same canonical event vocabulary returned by REST.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentExecutionChangedEvent {
+    #[serde(deserialize_with = "crate::serde_util::deserialize_execution_id")]
     pub execution_id: String,
     pub sequence: i64,
     pub change_kind: AgentExecutionEventKind,
@@ -401,8 +454,11 @@ pub struct CreateAgentExecutionRequest {
     pub decision_policy: DecisionPolicy,
     #[serde(default)]
     pub max_parallel: Option<i64>,
-    #[serde(default)]
-    pub lead_conversation_id: Option<i64>,
+    #[serde(
+        default,
+        deserialize_with = "crate::serde_util::deserialize_optional_conversation_id"
+    )]
+    pub lead_conversation_id: Option<String>,
     /// Preferred lead model for top-level creation. Attempt-local delegation
     /// appends Steps to the existing aggregate and does not create another
     /// execution or submit this field again.
@@ -433,6 +489,7 @@ fn default_decision_policy() -> DecisionPolicy {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ReassignExecutionStepRequest {
+    #[serde(deserialize_with = "crate::serde_util::deserialize_execution_participant_id")]
     pub participant_id: String,
     #[serde(default)]
     pub locked: bool,
@@ -554,6 +611,49 @@ pub struct AgentExecutionEventsQuery {
 mod tests {
     use super::*;
 
+    const CONVERSATION_ID: &str = "conv_0190f5fe-7c00-7a00-8000-000000000001";
+    const PARTICIPANT_ID: &str = "execpart_0190f5fe-7c00-7a00-8000-000000000001";
+    const PROVIDER_ID: &str = "prov_0190f5fe-7c00-7a00-8000-000000000001";
+
+    #[test]
+    fn execution_request_ids_are_strict_at_deserialization() {
+        let valid = serde_json::json!({
+            "goal": "ship",
+            "model_pool": {
+                "mode": "single",
+                "model": { "provider_id": PROVIDER_ID, "model": "model-a" }
+            },
+            "lead_conversation_id": CONVERSATION_ID
+        });
+        assert!(serde_json::from_value::<CreateAgentExecutionRequest>(valid).is_ok());
+
+        for invalid in ["1", "conversation-1", "conv_0190f5fe-7c00-4a00-8000-000000000001"] {
+            let value = serde_json::json!({
+                "goal": "ship",
+                "model_pool": { "mode": "automatic" },
+                "lead_conversation_id": invalid
+            });
+            assert!(serde_json::from_value::<CreateAgentExecutionRequest>(value).is_err());
+        }
+
+        assert!(
+            serde_json::from_value::<ReassignExecutionStepRequest>(serde_json::json!({
+                "participant_id": PARTICIPANT_ID,
+                "expected_execution_version": 1,
+                "expected_step_version": 2
+            }))
+            .is_ok()
+        );
+        assert!(
+            serde_json::from_value::<ReassignExecutionStepRequest>(serde_json::json!({
+                "participant_id": "participant-1",
+                "expected_execution_version": 1,
+                "expected_step_version": 2
+            }))
+            .is_err()
+        );
+    }
+
     #[test]
     fn planned_step_rejects_the_removed_pattern_config_bag() {
         let value = serde_json::json!({
@@ -611,11 +711,11 @@ mod tests {
             ExecutionModelPool::Range {
                 models: vec![
                     ExecutionModelRef {
-                        provider_id: "provider".into(),
+                        provider_id: PROVIDER_ID.into(),
                         model: "model".into(),
                     },
                     ExecutionModelRef {
-                        provider_id: "provider".into(),
+                        provider_id: PROVIDER_ID.into(),
                         model: "model".into(),
                     },
                 ],

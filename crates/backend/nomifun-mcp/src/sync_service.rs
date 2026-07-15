@@ -82,23 +82,10 @@ fn detected_to_response(detected: DetectedServer) -> DetectedMcpServerEntry {
     let importable = detected.importable || normalized_skip_reason.as_deref() == Some("Connected");
 
     DetectedMcpServerEntry {
-        server: nomifun_api_types::McpServerResponse {
-            // Detected servers are not DB entities and have no host-local
-            // primary key. Clients match/import them by `name`/`transport`, so
-            // a `0` sentinel id is sufficient and never read for identity.
-            id: 0,
-            name: detected.name,
-            description: None,
-            enabled: false,
-            transport: detected.transport.into(),
-            tools: None,
-            last_test_status: nomifun_common::McpServerStatus::Disconnected,
-            last_connected: None,
-            original_json: None,
-            builtin: false,
-            created_at: 0,
-            updated_at: 0,
-        },
+        name: detected.name,
+        description: None,
+        transport: detected.transport.into(),
+        original_json: None,
         importable,
         import_skip_reason: if importable { None } else { normalized_skip_reason },
     }
@@ -118,7 +105,7 @@ fn normalize_import_skip_reason(reason: &str) -> String {
 mod tests {
     use super::*;
     use crate::types::McpServerTransport;
-    use nomifun_common::{McpServerStatus, TimestampMs};
+    use nomifun_common::TimestampMs;
     use nomifun_db::models::McpServerRow;
     use nomifun_db::{CreateMcpServerParams, DbError, UpdateMcpServerParams};
     use std::collections::HashMap;
@@ -180,7 +167,7 @@ mod tests {
             Ok(Vec::new())
         }
 
-        async fn find_by_id(&self, _id: i64) -> Result<Option<McpServerRow>, DbError> {
+        async fn find_by_id(&self, _id: &nomifun_common::McpServerId) -> Result<Option<McpServerRow>, DbError> {
             Ok(None)
         }
 
@@ -192,11 +179,11 @@ mod tests {
             unimplemented!("not needed for detection tests")
         }
 
-        async fn update(&self, _id: i64, _params: UpdateMcpServerParams<'_>) -> Result<McpServerRow, DbError> {
+        async fn update(&self, _id: &nomifun_common::McpServerId, _params: UpdateMcpServerParams<'_>) -> Result<McpServerRow, DbError> {
             unimplemented!("not needed for detection tests")
         }
 
-        async fn delete(&self, _id: i64) -> Result<(), DbError> {
+        async fn delete(&self, _id: &nomifun_common::McpServerId) -> Result<(), DbError> {
             unimplemented!("not needed for detection tests")
         }
 
@@ -206,14 +193,14 @@ mod tests {
 
         async fn update_status(
             &self,
-            _id: i64,
+            _id: &nomifun_common::McpServerId,
             _status: &str,
             _last_connected: Option<TimestampMs>,
         ) -> Result<(), DbError> {
             unimplemented!("not needed for detection tests")
         }
 
-        async fn update_tools(&self, _id: i64, _tools: Option<&str>) -> Result<(), DbError> {
+        async fn update_tools(&self, _id: &nomifun_common::McpServerId, _tools: Option<&str>) -> Result<(), DbError> {
             unimplemented!("not needed for detection tests")
         }
     }
@@ -249,7 +236,7 @@ mod tests {
         assert_eq!(configs.len(), 2);
         assert_eq!(configs[0].source, McpSource::Claude);
         assert_eq!(configs[0].servers.len(), 1);
-        assert_eq!(configs[0].servers[0].server.name, "srv1");
+        assert_eq!(configs[0].servers[0].name, "srv1");
         assert_eq!(configs[1].source, McpSource::Qwen);
         assert!(configs[1].servers.is_empty());
     }
@@ -283,10 +270,7 @@ mod tests {
             import_skip_reason: Some("Needs authentication".into()),
         };
         let resp = detected_to_response(detected);
-        assert_eq!(resp.server.name, "my-srv");
-        assert_eq!(resp.server.id, 0);
-        assert!(!resp.server.enabled);
-        assert_eq!(resp.server.last_test_status, McpServerStatus::Disconnected);
+        assert_eq!(resp.name, "my-srv");
         assert!(!resp.importable);
         assert_eq!(resp.import_skip_reason.as_deref(), Some("Needs authentication"));
     }

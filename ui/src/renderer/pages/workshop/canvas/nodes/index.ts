@@ -20,7 +20,10 @@ import CompareNode from './CompareNode';
 import OutputNode from './OutputNode';
 import GroupNode from './GroupNode';
 
-export const WORKSHOP_NODE_TYPES: NodeTypes = {
+// React Flow's public registry erases custom node-id refinements back to
+// `string`; every node supplied to this registry is a validated
+// `WorkshopFlowNode`, so this cast is the single integration boundary.
+export const WORKSHOP_NODE_TYPES = {
   image: ImageNode,
   text: TextNode,
   video: VideoNode,
@@ -29,4 +32,4 @@ export const WORKSHOP_NODE_TYPES: NodeTypes = {
   compare: CompareNode,
   output: OutputNode,
   group: GroupNode,
-} as const;
+} as const as unknown as NodeTypes;

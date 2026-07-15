@@ -3,6 +3,8 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
+use crate::ProviderId;
+
 // ---------------------------------------------------------------------------
 // EnvVar / CommandSpec
 // ---------------------------------------------------------------------------
@@ -32,10 +34,41 @@ pub struct CommandSpec {
 
 /// Model selection config — references a provider and a specific model.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ProviderWithModel {
+    #[serde(deserialize_with = "deserialize_provider_id")]
     pub provider_id: String,
     pub model: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub use_model: Option<String>,
+}
+
+fn deserialize_provider_id<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = String::deserialize(deserializer)?;
+    ProviderId::parse(value)
+        .map(|id| id.into_string())
+        .map_err(serde::de::Error::custom)
+}
+
+impl ProviderWithModel {
+    pub fn validate(&self) -> Result<(), String> {
+        ProviderId::parse(&self.provider_id)
+            .map_err(|error| format!("invalid provider_id: {error}"))?;
+        if self.model.is_empty() || self.model.trim() != self.model {
+            return Err("model must be a non-empty trimmed natural key".into());
+        }
+        if self
+            .use_model
+            .as_deref()
+            .is_some_and(|model| model.is_empty() || model.trim() != model)
+        {
+            return Err("use_model must be absent or a non-empty trimmed natural key".into());
+        }
+        Ok(())
+    }
 }
 
 /// A pending tool-call confirmation item.
@@ -71,15 +104,28 @@ mod tests {
 
     #[test]
     fn test_provider_with_model_serde() {
+        let provider_id = ProviderId::new().into_string();
         let p = ProviderWithModel {
-            provider_id: "openai-1".into(),
+            provider_id: provider_id.clone(),
             model: "gpt-4".into(),
             use_model: Some("gpt-4-turbo".into()),
         };
         let json = serde_json::to_value(&p).unwrap();
-        assert_eq!(json["provider_id"], "openai-1");
+        assert_eq!(json["provider_id"], provider_id);
         assert_eq!(json["model"], "gpt-4");
         assert_eq!(json["use_model"], "gpt-4-turbo");
+    }
+
+    #[test]
+    fn provider_with_model_omits_absent_use_model() {
+        let p = ProviderWithModel {
+            provider_id: ProviderId::new().into_string(),
+            model: "gpt-4".into(),
+            use_model: None,
+        };
+
+        let json = serde_json::to_value(&p).unwrap();
+        assert!(json.get("use_model").is_none());
     }
 
     #[test]

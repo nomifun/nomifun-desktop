@@ -12,6 +12,8 @@ import { useNavigate } from 'react-router-dom';
 import { emitter } from '@/renderer/utils/emitter';
 import { seedConversationCache } from '@/renderer/pages/conversation/utils/conversationCache';
 import { useGuidModelSelection } from '@/renderer/pages/guid/hooks/useGuidModelSelection';
+import { conversationTarget } from '@/common/types/ids';
+import { sessionStorageKey } from '@/common/utils/browserStorageKey';
 
 export interface NomiQuickStartOptions {
   /** Conversation title. */
@@ -52,8 +54,11 @@ export const useNomiQuickStart = () => {
           return false;
         }
         emitter.emit('chat.history.refresh');
+        const target = conversationTarget(conversation.id);
         sessionStorage.setItem(
-          send ? `nomi_initial_message_${conversation.id}` : `nomi_draft_message_${conversation.id}`,
+          send
+            ? sessionStorageKey('initial-message-nomi', target)
+            : sessionStorageKey('draft', target),
           JSON.stringify({ input: prompt })
         );
         seedConversationCache(conversation);

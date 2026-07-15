@@ -1,11 +1,17 @@
 //! SQLite database layer: init, migrations, repository traits, and implementations.
+pub mod backup_bundle;
 mod database;
 mod error;
+mod id_schema_contract;
 pub mod models;
 mod repository;
 
-pub use database::{Database, init_database, init_database_memory};
+pub use database::{
+    Database, init_database, init_database_memory, init_database_memory_with_owner,
+    open_database_for_backup,
+};
 pub use error::DbError;
+pub use id_schema_contract::validate_id_schema_contract;
 pub use models::{
     AgentExecutionAttemptDetailRow, AgentExecutionAttemptRow, AgentExecutionDetailRows,
     AgentExecutionEventRow, AgentExecutionParticipantRow, AgentExecutionRow,
@@ -86,3 +92,43 @@ pub use repository::{
 // (e.g. nomifun-app's bootstrap relocation path rewrite).
 pub use sqlx;
 pub use sqlx::SqlitePool;
+
+/// Resolve the canonical owner user ID for this dataset.
+///
+/// The identity is stored in the database rather than reconstructed from a
+/// global constant. A missing, duplicated, non-canonical, or dangling owner is
+/// a database invariant violation and fails closed.
+pub async fn installation_owner_id(pool: &SqlitePool) -> Result<String, DbError> {
+    let identities: Vec<(String, String)> =
+        sqlx::query_as("SELECT key, owner_user_id FROM installation_identity")
+            .fetch_all(pool)
+            .await
+            .map_err(DbError::Query)?;
+    let [(key, owner_user_id)] = identities.as_slice() else {
+        return Err(DbError::Init(format!(
+            "installation identity must contain exactly one owner, found {}",
+            identities.len()
+        )));
+    };
+    if key != "installation" {
+        return Err(DbError::Init(format!(
+            "installation identity contains invalid singleton key {key:?}"
+        )));
+    }
+    nomifun_common::UserId::parse(owner_user_id.clone()).map_err(|error| {
+        DbError::Init(format!(
+            "installation owner ID is not canonical: {owner_user_id}: {error}"
+        ))
+    })?;
+    let owner_exists: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM users WHERE id = ?")
+        .bind(owner_user_id)
+        .fetch_one(pool)
+        .await
+        .map_err(DbError::Query)?;
+    if owner_exists != 1 {
+        return Err(DbError::Init(format!(
+            "installation identity references missing owner user {owner_user_id}"
+        )));
+    }
+    Ok(owner_user_id.clone())
+}

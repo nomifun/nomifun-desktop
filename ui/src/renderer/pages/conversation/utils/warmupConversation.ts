@@ -1,8 +1,9 @@
+import type { ConversationId } from '@/common/types/ids';
 import { ipcBridge } from '@/common';
 
-const warmupByConversation = new Map<number, Promise<void>>();
+const warmupByConversation = new Map<ConversationId, Promise<void>>();
 
-export function warmupConversation(conversation_id: number): Promise<void> {
+export function warmupConversation(conversation_id: ConversationId): Promise<void> {
   const existing = warmupByConversation.get(conversation_id);
   if (existing) return existing;
 

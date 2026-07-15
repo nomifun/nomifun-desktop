@@ -8,16 +8,23 @@ use nomifun_db::{
     NewAgentExecutionStep,
     NewAgentExecutionStepDependency, ReconcileAgentExecutionPlanParams,
     RetryAgentExecutionStep, SettleAgentExecutionAttemptParams, SqliteAgentExecutionRepository,
-    SqliteConversationRepository, UpdateAgentExecutionParams, init_database_memory,
+    SqliteConversationRepository, UpdateAgentExecutionParams,
 };
 use nomifun_common::{
     AdaptationPolicy, AgentExecutionEventKind, AgentExecutionStatus, AgentStepMode,
     AgentToolPolicy,
-    DecisionPolicy, DelegationPolicy, ExecutionAttemptStatus, ExecutionStepKind,
+    ConversationId, DecisionPolicy, DelegationPolicy, ExecutionAttemptStatus, ExecutionStepKind,
     ExecutionStepStatus, ParticipantAssignmentSource, PlanGate, StepFailurePolicy,
 };
 
-const USER_ID: &str = "system_default_user";
+const USER_ID: &str = "user_0190f5fe-7c00-7a00-8000-000000000001";
+
+async fn init_database_memory() -> Result<nomifun_db::Database, nomifun_db::DbError> {
+    nomifun_db::init_database_memory_with_owner(
+        nomifun_common::UserId::parse(USER_ID.to_owned()).expect("canonical fixture owner"),
+    )
+    .await
+}
 
 async fn test_database() -> nomifun_db::Database {
     let database = init_database_memory().await.unwrap();
@@ -117,10 +124,10 @@ fn loop_step(id: &str) -> NewAgentExecutionStep {
     }
 }
 
-async fn create_conversation(repo: &SqliteConversationRepository, name: &str) -> i64 {
+async fn create_conversation(repo: &SqliteConversationRepository, name: &str) -> String {
     let now = nomifun_common::now_ms();
     repo.create(&ConversationRow {
-        id: 0,
+        id: ConversationId::new().into_string(),
         user_id: USER_ID.to_string(),
         name: name.to_string(),
         r#type: "nomi".to_string(),
@@ -148,7 +155,7 @@ async fn create_conversation(repo: &SqliteConversationRepository, name: &str) ->
 
 async fn create_execution(
     repository: &SqliteAgentExecutionRepository,
-    lead_conversation_id: i64,
+    lead_conversation_id: &str,
 ) -> String {
     repository
         .create_execution_with_participants(
@@ -162,7 +169,7 @@ async fn create_execution(
                 delegation_policy: DelegationPolicy::Automatic,
                 max_parallel: 4,
                 work_dir: None,
-                lead_conversation_id: Some(lead_conversation_id),
+                lead_conversation_id: Some(lead_conversation_id.to_owned()),
                 initial_plan_input: r#"{"mode":"automatic"}"#.to_owned(),
             },
             &[participant("participant_1")],
@@ -179,7 +186,7 @@ async fn lead_conversation_has_at_most_one_unfinished_execution() {
     let conversations = SqliteConversationRepository::new(database.pool().clone());
     let repository = SqliteAgentExecutionRepository::new(database.pool().clone());
     let lead = create_conversation(&conversations, "shared lead").await;
-    let first_id = create_execution(&repository, lead).await;
+    let first_id = create_execution(&repository, &lead).await;
 
     let duplicate = repository
         .create_execution_with_participants(
@@ -193,7 +200,7 @@ async fn lead_conversation_has_at_most_one_unfinished_execution() {
                 delegation_policy: DelegationPolicy::Automatic,
                 max_parallel: 1,
                 work_dir: None,
-                lead_conversation_id: Some(lead),
+                lead_conversation_id: Some(lead.clone()),
                 initial_plan_input: r#"{"mode":"automatic"}"#.to_owned(),
             },
             &[participant("participant_2")],
@@ -208,10 +215,10 @@ async fn lead_conversation_has_at_most_one_unfinished_execution() {
         .await
         .unwrap();
 
-    let replacement = create_execution(&repository, lead).await;
+    let replacement = create_execution(&repository, &lead).await;
     assert_ne!(replacement, first_id);
     let links = repository
-        .resolve_conversation_link(USER_ID, lead)
+        .resolve_conversation_link(USER_ID, &lead)
         .await
         .unwrap();
     assert_eq!(
@@ -249,18 +256,20 @@ async fn schema_guards_owner_authority_idempotency_and_terminal_reopen_boundarie
     .execute(database.pool())
     .await
     .unwrap();
-    let foreign_conversation: i64 = nomifun_db::sqlx::query_scalar(
+    let foreign_conversation = ConversationId::new().into_string();
+    nomifun_db::sqlx::query(
         "INSERT INTO conversations \
-         (user_id, name, type, extra, delegation_policy, status, created_at, updated_at) \
-         VALUES ('user_2', 'foreign', 'nomi', '{}', 'disabled', 'pending', ?, ?) RETURNING id",
+         (id, user_id, name, type, extra, delegation_policy, status, created_at, updated_at) \
+         VALUES (?, 'user_2', 'foreign', 'nomi', '{}', 'disabled', 'pending', ?, ?)",
     )
+    .bind(&foreign_conversation)
     .bind(now)
     .bind(now)
-    .fetch_one(database.pool())
+    .execute(database.pool())
     .await
     .unwrap();
     let lead = create_conversation(&conversations, "reopen lead").await;
-    let first_id = create_execution(&repository, lead).await;
+    let first_id = create_execution(&repository, &lead).await;
 
     let unlinked = repository
         .create_execution_with_participants(
@@ -288,7 +297,7 @@ async fn schema_guards_owner_authority_idempotency_and_terminal_reopen_boundarie
              (id, conversation_id, execution_id, relation, active, created_at, updated_at) \
              VALUES ('foreign_owner_link', ?, ?, 'lead', 1, ?, ?)",
         )
-        .bind(foreign_conversation)
+        .bind(&foreign_conversation)
         .bind(&unlinked.id)
         .bind(now)
         .bind(now)
@@ -303,7 +312,7 @@ async fn schema_guards_owner_authority_idempotency_and_terminal_reopen_boundarie
              (creation_key, user_id, conversation_id, created_at) \
              VALUES ('foreign-key-owner', 'user_2', ?, ?)",
         )
-        .bind(lead)
+        .bind(&lead)
         .bind(now)
         .execute(database.pool())
         .await
@@ -313,12 +322,12 @@ async fn schema_guards_owner_authority_idempotency_and_terminal_reopen_boundarie
     assert!(
         nomifun_db::sqlx::query(
             "INSERT INTO conversation_delivery_receipts \
-             (operation_id, conversation_id, user_id, kind, request_payload, status, \
+             (operation_id, message_id, conversation_id, user_id, kind, request_payload, status, \
               created_at, updated_at) \
-             VALUES ('foreign-receipt-owner', ?, 'user_2', 'turn', '{}', \
+             VALUES ('foreign-receipt-owner', 'msg_0190f5fe-7c00-7a00-8abc-012345678901', ?, 'user_2', 'turn', '{}', \
                      'accepted', ?, ?)",
         )
-        .bind(lead)
+        .bind(&lead)
         .bind(now)
         .bind(now)
         .execute(database.pool())
@@ -339,7 +348,7 @@ async fn schema_guards_owner_authority_idempotency_and_terminal_reopen_boundarie
     );
     assert!(
         nomifun_db::sqlx::query("UPDATE conversations SET user_id = 'user_2' WHERE id = ?")
-            .bind(lead)
+            .bind(&lead)
             .execute(database.pool())
             .await
             .is_err(),
@@ -360,7 +369,7 @@ async fn schema_guards_owner_authority_idempotency_and_terminal_reopen_boundarie
         )
         .await
         .unwrap();
-    let replacement_id = create_execution(&repository, lead).await;
+    let replacement_id = create_execution(&repository, &lead).await;
     assert_ne!(replacement_id, first_id);
     nomifun_db::sqlx::query("UPDATE agent_executions SET status = 'running' WHERE id = ?")
         .bind(&first_id)
@@ -371,7 +380,7 @@ async fn schema_guards_owner_authority_idempotency_and_terminal_reopen_boundarie
         "SELECT execution_id FROM conversation_execution_links \
          WHERE conversation_id = ? AND relation = 'lead' AND active = 1",
     )
-    .bind(lead)
+    .bind(&lead)
     .fetch_all(database.pool())
     .await
     .unwrap();
@@ -388,7 +397,7 @@ async fn repository_and_schema_enforce_active_participant_limit() {
     let conversations = SqliteConversationRepository::new(database.pool().clone());
     let repository = SqliteAgentExecutionRepository::new(database.pool().clone());
     let lead = create_conversation(&conversations, "participant limit lead").await;
-    let execution_id = create_execution(&repository, lead).await;
+    let execution_id = create_execution(&repository, &lead).await;
 
     let mut excessive_participant_concurrency = participant("invalid_concurrency");
     excessive_participant_concurrency.constraints = Some(r#"{"max_concurrency":65}"#.to_owned());
@@ -601,7 +610,7 @@ async fn terminal_execution_reopen_atomically_restores_current_lead_for_every_co
         let conversations = SqliteConversationRepository::new(database.pool().clone());
         let repository = SqliteAgentExecutionRepository::new(database.pool().clone());
         let lead = create_conversation(&conversations, reopen_path).await;
-        let first_id = create_execution(&repository, lead).await;
+        let first_id = create_execution(&repository, &lead).await;
 
         let mut first_version = 0;
         let mut step_version = None;
@@ -653,7 +662,7 @@ async fn terminal_execution_reopen_atomically_restores_current_lead_for_every_co
             .unwrap();
         first_version += 1;
 
-        let second_id = create_execution(&repository, lead).await;
+        let second_id = create_execution(&repository, &lead).await;
         repository
             .update_execution(
                 USER_ID,
@@ -676,11 +685,11 @@ async fn terminal_execution_reopen_atomically_restores_current_lead_for_every_co
             .unwrap();
         assert_eq!(
             first_before_reopen.lead_conversation_id,
-            Some(lead),
+            Some(lead.clone()),
             "inactive lead history remains the Execution's immutable identity"
         );
         let current_before = repository
-            .resolve_conversation_link(USER_ID, lead)
+            .resolve_conversation_link(USER_ID, &lead)
             .await
             .unwrap();
         assert_eq!(
@@ -745,7 +754,7 @@ async fn terminal_execution_reopen_atomically_restores_current_lead_for_every_co
         }
 
         let links = repository
-            .resolve_conversation_link(USER_ID, lead)
+            .resolve_conversation_link(USER_ID, &lead)
             .await
             .unwrap();
         let active_leads: Vec<_> = links
@@ -787,7 +796,7 @@ async fn running_attempt_appends_one_flat_dag_and_gates_only_pending_downstream(
                 delegation_policy: DelegationPolicy::Automatic,
                 max_parallel: 1,
                 work_dir: None,
-                lead_conversation_id: Some(lead),
+                lead_conversation_id: Some(lead.clone()),
                 initial_plan_input: r#"{"mode":"automatic"}"#.to_owned(),
             },
             &[participant("participant_1")],
@@ -858,7 +867,7 @@ async fn running_attempt_appends_one_flat_dag_and_gates_only_pending_downstream(
             queued.step.version,
             &queued_attempt.id,
             queued_attempt.version,
-            attempt_conversation,
+            &attempt_conversation,
             None,
             &event(AgentExecutionEventKind::AttemptChanged),
         )
@@ -867,7 +876,7 @@ async fn running_attempt_appends_one_flat_dag_and_gates_only_pending_downstream(
     let running_attempt = running.current_attempt.as_ref().unwrap().attempt.clone();
     let append = AppendAgentExecutionStepsFromAttemptParams {
         operation_id: "delegate-operation-1".to_owned(),
-        caller_conversation_id: attempt_conversation,
+        caller_conversation_id: attempt_conversation.clone(),
         caller_step_id: "caller".to_owned(),
         caller_attempt_id: running_attempt.id.clone(),
         expected_caller_step_version: running.step.version,
@@ -886,7 +895,7 @@ async fn running_attempt_appends_one_flat_dag_and_gates_only_pending_downstream(
         step_id: None,
         attempt_id: None,
         actor: nomifun_common::AgentExecutionActor::agent(
-            attempt_conversation,
+            &attempt_conversation,
             Some(running_attempt.id.clone()),
         ),
         payload: r#"{"change":"delegated_steps_appended"}"#.to_owned(),
@@ -990,7 +999,7 @@ async fn running_attempt_appends_one_flat_dag_and_gates_only_pending_downstream(
             &execution_id,
             &AppendAgentExecutionStepsFromAttemptParams {
                 operation_id: append.operation_id.clone(),
-                caller_conversation_id: attempt_conversation,
+                caller_conversation_id: attempt_conversation.clone(),
                 caller_step_id: "caller".to_owned(),
                 caller_attempt_id: running_attempt.id.clone(),
                 expected_caller_step_version: -1,
@@ -1003,7 +1012,7 @@ async fn running_attempt_appends_one_flat_dag_and_gates_only_pending_downstream(
                 step_id: None,
                 attempt_id: None,
                 actor: nomifun_common::AgentExecutionActor::agent(
-                    attempt_conversation,
+                    &attempt_conversation,
                     Some(running_attempt.id),
                 ),
                 payload: "{}".to_owned(),
@@ -1053,7 +1062,7 @@ async fn versioned_append_preserves_history_and_reopens_a_settled_execution() {
     let repository = SqliteAgentExecutionRepository::new(database.pool().clone());
     let execution_id = create_execution(
         &repository,
-        create_conversation(&conversations, "settled append lead").await,
+        &create_conversation(&conversations, "settled append lead").await,
     )
     .await;
     repository
@@ -1145,7 +1154,7 @@ async fn pause_atomically_interrupts_in_flight_work_and_fences_the_old_generatio
     let repository = SqliteAgentExecutionRepository::new(database.pool().clone());
     let attempt_conversation = create_conversation(&conversations, "in-flight attempt").await;
     let lead_conversation_id = create_conversation(&conversations, "lead").await;
-    let execution_id = create_execution(&repository, lead_conversation_id).await;
+    let execution_id = create_execution(&repository, &lead_conversation_id).await;
     repository
         .reconcile_plan(
             USER_ID,
@@ -1198,7 +1207,7 @@ async fn pause_atomically_interrupts_in_flight_work_and_fences_the_old_generatio
             1,
             &running_attempt.id,
             0,
-            attempt_conversation,
+            &attempt_conversation,
             Some(&first),
             &event(AgentExecutionEventKind::AttemptChanged),
         )
@@ -1387,7 +1396,7 @@ async fn pause_preserves_waiting_questions_and_resume_restores_waiting_input() {
     let attempt_conversation = create_conversation(&conversations, "waiting attempt").await;
     let execution_id = create_execution(
         &repository,
-        create_conversation(&conversations, "waiting lead").await,
+        &create_conversation(&conversations, "waiting lead").await,
     )
     .await;
     repository
@@ -1428,7 +1437,7 @@ async fn pause_preserves_waiting_questions_and_resume_restores_waiting_input() {
             queued.step.version,
             &attempt.id,
             attempt.version,
-            attempt_conversation,
+            &attempt_conversation,
             None,
             &event(AgentExecutionEventKind::AttemptChanged),
         )
@@ -1516,7 +1525,7 @@ async fn attempt_lifecycle_resume_and_adopt_are_atomic() {
     let repository = SqliteAgentExecutionRepository::new(database.pool().clone());
     let lead_conversation_id = create_conversation(&conversations, "lead").await;
     let attempt_conversation_id = create_conversation(&conversations, "attempt").await;
-    let execution_id = create_execution(&repository, lead_conversation_id).await;
+    let execution_id = create_execution(&repository, &lead_conversation_id).await;
 
     repository
         .reconcile_plan(
@@ -1571,7 +1580,7 @@ async fn attempt_lifecycle_resume_and_adopt_are_atomic() {
             1,
             &attempt_id,
             0,
-            attempt_conversation_id,
+            &attempt_conversation_id,
             None,
             &event(AgentExecutionEventKind::AttemptChanged),
         )
@@ -1581,19 +1590,19 @@ async fn attempt_lifecycle_resume_and_adopt_are_atomic() {
     assert_eq!(running.current_attempt.as_ref().unwrap().attempt.version, 1);
     assert!(
         repository
-            .has_attempt_conversation_link(USER_ID, attempt_conversation_id)
+            .has_attempt_conversation_link(USER_ID, &attempt_conversation_id)
             .await
             .unwrap()
     );
     assert!(
         !repository
-            .has_attempt_conversation_link("another_user", attempt_conversation_id)
+            .has_attempt_conversation_link("another_user", &attempt_conversation_id)
             .await
             .unwrap()
     );
     assert!(
         !repository
-            .has_attempt_conversation_link(USER_ID, lead_conversation_id)
+            .has_attempt_conversation_link(USER_ID, &lead_conversation_id)
             .await
             .unwrap()
     );
@@ -1700,7 +1709,7 @@ async fn attempt_lifecycle_resume_and_adopt_are_atomic() {
     assert_eq!(completed.current_attempt.as_ref().unwrap().attempt.status, "completed");
     assert!(
         repository
-            .has_attempt_conversation_link(USER_ID, attempt_conversation_id)
+            .has_attempt_conversation_link(USER_ID, &attempt_conversation_id)
             .await
             .unwrap(),
         "inactive attempt links remain part of the execution audit trail"
@@ -1734,7 +1743,7 @@ async fn attempt_lifecycle_resume_and_adopt_are_atomic() {
                 delegation_policy: DelegationPolicy::Automatic,
                 max_parallel: 1,
                 work_dir: None,
-                lead_conversation_id: Some(attempt_conversation_id),
+                lead_conversation_id: Some(attempt_conversation_id.clone()),
                 initial_plan_input: r#"{"mode":"automatic"}"#.to_owned(),
             },
             &[participant("illegal_reuse_participant")],
@@ -1785,7 +1794,7 @@ async fn attempt_lifecycle_resume_and_adopt_are_atomic() {
              (id, conversation_id, execution_id, relation, active, created_at, updated_at) \
              VALUES ('historical_attempt_illegal_lead', ?, ?, 'lead', 1, 1, 1)",
         )
-        .bind(attempt_conversation_id)
+        .bind(&attempt_conversation_id)
         .bind(&schema_guard_target.id)
         .execute(database.pool())
         .await
@@ -1822,7 +1831,7 @@ async fn attempt_lifecycle_resume_and_adopt_are_atomic() {
     assert_eq!(adopted_attempt.attempt.attempt_no, 1);
     assert_eq!(adopted_attempt.attempt.trigger_reason, "adopt");
     assert_eq!(adopted_attempt.attempt.output_summary.as_deref(), Some("new conversation output"));
-    assert_eq!(adopted_attempt.conversation_id, Some(attempt_conversation_id));
+    assert_eq!(adopted_attempt.conversation_id, Some(attempt_conversation_id.clone()));
 
     let execution = repository
         .get_execution(USER_ID, &execution_id)
@@ -1849,7 +1858,7 @@ async fn attempt_lifecycle_resume_and_adopt_are_atomic() {
     );
     assert!(
         repository
-            .has_attempt_conversation_link(USER_ID, attempt_conversation_id)
+            .has_attempt_conversation_link(USER_ID, &attempt_conversation_id)
             .await
             .unwrap(),
         "soft deletion must not make an attempt transcript physically deletable"
@@ -1864,7 +1873,7 @@ async fn waiting_attempt_can_acknowledge_a_delivered_stop_turn_effect() {
     let lead_conversation_id = create_conversation(&conversations, "stop effect lead").await;
     let attempt_conversation_id =
         create_conversation(&conversations, "stop effect attempt").await;
-    let execution_id = create_execution(&repository, lead_conversation_id).await;
+    let execution_id = create_execution(&repository, &lead_conversation_id).await;
 
     let execution = repository
         .get_execution(USER_ID, &execution_id)
@@ -1914,7 +1923,7 @@ async fn waiting_attempt_can_acknowledge_a_delivered_stop_turn_effect() {
             queued.step.version,
             &queued_attempt.id,
             queued_attempt.version,
-            attempt_conversation_id,
+            &attempt_conversation_id,
             None,
             &event(AgentExecutionEventKind::AttemptChanged),
         )
@@ -1981,7 +1990,7 @@ async fn resuming_one_of_multiple_waiting_attempts_keeps_the_aggregate_waiting()
     let repository = SqliteAgentExecutionRepository::new(database.pool().clone());
     let execution_id = create_execution(
         &repository,
-        create_conversation(&conversations, "multi-wait lead").await,
+        &create_conversation(&conversations, "multi-wait lead").await,
     )
     .await;
     let conversation_a = create_conversation(&conversations, "multi-wait A").await;
@@ -2049,7 +2058,7 @@ async fn resuming_one_of_multiple_waiting_attempts_keeps_the_aggregate_waiting()
             queued_a.step.version,
             &attempt_a.id,
             attempt_a.version,
-            conversation_a,
+            &conversation_a,
             None,
             &event(AgentExecutionEventKind::AttemptChanged),
         )
@@ -2064,7 +2073,7 @@ async fn resuming_one_of_multiple_waiting_attempts_keeps_the_aggregate_waiting()
             queued_b.step.version,
             &attempt_b.id,
             attempt_b.version,
-            conversation_b,
+            &conversation_b,
             None,
             &event(AgentExecutionEventKind::AttemptChanged),
         )
@@ -2236,7 +2245,7 @@ async fn replan_interrupts_superseded_attempt_and_preserves_revision_history() {
     let conversations = SqliteConversationRepository::new(database.pool().clone());
     let repository = SqliteAgentExecutionRepository::new(database.pool().clone());
     let lead_conversation_id = create_conversation(&conversations, "lead").await;
-    let execution_id = create_execution(&repository, lead_conversation_id).await;
+    let execution_id = create_execution(&repository, &lead_conversation_id).await;
     let mut plan = initial_plan(vec![
         agent_step("step_keep", "participant_1"),
         agent_step("step_drop", "participant_1"),
@@ -2347,7 +2356,7 @@ async fn parallel_attempt_creation_advances_aggregate_version_without_false_conf
     let repository = SqliteAgentExecutionRepository::new(database.pool().clone());
     let execution_id = create_execution(
         &repository,
-        create_conversation(&conversations, "lead").await,
+        &create_conversation(&conversations, "lead").await,
     )
     .await;
     repository
@@ -2429,7 +2438,7 @@ async fn explicit_retry_reopens_a_settled_execution_but_never_a_cancelled_one() 
     let repository = SqliteAgentExecutionRepository::new(database.pool().clone());
     let execution_id = create_execution(
         &repository,
-        create_conversation(&conversations, "lead").await,
+        &create_conversation(&conversations, "lead").await,
     )
     .await;
     let attempt_conversation_id = create_conversation(&conversations, "attempt").await;
@@ -2471,7 +2480,7 @@ async fn explicit_retry_reopens_a_settled_execution_but_never_a_cancelled_one() 
             1,
             &attempt_id,
             0,
-            attempt_conversation_id,
+            &attempt_conversation_id,
             None,
             &event(AgentExecutionEventKind::AttemptChanged),
         )
@@ -2574,7 +2583,7 @@ async fn cancelled_execution_cannot_retry_or_adopt_a_completed_step() {
     let repository = SqliteAgentExecutionRepository::new(database.pool().clone());
     let execution_id = create_execution(
         &repository,
-        create_conversation(&conversations, "lead").await,
+        &create_conversation(&conversations, "lead").await,
     )
     .await;
     let attempt_conversation_id = create_conversation(&conversations, "attempt").await;
@@ -2616,7 +2625,7 @@ async fn cancelled_execution_cannot_retry_or_adopt_a_completed_step() {
             1,
             &attempt_id,
             0,
-            attempt_conversation_id,
+            &attempt_conversation_id,
             None,
             &event(AgentExecutionEventKind::AttemptChanged),
         )
@@ -2717,7 +2726,7 @@ async fn loop_repeat_settlement_and_body_closure_reset_are_one_cas_transaction()
     let repository = SqliteAgentExecutionRepository::new(database.pool().clone());
     let execution_id = create_execution(
         &repository,
-        create_conversation(&conversations, "lead").await,
+        &create_conversation(&conversations, "lead").await,
     )
     .await;
     let mut plan = initial_plan(vec![
@@ -2895,7 +2904,7 @@ async fn manual_retry_clears_dispatch_gate_without_rewriting_prior_attempt() {
     let repository = SqliteAgentExecutionRepository::new(database.pool().clone());
     let execution_id = create_execution(
         &repository,
-        create_conversation(&conversations, "lead").await,
+        &create_conversation(&conversations, "lead").await,
     )
     .await;
     let attempt_conversation_id = create_conversation(&conversations, "attempt").await;
@@ -2937,7 +2946,7 @@ async fn manual_retry_clears_dispatch_gate_without_rewriting_prior_attempt() {
             1,
             &attempt_id,
             0,
-            attempt_conversation_id,
+            &attempt_conversation_id,
             None,
             &event(AgentExecutionEventKind::AttemptChanged),
         )
@@ -3004,7 +3013,7 @@ async fn adopt_reopens_only_the_repaired_skipped_downstream_closure() {
     let repository = SqliteAgentExecutionRepository::new(database.pool().clone());
     let execution_id = create_execution(
         &repository,
-        create_conversation(&conversations, "lead").await,
+        &create_conversation(&conversations, "lead").await,
     )
     .await;
     let mut plan = initial_plan(vec![
@@ -3104,7 +3113,7 @@ async fn repository_and_schema_enforce_current_dag_limit_and_step_snapshot_immut
     let repository = SqliteAgentExecutionRepository::new(database.pool().clone());
     let execution_id = create_execution(
         &repository,
-        create_conversation(&conversations, "lead").await,
+        &create_conversation(&conversations, "lead").await,
     )
     .await;
     let too_many = (0..=nomifun_common::MAX_AGENT_EXECUTION_STEPS)
@@ -3188,7 +3197,7 @@ async fn schema_uses_plan_revision_as_the_only_graph_snapshot_clock() {
     let repository = SqliteAgentExecutionRepository::new(database.pool().clone());
     let execution_id = create_execution(
         &repository,
-        create_conversation(&conversations, "revision guard lead").await,
+        &create_conversation(&conversations, "revision guard lead").await,
     )
     .await;
     let mut plan = initial_plan(vec![
@@ -3314,7 +3323,7 @@ async fn delete_is_an_atomic_tombstone_that_preserves_execution_history() {
     let conversations = SqliteConversationRepository::new(database.pool().clone());
     let repository = SqliteAgentExecutionRepository::new(database.pool().clone());
     let lead_conversation_id = create_conversation(&conversations, "lead").await;
-    let execution_id = create_execution(&repository, lead_conversation_id).await;
+    let execution_id = create_execution(&repository, &lead_conversation_id).await;
 
     assert!(
         repository
@@ -3358,7 +3367,7 @@ async fn delete_is_an_atomic_tombstone_that_preserves_execution_history() {
     .unwrap();
     assert_eq!(preserved_participants, 1);
     let historical_links = repository
-        .resolve_conversation_link(USER_ID, lead_conversation_id)
+        .resolve_conversation_link(USER_ID, &lead_conversation_id)
         .await
         .unwrap();
     assert_eq!(historical_links.len(), 1);
@@ -3401,7 +3410,7 @@ async fn event_actor_is_authorized_and_on_behalf_user_is_derived_atomically() {
                 delegation_policy: DelegationPolicy::Automatic,
                 max_parallel: 4,
                 work_dir: None,
-                lead_conversation_id: Some(lead_conversation_id),
+                lead_conversation_id: Some(lead_conversation_id.clone()),
                 initial_plan_input: r#"{"mode":"automatic"}"#.to_owned(),
             },
             &[participant("participant_1")],
@@ -3421,7 +3430,7 @@ async fn event_actor_is_authorized_and_on_behalf_user_is_derived_atomically() {
         event_type: AgentExecutionEventKind::StatusChanged,
         step_id: None,
         attempt_id: None,
-        actor: nomifun_common::AgentExecutionActor::agent(lead_conversation_id, None),
+        actor: nomifun_common::AgentExecutionActor::agent(lead_conversation_id.clone(), None),
         payload: "{}".to_owned(),
     };
     repository
@@ -3450,7 +3459,7 @@ async fn event_actor_is_authorized_and_on_behalf_user_is_derived_atomically() {
         attributed.actor_id.as_deref(),
         Some(expected_actor_id.as_str())
     );
-    assert_eq!(attributed.actor_conversation_id, Some(lead_conversation_id));
+    assert_eq!(attributed.actor_conversation_id, Some(lead_conversation_id.clone()));
     assert_eq!(attributed.actor_attempt_id, None);
     assert_eq!(attributed.on_behalf_of_user_id, USER_ID);
 
@@ -3489,7 +3498,7 @@ async fn event_actor_is_authorized_and_on_behalf_user_is_derived_atomically() {
         nomifun_common::AgentExecutionActor::external_agent("companion_spoof"),
         nomifun_common::AgentExecutionActor::Agent {
             agent_id: "companion_spoof".to_owned(),
-            conversation_id: Some(lead_conversation_id),
+            conversation_id: Some(lead_conversation_id.clone()),
             attempt_id: None,
         },
     ] {
@@ -3566,7 +3575,7 @@ async fn raw_event_writes_preserve_baseline_sequence_and_root_actor_provenance()
                 delegation_policy: DelegationPolicy::Automatic,
                 max_parallel: 1,
                 work_dir: None,
-                lead_conversation_id: Some(lead_conversation_id),
+                lead_conversation_id: Some(lead_conversation_id.clone()),
                 initial_plan_input: r#"{"mode":"automatic"}"#.to_owned(),
             },
             &[participant("event_participant")],
@@ -3641,7 +3650,7 @@ async fn raw_event_writes_preserve_baseline_sequence_and_root_actor_provenance()
                        'companion_spoof', ?, ?, '{}', ?)",
         )
         .bind(&execution_id)
-        .bind(lead_conversation_id)
+        .bind(&lead_conversation_id)
         .bind(USER_ID)
         .bind(now)
         .execute(&mut *tx)

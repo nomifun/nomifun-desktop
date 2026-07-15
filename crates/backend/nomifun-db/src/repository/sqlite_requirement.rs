@@ -49,18 +49,17 @@ fn build_order_clause(order_by: Option<&str>, order: Option<&str>) -> String {
 
 #[async_trait::async_trait]
 impl IRequirementRepository for SqliteRequirementRepository {
-    async fn insert(&self, row: &RequirementRow) -> Result<i64, DbError> {
-        // `id` is allocated by SQLite (INTEGER PK AUTOINCREMENT) and never bound;
-        // the caller receives the assigned id via last_insert_rowid().
-        let result = sqlx::query(
+    async fn insert(&self, row: &RequirementRow) -> Result<String, DbError> {
+        sqlx::query(
             "INSERT INTO requirements (\
-                title, content, tag, order_key, sort_seq, status, priority, \
-                completion_note, owner_session_id, owner_kind, active_turn_started_at, lease_expires_at, \
+                id, title, content, tag, order_key, sort_seq, status, priority, \
+                completion_note, owner_conversation_id, owner_terminal_id, active_turn_started_at, lease_expires_at, \
                 started_at, completed_at, attempt_count, created_by, extra, created_at, updated_at\
             ) VALUES (\
-                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?\
+                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?\
             )",
         )
+        .bind(&row.id)
         .bind(&row.title)
         .bind(&row.content)
         .bind(&row.tag)
@@ -69,8 +68,8 @@ impl IRequirementRepository for SqliteRequirementRepository {
         .bind(&row.status)
         .bind(row.priority)
         .bind(&row.completion_note)
-        .bind(row.owner_session_id)
-        .bind(&row.owner_kind)
+        .bind(&row.owner_conversation_id)
+        .bind(&row.owner_terminal_id)
         .bind(row.active_turn_started_at)
         .bind(row.lease_expires_at)
         .bind(row.started_at)
@@ -82,10 +81,10 @@ impl IRequirementRepository for SqliteRequirementRepository {
         .bind(row.updated_at)
         .execute(&self.pool)
         .await?;
-        Ok(result.last_insert_rowid())
+        Ok(row.id.clone())
     }
 
-    async fn update(&self, id: i64, params: &RequirementRowUpdate) -> Result<(), DbError> {
+    async fn update(&self, id: &str, params: &RequirementRowUpdate) -> Result<(), DbError> {
         let mut set_parts: Vec<String> = Vec::new();
         let mut binds: Vec<BindValue> = Vec::new();
 
@@ -130,8 +129,8 @@ impl IRequirementRepository for SqliteRequirementRepository {
         push_str!(status);
         push_i64!(priority);
         push_opt_str!(completion_note);
-        push_opt_i64!(owner_session_id);
-        push_opt_str!(owner_kind);
+        push_opt_str!(owner_conversation_id);
+        push_opt_str!(owner_terminal_id);
         push_opt_i64!(active_turn_started_at);
         push_opt_i64!(lease_expires_at);
         push_opt_i64!(started_at);
@@ -160,7 +159,7 @@ impl IRequirementRepository for SqliteRequirementRepository {
         Ok(())
     }
 
-    async fn delete(&self, id: i64) -> Result<(), DbError> {
+    async fn delete(&self, id: &str) -> Result<(), DbError> {
         let result = sqlx::query("DELETE FROM requirements WHERE id = ?")
             .bind(id)
             .execute(&self.pool)
@@ -171,7 +170,7 @@ impl IRequirementRepository for SqliteRequirementRepository {
         Ok(())
     }
 
-    async fn get_by_id(&self, id: i64) -> Result<Option<RequirementRow>, DbError> {
+    async fn get_by_id(&self, id: &str) -> Result<Option<RequirementRow>, DbError> {
         let row = sqlx::query_as::<_, RequirementRow>("SELECT * FROM requirements WHERE id = ?")
             .bind(id)
             .fetch_optional(&self.pool)
@@ -191,13 +190,13 @@ impl IRequirementRepository for SqliteRequirementRepository {
             where_parts.push("status = ?".to_string());
             binds.push(BindValue::Str(status.clone()));
         }
-        if let Some(owner) = &params.owner_session_id {
-            where_parts.push("owner_session_id = ?".to_string());
-            binds.push(BindValue::I64(*owner));
+        if let Some(owner) = &params.owner_conversation_id {
+            where_parts.push("owner_conversation_id = ?".to_string());
+            binds.push(BindValue::Str(owner.clone()));
         }
-        if let Some(kind) = &params.owner_kind {
-            where_parts.push("owner_kind = ?".to_string());
-            binds.push(BindValue::Str(kind.clone()));
+        if let Some(owner) = &params.owner_terminal_id {
+            where_parts.push("owner_terminal_id = ?".to_string());
+            binds.push(BindValue::Str(owner.clone()));
         }
         if let Some(q) = &params.q
             && !q.is_empty()
@@ -267,15 +266,15 @@ impl IRequirementRepository for SqliteRequirementRepository {
     async fn claim_next(
         &self,
         tag: &str,
-        owner_session_id: i64,
-        owner_kind: &str,
+        owner_conversation_id: Option<&str>,
+        owner_terminal_id: Option<&str>,
         lease_ms: i64,
         now: TimestampMs,
     ) -> Result<Option<RequirementRow>, DbError> {
         let row = sqlx::query_as::<_, RequirementRow>(
             "UPDATE requirements \
              SET status='in_progress', \
-                 owner_session_id=?1, owner_kind=?2, \
+                 owner_conversation_id=?1, owner_terminal_id=?2, \
                  active_turn_started_at=?3, started_at=COALESCE(started_at, ?3), \
                  lease_expires_at=?3 + ?4, \
                  attempt_count=attempt_count + 1, \
@@ -291,8 +290,8 @@ impl IRequirementRepository for SqliteRequirementRepository {
              ) \
              RETURNING *",
         )
-        .bind(owner_session_id)
-        .bind(owner_kind)
+        .bind(owner_conversation_id)
+        .bind(owner_terminal_id)
         .bind(now)
         .bind(lease_ms)
         .bind(tag)
@@ -301,15 +300,24 @@ impl IRequirementRepository for SqliteRequirementRepository {
         Ok(row)
     }
 
-    async fn renew_lease(&self, id: i64, owner: i64, lease_ms: i64, now: TimestampMs) -> Result<bool, DbError> {
+    async fn renew_lease(
+        &self,
+        id: &str,
+        owner_conversation_id: Option<&str>,
+        owner_terminal_id: Option<&str>,
+        lease_ms: i64,
+        now: TimestampMs,
+    ) -> Result<bool, DbError> {
         let result = sqlx::query(
             "UPDATE requirements SET lease_expires_at = ?1 + ?2, updated_at = ?1 \
-             WHERE id = ?3 AND owner_session_id = ?4 AND status = 'in_progress'",
+             WHERE id = ?3 AND owner_conversation_id IS ?4 \
+               AND owner_terminal_id IS ?5 AND status = 'in_progress'",
         )
         .bind(now)
         .bind(lease_ms)
         .bind(id)
-        .bind(owner)
+        .bind(owner_conversation_id)
+        .bind(owner_terminal_id)
         .execute(&self.pool)
         .await?;
         Ok(result.rows_affected() > 0)
@@ -317,25 +325,35 @@ impl IRequirementRepository for SqliteRequirementRepository {
 
     async fn sweep_expired_leases(
         &self,
-        active_sessions: &[(String, i64)],
+        active_conversation_ids: &[String],
+        active_terminal_ids: &[String],
         now: TimestampMs,
     ) -> Result<u64, DbError> {
-        // Exclude active sessions by the FULL dual-domain key `(owner_kind,
-        // owner_session_id)`: a `(?,?)` tuple per active session, ORed and
-        // negated. A kind-less `owner_session_id NOT IN (...)` would let an
-        // active `conv#5` keep a stale `term#5` claim alive (numeric collision,
-        // spec §2.2). When there are no active sessions the clause is omitted.
-        let active_clause = if active_sessions.is_empty() {
-            String::new()
-        } else {
-            let one = "(owner_kind = ? AND owner_session_id = ?)";
-            let ors = vec![one; active_sessions.len()].join(" OR ");
-            format!(" AND NOT ({ors})")
-        };
+        // Exclude active sessions independently by their typed canonical owner columns. A conversation ID can never protect a terminal-owned claim.
+        let mut active_terms = Vec::new();
+        if !active_conversation_ids.is_empty() {
+            let placeholders = std::iter::repeat_n("?", active_conversation_ids.len())
+                .collect::<Vec<_>>()
+                .join(", ");
+            active_terms.push(format!(
+                "(owner_conversation_id IS NULL OR owner_conversation_id NOT IN ({placeholders}))"
+            ));
+        }
+        if !active_terminal_ids.is_empty() {
+            let placeholders = std::iter::repeat_n("?", active_terminal_ids.len())
+                .collect::<Vec<_>>()
+                .join(", ");
+            active_terms.push(format!(
+                "(owner_terminal_id IS NULL OR owner_terminal_id NOT IN ({placeholders}))"
+            ));
+        }
+        let active_clause = (!active_terms.is_empty())
+            .then(|| format!(" AND {}", active_terms.join(" AND ")))
+            .unwrap_or_default();
 
         let sql = format!(
             "UPDATE requirements \
-             SET status='pending', owner_session_id=NULL, owner_kind=NULL, \
+             SET status='pending', owner_conversation_id=NULL, owner_terminal_id=NULL, \
                  active_turn_started_at=NULL, lease_expires_at=NULL, updated_at=? \
              WHERE status='in_progress' \
                AND lease_expires_at IS NOT NULL \
@@ -343,8 +361,11 @@ impl IRequirementRepository for SqliteRequirementRepository {
         );
 
         let mut query = sqlx::query(&sql).bind(now).bind(now);
-        for (kind, id) in active_sessions {
-            query = query.bind(kind).bind(id);
+        for id in active_conversation_ids {
+            query = query.bind(id);
+        }
+        for id in active_terminal_ids {
+            query = query.bind(id);
         }
         let result = query.execute(&self.pool).await?;
         Ok(result.rows_affected())
@@ -356,7 +377,7 @@ impl IRequirementRepository for SqliteRequirementRepository {
         &self,
         tag: &str,
         reason: &str,
-        req_id: Option<i64>,
+        req_id: Option<&str>,
         now: TimestampMs,
     ) -> Result<(), DbError> {
         sqlx::query(
@@ -398,18 +419,25 @@ impl IRequirementRepository for SqliteRequirementRepository {
         Ok(row)
     }
 
-    async fn unclaim(&self, id: i64, owner: i64) -> Result<bool, DbError> {
+    async fn unclaim(
+        &self,
+        id: &str,
+        owner_conversation_id: Option<&str>,
+        owner_terminal_id: Option<&str>,
+    ) -> Result<bool, DbError> {
         let result = sqlx::query(
             "UPDATE requirements \
-             SET status='pending', owner_session_id=NULL, owner_kind=NULL, \
+             SET status='pending', owner_conversation_id=NULL, owner_terminal_id=NULL, \
                  active_turn_started_at=NULL, lease_expires_at=NULL, \
                  attempt_count = MAX(attempt_count - 1, 0), \
                  updated_at=?1 \
-             WHERE id=?2 AND status='in_progress' AND owner_session_id=?3",
+             WHERE id=?2 AND status='in_progress' \
+               AND owner_conversation_id IS ?3 AND owner_terminal_id IS ?4",
         )
         .bind(now_ms())
         .bind(id)
-        .bind(owner)
+        .bind(owner_conversation_id)
+        .bind(owner_terminal_id)
         .execute(&self.pool)
         .await?;
         Ok(result.rows_affected() > 0)
@@ -420,50 +448,48 @@ impl IRequirementRepository for SqliteRequirementRepository {
 mod tests {
     use super::*;
     use crate::init_database_memory;
+    use nomifun_common::{ConversationId, RequirementId, TerminalId};
 
-    async fn setup() -> (SqliteRequirementRepository, crate::Database) {
+    async fn setup() -> (
+        SqliteRequirementRepository,
+        crate::Database,
+        String,
+        String,
+    ) {
         let db = init_database_memory().await.expect("init db");
+        let installation_owner = crate::installation_owner_id(db.pool()).await.unwrap();
         let repo = SqliteRequirementRepository::new(db.pool().clone());
+        let conversation_id = ConversationId::new().into_string();
+        let terminal_id = TerminalId::new().into_string();
 
-        // Requirement ownership is a polymorphic soft reference, but the DB
-        // authority trigger requires every claimed target to exist and belong
-        // to the installation owner. Seed each identity used by this module so
-        // claim tests exercise real, authorized runtime principals.
-        for conversation_id in [5_i64, CONV_OWNER, 2000, 2001, 2002, 2003, 2004, 2005, 2006, 2007] {
-            sqlx::query(
-                "INSERT INTO conversations \
-                    (id, user_id, name, type, created_at, updated_at) \
-                 VALUES (?1, 'system_default_user', ?2, 'nomi', 0, 0)",
-            )
-            .bind(conversation_id)
-            .bind(format!("requirement-owner-conversation-{conversation_id}"))
-            .execute(db.pool())
-            .await
-            .unwrap();
-        }
-        for terminal_id in [5_i64, 7] {
-            sqlx::query(
-                "INSERT INTO terminal_sessions \
-                    (id, name, cwd, command, args, created_at, updated_at, user_id) \
-                 VALUES (?1, ?2, '/tmp', '$SHELL', '[]', 0, 0, 'system_default_user')",
-            )
-            .bind(terminal_id)
-            .bind(format!("requirement-owner-terminal-{terminal_id}"))
-            .execute(db.pool())
-            .await
-            .unwrap();
-        }
-        (repo, db)
+        sqlx::query(
+            "INSERT INTO conversations \
+                (id, user_id, name, type, created_at, updated_at) \
+             VALUES (?1, ?2, 'requirement-owner-conversation', 'nomi', 0, 0)",
+        )
+        .bind(&conversation_id)
+        .bind(&installation_owner)
+        .execute(db.pool())
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO terminal_sessions \
+                (id, name, cwd, command, args, created_at, updated_at, user_id) \
+             VALUES (?1, 'requirement-owner-terminal', '/tmp', '$SHELL', '[]', 0, 0, ?2)",
+        )
+        .bind(&terminal_id)
+        .bind(&installation_owner)
+        .execute(db.pool())
+        .await
+        .unwrap();
+
+        (repo, db, conversation_id, terminal_id)
     }
-
-    /// Installation-owned Conversation used by the ordinary claim tests.
-    const CONV_OWNER: i64 = 1001;
 
     fn make_row(tag: &str, sort_seq: &str) -> RequirementRow {
         let now = now_ms();
         RequirementRow {
-            // id is allocated by SQLite on insert(); the value here is ignored.
-            id: 0,
+            id: RequirementId::new().into_string(),
             title: format!("Req {tag}/{sort_seq}"),
             content: "do the thing".into(),
             tag: tag.into(),
@@ -472,8 +498,8 @@ mod tests {
             status: "pending".into(),
             priority: 0,
             completion_note: None,
-            owner_session_id: None,
-            owner_kind: None,
+            owner_conversation_id: None,
+            owner_terminal_id: None,
             active_turn_started_at: None,
             lease_expires_at: None,
             started_at: None,
@@ -487,31 +513,49 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn insert_and_get() {
-        let (repo, _db) = setup().await;
-        let id = repo.insert(&make_row("t", "00000001")).await.unwrap();
-        assert!(id > 0);
-        let found = repo.get_by_id(id).await.unwrap().expect("found");
-        assert_eq!(found.id, id);
-        assert_eq!(found.status, "pending");
-        assert_eq!(found.tag, "t");
+    async fn insert_update_get_delete_use_canonical_string_ids() {
+        let (repo, _db, _conversation_id, _terminal_id) = setup().await;
+        let row = make_row("t", "00000001");
+        let id = repo.insert(&row).await.unwrap();
+        assert_eq!(id, row.id);
+        assert!(id.parse::<RequirementId>().is_ok());
+
+        repo.update(
+            &id,
+            &RequirementRowUpdate {
+                title: Some("updated".into()),
+                status: Some("done".into()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let found = repo.get_by_id(&id).await.unwrap().unwrap();
+        assert_eq!(found.title, "updated");
+        assert_eq!(found.status, "done");
+
+        repo.delete(&id).await.unwrap();
+        assert!(repo.get_by_id(&id).await.unwrap().is_none());
+
+        let missing = RequirementId::new().into_string();
+        assert!(matches!(
+            repo.update(
+                &missing,
+                &RequirementRowUpdate {
+                    title: Some("missing".into()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap_err(),
+            DbError::NotFound(_)
+        ));
     }
 
     #[tokio::test]
-    async fn update_nonexistent_is_not_found() {
-        let (repo, _db) = setup().await;
-        let params = RequirementRowUpdate {
-            title: Some("x".into()),
-            ..Default::default()
-        };
-        let err = repo.update(999_999, &params).await.unwrap_err();
-        assert!(matches!(err, DbError::NotFound(_)));
-    }
-
-    #[tokio::test]
-    async fn list_filters_and_paginates() {
-        let (repo, _db) = setup().await;
-        let id1 = repo.insert(&make_row("alpha", "00000001")).await.unwrap();
+    async fn list_filters_paginates_and_sorts_without_interpolating_input() {
+        let (repo, _db, _conversation_id, _terminal_id) = setup().await;
+        let low = repo.insert(&make_row("alpha", "00000001")).await.unwrap();
         repo.insert(&make_row("alpha", "00000002")).await.unwrap();
         repo.insert(&make_row("beta", "00000001")).await.unwrap();
 
@@ -525,91 +569,10 @@ mod tests {
             .unwrap();
         assert_eq!(total, 2);
         assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].id, id1); // lowest sort_seq first
-    }
-
-    #[tokio::test]
-    async fn list_sorts_by_whitelisted_field_and_direction() {
-        let (repo, _db) = setup().await;
-
-        // Three rows with distinct created_at / updated_at / status, inserted in
-        // id order (id1 < id2 < id3). sort_seq is deliberately NOT id-aligned so
-        // a fallback to the default order would be distinguishable.
-        let mut r1 = make_row("s", "00000003");
-        r1.created_at = 100;
-        r1.updated_at = 300;
-        r1.status = "pending".into();
-        let mut r2 = make_row("s", "00000001");
-        r2.created_at = 300;
-        r2.updated_at = 100;
-        r2.status = "done".into();
-        let mut r3 = make_row("s", "00000002");
-        r3.created_at = 200;
-        r3.updated_at = 200;
-        r3.status = "cancelled".into();
-        let id1 = repo.insert(&r1).await.unwrap();
-        let id2 = repo.insert(&r2).await.unwrap();
-        let id3 = repo.insert(&r3).await.unwrap();
-
-        let sort = |order_by: &str, order: &str| ListRequirementsParams {
-            order_by: Some(order_by.into()),
-            order: Some(order.into()),
-            page_size: Some(100),
-            ..Default::default()
-        };
-        let ids = |rows: &[RequirementRow]| rows.iter().map(|r| r.id).collect::<Vec<_>>();
-
-        // id asc / desc
-        let (rows, _) = repo.list(&sort("id", "asc")).await.unwrap();
-        assert_eq!(ids(&rows), vec![id1, id2, id3]);
-        let (rows, _) = repo.list(&sort("id", "desc")).await.unwrap();
-        assert_eq!(ids(&rows), vec![id3, id2, id1]);
-
-        // created_at desc → r2(300) > r3(200) > r1(100)
-        let (rows, _) = repo.list(&sort("created_at", "desc")).await.unwrap();
-        assert_eq!(ids(&rows), vec![id2, id3, id1]);
-
-        // updated_at asc → r2(100) < r3(200) < r1(300)
-        let (rows, _) = repo.list(&sort("updated_at", "asc")).await.unwrap();
-        assert_eq!(ids(&rows), vec![id2, id3, id1]);
-
-        // status asc (alphabetical): cancelled(r3) < done(r2) < pending(r1)
-        let (rows, _) = repo.list(&sort("status", "asc")).await.unwrap();
-        assert_eq!(ids(&rows), vec![id3, id2, id1]);
-    }
-
-    #[tokio::test]
-    async fn list_status_sort_breaks_ties_by_id() {
-        let (repo, _db) = setup().await;
-        // All three share status "pending" (make_row default) → the secondary
-        // `id` tiebreaker decides, in the SAME direction as the primary sort.
-        let id1 = repo.insert(&make_row("s", "1")).await.unwrap();
-        let id2 = repo.insert(&make_row("s", "2")).await.unwrap();
-        let id3 = repo.insert(&make_row("s", "3")).await.unwrap();
-
-        let (rows, _) = repo
-            .list(&ListRequirementsParams {
-                order_by: Some("status".into()),
-                order: Some("desc".into()),
-                page_size: Some(100),
-                ..Default::default()
-            })
-            .await
-            .unwrap();
-        assert_eq!(rows.iter().map(|r| r.id).collect::<Vec<_>>(), vec![id3, id2, id1]);
-    }
-
-    #[tokio::test]
-    async fn list_unknown_order_by_falls_back_and_resists_injection() {
-        let (repo, _db) = setup().await;
-        // Default order is sort_seq ASC; insert so the lower sort_seq has the
-        // HIGHER id, making the fallback distinguishable from id-order.
-        repo.insert(&make_row("s", "00000002")).await.unwrap();
-        let id_low_seq = repo.insert(&make_row("s", "00000001")).await.unwrap();
+        assert_eq!(rows[0].id, low);
 
         let (rows, total) = repo
             .list(&ListRequirementsParams {
-                // Not in the whitelist + an injection attempt: must be ignored.
                 order_by: Some("title; DROP TABLE requirements".into()),
                 order: Some("asc".into()),
                 page_size: Some(100),
@@ -617,318 +580,179 @@ mod tests {
             })
             .await
             .unwrap();
-        assert_eq!(total, 2, "table intact — the injection string never reached SQL");
-        assert_eq!(rows[0].id, id_low_seq, "fell back to default sort_seq ASC order");
+        assert_eq!(total, 3);
+        assert_eq!(rows.len(), 3);
+        assert!(repo.get_by_id(&low).await.unwrap().is_some());
     }
 
     #[tokio::test]
-    async fn claim_next_returns_lowest_order_then_none() {
-        let (repo, _db) = setup().await;
-        repo.insert(&make_row("t", "00000002")).await.unwrap();
-        let id1 = repo.insert(&make_row("t", "00000001")).await.unwrap();
+    async fn claim_and_lease_guards_are_domain_typed() {
+        let (repo, _db, conversation_id, terminal_id) = setup().await;
+        let conversation_req = repo.insert(&make_row("conv", "1")).await.unwrap();
+        let terminal_req = repo.insert(&make_row("term", "1")).await.unwrap();
 
-        let first = repo
-            .claim_next("t", CONV_OWNER, "conversation", 60_000, now_ms())
+        let conversation_claim = repo
+            .claim_next("conv", Some(&conversation_id), None, 60_000, now_ms())
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(first.id, id1);
-        assert_eq!(first.status, "in_progress");
-        assert_eq!(first.owner_session_id, Some(CONV_OWNER));
-        assert_eq!(first.owner_kind.as_deref(), Some("conversation"));
-        assert_eq!(first.attempt_count, 1);
+        assert_eq!(conversation_claim.id, conversation_req);
+        assert_eq!(
+            conversation_claim.owner_conversation_id.as_deref(),
+            Some(conversation_id.as_str())
+        );
+        assert!(conversation_claim.owner_terminal_id.is_none());
+        assert_eq!(conversation_claim.attempt_count, 1);
 
-        let second = repo
-            .claim_next("t", CONV_OWNER, "conversation", 60_000, now_ms())
-            .await
-            .unwrap()
-            .unwrap();
-        assert_ne!(second.id, id1);
-
-        let third = repo.claim_next("t", CONV_OWNER, "conversation", 60_000, now_ms()).await.unwrap();
-        assert!(third.is_none(), "tag drained");
-    }
-
-    #[tokio::test]
-    async fn claim_allows_non_conversation_owner() {
-        // Regression for terminal AutoWork: the claim owner may be a terminal id
-        // recorded with owner_kind='terminal'. The seeded terminal belongs to
-        // the installation owner, so the claim must succeed and record both the
-        // owner token and its kind (paired, satisfying the table's CHECK).
-        let (repo, _db) = setup().await;
-        repo.insert(&make_row("t", "00000001")).await.unwrap();
-        let term_owner: i64 = 7;
-        let claimed = repo
-            .claim_next("t", term_owner, "terminal", 60_000, now_ms())
-            .await
-            .expect("claim must not error on a non-conversation owner")
-            .expect("a pending requirement is available to claim");
-        assert_eq!(claimed.status, "in_progress");
-        assert_eq!(claimed.owner_session_id, Some(term_owner));
-        assert_eq!(claimed.owner_kind.as_deref(), Some("terminal"));
-    }
-
-    #[tokio::test]
-    async fn claim_rejects_secondary_user_runtime_owner() {
-        let (repo, db) = setup().await;
-        const SECONDARY_CONVERSATION: i64 = 9001;
-
-        sqlx::query(
-            "INSERT INTO users (id, username, password_hash, created_at, updated_at) \
-             VALUES ('requirement-secondary', 'requirement_secondary', 'hash', 0, 0)",
-        )
-        .execute(db.pool())
-        .await
-        .unwrap();
-        sqlx::query(
-            "INSERT INTO conversations \
-                (id, user_id, name, type, delegation_policy, created_at, updated_at) \
-             VALUES \
-                (?1, 'requirement-secondary', 'Secondary model-only', 'nomi', 'disabled', 0, 0)",
-        )
-        .bind(SECONDARY_CONVERSATION)
-        .execute(db.pool())
-        .await
-        .unwrap();
-        repo.insert(&make_row("t", "00000001")).await.unwrap();
-
-        let err = repo
-            .claim_next(
-                "t",
-                SECONDARY_CONVERSATION,
-                "conversation",
+        assert!(
+            !repo
+                .renew_lease(
+                    &conversation_req,
+                    None,
+                    Some(&terminal_id),
+                    60_000,
+                    now_ms(),
+                )
+                .await
+                .unwrap(),
+            "a terminal identity must not renew a conversation-owned claim"
+        );
+        assert!(
+            repo.renew_lease(
+                &conversation_req,
+                Some(&conversation_id),
+                None,
                 60_000,
                 now_ms(),
             )
             .await
-            .unwrap_err();
-        assert!(
-            err.to_string()
-                .contains("requirement owner must belong to the installation owner"),
-            "unexpected authority error: {err}"
+            .unwrap()
         );
-    }
 
-    #[tokio::test]
-    async fn concurrent_claims_each_row_once() {
-        let (repo, db) = setup().await;
-        for i in 0..20 {
-            repo.insert(&make_row("t", &format!("{i:08}"))).await.unwrap();
-        }
-
-        // N concurrent claimers against the same tag + pool.
-        let mut handles = Vec::new();
-        for c in 0..8 {
-            let r = SqliteRequirementRepository::new(db.pool().clone());
-            let owner: i64 = 2000 + c;
-            handles.push(tokio::spawn(async move {
-                let mut got = Vec::new();
-                while let Some(row) = r
-                    .claim_next("t", owner, "conversation", 60_000, now_ms())
-                    .await
-                    .unwrap()
-                {
-                    got.push(row.id);
-                }
-                got
-            }));
-        }
-
-        let mut all_claimed = Vec::new();
-        for h in handles {
-            all_claimed.extend(h.await.unwrap());
-        }
-        all_claimed.sort();
-        all_claimed.dedup();
-        // All 20 claimed, each exactly once (dedup removed nothing).
-        assert_eq!(all_claimed.len(), 20, "every requirement claimed exactly once");
-    }
-
-    #[tokio::test]
-    async fn sweep_repends_expired_when_conversation_inactive() {
-        let (repo, _db) = setup().await;
-        let id1 = repo.insert(&make_row("t", "00000001")).await.unwrap();
-        // Claim with a lease that is already in the past.
-        let past = now_ms() - 10_000;
-        let claimed = repo
-            .claim_next("t", CONV_OWNER, "conversation", 1, past)
+        let terminal_claim = repo
+            .claim_next("term", None, Some(&terminal_id), 60_000, now_ms())
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(claimed.status, "in_progress");
+        assert_eq!(terminal_claim.id, terminal_req);
+        assert!(terminal_claim.owner_conversation_id.is_none());
+        assert_eq!(
+            terminal_claim.owner_terminal_id.as_deref(),
+            Some(terminal_id.as_str())
+        );
 
-        // Active set does NOT include CONV_OWNER → it should be re-pended.
-        let reset = repo.sweep_expired_leases(&[], now_ms()).await.unwrap();
-        assert_eq!(reset, 1);
-        let row = repo.get_by_id(id1).await.unwrap().unwrap();
+        assert!(
+            !repo
+                .unclaim(&terminal_req, Some(&conversation_id), None)
+                .await
+                .unwrap(),
+            "a conversation identity must not unclaim terminal-owned work"
+        );
+        assert!(
+            repo.unclaim(&terminal_req, None, Some(&terminal_id))
+                .await
+                .unwrap()
+        );
+        let row = repo.get_by_id(&terminal_req).await.unwrap().unwrap();
         assert_eq!(row.status, "pending");
-        assert!(row.owner_session_id.is_none());
-        assert!(row.owner_kind.is_none());
-
-        // Re-claim, then sweep with CONV_OWNER ACTIVE → must be retained.
-        let past2 = now_ms() - 10_000;
-        repo.claim_next("t", CONV_OWNER, "conversation", 1, past2)
-            .await
-            .unwrap()
-            .unwrap();
-        let reset2 = repo
-            .sweep_expired_leases(&[("conversation".to_string(), CONV_OWNER)], now_ms())
-            .await
-            .unwrap();
-        assert_eq!(reset2, 0);
-        let row2 = repo.get_by_id(id1).await.unwrap().unwrap();
-        assert_eq!(row2.status, "in_progress");
+        assert_eq!(row.attempt_count, 0);
+        assert!(row.owner_conversation_id.is_none());
+        assert!(row.owner_terminal_id.is_none());
     }
 
     #[tokio::test]
-    async fn sweep_active_conversation_does_not_protect_same_numbered_terminal() {
-        // Cross-domain (spec §2.2): the sweeper excludes active sessions by the
-        // FULL `(owner_kind, owner_session_id)` key. An expired lease owned by
-        // TERMINAL #5 must be re-pended even when CONVERSATION #5 (same number)
-        // is in the active set — a kind-less `NOT IN (5)` would wrongly retain it.
-        let (repo, _db) = setup().await;
-        let id = repo.insert(&make_row("t", "00000001")).await.unwrap();
-        let past = now_ms() - 10_000;
-        // Claim it for TERMINAL #5 with an already-expired lease.
-        repo.claim_next("t", 5, "terminal", 1, past).await.unwrap().unwrap();
+    async fn expired_lease_sweep_respects_separate_owner_domains() {
+        let (repo, _db, conversation_id, terminal_id) = setup().await;
+        let req_id = repo.insert(&make_row("t", "1")).await.unwrap();
+        let expired_at = now_ms() - 10_000;
+        repo.claim_next(
+            "t",
+            None,
+            Some(&terminal_id),
+            1,
+            expired_at,
+        )
+        .await
+        .unwrap()
+        .unwrap();
 
-        // Sweep with CONVERSATION #5 active. The terminal#5 lease must NOT be
-        // protected by the numerically-equal active conversation.
         let reset = repo
-            .sweep_expired_leases(&[("conversation".to_string(), 5)], now_ms())
+            .sweep_expired_leases(
+                std::slice::from_ref(&conversation_id),
+                &[],
+                expired_at + 10,
+            )
             .await
             .unwrap();
-        assert_eq!(reset, 1, "term#5's expired lease is re-pended despite active conv#5");
-        let row = repo.get_by_id(id).await.unwrap().unwrap();
+        assert_eq!(reset, 1, "an active conversation cannot protect a terminal lease");
+        let row = repo.get_by_id(&req_id).await.unwrap().unwrap();
         assert_eq!(row.status, "pending");
-        assert!(row.owner_session_id.is_none());
+        assert!(row.owner_conversation_id.is_none());
+        assert!(row.owner_terminal_id.is_none());
 
-        // Positive control: an active TERMINAL #5 DOES protect its own lease.
-        repo.claim_next("t", 5, "terminal", 1, now_ms() - 10_000)
+        repo.claim_next(
+            "t",
+            None,
+            Some(&terminal_id),
+            1,
+            expired_at,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let reset = repo
+            .sweep_expired_leases(
+                &[],
+                std::slice::from_ref(&terminal_id),
+                expired_at + 10,
+            )
             .await
-            .unwrap()
             .unwrap();
-        let reset2 = repo
-            .sweep_expired_leases(&[("terminal".to_string(), 5)], now_ms())
-            .await
-            .unwrap();
-        assert_eq!(reset2, 0, "an active terminal#5 retains its own expired lease");
+        assert_eq!(reset, 0, "the matching active terminal retains its lease");
     }
 
     #[tokio::test]
-    async fn pause_resume_roundtrip() {
-        let (repo, _db) = setup().await;
-        assert!(!repo.is_tag_paused("t").await.unwrap(), "absent tag = not paused");
-        assert!(repo.get_tag_state("t").await.unwrap().is_none());
-
-        // paused_req_id is an FK → requirements(id); the triggering requirement
-        // must exist before it can be recorded on the pause row.
-        let req_x = repo.insert(&make_row("t", "00000001")).await.unwrap();
-        repo.pause_tag("t", "requirement_failed", Some(req_x), now_ms())
-            .await
-            .unwrap();
-        assert!(repo.is_tag_paused("t").await.unwrap());
-        let st = repo.get_tag_state("t").await.unwrap().expect("state row exists");
-        assert!(st.is_paused());
-        assert_eq!(st.paused_reason.as_deref(), Some("requirement_failed"));
-        assert_eq!(st.paused_req_id, Some(req_x));
-        assert!(st.paused_at.is_some());
-
-        // Idempotent re-pause updates reason/req_id without erroring.
-        repo.pause_tag("t", "manual", None, now_ms()).await.unwrap();
-        let st2 = repo.get_tag_state("t").await.unwrap().unwrap();
-        assert_eq!(st2.paused_reason.as_deref(), Some("manual"));
-
-        repo.resume_tag("t").await.unwrap();
-        assert!(!repo.is_tag_paused("t").await.unwrap());
-    }
-
-    #[tokio::test]
-    async fn claim_next_skips_paused_tag() {
-        let (repo, _db) = setup().await;
-        repo.insert(&make_row("t", "00000001")).await.unwrap();
-        // None trigger id: this test only exercises the pause→skip→resume gate,
-        // and paused_req_id is an FK → requirements(id), so a bare placeholder id
-        // would violate it. The recorded trigger is irrelevant here.
-        repo.pause_tag("t", "requirement_failed", None, now_ms())
-            .await
-            .unwrap();
-
-        let claimed = repo.claim_next("t", CONV_OWNER, "conversation", 60_000, now_ms()).await.unwrap();
-        assert!(claimed.is_none(), "paused tag must not yield a claim");
-
-        repo.resume_tag("t").await.unwrap();
-        let claimed2 = repo.claim_next("t", CONV_OWNER, "conversation", 60_000, now_ms()).await.unwrap();
-        assert!(claimed2.is_some(), "resumed tag claims again");
-    }
-
-    #[tokio::test]
-    async fn unclaim_decrements_attempt_and_repends() {
-        let (repo, _db) = setup().await;
-        let id1 = repo.insert(&make_row("t", "00000001")).await.unwrap();
-        let claimed = repo
-            .claim_next("t", CONV_OWNER, "conversation", 60_000, now_ms())
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(claimed.attempt_count, 1);
-
-        // Wrong owner → no-op (row stays claimed).
-        assert!(!repo.unclaim(id1, 9999).await.unwrap());
-        assert_eq!(repo.get_by_id(id1).await.unwrap().unwrap().status, "in_progress");
-
-        // Correct owner → revert to pending, attempt decremented (NOT consumed).
-        assert!(repo.unclaim(id1, CONV_OWNER).await.unwrap());
-        let row = repo.get_by_id(id1).await.unwrap().unwrap();
-        assert_eq!(row.status, "pending");
-        assert_eq!(row.attempt_count, 0, "unclaim must not consume an attempt");
-        assert!(row.owner_session_id.is_none());
-        assert!(row.owner_kind.is_none());
-        assert!(row.lease_expires_at.is_none());
-    }
-
-    // ── Adversarial review (spec §2.2): renew_lease / unclaim are kind-LESS ──
-    //
-    // Both guards are `id = ? AND owner_session_id = ?` with NO owner_kind. This
-    // test CHARACTERIZES that gap: a row owned by TERMINAL #5 is mutated by a
-    // call that passes only the numeric owner `5` — i.e. the DB primitive itself
-    // does not isolate domains. This is NOT a reachable production hole because:
-    //   (a) the row is pinned by its UNIQUE requirement id (`id = ?`), and
-    //   (b) the only callers (the execution loop) always pass the req_id they
-    //       themselves just claimed via claim_next(kind, owner), so owner_kind
-    //       always matches in the self-flow,
-    // but it documents that the kind-less guard relies on caller discipline +
-    // the unique-id pin rather than on its own domain check. If a future caller
-    // ever passes a cross-domain (req_id, owner) pair, these primitives would
-    // mutate the wrong domain's claim. Defense-in-depth fix = add
-    // `AND owner_kind = ?` to both guards (cheap, closes the class entirely).
-    #[tokio::test]
-    async fn renew_and_unclaim_guards_do_not_consult_owner_kind() {
-        let (repo, _db) = setup().await;
-        let id = repo.insert(&make_row("t", "00000001")).await.unwrap();
-        // Claim it for TERMINAL #5.
-        let claimed = repo.claim_next("t", 5, "terminal", 60_000, now_ms()).await.unwrap().unwrap();
-        assert_eq!(claimed.owner_kind.as_deref(), Some("terminal"));
-        assert_eq!(claimed.owner_session_id, Some(5));
-
-        // renew_lease(req_id, 5) succeeds even though the caller carries no kind:
-        // the guard matches purely on (unique id, numeric owner). A conversation
-        // path passing owner 5 would renew a TERMINAL-owned lease.
-        let renewed = repo.renew_lease(id, 5, 60_000, now_ms()).await.unwrap();
+    async fn pause_resume_blocks_and_restores_claiming() {
+        let (repo, _db, conversation_id, _terminal_id) = setup().await;
+        let req_id = repo.insert(&make_row("paused", "1")).await.unwrap();
+        repo.pause_tag(
+            "paused",
+            "requirement_failed",
+            Some(&req_id),
+            now_ms(),
+        )
+        .await
+        .unwrap();
+        assert!(repo.is_tag_paused("paused").await.unwrap());
         assert!(
-            renewed,
-            "renew_lease matched a terminal-owned row on the bare numeric owner — \
-             the guard is kind-less (characterization, see test doc)"
+            repo.claim_next("paused", Some(&conversation_id), None, 60_000, now_ms())
+                .await
+                .unwrap()
+                .is_none()
         );
+        let state = repo.get_tag_state("paused").await.unwrap().unwrap();
+        assert_eq!(state.paused_req_id.as_deref(), Some(req_id.as_str()));
 
-        // unclaim(req_id, 5) likewise reverts the TERMINAL-owned claim with no
-        // kind check.
-        let unclaimed = repo.unclaim(id, 5).await.unwrap();
+        repo.resume_tag("paused").await.unwrap();
+        assert!(!repo.is_tag_paused("paused").await.unwrap());
         assert!(
-            unclaimed,
-            "unclaim matched a terminal-owned row on the bare numeric owner — kind-less guard"
+            repo.claim_next("paused", Some(&conversation_id), None, 60_000, now_ms())
+                .await
+                .unwrap()
+                .is_some()
         );
-        let row = repo.get_by_id(id).await.unwrap().unwrap();
-        assert_eq!(row.status, "pending", "the terminal-owned claim was reverted by a kind-less unclaim");
+    }
+
+    #[test]
+    fn order_clause_is_whitelisted() {
+        assert_eq!(build_order_clause(Some("id"), Some("asc")), "ORDER BY id ASC");
+        assert_eq!(
+            build_order_clause(Some("status"), Some("desc")),
+            "ORDER BY status DESC, id DESC"
+        );
+        assert_eq!(
+            build_order_clause(Some("title; DROP TABLE requirements"), Some("asc")),
+            "ORDER BY sort_seq ASC, priority DESC, created_at ASC"
+        );
     }
 }

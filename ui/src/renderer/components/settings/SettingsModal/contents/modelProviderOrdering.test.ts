@@ -1,9 +1,15 @@
 import { describe, expect, test } from 'bun:test';
 
 import type { IProvider } from '@/common/config/storage';
+import { parseProviderId, type ProviderId } from '@/common/types/ids';
 import { reorderById, reorderStrings, withDenseSortOrder } from './modelProviderOrdering';
 
-const provider = (id: string, sort_order?: number): IProvider =>
+const A = parseProviderId('prov_0190f5fe-7c00-7a00-8000-000000000001');
+const B = parseProviderId('prov_0190f5fe-7c00-7a00-8000-000000000002');
+const C = parseProviderId('prov_0190f5fe-7c00-7a00-8000-000000000003');
+const MISSING = parseProviderId('prov_0190f5fe-7c00-7a00-8000-000000000004');
+
+const provider = (id: ProviderId, sort_order?: number): IProvider =>
   ({
     id,
     platform: 'openai',
@@ -12,19 +18,19 @@ const provider = (id: string, sort_order?: number): IProvider =>
     api_key: 'sk-test',
     models: [],
     sort_order,
-  }) as IProvider;
+  });
 
 describe('modelProviderOrdering', () => {
   test('reorderById moves provider rows by id', () => {
-    const result = reorderById([provider('a'), provider('b'), provider('c')], 'c', 'a');
-    expect(result.map((item) => item.id)).toEqual(['c', 'a', 'b']);
+    const result = reorderById([provider(A), provider(B), provider(C)], C, A);
+    expect(result.map((item) => item.id)).toEqual([C, A, B]);
   });
 
   test('reorderById returns the original array for invalid or same targets', () => {
-    const input = [provider('a'), provider('b')];
-    expect(reorderById(input, 'missing', 'a')).toBe(input);
-    expect(reorderById(input, 'a', 'missing')).toBe(input);
-    expect(reorderById(input, 'a', 'a')).toBe(input);
+    const input = [provider(A), provider(B)];
+    expect(reorderById(input, MISSING, A)).toBe(input);
+    expect(reorderById(input, A, MISSING)).toBe(input);
+    expect(reorderById(input, A, A)).toBe(input);
   });
 
   test('reorderStrings moves model ids', () => {
@@ -32,10 +38,10 @@ describe('modelProviderOrdering', () => {
   });
 
   test('withDenseSortOrder rewrites provider priority by visual position', () => {
-    const result = withDenseSortOrder([provider('b', 10), provider('a', 3)]);
+    const result = withDenseSortOrder([provider(B, 10), provider(A, 3)]);
     expect(result.map((item) => [item.id, item.sort_order])).toEqual([
-      ['b', 0],
-      ['a', 1],
+      [B, 0],
+      [A, 1],
     ]);
   });
 });

@@ -1,3 +1,4 @@
+import type { ConversationId } from '@/common/types/ids';
 import { ipcBridge } from '@/common';
 import { refreshConversationCache } from '@/renderer/pages/conversation/utils/conversationCache';
 import { emitter } from '@/renderer/utils/emitter';
@@ -8,7 +9,7 @@ import { useTranslation } from 'react-i18next';
 
 type UseTitleRenameParams = {
   title?: React.ReactNode;
-  conversation_id?: number;
+  conversation_id?: ConversationId;
   /** When provided, replaces the default conversation.update call. Return true on success. */
   onRename?: (new_name: string) => Promise<boolean>;
 };

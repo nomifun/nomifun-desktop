@@ -41,6 +41,7 @@ use std::sync::Arc;
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::{Value, json};
+use nomifun_common::McpServerId;
 
 use crate::deps::{CallerCtx, GatewayDeps};
 use crate::registry::{Capability, CapabilityMeta, DangerTier, Surface};
@@ -82,7 +83,8 @@ struct McpAddServerParams {
 #[derive(Deserialize, JsonSchema)]
 struct McpEditServerParams {
     /// The MCP server id (from nomi_mcp_list_servers).
-    id: String,
+    #[schemars(with = "String")]
+    id: McpServerId,
     /// New description (pass null to clear, omit to keep).
     #[serde(default)]
     description: Option<Option<String>>,
@@ -109,13 +111,15 @@ struct McpEditServerParams {
 #[derive(Deserialize, JsonSchema)]
 struct McpDeleteServerParams {
     /// The MCP server id to permanently delete.
-    id: String,
+    #[schemars(with = "String")]
+    id: McpServerId,
 }
 
 #[derive(Deserialize, JsonSchema)]
 struct McpToggleServerParams {
     /// The MCP server id to toggle enabled/disabled.
-    id: String,
+    #[schemars(with = "String")]
+    id: McpServerId,
 }
 
 // ══════════════════════════════════════════════════════════════════════════════

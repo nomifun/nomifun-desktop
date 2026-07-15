@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import type { ConversationId, MessageId } from '@/common/types/ids';
 import { ipcBridge } from '@/common';
 import {
   ACP_AGENT_MESSAGE_EVENT,
@@ -66,7 +67,7 @@ export type UseAcpMessageReturn = {
   fetchSlashCommands: () => void;
 };
 
-export const useAcpMessage = (conversation_id: number, options?: { skipWarmup?: boolean }): UseAcpMessageReturn => {
+export const useAcpMessage = (conversation_id: ConversationId, options?: { skipWarmup?: boolean }): UseAcpMessageReturn => {
   const addOrUpdateMessage = useAddOrUpdateMessage();
   const [turnState, dispatchTurn] = useReducer(acpTurnReducer, initialAcpTurnState);
   const running = isAcpTurnBusy(turnState);
@@ -93,7 +94,7 @@ export const useAcpMessage = (conversation_id: number, options?: { skipWarmup?: 
   // Track whether current turn has a thinking message in the conversation
   const hasThinkingMessageRef = useRef(false);
   const [hasThinkingMessage, setHasThinkingMessage] = useState(false);
-  const activeThinkingRef = useRef<{ msgId: string; startedAt: number } | null>(null);
+  const activeThinkingRef = useRef<{ msgId: MessageId; startedAt: number } | null>(null);
 
   // Track request trace state for displaying complete request lifecycle
   const requestTraceRef = useRef<{
@@ -459,8 +460,7 @@ export const useAcpMessage = (conversation_id: number, options?: { skipWarmup?: 
 
   useEffect(() => {
     return ipcBridge.conversation.turnStarted.on((event) => {
-      const eventConversationId = event.conversation_id || event.session_id;
-      if (conversation_id !== eventConversationId) {
+      if (conversation_id !== event.conversation_id) {
         return;
       }
 

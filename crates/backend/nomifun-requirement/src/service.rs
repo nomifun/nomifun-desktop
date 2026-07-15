@@ -5,7 +5,10 @@ use nomifun_api_types::{
     ListRequirementsQuery, Requirement, RequirementStatus, TagBinding, TagBindings, TagSummary,
     UpdateRequirementRequest,
 };
-use nomifun_common::{AppError, PaginatedResult, now_ms};
+use nomifun_common::{
+    AppError, AttachmentId, ConversationId, PaginatedResult, RequirementId, TerminalId, UserId,
+    now_ms,
+};
 use nomifun_db::models::{RequirementRow, RequirementRowUpdate, RequirementTagRow};
 use nomifun_db::{
     ConversationFilters, IConversationRepository, IRequirementRepository, ITerminalRepository, ListRequirementsParams,
@@ -24,16 +27,31 @@ pub const DEFAULT_LEASE_MS: i64 = 120_000;
 /// Max claim attempts before a requirement is left `failed` (poison-pill guard).
 pub const MAX_ATTEMPTS: i64 = 3;
 
-/// Parse an AutoWork/IDMM string `target_id` (a `conversation`/`terminal`
-/// session id) into the integer key the repos/driver now use. The AutoWork DTO
-/// carries `target_id` as a string (the generic, kind-agnostic target handle);
-/// it is parsed to `i64` only at the repo/driver boundary. A non-numeric id —
-/// e.g. a stale id replayed from a persisted ACP transcript (spec §2.5/§7.4) —
-/// yields an explicit `NotFound` rather than silently pointing at another row.
-fn parse_target_id(target_id: &str) -> Result<i64, AppError> {
-    target_id
-        .parse::<i64>()
-        .map_err(|_| AppError::NotFound(format!("session {target_id}")))
+/// Validate an AutoWork target handle in the conversation entity domain.
+fn parse_conversation_id(target_id: &str) -> Result<&str, AppError> {
+    ConversationId::try_from(target_id)
+        .map(|_| target_id)
+        .map_err(|_| AppError::NotFound(format!("conversation {target_id}")))
+}
+
+fn parse_terminal_id(target_id: &str) -> Result<&str, AppError> {
+    TerminalId::try_from(target_id)
+        .map(|_| target_id)
+        .map_err(|_| AppError::NotFound(format!("terminal {target_id}")))
+}
+
+fn parse_requirement_id(id: &str) -> Result<&str, AppError> {
+    RequirementId::try_from(id)
+        .map(|_| id)
+        .map_err(|error| AppError::BadRequest(format!("invalid requirement id: {error}")))
+}
+
+fn validate_attachment_ids(ids: &[String]) -> Result<(), AppError> {
+    for id in ids {
+        AttachmentId::try_from(id.as_str())
+            .map_err(|error| AppError::BadRequest(format!("invalid attachment id: {error}")))?;
+    }
+    Ok(())
 }
 
 /// Business logic for requirements (CRUD + AutoWork claim/finalize/config).
@@ -52,7 +70,7 @@ pub struct RequirementService {
     /// list them, so the repo is needed for the enumeration.
     terminal_repo: Option<Arc<dyn ITerminalRepository>>,
     /// Fired (detached) after a requirement reaches a terminal state, so a bound
-    /// webhook can notify. Optional + non-blocking — a failing webhook never
+    /// webhook can notify. Optional + non-blocking —a failing webhook never
     /// affects requirement state.
     completion_notifier: Option<Arc<dyn CompletionNotifier>>,
     /// Notified whenever a requirement becomes claimable (created or re-pended),
@@ -134,7 +152,7 @@ impl RequirementService {
 
     /// Attachments of a requirement as DTOs; empty when no store is attached
     /// or on a read failure (display data must not fail the main call).
-    async fn load_attachments(&self, requirement_id: i64) -> Vec<AttachmentDto> {
+    async fn load_attachments(&self, requirement_id: &str) -> Vec<AttachmentDto> {
         let Some(store) = &self.attachments else { return Vec::new() };
         match store.list(requirement_id).await {
             Ok(rows) => rows.iter().map(|r| store.to_dto(r)).collect(),
@@ -150,7 +168,7 @@ impl RequirementService {
     /// entries. Empty when no store is attached.
     pub async fn stage_attachments_for_prompt(
         &self,
-        req_id: i64,
+        req_id: &str,
         workspace: Option<&std::path::Path>,
     ) -> Vec<crate::attachments::PromptAttachment> {
         match &self.attachments {
@@ -184,10 +202,7 @@ impl RequirementService {
         let order_key = req.order_key.unwrap_or_default();
         let status = req.status.unwrap_or(RequirementStatus::Pending);
         let row = RequirementRow {
-            // Placeholder id — the DB mints the real INTEGER PRIMARY KEY on
-            // insert and returns it via `last_insert_rowid()`. The id field on
-            // the in-struct row is ignored by `insert`.
-            id: 0,
+            id: RequirementId::new().into_string(),
             title: req.title,
             content: req.content,
             tag: req.tag,
@@ -195,11 +210,11 @@ impl RequirementService {
             order_key,
             status: status.as_db().to_string(),
             // `priority` column is retained in the DB for compatibility but is no
-            // longer user-facing — `order_key` is the sole ordering dimension.
+            // longer user-facing —`order_key` is the sole ordering dimension.
             priority: 0,
             completion_note: None,
-            owner_session_id: None,
-            owner_kind: None,
+            owner_conversation_id: None,
+            owner_terminal_id: None,
             active_turn_started_at: None,
             lease_expires_at: None,
             started_at: None,
@@ -210,20 +225,18 @@ impl RequirementService {
             created_at: now,
             updated_at: now,
         };
-        // Back-end minted id: the repo returns the real `last_insert_rowid()`.
-        let new_id = self.repo.insert(&row).await?;
-        let row = RequirementRow { id: new_id, ..row };
+        self.repo.insert(&row).await?;
         let mut dto = row_to_dto(&row);
         if !new_attachments.is_empty() {
             let Some(store) = &self.attachments else {
-                let _ = self.repo.delete(row.id).await;
+                let _ = self.repo.delete(&row.id).await;
                 return Err(AppError::Internal("attachment store not attached".into()));
             };
-            match store.ingest(row.id, &new_attachments, Some(&row.created_by)).await {
+            match store.ingest(&row.id, &new_attachments, Some(&row.created_by)).await {
                 Ok(rows) => dto.attachments = rows.iter().map(|r| store.to_dto(r)).collect(),
                 Err(e) => {
                     // Keep create atomic for the caller: drop the row we just inserted.
-                    if let Err(de) = self.repo.delete(row.id).await {
+                    if let Err(de) = self.repo.delete(&row.id).await {
                         warn!(error = %de, requirement_id = row.id, "rollback after attachment ingest failure failed");
                     }
                     return Err(e);
@@ -231,14 +244,15 @@ impl RequirementService {
             }
         }
         self.emitter.emit_created(&dto);
-        // A freshly-created pending requirement is claimable now — wake idle loops.
+        // A freshly-created pending requirement is claimable now —wake idle loops.
         if dto.status == RequirementStatus::Pending {
             self.wake_autowork();
         }
         Ok(dto)
     }
 
-    pub async fn get(&self, id: i64) -> Result<Requirement, AppError> {
+    pub async fn get(&self, id: &str) -> Result<Requirement, AppError> {
+        let id = parse_requirement_id(id)?;
         let row = self
             .repo
             .get_by_id(id)
@@ -250,15 +264,18 @@ impl RequirementService {
     }
 
     pub async fn list(&self, query: &ListRequirementsQuery) -> Result<PaginatedResult<Requirement>, AppError> {
+        if let Some(conversation_id) = query.conversation_id.as_deref() {
+            parse_conversation_id(conversation_id)?;
+        }
         let page = query.page.unwrap_or(1).max(1);
         let page_size = query.page_size.unwrap_or(20).clamp(1, 200);
         let params = ListRequirementsParams {
             tag: query.tag.clone(),
             status: query.status.map(|s| s.as_db().to_string()),
-            owner_session_id: query.conversation_id,
-            // The public list query has no kind filter — `conversation_id` here
+            owner_conversation_id: query.conversation_id.clone(),
+            // The public list query has no kind filter —`conversation_id` here
             // is a UI filter that historically meant the conversation domain.
-            owner_kind: None,
+            owner_terminal_id: None,
             q: query.q.clone(),
             order_by: query.order_by.clone(),
             order: query.order.clone(),
@@ -271,7 +288,9 @@ impl RequirementService {
         Ok(PaginatedResult { items, total, has_more })
     }
 
-    pub async fn update(&self, id: i64, req: UpdateRequirementRequest) -> Result<Requirement, AppError> {
+    pub async fn update(&self, id: &str, req: UpdateRequirementRequest) -> Result<Requirement, AppError> {
+        let id = parse_requirement_id(id)?;
+        validate_attachment_ids(&req.remove_attachment_ids)?;
         // Ensure it exists for a clean 404 (update() also returns NotFound).
         let row = self
             .repo
@@ -279,7 +298,7 @@ impl RequirementService {
             .await?
             .ok_or_else(|| AppError::NotFound(format!("requirement {id}")))?;
 
-        // Attachment changes first — ingest BEFORE remove. Ingest is the only
+        // Attachment changes first —ingest BEFORE remove. Ingest is the only
         // high-failure-probability step (validation, the temp source may already
         // be cleaned) and is all-or-nothing, so a failure here leaves the row and
         // its existing attachments completely untouched. Remove afterwards only
@@ -310,7 +329,7 @@ impl RequirementService {
         // Attachment-only update: every row field is None, so repo.update would
         // early-return on its empty SET list and leave updated_at stale while we
         // still emit `requirement.updated`. Force the SQL path with an equal-value
-        // field — repo.update stamps updated_at itself.
+        // field —repo.update stamps updated_at itself.
         if attachments_changed
             && params.title.is_none()
             && params.content.is_none()
@@ -334,11 +353,12 @@ impl RequirementService {
         Ok(dto)
     }
 
-    pub async fn delete(&self, id: i64) -> Result<(), AppError> {
+    pub async fn delete(&self, id: &str) -> Result<(), AppError> {
+        let id = parse_requirement_id(id)?;
         // Clean attachment files+rows BEFORE deleting the requirement: the
         // `attachments.requirement_id` FK is `ON DELETE CASCADE`, so deleting the
         // row first would cascade-drop the attachment rows and leave `delete_all`
-        // (which lists rows to find their files) nothing to remove — orphaning the
+        // (which lists rows to find their files) nothing to remove —orphaning the
         // files on disk. File failures are logged, not raised.
         if let Some(store) = &self.attachments
             && let Err(e) = store.delete_all(id).await
@@ -352,10 +372,13 @@ impl RequirementService {
 
     /// Delete many requirements by id. Missing ids are skipped (not an error).
     /// Returns the number actually deleted; emits `requirement.deleted` per row.
-    pub async fn delete_many(&self, ids: &[i64]) -> Result<u64, AppError> {
+    pub async fn delete_many(&self, ids: &[String]) -> Result<u64, AppError> {
+        for id in ids {
+            parse_requirement_id(id)?;
+        }
         let mut deleted = 0u64;
-        for &id in ids {
-            // Files first — the requirement_id FK cascades and would otherwise
+        for id in ids {
+            // Files first —the requirement_id FK cascades and would otherwise
             // drop the attachment rows before delete_all can find their files.
             if let Some(store) = &self.attachments
                 && let Err(e) = store.delete_all(id).await
@@ -434,21 +457,30 @@ impl RequirementService {
         Ok(board)
     }
 
-    /// Atomically claim the next pending requirement for `tag`, owned by
-    /// `owner_session_id` (a `conv_*` or `term_*` id). `kind` discriminates the
-    /// owner domain and is persisted as `owner_kind` (paired with the session id
-    /// to satisfy the table's paired-NULL CHECK). Emits `requirement.statusChanged`
-    /// for the claimed row.
+    /// Atomically claim the next pending requirement for `tag`. `kind` validates
+    /// `owner_id` in its entity domain and selects the corresponding disjoint
+    /// owner column; the other owner column stays null. Emits
+    /// `requirement.statusChanged` for the claimed row.
     pub async fn claim_next(
         &self,
         tag: &str,
-        owner_session_id: i64,
+        owner_id: &str,
         kind: AutoWorkTargetKind,
         lease_ms: i64,
     ) -> Result<Option<Requirement>, AppError> {
+        let (owner_conversation_id, owner_terminal_id) = match kind {
+            AutoWorkTargetKind::Conversation => (Some(parse_conversation_id(owner_id)?), None),
+            AutoWorkTargetKind::Terminal => (None, Some(parse_terminal_id(owner_id)?)),
+        };
         let claimed = self
             .repo
-            .claim_next(tag, owner_session_id, kind.as_str(), lease_ms, now_ms())
+            .claim_next(
+                tag,
+                owner_conversation_id,
+                owner_terminal_id,
+                lease_ms,
+                now_ms(),
+            )
             .await?;
         Ok(claimed.map(|row| {
             let dto = row_to_dto(&row);
@@ -457,17 +489,35 @@ impl RequirementService {
         }))
     }
 
-    /// Renew the lease for `id` held by `owner_session_id`. Returns whether a row matched.
-    pub async fn renew_lease(&self, id: i64, owner_session_id: i64, lease_ms: i64) -> Result<bool, AppError> {
-        Ok(self.repo.renew_lease(id, owner_session_id, lease_ms, now_ms()).await?)
+    /// Renew the lease for `id` held by `owner_id` in the requested owner domain.
+    /// Returns whether a row matched.
+    pub async fn renew_lease(
+        &self,
+        id: &str,
+        owner_id: &str,
+        kind: AutoWorkTargetKind,
+        lease_ms: i64,
+    ) -> Result<bool, AppError> {
+        let id = parse_requirement_id(id)?;
+        let owners = match kind {
+            AutoWorkTargetKind::Conversation => (Some(parse_conversation_id(owner_id)?), None),
+            AutoWorkTargetKind::Terminal => (None, Some(parse_terminal_id(owner_id)?)),
+        };
+        Ok(self
+            .repo
+            .renew_lease(id, owners.0, owners.1, lease_ms, now_ms())
+            .await?)
     }
 
     /// Verify `conversation_id` belongs to `user_id` (data isolation for the
     /// claim / autowork routes). No-op when no conversation repo is attached
-    /// (e.g. the sink-only service instance) or for legacy rows with an empty
-    /// owner. Returns `NotFound` if the conversation does not exist, `Forbidden`
+    /// (e.g. the sink-only service instance). Returns `NotFound` if the
+    /// conversation does not exist, `Forbidden`
     /// if owned by another user.
-    pub async fn verify_conversation_owner(&self, conversation_id: i64, user_id: &str) -> Result<(), AppError> {
+    pub async fn verify_conversation_owner(&self, conversation_id: &str, user_id: &str) -> Result<(), AppError> {
+        let conversation_id = parse_conversation_id(conversation_id)?;
+        let user_id = UserId::parse(user_id)
+            .map_err(|error| AppError::Forbidden(format!("invalid caller identity: {error}")))?;
         let Some(conv_repo) = &self.conversation_repo else {
             return Ok(());
         };
@@ -475,7 +525,10 @@ impl RequirementService {
             .get(conversation_id)
             .await?
             .ok_or_else(|| AppError::NotFound(format!("conversation {conversation_id}")))?;
-        if !row.user_id.is_empty() && row.user_id != user_id {
+        let row_user_id = UserId::parse(&row.user_id).map_err(|error| {
+            AppError::Forbidden(format!("conversation {conversation_id} has invalid owner: {error}"))
+        })?;
+        if row_user_id != user_id {
             return Err(AppError::Forbidden(format!(
                 "conversation {conversation_id} is not owned by the caller"
             )));
@@ -485,28 +538,27 @@ impl RequirementService {
 
     /// stopped mid-turn). No-op unless the requirement is `in_progress` and held
     /// by `conversation_id` IN THE CONVERSATION DOMAIN. Does NOT consume
-    /// `attempt_count` — a user stop is not a failed attempt. Emits
+    /// `attempt_count` —a user stop is not a failed attempt. Emits
     /// `requirement.statusChanged`.
     ///
-    /// SECURITY (C2, spec §2.2): `owner_session_id` is dual-domain
-    /// (conversation|terminal); after integerization `conv#5` and `term#5` share
-    /// the same numeric value. The owner comparison is therefore **paired with
-    /// `owner_kind`** — a conversation caller never releases a terminal-owned
-    /// requirement that merely shares its number.
-    pub async fn release_claim(&self, id: i64, conversation_id: i64) -> Result<(), AppError> {
+    /// SECURITY (C2, spec §2.2): ownership uses disjoint conversation and
+    /// terminal columns. A conversation caller can therefore never release a
+    /// terminal-owned requirement, even if a malformed caller reuses its text.
+    pub async fn release_claim(&self, id: &str, conversation_id: &str) -> Result<(), AppError> {
+        let id = parse_requirement_id(id)?;
+        let conversation_id = parse_conversation_id(conversation_id)?;
         let Some(row) = self.repo.get_by_id(id).await? else {
             return Ok(());
         };
         if row.status != "in_progress"
-            || row.owner_kind.as_deref() != Some(AutoWorkTargetKind::Conversation.as_str())
-            || row.owner_session_id != Some(conversation_id)
+            || row.owner_conversation_id.as_deref() != Some(conversation_id)
         {
             return Ok(());
         }
         let params = RequirementRowUpdate {
             status: Some("pending".to_string()),
-            owner_session_id: Some(None),
-            owner_kind: Some(None),
+            owner_conversation_id: Some(None),
+            owner_terminal_id: Some(None),
             active_turn_started_at: Some(None),
             lease_expires_at: Some(None),
             ..Default::default()
@@ -515,27 +567,28 @@ impl RequirementService {
         if let Some(updated) = self.repo.get_by_id(id).await? {
             self.emitter.emit_status_changed(&row_to_dto(&updated));
         }
-        // Released back to pending → another bound session may claim it now.
+        // Released back to pending —another bound session may claim it now.
         self.wake_autowork();
         Ok(())
     }
 
-    /// The user manually cancelled an AutoWork-driven turn — treat it as an
+    /// The user manually cancelled an AutoWork-driven turn —treat it as an
     /// explicit "stop working on this" signal, NOT a failed attempt:
     /// 1. pause the tag (reason `user_interrupted`, resumable from the UI) so
     ///    the persistent loop does not immediately re-claim and re-inject the
-    ///    same requirement — the historical "I paused it and seconds later it
+    ///    same requirement —the historical "I paused it and seconds later it
     ///    was running again";
     /// 2. release the claim back to `pending` WITHOUT consuming an attempt.
     /// Ordered pause-first so the release's wake cannot race a re-claim (the
     /// claim SQL skips paused tags). Best-effort on the pause write: a failure
     /// must not block the claim release.
-    pub async fn user_interrupt(&self, id: i64, conversation_id: i64, tag: &str) -> Result<(), AppError> {
+    pub async fn user_interrupt(&self, id: &str, conversation_id: &str, tag: &str) -> Result<(), AppError> {
+        let id = parse_requirement_id(id)?;
         match self.repo.pause_tag(tag, "user_interrupted", Some(id), now_ms()).await {
             Ok(()) => self.emitter.emit_tag_paused(&nomifun_api_types::TagPausedPayload {
                 tag: tag.to_string(),
                 reason: "user_interrupted".to_string(),
-                requirement_id: Some(id),
+                requirement_id: Some(id.to_string()),
             }),
             Err(e) => warn!(
                 tag,
@@ -553,10 +606,11 @@ impl RequirementService {
     /// transitions out of a terminal state (`done`/`failed`/`cancelled`).
     pub async fn set_status(
         &self,
-        id: i64,
+        id: &str,
         status: RequirementStatus,
         note: Option<String>,
     ) -> Result<Requirement, AppError> {
+        let id = parse_requirement_id(id)?;
         let row = self
             .repo
             .get_by_id(id)
@@ -638,7 +692,8 @@ impl RequirementService {
     }
 
     /// Convenience: mark done with a completion note.
-    pub async fn complete(&self, id: i64, completion_note: Option<String>) -> Result<Requirement, AppError> {
+    pub async fn complete(&self, id: &str, completion_note: Option<String>) -> Result<Requirement, AppError> {
+        let id = parse_requirement_id(id)?;
         self.set_status(id, RequirementStatus::Done, completion_note).await
     }
 
@@ -685,7 +740,7 @@ impl RequirementService {
                     "max_requirements": max_requirements,
                 })
                 .to_string();
-                driver.write_autowork(parse_target_id(target_id)?, Some(&blob)).await?;
+                driver.write_autowork(parse_terminal_id(target_id)?, Some(&blob)).await?;
                 Ok(())
             }
         }
@@ -693,8 +748,7 @@ impl RequirementService {
 
     /// Read the persisted AutoWork config `(enabled, tag, max)` for a target.
     /// Returns `(false, None, None)` when no backing store is attached or no
-    /// config exists. For conversations, falls back to the legacy `autopilot`
-    /// key once so a config written before the rename is not orphaned.
+    /// config exists.
     pub async fn read_autowork_config(
         &self,
         kind: AutoWorkTargetKind,
@@ -705,20 +759,17 @@ impl RequirementService {
                 let Some(conv_repo) = &self.conversation_repo else {
                     return Ok((false, None, None));
                 };
-                let Some(row) = conv_repo.get(parse_target_id(target_id)?).await? else {
+                let Some(row) = conv_repo.get(parse_conversation_id(target_id)?).await? else {
                     return Ok((false, None, None));
                 };
                 let extra: serde_json::Value = serde_json::from_str(&row.extra).unwrap_or_default();
-                extra
-                    .get("autowork")
-                    .or_else(|| extra.get("autopilot")) // legacy read-compat (pre-rename)
-                    .cloned()
+                extra.get("autowork").cloned()
             }
             AutoWorkTargetKind::Terminal => {
                 let Some(driver) = &self.terminal_driver else {
                     return Ok((false, None, None));
                 };
-                match driver.read_autowork(parse_target_id(target_id)?).await? {
+                match driver.read_autowork(parse_terminal_id(target_id)?).await? {
                     Some(s) => serde_json::from_str(&s).ok(),
                     None => None,
                 }
@@ -735,14 +786,20 @@ impl RequirementService {
     /// AutoWork routes). No-op when no terminal driver is attached. `NotFound` if
     /// the terminal does not exist, `Forbidden` if owned by someone else.
     pub async fn verify_terminal_owner(&self, terminal_id: &str, user_id: &str) -> Result<(), AppError> {
+        let terminal_id = parse_terminal_id(terminal_id)?;
+        let user_id = UserId::parse(user_id)
+            .map_err(|error| AppError::Forbidden(format!("invalid caller identity: {error}")))?;
         let Some(driver) = &self.terminal_driver else {
             return Ok(());
         };
         let desc = driver
-            .describe(parse_target_id(terminal_id)?)
+            .describe(terminal_id)
             .await?
             .ok_or_else(|| AppError::NotFound(format!("terminal {terminal_id}")))?;
-        if desc.user_id != user_id {
+        let owner_id = UserId::parse(&desc.user_id).map_err(|error| {
+            AppError::Forbidden(format!("terminal {terminal_id} has invalid owner: {error}"))
+        })?;
+        if owner_id != user_id {
             return Err(AppError::Forbidden(format!(
                 "terminal {terminal_id} is not owned by the caller"
             )));
@@ -751,13 +808,13 @@ impl RequirementService {
     }
 
     /// Ensure a terminal is eligible for AutoWork: it must be a verdict-capable
-    /// agent CLI (one with a lifecycle-hook renderer — claude/codex, including
-    /// wrappers like `stepcode claude` — those get the Stop → TurnEnd hook +
+    /// agent CLI (one with a lifecycle-hook renderer —claude/codex, including
+    /// wrappers like `stepcode claude` —those get the Stop —TurnEnd hook +
     /// requirement MCP injected) and currently running. `BadRequest` otherwise.
     ///
     /// Eligibility is resolved from the launch `(command, args, backend)` via
     /// `nomifun_terminal::terminal_autowork_capable`, the SAME logic the launch
-    /// injector uses — so the gate never rejects a terminal the platform would
+    /// injector uses —so the gate never rejects a terminal the platform would
     /// actually hook (the historical bug: a custom/wrapper launch stored
     /// `backend = None` and was rejected despite being injectable).
     pub async fn ensure_terminal_autowork_eligible(&self, terminal_id: &str) -> Result<(), AppError> {
@@ -765,7 +822,7 @@ impl RequirementService {
             return Err(AppError::Internal("terminal driver not attached".into()));
         };
         let desc = driver
-            .describe(parse_target_id(terminal_id)?)
+            .describe(parse_terminal_id(terminal_id)?)
             .await?
             .ok_or_else(|| AppError::NotFound(format!("terminal {terminal_id}")))?;
         let is_agent =
@@ -784,12 +841,12 @@ impl RequirementService {
     /// Called by the AutoWork runner after a turn ends. If the agent already moved
     /// the row to a terminal state (via its completion tool / terminal marker),
     /// respect it. Otherwise:
-    /// - clean turn + `expects_verdict` → mark `needs_review` (the agent had a
+    /// - clean turn + `expects_verdict` —mark `needs_review` (the agent had a
     ///   way to declare done/failed but didn't, so we do NOT silently assume
-    ///   success — a human verifies). This is the soft-failure guard.
-    /// - clean turn + NOT `expects_verdict` → mark `done` (legacy: the engine has
+    ///   success —a human verifies). This is the soft-failure guard.
+    /// - clean turn + NOT `expects_verdict` —mark `done` (legacy: the engine has
     ///   no declaration channel, so a clean finish is the best signal we have).
-    /// - error → if `attempt_count < MAX_ATTEMPTS` re-pend for retry, else mark
+    /// - error —if `attempt_count < MAX_ATTEMPTS` re-pend for retry, else mark
     ///   `failed` and pause the tag.
     ///
     /// `expects_verdict` is true when the engine WAS given an explicit way to
@@ -797,15 +854,16 @@ impl RequirementService {
     /// marker). Returns the final DTO (or None if the row vanished).
     pub async fn finalize_if_needed(
         &self,
-        id: i64,
+        id: &str,
         turn_errored: bool,
         note: Option<String>,
         expects_verdict: bool,
     ) -> Result<Option<Requirement>, AppError> {
+        let id = parse_requirement_id(id)?;
         let Some(row) = self.repo.get_by_id(id).await? else {
             return Ok(None);
         };
-        // Agent already reached a terminal state itself → respect it (its own
+        // Agent already reached a terminal state itself —respect it (its own
         // note, e.g. from the nomi `requirement_complete` tool, wins).
         if row.status == "done" || row.status == "failed" || row.status == "cancelled" {
             return Ok(Some(row_to_dto(&row)));
@@ -815,7 +873,7 @@ impl RequirementService {
             let note = note.map(|n| n.trim().to_string()).filter(|n| !n.is_empty());
             if expects_verdict {
                 // The agent could have declared done/failed but ended the turn
-                // without doing so → ambiguous. Park for human review instead of
+                // without doing so —ambiguous. Park for human review instead of
                 // silently recording success.
                 let dto = self.set_status(id, RequirementStatus::NeedsReview, note).await?;
                 return Ok(Some(dto));
@@ -831,15 +889,16 @@ impl RequirementService {
             // `updated_at` itself, so no timestamp is needed here.
             let params = RequirementRowUpdate {
                 status: Some("pending".to_string()),
-                owner_session_id: Some(None),
-                owner_kind: Some(None),
+                owner_conversation_id: Some(None),
+                owner_terminal_id: Some(None),
+
                 active_turn_started_at: Some(None),
                 lease_expires_at: Some(None),
                 ..Default::default()
             };
             self.repo.update(id, &params).await?;
             let updated = self.repo.get_by_id(id).await?;
-            // Back to pending → wake idle loops (this or a sibling session retries).
+            // Back to pending —wake idle loops (this or a sibling session retries).
             self.wake_autowork();
             return Ok(updated.map(|r| {
                 let dto = row_to_dto(&r);
@@ -850,7 +909,7 @@ impl RequirementService {
         let dto = self
             .set_status(id, RequirementStatus::Failed, Some("exhausted retries".into()))
             .await?;
-        // A requirement exhausted its retries → PAUSE the whole tag so the
+        // A requirement exhausted its retries —PAUSE the whole tag so the
         // AutoWork runner stops claiming the tag's remaining requirements until a
         // human resumes it. This is the fix for "a failed predecessor lets every
         // successor barge in instantly". Best-effort: a pause-write failure must
@@ -859,7 +918,7 @@ impl RequirementService {
             Ok(()) => self.emitter.emit_tag_paused(&nomifun_api_types::TagPausedPayload {
                 tag: row.tag.clone(),
                 reason: "requirement_failed".to_string(),
-                requirement_id: Some(id),
+                requirement_id: Some(id.to_string()),
             }),
             Err(e) => warn!(
                 tag = %row.tag,
@@ -884,9 +943,12 @@ impl RequirementService {
     /// Resume a paused tag. Optionally re-queue specific failed requirements back
     /// to `pending` (clearing their consumed attempts) so they retry from
     /// scratch. Wakes idle AutoWork loops so the tag's work resumes immediately.
-    pub async fn resume_tag(&self, tag: &str, requeue_ids: &[i64]) -> Result<(), AppError> {
+    pub async fn resume_tag(&self, tag: &str, requeue_ids: &[String]) -> Result<(), AppError> {
+        for id in requeue_ids {
+            parse_requirement_id(id)?;
+        }
         self.repo.resume_tag(tag).await?;
-        for &id in requeue_ids {
+        for id in requeue_ids {
             // Only re-pend rows that are genuinely failed AND belong to this tag.
             let Some(row) = self.repo.get_by_id(id).await? else { continue };
             if row.tag != tag || row.status != "failed" {
@@ -895,8 +957,9 @@ impl RequirementService {
             let params = RequirementRowUpdate {
                 status: Some("pending".to_string()),
                 completion_note: Some(None),
-                owner_session_id: Some(None),
-                owner_kind: Some(None),
+                owner_conversation_id: Some(None),
+                owner_terminal_id: Some(None),
+
                 active_turn_started_at: Some(None),
                 lease_expires_at: Some(None),
                 attempt_count: Some(0),
@@ -907,7 +970,7 @@ impl RequirementService {
                 self.emitter.emit_status_changed(&row_to_dto(&updated));
             }
         }
-        // Tag is active again (+ any requeued rows are pending) → wake idle loops.
+        // Tag is active again (+ any requeued rows are pending) —wake idle loops.
         self.wake_autowork();
         Ok(())
     }
@@ -915,8 +978,9 @@ impl RequirementService {
     /// Resume a tag because AutoWork was explicitly (re-)ENABLED on a session
     /// bound to it. A paused tag (prior `requirement_failed`, or a deleted-session
     /// cascade) otherwise silently blocks EVERY conversation bound to the same tag
-    /// — the user toggles 自动工作 on and nothing happens, with no per-conversation
-    /// indication that the shared tag is paused (the recurring "彻底不工作" trap).
+    /// —the user toggles AutoWork on and nothing happens, with no per-conversation
+    /// indication that the shared tag is paused (the recurring "nothing runs"
+    /// trap).
     ///
     /// An explicit enable is a clear "run this" signal, so: unpause the tag and
     /// give its STUCK requirements (`failed` / `pending` / stale `in_progress`) a
@@ -935,15 +999,16 @@ impl RequirementService {
             let params = RequirementRowUpdate {
                 status: Some("pending".to_string()),
                 completion_note: Some(None),
-                owner_session_id: Some(None),
-                owner_kind: Some(None),
+                owner_conversation_id: Some(None),
+                owner_terminal_id: Some(None),
+
                 active_turn_started_at: Some(None),
                 lease_expires_at: Some(None),
                 attempt_count: Some(0),
                 ..Default::default()
             };
-            self.repo.update(row.id, &params).await?;
-            if let Some(updated) = self.repo.get_by_id(row.id).await? {
+            self.repo.update(&row.id, &params).await?;
+            if let Some(updated) = self.repo.get_by_id(&row.id).await? {
                 self.emitter.emit_status_changed(&row_to_dto(&updated));
             }
         }
@@ -953,8 +1018,18 @@ impl RequirementService {
 
 
     /// WITHOUT consuming an attempt (the turn never ran). Wakes loops to retry.
-    pub async fn unclaim_busy(&self, id: i64, conversation_id: i64) -> Result<(), AppError> {
-        if self.repo.unclaim(id, conversation_id).await? {
+    pub async fn unclaim_busy(
+        &self,
+        id: &str,
+        owner_id: &str,
+        kind: AutoWorkTargetKind,
+    ) -> Result<(), AppError> {
+        let id = parse_requirement_id(id)?;
+        let owners = match kind {
+            AutoWorkTargetKind::Conversation => (Some(parse_conversation_id(owner_id)?), None),
+            AutoWorkTargetKind::Terminal => (None, Some(parse_terminal_id(owner_id)?)),
+        };
+        if self.repo.unclaim(id, owners.0, owners.1).await? {
             if let Some(updated) = self.repo.get_by_id(id).await? {
                 self.emitter.emit_status_changed(&row_to_dto(&updated));
             }
@@ -964,18 +1039,17 @@ impl RequirementService {
     }
 
     /// §9.B — clear the owner of every requirement bound to a now-deleted
-    /// session (`owner_session_id` matches), unblocking requirements whose
+    /// session, unblocking requirements whose
     /// `conv_*`/`term_*` executing session was deleted.
     ///
-    /// `owner_session_id` is a dual-domain column with NO FK (a single column
-    /// cannot reference two parent tables), so a deleted conversation/terminal
-    /// does NOT cascade-clear it. Without this hook a requirement claimed by a
+    /// The owner columns intentionally have no cross-table FK, so a deleted
+    /// conversation/terminal does not cascade-clear them. Without this hook a requirement claimed by a
     /// since-deleted session would keep a dangling owner and, if it was
     /// `in_progress`, sit orphaned until the lease sweeper happened to run.
     ///
     /// Clears both owner columns together (paired-NULL CHECK), and re-pends any
     /// `in_progress` row (its session is gone, so it can never finish) WITHOUT
-    /// consuming an attempt — the session vanishing is not a failed attempt.
+    /// consuming an attempt —the session vanishing is not a failed attempt.
     /// Idempotent; wakes idle loops so a re-pended requirement is reclaimable now.
     ///
     /// CALL SITE (Phase 3/4 wiring): invoke from the conversations + terminal
@@ -984,22 +1058,27 @@ impl RequirementService {
     /// can call it without the DB layer (the FK that would have cascaded does
     /// not exist).
     ///
-    /// SECURITY (spec §2.2): the query is scoped by BOTH `owner_session_id` and
-    /// `owner_kind` — after integerization a conversation and a terminal can
-    /// share a numeric id, so a kind-less scan would clear the OTHER domain's
-    /// requirements that merely share the number.
+    /// SECURITY (spec §2.2): the query is scoped to the owner column for the
+    /// requested domain. Clearing a conversation can never release terminal
+    /// work, and vice versa.
     pub async fn clear_owner_for_session(
         &self,
-        session_id: i64,
+        session_id: &str,
         kind: AutoWorkTargetKind,
     ) -> Result<u64, AppError> {
+        let session_id = match kind {
+            AutoWorkTargetKind::Conversation => parse_conversation_id(session_id)?,
+            AutoWorkTargetKind::Terminal => parse_terminal_id(session_id)?,
+        };
         // Page through every requirement owned by this session (paired domain).
         let mut cleared = 0u64;
         let mut woke = false;
         loop {
             let params = ListRequirementsParams {
-                owner_session_id: Some(session_id),
-                owner_kind: Some(kind.as_str().to_string()),
+                owner_conversation_id: (kind == AutoWorkTargetKind::Conversation)
+                    .then(|| session_id.to_owned()),
+                owner_terminal_id: (kind == AutoWorkTargetKind::Terminal)
+                    .then(|| session_id.to_owned()),
                 page: Some(1),
                 page_size: Some(200),
                 ..Default::default()
@@ -1012,8 +1091,8 @@ impl RequirementService {
             for row in &rows {
                 let re_pend = row.status == "in_progress";
                 let mut update = RequirementRowUpdate {
-                    owner_session_id: Some(None),
-                    owner_kind: Some(None),
+                    owner_conversation_id: Some(None),
+                    owner_terminal_id: Some(None),
                     ..Default::default()
                 };
                 if re_pend {
@@ -1022,15 +1101,15 @@ impl RequirementService {
                     update.lease_expires_at = Some(None);
                     woke = true;
                 }
-                self.repo.update(row.id, &update).await?;
-                if let Some(updated) = self.repo.get_by_id(row.id).await? {
+                self.repo.update(&row.id, &update).await?;
+                if let Some(updated) = self.repo.get_by_id(&row.id).await? {
                     self.emitter.emit_status_changed(&row_to_dto(&updated));
                 }
                 cleared += 1;
             }
-            // The list query filters on owner_session_id; cleared rows drop out of
-            // the result set, so re-querying page 1 always advances. Guard against
-            // a short page (no more rows) to terminate.
+            // The list query filters on the selected owner-domain column; cleared
+            // rows drop out of the result set, so re-querying page 1 always
+            // advances. Guard against a short page (no more rows) to terminate.
             if batch < 200 {
                 break;
             }
@@ -1041,30 +1120,34 @@ impl RequirementService {
         Ok(cleared)
     }
 
-    /// Enumerate AutoWork tag→session bindings for `user_id`, grouped by tag.
+    /// Enumerate AutoWork tag/session bindings for `user_id`, grouped by tag.
     ///
     /// A "binding" is a conversation or terminal whose persisted AutoWork config
     /// is `enabled`, pointing at a tag. The `run_state` returned here reflects the
     /// persisted config only (`Idle` for every enabled binding); the routes layer
     /// upgrades it to `Active` for targets the AutoWork runner is currently driving
-    /// (it owns the live progress map). Used by the AutoWork admin 标签会话管理 tab.
+    /// (it owns the live progress map). Used by the AutoWork admin session bindings tab.
     pub async fn tag_bindings(&self, user_id: &str) -> Result<Vec<TagBindings>, AppError> {
+        let user_id = UserId::parse(user_id)
+            .map_err(|error| AppError::Forbidden(format!("invalid caller identity: {error}")))?;
+        let user_id = user_id.as_str();
         // (tag, binding) accumulator, grouped at the end.
         let mut by_tag: std::collections::BTreeMap<String, Vec<TagBinding>> = std::collections::BTreeMap::new();
 
         // Conversations: page through all of the user's conversations and parse
-        // each `extra.autowork` (with legacy `autopilot` fallback) directly from
+        // each `extra.autowork` directly from
         // the row we already hold (no extra per-row query).
         if let Some(conv_repo) = &self.conversation_repo {
-            let mut cursor: Option<i64> = None;
+            let mut cursor: Option<String> = None;
             loop {
                 let filters = ConversationFilters {
-                    cursor,
+                    cursor: cursor.clone(),
                     limit: 200,
                     source: None,
                     cron_job_id: None,
                     pinned: None,
-                    // 需求采集扫描全部会话(含 companion);保持默认不排除。
+                    exclude_companion_companion: false,
+                    // Keep unrelated conversation filters at their defaults.
                     ..Default::default()
                 };
                 let page = conv_repo.list_paginated(user_id, &filters).await?;
@@ -1073,16 +1156,16 @@ impl RequirementService {
                 }
                 for row in &page.items {
                     let extra: serde_json::Value = serde_json::from_str(&row.extra).unwrap_or_default();
-                    let aw = extra.get("autowork").or_else(|| extra.get("autopilot"));
+                    let aw = extra.get("autowork");
                     let Some(aw) = aw else { continue };
                     let enabled = aw.get("enabled").and_then(|v| v.as_bool()).unwrap_or(false);
                     let tag = aw.get("tag").and_then(|v| v.as_str()).map(|s| s.to_string());
                     if let (true, Some(tag)) = (enabled, tag) {
                         by_tag.entry(tag).or_default().push(TagBinding {
                             kind: AutoWorkTargetKind::Conversation,
-                            target_id: row.id.to_string(),
+                            target_id: row.id.clone(),
                             name: if row.name.is_empty() {
-                                row.id.to_string()
+                                row.id.clone()
                             } else {
                                 row.name.clone()
                             },
@@ -1093,7 +1176,7 @@ impl RequirementService {
                 if !page.has_more {
                     break;
                 }
-                cursor = page.items.last().map(|r| r.id);
+                cursor = page.items.last().map(|r| r.id.clone());
             }
         }
 
@@ -1127,13 +1210,12 @@ impl RequirementService {
 }
 
 /// Conversation-delete hook (spec §9.B): when an owning `conv_*` conversation is
-/// deleted, clear the dual-domain owner of every requirement it owned. There is
-/// no FK to cascade (a single `owner_session_id` column addresses two tables),
-/// so the deletion path drives this explicitly. Wired in `nomifun-app` via
+/// deleted, clear the conversation owner of every requirement it owned. There
+/// is no FK cascade, so the deletion path drives this explicitly. Wired in `nomifun-app` via
 /// `ConversationService::with_delete_hook`.
 #[async_trait::async_trait]
 impl nomifun_common::OnConversationDelete for RequirementService {
-    async fn on_conversation_deleted(&self, _user_id: &str, conversation_id: i64) {
+    async fn on_conversation_deleted(&self, _user_id: &str, conversation_id: &str) {
         if let Err(e) = self
             .clear_owner_for_session(conversation_id, AutoWorkTargetKind::Conversation)
             .await
@@ -1152,9 +1234,9 @@ impl nomifun_common::OnConversationDelete for RequirementService {
 /// `TerminalService::with_delete_hook`.
 #[async_trait::async_trait]
 impl nomifun_common::OnTerminalDelete for RequirementService {
-    async fn on_terminal_deleted(&self, _user_id: &str, terminal_id: i64) {
+    async fn on_terminal_deleted(&self, _user_id: &str, terminal_id: &str) {
         if let Err(e) = self
-            .clear_owner_for_session(terminal_id, AutoWorkTargetKind::Terminal)
+            .clear_owner_for_session(&terminal_id, AutoWorkTargetKind::Terminal)
             .await
         {
             warn!(
@@ -1169,11 +1251,12 @@ impl nomifun_common::OnTerminalDelete for RequirementService {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nomifun_db::SqliteRequirementRepository;
-    use nomifun_db::init_database_memory;
+    use nomifun_common::{ConversationId, RequirementId, TerminalId, UserId};
+    use nomifun_db::{
+        IAttachmentRepository, SqliteAttachmentRepository, SqliteRequirementRepository,
+        init_database_memory,
+    };
     use nomifun_realtime::UserEventSink;
-
-    const INSTALLATION_OWNER: &str = "system_default_user";
 
     #[derive(Default)]
     struct NoopBroadcaster;
@@ -1186,302 +1269,341 @@ mod tests {
         }
     }
 
-    async fn svc() -> RequirementService {
+    async fn service_with_owners() -> (RequirementService, String, String) {
         let db = init_database_memory().await.unwrap();
-        let repo: Arc<dyn IRequirementRepository> = Arc::new(SqliteRequirementRepository::new(db.pool().clone()));
-        let emitter = RequirementEventEmitter::new(
-            Arc::new(NoopBroadcaster),
-            Arc::from(INSTALLATION_OWNER),
-        );
-        // Seed an installation-owner conversation so both the conversation FK
-        // and the execution-authority boundary exercised by `claim_next` are
-        // satisfiable. Secondary-user isolation has dedicated tests below.
+        let installation_owner = nomifun_db::installation_owner_id(db.pool()).await.unwrap();
+        let repo: Arc<dyn IRequirementRepository> =
+            Arc::new(SqliteRequirementRepository::new(db.pool().clone()));
+        let conversation_id = ConversationId::new().into_string();
+        let terminal_id = TerminalId::new().into_string();
         sqlx::query(
             "INSERT INTO conversations \
-             (id, user_id, name, type, delegation_policy, execution_model_pool, \
-              execution_template_id, channel_chat_id, preset_id, preset_revision, \
-              preset_snapshot, created_at, updated_at) \
-             VALUES \
-             (1, ?1, 'Test Conv', 'nomi', 'disabled', NULL, NULL, NULL, \
-              NULL, NULL, NULL, 0, 0)",
+                (id, user_id, name, type, created_at, updated_at) \
+             VALUES (?1, ?2, 'Requirement Conversation', 'nomi', 0, 0)",
         )
-        .bind(INSTALLATION_OWNER)
+        .bind(&conversation_id)
+        .bind(&installation_owner)
         .execute(db.pool())
         .await
         .unwrap();
-        // Keep the DB alive for the duration of the service via a leak in tests.
-        Box::leak(Box::new(db));
-        RequirementService::new(repo, emitter)
-    }
-
-    async fn svc_with_attachments() -> (RequirementService, tempfile::TempDir, tempfile::TempDir) {
-        let db = init_database_memory().await.unwrap();
-        let repo: Arc<dyn IRequirementRepository> = Arc::new(SqliteRequirementRepository::new(db.pool().clone()));
-        let att_repo: Arc<dyn nomifun_db::IAttachmentRepository> =
-            Arc::new(nomifun_db::SqliteAttachmentRepository::new(db.pool().clone()));
+        sqlx::query(
+            "INSERT INTO terminal_sessions \
+                (id, user_id, name, cwd, command, args, cols, rows, last_status, created_at, updated_at) \
+             VALUES (?1, ?2, 'Requirement Terminal', '/tmp', '$SHELL', '[]', 80, 24, 'running', 0, 0)",
+        )
+        .bind(&terminal_id)
+        .bind(&installation_owner)
+        .execute(db.pool())
+        .await
+        .unwrap();
         let emitter = RequirementEventEmitter::new(
             Arc::new(NoopBroadcaster),
-            Arc::from("system_default_user"),
+            Arc::from(installation_owner.as_str()),
         );
+        let service = RequirementService::new(repo, emitter);
         Box::leak(Box::new(db));
-        let data_dir = tempfile::tempdir().unwrap();
-        let upload_root = tempfile::tempdir().unwrap();
-        let store = crate::attachments::AttachmentStore::new(data_dir.path().to_path_buf(), att_repo)
-            .with_upload_root(upload_root.path().to_path_buf());
-        let svc = RequirementService::new(repo, emitter).with_attachment_store(Arc::new(store));
-        (svc, data_dir, upload_root)
+        (service, conversation_id, terminal_id)
     }
 
-    fn upload_png(root: &std::path::Path, name: &str) -> String {
-        let p = root.join(name);
-        std::fs::write(&p, b"png").unwrap();
-        p.to_string_lossy().to_string()
-    }
-
-    #[tokio::test]
-    async fn create_with_attachments_binds_and_returns_dtos() {
-        let (s, data_dir, upload_root) = svc_with_attachments().await;
-        let src = upload_png(upload_root.path(), "a.png");
-        let created = s
+    async fn create_req(service: &RequirementService, tag: &str) -> Requirement {
+        service
             .create(CreateRequirementRequest {
-                title: "T".into(),
-                content: String::new(),
-                tag: "t".into(),
-                order_key: None,
-                status: None,
-                created_by: None,
-                attachments: vec![nomifun_api_types::NewAttachmentRef {
-                    source_path: src,
-                    file_name: "a.png".into(),
-                }],
-            })
-            .await
-            .unwrap();
-        assert_eq!(created.attachments.len(), 1);
-        assert_eq!(created.attachments[0].file_name, "a.png");
-        assert!(std::path::Path::new(&created.attachments[0].abs_path).exists());
-        assert!(created.attachments[0].abs_path.starts_with(data_dir.path().to_string_lossy().as_ref()));
-        // get() returns them too
-        let got = s.get(created.id).await.unwrap();
-        assert_eq!(got.attachments.len(), 1);
-    }
-
-    #[tokio::test]
-    async fn create_with_bad_attachment_rolls_back_requirement() {
-        let (s, _data, upload_root) = svc_with_attachments().await;
-        let src = upload_png(upload_root.path(), "a.txt"); // wrong extension
-        let err = s
-            .create(CreateRequirementRequest {
-                title: "T".into(),
-                content: String::new(),
-                tag: "t".into(),
-                order_key: None,
-                status: None,
-                created_by: None,
-                attachments: vec![nomifun_api_types::NewAttachmentRef {
-                    source_path: src,
-                    file_name: "a.txt".into(),
-                }],
-            })
-            .await
-            .unwrap_err();
-        assert!(matches!(err, AppError::BadRequest(_)));
-        // the requirement row must NOT survive
-        let page = s.list(&ListRequirementsQuery::default()).await.unwrap();
-        assert_eq!(page.total, 0, "failed attachment bind must roll the create back");
-    }
-
-    #[tokio::test]
-    async fn update_adds_and_removes_attachments() {
-        let (s, data_dir, upload_root) = svc_with_attachments().await;
-        let a = upload_png(upload_root.path(), "a.png");
-        let created = s
-            .create(CreateRequirementRequest {
-                title: "T".into(),
-                content: String::new(),
-                tag: "t".into(),
-                order_key: None,
-                status: None,
-                created_by: None,
-                attachments: vec![nomifun_api_types::NewAttachmentRef { source_path: a, file_name: "a.png".into() }],
-            })
-            .await
-            .unwrap();
-        let b = upload_png(upload_root.path(), "b.png");
-        let updated = s
-            .update(
-                created.id,
-                UpdateRequirementRequest {
-                    title: None,
-                    content: None,
-                    tag: None,
-                    order_key: None,
-                    status: None,
-                    completion_note: None,
-                    add_attachments: vec![nomifun_api_types::NewAttachmentRef { source_path: b, file_name: "b.png".into() }],
-                    remove_attachment_ids: vec![created.attachments[0].id.clone()],
-                },
-            )
-            .await
-            .unwrap();
-        assert_eq!(updated.attachments.len(), 1);
-        assert_eq!(updated.attachments[0].file_name, "b.png");
-        assert!(!std::path::Path::new(&created.attachments[0].abs_path).exists(), "removed file is deleted");
-        let _ = data_dir;
-    }
-
-    #[tokio::test]
-    async fn update_failed_ingest_preserves_removed_targets() {
-        // update() carrying BOTH removals and additions must be safe when the
-        // ingest fails: the requirement's existing attachments (rows AND files)
-        // must survive untouched — i.e. removal must not have been applied.
-        let (s, _data, upload_root) = svc_with_attachments().await;
-        let a = upload_png(upload_root.path(), "a.png");
-        let created = s
-            .create(CreateRequirementRequest {
-                title: "T".into(),
-                content: String::new(),
-                tag: "t".into(),
-                order_key: None,
-                status: None,
-                created_by: None,
-                attachments: vec![nomifun_api_types::NewAttachmentRef { source_path: a, file_name: "a.png".into() }],
-            })
-            .await
-            .unwrap();
-        let bad = upload_png(upload_root.path(), "bad.txt"); // illegal extension → ingest fails
-        let err = s
-            .update(
-                created.id,
-                UpdateRequirementRequest {
-                    title: None,
-                    content: None,
-                    tag: None,
-                    order_key: None,
-                    status: None,
-                    completion_note: None,
-                    add_attachments: vec![nomifun_api_types::NewAttachmentRef { source_path: bad, file_name: "bad.txt".into() }],
-                    remove_attachment_ids: vec![created.attachments[0].id.clone()],
-                },
-            )
-            .await
-            .unwrap_err();
-        assert!(matches!(err, AppError::BadRequest(_)));
-        // Existing attachment row and file must be intact.
-        let got = s.get(created.id).await.unwrap();
-        assert_eq!(got.attachments.len(), 1, "failed ingest must not apply the removal");
-        assert!(
-            std::path::Path::new(&created.attachments[0].abs_path).exists(),
-            "the removed-target file must still exist after a failed ingest"
-        );
-    }
-
-    #[tokio::test]
-    async fn attachment_only_update_bumps_updated_at() {
-        // An update that ONLY touches attachments must still stamp updated_at —
-        // repo.update early-returns on an empty SET list, which would leave the
-        // row's timestamp stale while `requirement.updated` is still emitted.
-        let (s, _data, upload_root) = svc_with_attachments().await;
-        let a = upload_png(upload_root.path(), "a.png");
-        let created = s
-            .create(CreateRequirementRequest {
-                title: "T".into(),
-                content: String::new(),
-                tag: "t".into(),
-                order_key: None,
-                status: None,
-                created_by: None,
-                attachments: vec![nomifun_api_types::NewAttachmentRef { source_path: a, file_name: "a.png".into() }],
-            })
-            .await
-            .unwrap();
-        // now_ms is millisecond-precision — ensure a visible delta.
-        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-        let b = upload_png(upload_root.path(), "b.png");
-        let updated = s
-            .update(
-                created.id,
-                UpdateRequirementRequest {
-                    title: None,
-                    content: None,
-                    tag: None,
-                    order_key: None,
-                    status: None,
-                    completion_note: None,
-                    add_attachments: vec![nomifun_api_types::NewAttachmentRef { source_path: b, file_name: "b.png".into() }],
-                    remove_attachment_ids: vec![],
-                },
-            )
-            .await
-            .unwrap();
-        assert!(
-            updated.updated_at > created.updated_at,
-            "attachment-only update must bump updated_at ({} !> {})",
-            updated.updated_at,
-            created.updated_at
-        );
-    }
-
-    #[tokio::test]
-    async fn delete_cleans_attachment_rows_and_files() {
-        let (s, data_dir, upload_root) = svc_with_attachments().await;
-        let a = upload_png(upload_root.path(), "a.png");
-        let created = s
-            .create(CreateRequirementRequest {
-                title: "T".into(),
-                content: String::new(),
-                tag: "t".into(),
-                order_key: None,
-                status: None,
-                created_by: None,
-                attachments: vec![nomifun_api_types::NewAttachmentRef { source_path: a, file_name: "a.png".into() }],
-            })
-            .await
-            .unwrap();
-        s.delete(created.id).await.unwrap();
-        assert!(!data_dir.path().join("attachments").join(created.id.to_string()).exists());
-    }
-
-    #[tokio::test]
-    async fn create_requires_title_and_tag() {
-        let s = svc().await;
-        let err = s
-            .create(CreateRequirementRequest {
-                title: "  ".into(),
-                content: String::new(),
-                tag: "t".into(),
-                order_key: None,
-                status: None,
-                created_by: None,
-                attachments: vec![],
-            })
-            .await
-            .unwrap_err();
-        assert!(matches!(err, AppError::BadRequest(_)));
-    }
-
-    #[tokio::test]
-    async fn create_then_get_and_list() {
-        let s = svc().await;
-        let created = s
-            .create(CreateRequirementRequest {
-                title: "First".into(),
+                title: "Do X".into(),
                 content: "body".into(),
-                tag: "alpha".into(),
+                tag: tag.into(),
                 order_key: Some("1".into()),
                 status: None,
                 created_by: None,
                 attachments: vec![],
             })
             .await
+            .unwrap()
+    }
+
+    async fn exhaust_requirement(
+        service: &RequirementService,
+        requirement_id: &str,
+        tag: &str,
+        conversation_id: &str,
+    ) {
+        for _ in 0..MAX_ATTEMPTS {
+            service
+                .claim_next(
+                    tag,
+                    conversation_id,
+                    AutoWorkTargetKind::Conversation,
+                    DEFAULT_LEASE_MS,
+                )
+                .await
+                .unwrap()
+                .expect("requirement remains claimable until retries are exhausted");
+            service
+                .finalize_if_needed(requirement_id, true, None, false)
+                .await
+                .unwrap();
+        }
+    }
+
+    async fn service_with_attachments() -> (RequirementService, tempfile::TempDir, tempfile::TempDir) {
+        let db = init_database_memory().await.unwrap();
+        let installation_owner = nomifun_db::installation_owner_id(db.pool()).await.unwrap();
+        let repo: Arc<dyn IRequirementRepository> =
+            Arc::new(SqliteRequirementRepository::new(db.pool().clone()));
+        let attachment_repo: Arc<dyn IAttachmentRepository> =
+            Arc::new(SqliteAttachmentRepository::new(db.pool().clone()));
+        let emitter = RequirementEventEmitter::new(
+            Arc::new(NoopBroadcaster),
+            Arc::from(installation_owner.as_str()),
+        );
+        Box::leak(Box::new(db));
+
+        let data_dir = tempfile::tempdir().unwrap();
+        let upload_root = tempfile::tempdir().unwrap();
+        let store = AttachmentStore::new(data_dir.path().to_path_buf(), attachment_repo)
+            .with_upload_root(upload_root.path().to_path_buf());
+        let service = RequirementService::new(repo, emitter).with_attachment_store(Arc::new(store));
+        (service, data_dir, upload_root)
+    }
+
+    fn upload_file(root: &std::path::Path, name: &str) -> String {
+        let path = root.join(name);
+        std::fs::write(&path, b"test image bytes").unwrap();
+        path.to_string_lossy().into_owned()
+    }
+
+    fn attachment_ref(source_path: String, file_name: &str) -> nomifun_api_types::NewAttachmentRef {
+        nomifun_api_types::NewAttachmentRef {
+            source_path,
+            file_name: file_name.to_string(),
+        }
+    }
+
+    #[tokio::test]
+    async fn create_with_attachments_binds_and_returns_dtos() {
+        let (service, data_dir, upload_root) = service_with_attachments().await;
+        let created = service
+            .create(CreateRequirementRequest {
+                title: "With image".into(),
+                content: String::new(),
+                tag: "attachments".into(),
+                order_key: None,
+                status: None,
+                created_by: None,
+                attachments: vec![attachment_ref(upload_file(upload_root.path(), "a.png"), "a.png")],
+            })
+            .await
             .unwrap();
-        assert_eq!(created.status, RequirementStatus::Pending);
-        assert_eq!(created.order_key, "1");
 
-        let fetched = s.get(created.id).await.unwrap();
-        assert_eq!(fetched.id, created.id);
+        assert!(created.id.parse::<RequirementId>().is_ok());
+        assert_eq!(created.attachments.len(), 1);
+        assert_eq!(created.attachments[0].file_name, "a.png");
+        assert!(std::path::Path::new(&created.attachments[0].abs_path).exists());
+        assert!(
+            created.attachments[0]
+                .abs_path
+                .starts_with(data_dir.path().to_string_lossy().as_ref())
+        );
+        assert_eq!(service.get(&created.id).await.unwrap().attachments.len(), 1);
+    }
 
-        let page = s
+    #[tokio::test]
+    async fn create_with_bad_attachment_rolls_back_requirement() {
+        let (service, _data_dir, upload_root) = service_with_attachments().await;
+        let error = service
+            .create(CreateRequirementRequest {
+                title: "Bad image".into(),
+                content: String::new(),
+                tag: "attachments".into(),
+                order_key: None,
+                status: None,
+                created_by: None,
+                attachments: vec![attachment_ref(upload_file(upload_root.path(), "bad.txt"), "bad.txt")],
+            })
+            .await
+            .unwrap_err();
+
+        assert!(matches!(error, AppError::BadRequest(_)));
+        assert_eq!(
+            service
+                .list(&ListRequirementsQuery::default())
+                .await
+                .unwrap()
+                .total,
+            0,
+            "a failed attachment ingest must roll back the canonical requirement row"
+        );
+    }
+
+    #[tokio::test]
+    async fn update_adds_and_removes_attachments() {
+        let (service, _data_dir, upload_root) = service_with_attachments().await;
+        let created = service
+            .create(CreateRequirementRequest {
+                title: "Replace image".into(),
+                content: String::new(),
+                tag: "attachments".into(),
+                order_key: None,
+                status: None,
+                created_by: None,
+                attachments: vec![attachment_ref(upload_file(upload_root.path(), "a.png"), "a.png")],
+            })
+            .await
+            .unwrap();
+        let removed_path = created.attachments[0].abs_path.clone();
+        let removed_id = created.attachments[0].id.clone();
+        let updated = service
+            .update(
+                &created.id,
+                UpdateRequirementRequest {
+                    title: None,
+                    content: None,
+                    tag: None,
+                    order_key: None,
+                    status: None,
+                    completion_note: None,
+                    add_attachments: vec![attachment_ref(
+                        upload_file(upload_root.path(), "b.png"),
+                        "b.png",
+                    )],
+                    remove_attachment_ids: vec![removed_id],
+                },
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(updated.attachments.len(), 1);
+        assert_eq!(updated.attachments[0].file_name, "b.png");
+        assert!(!std::path::Path::new(&removed_path).exists());
+    }
+
+    #[tokio::test]
+    async fn update_failed_ingest_preserves_removal_targets() {
+        let (service, _data_dir, upload_root) = service_with_attachments().await;
+        let created = service
+            .create(CreateRequirementRequest {
+                title: "Atomic image update".into(),
+                content: String::new(),
+                tag: "attachments".into(),
+                order_key: None,
+                status: None,
+                created_by: None,
+                attachments: vec![attachment_ref(upload_file(upload_root.path(), "a.png"), "a.png")],
+            })
+            .await
+            .unwrap();
+        let original = created.attachments[0].clone();
+        let error = service
+            .update(
+                &created.id,
+                UpdateRequirementRequest {
+                    title: None,
+                    content: None,
+                    tag: None,
+                    order_key: None,
+                    status: None,
+                    completion_note: None,
+                    add_attachments: vec![attachment_ref(
+                        upload_file(upload_root.path(), "bad.txt"),
+                        "bad.txt",
+                    )],
+                    remove_attachment_ids: vec![original.id.clone()],
+                },
+            )
+            .await
+            .unwrap_err();
+
+        assert!(matches!(error, AppError::BadRequest(_)));
+        let after = service.get(&created.id).await.unwrap();
+        assert_eq!(after.attachments.len(), 1);
+        assert_eq!(after.attachments[0].id, original.id);
+        assert!(std::path::Path::new(&original.abs_path).exists());
+    }
+
+    #[tokio::test]
+    async fn attachment_only_update_bumps_updated_at() {
+        let (service, _data_dir, upload_root) = service_with_attachments().await;
+        let created = service
+            .create(CreateRequirementRequest {
+                title: "Timestamp image update".into(),
+                content: String::new(),
+                tag: "attachments".into(),
+                order_key: None,
+                status: None,
+                created_by: None,
+                attachments: vec![attachment_ref(upload_file(upload_root.path(), "a.png"), "a.png")],
+            })
+            .await
+            .unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        let updated = service
+            .update(
+                &created.id,
+                UpdateRequirementRequest {
+                    title: None,
+                    content: None,
+                    tag: None,
+                    order_key: None,
+                    status: None,
+                    completion_note: None,
+                    add_attachments: vec![attachment_ref(
+                        upload_file(upload_root.path(), "b.png"),
+                        "b.png",
+                    )],
+                    remove_attachment_ids: vec![],
+                },
+            )
+            .await
+            .unwrap();
+
+        assert!(updated.updated_at > created.updated_at);
+    }
+
+    #[tokio::test]
+    async fn delete_cleans_attachment_rows_and_files() {
+        let (service, data_dir, upload_root) = service_with_attachments().await;
+        let created = service
+            .create(CreateRequirementRequest {
+                title: "Delete image".into(),
+                content: String::new(),
+                tag: "attachments".into(),
+                order_key: None,
+                status: None,
+                created_by: None,
+                attachments: vec![attachment_ref(upload_file(upload_root.path(), "a.png"), "a.png")],
+            })
+            .await
+            .unwrap();
+        let requirement_id = created.id.clone();
+        service.delete(&requirement_id).await.unwrap();
+
+        assert!(!data_dir.path().join("attachments").join(requirement_id).exists());
+    }
+
+    #[tokio::test]
+    async fn create_get_update_list_and_delete_use_string_ids() {
+        let (service, _conversation_id, _terminal_id) = service_with_owners().await;
+        let req = create_req(&service, "alpha").await;
+        assert!(req.id.parse::<RequirementId>().is_ok());
+        assert_eq!(service.get(&req.id).await.unwrap().id, req.id);
+
+        let updated = service
+            .update(
+                &req.id,
+                UpdateRequirementRequest {
+                    title: Some("Updated".into()),
+                    content: None,
+                    tag: None,
+                    order_key: None,
+                    status: None,
+                    completion_note: None,
+                    add_attachments: vec![],
+                    remove_attachment_ids: vec![],
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(updated.title, "Updated");
+        let page = service
             .list(&ListRequirementsQuery {
                 tag: Some("alpha".into()),
                 ..Default::default()
@@ -1489,622 +1611,486 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(page.total, 1);
-        assert_eq!(page.items.len(), 1);
+
+        service.delete(&req.id).await.unwrap();
+        assert!(matches!(
+            service.get(&req.id).await.unwrap_err(),
+            AppError::NotFound(_)
+        ));
     }
 
     #[tokio::test]
-    async fn get_missing_is_not_found() {
-        let s = svc().await;
-        let err = s.get(999_999).await.unwrap_err();
-        assert!(matches!(err, AppError::NotFound(_)));
+    async fn conversation_and_terminal_claims_are_domain_scoped() {
+        let (service, conversation_id, terminal_id) = service_with_owners().await;
+        let conversation_req = create_req(&service, "conv").await;
+        let terminal_req = create_req(&service, "term").await;
+
+        let claimed = service
+            .claim_next(
+                "conv",
+                &conversation_id,
+                AutoWorkTargetKind::Conversation,
+                DEFAULT_LEASE_MS,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            claimed.owner_conversation_id.as_deref(),
+            Some(conversation_id.as_str())
+        );
+        assert!(claimed.owner_terminal_id.is_none());
+        assert_eq!(claimed.id, conversation_req.id);
+
+        let term_claimed = service
+            .claim_next(
+                "term",
+                &terminal_id,
+                AutoWorkTargetKind::Terminal,
+                DEFAULT_LEASE_MS,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            term_claimed.owner_terminal_id.as_deref(),
+            Some(terminal_id.as_str())
+        );
+        assert!(term_claimed.owner_conversation_id.is_none());
+        assert_eq!(term_claimed.id, terminal_req.id);
+
+        assert!(
+            !service
+                .renew_lease(
+                    &terminal_req.id,
+                    &conversation_id,
+                    AutoWorkTargetKind::Conversation,
+                    DEFAULT_LEASE_MS,
+                )
+                .await
+                .unwrap(),
+            "wrong owner domain cannot renew terminal claim"
+        );
+        assert!(
+            service
+                .renew_lease(
+                    &terminal_req.id,
+                    &terminal_id,
+                    AutoWorkTargetKind::Terminal,
+                    DEFAULT_LEASE_MS,
+                )
+                .await
+                .unwrap()
+        );
     }
 
     #[tokio::test]
-    async fn update_recomputes_sort_seq_and_board_groups() {
-        let s = svc().await;
-        let r = s
-            .create(CreateRequirementRequest {
-                title: "T".into(),
-                content: String::new(),
-                tag: "g".into(),
-                order_key: Some("2".into()),
-                status: None,
-                created_by: None,
-                attachments: vec![],
-            })
+    async fn finalize_transitions_clean_error_and_exhaustion() {
+        let (service, conversation_id, _terminal_id) = service_with_owners().await;
+        let clean = create_req(&service, "clean").await;
+        service
+            .claim_next(
+                "clean",
+                &conversation_id,
+                AutoWorkTargetKind::Conversation,
+                DEFAULT_LEASE_MS,
+            )
+            .await
+            .unwrap();
+        let done = service
+            .finalize_if_needed(&clean.id, false, Some("finished".into()), false)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(done.status, RequirementStatus::Done);
+        assert_eq!(done.completion_note.as_deref(), Some("finished"));
+
+        let review = create_req(&service, "review").await;
+        service
+            .claim_next(
+                "review",
+                &conversation_id,
+                AutoWorkTargetKind::Conversation,
+                DEFAULT_LEASE_MS,
+            )
+            .await
+            .unwrap();
+        let parked = service
+            .finalize_if_needed(&review.id, false, None, true)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(parked.status, RequirementStatus::NeedsReview);
+
+        let retry = create_req(&service, "retry").await;
+        service
+            .claim_next(
+                "retry",
+                &conversation_id,
+                AutoWorkTargetKind::Conversation,
+                DEFAULT_LEASE_MS,
+            )
+            .await
+            .unwrap();
+        let pending = service
+            .finalize_if_needed(&retry.id, true, None, false)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(pending.status, RequirementStatus::Pending);
+        assert!(pending.owner_conversation_id.is_none());
+        assert!(pending.owner_terminal_id.is_none());
+    }
+
+    #[tokio::test]
+    async fn finalize_respects_agent_verdict_and_terminal_state_is_frozen() {
+        let (service, conversation_id, _terminal_id) = service_with_owners().await;
+        let requirement = create_req(&service, "agent-verdict").await;
+        service
+            .claim_next(
+                "agent-verdict",
+                &conversation_id,
+                AutoWorkTargetKind::Conversation,
+                DEFAULT_LEASE_MS,
+            )
+            .await
+            .unwrap();
+        service
+            .complete(&requirement.id, Some("agent did it".into()))
             .await
             .unwrap();
 
-        s.update(
-            r.id,
-            UpdateRequirementRequest {
-                status: Some(RequirementStatus::Done),
-                order_key: Some("1.1".into()),
-                title: None,
-                content: None,
-                tag: None,
-                completion_note: Some("did it".into()),
-                add_attachments: vec![],
-                remove_attachment_ids: vec![],
-            },
-        )
-        .await
-        .unwrap();
-
-        let board = s.board("g").await.unwrap();
-        assert_eq!(board.done.len(), 1);
-        assert_eq!(board.done[0].order_key, "1.1");
-        assert_eq!(board.pending.len(), 0);
-
-        let tags = s.tags().await.unwrap();
-        let g = tags.iter().find(|t| t.tag == "g").unwrap();
-        assert_eq!(g.done, 1);
-        assert_eq!(g.total, 1);
-    }
-
-    #[tokio::test]
-    async fn claim_set_status_and_finalize_respects_terminal() {
-        let s = svc().await;
-        let r = s
-            .create(CreateRequirementRequest {
-                title: "T".into(),
-                content: String::new(),
-                tag: "auto".into(),
-                order_key: Some("1".into()),
-                status: None,
-                created_by: None,
-                attachments: vec![],
-            })
+        let finalized = service
+            .finalize_if_needed(&requirement.id, false, None, true)
             .await
+            .unwrap()
             .unwrap();
-
-        let claimed = s.claim_next("auto", 1, AutoWorkTargetKind::Conversation, 60_000).await.unwrap().unwrap();
-        assert_eq!(claimed.id, r.id);
-        assert_eq!(claimed.status, RequirementStatus::InProgress);
-
-        // Agent self-reports done → finalize must respect it (note preserved).
-        s.complete(r.id, Some("agent did it".into())).await.unwrap();
-        let finalized = s.finalize_if_needed(r.id, false, None, false).await.unwrap().unwrap();
         assert_eq!(finalized.status, RequirementStatus::Done);
         assert_eq!(finalized.completion_note.as_deref(), Some("agent did it"));
+        assert!(matches!(
+            service
+                .set_status(&requirement.id, RequirementStatus::InProgress, None)
+                .await
+                .unwrap_err(),
+            AppError::BadRequest(_)
+        ));
+        assert_eq!(
+            service
+                .set_status(&requirement.id, RequirementStatus::Done, None)
+                .await
+                .unwrap()
+                .completion_note
+                .as_deref(),
+            Some("agent did it"),
+            "an idempotent terminal-state write must retain the existing verdict"
+        );
     }
 
     #[tokio::test]
-    async fn finalize_success_marks_done_when_agent_silent() {
-        let s = svc().await;
-        let r = s
-            .create(CreateRequirementRequest {
-                title: "T".into(),
-                content: String::new(),
-                tag: "auto".into(),
-                order_key: Some("1".into()),
-                status: None,
-                created_by: None,
-                attachments: vec![],
-            })
+    async fn a_no_note_verdict_clears_stale_review_prose() {
+        let (service, _conversation_id, _terminal_id) = service_with_owners().await;
+        let requirement = create_req(&service, "stale-note").await;
+        service
+            .set_status(
+                &requirement.id,
+                RequirementStatus::NeedsReview,
+                Some("unable to declare a verdict".into()),
+            )
             .await
             .unwrap();
-        s.claim_next("auto", 1, AutoWorkTargetKind::Conversation, 60_000).await.unwrap().unwrap();
-        let done = s.finalize_if_needed(r.id, false, None, false).await.unwrap().unwrap();
+
+        let done = service
+            .set_status(&requirement.id, RequirementStatus::Done, None)
+            .await
+            .unwrap();
         assert_eq!(done.status, RequirementStatus::Done);
+        assert_eq!(done.completion_note, None);
     }
 
     #[tokio::test]
-    async fn verdict_with_no_note_clears_a_stale_completion_note() {
-        // A prior attempt can leave prose in completion_note (e.g. a conversation
-        // turn whose agent couldn't call requirement_complete parked the requirement
-        // as needs_review with its apology as the note). When the requirement later
-        // reaches a verdict with NO note — exactly what the terminal path passes
-        // (`finalize_if_needed(.., None, false)`) — the stale note must be cleared,
-        // not preserved, or a `done` requirement shows a misleading completion record.
-        let s = svc().await;
-        let r = s
-            .create(CreateRequirementRequest {
-                title: "T".into(),
-                content: String::new(),
-                tag: "auto".into(),
-                order_key: Some("1".into()),
-                status: None,
-                created_by: None,
-                attachments: vec![],
-            })
+    async fn needs_review_roundtrips_and_remains_human_resolvable() {
+        let (service, conversation_id, _terminal_id) = service_with_owners().await;
+        let requirement = create_req(&service, "reviewable").await;
+        service
+            .claim_next(
+                "reviewable",
+                &conversation_id,
+                AutoWorkTargetKind::Conversation,
+                DEFAULT_LEASE_MS,
+            )
             .await
             .unwrap();
-        s.claim_next("auto", 1, AutoWorkTargetKind::Conversation, 60_000).await.unwrap().unwrap();
-        // Prior attempt parked it as needs_review with an apology note.
-        s.set_status(r.id, RequirementStatus::NeedsReview, Some("你好\n\n无法调用 requirement_complete".into()))
-            .await
-            .unwrap();
-        // Terminal completion: done with no note → must clear the stale note.
-        let done = s.set_status(r.id, RequirementStatus::Done, None).await.unwrap();
-        assert_eq!(done.status, RequirementStatus::Done);
-        assert_eq!(done.completion_note, None, "a no-note verdict must clear the stale completion note");
-    }
-
-    #[tokio::test]
-    async fn finalize_success_records_agent_note_when_supplied() {
-        // Tool-free engines (ACP/codex/gemini) have no native completion tool, so
-        // the AutoWork runner passes the agent's final plain-text message as the note.
-        let s = svc().await;
-        let r = s
-            .create(CreateRequirementRequest {
-                title: "T".into(),
-                content: String::new(),
-                tag: "auto".into(),
-                order_key: Some("1".into()),
-                status: None,
-                created_by: None,
-                attachments: vec![],
-            })
-            .await
-            .unwrap();
-        s.claim_next("auto", 1, AutoWorkTargetKind::Conversation, 60_000).await.unwrap().unwrap();
-        let done = s
-            .finalize_if_needed(r.id, false, Some("  added the logout button  ".into()), false)
+        let review = service
+            .finalize_if_needed(
+                &requirement.id,
+                false,
+                Some("please verify".into()),
+                true,
+            )
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(done.status, RequirementStatus::Done);
-        // Note is trimmed and recorded as the completion note.
-        assert_eq!(done.completion_note.as_deref(), Some("added the logout button"));
+
+        assert_eq!(review.status, RequirementStatus::NeedsReview);
+        assert_eq!(review.completion_note.as_deref(), Some("please verify"));
+        assert!(!service.is_tag_paused("reviewable").await.unwrap());
+        assert_eq!(service.board("reviewable").await.unwrap().needs_review.len(), 1);
+        assert_eq!(
+            service
+                .tags()
+                .await
+                .unwrap()
+                .into_iter()
+                .find(|summary| summary.tag == "reviewable")
+                .unwrap()
+                .needs_review,
+            1
+        );
+        assert_eq!(
+            service
+                .set_status(&requirement.id, RequirementStatus::Done, None)
+                .await
+                .unwrap()
+                .status,
+            RequirementStatus::Done
+        );
     }
 
     #[tokio::test]
-    async fn finalize_clean_turn_needs_review_when_verdict_expected() {
-        // Engine HAD a declaration channel (expects_verdict=true) but the agent
-        // ended the turn without declaring done/failed → park for human review,
-        // NOT silently done. This is the soft-failure guard.
-        let s = svc().await;
-        let r = s
-            .create(CreateRequirementRequest {
-                title: "T".into(),
-                content: String::new(),
-                tag: "auto".into(),
-                order_key: Some("1".into()),
-                status: None,
-                created_by: None,
-                attachments: vec![],
-            })
+    async fn exhausted_retries_pause_tag_and_explicit_resume_requeues() {
+        let (service, conversation_id, _terminal_id) = service_with_owners().await;
+        let requirement = create_req(&service, "retry-pause").await;
+        exhaust_requirement(&service, &requirement.id, "retry-pause", &conversation_id).await;
+
+        let failed = service.get(&requirement.id).await.unwrap();
+        assert_eq!(failed.status, RequirementStatus::Failed);
+        assert_eq!(failed.attempt_count, MAX_ATTEMPTS);
+        assert!(service.is_tag_paused("retry-pause").await.unwrap());
+        let state = service.tag_state("retry-pause").await.unwrap().unwrap();
+        assert_eq!(state.paused_reason.as_deref(), Some("requirement_failed"));
+        assert_eq!(state.paused_req_id.as_deref(), Some(requirement.id.as_str()));
+
+        service
+            .resume_tag("retry-pause", std::slice::from_ref(&requirement.id))
             .await
             .unwrap();
-        s.claim_next("auto", 1, AutoWorkTargetKind::Conversation, 60_000).await.unwrap().unwrap();
-        let out = s
-            .finalize_if_needed(r.id, false, Some("I think I'm done".into()), true)
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(out.status, RequirementStatus::NeedsReview, "no explicit verdict → needs_review");
-        assert_eq!(out.completion_note.as_deref(), Some("I think I'm done"));
-        // needs_review does NOT pause the tag (it's "verify", not "failed").
-        assert!(!s.is_tag_paused("auto").await.unwrap());
-        // …and it is surfaced in board + tag counts.
-        let board = s.board("auto").await.unwrap();
-        assert_eq!(board.needs_review.len(), 1);
-        let tags = s.tags().await.unwrap();
-        assert_eq!(tags.iter().find(|t| t.tag == "auto").unwrap().needs_review, 1);
-    }
-
-    #[tokio::test]
-    async fn finalize_respects_agent_declared_done_even_when_verdict_expected() {
-        // The agent explicitly completed via its tool (row already `done`) →
-        // finalize respects it even though expects_verdict=true.
-        let s = svc().await;
-        let r = s
-            .create(CreateRequirementRequest {
-                title: "T".into(),
-                content: String::new(),
-                tag: "auto".into(),
-                order_key: Some("1".into()),
-                status: None,
-                created_by: None,
-                attachments: vec![],
-            })
-            .await
-            .unwrap();
-        s.claim_next("auto", 1, AutoWorkTargetKind::Conversation, 60_000).await.unwrap().unwrap();
-        s.complete(r.id, Some("agent did it".into())).await.unwrap();
-        let out = s.finalize_if_needed(r.id, false, None, true).await.unwrap().unwrap();
-        assert_eq!(out.status, RequirementStatus::Done);
-        assert_eq!(out.completion_note.as_deref(), Some("agent did it"));
-    }
-
-    #[tokio::test]
-    async fn needs_review_is_not_frozen_and_db_roundtrips() {
-        // A human can move a needs_review requirement to done/failed (not frozen).
-        let s = svc().await;
-        let r = s
-            .create(CreateRequirementRequest {
-                title: "T".into(),
-                content: String::new(),
-                tag: "auto".into(),
-                order_key: Some("1".into()),
-                status: None,
-                created_by: None,
-                attachments: vec![],
-            })
-            .await
-            .unwrap();
-        s.claim_next("auto", 1, AutoWorkTargetKind::Conversation, 60_000).await.unwrap().unwrap();
-        s.finalize_if_needed(r.id, false, None, true).await.unwrap();
-        assert_eq!(s.get(r.id).await.unwrap().status, RequirementStatus::NeedsReview);
-        // human verifies → done
-        let done = s.set_status(r.id, RequirementStatus::Done, None).await.unwrap();
-        assert_eq!(done.status, RequirementStatus::Done);
-    }
-
-    #[tokio::test]
-    async fn finalize_error_repends_until_exhausted() {
-        let s = svc().await;
-        let r = s
-            .create(CreateRequirementRequest {
-                title: "T".into(),
-                content: String::new(),
-                tag: "auto".into(),
-                order_key: Some("1".into()),
-                status: None,
-                created_by: None,
-                attachments: vec![],
-            })
-            .await
-            .unwrap();
-
-        // Attempt 1: claim (attempt_count=1) → error → re-pend.
-        s.claim_next("auto", 1, AutoWorkTargetKind::Conversation, 60_000).await.unwrap().unwrap();
-        let after1 = s.finalize_if_needed(r.id, true, None, false).await.unwrap().unwrap();
-        assert_eq!(after1.status, RequirementStatus::Pending);
-
-        // Attempt 2 (count=2) → error → re-pend.
-        s.claim_next("auto", 1, AutoWorkTargetKind::Conversation, 60_000).await.unwrap().unwrap();
-        let after2 = s.finalize_if_needed(r.id, true, None, false).await.unwrap().unwrap();
-        assert_eq!(after2.status, RequirementStatus::Pending);
-
-        // Attempt 3 (count=3) → error → exhausted → failed.
-        s.claim_next("auto", 1, AutoWorkTargetKind::Conversation, 60_000).await.unwrap().unwrap();
-        let after3 = s.finalize_if_needed(r.id, true, None, false).await.unwrap().unwrap();
-        assert_eq!(after3.status, RequirementStatus::Failed);
-    }
-
-    #[tokio::test]
-    async fn finalize_exhausted_pauses_tag() {
-        let s = svc().await;
-        let r = s
-            .create(CreateRequirementRequest {
-                title: "T".into(),
-                content: String::new(),
-                tag: "auto".into(),
-                order_key: Some("1".into()),
-                status: None,
-                created_by: None,
-                attachments: vec![],
-            })
-            .await
-            .unwrap();
-        assert!(!s.is_tag_paused("auto").await.unwrap());
-
-        // Burn all 3 attempts → failed → tag must pause.
-        for _ in 0..3 {
-            s.claim_next("auto", 1, AutoWorkTargetKind::Conversation, 60_000).await.unwrap().unwrap();
-            s.finalize_if_needed(r.id, true, None, false).await.unwrap();
-        }
-        assert_eq!(s.get(r.id).await.unwrap().status, RequirementStatus::Failed);
-        assert!(s.is_tag_paused("auto").await.unwrap(), "exhausted failure must pause the tag");
-
-        let st = s.tag_state("auto").await.unwrap().expect("tag state row");
-        assert_eq!(st.paused_reason.as_deref(), Some("requirement_failed"));
-        assert_eq!(st.paused_req_id, Some(r.id));
-    }
-
-    #[tokio::test]
-    async fn resume_tag_unpauses_and_requeues_failed() {
-        let s = svc().await;
-        let r = s
-            .create(CreateRequirementRequest {
-                title: "T".into(),
-                content: String::new(),
-                tag: "auto".into(),
-                order_key: Some("1".into()),
-                status: None,
-                created_by: None,
-                attachments: vec![],
-            })
-            .await
-            .unwrap();
-        for _ in 0..3 {
-            s.claim_next("auto", 1, AutoWorkTargetKind::Conversation, 60_000).await.unwrap().unwrap();
-            s.finalize_if_needed(r.id, true, None, false).await.unwrap();
-        }
-        assert!(s.is_tag_paused("auto").await.unwrap());
-
-        // Resume + requeue the failed requirement.
-        s.resume_tag("auto", &[r.id.clone()]).await.unwrap();
-        assert!(!s.is_tag_paused("auto").await.unwrap());
-        let row = s.get(r.id).await.unwrap();
-        assert_eq!(row.status, RequirementStatus::Pending, "requeued back to pending");
-        assert_eq!(row.attempt_count, 0, "requeue clears consumed attempts");
-        // And it is claimable again now the tag is resumed.
-        let claimed = s.claim_next("auto", 1, AutoWorkTargetKind::Conversation, 60_000).await.unwrap();
-        assert_eq!(claimed.expect("claimable after resume").id, r.id);
-    }
-
-    #[tokio::test]
-    async fn resume_tag_for_enable_unpauses_and_refreshes_stuck_requirement() {
-        // The recurring "彻底不工作" trap: a tag paused by a prior failure blocks
-        // every conversation bound to it. Re-enabling AutoWork must auto-resume it
-        // AND give the stuck requirement a fresh attempt budget — without the
-        // caller passing explicit ids.
-        let s = svc().await;
-        let r = s
-            .create(CreateRequirementRequest {
-                title: "T".into(),
-                content: String::new(),
-                tag: "auto".into(),
-                order_key: Some("1".into()),
-                status: None,
-                created_by: None,
-                attachments: vec![],
-            })
-            .await
-            .unwrap();
-        for _ in 0..3 {
-            s.claim_next("auto", 1, AutoWorkTargetKind::Conversation, 60_000).await.unwrap().unwrap();
-            s.finalize_if_needed(r.id, true, None, false).await.unwrap();
-        }
-        assert!(s.is_tag_paused("auto").await.unwrap(), "3 failures pause the tag");
-
-        // Enabling AutoWork on a conversation bound to this tag auto-resumes it.
-        s.resume_tag_for_enable("auto").await.unwrap();
-        assert!(!s.is_tag_paused("auto").await.unwrap(), "enable must unpause the tag");
-        let row = s.get(r.id).await.unwrap();
-        assert_eq!(row.status, RequirementStatus::Pending, "stuck requirement re-pended");
-        assert_eq!(row.attempt_count, 0, "fresh attempt budget on enable");
-        // Claimable again.
-        let claimed = s.claim_next("auto", 1, AutoWorkTargetKind::Conversation, 60_000).await.unwrap();
-        assert_eq!(claimed.expect("claimable after enable-resume").id, r.id);
-    }
-
-    #[tokio::test]
-    async fn resume_tag_for_enable_is_noop_when_not_paused() {
-        // Must NOT disturb a healthy tag: no pause → no requeue, no attempt reset.
-        let s = svc().await;
-        let r = s
-            .create(CreateRequirementRequest {
-                title: "T".into(),
-                content: String::new(),
-                tag: "auto".into(),
-                order_key: Some("1".into()),
-                status: None,
-                created_by: None,
-                attachments: vec![],
-            })
-            .await
-            .unwrap();
-        // Consume one attempt but do NOT exhaust (tag stays active).
-        s.claim_next("auto", 1, AutoWorkTargetKind::Conversation, 60_000).await.unwrap().unwrap();
-        s.finalize_if_needed(r.id, true, None, false).await.unwrap(); // re-pended, attempt_count=1
-        assert!(!s.is_tag_paused("auto").await.unwrap());
-
-        s.resume_tag_for_enable("auto").await.unwrap();
-        let row = s.get(r.id).await.unwrap();
-        assert_eq!(row.attempt_count, 1, "an unpaused tag must not be reset by enable");
-    }
-
-    #[tokio::test]
-    async fn tags_reports_paused_state() {
-        let s = svc().await;
-        s.create(CreateRequirementRequest {
-            title: "T".into(),
-            content: String::new(),
-            tag: "auto".into(),
-            order_key: Some("1".into()),
-            status: None,
-            created_by: None,
-            attachments: vec![],
-        })
-        .await
-        .unwrap();
-
-        let tags = s.tags().await.unwrap();
-        assert!(!tags.iter().find(|t| t.tag == "auto").unwrap().paused);
-
-        s.repo()
-            .pause_tag("auto", "requirement_failed", None, now_ms())
-            .await
-            .unwrap();
-        let tags2 = s.tags().await.unwrap();
-        let t = tags2.iter().find(|t| t.tag == "auto").unwrap();
-        assert!(t.paused, "tags() must report the paused tag");
-        assert_eq!(t.paused_reason.as_deref(), Some("requirement_failed"));
-    }
-
-    #[tokio::test]
-    async fn unclaim_busy_reverts_without_consuming_attempt() {
-        let s = svc().await;
-        let r = s
-            .create(CreateRequirementRequest {
-                title: "T".into(),
-                content: String::new(),
-                tag: "auto".into(),
-                order_key: Some("1".into()),
-                status: None,
-                created_by: None,
-                attachments: vec![],
-            })
-            .await
-            .unwrap();
-        let claimed = s.claim_next("auto", 1, AutoWorkTargetKind::Conversation, 60_000).await.unwrap().unwrap();
-        assert_eq!(claimed.attempt_count, 1);
-        s.unclaim_busy(r.id, 1).await.unwrap();
-        let after = s.get(r.id).await.unwrap();
-        assert_eq!(after.status, RequirementStatus::Pending);
-        assert_eq!(after.attempt_count, 0, "busy unclaim must not consume an attempt");
-    }
-
-    #[tokio::test]
-    async fn clear_owner_for_session_clears_owner_columns_and_repends_in_progress() {
-        // §9.B: deleting a conversation/terminal must clear the dual-domain
-        // `owner_session_id`+`owner_kind` (no FK to cascade) of every requirement
-        // it owned, and re-pend any in_progress one (its session is gone).
-        let s = svc().await;
-        let r = s
-            .create(CreateRequirementRequest {
-                title: "T".into(),
-                content: String::new(),
-                tag: "auto".into(),
-                order_key: Some("1".into()),
-                status: None,
-                created_by: None,
-                attachments: vec![],
-            })
-            .await
-            .unwrap();
-        let claimed = s.claim_next("auto", 1, AutoWorkTargetKind::Conversation, 60_000).await.unwrap().unwrap();
-        // Claimed → owner columns are set and paired.
-        assert_eq!(claimed.owner_session_id, Some(1));
-        assert_eq!(claimed.owner_kind.as_deref(), Some("conversation"));
-        assert_eq!(claimed.status, RequirementStatus::InProgress);
-
-        // The owning conversation is deleted → clear its requirements' owner.
-        let cleared = s.clear_owner_for_session(1, AutoWorkTargetKind::Conversation).await.unwrap();
-        assert_eq!(cleared, 1, "the one claimed requirement must be cleared");
-        let after = s.get(r.id).await.unwrap();
-        // Both owner columns cleared together (paired-NULL CHECK), in_progress
-        // re-pended, attempt NOT consumed (session vanishing is not a failed try).
-        assert_eq!(after.owner_session_id, None);
-        assert_eq!(after.owner_kind, None);
-        assert_eq!(after.status, RequirementStatus::Pending);
-        assert_eq!(after.attempt_count, 1, "clearing owner must not consume an attempt");
-
-        // A session that owns nothing → no-op, zero cleared, idempotent.
-        assert_eq!(s.clear_owner_for_session(1, AutoWorkTargetKind::Conversation).await.unwrap(), 0);
-        assert_eq!(s.clear_owner_for_session(999, AutoWorkTargetKind::Terminal).await.unwrap(), 0);
-    }
-
-    #[tokio::test]
-    async fn set_status_rejects_transition_out_of_terminal() {
-        let s = svc().await;
-        let r = s
-            .create(CreateRequirementRequest {
-                title: "T".into(),
-                content: String::new(),
-                tag: "t".into(),
-                order_key: Some("1".into()),
-                status: None,
-                created_by: None,
-                attachments: vec![],
-            })
-            .await
-            .unwrap();
-        s.set_status(r.id, RequirementStatus::Done, None).await.unwrap();
-        // done is terminal → cannot go back to in_progress.
-        let err = s
-            .set_status(r.id, RequirementStatus::InProgress, None)
-            .await
-            .unwrap_err();
-        assert!(matches!(err, AppError::BadRequest(_)));
-        // re-setting the same terminal status is an idempotent no-op.
-        let again = s.set_status(r.id, RequirementStatus::Done, None).await.unwrap();
-        assert_eq!(again.status, RequirementStatus::Done);
-    }
-
-    #[tokio::test]
-    async fn release_claim_repends_without_consuming_attempt() {
-        let s = svc().await;
-        let r = s
-            .create(CreateRequirementRequest {
-                title: "T".into(),
-                content: String::new(),
-                tag: "auto".into(),
-                order_key: Some("1".into()),
-                status: None,
-                created_by: None,
-                attachments: vec![],
-            })
-            .await
-            .unwrap();
-        let claimed = s.claim_next("auto", 1, AutoWorkTargetKind::Conversation, 60_000).await.unwrap().unwrap();
-        assert_eq!(claimed.attempt_count, 1);
-        s.release_claim(r.id, 1).await.unwrap();
-        let after = s.get(r.id).await.unwrap();
-        assert_eq!(after.status, RequirementStatus::Pending);
-        assert_eq!(after.attempt_count, 1, "release must not consume an attempt");
-        // wrong-owner release is a no-op.
-        s.claim_next("auto", 1, AutoWorkTargetKind::Conversation, 60_000).await.unwrap().unwrap();
-        s.release_claim(r.id, 2).await.unwrap();
-        assert_eq!(s.get(r.id).await.unwrap().status, RequirementStatus::InProgress);
-    }
-
-    #[tokio::test]
-    async fn user_interrupt_pauses_tag_and_repends_without_consuming_attempt() {
-        let s = svc().await;
-        let r = s
-            .create(CreateRequirementRequest {
-                title: "T".into(),
-                content: String::new(),
-                tag: "auto".into(),
-                order_key: Some("1".into()),
-                status: None,
-                created_by: None,
-                attachments: vec![],
-            })
-            .await
-            .unwrap();
-        let claimed = s.claim_next("auto", 1, AutoWorkTargetKind::Conversation, 60_000).await.unwrap().unwrap();
-        assert_eq!(claimed.attempt_count, 1);
-
-        s.user_interrupt(r.id, 1, "auto").await.unwrap();
-
-        // The requirement goes back to pending WITHOUT a consumed attempt — a
-        // user stop is not a failed attempt.
-        let after = s.get(r.id).await.unwrap();
-        assert_eq!(after.status, RequirementStatus::Pending);
-        assert_eq!(after.attempt_count, 1, "user interrupt must not consume an attempt");
-
-        // The tag is paused (reason user_interrupted) so the loop cannot
-        // instantly re-claim and re-inject — the "paused it and it started
-        // running again by itself" bug.
-        assert!(s.is_tag_paused("auto").await.unwrap(), "user interrupt must pause the tag");
-        let st = s.tag_state("auto").await.unwrap().expect("tag state row");
-        assert_eq!(st.paused_reason.as_deref(), Some("user_interrupted"));
-        assert_eq!(st.paused_req_id, Some(r.id));
+        let requeued = service.get(&requirement.id).await.unwrap();
+        assert_eq!(requeued.status, RequirementStatus::Pending);
+        assert_eq!(requeued.attempt_count, 0);
+        assert!(!service.is_tag_paused("retry-pause").await.unwrap());
         assert!(
-            s.claim_next("auto", 1, AutoWorkTargetKind::Conversation, 60_000).await.unwrap().is_none(),
-            "a paused tag must not be claimable"
+            service
+                .claim_next(
+                    "retry-pause",
+                    &conversation_id,
+                    AutoWorkTargetKind::Conversation,
+                    DEFAULT_LEASE_MS,
+                )
+                .await
+                .unwrap()
+                .is_some()
+        );
+    }
+
+    #[tokio::test]
+    async fn enable_resume_refreshes_paused_work_but_not_healthy_work() {
+        let (service, conversation_id, _terminal_id) = service_with_owners().await;
+        let stuck = create_req(&service, "enable-resume").await;
+        exhaust_requirement(&service, &stuck.id, "enable-resume", &conversation_id).await;
+        service.resume_tag_for_enable("enable-resume").await.unwrap();
+        let refreshed = service.get(&stuck.id).await.unwrap();
+        assert_eq!(refreshed.status, RequirementStatus::Pending);
+        assert_eq!(refreshed.attempt_count, 0);
+        assert!(!service.is_tag_paused("enable-resume").await.unwrap());
+
+        let healthy = create_req(&service, "healthy-enable").await;
+        service
+            .claim_next(
+                "healthy-enable",
+                &conversation_id,
+                AutoWorkTargetKind::Conversation,
+                DEFAULT_LEASE_MS,
+            )
+            .await
+            .unwrap();
+        service
+            .finalize_if_needed(&healthy.id, true, None, false)
+            .await
+            .unwrap();
+        assert_eq!(service.get(&healthy.id).await.unwrap().attempt_count, 1);
+        service.resume_tag_for_enable("healthy-enable").await.unwrap();
+        assert_eq!(
+            service.get(&healthy.id).await.unwrap().attempt_count,
+            1,
+            "enabling an unpaused tag must not reset a healthy retry budget"
+        );
+    }
+
+    #[tokio::test]
+    async fn busy_unclaim_requeues_without_consuming_attempt() {
+        let (service, conversation_id, _terminal_id) = service_with_owners().await;
+        let requirement = create_req(&service, "busy").await;
+        let claimed = service
+            .claim_next(
+                "busy",
+                &conversation_id,
+                AutoWorkTargetKind::Conversation,
+                DEFAULT_LEASE_MS,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(claimed.attempt_count, 1);
+
+        service
+            .unclaim_busy(
+                &requirement.id,
+                &conversation_id,
+                AutoWorkTargetKind::Conversation,
+            )
+            .await
+            .unwrap();
+        let requeued = service.get(&requirement.id).await.unwrap();
+        assert_eq!(requeued.status, RequirementStatus::Pending);
+        assert_eq!(requeued.attempt_count, 0);
+    }
+
+    #[tokio::test]
+    async fn user_interrupt_pauses_then_resume_allows_reclaim() {
+        let (service, conversation_id, _terminal_id) = service_with_owners().await;
+        let requirement = create_req(&service, "interrupted").await;
+        service
+            .claim_next(
+                "interrupted",
+                &conversation_id,
+                AutoWorkTargetKind::Conversation,
+                DEFAULT_LEASE_MS,
+            )
+            .await
+            .unwrap();
+        service
+            .user_interrupt(&requirement.id, &conversation_id, "interrupted")
+            .await
+            .unwrap();
+
+        let interrupted = service.get(&requirement.id).await.unwrap();
+        assert_eq!(interrupted.status, RequirementStatus::Pending);
+        assert_eq!(interrupted.attempt_count, 1);
+        assert!(service.is_tag_paused("interrupted").await.unwrap());
+        assert!(
+            service
+                .claim_next(
+                    "interrupted",
+                    &conversation_id,
+                    AutoWorkTargetKind::Conversation,
+                    DEFAULT_LEASE_MS,
+                )
+                .await
+                .unwrap()
+                .is_none()
         );
 
-        // Resume (the UI's 恢复 button) makes it claimable again.
-        s.resume_tag("auto", &[]).await.unwrap();
-        assert!(s.claim_next("auto", 1, AutoWorkTargetKind::Conversation, 60_000).await.unwrap().is_some());
+        service.resume_tag("interrupted", &[]).await.unwrap();
+        assert!(
+            service
+                .claim_next(
+                    "interrupted",
+                    &conversation_id,
+                    AutoWorkTargetKind::Conversation,
+                    DEFAULT_LEASE_MS,
+                )
+                .await
+                .unwrap()
+                .is_some()
+        );
     }
 
     #[tokio::test]
-    async fn delete_many_counts_and_skips_missing() {
-        let s = svc().await;
-        let mut ids = Vec::new();
-        for i in 0..2 {
-            let r = s
-                .create(CreateRequirementRequest {
-                    title: format!("T{i}"),
-                    content: String::new(),
-                    tag: "t".into(),
-                    order_key: Some(format!("{i}")),
-                    status: None,
-                    created_by: None,
-                    attachments: vec![],
-                })
+    async fn clear_owner_is_scoped_to_domain_and_requeues_work() {
+        let (service, conversation_id, terminal_id) = service_with_owners().await;
+        let conv_req = create_req(&service, "conv").await;
+        let term_req = create_req(&service, "term").await;
+        service
+            .claim_next(
+                "conv",
+                &conversation_id,
+                AutoWorkTargetKind::Conversation,
+                DEFAULT_LEASE_MS,
+            )
+            .await
+            .unwrap();
+        service
+            .claim_next(
+                "term",
+                &terminal_id,
+                AutoWorkTargetKind::Terminal,
+                DEFAULT_LEASE_MS,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            service
+                .clear_owner_for_session(&conversation_id, AutoWorkTargetKind::Conversation)
                 .await
-                .unwrap();
-            ids.push(r.id);
-        }
-        ids.push(999_999);
-        let deleted = s.delete_many(&ids).await.unwrap();
-        assert_eq!(deleted, 2, "missing ids are skipped");
+                .unwrap(),
+            1
+        );
+        let conv_after = service.get(&conv_req.id).await.unwrap();
+        assert_eq!(conv_after.status, RequirementStatus::Pending);
+        assert!(conv_after.owner_conversation_id.is_none());
+        let term_after = service.get(&term_req.id).await.unwrap();
+        assert_eq!(
+            term_after.owner_terminal_id.as_deref(),
+            Some(terminal_id.as_str())
+        );
     }
 
-    // --- Terminal AutoWork (mock driver) --------------------------------
+    #[tokio::test]
+    async fn conversation_release_cannot_release_terminal_owned_work() {
+        let (service, conversation_id, terminal_id) = service_with_owners().await;
+        let terminal_requirement = create_req(&service, "terminal-release").await;
+        service
+            .claim_next(
+                "terminal-release",
+                &terminal_id,
+                AutoWorkTargetKind::Terminal,
+                DEFAULT_LEASE_MS,
+            )
+            .await
+            .unwrap();
 
-    use nomifun_terminal::TerminalDescription;
-    use nomifun_terminal::error::TerminalError;
-    use std::sync::Mutex as StdMutex;
+        service
+            .release_claim(&terminal_requirement.id, &conversation_id)
+            .await
+            .unwrap();
+        let terminal_after = service.get(&terminal_requirement.id).await.unwrap();
+        assert_eq!(terminal_after.status, RequirementStatus::InProgress);
+        assert_eq!(
+            terminal_after.owner_terminal_id.as_deref(),
+            Some(terminal_id.as_str())
+        );
+        assert!(terminal_after.owner_conversation_id.is_none());
+
+        let conversation_requirement = create_req(&service, "conversation-release").await;
+        service
+            .claim_next(
+                "conversation-release",
+                &conversation_id,
+                AutoWorkTargetKind::Conversation,
+                DEFAULT_LEASE_MS,
+            )
+            .await
+            .unwrap();
+        service
+            .release_claim(&conversation_requirement.id, &conversation_id)
+            .await
+            .unwrap();
+        let conversation_after = service.get(&conversation_requirement.id).await.unwrap();
+        assert_eq!(conversation_after.status, RequirementStatus::Pending);
+        assert!(conversation_after.owner_conversation_id.is_none());
+        assert!(conversation_after.owner_terminal_id.is_none());
+    }
 
     struct MockDriver {
         user_id: String,
@@ -2113,45 +2099,54 @@ mod tests {
         backend: Option<String>,
         last_status: String,
         exists: bool,
-        autowork: StdMutex<Option<String>>,
-        idmm: StdMutex<Option<String>>,
+        autowork: std::sync::Mutex<Option<String>>,
+        idmm: std::sync::Mutex<Option<String>>,
     }
 
     impl MockDriver {
-        fn agent() -> Self {
+        fn agent(user_id: String) -> Self {
             Self {
-                user_id: "user_1".into(),
-                // Empty command/no-args: eligibility for the existing cases is
-                // driven purely by the declared `backend` (which `resolve_agent_family`
-                // checks first). The wrapper/custom-command tests set command/args
-                // explicitly to exercise the program-stem / arg-token paths.
+                user_id,
                 command: String::new(),
                 args: vec![],
                 backend: Some("claude".into()),
                 last_status: "running".into(),
                 exists: true,
-                autowork: StdMutex::new(None),
-                idmm: StdMutex::new(None),
+                autowork: std::sync::Mutex::new(None),
+                idmm: std::sync::Mutex::new(None),
             }
         }
     }
 
     #[async_trait::async_trait]
     impl TerminalDriver for MockDriver {
-        async fn write_input(&self, _id: i64, _bytes: &[u8]) -> Result<(), TerminalError> {
+        async fn write_input(
+            &self,
+            _id: &str,
+            _bytes: &[u8],
+        ) -> Result<(), nomifun_terminal::error::TerminalError> {
             Ok(())
         }
-        fn subscribe_output(&self, _id: i64) -> Option<tokio::sync::broadcast::Receiver<Vec<u8>>> {
+
+        fn subscribe_output(
+            &self,
+            _id: &str,
+        ) -> Option<tokio::sync::broadcast::Receiver<Vec<u8>>> {
             None
         }
-        fn is_alive(&self, _id: i64) -> bool {
+
+        fn is_alive(&self, _id: &str) -> bool {
             self.last_status == "running"
         }
-        async fn describe(&self, _id: i64) -> Result<Option<TerminalDescription>, TerminalError> {
+
+        async fn describe(
+            &self,
+            _id: &str,
+        ) -> Result<Option<nomifun_terminal::TerminalDescription>, nomifun_terminal::error::TerminalError> {
             if !self.exists {
                 return Ok(None);
             }
-            Ok(Some(TerminalDescription {
+            Ok(Some(nomifun_terminal::TerminalDescription {
                 user_id: self.user_id.clone(),
                 cwd: String::new(),
                 command: self.command.clone(),
@@ -2161,48 +2156,78 @@ mod tests {
                 last_status: self.last_status.clone(),
             }))
         }
-        async fn read_autowork(&self, _id: i64) -> Result<Option<String>, TerminalError> {
+
+        async fn read_autowork(
+            &self,
+            _id: &str,
+        ) -> Result<Option<String>, nomifun_terminal::error::TerminalError> {
             Ok(self.autowork.lock().unwrap().clone())
         }
-        async fn write_autowork(&self, _id: i64, autowork: Option<&str>) -> Result<(), TerminalError> {
-            *self.autowork.lock().unwrap() = autowork.map(|s| s.to_owned());
+
+        async fn write_autowork(
+            &self,
+            _id: &str,
+            autowork: Option<&str>,
+        ) -> Result<(), nomifun_terminal::error::TerminalError> {
+            *self.autowork.lock().unwrap() = autowork.map(str::to_owned);
             Ok(())
         }
-        async fn read_idmm(&self, _id: i64) -> Result<Option<String>, TerminalError> {
+
+        async fn read_idmm(
+            &self,
+            _id: &str,
+        ) -> Result<Option<String>, nomifun_terminal::error::TerminalError> {
             Ok(self.idmm.lock().unwrap().clone())
         }
-        async fn write_idmm(&self, _id: i64, idmm: Option<&str>) -> Result<(), TerminalError> {
-            *self.idmm.lock().unwrap() = idmm.map(|s| s.to_owned());
+
+        async fn write_idmm(
+            &self,
+            _id: &str,
+            idmm: Option<&str>,
+        ) -> Result<(), nomifun_terminal::error::TerminalError> {
+            *self.idmm.lock().unwrap() = idmm.map(str::to_owned);
             Ok(())
         }
+
         fn subscribe_lifecycle(
             &self,
-            _id: i64,
+            _id: &str,
         ) -> Option<tokio::sync::broadcast::Receiver<nomifun_terminal::TerminalLifecycleEvent>> {
             None
         }
     }
 
-    async fn svc_with_driver(driver: Arc<dyn TerminalDriver>) -> RequirementService {
+    async fn service_with_driver(driver: Arc<dyn TerminalDriver>) -> RequirementService {
         let db = init_database_memory().await.unwrap();
-        let repo: Arc<dyn IRequirementRepository> = Arc::new(SqliteRequirementRepository::new(db.pool().clone()));
+        let installation_owner = nomifun_db::installation_owner_id(db.pool()).await.unwrap();
+        let repo: Arc<dyn IRequirementRepository> =
+            Arc::new(SqliteRequirementRepository::new(db.pool().clone()));
         let emitter = RequirementEventEmitter::new(
             Arc::new(NoopBroadcaster),
-            Arc::from("system_default_user"),
+            Arc::from(installation_owner.as_str()),
         );
         Box::leak(Box::new(db));
         RequirementService::new(repo, emitter).with_terminal_driver(driver)
     }
 
     #[tokio::test]
-    async fn terminal_config_save_and_read_roundtrips() {
-        let driver = Arc::new(MockDriver::agent());
-        let s = svc_with_driver(driver).await;
-        s.save_autowork_config(AutoWorkTargetKind::Terminal, "1", true, Some("alpha"), Some(5))
+    async fn terminal_config_roundtrips_with_canonical_id() {
+        let user_id = UserId::new().into_string();
+        let terminal_id = TerminalId::new().into_string();
+        let service = service_with_driver(Arc::new(MockDriver::agent(user_id))).await;
+
+        service
+            .save_autowork_config(
+                AutoWorkTargetKind::Terminal,
+                &terminal_id,
+                true,
+                Some("alpha"),
+                Some(5),
+            )
             .await
             .unwrap();
-        let (enabled, tag, max) = s
-            .read_autowork_config(AutoWorkTargetKind::Terminal, "1")
+        let (enabled, tag, max) = service
+            .read_autowork_config(AutoWorkTargetKind::Terminal, &terminal_id)
             .await
             .unwrap();
         assert!(enabled);
@@ -2212,302 +2237,122 @@ mod tests {
 
     #[tokio::test]
     async fn verify_terminal_owner_enforces_isolation() {
-        let s = svc_with_driver(Arc::new(MockDriver::agent())).await;
-        // owner matches
-        s.verify_terminal_owner("1", "user_1").await.unwrap();
-        // wrong owner → Forbidden
+        let owner_id = UserId::new().into_string();
+        let terminal_id = TerminalId::new().into_string();
+        let service = service_with_driver(Arc::new(MockDriver::agent(owner_id.clone()))).await;
+
+        service
+            .verify_terminal_owner(&terminal_id, &owner_id)
+            .await
+            .unwrap();
+        let intruder_id = UserId::new().into_string();
         assert!(matches!(
-            s.verify_terminal_owner("1", "intruder").await.unwrap_err(),
+            service
+                .verify_terminal_owner(&terminal_id, &intruder_id)
+                .await
+                .unwrap_err(),
             AppError::Forbidden(_)
         ));
-        // missing terminal → NotFound
+
         let missing = Arc::new(MockDriver {
             exists: false,
-            ..MockDriver::agent()
+            ..MockDriver::agent(owner_id.clone())
         });
-        let s2 = svc_with_driver(missing).await;
+        let missing_service = service_with_driver(missing).await;
+        let missing_terminal_id = TerminalId::new().into_string();
         assert!(matches!(
-            s2.verify_terminal_owner("999", "user_1").await.unwrap_err(),
+            missing_service
+                .verify_terminal_owner(&missing_terminal_id, &owner_id)
+                .await
+                .unwrap_err(),
             AppError::NotFound(_)
         ));
     }
 
     #[tokio::test]
-    async fn ensure_terminal_autowork_eligible_gates_backend_and_status() {
-        // agent CLI + running → ok
-        let s = svc_with_driver(Arc::new(MockDriver::agent())).await;
-        s.ensure_terminal_autowork_eligible("1").await.unwrap();
+    async fn terminal_autowork_eligibility_gates_backend_status_and_wrappers() {
+        let owner_id = UserId::new().into_string();
+        let terminal_id = TerminalId::new().into_string();
+        service_with_driver(Arc::new(MockDriver::agent(owner_id.clone())))
+            .await
+            .ensure_terminal_autowork_eligible(&terminal_id)
+            .await
+            .unwrap();
 
-        // plain shell (backend None) → BadRequest
-        let shell = Arc::new(MockDriver {
+        let plain_shell = Arc::new(MockDriver {
             backend: None,
-            ..MockDriver::agent()
+            ..MockDriver::agent(owner_id.clone())
         });
-        let s_shell = svc_with_driver(shell).await;
         assert!(matches!(
-            s_shell.ensure_terminal_autowork_eligible("1").await.unwrap_err(),
+            service_with_driver(plain_shell)
+                .await
+                .ensure_terminal_autowork_eligible(&terminal_id)
+                .await
+                .unwrap_err(),
             AppError::BadRequest(_)
         ));
 
-        // agent CLI but exited → BadRequest
         let exited = Arc::new(MockDriver {
             last_status: "exited".into(),
-            ..MockDriver::agent()
+            ..MockDriver::agent(owner_id.clone())
         });
-        let s_exited = svc_with_driver(exited).await;
         assert!(matches!(
-            s_exited.ensure_terminal_autowork_eligible("1").await.unwrap_err(),
+            service_with_driver(exited)
+                .await
+                .ensure_terminal_autowork_eligible(&terminal_id)
+                .await
+                .unwrap_err(),
             AppError::BadRequest(_)
         ));
-    }
 
-    #[tokio::test]
-    async fn ensure_terminal_autowork_eligible_verdict_capable_only() {
-        // codex is verdict-capable → ok
-        let codex = Arc::new(MockDriver {
-            backend: Some("codex".into()),
-            ..MockDriver::agent()
-        });
-        let s_codex = svc_with_driver(codex).await;
-        s_codex.ensure_terminal_autowork_eligible("1").await.unwrap();
-
-        // gemini is NOT verdict-capable (no lifecycle hook, no MCP profile) → BadRequest
-        let gemini = Arc::new(MockDriver {
+        let unsupported = Arc::new(MockDriver {
             backend: Some("gemini".into()),
-            ..MockDriver::agent()
+            ..MockDriver::agent(owner_id.clone())
         });
-        let s_gemini = svc_with_driver(gemini).await;
         assert!(matches!(
-            s_gemini.ensure_terminal_autowork_eligible("1").await.unwrap_err(),
+            service_with_driver(unsupported)
+                .await
+                .ensure_terminal_autowork_eligible(&terminal_id)
+                .await
+                .unwrap_err(),
             AppError::BadRequest(_)
         ));
 
-        // unknown CLI (e.g. "aider") → BadRequest
-        let unknown = Arc::new(MockDriver {
-            backend: Some("aider".into()),
-            ..MockDriver::agent()
-        });
-        let s_unknown = svc_with_driver(unknown).await;
+        for (command, args) in [
+            ("stepcode", vec!["claude"]),
+            ("npx", vec!["codex"]),
+            ("claude", vec!["--dangerously-skip-permissions"]),
+        ] {
+            let wrapper = Arc::new(MockDriver {
+                command: command.into(),
+                args: args.into_iter().map(str::to_owned).collect(),
+                backend: None,
+                ..MockDriver::agent(owner_id.clone())
+            });
+            service_with_driver(wrapper)
+                .await
+                .ensure_terminal_autowork_eligible(&terminal_id)
+                .await
+                .unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn invalid_ids_fail_closed_at_service_boundaries() {
+        let (service, _conversation_id, _terminal_id) = service_with_owners().await;
         assert!(matches!(
-            s_unknown.ensure_terminal_autowork_eligible("1").await.unwrap_err(),
-            AppError::BadRequest(_)
+            service
+                .claim_next("x", "1", AutoWorkTargetKind::Conversation, DEFAULT_LEASE_MS)
+                .await
+                .unwrap_err(),
+            AppError::NotFound(_)
         ));
-    }
-
-    #[tokio::test]
-    async fn ensure_terminal_autowork_eligible_accepts_wrappers_and_custom_commands() {
-        // The bug this fixes: a wrapper / custom launch stores `backend = None`
-        // (no preset declared it), yet the launch injector resolves it to an
-        // agent family via the command/args and DOES inject the lifecycle hook.
-        // Eligibility must agree — it now resolves the family the same way.
-
-        // Wrapper `stepcode claude` with no declared backend → eligible.
-        let wrapper = Arc::new(MockDriver {
-            command: "stepcode".into(),
-            args: vec!["claude".into()],
-            backend: None,
-            ..MockDriver::agent()
-        });
-        svc_with_driver(wrapper).await.ensure_terminal_autowork_eligible("1").await.unwrap();
-
-        // `npx codex` wrapper → eligible.
-        let npx = Arc::new(MockDriver {
-            command: "npx".into(),
-            args: vec!["codex".into()],
-            backend: None,
-            ..MockDriver::agent()
-        });
-        svc_with_driver(npx).await.ensure_terminal_autowork_eligible("1").await.unwrap();
-
-        // Bare `claude` typed into a custom (shell-preset) command, backend None → eligible.
-        let bare = Arc::new(MockDriver {
-            command: "claude".into(),
-            args: vec!["--dangerously-skip-permissions".into()],
-            backend: None,
-            ..MockDriver::agent()
-        });
-        svc_with_driver(bare).await.ensure_terminal_autowork_eligible("1").await.unwrap();
-
-        // A wrapper around a non-agent (e.g. `stepcode frob`) → still rejected.
-        let bad_wrapper = Arc::new(MockDriver {
-            command: "stepcode".into(),
-            args: vec!["frob".into()],
-            backend: None,
-            ..MockDriver::agent()
-        });
         assert!(matches!(
-            svc_with_driver(bad_wrapper).await.ensure_terminal_autowork_eligible("1").await.unwrap_err(),
-            AppError::BadRequest(_)
+            service
+                .claim_next("x", "1", AutoWorkTargetKind::Terminal, DEFAULT_LEASE_MS)
+                .await
+                .unwrap_err(),
+            AppError::NotFound(_)
         ));
-    }
-
-    // ── C2 (spec §2.2): cross-domain release isolation ──────────────────────
-    //
-    // After integerization `conv#5` and `term#5` share the numeric owner value
-    // `5`. `release_claim` is a CONVERSATION-domain operation; it must NOT
-    // release a requirement owned by a TERMINAL that merely shares the number.
-
-    /// Build a service over a fresh memory DB with BOTH a conversation #5 and a
-    /// terminal #5 seeded (so the dual-domain owner column can hold either at
-    /// the same numeric id). Returns the live service (DB leaked to keep it
-    /// alive, mirroring `svc()`).
-    async fn svc_with_conv5_and_term5() -> RequirementService {
-        let db = init_database_memory().await.unwrap();
-        let repo: Arc<dyn IRequirementRepository> = Arc::new(SqliteRequirementRepository::new(db.pool().clone()));
-        let emitter = RequirementEventEmitter::new(
-            Arc::new(NoopBroadcaster),
-            Arc::from(INSTALLATION_OWNER),
-        );
-        // Force a conversation with id == 5.
-        sqlx::query(
-            "INSERT INTO conversations \
-             (id, user_id, name, type, delegation_policy, execution_model_pool, created_at, updated_at) \
-             VALUES (5, ?1, 'Conv Five', 'nomi', 'disabled', NULL, 0, 0)",
-        )
-        .bind(INSTALLATION_OWNER)
-        .execute(db.pool())
-        .await
-        .unwrap();
-        // Force a terminal with id == 5 (same number, different domain).
-        sqlx::query(
-            "INSERT INTO terminal_sessions \
-                 (id, user_id, name, cwd, command, args, cols, rows, last_status, created_at, updated_at) \
-             VALUES (5, ?1, 'Term Five', '/tmp', 'bash', '[]', 80, 24, 'running', 0, 0)",
-        )
-        .bind(INSTALLATION_OWNER)
-        .execute(db.pool())
-        .await
-        .unwrap();
-        Box::leak(Box::new(db));
-        RequirementService::new(repo, emitter)
-    }
-
-    #[tokio::test]
-    async fn c2_conversation_release_does_not_release_terminal_owned_requirement() {
-        let s = svc_with_conv5_and_term5().await;
-        // A requirement claimed by TERMINAL #5 (owner_kind = "terminal").
-        let req = s
-            .create(CreateRequirementRequest {
-                title: "term work".into(),
-                content: String::new(),
-                tag: "t".into(),
-                order_key: None,
-                status: None,
-                created_by: None,
-                attachments: vec![],
-            })
-            .await
-            .unwrap();
-        let claimed = s
-            .claim_next("t", 5, AutoWorkTargetKind::Terminal, 60_000)
-            .await
-            .unwrap()
-            .expect("a pending requirement is claimable");
-        assert_eq!(claimed.owner_session_id, Some(5));
-        assert_eq!(claimed.owner_kind.as_deref(), Some("terminal"));
-
-        // CONVERSATION #5 tries to release it (numeric owner matches: 5 == 5).
-        // It must be a NO-OP — the requirement stays in_progress, terminal-owned.
-        s.release_claim(req.id, 5).await.unwrap();
-
-        let after = s.get(req.id).await.unwrap();
-        assert_eq!(
-            after.status,
-            RequirementStatus::InProgress,
-            "conversation #5 must NOT release a requirement owned by terminal #5"
-        );
-        assert_eq!(after.owner_session_id, Some(5));
-        assert_eq!(after.owner_kind.as_deref(), Some("terminal"));
-    }
-
-    #[tokio::test]
-    async fn c2_conversation_release_does_release_own_conversation_requirement() {
-        // The positive control: a CONVERSATION #5-owned requirement IS released
-        // by conversation #5 (so the fix did not over-restrict the happy path).
-        let s = svc_with_conv5_and_term5().await;
-        let req = s
-            .create(CreateRequirementRequest {
-                title: "conv work".into(),
-                content: String::new(),
-                tag: "t".into(),
-                order_key: None,
-                status: None,
-                created_by: None,
-                attachments: vec![],
-            })
-            .await
-            .unwrap();
-        let claimed = s
-            .claim_next("t", 5, AutoWorkTargetKind::Conversation, 60_000)
-            .await
-            .unwrap()
-            .expect("claimable");
-        assert_eq!(claimed.owner_kind.as_deref(), Some("conversation"));
-
-        s.release_claim(req.id, 5).await.unwrap();
-
-        let after = s.get(req.id).await.unwrap();
-        assert_eq!(after.status, RequirementStatus::Pending);
-        assert_eq!(after.owner_session_id, None);
-        assert_eq!(after.owner_kind, None);
-    }
-
-    #[tokio::test]
-    async fn c2_clear_owner_for_session_is_domain_scoped() {
-        // `clear_owner_for_session(5, Conversation)` must clear ONLY conv#5's
-        // requirements, never term#5's — even though both owners are the
-        // integer 5 (spec §2.2, the C2-adjacent cross-domain path).
-        let s = svc_with_conv5_and_term5().await;
-        // One requirement owned by conv#5, one by term#5, both in tag "t".
-        let conv_req = s
-            .create(CreateRequirementRequest {
-                title: "conv".into(),
-                content: String::new(),
-                tag: "t".into(),
-                order_key: Some("a".into()),
-                status: None,
-                created_by: None,
-                attachments: vec![],
-            })
-            .await
-            .unwrap();
-        let term_req = s
-            .create(CreateRequirementRequest {
-                title: "term".into(),
-                content: String::new(),
-                tag: "t2".into(),
-                order_key: Some("a".into()),
-                status: None,
-                created_by: None,
-                attachments: vec![],
-            })
-            .await
-            .unwrap();
-        // Claim each into its own domain at id 5.
-        s.claim_next("t", 5, AutoWorkTargetKind::Conversation, 60_000)
-            .await
-            .unwrap()
-            .expect("conv claim");
-        s.claim_next("t2", 5, AutoWorkTargetKind::Terminal, 60_000)
-            .await
-            .unwrap()
-            .expect("term claim");
-
-        // Delete-hook for conversation #5: clears the conversation domain only.
-        let cleared = s
-            .clear_owner_for_session(5, AutoWorkTargetKind::Conversation)
-            .await
-            .unwrap();
-        assert_eq!(cleared, 1, "exactly the conv#5-owned requirement is cleared");
-
-        let conv_after = s.get(conv_req.id).await.unwrap();
-        assert_eq!(conv_after.owner_session_id, None, "conv#5 owner cleared");
-        let term_after = s.get(term_req.id).await.unwrap();
-        assert_eq!(
-            term_after.owner_session_id,
-            Some(5),
-            "term#5 owner is UNTOUCHED by a conversation-domain clear"
-        );
-        assert_eq!(term_after.owner_kind.as_deref(), Some("terminal"));
     }
 }

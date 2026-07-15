@@ -112,8 +112,8 @@ fn json_with_csrf(
 
 /// Set up a user and login, returning (session_token, csrf_token).
 ///
-/// Seeded `system_default_user` already owns `username = "admin"` with an empty
-/// hash; if the test uses that name, overwrite the seed row in place. Other
+/// The installation owner already owns `username = "admin"` with an empty
+/// hash; if the test uses that name, overwrite the owner row in place. Other
 /// usernames use the normal create_user path.
 async fn setup_and_login(
     app: &mut axum::Router,
@@ -258,8 +258,8 @@ async fn t12_2_csrf_exempt_paths() {
 async fn t12_3_session_cookie_attributes() {
     let (app, services) = build_app().await;
     let hash = nomifun_auth::hash_password("StrongP@ss1").unwrap();
-    // system_default_user is seeded with username='admin'; overwrite its empty
-    // password in place instead of creating a duplicate.
+    // The installation owner is initialized with username='admin'; overwrite
+    // its empty password in place instead of creating a duplicate.
     services
         .user_repo
         .set_system_user_credentials("admin", &hash)
@@ -337,9 +337,11 @@ async fn t13_3_no_token_fails() {
 #[tokio::test]
 async fn installation_control_plane_uses_canonical_owner_identity() {
     let (mut app, services) = build_app().await;
+    let installation_owner =
+        nomifun_db::installation_owner_id(services.database.pool()).await.unwrap();
     assert_eq!(
         services.authoritative_user_id.as_ref(),
-        nomifun_auth::SYSTEM_USER_ID
+        installation_owner
     );
 
     let (owner_token, owner_csrf) =
@@ -395,7 +397,7 @@ async fn installation_control_plane_uses_canonical_owner_identity() {
         .unwrap();
     assert_eq!(owner_conversation.status(), StatusCode::CREATED);
     let owner_conversation = body_json(owner_conversation).await;
-    let owner_conversation_id = owner_conversation["data"]["id"].as_i64().unwrap();
+    let owner_conversation_id = owner_conversation["data"]["id"].as_str().unwrap().to_owned();
 
     for suffix in [
         "mode",
@@ -520,7 +522,7 @@ async fn installation_control_plane_uses_canonical_owner_identity() {
                 "extra":{
                     "workspace":"/",
                     "system_prompt":"read the host",
-                    "companionSession":true,
+                    "companion_session":true,
                     "allowed_tools":[],
                     "gateway_mcp_config":{"token":"forged-root"}
                 }
@@ -541,7 +543,7 @@ async fn installation_control_plane_uses_canonical_owner_identity() {
     assert_ne!(conversation["extra"]["workspace"], "/");
     for key in [
         "system_prompt",
-        "companionSession",
+        "companion_session",
         "allowed_tools",
         "gateway_mcp_config",
     ] {
@@ -562,12 +564,12 @@ async fn installation_control_plane_uses_canonical_owner_identity() {
                 "name":"model-only schedule",
                 "schedule":{"kind":"every","every_ms":60000},
                 "message":"summarize",
-                "conversation_id":0,
+                "conversation_id":null,
                 "agent_type":"nomi",
                 "created_by":"user",
                 "execution_mode":"new_conversation",
                 "agent_config":{
-                    "backend":"provider-safe",
+                    "backend":"prov_0190f5fe-7c00-7a00-8000-000000000015",
                     "name":"Nomi",
                     "model_id":"model-safe",
                     "cli_path":"/bin/sh",
@@ -585,7 +587,10 @@ async fn installation_control_plane_uses_canonical_owner_identity() {
     let cron = body_json(cron).await;
     let cron_id = cron["data"]["id"].as_str().unwrap();
     let cron_config = &cron["data"]["metadata"]["agent_config"];
-    assert_eq!(cron_config["backend"], "provider-safe");
+    assert_eq!(
+        cron_config["backend"],
+        "prov_0190f5fe-7c00-7a00-8000-000000000015"
+    );
     assert_eq!(cron_config["model_id"], "model-safe");
     for key in ["cli_path", "workspace", "mode", "config_options", "preset_id"] {
         assert!(
@@ -608,7 +613,7 @@ async fn installation_control_plane_uses_canonical_owner_identity() {
 
     // Model-only messages cannot smuggle host files or turn-scoped skills into
     // the otherwise valid text conversation.
-    let conversation_id = conversation["id"].as_i64().unwrap();
+    let conversation_id = conversation["id"].as_str().unwrap().to_owned();
     let attachment_attempt = app
         .oneshot(post_json_with_csrf(
             &format!("/api/conversations/{conversation_id}/messages"),
@@ -646,7 +651,7 @@ async fn t14_2_setup_then_login() {
     let json = body_json(resp).await;
     assert_eq!(json["needs_setup"], true);
 
-    // Set system user credentials (simulating initial setup)
+    // Set installation-owner credentials (simulating initial setup)
     let hash = nomifun_auth::hash_password("Admin@Pass1").unwrap();
     services
         .user_repo

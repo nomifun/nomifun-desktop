@@ -162,7 +162,20 @@ impl SkillSuggestDetector {
         description: &str,
         skill_content: &str,
     ) {
-        let row = build_skill_suggest_artifact(conversation_id, job_id, name, description, skill_content, now_ms());
+        let row = match build_skill_suggest_artifact(
+            conversation_id,
+            job_id,
+            name,
+            description,
+            skill_content,
+            now_ms(),
+        ) {
+            Ok(row) => row,
+            Err(err) => {
+                warn!(conversation_id, job_id, error = %err, "Refusing invalid cron skill suggestion artifact");
+                return;
+            }
+        };
 
         let row = match self.conversation_repo.upsert_artifact(&row).await {
             Ok(row) => row,
@@ -219,6 +232,10 @@ mod tests {
     use tempfile::tempdir;
     use tokio::sync::broadcast;
 
+    const JOB_ID: &str = "cron_0190f5fe-7c00-7a00-8000-000000000001";
+    const CONVERSATION_ID: &str = "conv_0190f5fe-7c00-7a00-8000-000000000001";
+    const CONVERSATION_ID_2: &str = "conv_0190f5fe-7c00-7a00-8000-000000000002";
+
     struct TestUserEventBus {
         sender: broadcast::Sender<nomifun_api_types::WebSocketMessage<serde_json::Value>>,
     }
@@ -246,12 +263,10 @@ mod tests {
         }
     }
 
-    fn make_conversation(id: &str) -> ConversationRow {
+    fn make_conversation(id: &str, installation_owner: &str) -> ConversationRow {
         ConversationRow {
-            // `create` allocates the PK (AUTOINCREMENT) and ignores this field,
-            // but parse the test's id string so the struct is well-typed.
-            id: id.parse::<i64>().unwrap_or_default(),
-            user_id: "system_default_user".into(),
+            id: id.to_owned(),
+            user_id: installation_owner.to_owned(),
             name: "Cron Conversation".into(),
             r#type: "acp".into(),
             extra: "{}".into(),
@@ -277,11 +292,11 @@ mod tests {
     /// Seed a minimal `cron_jobs` row so the
     /// `conversation_artifacts.cron_job_id → cron_jobs(id)` FK is satisfied
     /// when a skill-suggest artifact is persisted (foreign_keys=ON).
-    async fn seed_cron_job(pool: &SqlitePool, id: &str) {
+    async fn seed_cron_job(pool: &SqlitePool, installation_owner: &str, id: &str) {
         let repo = SqliteCronRepository::new(pool.clone());
         repo.insert(&CronJobRow {
             id: id.into(),
-            user_id: "system_default_user".into(),
+            user_id: installation_owner.to_owned(),
             name: "Test Cron".into(),
             enabled: true,
             schedule_kind: "every".into(),
@@ -327,9 +342,11 @@ mod tests {
         .unwrap();
 
         let db = init_database_memory().await.unwrap();
+        let installation_owner = nomifun_db::installation_owner_id(db.pool()).await.unwrap();
         let repo: Arc<dyn IConversationRepository> = Arc::new(SqliteConversationRepository::new(db.pool().clone()));
-        seed_cron_job(db.pool(), "cron-1").await;
-        repo.create(&make_conversation("1")).await.unwrap();
+        seed_cron_job(db.pool(), &installation_owner, JOB_ID).await;
+        let conversation_id = CONVERSATION_ID;
+        repo.create(&make_conversation(conversation_id, &installation_owner)).await.unwrap();
 
         let bus = Arc::new(TestUserEventBus::new(16));
         let detector = SkillSuggestDetector::new(bus.clone(), repo.clone(), temp.path().to_path_buf());
@@ -337,9 +354,9 @@ mod tests {
 
         let emitted = detector
             .check_and_emit(
-                "system_default_user",
-                "1",
-                "cron-1",
+                &installation_owner,
+                conversation_id,
+                JOB_ID,
                 &workspace.to_string_lossy(),
             )
             .await
@@ -350,10 +367,10 @@ mod tests {
         assert_eq!(msg.name, "conversation.artifact");
         assert_eq!(msg.data["kind"], "skill_suggest");
         assert_eq!(msg.data["status"], "pending");
-        assert_eq!(msg.data["payload"]["cron_job_id"], "cron-1");
+        assert_eq!(msg.data["payload"]["cron_job_id"], JOB_ID);
         assert_eq!(msg.data["payload"]["name"], "daily-report");
 
-        let rows = repo.list_artifacts(1).await.unwrap();
+        let rows = repo.list_artifacts(conversation_id).await.unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].kind, "skill_suggest");
         assert_eq!(rows[0].status, "pending");
@@ -373,10 +390,11 @@ mod tests {
         .unwrap();
 
         let db = init_database_memory().await.unwrap();
+        let installation_owner = nomifun_db::installation_owner_id(db.pool()).await.unwrap();
         let repo: Arc<dyn IConversationRepository> = Arc::new(SqliteConversationRepository::new(db.pool().clone()));
-        seed_cron_job(db.pool(), "cron-1").await;
-        repo.create(&make_conversation("1")).await.unwrap();
-        repo.create(&make_conversation("conv-2")).await.unwrap();
+        seed_cron_job(db.pool(), &installation_owner, JOB_ID).await;
+        repo.create(&make_conversation(CONVERSATION_ID, &installation_owner)).await.unwrap();
+        repo.create(&make_conversation(CONVERSATION_ID_2, &installation_owner)).await.unwrap();
 
         let bus = Arc::new(TestUserEventBus::new(16));
         let detector = SkillSuggestDetector::new(bus.clone(), repo, temp.path().to_path_buf());
@@ -385,9 +403,9 @@ mod tests {
         assert!(
             detector
                 .check_and_emit(
-                    "system_default_user",
-                    "1",
-                    "cron-1",
+                    &installation_owner,
+                    CONVERSATION_ID,
+                    JOB_ID,
                     &workspace.to_string_lossy(),
                 )
                 .await
@@ -398,9 +416,9 @@ mod tests {
         assert!(
             detector
                 .check_and_emit(
-                    "system_default_user",
-                    "conv-2",
-                    "cron-1",
+                    &installation_owner,
+                    CONVERSATION_ID_2,
+                    JOB_ID,
                     &workspace.to_string_lossy(),
                 )
                 .await
@@ -420,7 +438,7 @@ mod tests {
         )
         .await
         .unwrap();
-        let skill_dir = temp.path().join("cron/skills/cron-cron-1");
+        let skill_dir = temp.path().join(format!("cron/skills/cron-{JOB_ID}"));
         tokio::fs::create_dir_all(&skill_dir).await.unwrap();
         tokio::fs::write(
             skill_dir.join("SKILL.md"),
@@ -430,8 +448,9 @@ mod tests {
         .unwrap();
 
         let db = init_database_memory().await.unwrap();
+        let installation_owner = nomifun_db::installation_owner_id(db.pool()).await.unwrap();
         let repo: Arc<dyn IConversationRepository> = Arc::new(SqliteConversationRepository::new(db.pool().clone()));
-        repo.create(&make_conversation("1")).await.unwrap();
+        repo.create(&make_conversation(CONVERSATION_ID, &installation_owner)).await.unwrap();
 
         let bus = Arc::new(TestUserEventBus::new(16));
         let detector = SkillSuggestDetector::new(bus.clone(), repo, temp.path().to_path_buf());
@@ -439,9 +458,9 @@ mod tests {
 
         let emitted = detector
             .check_and_emit(
-                "system_default_user",
-                "1",
-                "cron-1",
+                &installation_owner,
+                CONVERSATION_ID,
+                JOB_ID,
                 &workspace.to_string_lossy(),
             )
             .await

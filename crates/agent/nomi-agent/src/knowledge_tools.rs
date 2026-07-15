@@ -8,6 +8,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use nomifun_common::KnowledgeBaseId;
 use serde_json::{Value, json};
 
 use nomi_protocol::events::ToolCategory;
@@ -19,7 +20,7 @@ use nomi_types::tool::{JsonSchema, ToolResult};
 /// never has to reconstruct a path.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KnowledgeHit {
-    pub kb_id: String,
+    pub kb_id: KnowledgeBaseId,
     pub handle: String,
     pub kb_name: String,
     pub rel_path: String,
@@ -32,21 +33,30 @@ pub struct KnowledgeHit {
 #[async_trait]
 pub trait KnowledgeRetrievalSink: Send + Sync {
     /// Search the given bases for `query`, returning up to `limit` ranked hits.
-    async fn search(&self, kb_ids: &[String], query: &str, limit: usize) -> Result<Vec<KnowledgeHit>, String>;
+    async fn search(
+        &self,
+        kb_ids: &[KnowledgeBaseId],
+        query: &str,
+        limit: usize,
+    ) -> Result<Vec<KnowledgeHit>, String>;
     /// Return the full markdown for the document addressed by the opaque
     /// `handle`, scoped to `kb_ids` (a handle outside the set is an error).
-    async fn read_document(&self, kb_ids: &[String], handle: &str) -> Result<String, String>;
+    async fn read_document(
+        &self,
+        kb_ids: &[KnowledgeBaseId],
+        handle: &str,
+    ) -> Result<String, String>;
 }
 
 /// `knowledge_search` — search the bases mounted into this session. Holds the
 /// session's bound `kb_ids` (opaque to the model) plus the shared sink.
 pub struct KnowledgeSearchTool {
     sink: Arc<dyn KnowledgeRetrievalSink>,
-    kb_ids: Vec<String>,
+    kb_ids: Vec<KnowledgeBaseId>,
 }
 
 impl KnowledgeSearchTool {
-    pub fn new(sink: Arc<dyn KnowledgeRetrievalSink>, kb_ids: Vec<String>) -> Self {
+    pub fn new(sink: Arc<dyn KnowledgeRetrievalSink>, kb_ids: Vec<KnowledgeBaseId>) -> Self {
         Self { sink, kb_ids }
     }
 }
@@ -161,11 +171,11 @@ fn format_hits(query: &str, hits: &[KnowledgeHit]) -> String {
 /// loop. Holds the session's bound `kb_ids` so a handle outside them is denied.
 pub struct KnowledgeReadTool {
     sink: Arc<dyn KnowledgeRetrievalSink>,
-    kb_ids: Vec<String>,
+    kb_ids: Vec<KnowledgeBaseId>,
 }
 
 impl KnowledgeReadTool {
-    pub fn new(sink: Arc<dyn KnowledgeRetrievalSink>, kb_ids: Vec<String>) -> Self {
+    pub fn new(sink: Arc<dyn KnowledgeRetrievalSink>, kb_ids: Vec<KnowledgeBaseId>) -> Self {
         Self { sink, kb_ids }
     }
 }
@@ -235,7 +245,7 @@ impl Tool for KnowledgeReadTool {
 #[derive(Debug, Clone)]
 pub enum WriteTarget {
     Handle(String),
-    Path { kb_id: String, rel_path: String },
+    Path { kb_id: KnowledgeBaseId, rel_path: String },
 }
 
 /// Placement mode for a write-back, decided by the backend per session/surface
@@ -257,7 +267,7 @@ pub struct WriteRequest {
     pub mode: WriteMode,
     /// Bases this session may write to; the backend rejects a handle/path
     /// outside this set.
-    pub bound_kb_ids: Vec<String>,
+    pub bound_kb_ids: Vec<KnowledgeBaseId>,
 }
 
 /// What actually happened, for the tool's confirmation message.
@@ -293,20 +303,20 @@ pub struct KnowledgeWriteTool {
     sink: Arc<dyn KnowledgeWritebackSink>,
     /// Bound bases as `(kb_id, name)`. The model selects by `name`; `kb_id` is
     /// opaque to it. Used to resolve `base` → `kb_id` for the create path.
-    bases: Vec<(String, String)>,
+    bases: Vec<(KnowledgeBaseId, String)>,
     /// Placement mode baked at construction (Staged inbox scope, or Direct).
     mode: WriteMode,
     /// Bases this session may write to (forwarded to the backend for scope
     /// enforcement). Mirrors the search/read tools' `kb_ids`.
-    bound_kb_ids: Vec<String>,
+    bound_kb_ids: Vec<KnowledgeBaseId>,
 }
 
 impl KnowledgeWriteTool {
     pub fn new(
         sink: Arc<dyn KnowledgeWritebackSink>,
-        bases: Vec<(String, String)>,
+        bases: Vec<(KnowledgeBaseId, String)>,
         mode: WriteMode,
-        bound_kb_ids: Vec<String>,
+        bound_kb_ids: Vec<KnowledgeBaseId>,
     ) -> Self {
         Self { sink, bases, mode, bound_kb_ids }
     }
@@ -322,9 +332,9 @@ impl KnowledgeWriteTool {
 /// Matching is case-insensitive and whitespace-trimmed. `Err` carries a
 /// ready-to-return, model-actionable message.
 fn resolve_write_base<'a>(
-    bases: &'a [(String, String)],
+    bases: &'a [(KnowledgeBaseId, String)],
     requested: Option<&str>,
-) -> Result<&'a (String, String), String> {
+) -> Result<&'a (KnowledgeBaseId, String), String> {
     if bases.is_empty() {
         return Err("No knowledge bases are mounted in this session, so there is nothing to write to.".to_owned());
     }
@@ -493,6 +503,18 @@ impl Tool for KnowledgeWriteTool {
 mod tests {
     use super::*;
 
+    const KB1: &str = "kb_0190f5fe-7c00-7a00-8abc-012345678961";
+    const KB2: &str = "kb_0190f5fe-7c00-7a00-8abc-012345678962";
+
+    fn kb_id(label: &str) -> KnowledgeBaseId {
+        let value = match label {
+            "kb1" => KB1,
+            "kb2" => KB2,
+            other => panic!("unknown knowledge-base test label: {other}"),
+        };
+        KnowledgeBaseId::parse(value).expect("canonical knowledge-base test ID")
+    }
+
     struct FakeSink {
         hits: Vec<KnowledgeHit>,
         last_query: std::sync::Mutex<String>,
@@ -500,23 +522,35 @@ mod tests {
 
     #[async_trait]
     impl KnowledgeRetrievalSink for FakeSink {
-        async fn search(&self, _kb_ids: &[String], query: &str, _limit: usize) -> Result<Vec<KnowledgeHit>, String> {
+        async fn search(
+            &self,
+            _kb_ids: &[KnowledgeBaseId],
+            query: &str,
+            _limit: usize,
+        ) -> Result<Vec<KnowledgeHit>, String> {
             *self.last_query.lock().unwrap() = query.to_owned();
             Ok(self.hits.clone())
         }
-        async fn read_document(&self, _kb_ids: &[String], _handle: &str) -> Result<String, String> {
+        async fn read_document(
+            &self,
+            _kb_ids: &[KnowledgeBaseId],
+            _handle: &str,
+        ) -> Result<String, String> {
             Ok(String::new())
         }
     }
 
-    fn tool_with(hits: Vec<KnowledgeHit>, kb_ids: Vec<String>) -> (KnowledgeSearchTool, Arc<FakeSink>) {
+    fn tool_with(
+        hits: Vec<KnowledgeHit>,
+        kb_ids: Vec<KnowledgeBaseId>,
+    ) -> (KnowledgeSearchTool, Arc<FakeSink>) {
         let sink = Arc::new(FakeSink { hits, last_query: std::sync::Mutex::new(String::new()) });
         (KnowledgeSearchTool::new(sink.clone(), kb_ids), sink)
     }
 
     #[test]
     fn search_description_requires_knowledge_read_handle() {
-        let (tool, _) = tool_with(vec![], vec!["kb1".into()]);
+        let (tool, _) = tool_with(vec![], vec![kb_id("kb1")]);
         let description = tool.description();
         assert!(description.contains("knowledge_read") && description.contains("handle"));
         assert!(!description.contains("Read tool using the given path"));
@@ -525,14 +559,14 @@ mod tests {
     #[tokio::test]
     async fn formats_hits_and_passes_trimmed_query() {
         let hits = vec![KnowledgeHit {
-            kb_id: "kb1".into(),
+            kb_id: kb_id("kb1"),
             handle: "kdoc_abc".into(),
             kb_name: "运维手册".into(),
             rel_path: "deploy/rollback.md".into(),
             heading: "回滚流程".into(),
             snippet: "回滚分三步……".into(),
         }];
-        let (tool, sink) = tool_with(hits, vec!["kb1".into()]);
+        let (tool, sink) = tool_with(hits, vec![kb_id("kb1")]);
         let res = tool.execute(json!({"query": "  回滚  "})).await;
         assert!(!res.is_error, "{res:?}");
         assert!(res.content.contains("运维手册"));
@@ -557,7 +591,7 @@ mod tests {
 
     #[tokio::test]
     async fn missing_query_is_error() {
-        let (tool, _sink) = tool_with(vec![], vec!["kb1".into()]);
+        let (tool, _sink) = tool_with(vec![], vec![kb_id("kb1")]);
         let res = tool.execute(json!({})).await;
         assert!(res.is_error);
         assert!(res.content.contains("Missing required 'query'"));
@@ -565,7 +599,7 @@ mod tests {
 
     #[tokio::test]
     async fn no_hits_suggests_alternatives() {
-        let (tool, _sink) = tool_with(vec![], vec!["kb1".into()]);
+        let (tool, _sink) = tool_with(vec![], vec![kb_id("kb1")]);
         let res = tool.execute(json!({"query": "无此主题"})).await;
         assert!(!res.is_error);
         assert!(res.content.contains("No matches"));
@@ -576,11 +610,20 @@ mod tests {
     struct FakeReadSink;
     #[async_trait]
     impl KnowledgeRetrievalSink for FakeReadSink {
-        async fn search(&self, _: &[String], _: &str, _: usize) -> Result<Vec<KnowledgeHit>, String> {
+        async fn search(
+            &self,
+            _: &[KnowledgeBaseId],
+            _: &str,
+            _: usize,
+        ) -> Result<Vec<KnowledgeHit>, String> {
             Ok(vec![])
         }
-        async fn read_document(&self, kb_ids: &[String], handle: &str) -> Result<String, String> {
-            if handle == "kdoc_ok" && kb_ids == ["kb1"] {
+        async fn read_document(
+            &self,
+            kb_ids: &[KnowledgeBaseId],
+            handle: &str,
+        ) -> Result<String, String> {
+            if handle == "kdoc_ok" && kb_ids == [kb_id("kb1")] {
                 Ok("FULL DOC".into())
             } else {
                 Err("not found".into())
@@ -590,7 +633,7 @@ mod tests {
 
     #[tokio::test]
     async fn read_tool_returns_full_content_by_handle() {
-        let tool = KnowledgeReadTool::new(Arc::new(FakeReadSink), vec!["kb1".into()]);
+        let tool = KnowledgeReadTool::new(Arc::new(FakeReadSink), vec![kb_id("kb1")]);
         let ok = tool.execute(json!({"handle": "kdoc_ok"})).await;
         assert!(!ok.is_error && ok.content.contains("FULL DOC"), "{ok:?}");
         let bad = tool.execute(json!({"handle": "kdoc_no"})).await;
@@ -625,8 +668,11 @@ mod tests {
 
     fn write_tool(bases: Vec<(&str, &str)>, mode: WriteMode) -> (KnowledgeWriteTool, Arc<FakeWriteSink>) {
         let sink = Arc::new(FakeWriteSink::default());
-        let bases: Vec<(String, String)> = bases.into_iter().map(|(i, n)| (i.to_owned(), n.to_owned())).collect();
-        let bound: Vec<String> = bases.iter().map(|(i, _)| i.clone()).collect();
+        let bases: Vec<(KnowledgeBaseId, String)> = bases
+            .into_iter()
+            .map(|(id, name)| (kb_id(id), name.to_owned()))
+            .collect();
+        let bound: Vec<KnowledgeBaseId> = bases.iter().map(|(id, _)| id.clone()).collect();
         (KnowledgeWriteTool::new(sink.clone(), bases, mode, bound), sink)
     }
 
@@ -641,17 +687,17 @@ mod tests {
 
     #[test]
     fn resolve_base_single_default_and_by_name() {
-        let one = vec![("kb1".to_owned(), "金融知识库".to_owned())];
-        assert_eq!(resolve_write_base(&one, None).unwrap().0, "kb1");
+        let one = vec![(kb_id("kb1"), "金融知识库".to_owned())];
+        assert_eq!(resolve_write_base(&one, None).unwrap().0, kb_id("kb1"));
         // Case-insensitive + trimmed name match across multiple bases.
-        let many = vec![("kb1".to_owned(), "Finance".to_owned()), ("kb2".to_owned(), "Ops".to_owned())];
-        assert_eq!(resolve_write_base(&many, Some("  finance ")).unwrap().0, "kb1");
+        let many = vec![(kb_id("kb1"), "Finance".to_owned()), (kb_id("kb2"), "Ops".to_owned())];
+        assert_eq!(resolve_write_base(&many, Some("  finance ")).unwrap().0, kb_id("kb1"));
     }
 
     #[test]
     fn resolve_base_errors_are_actionable() {
         assert!(resolve_write_base(&[], None).unwrap_err().contains("nothing to write"));
-        let many = vec![("kb1".to_owned(), "Finance".to_owned()), ("kb2".to_owned(), "Ops".to_owned())];
+        let many = vec![(kb_id("kb1"), "Finance".to_owned()), (kb_id("kb2"), "Ops".to_owned())];
         // Ambiguous (no base arg, >1 base) names the choices.
         let amb = resolve_write_base(&many, None).unwrap_err();
         assert!(amb.contains("Finance") && amb.contains("Ops"), "{amb}");
@@ -684,7 +730,7 @@ mod tests {
         let req = sink.last.lock().unwrap().clone().unwrap();
         match &req.target {
             WriteTarget::Path { kb_id, rel_path } => {
-                assert_eq!(kb_id, "kb1");
+                assert_eq!(kb_id, &self::kb_id("kb1"));
                 assert_eq!(rel_path, "terms.md");
             }
             other => panic!("expected Path target, got {other:?}"),
@@ -717,7 +763,12 @@ mod tests {
     #[tokio::test]
     async fn execute_surfaces_sink_error() {
         let sink = Arc::new(FakeWriteSink { fail: true, ..Default::default() });
-        let tool = KnowledgeWriteTool::new(sink, vec![("kb1".into(), "Finance".into())], WriteMode::Direct, vec!["kb1".into()]);
+        let tool = KnowledgeWriteTool::new(
+            sink,
+            vec![(kb_id("kb1"), "Finance".into())],
+            WriteMode::Direct,
+            vec![kb_id("kb1")],
+        );
         let res = tool.execute(json!({"handle": "kdoc_x", "content": "x"})).await;
         assert!(res.is_error);
         assert!(res.content.contains("disk full"));

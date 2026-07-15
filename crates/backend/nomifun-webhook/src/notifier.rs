@@ -75,7 +75,7 @@ impl CompletionNotifierImpl {
             .map(str::to_string)
             .collect();
         let webhook_id = setting.webhook_id?;
-        let webhook = self.webhooks.get_by_id(webhook_id).await.ok().flatten()?;
+        let webhook = self.webhooks.get_by_id(&webhook_id).await.ok().flatten()?;
         webhook.enabled.then_some((webhook, events))
     }
 }

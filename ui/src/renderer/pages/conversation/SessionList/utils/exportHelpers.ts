@@ -16,7 +16,7 @@ export const EXPORT_IO_TIMEOUT_MS = 15000;
 export const normalizeZipPath = (value: string): string => value.replace(/\\/g, '/').replace(/^\/+/, '');
 
 export const buildTopicFolderName = (conversation: TChatConversation): string => {
-  const safeName = sanitizeFileName(conversation.name || String(conversation.id));
+  const safeName = sanitizeFileName(conversation.name || conversation.id);
   return `${safeName}__${conversation.id}`;
 };
 

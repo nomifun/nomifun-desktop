@@ -107,7 +107,7 @@ const DiscordConfigForm: React.FC<DiscordConfigFormProps> = ({ pluginStatus, cha
   const handleAutoEnable = async () => {
     try {
       const config = { credentials: { token: discordToken.trim() } };
-      const result = await channel.enablePlugin.invoke(channelTarget ? { plugin_id: channelTarget.channelId, plugin_type: 'discord', ...(channelTarget.publicAgentId ? { public_agent_id: channelTarget.publicAgentId } : { companion_id: channelTarget.companionId }), config } : { plugin_id: 'discord', config });
+      const result = await channel.enablePlugin.invoke(channelTarget ? { plugin_id: channelTarget.channelId, plugin_type: 'discord', ...(channelTarget.publicAgentId ? { public_agent_id: channelTarget.publicAgentId } : { companion_id: channelTarget.companionId }), config } : { plugin_type: 'discord', config });
       if (!result.success) {
         throw new Error(result.error || result.message || t('nomi.settings.remoteEnableFailed', { defaultValue: 'Failed to enable channel' }));
       }
@@ -130,7 +130,7 @@ const DiscordConfigForm: React.FC<DiscordConfigFormProps> = ({ pluginStatus, cha
     }
     setTestLoading(true);
     try {
-      const result = await channel.testPlugin.invoke({ plugin_id: 'discord', token: discordToken.trim() });
+      const result = await channel.testPlugin.invoke({ plugin_type: 'discord', token: discordToken.trim() });
       if (result.success) {
         Message.success(t('settings.discord.connectionSuccess', { defaultValue: 'Connected! Bot: {{username}}', username: result.bot_username || 'unknown' }));
         await handleAutoEnable();
@@ -170,7 +170,7 @@ const DiscordConfigForm: React.FC<DiscordConfigFormProps> = ({ pluginStatus, cha
     }
   };
 
-  const handleRevokeUser = async (user_id: string) => {
+  const handleRevokeUser = async (user_id: import('@/common/types/ids').ChannelUserId) => {
     try {
       await channel.revokeUser.invoke({ user_id });
       Message.success(t('settings.channels.userRevoked', 'User access revoked'));

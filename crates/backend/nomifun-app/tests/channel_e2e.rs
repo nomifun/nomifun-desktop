@@ -11,13 +11,17 @@ use tower::ServiceExt;
 
 use common::{body_json, build_app, get_with_token, json_with_token, setup_and_login};
 
-/// Seed a `tg-1` telegram bot channel so pairing/user rows satisfy the
+const TELEGRAM_CHANNEL_ID: &str = "chn_018f1234-5678-7abc-8def-012345678950";
+const MISSING_CHANNEL_ID: &str = "chn_018f1234-5678-7abc-8def-012345678951";
+const MISSING_CHANNEL_USER_ID: &str = "chu_018f1234-5678-7abc-8def-012345678952";
+
+/// Seed a canonical Telegram bot channel so pairing/user rows satisfy the
 /// FK channel_id → channel_plugins(id) added in migration 004.
 async fn seed_telegram_channel(repo: &std::sync::Arc<dyn nomifun_db::IChannelRepository>) {
     use nomifun_common::now_ms;
     use nomifun_db::models::ChannelPluginRow;
     repo.upsert_plugin(&ChannelPluginRow {
-        id: "tg-1".into(),
+        id: TELEGRAM_CHANNEL_ID.into(),
         r#type: "telegram".into(),
         name: "Test Bot".into(),
         enabled: true,
@@ -51,16 +55,7 @@ async fn get_plugins_empty() {
     let json = body_json(resp).await;
     assert!(json["success"].as_bool().unwrap());
     let data = json["data"].as_array().unwrap();
-    assert_eq!(data.len(), 12);
-    let types: std::collections::HashSet<_> = data.iter().filter_map(|item| item["type"].as_str()).collect();
-    assert_eq!(
-        types,
-        std::collections::HashSet::from([
-            "telegram", "lark", "dingtalk", "slack", "discord", "matrix", "mattermost", "weixin", "wecom", "qqbot",
-            "twitch", "nostr",
-        ])
-    );
-    assert!(data.iter().all(|item| item["enabled"] == false));
+    assert!(data.is_empty());
 }
 
 // PS-3: Unauthenticated request returns 403
@@ -111,7 +106,7 @@ async fn enable_plugin_missing_config() {
     let req = json_with_token(
         "POST",
         "/api/channel/plugins/enable",
-        json!({ "plugin_id": "telegram" }),
+        json!({ "plugin_type": "telegram" }),
         &token,
         &csrf,
     );
@@ -129,7 +124,7 @@ async fn enable_plugin_invalid_type() {
         "POST",
         "/api/channel/plugins/enable",
         json!({
-            "plugin_id": "nonexistent",
+            "plugin_type": "nonexistent",
             "config": { "credentials": { "token": "x" } }
         }),
         &token,
@@ -164,7 +159,7 @@ async fn disable_plugin_not_registered() {
     let req = json_with_token(
         "POST",
         "/api/channel/plugins/disable",
-        json!({ "plugin_id": "telegram" }),
+        json!({ "plugin_id": MISSING_CHANNEL_ID }),
         &token,
         &csrf,
     );
@@ -203,7 +198,7 @@ async fn test_plugin_missing_token() {
     let req = json_with_token(
         "POST",
         "/api/channel/plugins/test",
-        json!({ "plugin_id": "telegram" }),
+        json!({ "plugin_type": "telegram" }),
         &token,
         &csrf,
     );
@@ -314,7 +309,7 @@ async fn revoke_user_not_found() {
     let req = json_with_token(
         "POST",
         "/api/channel/users/revoke",
-        json!({ "user_id": "nonexistent" }),
+        json!({ "user_id": MISSING_CHANNEL_USER_ID }),
         &token,
         &csrf,
     );
@@ -412,7 +407,7 @@ async fn pairing_approve_creates_user() {
     let pairing_svc = nomifun_channel::pairing::PairingService::new(
         repo.clone(),
         services.event_bus.clone(),
-        "system_default_user",
+        services.authoritative_user_id.as_ref(),
     );
 
     // The pairing/user rows carry an FK channel_id → channel_plugins(id), so
@@ -420,7 +415,7 @@ async fn pairing_approve_creates_user() {
     seed_telegram_channel(&repo).await;
 
     let code = pairing_svc
-        .request_pairing("tg_user_42", "telegram", "tg-1", Some("Alice"))
+        .request_pairing("tg_user_42", "telegram", TELEGRAM_CHANNEL_ID, Some("Alice"))
         .await
         .unwrap();
 
@@ -511,14 +506,14 @@ async fn pairing_reject_removes_from_pending() {
     let pairing_svc = nomifun_channel::pairing::PairingService::new(
         repo.clone(),
         services.event_bus.clone(),
-        "system_default_user",
+        services.authoritative_user_id.as_ref(),
     );
 
     // FK channel_id → channel_plugins(id): seed the bot channel first.
     seed_telegram_channel(&repo).await;
 
     let code = pairing_svc
-        .request_pairing("tg_user_99", "telegram", "tg-1", None)
+        .request_pairing("tg_user_99", "telegram", TELEGRAM_CHANNEL_ID, None)
         .await
         .unwrap();
 
@@ -576,7 +571,7 @@ async fn enable_disable_plugin_lifecycle() {
         "POST",
         "/api/channel/plugins/enable",
         json!({
-            "plugin_id": "telegram",
+            "plugin_type": "telegram",
             "config": {
                 "credentials": { "token": "000000000:FAKE_TOKEN" },
                 "config": { "mode": "polling" }
@@ -595,11 +590,16 @@ async fn enable_disable_plugin_lifecycle() {
     assert_eq!(resp.status(), StatusCode::OK);
     let json = body_json(resp).await;
     let plugins = json["data"].as_array().unwrap();
-    assert_eq!(plugins.len(), 12);
+    assert_eq!(plugins.len(), 1);
     let telegram = plugins
         .iter()
-        .find(|plugin| plugin["plugin_id"] == "telegram")
+        .find(|plugin| plugin["type"] == "telegram")
         .expect("telegram plugin should be present");
+    let channel_id = telegram["plugin_id"]
+        .as_str()
+        .expect("persisted plugin exposes its canonical channel id")
+        .to_owned();
+    nomifun_common::ChannelId::parse(channel_id.clone()).expect("canonical channel id");
     assert_eq!(telegram["type"], "telegram");
     assert_eq!(telegram["name"], "Telegram Bot");
     assert_eq!(telegram["enabled"], true);
@@ -608,7 +608,7 @@ async fn enable_disable_plugin_lifecycle() {
     let req = json_with_token(
         "POST",
         "/api/channel/plugins/disable",
-        json!({ "plugin_id": "telegram" }),
+        json!({ "plugin_id": channel_id }),
         &token,
         &csrf,
     );
@@ -622,10 +622,10 @@ async fn enable_disable_plugin_lifecycle() {
     let resp = app.oneshot(req).await.unwrap();
     let json = body_json(resp).await;
     let plugins = json["data"].as_array().unwrap();
-    assert_eq!(plugins.len(), 12);
+    assert_eq!(plugins.len(), 1);
     let telegram = plugins
         .iter()
-        .find(|plugin| plugin["plugin_id"] == "telegram")
+        .find(|plugin| plugin["type"] == "telegram")
         .expect("telegram plugin should remain listed after disable");
     assert!(!telegram["enabled"].as_bool().unwrap());
 }

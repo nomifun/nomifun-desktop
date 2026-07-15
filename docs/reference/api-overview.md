@@ -36,7 +36,8 @@ NomiFun runs under one of three auth policies, decided at startup:
 
 ### No-auth local mode (`--local` on `nomicore`, or `--insecure-no-auth` on the web host)
 
-- Authentication and CSRF are turned off entirely. Every request acts as `system_default_user`.
+- Authentication and CSRF are turned off entirely. Every request acts as the
+  installation owner recorded in the database.
 - A permissive CORS layer is added so the desktop WebView (and tooling) can call the API freely.
 - Local-only routes such as `/api/auth/internal/*` and `/api/webui/*` become reachable.
 

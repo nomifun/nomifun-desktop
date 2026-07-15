@@ -58,7 +58,7 @@ mod dingtalk_tests {
         let manager = ChannelManager::new(
             repo.clone(),
             broadcaster.clone(),
-            "owner-a",
+            "user_018f1234-5678-7abc-8def-012345678972",
             make_encryption_key(),
             message_tx,
             confirm_tx,
@@ -216,7 +216,18 @@ mod dingtalk_tests {
         let factory = dingtalk_factory();
 
         let config = make_dingtalk_config_value(Some("key_123"), Some("secret"));
-        let result = manager.enable_plugin(&EnableChannelSpec::legacy("nonexistent"), &config, &factory).await;
+        let result = manager
+            .enable_plugin(
+                &EnableChannelSpec {
+                    plugin_id: None,
+                    plugin_type: Some("nonexistent".into()),
+                    companion_id: None,
+                    public_agent_id: None,
+                },
+                &config,
+                &factory,
+            )
+            .await;
         assert!(result.is_err());
     }
 
@@ -228,7 +239,18 @@ mod dingtalk_tests {
         let factory = dingtalk_factory();
 
         let config = make_dingtalk_config_value(Some("bad_id"), Some("bad_secret"));
-        let result = manager.enable_plugin(&EnableChannelSpec::legacy("dingtalk"), &config, &factory).await;
+        let result = manager
+            .enable_plugin(
+                &EnableChannelSpec {
+                    plugin_id: None,
+                    plugin_type: Some("dingtalk".into()),
+                    companion_id: None,
+                    public_agent_id: None,
+                },
+                &config,
+                &factory,
+            )
+            .await;
         assert!(result.is_err());
     }
 
@@ -237,7 +259,8 @@ mod dingtalk_tests {
     #[tokio::test]
     async fn disable_without_db_row_returns_error() {
         let (manager, _repo, _bc) = setup().await;
-        let result = manager.disable_plugin("dingtalk").await;
+        let missing_channel = nomifun_common::ChannelId::new();
+        let result = manager.disable_plugin(missing_channel.as_str()).await;
         assert!(result.is_err());
     }
 
@@ -266,6 +289,6 @@ mod dingtalk_tests {
     #[tokio::test]
     async fn is_plugin_running_false_when_not_enabled() {
         let (manager, _repo, _bc) = setup().await;
-        assert!(!manager.is_plugin_running("dingtalk"));
+        assert!(!manager.is_plugin_running(nomifun_common::ChannelId::new().as_str()));
     }
 }

@@ -80,7 +80,7 @@ async fn t2_4_list_users_returns_all() {
     r.create_user("u2", "h").await.unwrap();
 
     let users = r.list_users().await.unwrap();
-    // system_default_user + u1 + u2
+    // installation owner + u1 + u2
     assert_eq!(users.len(), 3);
 }
 
@@ -91,7 +91,7 @@ async fn t2_5_count_users() {
     let r = repo().await;
     r.create_user("counted", "h").await.unwrap();
 
-    // system_default_user + counted
+    // installation owner + counted
     assert_eq!(r.count_users().await.unwrap(), 2);
 }
 
@@ -110,7 +110,7 @@ async fn t2_6_has_users_true_with_real_user() {
     assert!(r.has_users().await.unwrap());
 }
 
-// -- T2.7 Get system user --
+// -- T2.7 Get installation owner --
 
 #[tokio::test]
 async fn t2_7_get_system_user_returns_default() {
@@ -119,7 +119,7 @@ async fn t2_7_get_system_user_returns_default() {
     assert!(user.is_some());
 
     let user = user.unwrap();
-    assert_eq!(user.id, "system_default_user");
+    assert!(user.id.as_str().starts_with("user_"));
 }
 
 // -- T2.8 Get primary WebUI user --
@@ -128,24 +128,22 @@ async fn t2_7_get_system_user_returns_default() {
 async fn t2_8_primary_webui_user_is_system_user_when_only_system() {
     let r = repo().await;
     let user = r.get_primary_webui_user().await.unwrap().unwrap();
-    assert_eq!(user.id, "system_default_user");
+    assert!(user.id.as_str().starts_with("user_"));
 }
 
 #[tokio::test]
 async fn t2_8_primary_webui_user_prefers_system_over_admin() {
     let r = repo().await;
     // Can't create another user called "admin" now that seed uses it.
-    // The priority check still holds: any non-system user must not shadow system.
+    // A secondary user must not shadow the installation owner.
     r.create_user("other", "h").await.unwrap();
 
     let user = r.get_primary_webui_user().await.unwrap().unwrap();
-    assert_eq!(
-        user.id, "system_default_user",
-        "system user should take priority over non-system users"
-    );
+    let owner = r.get_system_user().await.unwrap().unwrap();
+    assert_eq!(user.id, owner.id, "installation owner should take priority");
 }
 
-// -- T2.9 Set system user credentials --
+// -- T2.9 Set installation-owner credentials --
 
 #[tokio::test]
 async fn t2_9_set_system_user_credentials_updates_username_and_hash() {
@@ -169,8 +167,9 @@ async fn t2_9_set_system_user_credentials_conflict_with_existing_username() {
 #[tokio::test]
 async fn t2_9_set_system_user_password_if_uninitialized_preserves_username() {
     let r = repo().await;
-    // Rename the system admin while its password is still empty (WebUI-off edit).
-    r.update_username("system_default_user", "renamed").await.unwrap();
+    // Rename the installation owner while its password is still empty (WebUI-off edit).
+    let owner = r.get_system_user().await.unwrap().unwrap();
+    r.update_username(&owner.id, "renamed").await.unwrap();
 
     let wrote = r.set_system_user_password_if_uninitialized("hash1").await.unwrap();
     assert!(wrote, "should provision the password when empty");

@@ -120,7 +120,7 @@ pub struct LocalRuntimeStatus {
 pub struct LocalModelServiceStatus {
     pub kind: ManagedModelServiceKind,
     pub protocol_version: String,
-    pub provider_id: String,
+    pub provider_id: Option<String>,
     pub enabled: bool,
     pub ready: bool,
     pub active_model_id: Option<String>,
@@ -198,10 +198,11 @@ mod tests {
 
     #[test]
     fn local_status_uses_stable_camel_case_wire_contract() {
+        let provider_id = nomifun_common::ProviderId::new().into_string();
         let status = LocalModelServiceStatus {
             kind: ManagedModelServiceKind::Local,
             protocol_version: "1".into(),
-            provider_id: "nomifun-local-model".into(),
+            provider_id: Some(provider_id.clone()),
             enabled: true,
             ready: false,
             active_model_id: Some("example-local".into()),
@@ -232,7 +233,7 @@ mod tests {
         let json = serde_json::to_value(status).unwrap();
         assert_eq!(json["kind"], "local");
         assert_eq!(json["protocolVersion"], "1");
-        assert_eq!(json["providerId"], "nomifun-local-model");
+        assert_eq!(json["providerId"], provider_id);
         assert_eq!(json["activeModelId"], "example-local");
         assert_eq!(json["runtime"]["backend"], "cpu");
         assert_eq!(json["models"][0]["installPhase"], "downloading");

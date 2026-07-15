@@ -14,6 +14,7 @@ import { isDesktopShell } from '@/renderer/utils/platform';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { MessageApi, PasteConfirmState, SelectedNodeRef } from '../types';
 import { getTargetFolderPath } from '../utils/treeHelpers';
+import type { ConversationId } from '@/common/types/ids';
 
 interface UseWorkspacePasteOptions {
   /**
@@ -21,7 +22,7 @@ interface UseWorkspacePasteOptions {
    * uploads + paste-service registration). Sourced from the active workspace
    * source's upload config.
    */
-  trackingKey: string;
+  trackingKey?: ConversationId;
   workspace: string;
   messageApi: MessageApi;
   t: (key: string, options?: Record<string, unknown>) => string;
@@ -103,6 +104,7 @@ export function useWorkspacePaste(options: UseWorkspacePasteOptions) {
   }, [copyFilesIntoWorkspace, workspace]);
 
   const handleUploadDeviceFiles = useCallback(() => {
+    if (!trackingKey) return;
     if (isDesktopShell()) {
       handleSelectHostFiles();
       return;

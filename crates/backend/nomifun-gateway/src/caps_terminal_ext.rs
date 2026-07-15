@@ -6,10 +6,10 @@
 //! needs to fully manage PTY sessions.
 
 use std::sync::Arc;
-use std::{borrow::Cow, fmt};
+use std::borrow::Cow;
 
 use schemars::{JsonSchema, Schema, SchemaGenerator};
-use serde::de::{self, Visitor};
+use serde::de;
 use serde::{Deserialize, Deserializer};
 use serde_json::{Value, json};
 
@@ -17,15 +17,16 @@ use crate::deps::{CallerCtx, GatewayDeps};
 use crate::registry::{Capability, CapabilityMeta, DangerTier, Surface};
 use crate::server::ok;
 
-// ─── Params ────────────────────────────────────────────────────────────────
+// 闁冲厜鍋撻柍鍏夊亾闁冲厜鍋?Params 闁冲厜鍋撻柍鍏夊亾闁冲厜鍋撻柍鍏夊亾闁冲厜鍋撻柍鍏夊亾闁冲厜鍋撻柍鍏夊亾闁冲厜鍋撻柍鍏夊亾闁冲厜鍋撻柍鍏夊亾闁冲厜鍋撻柍鍏夊亾闁冲厜鍋撻柍鍏夊亾闁冲厜鍋撻柍鍏夊亾闁冲厜鍋撻柍鍏夊亾闁冲厜鍋撻柍鍏夊亾闁冲厜鍋撻柍鍏夊亾闁冲厜鍋撻柍鍏夊亾闁冲厜鍋撻柍鍏夊亾闁冲厜鍋撻柍鍏夊亾闁冲厜鍋撻柍鍏夊亾闁冲厜鍋撻柍鍏夊亾闁冲厜鍋撻柍鍏夊亾闁冲厜鍋撻柍鍏夊亾闁冲厜鍋撻柍鍏夊亾闁冲厜鍋撻柍鍏夊亾闁冲厜鍋撻柍鍏夊亾闁冲厜鍋撻柍鍏夊亾闁冲厜鍋撻柍鍏夊亾闁冲厜鍋撻柍鍏夊亾闁冲厜鍋撻柍鍏夊亾闁冲厜鍋撻柍鍏夊亾闁冲厜鍋撻柍鍏夊亾闁冲厜鍋撻柍鍏夊亾闁冲厜鍋撻柍鍏夊亾闁冲厜鍋撻柍鍏夊亾闁冲厜鍋撻柍鍏夊亾
 
-/// LLM/MCP clients sometimes quote numeric tool args; keep service calls typed.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct TerminalId(i64);
+/// A canonical terminal entity ID. MCP clients must pass the exact `term_*`
+/// UUIDv7 string returned by the terminal APIs; numbers are rejected.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TerminalId(String);
 
 impl TerminalId {
-    fn get(self) -> i64 {
-        self.0
+    fn as_str(&self) -> &str {
+        &self.0
     }
 }
 
@@ -34,70 +35,24 @@ impl<'de> Deserialize<'de> for TerminalId {
     where
         D: Deserializer<'de>,
     {
-        struct TerminalIdVisitor;
-
-        impl Visitor<'_> for TerminalIdVisitor {
-            type Value = TerminalId;
-
-            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-                formatter.write_str("an integer terminal session id or numeric string")
-            }
-
-            fn visit_i64<E>(self, value: i64) -> Result<Self::Value, E> {
-                Ok(TerminalId(value))
-            }
-
-            fn visit_u64<E>(self, value: u64) -> Result<Self::Value, E>
-            where
-                E: de::Error,
-            {
-                i64::try_from(value)
-                    .map(TerminalId)
-                    .map_err(|_| E::custom("terminal session id overflows i64"))
-            }
-
-            fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
-            where
-                E: de::Error,
-            {
-                let trimmed = value.trim();
-                if trimmed.is_empty() {
-                    return Err(E::custom("terminal session id must not be empty"));
-                }
-                trimmed
-                    .parse::<i64>()
-                    .map(TerminalId)
-                    .map_err(|_| E::custom("terminal session id string must be an integer"))
-            }
-        }
-
-        deserializer.deserialize_any(TerminalIdVisitor)
+        let value = String::deserialize(deserializer)?;
+        nomifun_common::TerminalId::try_from(value.as_str())
+            .map_err(de::Error::custom)?;
+        Ok(Self(value))
     }
 }
 
 impl JsonSchema for TerminalId {
-    fn inline_schema() -> bool {
-        true
-    }
-
-    fn schema_name() -> Cow<'static, str> {
-        "TerminalId".into()
-    }
-
+    fn inline_schema() -> bool { true }
+    fn schema_name() -> Cow<'static, str> { "TerminalId".into() }
     fn json_schema(_generator: &mut SchemaGenerator) -> Schema {
         schemars::json_schema!({
-            "oneOf": [
-                { "type": "integer", "format": "int64" },
-                {
-                    "type": "string",
-                    "pattern": "^-?\\d+$",
-                    "description": "Numeric terminal session id as a string."
-                }
-            ]
+            "type": "string",
+            "pattern": "^term_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+            "description": "Canonical NomiFun terminal UUIDv7 entity ID."
         })
     }
 }
-
 /// Parameters for reading a single terminal session's detail/status.
 #[derive(Deserialize, JsonSchema)]
 struct GetTerminalParams {
@@ -117,18 +72,18 @@ struct WriteInputParams {
 }
 
 /// Parameters for submitting text to a terminal so it EXECUTES (the high-level
-/// "type it and press Enter" op — no base64, no manual newline).
+/// "type it and press Enter" op 闁?no base64, no manual newline).
 #[derive(Deserialize, JsonSchema)]
 struct SubmitTerminalParams {
     /// The terminal session id (from nomi_list_terminals).
     id: TerminalId,
     /// Plain UTF-8 text/command to type into the terminal and RUN. Do NOT
-    /// base64-encode and do NOT append a newline — submission (Enter) is handled
+    /// base64-encode and do NOT append a newline 闁?submission (Enter) is handled
     /// for you, including the bracketed-paste sequence agent CLIs (claude/codex/
     /// gemini) need so the text actually executes instead of sitting unrun.
     text: String,
     /// Wait for the turn to settle and return an output tail. Default false
-    /// (fire-and-forget). true → also returns settle_reason + output_tail.
+    /// (fire-and-forget). true 闁?also returns settle_reason + output_tail.
     #[serde(default)]
     wait: bool,
     /// Max seconds to wait when `wait` is true (default 300, capped 1800).
@@ -194,13 +149,13 @@ struct UpdateTerminalParams {
     pinned: Option<bool>,
 }
 
-// ─── Handlers ──────────────────────────────────────────────────────────────
+// 闁冲厜鍋撻柍鍏夊亾闁冲厜鍋?Handlers 闁冲厜鍋撻柍鍏夊亾闁冲厜鍋撻柍鍏夊亾闁冲厜鍋撻柍鍏夊亾闁冲厜鍋撻柍鍏夊亾闁冲厜鍋撻柍鍏夊亾闁冲厜鍋撻柍鍏夊亾闁冲厜鍋撻柍鍏夊亾闁冲厜鍋撻柍鍏夊亾闁冲厜鍋撻柍鍏夊亾闁冲厜鍋撻柍鍏夊亾闁冲厜鍋撻柍鍏夊亾闁冲厜鍋撻柍鍏夊亾闁冲厜鍋撻柍鍏夊亾闁冲厜鍋撻柍鍏夊亾闁冲厜鍋撻柍鍏夊亾闁冲厜鍋撻柍鍏夊亾闁冲厜鍋撻柍鍏夊亾闁冲厜鍋撻柍鍏夊亾闁冲厜鍋撻柍鍏夊亾闁冲厜鍋撻柍鍏夊亾闁冲厜鍋撻柍鍏夊亾闁冲厜鍋撻柍鍏夊亾闁冲厜鍋撻柍鍏夊亾闁冲厜鍋撻柍鍏夊亾闁冲厜鍋撻柍鍏夊亾闁冲厜鍋撻柍鍏夊亾闁冲厜鍋撻柍鍏夊亾闁冲厜鍋撻柍鍏夊亾闁冲厜鍋撻柍鍏夊亾闁冲厜鍋撻柍鍏夊亾闁冲厜鍋撻柍鍏夊亾
 
 async fn get_terminal(deps: Arc<GatewayDeps>, ctx: CallerCtx, p: GetTerminalParams) -> Value {
-    if ctx.user_id.is_empty() {
+    if nomifun_common::UserId::parse(ctx.user_id.as_str()).is_err() {
         return json!({"error": "missing caller user identity in signed Gateway capability"});
     }
-    let id = p.id.get();
+    let id = p.id.as_str();
     match deps.terminal_service.get(id).await {
         Ok(resp) => ok(json!({
             "id": resp.id,
@@ -223,10 +178,10 @@ async fn get_terminal(deps: Arc<GatewayDeps>, ctx: CallerCtx, p: GetTerminalPara
 }
 
 async fn write_input(deps: Arc<GatewayDeps>, ctx: CallerCtx, p: WriteInputParams) -> Value {
-    if ctx.user_id.is_empty() {
+    if nomifun_common::UserId::parse(ctx.user_id.as_str()).is_err() {
         return json!({"error": "missing caller user identity in signed Gateway capability"});
     }
-    let id = p.id.get();
+    let id = p.id.as_str();
     match deps.terminal_service.input(id, &p.data_b64).await {
         Ok(()) => ok(json!({"written": true})),
         Err(e) => json!({"error": e.to_string()}),
@@ -234,12 +189,12 @@ async fn write_input(deps: Arc<GatewayDeps>, ctx: CallerCtx, p: WriteInputParams
 }
 
 async fn submit_terminal(deps: Arc<GatewayDeps>, ctx: CallerCtx, p: SubmitTerminalParams) -> Value {
-    if ctx.user_id.is_empty() {
+    if nomifun_common::UserId::parse(ctx.user_id.as_str()).is_err() {
         return json!({"error": "missing caller user identity in signed Gateway capability"});
     }
-    let id = p.id.get();
+    let id = p.id.as_str();
     if let Err(e) = deps.terminal_service.submit_text(id, &p.text).await {
-        // A not-live session is the common, actionable failure — point at relaunch.
+        // A not-live session is the common, actionable failure 闁?point at relaunch.
         return json!({
             "error": e.to_string(),
             "hint": "if the session has exited, call nomi_terminal_relaunch first, then retry"
@@ -268,10 +223,10 @@ async fn submit_terminal(deps: Arc<GatewayDeps>, ctx: CallerCtx, p: SubmitTermin
 }
 
 async fn read_terminal_output(deps: Arc<GatewayDeps>, ctx: CallerCtx, p: ReadTerminalOutputParams) -> Value {
-    if ctx.user_id.is_empty() {
+    if nomifun_common::UserId::parse(ctx.user_id.as_str()).is_err() {
         return json!({"error": "missing caller user identity in signed Gateway capability"});
     }
-    let id = p.id.get();
+    let id = p.id.as_str();
     let cap = p.max_bytes.unwrap_or(16_384).min(65_536);
     match deps.terminal_service.read_output_tail(id, cap).await {
         Ok(t) => ok(json!({
@@ -285,10 +240,10 @@ async fn read_terminal_output(deps: Arc<GatewayDeps>, ctx: CallerCtx, p: ReadTer
 }
 
 async fn kill_terminal(deps: Arc<GatewayDeps>, ctx: CallerCtx, p: KillTerminalParams) -> Value {
-    if ctx.user_id.is_empty() {
+    if nomifun_common::UserId::parse(ctx.user_id.as_str()).is_err() {
         return json!({"error": "missing caller user identity in signed Gateway capability"});
     }
-    let id = p.id.get();
+    let id = p.id.as_str();
     match deps.terminal_service.kill(id).await {
         Ok(()) => ok(json!({"killed": true, "id": id})),
         Err(e) => json!({"error": e.to_string()}),
@@ -296,10 +251,10 @@ async fn kill_terminal(deps: Arc<GatewayDeps>, ctx: CallerCtx, p: KillTerminalPa
 }
 
 async fn delete_terminal(deps: Arc<GatewayDeps>, ctx: CallerCtx, p: DeleteTerminalParams) -> Value {
-    if ctx.user_id.is_empty() {
+    if nomifun_common::UserId::parse(ctx.user_id.as_str()).is_err() {
         return json!({"error": "missing caller user identity in signed Gateway capability"});
     }
-    let id = p.id.get();
+    let id = p.id.as_str();
     match deps.terminal_service.delete(id).await {
         Ok(()) => ok(json!({"deleted": true, "id": id})),
         Err(e) => json!({"error": e.to_string()}),
@@ -307,10 +262,10 @@ async fn delete_terminal(deps: Arc<GatewayDeps>, ctx: CallerCtx, p: DeleteTermin
 }
 
 async fn resize_terminal(deps: Arc<GatewayDeps>, ctx: CallerCtx, p: ResizeTerminalParams) -> Value {
-    if ctx.user_id.is_empty() {
+    if nomifun_common::UserId::parse(ctx.user_id.as_str()).is_err() {
         return json!({"error": "missing caller user identity in signed Gateway capability"});
     }
-    let id = p.id.get();
+    let id = p.id.as_str();
     match deps.terminal_service.resize(id, p.cols, p.rows).await {
         Ok(()) => ok(json!({"resized": true, "id": id, "cols": p.cols, "rows": p.rows})),
         Err(e) => json!({"error": e.to_string()}),
@@ -318,10 +273,10 @@ async fn resize_terminal(deps: Arc<GatewayDeps>, ctx: CallerCtx, p: ResizeTermin
 }
 
 async fn relaunch_terminal(deps: Arc<GatewayDeps>, ctx: CallerCtx, p: RelaunchTerminalParams) -> Value {
-    if ctx.user_id.is_empty() {
+    if nomifun_common::UserId::parse(ctx.user_id.as_str()).is_err() {
         return json!({"error": "missing caller user identity in signed Gateway capability"});
     }
-    let id = p.id.get();
+    let id = p.id.as_str();
     match deps.terminal_service.relaunch(id).await {
         Ok(resp) => ok(json!({
             "id": resp.id,
@@ -339,13 +294,13 @@ async fn relaunch_terminal(deps: Arc<GatewayDeps>, ctx: CallerCtx, p: RelaunchTe
 }
 
 async fn update_terminal(deps: Arc<GatewayDeps>, ctx: CallerCtx, p: UpdateTerminalParams) -> Value {
-    if ctx.user_id.is_empty() {
+    if nomifun_common::UserId::parse(ctx.user_id.as_str()).is_err() {
         return json!({"error": "missing caller user identity in signed Gateway capability"});
     }
     if p.name.is_none() && p.pinned.is_none() {
         return json!({"error": "nothing to update: provide at least one of name / pinned"});
     }
-    let id = p.id.get();
+    let id = p.id.as_str();
     match deps.terminal_service.update_meta(id, p.name, p.pinned).await {
         Ok(resp) => ok(json!({
             "id": resp.id,
@@ -357,7 +312,7 @@ async fn update_terminal(deps: Arc<GatewayDeps>, ctx: CallerCtx, p: UpdateTermin
     }
 }
 
-// ─── Registration ──────────────────────────────────────────────────────────
+// 闁冲厜鍋撻柍鍏夊亾闁冲厜鍋?Registration 闁冲厜鍋撻柍鍏夊亾闁冲厜鍋撻柍鍏夊亾闁冲厜鍋撻柍鍏夊亾闁冲厜鍋撻柍鍏夊亾闁冲厜鍋撻柍鍏夊亾闁冲厜鍋撻柍鍏夊亾闁冲厜鍋撻柍鍏夊亾闁冲厜鍋撻柍鍏夊亾闁冲厜鍋撻柍鍏夊亾闁冲厜鍋撻柍鍏夊亾闁冲厜鍋撻柍鍏夊亾闁冲厜鍋撻柍鍏夊亾闁冲厜鍋撻柍鍏夊亾闁冲厜鍋撻柍鍏夊亾闁冲厜鍋撻柍鍏夊亾闁冲厜鍋撻柍鍏夊亾闁冲厜鍋撻柍鍏夊亾闁冲厜鍋撻柍鍏夊亾闁冲厜鍋撻柍鍏夊亾闁冲厜鍋撻柍鍏夊亾闁冲厜鍋撻柍鍏夊亾闁冲厜鍋撻柍鍏夊亾闁冲厜鍋撻柍鍏夊亾闁冲厜鍋撻柍鍏夊亾闁冲厜鍋撻柍鍏夊亾闁冲厜鍋撻柍鍏夊亾闁冲厜鍋撻柍鍏夊亾闁冲厜鍋撻柍鍏夊亾闁冲厜鍋撻柍鍏夊亾
 
 /// Register the extended terminal-domain capabilities.
 pub(crate) fn register(out: &mut Vec<Capability>) {
@@ -384,7 +339,7 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
         CapabilityMeta::new(
             "nomi_terminal_send",
             "terminal",
-            "Type text/a command into a terminal and RUN it (plain text, no base64, no manual newline — Enter and the agent-CLI paste sequence are handled). Optional wait=true returns settle_reason + output_tail. Preferred over nomi_terminal_write_input for sending commands.",
+            "Type text/a command into a terminal and RUN it (plain text, no base64, no manual newline 闁?Enter and the agent-CLI paste sequence are handled). Optional wait=true returns settle_reason + output_tail. Preferred over nomi_terminal_write_input for sending commands.",
             DangerTier::Write,
         )
         .deny_on(&[Surface::Channel]),
@@ -457,105 +412,42 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    #[test]
-    fn submit_params_plain_text_no_base64() {
-        let p: SubmitTerminalParams =
-            serde_json::from_value(json!({"id": 7, "text": "git status"})).unwrap();
-        assert_eq!(p.id.get(), 7);
-        assert_eq!(p.text, "git status");
-        assert!(!p.wait);
-        assert_eq!(p.timeout_secs, None);
+    const TERM_ID: &str = "term_0190f5fe-7c00-7a00-8abc-012345678901";
 
-        let p2: SubmitTerminalParams = serde_json::from_value(
-            json!({"id": 1, "text": "run", "wait": true, "timeout_secs": 60}),
+    #[test]
+    fn terminal_params_require_canonical_string_ids() {
+        let p: SubmitTerminalParams = serde_json::from_value(
+            json!({"id": TERM_ID, "text": "git status", "wait": true, "timeout_secs": 60}),
         )
         .unwrap();
-        assert!(p2.wait);
-        assert_eq!(p2.timeout_secs, Some(60));
+        assert_eq!(p.id.as_str(), TERM_ID);
+        assert!(p.wait);
+        assert_eq!(p.timeout_secs, Some(60));
+
+        assert!(serde_json::from_value::<GetTerminalParams>(json!({"id": 7})).is_err());
+        assert!(serde_json::from_value::<GetTerminalParams>(json!({"id": "7"})).is_err());
+        assert!(serde_json::from_value::<GetTerminalParams>(json!({
+            "id": "conv_0190f5fe-7c00-7a00-8abc-012345678901"
+        }))
+        .is_err());
     }
 
     #[test]
-    fn terminal_id_params_accept_numeric_string_ids() {
-        let p: GetTerminalParams = serde_json::from_value(json!({"id": "7"})).unwrap();
-        assert_eq!(p.id.get(), 7);
-
-        let p: WriteInputParams =
-            serde_json::from_value(json!({"id": "7", "data_b64": "cHdkDQo="})).unwrap();
-        assert_eq!(p.id.get(), 7);
-
-        let p: SubmitTerminalParams =
-            serde_json::from_value(json!({"id": "7", "text": "pwd"})).unwrap();
-        assert_eq!(p.id.get(), 7);
-
-        let p: ReadTerminalOutputParams = serde_json::from_value(json!({"id": "7"})).unwrap();
-        assert_eq!(p.id.get(), 7);
-
-        let p: KillTerminalParams = serde_json::from_value(json!({"id": "7"})).unwrap();
-        assert_eq!(p.id.get(), 7);
-
-        let p: DeleteTerminalParams = serde_json::from_value(json!({"id": "7"})).unwrap();
-        assert_eq!(p.id.get(), 7);
-
-        let p: ResizeTerminalParams =
-            serde_json::from_value(json!({"id": "7", "cols": 120, "rows": 30})).unwrap();
-        assert_eq!(p.id.get(), 7);
-
-        let p: RelaunchTerminalParams = serde_json::from_value(json!({"id": "7"})).unwrap();
-        assert_eq!(p.id.get(), 7);
-
-        let p: UpdateTerminalParams =
-            serde_json::from_value(json!({"id": "7", "name": "work"})).unwrap();
-        assert_eq!(p.id.get(), 7);
-    }
-
-    #[test]
-    fn terminal_id_schemas_accept_numeric_strings() {
+    fn terminal_id_schema_is_canonical_string_only() {
         use crate::registry::Registry;
         let specs = Registry::global().tool_specs(crate::registry::Surface::Desktop);
-
         for name in [
-            "nomi_terminal_get",
-            "nomi_terminal_write_input",
-            "nomi_terminal_send",
-            "nomi_terminal_read_output",
-            "nomi_terminal_kill",
-            "nomi_terminal_delete",
-            "nomi_terminal_resize",
-            "nomi_terminal_relaunch",
-            "nomi_terminal_update",
+            "nomi_terminal_get", "nomi_terminal_write_input", "nomi_terminal_send",
+            "nomi_terminal_read_output", "nomi_terminal_kill", "nomi_terminal_delete",
+            "nomi_terminal_resize", "nomi_terminal_relaunch", "nomi_terminal_update",
         ] {
             let spec = specs.iter().find(|spec| spec.name == name).expect("tool registered");
-            let id_schema = spec
-                .input_schema
-                .get("properties")
-                .and_then(Value::as_object)
-                .and_then(|props| props.get("id"))
+            let id_schema = spec.input_schema.get("properties")
+                .and_then(Value::as_object).and_then(|props| props.get("id"))
                 .expect("id schema present");
-            let variants = id_schema
-                .get("oneOf")
-                .or_else(|| id_schema.get("anyOf"))
-                .and_then(Value::as_array)
-                .expect("id schema must accept integer or numeric string");
-            assert!(
-                variants
-                    .iter()
-                    .any(|v| v.get("type").and_then(Value::as_str) == Some("integer")),
-                "{name} id schema must accept integer"
-            );
-            assert!(
-                variants
-                    .iter()
-                    .any(|v| v.get("type").and_then(Value::as_str) == Some("string")),
-                "{name} id schema must accept numeric string"
-            );
+            assert_eq!(id_schema.get("type").and_then(Value::as_str), Some("string"), "{name}");
+            assert!(id_schema.get("pattern").and_then(Value::as_str).is_some(), "{name}");
         }
-    }
-
-    #[test]
-    fn read_output_params_defaults() {
-        let p: ReadTerminalOutputParams = serde_json::from_value(json!({"id": 3})).unwrap();
-        assert_eq!(p.id.get(), 3);
-        assert_eq!(p.max_bytes, None);
     }
 
     #[test]
@@ -563,20 +455,10 @@ mod tests {
         use crate::registry::Registry;
         let reg = Registry::global();
         for name in ["nomi_terminal_send", "nomi_terminal_read_output"] {
-            assert!(reg.contains(name), "{name} must be registered");
-            assert!(
-                reg.tool_visible(crate::registry::Surface::Desktop, name),
-                "{name} must be visible to the Desktop companion"
-            );
+            assert!(reg.contains(name));
+            assert!(reg.tool_visible(crate::registry::Surface::Desktop, name));
         }
-        // send 写类：渠道面必须拒绝。read 只读：渠道面可见（不放大攻击面，仅只读）。
-        assert!(
-            !reg.tool_visible(crate::registry::Surface::Channel, "nomi_terminal_send"),
-            "nomi_terminal_send must be denied on Channel"
-        );
-        assert!(
-            reg.tool_visible(crate::registry::Surface::Channel, "nomi_terminal_read_output"),
-            "nomi_terminal_read_output is read-only and should follow Channel's default Read visibility"
-        );
+        assert!(!reg.tool_visible(crate::registry::Surface::Channel, "nomi_terminal_send"));
+        assert!(reg.tool_visible(crate::registry::Surface::Channel, "nomi_terminal_read_output"));
     }
 }

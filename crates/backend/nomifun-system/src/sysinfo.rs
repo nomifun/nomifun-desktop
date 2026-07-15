@@ -75,12 +75,18 @@ fn resolve_log_dir() -> String {
         .unwrap_or_default()
 }
 
+fn resolve_storage_generation() -> String {
+    std::env::var("NOMIFUN_STORAGE_GENERATION")
+        .unwrap_or_else(|_| "uninitialized".to_owned())
+}
+
 /// Build the system info response from the current runtime environment.
 pub fn get_system_info() -> SystemInfoResponse {
     SystemInfoResponse {
         cache_dir: resolve_cache_dir(),
         work_dir: resolve_work_dir(),
         log_dir: resolve_log_dir(),
+        storage_generation: resolve_storage_generation(),
         platform: map_platform().to_owned(),
         arch: map_arch().to_owned(),
     }

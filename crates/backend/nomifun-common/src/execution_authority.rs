@@ -39,18 +39,20 @@ impl ExecutionAuthority {
 mod tests {
     use super::*;
 
+    const TEST_OWNER_ID: &str = "user_0190f5fe-7c00-7a00-8000-000000000001";
+
     #[test]
     fn resolution_is_exact_and_never_treats_admin_as_owner() {
         assert_eq!(
-            ExecutionAuthority::resolve("system_default_user", "system_default_user"),
+            ExecutionAuthority::resolve(TEST_OWNER_ID, TEST_OWNER_ID),
             ExecutionAuthority::InstanceOwner
         );
         assert_eq!(
-            ExecutionAuthority::resolve("admin", "system_default_user"),
+            ExecutionAuthority::resolve("admin", TEST_OWNER_ID),
             ExecutionAuthority::ModelOnly
         );
         assert_eq!(
-            ExecutionAuthority::resolve(" system_default_user", "system_default_user"),
+            ExecutionAuthority::resolve(" user_0190f5fe-7c00-7a00-8000-000000000001", TEST_OWNER_ID),
             ExecutionAuthority::ModelOnly
         );
     }

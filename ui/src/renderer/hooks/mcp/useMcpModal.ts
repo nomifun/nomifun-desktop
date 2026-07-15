@@ -1,3 +1,4 @@
+import type { McpServerId } from '@/common/types/ids';
 import { useState, useCallback } from 'react';
 import type { IMcpServer } from '@/common/config/storage';
 
@@ -9,7 +10,7 @@ export const useMcpModal = () => {
   const [showMcpModal, setShowMcpModal] = useState(false);
   const [editingMcpServer, setEditingMcpServer] = useState<IMcpServer | undefined>();
   const [deleteConfirmVisible, setDeleteConfirmVisible] = useState(false);
-  const [serverToDelete, setServerToDelete] = useState<number | null>(null);
+  const [serverToDelete, setServerToDelete] = useState<McpServerId | null>(null);
   const [mcpCollapseKey, setMcpCollapseKey] = useState<Record<string, boolean>>({});
 
   // 显示添加MCP服务器模态框
@@ -31,7 +32,7 @@ export const useMcpModal = () => {
   }, []);
 
   // 显示删除确认模态框
-  const showDeleteConfirm = useCallback((serverId: number) => {
+  const showDeleteConfirm = useCallback((serverId: McpServerId) => {
     setServerToDelete(serverId);
     setDeleteConfirmVisible(true);
   }, []);
@@ -43,7 +44,7 @@ export const useMcpModal = () => {
   }, []);
 
   // 切换服务器折叠状态
-  const toggleServerCollapse = useCallback((serverId: number) => {
+  const toggleServerCollapse = useCallback((serverId: McpServerId) => {
     setMcpCollapseKey((prev) => ({ ...prev, [serverId]: !prev[serverId] }));
   }, []);
 

@@ -16,24 +16,19 @@ fn test_generate_prefixed_id_has_prefix() {
 }
 
 #[test]
-fn test_generate_prefixed_id_is_prefix_plus_short_id() {
-    // Entity ID convention: `{prefix}_{shortId}` — a 16-char base32 body
-    // (9-char millisecond timestamp + 7-char random), time-ordered and far
-    // shorter than the former UUIDv7 tail.
-    const SHORT_ID_ALPHABET: &str = "0123456789abcdefghjkmnpqrstvwxyz";
+fn test_generate_prefixed_id_is_prefix_plus_full_uuid_v7() {
+    // Entity ID convention: `{prefix}_{full UUIDv7}`.
     let id = generate_prefixed_id("conv");
     let body = id.strip_prefix("conv_").expect("prefix with underscore separator");
-    assert_eq!(body.len(), 16);
-    assert!(
-        body.chars().all(|c| SHORT_ID_ALPHABET.contains(c)),
-        "short-id body {body} must use only the base32 alphabet"
-    );
+    assert_eq!(body.len(), UUID_STRING_LEN);
+    let parsed = uuid::Uuid::parse_str(body).expect("UUID body");
+    assert_eq!(parsed.get_version_num(), 7);
+    assert_eq!(parsed.hyphenated().to_string(), body);
 }
 
 #[test]
 fn test_prefixed_id_is_time_ordered() {
-    // The timestamp is the high-order prefix of the body, so a later mint
-    // sorts lexicographically after an earlier one.
+    // UUIDv7 carries its timestamp in the high-order bytes.
     let earlier = generate_prefixed_id("conv");
     std::thread::sleep(std::time::Duration::from_millis(2));
     let later = generate_prefixed_id("conv");

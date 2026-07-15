@@ -6,10 +6,25 @@
 
 import { describe, expect, test } from 'bun:test';
 import type { IChannelPluginStatus } from '@/common/types/channel/channel';
+import { parseChannelId, parseCompanionId, parsePublicAgentId } from '@/common/types/ids';
 import { findEnabledChannelStatus, retargetConfigAfterStatus, statusOwnedBy, statusIsUnbound } from './channelStatusSelection';
 
+const CHANNEL_DEFAULT = parseChannelId('chn_0190f5fe-7c00-7a00-8000-000000000001');
+const CHANNEL_OTHER = parseChannelId('chn_0190f5fe-7c00-7a00-8000-000000000002');
+const CHANNEL_TARGET = parseChannelId('chn_0190f5fe-7c00-7a00-8000-000000000003');
+const CHANNEL_UNBOUND = parseChannelId('chn_0190f5fe-7c00-7a00-8000-000000000004');
+const CHANNEL_EXISTING = parseChannelId('chn_0190f5fe-7c00-7a00-8000-000000000005');
+const CHANNEL_X = parseChannelId('chn_0190f5fe-7c00-7a00-8000-000000000006');
+const COMPANION_A = parseCompanionId('companion_0190f5fe-7c00-7a00-8000-000000000001');
+const COMPANION_B = parseCompanionId('companion_0190f5fe-7c00-7a00-8000-000000000002');
+const COMPANION_OTHER = parseCompanionId('companion_0190f5fe-7c00-7a00-8000-000000000003');
+const COMPANION_TARGET = parseCompanionId('companion_0190f5fe-7c00-7a00-8000-000000000004');
+const PUBLIC_A = parsePublicAgentId('pubagent_0190f5fe-7c00-7a00-8000-000000000001');
+const PUBLIC_OTHER = parsePublicAgentId('pubagent_0190f5fe-7c00-7a00-8000-000000000002');
+const PUBLIC_TARGET = parsePublicAgentId('pubagent_0190f5fe-7c00-7a00-8000-000000000003');
+
 const row = (patch: Partial<IChannelPluginStatus>): IChannelPluginStatus => ({
-  id: 'achn_default',
+  id: CHANNEL_DEFAULT,
   type: 'qqbot',
   name: 'QQ Bot',
   enabled: true,
@@ -22,69 +37,64 @@ const row = (patch: Partial<IChannelPluginStatus>): IChannelPluginStatus => ({
 describe('findEnabledChannelStatus', () => {
   test('uses the backend returned channel id before owner fallback', () => {
     const statuses = [
-      row({ id: 'qqbot', enabled: false, connected: false, hasToken: false }),
-      row({ id: 'achn_other', companionId: 'companion_other' }),
-      row({ id: 'achn_target', companionId: 'companion_target' }),
+      row({ id: CHANNEL_DEFAULT, enabled: false, connected: false, hasToken: false }),
+      row({ id: CHANNEL_OTHER, companionId: COMPANION_OTHER }),
+      row({ id: CHANNEL_TARGET, companionId: COMPANION_TARGET }),
     ];
 
     expect(
       findEnabledChannelStatus(statuses, {
         platform: 'qqbot',
-        enabledPluginId: 'achn_target',
-        companionId: 'companion_other',
+        enabledPluginId: CHANNEL_TARGET,
+        companionId: COMPANION_OTHER,
       })?.id
-    ).toBe('achn_target');
+    ).toBe(CHANNEL_TARGET);
   });
 
   test('falls back to platform plus companion binding for create-mode enables', () => {
     const statuses = [
-      row({ id: 'achn_unbound', companionId: undefined, publicAgentId: null }),
-      row({ id: 'achn_target', companionId: 'companion_target' }),
+      row({ id: CHANNEL_UNBOUND, companionId: undefined, publicAgentId: null }),
+      row({ id: CHANNEL_TARGET, companionId: COMPANION_TARGET }),
     ];
 
     expect(
       findEnabledChannelStatus(statuses, {
         platform: 'qqbot',
-        companionId: 'companion_target',
+        companionId: COMPANION_TARGET,
       })?.id
-    ).toBe('achn_target');
+    ).toBe(CHANNEL_TARGET);
   });
 
   test('falls back to platform plus public agent binding', () => {
     const statuses = [
-      row({ id: 'achn_other', publicAgentId: 'pub_other' }),
-      row({ id: 'achn_target', publicAgentId: 'pub_target' }),
+      row({ id: CHANNEL_OTHER, publicAgentId: PUBLIC_OTHER }),
+      row({ id: CHANNEL_TARGET, publicAgentId: PUBLIC_TARGET }),
     ];
 
     expect(
       findEnabledChannelStatus(statuses, {
         platform: 'qqbot',
-        publicAgentId: 'pub_target',
+        publicAgentId: PUBLIC_TARGET,
       })?.id
-    ).toBe('achn_target');
+    ).toBe(CHANNEL_TARGET);
   });
 });
 
 describe('retargetConfigAfterStatus', () => {
   test('moves a create-mode modal onto the resolved row by id (owner-agnostic)', () => {
     expect(
-      retargetConfigAfterStatus({ platform: 'qqbot' }, row({ id: 'achn_target', companionId: 'companion_target' }))
-    ).toEqual({ platform: 'qqbot', channelId: 'achn_target' });
-    // The caller already resolved the correct row, so an owner-id skew must NOT
-    // block the retarget (this was the stuck-toggle bug).
-    expect(
-      retargetConfigAfterStatus({ platform: 'qqbot' }, row({ id: 'achn_target', companionId: ' companion_target ' }))
-    ).toEqual({ platform: 'qqbot', channelId: 'achn_target' });
+      retargetConfigAfterStatus({ platform: 'qqbot' }, row({ id: CHANNEL_TARGET, companionId: COMPANION_TARGET }))
+    ).toEqual({ platform: 'qqbot', channelId: CHANNEL_TARGET });
   });
 
   test('leaves an existing-row modal, a platform mismatch, or null status untouched', () => {
     expect(
       retargetConfigAfterStatus(
-        { platform: 'qqbot', channelId: 'achn_existing' },
-        row({ id: 'achn_target', companionId: 'companion_target' })
+        { platform: 'qqbot', channelId: CHANNEL_EXISTING },
+        row({ id: CHANNEL_TARGET, companionId: COMPANION_TARGET })
       )
-    ).toEqual({ platform: 'qqbot', channelId: 'achn_existing' });
-    expect(retargetConfigAfterStatus({ platform: 'qqbot' }, row({ id: 'achn_x', type: 'telegram' }))).toEqual({
+    ).toEqual({ platform: 'qqbot', channelId: CHANNEL_EXISTING });
+    expect(retargetConfigAfterStatus({ platform: 'qqbot' }, row({ id: CHANNEL_X, type: 'telegram' }))).toEqual({
       platform: 'qqbot',
     });
     expect(retargetConfigAfterStatus({ platform: 'qqbot' }, null)).toEqual({ platform: 'qqbot' });
@@ -92,18 +102,17 @@ describe('retargetConfigAfterStatus', () => {
 });
 
 describe('statusOwnedBy / statusIsUnbound', () => {
-  test('statusOwnedBy trims and matches the right owner side', () => {
-    expect(statusOwnedBy(row({ companionId: 'companion_a' }), { companionId: ' companion_a ' })).toBe(true);
-    expect(statusOwnedBy(row({ companionId: 'companion_a' }), { companionId: 'companion_b' })).toBe(false);
-    expect(statusOwnedBy(row({ publicAgentId: 'pub_a' }), { publicAgentId: 'pub_a' })).toBe(true);
+  test('statusOwnedBy matches the right canonical owner side', () => {
+    expect(statusOwnedBy(row({ companionId: COMPANION_A }), { companionId: COMPANION_A })).toBe(true);
+    expect(statusOwnedBy(row({ companionId: COMPANION_A }), { companionId: COMPANION_B })).toBe(false);
+    expect(statusOwnedBy(row({ publicAgentId: PUBLIC_A }), { publicAgentId: PUBLIC_A })).toBe(true);
     // publicAgent owner takes precedence in the query
-    expect(statusOwnedBy(row({ companionId: 'companion_a' }), { publicAgentId: 'pub_a' })).toBe(false);
+    expect(statusOwnedBy(row({ companionId: COMPANION_A }), { publicAgentId: PUBLIC_A })).toBe(false);
   });
 
   test('statusIsUnbound is true only when neither owner is set', () => {
     expect(statusIsUnbound(row({ companionId: undefined, publicAgentId: undefined }))).toBe(true);
-    expect(statusIsUnbound(row({ companionId: '   ', publicAgentId: undefined }))).toBe(true);
-    expect(statusIsUnbound(row({ companionId: 'companion_a' }))).toBe(false);
-    expect(statusIsUnbound(row({ publicAgentId: 'pub_a' }))).toBe(false);
+    expect(statusIsUnbound(row({ companionId: COMPANION_A }))).toBe(false);
+    expect(statusIsUnbound(row({ publicAgentId: PUBLIC_A }))).toBe(false);
   });
 });

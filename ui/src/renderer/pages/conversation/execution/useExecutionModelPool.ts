@@ -1,6 +1,7 @@
 import type { TExecutionModelPool, TExecutionModelRef } from '@/common/types/agentExecution/agentExecutionTypes';
 import { useModelProviderList } from '@/renderer/hooks/agent/useModelProviderList';
 import { useCallback, useMemo } from 'react';
+import { parseProviderId } from '@/common/types/ids';
 
 const PAIR_SEPARATOR = '\u0000';
 
@@ -9,7 +10,7 @@ export const encodePair = (ref: TExecutionModelRef): string => `${ref.provider_i
 export const decodePair = (value: string): TExecutionModelRef => {
   const separatorIndex = value.indexOf(PAIR_SEPARATOR);
   return {
-    provider_id: value.slice(0, separatorIndex),
+    provider_id: parseProviderId(value.slice(0, separatorIndex)),
     model: value.slice(separatorIndex + PAIR_SEPARATOR.length),
   };
 };

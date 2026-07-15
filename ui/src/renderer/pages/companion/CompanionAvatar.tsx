@@ -10,6 +10,7 @@ import CustomFigure from './characters/CustomFigure';
 import { CUSTOM_CHARACTER_ID, getCharacter } from './characters';
 import { customFigureUrlOf } from './characters/customMeta';
 import type { CustomFigureMeta, CompanionActivity, CompanionMood } from './characters';
+import type { CompanionId } from '@/common/types/ids';
 
 interface CompanionAvatarProps {
   /** Character id from companion config (appearance.character); falls back to default. */
@@ -18,7 +19,7 @@ interface CompanionAvatarProps {
   activity: CompanionActivity;
   size?: number;
   /** Required for character==='custom': which companion's figure to load. */
-  companionId?: string;
+  companionId?: CompanionId;
   /** Required for character==='custom': figure metadata from the companion profile. */
   customFigure?: CustomFigureMeta | null;
   /** 自定义立绘的命中元素（index.tsx 的 data-companion-hit wrapper），用于挂 alpha 掩码。 */

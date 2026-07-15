@@ -58,12 +58,15 @@ export type ReadOnlyConversationViewProps = {
  * `MessageList` (via `useAutoPreviewOfficeFiles`) calls `usePreviewContext()`,
  * which throws when no provider is in scope. The collaboration view renders this
  * inside an Arco `Drawer` without a `ChatLayout`, so without this self-contained
- * provider clicking a task crashed the window. We use a dedicated namespace
- * and `subscribeGlobalOpen={false}` so this read-only viewer never persists into
- * the main conversation's preview bucket nor steals agent-driven global preview
- * opens (mirrors the terminal surface's per-surface provider convention).
+ * provider clicking a task crashed the window. The namespace includes the
+ * immutable attempt identity when available (falling back to the conversation
+ * id), so projected transcripts never restore another attempt's tabs.
+ * `subscribeGlobalOpen={false}` also prevents this viewer from stealing
+ * agent-driven global preview opens.
  */
 const ReadOnlyConversationView: React.FC<ReadOnlyConversationViewProps> = ({ conversation, agent_name }) => {
+  const transcriptEntityId =
+    conversation.execution_attempt_id ?? conversation.execution_step_id ?? conversation.id;
   const content = (() => {
     switch (conversation.type) {
       case 'acp':
@@ -150,7 +153,11 @@ const ReadOnlyConversationView: React.FC<ReadOnlyConversationViewProps> = ({ con
   })();
 
   return (
-    <PreviewProvider persistNamespace='execution-transcript' subscribeGlobalOpen={false}>
+    <PreviewProvider
+      key={`execution-transcript:${transcriptEntityId}`}
+      persistNamespace={`execution-transcript:${transcriptEntityId}`}
+      subscribeGlobalOpen={false}
+    >
       <Suspense fallback={<Spin loading className='flex flex-1 items-center justify-center' />}>{content}</Suspense>
     </PreviewProvider>
   );

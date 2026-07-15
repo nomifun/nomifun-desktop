@@ -4,79 +4,59 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-/**
- * Lowercase Crockford-style base32 alphabet (drops i/l/o/u for legibility),
- * in ascending ASCII order so a fixed-width big-endian encoding sorts
- * lexicographically by the integer it encodes. MUST match
- * `SHORT_ID_ALPHABET` in the Rust `nomifun-common::id` module.
- */
-const SHORT_ID_ALPHABET = '0123456789abcdefghjkmnpqrstvwxyz';
+const ID_PREFIX = /^[a-z][a-z0-9]{0,31}$/;
 
-/** Base32 char counts for the 45-bit timestamp and 35-bit random components. */
-const TIME_CHARS = 9;
-const RAND_CHARS = 7;
-
-/**
- * Encode the low `chars * 5` bits of `value` as `chars` base32 characters,
- * most-significant character first (big-endian), so the text sorts like the
- * value. Mirrors `encode_base32` on the Rust side.
- */
-const encodeBase32 = (value: bigint, chars: number): string => {
-  let v = value;
-  const out = new Array<string>(chars);
-  for (let i = chars - 1; i >= 0; i--) {
-    out[i] = SHORT_ID_ALPHABET[Number(v & 31n)];
-    v >>= 5n;
-  }
-  return out.join('');
-};
-
-/**
- * Self-contained sortable short-id generator: a 45-bit unix-millisecond
- * timestamp (9 base32 chars) followed by 35 random bits (7 base32 chars),
- * for a 16-char body. Mirrors the Rust side
- * (`nomifun-common::generate_prefixed_id`), so ids minted by either side
- * interleave and sort identically — they are lexicographically time-ordered
- * and globally unique, but roughly half the length of the former UUIDv7 tail.
- *
- * Uses crypto.getRandomValues when available; falls back to Math.random
- * (format preserved, randomness not cryptographically secure).
- */
-export const shortId = (): string => {
-  const ms = BigInt(Date.now()) & ((1n << 45n) - 1n);
-
-  const words = new Uint32Array(2);
-  let filled = false;
+function randomBytes(): Uint8Array {
+  const bytes = new Uint8Array(16);
   try {
     const cryptoObj = globalThis.crypto;
     if (cryptoObj && typeof cryptoObj.getRandomValues === 'function') {
-      cryptoObj.getRandomValues(words);
-      filled = true;
+      cryptoObj.getRandomValues(bytes);
+      return bytes;
     }
   } catch {
-    // fall through to Math.random
+    // Use the non-cryptographic fallback only when WebCrypto is unavailable.
   }
-  if (!filled) {
-    words[0] = Math.floor(Math.random() * 2 ** 32) >>> 0;
-    words[1] = Math.floor(Math.random() * 2 ** 32) >>> 0;
+  for (let index = 0; index < bytes.length; index += 1) {
+    bytes[index] = Math.floor(Math.random() * 256);
   }
-  const rand = ((BigInt(words[0]) << 32n) | BigInt(words[1])) & ((1n << 35n) - 1n);
+  return bytes;
+}
 
-  return encodeBase32(ms, TIME_CHARS) + encodeBase32(rand, RAND_CHARS);
-};
+/** Generate a canonical RFC 9562 UUIDv7 without a runtime dependency. */
+function uuidv7(): string {
+  const bytes = randomBytes();
+  let timestamp = BigInt(Date.now());
+  for (let index = 5; index >= 0; index -= 1) {
+    bytes[index] = Number(timestamp & 0xffn);
+    timestamp >>= 8n;
+  }
+  bytes[6] = (bytes[6] & 0x0f) | 0x70;
+  bytes[8] = (bytes[8] & 0x3f) | 0x80;
+  const hex = Array.from(bytes, (value) => value.toString(16).padStart(2, '0')).join('');
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
 
 /**
- * Mint an entity ID in the unified `{prefix}_{shortId}` format, e.g.
- * `prefixedId('msg')` -> `msg_0fh3k…`. Frontend mirror of the Rust
- * `nomifun-common::generate_prefixed_id` — the minting convention for the
- * TEXT short-id entities (messages `msg_`, providers `prov_`, …).
+ * Mint a full canonical lowercase UUIDv7.
  *
- * NOTE: conversations/requirements/terminal sessions are now
- * `INTEGER PRIMARY KEY AUTOINCREMENT` and are minted **only** by the backend
- * (`last_insert_rowid()`); the frontend must NOT mint `conv_`/`req_`/`term_`
- * ids — create the row first and use the integer id the backend returns. See
- * the numeric-id spec §5 (create flow). Use this for any TEXT id that is sent
- * to / stored by the backend; for throwaway local UI keys, `uuid()` from
- * ./utils is fine.
+ * This helper is exported for non-entity values that need UUIDv7 entropy.
+ * Persisted entities should use {@link prefixedId} so their namespace remains
+ * explicit at every protocol and storage boundary.
  */
-export const prefixedId = (prefix: string): string => `${prefix}_${shortId()}`;
+export const shortId = (): string => uuidv7();
+
+/**
+ * Mint an entity ID in the unified `{registered-prefix}_{UUIDv7}` format.
+ *
+ * The prefix validation mirrors `nomifun_common::validate_id_prefix`:
+ * lowercase ASCII letter first, then lowercase ASCII letters or digits, with
+ * a maximum of 32 characters. Invalid programmer-supplied prefixes fail fast
+ * instead of minting an ambiguous identifier.
+ */
+export const prefixedId = (prefix: string): string => {
+  if (!ID_PREFIX.test(prefix)) {
+    throw new TypeError(`Invalid entity ID prefix: ${prefix}`);
+  }
+  return `${prefix}_${uuidv7()}`;
+};

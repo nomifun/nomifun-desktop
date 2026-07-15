@@ -5,7 +5,13 @@
  */
 
 import { ipcBridge } from '@/common';
-import type { AutoWorkRunState, IAutoWorkState, IIdmmState, IdmmRunState } from '@/common/adapter/ipcBridge';
+import type {
+  AutoWorkRunState,
+  IAutoWorkState,
+  IIdmmState,
+  IdmmRunState,
+  SessionCapabilityTargetId,
+} from '@/common/adapter/ipcBridge';
 import { useEffect, useState } from 'react';
 
 type CapabilityTargetKind = 'conversation' | 'terminal';
@@ -13,7 +19,7 @@ type CapabilityTargetKind = 'conversation' | 'terminal';
 // Composite string key for the capability maps: the numeric session id is
 // namespaced by kind, so a number id is fine to interpolate here (the map key
 // stays a string by design — it is not an id comparison).
-export const capabilityKey = (kind: CapabilityTargetKind, id: number | string) => `${kind}:${id}`;
+export const capabilityKey = (kind: CapabilityTargetKind, id: SessionCapabilityTargetId) => `${kind}:${id}`;
 
 export type SessionCapabilitySnapshot = {
   /** `capabilityKey(kind, id)` → run_state. Only AutoWork-enabled sessions are present. */

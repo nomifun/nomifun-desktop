@@ -4,6 +4,7 @@ import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { ipcBridge } from '@/common';
 import type { TChatConversation } from '@/common/config/storage';
+import type { ExecutionParticipantId } from '@/common/types/ids';
 import type {
   TConfigureExecutionStep,
   TExecutionModelRef,
@@ -122,7 +123,7 @@ const ProjectedAttemptView: React.FC<ProjectedAttemptViewProps> = ({ payload }) 
   const applyModel = useCallback((model: TExecutionModelRef | null) => applyStepConfig({ model }), [applyStepConfig]);
   const applyPreset = useCallback((preset: string) => applyStepConfig({ preset_prompt: preset.trim() || null }), [applyStepConfig]);
 
-  const reassign = async (participantId: string) => {
+  const reassign = async (participantId: ExecutionParticipantId) => {
     if (reassigning || participantId === step.assigned_participant_id) return;
     setReassigning(true);
     try {
@@ -161,7 +162,10 @@ const ProjectedAttemptView: React.FC<ProjectedAttemptViewProps> = ({ payload }) 
   };
 
   const participantMenu = (
-    <Menu selectedKeys={step.assigned_participant_id ? [step.assigned_participant_id] : []} onClickMenuItem={(key) => void reassign(key)}>
+    <Menu
+      selectedKeys={step.assigned_participant_id ? [step.assigned_participant_id] : []}
+      onClickMenuItem={(key) => void reassign(key as ExecutionParticipantId)}
+    >
       {assignableParticipants.map((participant) => (
         <Menu.Item key={participant.id}>{participantShortLabel(participant) ?? participant.id}</Menu.Item>
       ))}

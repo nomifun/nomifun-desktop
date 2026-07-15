@@ -5,6 +5,7 @@
  */
 
 // Canonical definitions live in common/types/agent/detectedAgent.ts
+import type { RemoteAgentId } from '@/common/types/ids';
 import type { RemoteAgentProtocol, RemoteAgentAuthType } from '@/common/types/agent/detectedAgent';
 export type { RemoteAgentProtocol, RemoteAgentAuthType } from '@/common/types/agent/detectedAgent';
 
@@ -13,7 +14,7 @@ export type RemoteAgentStatus = 'unknown' | 'connected' | 'pending' | 'error';
 
 /** Remote Agent instance configuration (corresponds to remote_agents DB table) */
 export type RemoteAgentConfig = {
-  id: number;
+  id: RemoteAgentId;
   name: string;
   protocol: RemoteAgentProtocol;
   url: string;

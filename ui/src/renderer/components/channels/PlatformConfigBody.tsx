@@ -186,7 +186,7 @@ export const PlatformConfigBody: React.FC<{
                   : { companion_id: channelTarget.companionId }),
                 config,
               }
-            : { plugin_id: platform, config }
+            : { plugin_type: platform, config }
         );
         if (!result.success) {
           throw new Error(
@@ -199,7 +199,7 @@ export const PlatformConfigBody: React.FC<{
         const enabledStatus = latestStatuses
           ? findEnabledChannelStatus(latestStatuses, {
               platform,
-              enabledPluginId: result.message,
+              enabledPluginId: result.channel_id,
               companionId: channelTarget?.companionId,
               publicAgentId: channelTarget?.publicAgentId,
             })
@@ -209,7 +209,11 @@ export const PlatformConfigBody: React.FC<{
         }
         Message.success(t(PLUGIN_ENABLED_KEY[platform]));
       } else {
-        await channel.disablePlugin.invoke({ plugin_id: channelTarget?.channelId ?? platform });
+        const channelId = channelTarget?.channelId ?? status?.id;
+        if (!channelId) {
+          throw new Error(t('nomi.settings.remoteChannelMissing', { defaultValue: 'Channel record is missing' }));
+        }
+        await channel.disablePlugin.invoke({ plugin_id: channelId });
         Message.success(t(PLUGIN_DISABLED_KEY[platform]));
       }
       await refreshStatuses();

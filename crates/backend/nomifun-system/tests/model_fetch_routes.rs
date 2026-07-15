@@ -13,7 +13,7 @@ use tower::ServiceExt;
 use wiremock::matchers::{header, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
-use nomifun_common::encrypt_string;
+use nomifun_common::{ProviderId, encrypt_string};
 use nomifun_db::{
     CreateProviderParams, IProviderRepository, SqliteClientPreferenceRepository,
     SqliteProviderRepository, SqliteSettingsRepository, init_database_memory,
@@ -115,8 +115,9 @@ fn post_request(uri: &str, body: serde_json::Value) -> Request<Body> {
 #[tokio::test]
 async fn fetch_models_nonexistent_provider() {
     let (router, _db) = setup().await;
+    let provider_id = ProviderId::new().into_string();
     let req = post_request(
-        "/api/providers/nonexistent/models",
+        &format!("/api/providers/{provider_id}/models"),
         json!({"try_fix": false}),
     );
     let resp = router.oneshot(req).await.unwrap();

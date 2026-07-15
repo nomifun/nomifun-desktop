@@ -5,6 +5,16 @@
  */
 
 import type { TProviderWithModel } from '../config/storage';
+import {
+  parseConversationId,
+  parseCronJobId,
+  parseExecutionAttemptId,
+  parseExecutionId,
+  parseExecutionStepId,
+  parseExecutionTemplateId,
+  parseProviderId,
+  parseRemoteAgentId,
+} from '../types/ids';
 
 export type ApiProviderWithModel = {
   provider_id: string;
@@ -41,7 +51,7 @@ export function toApiModelOptional(m?: TProviderWithModel): ApiProviderWithModel
 
 export function fromApiModel(raw: ApiProviderWithModel): TProviderWithModel {
   return {
-    id: raw.provider_id,
+    id: parseProviderId(raw.provider_id),
     platform: '',
     name: '',
     base_url: '',
@@ -73,19 +83,44 @@ export function fromApiConversation<T>(raw: T): T {
   const r = raw as T &
     ApiConversationPinnedFields &
     ApiConversationExecutionTemplateFields & {
+      id?: unknown;
       model?: ApiProviderWithModel | null;
       extra?: Record<string, unknown> | null;
       /** Promoted to a top-level conversations column (was extra.cronJobId). */
       cron_job_id?: string | null;
+      execution_template_id?: string | null;
+      linked_execution_id?: string | null;
+      execution_step_id?: string | null;
+      execution_attempt_id?: string | null;
     };
   const next = { ...r } as unknown as T & {
+    id?: ReturnType<typeof parseConversationId>;
     model?: TProviderWithModel;
     extra?: Record<string, unknown> | null;
+    cron_job_id?: ReturnType<typeof parseCronJobId>;
+    execution_template_id?: ReturnType<typeof parseExecutionTemplateId> | null;
+    linked_execution_id?: ReturnType<typeof parseExecutionId>;
+    execution_step_id?: ReturnType<typeof parseExecutionStepId>;
+    execution_attempt_id?: ReturnType<typeof parseExecutionAttemptId>;
   };
+
+  if ('id' in r) {
+    next.id = parseConversationId(r.id);
+  }
 
   if ('model' in r) {
     next.model = fromApiModelOptional(r.model);
   }
+
+  if (r.cron_job_id != null) next.cron_job_id = parseCronJobId(r.cron_job_id);
+  if (r.execution_template_id != null) {
+    next.execution_template_id = parseExecutionTemplateId(r.execution_template_id);
+  } else if ('execution_template_id' in r) {
+    next.execution_template_id = null;
+  }
+  if (r.linked_execution_id != null) next.linked_execution_id = parseExecutionId(r.linked_execution_id);
+  if (r.execution_step_id != null) next.execution_step_id = parseExecutionStepId(r.execution_step_id);
+  if (r.execution_attempt_id != null) next.execution_attempt_id = parseExecutionAttemptId(r.execution_attempt_id);
 
   let extra = r.extra && typeof r.extra === 'object' ? r.extra : null;
 
@@ -101,17 +136,19 @@ export function fromApiConversation<T>(raw: T): T {
   // Remote-agent conversations use snake_case on the backend. Mirror the row
   // id to the legacy camelCase key while older UI call sites are still being
   // upgraded, so both fresh and existing conversations resolve their agent.
-  if (extra && typeof extra.remote_agent_id === 'number' && !('remoteAgentId' in extra)) {
+  if (extra && 'remote_agent_id' in extra) {
+    const remoteAgentId = parseRemoteAgentId(extra.remote_agent_id);
     extra = {
       ...extra,
-      remoteAgentId: extra.remote_agent_id,
+      remote_agent_id: remoteAgentId,
+      remoteAgentId: remoteAgentId,
     };
   }
 
   // cron_job_id 镜像：后端把它从 extra.cronJobId 提升为顶层列；为保持既有读路径
   // （多处读 conversation.extra?.cron_job_id）不变，将顶层值镜像回 extra。
-  if (typeof r.cron_job_id === 'string' && r.cron_job_id.length > 0) {
-    extra = { ...(extra ?? {}), cron_job_id: r.cron_job_id };
+  if (next.cron_job_id) {
+    extra = { ...(extra ?? {}), cron_job_id: next.cron_job_id };
   }
 
   // 置顶镜像：DB 顶层 pinned/pinned_at 列为权威，镜像进 extra，客户端读路径

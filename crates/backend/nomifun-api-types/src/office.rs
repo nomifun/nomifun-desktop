@@ -1,4 +1,4 @@
-use nomifun_common::PreviewContentType;
+use nomifun_common::{ConversationId, PreviewContentType};
 use serde::{Deserialize, Serialize};
 
 /// Preview capabilities carry 256 bits of OS entropy and are encoded as
@@ -76,7 +76,7 @@ pub struct PreviewHistoryTargetDto {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub language: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub conversation_id: Option<i64>,
+    pub conversation_id: Option<ConversationId>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -404,6 +404,7 @@ mod tests {
 
     #[test]
     fn target_dto_full_fields() {
+        let conversation_id = "conv_0190f5fe-7c00-7a00-8abc-012345678901";
         let raw = json!({
             "content_type": "markdown",
             "file_path": "/a.md",
@@ -411,7 +412,7 @@ mod tests {
             "file_name": "a.md",
             "title": "My Doc",
             "language": "rust",
-            "conversation_id": 123
+            "conversation_id": conversation_id
         });
         let t: PreviewHistoryTargetDto = serde_json::from_value(raw).unwrap();
         assert_eq!(t.content_type, PreviewContentType::Markdown);
@@ -420,7 +421,7 @@ mod tests {
         assert_eq!(t.file_name.as_deref(), Some("a.md"));
         assert_eq!(t.title.as_deref(), Some("My Doc"));
         assert_eq!(t.language.as_deref(), Some("rust"));
-        assert_eq!(t.conversation_id, Some(123));
+        assert_eq!(t.conversation_id.as_ref().map(|id| id.as_str()), Some(conversation_id));
     }
 
     #[test]
@@ -465,6 +466,7 @@ mod tests {
 
     #[test]
     fn target_dto_roundtrip() {
+        let conversation_id = ConversationId::try_from("conv_0190f5fe-7c00-7a00-8abc-012345678904").unwrap();
         let t = PreviewHistoryTargetDto {
             content_type: PreviewContentType::Excel,
             file_path: Some("/sheet.xlsx".into()),
@@ -472,7 +474,7 @@ mod tests {
             file_name: Some("sheet.xlsx".into()),
             title: Some("Budget".into()),
             language: None,
-            conversation_id: Some(1),
+            conversation_id: Some(conversation_id),
         };
         let json = serde_json::to_string(&t).unwrap();
         let parsed: PreviewHistoryTargetDto = serde_json::from_str(&json).unwrap();

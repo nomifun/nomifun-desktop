@@ -13,7 +13,7 @@
  * shell relays the editor's autosave state to the pill and the title-rename
  * flow to the backend.
  */
-import React, { useCallback, useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { Button, Result, Spin } from '@arco-design/web-react';
@@ -23,6 +23,7 @@ import { getCanvas, patchCanvas } from './api';
 import CanvasEditor from './canvas/CanvasEditor';
 import type { SaveState } from './canvas/persistence';
 import type { WorkshopCanvasDoc, WorkshopCanvasMeta } from './types';
+import { parseCanvasId } from '@/common/types/ids';
 
 // ─── Save-state pill ──────────────────────────────────────────────────────────
 
@@ -69,6 +70,7 @@ const CanvasPage: React.FC = () => {
   const { t } = useTranslation();
   const navigate = useNavigate();
   const { id } = useParams<{ id: string }>();
+  const canvasId = useMemo(() => (id === undefined ? null : parseCanvasId(id)), [id]);
   const [message, messageHolder] = useArcoMessage();
 
   const [meta, setMeta] = useState<WorkshopCanvasMeta | null>(null);
@@ -78,10 +80,10 @@ const CanvasPage: React.FC = () => {
   const [saveState, setSaveState] = useState<SaveState>('idle');
 
   const load = useCallback(async () => {
-    if (!id) return;
+    if (!canvasId) return;
     setLoading(true);
     try {
-      const detail = await getCanvas(id);
+      const detail = await getCanvas(canvasId);
       setMeta(detail.meta);
       setDoc(detail.doc);
       setError(null);
@@ -93,7 +95,7 @@ const CanvasPage: React.FC = () => {
     } finally {
       setLoading(false);
     }
-  }, [id]);
+  }, [canvasId]);
 
   useEffect(() => {
     void load();
@@ -116,7 +118,7 @@ const CanvasPage: React.FC = () => {
   }, [editingTitle]);
 
   const commitTitle = useCallback(async () => {
-    if (!meta || !id) {
+    if (!meta || !canvasId) {
       setEditingTitle(false);
       return;
     }
@@ -125,7 +127,7 @@ const CanvasPage: React.FC = () => {
     if (!next || next === meta.title) return;
     setSaveState('saving');
     try {
-      const updated = await patchCanvas(id, { title: next });
+      const updated = await patchCanvas(canvasId, { title: next });
       setMeta(updated);
       setSaveState('saved');
     } catch (e) {
@@ -134,7 +136,7 @@ const CanvasPage: React.FC = () => {
         `${t('workshop.actions.renameFailed', { defaultValue: '重命名失败' })}: ${e instanceof Error ? e.message : String(e)}`
       );
     }
-  }, [meta, id, titleDraft, message, t]);
+  }, [meta, canvasId, titleDraft, message, t]);
 
   const goBack = useCallback(() => navigate('/workshop'), [navigate]);
 
@@ -148,7 +150,7 @@ const CanvasPage: React.FC = () => {
     );
   }
 
-  if (error || !meta || !doc || !id) {
+  if (error || !meta || !doc || !canvasId) {
     return (
       <div className='size-full flex items-center justify-center px-16px'>
         {messageHolder}
@@ -252,7 +254,7 @@ const CanvasPage: React.FC = () => {
 
       {/* Infinite canvas */}
       <div className='relative flex-1 min-h-0 overflow-hidden'>
-        <CanvasEditor key={id} canvasId={id} initialDoc={doc} onSaveStateChange={setSaveState} />
+        <CanvasEditor key={canvasId} canvasId={canvasId} initialDoc={doc} onSaveStateChange={setSaveState} />
       </div>
     </div>
   );

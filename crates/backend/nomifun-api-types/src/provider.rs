@@ -72,6 +72,7 @@ pub enum ProviderHealthCheckErrorKind {
 /// Request body for `POST /api/agents/provider-health-check`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ProviderHealthCheckRequest {
+    #[serde(deserialize_with = "crate::serde_util::deserialize_provider_id")]
     pub provider_id: String,
     pub model: String,
     /// Which task to probe. `None` → look up the model's stored profile primary
@@ -84,6 +85,7 @@ pub struct ProviderHealthCheckRequest {
 /// Response body for `POST /api/agents/provider-health-check`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ProviderHealthCheckResponse {
+    #[serde(deserialize_with = "crate::serde_util::deserialize_provider_id")]
     pub provider_id: String,
     pub platform: String,
     pub model: String,
@@ -128,6 +130,7 @@ pub struct BedrockConfig {
 /// local-store → backend migration; no masking applied.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ProviderResponse {
+    #[serde(deserialize_with = "crate::serde_util::deserialize_provider_id")]
     pub id: String,
     pub platform: String,
     pub name: String,
@@ -164,7 +167,11 @@ pub struct CreateProviderRequest {
     /// Optional caller-supplied id. When `None`, the server generates one.
     /// Lets callers preserve a locally-known id across the create boundary
     /// (used during the frontend-local-store → backend migration).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::serde_util::deserialize_optional_provider_id"
+    )]
     pub id: Option<String>,
     pub platform: String,
     pub name: String,
@@ -351,6 +358,8 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    const PROVIDER_ID: &str = "prov_018f1234-5678-7abc-8def-012345678990";
+
     // -- ModelType --
 
     #[test]
@@ -501,7 +510,7 @@ mod tests {
     #[test]
     fn test_provider_response_serialization() {
         let resp = ProviderResponse {
-            id: "uuid-xxx".into(),
+            id: PROVIDER_ID.into(),
             platform: "anthropic".into(),
             name: "Anthropic".into(),
             base_url: "https://api.anthropic.com".into(),
@@ -525,7 +534,7 @@ mod tests {
             updated_at: 1712345678000,
         };
         let json = serde_json::to_value(&resp).unwrap();
-        assert_eq!(json["id"], "uuid-xxx");
+        assert_eq!(json["id"], PROVIDER_ID);
         assert_eq!(json["platform"], "anthropic");
         assert_eq!(json["api_key"], "sk-ant-api03-plaintext");
         assert_eq!(json["base_url"], "https://api.anthropic.com");
@@ -540,7 +549,7 @@ mod tests {
     fn test_provider_response_api_key_plaintext() {
         // Pre-launch: no masking is applied to the api_key field on the wire.
         let resp = ProviderResponse {
-            id: "id".into(),
+            id: PROVIDER_ID.into(),
             platform: "openai".into(),
             name: "n".into(),
             base_url: "https://api.openai.com".into(),
@@ -624,14 +633,14 @@ mod tests {
     #[test]
     fn test_create_provider_request_with_id() {
         let raw = json!({
-            "id": "caller-supplied-1",
+            "id": PROVIDER_ID,
             "platform": "openai",
             "name": "OpenAI",
             "base_url": "https://api.openai.com",
             "api_key": "sk-test"
         });
         let req: CreateProviderRequest = serde_json::from_value(raw).unwrap();
-        assert_eq!(req.id.as_deref(), Some("caller-supplied-1"));
+        assert_eq!(req.id.as_deref(), Some(PROVIDER_ID));
     }
 
     #[test]
@@ -1008,18 +1017,18 @@ mod tests {
     #[test]
     fn test_provider_health_check_request_serde() {
         let raw = json!({
-            "provider_id": "anthropic",
+            "provider_id": PROVIDER_ID,
             "model": "claude-sonnet-4-20250514"
         });
         let req: ProviderHealthCheckRequest = serde_json::from_value(raw).unwrap();
-        assert_eq!(req.provider_id, "anthropic");
+        assert_eq!(req.provider_id, PROVIDER_ID);
         assert_eq!(req.model, "claude-sonnet-4-20250514");
     }
 
     #[test]
     fn test_provider_health_check_response_serde() {
         let resp = ProviderHealthCheckResponse {
-            provider_id: "anthropic".into(),
+            provider_id: PROVIDER_ID.into(),
             platform: "anthropic".into(),
             model: "claude-sonnet-4-20250514".into(),
             status: HealthStatus::Unhealthy,
@@ -1030,10 +1039,50 @@ mod tests {
             timeout_stage: None,
         };
         let json = serde_json::to_value(&resp).unwrap();
-        assert_eq!(json["provider_id"], "anthropic");
+        assert_eq!(json["provider_id"], PROVIDER_ID);
         assert_eq!(json["status"], "unhealthy");
         assert_eq!(json["error_kind"], "unauthorized");
         assert_eq!(json["http_status"], 401);
         assert!(json.get("timeout_stage").is_none());
+    }
+
+    #[test]
+    fn create_provider_request_rejects_noncanonical_supplied_id() {
+        let raw = json!({
+            "id": "caller-supplied-1",
+            "platform": "openai",
+            "name": "OpenAI",
+            "base_url": "https://api.openai.com",
+            "api_key": "sk-test"
+        });
+        assert!(serde_json::from_value::<CreateProviderRequest>(raw).is_err());
+    }
+
+    #[test]
+    fn provider_health_check_request_rejects_platform_key_as_entity_id() {
+        let raw = json!({
+            "provider_id": "anthropic",
+            "model": "claude-sonnet-4-20250514"
+        });
+        assert!(serde_json::from_value::<ProviderHealthCheckRequest>(raw).is_err());
+    }
+
+    #[test]
+    fn provider_response_rejects_noncanonical_entity_id() {
+        let raw = json!({
+            "id": "openai",
+            "platform": "openai",
+            "name": "OpenAI",
+            "base_url": "https://api.openai.com",
+            "api_key": "sk-test",
+            "models": [],
+            "enabled": true,
+            "capabilities": [],
+            "is_full_url": false,
+            "sort_order": 0,
+            "created_at": 0,
+            "updated_at": 0
+        });
+        assert!(serde_json::from_value::<ProviderResponse>(raw).is_err());
     }
 }

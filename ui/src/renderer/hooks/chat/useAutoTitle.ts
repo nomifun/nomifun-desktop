@@ -1,3 +1,4 @@
+import type { ConversationId } from '@/common/types/ids';
 import { useCallback } from 'react';
 import { useTranslation } from 'react-i18next';
 import { ipcBridge } from '@/common';
@@ -9,7 +10,7 @@ export const useAutoTitle = () => {
   const { t } = useTranslation();
 
   const syncTitleFromHistory = useCallback(
-    async (conversation_id: number, fallbackContent?: string) => {
+    async (conversation_id: ConversationId, fallbackContent?: string) => {
       const defaultTitle = t('conversation.welcome.newConversation');
       try {
         const conversation = await getConversationOrNull(conversation_id);
@@ -44,7 +45,7 @@ export const useAutoTitle = () => {
   );
 
   const checkAndUpdateTitle = useCallback(
-    async (conversation_id: number, messageContent: string) => {
+    async (conversation_id: ConversationId, messageContent: string) => {
       await syncTitleFromHistory(conversation_id, messageContent);
     },
     [syncTitleFromHistory]

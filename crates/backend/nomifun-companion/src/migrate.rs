@@ -256,7 +256,7 @@ pub fn migrate_legacy_layout(data_dir: &Path) -> std::io::Result<Option<String>>
             interval_minutes: old.learn.interval_minutes,
             model: old.model.clone(),
         },
-        default_companion_id: companion_id.clone(),
+        default_companion_id: Some(companion_id.clone()),
         bridge_to_memory_dir: None,
         ..Default::default()
     };
@@ -268,7 +268,7 @@ pub fn migrate_legacy_layout(data_dir: &Path) -> std::io::Result<Option<String>>
         // as None would let the boot backfill renumber an already-numbered
         // companion. A freshly minted first companion stays None and is numbered by the
         // boot backfill right after the registry scan.
-        seq: CompanionProfileConfig::load(&companions.join(&companion_id)).seq,
+        seq: CompanionProfileConfig::load(&companions.join(&companion_id)).and_then(|profile| profile.seq),
         name: "Nomi".into(),
         character: old.appearance.character.clone(),
         persona: old.persona.clone(),
@@ -366,8 +366,8 @@ fn salvage_unique_staging_copies(staging_shared: &Path, shared: &Path, legacy: &
 
 /// Window 1 id adoption: the first companion a previous (marker-less) run already
 /// committed under `companions/`. Recognized by its migration-given name "Nomi"
-/// with a profile that passes the registry's sanity rule (non-empty id
-/// matching its directory). Oldest wins should several qualify.
+/// with a profile that passes the registry's canonical-ID and matching-directory
+/// rules. Oldest wins should several qualify.
 fn existing_first_companion_id(companions: &Path) -> Option<String> {
     let entries = std::fs::read_dir(companions).ok()?;
     let mut found: Option<CompanionProfileConfig> = None;
@@ -376,8 +376,10 @@ fn existing_first_companion_id(companions: &Path) -> Option<String> {
         if !path.is_dir() {
             continue;
         }
-        let profile = CompanionProfileConfig::load(&path);
-        if profile.id.is_empty() || profile.id != entry.file_name().to_string_lossy() || profile.name != "Nomi" {
+        let Some(profile) = CompanionProfileConfig::load(&path) else {
+            continue;
+        };
+        if profile.id != entry.file_name().to_string_lossy() || profile.name != "Nomi" {
             continue;
         }
         if found.as_ref().is_none_or(|f| profile.created_at < f.created_at) {
@@ -453,6 +455,8 @@ fn copy_dir_recursive(from: &Path, to: &Path) -> std::io::Result<()> {
 mod tests {
     use super::*;
 
+    const PROVIDER_FIXTURE: &str = "prov_0190f5fe-7c00-7a00-8abc-000000000001";
+
     /// A legacy `companion/nomi` install: old-format config.json, a fake db file
     /// and one events JSONL.
     fn build_legacy(data_dir: &Path) {
@@ -462,7 +466,7 @@ mod tests {
             legacy.join("config.json"),
             serde_json::json!({
                 "collect": {"chat_user_messages": true, "cron_runs": true},
-                "model": {"provider_id": "prov_x", "model": "claude-fable-5"},
+                "model": {"provider_id": PROVIDER_FIXTURE, "model": "claude-fable-5"},
                 "learn": {"enabled": true, "interval_minutes": 30},
                 "appearance": {
                     "companion_enabled": true,
@@ -487,11 +491,12 @@ mod tests {
         let shared = dir.path().join(crate::COMPANION_SHARED_REL_DIR);
         std::fs::create_dir_all(&shared).unwrap();
         let path = shared.join("config.json");
+        let companion_id = nomifun_common::CompanionId::new().into_string();
         std::fs::write(
             &path,
             serde_json::json!({
                 "smart_orchestration": true,
-                "default_companion_id": "companion_1"
+                "default_companion_id": companion_id
             })
             .to_string(),
         )
@@ -505,7 +510,7 @@ mod tests {
         assert!(migrated.get("smart_orchestration").is_none());
         let config = SharedCompanionConfig::load(&shared);
         assert!(config.smart_collaboration);
-        assert_eq!(config.default_companion_id, "companion_1");
+        assert_eq!(config.default_companion_id.as_deref(), Some(companion_id.as_str()));
 
         let after_first_run = std::fs::read_to_string(&path).unwrap();
         migrate_pet_dir_to_companion(dir.path());
@@ -556,12 +561,12 @@ mod tests {
         assert!(!shared_cfg.collect.requirements);
         assert!(shared_cfg.learn.enabled);
         assert_eq!(shared_cfg.learn.interval_minutes, 30);
-        assert_eq!(shared_cfg.learn.model.provider_id, "prov_x");
-        assert_eq!(shared_cfg.learn.model.model, "claude-fable-5");
-        assert_eq!(shared_cfg.default_companion_id, companion_id);
+        assert_eq!(shared_cfg.learn.model.as_ref().unwrap().provider_id, PROVIDER_FIXTURE);
+        assert_eq!(shared_cfg.learn.model.as_ref().unwrap().model, "claude-fable-5");
+        assert_eq!(shared_cfg.default_companion_id.as_deref(), Some(companion_id.as_str()));
 
         // First companion profile: named Nomi, everything else from the old config.
-        let profile = CompanionProfileConfig::load(&companions.join(&companion_id));
+        let profile = CompanionProfileConfig::load(&companions.join(&companion_id)).unwrap();
         assert_eq!(profile.id, companion_id);
         // A freshly minted first companion carries no number yet — the boot
         // backfill right after the registry scan assigns it.
@@ -570,7 +575,7 @@ mod tests {
         assert_eq!(profile.character, "ink");
         assert_eq!(profile.persona.preset, "calm");
         assert_eq!(profile.persona.custom, "多用颜文字");
-        assert_eq!(profile.model.provider_id, "prov_x");
+        assert_eq!(profile.model.as_ref().unwrap().provider_id, PROVIDER_FIXTURE);
         assert!(profile.appearance.companion_enabled);
         assert_eq!(profile.appearance.companion_x, Some(12));
         assert_eq!(profile.appearance.companion_y, Some(34));
@@ -610,7 +615,11 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         build_legacy(dir.path());
         let legacy = dir.path().join(crate::COMPANION_REL_DIR);
-        std::fs::write(legacy.join(MIGRATED_MARKER), "companion_done").unwrap();
+        std::fs::write(
+            legacy.join(MIGRATED_MARKER),
+            nomifun_common::CompanionId::new().into_string(),
+        )
+        .unwrap();
 
         assert_eq!(migrate_legacy_layout(dir.path()).unwrap(), None);
         // Nothing was touched: no shared dir, legacy artifacts intact.
@@ -645,9 +654,9 @@ mod tests {
             "{\"e\":1}\n"
         );
         let shared_cfg = SharedCompanionConfig::load(&shared);
-        assert_eq!(shared_cfg.default_companion_id, companion_id);
+        assert_eq!(shared_cfg.default_companion_id.as_deref(), Some(companion_id.as_str()));
         let companions = dir.path().join(crate::COMPANION_COMPANIONS_REL_DIR);
-        assert_eq!(CompanionProfileConfig::load(&companions.join(&companion_id)).id, companion_id);
+        assert_eq!(CompanionProfileConfig::load(&companions.join(&companion_id)).unwrap().id, companion_id);
         // Marker written, legacy db/events cleaned, staging gone.
         assert_eq!(std::fs::read_to_string(legacy.join(MIGRATED_MARKER)).unwrap(), companion_id);
         assert!(!legacy.join("memory.db").exists());
@@ -714,7 +723,7 @@ mod tests {
 
         // Simulate the boot that followed: the registry backfill numbered the
         // first companion and advanced its watermark state file under shared.
-        let mut numbered = CompanionProfileConfig::load(&companions.join(&first_id));
+        let mut numbered = CompanionProfileConfig::load(&companions.join(&first_id)).unwrap();
         numbered.seq = Some(1);
         numbered.save(&companions.join(&first_id)).unwrap();
         crate::registry::CompanionSeqState { last_companion_seq: 1 }.save(&shared).unwrap();
@@ -744,13 +753,16 @@ mod tests {
         assert_eq!(second_id, first_id);
         let companion_dirs: Vec<_> = std::fs::read_dir(&companions).unwrap().flatten().collect();
         assert_eq!(companion_dirs.len(), 1);
-        assert_eq!(CompanionProfileConfig::load(&companions.join(&first_id)).name, "Nomi");
+        assert_eq!(CompanionProfileConfig::load(&companions.join(&first_id)).unwrap().name, "Nomi");
         // The adopted companion keeps its short number, and the registry's
         // watermark state file is carried into the rebuilt shared dir
         // instead of being reset.
-        assert_eq!(CompanionProfileConfig::load(&companions.join(&first_id)).seq, Some(1));
+        assert_eq!(CompanionProfileConfig::load(&companions.join(&first_id)).unwrap().seq, Some(1));
         assert_eq!(crate::registry::CompanionSeqState::load(&shared).last_companion_seq, 1);
-        assert_eq!(SharedCompanionConfig::load(&shared).default_companion_id, first_id);
+        assert_eq!(
+            SharedCompanionConfig::load(&shared).default_companion_id.as_deref(),
+            Some(first_id.as_str()),
+        );
         assert_eq!(std::fs::read_to_string(legacy.join(MIGRATED_MARKER)).unwrap(), first_id);
         // The displaced previous shared was swept after the marker.
         assert!(displaced_dirs(dir.path()).is_empty());

@@ -1,3 +1,4 @@
+use nomifun_common::{ConnectorCredentialId, KnowledgeBaseId};
 use serde::{Deserialize, Serialize};
 
 /// A live (URL-backed) source attached to a knowledge base. Snapshots of
@@ -53,7 +54,7 @@ pub struct KnowledgeSource {
     /// **P3 connector**: reference to a `connector_credentials` row (never a
     /// secret). Present for connector-backed sources (`kind != "url"`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub credential_ref: Option<String>,
+    pub credential_ref: Option<ConnectorCredentialId>,
     /// Connector-specific scope (e.g. a Feishu wiki space `{ "space_id": .. }`).
     /// Opaque to the core; interpreted by the connector.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -73,7 +74,7 @@ fn default_source_kind() -> String {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ConnectorCredentialSummary {
-    pub id: String,
+    pub id: ConnectorCredentialId,
     /// Connector discriminator: "feishu", "notion", …
     pub kind: String,
     pub name: String,
@@ -115,9 +116,9 @@ pub struct ConnectorSyncState {
 /// Serialized into `extra.knowledge_mounts`; every field added after the
 /// initial shape MUST be `#[serde(default)]`-compatible so old persisted
 /// extras keep deserializing.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct KnowledgeMountInfo {
-    pub id: String,
+    pub id: KnowledgeBaseId,
     pub name: String,
     pub description: String,
     /// Workspace-relative mount path, e.g. `.nomi/knowledge/领域知识`.
@@ -177,6 +178,25 @@ pub struct UpdateKnowledgeTagRequest {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn durable_knowledge_dtos_reject_noncanonical_ids() {
+        let credential = serde_json::json!({
+            "id": "conn_1",
+            "kind": "feishu",
+            "name": "tenant",
+            "createdAt": 1
+        });
+        assert!(serde_json::from_value::<ConnectorCredentialSummary>(credential).is_err());
+
+        let mount = serde_json::json!({
+            "id": 42,
+            "name": "docs",
+            "description": "",
+            "rel_path": ".nomi/knowledge/docs"
+        });
+        assert!(serde_json::from_value::<KnowledgeMountInfo>(mount).is_err());
+    }
 
     /// The `extra.source` wire shape (camelCase + lowercase mode) is a
     /// frontend/gateway contract — pin it.

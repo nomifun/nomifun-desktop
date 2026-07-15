@@ -6,13 +6,13 @@ import React, { useEffect, useMemo, useState } from 'react';
 import { Button, Message } from '@arco-design/web-react';
 import { useTranslation } from 'react-i18next';
 import { ipcBridge } from '@/common';
-import type { Preset, PresetTarget, ResolvedPresetSnapshot } from '@/common/types/agent/presetTypes';
+import type { Preset, PresetReference, PresetTarget, ResolvedPresetSnapshot } from '@/common/types/agent/presetTypes';
 import NomiSelect from '@/renderer/components/base/NomiSelect';
 
 type Props = {
   target: PresetTarget;
   appliedPreset?: ResolvedPresetSnapshot;
-  onApply: (presetId: string, locale: string) => Promise<void>;
+  onApply: (presetId: PresetReference, locale: string) => Promise<void>;
   disabled?: boolean;
 };
 
@@ -21,7 +21,7 @@ const PresetApplyControl: React.FC<Props> = ({ target, appliedPreset, onApply, d
   const [presets, setPresets] = useState<Preset[]>([]);
   const [loading, setLoading] = useState(true);
   const [applying, setApplying] = useState(false);
-  const [selectedId, setSelectedId] = useState<string | undefined>(appliedPreset?.preset_id);
+  const [selectedId, setSelectedId] = useState<PresetReference | undefined>(appliedPreset?.preset_id);
 
   useEffect(() => {
     let active = true;
@@ -69,7 +69,7 @@ const PresetApplyControl: React.FC<Props> = ({ target, appliedPreset, onApply, d
       <div className='flex items-center gap-8px flex-wrap'>
         <NomiSelect
           value={selectedId}
-          onChange={(value) => setSelectedId(value as string)}
+          onChange={(value) => setSelectedId(value as PresetReference | undefined)}
           disabled={disabled || loading || applying}
           loading={loading}
           showSearch

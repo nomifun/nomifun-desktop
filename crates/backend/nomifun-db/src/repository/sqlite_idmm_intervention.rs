@@ -154,20 +154,22 @@ mod tests {
     use super::*;
     use crate::init_database_memory;
 
-    const CONVERSATION_A: &str = "1001";
-    const CONVERSATION_B: &str = "1002";
-    const OWNER_B_CONVERSATION: &str = "2001";
-    const TERMINAL_A: &str = "3001";
+    const CONVERSATION_A: &str = "conv_0190f5fe-7c00-7a00-8abc-012345678901";
+    const CONVERSATION_B: &str = "conv_0190f5fe-7c00-7a00-8abc-012345678902";
+    const OWNER_B_CONVERSATION: &str = "conv_0190f5fe-7c00-7a00-8abc-012345678903";
+    const TERMINAL_A: &str = "term_0190f5fe-7c00-7a00-8abc-012345678901";
 
-    async fn setup() -> (SqliteIdmmInterventionRepository, crate::Database) {
+    async fn setup() -> (SqliteIdmmInterventionRepository, crate::Database, String) {
         let db = init_database_memory().await.unwrap();
+        let installation_owner = crate::installation_owner_id(db.pool()).await.unwrap();
         for (id, name) in [(CONVERSATION_A, "conversation-a"), (CONVERSATION_B, "conversation-b")] {
             sqlx::query(
                 "INSERT INTO conversations \
                  (id, user_id, name, type, extra, status, created_at, updated_at) \
-                 VALUES (?, 'system_default_user', ?, 'nomi', '{}', 'pending', 1, 1)",
+                 VALUES (?, ?, ?, 'nomi', '{}', 'pending', 1, 1)",
             )
-            .bind(id.parse::<i64>().unwrap())
+            .bind(id)
+            .bind(&installation_owner)
             .bind(name)
             .execute(db.pool())
             .await
@@ -176,14 +178,15 @@ mod tests {
         sqlx::query(
             "INSERT INTO terminal_sessions \
              (id, name, cwd, command, args, created_at, updated_at, user_id) \
-             VALUES (?, 'terminal-a', '/tmp', '$SHELL', '[]', 1, 1, 'system_default_user')",
+             VALUES (?, 'terminal-a', '/tmp', '$SHELL', '[]', 1, 1, ?)",
         )
-        .bind(TERMINAL_A.parse::<i64>().unwrap())
+        .bind(TERMINAL_A)
+        .bind(&installation_owner)
         .execute(db.pool())
         .await
         .unwrap();
         let repo = SqliteIdmmInterventionRepository::new(db.pool().clone());
-        (repo, db)
+        (repo, db, installation_owner)
     }
 
     async fn insert_user(db: &crate::Database, id: &str) {
@@ -201,15 +204,21 @@ mod tests {
              (id, user_id, name, type, extra, status, delegation_policy, created_at, updated_at) \
              VALUES (?, ?, 'owner-b-conversation', 'nomi', '{}', 'pending', 'disabled', 1, 1)",
         )
-        .bind(OWNER_B_CONVERSATION.parse::<i64>().unwrap())
+        .bind(OWNER_B_CONVERSATION)
         .bind(id)
         .execute(db.pool())
         .await
         .unwrap();
     }
 
-    fn sample_row(id: &str, target_kind: &str, target_id: &str, at: i64) -> IdmmInterventionRow {
-        sample_row_for_user("system_default_user", id, target_kind, target_id, at)
+    fn sample_row(
+        installation_owner: &str,
+        id: &str,
+        target_kind: &str,
+        target_id: &str,
+        at: i64,
+    ) -> IdmmInterventionRow {
+        sample_row_for_user(installation_owner, id, target_kind, target_id, at)
     }
 
     fn sample_row_for_user(
@@ -240,19 +249,19 @@ mod tests {
 
     #[tokio::test]
     async fn insert_then_list_returns_recent_first() {
-        let (repo, _db) = setup().await;
-        repo.insert(&sample_row("idmmrec_a", "conversation", CONVERSATION_A, 10))
+        let (repo, _db, owner) = setup().await;
+        repo.insert(&sample_row(&owner, "idmmrec_a", "conversation", CONVERSATION_A, 10))
             .await
             .unwrap();
-        repo.insert(&sample_row("idmmrec_b", "conversation", CONVERSATION_A, 30))
+        repo.insert(&sample_row(&owner, "idmmrec_b", "conversation", CONVERSATION_A, 30))
             .await
             .unwrap();
-        repo.insert(&sample_row("idmmrec_c", "conversation", CONVERSATION_A, 20))
+        repo.insert(&sample_row(&owner, "idmmrec_c", "conversation", CONVERSATION_A, 20))
             .await
             .unwrap();
 
         let rows = repo
-            .list_for_target("system_default_user", "conversation", CONVERSATION_A, 100)
+            .list_for_target(&owner, "conversation", CONVERSATION_A, 100)
             .await
             .unwrap();
         let ids: Vec<&str> = rows.iter().map(|r| r.id.as_str()).collect();
@@ -262,10 +271,11 @@ mod tests {
 
     #[tokio::test]
     async fn insert_prunes_to_per_target_cap() {
-        let (repo, _db) = setup().await;
+        let (repo, _db, owner) = setup().await;
         // 插 35 条,at 递增(at=i 对应 id idmmrec_i)。
         for i in 0..35 {
             repo.insert(&sample_row(
+                &owner,
                 &format!("idmmrec_{i:02}"),
                 "conversation",
                 CONVERSATION_A,
@@ -276,7 +286,7 @@ mod tests {
         }
 
         let rows = repo
-            .list_for_target("system_default_user", "conversation", CONVERSATION_A, 100)
+            .list_for_target(&owner, "conversation", CONVERSATION_A, 100)
             .await
             .unwrap();
         assert_eq!(rows.len(), PER_TARGET_CAP as usize);
@@ -297,31 +307,31 @@ mod tests {
 
     #[tokio::test]
     async fn delete_for_target_removes_only_that_target() {
-        let (repo, _db) = setup().await;
-        repo.insert(&sample_row("idmmrec_c1a", "conversation", CONVERSATION_A, 10))
+        let (repo, _db, owner) = setup().await;
+        repo.insert(&sample_row(&owner, "idmmrec_c1a", "conversation", CONVERSATION_A, 10))
             .await
             .unwrap();
-        repo.insert(&sample_row("idmmrec_c1b", "conversation", CONVERSATION_A, 20))
+        repo.insert(&sample_row(&owner, "idmmrec_c1b", "conversation", CONVERSATION_A, 20))
             .await
             .unwrap();
-        repo.insert(&sample_row("idmmrec_t1a", "terminal", TERMINAL_A, 15))
+        repo.insert(&sample_row(&owner, "idmmrec_t1a", "terminal", TERMINAL_A, 15))
             .await
             .unwrap();
 
         let removed = repo
-            .delete_for_target("system_default_user", "conversation", CONVERSATION_A)
+            .delete_for_target(&owner, "conversation", CONVERSATION_A)
             .await
             .unwrap();
         assert_eq!(removed, 2);
 
         assert!(
-            repo.list_for_target("system_default_user", "conversation", CONVERSATION_A, 100)
+            repo.list_for_target(&owner, "conversation", CONVERSATION_A, 100)
                 .await
                 .unwrap()
                 .is_empty()
         );
         let remaining = repo
-            .list_for_target("system_default_user", "terminal", TERMINAL_A, 100)
+            .list_for_target(&owner, "terminal", TERMINAL_A, 100)
             .await
             .unwrap();
         assert_eq!(remaining.len(), 1);
@@ -330,11 +340,11 @@ mod tests {
 
     #[tokio::test]
     async fn sweep_removes_older_than_cutoff() {
-        let (repo, _db) = setup().await;
-        repo.insert(&sample_row("idmmrec_old", "conversation", CONVERSATION_A, 100))
+        let (repo, _db, owner) = setup().await;
+        repo.insert(&sample_row(&owner, "idmmrec_old", "conversation", CONVERSATION_A, 100))
             .await
             .unwrap();
-        repo.insert(&sample_row("idmmrec_new", "conversation", CONVERSATION_A, 1000))
+        repo.insert(&sample_row(&owner, "idmmrec_new", "conversation", CONVERSATION_A, 1000))
             .await
             .unwrap();
 
@@ -343,7 +353,7 @@ mod tests {
         assert_eq!(removed, 1);
 
         let rows = repo
-            .list_for_target("system_default_user", "conversation", CONVERSATION_A, 100)
+            .list_for_target(&owner, "conversation", CONVERSATION_A, 100)
             .await
             .unwrap();
         assert_eq!(rows.len(), 1);
@@ -352,43 +362,43 @@ mod tests {
 
     #[tokio::test]
     async fn list_recent_is_owner_scoped_cross_target_recent_first_capped() {
-        let (repo, _db) = setup().await;
+        let (repo, _db, owner) = setup().await;
         // 跨多个 target 写入,at 交错。
-        repo.insert(&sample_row("idmmrec_c1a", "conversation", CONVERSATION_A, 10))
+        repo.insert(&sample_row(&owner, "idmmrec_c1a", "conversation", CONVERSATION_A, 10))
             .await
             .unwrap();
-        repo.insert(&sample_row("idmmrec_t1a", "terminal", TERMINAL_A, 40))
+        repo.insert(&sample_row(&owner, "idmmrec_t1a", "terminal", TERMINAL_A, 40))
             .await
             .unwrap();
-        repo.insert(&sample_row("idmmrec_c2a", "conversation", CONVERSATION_B, 20))
+        repo.insert(&sample_row(&owner, "idmmrec_c2a", "conversation", CONVERSATION_B, 20))
             .await
             .unwrap();
-        repo.insert(&sample_row("idmmrec_t1b", "terminal", TERMINAL_A, 30))
+        repo.insert(&sample_row(&owner, "idmmrec_t1b", "terminal", TERMINAL_A, 30))
             .await
             .unwrap();
 
         // 跨全部 target 按 at DESC:40 -> 30 -> 20 -> 10。
-        let rows = repo.list_recent("system_default_user", 100).await.unwrap();
+        let rows = repo.list_recent(&owner, 100).await.unwrap();
         let ids: Vec<&str> = rows.iter().map(|r| r.id.as_str()).collect();
         assert_eq!(ids, vec!["idmmrec_t1a", "idmmrec_t1b", "idmmrec_c2a", "idmmrec_c1a"]);
 
         // limit 封顶,仍取最近的。
-        let capped = repo.list_recent("system_default_user", 2).await.unwrap();
+        let capped = repo.list_recent(&owner, 2).await.unwrap();
         let ids: Vec<&str> = capped.iter().map(|r| r.id.as_str()).collect();
         assert_eq!(ids, vec!["idmmrec_t1a", "idmmrec_t1b"]);
     }
 
     #[tokio::test]
     async fn clear_all_empties_only_the_owners_activity_and_returns_count() {
-        let (repo, db) = setup().await;
+        let (repo, db, owner) = setup().await;
         insert_user(&db, "owner-b").await;
-        repo.insert(&sample_row("idmmrec_c1a", "conversation", CONVERSATION_A, 10))
+        repo.insert(&sample_row(&owner, "idmmrec_c1a", "conversation", CONVERSATION_A, 10))
             .await
             .unwrap();
-        repo.insert(&sample_row("idmmrec_t1a", "terminal", TERMINAL_A, 20))
+        repo.insert(&sample_row(&owner, "idmmrec_t1a", "terminal", TERMINAL_A, 20))
             .await
             .unwrap();
-        repo.insert(&sample_row("idmmrec_c2a", "conversation", CONVERSATION_B, 30))
+        repo.insert(&sample_row(&owner, "idmmrec_c2a", "conversation", CONVERSATION_B, 30))
             .await
             .unwrap();
         repo.insert(&sample_row_for_user(
@@ -401,10 +411,10 @@ mod tests {
         .await
         .unwrap();
 
-        let removed = repo.clear_all("system_default_user").await.unwrap();
+        let removed = repo.clear_all(&owner).await.unwrap();
         assert_eq!(removed, 3);
 
-        assert!(repo.list_recent("system_default_user", 100).await.unwrap().is_empty());
+        assert!(repo.list_recent(&owner, 100).await.unwrap().is_empty());
         let other = repo.list_recent("owner-b", 100).await.unwrap();
         assert_eq!(other.len(), 1);
         assert_eq!(other[0].id, "idmmrec_other");
@@ -412,11 +422,12 @@ mod tests {
 
     #[tokio::test]
     async fn target_queries_and_pruning_are_partitioned_by_owner() {
-        let (repo, db) = setup().await;
+        let (repo, db, owner) = setup().await;
         insert_user(&db, "owner-b").await;
 
         for i in 0..35 {
             repo.insert(&sample_row(
+                &owner,
                 &format!("idmmrec_a_{i:02}"),
                 "conversation",
                 CONVERSATION_A,
@@ -436,7 +447,7 @@ mod tests {
         }
 
         let owner_a = repo
-            .list_for_target("system_default_user", "conversation", CONVERSATION_A, 100)
+            .list_for_target(&owner, "conversation", CONVERSATION_A, 100)
             .await
             .unwrap();
         let owner_b = repo
@@ -445,13 +456,13 @@ mod tests {
             .unwrap();
         assert_eq!(owner_a.len(), PER_TARGET_CAP as usize);
         assert_eq!(owner_b.len(), PER_TARGET_CAP as usize);
-        assert!(owner_a.iter().all(|row| row.user_id == "system_default_user"));
+        assert!(owner_a.iter().all(|row| row.user_id == owner));
         assert!(owner_b.iter().all(|row| row.user_id == "owner-b"));
     }
 
     #[tokio::test]
     async fn intervention_owner_cannot_forge_another_users_target() {
-        let (repo, db) = setup().await;
+        let (repo, db, _owner) = setup().await;
         insert_user(&db, "owner-b").await;
 
         let forged = sample_row_for_user(
@@ -470,10 +481,11 @@ mod tests {
 
     #[tokio::test]
     async fn sweep_cap_is_enforced_independently_per_owner() {
-        let (repo, db) = setup().await;
+        let (repo, db, owner) = setup().await;
         insert_user(&db, "owner-b").await;
         for i in 0..4 {
             repo.insert(&sample_row(
+                &owner,
                 &format!("idmmrec_a_cap_{i}"),
                 "conversation",
                 CONVERSATION_A,
@@ -493,7 +505,7 @@ mod tests {
         }
 
         assert_eq!(repo.sweep_all_owners(i64::MIN, 2).await.unwrap(), 4);
-        assert_eq!(repo.list_recent("system_default_user", 100).await.unwrap().len(), 2);
+        assert_eq!(repo.list_recent(&owner, 100).await.unwrap().len(), 2);
         assert_eq!(repo.list_recent("owner-b", 100).await.unwrap().len(), 2);
     }
 }

@@ -27,6 +27,7 @@ nomi-memory.workspace    = true
 nomi-compact.workspace   = true
 nomi-redact.workspace    = true
 nomi-process-runtime.workspace = true
+nomifun-common.workspace = true
 nomi-computer = { workspace = true, optional = true }
 nomi-browser = { workspace = true, optional = true }
 # Used only by the browser-use SessionVisualLocator adapter (base64-encode the

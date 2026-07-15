@@ -7,6 +7,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import { ipcBridge } from '@/common';
 import type { ITerminalSession } from '@/common/adapter/ipcBridge';
+import type { TerminalId } from '@/common/types/ids';
 import { emitter } from '@/renderer/utils/emitter';
 
 /**
@@ -61,7 +62,7 @@ export function useTerminalSessions() {
     };
   }, [refresh]);
 
-  const removeSession = useCallback(async (id: number) => {
+  const removeSession = useCallback(async (id: TerminalId) => {
     await ipcBridge.terminal.remove.invoke({ id });
     setSessions((prev) => prev.filter((p) => p.id !== id));
   }, []);

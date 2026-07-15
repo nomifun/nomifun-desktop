@@ -136,10 +136,13 @@ fn resolve_mcp_servers(
 ) -> (Vec<McpServer>, LoopbackCapabilityLeaseSet) {
     let mut servers: Vec<McpServer> = Vec::new();
     let mut leases = LoopbackCapabilityLeaseSet::new();
-    if let Some(req_cfg) = config.requirement_mcp_config.as_ref() {
+    if let (Some(req_cfg), Some(user_id)) = (
+        config.requirement_mcp_config.as_ref(),
+        config.user_id.as_deref(),
+    ) {
         if let Some((server, lease)) = requirement_mcp_server(
             req_cfg,
-            config.user_id.as_deref().unwrap_or_default(),
+            user_id,
             conversation_id,
         ) {
             servers.push(server);
@@ -150,16 +153,17 @@ fn resolve_mcp_servers(
     // bases (independent of the platform Gateway). The bound base ids are baked
     // into the server's env here, so the model-facing tool stays query-only.
     if let Some(cfg) = config.knowledge_mcp_config.as_ref()
+        && let Some(user_id) = config.user_id.as_deref()
         && !config.knowledge_mounts.is_empty()
     {
-        let kb_ids: Vec<String> = config
+        let kb_ids: Vec<nomifun_common::KnowledgeBaseId> = config
             .knowledge_mounts
             .iter()
             .map(|m| m.id.clone())
             .collect();
         if let Some((server, lease)) = knowledge_mcp_server(
             cfg,
-            config.user_id.as_deref().unwrap_or_default(),
+            user_id,
             conversation_id,
             workspace_path,
             &kb_ids,
@@ -344,13 +348,6 @@ fn requirement_mcp_server(
     user_id: &str,
     conversation_id: &str,
 ) -> Option<(McpServer, LoopbackCapabilityLease)> {
-    let conversation_id = match conversation_id.parse::<i64>() {
-        Ok(id) if id > 0 => id,
-        _ => {
-            tracing::warn!(conversation_id, "requirement MCP capability issuance rejected non-numeric conversation id");
-            return None;
-        }
-    };
     let child = match cfg.issue_for_conversation(user_id, conversation_id) {
         Ok(child) => child,
         Err(error) => {
@@ -386,7 +383,7 @@ fn knowledge_mcp_server(
     user_id: &str,
     conversation_id: &str,
     workspace_path: &str,
-    kb_ids: &[String],
+    kb_ids: &[nomifun_common::KnowledgeBaseId],
     allow_write: bool,
 ) -> Option<(McpServer, LoopbackCapabilityLease)> {
     let child = match cfg.issue_for_conversation(
@@ -462,8 +459,12 @@ fn gateway_mcp_server(
     extra: &AcpBuildExtra,
     conversation_id: &str,
 ) -> Option<(McpServer, LoopbackCapabilityLease)> {
+    let Some(user_id) = extra.user_id.as_deref() else {
+        tracing::warn!(conversation_id, "gateway MCP capability issuance requires a user ID");
+        return None;
+    };
     let child = match cfg.issue_for_conversation(
-        extra.user_id.as_deref().unwrap_or_default(),
+        user_id,
         conversation_id,
         extra.companion_id.as_deref(),
         extra.channel_platform.as_deref(),
@@ -638,19 +639,19 @@ mod tests {
     #[test]
     fn knowledge_context_section_is_none_without_mounts() {
         let config = AcpBuildExtra::default();
-        assert_eq!(build_knowledge_context_section(&config, "conv-1"), None);
+        assert_eq!(build_knowledge_context_section(&config, "conv_0190f5fe-7c00-7a00-8abc-012345678963"), None);
     }
 
     #[test]
     fn process_owned_gateway_config_injects_gateway_mcp_server() {
         let config = AcpBuildExtra {
             gateway_mcp_config: Some(gateway_config(41236, "/usr/bin/nomicore", "owner")),
-            user_id: Some("u1".into()),
-            companion_id: Some("companion_9".into()),
+            user_id: Some("user_0190f5fe-7c00-7a00-8abc-012345678961".into()),
+            companion_id: Some("companion_0190f5fe-7c00-7a00-8abc-012345678965".into()),
             session_mode: Some("yolo".into()),
             ..Default::default()
         };
-        let (servers, _leases) = resolve_mcp_servers(&config, "conv-1", "/workspace", vec![]);
+        let (servers, _leases) = resolve_mcp_servers(&config, "conv_0190f5fe-7c00-7a00-8abc-012345678963", "/workspace", vec![]);
         let rendered = serde_json::to_string(&servers).expect("McpServer serializes");
         assert!(rendered.contains("mcp-gateway-stdio"), "got {rendered}");
         assert!(
@@ -666,9 +667,9 @@ mod tests {
             rendered.contains(GatewayMcpConfig::PROFILE_WORK),
             "got {rendered}"
         );
-        assert!(rendered.contains("conv-1"), "got {rendered}");
-        assert!(rendered.contains("u1"), "got {rendered}");
-        assert!(rendered.contains("companion_9"), "got {rendered}");
+        assert!(rendered.contains("conv_0190f5fe-7c00-7a00-8abc-012345678963"), "got {rendered}");
+        assert!(rendered.contains("user_0190f5fe-7c00-7a00-8abc-012345678961"), "got {rendered}");
+        assert!(rendered.contains("companion_0190f5fe-7c00-7a00-8abc-012345678965"), "got {rendered}");
         assert!(
             !rendered.contains("gw-root-secret"),
             "root Gateway issuer secret must never leave the backend: {rendered}"
@@ -679,12 +680,12 @@ mod tests {
     fn gateway_env_omits_companion_id_when_unbound() {
         let config = AcpBuildExtra {
             gateway_mcp_config: Some(gateway_config(41236, "/usr/bin/nomicore", "owner")),
-            user_id: Some("u1".into()),
+            user_id: Some("user_0190f5fe-7c00-7a00-8abc-012345678961".into()),
             companion_id: None,
             channel_platform: None,
             ..Default::default()
         };
-        let (servers, _leases) = resolve_mcp_servers(&config, "conv-1", "/workspace", vec![]);
+        let (servers, _leases) = resolve_mcp_servers(&config, "conv_0190f5fe-7c00-7a00-8abc-012345678963", "/workspace", vec![]);
         let rendered = serde_json::to_string(&servers).expect("McpServer serializes");
         assert!(
             !rendered.contains("companion_id"),
@@ -696,11 +697,11 @@ mod tests {
     fn gateway_env_uses_lite_profile_for_channel_sessions() {
         let config = AcpBuildExtra {
             gateway_mcp_config: Some(gateway_config(41236, "/usr/bin/nomicore", "owner")),
-            user_id: Some("u1".into()),
+            user_id: Some("user_0190f5fe-7c00-7a00-8abc-012345678961".into()),
             channel_platform: Some("lark".into()),
             ..Default::default()
         };
-        let (servers, _leases) = resolve_mcp_servers(&config, "conv-1", "/workspace", vec![]);
+        let (servers, _leases) = resolve_mcp_servers(&config, "conv_0190f5fe-7c00-7a00-8abc-012345678963", "/workspace", vec![]);
         let rendered = serde_json::to_string(&servers).expect("McpServer serializes");
         assert!(
             rendered.contains(GatewayMcpConfig::PROFILE_LITE),
@@ -714,16 +715,17 @@ mod tests {
             gateway_mcp_config: None,
             ..Default::default()
         };
-        let (servers, _leases) = resolve_mcp_servers(&config, "conv-1", "/workspace", vec![]);
+        let (servers, _leases) = resolve_mcp_servers(&config, "conv_0190f5fe-7c00-7a00-8abc-012345678963", "/workspace", vec![]);
         let rendered = serde_json::to_string(&servers).expect("McpServer serializes");
         assert!(!rendered.contains("mcp-gateway-stdio"), "got {rendered}");
     }
 
     #[test]
     fn knowledge_context_section_renders_mounts_and_writeback() {
+        let conversation_id = "conv_0190f5fe-7c00-7a00-8abc-012345678963";
         let mut config = AcpBuildExtra {
             knowledge_mounts: vec![nomifun_api_types::KnowledgeMountInfo {
-                id: "kb_1".into(),
+                id: nomifun_common::KnowledgeBaseId::new(),
                 name: "领域知识".into(),
                 description: "团队约定".into(),
                 rel_path: ".nomi/knowledge/领域知识".into(),
@@ -738,7 +740,7 @@ mod tests {
 
         // The section is standalone (no preset prefix) — it is delivered by its
         // own hook, not folded into the [Assistant Rules] prelude.
-        let readonly = build_knowledge_context_section(&config, "conv-1").unwrap();
+        let readonly = build_knowledge_context_section(&config, conversation_id).unwrap();
         assert!(readonly.starts_with("## Knowledge bases (extended knowledge source)"));
         assert!(readonly.contains("领域知识"));
         assert!(readonly.contains(".nomi/knowledge/领域知识"));
@@ -754,19 +756,19 @@ mod tests {
 
         // writeback on + default (staged) mode → inbox path scoped to the session.
         config.knowledge_writeback = true;
-        let staged = build_knowledge_context_section(&config, "conv-1").unwrap();
+        let staged = build_knowledge_context_section(&config, conversation_id).unwrap();
         assert!(staged.contains("STAGED mode"));
-        assert!(staged.contains("_inbox/conv-1/"));
+        assert!(staged.contains(&format!("_inbox/{conversation_id}/")));
 
         config.knowledge_writeback_mode = Some("direct".into());
-        let direct = build_knowledge_context_section(&config, "conv-1").unwrap();
+        let direct = build_knowledge_context_section(&config, conversation_id).unwrap();
         assert!(direct.contains("DIRECT mode"));
         assert!(!direct.contains("_inbox/"));
         // Disposition (回写意识) threads from build-extra → contract; defaults
         // to conservative, flips to aggressive when set.
         assert!(direct.contains("Disposition — CONSERVATIVE"));
         config.knowledge_writeback_eagerness = Some("aggressive".into());
-        let eager = build_knowledge_context_section(&config, "conv-1").unwrap();
+        let eager = build_knowledge_context_section(&config, conversation_id).unwrap();
         assert!(eager.contains("Disposition — AGGRESSIVE"));
     }
 
@@ -811,7 +813,7 @@ mod tests {
             knowledge_writeback_eagerness: None,
         };
         let user = vec![user_stdio("ctx7"), user_stdio("playwright")];
-        let (servers, _leases) = resolve_mcp_servers(&config, "conv-1", "/workspace", user);
+        let (servers, _leases) = resolve_mcp_servers(&config, "conv_0190f5fe-7c00-7a00-8abc-012345678963", "/workspace", user);
         assert_eq!(servers.len(), 2);
         let names: Vec<_> = servers
             .iter()
@@ -858,7 +860,7 @@ mod tests {
             knowledge_writeback_eagerness: None,
         };
         let (servers, _leases) =
-            resolve_mcp_servers(&config, "conv-1", "/workspace", Vec::new());
+            resolve_mcp_servers(&config, "conv_0190f5fe-7c00-7a00-8abc-012345678963", "/workspace", Vec::new());
         assert!(servers.is_empty());
     }
 
@@ -867,10 +869,15 @@ mod tests {
         let config = AcpBuildExtra {
             backend: Some("claude".into()),
             requirement_mcp_config: Some(requirement_config(41000, "/bin/backend")),
-            user_id: Some("user-1".into()),
+            user_id: Some("user_0190f5fe-7c00-7a00-8abc-012345678962".into()),
             ..Default::default()
         };
-        let (servers, leases) = resolve_mcp_servers(&config, "9", "/workspace", Vec::new());
+        let (servers, leases) = resolve_mcp_servers(
+            &config,
+            "conv_0190f5fe-7c00-7a00-8000-000000000009",
+            "/workspace",
+            Vec::new(),
+        );
         assert_eq!(leases.len(), 1);
         assert_eq!(servers.len(), 1);
         match &servers[0] {
@@ -1030,11 +1037,16 @@ mod tests {
         let config = AcpBuildExtra {
             backend: Some("claude".into()),
             requirement_mcp_config: Some(requirement_config(41000, "/bin/backend")),
-            user_id: Some("user-1".into()),
+            user_id: Some("user_0190f5fe-7c00-7a00-8abc-012345678962".into()),
             ..Default::default()
         };
         let user = vec![user_stdio("ctx7")];
-        let (servers, _leases) = resolve_mcp_servers(&config, "1", "/workspace", user);
+        let (servers, _leases) = resolve_mcp_servers(
+            &config,
+            "conv_0190f5fe-7c00-7a00-8000-000000000001",
+            "/workspace",
+            user,
+        );
         assert_eq!(servers.len(), 2);
         let names: Vec<&str> = servers
             .iter()
@@ -1048,7 +1060,7 @@ mod tests {
 
     fn knowledge_mount(id: &str) -> nomifun_api_types::KnowledgeMountInfo {
         nomifun_api_types::KnowledgeMountInfo {
-            id: id.to_owned(),
+            id: nomifun_common::KnowledgeBaseId::parse(id).expect("canonical knowledge base test id"),
             name: "领域知识".into(),
             description: "团队约定".into(),
             rel_path: format!(".nomi/knowledge/{id}"),
@@ -1073,12 +1085,12 @@ mod tests {
         let config_a = AcpBuildExtra {
             backend: Some("claude".into()),
             knowledge_mcp_config: Some(cfg.clone()),
-            knowledge_mounts: vec![knowledge_mount("kb_alpha")],
-            user_id: Some("user-1".into()),
+            knowledge_mounts: vec![knowledge_mount("kb_0190f5fe-7c00-7a00-8abc-012345678969")],
+            user_id: Some("user_0190f5fe-7c00-7a00-8abc-012345678962".into()),
             ..Default::default()
         };
         let (servers, leases) =
-            resolve_mcp_servers(&config_a, "conv-kb", "/workspace", Vec::new());
+            resolve_mcp_servers(&config_a, "conv_0190f5fe-7c00-7a00-8abc-012345678964", "/workspace", Vec::new());
         assert_eq!(leases.len(), 1);
         let kb_server = servers
             .iter()
@@ -1106,7 +1118,7 @@ mod tests {
         let baked = env_val(nomifun_api_types::KnowledgeMcpConfig::ENV_CAPABILITY)
             .expect("knowledge capability bootstrap env must be set");
         assert!(
-            baked.contains("kb_alpha"),
+            baked.contains("kb_0190f5fe-7c00-7a00-8abc-012345678969"),
             "baked kb_ids must carry the mount id, got {baked}"
         );
         // Invariant 3: port + access + renewal proof are one immutable value.
@@ -1129,7 +1141,7 @@ mod tests {
             ..Default::default()
         };
         let (servers_b, _leases) =
-            resolve_mcp_servers(&config_b, "conv-kb", "/workspace", Vec::new());
+            resolve_mcp_servers(&config_b, "conv_0190f5fe-7c00-7a00-8abc-012345678964", "/workspace", Vec::new());
         assert!(
             !servers_b.iter().any(|s| matches!(
                 s,
@@ -1142,11 +1154,11 @@ mod tests {
         let config_c = AcpBuildExtra {
             backend: Some("claude".into()),
             knowledge_mcp_config: None,
-            knowledge_mounts: vec![knowledge_mount("kb_alpha")],
+            knowledge_mounts: vec![knowledge_mount("kb_0190f5fe-7c00-7a00-8abc-012345678969")],
             ..Default::default()
         };
         let (servers_c, _leases) =
-            resolve_mcp_servers(&config_c, "conv-kb", "/workspace", Vec::new());
+            resolve_mcp_servers(&config_c, "conv_0190f5fe-7c00-7a00-8abc-012345678964", "/workspace", Vec::new());
         assert!(
             !servers_c.iter().any(|s| matches!(
                 s,
@@ -1164,10 +1176,10 @@ mod tests {
         // config + mount → section promises the search tool.
         let with = AcpBuildExtra {
             knowledge_mcp_config: Some(cfg.clone()),
-            knowledge_mounts: vec![knowledge_mount("kb_alpha")],
+            knowledge_mounts: vec![knowledge_mount("kb_0190f5fe-7c00-7a00-8abc-012345678969")],
             ..Default::default()
         };
-        let section = build_knowledge_context_section(&with, "conv-kb").expect("section renders");
+        let section = build_knowledge_context_section(&with, "conv_0190f5fe-7c00-7a00-8abc-012345678964").expect("section renders");
         assert!(
             section.contains("knowledge_search"),
             "section must advertise the search tool when injected, got {section}"
@@ -1175,11 +1187,11 @@ mod tests {
         // mount but NO config → no search tool promised (it is not injected).
         let without = AcpBuildExtra {
             knowledge_mcp_config: None,
-            knowledge_mounts: vec![knowledge_mount("kb_alpha")],
+            knowledge_mounts: vec![knowledge_mount("kb_0190f5fe-7c00-7a00-8abc-012345678969")],
             ..Default::default()
         };
         let section_no =
-            build_knowledge_context_section(&without, "conv-kb").expect("section renders");
+            build_knowledge_context_section(&without, "conv_0190f5fe-7c00-7a00-8abc-012345678964").expect("section renders");
         assert!(
             !section_no.contains("knowledge_search"),
             "section must NOT advertise an uninjected search tool, got {section_no}"

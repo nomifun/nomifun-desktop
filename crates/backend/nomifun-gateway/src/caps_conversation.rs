@@ -11,7 +11,7 @@ use nomifun_api_types::{
     CreateConversationRequest, ListConversationsQuery, ListMessagesQuery, SendMessageRequest,
     UpdateConversationRequest,
 };
-use nomifun_common::{AgentType, AppError};
+use nomifun_common::{AgentType, AppError, CompanionId, ConversationId};
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -37,7 +37,7 @@ struct ListConversationsParams {
 #[derive(Deserialize, JsonSchema)]
 struct ConversationStatusParams {
     /// The id of the conversation to inspect.
-    conversation_id: i64,
+    conversation_id: String,
     /// How many recent messages to include (default 5, max 50).
     #[serde(default)]
     message_limit: Option<u32>,
@@ -46,7 +46,7 @@ struct ConversationStatusParams {
 #[derive(Deserialize, JsonSchema)]
 struct SendToConversationParams {
     /// The id of the TARGET conversation (not your own).
-    conversation_id: i64,
+    conversation_id: String,
     /// The message or task prompt to inject.
     content: String,
     /// When true the message is hidden from the visible history (use for
@@ -76,13 +76,13 @@ struct CreateConversationParams {
     model: Option<String>,
     /// Registered remote-agent row id. Required when agent_type is "remote".
     #[serde(default)]
-    remote_agent_id: Option<i64>,
+    remote_agent_id: Option<String>,
 }
 
 #[derive(Deserialize, JsonSchema)]
 struct UpdateConversationParams {
     /// The id of the conversation to update (from nomi_list_conversations).
-    conversation_id: i64,
+    conversation_id: String,
     /// New display name (omit to keep).
     #[serde(default)]
     name: Option<String>,
@@ -101,7 +101,7 @@ struct UpdateConversationParams {
 struct DeleteConversationParams {
     /// The id of the conversation to delete. Confirm the target with the user
     /// before calling — deletion also kills its agent and cron bindings.
-    conversation_id: i64,
+    conversation_id: String,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -112,19 +112,14 @@ fn error_value(e: AppError) -> Value {
 }
 
 fn require_user(ctx: &CallerCtx) -> Result<&str, Value> {
-    if ctx.user_id.is_empty() {
-        Err(json!({ "error": "missing caller user identity" }))
-    } else {
-        Ok(&ctx.user_id)
-    }
+    Ok(ctx.user_id.as_str())
 }
 
 fn require_companion_creator(ctx: &CallerCtx) -> Result<(), Value> {
     if ctx
         .companion_id
-        .as_deref()
-        .map(str::trim)
-        .is_some_and(|companion_id| !companion_id.is_empty())
+        .as_ref()
+        .is_some()
     {
         Ok(())
     } else {
@@ -151,6 +146,18 @@ async fn list(deps: Arc<GatewayDeps>, ctx: CallerCtx, p: ListConversationsParams
     let mut items = Vec::with_capacity(resp.items.len());
     for conv in resp.items {
         let runtime = deps.conversation_service.runtime_summary_for(&conv.id.to_string()).await;
+        let companion_id = match conv.extra.get("companion_id") {
+            None => None,
+            Some(Value::String(value)) => match CompanionId::parse(value) {
+                Ok(id) => Some(id),
+                Err(error) => {
+                    return json!({"error": format!("conversation {} has invalid companion_id: {error}", conv.id)});
+                }
+            },
+            Some(_) => {
+                return json!({"error": format!("conversation {} has non-string companion_id", conv.id)});
+            }
+        };
         items.push(json!({
             "id": conv.id,
             "name": conv.name,
@@ -160,9 +167,9 @@ async fn list(deps: Arc<GatewayDeps>, ctx: CallerCtx, p: ListConversationsParams
             "pending_confirmations": runtime.pending_confirmations,
             "source": conv.source,
             "pinned": conv.pinned,
-            "is_companion_companion": conv.extra.get("companionSession").and_then(Value::as_bool).unwrap_or(false),
-            "companion_id": conv.extra.get("companionId").and_then(Value::as_str),
-            "is_self": conv.id.to_string() == ctx.conversation_id,
+            "is_companion_companion": conv.extra.get("companion_session").and_then(Value::as_bool).unwrap_or(false),
+            "companion_id": companion_id,
+            "is_self": ctx.conversation_id.as_ref().is_some_and(|id| conv.id.as_str() == id.as_str()),
             "modified_at": conv.modified_at,
         }));
     }
@@ -174,7 +181,10 @@ async fn status(deps: Arc<GatewayDeps>, ctx: CallerCtx, p: ConversationStatusPar
         Ok(u) => u,
         Err(e) => return e,
     };
-    let id = p.conversation_id.to_string();
+    let id = match ConversationId::try_from(p.conversation_id.as_str()) {
+        Ok(id) => id,
+        Err(error) => return json!({ "error": format!("invalid conversation_id: {error}") }),
+    };
     let id = id.as_str();
     let conv = match deps.conversation_service.get(user_id, id).await {
         Ok(c) => c,
@@ -219,8 +229,11 @@ async fn send(deps: Arc<GatewayDeps>, ctx: CallerCtx, p: SendToConversationParam
         Ok(u) => u.to_owned(),
         Err(e) => return e,
     };
-    let id = p.conversation_id.to_string();
-    if !ctx.conversation_id.is_empty() && id == ctx.conversation_id {
+    let id = match ConversationId::try_from(p.conversation_id) {
+        Ok(id) => id.into_string(),
+        Err(error) => return json!({ "error": format!("invalid conversation_id: {error}") }),
+    };
+    if ctx.conversation_id.as_ref().is_some_and(|caller| id == caller.as_str()) {
         return json!({ "error": "self_injection_forbidden: you cannot send a message into your own conversation" });
     }
     let req = SendMessageRequest {
@@ -266,7 +279,11 @@ async fn create(deps: Arc<GatewayDeps>, ctx: CallerCtx, p: CreateConversationPar
         let Some(remote_agent_id) = p.remote_agent_id else {
             return json!({ "error": "remote_agent_id is required when agent_type is 'remote'" });
         };
-        match deps.remote_agent_service.get(&remote_agent_id.to_string()).await {
+        let remote_agent_id = match nomifun_common::RemoteAgentId::parse(remote_agent_id) {
+            Ok(id) => id,
+            Err(error) => return json!({ "error": format!("invalid remote_agent_id: {error}") }),
+        };
+        match deps.remote_agent_service.get(&remote_agent_id).await {
             Ok(remote) if remote.protocol == nomifun_common::RemoteAgentProtocol::OpenClaw => {}
             Ok(_) => {
                 return json!({
@@ -341,13 +358,16 @@ async fn update(deps: Arc<GatewayDeps>, ctx: CallerCtx, p: UpdateConversationPar
         Ok(u) => u.to_owned(),
         Err(e) => return e,
     };
-    let id = p.conversation_id.to_string();
+    let id = match ConversationId::try_from(p.conversation_id) {
+        Ok(id) => id.into_string(),
+        Err(error) => return json!({ "error": format!("invalid conversation_id: {error}") }),
+    };
     if p.name.is_none() && p.pinned.is_none() && p.provider_id.is_none() && p.model.is_none() {
         return json!({ "error": "nothing to update: provide at least one of name / pinned / provider_id+model" });
     }
     let mut model = None;
     if p.provider_id.is_some() || p.model.is_some() {
-        if !ctx.conversation_id.is_empty() && id == ctx.conversation_id {
+        if ctx.conversation_id.as_ref().is_some_and(|caller| id == caller.as_str()) {
             return json!({
                 "error": "self_model_change_forbidden: changing your own conversation's model would terminate your current turn; the owner can change it from the desktop UI"
             });
@@ -387,8 +407,11 @@ async fn delete(deps: Arc<GatewayDeps>, ctx: CallerCtx, p: DeleteConversationPar
         Ok(u) => u.to_owned(),
         Err(e) => return e,
     };
-    let id = p.conversation_id.to_string();
-    if !ctx.conversation_id.is_empty() && id == ctx.conversation_id {
+    let id = match ConversationId::try_from(p.conversation_id) {
+        Ok(id) => id.into_string(),
+        Err(error) => return json!({ "error": format!("invalid conversation_id: {error}") }),
+    };
+    if ctx.conversation_id.as_ref().is_some_and(|caller| id == caller.as_str()) {
         return json!({ "error": "self_deletion_forbidden: you cannot delete your own conversation" });
     }
     match deps.conversation_service.delete(&user_id, &id).await {
@@ -500,6 +523,7 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use nomifun_common::UserId;
 
     #[test]
     fn truncate_caps_long_content_strings() {
@@ -520,22 +544,29 @@ mod tests {
     }
 
     #[test]
-    fn remote_create_params_accept_numeric_remote_agent_id() {
+    fn remote_create_params_accepts_canonical_remote_agent_id() {
         let params: CreateConversationParams = serde_json::from_value(json!({
             "agent_type": "remote",
-            "remote_agent_id": 12
+            "remote_agent_id": "ragent_0190f5fe-7c00-7a00-8abc-012345678901"
         }))
         .unwrap();
 
         assert_eq!(params.agent_type.as_deref(), Some("remote"));
-        assert_eq!(params.remote_agent_id, Some(12));
+        assert_eq!(
+            params.remote_agent_id.as_deref(),
+            Some("ragent_0190f5fe-7c00-7a00-8abc-012345678901")
+        );
     }
 
     #[test]
     fn top_level_creation_requires_a_companion_identity() {
         let plain = CallerCtx {
-            conversation_id: "111".to_owned(),
-            user_id: "user-1".to_owned(),
+            conversation_id: Some(
+                ConversationId::parse("conv_0190f5fe-7c00-7a00-8abc-012345678901")
+                    .unwrap(),
+            ),
+            user_id: UserId::parse("user_0190f5fe-7c00-7a00-8abc-012345678902")
+                .unwrap(),
             ..Default::default()
         };
         let error = require_companion_creator(&plain).unwrap_err();
@@ -544,7 +575,10 @@ mod tests {
             .is_some_and(|message| message.contains("conversation_creation_forbidden")));
 
         let companion = CallerCtx {
-            companion_id: Some("companion-1".to_owned()),
+            companion_id: Some(
+                CompanionId::parse("companion_0190f5fe-7c00-7a00-8abc-012345678903")
+                    .unwrap(),
+            ),
             ..plain
         };
         assert!(require_companion_creator(&companion).is_ok());

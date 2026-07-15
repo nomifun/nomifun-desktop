@@ -3,6 +3,8 @@
  * Copyright 2025-2026 NomiFun (nomifun.com)
  * SPDX-License-Identifier: Apache-2.0
  */
+import { conversationTarget, type ConversationId } from '@/common/types/ids';
+import { sessionStorageKey } from '@/common/utils/browserStorageKey';
 
 import { ipcBridge } from '@/common';
 import type { TMessage } from '@/common/chat/chatLib';
@@ -15,12 +17,12 @@ import { getConversationRuntimeWorkspaceErrorMessage } from '../../utils/convers
 import { buildSendFailureError } from './buildSendFailureError';
 
 type UseAcpInitialMessageParams = {
-  conversation_id: number;
+  conversation_id: ConversationId;
   backend: string;
   workspacePath?: string;
   enabled?: boolean;
   setAiProcessing: (value: boolean) => void;
-  checkAndUpdateTitle: (conversation_id: number, input: string) => void;
+  checkAndUpdateTitle: (conversation_id: ConversationId, input: string) => void;
   addOrUpdateMessage: (message: TMessage, prepend?: boolean) => void;
 };
 
@@ -42,7 +44,7 @@ export const useAcpInitialMessage = ({
   useEffect(() => {
     if (!enabled) return;
 
-    const storageKey = `acp_initial_message_${conversation_id}`;
+    const storageKey = sessionStorageKey('initial-message-acp', conversationTarget(conversation_id));
     const storedMessage = sessionStorage.getItem(storageKey);
 
     if (!storedMessage) return;
@@ -99,7 +101,6 @@ export const useAcpInitialMessage = ({
 
         const errorMessage: TMessage = {
           id: prefixedId('msg'),
-          msg_id: prefixedId('msg'),
           conversation_id: conversation_id,
           type: 'tips',
           position: 'center',

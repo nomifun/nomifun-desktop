@@ -17,7 +17,7 @@ import CompanionModelControl from '../CompanionModelControl';
 type NomiConversation = Extract<TChatConversation, { type: 'nomi' }>;
 
 interface Props {
-  /** A desktop-companion's single per-companion nomi session (extra.companionSession). */
+  /** A desktop-companion's single per-companion nomi session (extra.companion_session). */
   conversation: NomiConversation;
 }
 
@@ -26,18 +26,18 @@ interface Props {
  *
  * 取代旧的 /nomi 配置中心「聊天」Tab（ChatTab）：迁移后伙伴聊天统一从会话列表的
  * 「桌面伙伴」分组进入标准 `/conversation/:id`。ChatConversation 见到
- * `type==='nomi' && extra.companionSession` 即渲染本面板（而非全功能 NomiConversationPanel），
+ * `type==='nomi' && extra.companion_session` 即渲染本面板（而非全功能 NomiConversationPanel），
  * 从而保留伙伴专属约束（锁定模型 / 隐藏高级控制 / 强制 yolo / 固定工作区，详见
  * CompanionConversation）。
  *
  * 与 ChatTab 的差别：会话对象已由会话页 SWR 载入并传入，故无需再 ensureCompanionSession /
- * 二次载入——本面板只负责：① 由 `extra.companionId` 解析伙伴 profile（模型唯一事实源
+ * 二次载入——本面板只负责：① 由 `extra.companion_id` 解析伙伴 profile（模型唯一事实源
  * + 乐观 patch 通道）；② 模型未配置态的引导（含模型配置入口）；③ 交给
  * CompanionConversation 渲染受限会话主体。
  */
 const CompanionChatPanel: React.FC<Props> = ({ conversation }) => {
   const { t } = useTranslation();
-  const companionId = conversation.extra?.companionId ?? null;
+  const companionId = conversation.extra?.companion_id ?? null;
   const companion = useCompanion(companionId);
   const { profile, status } = companion;
   const workspace = conversation.extra?.workspace ?? '';
@@ -79,7 +79,7 @@ const CompanionChatPanel: React.FC<Props> = ({ conversation }) => {
   // 模型未配置：把模型配置入口（唯一事实源）放在引导态，配置后伙伴会话即可对话。
   const modelConfigured = status
     ? status.model_configured
-    : Boolean(profile.model.provider_id && profile.model.model);
+    : profile.model !== null;
   if (!modelConfigured) {
     return renderInExecutionShell(
       <div className='flex flex-col h-full min-h-0 items-center justify-center gap-14px px-16px text-center'>

@@ -9,9 +9,7 @@ use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use dashmap::DashMap;
 use nomifun_api_types::{CreateTerminalRequest, TerminalSessionResponse};
-use nomifun_common::{
-    LoopbackCapabilityLeaseSet, OnTerminalDelete,
-};
+use nomifun_common::{KnowledgeBaseId, LoopbackCapabilityLeaseSet, OnTerminalDelete, TerminalId, UserId};
 use nomifun_db::{CreateTerminalParams, ITerminalRepository};
 use tracing::{info, warn};
 
@@ -23,7 +21,7 @@ use crate::types::{resolve_command, row_to_response};
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 struct TerminalKnowledgeScope {
-    kb_ids: Vec<String>,
+    kb_ids: Vec<KnowledgeBaseId>,
     allow_write: bool,
 }
 
@@ -138,7 +136,7 @@ fn is_utf8_lc_all(value: &std::ffi::OsStr) -> bool {
 /// Interval between debounced scrollback persistence passes. Each pass writes
 /// only the *dirty* live sessions (see [`PtyHandle::take_dirty_scrollback`]), so
 /// idle terminals are never rewritten. A hard app kill loses at most this much
-/// of the most recent output for a still-live session — bounded and acceptable
+/// of the most recent output for a still-live session —bounded and acceptable
 /// (a process that exits flushes its final scrollback immediately via `on_exit`).
 const SCROLLBACK_FLUSH_INTERVAL: Duration = Duration::from_secs(5);
 
@@ -154,7 +152,7 @@ const SCROLLBACK_FLUSH_INTERVAL: Duration = Duration::from_secs(5);
 /// MUST be a cheap no-op when IDMM is disabled for the terminal or already
 /// supervising it (e.g. guard on `is_supervising` before spawning).
 pub trait TerminalSupervisionHook: Send + Sync {
-    fn on_terminal_activity(&self, terminal_id: i64);
+    fn on_terminal_activity(&self, terminal_id: &str);
 }
 
 /// ANSI-stripped tail of a terminal's scrollback, for read-back by agents.
@@ -176,17 +174,17 @@ pub struct TerminalService {
     /// Backend-managed default work dir; responses derive `is_default_workpath`
     /// from it (constructor-injected like `ConversationService`'s work_dir).
     work_dir: std::path::PathBuf,
-    live: Arc<DashMap<i64, Arc<PtyHandle>>>,
+    live: Arc<DashMap<String, Arc<PtyHandle>>>,
     /// Renewable loopback capability guards bound to the exact live PTY
     /// generation. The exit callback, kill/delete/relaunch, and final service
     /// drop all revoke deterministically.
-    live_capability_leases: Arc<DashMap<i64, (u64, LoopbackCapabilityLeaseSet)>>,
+    live_capability_leases: Arc<DashMap<String, (u64, LoopbackCapabilityLeaseSet)>>,
     /// Sessions created with `defer_spawn` that have not spawned their PTY yet.
     /// The first `resize` (carrying the real fitted size) consumes the marker and
     /// spawns the PTY at that size, so a full-screen TUI never draws at the 80×24
     /// default first. In-memory only: a deferred row that is never resized (e.g.
     /// an app crash before the client mounts) is healed by `reconcile_on_boot`.
-    pending_spawn: Arc<DashMap<i64, ()>>,
+    pending_spawn: Arc<DashMap<String, ()>>,
     /// Late-wired knowledge service (assembly order: knowledge comes up after
     /// the terminal singleton, mirroring `ConversationService`). `None` means
     /// knowledge features are silently skipped (best-effort contract).
@@ -205,7 +203,7 @@ pub struct TerminalService {
     /// Monotonic PTY spawn generation. Every `spawn_pty` mints the next value
     /// and stamps it on the handle + its exit callback, so a relaunch's killed
     /// predecessor (whose exit callback fires after the drain grace) can be told
-    /// apart from the live handle and ignored — without it, that stale callback
+    /// apart from the live handle and ignored —without it, that stale callback
     /// removes the fresh PTY and marks the session exited ("restart" → "close").
     next_epoch: Arc<std::sync::atomic::AtomicU64>,
     /// Scoped knowledge-search MCP connection (port/token/binary). Late-wired by
@@ -214,7 +212,7 @@ pub struct TerminalService {
     /// Scoped requirement MCP connection (port/token/binary). Late-wired by
     /// `with_requirement_mcp_config`. `None` → no requirement tool injection.
     /// When wired, `build_enhancement` unconditionally injects the requirement MCP
-    /// server into every terminal spawn — `apply_enhancement` only renders it for
+    /// server into every terminal spawn —`apply_enhancement` only renders it for
     /// agent CLIs (claude/codex), so shell/unknown CLIs never see it.
     requirement_mcp_config: Arc<std::sync::RwLock<Option<nomifun_api_types::RequirementMcpConfig>>>,
     /// Platform-private dir for per-terminal CLI config (e.g. claude mcp.json).
@@ -232,10 +230,10 @@ pub struct TerminalService {
     /// Per-terminal once-guard for auto-titling: a key is claimed by whichever of
     /// the first-input (shell) / first-TurnEnd (agent) seams fires first, so a
     /// title is generated at most once per session.
-    titled: Arc<DashMap<i64, ()>>,
+    titled: Arc<DashMap<String, ()>>,
     /// Accumulates the FIRST line of user input per terminal (until newline / a
-    /// 200-char cap) — the title source. Dropped once a title is set.
-    first_input: Arc<DashMap<i64, String>>,
+    /// 200-char cap) —the title source. Dropped once a title is set.
+    first_input: Arc<DashMap<String, String>>,
 }
 
 impl TerminalService {
@@ -298,8 +296,8 @@ impl TerminalService {
     }
 
     /// Fire the supervision hook (fire-and-forget; no-op when unset). Cheap to
-    /// call on every input — the hook impl guards on already-supervising.
-    fn arm_supervision(&self, id: i64) {
+    /// call on every input —the hook impl guards on already-supervising.
+    fn arm_supervision(&self, id: &str) {
         if let Ok(guard) = self.supervision_hook.read()
             && let Some(hook) = guard.as_ref()
         {
@@ -367,12 +365,13 @@ impl TerminalService {
     /// no lifecycle server is wired (graceful degradation).
     pub fn subscribe_lifecycle(
         &self,
-        terminal_id: i64,
+        terminal_id: &str,
     ) -> Option<tokio::sync::broadcast::Receiver<crate::lifecycle::TerminalLifecycleEvent>> {
+        let terminal_id = TerminalId::parse(terminal_id).ok()?;
         self.terminal_lifecycle
             .read()
             .ok()
-            .and_then(|g| g.as_ref().map(|s| s.subscribe(terminal_id)))
+            .and_then(|g| g.as_ref().map(|s| s.subscribe(&terminal_id)))
     }
 
     /// Late-wire the auto-title LLM completer (interior mutable, same slot pattern
@@ -385,14 +384,14 @@ impl TerminalService {
 
     /// Build the launch enhancement for a spawn: knowledge_search MCP when bases
     /// are mounted AND the MCP server is wired; requirement MCP when the requirement
-    /// server is wired (unconditional — scoped by terminal_id + owner_kind);
+    /// server is wired (unconditional —scoped by terminal_id + owner_kind);
     /// lifecycle hooks when the lifecycle server is wired. Empty otherwise (honest
     /// no-op).
     fn build_enhancement(
         &self,
         knowledge_scope: &TerminalKnowledgeScope,
         user_id: &str,
-        terminal_id: i64,
+        terminal_id: &str,
         workspace_path: &str,
     ) -> (
         crate::enhance::TerminalLaunchEnhancement,
@@ -436,7 +435,7 @@ impl TerminalService {
         // terminal_id + owner_kind so verify_scope confines mutations to this terminal.
         if let Some(cfg) = self.requirement_mcp_config() {
             use nomifun_api_types::RequirementMcpConfig as R;
-            match cfg.issue_for_terminal(user_id, terminal_id) {
+            match cfg.issue_for_terminal(user_id, &terminal_id.to_string()) {
                 Ok(child) => {
                     let env = std::collections::HashMap::from([(
                         R::ENV_CAPABILITY.to_owned(),
@@ -458,7 +457,7 @@ impl TerminalService {
         // Lifecycle hook wiring (Plan 2): if the server is running, inject
         // the hook config + env so the CLI calls back on turn boundaries.
         // Guard: skip hook injection if binary_path is empty (startup logic
-        // error — emitting a broken ` terminal-hook ...` command with no
+        // error —emitting a broken ` terminal-hook ...` command with no
         // program is worse than launching without hooks).
         if let Ok(guard) = self.terminal_lifecycle.read() {
             if let Some(server) = guard.as_ref() {
@@ -472,7 +471,8 @@ impl TerminalService {
                     enh.lifecycle = Some(crate::enhance::LifecycleHookWiring {
                         port: server.http_port(),
                         token: server.auth_token().to_owned(),
-                        terminal_id,
+                        terminal_id: TerminalId::parse(terminal_id)
+                            .expect("spawn enhancement receives a validated terminal id"),
                         binary_path,
                     });
                 }
@@ -482,7 +482,7 @@ impl TerminalService {
     }
 
     /// Platform-private per-terminal config dir (NEVER the user cwd).
-    fn session_mcp_dir(&self, id: i64) -> std::path::PathBuf {
+    fn session_mcp_dir(&self, id: &str) -> std::path::PathBuf {
         let base = self
             .mcp_config_dir
             .read()
@@ -504,12 +504,15 @@ impl TerminalService {
             .unwrap_or_else(|| default_name(&req.command, req.backend.as_deref()));
         let args_json = serde_json::to_string(&req.args)?;
         let env_json = req.env.as_ref().map(serde_json::to_string).transpose()?;
-
-        // The id is minted by the DB (INTEGER PRIMARY KEY AUTOINCREMENT) and
-        // returned on the row — never client-generated.
+        let id = TerminalId::new();
+        let user_id = UserId::parse(user_id)
+            .map_err(|error| TerminalError::InvalidInput(format!("invalid user_id: {error}")))?;
+        // Entity identity is application-minted before persistence; clients
+        // cannot supply or influence it.
         let row = self
             .repo
             .create(&CreateTerminalParams {
+                id: id.clone(),
                 name,
                 cwd: req.cwd.clone(),
                 command: req.command.clone(),
@@ -519,12 +522,12 @@ impl TerminalService {
                 mode: req.mode.clone(),
                 cols: req.cols as i64,
                 rows: req.rows as i64,
-                user_id: user_id.to_owned(),
+                user_id: user_id.clone(),
             })
             .await?;
-        let id = row.id;
+        let id = row.id.clone();
 
-        // Knowledge integration — strictly best-effort: persist the
+        // Knowledge integration —strictly best-effort: persist the
         // create-time binding, mount the bound bases into the workspace and
         // materialize the README contract. Failures only warn; the PTY always
         // launches.
@@ -533,34 +536,34 @@ impl TerminalService {
             .as_ref()
             .filter(|ids| !ids.is_empty())
         {
-            self.bind_knowledge(id, &req.cwd, kb_ids).await;
+            self.bind_knowledge(id.as_str(), &req.cwd, kb_ids).await;
         }
 
         if req.defer_spawn {
             // Defer the PTY until the first `resize` carries the real terminal
             // size (interactive path), so a full-screen TUI draws at the correct
-            // dimensions from frame one — no 80×24→real jump, no stale-frame
+            // dimensions from frame one —no 80×24→ real jump, no stale-frame
             // replay. Knowledge mounts + spawn happen then (see `spawn_deferred`,
             // mirroring `relaunch`). The row is already 'running'; the spawn is
             // imminent (the client fits-and-resizes on mount) and a crash before
             // it is healed by `reconcile_on_boot`.
-            self.pending_spawn.insert(id, ());
+            self.pending_spawn.insert(id.to_string(), ());
             let resp = row_to_response(&row, None, &self.work_dir);
-            self.emitter.emit_created(user_id, &resp);
+            self.emitter.emit_created(user_id.as_str(), &resp);
             info!(
-                terminal_id = id,
+                terminal_id = %id,
                 "terminal session created (spawn deferred to first resize)"
             );
             return Ok(resp);
         }
 
         let kb_ids = self
-            .sync_knowledge_workspace(id, &req.cwd, &req.command, &req.args)
+            .sync_knowledge_workspace(id.as_str(), &req.cwd, &req.command, &req.args)
             .await;
 
         self.spawn_pty(
-            user_id,
-            id,
+            user_id.as_str(),
+            id.as_str(),
             &req.command,
             &req.args,
             &req.cwd,
@@ -572,10 +575,10 @@ impl TerminalService {
         )?;
 
         let resp = row_to_response(&row, None, &self.work_dir);
-        self.emitter.emit_created(user_id, &resp);
-        info!(terminal_id = id, "terminal session created");
+        self.emitter.emit_created(user_id.as_str(), &resp);
+        info!(terminal_id = %id, "terminal session created");
         // Arm IDMM supervision for the fresh PTY (no-op if disabled / already on).
-        self.arm_supervision(id);
+        self.arm_supervision(id.as_str());
         Ok(resp)
     }
 
@@ -584,7 +587,7 @@ impl TerminalService {
     fn spawn_pty(
         &self,
         owner_id: &str,
-        id: i64,
+        id: &str,
         command: &str,
         args: &[String],
         cwd: &str,
@@ -627,23 +630,31 @@ impl TerminalService {
         });
         if capability_rendered && !capability_leases.is_empty() {
             self.live_capability_leases
-                .insert(id, (epoch, capability_leases));
+                .insert(id.to_string(), (epoch, capability_leases));
         }
         let mut env: HashMap<String, String> = env.unwrap_or_default();
         // Describe the xterm.js emulator the PTY talks to (TERM/COLORTERM), so a
-        // Finder/launchd-launched macOS app — which inherits no TERM — still gets
+        // Finder/launchd-launched macOS app —which inherits no TERM —still gets
         // color + correct backspace rendering. Defaults only; explicit env wins.
         apply_emulator_env_defaults(&mut env);
         for (k, v) in hook_env {
             env.insert(k, v);
         }
 
+        let terminal_id = TerminalId::parse(id)
+            .map_err(|error| TerminalError::InvalidInput(format!("invalid terminal id: {error}")))?;
+        let output_terminal_id = terminal_id.clone();
         let emitter_out = self.emitter.clone();
         let output_owner_id = owner_id.to_owned();
         let on_output = move |chunk: Vec<u8>| {
-            emitter_out.emit_output(&output_owner_id, id, BASE64.encode(&chunk));
+            emitter_out.emit_output(
+                &output_owner_id,
+                &output_terminal_id,
+                BASE64.encode(&chunk),
+            );
         };
 
+        let exit_terminal_id = terminal_id.clone();
         let emitter_exit = self.emitter.clone();
         let exit_owner_id = owner_id.to_owned();
         let repo_exit = self.repo.clone();
@@ -654,7 +665,7 @@ impl TerminalService {
         // ambient Tokio runtime, so `tokio::spawn` there would panic.
         let rt = tokio::runtime::Handle::current();
         let on_exit = move |code: Option<i32>, scrollback: Vec<u8>| {
-            capability_leases_exit.remove_if(&id, |_, (lease_epoch, _)| {
+            capability_leases_exit.remove_if(exit_terminal_id.as_str(), |_, (lease_epoch, _)| {
                 *lease_epoch == epoch
             });
             // Tear down ONLY if this PTY is still the live one for the id. A
@@ -662,27 +673,30 @@ impl TerminalService {
             // inserts a fresh higher-epoch handle under the same id; the killed
             // child's exit callback fires later (after EXIT_DRAIN_GRACE). An
             // unconditional teardown here would then remove the FRESH handle and
-            // mark the session exited — turning "restart" into "close". The
+            // mark the session exited —turning "restart" into "close". The
             // epoch guard makes the stale callback a no-op (also covers delete:
             // the row/handle are already gone, so we skip a doomed status write).
             if live_exit
-                .remove_if(&id, |_, h| h.epoch() == epoch)
+                .remove_if(exit_terminal_id.as_str(), |_, h| h.epoch() == epoch)
                 .is_none()
             {
                 return;
             }
-            emitter_exit.emit_exit(&exit_owner_id, id, code);
+            emitter_exit.emit_exit(&exit_owner_id, &exit_terminal_id, code);
             // Persist the terminal status off the reader thread, onto the runtime.
             let repo = repo_exit.clone();
             rt.spawn(async move {
-                if let Err(e) = repo.update_status(id, "exited", code.map(i64::from)).await {
-                    warn!(terminal_id = id, error = %e, "failed to persist terminal exit status");
+                if let Err(e) = repo
+                    .update_status(exit_terminal_id.as_str(), "exited", code.map(i64::from))
+                    .await
+                {
+                    warn!(terminal_id = %exit_terminal_id, error = %e, "failed to persist terminal exit status");
                 }
                 // Persist the FINAL scrollback so the output survives a restart
-                // even if the process exited between debounced flushes — this is
+                // even if the process exited between debounced flushes —this is
                 // what captures the tail the periodic flusher may not have reached.
-                if let Err(e) = repo.save_scrollback(id, &scrollback).await {
-                    warn!(terminal_id = id, error = %e, "failed to persist final terminal scrollback");
+                if let Err(e) = repo.save_scrollback(exit_terminal_id.as_str(), &scrollback).await {
+                    warn!(terminal_id = %exit_terminal_id, error = %e, "failed to persist final terminal scrollback");
                 }
             });
         };
@@ -702,10 +716,10 @@ impl TerminalService {
         );
         if handle.is_err() {
             self.live_capability_leases
-                .remove_if(&id, |_, (lease_epoch, _)| *lease_epoch == epoch);
+                .remove_if(terminal_id.as_str(), |_, (lease_epoch, _)| *lease_epoch == epoch);
         }
         let handle = handle?;
-        self.live.insert(id, handle);
+        self.live.insert(id.to_string(), handle);
 
         // Plan-2 lifecycle consumer: subscribe to this terminal's lifecycle
         // events. On the FIRST `TurnEnd` of an agent session, auto-title from the
@@ -713,12 +727,13 @@ impl TerminalService {
         // captured) via the wired LLM completer.
         if let Some(mut rx) = self.subscribe_lifecycle(id) {
             let svc = self.clone();
+            let lifecycle_terminal_id = terminal_id.clone();
             tokio::spawn(async move {
                 let mut titled_fired = false;
                 loop {
                     match rx.recv().await {
                         Ok(ev) => {
-                            info!(terminal_id = ev.terminal_id, kind = ?ev.kind, "terminal lifecycle event");
+                            info!(terminal_id = %ev.terminal_id, kind = ?ev.kind, "terminal lifecycle event");
                             if !titled_fired && ev.kind == crate::lifecycle::LifecycleKind::TurnEnd
                             {
                                 titled_fired = true;
@@ -730,23 +745,24 @@ impl TerminalService {
                                     .to_owned();
                                 let prompt = svc
                                     .first_input
-                                    .get(&id)
+                                    .get(lifecycle_terminal_id.as_str())
                                     .map(|v| v.clone())
                                     .unwrap_or_default();
                                 let content =
                                     if !assistant.trim().is_empty() && !prompt.trim().is_empty() {
-                                        format!("用户首条输入：{prompt}\n助手回复：{assistant}")
+                                        format!("User input: {prompt}\nAssistant response: {assistant}")
                                     } else if !assistant.trim().is_empty() {
                                         assistant
                                     } else {
                                         prompt
                                     };
-                                svc.maybe_autotitle(id, Some(content)).await;
+                                svc.maybe_autotitle(lifecycle_terminal_id.as_str(), Some(content))
+                                    .await;
                             }
                         }
                         Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                         Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
-                            warn!(terminal_id = id, lagged = n, "lifecycle consumer lagged");
+                            warn!(terminal_id = %lifecycle_terminal_id, lagged = n, "lifecycle consumer lagged");
                         }
                     }
                 }
@@ -769,11 +785,11 @@ impl TerminalService {
     /// `("terminal", id)` key here is what made the create-time picker invisible
     /// in the session header (it reads `("workpath", key)`, which had no row)
     /// and let any workpath row silently shadow the selection at mount time.
-    async fn bind_knowledge(&self, id: i64, cwd: &str, kb_ids: &[String]) {
+    async fn bind_knowledge(&self, id: &str, cwd: &str, kb_ids: &[KnowledgeBaseId]) {
         let Some(ks) = self.knowledge_service() else {
             warn!(
                 terminal_id = id,
-                "knowledge_base_ids given but no knowledge service is wired — skipping binding"
+                "knowledge_base_ids given but no knowledge service is wired —skipping binding"
             );
             return;
         };
@@ -802,13 +818,13 @@ impl TerminalService {
     /// and materialize the standalone README contract next to the mounts.
     /// Returns the mounted base ids + write permission that are signed into the
     /// per-child capability. The README's `has_search_tool` claim is honest: it only
-    /// asserts the tool exists when the MCP is launch-injected — true for
+    /// asserts the tool exists when the MCP is launch-injected —true for
     /// Claude/Codex (including wrappers like `stepcode claude`). Gemini has no
     /// secure launch-time injection mechanism, so it is false there.
-    /// Never blocks the launch — failures degrade to warnings.
+    /// Never blocks the launch —failures degrade to warnings.
     async fn sync_knowledge_workspace(
         &self,
-        id: i64,
+        id: &str,
         cwd: &str,
         command: &str,
         args: &[String],
@@ -819,9 +835,9 @@ impl TerminalService {
         let id_str = id.to_string();
         // Workpath-first (session-list unification spec §7): the binding
         // belongs to the workspace path, not the terminal session.
-        // `session_workpath_key` maps a backend-managed default cwd — one
+        // `session_workpath_key` maps a backend-managed default cwd —one
         // under `work_dir`, the same root `row_to_response` uses for the
-        // `is_default_workpath` flag — to the `__default__` sentinel, and a
+        // `is_default_workpath` flag —to the `__default__` sentinel, and a
         // custom cwd to its normalized key. The knowledge service looks up
         // the `('workpath', key)` row first and only falls back to the legacy
         // `('terminal', id)` binding on a full miss.
@@ -857,7 +873,7 @@ impl TerminalService {
                 // The same scoped MCP bridge that exposes knowledge_search also
                 // exposes knowledge_write, so point the model at the tool (not
                 // the file-write prose) when write-back is on and the tool will
-                // actually be injected — mirroring the ACP assembler. `mounts`
+                // actually be injected —mirroring the ACP assembler. `mounts`
                 // is already non-empty here (early return above).
                 has_write_tool: tool_available && outcome.writeback,
             },
@@ -871,7 +887,7 @@ impl TerminalService {
             }
             .await
             {
-                warn!(terminal_id = id, error = %e, "failed to write knowledge README — continuing");
+                warn!(terminal_id = id, error = %e, "failed to write knowledge README —continuing");
             }
         }
         TerminalKnowledgeScope {
@@ -893,17 +909,17 @@ impl TerminalService {
     /// returns its in-memory scrollback; a session with no live PTY (e.g. after
     /// an app restart) falls back to the persisted snapshot so the frontend can
     /// still replay its history.
-    pub async fn get(&self, id: i64) -> Result<TerminalSessionResponse, TerminalError> {
+    pub async fn get(&self, id: &str) -> Result<TerminalSessionResponse, TerminalError> {
         let row = self
             .repo
             .get_by_id(id)
             .await?
             .ok_or_else(|| TerminalError::NotFound(id.to_string()))?;
-        let scrollback = match self.live.get(&id) {
+        let scrollback = match self.live.get(id) {
             Some(h) => Some(BASE64.encode(h.scrollback())),
             None => self
                 .repo
-                .load_scrollback(id)
+                .load_scrollback(&id)
                 .await?
                 .map(|b| BASE64.encode(b)),
         };
@@ -912,10 +928,10 @@ impl TerminalService {
 
     /// Read the terminal's scrollback as ANSI-stripped text, keeping at most
     /// `max_bytes` from the TAIL. The terminal analogue of a conversation's
-    /// transcript read-back — what an agent uses to SEE a command's result.
+    /// transcript read-back —what an agent uses to SEE a command's result.
     pub async fn read_output_tail(
         &self,
-        id: i64,
+        id: &str,
         max_bytes: usize,
     ) -> Result<TerminalOutputTail, TerminalError> {
         let resp = self.get(id).await?;
@@ -933,15 +949,15 @@ impl TerminalService {
     }
 
     /// Enumerate entries under `path` (workspace-relative) inside this terminal
-    /// session's working directory. The root is server-authoritative — derived
-    /// from the row's `cwd`, never a client-supplied path — so listing it grants
+    /// session's working directory. The root is server-authoritative —derived
+    /// from the row's `cwd`, never a client-supplied path —so listing it grants
     /// no capability beyond the shell the user already runs there. The
     /// `..`-rejection + boundary/depth guards and the optional case-insensitive
     /// `search` filter live in [`nomifun_file::list_workspace_level`]. The exact
     /// terminal analogue of `ConversationService::browse_workspace`.
     pub async fn browse_workspace(
         &self,
-        id: i64,
+        id: &str,
         path: &str,
         search: Option<&str>,
     ) -> Result<Vec<nomifun_api_types::WorkspaceEntry>, nomifun_common::AppError> {
@@ -985,7 +1001,7 @@ impl TerminalService {
     /// Spawn the background scrollback persistence loop. Every
     /// [`SCROLLBACK_FLUSH_INTERVAL`] it persists each *dirty* live session's
     /// scrollback so a restart can replay history. Idle sessions are skipped.
-    /// Spawn exactly once at boot (the service is cheaply cloneable — Arc fields).
+    /// Spawn exactly once at boot (the service is cheaply cloneable —Arc fields).
     pub fn spawn_scrollback_flusher(&self) {
         let svc = self.clone();
         tokio::spawn(async move {
@@ -1003,30 +1019,34 @@ impl TerminalService {
     /// DB. Snapshots are collected from the `DashMap` synchronously (no await
     /// held across shard locks), then written outside the iterator.
     async fn flush_dirty_scrollback(&self) {
-        let pending: Vec<(i64, Vec<u8>)> = self
+        let pending: Vec<(String, Vec<u8>)> = self
             .live
             .iter()
-            .filter_map(|e| e.value().take_dirty_scrollback().map(|sb| (*e.key(), sb)))
+            .filter_map(|e| {
+                e.value()
+                    .take_dirty_scrollback()
+                    .map(|sb| (e.key().clone(), sb))
+            })
             .collect();
         for (id, sb) in pending {
-            if let Err(e) = self.repo.save_scrollback(id, &sb).await {
+            if let Err(e) = self.repo.save_scrollback(&id, &sb).await {
                 warn!(terminal_id = id, error = %e, "failed to persist terminal scrollback");
             }
         }
     }
 
     /// Write base64-encoded bytes to the PTY.
-    pub async fn input(&self, id: i64, data_b64: &str) -> Result<(), TerminalError> {
+    pub async fn input(&self, id: &str, data_b64: &str) -> Result<(), TerminalError> {
         let bytes = BASE64
             .decode(data_b64)
             .map_err(|e| TerminalError::InvalidInput(format!("base64: {e}")))?;
         let handle = self
             .live
-            .get(&id)
+            .get(id)
             .ok_or_else(|| TerminalError::NotFound(id.to_string()))?;
         handle.write(&bytes)?;
         // Re-arm IDMM supervision on user activity (no-op if disabled / already
-        // supervising) — covers re-arm after a prior supervisor stood down.
+        // supervising) —covers re-arm after a prior supervisor stood down.
         self.arm_supervision(id);
         // Capture the first input line for auto-titling (cheap no-op once titled).
         self.capture_first_input(id, &bytes);
@@ -1037,10 +1057,10 @@ impl TerminalService {
     /// Resolves the target's agent family from its stored command/args/backend to
     /// choose the correct submit sequence (bracketed-paste + separated CR for
     /// agent TUIs, raw + CR for single lines / shells). Uses the raw PTY write
-    /// path — this is deliberate driving, so it does NOT arm IDMM supervision or
+    /// path —this is deliberate driving, so it does NOT arm IDMM supervision or
     /// auto-title the way `input` (user typing) does. `Err(NotFound)` if not live.
-    pub async fn submit_text(&self, id: i64, text: &str) -> Result<(), TerminalError> {
-        if !self.live.contains_key(&id) {
+    pub async fn submit_text(&self, id: &str, text: &str) -> Result<(), TerminalError> {
+        if !self.live.contains_key(id) {
             return Err(TerminalError::NotFound(id.to_string()));
         }
         let is_agent = match self.describe(id).await? {
@@ -1067,7 +1087,7 @@ impl TerminalService {
     /// (`IDLE_SETTLE_WINDOW`). Never dresses `Idle` up as definitive completion.
     pub async fn await_turn_settle(
         &self,
-        id: i64,
+        id: &str,
         timeout: std::time::Duration,
     ) -> crate::submit::SettleReason {
         use crate::submit::SettleReason;
@@ -1153,19 +1173,19 @@ impl TerminalService {
     /// For agent sessions this input fires before the assistant replies, so it
     /// wins the once-guard over the (best-effort) TurnEnd LLM path. Cheap no-op
     /// once a title has been claimed.
-    fn capture_first_input(&self, id: i64, bytes: &[u8]) {
-        if self.titled.contains_key(&id) {
+    fn capture_first_input(&self, id: &str, bytes: &[u8]) {
+        if self.titled.contains_key(id) {
             return;
         }
         // Enter is detected on the RAW bytes (a TUI submits with \r, which
         // strip_ansi drops). The captured TEXT is strip_ansi'd so the mouse
         // reports / focus events / cursor-key sequences a TUI like claude makes
-        // xterm send are never accumulated — they are not typed text. strip_ansi
+        // xterm send are never accumulated —they are not typed text. strip_ansi
         // keeps \n + printable and removes \r and all other C0 controls.
         let had_newline = bytes.iter().any(|&b| b == b'\r' || b == b'\n');
         let cleaned = crate::ansi::strip_ansi(bytes);
         {
-            let mut buf = self.first_input.entry(id).or_default();
+            let mut buf = self.first_input.entry(id.to_string()).or_default();
             for ch in cleaned.chars() {
                 if ch == '\n' {
                     break;
@@ -1183,15 +1203,16 @@ impl TerminalService {
         // one-shot trigger isn't wasted on an empty title.
         let first_line_empty = self
             .first_input
-            .get(&id)
+            .get(id)
             .map(|v| v.trim().is_empty())
             .unwrap_or(true);
         if first_line_empty {
             return;
         }
         let svc = self.clone();
+        let terminal_id = id.to_string();
         tokio::spawn(async move {
-            svc.maybe_autotitle(id, None).await;
+            svc.maybe_autotitle(&terminal_id, None).await;
         });
     }
 
@@ -1201,11 +1222,11 @@ impl TerminalService {
     /// the wired completer; `None`, no completer, or a failed/empty completion
     /// falls back to the captured first input line. Guards: (1) a per-terminal
     /// once-claim, and (2) the row's name must still equal the mechanical
-    /// `default_name` — if the user (or a prior auto-title) already changed it,
+    /// `default_name` —if the user (or a prior auto-title) already changed it,
     /// we never overwrite. Best-effort: every failure path only logs.
-    async fn maybe_autotitle(&self, id: i64, llm_source: Option<String>) {
+    async fn maybe_autotitle(&self, id: &str, llm_source: Option<String>) {
         // (1) Atomic once-claim: the first of the input/TurnEnd seams wins.
-        if self.titled.insert(id, ()).is_some() {
+        if self.titled.insert(id.to_string(), ()).is_some() {
             return;
         }
         // (2) Don't clobber a custom name (manual rename, create-time name, or a
@@ -1214,14 +1235,14 @@ impl TerminalService {
             return;
         };
         if row.name != default_name(&row.command, row.backend.as_deref()) {
-            self.first_input.remove(&id);
+            self.first_input.remove(id);
             return;
         }
 
         let completer = self.title_completer.read().ok().and_then(|g| g.clone());
         let first_input = self
             .first_input
-            .get(&id)
+            .get(id)
             .map(|v| v.clone())
             .unwrap_or_default();
 
@@ -1241,12 +1262,12 @@ impl TerminalService {
         if title.is_empty() {
             title = crate::title::fallback_title(&first_input, crate::title::TITLE_MAX_CHARS);
         }
-        self.first_input.remove(&id);
+        self.first_input.remove(id);
 
         if title.is_empty() {
-            // Nothing usable yet — release the once-guard so a later, real input
+            // Nothing usable yet —release the once-guard so a later, real input
             // can try again (never permanently block titling on a junk first line).
-            self.titled.remove(&id);
+            self.titled.remove(id);
             return;
         }
         if title == row.name {
@@ -1259,19 +1280,19 @@ impl TerminalService {
     }
 
     /// Resize the PTY and persist the new dimensions.
-    pub async fn resize(&self, id: i64, cols: u16, rows: u16) -> Result<(), TerminalError> {
+    pub async fn resize(&self, id: &str, cols: u16, rows: u16) -> Result<(), TerminalError> {
         // Deferred-spawn sessions spawn their PTY on the FIRST resize, at the
-        // real fitted size — so a full-screen TUI (claude) draws correctly from
+        // real fitted size —so a full-screen TUI (claude) draws correctly from
         // frame one instead of at 80×24 then jumping. `remove` is atomic, so when
         // two near-simultaneous resizes race (rAF + ResizeObserver), exactly one
         // wins the spawn; the loser falls through to the live-handle resize below.
-        if self.pending_spawn.remove(&id).is_some() {
+        if self.pending_spawn.remove(id).is_some() {
             return self.spawn_deferred(id, cols, rows).await;
         }
         {
             let handle = self
                 .live
-                .get(&id)
+                .get(id)
                 .ok_or_else(|| TerminalError::NotFound(id.to_string()))?;
             handle.resize(cols, rows)?;
         }
@@ -1281,9 +1302,9 @@ impl TerminalService {
 
     /// Spawn the PTY for a deferred-create session at the given (real) size,
     /// reading its command/cwd/env from the persisted row and re-syncing
-    /// knowledge mounts (mirrors `relaunch` — the documented moment a binding
+    /// knowledge mounts (mirrors `relaunch` —the documented moment a binding
     /// takes effect). Persists the real size and arms IDMM supervision.
-    async fn spawn_deferred(&self, id: i64, cols: u16, rows: u16) -> Result<(), TerminalError> {
+    async fn spawn_deferred(&self, id: &str, cols: u16, rows: u16) -> Result<(), TerminalError> {
         let row = self
             .repo
             .get_by_id(id)
@@ -1319,17 +1340,19 @@ impl TerminalService {
     }
 
     /// Kill the child process (session row remains, status flips to exited via on_exit).
-    pub async fn kill(&self, id: i64) -> Result<(), TerminalError> {
-        self.live_capability_leases.remove(&id);
+    pub async fn kill(&self, id: &str) -> Result<(), TerminalError> {
+        self.live_capability_leases.remove(id);
         let handle = self
             .live
-            .get(&id)
+            .get(id)
             .ok_or_else(|| TerminalError::NotFound(id.to_string()))?;
         handle.kill()
     }
 
     /// Kill (if live) and delete the session row.
-    pub async fn delete(&self, id: i64) -> Result<(), TerminalError> {
+    pub async fn delete(&self, id: &str) -> Result<(), TerminalError> {
+        let terminal_id = TerminalId::parse(id)
+            .map_err(|error| TerminalError::InvalidInput(format!("invalid terminal id: {error}")))?;
         // Resolve the authoritative owner before deletion. The row is gone by
         // the time `terminal.removed` is emitted, so the audience cannot be
         // reconstructed afterwards.
@@ -1341,12 +1364,12 @@ impl TerminalService {
             .user_id;
         // Drop any pending deferred-spawn marker so a never-resized session does
         // not leak (and cannot later spawn against a deleted row).
-        self.pending_spawn.remove(&id);
+        self.pending_spawn.remove(id);
         // Drop per-session auto-title bookkeeping.
-        self.titled.remove(&id);
-        self.first_input.remove(&id);
-        self.live_capability_leases.remove(&id);
-        if let Some((_, handle)) = self.live.remove(&id) {
+        self.titled.remove(id);
+        self.first_input.remove(id);
+        self.live_capability_leases.remove(id);
+        if let Some((_, handle)) = self.live.remove(id) {
             let _ = handle.kill();
         }
         self.repo.delete(id).await?;
@@ -1355,25 +1378,25 @@ impl TerminalService {
         // dir may not exist for shell terminals that never got enhancement.
         let _ = std::fs::remove_dir_all(self.session_mcp_dir(id));
         // Snapshot the hook list under the read lock, then drop the guard before
-        // awaiting — `RwLockReadGuard` is not `Send` (mirrors ConversationService).
+        // awaiting —`RwLockReadGuard` is not `Send` (mirrors ConversationService).
         let hooks: Vec<Arc<dyn OnTerminalDelete>> = self
             .delete_hooks
             .read()
             .map(|guard| guard.clone())
             .unwrap_or_default();
         for hook in hooks {
-            hook.on_terminal_deleted(&owner_id, id).await;
+            hook.on_terminal_deleted(owner_id.as_str(), terminal_id.as_str()).await;
         }
-        self.emitter.emit_removed(&owner_id, id);
+        self.emitter.emit_removed(owner_id.as_str(), &terminal_id);
         Ok(())
     }
 
     /// Relaunch a session **in place**: kill the old PTY (if any) and spawn a
     /// fresh child for the SAME session id, reusing the stored command/cwd/env.
-    /// The session keeps its id, name and sidebar entry — only the underlying
+    /// The session keeps its id, name and sidebar entry —only the underlying
     /// process is replaced. A PTY child cannot be resumed once it exits, so a
     /// new process is unavoidable; reusing the id keeps continuity for the user.
-    pub async fn relaunch(&self, id: i64) -> Result<TerminalSessionResponse, TerminalError> {
+    pub async fn relaunch(&self, id: &str) -> Result<TerminalSessionResponse, TerminalError> {
         let row = self
             .repo
             .get_by_id(id)
@@ -1381,14 +1404,14 @@ impl TerminalService {
             .ok_or_else(|| TerminalError::NotFound(id.to_string()))?;
 
         // Tear down any still-running PTY for this id first.
-        self.live_capability_leases.remove(&id);
-        if let Some((_, handle)) = self.live.remove(&id) {
+        self.live_capability_leases.remove(id);
+        if let Some((_, handle)) = self.live.remove(id) {
             let _ = handle.kill();
         }
         // A relaunch spawns fresh now, so a pending deferred-spawn marker (if the
-        // session was never resized) is obsolete — clear it to avoid a later
+        // session was never resized) is obsolete —clear it to avoid a later
         // resize spawning a second PTY for the same id.
-        self.pending_spawn.remove(&id);
+        self.pending_spawn.remove(id);
 
         let args = crate::types::parse_args(&row.args);
         let env: Option<HashMap<String, String>> = row
@@ -1422,7 +1445,7 @@ impl TerminalService {
             return Err(e);
         }
 
-        // The fresh process starts with empty scrollback — drop the persisted
+        // The fresh process starts with empty scrollback —drop the persisted
         // snapshot so a later restart does not replay the *previous* process's
         // output as this one's history. Best-effort: the new handle's flushes
         // repopulate it. (Common path — relaunch of an already-exited session —
@@ -1457,10 +1480,10 @@ impl TerminalService {
     /// garbled and unresponsive: the user can always get back to a usable shell
     /// without the dead-page/disabled-composer state. Structurally identical to
     /// [`relaunch`] (same id, fresh epoch, status→running, emit `terminal.updated`
-    /// which re-enables the frontend composer) — only the launch target differs.
+    /// which re-enables the frontend composer) —only the launch target differs.
     pub async fn relaunch_as_shell(
         &self,
-        id: i64,
+        id: &str,
     ) -> Result<TerminalSessionResponse, TerminalError> {
         let row = self
             .repo
@@ -1469,11 +1492,11 @@ impl TerminalService {
             .ok_or_else(|| TerminalError::NotFound(id.to_string()))?;
 
         // Tear down any still-running (or wedged) PTY for this id first.
-        self.live_capability_leases.remove(&id);
-        if let Some((_, handle)) = self.live.remove(&id) {
+        self.live_capability_leases.remove(id);
+        if let Some((_, handle)) = self.live.remove(id) {
             let _ = handle.kill();
         }
-        self.pending_spawn.remove(&id);
+        self.pending_spawn.remove(id);
 
         // Persist the shell identity BEFORE spawning so a crash mid-relaunch (or a
         // later boot-reconcile) still relaunches a shell, never the dead agent CLI.
@@ -1527,7 +1550,7 @@ impl TerminalService {
     /// Rename a session and/or toggle its pinned state. Broadcasts the update.
     pub async fn update_meta(
         &self,
-        id: i64,
+        id: &str,
         name: Option<String>,
         pinned: Option<bool>,
     ) -> Result<TerminalSessionResponse, TerminalError> {
@@ -1548,7 +1571,7 @@ impl TerminalService {
     /// then starts with a clean list instead of a pile of dirty `exited` ghosts.
     ///
     /// MUST be called only on a real quit (desktop tray-quit / `RunEvent::Exit`),
-    /// never on close-to-tray — see `apps/desktop/src/main.rs`. Returns the number
+    /// never on close-to-tray —see `apps/desktop/src/main.rs`. Returns the number
     /// of rows deleted. Best-effort on the PTY kills (a failed kill only warns; the
     /// OS reaps the tree on process exit anyway).
     pub async fn shutdown_cleanup(&self) -> Result<u64, TerminalError> {
@@ -1572,28 +1595,28 @@ impl TerminalService {
 
 #[async_trait::async_trait]
 impl TerminalDriver for TerminalService {
-    async fn write_input(&self, id: i64, bytes: &[u8]) -> Result<(), TerminalError> {
+    async fn write_input(&self, id: &str, bytes: &[u8]) -> Result<(), TerminalError> {
         let handle = self
             .live
-            .get(&id)
+            .get(id)
             .ok_or_else(|| TerminalError::NotFound(id.to_string()))?;
         handle.write(bytes)
     }
 
-    fn subscribe_output(&self, id: i64) -> Option<tokio::sync::broadcast::Receiver<Vec<u8>>> {
-        self.live.get(&id).map(|h| h.subscribe_output())
+    fn subscribe_output(&self, id: &str) -> Option<tokio::sync::broadcast::Receiver<Vec<u8>>> {
+        self.live.get(id).map(|h| h.subscribe_output())
     }
 
-    fn is_alive(&self, id: i64) -> bool {
-        self.live.contains_key(&id)
+    fn is_alive(&self, id: &str) -> bool {
+        self.live.contains_key(id)
     }
 
-    async fn describe(&self, id: i64) -> Result<Option<TerminalDescription>, TerminalError> {
+    async fn describe(&self, id: &str) -> Result<Option<TerminalDescription>, TerminalError> {
         let Some(row) = self.repo.get_by_id(id).await? else {
             return Ok(None);
         };
         Ok(Some(TerminalDescription {
-            user_id: row.user_id,
+            user_id: row.user_id.to_string(),
             cwd: row.cwd,
             command: row.command,
             args: crate::types::parse_args(&row.args),
@@ -1603,30 +1626,30 @@ impl TerminalDriver for TerminalService {
         }))
     }
 
-    async fn read_autowork(&self, id: i64) -> Result<Option<String>, TerminalError> {
+    async fn read_autowork(&self, id: &str) -> Result<Option<String>, TerminalError> {
         let Some(row) = self.repo.get_by_id(id).await? else {
             return Ok(None);
         };
         Ok(row.autowork)
     }
 
-    async fn write_autowork(&self, id: i64, autowork: Option<&str>) -> Result<(), TerminalError> {
+    async fn write_autowork(&self, id: &str, autowork: Option<&str>) -> Result<(), TerminalError> {
         self.repo.update_autowork(id, autowork).await?;
         Ok(())
     }
 
-    async fn read_idmm(&self, id: i64) -> Result<Option<String>, TerminalError> {
+    async fn read_idmm(&self, id: &str) -> Result<Option<String>, TerminalError> {
         self.repo.get_idmm(id).await.map_err(Into::into)
     }
 
-    async fn write_idmm(&self, id: i64, idmm: Option<&str>) -> Result<(), TerminalError> {
+    async fn write_idmm(&self, id: &str, idmm: Option<&str>) -> Result<(), TerminalError> {
         self.repo.update_idmm(id, idmm).await?;
         Ok(())
     }
 
     fn subscribe_lifecycle(
         &self,
-        id: i64,
+        id: &str,
     ) -> Option<tokio::sync::broadcast::Receiver<crate::lifecycle::TerminalLifecycleEvent>> {
         // Delegate to the inherent method (same name, same signature).
         // Rust resolves `self.subscribe_lifecycle(id)` to the inherent impl which
@@ -1689,6 +1712,13 @@ mod tests {
     use nomifun_realtime::{EventBroadcaster, UserEventSink};
     use std::sync::Mutex;
     use std::time::Duration;
+
+    const TEST_USER_ID: &str = "user_0190f5fe-7c00-7a00-8000-000000000001";
+    const TEST_KB_ID: &str = "kb_0190f5fe-7c00-7a00-8000-000000000001";
+
+    fn test_kb_id() -> nomifun_common::KnowledgeBaseId {
+        nomifun_common::KnowledgeBaseId::parse(TEST_KB_ID).unwrap()
+    }
 
     fn test_issuer() -> Arc<nomifun_common::LoopbackCapabilityIssuer> {
         Arc::new(nomifun_common::LoopbackCapabilityIssuer::random().unwrap())
@@ -1993,9 +2023,8 @@ mod tests {
 
     #[derive(Default)]
     struct MemRepo {
-        rows: Mutex<HashMap<i64, nomifun_db::TerminalSessionRow>>,
-        next_id: std::sync::atomic::AtomicI64,
-        scrollback: Mutex<HashMap<i64, Vec<u8>>>,
+        rows: Mutex<HashMap<String, nomifun_db::TerminalSessionRow>>,
+        scrollback: Mutex<HashMap<String, Vec<u8>>>,
     }
 
     #[async_trait::async_trait]
@@ -2004,13 +2033,8 @@ mod tests {
             &self,
             p: &CreateTerminalParams,
         ) -> Result<nomifun_db::TerminalSessionRow, nomifun_db::DbError> {
-            // SQLite mints the id; the mock allocates a monotonic i64.
-            let id = self
-                .next_id
-                .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-                + 1;
             let row = nomifun_db::TerminalSessionRow {
-                id,
+                id: p.id.clone(),
                 name: p.name.clone(),
                 cwd: p.cwd.clone(),
                 command: p.command.clone(),
@@ -2030,15 +2054,20 @@ mod tests {
                 autowork: None,
                 idmm: None,
             };
-            self.rows.lock().unwrap().insert(id, row.clone());
+            self.rows
+                .lock()
+                .unwrap()
+                .insert(row.id.to_string(), row.clone());
             Ok(row)
         }
+
         async fn get_by_id(
             &self,
-            id: i64,
+            id: &str,
         ) -> Result<Option<nomifun_db::TerminalSessionRow>, nomifun_db::DbError> {
-            Ok(self.rows.lock().unwrap().get(&id).cloned())
+            Ok(self.rows.lock().unwrap().get(id).cloned())
         }
+
         async fn list_by_user(
             &self,
             user_id: &str,
@@ -2048,145 +2077,155 @@ mod tests {
                 .lock()
                 .unwrap()
                 .values()
-                .filter(|r| r.user_id == user_id)
+                .filter(|row| row.user_id.as_str() == user_id)
                 .cloned()
                 .collect())
         }
+
         async fn update_status(
             &self,
-            id: i64,
+            id: &str,
             status: &str,
             exit_code: Option<i64>,
         ) -> Result<(), nomifun_db::DbError> {
             let mut rows = self.rows.lock().unwrap();
             let row = rows
-                .get_mut(&id)
+                .get_mut(id)
                 .ok_or_else(|| nomifun_db::DbError::NotFound(id.to_string()))?;
             row.last_status = status.to_owned();
             row.exit_code = exit_code;
             Ok(())
         }
+
         async fn update_size(
             &self,
-            id: i64,
+            id: &str,
             cols: i64,
             rows_: i64,
         ) -> Result<(), nomifun_db::DbError> {
             let mut rows = self.rows.lock().unwrap();
             let row = rows
-                .get_mut(&id)
+                .get_mut(id)
                 .ok_or_else(|| nomifun_db::DbError::NotFound(id.to_string()))?;
             row.cols = cols;
             row.rows = rows_;
             Ok(())
         }
+
         async fn update_meta(
             &self,
-            id: i64,
+            id: &str,
             name: Option<&str>,
             pinned: Option<bool>,
         ) -> Result<(), nomifun_db::DbError> {
             let mut rows = self.rows.lock().unwrap();
             let row = rows
-                .get_mut(&id)
+                .get_mut(id)
                 .ok_or_else(|| nomifun_db::DbError::NotFound(id.to_string()))?;
-            if let Some(n) = name {
-                row.name = n.to_owned();
+            if let Some(name) = name {
+                row.name = name.to_owned();
             }
-            if let Some(p) = pinned {
-                row.pinned = p;
-                row.pinned_at = if p { Some(2) } else { None };
+            if let Some(pinned) = pinned {
+                row.pinned = pinned;
+                row.pinned_at = pinned.then_some(2);
             }
             Ok(())
         }
-        async fn delete(&self, id: i64) -> Result<(), nomifun_db::DbError> {
+
+        async fn delete(&self, id: &str) -> Result<(), nomifun_db::DbError> {
             self.rows
                 .lock()
                 .unwrap()
-                .remove(&id)
+                .remove(id)
                 .map(|_| ())
                 .ok_or_else(|| nomifun_db::DbError::NotFound(id.to_string()))
         }
+
         async fn delete_all(&self) -> Result<u64, nomifun_db::DbError> {
             let mut rows = self.rows.lock().unwrap();
-            let n = rows.len() as u64;
+            let count = rows.len() as u64;
             rows.clear();
             self.scrollback.lock().unwrap().clear();
-            Ok(n)
+            Ok(count)
         }
+
         async fn update_command(
             &self,
-            id: i64,
+            id: &str,
             command: &str,
             args: &str,
             backend: Option<&str>,
         ) -> Result<(), nomifun_db::DbError> {
             let mut rows = self.rows.lock().unwrap();
             let row = rows
-                .get_mut(&id)
+                .get_mut(id)
                 .ok_or_else(|| nomifun_db::DbError::NotFound(id.to_string()))?;
             row.command = command.to_owned();
             row.args = args.to_owned();
-            row.backend = backend.map(|s| s.to_owned());
+            row.backend = backend.map(str::to_owned);
             Ok(())
         }
+
         async fn update_autowork(
             &self,
-            id: i64,
+            id: &str,
             autowork: Option<&str>,
         ) -> Result<(), nomifun_db::DbError> {
             let mut rows = self.rows.lock().unwrap();
             let row = rows
-                .get_mut(&id)
+                .get_mut(id)
                 .ok_or_else(|| nomifun_db::DbError::NotFound(id.to_string()))?;
-            row.autowork = autowork.map(|s| s.to_owned());
+            row.autowork = autowork.map(str::to_owned);
             Ok(())
         }
+
         async fn update_idmm(
             &self,
-            id: i64,
+            id: &str,
             idmm: Option<&str>,
         ) -> Result<(), nomifun_db::DbError> {
             let mut rows = self.rows.lock().unwrap();
             let row = rows
-                .get_mut(&id)
+                .get_mut(id)
                 .ok_or_else(|| nomifun_db::DbError::NotFound(id.to_string()))?;
-            row.idmm = idmm.map(|s| s.to_owned());
+            row.idmm = idmm.map(str::to_owned);
             Ok(())
         }
-        async fn get_idmm(&self, id: i64) -> Result<Option<String>, nomifun_db::DbError> {
-            Ok(self
-                .rows
-                .lock()
-                .unwrap()
-                .get(&id)
-                .and_then(|r| r.idmm.clone()))
+
+        async fn get_idmm(&self, id: &str) -> Result<Option<String>, nomifun_db::DbError> {
+            Ok(self.rows.lock().unwrap().get(id).and_then(|row| row.idmm.clone()))
         }
+
         async fn mark_all_running_exited(&self) -> Result<u64, nomifun_db::DbError> {
             let mut rows = self.rows.lock().unwrap();
-            let mut n = 0u64;
+            let mut count = 0;
             for row in rows.values_mut() {
                 if row.last_status == "running" {
                     row.last_status = "exited".to_owned();
                     row.exit_code = None;
-                    n += 1;
+                    count += 1;
                 }
             }
-            Ok(n)
+            Ok(count)
         }
-        async fn save_scrollback(&self, id: i64, data: &[u8]) -> Result<(), nomifun_db::DbError> {
-            self.scrollback.lock().unwrap().insert(id, data.to_vec());
+
+        async fn save_scrollback(&self, id: &str, data: &[u8]) -> Result<(), nomifun_db::DbError> {
+            self.scrollback
+                .lock()
+                .unwrap()
+                .insert(id.to_string(), data.to_vec());
             Ok(())
         }
-        async fn load_scrollback(&self, id: i64) -> Result<Option<Vec<u8>>, nomifun_db::DbError> {
-            Ok(self.scrollback.lock().unwrap().get(&id).cloned())
+
+        async fn load_scrollback(&self, id: &str) -> Result<Option<Vec<u8>>, nomifun_db::DbError> {
+            Ok(self.scrollback.lock().unwrap().get(id).cloned())
         }
-        async fn clear_scrollback(&self, id: i64) -> Result<(), nomifun_db::DbError> {
-            self.scrollback.lock().unwrap().remove(&id);
+
+        async fn clear_scrollback(&self, id: &str) -> Result<(), nomifun_db::DbError> {
+            self.scrollback.lock().unwrap().remove(id);
             Ok(())
         }
     }
-
     // --- Capturing broadcaster ------------------------------------------
 
     #[derive(Default, Clone)]
@@ -2269,7 +2308,6 @@ mod tests {
         bindings: Mutex<
             HashMap<(String, String), (nomifun_db::models::KnowledgeBindingRow, Vec<String>)>,
         >,
-        next_binding_id: std::sync::atomic::AtomicI64,
     }
 
     #[async_trait::async_trait]
@@ -2281,7 +2319,7 @@ mod tests {
             self.bases
                 .lock()
                 .unwrap()
-                .insert(row.id.clone(), row.clone());
+                .insert(row.id.to_string(), row.clone());
             Ok(())
         }
         async fn update_base(
@@ -2291,7 +2329,7 @@ mod tests {
             self.bases
                 .lock()
                 .unwrap()
-                .insert(row.id.clone(), row.clone());
+                .insert(row.id.to_string(), row.clone());
             Ok(())
         }
         async fn delete_base(&self, id: &str) -> Result<(), nomifun_db::DbError> {
@@ -2336,20 +2374,16 @@ mod tests {
             writeback_eagerness: &str,
             _channel_write_enabled: bool,
             updated_at: nomifun_common::TimestampMs,
-        ) -> Result<i64, nomifun_db::DbError> {
+        ) -> Result<String, nomifun_db::DbError> {
             let key = (target_kind.to_owned(), target_id.to_owned());
             let mut bindings = self.bindings.lock().unwrap();
             // Preserve an existing binding_id on replace; allocate otherwise.
             let binding_id = bindings
                 .get(&key)
-                .map(|(row, _)| row.binding_id)
-                .unwrap_or_else(|| {
-                    self.next_binding_id
-                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-                        + 1
-                });
+                .map(|(row, _)| row.binding_id.clone())
+                .unwrap_or_else(nomifun_common::KnowledgeBindingId::new);
             let mut row = nomifun_db::models::KnowledgeBindingRow {
-                binding_id,
+                binding_id: binding_id.clone(),
                 target_kind: target_kind.to_owned(),
                 target_workpath: None,
                 target_conv_id: None,
@@ -2364,13 +2398,22 @@ mod tests {
             };
             match target_kind {
                 "workpath" => row.target_workpath = Some(target_id.to_owned()),
-                "conversation" => row.target_conv_id = target_id.parse::<i64>().ok(),
-                "terminal" => row.target_term_id = target_id.parse::<i64>().ok(),
-                "companion" => row.target_companion_id = Some(target_id.to_owned()),
+                "conversation" => {
+                    row.target_conv_id = Some(nomifun_common::ConversationId::parse(target_id)
+                        .map_err(|error| nomifun_db::DbError::Init(error.to_string()))?)
+                }
+                "terminal" => {
+                    row.target_term_id = Some(nomifun_common::TerminalId::parse(target_id)
+                        .map_err(|error| nomifun_db::DbError::Init(error.to_string()))?)
+                }
+                "companion" => {
+                    row.target_companion_id = Some(nomifun_common::CompanionId::parse(target_id)
+                        .map_err(|error| nomifun_db::DbError::Init(error.to_string()))?)
+                }
                 _ => {}
             }
             bindings.insert(key, (row, kb_ids.to_vec()));
-            Ok(binding_id)
+            Ok(binding_id.to_string())
         }
         async fn delete_binding(
             &self,
@@ -2414,16 +2457,16 @@ mod tests {
 
     /// A `KnowledgeService` over an in-memory repo with one registered base
     /// (`kb_test`) rooted at `kb_root`. The returned `TempDir` is the service
-    /// data dir — keep it alive for the test's duration.
+    /// data dir —keep it alive for the test's duration.
     fn knowledge_fixture(
         kb_root: &std::path::Path,
     ) -> (Arc<nomifun_knowledge::KnowledgeService>, tempfile::TempDir) {
         let data_dir = tempfile::TempDir::new().unwrap();
         let repo = MemKbRepo::default();
         repo.bases.lock().unwrap().insert(
-            "kb_test".into(),
+            TEST_KB_ID.into(),
             nomifun_db::models::KnowledgeBaseRow {
-                id: "kb_test".into(),
+                id: test_kb_id(),
                 name: "Domain Notes".into(),
                 description: "test base".into(),
                 root_path: kb_root.to_string_lossy().into_owned(),
@@ -2459,11 +2502,11 @@ mod tests {
         let cwd = tempfile::TempDir::new().unwrap();
         let mut request = req("cat", &[]);
         request.cwd = cwd.path().to_string_lossy().into_owned();
-        request.knowledge_base_ids = Some(vec!["kb_test".into()]);
-        let resp = svc.create("u", request).await.unwrap();
+        request.knowledge_base_ids = Some(vec![test_kb_id()]);
+        let resp = svc.create(TEST_USER_ID, request).await.unwrap();
 
         // Create-time kb_ids persist an enabled binding under the session's
-        // WORKPATH (spec §7) — the exact key the session-header KnowledgeControl
+        // WORKPATH (spec §7) —the exact key the session-header KnowledgeControl
         // and the mount resolver read. (The test `work_dir` == temp_dir and the
         // cwd is under it, so this resolves to the default-workpath sentinel.)
         let wp_key = nomifun_knowledge::session_workpath_key(cwd.path(), &std::env::temp_dir());
@@ -2472,8 +2515,8 @@ mod tests {
             binding.enabled,
             "create-time kb_ids must enable the binding"
         );
-        assert_eq!(binding.kb_ids, vec!["kb_test".to_owned()]);
-        // The legacy per-session key must NOT be written — that mismatch is the
+        assert_eq!(binding.kb_ids, vec![test_kb_id()]);
+        // The legacy per-session key must NOT be written —that mismatch is the
         // bug this fix closes (header/mount read workpath, create wrote terminal).
         let legacy = ks
             .get_binding("terminal", &resp.id.to_string())
@@ -2495,11 +2538,11 @@ mod tests {
         );
         assert!(text.contains("Domain Notes"));
 
-        svc.kill(resp.id).await.ok();
+        svc.kill(&resp.id).await.ok();
     }
 
     /// A user-picked working directory (NOT under the managed work dir) binds
-    /// under its normalized path key — the common real-world case, and exactly
+    /// under its normalized path key —the common real-world case, and exactly
     /// the key the session header reads back via `workpathKeyForTerminal`.
     #[tokio::test]
     async fn create_with_kb_ids_binds_under_custom_workpath() {
@@ -2522,8 +2565,8 @@ mod tests {
 
         let mut request = req("cat", &[]);
         request.cwd = cwd.path().to_string_lossy().into_owned();
-        request.knowledge_base_ids = Some(vec!["kb_test".into()]);
-        let resp = svc.create("u", request).await.unwrap();
+        request.knowledge_base_ids = Some(vec![test_kb_id()]);
+        let resp = svc.create(TEST_USER_ID, request).await.unwrap();
 
         let key = nomifun_knowledge::workpath_key(&cwd.path().to_string_lossy());
         assert_ne!(
@@ -2535,7 +2578,7 @@ mod tests {
             binding.enabled,
             "create-time kb_ids must enable the workpath binding"
         );
-        assert_eq!(binding.kb_ids, vec!["kb_test".to_owned()]);
+        assert_eq!(binding.kb_ids, vec![test_kb_id()]);
         // End-to-end: the README contract materializes from the workpath binding.
         assert!(
             cwd.path()
@@ -2546,7 +2589,7 @@ mod tests {
             "the workpath binding must drive the mount + README"
         );
 
-        svc.kill(resp.id).await.ok();
+        svc.kill(&resp.id).await.ok();
     }
 
     /// Read-modify-write: binding kb_ids at create time must NOT clobber the
@@ -2578,7 +2621,7 @@ mod tests {
                 writeback: true,
                 writeback_mode: "direct".into(),
                 writeback_eagerness: "aggressive".into(),
-                kb_ids: vec!["kb_old".into()],
+                kb_ids: vec![test_kb_id()],
                 channel_write_enabled: false,
             },
         )
@@ -2587,13 +2630,13 @@ mod tests {
 
         let mut request = req("cat", &[]);
         request.cwd = cwd.path().to_string_lossy().into_owned();
-        request.knowledge_base_ids = Some(vec!["kb_test".into()]);
-        let resp = svc.create("u", request).await.unwrap();
+        request.knowledge_base_ids = Some(vec![test_kb_id()]);
+        let resp = svc.create(TEST_USER_ID, request).await.unwrap();
 
         let binding = ks.get_binding("workpath", &key).await.unwrap();
         assert_eq!(
             binding.kb_ids,
-            vec!["kb_test".to_owned()],
+            vec![test_kb_id()],
             "create selection replaces the base list"
         );
         assert!(binding.writeback, "writeback flag must be preserved");
@@ -2606,7 +2649,7 @@ mod tests {
             "writeback eagerness must be preserved"
         );
 
-        svc.kill(resp.id).await.ok();
+        svc.kill(&resp.id).await.ok();
     }
 
     #[tokio::test]
@@ -2620,12 +2663,12 @@ mod tests {
         let cwd = tempfile::TempDir::new().unwrap();
         let mut request = req("cat", &[]);
         request.cwd = cwd.path().to_string_lossy().into_owned();
-        let resp = svc.create("u", request).await.unwrap(); // no kb ids yet
+        let resp = svc.create(TEST_USER_ID, request).await.unwrap(); // no kb ids yet
         let readme = cwd.path().join(".nomi").join("knowledge").join("README.md");
         assert!(!readme.exists(), "no binding yet → no README");
 
         // Bind afterwards (the KnowledgeControl UI path), then relaunch in place
-        // — the documented way for a binding change to take effect.
+        // —the documented way for a binding change to take effect.
         ks.set_binding(
             "terminal",
             &resp.id.to_string(),
@@ -2634,13 +2677,13 @@ mod tests {
                 writeback: false,
                 writeback_mode: "staged".into(),
                 writeback_eagerness: "conservative".into(),
-                kb_ids: vec!["kb_test".into()],
+                kb_ids: vec![test_kb_id()],
                 channel_write_enabled: false,
             },
         )
         .await
         .unwrap();
-        svc.relaunch(resp.id).await.unwrap();
+        svc.relaunch(&resp.id).await.unwrap();
         assert!(
             readme.exists(),
             "relaunch must re-sync mounts and write the README"
@@ -2655,13 +2698,13 @@ mod tests {
         )
         .await
         .unwrap();
-        svc.relaunch(resp.id).await.unwrap();
+        svc.relaunch(&resp.id).await.unwrap();
         assert!(
             !readme.exists(),
             "relaunch after unbinding must sweep the README with the mounts"
         );
 
-        svc.kill(resp.id).await.ok();
+        svc.kill(&resp.id).await.ok();
     }
 
     #[tokio::test]
@@ -2670,9 +2713,9 @@ mod tests {
         let cwd = tempfile::TempDir::new().unwrap();
         let mut request = req("cat", &[]);
         request.cwd = cwd.path().to_string_lossy().into_owned();
-        request.knowledge_base_ids = Some(vec!["kb_zzz".into()]);
+        request.knowledge_base_ids = Some(vec![nomifun_common::KnowledgeBaseId::new()]);
 
-        let resp = svc.create("u", request).await.unwrap();
+        let resp = svc.create(TEST_USER_ID, request).await.unwrap();
         assert_eq!(
             resp.last_status, "running",
             "knowledge is best-effort, never blocks"
@@ -2684,7 +2727,7 @@ mod tests {
                 .join("README.md")
                 .exists()
         );
-        svc.kill(resp.id).await.ok();
+        svc.kill(&resp.id).await.ok();
     }
 
     async fn wait_for<F: Fn() -> bool>(pred: F, ms: u64) -> bool {
@@ -2711,17 +2754,15 @@ mod tests {
     #[tokio::test]
     async fn read_output_tail_strips_ansi_and_tails() {
         let (svc, _bc) = service();
-        let id = svc.create("u", req("cat", &[])).await.unwrap().id;
-        svc.submit_text(id, "marker-xyz").await.unwrap();
+        let id = svc.create(TEST_USER_ID, req("cat", &[])).await.unwrap().id;
+        svc.submit_text(&id, "marker-xyz").await.unwrap();
 
-        // 等回显落入 scrollback。
         let mut ok = false;
         for _ in 0..40 {
-            let out = svc.read_output_tail(id, 65536).await.unwrap();
+            let out = svc.read_output_tail(&id, 65536).await.unwrap();
             if out.text.contains("marker-xyz") {
                 assert!(!out.truncated);
                 assert_eq!(out.status, "running");
-                // strip_ansi 已去除裸控制符：不应含 ESC。
                 assert!(!out.text.contains('\u{1b}'));
                 ok = true;
                 break;
@@ -2730,17 +2771,16 @@ mod tests {
         }
         assert!(ok, "tail should contain the echoed marker");
 
-        // 极小上界 → 截断标记为真。
-        let tiny = svc.read_output_tail(id, 4).await.unwrap();
+        let tiny = svc.read_output_tail(&id, 4).await.unwrap();
         assert!(tiny.truncated);
         assert!(tiny.text.len() <= 4 + 3); // 允许 char-boundary 前移少量
-        svc.delete(id).await.ok();
+        svc.delete(&id).await.ok();
     }
 
     #[tokio::test]
     async fn spawn_echo_streams_output_and_exits() {
         let (svc, bc) = service();
-        let resp = svc.create("u", req("printf", &["hi-there"])).await.unwrap();
+        let resp = svc.create(TEST_USER_ID, req("printf", &["hi-there"])).await.unwrap();
         assert_eq!(resp.last_status, "running");
 
         let got = wait_for(|| collect_output(&bc).contains("hi-there"), 4000).await;
@@ -2769,7 +2809,7 @@ mod tests {
         let mut persisted = false;
         for _ in 0..200 {
             if svc
-                .get(resp.id)
+                .get(&resp.id)
                 .await
                 .map(|s| s.last_status == "exited")
                 .unwrap_or(false)
@@ -2785,27 +2825,27 @@ mod tests {
     #[tokio::test]
     async fn input_is_echoed_back_by_cat() {
         let (svc, bc) = service();
-        let resp = svc.create("u", req("cat", &[])).await.unwrap();
-        svc.input(resp.id, &BASE64.encode("ping\n")).await.unwrap();
+        let resp = svc.create(TEST_USER_ID, req("cat", &[])).await.unwrap();
+        svc.input(&resp.id, &BASE64.encode("ping\n")).await.unwrap();
 
         let got = wait_for(|| collect_output(&bc).contains("ping"), 4000).await;
         assert!(got, "cat should echo input, got: {:?}", collect_output(&bc));
-        svc.kill(resp.id).await.unwrap();
+        svc.kill(&resp.id).await.unwrap();
     }
 
     #[tokio::test]
     async fn driver_subscribe_output_and_write_input() {
         use crate::driver::TerminalDriver;
         let (svc, _bc) = service();
-        let resp = svc.create("u", req("cat", &[])).await.unwrap();
+        let resp = svc.create(TEST_USER_ID, req("cat", &[])).await.unwrap();
 
         // Subscribe via the driver seam, then write raw bytes; the echo must
         // arrive on the broadcast stream (independent of the WS path).
         let mut rx = svc
-            .subscribe_output(resp.id)
+            .subscribe_output(&resp.id)
             .expect("live session has an output stream");
-        assert!(svc.is_alive(resp.id), "session should be alive");
-        TerminalDriver::write_input(&svc, resp.id, b"hello-driver\n")
+        assert!(svc.is_alive(&resp.id), "session should be alive");
+        TerminalDriver::write_input(&svc, &resp.id, b"hello-driver\n")
             .await
             .unwrap();
 
@@ -2832,62 +2872,60 @@ mod tests {
         );
 
         // describe + autowork round-trip through the driver.
-        let desc = svc.describe(resp.id).await.unwrap().unwrap();
+        let desc = svc.describe(&resp.id).await.unwrap().unwrap();
         assert_eq!(desc.last_status, "running");
         assert_eq!(desc.cwd, std::env::temp_dir().to_string_lossy());
-        svc.write_autowork(resp.id, Some(r#"{"enabled":true,"tag":"t"}"#))
+        svc.write_autowork(&resp.id, Some(r#"{"enabled":true,"tag":"t"}"#))
             .await
             .unwrap();
         assert_eq!(
-            svc.read_autowork(resp.id).await.unwrap().as_deref(),
+            svc.read_autowork(&resp.id).await.unwrap().as_deref(),
             Some(r#"{"enabled":true,"tag":"t"}"#)
         );
 
         // idmm round-trip through the driver (set, read, clear).
-        svc.write_idmm(resp.id, Some(r#"{"enabled":true,"tier":"rule"}"#))
+        svc.write_idmm(&resp.id, Some(r#"{"enabled":true,"tier":"rule"}"#))
             .await
             .unwrap();
         assert_eq!(
-            svc.read_idmm(resp.id).await.unwrap().as_deref(),
+            svc.read_idmm(&resp.id).await.unwrap().as_deref(),
             Some(r#"{"enabled":true,"tier":"rule"}"#)
         );
-        svc.write_idmm(resp.id, None).await.unwrap();
-        assert_eq!(svc.read_idmm(resp.id).await.unwrap(), None);
+        svc.write_idmm(&resp.id, None).await.unwrap();
+        assert_eq!(svc.read_idmm(&resp.id).await.unwrap(), None);
 
-        svc.kill(resp.id).await.unwrap();
+        svc.kill(&resp.id).await.unwrap();
     }
 
     #[tokio::test]
     async fn get_returns_scrollback_and_resize_persists() {
         let (svc, _bc) = service();
-        let resp = svc.create("u", req("cat", &[])).await.unwrap();
+        let resp = svc.create(TEST_USER_ID, req("cat", &[])).await.unwrap();
         // cwd == work_dir (the fixture's temp_dir) → the derived flag is set
         // on both the create and GET responses.
         assert!(resp.is_default_workpath);
-        svc.input(resp.id, &BASE64.encode("xyz\n")).await.unwrap();
+        svc.input(&resp.id, &BASE64.encode("xyz\n")).await.unwrap();
         wait_for(|| true, 200).await;
 
-        let got = svc.get(resp.id).await.unwrap();
+        let got = svc.get(&resp.id).await.unwrap();
         assert!(got.scrollback_b64.is_some());
         assert!(got.is_default_workpath);
 
-        svc.resize(resp.id, 120, 40).await.unwrap();
-        let after = svc.get(resp.id).await.unwrap();
+        svc.resize(&resp.id, 120, 40).await.unwrap();
+        let after = svc.get(&resp.id).await.unwrap();
         assert_eq!((after.cols, after.rows), (120, 40));
-        svc.kill(resp.id).await.unwrap();
+        svc.kill(&resp.id).await.unwrap();
     }
 
     #[tokio::test]
     async fn submit_text_single_line_executes_via_cat_echo() {
-        // cat 会回显收到的字节。shell 后端(None) → 单行 raw+CR 一次写。
         let (svc, _bc) = service();
-        let id = svc.create("u", req("cat", &[])).await.unwrap().id;
-        svc.submit_text(id, "hello-world").await.unwrap();
+        let id = svc.create(TEST_USER_ID, req("cat", &[])).await.unwrap().id;
+        svc.submit_text(&id, "hello-world").await.unwrap();
 
-        // 等 cat 把 "hello-world\r" 回显进 live scrollback。
         let mut seen = false;
         for _ in 0..40 {
-            if let Ok(resp) = svc.get(id).await {
+            if let Ok(resp) = svc.get(&id).await {
                 if let Some(b64) = resp.scrollback_b64 {
                     let s = String::from_utf8_lossy(&BASE64.decode(b64).unwrap()).to_string();
                     if s.contains("hello-world") {
@@ -2899,41 +2937,40 @@ mod tests {
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         }
         assert!(seen, "cat should echo the submitted single line");
-        svc.delete(id).await.ok();
+        svc.delete(&id).await.ok();
     }
 
     #[tokio::test]
     async fn submit_text_not_found_when_not_live() {
         let (svc, _bc) = service();
+        let missing = nomifun_common::TerminalId::new();
         assert!(matches!(
-            svc.submit_text(999_999, "x").await.unwrap_err(),
+            svc.submit_text(missing.as_str(), "x").await.unwrap_err(),
             TerminalError::NotFound(_)
         ));
     }
 
     #[tokio::test]
     async fn await_turn_settle_idle_when_shell_goes_quiet() {
-        // cat(shell,无 lifecycle) 回显后即安静 → Idle。
         let (svc, _bc) = service();
-        let id = svc.create("u", req("cat", &[])).await.unwrap().id;
-        svc.submit_text(id, "ping").await.unwrap();
+        let id = svc.create(TEST_USER_ID, req("cat", &[])).await.unwrap().id;
+        svc.submit_text(&id, "ping").await.unwrap();
         let reason = svc
-            .await_turn_settle(id, std::time::Duration::from_secs(5))
+            .await_turn_settle(&id, std::time::Duration::from_secs(5))
             .await;
         assert_eq!(reason, SettleReason::Idle);
-        svc.delete(id).await.ok();
+        svc.delete(&id).await.ok();
     }
 
     #[tokio::test]
     async fn await_turn_settle_timeout_when_output_never_quiets() {
-        // yes 持续刷输出 → 永不 idle；超时短于 idle window → Timeout。
         let (svc, _bc) = service();
-        let id = svc.create("u", req("yes", &[])).await.unwrap().id;
+        let id = svc.create(TEST_USER_ID, req("yes", &[])).await.unwrap().id;
         let reason = svc
-            .await_turn_settle(id, std::time::Duration::from_millis(400))
+            .await_turn_settle(&id, std::time::Duration::from_millis(400))
             .await;
         assert_eq!(reason, SettleReason::Timeout);
-        svc.delete(id).await.ok();
+        svc.delete(&id).await.ok();
     }
 
     #[tokio::test]
@@ -2943,7 +2980,6 @@ mod tests {
         let srv = std::sync::Arc::new(TerminalLifecycleServer::start().await.unwrap());
         svc.with_terminal_lifecycle(srv.clone(), "nomicore".into());
 
-        // 进程用 cat，但声明 backend=claude → 被判为 lifecycle-capable，走 TurnEnd 路径。
         let request = nomifun_api_types::CreateTerminalRequest {
             name: None,
             cwd: std::env::temp_dir().to_string_lossy().into_owned(),
@@ -2957,7 +2993,7 @@ mod tests {
             defer_spawn: false,
             knowledge_base_ids: None,
         };
-        let id = svc.create("u", request).await.unwrap().id;
+        let id = svc.create(TEST_USER_ID, request).await.unwrap().id;
 
         // settle future 与 POST future 用 tokio::join! 同任务并发（svc 非 Clone，
         // 借用即可）。settle 先被 poll → 内部 subscribe_lifecycle 建立订阅；post
@@ -2966,14 +3002,14 @@ mod tests {
         let token = srv.auth_token().to_owned();
         let client = reqwest::Client::builder().no_proxy().build().unwrap();
         let body = serde_json::json!({"terminal_id": id, "kind": "turn_end", "payload": {}});
-        let settle = svc.await_turn_settle(id, std::time::Duration::from_secs(5));
+        let settle = svc.await_turn_settle(&id, std::time::Duration::from_secs(5));
         let post = async {
             tokio::time::sleep(std::time::Duration::from_millis(150)).await;
             client.post(&url).json(&body).bearer_auth(&token).send().await.unwrap();
         };
         let (reason, _) = tokio::join!(settle, post);
         assert_eq!(reason, SettleReason::TurnEnd);
-        svc.delete(id).await.ok();
+        svc.delete(&id).await.ok();
     }
 
     #[tokio::test]
@@ -3001,19 +3037,19 @@ mod tests {
             defer_spawn: false,
             knowledge_base_ids: None,
         };
-        let id = svc.create("u", request).await.unwrap().id;
+        let id = svc.create(TEST_USER_ID, request).await.unwrap().id;
 
         // Kill the PTY and let the exit callback drop it from the live map.
-        svc.kill(id).await.unwrap();
+        svc.kill(&id).await.unwrap();
         tokio::time::sleep(Duration::from_millis(400)).await;
         assert!(
-            !svc.live.contains_key(&id),
+            !svc.live.contains_key(id.as_str()),
             "the killed PTY must be gone from the live map before we await settle"
         );
 
         let started = std::time::Instant::now();
         let reason = svc
-            .await_turn_settle(id, std::time::Duration::from_secs(10))
+            .await_turn_settle(&id, std::time::Duration::from_secs(10))
             .await;
         let elapsed = started.elapsed();
         assert_eq!(reason, SettleReason::Exited);
@@ -3021,23 +3057,23 @@ mod tests {
             elapsed < Duration::from_secs(5),
             "must resolve via the 2s liveness tick, not ride the 10s timeout (elapsed {elapsed:?})"
         );
-        svc.delete(id).await.ok();
+        svc.delete(&id).await.ok();
     }
 
     #[tokio::test]
     async fn reconcile_on_boot_marks_running_exited() {
         let (svc, _bc) = service();
         // `cat` stays alive, so its row stays `running` until reconciliation.
-        let id = svc.create("u", req("cat", &[])).await.unwrap().id;
+        let id = svc.create(TEST_USER_ID, req("cat", &[])).await.unwrap().id;
 
         let n = svc.reconcile_on_boot().await.unwrap();
         assert_eq!(n, 1, "the one running session must be reconciled");
         assert_eq!(
-            svc.get(id).await.unwrap().last_status,
+            svc.get(&id).await.unwrap().last_status,
             "exited",
             "boot reconciliation flips ghost running → exited"
         );
-        svc.kill(id).await.unwrap();
+        svc.kill(&id).await.unwrap();
     }
 
     #[tokio::test]
@@ -3045,7 +3081,7 @@ mod tests {
         let (svc, bc) = service();
         // Emits known output, then exits on its own.
         let id = svc
-            .create("u", req("printf", &["restore-me"]))
+            .create(TEST_USER_ID, req("printf", &["restore-me"]))
             .await
             .unwrap()
             .id;
@@ -3063,11 +3099,11 @@ mod tests {
             )
             .await
         );
-        // `on_exit` persists on a spawned task — give it a beat to land.
+        // `on_exit` persists on a spawned task —give it a beat to land.
         tokio::time::sleep(Duration::from_millis(250)).await;
 
         // No live handle now → `get` must fall back to the persisted snapshot.
-        let resp = svc.get(id).await.unwrap();
+        let resp = svc.get(&id).await.unwrap();
         let b64 = resp
             .scrollback_b64
             .expect("persisted scrollback must be returned when not live");
@@ -3082,16 +3118,16 @@ mod tests {
     #[tokio::test]
     async fn flush_persists_dirty_live_scrollback() {
         let (svc, _bc) = service();
-        let id = svc.create("u", req("cat", &[])).await.unwrap().id;
+        let id = svc.create(TEST_USER_ID, req("cat", &[])).await.unwrap().id;
         // Feed a line; the PTY echoes it (and cat re-emits) → scrollback dirty.
-        svc.input(id, &BASE64.encode("echoline\n")).await.unwrap();
+        svc.input(&id, &BASE64.encode("echoline\n")).await.unwrap();
 
         // Actually wait for the echoed bytes to land in the live scrollback
         // (the reader thread is async); `get` reads the live handle's buffer
         // without clearing the dirty flag, so the subsequent flush still fires.
         let mut landed = false;
         for _ in 0..100 {
-            if let Some(b64) = svc.get(id).await.unwrap().scrollback_b64
+            if let Some(b64) = svc.get(&id).await.unwrap().scrollback_b64
                 && String::from_utf8_lossy(&BASE64.decode(b64).unwrap()).contains("echoline")
             {
                 landed = true;
@@ -3106,14 +3142,14 @@ mod tests {
 
         svc.flush_dirty_scrollback().await;
 
-        let persisted = svc.repo.load_scrollback(id).await.unwrap();
+        let persisted = svc.repo.load_scrollback(&id).await.unwrap();
         let bytes = persisted.expect("a dirty live session must be flushed to the DB");
         assert!(
             String::from_utf8_lossy(&bytes).contains("echoline"),
             "flushed scrollback should contain the live output, got {:?}",
             String::from_utf8_lossy(&bytes)
         );
-        svc.kill(id).await.unwrap();
+        svc.kill(&id).await.unwrap();
     }
 
     #[tokio::test]
@@ -3121,37 +3157,37 @@ mod tests {
         let (svc, _bc) = service();
         let mut r = req("cat", &[]);
         r.defer_spawn = true;
-        let id = svc.create("u", r).await.unwrap().id;
+        let id = svc.create(TEST_USER_ID, r).await.unwrap().id;
 
         // Not spawned yet: no live PTY → no scrollback, and input fails (the
-        // root-cause fix — `claude` never draws at 80×24 before the real size).
-        assert!(svc.get(id).await.unwrap().scrollback_b64.is_none());
+        // root-cause fix —`claude` never draws at 80×24 before the real size).
+        assert!(svc.get(&id).await.unwrap().scrollback_b64.is_none());
         assert!(matches!(
-            svc.input(id, &BASE64.encode("x")).await.unwrap_err(),
+            svc.input(&id, &BASE64.encode("x")).await.unwrap_err(),
             TerminalError::NotFound(_)
         ));
 
         // First resize spawns the PTY at the requested (real) size.
-        svc.resize(id, 120, 40).await.unwrap();
+        svc.resize(&id, 120, 40).await.unwrap();
         // Now live: input works and the persisted size is the resize size.
-        svc.input(id, &BASE64.encode("hi\n")).await.unwrap();
-        let got = svc.get(id).await.unwrap();
+        svc.input(&id, &BASE64.encode("hi\n")).await.unwrap();
+        let got = svc.get(&id).await.unwrap();
         assert_eq!(
             (got.cols, got.rows),
             (120, 40),
             "deferred spawn must adopt the first-resize size"
         );
-        svc.kill(id).await.unwrap();
+        svc.kill(&id).await.unwrap();
     }
 
     #[tokio::test]
     async fn non_deferred_create_spawns_immediately() {
         let (svc, _bc) = service();
-        // `req` defaults `defer_spawn = false` — headless/cron behaviour unchanged.
-        let id = svc.create("u", req("cat", &[])).await.unwrap().id;
+        // `req` defaults `defer_spawn = false` —headless/cron behaviour unchanged.
+        let id = svc.create(TEST_USER_ID, req("cat", &[])).await.unwrap().id;
         // Live without any resize: input succeeds immediately.
-        svc.input(id, &BASE64.encode("hi\n")).await.unwrap();
-        svc.kill(id).await.unwrap();
+        svc.input(&id, &BASE64.encode("hi\n")).await.unwrap();
+        svc.kill(&id).await.unwrap();
     }
 
     #[tokio::test]
@@ -3160,10 +3196,10 @@ mod tests {
         // Start as an "agent" session (backend label set), then fall back to shell.
         let mut r = req("cat", &[]);
         r.backend = Some("claude".into());
-        let id = svc.create("u", r).await.unwrap().id;
+        let id = svc.create(TEST_USER_ID, r).await.unwrap().id;
         bc.events.lock().unwrap().clear();
 
-        let resp = svc.relaunch_as_shell(id).await.unwrap();
+        let resp = svc.relaunch_as_shell(&id).await.unwrap();
         assert_eq!(
             resp.command,
             crate::types::SHELL_SENTINEL,
@@ -3172,7 +3208,7 @@ mod tests {
         assert_eq!(resp.backend, None, "agent backend label cleared");
         assert_eq!(resp.last_status, "running", "fresh shell is running");
         // The row is persisted as a shell, so its mechanical name is now `Shell`.
-        let row = svc.get(id).await.unwrap();
+        let row = svc.get(&id).await.unwrap();
         assert_eq!(row.command, crate::types::SHELL_SENTINEL);
         // A terminal.updated event re-enables the frontend composer.
         let emitted_updated = bc
@@ -3186,26 +3222,26 @@ mod tests {
             "relaunch_as_shell must emit terminal.updated"
         );
 
-        svc.kill(id).await.ok();
+        svc.kill(&id).await.ok();
     }
 
     #[tokio::test]
     async fn shutdown_cleanup_kills_and_deletes_all_sessions() {
         let (svc, _bc) = service();
-        let a = svc.create("u", req("cat", &[])).await.unwrap().id;
-        let b = svc.create("u", req("cat", &[])).await.unwrap().id;
-        assert!(svc.live.contains_key(&a) && svc.live.contains_key(&b));
+        let a = svc.create(TEST_USER_ID, req("cat", &[])).await.unwrap().id;
+        let b = svc.create(TEST_USER_ID, req("cat", &[])).await.unwrap().id;
+        assert!(svc.live.contains_key(a.as_str()) && svc.live.contains_key(b.as_str()));
 
         let n = svc.shutdown_cleanup().await.unwrap();
         assert_eq!(n, 2, "both rows deleted");
-        // Live map drained and rows gone — next launch starts clean.
+        // Live map drained and rows gone —next launch starts clean.
         assert!(svc.live.is_empty());
-        assert!(svc.list("u").await.unwrap().is_empty());
+        assert!(svc.list(TEST_USER_ID).await.unwrap().is_empty());
         // Idempotent on an already-empty service.
         assert_eq!(svc.shutdown_cleanup().await.unwrap(), 0);
     }
 
-    async fn wait_for_name(svc: &TerminalService, id: i64, expected: &str, ms: u64) -> bool {
+    async fn wait_for_name(svc: &TerminalService, id: &str, expected: &str, ms: u64) -> bool {
         for _ in 0..(ms / 20).max(1) {
             if svc
                 .get(id)
@@ -3227,53 +3263,53 @@ mod tests {
     async fn shell_session_autotitles_from_first_input_line() {
         let (svc, _bc) = service();
         // command "cat", no backend → is_agent=false, mechanical name "cat".
-        let id = svc.create("u", req("cat", &[])).await.unwrap().id;
+        let id = svc.create(TEST_USER_ID, req("cat", &[])).await.unwrap().id;
         // First input line (ends with CR) → fallback title from that line.
-        svc.input(id, &BASE64.encode("echo hello world\r"))
+        svc.input(&id, &BASE64.encode("echo hello world\r"))
             .await
             .unwrap();
         assert!(
-            wait_for_name(&svc, id, "echo hello world", 4000).await,
+            wait_for_name(&svc, &id, "echo hello world", 4000).await,
             "shell title should fall back to the first input line, got {:?}",
-            svc.get(id).await.unwrap().name
+            svc.get(&id).await.unwrap().name
         );
-        svc.kill(id).await.ok();
+        svc.kill(&id).await.ok();
     }
 
     #[tokio::test]
     async fn agent_session_also_autotitles_from_first_input_line() {
         let (svc, _bc) = service();
         // An agent session (backend "claude", mechanical name "claude") must ALSO
-        // title from the first input line — independent of the (possibly-absent)
+        // title from the first input line —independent of the (possibly-absent)
         // TurnEnd lifecycle hook / a configured provider. No completer is wired
         // here, so it takes the first-N-chars path.
         let mut r = req("cat", &[]);
         r.backend = Some("claude".into());
-        let id = svc.create("u", r).await.unwrap().id;
-        svc.input(id, &BASE64.encode("你好\r")).await.unwrap();
+        let id = svc.create(TEST_USER_ID, r).await.unwrap().id;
+        svc.input(&id, &BASE64.encode("你好\r")).await.unwrap();
         assert!(
-            wait_for_name(&svc, id, "你好", 4000).await,
+            wait_for_name(&svc, &id, "你好", 4000).await,
             "agent session should title from first input, got {:?}",
-            svc.get(id).await.unwrap().name
+            svc.get(&id).await.unwrap().name
         );
-        svc.kill(id).await.ok();
+        svc.kill(&id).await.ok();
     }
 
     #[tokio::test]
     async fn autotitle_strips_tui_mouse_and_focus_sequences() {
         // A claude-style TUI enables mouse tracking + focus reporting, so xterm
-        // sends focus events (CSI I) and SGR mouse reports (CSI < … M) into the
+        // sends focus events (CSI I) and SGR mouse reports (CSI < —M) into the
         // PTY before the user's typed text. These must be stripped, not titled.
         let (svc, _bc) = service();
-        let id = svc.create("u", req("cat", &[])).await.unwrap().id;
+        let id = svc.create(TEST_USER_ID, req("cat", &[])).await.unwrap().id;
         let noisy = "\u{1b}[I\u{1b}[<35;29;26M\u{1b}[<0;30;25m你好\r";
-        svc.input(id, &BASE64.encode(noisy)).await.unwrap();
+        svc.input(&id, &BASE64.encode(noisy)).await.unwrap();
         assert!(
-            wait_for_name(&svc, id, "你好", 4000).await,
+            wait_for_name(&svc, &id, "你好", 4000).await,
             "TUI control sequences must be stripped from the title, got {:?}",
-            svc.get(id).await.unwrap().name
+            svc.get(&id).await.unwrap().name
         );
-        svc.kill(id).await.ok();
+        svc.kill(&id).await.ok();
     }
 
     #[tokio::test]
@@ -3283,63 +3319,64 @@ mod tests {
         // backend "claude" → mechanical name "claude" (the agent label).
         let mut r = req("cat", &[]);
         r.backend = Some("claude".into());
-        let id = svc.create("u", r).await.unwrap().id;
+        let id = svc.create(TEST_USER_ID, r).await.unwrap().id;
 
-        svc.maybe_autotitle(id, Some("user deployed prod; assistant confirmed".into()))
+        svc.maybe_autotitle(&id, Some("user deployed prod; assistant confirmed".into()))
             .await;
         assert_eq!(
-            svc.get(id).await.unwrap().name,
+            svc.get(&id).await.unwrap().name,
             "title-0",
             "LLM summary becomes the title"
         );
-        svc.kill(id).await.ok();
+        svc.kill(&id).await.ok();
     }
 
     #[tokio::test]
     async fn autotitle_skips_when_name_is_custom() {
         let (svc, _bc) = service();
         svc.with_title_completer(Arc::new(FakeTitler::new("auto-")));
-        let id = svc.create("u", req("cat", &[])).await.unwrap().id;
+        let id = svc.create(TEST_USER_ID, req("cat", &[])).await.unwrap().id;
         // A manual rename makes name != default_name → never overwritten.
-        svc.update_meta(id, Some("我的终端".into()), None)
+        svc.update_meta(&id, Some("我的终端".into()), None)
             .await
             .unwrap();
-        svc.maybe_autotitle(id, Some("content".into())).await;
+        svc.maybe_autotitle(&id, Some("content".into())).await;
         assert_eq!(
-            svc.get(id).await.unwrap().name,
+            svc.get(&id).await.unwrap().name,
             "我的终端",
             "must not clobber a manual rename"
         );
-        svc.kill(id).await.ok();
+        svc.kill(&id).await.ok();
     }
 
     #[tokio::test]
     async fn autotitle_fires_at_most_once() {
         let (svc, _bc) = service();
         svc.with_title_completer(Arc::new(FakeTitler::new("t")));
-        let id = svc.create("u", req("cat", &[])).await.unwrap().id;
-        svc.maybe_autotitle(id, Some("a".into())).await;
-        assert_eq!(svc.get(id).await.unwrap().name, "t0");
+        let id = svc.create(TEST_USER_ID, req("cat", &[])).await.unwrap().id;
+        svc.maybe_autotitle(&id, Some("a".into())).await;
+        assert_eq!(svc.get(&id).await.unwrap().name, "t0");
         // Second call is a no-op (once-guard): the completer is NOT called again,
         // so the name stays "t0" (not "t1").
-        svc.maybe_autotitle(id, Some("b".into())).await;
-        assert_eq!(svc.get(id).await.unwrap().name, "t0");
-        svc.kill(id).await.ok();
+        svc.maybe_autotitle(&id, Some("b".into())).await;
+        assert_eq!(svc.get(&id).await.unwrap().name, "t0");
+        svc.kill(&id).await.ok();
     }
 
     #[tokio::test]
     async fn unknown_id_is_not_found() {
         let (svc, _bc) = service();
+        let missing = "term_0190f5fe-7c00-7a00-8000-000000000099";
         assert!(matches!(
-            svc.get(999_999).await.unwrap_err(),
+            svc.get(missing).await.unwrap_err(),
             TerminalError::NotFound(_)
         ));
         assert!(matches!(
-            svc.input(999_999, &BASE64.encode("x")).await.unwrap_err(),
+            svc.input(missing, &BASE64.encode("x")).await.unwrap_err(),
             TerminalError::NotFound(_)
         ));
         assert!(matches!(
-            svc.delete(999_999).await.unwrap_err(),
+            svc.delete(missing).await.unwrap_err(),
             TerminalError::NotFound(_)
         ));
     }
@@ -3355,9 +3392,9 @@ mod tests {
         let mut create = req("cat", &[]);
         create.cwd = dir.path().to_string_lossy().into_owned();
         create.defer_spawn = true; // no live PTY needed to list files
-        let resp = svc.create("u", create).await.unwrap();
+        let resp = svc.create(TEST_USER_ID, create).await.unwrap();
 
-        let entries = svc.browse_workspace(resp.id, "", None).await.unwrap();
+        let entries = svc.browse_workspace(&resp.id, "", None).await.unwrap();
         assert!(
             entries
                 .iter()
@@ -3369,8 +3406,11 @@ mod tests {
     #[tokio::test]
     async fn browse_workspace_unknown_id_is_not_found() {
         let (svc, _bc) = service();
+        let missing = nomifun_common::TerminalId::new();
         assert!(matches!(
-            svc.browse_workspace(999_999, "", None).await.unwrap_err(),
+            svc.browse_workspace(missing.as_str(), "", None)
+                .await
+                .unwrap_err(),
             nomifun_common::AppError::NotFound(_)
         ));
     }
@@ -3378,16 +3418,16 @@ mod tests {
     #[tokio::test]
     async fn browse_workspace_rejects_parent_traversal() {
         // `../` must be rejected by list_workspace_level's `..` guard, surfacing
-        // as a BadRequest (HTTP 400) — the path stays scoped to the cwd root.
+        // as a BadRequest (HTTP 400) —the path stays scoped to the cwd root.
         let (svc, _bc) = service();
         let dir = tempfile::tempdir().unwrap();
         let mut create = req("cat", &[]);
         create.cwd = dir.path().to_string_lossy().into_owned();
         create.defer_spawn = true;
-        let resp = svc.create("u", create).await.unwrap();
+        let resp = svc.create(TEST_USER_ID, create).await.unwrap();
 
         let err = svc
-            .browse_workspace(resp.id, "../", None)
+            .browse_workspace(&resp.id, "../", None)
             .await
             .unwrap_err();
         assert!(
@@ -3399,19 +3439,19 @@ mod tests {
     #[tokio::test]
     async fn invalid_base64_input_is_rejected() {
         let (svc, _bc) = service();
-        let resp = svc.create("u", req("cat", &[])).await.unwrap();
-        let err = svc.input(resp.id, "!!!not-base64!!!").await.unwrap_err();
+        let resp = svc.create(TEST_USER_ID, req("cat", &[])).await.unwrap();
+        let err = svc.input(&resp.id, "!!!not-base64!!!").await.unwrap_err();
         assert!(matches!(err, TerminalError::InvalidInput(_)));
-        svc.kill(resp.id).await.unwrap();
+        svc.kill(&resp.id).await.unwrap();
     }
 
     #[tokio::test]
     async fn delete_removes_and_emits() {
         let (svc, bc) = service();
-        let resp = svc.create("u", req("cat", &[])).await.unwrap();
-        svc.delete(resp.id).await.unwrap();
+        let resp = svc.create(TEST_USER_ID, req("cat", &[])).await.unwrap();
+        svc.delete(&resp.id).await.unwrap();
         assert!(matches!(
-            svc.get(resp.id).await.unwrap_err(),
+            svc.get(&resp.id).await.unwrap_err(),
             TerminalError::NotFound(_)
         ));
         assert!(
@@ -3421,14 +3461,14 @@ mod tests {
                 .iter()
                 .any(|e| e.name == "terminal.removed")
         );
-        assert!(bc.owners.lock().unwrap().iter().all(|owner| owner == "u"));
+        assert!(bc.owners.lock().unwrap().iter().all(|owner| owner == TEST_USER_ID));
     }
 
     #[tokio::test]
     async fn relaunch_reuses_same_id_and_marks_running() {
         let (svc, bc) = service();
         // short-lived child so it exits, then relaunch in place.
-        let resp = svc.create("u", req("printf", &["x"])).await.unwrap();
+        let resp = svc.create(TEST_USER_ID, req("printf", &["x"])).await.unwrap();
         let id = resp.id.clone();
         // wait until it exits
         let exited = wait_for(
@@ -3444,7 +3484,7 @@ mod tests {
         .await;
         assert!(exited);
 
-        let relaunched = svc.relaunch(id).await.unwrap();
+        let relaunched = svc.relaunch(&id).await.unwrap();
         assert_eq!(relaunched.id, id, "relaunch must reuse the same session id");
         assert_eq!(relaunched.last_status, "running");
         assert!(
@@ -3455,10 +3495,10 @@ mod tests {
                 .any(|e| e.name == "terminal.updated"),
             "relaunch should emit terminal.updated, not create a new session"
         );
-        svc.delete(id).await.ok();
+        svc.delete(&id).await.ok();
     }
 
-    /// Relaunching a RUNNING session must leave a fresh running PTY — the killed
+    /// Relaunching a RUNNING session must leave a fresh running PTY —the killed
     /// predecessor's exit callback (fired after EXIT_DRAIN_GRACE) must NOT tear
     /// down the replacement or mark the session exited. Regression: "重启"
     /// closed the terminal because that stale callback ran `live.remove` +
@@ -3467,37 +3507,38 @@ mod tests {
     async fn relaunch_running_session_survives_stale_exit_callback() {
         let (svc, _bc) = service();
         // A long-lived child (cat blocks reading the PTY) → genuinely running.
-        let resp = svc.create("u", req("cat", &[])).await.unwrap();
+        let resp = svc.create(TEST_USER_ID, req("cat", &[])).await.unwrap();
         let id = resp.id;
         assert!(
-            svc.live.contains_key(&id),
+            svc.live.contains_key(id.as_str()),
             "freshly created session must be live"
         );
 
-        svc.relaunch(id).await.unwrap();
+        svc.relaunch(&id).await.unwrap();
 
         // Wait well past EXIT_DRAIN_GRACE (~120ms) so the OLD child's exit
         // callback has definitely fired before we assert.
         tokio::time::sleep(Duration::from_millis(400)).await;
 
         assert!(
-            svc.live.contains_key(&id),
+            svc.live.contains_key(id.as_str()),
             "the fresh PTY must remain live after the predecessor's stale exit callback"
         );
-        let got = svc.get(id).await.unwrap();
+        let got = svc.get(&id).await.unwrap();
         assert_eq!(
             got.last_status, "running",
             "relaunch must not leave the session exited"
         );
 
-        svc.delete(id).await.ok();
+        svc.delete(&id).await.ok();
     }
 
     #[tokio::test]
     async fn relaunch_unknown_is_not_found() {
         let (svc, _bc) = service();
+        let missing = nomifun_common::TerminalId::new();
         assert!(matches!(
-            svc.relaunch(999_999).await.unwrap_err(),
+            svc.relaunch(missing.as_str()).await.unwrap_err(),
             TerminalError::NotFound(_)
         ));
     }
@@ -3514,11 +3555,12 @@ mod tests {
     /// 1. empty kb_ids → no enhancement (no MCP server).
     /// 2. kb_ids present but no `knowledge_mcp_config` wired → no enhancement.
     /// 3. kb_ids present AND config wired → exactly one `McpServerSpec` with
-    ///    PORT+TOKEN env (no KB_IDS — scope resolved at runtime by bridge's cwd).
+    ///    PORT+TOKEN env (no KB_IDS —scope resolved at runtime by bridge's cwd).
     #[tokio::test]
     async fn build_enhancement_three_way_gate() {
         use nomifun_api_types::KnowledgeMcpConfig as K;
         let (svc, _bc) = service();
+        let terminal_id = nomifun_common::TerminalId::new();
 
         // Case 1: empty kb_ids → always empty regardless of config.
         svc.with_knowledge_mcp_config(
@@ -3527,8 +3569,8 @@ mod tests {
         );
         let (enh, leases) = svc.build_enhancement(
             &TerminalKnowledgeScope::default(),
-            "user-1",
-            1,
+            TEST_USER_ID,
+            &terminal_id,
             "/workspace",
         );
         assert!(
@@ -3539,10 +3581,14 @@ mod tests {
 
         // Case 2: kb_ids present but NO knowledge_mcp_config wired → empty.
         let (svc2, _bc2) = service(); // fresh service, config NOT wired
+        let terminal_id2 = nomifun_common::TerminalId::new().into_string();
         let (enh, leases) = svc2.build_enhancement(
-            &TerminalKnowledgeScope { kb_ids: vec!["kb_1".into()], allow_write: false },
-            "user-1",
-            1,
+            &TerminalKnowledgeScope {
+                kb_ids: vec![KnowledgeBaseId::new()],
+                allow_write: false,
+            },
+            TEST_USER_ID,
+            &terminal_id2,
             "/workspace",
         );
         assert!(
@@ -3553,9 +3599,12 @@ mod tests {
 
         // Case 3: kb_ids present AND config wired → one McpServerSpec.
         let (enh, leases) = svc.build_enhancement(
-            &TerminalKnowledgeScope { kb_ids: vec!["kb_1".into(), "kb_2".into()], allow_write: false },
-            "user-1",
-            1,
+            &TerminalKnowledgeScope {
+                kb_ids: vec![KnowledgeBaseId::new(), KnowledgeBaseId::new()],
+                allow_write: false,
+            },
+            TEST_USER_ID,
+            &terminal_id,
             "/workspace",
         );
         assert_eq!(
@@ -3572,15 +3621,15 @@ mod tests {
             .env
             .get(K::ENV_CAPABILITY)
             .expect("single capability bootstrap");
-        assert!(bootstrap.contains("kb_1") && bootstrap.contains("/workspace"));
+        assert!(bootstrap.contains("\"kb_ids\":[\"kb_") && bootstrap.contains("/workspace"));
     }
 
     #[tokio::test]
     async fn update_meta_renames_and_pins_and_emits() {
         let (svc, bc) = service();
-        let resp = svc.create("u", req("cat", &[])).await.unwrap();
+        let resp = svc.create(TEST_USER_ID, req("cat", &[])).await.unwrap();
         let updated = svc
-            .update_meta(resp.id, Some("Renamed".into()), Some(true))
+            .update_meta(&resp.id, Some("Renamed".into()), Some(true))
             .await
             .unwrap();
         assert_eq!(updated.name, "Renamed");
@@ -3594,11 +3643,11 @@ mod tests {
         );
         // blank name is ignored (keeps prior)
         let again = svc
-            .update_meta(resp.id, Some("   ".into()), None)
+            .update_meta(&resp.id, Some("   ".into()), None)
             .await
             .unwrap();
         assert_eq!(again.name, "Renamed");
-        svc.delete(resp.id).await.ok();
+        svc.delete(&resp.id).await.ok();
     }
 
     #[tokio::test]
@@ -3636,7 +3685,8 @@ mod tests {
         // Without a lifecycle server wired, the trait method must return None.
         let (svc, _bc) = service();
         let driver: &dyn TerminalDriver = &svc;
-        assert!(driver.subscribe_lifecycle(1).is_none());
+        let terminal_id = nomifun_common::TerminalId::new();
+        assert!(driver.subscribe_lifecycle(terminal_id.as_str()).is_none());
     }
 
     #[tokio::test]
@@ -3650,17 +3700,18 @@ mod tests {
                 .expect("start lifecycle server"),
         );
         svc.with_terminal_lifecycle(srv.clone(), "nomicore".into());
+        let terminal_id = nomifun_common::TerminalId::new();
 
         // Via the trait object, subscribe_lifecycle should now return Some.
         let driver: &dyn TerminalDriver = &svc;
         let mut rx = driver
-            .subscribe_lifecycle(42)
+            .subscribe_lifecycle(terminal_id.as_str())
             .expect("must be Some when lifecycle is wired");
 
         // Broadcast an event through the lifecycle server.
         let url = format!("http://127.0.0.1:{}/hook", srv.http_port());
         let body = serde_json::json!({
-            "terminal_id": 42,
+            "terminal_id": terminal_id,
             "kind": "turn_end",
             "payload": {"last_assistant_message": "hello"}
         });
@@ -3679,7 +3730,7 @@ mod tests {
             .await
             .expect("timeout waiting for lifecycle event")
             .expect("recv error");
-        assert_eq!(ev.terminal_id, 42);
+        assert_eq!(ev.terminal_id, terminal_id);
         assert_eq!(ev.kind, LifecycleKind::TurnEnd);
     }
 
@@ -3702,12 +3753,13 @@ mod tests {
         use nomifun_api_types::RequirementMcpConfig as R;
         let (svc, _bc) = service();
         svc.with_requirement_mcp_config(requirement_mcp_config(9876, "/usr/bin/nomicore"));
+        let terminal_id = nomifun_common::TerminalId::new().into_string();
 
         // No kb_ids, terminal_id = 42
         let (enh, leases) = svc.build_enhancement(
             &TerminalKnowledgeScope::default(),
-            "user-1",
-            42,
+            TEST_USER_ID,
+            &terminal_id,
             "/workspace",
         );
         assert!(
@@ -3725,7 +3777,7 @@ mod tests {
             .env
             .get(R::ENV_CAPABILITY)
             .expect("single capability bootstrap");
-        assert!(bootstrap.contains("terminal") && bootstrap.contains("42"));
+        assert!(bootstrap.contains("terminal") && bootstrap.contains(&terminal_id));
     }
 
     /// When both knowledge AND requirement MCP are wired, `build_enhancement`
@@ -3739,11 +3791,15 @@ mod tests {
             std::env::temp_dir(),
         );
         svc.with_requirement_mcp_config(requirement_mcp_config(222, "nomicore"));
+        let terminal_id = nomifun_common::TerminalId::new().into_string();
 
         let (enh, leases) = svc.build_enhancement(
-            &TerminalKnowledgeScope { kb_ids: vec!["kb_x".into()], allow_write: true },
-            "user-1",
-            7,
+            &TerminalKnowledgeScope {
+                kb_ids: vec![KnowledgeBaseId::new()],
+                allow_write: true,
+            },
+            TEST_USER_ID,
+            &terminal_id,
             "/workspace",
         );
         assert_eq!(

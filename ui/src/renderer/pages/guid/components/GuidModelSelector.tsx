@@ -5,6 +5,7 @@
  */
 
 import type { IProvider, TProviderWithModel } from '@/common/config/storage';
+import { compositeKey } from '@/common/utils/compositeKey';
 import { iconColors } from '@/renderer/styles/colors';
 import { getModelDisplayLabel } from '@/renderer/utils/model/agentLogo';
 import type { AcpModelInfo } from '../types';
@@ -130,9 +131,9 @@ const GuidModelSelector: React.FC<GuidModelSelectorProps> = ({
                           const dot = healthDotColor(provider.id, modelName);
                           return (
                             <Menu.Item
-                              key={provider.id + modelName}
+                              key={compositeKey(provider.id, modelName)}
                               className={
-                                (current_model?.id ?? '') + (current_model?.use_model ?? '') === provider.id + modelName
+                                current_model?.id === provider.id && current_model?.use_model === modelName
                                   ? '!bg-2'
                                   : ''
                               }

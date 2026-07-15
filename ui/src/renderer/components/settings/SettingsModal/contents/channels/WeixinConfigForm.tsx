@@ -185,7 +185,7 @@ const WeixinConfigForm: React.FC<WeixinConfigFormProps> = ({
     }
   };
 
-  const handleRevokeUser = async (user_id: string) => {
+  const handleRevokeUser = async (user_id: import('@/common/types/ids').ChannelUserId) => {
     try {
       await channel.revokeUser.invoke({ user_id });
       Message.success(t('settings.channels.userRevoked', 'User access revoked'));
@@ -205,7 +205,7 @@ const WeixinConfigForm: React.FC<WeixinConfigFormProps> = ({
     const result = await channel.enablePlugin.invoke(
       channelTarget
         ? { plugin_id: channelTarget.channelId, plugin_type: 'weixin', ...(channelTarget.publicAgentId ? { public_agent_id: channelTarget.publicAgentId } : { companion_id: channelTarget.companionId }), config }
-        : { plugin_id: 'weixin', config }
+        : { plugin_type: 'weixin', config }
     );
     if (!result.success) {
       throw new Error(result.error || result.message || t('nomi.settings.remoteEnableFailed', { defaultValue: 'Failed to enable channel' }));
@@ -286,7 +286,11 @@ const WeixinConfigForm: React.FC<WeixinConfigFormProps> = ({
 
   const handleDisconnect = async () => {
     try {
-      await channel.disablePlugin.invoke({ plugin_id: channelTarget?.channelId ?? 'weixin' });
+      const channelId = channelTarget?.channelId ?? pluginStatus?.id;
+      if (!channelId) {
+        throw new Error(t('nomi.settings.remoteChannelMissing', 'Channel record is missing'));
+      }
+      await channel.disablePlugin.invoke({ plugin_id: channelId });
       Message.success(t('settings.weixin.pluginDisabled', 'WeChat channel disabled'));
       onStatusChange(null);
       setLoginState('idle');

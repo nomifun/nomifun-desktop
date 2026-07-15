@@ -22,12 +22,9 @@ use axum::http::HeaderMap;
 use axum::middleware::Next;
 use axum::response::Response;
 
-use nomifun_common::AppError;
+use nomifun_common::{AppError, UserId};
 
 use crate::middleware::CurrentUser;
-
-/// The privileged identity injected for trusted (local) requests.
-pub const SYSTEM_USER_ID: &str = "system_default_user";
 
 /// HTTP header the desktop webview presents to prove it is the trusted local
 /// client. Value = the per-boot local-trust secret. Named with a `token`-ish
@@ -38,19 +35,20 @@ pub const LOCAL_TRUST_HEADER: &str = "x-nomi-local-trust";
 /// that replaces the former scattered `local: bool`.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum AuthPolicy {
-    /// Authentication fully disabled; every request is `system_default_user`.
+    /// Authentication fully disabled; every request is the database-resolved
+    /// installation owner.
     /// Used by `--insecure-no-auth` (dev / `dev:webui`).
     NoAuth,
     /// JWT required for every client. Standalone `nomifun-web` default.
     Required,
     /// JWT required for everyone EXCEPT requests bearing the per-boot
     /// local-trust secret (the desktop's own webview), which are
-    /// `system_default_user`. Used by the desktop shell.
+    /// the database-resolved installation owner. Used by the desktop shell.
     TrustLocalToken,
 }
 
 impl AuthPolicy {
-    /// No authentication at all (every request is the system user).
+    /// No authentication at all (every request is the installation owner).
     pub fn is_no_auth(self) -> bool {
         matches!(self, AuthPolicy::NoAuth)
     }
@@ -129,8 +127,12 @@ pub fn is_locally_trusted(state: &TrustState, headers: &HeaderMap) -> bool {
 /// untouched so per-route auth can enforce JWT where required.
 pub async fn trust_resolve_middleware(State(state): State<TrustState>, mut request: Request, next: Next) -> Response {
     if is_locally_trusted(&state, request.headers()) {
+        let Ok(user_id) = UserId::parse(state.authoritative_user_id.as_ref()) else {
+            tracing::error!("local trust owner has a noncanonical user id; request is not elevated");
+            return next.run(request).await;
+        };
         request.extensions_mut().insert(CurrentUser {
-            id: state.authoritative_user_id.to_string(),
+            id: user_id,
             username: state.authoritative_user_id.to_string(),
         });
         request.extensions_mut().insert(LocalTrusted);
@@ -155,6 +157,8 @@ pub async fn require_local_trust_middleware(request: Request, next: Next) -> Res
 mod tests {
     use super::*;
 
+    const TEST_OWNER_ID: &str = "user_0190f5fe-7c00-7a00-8000-000000000001";
+
     fn hdrs(secret: Option<&str>) -> HeaderMap {
         let mut h = HeaderMap::new();
         if let Some(s) = secret {
@@ -168,7 +172,7 @@ mod tests {
         let st = TrustState {
             policy: AuthPolicy::NoAuth,
             local_trust_secret: None,
-            authoritative_user_id: Arc::from(SYSTEM_USER_ID),
+            authoritative_user_id: Arc::from(TEST_OWNER_ID),
         };
         assert!(is_locally_trusted(&st, &hdrs(None)));
     }
@@ -178,7 +182,7 @@ mod tests {
         let st = TrustState {
             policy: AuthPolicy::Required,
             local_trust_secret: None,
-            authoritative_user_id: Arc::from(SYSTEM_USER_ID),
+            authoritative_user_id: Arc::from(TEST_OWNER_ID),
         };
         assert!(!is_locally_trusted(&st, &hdrs(Some("anything"))));
     }
@@ -188,7 +192,7 @@ mod tests {
         let st = TrustState {
             policy: AuthPolicy::TrustLocalToken,
             local_trust_secret: Some(Arc::from("s3cr3t-abc")),
-            authoritative_user_id: Arc::from(SYSTEM_USER_ID),
+            authoritative_user_id: Arc::from(TEST_OWNER_ID),
         };
         assert!(is_locally_trusted(&st, &hdrs(Some("s3cr3t-abc"))));
         assert!(!is_locally_trusted(&st, &hdrs(Some("wrong"))));

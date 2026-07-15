@@ -23,7 +23,7 @@ pub struct CronJobRow {
     pub preset_snapshot: Option<String>,
     /// Target conversation; NULL for a new_conversation job before first fire
     /// (FK to conversations, ON DELETE SET NULL).
-    pub conversation_id: Option<i64>,
+    pub conversation_id: Option<String>,
     pub conversation_title: Option<String>,
     pub agent_type: String,
     pub created_by: String,
@@ -61,7 +61,7 @@ mod tests {
             preset_id: None,
             preset_revision: None,
             preset_snapshot: None,
-            conversation_id: Some(101),
+            conversation_id: Some(nomifun_common::ConversationId::new().into_string()),
             conversation_title: Some("Reports".into()),
             agent_type: "openai".into(),
             created_by: "user".into(),
@@ -103,7 +103,7 @@ mod tests {
             preset_id: None,
             preset_revision: None,
             preset_snapshot: None,
-            conversation_id: Some(1),
+            conversation_id: Some(nomifun_common::ConversationId::new().into_string()),
             conversation_title: None,
             agent_type: "acp".into(),
             created_by: "agent".into(),

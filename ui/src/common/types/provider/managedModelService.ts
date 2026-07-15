@@ -9,9 +9,11 @@
  *
  * Managed services expose an OpenAI-compatible loopback endpoint to the rest
  * of the platform while keeping upstream-specific details behind a stable
- * provider id. The free service is available now; the local service reserves
+ * provider entity. The free service is available now; the local service reserves
  * the same contract for a future one-click local-model runtime.
- */
+*/
+
+import type { ProviderId } from '@/common/types/ids';
 
 export type ManagedModelServiceKind = 'free' | 'local';
 
@@ -58,7 +60,7 @@ export interface ManagedModelHealthBatchResult {
 export interface ManagedModelServiceStatus {
   kind: ManagedModelServiceKind;
   protocolVersion: string;
-  providerId: string;
+  providerId: ProviderId | null;
   enabled: boolean;
   ready: boolean;
   upstream: string;
@@ -89,14 +91,14 @@ export interface CheckManagedModelHealthRequest {
   id: string;
 }
 
-export const NOMIFUN_FREE_MODEL_PROVIDER_ID = 'nomifun-free-model';
-export const NOMIFUN_LOCAL_MODEL_PROVIDER_ID = 'nomifun-local-model';
+export const NOMIFUN_FREE_MODEL_PLATFORM = 'nomifun-free-model';
+export const NOMIFUN_LOCAL_MODEL_PLATFORM = 'nomifun-local-model';
 
-const MANAGED_MODEL_PROVIDER_IDS = new Set([
-  NOMIFUN_FREE_MODEL_PROVIDER_ID,
-  NOMIFUN_LOCAL_MODEL_PROVIDER_ID,
+const MANAGED_MODEL_PLATFORMS = new Set([
+  NOMIFUN_FREE_MODEL_PLATFORM,
+  NOMIFUN_LOCAL_MODEL_PLATFORM,
 ]);
 
 /** Managed providers have dedicated UIs and must not be edited by generic CRUD. */
 export const isManagedModelProvider = (provider: { id?: string; platform?: string }): boolean =>
-  MANAGED_MODEL_PROVIDER_IDS.has(provider.id ?? '') || MANAGED_MODEL_PROVIDER_IDS.has(provider.platform ?? '');
+  MANAGED_MODEL_PLATFORMS.has(provider.platform ?? '');

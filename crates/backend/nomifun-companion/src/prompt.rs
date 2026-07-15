@@ -250,7 +250,7 @@ mod tests {
     #[test]
     fn learn_prompt_lists_pending_suggestions_and_system_has_loop_guards() {
         let suggestion = CompanionSuggestion {
-            id: "sug_1".into(),
+            id: nomifun_common::CompanionSuggestionId::new().into_string(),
             kind: "create_cron".into(),
             title: "建议加个每日备份任务".into(),
             body: "…".into(),

@@ -14,6 +14,7 @@ use async_trait::async_trait;
 use nomifun_ai_agent::{one_shot_completion, resolve_provider_config, user_message};
 use nomifun_api_types::{BypassModelRef, DecisionStrategy};
 use nomifun_db::{IClientPreferenceRepository, IProviderRepository};
+use nomifun_common::ProviderId;
 
 use crate::prompt::{SIDECAR_SYSTEM, SidecarDecision, build_open_question_prompt, build_user_prompt, parse_decision};
 use crate::signal::StallClass;
@@ -43,6 +44,9 @@ pub struct LiveCompleter {
 #[async_trait]
 impl Completer for LiveCompleter {
     async fn complete(&self, provider_id: &str, model: &str, system: &str, user: &str) -> Result<String, ()> {
+        ProviderId::parse(provider_id).map_err(|error| {
+            tracing::warn!(provider_id, error = %error, "IDMM sidecar rejected a non-canonical provider id");
+        })?;
         let cfg = resolve_provider_config(
             &self.provider_repo,
             &self.encryption_key,
@@ -133,9 +137,9 @@ impl SidecarClient {
     /// global defaults. `model` falls back to the global default, then to empty
     /// (the provider's default).
     pub async fn resolve_backup(&self, bypass: &BypassModelRef) -> Option<(String, String)> {
-        let provider_id = match &bypass.provider_id {
-            Some(p) if !p.is_empty() => p.clone(),
-            _ => self.pref(PREF_BACKUP_PROVIDER).await?,
+        let provider_id = match bypass.provider_id.as_deref() {
+            Some(provider_id) => ProviderId::parse(provider_id).ok()?.into_string(),
+            None => ProviderId::parse(self.pref(PREF_BACKUP_PROVIDER).await?).ok()?.into_string(),
         };
         let model = match &bypass.model {
             Some(m) if !m.is_empty() => m.clone(),
@@ -172,7 +176,7 @@ impl SidecarClient {
     ) -> SidecarOutcome {
         let resolved = match self.resolve_backup(bypass).await {
             Some(pm) => Some(pm),
-            None => fallback.filter(|(p, _)| !p.trim().is_empty()),
+            None => fallback.filter(|(provider_id, _)| ProviderId::parse(provider_id).is_ok()),
         };
         let Some((provider_id, model)) = resolved else {
             return SidecarOutcome {
@@ -239,6 +243,10 @@ mod tests {
     use nomifun_db::DbError;
     use nomifun_db::models::ClientPreference;
     use std::sync::Mutex;
+
+    const PROVIDER_ID: &str = "prov_0190f5fe-7c00-7a00-8000-000000000001";
+    const WATCH_PROVIDER_ID: &str = "prov_0190f5fe-7c00-7a00-8000-000000000002";
+    const GLOBAL_PROVIDER_ID: &str = "prov_0190f5fe-7c00-7a00-8000-000000000003";
 
     // ── Mock client-preferences repo ──
     #[derive(Default)]
@@ -325,7 +333,7 @@ mod tests {
 
     fn bypass() -> BypassModelRef {
         BypassModelRef {
-            provider_id: Some("prov1".into()),
+            provider_id: Some(PROVIDER_ID.into()),
             model: Some("m1".into()),
         }
     }
@@ -337,7 +345,7 @@ mod tests {
     #[tokio::test]
     async fn resolve_backup_prefers_watch_then_global() {
         let prefs = Arc::new(MockPrefs::with(&[
-            (PREF_BACKUP_PROVIDER, "global_prov"),
+            (PREF_BACKUP_PROVIDER, GLOBAL_PROVIDER_ID),
             (PREF_BACKUP_MODEL, "global_model"),
         ]));
         let comp = Arc::new(ScriptedCompleter::new(vec![]));
@@ -345,19 +353,19 @@ mod tests {
 
         // Per-watch override wins.
         let watch = BypassModelRef {
-            provider_id: Some("watch_prov".into()),
+            provider_id: Some(WATCH_PROVIDER_ID.into()),
             model: Some("watch_model".into()),
         };
         assert_eq!(
             client.resolve_backup(&watch).await,
-            Some(("watch_prov".into(), "watch_model".into()))
+            Some((WATCH_PROVIDER_ID.into(), "watch_model".into()))
         );
 
         // Empty → global default.
         let empty = BypassModelRef::default();
         assert_eq!(
             client.resolve_backup(&empty).await,
-            Some(("global_prov".into(), "global_model".into()))
+            Some((GLOBAL_PROVIDER_ID.into(), "global_model".into()))
         );
     }
 
@@ -373,7 +381,7 @@ mod tests {
     #[tokio::test]
     async fn sidecar_uses_global_default_steering_when_watch_policy_empty() {
         let prefs = Arc::new(MockPrefs::with(&[
-            (PREF_BACKUP_PROVIDER, "global_prov"),
+            (PREF_BACKUP_PROVIDER, GLOBAL_PROVIDER_ID),
             (PREF_DEFAULT_STEERING, "prefer option 2 when safe"),
         ]));
         let comp = Arc::new(CapturingCompleter { last_user: Mutex::new(None) });

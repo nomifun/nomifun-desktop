@@ -5,6 +5,7 @@
  */
 
 import type { ModelTask, ModelTrait } from '@/common/config/storage';
+import type { ProviderId } from '@/common/types/ids';
 
 /** Immutable metadata from NomiFun's curated, built-in local-model catalog. */
 export interface LocalModelCatalogEntry {
@@ -82,7 +83,7 @@ export interface LocalRuntimeStatus {
 export interface LocalModelServiceStatus {
   kind: 'local';
   protocolVersion: string;
-  providerId: 'nomifun-local-model';
+  providerId: ProviderId | null;
   enabled: boolean;
   ready: boolean;
   activeModelId: string | null;

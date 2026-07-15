@@ -13,7 +13,10 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
-use nomifun_common::{AppError, decrypt_string, generate_prefixed_id, now_ms};
+use nomifun_common::{
+    AppError, CreationTaskId, ProviderId, WorkshopAssetId, WorkshopCanvasId, WorkshopNodeId,
+    decrypt_string, now_ms,
+};
 use nomifun_db::{
     CreateCreationTaskParams, ICreationTaskRepository, IProviderRepository, ListCreationTasksParams,
     UpdateCreationTaskParams,
@@ -253,27 +256,53 @@ impl CreationService {
                 req.capability
             ))
         })?;
-        if req.provider_id.trim().is_empty() {
-            return Err(AppError::BadRequest("provider_id must not be empty".into()));
+        let provider_id = ProviderId::parse(req.provider_id)
+            .map_err(|error| AppError::BadRequest(format!("invalid provider_id: {error}")))?
+            .into_string();
+        if let Some(repo) = &self.provider_repo
+            && repo.find_by_id(&provider_id).await?.is_none()
+        {
+            return Err(AppError::NotFound(format!(
+                "provider {provider_id} not found"
+            )));
         }
+        let canvas_id = req
+            .canvas_id
+            .map(WorkshopCanvasId::parse)
+            .transpose()
+            .map_err(|error| AppError::BadRequest(format!("invalid canvas_id: {error}")))?
+            .map(WorkshopCanvasId::into_string);
+        let node_id = req
+            .node_id
+            .map(WorkshopNodeId::parse)
+            .transpose()
+            .map_err(|error| AppError::BadRequest(format!("invalid node_id: {error}")))?
+            .map(WorkshopNodeId::into_string);
         if req.model.trim().is_empty() {
             return Err(AppError::BadRequest("model must not be empty".into()));
         }
-        if let Some(bad) = req.inputs.iter().find(|i| i.asset_id.trim().is_empty()) {
-            return Err(AppError::BadRequest(format!("input has an empty asset_id (role '{}')", bad.role)));
-        }
+        let inputs = req
+            .inputs
+            .into_iter()
+            .map(|input| {
+                let asset_id = WorkshopAssetId::parse(input.asset_id)
+                    .map_err(|error| AppError::BadRequest(format!("invalid input asset_id: {error}")))?
+                    .into_string();
+                Ok(CreationInput { asset_id, role: input.role })
+            })
+            .collect::<Result<Vec<_>, AppError>>()?;
 
         let params_json = serde_json::to_string(&req.params)
             .map_err(|e| AppError::BadRequest(format!("invalid params json: {e}")))?;
-        let id = generate_prefixed_id("wst");
+        let id = CreationTaskId::new().into_string();
         let now = now_ms();
         let row = self
             .repo
             .create_task(CreateCreationTaskParams {
                 id: &id,
-                canvas_id: req.canvas_id.as_deref(),
-                node_id: req.node_id.as_deref(),
-                provider_id: &req.provider_id,
+                canvas_id: canvas_id.as_deref(),
+                node_id: node_id.as_deref(),
+                provider_id: &provider_id,
                 model: &req.model,
                 capability: capability.as_str(),
                 params: &params_json,
@@ -284,27 +313,29 @@ impl CreationService {
 
         self.spawn(WorkerJob {
             id,
-            canvas_id: req.canvas_id,
-            node_id: req.node_id,
-            provider_id: req.provider_id,
+            canvas_id,
+            node_id,
+            provider_id,
             model: req.model,
             capability,
             params: req.params,
-            inputs: req.inputs,
+            inputs,
             submitted_at: now,
             remote_task_id: None,
         });
 
-        Ok(row.into())
+        row.try_into()
     }
 
     pub async fn get_task(&self, id: &str) -> Result<CreationTask, AppError> {
+        let id = CreationTaskId::parse(id)
+            .map_err(|error| AppError::BadRequest(format!("invalid creation task id: {error}")))?;
         let row = self
             .repo
-            .get_task(id)
+            .get_task(id.as_str())
             .await?
             .ok_or_else(|| AppError::NotFound(format!("creation task {id} not found")))?;
-        Ok(row.into())
+        row.try_into()
     }
 
     pub async fn list_tasks(
@@ -313,34 +344,40 @@ impl CreationService {
         status: Option<&str>,
         limit: i64,
     ) -> Result<Vec<CreationTask>, AppError> {
+        let canvas_id = canvas_id
+            .map(WorkshopCanvasId::parse)
+            .transpose()
+            .map_err(|error| AppError::BadRequest(format!("invalid canvas_id: {error}")))?;
         let rows = self
             .repo
             .list_tasks(ListCreationTasksParams {
-                canvas_id: canvas_id.filter(|s| !s.trim().is_empty()),
+                canvas_id: canvas_id.as_ref().map(WorkshopCanvasId::as_str),
                 status: status.filter(|s| !s.trim().is_empty()),
                 limit,
             })
             .await?;
-        Ok(rows.into_iter().map(CreationTask::from).collect())
+        rows.into_iter().map(CreationTask::try_from).collect()
     }
 
     /// Cancel a task. Terminal tasks are returned unchanged (idempotent); a live
     /// task moves to `canceled` and its worker is signalled to abort in-flight.
     pub async fn cancel_task(&self, id: &str) -> Result<CreationTask, AppError> {
+        let id = CreationTaskId::parse(id)
+            .map_err(|error| AppError::BadRequest(format!("invalid creation task id: {error}")))?;
         let row = self
             .repo
-            .get_task(id)
+            .get_task(id.as_str())
             .await?
             .ok_or_else(|| AppError::NotFound(format!("creation task {id} not found")))?;
         if TaskStatus::parse_str(&row.status).is_some_and(TaskStatus::is_terminal) {
-            return Ok(row.into());
+            return row.try_into();
         }
         // Write the terminal status FIRST, then cancel the token so the worker's
         // finalize sees `Canceled` and won't overwrite it.
         let updated = self
             .repo
             .update_task(
-                id,
+                id.as_str(),
                 UpdateCreationTaskParams {
                     status: Some(TaskStatus::Canceled.as_str()),
                     finished_at: Some(Some(now_ms())),
@@ -348,10 +385,10 @@ impl CreationService {
                 },
             )
             .await?;
-        if let Some(token) = self.inflight.lock().unwrap().get(id) {
+        if let Some(token) = self.inflight.lock().unwrap().get(id.as_str()) {
             token.cancel();
         }
-        Ok(updated.into())
+        updated.try_into()
     }
 
     /// Boot reconciliation ("running ⟺ active executor" invariant). Async tasks that
@@ -678,7 +715,9 @@ impl CreationService {
                     origin: origin.clone(),
                 })
                 .await?;
-            ids.push(id);
+            let id = WorkshopAssetId::parse(id)
+                .map_err(|error| CreationError::config(format!("asset sink returned invalid asset id: {error}")))?;
+            ids.push(id.into_string());
         }
         if ids.is_empty() {
             return Err(CreationError::provider_error("adapter produced no artifacts"));
@@ -946,8 +985,8 @@ mod tests {
     #[async_trait]
     impl AssetSink for RecordingSink {
         async fn persist(&self, _asset: PersistAsset) -> Result<String, CreationError> {
-            let n = self.count.fetch_add(1, Ordering::SeqCst);
-            Ok(format!("wsa_test_{n}"))
+            self.count.fetch_add(1, Ordering::SeqCst);
+            Ok(WorkshopAssetId::new().into_string())
         }
     }
 
@@ -1027,8 +1066,8 @@ mod tests {
 
     fn new_task(provider_id: &str, capability: &str) -> NewCreationTask {
         NewCreationTask {
-            canvas_id: Some("wsc_1".into()),
-            node_id: Some("node_1".into()),
+            canvas_id: None,
+            node_id: None,
             provider_id: provider_id.into(),
             model: "test-model".into(),
             capability: capability.into(),
@@ -1046,7 +1085,8 @@ mod tests {
 
         let done = wait_terminal(&h.svc, &created.id).await;
         assert_eq!(done.status, "succeeded");
-        assert_eq!(done.result_asset_ids, vec!["wsa_test_0".to_string()]);
+        assert_eq!(done.result_asset_ids.len(), 1);
+        WorkshopAssetId::parse(&done.result_asset_ids[0]).unwrap();
         assert!(done.finished_at.is_some());
         assert_eq!(h.sink.count.load(Ordering::SeqCst), 1);
     }
@@ -1120,25 +1160,38 @@ mod tests {
         // cancel of a terminal task returns it unchanged
         let after = h.svc.cancel_task(&created.id).await.unwrap();
         assert_eq!(after.status, "succeeded");
-        assert!(matches!(h.svc.cancel_task("wst_missing").await.unwrap_err(), AppError::NotFound(_)));
+        let missing = CreationTaskId::new().into_string();
+        assert!(matches!(h.svc.cancel_task(&missing).await.unwrap_err(), AppError::NotFound(_)));
     }
 
     #[tokio::test]
-    async fn bad_capability_and_empty_provider_rejected() {
+    async fn malformed_entity_ids_are_rejected() {
         let h = harness(MockAdapter::sync("openai_images"), "openai").await;
         let mut bad = new_task(&h.provider_id, "nope");
         assert!(matches!(h.svc.create_task(bad).await.unwrap_err(), AppError::BadRequest(_)));
         bad = new_task("  ", "t2i");
         assert!(matches!(h.svc.create_task(bad).await.unwrap_err(), AppError::BadRequest(_)));
+        bad = new_task(&h.provider_id, "t2i");
+        bad.canvas_id = Some("wsc_1".into());
+        assert!(matches!(h.svc.create_task(bad).await.unwrap_err(), AppError::BadRequest(_)));
+        bad = new_task(&h.provider_id, "t2i");
+        bad.node_id = Some("node_1".into());
+        assert!(matches!(h.svc.create_task(bad).await.unwrap_err(), AppError::BadRequest(_)));
+        bad = new_task(&h.provider_id, "t2i");
+        bad.inputs = vec![CreationInput { asset_id: String::new(), role: "reference".into() }];
+        assert!(matches!(h.svc.create_task(bad).await.unwrap_err(), AppError::BadRequest(_)));
+        assert!(matches!(h.svc.get_task("wst_missing").await.unwrap_err(), AppError::BadRequest(_)));
+        assert!(matches!(h.svc.list_tasks(Some(""), None, 10).await.unwrap_err(), AppError::BadRequest(_)));
     }
 
     #[tokio::test]
-    async fn missing_provider_fails_task() {
+    async fn missing_provider_is_rejected_before_task_persistence() {
         let h = harness(MockAdapter::sync("openai_images"), "openai").await;
-        let created = h.svc.create_task(new_task("prov_missing", "t2i")).await.unwrap();
-        let done = wait_terminal(&h.svc, &created.id).await;
-        assert_eq!(done.status, "failed");
-        assert_eq!(done.error.as_ref().unwrap()["kind"], "provider_not_found");
+        let missing_provider = ProviderId::new().into_string();
+        assert!(matches!(
+            h.svc.create_task(new_task(&missing_provider, "t2i")).await.unwrap_err(),
+            AppError::NotFound(_)
+        ));
     }
 
     #[tokio::test]
@@ -1152,10 +1205,13 @@ mod tests {
         );
         let h = harness(adapter, "openai").await;
         let repo = &h.svc.repo;
+        let queued_id = CreationTaskId::new().into_string();
+        let running_id = CreationTaskId::new().into_string();
+        let resume_id = CreationTaskId::new().into_string();
 
         // (a) a queued leftover → should become failed(interrupted)
         repo.create_task(CreateCreationTaskParams {
-            id: "wst_queued",
+            id: &queued_id,
             canvas_id: None,
             node_id: None,
             provider_id: &h.provider_id,
@@ -1170,7 +1226,7 @@ mod tests {
 
         // (b) a running task WITHOUT remote → failed(interrupted)
         repo.create_task(CreateCreationTaskParams {
-            id: "wst_running_noremote",
+            id: &running_id,
             canvas_id: None,
             node_id: None,
             provider_id: &h.provider_id,
@@ -1182,13 +1238,13 @@ mod tests {
         })
         .await
         .unwrap();
-        repo.update_task("wst_running_noremote", UpdateCreationTaskParams { status: Some("running"), ..Default::default() })
+        repo.update_task(&running_id, UpdateCreationTaskParams { status: Some("running"), ..Default::default() })
             .await
             .unwrap();
 
         // (c) a running task WITH remote → resumed → succeeded
         repo.create_task(CreateCreationTaskParams {
-            id: "wst_resume",
+            id: &resume_id,
             canvas_id: None,
             node_id: None,
             provider_id: &h.provider_id,
@@ -1201,7 +1257,7 @@ mod tests {
         .await
         .unwrap();
         repo.update_task(
-            "wst_resume",
+            &resume_id,
             UpdateCreationTaskParams {
                 status: Some("running"),
                 remote_task_id: Some(Some("remote-xyz")),
@@ -1214,15 +1270,15 @@ mod tests {
         let settled = h.svc.reconcile_on_boot().await;
         assert_eq!(settled, 2, "queued + running-without-remote settle as failed");
 
-        assert_eq!(h.svc.get_task("wst_queued").await.unwrap().status, "failed");
+        assert_eq!(h.svc.get_task(&queued_id).await.unwrap().status, "failed");
         assert_eq!(
-            h.svc.get_task("wst_queued").await.unwrap().error.unwrap()["kind"],
+            h.svc.get_task(&queued_id).await.unwrap().error.unwrap()["kind"],
             "interrupted"
         );
-        assert_eq!(h.svc.get_task("wst_running_noremote").await.unwrap().status, "failed");
+        assert_eq!(h.svc.get_task(&running_id).await.unwrap().status, "failed");
 
         // resumed one completes via its poll loop
-        let resumed = wait_terminal(&h.svc, "wst_resume").await;
+        let resumed = wait_terminal(&h.svc, &resume_id).await;
         assert_eq!(resumed.status, "succeeded");
     }
 
@@ -1236,13 +1292,14 @@ mod tests {
         );
         let h = harness(adapter, "openai").await; // task_timeout = 30s
         let repo = &h.svc.repo;
+        let old_resume_id = CreationTaskId::new().into_string();
 
         // submitted far in the past: an absolute (submitted_at + timeout)
         // deadline would already be elapsed, so the old code would fail this on
         // the first loop iteration WITHOUT ever polling the healthy remote job.
         let old = now_ms() - 3_600_000; // 1h ago
         repo.create_task(CreateCreationTaskParams {
-            id: "wst_old_resume",
+            id: &old_resume_id,
             canvas_id: None,
             node_id: None,
             provider_id: &h.provider_id,
@@ -1255,7 +1312,7 @@ mod tests {
         .await
         .unwrap();
         repo.update_task(
-            "wst_old_resume",
+            &old_resume_id,
             UpdateCreationTaskParams {
                 status: Some("running"),
                 remote_task_id: Some(Some("remote-old")),
@@ -1269,17 +1326,18 @@ mod tests {
         assert_eq!(settled, 0, "the resumable task is resumed, not settled as failed");
         // With a resume-relative deadline it polls to completion instead of an
         // instant timeout.
-        let done = wait_terminal(&h.svc, "wst_old_resume").await;
+        let done = wait_terminal(&h.svc, &old_resume_id).await;
         assert_eq!(done.status, "succeeded", "resumed old job polls to completion; error={:?}", done.error);
     }
 
     #[tokio::test]
     async fn bare_service_without_adapter_fails_config() {
         let db = nomifun_db::init_database_memory().await.unwrap();
+        let provider_id = seed_provider(db.pool(), "openai").await;
         let repo: Arc<dyn ICreationTaskRepository> = Arc::new(SqliteCreationTaskRepository::new(db.pool().clone()));
         Box::leak(Box::new(db));
         let svc = CreationService::new(repo);
-        let created = svc.create_task(new_task("prov_x", "t2i")).await.unwrap();
+        let created = svc.create_task(new_task(&provider_id, "t2i")).await.unwrap();
         assert_eq!(created.status, "queued");
         let done = wait_terminal(&svc, &created.id).await;
         // No provider repo wired → resolution fails with a config error.
@@ -1297,11 +1355,15 @@ mod tests {
 
     #[test]
     fn build_origin_carries_provenance() {
+        let task_id = CreationTaskId::new().into_string();
+        let canvas_id = WorkshopCanvasId::new().into_string();
+        let node_id = WorkshopNodeId::new().into_string();
+        let provider_id = ProviderId::new().into_string();
         let job = WorkerJob {
-            id: "wst_1".into(),
-            canvas_id: Some("wsc_9".into()),
-            node_id: Some("n_2".into()),
-            provider_id: "prov_a".into(),
+            id: task_id.clone(),
+            canvas_id: Some(canvas_id.clone()),
+            node_id: Some(node_id.clone()),
+            provider_id: provider_id.clone(),
             model: "gpt-image-1".into(),
             capability: MediaCapability::T2i,
             params: json!({"prompt": "sunset", "count": 2}),
@@ -1312,10 +1374,10 @@ mod tests {
         let o = build_origin(&job);
         assert_eq!(o["prompt"], "sunset");
         assert_eq!(o["model"], "gpt-image-1");
-        assert_eq!(o["provider_id"], "prov_a");
-        assert_eq!(o["canvas_id"], "wsc_9");
-        assert_eq!(o["node_id"], "n_2");
-        assert_eq!(o["task_id"], "wst_1");
+        assert_eq!(o["provider_id"], provider_id);
+        assert_eq!(o["canvas_id"], canvas_id);
+        assert_eq!(o["node_id"], node_id);
+        assert_eq!(o["task_id"], task_id);
         assert_eq!(o["capability"], "t2i");
         assert_eq!(o["params"]["count"], 2);
     }
@@ -1345,8 +1407,8 @@ mod http_e2e_tests {
         async fn persist(&self, asset: PersistAsset) -> Result<String, CreationError> {
             assert!(!asset.bytes.is_empty(), "persisted asset must carry bytes");
             self.persisted.lock().unwrap().push((asset.mime.clone(), asset.bytes.clone()));
-            let n = self.count.fetch_add(1, Ordering::SeqCst);
-            Ok(format!("wsa_e2e_{n}"))
+            self.count.fetch_add(1, Ordering::SeqCst);
+            Ok(WorkshopAssetId::new().into_string())
         }
     }
     struct NoInputs;
@@ -1413,7 +1475,7 @@ mod http_e2e_tests {
 
     fn t2i(provider_id: &str) -> NewCreationTask {
         NewCreationTask {
-            canvas_id: Some("wsc_e".into()),
+            canvas_id: None,
             node_id: None,
             provider_id: provider_id.into(),
             model: "gpt-image-1".into(),
@@ -1437,7 +1499,8 @@ mod http_e2e_tests {
         let created = svc.create_task(t2i(&provider_id)).await.unwrap();
         let done = wait_terminal(&svc, &created.id).await;
         assert_eq!(done.status, "succeeded", "error={:?}", done.error);
-        assert_eq!(done.result_asset_ids, vec!["wsa_e2e_0".to_string()]);
+        assert_eq!(done.result_asset_ids.len(), 1);
+        WorkshopAssetId::parse(&done.result_asset_ids[0]).unwrap();
         assert_eq!(sink.count.load(Ordering::SeqCst), 1);
     }
 
@@ -1511,7 +1574,7 @@ mod http_e2e_tests {
 
         let (svc, provider_id, sink, _db) = build(&server.uri()).await;
         let task = NewCreationTask {
-            canvas_id: Some("wsc_t".into()),
+            canvas_id: None,
             node_id: None,
             provider_id: provider_id.clone(),
             model: "gpt-4o-mini".into(),

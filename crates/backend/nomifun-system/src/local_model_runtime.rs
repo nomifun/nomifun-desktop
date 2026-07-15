@@ -98,9 +98,14 @@ impl LazyLocalModelRuntime {
         }
 
         let catalog = local.catalog().await;
+        let provider_id = local
+            .status()
+            .await
+            .provider_id
+            .ok_or_else(|| AppError::Internal("local model status is missing its provider id".into()))?;
         if let Err(error) = reconcile_local_catalog_profiles(
             self.model_profile_repo.as_ref(),
-            crate::LOCAL_MODEL_PROVIDER_ID,
+            &provider_id,
             &catalog,
         )
         .await
@@ -111,7 +116,7 @@ impl LazyLocalModelRuntime {
         if let Err(error) = image
             .reconcile_profile(
                 self.model_profile_repo.as_ref(),
-                crate::LOCAL_MODEL_PROVIDER_ID,
+                &provider_id,
             )
             .await
         {
@@ -234,6 +239,15 @@ mod tests {
     };
     use tempfile::TempDir;
 
+    async fn has_local_provider(provider_repo: &Arc<dyn IProviderRepository>) -> bool {
+        provider_repo
+            .list()
+            .await
+            .unwrap()
+            .iter()
+            .any(|row| row.platform == crate::LOCAL_MODEL_PLATFORM)
+    }
+
     #[tokio::test]
     async fn construction_is_side_effect_free_until_first_mutation() {
         let db = init_database_memory().await.unwrap();
@@ -251,25 +265,13 @@ mod tests {
 
         assert!(!runtime.is_started());
         assert!(!temp.path().join("local-ai").exists());
-        assert!(
-            provider_repo
-                .find_by_id(crate::LOCAL_MODEL_PROVIDER_ID)
-                .await
-                .unwrap()
-                .is_none()
-        );
+        assert!(!has_local_provider(&provider_repo).await);
 
         let _ = runtime.local().await.unwrap();
 
         assert!(runtime.is_started());
         assert!(temp.path().join("local-ai").is_dir());
-        assert!(
-            provider_repo
-                .find_by_id(crate::LOCAL_MODEL_PROVIDER_ID)
-                .await
-                .unwrap()
-                .is_some()
-        );
+        assert!(has_local_provider(&provider_repo).await);
     }
 
     #[tokio::test]
@@ -318,13 +320,7 @@ mod tests {
         assert!(!runtime.is_started());
         assert!(Arc::ptr_eq(&asr, &runtime.asr_if_started().unwrap()));
         assert!(temp.path().join("local-ai").join("asr").is_dir());
-        assert!(
-            provider_repo
-                .find_by_id(crate::LOCAL_MODEL_PROVIDER_ID)
-                .await
-                .unwrap()
-                .is_none()
-        );
+        assert!(!has_local_provider(&provider_repo).await);
     }
 
     #[tokio::test]
@@ -370,12 +366,6 @@ mod tests {
         assert!(runtime.restore_asr_if_opted_in().await.unwrap());
         assert!(runtime.is_asr_started());
         assert!(!runtime.is_started());
-        assert!(
-            provider_repo
-                .find_by_id(crate::LOCAL_MODEL_PROVIDER_ID)
-                .await
-                .unwrap()
-                .is_none()
-        );
+        assert!(!has_local_provider(&provider_repo).await);
     }
 }

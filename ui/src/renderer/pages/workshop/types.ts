@@ -12,14 +12,23 @@
  * 1. **Wire types (§3)** — the REST payloads exchanged with `nomifun-workshop` /
  *    `nomifun-creation`. Field names are **snake_case**, mirroring the backend
  *    JSON exactly.
- * 2. **Canvas doc types (§4)** — the shape of the opaque `canvas.json` the
- *    backend only stores/serves. This is **frontend-owned**; the backend never
- *    parses it (it only measures `node_count` and enforces a size cap). Doc
- *    field names are **camelCase**, per the contract.
+ * 2. **Canvas doc types (§4)** — the frontend-owned shape of `canvas.json`.
+ *    The backend leaves node payload semantics to the frontend, while strictly
+ *    validating the durable `wsn_`/`wse_` identity envelope and node
+ *    references. Doc field names are **camelCase**, per the contract.
  *
  * Both layers are frozen at M0: downstream modules may **append** fields but must
  * not change existing semantics.
  */
+
+import type {
+  AssetId,
+  CanvasId,
+  CreationTaskId,
+  ProviderId,
+  WorkshopEdgeId,
+  WorkshopNodeId,
+} from '@/common/types/ids';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // §3 Wire types — REST payloads (snake_case)
@@ -46,7 +55,7 @@ export type CreationInputRole = 'reference' | 'mask' | 'first_frame' | 'last_fra
 
 /** Canvas gallery index row (§3.1 `WorkshopCanvasMeta`). */
 export interface WorkshopCanvasMeta {
-  id: string;
+  id: CanvasId;
   title: string;
   /** Serve URL for the canvas thumbnail, or null when none has been rendered. */
   thumbnail_url: string | null;
@@ -59,16 +68,16 @@ export interface WorkshopCanvasMeta {
 export interface WorkshopAssetOrigin {
   prompt?: string;
   model?: string;
-  provider_id?: string;
+  provider_id?: ProviderId;
   params?: Record<string, unknown>;
-  canvas_id?: string;
-  node_id?: string;
-  task_id?: string;
+  canvas_id?: CanvasId;
+  node_id?: WorkshopNodeId;
+  task_id?: CreationTaskId;
 }
 
 /** Asset library / canvas-internal media record (§3.2 `WorkshopAsset`). */
 export interface WorkshopAsset {
-  id: string;
+  id: AssetId;
   kind: WorkshopAssetKind;
   title: string;
   collection: string | null;
@@ -98,16 +107,16 @@ export interface CreationError {
 
 /** Generation task record (§3.3 `CreationTask`). */
 export interface CreationTask {
-  id: string;
-  canvas_id: string | null;
-  node_id: string | null;
-  provider_id: string;
+  id: CreationTaskId;
+  canvas_id: CanvasId | null;
+  node_id: WorkshopNodeId | null;
+  provider_id: ProviderId;
   model: string;
   capability: MediaCapability;
   params: Record<string, unknown>;
   status: CreationTaskStatus;
   error: CreationError | null;
-  result_asset_ids: string[];
+  result_asset_ids: AssetId[];
   attempt: number;
   submitted_at: number;
   started_at: number | null;
@@ -116,7 +125,7 @@ export interface CreationTask {
 
 /** One input asset attached to a generation request (§3.3 `inputs[]`). */
 export interface CreationInput {
-  asset_id: string;
+  asset_id: AssetId;
   role: CreationInputRole;
 }
 
@@ -179,9 +188,11 @@ export interface UploadAssetOptions {
 
 /** `POST /api/creation/tasks` body. */
 export interface CreateTaskBody {
-  canvas_id?: string;
-  node_id?: string;
-  provider_id: string;
+  canvas_id?: CanvasId;
+  node_id?: WorkshopNodeId;
+  provider_id: ProviderId;
+  /** Client-only platform discriminator; stripped before the HTTP request. */
+  provider_platform?: string;
   model: string;
   capability: MediaCapability;
   params: Record<string, unknown>;
@@ -190,7 +201,7 @@ export interface CreateTaskBody {
 
 /** `GET /api/creation/tasks` query params. */
 export interface ListTasksQuery {
-  canvas_id?: string;
+  canvas_id?: CanvasId;
   status?: CreationTaskStatus;
   limit?: number;
 }
@@ -235,7 +246,7 @@ export type WorkshopGeneratorStatus = 'idle' | 'queued' | 'running' | 'success' 
 
 /** Image node payload. */
 export interface WorkshopImageNodeData {
-  assetId: string | null;
+  assetId: AssetId | null;
   naturalWidth?: number;
   naturalHeight?: number;
   caption?: string;
@@ -255,27 +266,27 @@ export interface WorkshopTextNodeData {
 
 /** Video node payload. */
 export interface WorkshopVideoNodeData {
-  assetId: string | null;
+  assetId: AssetId | null;
   durationMs?: number;
 }
 
 /** Batch-group state carried by a generator card that produced multiple images. */
 export interface WorkshopGeneratorBatch {
   expanded: boolean;
-  primary?: string;
+  primary?: AssetId;
 }
 
 /** Generation card payload. */
 export interface WorkshopGeneratorNodeData {
   mode: WorkshopGeneratorMode;
-  providerId?: string;
+  providerId?: ProviderId;
   model?: string;
   prompt: string;
   params: Record<string, unknown>;
   mentions: string[];
   status: WorkshopGeneratorStatus;
-  taskId?: string | null;
-  resultAssetIds: string[];
+  taskId?: CreationTaskId | null;
+  resultAssetIds: AssetId[];
   batch?: WorkshopGeneratorBatch;
   errorMessage?: string;
   /**
@@ -283,7 +294,7 @@ export interface WorkshopGeneratorNodeData {
    * spawned from the image editor's mask tool. Present ⇒ image-mode runs derive
    * the `inpaint` capability and attach the mask as a `role: 'mask'` input.
    */
-  maskAssetId?: string;
+  maskAssetId?: AssetId;
   /**
    * Append-only (M7): transient flag set when a card is spawned mid-chain
    * (mask repaint / continuous-edit) so it should run itself once on mount.
@@ -352,13 +363,13 @@ export type WorkshopNodeData =
 
 /** Fields shared by every node. */
 interface WorkshopNodeBase {
-  id: string;
+  id: WorkshopNodeId;
   x: number;
   y: number;
   w: number;
   h: number;
   /** Owning group node id, when the node belongs to a group (M8). */
-  groupId?: string | null;
+  groupId?: WorkshopNodeId | null;
 }
 
 export interface WorkshopImageNode extends WorkshopNodeBase {
@@ -392,9 +403,9 @@ export type WorkshopNode =
 
 /** A directed connection between two nodes. */
 export interface WorkshopEdge {
-  id: string;
-  from: string;
-  to: string;
+  id: WorkshopEdgeId;
+  from: WorkshopNodeId;
+  to: WorkshopNodeId;
 }
 
 /** Canvas viewport (pan + zoom). */
@@ -404,7 +415,7 @@ export interface WorkshopViewport {
   zoom: number;
 }
 
-/** The full canvas document — opaque to the backend, owned by the frontend. */
+/** The full canvas document — payload semantics are owned by the frontend. */
 export interface WorkshopCanvasDoc {
   schema: typeof WORKSHOP_DOC_SCHEMA;
   viewport: WorkshopViewport;

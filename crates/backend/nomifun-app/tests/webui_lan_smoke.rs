@@ -275,12 +275,15 @@ async fn webui_enable_preserves_user_set_username_and_reports_persisted_state() 
     let pool = sqlx::SqlitePool::connect(&format!("sqlite://{}", db_path.display()))
         .await
         .expect("open backend db");
-    let affected = sqlx::query("UPDATE users SET username = 'custom_admin' WHERE id = 'system_default_user'")
+    let affected = sqlx::query(
+        "UPDATE users SET username = 'custom_admin' \
+         WHERE id = (SELECT owner_user_id FROM installation_identity WHERE key = 'installation')",
+    )
         .execute(&pool)
         .await
         .expect("rename system admin")
         .rows_affected();
-    assert_eq!(affected, 1, "should have renamed the seeded system_default_user");
+    assert_eq!(affected, 1, "should have renamed the installation owner");
     pool.close().await;
 
     // Before enabling: snapshot reflects the persisted username and "no password yet".

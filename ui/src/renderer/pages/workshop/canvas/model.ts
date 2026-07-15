@@ -11,10 +11,13 @@
  *
  * The canvas works internally in react-flow's shape; this module converts to /
  * from the doc on load / save, builds content-only history snapshots, and mints
- * fresh nodes. Node/edge ids are frontend-owned opaque strings (the backend
- * never parses the doc), so we mint short uuid-ish ids here.
+ * fresh nodes. Node/edge ids are durable workshop entities and are validated
+ * at both conversion boundaries.
  */
 
+import { prefixedId } from '@/common/utils/prefixedId';
+import { parseWorkshopEdgeId, parseWorkshopNodeId } from '@/common/types/ids';
+import type { WorkshopEdgeId, WorkshopNodeId } from '@/common/types/ids';
 import type { Edge, Node } from '@xyflow/react';
 import type {
   WorkshopCanvasBackground,
@@ -54,14 +57,19 @@ export type CompareNodeData = WorkshopCompareNodeData & Record<string, unknown>;
 export type OutputNodeData = WorkshopOutputNodeData & Record<string, unknown>;
 export type GroupNodeData = WorkshopGroupNodeData & Record<string, unknown>;
 
-export type ImageFlowNode = Node<ImageNodeData, 'image'>;
-export type TextFlowNode = Node<TextNodeData, 'text'>;
-export type VideoFlowNode = Node<VideoNodeData, 'video'>;
-export type GeneratorFlowNode = Node<GeneratorNodeData, 'generator'>;
-export type LoopFlowNode = Node<LoopNodeData, 'loop'>;
-export type CompareFlowNode = Node<CompareNodeData, 'compare'>;
-export type OutputFlowNode = Node<OutputNodeData, 'output'>;
-export type GroupFlowNode = Node<GroupNodeData, 'group'>;
+type DurableWorkshopNode<TData extends Record<string, unknown>, TKind extends string> = Node<TData, TKind> & {
+  id: WorkshopNodeId;
+  parentId?: WorkshopNodeId;
+};
+
+export type ImageFlowNode = DurableWorkshopNode<ImageNodeData, 'image'>;
+export type TextFlowNode = DurableWorkshopNode<TextNodeData, 'text'>;
+export type VideoFlowNode = DurableWorkshopNode<VideoNodeData, 'video'>;
+export type GeneratorFlowNode = DurableWorkshopNode<GeneratorNodeData, 'generator'>;
+export type LoopFlowNode = DurableWorkshopNode<LoopNodeData, 'loop'>;
+export type CompareFlowNode = DurableWorkshopNode<CompareNodeData, 'compare'>;
+export type OutputFlowNode = DurableWorkshopNode<OutputNodeData, 'output'>;
+export type GroupFlowNode = DurableWorkshopNode<GroupNodeData, 'group'>;
 
 /** The M8 flow-node kinds (loop / compare / output / group). */
 export type PlaceholderFlowNode = LoopFlowNode | CompareFlowNode | OutputFlowNode | GroupFlowNode;
@@ -77,7 +85,11 @@ export type WorkshopFlowNode =
   | OutputFlowNode
   | GroupFlowNode;
 
-export type WorkshopFlowEdge = Edge;
+export type WorkshopFlowEdge = Edge & {
+  id: WorkshopEdgeId;
+  source: WorkshopNodeId;
+  target: WorkshopNodeId;
+};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Per-kind metadata (default sizes, minimap tint)
@@ -168,26 +180,15 @@ export const FIT_VIEW_OPTIONS = { padding: 0.2, maxZoom: 1.5, duration: 240 } as
 export const PASTE_OFFSET = 24;
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Id minting (frontend-owned opaque ids)
+// Id minting (frontend-owned durable entity ids)
 // ─────────────────────────────────────────────────────────────────────────────
 
-function randomToken(): string {
-  try {
-    if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
-      return crypto.randomUUID().replace(/-/g, '').slice(0, 20);
-    }
-  } catch {
-    /* fall through */
-  }
-  return `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 10)}`;
+export function newNodeId(): WorkshopNodeId {
+  return parseWorkshopNodeId(prefixedId('wsn'));
 }
 
-export function newNodeId(): string {
-  return `wsn_${randomToken()}`;
-}
-
-export function newEdgeId(): string {
-  return `wse_${randomToken()}`;
+export function newEdgeId(): WorkshopEdgeId {
+  return parseWorkshopEdgeId(prefixedId('wse'));
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -293,17 +294,21 @@ export function flowToDoc(
       const absX = parentPos ? n.position.x + parentPos.x : n.position.x;
       const absY = parentPos ? n.position.y + parentPos.y : n.position.y;
       return {
-        id: n.id,
+        id: parseWorkshopNodeId(n.id),
         kind: n.type as WorkshopNodeKind,
         x: Math.round(absX),
         y: Math.round(absY),
         w: width,
         h: height,
-        groupId: n.parentId ?? null,
+        groupId: n.parentId == null ? null : parseWorkshopNodeId(n.parentId),
         data: { ...(n.data as Record<string, unknown>) },
       } as WorkshopNode;
     }),
-    edges: edges.map((e) => ({ id: e.id, from: e.source, to: e.target })),
+    edges: edges.map((e) => ({
+      id: parseWorkshopEdgeId(e.id),
+      from: parseWorkshopNodeId(e.source),
+      to: parseWorkshopNodeId(e.target),
+    })),
   };
 }
 
@@ -395,7 +400,7 @@ export interface XY {
   y: number;
 }
 
-function base(kind: WorkshopNodeKind, position: XY): { id: string; position: XY; width: number; height: number } {
+function base(kind: WorkshopNodeKind, position: XY): { id: WorkshopNodeId; position: XY; width: number; height: number } {
   const meta = KIND_META[kind];
   return { id: newNodeId(), position, width: meta.defaultWidth, height: meta.defaultHeight };
 }
@@ -554,9 +559,9 @@ function absoluteRect(
  */
 export function groupSelectedNodes(
   nodes: WorkshopFlowNode[],
-  selectedIds: string[],
+  selectedIds: WorkshopNodeId[],
   title: string
-): { nodes: WorkshopFlowNode[]; groupId: string } | null {
+): { nodes: WorkshopFlowNode[]; groupId: WorkshopNodeId } | null {
   const selected = new Set(selectedIds);
   const members = nodes.filter((n) => selected.has(n.id) && !n.parentId && n.type !== 'group');
   if (members.length < 2) return null;
@@ -604,7 +609,7 @@ export function groupSelectedNodes(
  * cleared) and drop the group node. Returns the new node array, or `null` when
  * the id isn't a group.
  */
-export function ungroupNodes(nodes: WorkshopFlowNode[], groupId: string): WorkshopFlowNode[] | null {
+export function ungroupNodes(nodes: WorkshopFlowNode[], groupId: WorkshopNodeId): WorkshopFlowNode[] | null {
   const group = nodes.find((n) => n.id === groupId && n.type === 'group');
   if (!group) return null;
   const gx = group.position.x;
@@ -625,7 +630,7 @@ export function ungroupNodes(nodes: WorkshopFlowNode[], groupId: string): Worksh
 }
 
 /** Ids of a group node and all its members (for delete-with-children). */
-export function groupMemberIds(nodes: WorkshopFlowNode[], groupId: string): string[] {
+export function groupMemberIds(nodes: WorkshopFlowNode[], groupId: WorkshopNodeId): WorkshopNodeId[] {
   return [groupId, ...nodes.filter((n) => n.parentId === groupId).map((n) => n.id)];
 }
 
@@ -645,8 +650,8 @@ export function cloneNodesWithEdges(
   edges: WorkshopFlowEdge[],
   offset: XY,
   allNodes?: WorkshopFlowNode[]
-): { nodes: WorkshopFlowNode[]; edges: WorkshopFlowEdge[]; idMap: Map<string, string> } {
-  const idMap = new Map<string, string>();
+): { nodes: WorkshopFlowNode[]; edges: WorkshopFlowEdge[]; idMap: Map<WorkshopNodeId, WorkshopNodeId> } {
+  const idMap = new Map<WorkshopNodeId, WorkshopNodeId>();
   const inSet = new Set(nodes.map((n) => n.id));
   for (const n of nodes) idMap.set(n.id, newNodeId());
 
@@ -673,7 +678,7 @@ export function cloneNodesWithEdges(
     }
     const next = {
       ...n,
-      id: idMap.get(n.id) as string,
+      id: idMap.get(n.id) as WorkshopNodeId,
       selected: true,
       dragging: false,
       measured: undefined,
@@ -681,7 +686,7 @@ export function cloneNodesWithEdges(
       data: { ...n.data },
     } as WorkshopFlowNode;
     if (parentKept) {
-      next.parentId = idMap.get(n.parentId as string) as string;
+      next.parentId = idMap.get(n.parentId as WorkshopNodeId) as WorkshopNodeId;
       next.extent = 'parent';
     } else {
       delete next.parentId;
@@ -694,8 +699,8 @@ export function cloneNodesWithEdges(
     .filter((e) => inSet.has(e.source) && inSet.has(e.target))
     .map((e) => ({
       id: newEdgeId(),
-      source: idMap.get(e.source) as string,
-      target: idMap.get(e.target) as string,
+      source: idMap.get(e.source) as WorkshopNodeId,
+      target: idMap.get(e.target) as WorkshopNodeId,
     }));
   return { nodes: cloned, edges: clonedEdges, idMap };
 }

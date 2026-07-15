@@ -11,6 +11,7 @@ import { Check, Delete, Refresh } from '@icon-park/react';
 import { ipcBridge } from '@/common';
 import type { IConnectorCredentialSummary, IKnowledgeBase } from '@/common/adapter/ipcBridge';
 import { getBaseSource, knowledgeErrorText, notifySourceFetchResult } from './useKnowledge';
+import type { ConnectorCredentialId } from '@/common/types/ids';
 
 interface KnowledgeConnectorDrawerProps {
   visible: boolean;
@@ -43,11 +44,11 @@ const KnowledgeConnectorDrawer: React.FC<KnowledgeConnectorDrawerProps> = ({ vis
   const [creating, setCreating] = useState(false);
 
   // Attach form.
-  const [credId, setCredId] = useState<string | undefined>(undefined);
+  const [credId, setCredId] = useState<ConnectorCredentialId | undefined>(undefined);
   const [spaceId, setSpaceId] = useState('');
   const [attaching, setAttaching] = useState(false);
   const [syncing, setSyncing] = useState(false);
-  const [testingId, setTestingId] = useState<string | null>(null);
+  const [testingId, setTestingId] = useState<ConnectorCredentialId | null>(null);
 
   const refreshCreds = useCallback(async () => {
     setCredsLoading(true);
@@ -97,7 +98,7 @@ const KnowledgeConnectorDrawer: React.FC<KnowledgeConnectorDrawerProps> = ({ vis
     }
   };
 
-  const handleTest = async (id: string) => {
+  const handleTest = async (id: ConnectorCredentialId) => {
     setTestingId(id);
     try {
       const identity = await ipcBridge.knowledge.testCredential.invoke({ id });
@@ -111,7 +112,7 @@ const KnowledgeConnectorDrawer: React.FC<KnowledgeConnectorDrawerProps> = ({ vis
     }
   };
 
-  const handleDeleteCredential = async (id: string) => {
+  const handleDeleteCredential = async (id: ConnectorCredentialId) => {
     try {
       await ipcBridge.knowledge.deleteCredential.invoke({ id });
       if (credId === id) setCredId(undefined);

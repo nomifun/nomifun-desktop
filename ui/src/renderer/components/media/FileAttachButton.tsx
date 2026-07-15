@@ -119,7 +119,7 @@ const FileAttachButton: React.FC<FileAttachButtonProps> = ({
       try {
         const processed = await FileService.processDroppedFiles(
           fileList,
-          conversationContext?.conversation_id != null ? String(conversationContext.conversation_id) : undefined
+          conversationContext?.conversation_id != null ? conversationContext.conversation_id : undefined
         );
         if (processed.length > 0) onLocalFilesAdded(processed);
       } catch {

@@ -1,3 +1,4 @@
+use nomifun_common::ConversationId;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -173,6 +174,7 @@ pub struct SkillPathsResponse {
 /// `POST /api/skills/preset-skill/read`.
 #[derive(Debug, Clone, Deserialize)]
 pub struct ReadPresetRuleRequest {
+    #[serde(deserialize_with = "crate::serde_util::deserialize_preset_reference")]
     pub preset_id: String,
     #[serde(default)]
     pub locale: Option<String>,
@@ -182,6 +184,7 @@ pub struct ReadPresetRuleRequest {
 /// `POST /api/skills/preset-skill/write`.
 #[derive(Debug, Clone, Deserialize)]
 pub struct WritePresetRuleRequest {
+    #[serde(deserialize_with = "crate::serde_util::deserialize_preset_reference")]
     pub preset_id: String,
     pub content: String,
     #[serde(default)]
@@ -198,13 +201,11 @@ pub struct ReadBuiltinResourceRequest {
 /// Request body for `POST /api/skills/materialize-for-agent`.
 ///
 /// Callers pass the resolved skill snapshot (see
-/// `conversation.extra.skills`). For backwards compatibility with pre-
-/// snapshot clients that still emit `enabled_skills`, the alias below
-/// accepts either spelling; remove the alias after the frontend PR lands.
+/// `conversation.extra.skills`).
 #[derive(Debug, Clone, Deserialize)]
 pub struct MaterializeSkillsRequest {
-    pub conversation_id: i64,
-    #[serde(default, alias = "enabled_skills")]
+    pub conversation_id: ConversationId,
+    #[serde(default)]
     pub skills: Vec<String>,
 }
 
@@ -386,28 +387,38 @@ mod tests {
 
     #[test]
     fn test_materialize_request_roundtrip() {
+        let conversation_id = "conv_0190f5fe-7c00-7a00-8abc-012345678901";
         let raw = json!({
-            "conversation_id": 42,
+            "conversation_id": conversation_id,
             "skills": ["mermaid", "pdf"],
         });
         let req: MaterializeSkillsRequest = serde_json::from_value(raw).unwrap();
-        assert_eq!(req.conversation_id, 42);
+        assert_eq!(req.conversation_id.as_str(), conversation_id);
         assert_eq!(req.skills, vec!["mermaid", "pdf"]);
     }
 
     #[test]
-    fn test_materialize_request_accepts_legacy_enabled_skills_alias() {
+    fn test_materialize_request_ignores_unknown_legacy_field() {
         let raw = json!({
-            "conversation_id": 42,
+            "conversation_id": "conv_0190f5fe-7c00-7a00-8abc-012345678901",
             "enabled_skills": ["pdf"],
         });
         let req: MaterializeSkillsRequest = serde_json::from_value(raw).unwrap();
-        assert_eq!(req.skills, vec!["pdf"]);
+        assert!(req.skills.is_empty());
+    }
+
+    #[test]
+    fn test_materialize_request_rejects_numeric_conversation_id() {
+        let raw = json!({
+            "conversation_id": 42,
+            "skills": [],
+        });
+        assert!(serde_json::from_value::<MaterializeSkillsRequest>(raw).is_err());
     }
 
     #[test]
     fn test_materialize_request_default_enabled() {
-        let raw = json!({"conversation_id": 42});
+        let raw = json!({"conversation_id": "conv_0190f5fe-7c00-7a00-8abc-012345678901"});
         let req: MaterializeSkillsRequest = serde_json::from_value(raw).unwrap();
         assert!(req.skills.is_empty());
     }
@@ -649,6 +660,12 @@ mod tests {
         assert_eq!(req.preset_id, "abc123");
         assert_eq!(req.content, "# Rules\nBe helpful.");
         assert_eq!(req.locale.as_deref(), Some("en-US"));
+    }
+
+    #[test]
+    fn preset_rule_request_rejects_malformed_entity_namespace_value() {
+        let raw = json!({ "preset_id": "preset_not-a-uuid" });
+        assert!(serde_json::from_value::<ReadPresetRuleRequest>(raw).is_err());
     }
 
     #[test]

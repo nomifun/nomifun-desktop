@@ -36,6 +36,7 @@ import RequirementFilters from './RequirementFilters';
 import RequirementListView from './RequirementListView';
 import RequirementBoardView from './RequirementBoardView';
 import RequirementDrawer from '../RequirementDrawer';
+import type { RequirementId } from '@/common/types/ids';
 
 type ViewMode = 'list' | 'board';
 
@@ -77,9 +78,9 @@ const WorkspacePage: React.FC = () => {
   const [pageSize, setPageSize] = useState(DEFAULT_PAGE_SIZE);
 
   // ---- Selection (list view) -----------------------------------------------
-  const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set());
+  const [selectedIds, setSelectedIds] = useState<Set<RequirementId>>(new Set());
 
-  const toggleSelect = useCallback((id: number) => {
+  const toggleSelect = useCallback((id: RequirementId) => {
     setSelectedIds((prev) => {
       const next = new Set(prev);
       if (next.has(id)) next.delete(id);
@@ -91,7 +92,7 @@ const WorkspacePage: React.FC = () => {
   // Select / deselect every row on the current page (used by the list header
   // checkbox). Selection is by id and persists across pages, so batch delete
   // still operates on the full accumulated set.
-  const selectAllOnPage = useCallback((pageIds: number[], checked: boolean) => {
+  const selectAllOnPage = useCallback((pageIds: RequirementId[], checked: boolean) => {
     setSelectedIds((prev) => {
       const next = new Set(prev);
       if (checked) pageIds.forEach((id) => next.add(id));
@@ -149,7 +150,10 @@ const WorkspacePage: React.FC = () => {
   // ---- Drawer state derived from URL params --------------------------------
   // `new=1` → create; `req=<id>` + `edit=1` → edit; `req=<id>` → view; else closed.
   const reqParam = searchParams.get('req');
-  const reqId = reqParam != null && reqParam !== '' && Number.isFinite(Number(reqParam)) ? Number(reqParam) : undefined;
+  const reqId =
+    reqParam != null && reqParam !== '' && reqParam.startsWith('req_')
+      ? (reqParam as RequirementId)
+      : undefined;
   const isNew = searchParams.get('new') === '1';
   const isEdit = searchParams.get('edit') === '1';
 
@@ -170,7 +174,7 @@ const WorkspacePage: React.FC = () => {
   }, [setSearchParams]);
 
   const openDetail = useCallback(
-    (id: number) => {
+    (id: RequirementId) => {
       setSearchParams(
         (prev) => {
           const p = new URLSearchParams(prev);
@@ -186,7 +190,7 @@ const WorkspacePage: React.FC = () => {
   );
 
   const openEdit = useCallback(
-    (id: number) => {
+    (id: RequirementId) => {
       setSearchParams(
         (prev) => {
           const p = new URLSearchParams(prev);
@@ -216,7 +220,7 @@ const WorkspacePage: React.FC = () => {
 
   // ---- Mutations -----------------------------------------------------------
   const handleRowStatusChange = useCallback(
-    async (id: number, next: RequirementStatus) => {
+    async (id: RequirementId, next: RequirementStatus) => {
       try {
         await ipcBridge.requirements.update.invoke({ id, updates: { status: next } });
         void refresh();
@@ -229,7 +233,7 @@ const WorkspacePage: React.FC = () => {
   );
 
   const handleDelete = useCallback(
-    async (id: number) => {
+    async (id: RequirementId) => {
       try {
         await ipcBridge.requirements.remove.invoke({ id });
         setSelectedIds((prev) => {

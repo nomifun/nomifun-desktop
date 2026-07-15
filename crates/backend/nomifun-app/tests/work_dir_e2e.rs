@@ -33,7 +33,11 @@ async fn conversation_workspace_uses_work_dir() {
         execution_template_id: None,
         extra: serde_json::json!({}),
     };
-    let response = state.service.create("system_default_user", request).await.unwrap();
+    let response = state
+        .service
+        .create(services.authoritative_user_id.as_ref(), request)
+        .await
+        .unwrap();
 
     let workspace = response.extra.get("workspace").and_then(|v| v.as_str()).unwrap();
     assert!(
@@ -78,7 +82,11 @@ async fn user_specified_workspace_is_not_overridden() {
             "workspace": custom_workspace.path().to_str().unwrap()
         }),
     };
-    let response = state.service.create("system_default_user", request).await.unwrap();
+    let response = state
+        .service
+        .create(services.authoritative_user_id.as_ref(), request)
+        .await
+        .unwrap();
 
     let workspace = response.extra.get("workspace").and_then(|v| v.as_str()).unwrap();
     assert!(
@@ -115,7 +123,11 @@ async fn workspace_defaults_to_data_dir_when_work_dir_equals_data_dir() {
         execution_template_id: None,
         extra: serde_json::json!({}),
     };
-    let response = state.service.create("system_default_user", request).await.unwrap();
+    let response = state
+        .service
+        .create(services.authoritative_user_id.as_ref(), request)
+        .await
+        .unwrap();
 
     let workspace = response.extra.get("workspace").and_then(|v| v.as_str()).unwrap();
     assert!(

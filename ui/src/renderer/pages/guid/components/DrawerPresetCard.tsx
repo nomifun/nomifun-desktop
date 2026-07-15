@@ -3,7 +3,7 @@
  * Displays avatar, name, source badge, description, engine/model capsule, tag chips,
  * radio indicator (top-right), and hover "使用 →" CTA.
  */
-import type { Preset } from '@/common/types/agent/presetTypes';
+import type { Preset, PresetReference } from '@/common/types/agent/presetTypes';
 import React from 'react';
 import { useTranslation } from 'react-i18next';
 import PresetAvatar from '@/renderer/pages/settings/PresetSettings/PresetAvatar';
@@ -15,7 +15,7 @@ export type DrawerPresetCardProps = {
   selected: boolean;
   localeKey: string;
   avatarImageMap: Record<string, string>;
-  onSelect: (presetId: string) => void;
+  onSelect: (presetId: PresetReference) => void;
 };
 
 const DrawerPresetCard: React.FC<DrawerPresetCardProps> = ({

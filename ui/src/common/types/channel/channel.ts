@@ -1,5 +1,15 @@
+import type {
+  ChannelId,
+  ChannelSessionId,
+  ChannelUserId,
+  CompanionId,
+  ConversationId,
+  PublicAgentId,
+} from '@/common/types/ids';
+
 export interface IChannelPluginStatus {
-  id: string;
+  /** Canonical persisted channel entity id. */
+  id: ChannelId;
   type: string;
   name: string;
   enabled: boolean;
@@ -11,9 +21,9 @@ export interface IChannelPluginStatus {
   botUsername?: string;
   hasToken?: boolean;
   /** 绑定的伙伴（每机器人一宠；UNIQUE(type,bot_key) 保证同一机器人不绑多宠）。 */
-  companionId?: string;
+  companionId?: CompanionId;
   /** 绑定的对外伙伴（与 companionId 互斥；一个机器人只服务一个对象）。 */
-  publicAgentId?: string | null;
+  publicAgentId?: PublicAgentId | null;
   /** 平台级机器人身份（lark app_id / telegram bot id / ...）。 */
   botKey?: string;
   isExtension?: boolean;
@@ -48,26 +58,26 @@ export interface IChannelPairingRequest {
   requestedAt: number;
   expiresAt: number;
   /** 发起/归属的机器人渠道行 id；旧库未回填时可能缺省。 */
-  channelId?: string;
+  channelId?: ChannelId;
 }
 
 export interface IChannelUser {
-  id: string;
+  id: ChannelUserId;
   platformUserId: string;
   platformType: string;
   display_name?: string;
   authorizedAt: number;
   lastActive?: number;
-  session_id?: string;
-  /** 发起/归属的机器人渠道行 id；旧库未回填时可能缺省。 */
-  channelId?: string;
+  session_id?: ChannelSessionId;
+  /** 发起/归属的机器人渠道行 id。 */
+  channelId?: ChannelId;
 }
 
 export interface IChannelSession {
-  id: string;
-  user_id: string;
+  id: ChannelSessionId;
+  user_id: ChannelUserId;
   agent_type: string;
-  conversation_id?: string;
+  conversation_id?: ConversationId;
   workspace?: string;
   chatId?: string;
   created_at: number;

@@ -6,9 +6,9 @@
 //! The companion domain owns only a thin thread registry (which conversation ids
 //! are companion threads + titles + owning companion); messages, streaming,
 //! persistence and lifecycle belong to the conversation domain. Companion
-//! threads are marked `extra.companionSession = true` so (a) the agent factory
+//! threads are marked `extra.companion_session = true` so (a) the agent factory
 //! registers the memory tools, and (b) the main sidebar filters them out;
-//! `extra.companionId` records the owning companion for persona/knowledge selection.
+//! `extra.companion_id` records the owning companion for persona/knowledge selection.
 
 use std::sync::Arc;
 
@@ -46,15 +46,37 @@ pub(crate) fn format_date(ts_ms: i64) -> String {
         .unwrap_or_else(|| "????-??-??".into())
 }
 
-/// Read one companion's active-thread pointer (empty string normalizes to the
-/// stored-but-cleared state; callers filter).
+/// Read one companion's active-thread pointer. Absence is represented by no KV
+/// row, never by an empty ID value.
 pub(crate) async fn active_thread_ptr(store: &CompanionStore, companion_id: &str) -> Result<Option<String>, AppError> {
-    store.get_companion_state(companion_id, ACTIVE_THREAD_KEY).await
+    nomifun_common::CompanionId::try_from(companion_id)
+        .map_err(|error| AppError::BadRequest(format!("invalid companion_id: {error}")))?;
+    let value = store.get_companion_state(companion_id, ACTIVE_THREAD_KEY).await?;
+    value
+        .map(|conversation_id| {
+            nomifun_common::ConversationId::try_from(conversation_id.as_str())
+                .map(|_| conversation_id)
+                .map_err(|error| AppError::Internal(format!("invalid stored active conversation_id: {error}")))
+        })
+        .transpose()
 }
 
-/// Write one companion's active-thread pointer (empty string clears it).
-pub(crate) async fn set_active_thread_ptr(store: &CompanionStore, companion_id: &str, conversation_id: &str) -> Result<(), AppError> {
-    store.set_companion_state(companion_id, ACTIVE_THREAD_KEY, conversation_id).await
+/// Write or clear one companion's active-thread pointer.
+pub(crate) async fn set_active_thread_ptr(
+    store: &CompanionStore,
+    companion_id: &str,
+    conversation_id: Option<&str>,
+) -> Result<(), AppError> {
+    nomifun_common::CompanionId::try_from(companion_id)
+        .map_err(|error| AppError::BadRequest(format!("invalid companion_id: {error}")))?;
+    match conversation_id {
+        Some(conversation_id) => {
+            nomifun_common::ConversationId::try_from(conversation_id)
+                .map_err(|error| AppError::BadRequest(format!("invalid conversation_id: {error}")))?;
+            store.set_companion_state(companion_id, ACTIVE_THREAD_KEY, conversation_id).await
+        }
+        None => store.delete_companion_state(companion_id, ACTIVE_THREAD_KEY).await,
+    }
 }
 
 /// Build the persona system prompt for a companion conversation. The prompt
@@ -571,12 +593,12 @@ impl CompanionThreads {
             // 外来 temp cwd 的老线程仍留置不动（见 plan_workspace_reconcile 的 Leave 分支：
             // 迁移 live cwd 会孤立已写文件）。新伙伴走下面的 create 分支直接落 pretty 名。
             self.reconcile_thread_workspace(&profile, &existing.conversation_id).await;
-            let _ = set_active_thread_ptr(&self.store, companion_id, &existing.conversation_id).await;
+            let _ = set_active_thread_ptr(&self.store, companion_id, Some(&existing.conversation_id)).await;
             return Ok(existing);
         }
-        if !profile.model.is_configured() {
+        let Some(model) = profile.model.as_ref() else {
             return Err(AppError::BadRequest("companion model not configured".into()));
-        }
+        };
         let smart_collaboration = self.config.read().await.smart_collaboration;
         let system_prompt = build_companion_system_prompt(&self.store, &profile, None, smart_collaboration).await;
         let title = title
@@ -599,11 +621,7 @@ impl CompanionThreads {
         let req = CreateConversationRequest {
             r#type: nomifun_common::AgentType::Nomi,
             name: Some(title.clone()),
-            model: Some(ProviderWithModel {
-                provider_id: profile.model.provider_id.clone(),
-                model: profile.model.model.clone(),
-                use_model: Some(profile.model.model.clone()),
-            }),
+            model: Some(model.clone()),
             source: None,
             channel_chat_id: None,
             preset_id: None,
@@ -614,8 +632,8 @@ impl CompanionThreads {
             execution_template_id: None,
             extra: {
                 let extra = serde_json::json!({
-                "companionSession": true,
-                "companionId": companion_id,
+                "companion_session": true,
+                "companion_id": companion_id,
                 "system_prompt": system_prompt,
                 // `build_companion_system_prompt` already includes the frozen
                 // preset instructions. Prevent the generic conversation path
@@ -648,7 +666,7 @@ impl CompanionThreads {
         let created_id = created.id.to_string();
         // Register; if the registry write fails, reap the just-created
         // conversation — an unregistered companion row is invisible to every
-        // surface (sidebar filters companionSession, thread list never shows it).
+        // surface (sidebar filters companion_session, thread list never shows it).
         let thread = match self.store.insert_companion_thread(&created_id, companion_id, &title).await {
             Ok(thread) => thread,
             Err(e) => {
@@ -659,7 +677,7 @@ impl CompanionThreads {
                 return Err(e);
             }
         };
-        let _ = set_active_thread_ptr(&self.store, companion_id, &created_id).await;
+        let _ = set_active_thread_ptr(&self.store, companion_id, Some(&created_id)).await;
         Ok(thread)
     }
 
@@ -683,7 +701,7 @@ impl CompanionThreads {
                 // conversation left by a different build's ACP-companion feature, which this
                 // nomi-only build can't render → "走神" with no chat). Drop the registry
                 // pointer so `create` mints a fresh nomi session; the orphaned conversation
-                // row stays hidden (extra.companionSession filters it from every list).
+                // row stays hidden (extra.companion_session filters it from every list).
                 Ok(_) | Err(AppError::NotFound(_)) => {
                     let _ = self.store.delete_companion_thread(&t.conversation_id).await;
                     removed_ids.push(t.conversation_id);
@@ -695,7 +713,7 @@ impl CompanionThreads {
             && let Ok(Some(active)) = active_thread_ptr(&self.store, companion_id).await
             && removed_ids.iter().any(|id| *id == active)
         {
-            let _ = set_active_thread_ptr(&self.store, companion_id, "").await;
+            let _ = set_active_thread_ptr(&self.store, companion_id, None).await;
         }
         Ok(pruned)
     }
@@ -722,7 +740,7 @@ impl CompanionThreads {
         }
         self.store.delete_companion_thread(conversation_id).await?;
         if active_thread_ptr(&self.store, companion_id).await?.as_deref() == Some(conversation_id) {
-            let _ = set_active_thread_ptr(&self.store, companion_id, "").await;
+            let _ = set_active_thread_ptr(&self.store, companion_id, None).await;
         }
         if let Some(ws) = workspace {
             match std::fs::remove_dir_all(&ws) {
@@ -829,8 +847,7 @@ impl CompanionStoreSink {
         if let Ok(Some(companion_id)) = self.store.thread_companion_id(conversation_id).await {
             return Some(companion_id);
         }
-        let default = self.config.read().await.default_companion_id.clone();
-        (!default.is_empty()).then_some(default)
+        self.config.read().await.default_companion_id.clone()
     }
 }
 
@@ -970,6 +987,16 @@ mod tests {
     use nomifun_realtime::BroadcastEventBus;
     use tokio::sync::RwLock;
 
+    fn companion_fixture(sequence: u64) -> String {
+        let raw = format!("companion_0190f5fe-7c00-7a00-8abc-{sequence:012}");
+        nomifun_common::CompanionId::try_from(raw.as_str()).unwrap().into_string()
+    }
+
+    fn conversation_fixture(sequence: u64) -> String {
+        let raw = format!("conv_0190f5fe-7c00-7a00-8abc-{sequence:012}");
+        nomifun_common::ConversationId::try_from(raw.as_str()).unwrap().into_string()
+    }
+
     #[test]
     fn mirror_memory_to_nomi_writes_a_file_and_indexes_it() {
         let dir = tempfile::tempdir().unwrap();
@@ -1015,36 +1042,40 @@ mod tests {
     async fn sink_save_recall_roundtrip_with_dedup() {
         let dir = tempfile::tempdir().unwrap();
         let store = CompanionStore::open_memory().await.unwrap();
-        store.insert_companion_thread("conv_owned", "companion_owner", "聊").await.unwrap();
+        let owned_conversation = conversation_fixture(1);
+        let unknown_conversation = conversation_fixture(2);
+        let owner = companion_fixture(1);
+        let default_companion = companion_fixture(2);
+        store.insert_companion_thread(&owned_conversation, &owner, "聊").await.unwrap();
         let mut config = SharedCompanionConfig::default();
-        config.default_companion_id = "companion_def".into();
+        config.default_companion_id = Some(default_companion.clone());
         let s = sink(dir.path(), store.clone(), config);
 
-        let saved = s.save("conv_owned", "preference", "主人喜欢先结论后细节", &[]).await.unwrap();
+        let saved = s.save(&owned_conversation, "preference", "主人喜欢先结论后细节", &[]).await.unwrap();
         assert!(saved.contains("已保存"));
         assert_eq!(store.count_memories("active").await.unwrap(), 1);
         // XP credited to the owning companion, not the default and not globally.
-        assert_eq!(store.get_companion_state_i64("companion_owner", "xp").await.unwrap(), 5);
-        assert_eq!(store.get_companion_state_i64("companion_def", "xp").await.unwrap(), 0);
+        assert_eq!(store.get_companion_state_i64(&owner, "xp").await.unwrap(), 5);
+        assert_eq!(store.get_companion_state_i64(&default_companion, "xp").await.unwrap(), 0);
         assert_eq!(store.get_state_i64("xp").await.unwrap(), 0);
 
-        let dup = s.save("conv_owned", "preference", "主人喜欢先结论后细节", &[]).await.unwrap();
+        let dup = s.save(&owned_conversation, "preference", "主人喜欢先结论后细节", &[]).await.unwrap();
         assert!(dup.contains("相似"));
         assert_eq!(store.count_memories("active").await.unwrap(), 1);
-        assert_eq!(store.get_companion_state_i64("companion_owner", "xp").await.unwrap(), 5);
+        assert_eq!(store.get_companion_state_i64(&owner, "xp").await.unwrap(), 5);
 
         // Unregistered conversation falls back to the default companion.
-        let other = s.save("conv_unknown", "knowledge", "cargo check 是门禁", &[]).await.unwrap();
+        let other = s.save(&unknown_conversation, "knowledge", "cargo check 是门禁", &[]).await.unwrap();
         assert!(other.contains("已保存"));
-        assert_eq!(store.get_companion_state_i64("companion_def", "xp").await.unwrap(), 5);
+        assert_eq!(store.get_companion_state_i64(&default_companion, "xp").await.unwrap(), 5);
 
-        let hits = s.recall("conv_owned", "结论", None, false).await.unwrap();
+        let hits = s.recall(&owned_conversation, "结论", None, false).await.unwrap();
         assert!(hits.contains("先结论后细节"));
-        let miss = s.recall("conv_owned", "不存在xyz", None, false).await.unwrap();
+        let miss = s.recall(&owned_conversation, "不存在xyz", None, false).await.unwrap();
         assert!(miss.contains("没有找到"));
 
-        assert!(s.save("conv_owned", "bogus", "x", &[]).await.is_err());
-        assert!(s.save("conv_owned", "task", "  ", &[]).await.is_err());
+        assert!(s.save(&owned_conversation, "bogus", "x", &[]).await.is_err());
+        assert!(s.save(&owned_conversation, "task", "  ", &[]).await.is_err());
     }
 
     #[tokio::test]
@@ -1052,7 +1083,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = CompanionStore::open_memory().await.unwrap();
         let s = sink(dir.path(), store.clone(), SharedCompanionConfig::default());
-        let saved = s.save("conv_nobody", "task", "明天修 bug", &[]).await.unwrap();
+        let saved = s.save(&conversation_fixture(3), "task", "明天修 bug", &[]).await.unwrap();
         assert!(saved.contains("已保存"));
         assert_eq!(store.get_state_i64("xp").await.unwrap(), 0);
     }
@@ -1142,7 +1173,7 @@ mod tests {
         let store = CompanionStore::open_memory().await.unwrap();
         let profile = CompanionProfileConfig::new("毛球", "ink");
         // Seed one archived day-digest for this companion.
-        let w = store.ensure_open_window(&profile.id, "conv1", 0).await.unwrap();
+        let w = store.ensure_open_window(&profile.id, &conversation_fixture(5), 0).await.unwrap();
         store
             .close_window(&w.id, "archived", Some("今天陪主人修了一下午 Rust 编译错误"), None, 20)
             .await
@@ -1263,7 +1294,7 @@ mod tests {
             .await
             .unwrap();
         let s = sink(dir.path(), store, SharedCompanionConfig::default());
-        let hits = s.recall("conv_x", "导出", None, false).await.unwrap();
+        let hits = s.recall(&conversation_fixture(4), "导出", None, false).await.unwrap();
         let today = format_date(nomifun_common::now_ms());
         assert!(hits.contains(&format!("[{today}|task|")), "recall lines must be dated: {hits}");
     }
@@ -1271,15 +1302,20 @@ mod tests {
     #[tokio::test]
     async fn active_thread_pointer_is_isolated_per_companion() {
         let store = CompanionStore::open_memory().await.unwrap();
-        set_active_thread_ptr(&store, "companion_1", "conv_a").await.unwrap();
-        set_active_thread_ptr(&store, "companion_2", "conv_b").await.unwrap();
-        assert_eq!(active_thread_ptr(&store, "companion_1").await.unwrap().as_deref(), Some("conv_a"));
-        assert_eq!(active_thread_ptr(&store, "companion_2").await.unwrap().as_deref(), Some("conv_b"));
+        let companion_a = companion_fixture(1);
+        let companion_b = companion_fixture(2);
+        let companion_unknown = companion_fixture(3);
+        let conversation_a = conversation_fixture(1);
+        let conversation_b = conversation_fixture(2);
+        set_active_thread_ptr(&store, &companion_a, Some(&conversation_a)).await.unwrap();
+        set_active_thread_ptr(&store, &companion_b, Some(&conversation_b)).await.unwrap();
+        assert_eq!(active_thread_ptr(&store, &companion_a).await.unwrap().as_deref(), Some(conversation_a.as_str()));
+        assert_eq!(active_thread_ptr(&store, &companion_b).await.unwrap().as_deref(), Some(conversation_b.as_str()));
         // Clearing one companion's pointer never touches the other's.
-        set_active_thread_ptr(&store, "companion_1", "").await.unwrap();
-        assert_eq!(active_thread_ptr(&store, "companion_1").await.unwrap().as_deref(), Some(""));
-        assert_eq!(active_thread_ptr(&store, "companion_2").await.unwrap().as_deref(), Some("conv_b"));
+        set_active_thread_ptr(&store, &companion_a, None).await.unwrap();
+        assert_eq!(active_thread_ptr(&store, &companion_a).await.unwrap(), None);
+        assert_eq!(active_thread_ptr(&store, &companion_b).await.unwrap().as_deref(), Some(conversation_b.as_str()));
         // Unknown companions read back as unset.
-        assert_eq!(active_thread_ptr(&store, "companion_3").await.unwrap(), None);
+        assert_eq!(active_thread_ptr(&store, &companion_unknown).await.unwrap(), None);
     }
 }

@@ -32,7 +32,7 @@ use crate::config::{AppConfig, load_or_create_data_encryption_key};
 pub struct AppServices {
     pub database: Database,
     /// Canonical owner of every installation-scoped resource. Resolved once
-    /// from the seeded system-user row at boot; usernames are mutable display
+    /// through `installation_identity` at boot; usernames are mutable display
     /// data and must never be used as an authorization identity.
     pub authoritative_user_id: Arc<str>,
     pub jwt_service: Arc<JwtService>,
@@ -121,7 +121,7 @@ pub struct AppServices {
     pub(crate) _knowledge_mcp_server: Option<nomifun_knowledge::KnowledgeMcpServer>,
     /// Singleton companion service (nomi desktop companion). Built before the agent
     /// factory so the factory can register the companion memory tools for
-    /// companionSession conversations; the router reuses this same instance.
+    /// companion_session conversations; the router reuses this same instance.
     pub companion_service: Arc<nomifun_companion::CompanionService>,
     /// Singleton public-companion (对外伙伴) service — the enterprise external-
     /// service domain, entirely separate from `companion_service`. Owns its own
@@ -210,27 +210,25 @@ impl AppServices {
         });
         let companion_token_validator = Arc::new(CompanionTokenValidator::new(initial_tokens));
 
-        // Resolve JWT secret: env var → system user db field → random generation
+        // Resolve JWT secret: env var → installation-owner DB field → random generation
         let env_secret = std::env::var("JWT_SECRET").ok();
-        let system_user = user_repo
+        let installation_owner = user_repo
             .get_system_user()
             .await
-            .map_err(|e| anyhow::anyhow!("Failed to get system user: {e}"))?
+            .map_err(|e| anyhow::anyhow!("Failed to get installation owner: {e}"))?
             .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "Database invariant violated: canonical system user is missing"
-                )
+                anyhow::anyhow!("Database invariant violated: installation owner is missing")
             })?;
-        let authoritative_user_id: Arc<str> = Arc::from(system_user.id.as_str());
+        let authoritative_user_id: Arc<str> = Arc::from(installation_owner.id.as_str());
 
-        let db_secret = system_user.jwt_secret.as_deref().filter(|s| !s.is_empty());
+        let db_secret = installation_owner.jwt_secret.as_deref().filter(|s| !s.is_empty());
 
         let (secret, is_new) = resolve_jwt_secret(env_secret.as_deref(), db_secret);
 
         // Persist newly generated secret to database
         if is_new {
             user_repo
-                .update_jwt_secret(&system_user.id, &secret)
+                .update_jwt_secret(&installation_owner.id, &secret)
                 .await
                 .map_err(|e| anyhow::anyhow!("Failed to persist JWT secret: {e}"))?;
             tracing::info!("Generated and persisted new JWT secret");
@@ -267,10 +265,11 @@ impl AppServices {
         // have no row and remain completely cold; existing local-model users
         // regain their installed/active state and loopback endpoint at boot.
         if provider_repo
-            .find_by_id(nomifun_system::LOCAL_MODEL_PROVIDER_ID)
+            .list()
             .await
             .map_err(|error| anyhow::anyhow!("Failed to inspect local-model opt-in state: {error}"))?
-            .is_some()
+            .iter()
+            .any(|row| row.platform == nomifun_system::LOCAL_MODEL_PLATFORM)
             && let Err(error) = lazy_local_model_runtime.start().await
         {
             tracing::warn!(error = %error, "Previously enabled local model service is unavailable");
@@ -299,6 +298,10 @@ impl AppServices {
                 move |status| {
                     let profile_repo = profile_repo.clone();
                     async move {
+                        let Some(provider_id) = status.provider_id.as_deref() else {
+                            tracing::warn!("Managed free-model refresh returned no provider id");
+                            return;
+                        };
                         let models = status
                             .models
                             .iter()
@@ -306,8 +309,8 @@ impl AppServices {
                             .collect::<Vec<_>>();
                         match nomifun_system::seed_missing_inferred_profiles(
                             profile_repo.as_ref(),
-                            nomifun_system::FREE_MODEL_PROVIDER_ID,
-                            nomifun_system::FREE_MODEL_PROVIDER_ID,
+                            provider_id,
+                            nomifun_system::FREE_MODEL_PLATFORM,
                             &models,
                         )
                         .await
@@ -667,7 +670,7 @@ impl AppServices {
 
         // Companion service (nomi companion): built BEFORE the agent factory so the
         // factory gets the companion memory sink (recall/save memory tools for
-        // companionSession conversations). The companion router state reuses this same
+        // companion_session conversations). The companion router state reuses this same
         // instance via `services.companion_service`.
         let companion_completer: Arc<dyn nomifun_companion::learner::CompanionCompleter> =
             Arc::new(nomifun_companion::learner::LiveCompanionCompleter {
@@ -735,6 +738,8 @@ impl AppServices {
             if !seed.is_empty() && companion_token_validator.resolve(seed).is_none() {
                 match companion_service.default_companion_id().await {
                     Some(default_id) => {
+                        let default_id = nomifun_common::CompanionId::parse(default_id)
+                            .map_err(|error| anyhow::anyhow!("default companion has invalid id: {error}"))?;
                         let hash = nomifun_auth::token_sha256_hex(seed);
                         if let Err(e) = companion_token_repo
                             .upsert_for_companion(&default_id, &hash)
@@ -949,29 +954,26 @@ mod tests {
         let services = AppServices::from_config(db, &config).await.unwrap();
 
         // JWT service should be functional
-        let token = services.jwt_service.sign("test_user", "testuser").unwrap();
+        let test_user_id = "user_0190f5fe-7c00-7a00-8000-000000000001";
+        let token = services.jwt_service.sign(test_user_id, "testuser").unwrap();
         let payload = services.jwt_service.verify(&token).unwrap();
-        assert_eq!(payload.user_id, "test_user");
+        assert_eq!(payload.user_id.as_str(), test_user_id);
 
-        // User repo should have system user
+        // The installation owner exists but has no login credential yet.
         let has_users = services.user_repo.has_users().await.unwrap();
-        assert!(!has_users); // system user has empty password → not counted
+        assert!(!has_users); // empty owner password → not counted
 
         // Fresh boot does not initialize local AI, create its provider, or
         // start the loopback facade.
         assert!(!services.lazy_local_model_runtime.is_started());
-        let local_provider = services
+        let has_local_provider = services
             .provider_repo
-            .find_by_id(nomifun_system::LOCAL_MODEL_PROVIDER_ID)
+            .list()
             .await
-            .unwrap();
-        assert!(local_provider.is_none());
-        let local_profiles = services
-            .model_profile_repo
-            .list_for_provider(nomifun_system::LOCAL_MODEL_PROVIDER_ID)
-            .await
-            .unwrap();
-        assert!(local_profiles.is_empty());
+            .unwrap()
+            .iter()
+            .any(|row| row.platform == nomifun_system::LOCAL_MODEL_PLATFORM);
+        assert!(!has_local_provider);
 
         services.database.close().await;
     }
@@ -983,9 +985,9 @@ mod tests {
         let config = test_config(tmp.path());
         let services = AppServices::from_config(db, &config).await.unwrap();
 
-        // System user should now have a jwt_secret persisted
-        let system_user = services.user_repo.get_system_user().await.unwrap();
-        let jwt_secret = system_user.unwrap().jwt_secret;
+        // The installation owner should now have a persisted jwt_secret.
+        let installation_owner = services.user_repo.get_system_user().await.unwrap();
+        let jwt_secret = installation_owner.unwrap().jwt_secret;
         assert!(jwt_secret.is_some());
         assert!(!jwt_secret.unwrap().is_empty());
 

@@ -17,7 +17,7 @@ use async_trait::async_trait;
 /// the conversation row no longer exists.
 #[async_trait]
 pub trait OnConversationDelete: Send + Sync {
-    async fn on_conversation_deleted(&self, user_id: &str, conversation_id: i64);
+    async fn on_conversation_deleted(&self, user_id: &str, conversation_id: &str);
 }
 
 /// Notified when a terminal session row is deleted via
@@ -36,7 +36,7 @@ pub trait OnConversationDelete: Send + Sync {
 /// itself is gone.
 #[async_trait]
 pub trait OnTerminalDelete: Send + Sync {
-    async fn on_terminal_deleted(&self, user_id: &str, terminal_id: i64);
+    async fn on_terminal_deleted(&self, user_id: &str, terminal_id: &str);
 }
 
 /// Creates a tracked requirement from an inbound channel message (the opt-in

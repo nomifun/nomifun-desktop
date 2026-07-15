@@ -4,7 +4,9 @@ use std::time::{Duration, Instant};
 
 use dashmap::DashMap;
 use nomifun_api_types::{PluginStatusChangedPayload, PluginStatusResponse, WebSocketMessage};
-use nomifun_common::{decrypt_string, encrypt_string, generate_prefixed_id, now_ms};
+use nomifun_common::{
+    ChannelId, CompanionId, PublicAgentId, decrypt_string, encrypt_string, now_ms,
+};
 use nomifun_db::models::ChannelPluginRow;
 use nomifun_db::{IChannelRepository, UpdatePluginStatusParams};
 use nomifun_realtime::UserEventSink;
@@ -39,8 +41,7 @@ pub struct ChannelManager {
     owner_id: Arc<str>,
     user_events: Arc<dyn UserEventSink>,
     encryption_key: [u8; 32],
-    /// Active plugin instances keyed by `channel_plugins.id` (row id, not
-    /// platform — legacy rows keep `id == platform`).
+    /// Active plugin instances keyed by the canonical `channel_plugins.id`.
     plugins: DashMap<String, Box<dyn ChannelPlugin>>,
     /// Sender for incoming messages from all plugins, stamped with their
     /// channel row id. The `ChannelMessageLoop` holds the receiving end.
@@ -61,8 +62,7 @@ pub type PluginFactory = Box<dyn Fn(PluginType) -> Option<Box<dyn ChannelPlugin>
 
 /// How a channel row is addressed by `enable_plugin`.
 ///
-/// - `plugin_id` set: update that row (legacy callers pass the platform
-///   name, which doubles as the legacy row id).
+/// - canonical `plugin_id` set: update that row;
 /// - `plugin_id` unset + `plugin_type` set: create a new row with a
 ///   generated `chn_` id — this is the per-companion multi-bot path.
 /// - `companion_id`: bind the bot to a companion; `None` keeps the row's binding.
@@ -78,10 +78,10 @@ pub struct EnableChannelSpec {
 }
 
 impl EnableChannelSpec {
-    /// Legacy addressing: plugin id == platform name.
-    pub fn legacy(plugin_id: &str) -> Self {
+    /// Convenience constructor for creating a row by platform type.
+    pub fn legacy(plugin_type: &str) -> Self {
         Self {
-            plugin_id: Some(plugin_id.to_owned()),
+            plugin_type: Some(plugin_type.to_owned()),
             ..Default::default()
         }
     }
@@ -151,6 +151,46 @@ impl WatchdogState {
 }
 
 impl ChannelManager {
+    fn validate_persisted_row(row: &ChannelPluginRow) -> Result<(), ChannelError> {
+        ChannelId::parse(&row.id).map_err(|error| {
+            ChannelError::InvalidConfig(format!(
+                "stored channel row has invalid id '{}': {error}",
+                row.id
+            ))
+        })?;
+        if let Some(id) = row.companion_id.as_deref() {
+            CompanionId::parse(id).map_err(|error| {
+                ChannelError::InvalidConfig(format!(
+                    "stored channel '{}' has invalid companion_id '{id}': {error}",
+                    row.id
+                ))
+            })?;
+        }
+        if let Some(id) = row.public_agent_id.as_deref() {
+            PublicAgentId::parse(id).map_err(|error| {
+                ChannelError::InvalidConfig(format!(
+                    "stored channel '{}' has invalid public_agent_id '{id}': {error}",
+                    row.id
+                ))
+            })?;
+        }
+        Ok(())
+    }
+
+    fn validate_channel_id(id: &str) -> Result<(), ChannelError> {
+        ChannelId::parse(id).map(|_| ()).map_err(|error| {
+            ChannelError::InvalidConfig(format!("invalid channel id '{id}': {error}"))
+        })
+    }
+
+    async fn load_all_plugin_rows(&self) -> Result<Vec<ChannelPluginRow>, ChannelError> {
+        let rows = self.repo.get_all_plugins().await?;
+        for row in &rows {
+            Self::validate_persisted_row(row)?;
+        }
+        Ok(rows)
+    }
+
     /// Creates a new `ChannelManager`.
     ///
     /// # Arguments
@@ -183,7 +223,7 @@ impl ChannelManager {
     ///
     /// Merges DB state with live runtime status for active plugins.
     pub async fn get_plugin_status(&self) -> Result<Vec<PluginStatusResponse>, ChannelError> {
-        let rows = self.repo.get_all_plugins().await?;
+        let rows = self.load_all_plugin_rows().await?;
         let statuses: Vec<PluginStatusResponse> = rows
             .into_iter()
             .map(|row| {
@@ -206,12 +246,28 @@ impl ChannelManager {
         config_value: &serde_json::Value,
         factory: &PluginFactory,
     ) -> Result<String, ChannelError> {
-        // Resolve the target row: existing row id > legacy platform-named
-        // create > explicit-type create with a generated id.
+        // Entity references and platform natural keys are deliberately
+        // separate: `plugin_id` addresses a row, `plugin_type` creates one.
+        let requested_type = spec.plugin_type.as_deref();
         let existing = match spec.plugin_id.as_deref() {
-            Some(id) => self.repo.get_plugin(id).await?,
+            Some(id) => {
+                Self::validate_channel_id(id)?;
+                let row = self.repo.get_plugin(id).await?;
+                if let Some(row) = row.as_ref() {
+                    Self::validate_persisted_row(row)?;
+                }
+                row
+            }
             None => None,
         };
+        if let Some(id) = spec
+            .plugin_id
+            .as_deref()
+            .filter(|id| ChannelId::parse(*id).is_ok())
+            && existing.is_none()
+        {
+            return Err(ChannelError::PluginNotFound(id.to_owned()));
+        }
         let (mut row_id, plugin_type, mut created_at, mut prior_companion, mut prior_public_agent) =
             match (&existing, spec.plugin_id.as_deref()) {
                 (Some(row), _) => {
@@ -226,18 +282,21 @@ impl ChannelManager {
                     )
                 }
                 (None, Some(id)) => {
-                    let pt =
-                        PluginType::from_str_opt(id).ok_or_else(|| ChannelError::InvalidPluginType(id.to_owned()))?;
-                    (id.to_owned(), pt, now_ms(), None, None)
+                    let type_str = requested_type.ok_or_else(|| {
+                        ChannelError::InvalidConfig(format!(
+                            "plugin_type is required when channel '{id}' does not exist"
+                        ))
+                    })?;
+                    let pt = PluginType::from_str_opt(type_str)
+                        .ok_or_else(|| ChannelError::InvalidPluginType(type_str.to_owned()))?;
+                    (ChannelId::new().into_string(), pt, now_ms(), None, None)
                 }
                 (None, None) => {
-                    let type_str = spec
-                        .plugin_type
-                        .as_deref()
+                    let type_str = requested_type
                         .ok_or_else(|| ChannelError::InvalidConfig("plugin_type is required to create a channel".into()))?;
                     let pt = PluginType::from_str_opt(type_str)
                         .ok_or_else(|| ChannelError::InvalidPluginType(type_str.to_owned()))?;
-                    (generate_prefixed_id("chn"), pt, now_ms(), None, None)
+                    (ChannelId::new().into_string(), pt, now_ms(), None, None)
                 }
             };
 
@@ -251,8 +310,7 @@ impl ChannelManager {
         let bot_key = bot_key_for(plugin_type, &config.credentials);
         if let Some(key) = bot_key.as_deref() {
             let clash = self
-                .repo
-                .get_all_plugins()
+                .load_all_plugin_rows()
                 .await?
                 .into_iter()
                 .find(|r| r.id != row_id && r.r#type == plugin_type.to_string() && r.bot_key.as_deref() == Some(key));
@@ -301,6 +359,16 @@ impl ChannelManager {
             .as_deref()
             .map(str::trim)
             .filter(|s| !s.is_empty());
+        if let Some(id) = spec_companion {
+            CompanionId::parse(id).map_err(|error| {
+                ChannelError::InvalidConfig(format!("invalid companion_id '{id}': {error}"))
+            })?;
+        }
+        if let Some(id) = spec_public_agent {
+            PublicAgentId::parse(id).map_err(|error| {
+                ChannelError::InvalidConfig(format!("invalid public_agent_id '{id}': {error}"))
+            })?;
+        }
         let (companion_id, public_agent_id) = if let Some(pa) = spec_public_agent {
             (None, Some(pa.to_owned()))
         } else if let Some(comp) = spec_companion {
@@ -365,12 +433,36 @@ impl ChannelManager {
     /// can behave consistently and survive restarts.
     pub async fn enable_extension_plugin(
         &self,
-        plugin_id: &str,
+        plugin_type: &str,
         plugin_name: &str,
         config: &PluginConfig,
-    ) -> Result<(), ChannelError> {
-        if self.plugins.contains_key(plugin_id) {
-            self.stop_plugin(plugin_id).await;
+    ) -> Result<String, ChannelError> {
+        let matching_rows: Vec<_> = self
+            .load_all_plugin_rows()
+            .await?
+            .into_iter()
+            .filter(|row| row.r#type == plugin_type)
+            .collect();
+        if matching_rows.len() > 1 {
+            return Err(ChannelError::InvalidConfig(format!(
+                "extension plugin type '{plugin_type}' has multiple channel rows"
+            )));
+        }
+        let existing = matching_rows.into_iter().next();
+        let row_id = match existing.as_ref() {
+            Some(row) => ChannelId::parse(&row.id)
+                .map_err(|error| {
+                    ChannelError::InvalidConfig(format!(
+                        "extension channel row has invalid id '{}': {error}",
+                        row.id
+                    ))
+                })?
+                .into_string(),
+            None => ChannelId::new().into_string(),
+        };
+
+        if self.plugins.contains_key(&row_id) {
+            self.stop_plugin(&row_id).await;
         }
 
         let config_json = serde_json::to_string(config)?;
@@ -378,10 +470,9 @@ impl ChannelManager {
             .map_err(|e| ChannelError::EncryptionFailed(e.to_string()))?;
 
         let now = now_ms();
-        let existing = self.repo.get_plugin(plugin_id).await?;
         let row = ChannelPluginRow {
-            id: plugin_id.to_owned(),
-            r#type: plugin_id.to_owned(),
+            id: row_id.clone(),
+            r#type: plugin_type.to_owned(),
             name: plugin_name.to_owned(),
             enabled: true,
             config: encrypted_config,
@@ -395,9 +486,9 @@ impl ChannelManager {
         };
         self.repo.upsert_plugin(&row).await?;
 
-        info!(plugin_id = %plugin_id, "extension plugin enabled (metadata-only mode)");
-        self.broadcast_status_change(plugin_id).await;
-        Ok(())
+        info!(plugin_id = %row_id, plugin_type = %plugin_type, "extension plugin enabled (metadata-only mode)");
+        self.broadcast_status_change(&row_id).await;
+        Ok(row_id)
     }
 
     /// Disables a plugin: stops the connection, updates DB, and removes
@@ -405,6 +496,7 @@ impl ChannelManager {
     ///
     /// Idempotent — disabling an already-disabled plugin is a no-op.
     pub async fn disable_plugin(&self, plugin_id: &str) -> Result<(), ChannelError> {
+        Self::validate_channel_id(plugin_id)?;
         // Stop running instance if any
         self.stop_plugin(plugin_id).await;
 
@@ -425,6 +517,7 @@ impl ChannelManager {
     /// its sessions, removes the row, and broadcasts the change. The bot's
     /// conversations survive (they belong to the conversation domain).
     pub async fn delete_channel(&self, plugin_id: &str) -> Result<(), ChannelError> {
+        Self::validate_channel_id(plugin_id)?;
         let row = self
             .repo
             .get_plugin(plugin_id)
@@ -451,6 +544,12 @@ impl ChannelManager {
     /// channel's sessions so the next inbound message recreates its
     /// conversation under the new binding.
     pub async fn rebind_channel_companion(&self, plugin_id: &str, companion_id: Option<&str>) -> Result<(), ChannelError> {
+        Self::validate_channel_id(plugin_id)?;
+        if let Some(id) = companion_id {
+            CompanionId::parse(id).map_err(|error| {
+                ChannelError::InvalidConfig(format!("invalid companion_id '{id}': {error}"))
+            })?;
+        }
         self.repo.update_plugin_companion(plugin_id, companion_id).await?;
         self.repo.delete_sessions_by_channel(plugin_id).await?;
         self.broadcast_status_change(plugin_id).await;
@@ -470,6 +569,12 @@ impl ChannelManager {
         plugin_id: &str,
         public_agent_id: Option<&str>,
     ) -> Result<(), ChannelError> {
+        Self::validate_channel_id(plugin_id)?;
+        if let Some(id) = public_agent_id {
+            PublicAgentId::parse(id).map_err(|error| {
+                ChannelError::InvalidConfig(format!("invalid public_agent_id '{id}': {error}"))
+            })?;
+        }
         self.repo.update_plugin_public_agent(plugin_id, public_agent_id).await?;
         self.repo.delete_sessions_by_channel(plugin_id).await?;
         self.broadcast_status_change(plugin_id).await;
@@ -490,12 +595,11 @@ impl ChannelManager {
     /// `rebind_channel_companion` / `delete_channel` use. Failures are logged and
     /// skipped rather than aborting the whole sweep.
     pub async fn clear_sessions_for_companion(&self, companion_id: &str) {
-        let companion_id = companion_id.trim();
-        if companion_id.is_empty() {
+        if CompanionId::parse(companion_id).is_err() {
+            warn!(companion_id, "clear_sessions_for_companion: invalid companion id");
             return;
         }
-
-        let rows = match self.repo.get_all_plugins().await {
+        let rows = match self.load_all_plugin_rows().await {
             Ok(rows) => rows,
             Err(e) => {
                 warn!(companion_id = %companion_id, error = %e, "clear_sessions_for_companion: failed to list plugins");
@@ -528,12 +632,11 @@ impl ChannelManager {
     /// companion, then clears those channels' sessions. This prevents ghost
     /// `companion_id`s from reserving bot identities after the owner is gone.
     pub async fn unbind_channels_for_deleted_companion(&self, companion_id: &str) {
-        let companion_id = companion_id.trim();
-        if companion_id.is_empty() {
+        if CompanionId::parse(companion_id).is_err() {
+            warn!(companion_id, "unbind_channels_for_deleted_companion: invalid companion id");
             return;
         }
-
-        let rows = match self.repo.get_all_plugins().await {
+        let rows = match self.load_all_plugin_rows().await {
             Ok(rows) => rows,
             Err(e) => {
                 warn!(companion_id = %companion_id, error = %e, "unbind_channels_for_deleted_companion: failed to list plugins");
@@ -584,7 +687,7 @@ impl ChannelManager {
         live_companions: &HashSet<String>,
         live_public_agents: &HashSet<String>,
     ) {
-        let rows = match self.repo.get_all_plugins().await {
+        let rows = match self.load_all_plugin_rows().await {
             Ok(rows) => rows,
             Err(e) => {
                 warn!(error = %e, "reconcile_orphaned_owners: failed to list plugins");
@@ -672,7 +775,7 @@ impl ChannelManager {
     /// individual plugins are logged but don't prevent other plugins
     /// from starting.
     pub async fn restore_plugins(&self, factory: &PluginFactory) -> Result<(), ChannelError> {
-        let rows = self.repo.get_all_plugins().await?;
+        let rows = self.load_all_plugin_rows().await?;
 
         for row in &rows {
             if row.bot_key.is_none() {
@@ -748,6 +851,7 @@ impl ChannelManager {
         chat_id: &str,
         message: crate::types::UnifiedOutgoingMessage,
     ) -> Result<String, ChannelError> {
+        Self::validate_channel_id(plugin_id)?;
         let plugin = self
             .plugins
             .get(plugin_id)
@@ -763,6 +867,7 @@ impl ChannelManager {
         message_id: &str,
         message: crate::types::UnifiedOutgoingMessage,
     ) -> Result<(), ChannelError> {
+        Self::validate_channel_id(plugin_id)?;
         let plugin = self
             .plugins
             .get(plugin_id)
@@ -778,6 +883,7 @@ impl ChannelManager {
         media: crate::types::OutgoingMedia,
         caption: Option<&str>,
     ) -> Result<String, ChannelError> {
+        Self::validate_channel_id(plugin_id)?;
         let plugin = self
             .plugins
             .get(plugin_id)
@@ -1230,10 +1336,29 @@ mod tests {
     use crate::types::{
         BotInfo, OutgoingMessageType, PluginCredentials, PluginStatus, PluginType, UnifiedOutgoingMessage,
     };
-    use nomifun_common::TimestampMs;
+    use nomifun_common::{ChannelId, TimestampMs};
     use nomifun_db::models::{ChannelSessionRow, ChannelUserRow, ChannelPluginRow, ChannelPairingCodeRow};
     use nomifun_db::{DbError, IChannelRepository, UpdatePluginStatusParams};
     use std::sync::Mutex;
+
+    const OWNER_ID: &str = "user_018f1234-5678-7abc-8def-012345678900";
+    const COMPANION_A: &str = "companion_018f1234-5678-7abc-8def-012345678901";
+    const COMPANION_B: &str = "companion_018f1234-5678-7abc-8def-012345678902";
+    const COMPANION_Z: &str = "companion_018f1234-5678-7abc-8def-012345678903";
+    const COMPANION_LIVE: &str = "companion_018f1234-5678-7abc-8def-012345678904";
+    const COMPANION_GHOST: &str = "companion_018f1234-5678-7abc-8def-012345678905";
+    const PUBLIC_AGENT_A: &str = "pubagent_018f1234-5678-7abc-8def-012345678906";
+    const PUBLIC_AGENT_Z: &str = "pubagent_018f1234-5678-7abc-8def-012345678907";
+    const PUBLIC_AGENT_GHOST: &str = "pubagent_018f1234-5678-7abc-8def-012345678908";
+
+    fn platform_spec(plugin_type: &str) -> EnableChannelSpec {
+        EnableChannelSpec {
+            plugin_id: None,
+            plugin_type: Some(plugin_type.to_owned()),
+            companion_id: None,
+            public_agent_id: None,
+        }
+    }
 
     // ── Mock owner-scoped event sink ───────────────────────────────────
 
@@ -1417,7 +1542,7 @@ mod tests {
         async fn update_session_activity(&self, _id: &str, _la: TimestampMs) -> Result<(), DbError> {
             Ok(())
         }
-        async fn update_session_conversation(&self, _id: &str, _cid: i64) -> Result<(), DbError> {
+        async fn update_session_conversation(&self, _id: &str, _cid: &str) -> Result<(), DbError> {
             Ok(())
         }
         async fn update_session_agent_type(&self, _id: &str, _at: &str) -> Result<(), DbError> {
@@ -1592,7 +1717,7 @@ mod tests {
         let mgr = ChannelManager::new(
             repo.clone(),
             broadcaster.clone(),
-            "owner-a",
+            OWNER_ID,
             test_key(),
             msg_tx,
             confirm_tx,
@@ -1672,8 +1797,9 @@ mod tests {
     async fn get_status_returns_db_plugins() {
         let (mgr, repo, _bc) = make_manager();
         let now = now_ms();
+        let channel_id = ChannelId::new().into_string();
         repo.plugins.lock().unwrap().push(ChannelPluginRow {
-            id: "telegram".into(),
+            id: channel_id.clone(),
             r#type: "telegram".into(),
             name: "Telegram Bot".into(),
             enabled: true,
@@ -1689,7 +1815,7 @@ mod tests {
 
         let statuses = mgr.get_plugin_status().await.unwrap();
         assert_eq!(statuses.len(), 1);
-        assert_eq!(statuses[0].plugin_id, "telegram");
+        assert_eq!(statuses[0].plugin_id, channel_id);
         assert_eq!(statuses[0].plugin_type, "telegram");
         assert_eq!(statuses[0].name, "Telegram Bot");
         assert!(statuses[0].enabled);
@@ -1701,14 +1827,15 @@ mod tests {
         let factory = make_factory();
 
         // Enable the plugin (will set live status to Running)
-        mgr.enable_plugin(&EnableChannelSpec::legacy("telegram"), &make_test_config(), &factory)
+        let channel_id = mgr
+            .enable_plugin(&platform_spec("telegram"), &make_test_config(), &factory)
             .await
             .unwrap();
 
         // Manually set DB status to something different
         {
             let mut plugins = repo.plugins.lock().unwrap();
-            if let Some(p) = plugins.iter_mut().find(|p| p.id == "telegram") {
+            if let Some(p) = plugins.iter_mut().find(|p| p.id == channel_id) {
                 p.status = Some("stopped".into());
             }
         }
@@ -1726,13 +1853,14 @@ mod tests {
         let (mgr, repo, _bc) = make_manager();
         let factory = make_factory();
 
-        mgr.enable_plugin(&EnableChannelSpec::legacy("telegram"), &make_test_config(), &factory)
+        let channel_id = mgr
+            .enable_plugin(&platform_spec("telegram"), &make_test_config(), &factory)
             .await
             .unwrap();
 
         let plugins = repo.get_plugins();
         assert_eq!(plugins.len(), 1);
-        assert_eq!(plugins[0].id, "telegram");
+        assert_eq!(plugins[0].id, channel_id);
         assert!(plugins[0].enabled);
         // Config should be encrypted (base64), not plaintext
         assert_ne!(plugins[0].config, serde_json::to_string(&make_test_config()).unwrap());
@@ -1747,12 +1875,13 @@ mod tests {
         let (mgr, _repo, _bc) = make_manager();
         let factory = make_factory();
 
-        mgr.enable_plugin(&EnableChannelSpec::legacy("telegram"), &make_test_config(), &factory)
+        let channel_id = mgr
+            .enable_plugin(&platform_spec("telegram"), &make_test_config(), &factory)
             .await
             .unwrap();
 
         assert_eq!(mgr.active_plugin_count(), 1);
-        assert!(mgr.is_plugin_running("telegram"));
+        assert!(mgr.is_plugin_running(&channel_id));
     }
 
     #[tokio::test]
@@ -1760,7 +1889,8 @@ mod tests {
         let (mgr, _repo, bc) = make_manager();
         let factory = make_factory();
 
-        mgr.enable_plugin(&EnableChannelSpec::legacy("telegram"), &make_test_config(), &factory)
+        let channel_id = mgr
+            .enable_plugin(&platform_spec("telegram"), &make_test_config(), &factory)
             .await
             .unwrap();
 
@@ -1768,7 +1898,7 @@ mod tests {
         assert!(!events.is_empty());
         let last = events.last().unwrap();
         assert_eq!(last.name, "channel.plugin-status-changed");
-        assert_eq!(last.data["plugin_id"], "telegram");
+        assert_eq!(last.data["plugin_id"], channel_id);
     }
 
     #[tokio::test]
@@ -1776,13 +1906,23 @@ mod tests {
         let (mgr, _repo, _bc) = make_manager();
         let factory = make_factory();
 
-        mgr.enable_plugin(&EnableChannelSpec::legacy("telegram"), &make_test_config(), &factory)
+        let channel_id = mgr
+            .enable_plugin(&platform_spec("telegram"), &make_test_config(), &factory)
             .await
             .unwrap();
         assert_eq!(mgr.active_plugin_count(), 1);
 
         // Re-enable should replace (stop old, start new)
-        mgr.enable_plugin(&EnableChannelSpec::legacy("telegram"), &make_test_config(), &factory)
+        mgr.enable_plugin(
+            &EnableChannelSpec {
+                plugin_id: Some(channel_id),
+                plugin_type: Some("telegram".into()),
+                companion_id: None,
+                public_agent_id: None,
+            },
+            &make_test_config(),
+            &factory,
+        )
             .await
             .unwrap();
         assert_eq!(mgr.active_plugin_count(), 1);
@@ -1793,15 +1933,25 @@ mod tests {
         let (mgr, repo, _bc) = make_manager();
         let factory = make_factory();
 
-        mgr.enable_plugin(&EnableChannelSpec::legacy("telegram"), &make_test_config(), &factory)
+        let channel_id = mgr
+            .enable_plugin(&platform_spec("telegram"), &make_test_config(), &factory)
             .await
             .unwrap();
 
-        mgr.enable_plugin(&EnableChannelSpec::legacy("telegram"), &serde_json::json!({}), &factory)
+        mgr.enable_plugin(
+            &EnableChannelSpec {
+                plugin_id: Some(channel_id.clone()),
+                plugin_type: Some("telegram".into()),
+                companion_id: None,
+                public_agent_id: None,
+            },
+            &serde_json::json!({}),
+            &factory,
+        )
             .await
             .unwrap();
 
-        assert!(mgr.is_plugin_running("telegram"));
+        assert!(mgr.is_plugin_running(&channel_id));
         assert_eq!(mgr.active_plugin_count(), 1);
         assert_eq!(repo.get_plugins()[0].bot_key.as_deref(), Some("bot"));
     }
@@ -1812,7 +1962,7 @@ mod tests {
         let factory = make_factory();
 
         let err = mgr
-            .enable_plugin(&EnableChannelSpec::legacy("whatsapp"), &make_test_config(), &factory)
+            .enable_plugin(&platform_spec("whatsapp"), &make_test_config(), &factory)
             .await
             .unwrap_err();
         assert!(matches!(err, ChannelError::InvalidPluginType(_)));
@@ -1824,7 +1974,10 @@ mod tests {
         let factory = make_factory();
 
         let bad_config = serde_json::json!({ "wrong": "shape" });
-        let err = mgr.enable_plugin(&EnableChannelSpec::legacy("telegram"), &bad_config, &factory).await.unwrap_err();
+        let err = mgr
+            .enable_plugin(&platform_spec("telegram"), &bad_config, &factory)
+            .await
+            .unwrap_err();
         assert!(matches!(err, ChannelError::InvalidConfig(_)));
     }
 
@@ -1834,7 +1987,7 @@ mod tests {
         let factory = make_no_impl_factory();
 
         let err = mgr
-            .enable_plugin(&EnableChannelSpec::legacy("telegram"), &make_test_config(), &factory)
+            .enable_plugin(&platform_spec("telegram"), &make_test_config(), &factory)
             .await
             .unwrap_err();
         assert!(matches!(err, ChannelError::InvalidPluginType(_)));
@@ -1845,7 +1998,7 @@ mod tests {
         let (mgr, repo, _bc) = make_manager();
         let factory = make_failing_init_factory();
 
-        let err = mgr.enable_plugin(&EnableChannelSpec::legacy("telegram"), &make_test_config(), &factory).await;
+        let err = mgr.enable_plugin(&platform_spec("telegram"), &make_test_config(), &factory).await;
         assert!(err.is_err());
 
         // Plugin should not be in active map
@@ -1861,7 +2014,7 @@ mod tests {
         let (mgr, repo, _bc) = make_manager();
         let factory = make_failing_start_factory();
 
-        let err = mgr.enable_plugin(&EnableChannelSpec::legacy("telegram"), &make_test_config(), &factory).await;
+        let err = mgr.enable_plugin(&platform_spec("telegram"), &make_test_config(), &factory).await;
         assert!(err.is_err());
 
         assert_eq!(mgr.active_plugin_count(), 0);
@@ -1876,12 +2029,13 @@ mod tests {
         let (mgr, repo, _bc) = make_manager();
         let factory = make_factory();
 
-        mgr.enable_plugin(&EnableChannelSpec::legacy("telegram"), &make_test_config(), &factory)
+        let channel_id = mgr
+            .enable_plugin(&platform_spec("telegram"), &make_test_config(), &factory)
             .await
             .unwrap();
-        assert!(mgr.is_plugin_running("telegram"));
+        assert!(mgr.is_plugin_running(&channel_id));
 
-        mgr.disable_plugin("telegram").await.unwrap();
+        mgr.disable_plugin(&channel_id).await.unwrap();
 
         assert_eq!(mgr.active_plugin_count(), 0);
         let plugins = repo.get_plugins();
@@ -1894,12 +2048,13 @@ mod tests {
         let (mgr, _repo, bc) = make_manager();
         let factory = make_factory();
 
-        mgr.enable_plugin(&EnableChannelSpec::legacy("telegram"), &make_test_config(), &factory)
+        let channel_id = mgr
+            .enable_plugin(&platform_spec("telegram"), &make_test_config(), &factory)
             .await
             .unwrap();
         bc.take_events(); // clear enable events
 
-        mgr.disable_plugin("telegram").await.unwrap();
+        mgr.disable_plugin(&channel_id).await.unwrap();
 
         let events = bc.take_events();
         assert!(!events.is_empty());
@@ -1910,8 +2065,9 @@ mod tests {
     async fn disable_idempotent_for_not_running() {
         let (mgr, repo, _bc) = make_manager();
         // Manually insert a disabled plugin in DB
+        let channel_id = ChannelId::new().into_string();
         repo.plugins.lock().unwrap().push(ChannelPluginRow {
-            id: "telegram".into(),
+            id: channel_id.clone(),
             r#type: "telegram".into(),
             name: "Telegram Bot".into(),
             enabled: false,
@@ -1926,7 +2082,7 @@ mod tests {
         });
 
         // Should not error
-        mgr.disable_plugin("telegram").await.unwrap();
+        mgr.disable_plugin(&channel_id).await.unwrap();
         assert_eq!(mgr.active_plugin_count(), 0);
     }
 
@@ -1988,9 +2144,10 @@ mod tests {
 
         let config_json = serde_json::to_string(&make_plugin_config()).unwrap();
         let encrypted = encrypt_string(&config_json, &test_key()).unwrap();
+        let channel_id = ChannelId::new().into_string();
 
         repo.plugins.lock().unwrap().push(ChannelPluginRow {
-            id: "telegram".into(),
+            id: channel_id,
             r#type: "telegram".into(),
             name: "Telegram Bot".into(),
             enabled: false,
@@ -2015,9 +2172,10 @@ mod tests {
 
         let config_json = serde_json::to_string(&make_plugin_config()).unwrap();
         let encrypted = encrypt_string(&config_json, &test_key()).unwrap();
+        let channel_id = ChannelId::new().into_string();
 
         repo.plugins.lock().unwrap().push(ChannelPluginRow {
-            id: "telegram".into(),
+            id: channel_id.clone(),
             r#type: "telegram".into(),
             name: "Telegram Bot".into(),
             enabled: true,
@@ -2033,7 +2191,7 @@ mod tests {
 
         mgr.restore_plugins(&factory).await.unwrap();
         assert_eq!(mgr.active_plugin_count(), 1);
-        assert!(mgr.is_plugin_running("telegram"));
+        assert!(mgr.is_plugin_running(&channel_id));
     }
 
     #[tokio::test]
@@ -2042,12 +2200,14 @@ mod tests {
 
         let config_json = serde_json::to_string(&make_plugin_config()).unwrap();
         let encrypted = encrypt_string(&config_json, &test_key()).unwrap();
+        let telegram_id = ChannelId::new().into_string();
+        let lark_id = ChannelId::new().into_string();
 
         // One valid plugin and one with bad encrypted config
         {
             let mut plugins = repo.plugins.lock().unwrap();
             plugins.push(ChannelPluginRow {
-                id: "telegram".into(),
+                id: telegram_id.clone(),
                 r#type: "telegram".into(),
                 name: "Telegram Bot".into(),
                 enabled: true,
@@ -2061,7 +2221,7 @@ mod tests {
                 updated_at: now_ms(),
             });
             plugins.push(ChannelPluginRow {
-                id: "lark".into(),
+                id: lark_id.clone(),
                 r#type: "lark".into(),
                 name: "Lark Bot".into(),
                 enabled: true,
@@ -2081,12 +2241,12 @@ mod tests {
 
         // Telegram should have started, Lark should have failed
         assert_eq!(mgr.active_plugin_count(), 1);
-        assert!(mgr.is_plugin_running("telegram"));
-        assert!(!mgr.is_plugin_running("lark"));
+        assert!(mgr.is_plugin_running(&telegram_id));
+        assert!(!mgr.is_plugin_running(&lark_id));
 
         // Lark should have error status in DB
         let plugins = repo.get_plugins();
-        let lark = plugins.iter().find(|p| p.id == "lark").unwrap();
+        let lark = plugins.iter().find(|p| p.id == lark_id).unwrap();
         assert_eq!(lark.status.as_deref(), Some("error"));
     }
 
@@ -2105,7 +2265,7 @@ mod tests {
         let (mgr, _repo, _bc) = make_manager();
         let factory = make_factory();
 
-        mgr.enable_plugin(&EnableChannelSpec::legacy("telegram"), &make_test_config(), &factory)
+        mgr.enable_plugin(&platform_spec("telegram"), &make_test_config(), &factory)
             .await
             .unwrap();
 
@@ -2115,7 +2275,9 @@ mod tests {
                 "appSecret": "secret"
             }
         });
-        mgr.enable_plugin(&EnableChannelSpec::legacy("lark"), &lark_config, &factory).await.unwrap();
+        mgr.enable_plugin(&platform_spec("lark"), &lark_config, &factory)
+            .await
+            .unwrap();
 
         assert_eq!(mgr.active_plugin_count(), 2);
 
@@ -2130,12 +2292,13 @@ mod tests {
         let (mgr, _repo, _bc) = make_manager();
         let factory = make_factory();
 
-        mgr.enable_plugin(&EnableChannelSpec::legacy("telegram"), &make_test_config(), &factory)
+        let channel_id = mgr
+            .enable_plugin(&platform_spec("telegram"), &make_test_config(), &factory)
             .await
             .unwrap();
 
         let msg_id = mgr
-            .send_message("telegram", "chat_1", make_test_outgoing())
+            .send_message(&channel_id, "chat_1", make_test_outgoing())
             .await
             .unwrap();
         assert_eq!(msg_id, "mock_msg_id");
@@ -2144,8 +2307,9 @@ mod tests {
     #[tokio::test]
     async fn send_message_plugin_not_found() {
         let (mgr, _repo, _bc) = make_manager();
+        let channel_id = ChannelId::new().into_string();
         let err = mgr
-            .send_message("telegram", "chat_1", make_test_outgoing())
+            .send_message(&channel_id, "chat_1", make_test_outgoing())
             .await
             .unwrap_err();
         assert!(matches!(err, ChannelError::PluginNotFound(_)));
@@ -2156,11 +2320,12 @@ mod tests {
         let (mgr, _repo, _bc) = make_manager();
         let factory = make_factory();
 
-        mgr.enable_plugin(&EnableChannelSpec::legacy("telegram"), &make_test_config(), &factory)
+        let channel_id = mgr
+            .enable_plugin(&platform_spec("telegram"), &make_test_config(), &factory)
             .await
             .unwrap();
 
-        mgr.edit_message("telegram", "chat_1", "msg_1", make_test_outgoing())
+        mgr.edit_message(&channel_id, "chat_1", "msg_1", make_test_outgoing())
             .await
             .unwrap();
     }
@@ -2168,8 +2333,9 @@ mod tests {
     #[tokio::test]
     async fn edit_message_plugin_not_found() {
         let (mgr, _repo, _bc) = make_manager();
+        let channel_id = ChannelId::new().into_string();
         let err = mgr
-            .edit_message("telegram", "chat_1", "msg_1", make_test_outgoing())
+            .edit_message(&channel_id, "chat_1", "msg_1", make_test_outgoing())
             .await
             .unwrap_err();
         assert!(matches!(err, ChannelError::PluginNotFound(_)));
@@ -2184,19 +2350,20 @@ mod tests {
 
         assert_eq!(mgr.active_plugin_count(), 0);
 
-        mgr.enable_plugin(&EnableChannelSpec::legacy("telegram"), &make_test_config(), &factory)
+        let channel_id = mgr
+            .enable_plugin(&platform_spec("telegram"), &make_test_config(), &factory)
             .await
             .unwrap();
         assert_eq!(mgr.active_plugin_count(), 1);
 
-        mgr.disable_plugin("telegram").await.unwrap();
+        mgr.disable_plugin(&channel_id).await.unwrap();
         assert_eq!(mgr.active_plugin_count(), 0);
     }
 
     #[tokio::test]
     async fn is_plugin_running_false_for_missing() {
         let (mgr, _repo, _bc) = make_manager();
-        assert!(!mgr.is_plugin_running("nonexistent"));
+        assert!(!mgr.is_plugin_running(ChannelId::new().as_str()));
     }
 
     #[test]
@@ -2281,7 +2448,7 @@ mod tests {
         let factory = make_factory();
 
         let id = mgr
-            .enable_plugin(&lark_spec("companion_a"), &lark_config_with_app("cli_app_1"), &factory)
+            .enable_plugin(&lark_spec(COMPANION_A), &lark_config_with_app("cli_app_1"), &factory)
             .await
             .unwrap();
 
@@ -2289,7 +2456,7 @@ mod tests {
         let plugins = repo.get_plugins();
         assert_eq!(plugins.len(), 1);
         assert_eq!(plugins[0].id, id);
-        assert_eq!(plugins[0].companion_id.as_deref(), Some("companion_a"));
+        assert_eq!(plugins[0].companion_id.as_deref(), Some(COMPANION_A));
         assert_eq!(plugins[0].bot_key.as_deref(), Some("cli_app_1"));
         assert!(mgr.is_plugin_running(&id));
     }
@@ -2299,18 +2466,18 @@ mod tests {
         let (mgr, repo, _bc) = make_manager();
         let factory = make_factory();
 
-        mgr.enable_plugin(&lark_spec("companion_a"), &lark_config_with_app("cli_app_1"), &factory)
+        mgr.enable_plugin(&lark_spec(COMPANION_A), &lark_config_with_app("cli_app_1"), &factory)
             .await
             .unwrap();
 
         let err = mgr
-            .enable_plugin(&lark_spec("companion_b"), &lark_config_with_app("cli_app_1"), &factory)
+            .enable_plugin(&lark_spec(COMPANION_B), &lark_config_with_app("cli_app_1"), &factory)
             .await
             .unwrap_err();
         match err {
             ChannelError::BotAlreadyBound(ref bound_to) => {
                 assert!(
-                    bound_to.to_string().contains("companion_a"),
+                    bound_to.to_string().contains(COMPANION_A),
                     "error should name the bound companion: {bound_to}"
                 );
             }
@@ -2327,20 +2494,20 @@ mod tests {
         let factory = make_factory();
 
         let first_id = mgr
-            .enable_plugin(&lark_spec("companion_a"), &lark_config_with_app("cli_app_1"), &factory)
+            .enable_plugin(&lark_spec(COMPANION_A), &lark_config_with_app("cli_app_1"), &factory)
             .await
             .unwrap();
         mgr.disable_plugin(&first_id).await.unwrap();
         assert!(repo.get_plugins()[0].last_connected.is_some());
 
         let reused_id = mgr
-            .enable_plugin(&lark_spec("companion_a"), &lark_config_with_app("cli_app_1"), &factory)
+            .enable_plugin(&lark_spec(COMPANION_A), &lark_config_with_app("cli_app_1"), &factory)
             .await
             .unwrap();
 
         assert_eq!(reused_id, first_id);
         assert_eq!(repo.get_plugins().len(), 1);
-        assert_eq!(repo.get_plugins()[0].companion_id.as_deref(), Some("companion_a"));
+        assert_eq!(repo.get_plugins()[0].companion_id.as_deref(), Some(COMPANION_A));
         assert!(mgr.is_plugin_running(&first_id));
     }
 
@@ -2349,7 +2516,7 @@ mod tests {
         let (mgr, repo, _bc) = make_manager();
         let factory = make_factory();
 
-        let companion_id = "companion_1kwgygw5ryvedy89";
+        let companion_id = COMPANION_A;
         let app_id = "1904991044";
         let first_id = mgr
             .enable_plugin(&qqbot_spec(companion_id), &qqbot_config_with_app(app_id), &factory)
@@ -2381,19 +2548,19 @@ mod tests {
         let factory = make_factory();
 
         let first_id = mgr
-            .enable_plugin(&lark_public_agent_spec("pubagent_a"), &lark_config_with_app("cli_app_1"), &factory)
+            .enable_plugin(&lark_public_agent_spec(PUBLIC_AGENT_A), &lark_config_with_app("cli_app_1"), &factory)
             .await
             .unwrap();
         mgr.disable_plugin(&first_id).await.unwrap();
 
         let reused_id = mgr
-            .enable_plugin(&lark_public_agent_spec("pubagent_a"), &lark_config_with_app("cli_app_1"), &factory)
+            .enable_plugin(&lark_public_agent_spec(PUBLIC_AGENT_A), &lark_config_with_app("cli_app_1"), &factory)
             .await
             .unwrap();
 
         assert_eq!(reused_id, first_id);
         assert_eq!(repo.get_plugins().len(), 1);
-        assert_eq!(repo.get_plugins()[0].public_agent_id.as_deref(), Some("pubagent_a"));
+        assert_eq!(repo.get_plugins()[0].public_agent_id.as_deref(), Some(PUBLIC_AGENT_A));
         assert!(mgr.is_plugin_running(&first_id));
     }
 
@@ -2417,13 +2584,13 @@ mod tests {
             .unwrap();
 
         let reused_id = mgr
-            .enable_plugin(&lark_spec("companion_a"), &lark_config_with_app("cli_app_1"), &factory)
+            .enable_plugin(&lark_spec(COMPANION_A), &lark_config_with_app("cli_app_1"), &factory)
             .await
             .unwrap();
 
         assert_eq!(reused_id, first_id);
         assert_eq!(repo.get_plugins().len(), 1);
-        assert_eq!(repo.get_plugins()[0].companion_id.as_deref(), Some("companion_a"));
+        assert_eq!(repo.get_plugins()[0].companion_id.as_deref(), Some(COMPANION_A));
     }
 
     #[tokio::test]
@@ -2433,7 +2600,7 @@ mod tests {
         let factory = make_factory();
 
         let err = mgr
-            .enable_plugin(&lark_spec("companion_a"), &lark_config_with_app("cli_app_1"), &failing_factory)
+            .enable_plugin(&lark_spec(COMPANION_A), &lark_config_with_app("cli_app_1"), &failing_factory)
             .await;
         assert!(err.is_err());
         let failed_id = repo.get_plugins()[0].id.clone();
@@ -2442,14 +2609,14 @@ mod tests {
         assert_eq!(mgr.active_plugin_count(), 0);
 
         let reused_id = mgr
-            .enable_plugin(&lark_spec("companion_b"), &lark_config_with_app("cli_app_1"), &factory)
+            .enable_plugin(&lark_spec(COMPANION_B), &lark_config_with_app("cli_app_1"), &factory)
             .await
             .unwrap();
 
         assert_eq!(reused_id, failed_id);
         let plugins = repo.get_plugins();
         assert_eq!(plugins.len(), 1);
-        assert_eq!(plugins[0].companion_id.as_deref(), Some("companion_b"));
+        assert_eq!(plugins[0].companion_id.as_deref(), Some(COMPANION_B));
         assert_eq!(plugins[0].bot_key.as_deref(), Some("cli_app_1"));
         assert!(mgr.is_plugin_running(&reused_id));
     }
@@ -2460,7 +2627,7 @@ mod tests {
         let factory = make_factory();
 
         let id = mgr
-            .enable_plugin(&lark_spec("companion_a"), &lark_config_with_app("cli_app_1"), &factory)
+            .enable_plugin(&lark_spec(COMPANION_A), &lark_config_with_app("cli_app_1"), &factory)
             .await
             .unwrap();
         mgr.disable_plugin(&id).await.unwrap();
@@ -2468,11 +2635,11 @@ mod tests {
         assert!(repo.get_plugins()[0].last_connected.is_some());
 
         let err = mgr
-            .enable_plugin(&lark_spec("companion_b"), &lark_config_with_app("cli_app_1"), &factory)
+            .enable_plugin(&lark_spec(COMPANION_B), &lark_config_with_app("cli_app_1"), &factory)
             .await
             .unwrap_err();
         assert!(matches!(err, ChannelError::BotAlreadyBound(_)));
-        assert_eq!(repo.get_plugins()[0].companion_id.as_deref(), Some("companion_a"));
+        assert_eq!(repo.get_plugins()[0].companion_id.as_deref(), Some(COMPANION_A));
     }
 
     #[tokio::test]
@@ -2481,11 +2648,11 @@ mod tests {
         let factory = make_factory();
 
         let id_a = mgr
-            .enable_plugin(&lark_spec("companion_a"), &lark_config_with_app("cli_app_a"), &factory)
+            .enable_plugin(&lark_spec(COMPANION_A), &lark_config_with_app("cli_app_a"), &factory)
             .await
             .unwrap();
         let id_b = mgr
-            .enable_plugin(&lark_spec("companion_b"), &lark_config_with_app("cli_app_b"), &factory)
+            .enable_plugin(&lark_spec(COMPANION_B), &lark_config_with_app("cli_app_b"), &factory)
             .await
             .unwrap();
 
@@ -2497,21 +2664,21 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn legacy_spec_keeps_platform_row_id() {
+    async fn platform_spec_mints_canonical_channel_id() {
         let (mgr, repo, _bc) = make_manager();
         let factory = make_factory();
 
         let id = mgr
-            .enable_plugin(&EnableChannelSpec::legacy("telegram"), &make_test_config(), &factory)
+            .enable_plugin(&platform_spec("telegram"), &make_test_config(), &factory)
             .await
             .unwrap();
 
-        assert_eq!(id, "telegram");
+        ChannelId::parse(id.clone()).expect("enable must mint a canonical channel id");
         let plugins = repo.get_plugins();
         assert_eq!(plugins.len(), 1);
-        assert_eq!(plugins[0].id, "telegram");
+        assert_eq!(plugins[0].id, id);
         assert!(plugins[0].companion_id.is_none());
-        assert!(mgr.is_plugin_running("telegram"));
+        assert!(mgr.is_plugin_running(&plugins[0].id));
     }
 
     #[tokio::test]
@@ -2521,7 +2688,7 @@ mod tests {
         let factory = make_capturing_factory(&slot);
 
         let id = mgr
-            .enable_plugin(&EnableChannelSpec::legacy("telegram"), &make_test_config(), &factory)
+            .enable_plugin(&platform_spec("telegram"), &make_test_config(), &factory)
             .await
             .unwrap();
 
@@ -2545,29 +2712,30 @@ mod tests {
         let (mgr, repo, bc) = make_manager();
         let factory = make_factory();
 
-        mgr.enable_plugin(&EnableChannelSpec::legacy("telegram"), &make_test_config(), &factory)
+        let channel_id = mgr
+            .enable_plugin(&platform_spec("telegram"), &make_test_config(), &factory)
             .await
             .unwrap();
-        assert!(mgr.is_plugin_running("telegram"));
+        assert!(mgr.is_plugin_running(&channel_id));
         bc.take_events();
 
-        mgr.delete_channel("telegram").await.unwrap();
+        mgr.delete_channel(&channel_id).await.unwrap();
 
         assert!(repo.get_plugins().is_empty());
         assert_eq!(mgr.active_plugin_count(), 0);
-        assert_eq!(repo.cleared_channels(), vec!["telegram".to_string()]);
+        assert_eq!(repo.cleared_channels(), vec![channel_id.clone()]);
         // The final broadcast reports the deleted channel as stopped/disabled.
         let events = bc.take_events();
         let last = events.last().unwrap();
         assert_eq!(last.name, "channel.plugin-status-changed");
-        assert_eq!(last.data["plugin_id"], "telegram");
+        assert_eq!(last.data["plugin_id"], channel_id);
         assert_eq!(last.data["status"]["enabled"], false);
     }
 
     #[tokio::test]
     async fn delete_channel_unknown_id_is_not_found() {
         let (mgr, _repo, _bc) = make_manager();
-        let err = mgr.delete_channel("missing").await.unwrap_err();
+        let err = mgr.delete_channel(ChannelId::new().as_str()).await.unwrap_err();
         assert!(matches!(err, ChannelError::PluginNotFound(_)));
     }
 
@@ -2577,12 +2745,12 @@ mod tests {
         let factory = make_factory();
 
         let id = mgr
-            .enable_plugin(&lark_spec("companion_a"), &lark_config_with_app("cli_app_1"), &factory)
+            .enable_plugin(&lark_spec(COMPANION_A), &lark_config_with_app("cli_app_1"), &factory)
             .await
             .unwrap();
 
-        mgr.rebind_channel_companion(&id, Some("companion_z")).await.unwrap();
-        assert_eq!(repo.get_plugins()[0].companion_id.as_deref(), Some("companion_z"));
+        mgr.rebind_channel_companion(&id, Some(COMPANION_Z)).await.unwrap();
+        assert_eq!(repo.get_plugins()[0].companion_id.as_deref(), Some(COMPANION_Z));
         assert_eq!(repo.cleared_channels(), vec![id.clone()]);
 
         // Clearing the binding works too (and clears sessions again).
@@ -2599,11 +2767,11 @@ mod tests {
         // A brand-new bot bound to a public agent: the row carries public_agent_id
         // and NO companion.
         let id = mgr
-            .enable_plugin(&lark_public_agent_spec("pubagent_1"), &lark_config_with_app("cli_app_1"), &factory)
+            .enable_plugin(&lark_public_agent_spec(PUBLIC_AGENT_A), &lark_config_with_app("cli_app_1"), &factory)
             .await
             .unwrap();
         let row = repo.get_plugins().into_iter().find(|r| r.id == id).unwrap();
-        assert_eq!(row.public_agent_id.as_deref(), Some("pubagent_1"));
+        assert_eq!(row.public_agent_id.as_deref(), Some(PUBLIC_AGENT_A));
         assert!(row.companion_id.is_none(), "a public-agent bot must not carry a companion");
 
         // Re-enabling the SAME row with a companion spec flips it to companion and
@@ -2611,12 +2779,12 @@ mod tests {
         let spec = EnableChannelSpec {
             plugin_id: Some(id.clone()),
             plugin_type: Some("lark".into()),
-            companion_id: Some("companion_a".into()),
+            companion_id: Some(COMPANION_A.into()),
             public_agent_id: None,
         };
         mgr.enable_plugin(&spec, &lark_config_with_app("cli_app_1"), &factory).await.unwrap();
         let row = repo.get_plugins().into_iter().find(|r| r.id == id).unwrap();
-        assert_eq!(row.companion_id.as_deref(), Some("companion_a"));
+        assert_eq!(row.companion_id.as_deref(), Some(COMPANION_A));
         assert!(row.public_agent_id.is_none(), "binding a companion must clear the public agent");
     }
 
@@ -2627,14 +2795,14 @@ mod tests {
 
         // Start companion-bound, then rebind to a public agent.
         let id = mgr
-            .enable_plugin(&lark_spec("companion_a"), &lark_config_with_app("cli_app_1"), &factory)
+            .enable_plugin(&lark_spec(COMPANION_A), &lark_config_with_app("cli_app_1"), &factory)
             .await
             .unwrap();
-        assert_eq!(repo.get_plugins()[0].companion_id.as_deref(), Some("companion_a"));
+        assert_eq!(repo.get_plugins()[0].companion_id.as_deref(), Some(COMPANION_A));
 
-        mgr.rebind_channel_public_agent(&id, Some("pubagent_z")).await.unwrap();
+        mgr.rebind_channel_public_agent(&id, Some(PUBLIC_AGENT_Z)).await.unwrap();
         let row = repo.get_plugins().into_iter().find(|r| r.id == id).unwrap();
-        assert_eq!(row.public_agent_id.as_deref(), Some("pubagent_z"));
+        assert_eq!(row.public_agent_id.as_deref(), Some(PUBLIC_AGENT_Z));
         assert!(row.companion_id.is_none(), "rebinding to a public agent clears the companion");
         assert_eq!(repo.cleared_channels(), vec![id.clone()]);
 
@@ -2651,19 +2819,19 @@ mod tests {
 
         // Two bots on companion_a, one on companion_b.
         let id_a1 = mgr
-            .enable_plugin(&lark_spec("companion_a"), &lark_config_with_app("cli_app_a1"), &factory)
+            .enable_plugin(&lark_spec(COMPANION_A), &lark_config_with_app("cli_app_a1"), &factory)
             .await
             .unwrap();
         let id_a2 = mgr
-            .enable_plugin(&lark_spec("companion_a"), &lark_config_with_app("cli_app_a2"), &factory)
+            .enable_plugin(&lark_spec(COMPANION_A), &lark_config_with_app("cli_app_a2"), &factory)
             .await
             .unwrap();
         let _id_b = mgr
-            .enable_plugin(&lark_spec("companion_b"), &lark_config_with_app("cli_app_b"), &factory)
+            .enable_plugin(&lark_spec(COMPANION_B), &lark_config_with_app("cli_app_b"), &factory)
             .await
             .unwrap();
 
-        mgr.clear_sessions_for_companion("companion_a").await;
+        mgr.clear_sessions_for_companion(COMPANION_A).await;
 
         let cleared = repo.cleared_channels();
         assert_eq!(cleared.len(), 2, "only companion_a's two channels cleared: {cleared:?}");
@@ -2677,21 +2845,21 @@ mod tests {
         let factory = make_factory();
 
         let id_a = mgr
-            .enable_plugin(&lark_spec("companion_a"), &lark_config_with_app("cli_app_a"), &factory)
+            .enable_plugin(&lark_spec(COMPANION_A), &lark_config_with_app("cli_app_a"), &factory)
             .await
             .unwrap();
         let id_b = mgr
-            .enable_plugin(&lark_spec("companion_b"), &lark_config_with_app("cli_app_b"), &factory)
+            .enable_plugin(&lark_spec(COMPANION_B), &lark_config_with_app("cli_app_b"), &factory)
             .await
             .unwrap();
 
-        mgr.unbind_channels_for_deleted_companion("companion_a").await;
+        mgr.unbind_channels_for_deleted_companion(COMPANION_A).await;
 
         let rows = repo.get_plugins();
         let row_a = rows.iter().find(|r| r.id == id_a).unwrap();
         let row_b = rows.iter().find(|r| r.id == id_b).unwrap();
         assert!(row_a.companion_id.is_none());
-        assert_eq!(row_b.companion_id.as_deref(), Some("companion_b"));
+        assert_eq!(row_b.companion_id.as_deref(), Some(COMPANION_B));
         assert_eq!(repo.cleared_channels(), vec![id_a]);
     }
 
@@ -2701,16 +2869,16 @@ mod tests {
         let factory = make_factory();
 
         let live_id = mgr
-            .enable_plugin(&lark_spec("companion_live"), &lark_config_with_app("cli_live"), &factory)
+            .enable_plugin(&lark_spec(COMPANION_LIVE), &lark_config_with_app("cli_live"), &factory)
             .await
             .unwrap();
         let ghost_companion_id = mgr
-            .enable_plugin(&lark_spec("companion_ghost"), &lark_config_with_app("cli_ghost"), &factory)
+            .enable_plugin(&lark_spec(COMPANION_GHOST), &lark_config_with_app("cli_ghost"), &factory)
             .await
             .unwrap();
         let ghost_pa_id = mgr
             .enable_plugin(
-                &lark_public_agent_spec("pubagent_ghost"),
+                &lark_public_agent_spec(PUBLIC_AGENT_GHOST),
                 &lark_config_with_app("cli_pa_ghost"),
                 &factory,
             )
@@ -2718,7 +2886,7 @@ mod tests {
             .unwrap();
 
         // Only `companion_live` still exists; both ghosts must be unbound.
-        let live_companions = std::collections::HashSet::from(["companion_live".to_string()]);
+        let live_companions = std::collections::HashSet::from([COMPANION_LIVE.to_string()]);
         let live_public_agents: std::collections::HashSet<String> = std::collections::HashSet::new();
         mgr.reconcile_orphaned_owners(&live_companions, &live_public_agents).await;
 
@@ -2727,7 +2895,7 @@ mod tests {
         let ghost_c = rows.iter().find(|r| r.id == ghost_companion_id).unwrap();
         let ghost_p = rows.iter().find(|r| r.id == ghost_pa_id).unwrap();
 
-        assert_eq!(live.companion_id.as_deref(), Some("companion_live"), "live owner preserved");
+        assert_eq!(live.companion_id.as_deref(), Some(COMPANION_LIVE), "live owner preserved");
         assert!(ghost_c.companion_id.is_none(), "ghost companion unbound");
         assert!(ghost_p.public_agent_id.is_none(), "ghost public agent unbound");
 
@@ -2742,7 +2910,7 @@ mod tests {
         let (mgr, repo, _bc) = make_manager();
         let factory = make_factory();
 
-        mgr.enable_plugin(&lark_spec("companion_a"), &lark_config_with_app("cli_app_a"), &factory)
+        mgr.enable_plugin(&lark_spec(COMPANION_A), &lark_config_with_app("cli_app_a"), &factory)
             .await
             .unwrap();
 
@@ -2751,7 +2919,7 @@ mod tests {
         assert!(repo.cleared_channels().is_empty());
 
         // Unknown companion id: nothing cleared.
-        mgr.clear_sessions_for_companion("companion_ghost").await;
+        mgr.clear_sessions_for_companion(COMPANION_GHOST).await;
         assert!(repo.cleared_channels().is_empty());
     }
 
@@ -2909,15 +3077,16 @@ mod tests {
         let probe = FactoryProbe::new(usize::MAX);
         let factory = make_probe_factory(&probe);
 
-        mgr.enable_plugin(&EnableChannelSpec::legacy("telegram"), &make_test_config(), &factory)
+        let channel_id = mgr
+            .enable_plugin(&platform_spec("telegram"), &make_test_config(), &factory)
             .await
             .unwrap();
-        assert!(mgr.is_plugin_running("telegram"));
+        assert!(mgr.is_plugin_running(&channel_id));
         bc.take_events();
 
         // Simulate the background loop dying after reconnect exhaustion.
         probe.handle(0).set(PluginStatus::Error);
-        assert!(!mgr.is_plugin_running("telegram"));
+        assert!(!mgr.is_plugin_running(&channel_id));
 
         let mut state = WatchdogState::default();
         mgr.check_and_heal_plugins(&factory, &zero_backoff_config(), &mut state)
@@ -2925,7 +3094,7 @@ mod tests {
 
         // A fresh instance was created and started.
         assert_eq!(probe.calls(), 2);
-        assert!(mgr.is_plugin_running("telegram"));
+        assert!(mgr.is_plugin_running(&channel_id));
         // DB reflects the restart.
         let plugins = repo.get_plugins();
         assert_eq!(plugins[0].status.as_deref(), Some("running"));
@@ -2942,7 +3111,8 @@ mod tests {
         let probe = FactoryProbe::new(1);
         let factory = make_probe_factory(&probe);
 
-        mgr.enable_plugin(&EnableChannelSpec::legacy("telegram"), &make_test_config(), &factory)
+        let channel_id = mgr
+            .enable_plugin(&platform_spec("telegram"), &make_test_config(), &factory)
             .await
             .unwrap();
         probe.handle(0).set(PluginStatus::Error);
@@ -2956,7 +3126,7 @@ mod tests {
 
         // enable (1) + capped restart attempts (3)
         assert_eq!(probe.calls(), 4);
-        assert!(!mgr.is_plugin_running("telegram"));
+        assert!(!mgr.is_plugin_running(&channel_id));
         let plugins = repo.get_plugins();
         assert_eq!(plugins[0].status.as_deref(), Some("error"));
     }
@@ -2967,7 +3137,7 @@ mod tests {
         let probe = FactoryProbe::new(1);
         let factory = make_probe_factory(&probe);
 
-        mgr.enable_plugin(&EnableChannelSpec::legacy("telegram"), &make_test_config(), &factory)
+        mgr.enable_plugin(&platform_spec("telegram"), &make_test_config(), &factory)
             .await
             .unwrap();
         probe.handle(0).set(PluginStatus::Error);
@@ -2991,7 +3161,7 @@ mod tests {
         let probe = FactoryProbe::new(usize::MAX);
         let factory = make_probe_factory(&probe);
 
-        mgr.enable_plugin(&EnableChannelSpec::legacy("telegram"), &make_test_config(), &factory)
+        mgr.enable_plugin(&platform_spec("telegram"), &make_test_config(), &factory)
             .await
             .unwrap();
         probe.handle(0).set(PluginStatus::Error);
@@ -3016,7 +3186,8 @@ mod tests {
         let probe = FactoryProbe::new(usize::MAX);
         let factory = make_probe_factory(&probe);
 
-        mgr.enable_plugin(&EnableChannelSpec::legacy("telegram"), &make_test_config(), &factory)
+        let channel_id = mgr
+            .enable_plugin(&platform_spec("telegram"), &make_test_config(), &factory)
             .await
             .unwrap();
         bc.take_events();
@@ -3026,7 +3197,7 @@ mod tests {
             .await;
 
         assert_eq!(probe.calls(), 1);
-        assert!(mgr.is_plugin_running("telegram"));
+        assert!(mgr.is_plugin_running(&channel_id));
         assert!(bc.take_events().is_empty());
         let plugins = repo.get_plugins();
         assert_eq!(plugins[0].status.as_deref(), Some("running"));

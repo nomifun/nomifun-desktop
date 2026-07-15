@@ -33,7 +33,7 @@ mod error;
 mod value;
 mod vault;
 
-// X2 `web` feature: per-pet secret CRUD service + axum routes (mounted by
+// X2 `web` feature: global secret CRUD service + axum routes (mounted by
 // nomifun-app). Gated so pure-logic consumers don't pull axum / auth / api-types.
 #[cfg(feature = "web")]
 mod routes;
@@ -50,8 +50,8 @@ pub use domain::{etld_plus_one, host_of, same_etld_plus_one};
 pub use error::SecretError;
 pub use value::SecretValue;
 pub use vault::{
-    SHARED_SECRET_DIR, SecretVaultFile, load_secret_store, pet_vault_path, save_secret_store,
-    secret_vault_path, shared_vault_path,
+    SHARED_SECRET_DIR, SecretVaultFile, load_secret_store, save_secret_store, secret_vault_path,
+    shared_vault_path,
 };
 
 #[cfg(feature = "web")]

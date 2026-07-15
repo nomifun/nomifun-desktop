@@ -24,7 +24,7 @@ pub struct UpdateCronJobParams {
     pub preset_snapshot: Option<Option<String>>,
     /// Target conversation. `Some(Some(id))` binds a conversation, `Some(None)`
     /// clears it to NULL (FK ON DELETE SET NULL), `None` leaves it unchanged.
-    pub conversation_id: Option<Option<i64>>,
+    pub conversation_id: Option<Option<String>>,
     pub conversation_title: Option<Option<String>>,
     pub agent_type: Option<String>,
     pub skill_content: Option<Option<String>>,
@@ -73,7 +73,7 @@ pub trait ICronRepository: Send + Sync {
     async fn list_by_conversation(
         &self,
         user_id: &str,
-        conversation_id: i64,
+        conversation_id: &str,
     ) -> Result<Vec<CronJobRow>, DbError>;
 
     /// Deletes all cron jobs associated with a conversation.
@@ -81,7 +81,7 @@ pub trait ICronRepository: Send + Sync {
     async fn delete_by_conversation(
         &self,
         user_id: &str,
-        conversation_id: i64,
+        conversation_id: &str,
     ) -> Result<u64, DbError>;
 
     /// Inserts one execution record and prunes older rows for the same job so

@@ -13,12 +13,15 @@ use tower::ServiceExt;
 
 use common::{body_json, build_app, delete_with_token, get_with_token, json_with_token, setup_and_login};
 
+const MISSING_COMPANION_ID: &str =
+    "companion_0190f5fe-7c00-7a00-8000-000000000099";
+
 async fn seed_test_provider(services: &nomifun_app::AppServices) {
     nomifun_db::sqlx::query(
         "INSERT INTO providers (\
             id, platform, name, base_url, api_key_encrypted, models, enabled, \
             capabilities, created_at, updated_at\
-         ) VALUES ('prov_test', 'openai', 'test', 'https://example.invalid', \
+         ) VALUES ('prov_0190f5fe-7c00-7a00-8000-000000000012', 'openai', 'test', 'https://example.invalid', \
                    'encrypted', '[\"test-model\"]', 1, '[]', 1, 1)",
     )
     .execute(services.database.pool())
@@ -143,19 +146,25 @@ async fn companions_unknown_id_is_404_and_bad_name_is_400() {
     // 404 on every per-companion verb for an unknown id.
     let resp = app
         .clone()
-        .oneshot(get_with_token("/api/companion/companions/companion_missing", &token))
+        .oneshot(get_with_token(
+            &format!("/api/companion/companions/{MISSING_COMPANION_ID}"),
+            &token,
+        ))
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
     let resp = app
         .clone()
-        .oneshot(get_with_token("/api/companion/companions/companion_missing/status", &token))
+        .oneshot(get_with_token(
+            &format!("/api/companion/companions/{MISSING_COMPANION_ID}/status"),
+            &token,
+        ))
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
     let req = json_with_token(
         "PATCH",
-        "/api/companion/companions/companion_missing",
+        &format!("/api/companion/companions/{MISSING_COMPANION_ID}"),
         json!({ "name": "x" }),
         &token,
         &csrf,
@@ -164,7 +173,11 @@ async fn companions_unknown_id_is_404_and_bad_name_is_400() {
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
     let resp = app
         .clone()
-        .oneshot(delete_with_token("/api/companion/companions/companion_missing", &token, &csrf))
+        .oneshot(delete_with_token(
+            &format!("/api/companion/companions/{MISSING_COMPANION_ID}"),
+            &token,
+            &csrf,
+        ))
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
@@ -211,7 +224,7 @@ async fn companion_single_session_happy_path() {
     let req = json_with_token(
         "PATCH",
         &format!("/api/companion/companions/{id}"),
-        json!({ "model": { "provider_id": "prov_test", "model": "test-model" } }),
+        json!({ "model": { "provider_id": "prov_0190f5fe-7c00-7a00-8000-000000000012", "model": "test-model" } }),
         &token,
         &csrf,
     );
@@ -268,13 +281,20 @@ async fn companion_thread_unknown_companion_404_and_no_model_400() {
     // instead of reading as "no active session".
     let resp = app
         .clone()
-        .oneshot(get_with_token("/api/companion/companions/companion_missing/companion/active", &token))
+        .oneshot(get_with_token(
+            &format!(
+                "/api/companion/companions/{MISSING_COMPANION_ID}/companion/active"
+            ),
+            &token,
+        ))
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
     let req = json_with_token(
         "POST",
-        "/api/companion/companions/companion_missing/companion/threads",
+        &format!(
+            "/api/companion/companions/{MISSING_COMPANION_ID}/companion/threads"
+        ),
         json!({}),
         &token,
         &csrf,

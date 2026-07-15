@@ -105,7 +105,8 @@ Source: [`crates/backend/nomifun-common/src/constants.rs`](../../crates/backend/
 `JwtService` is constructed from a single secret; `AppServices::from_config` resolves it in this order:
 
 1. `JWT_SECRET` environment variable, if set.
-2. Otherwise, the value persisted in the system user row (`system_default_user.jwt_secret`).
+2. Otherwise, the value persisted on the installation-owner user row selected
+   by `installation_identity.owner_user_id`.
 3. Otherwise, a fresh cryptographically random secret is generated and **persisted to the database** for future boots.
 
 The change-password flow rotates the JWT secret as a side effect, invalidating every existing session.

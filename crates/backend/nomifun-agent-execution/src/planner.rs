@@ -16,7 +16,7 @@ use nomifun_api_types::{
     AgentExecutionDetail, ExecutionParticipant, PlannedExecution, PlannedExecutionStep,
 };
 use nomifun_common::{
-    AgentStepMode, AgentToolPolicy, AppError, ExecutionStepKind, ProviderWithModel,
+    AgentStepMode, AgentToolPolicy, AppError, ExecutionStepKind, ProviderId, ProviderWithModel,
     StepFailurePolicy,
 };
 use nomifun_db::IProviderRepository;
@@ -196,7 +196,7 @@ pub(crate) struct LlmPlanProducer {
     provider_repo: Arc<dyn IProviderRepository>,
     encryption_key: [u8; 32],
     workspace: PathBuf,
-    lead: ProviderWithModel,
+    lead: Option<ProviderWithModel>,
 }
 
 impl LlmPlanProducer {
@@ -204,7 +204,7 @@ impl LlmPlanProducer {
         provider_repo: Arc<dyn IProviderRepository>,
         encryption_key: [u8; 32],
         workspace: impl Into<PathBuf>,
-        lead: ProviderWithModel,
+        lead: Option<ProviderWithModel>,
     ) -> Self {
         Self {
             provider_repo,
@@ -222,7 +222,11 @@ impl LlmPlanProducer {
         max_tokens: u32,
         sink: Option<&LeadThinkingSink>,
     ) -> Result<String, AppError> {
-        let lead = pick_lead(participants, &self.lead);
+        let lead = pick_lead(participants, self.lead.as_ref()).ok_or_else(|| {
+            AppError::ProviderUnavailable(
+                "execution planner has no canonical provider/model participant".to_owned(),
+            )
+        })?;
         let model = lead.use_model.as_deref().unwrap_or(&lead.model);
         let config = resolve_provider_config(
             &self.provider_repo,
@@ -303,20 +307,32 @@ impl PlanProducer for LlmPlanProducer {
 
 fn pick_lead(
     participants: &[ExecutionParticipant],
-    fallback: &ProviderWithModel,
-) -> ProviderWithModel {
+    fallback: Option<&ProviderWithModel>,
+) -> Option<ProviderWithModel> {
     participants
         .iter()
         .find_map(|participant| {
-            let provider_id = participant.provider_id.as_ref()?.trim();
-            let model = participant.model.as_ref()?.trim();
-            (!provider_id.is_empty() && !model.is_empty()).then(|| ProviderWithModel {
-                provider_id: provider_id.to_owned(),
-                model: model.to_owned(),
-                use_model: Some(model.to_owned()),
-            })
+            let provider_id = participant.provider_id.as_ref()?;
+            let model = participant.model.as_ref()?;
+            (ProviderId::try_from(provider_id.as_str()).is_ok()
+                && !model.is_empty()
+                && model.trim() == model)
+                .then(|| ProviderWithModel {
+                    provider_id: provider_id.clone(),
+                    model: model.clone(),
+                    use_model: Some(model.clone()),
+                })
         })
-        .unwrap_or_else(|| fallback.clone())
+        .or_else(|| {
+            let fallback = fallback?;
+            let selected = fallback.use_model.as_deref().unwrap_or(&fallback.model);
+            (ProviderId::try_from(fallback.provider_id.as_str()).is_ok()
+                && !fallback.model.is_empty()
+                && fallback.model.trim() == fallback.model
+                && !selected.is_empty()
+                && selected.trim() == selected)
+                .then(|| fallback.clone())
+        })
 }
 
 const PLAN_SYSTEM: &str = r#"You are the lead Agent planning one AgentExecution.

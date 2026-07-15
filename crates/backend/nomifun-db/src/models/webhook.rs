@@ -1,10 +1,11 @@
-use nomifun_common::TimestampMs;
+use nomifun_common::{TimestampMs, WebhookId};
 use serde::{Deserialize, Serialize};
 
 /// Row in the `webhooks` table — a reusable outbound webhook endpoint.
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct WebhookRow {
-    pub id: i64,
+    #[sqlx(try_from = "String")]
+    pub id: WebhookId,
     pub name: String,
     /// Platform discriminator; `lark` is the only supported value in v1.
     pub platform: String,
@@ -24,7 +25,7 @@ mod tests {
     #[test]
     fn webhook_row_roundtrips() {
         let row = WebhookRow {
-            id: 1,
+            id: WebhookId::new(),
             name: "Team bot".into(),
             platform: "lark".into(),
             url: "https://open.feishu.cn/open-apis/bot/v2/hook/xxx".into(),

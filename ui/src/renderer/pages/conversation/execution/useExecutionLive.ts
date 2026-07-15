@@ -1,10 +1,11 @@
 import { ipcBridge } from '@/common';
 import type { TAgentExecutionDetail } from '@/common/types/agentExecution/agentExecutionTypes';
 import { useCallback, useEffect, useRef, useState } from 'react';
+import type { ExecutionId } from '@/common/types/ids';
 
 const EVENT_REFETCH_DEBOUNCE_MS = 180;
 
-export function useExecutionLive(executionId: string | undefined): {
+export function useExecutionLive(executionId: ExecutionId | undefined): {
   detail: TAgentExecutionDetail | null;
   loading: boolean;
   refetch: () => Promise<void>;

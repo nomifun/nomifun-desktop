@@ -12,9 +12,10 @@ import { Down, FolderOpen, Message, Right, Robot, Terminal, Unlink, User } from 
 import { ipcBridge } from '@/common';
 import type { IKnowledgeBinding, IKnowledgeConsumer, KnowledgeBindingKind } from '@/common/adapter/ipcBridge';
 import { useKnowledgeConsumers } from './useKnowledge';
+import type { KnowledgeBaseId } from '@/common/types/ids';
 
 interface KnowledgeConsumersSectionProps {
-  baseId: string;
+  baseId: KnowledgeBaseId;
 }
 
 function kindIcon(kind: string): React.ReactNode {
@@ -43,7 +44,7 @@ function consumerKey(c: IKnowledgeConsumer, fallback = 0): string {
   return `${c.target_kind}-${c.target_id ?? fallback}`;
 }
 
-export function removeBaseFromBinding(binding: IKnowledgeBinding, baseId: string): IKnowledgeBinding {
+export function removeBaseFromBinding(binding: IKnowledgeBinding, baseId: KnowledgeBaseId): IKnowledgeBinding {
   const kbIds = binding.kb_ids.filter((id) => id !== baseId);
   return {
     ...binding,

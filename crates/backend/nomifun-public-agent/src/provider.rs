@@ -19,8 +19,9 @@ use crate::service::PublicAgentService;
 
 impl PublicAgentConfig {
     /// Project the persisted config into the runtime DTO the factory consumes.
-    fn to_runtime(&self) -> PublicAgentRuntime {
-        PublicAgentRuntime {
+    fn to_runtime(&self) -> Option<PublicAgentRuntime> {
+        let provider_id = self.model.provider_id.as_ref()?.to_string();
+        Some(PublicAgentRuntime {
             name: self.name.clone(),
             greeting: self.greeting.clone(),
             tone: self.tone.clone(),
@@ -33,11 +34,11 @@ impl PublicAgentConfig {
             grounded_mode: self.grounded_mode,
             knowledge_base_ids: self.knowledge_base_ids.clone(),
             model: ProviderWithModel {
-                provider_id: self.model.provider_id.clone(),
+                provider_id,
                 model: self.model.model.clone(),
                 use_model: self.model.use_model.clone(),
             },
-        }
+        })
     }
 }
 
@@ -46,7 +47,7 @@ impl PublicAgentProvider for PublicAgentService {
     async fn resolve_public_agent(&self, id: &str) -> Option<PublicAgentRuntime> {
         // A disabled agent still resolves (so the owner can preview it); the
         // channel layer decides whether to serve. Unknown id → None.
-        self.get(id).await.ok().map(|cfg| cfg.to_runtime())
+        self.get(id).await.ok().and_then(|cfg| cfg.to_runtime())
     }
 
     async fn record_public_agent_turn(
@@ -64,32 +65,49 @@ impl PublicAgentProvider for PublicAgentService {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use nomifun_common::{KnowledgeBaseId, ProviderId};
 
     #[tokio::test]
     async fn resolve_maps_config_to_runtime() {
         let d = tempfile::tempdir().unwrap();
         let svc = PublicAgentService::start(d.path());
         let a = svc.create("客服台").await.unwrap();
+        let first_kb = KnowledgeBaseId::new();
+        let second_kb = KnowledgeBaseId::new();
+        let provider_id = ProviderId::new();
         svc.patch(
-            &a.id,
+            a.id.as_str(),
             serde_json::json!({
                 "greeting": "您好",
                 "grounded_mode": true,
-                "knowledge_base_ids": ["kb_1", "kb_2"],
-                "model": { "provider_id": "prov", "model": "m", "use_model": "m-2" }
+                "knowledge_base_ids": [first_kb, second_kb],
+                "model": { "provider_id": provider_id, "model": "m", "use_model": "m-2" }
             }),
         )
         .await
         .unwrap();
 
-        let rt = PublicAgentProvider::resolve_public_agent(&*svc, &a.id).await.unwrap();
+        let rt = PublicAgentProvider::resolve_public_agent(&*svc, a.id.as_str()).await.unwrap();
         assert_eq!(rt.name, "客服台");
         assert_eq!(rt.greeting, "您好");
         assert!(rt.grounded_mode);
-        assert_eq!(rt.knowledge_base_ids, vec!["kb_1".to_string(), "kb_2".to_string()]);
+        assert_eq!(rt.knowledge_base_ids, vec![first_kb, second_kb]);
+        assert_eq!(rt.model.provider_id, provider_id.to_string());
         assert_eq!(rt.model.use_model.as_deref(), Some("m-2"));
 
         // Unknown id → None.
         assert!(PublicAgentProvider::resolve_public_agent(&*svc, "pubagent_nope").await.is_none());
+    }
+
+    #[tokio::test]
+    async fn unconfigured_agent_does_not_resolve_to_empty_provider_id() {
+        let d = tempfile::tempdir().unwrap();
+        let svc = PublicAgentService::start(d.path());
+        let agent = svc.create("未配置").await.unwrap();
+        assert!(
+            PublicAgentProvider::resolve_public_agent(&*svc, agent.id.as_str())
+                .await
+                .is_none()
+        );
     }
 }

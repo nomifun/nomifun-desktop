@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useReducer, useRef } from 'react';
 import type React from 'react';
 import type { ICompanionSuggestion } from '@/common/adapter/ipcBridge';
+import type { CompanionId } from '@/common/types/ids';
 import { isTauriRuntime } from '@/common/adapter/tauriRuntime';
 import { configService } from '@/common/config/configService';
 import { chooseDetachedMemoryPanelLayout, type DetachedMonitor } from './detachedMemoryPanelGeometry';
@@ -27,7 +28,7 @@ import { emitToMemoryPanel, hideMemoryPanelWindow, listenCurrentWindow, placeMem
 export interface DetachedMemoryPanelController { phase: MemoryPanelPhase; isExpanded: boolean; toggle(): void; close(reason?: MemoryPanelCloseReason): void }
 
 export function useDetachedMemoryPanel(options: {
-  companionId: string | null;
+  companionId: CompanionId | null;
   suggestions: ICompanionSuggestion[];
   onActivate: (suggestion: ICompanionSuggestion) => Promise<void>;
   onFallback: () => Promise<void>;

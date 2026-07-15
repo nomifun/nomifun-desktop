@@ -13,7 +13,10 @@ use std::time::Duration;
 
 use futures_util::{StreamExt, stream};
 use nomifun_api_types::{ConnectorCredentialSummary, ConnectorSyncState, KnowledgeMountInfo, KnowledgeSource, KnowledgeSourceEntry, KnowledgeSourceMode, KnowledgeTag, UpdateKnowledgeTagRequest};
-use nomifun_common::{AppError, TimestampMs, generate_prefixed_id, now_ms};
+use nomifun_common::{
+    AppError, CompanionId, ConnectorCredentialId, ConversationId, KnowledgeBaseId, TerminalId,
+    TimestampMs, now_ms,
+};
 use nomifun_db::models::{CreateKnowledgeTagParams, KnowledgeBaseRow, KnowledgeBindingRow};
 use nomifun_db::{IConnectorCredentialRepository, IKnowledgeRepository};
 use serde::{Deserialize, Serialize};
@@ -31,10 +34,8 @@ use crate::{KB_MANAGED_REL_DIR, KB_MOUNT_REL_DIR};
 
 /// Binding target kinds accepted by the API. `workpath` is the primary kind
 /// for conversation/terminal sessions since the session-list unification
-/// (its `target_id` is a normalized [`workpath_key`]); `conversation` and
-/// `terminal` are the legacy per-session bindings still honored as a read
-/// fallback (see [`KnowledgeService::ensure_mounts_for_session`]); `companion`
-/// binds a companion's sessions.
+/// (its `target_id` is a normalized [`workpath_key`]); the remaining kinds use
+/// their registered canonical entity IDs.
 pub const BINDING_KINDS: &[&str] = &["workpath", "conversation", "terminal", "companion"];
 
 /// Write-back modes. `staged` confines agent writes to
@@ -62,7 +63,7 @@ const DOC_HANDLE_PREFIX: &str = "kdoc_";
 const DOC_HANDLE_SEP: char = '\u{1f}';
 
 /// Encode a stable `(kb_id, rel_path)` document handle. See [`DOC_HANDLE_PREFIX`].
-pub fn encode_doc_handle(kb_id: &str, rel_path: &str) -> String {
+pub fn encode_doc_handle(kb_id: &KnowledgeBaseId, rel_path: &str) -> String {
     use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
     let raw = format!("{kb_id}{DOC_HANDLE_SEP}{rel_path}");
     format!("{DOC_HANDLE_PREFIX}{}", URL_SAFE_NO_PAD.encode(raw.as_bytes()))
@@ -71,16 +72,14 @@ pub fn encode_doc_handle(kb_id: &str, rel_path: &str) -> String {
 /// Decode a document handle back to `(kb_id, rel_path)`. Returns `None` for any
 /// malformed input (wrong prefix, bad base64, non-UTF8, missing separator, or
 /// an empty component).
-pub fn decode_doc_handle(handle: &str) -> Option<(String, String)> {
+pub fn decode_doc_handle(handle: &str) -> Option<(KnowledgeBaseId, String)> {
     use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
     let body = handle.strip_prefix(DOC_HANDLE_PREFIX)?;
     let bytes = URL_SAFE_NO_PAD.decode(body.as_bytes()).ok()?;
     let raw = String::from_utf8(bytes).ok()?;
     let (kb_id, rel_path) = raw.split_once(DOC_HANDLE_SEP)?;
-    if kb_id.is_empty() || rel_path.is_empty() {
-        return None;
-    }
-    Some((kb_id.to_owned(), rel_path.to_owned()))
+    let kb_id = KnowledgeBaseId::parse(kb_id).ok()?;
+    (!rel_path.is_empty()).then(|| (kb_id, rel_path.to_owned()))
 }
 
 /// Hard cap on `source.entries` per knowledge base — every entry costs a
@@ -94,7 +93,7 @@ const SOURCE_FETCH_CONCURRENCY: usize = 4;
 /// A knowledge base plus directory statistics, as returned by the API.
 #[derive(Debug, Clone, Serialize)]
 pub struct KnowledgeBaseInfo {
-    pub id: String,
+    pub id: KnowledgeBaseId,
     /// Legacy display-only sequence number; no longer sourced from the
     /// registry (the `seq` column was dropped in the primary-key rework) —
     /// always `None`, kept on the wire until the frontend stops reading it.
@@ -135,7 +134,7 @@ pub struct KnowledgeBaseInfo {
 /// One `search_bases` hit. `rel_path` is relative to the base root.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct KnowledgeSearchHit {
-    pub kb_id: String,
+    pub kb_id: KnowledgeBaseId,
     pub kb_name: String,
     pub rel_path: String,
     pub heading: String,
@@ -229,7 +228,7 @@ pub struct KnowledgeBinding {
     #[serde(default)]
     pub channel_write_enabled: bool,
     #[serde(default)]
-    pub kb_ids: Vec<String>,
+    pub kb_ids: Vec<KnowledgeBaseId>,
 }
 
 fn default_writeback_mode() -> String {
@@ -279,13 +278,13 @@ pub struct MountOutcome {
 #[derive(Debug, Clone)]
 pub enum WriteTargetSpec {
     Handle(String),
-    Path { kb_id: String, rel_path: String },
+    Path { kb_id: KnowledgeBaseId, rel_path: String },
 }
 
 /// Result of resolving a write target to a canonical, base-relative document.
 #[derive(Debug, Clone)]
 pub struct WriteResolution {
-    pub kb_id: String,
+    pub kb_id: KnowledgeBaseId,
     pub canonical_rel_path: String,
     pub op: WriteOp,
 }
@@ -327,12 +326,12 @@ pub struct WriteRequest {
     pub spec: WriteTargetSpec,
     pub content: String,
     pub policy: WritePolicy,
-    pub bound_kb_ids: Vec<String>,
+    pub bound_kb_ids: Vec<KnowledgeBaseId>,
 }
 
 #[derive(Debug, Clone)]
 pub struct WriteOutcome {
-    pub kb_id: String,
+    pub kb_id: KnowledgeBaseId,
     pub final_rel_path: String,
     pub op: WriteOp,
     pub staged: bool,
@@ -370,7 +369,7 @@ pub enum TurnWritebackPhase {
 
 #[derive(Debug, Clone)]
 pub struct TurnWritebackFailure {
-    pub kb_id: Option<String>,
+    pub kb_id: Option<KnowledgeBaseId>,
     pub rel_path: Option<String>,
     pub error: String,
 }
@@ -635,7 +634,7 @@ impl KnowledgeService {
 
     /// Decrypt a stored credential into the in-memory [`ConnectorCredential`]
     /// the connector authenticates with.
-    async fn load_credential(&self, id: &str) -> Result<ConnectorCredential, AppError> {
+    async fn load_credential(&self, id: &ConnectorCredentialId) -> Result<ConnectorCredential, AppError> {
         let repo = self.cred_repo()?;
         let key = self.cred_key()?;
         let row = repo
@@ -645,7 +644,7 @@ impl KnowledgeService {
         let plaintext = nomifun_common::decrypt_string(&row.payload_encrypted, &key)?;
         let payload: serde_json::Value = serde_json::from_str(&plaintext)
             .map_err(|e| AppError::Internal(format!("credential payload decode failed: {e}")))?;
-        Ok(ConnectorCredential { id: row.id, kind: row.kind, name: row.name, payload })
+        Ok(ConnectorCredential { id: Some(row.id), kind: row.kind, name: row.name, payload })
     }
 
     /// All stored credentials (secret-free summaries).
@@ -676,7 +675,7 @@ impl KnowledgeService {
         }
         // Fail fast: never persist a credential that can't authenticate.
         let probe = ConnectorCredential {
-            id: String::new(),
+            id: None,
             kind: kind.to_owned(),
             name: name.to_owned(),
             payload: payload.clone(),
@@ -692,7 +691,7 @@ impl KnowledgeService {
         Ok(ConnectorCredentialSummary { id: row.id, kind: row.kind, name: row.name, created_at: row.created_at })
     }
 
-    pub async fn delete_credential(&self, id: &str) -> Result<(), AppError> {
+    pub async fn delete_credential(&self, id: &ConnectorCredentialId) -> Result<(), AppError> {
         let repo = self.cred_repo()?;
         repo.delete(id).await?;
         Ok(())
@@ -700,7 +699,7 @@ impl KnowledgeService {
 
     /// Re-probe a stored credential against its remote (the UI "test
     /// connection" action). Returns the connector identity on success.
-    pub async fn test_credential(&self, id: &str) -> Result<ConnectorIdentity, AppError> {
+    pub async fn test_credential(&self, id: &ConnectorCredentialId) -> Result<ConnectorIdentity, AppError> {
         let cred = self.load_credential(id).await?;
         let connector = self
             .connector_for(&cred.kind)
@@ -941,7 +940,12 @@ impl KnowledgeService {
     /// than [`Self::list_bases`], which walks every base's directory tree and
     /// would pay a full (possibly NAS-bound) walk just to produce a set of ids.
     pub async fn list_base_ids(&self) -> Result<Vec<String>, AppError> {
-        Ok(self.repo.list_bases().await?.into_iter().map(|r| r.id).collect())
+        Ok(self.repo
+            .list_bases()
+            .await?
+            .into_iter()
+            .map(|row| row.id.into_string())
+            .collect())
     }
 
     pub async fn get_base_info(&self, id: &str) -> Result<KnowledgeBaseInfo, AppError> {
@@ -1001,7 +1005,7 @@ impl KnowledgeService {
             tokio::spawn(async move {
                 let kb_id = row.id.clone();
                 if let Err(e) = service.fetch_source_and_autogen(row, src).await {
-                    tracing::warn!(kb_id, error = %e, "background knowledge source fetch failed");
+                    tracing::warn!(kb_id = %kb_id, error = %e, "background knowledge source fetch failed");
                 }
             });
         }
@@ -1031,10 +1035,10 @@ impl KnowledgeService {
             src.last_fetched_at = None;
         }
 
-        let id = generate_prefixed_id("kb");
+        let id = KnowledgeBaseId::new();
         let (root, managed) = match root_path.map(str::trim).filter(|p| !p.is_empty()) {
             None => {
-                let dir = self.data_dir.join(KB_MANAGED_REL_DIR).join(&id);
+                let dir = self.data_dir.join(KB_MANAGED_REL_DIR).join(id.as_str());
                 tokio::fs::create_dir_all(&dir)
                     .await
                     .map_err(|e| AppError::Internal(format!("failed to create knowledge dir: {e}")))?;
@@ -1121,7 +1125,7 @@ impl KnowledgeService {
         for (row, src) in pending {
             let kb_id = row.id.clone();
             if let Err(e) = self.fetch_source_and_autogen(row, src).await {
-                tracing::warn!(kb_id, error = %e, "knowledge boot-resume fetch failed");
+                tracing::warn!(kb_id = %kb_id, error = %e, "knowledge boot-resume fetch failed");
             }
         }
     }
@@ -1237,7 +1241,7 @@ impl KnowledgeService {
                 tracing::warn!(path = %root.display(), "purge refused: root not under managed knowledge dir");
             }
         }
-        self.emitter.emit_base_deleted(id);
+        self.emitter.emit_base_deleted(&row.id);
         Ok(())
     }
 
@@ -1471,7 +1475,7 @@ impl KnowledgeService {
     /// handle, rather than silently creating a duplicate (the wrong-folder bug).
     pub async fn resolve_write_target(
         &self,
-        bound_kb_ids: &[String],
+        bound_kb_ids: &[KnowledgeBaseId],
         spec: &WriteTargetSpec,
     ) -> Result<WriteResolution, AppError> {
         match spec {
@@ -1481,7 +1485,7 @@ impl KnowledgeService {
                 if !bound_kb_ids.iter().any(|b| b == &kb_id) {
                     return Err(AppError::Forbidden("handle points to a base not mounted in this session".into()));
                 }
-                let row = self.require_base(&kb_id).await?;
+                let row = self.require_base(kb_id.as_str()).await?;
                 let abs = safe_md_path(Path::new(&row.root_path), &rel_path)?;
                 if !tokio::fs::try_exists(&abs).await.unwrap_or(false) {
                     return Err(AppError::NotFound(format!("document for handle no longer exists: {rel_path}")));
@@ -1493,7 +1497,7 @@ impl KnowledgeService {
                     return Err(AppError::Forbidden("target base is not mounted in this session".into()));
                 }
                 let canonical = deconfuse_rel_path(rel_path);
-                let row = self.require_base(kb_id).await?;
+                let row = self.require_base(kb_id.as_str()).await?;
                 let abs = safe_md_path(Path::new(&row.root_path), &canonical)?;
                 if tokio::fs::try_exists(&abs).await.unwrap_or(false) {
                     return Ok(WriteResolution { kb_id: kb_id.clone(), canonical_rel_path: canonical, op: WriteOp::Update });
@@ -1501,7 +1505,7 @@ impl KnowledgeService {
                 // No exact match: a unique basename match elsewhere is almost
                 // certainly the intended update — suggest the handle, don't dupe.
                 let basename = canonical.rsplit('/').next().unwrap_or(&canonical).to_owned();
-                let files = self.list_files(kb_id).await.unwrap_or_default();
+                let files = self.list_files(kb_id.as_str()).await.unwrap_or_default();
                 let collisions: Vec<&KbFileEntry> = files
                     .iter()
                     .filter(|f| f.rel_path.rsplit('/').next().is_some_and(|n| n.eq_ignore_ascii_case(&basename)))
@@ -1552,7 +1556,7 @@ impl KnowledgeService {
             WriteMode::Direct => (res.canonical_rel_path.clone(), false),
             WriteMode::Disabled => unreachable!("disabled handled above"),
         };
-        self.write_file(&res.kb_id, &final_rel_path, &req.content).await?;
+        self.write_file(res.kb_id.as_str(), &final_rel_path, &req.content).await?;
         Ok(WriteOutcome { kb_id: res.kb_id, final_rel_path, op: res.op, staged })
     }
 
@@ -1645,20 +1649,20 @@ impl KnowledgeService {
         }
         progress(TurnWritebackPhase::Writing).await;
 
-        let mounted_ids: HashSet<String> = req.mounts.iter().map(|m| m.id.clone()).collect();
-        let bound_kb_ids: Vec<String> = req.mounts.iter().map(|m| m.id.clone()).collect();
+        let mounted_ids: HashSet<KnowledgeBaseId> = req.mounts.iter().map(|m| m.id.clone()).collect();
+        let bound_kb_ids: Vec<KnowledgeBaseId> = req.mounts.iter().map(|m| m.id.clone()).collect();
         let mut seen = HashSet::new();
         let mut written = Vec::new();
         let mut failures = Vec::new();
 
         for candidate in out.candidates {
-            let kb_id = candidate.kb_id.trim().to_owned();
+            let kb_id = candidate.kb_id;
             let rel_path = candidate.rel_path.trim().trim_start_matches("./").to_owned();
             let content = candidate.content.trim();
 
-            if kb_id.is_empty() || rel_path.is_empty() || content.is_empty() {
+            if rel_path.is_empty() || content.is_empty() {
                 failures.push(TurnWritebackFailure {
-                    kb_id: if kb_id.is_empty() { None } else { Some(kb_id) },
+                    kb_id: Some(kb_id),
                     rel_path: if rel_path.is_empty() { None } else { Some(rel_path) },
                     error: "candidate must include kb_id, rel_path and content".into(),
                 });
@@ -1704,7 +1708,7 @@ impl KnowledgeService {
                     }
                 };
                 if resolution.op == WriteOp::Update {
-                    let existing = match self.read_file(&kb_id, &resolution.canonical_rel_path).await {
+                    let existing = match self.read_file(kb_id.as_str(), &resolution.canonical_rel_path).await {
                         Ok(file) => file.content,
                         Err(e) => {
                             failures.push(TurnWritebackFailure {
@@ -1732,7 +1736,7 @@ impl KnowledgeService {
                 }
 
                 let final_rel_path = resolution.canonical_rel_path.clone();
-                match self.write_file(&kb_id, &final_rel_path, &content).await {
+                match self.write_file(kb_id.as_str(), &final_rel_path, &content).await {
                     Ok(()) => written.push(WriteOutcome {
                         kb_id,
                         final_rel_path,
@@ -1831,7 +1835,7 @@ impl KnowledgeService {
 
     async fn acquire_turn_writeback_target_lock(
         &self,
-        kb_id: &str,
+        kb_id: &KnowledgeBaseId,
         rel_path: &str,
     ) -> OwnedMutexGuard<()> {
         let key = format!("{kb_id}\0{rel_path}");
@@ -1886,7 +1890,7 @@ impl KnowledgeService {
 
     async fn staged_turn_writeback_candidate_already_present(
         &self,
-        kb_id: &str,
+        kb_id: &KnowledgeBaseId,
         scope: &str,
         canonical_rel_path: &str,
         content: &str,
@@ -1903,7 +1907,7 @@ impl KnowledgeService {
 
         for scope in scopes {
             let inbox_rel_path = format!("{KB_INBOX_REL_DIR}/{scope}/{canonical_rel_path}");
-            match self.read_file(kb_id, &inbox_rel_path).await {
+            match self.read_file(kb_id.as_str(), &inbox_rel_path).await {
                 Ok(existing) if existing.content == content => return Ok(true),
                 Ok(_) | Err(AppError::NotFound(_)) => {}
                 Err(e) => return Err(e.to_string()),
@@ -1914,14 +1918,14 @@ impl KnowledgeService {
 
     async fn staged_turn_writeback_rel_path_without_overwrite(
         &self,
-        kb_id: &str,
+        kb_id: &KnowledgeBaseId,
         scope: &str,
         canonical_rel_path: &str,
         content: &str,
     ) -> Result<String, String> {
         let scope = scope.trim_matches('/');
         let inbox_rel_path = format!("{KB_INBOX_REL_DIR}/{scope}/{canonical_rel_path}");
-        match self.read_file(kb_id, &inbox_rel_path).await {
+        match self.read_file(kb_id.as_str(), &inbox_rel_path).await {
             Ok(existing) if existing.content == content => return Ok(canonical_rel_path.to_owned()),
             Ok(_) => {}
             Err(AppError::NotFound(_)) => return Ok(canonical_rel_path.to_owned()),
@@ -2325,9 +2329,9 @@ impl KnowledgeService {
 
     pub async fn get_binding(&self, kind: &str, target_id: &str) -> Result<KnowledgeBinding, AppError> {
         validate_kind(kind)?;
-        let target_id = canonical_target_id(kind, target_id);
+        let target_id = canonical_target_id(kind, target_id)?;
         let row = self.repo.get_binding(kind, &target_id).await?;
-        Ok(row.map(binding_from_row).unwrap_or_default())
+        row.map(binding_from_row).transpose().map(|row| row.unwrap_or_default())
     }
 
     pub async fn set_binding(
@@ -2337,10 +2341,7 @@ impl KnowledgeService {
         binding: KnowledgeBinding,
     ) -> Result<KnowledgeBinding, AppError> {
         validate_kind(kind)?;
-        let target_id = canonical_target_id(kind, target_id);
-        if target_id.trim().is_empty() {
-            return Err(AppError::BadRequest("target_id must not be empty".into()));
-        }
+        let target_id = canonical_target_id(kind, target_id)?;
         if !WRITEBACK_MODES.contains(&binding.writeback_mode.as_str()) {
             return Err(AppError::BadRequest(format!(
                 "unsupported writeback_mode: {}",
@@ -2353,11 +2354,24 @@ impl KnowledgeService {
                 binding.writeback_eagerness
             )));
         }
+        let mut unique = HashSet::with_capacity(binding.kb_ids.len());
+        for id in &binding.kb_ids {
+            if !unique.insert(id.as_str()) {
+                return Err(AppError::BadRequest(format!(
+                    "duplicate knowledge base id in binding: {id}"
+                )));
+            }
+        }
+        let known: HashSet<String> = self.list_base_ids().await?.into_iter().collect();
+        if let Some(id) = binding.kb_ids.iter().find(|id| !known.contains(id.as_str())) {
+            return Err(AppError::NotFound(format!("knowledge base {id} not found")));
+        }
+        let kb_ids = binding.kb_ids.iter().map(ToString::to_string).collect::<Vec<_>>();
         self.repo
             .set_binding(
                 kind,
                 &target_id,
-                &binding.kb_ids,
+                &kb_ids,
                 binding.enabled,
                 binding.writeback,
                 &binding.writeback_mode,
@@ -2385,7 +2399,7 @@ impl KnowledgeService {
     /// a no-op.
     pub async fn delete_binding(&self, kind: &str, target_id: &str) -> Result<(), AppError> {
         validate_kind(kind)?;
-        let target_id = canonical_target_id(kind, target_id);
+        let target_id = canonical_target_id(kind, target_id)?;
         self.repo.delete_binding(kind, &target_id).await?;
         Ok(())
     }
@@ -2453,14 +2467,14 @@ impl KnowledgeService {
         if binding.enabled {
             let mut used_names: HashSet<String> = HashSet::new();
             for kb_id in &binding.kb_ids {
-                let row = match self.repo.get_base(kb_id).await {
+                let row = match self.repo.get_base(kb_id.as_str()).await {
                     Ok(Some(row)) => row,
                     Ok(None) => {
-                        tracing::warn!(kb_id, "bound knowledge base no longer exists; skipping");
+                        tracing::warn!(kb_id = %kb_id, "bound knowledge base no longer exists; skipping");
                         continue;
                     }
                     Err(e) => {
-                        tracing::warn!(kb_id, error = %e, "knowledge base lookup failed; skipping");
+                        tracing::warn!(kb_id = %kb_id, error = %e, "knowledge base lookup failed; skipping");
                         continue;
                     }
                 };
@@ -2526,7 +2540,7 @@ impl KnowledgeService {
     /// blindness entirely. Unknown ids are skipped (not an error).
     pub async fn search_bases(
         &self,
-        kb_ids: &[String],
+        kb_ids: &[KnowledgeBaseId],
         query: &str,
         limit: usize,
     ) -> Result<Vec<KnowledgeSearchHit>, AppError> {
@@ -2534,9 +2548,9 @@ impl KnowledgeService {
         if query.is_empty() || kb_ids.is_empty() {
             return Ok(Vec::new());
         }
-        let mut roots: Vec<(String, String, PathBuf)> = Vec::new();
+        let mut roots: Vec<(KnowledgeBaseId, String, PathBuf)> = Vec::new();
         for id in kb_ids {
-            if let Ok(Some(row)) = self.repo.get_base(id).await {
+            if let Ok(Some(row)) = self.repo.get_base(id.as_str()).await {
                 roots.push((row.id.clone(), row.name.clone(), PathBuf::from(&row.root_path)));
             }
         }
@@ -2673,7 +2687,7 @@ impl KnowledgeService {
     ///
     /// Used by [`crate::mcp_server`] to resolve the search scope at runtime
     /// from the caller's cwd rather than relying on baked `kb_ids`.
-    pub async fn resolve_kb_ids_for_cwd(&self, cwd: &str) -> Vec<String> {
+    pub async fn resolve_kb_ids_for_cwd(&self, cwd: &str) -> Vec<KnowledgeBaseId> {
         use crate::workpath::{DEFAULT_WORKPATH_KEY, WORKPATH_BINDING_KIND, session_workpath_key};
 
         let key = if cwd.trim().is_empty() {
@@ -2689,7 +2703,9 @@ impl KnowledgeService {
 
         // Look up the workpath binding — same row `ensure_mounts_for_session` uses.
         match self.get_binding(WORKPATH_BINDING_KIND, &key).await {
-            Ok(binding) if binding.enabled && !binding.kb_ids.is_empty() => binding.kb_ids,
+            Ok(binding) if binding.enabled && !binding.kb_ids.is_empty() => {
+                binding.kb_ids
+            }
             // No row, disabled, or empty → fallback to all bases.
             _ => self.all_base_ids().await,
         }
@@ -2697,9 +2713,9 @@ impl KnowledgeService {
 
     /// All registered base IDs (the broadest search scope). Used as fallback
     /// when no workpath binding narrows it.
-    async fn all_base_ids(&self) -> Vec<String> {
+    async fn all_base_ids(&self) -> Vec<KnowledgeBaseId> {
         match self.repo.list_bases().await {
-            Ok(rows) => rows.into_iter().map(|r| r.id).collect(),
+            Ok(rows) => rows.into_iter().map(|row| row.id).collect(),
             Err(e) => {
                 tracing::warn!(error = %e, "failed to list knowledge bases for scope resolution");
                 Vec::new()
@@ -2714,7 +2730,10 @@ impl KnowledgeService {
     /// write path needs. An empty/temp cwd (DEFAULT_WORKPATH_KEY) yields the
     /// default binding (writeback off → policy Disabled), so a CLI started in an
     /// unbound directory cannot write until the user enables write-back there.
-    pub async fn resolve_write_context_for_cwd(&self, cwd: &str) -> (Vec<String>, KnowledgeBinding, String) {
+    pub async fn resolve_write_context_for_cwd(
+        &self,
+        cwd: &str,
+    ) -> (Vec<KnowledgeBaseId>, KnowledgeBinding, String) {
         use crate::workpath::{DEFAULT_WORKPATH_KEY, WORKPATH_BINDING_KIND, session_workpath_key};
 
         let key = if cwd.trim().is_empty() {
@@ -2756,10 +2775,13 @@ impl KnowledgeService {
     }
 
     async fn require_base(&self, id: &str) -> Result<KnowledgeBaseRow, AppError> {
+        let id = KnowledgeBaseId::parse(id).map_err(|error| {
+            AppError::BadRequest(format!("invalid knowledge base id '{id}': {error}"))
+        })?;
         self.repo
-            .get_base(id)
+            .get_base(id.as_str())
             .await?
-            .ok_or_else(|| AppError::NotFound(format!("knowledge base {id} not found")))
+            .ok_or_else(|| AppError::NotFound(format!("knowledge base {} not found", id.as_str())))
     }
 }
 
@@ -2768,11 +2790,12 @@ impl KnowledgeService {
 /// (hook contract).
 #[async_trait::async_trait]
 impl nomifun_common::OnConversationDelete for KnowledgeService {
-    async fn on_conversation_deleted(&self, _user_id: &str, conversation_id: i64) {
-        // Knowledge bindings are keyed by a string `(kind, target_id)`; the
-        // integer conversation id is stringified at this domain boundary.
-        let target_id = conversation_id.to_string();
-        if let Err(e) = self.repo.delete_binding("conversation", &target_id).await {
+    async fn on_conversation_deleted(&self, _user_id: &str, conversation_id: &str) {
+        if let Err(e) = self
+            .repo
+            .delete_binding("conversation", conversation_id)
+            .await
+        {
             tracing::warn!(conversation_id, error = %e, "failed to delete knowledge binding");
         }
     }
@@ -2850,11 +2873,16 @@ fn validate_kind(kind: &str) -> Result<(), AppError> {
 /// re-normalized server-side ([`workpath_key`] is idempotent), so every
 /// client spelling of the same directory (trailing slash, backslashes)
 /// converges on one binding row; other kinds carry opaque ids unchanged.
-fn canonical_target_id(kind: &str, target_id: &str) -> String {
-    if kind == WORKPATH_BINDING_KIND {
-        workpath_key(target_id)
-    } else {
-        target_id.to_owned()
+fn canonical_target_id(kind: &str, target_id: &str) -> Result<String, AppError> {
+    let invalid = |error: nomifun_common::PrefixedIdError| {
+        AppError::BadRequest(format!("invalid {kind} target id '{target_id}': {error}"))
+    };
+    match kind {
+        WORKPATH_BINDING_KIND => Ok(workpath_key(target_id)),
+        "conversation" => ConversationId::parse(target_id).map(|id| id.into_string()).map_err(invalid),
+        "terminal" => TerminalId::parse(target_id).map(|id| id.into_string()).map_err(invalid),
+        "companion" => CompanionId::parse(target_id).map(|id| id.into_string()).map_err(invalid),
+        _ => Err(AppError::BadRequest(format!("unsupported binding kind: {kind}"))),
     }
 }
 
@@ -2911,25 +2939,36 @@ async fn complete_description(
     )))
 }
 
-fn binding_from_row((row, kb_ids): (KnowledgeBindingRow, Vec<String>)) -> KnowledgeBinding {
-    let writeback_mode = if WRITEBACK_MODES.contains(&row.writeback_mode.as_str()) {
-        row.writeback_mode
-    } else {
-        default_writeback_mode()
-    };
-    let writeback_eagerness = if WRITEBACK_EAGERNESS.contains(&row.writeback_eagerness.as_str()) {
-        row.writeback_eagerness
-    } else {
-        default_writeback_eagerness()
-    };
-    KnowledgeBinding {
+fn binding_from_row((row, kb_ids): (KnowledgeBindingRow, Vec<String>)) -> Result<KnowledgeBinding, AppError> {
+    if !WRITEBACK_MODES.contains(&row.writeback_mode.as_str()) {
+        return Err(AppError::Internal(format!(
+            "knowledge binding '{}' contains invalid writeback_mode '{}'",
+            row.binding_id, row.writeback_mode
+        )));
+    }
+    if !WRITEBACK_EAGERNESS.contains(&row.writeback_eagerness.as_str()) {
+        return Err(AppError::Internal(format!(
+            "knowledge binding '{}' contains invalid writeback_eagerness '{}'",
+            row.binding_id, row.writeback_eagerness
+        )));
+    }
+    let kb_ids = kb_ids
+        .into_iter()
+        .map(|id| KnowledgeBaseId::parse(id.clone()).map_err(|error| {
+            AppError::Internal(format!(
+                "knowledge binding '{}' contains invalid base id '{id}': {error}",
+                row.binding_id
+            ))
+        }))
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(KnowledgeBinding {
         enabled: row.enabled,
         writeback: row.writeback,
-        writeback_mode,
-        writeback_eagerness,
+        writeback_mode: row.writeback_mode,
+        writeback_eagerness: row.writeback_eagerness,
         channel_write_enabled: row.channel_write_enabled,
         kb_ids,
-    }
+    })
 }
 
 /// Deserialize `extra.source`, tolerating absent/corrupt extras (`None`).
@@ -3851,14 +3890,14 @@ fn unique_link_name(row: &KnowledgeBaseRow, used: &mut HashSet<String>) -> Strin
         .trim_end_matches('.')
         .to_owned();
     if name.is_empty() {
-        name = row.id.clone();
+        name = row.id.to_string();
     }
     // `MANAGED_KEEP` entries (`.gitignore`, `README.md`) are exempt from the
     // mount sweep and owned by the platform — a link with such a name would
     // collide with them. Windows file names are case-insensitive, so compare
     // accordingly.
     if mount::MANAGED_KEEP.iter().any(|kept| kept.eq_ignore_ascii_case(&name)) || used.contains(&name) {
-        name = format!("{name}-{}", short_id_suffix(&row.id));
+        name = format!("{name}-{}", short_id_suffix(row.id.as_str()));
     }
     used.insert(name.clone());
     name
@@ -4148,6 +4187,18 @@ fn deduplicate_slug(base: &str, existing: &HashSet<String>) -> String {
 mod tests {
     use super::*;
 
+    const TEST_OWNER_ID: &str = "user_0190f5fe-7c00-7a00-8000-000000000001";
+    const TEST_CONVERSATION_ID: &str = "conv_0190f5fe-7c00-7a00-8000-000000000001";
+    const TEST_CONVERSATION_ID_2: &str = "conv_0190f5fe-7c00-7a00-8000-000000000002";
+    const TEST_CONVERSATION_ID_9: &str = "conv_0190f5fe-7c00-7a00-8000-000000000009";
+    const TEST_TERMINAL_ID_2: &str = "term_0190f5fe-7c00-7a00-8000-000000000002";
+    const TEST_TERMINAL_ID_9: &str = "term_0190f5fe-7c00-7a00-8000-000000000009";
+    const TEST_PROVIDER_ID_2: &str = "prov_0190f5fe-7c00-7a00-8000-000000000002";
+    const TEST_PROVIDER_ID_9: &str = "prov_0190f5fe-7c00-7a00-8000-000000000009";
+    const TEST_KB_PENDING: &str = "kb_0190f5fe-7c00-7a00-8000-000000000091";
+    const TEST_KB_LIVE: &str = "kb_0190f5fe-7c00-7a00-8000-000000000092";
+    const TEST_KB_STAMPED: &str = "kb_0190f5fe-7c00-7a00-8000-000000000093";
+
     /// **P3-K2 seam**: the render fetcher is an OPTIONAL, late-wired backend. By
     /// default it is absent (every source uses the HTTP `fetcher` — zero
     /// regression); the app layer registers a `BrowserFetcher` via
@@ -4176,7 +4227,7 @@ mod tests {
         let service = Arc::new(KnowledgeService::new(
             repo,
             &dir.path().join("data"),
-            KnowledgeEventEmitter::new(events, Arc::from("test-owner")),
+            KnowledgeEventEmitter::new(events, Arc::from(TEST_OWNER_ID)),
         ));
 
         // Default: no render backend → HTTP fetcher is the only path (zero regression).
@@ -4233,7 +4284,7 @@ mod tests {
             &dir.path().join("data"),
             KnowledgeEventEmitter::new(
                 Arc::new(NoopBroadcaster),
-                Arc::from("test-owner"),
+                Arc::from(TEST_OWNER_ID),
             ),
         )
         .with_url_fetcher(Canned("http"));
@@ -4298,8 +4349,9 @@ mod tests {
         let dir = tempfile::TempDir::new().unwrap();
         let root = dir.path();
         std::fs::write(root.join("guide.md"), "# 使用指南\n正文").unwrap();
-        std::fs::create_dir_all(root.join("_inbox/conv_x")).unwrap();
-        std::fs::write(root.join("_inbox/conv_x/draft.md"), "# 草稿").unwrap();
+        let inbox = root.join("_inbox/conv_0190f5fe-7c00-7a00-8000-000000000001");
+        std::fs::create_dir_all(&inbox).unwrap();
+        std::fs::write(inbox.join("draft.md"), "# 草稿").unwrap();
         std::fs::create_dir_all(root.join("sub")).unwrap();
         std::fs::write(root.join("sub/notes.md"), "no heading here").unwrap();
 
@@ -4373,7 +4425,7 @@ mod tests {
             .await
             .unwrap();
 
-        let hits = service.search_bases(&[kb.id], "部署", 10).await.unwrap();
+        let hits = service.search_bases(&[kb.id.clone()], "部署", 10).await.unwrap();
         let rels: Vec<&str> = hits.iter().map(|h| h.rel_path.as_str()).collect();
         assert_eq!(rels, vec!["real.md"], "machinery-dir files must not be searchable: {rels:?}");
     }
@@ -4507,7 +4559,7 @@ mod tests {
     fn link_names_sanitize_and_dedupe() {
         let mut used = HashSet::new();
         let row_a = KnowledgeBaseRow {
-            id: "kb_aaaaaa".into(),
+            id: KnowledgeBaseId::new(),
             name: "领域/知识:v1".into(),
             description: String::new(),
             root_path: String::new(),
@@ -4521,7 +4573,7 @@ mod tests {
         assert_eq!(name_a, "领域_知识_v1");
 
         let row_b = KnowledgeBaseRow {
-            id: "kb_bbbbbb".into(),
+            id: KnowledgeBaseId::new(),
             ..row_a.clone()
         };
         let name_b = unique_link_name(&row_b, &mut used);
@@ -4538,7 +4590,7 @@ mod tests {
         for name in ["README.md", "readme.MD", ".gitignore"] {
             let mut used = HashSet::new();
             let row = KnowledgeBaseRow {
-                id: "kb_cccccc".into(),
+                id: KnowledgeBaseId::new(),
                 name: name.into(),
                 description: String::new(),
                 root_path: String::new(),
@@ -4553,7 +4605,7 @@ mod tests {
                 !mount::MANAGED_KEEP.iter().any(|k| k.eq_ignore_ascii_case(&link)),
                 "{name} → {link}"
             );
-            assert!(link.starts_with(name) && link.ends_with("cccccc"), "{name} → {link}");
+            assert_eq!(link, format!("{name}-{}", short_id_suffix(row.id.as_str())));
         }
     }
 
@@ -4667,13 +4719,14 @@ mod tests {
         std::fs::create_dir_all(vault.join("raw")).unwrap();
         std::fs::create_dir_all(vault.join("empty")).unwrap();
         std::fs::create_dir_all(vault.join("assets")).unwrap();
-        std::fs::create_dir_all(vault.join("_inbox/conv_x")).unwrap();
+        let inbox = vault.join("_inbox/conv_0190f5fe-7c00-7a00-8000-000000000001");
+        std::fs::create_dir_all(&inbox).unwrap();
         std::fs::create_dir_all(vault.join(".obsidian")).unwrap();
         std::fs::create_dir_all(vault.join("node_modules/pkg")).unwrap();
         std::fs::write(vault.join("README.md"), "# Root").unwrap();
         std::fs::write(vault.join("raw/python3-type-conversion.md"), "# Types").unwrap();
         std::fs::write(vault.join("assets/logo.png"), "png").unwrap();
-        std::fs::write(vault.join("_inbox/conv_x/draft.md"), "# Draft").unwrap();
+        std::fs::write(inbox.join("draft.md"), "# Draft").unwrap();
         std::fs::write(vault.join(".obsidian/workspace.md"), "# Tooling").unwrap();
         std::fs::write(vault.join("node_modules/pkg/readme.md"), "# Package").unwrap();
 
@@ -4838,7 +4891,7 @@ mod tests {
 
         let mut got = service.list_base_ids().await.unwrap();
         got.sort();
-        let mut expected = vec![a.id, b.id];
+        let mut expected = vec![a.id.into_string(), b.id.into_string()];
         expected.sort();
         assert_eq!(got, expected);
     }
@@ -4972,11 +5025,11 @@ mod tests {
     }
 
     struct ConcurrentDirectMergeCompleter {
-        kb_id: String,
+        kb_id: KnowledgeBaseId,
     }
 
     impl ConcurrentDirectMergeCompleter {
-        fn new(kb_id: String) -> Arc<Self> {
+        fn new(kb_id: KnowledgeBaseId) -> Arc<Self> {
             Arc::new(Self { kb_id })
         }
     }
@@ -5030,7 +5083,7 @@ mod tests {
         let completer = ScriptedCompleter::new(&[r#"{"description":"覆盖A，查阅时用。"}"#]);
         service.set_completer(completer.clone());
 
-        let pick = Some(("prov-2".to_owned(), "model-x".to_owned()));
+        let pick = Some((TEST_PROVIDER_ID_2.to_owned(), "model-x".to_owned()));
         let description = service
             .generate_description_for_path("库", &docs.to_string_lossy(), pick.clone())
             .await
@@ -5038,7 +5091,7 @@ mod tests {
         assert_eq!(description, "覆盖A，查阅时用。");
         assert_eq!(
             *completer.last_override.lock().unwrap(),
-            Some(("prov-2".to_owned(), "model-x".to_owned())),
+            Some((TEST_PROVIDER_ID_2.to_owned(), "model-x".to_owned())),
             "the explicit (provider_id, model) must reach complete_with verbatim"
         );
 
@@ -5046,12 +5099,16 @@ mod tests {
         let completer = ScriptedCompleter::new(&[r#"{"description":"润色结果。"}"#]);
         service.set_completer(completer.clone());
         service
-            .polish_description("库", "草稿", Some(("prov-9".to_owned(), "m-9".to_owned())))
+            .polish_description(
+                "库",
+                "草稿",
+                Some((TEST_PROVIDER_ID_9.to_owned(), "m-9".to_owned())),
+            )
             .await
             .unwrap();
         assert_eq!(
             *completer.last_override.lock().unwrap(),
-            Some(("prov-9".to_owned(), "m-9".to_owned()))
+            Some((TEST_PROVIDER_ID_9.to_owned(), "m-9".to_owned()))
         );
     }
 
@@ -5225,7 +5282,7 @@ mod tests {
             dir,
             KnowledgeEventEmitter::new(
                 Arc::new(NoopBroadcaster),
-                Arc::from("test-owner"),
+                Arc::from(TEST_OWNER_ID),
             ),
         )
         .with_url_fetcher(HttpFetcher::new().allow_private_for_tests());
@@ -5233,7 +5290,14 @@ mod tests {
     }
 
     fn extra_source(repo: &MemRepo, kb_id: &str) -> Option<KnowledgeSource> {
-        let row = repo.bases.lock().unwrap().iter().find(|r| r.id == kb_id).cloned().unwrap();
+        let row = repo
+            .bases
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|r| r.id.as_str() == kb_id)
+            .cloned()
+            .unwrap();
         source_from_extra(&row.extra)
     }
 
@@ -5268,7 +5332,7 @@ mod tests {
         // create-time fetch summary.
         assert!(!PathBuf::from(&kb.root_path).join(source_url::SNAPSHOT_REL_DIR).exists());
         assert!(kb.source_fetch.is_none(), "live create must not report a fetch");
-        let stored = extra_source(&repo, &kb.id).expect("source stored in extra");
+        let stored = extra_source(&repo, kb.id.as_str()).expect("source stored in extra");
         assert_eq!(stored.mode, KnowledgeSourceMode::Live);
         assert_eq!(stored.last_fetched_at, None, "client-sent stamp must be discarded");
 
@@ -5276,7 +5340,7 @@ mod tests {
         service
             .set_binding(
                 "conversation",
-                "1",
+                TEST_CONVERSATION_ID,
                 KnowledgeBinding {
                     enabled: true,
                     kb_ids: vec![kb.id.clone()],
@@ -5287,7 +5351,9 @@ mod tests {
             .unwrap();
         let ws = dir.path().join("ws");
         std::fs::create_dir_all(&ws).unwrap();
-        let outcome = service.ensure_mounts_for_target("conversation", "1", &ws).await;
+        let outcome = service
+            .ensure_mounts_for_target("conversation", TEST_CONVERSATION_ID, &ws)
+            .await;
         assert_eq!(outcome.mounts.len(), 1);
         let live = &outcome.mounts[0].live_sources;
         assert_eq!(live.len(), 1, "{live:?}");
@@ -5316,7 +5382,7 @@ mod tests {
             .create_base("有源库", "", None, Some(url_source(KnowledgeSourceMode::Snapshot, &[&url])))
             .await
             .unwrap();
-        let stamp = extra_source(&repo, &kb.id)
+        let stamp = extra_source(&repo, kb.id.as_str())
             .unwrap()
             .last_fetched_at
             .expect("snapshot create stamps last_fetched_at");
@@ -5396,7 +5462,7 @@ mod tests {
         assert!(content.contains("# API"), "got: {content}");
 
         // Source stamped + entry title backfilled from <title>.
-        let stored = extra_source(&repo, &kb.id).unwrap();
+        let stored = extra_source(&repo, kb.id.as_str()).unwrap();
         assert!(stored.last_fetched_at.is_some());
         assert_eq!(stored.entries[0].title.as_deref(), Some("接口文档"));
 
@@ -5442,7 +5508,7 @@ mod tests {
         assert!(names.iter().any(|n| n.ends_with("-2.md")), "{names:?}");
         assert!(!PathBuf::from(&kb.root_path).join("README.md").exists(), "no completer → no README");
         assert_eq!(kb.description, "");
-        assert!(extra_source(&repo, &kb.id).unwrap().last_fetched_at.is_some());
+        assert!(extra_source(&repo, kb.id.as_str()).unwrap().last_fetched_at.is_some());
     }
 
     #[tokio::test]
@@ -5610,7 +5676,7 @@ mod tests {
             .create_base("刷新库", "", None, Some(url_source(KnowledgeSourceMode::Snapshot, &[&url])))
             .await
             .unwrap();
-        let first_stamp = extra_source(&repo, &kb.id).unwrap().last_fetched_at.unwrap();
+        let first_stamp = extra_source(&repo, kb.id.as_str()).unwrap().last_fetched_at.unwrap();
         let snap_dir = PathBuf::from(&kb.root_path).join(source_url::SNAPSHOT_REL_DIR);
         let snap_path = std::fs::read_dir(&snap_dir).unwrap().flatten().next().unwrap().path();
         assert!(std::fs::read_to_string(&snap_path).unwrap().contains("version-one"));
@@ -5623,7 +5689,7 @@ mod tests {
         // Same slug → overwritten in place, not duplicated.
         assert_eq!(std::fs::read_dir(&snap_dir).unwrap().flatten().count(), 1);
         assert!(std::fs::read_to_string(&snap_path).unwrap().contains("version-two"));
-        assert_eq!(extra_source(&repo, &kb.id).unwrap().last_fetched_at, Some(stamp));
+        assert_eq!(extra_source(&repo, kb.id.as_str()).unwrap().last_fetched_at, Some(stamp));
 
         // A base without a source refuses to refresh.
         let plain = service.create_base("无源库", "", None, None).await.unwrap();
@@ -5660,13 +5726,13 @@ mod tests {
             .create_base("失败刷新库", "", None, Some(url_source(KnowledgeSourceMode::Snapshot, &[&url])))
             .await
             .unwrap();
-        let first_stamp = extra_source(&repo, &kb.id).unwrap().last_fetched_at.expect("create stamped");
+        let first_stamp = extra_source(&repo, kb.id.as_str()).unwrap().last_fetched_at.expect("create stamped");
 
         let summary = service.refresh_source(&kb.id).await.unwrap();
         assert_eq!((summary.fetched, summary.failed), (0, 1), "{:?}", summary.errors);
         assert_eq!(summary.last_fetched_at, Some(first_stamp), "summary must report the old stamp");
         assert_eq!(
-            extra_source(&repo, &kb.id).unwrap().last_fetched_at,
+            extra_source(&repo, kb.id.as_str()).unwrap().last_fetched_at,
             Some(first_stamp),
             "extra.source.lastFetchedAt must keep the old value"
         );
@@ -5919,7 +5985,7 @@ mod tests {
             writeback_eagerness: &str,
             channel_write_enabled: bool,
             updated_at: nomifun_common::TimestampMs,
-        ) -> Result<i64, nomifun_db::DbError> {
+        ) -> Result<String, nomifun_db::DbError> {
             self.0
                 .set_binding(kind, id, kb_ids, enabled, writeback, writeback_mode, writeback_eagerness, channel_write_enabled, updated_at)
                 .await
@@ -5966,7 +6032,7 @@ mod tests {
             &dir.path().join("data"),
             KnowledgeEventEmitter::new(
                 Arc::new(NoopBroadcaster),
-                Arc::from("test-owner"),
+                Arc::from(TEST_OWNER_ID),
             ),
         )
         .with_url_fetcher(HttpFetcher::new().allow_private_for_tests());
@@ -6030,7 +6096,7 @@ mod tests {
                 sync: None,
             };
             repo.bases.lock().unwrap().push(KnowledgeBaseRow {
-                id: id.into(),
+                id: KnowledgeBaseId::parse(id).unwrap(),
                 name: id.into(),
                 description: String::new(),
                 root_path: root.to_string_lossy().into_owned(),
@@ -6042,9 +6108,9 @@ mod tests {
             });
             root
         };
-        let pending_root = seed("kb_pending", KnowledgeSourceMode::Snapshot, None);
-        let live_root = seed("kb_live", KnowledgeSourceMode::Live, None);
-        let stamped_root = seed("kb_stamped", KnowledgeSourceMode::Snapshot, Some(123));
+        let pending_root = seed(TEST_KB_PENDING, KnowledgeSourceMode::Snapshot, None);
+        let live_root = seed(TEST_KB_LIVE, KnowledgeSourceMode::Live, None);
+        let stamped_root = seed(TEST_KB_STAMPED, KnowledgeSourceMode::Snapshot, Some(123));
 
         // Spawned exactly like the production wiring (boot must not block).
         tokio::spawn(Arc::clone(&service).resume_pending_source_fetches());
@@ -6053,7 +6119,10 @@ mod tests {
         let snap_dir = pending_root.join(source_url::SNAPSHOT_REL_DIR);
         let deadline = Instant::now() + Duration::from_secs(15);
         loop {
-            let stamped = extra_source(&repo, "kb_pending").unwrap().last_fetched_at.is_some();
+            let stamped = extra_source(&repo, TEST_KB_PENDING)
+                .unwrap()
+                .last_fetched_at
+                .is_some();
             let snapshots = std::fs::read_dir(&snap_dir).map(|d| d.flatten().count()).unwrap_or(0);
             if stamped && snapshots == 1 {
                 let snap = std::fs::read_dir(&snap_dir).unwrap().flatten().next().unwrap();
@@ -6072,12 +6141,17 @@ mod tests {
             !live_root.join(source_url::SNAPSHOT_REL_DIR).exists(),
             "live source must not be fetched by boot-resume"
         );
-        assert_eq!(extra_source(&repo, "kb_live").unwrap().last_fetched_at, None);
+        assert_eq!(extra_source(&repo, TEST_KB_LIVE).unwrap().last_fetched_at, None);
         assert!(
             !stamped_root.join(source_url::SNAPSHOT_REL_DIR).exists(),
             "stamped source must not be re-fetched by boot-resume"
         );
-        assert_eq!(extra_source(&repo, "kb_stamped").unwrap().last_fetched_at, Some(123));
+        assert_eq!(
+            extra_source(&repo, TEST_KB_STAMPED)
+                .unwrap()
+                .last_fetched_at,
+            Some(123)
+        );
     }
 
     // ── background-dispatch create (gateway path) ────────────────────
@@ -6133,7 +6207,7 @@ mod tests {
             KnowledgeService::new(
                 repo.clone(),
                 &dir.path().join("data"),
-                KnowledgeEventEmitter::new(events.clone(), Arc::from("test-owner")),
+                KnowledgeEventEmitter::new(events.clone(), Arc::from(TEST_OWNER_ID)),
             )
             .with_url_fetcher(HttpFetcher::new().allow_private_for_tests()),
         );
@@ -6154,7 +6228,7 @@ mod tests {
         // yet, description still the (empty) user-supplied one.
         assert!(kb.source_fetch.is_none(), "background create must not report a sync fetch");
         assert_eq!(kb.description, "");
-        let stored = extra_source(&repo, &kb.id).expect("extra.source persisted before the fetch");
+        let stored = extra_source(&repo, kb.id.as_str()).expect("extra.source persisted before the fetch");
         assert_eq!(stored.entries[0].url, url);
         assert_eq!(stored.last_fetched_at, None, "stamp belongs to the background fetch");
         let snap_dir = PathBuf::from(&kb.root_path).join(source_url::SNAPSHOT_REL_DIR);
@@ -6164,7 +6238,7 @@ mod tests {
         // description backfilled, completion event emitted.
         let deadline = Instant::now() + Duration::from_secs(15);
         loop {
-            let stored = extra_source(&repo, &kb.id).unwrap();
+            let stored = extra_source(&repo, kb.id.as_str()).unwrap();
             let described = repo
                 .bases
                 .lock()
@@ -6200,7 +6274,7 @@ mod tests {
         service
             .set_binding(
                 "conversation",
-                "1",
+                TEST_CONVERSATION_ID,
                 KnowledgeBinding {
                     enabled: true,
                     kb_ids: vec![kb.id.clone()],
@@ -6211,12 +6285,16 @@ mod tests {
             .unwrap();
 
         // Workspace == data root → skipped, no scaffolding created.
-        let outcome = service.ensure_mounts_for_target("conversation", "1", &data_dir).await;
+        let outcome = service
+            .ensure_mounts_for_target("conversation", TEST_CONVERSATION_ID, &data_dir)
+            .await;
         assert!(outcome.mounts.is_empty());
         assert!(!data_dir.join(".nomi").exists());
 
         // Workspace is an ancestor of the data root → skipped too.
-        let outcome = service.ensure_mounts_for_target("conversation", "1", dir.path()).await;
+        let outcome = service
+            .ensure_mounts_for_target("conversation", TEST_CONVERSATION_ID, dir.path())
+            .await;
         assert!(outcome.mounts.is_empty());
         assert!(!dir.path().join(".nomi").exists());
 
@@ -6224,14 +6302,18 @@ mod tests {
         // (here: the base's own directory) must be skipped as well — the
         // mount sweep would otherwise run inside a knowledge base's files.
         let kb_root = PathBuf::from(&kb.root_path);
-        let outcome = service.ensure_mounts_for_target("conversation", "1", &kb_root).await;
+        let outcome = service
+            .ensure_mounts_for_target("conversation", TEST_CONVERSATION_ID, &kb_root)
+            .await;
         assert!(outcome.mounts.is_empty());
         assert!(!kb_root.join(".nomi").exists());
 
         // A sibling workspace mounts normally (guard must not overfire).
         let ws = dir.path().join("ws");
         std::fs::create_dir_all(&ws).unwrap();
-        let outcome = service.ensure_mounts_for_target("conversation", "1", &ws).await;
+        let outcome = service
+            .ensure_mounts_for_target("conversation", TEST_CONVERSATION_ID, &ws)
+            .await;
         assert_eq!(outcome.mounts.len(), 1);
     }
 
@@ -6256,7 +6338,7 @@ mod tests {
             )
             .await
             .unwrap();
-        kb.id
+        kb.id.into_string()
     }
 
     /// When a `workpath` row exists it wins over the legacy per-session
@@ -6270,11 +6352,19 @@ mod tests {
         let key = workpath_key(&ws.to_string_lossy());
 
         let kb_workpath = bind_new_base(&service, "路径库", WORKPATH_BINDING_KIND, &key).await;
-        let _kb_legacy = bind_new_base(&service, "会话库", "conversation", "1").await;
+        let _kb_legacy = bind_new_base(
+            &service,
+            "会话库",
+            "conversation",
+            TEST_CONVERSATION_ID,
+        )
+        .await;
 
-        let outcome = service.ensure_mounts_for_session(&key, "conversation", "1", &ws).await;
+        let outcome = service
+            .ensure_mounts_for_session(&key, "conversation", TEST_CONVERSATION_ID, &ws)
+            .await;
         assert_eq!(outcome.mounts.len(), 1, "{:?}", outcome.mounts);
-        assert_eq!(outcome.mounts[0].id, kb_workpath);
+        assert_eq!(outcome.mounts[0].id.to_string(), kb_workpath);
     }
 
     /// No `workpath` row at all → the legacy `(conversation, id)` binding
@@ -6287,17 +6377,27 @@ mod tests {
         std::fs::create_dir_all(&ws).unwrap();
         let key = workpath_key(&ws.to_string_lossy());
 
-        let kb_legacy = bind_new_base(&service, "会话库", "conversation", "1").await;
+        let kb_legacy = bind_new_base(
+            &service,
+            "会话库",
+            "conversation",
+            TEST_CONVERSATION_ID,
+        )
+        .await;
 
-        let outcome = service.ensure_mounts_for_session(&key, "conversation", "1", &ws).await;
+        let outcome = service
+            .ensure_mounts_for_session(&key, "conversation", TEST_CONVERSATION_ID, &ws)
+            .await;
         assert_eq!(outcome.mounts.len(), 1, "{:?}", outcome.mounts);
-        assert_eq!(outcome.mounts[0].id, kb_legacy);
+        assert_eq!(outcome.mounts[0].id.to_string(), kb_legacy);
 
         // Terminal sessions take the same path with their own legacy kind.
-        let kb_term = bind_new_base(&service, "终端库", "terminal", "2").await;
-        let outcome = service.ensure_mounts_for_session(&key, "terminal", "2", &ws).await;
+        let kb_term = bind_new_base(&service, "终端库", "terminal", TEST_TERMINAL_ID_2).await;
+        let outcome = service
+            .ensure_mounts_for_session(&key, "terminal", TEST_TERMINAL_ID_2, &ws)
+            .await;
         assert_eq!(outcome.mounts.len(), 1, "{:?}", outcome.mounts);
-        assert_eq!(outcome.mounts[0].id, kb_term);
+        assert_eq!(outcome.mounts[0].id.to_string(), kb_term);
     }
 
     /// An existing-but-disabled workpath row is an explicit choice, not a
@@ -6310,13 +6410,21 @@ mod tests {
         std::fs::create_dir_all(&ws).unwrap();
         let key = workpath_key(&ws.to_string_lossy());
 
-        let _kb_legacy = bind_new_base(&service, "会话库", "conversation", "1").await;
+        let _kb_legacy = bind_new_base(
+            &service,
+            "会话库",
+            "conversation",
+            TEST_CONVERSATION_ID,
+        )
+        .await;
         service
             .set_binding(WORKPATH_BINDING_KIND, &key, KnowledgeBinding::default())
             .await
             .unwrap();
 
-        let outcome = service.ensure_mounts_for_session(&key, "conversation", "1", &ws).await;
+        let outcome = service
+            .ensure_mounts_for_session(&key, "conversation", TEST_CONVERSATION_ID, &ws)
+            .await;
         assert!(outcome.mounts.is_empty(), "{:?}", outcome.mounts);
     }
 
@@ -6336,9 +6444,16 @@ mod tests {
         assert_eq!(key, DEFAULT_WORKPATH_KEY);
 
         let kb = bind_new_base(&service, "默认库", WORKPATH_BINDING_KIND, DEFAULT_WORKPATH_KEY).await;
-        let outcome = service.ensure_mounts_for_session(&key, "conversation", "1", &temp_ws).await;
+        let outcome = service
+            .ensure_mounts_for_session(
+                &key,
+                "conversation",
+                TEST_CONVERSATION_ID,
+                &temp_ws,
+            )
+            .await;
         assert_eq!(outcome.mounts.len(), 1, "{:?}", outcome.mounts);
-        assert_eq!(outcome.mounts[0].id, kb);
+        assert_eq!(outcome.mounts[0].id.to_string(), kb);
     }
 
     /// Workpath target ids are canonicalized server-side: every spelling of
@@ -6358,14 +6473,19 @@ mod tests {
         // …read back under the canonical key.
         let binding = service.get_binding(WORKPATH_BINDING_KIND, &canonical).await.unwrap();
         assert!(binding.enabled);
-        assert_eq!(binding.kb_ids, vec![kb.clone()]);
+        assert_eq!(binding.kb_ids, vec![KnowledgeBaseId::parse(kb.clone()).unwrap()]);
 
         // The session lookup normalizes its own input too.
         let outcome = service
-            .ensure_mounts_for_session(&format!("{}/", ws.display()), "conversation", "1", &ws)
+            .ensure_mounts_for_session(
+                &format!("{}/", ws.display()),
+                "conversation",
+                TEST_CONVERSATION_ID,
+                &ws,
+            )
             .await;
         assert_eq!(outcome.mounts.len(), 1, "{:?}", outcome.mounts);
-        assert_eq!(outcome.mounts[0].id, kb);
+        assert_eq!(outcome.mounts[0].id.to_string(), kb);
 
         // delete_binding canonicalizes as well — the row really goes away.
         service
@@ -6392,12 +6512,13 @@ mod tests {
     async fn search_bases_finds_topic_in_managed_base_ignoring_gitignore() {
         let (svc, _tmp) = search_test_service().await;
         let info = svc.create_base("运维手册", "团队运维约定", None, None).await.unwrap();
-        let root = svc.data_dir().join("knowledge").join(&info.id);
+        let root = svc.data_dir().join("knowledge").join(info.id.as_str());
         std::fs::write(root.join(".gitignore"), "*\n").unwrap();
         std::fs::create_dir_all(root.join("deploy")).unwrap();
         std::fs::write(root.join("deploy/rollback.md"), "# 回滚流程\n\n生产环境回滚分三步：先停流量……\n").unwrap();
-        std::fs::create_dir_all(root.join("_inbox/conv-1")).unwrap();
-        std::fs::write(root.join("_inbox/conv-1/draft.md"), "# 回滚草稿\n临时笔记\n").unwrap();
+        let inbox = root.join("_inbox/conv_0190f5fe-7c00-7a00-8000-000000000001");
+        std::fs::create_dir_all(&inbox).unwrap();
+        std::fs::write(inbox.join("draft.md"), "# 回滚草稿\n临时笔记\n").unwrap();
 
         let hits = svc.search_bases(&[info.id.clone()], "回滚", 8).await.unwrap();
         assert!(!hits.is_empty(), "must find topic despite .gitignore + hidden mount semantics");
@@ -6413,7 +6534,7 @@ mod tests {
     async fn search_bases_ranks_filename_and_heading_above_body() {
         let (svc, _tmp) = search_test_service().await;
         let info = svc.create_base("库", "", None, None).await.unwrap();
-        let root = svc.data_dir().join("knowledge").join(&info.id);
+        let root = svc.data_dir().join("knowledge").join(info.id.as_str());
         std::fs::write(root.join("payments.md"), "# Payments API\n\nrefund flow here\n").unwrap();
         std::fs::write(root.join("misc.md"), "# Misc\n\nthe word payments appears once\n").unwrap();
         let hits = svc.search_bases(&[info.id.clone()], "payments", 8).await.unwrap();
@@ -6423,7 +6544,7 @@ mod tests {
     #[tokio::test]
     async fn search_bases_unknown_id_is_skipped_not_error() {
         let (svc, _tmp) = search_test_service().await;
-        let hits = svc.search_bases(&["does-not-exist".into()], "x", 8).await.unwrap();
+        let hits = svc.search_bases(&[KnowledgeBaseId::new()], "x", 8).await.unwrap();
         assert!(hits.is_empty());
     }
 
@@ -6542,15 +6663,17 @@ mod tests {
 
     #[test]
     fn handle_roundtrips_kb_id_and_rel_path() {
-        let h = encode_doc_handle("kb_0193", "deploy/rollback.md");
+        let kb_id = KnowledgeBaseId::new();
+        let h = encode_doc_handle(&kb_id, "deploy/rollback.md");
         assert!(h.starts_with("kdoc_"), "{h}");
-        assert_eq!(decode_doc_handle(&h), Some(("kb_0193".to_owned(), "deploy/rollback.md".to_owned())));
+        assert_eq!(decode_doc_handle(&h), Some((kb_id, "deploy/rollback.md".to_owned())));
     }
 
     #[test]
     fn handle_roundtrips_unicode_and_spaces() {
-        let h = encode_doc_handle("kb_x", "运维/回滚 流程.md");
-        assert_eq!(decode_doc_handle(&h), Some(("kb_x".to_owned(), "运维/回滚 流程.md".to_owned())));
+        let kb_id = KnowledgeBaseId::new();
+        let h = encode_doc_handle(&kb_id, "运维/回滚 流程.md");
+        assert_eq!(decode_doc_handle(&h), Some((kb_id, "运维/回滚 流程.md".to_owned())));
     }
 
     #[test]
@@ -6565,7 +6688,10 @@ mod tests {
     /// Build a service with one managed base seeded with `{rel}` = `content`.
     /// The returned `TempDir` must be kept in scope by the caller (bind it as
     /// `_dir`) so the managed directory survives for the test.
-    async fn test_service_with_file(rel: &str, content: &str) -> (KnowledgeService, String, tempfile::TempDir) {
+    async fn test_service_with_file(
+        rel: &str,
+        content: &str,
+    ) -> (KnowledgeService, KnowledgeBaseId, tempfile::TempDir) {
         let dir = tempfile::TempDir::new().unwrap();
         let service = crate::testutil::make_service(&dir.path().join("data"));
         let kb = service.create_base("库", "", None, None).await.unwrap();
@@ -6656,9 +6782,17 @@ mod tests {
 
     #[test]
     fn policy_regular_chat_defaults_staged_and_respects_direct() {
-        let p = resolve_write_policy(WriteSurface::RegularChat, &wb_binding(true, "staged"), "conv-1");
-        assert!(matches!(p.mode, WriteMode::Staged { ref scope } if scope == "conv-1"));
-        let p = resolve_write_policy(WriteSurface::RegularChat, &wb_binding(true, "direct"), "conv-1");
+        let p = resolve_write_policy(
+            WriteSurface::RegularChat,
+            &wb_binding(true, "staged"),
+            TEST_CONVERSATION_ID,
+        );
+        assert!(matches!(p.mode, WriteMode::Staged { ref scope } if scope == TEST_CONVERSATION_ID));
+        let p = resolve_write_policy(
+            WriteSurface::RegularChat,
+            &wb_binding(true, "direct"),
+            TEST_CONVERSATION_ID,
+        );
         assert!(matches!(p.mode, WriteMode::Direct));
     }
 
@@ -6697,14 +6831,26 @@ mod tests {
         let req = WriteRequest {
             spec: WriteTargetSpec::Path { kb_id: kb_id.clone(), rel_path: "terms.md".into() },
             content: "PROPOSED".into(),
-            policy: WritePolicy { mode: WriteMode::Staged { scope: "conv-7".into() }, allow_create: true, surface: WriteSurface::RegularChat },
+            policy: WritePolicy { mode: WriteMode::Staged { scope: TEST_CONVERSATION_ID.to_owned() }, allow_create: true, surface: WriteSurface::RegularChat },
             bound_kb_ids: vec![kb_id.clone()],
         };
         let out = svc.write_document(req).await.unwrap();
-        assert_eq!(out.final_rel_path, "_inbox/conv-7/terms.md");
+        assert_eq!(
+            out.final_rel_path,
+            "_inbox/conv_0190f5fe-7c00-7a00-8000-000000000001/terms.md"
+        );
         assert!(out.staged && out.op == WriteOp::Update);
         assert_eq!(svc.read_file(&kb_id, "terms.md").await.unwrap().content, "ORIGINAL");
-        assert_eq!(svc.read_file(&kb_id, "_inbox/conv-7/terms.md").await.unwrap().content, "PROPOSED");
+        assert_eq!(
+            svc.read_file(
+                &kb_id,
+                "_inbox/conv_0190f5fe-7c00-7a00-8000-000000000001/terms.md",
+            )
+            .await
+            .unwrap()
+            .content,
+            "PROPOSED"
+        );
     }
 
     #[tokio::test]
@@ -6744,11 +6890,15 @@ mod tests {
         let req = WriteRequest {
             spec: WriteTargetSpec::Path { kb_id: kb_id.clone(), rel_path: ".nomi/knowledge/Finance/terms.md".into() },
             content: "PROPOSED EDIT".into(),
-            policy: WritePolicy { mode: WriteMode::Staged { scope: "conv-9".into() }, allow_create: true, surface: WriteSurface::RegularChat },
+            policy: WritePolicy { mode: WriteMode::Staged { scope: TEST_CONVERSATION_ID_9.to_owned() }, allow_create: true, surface: WriteSurface::RegularChat },
             bound_kb_ids: vec![kb_id.clone()],
         };
         let out = svc.write_document(req).await.unwrap();
-        assert_eq!(out.final_rel_path, "_inbox/conv-9/terms.md", "mirror original, not nest under .nomi/...");
+        assert_eq!(
+            out.final_rel_path,
+            "_inbox/conv_0190f5fe-7c00-7a00-8000-000000000009/terms.md",
+            "mirror original, not nest under .nomi/..."
+        );
         assert_eq!(out.op, WriteOp::Update);
         assert_eq!(svc.read_file(&kb_id, "terms.md").await.unwrap().content, "ORIGINAL");
         let files = svc.list_files(&kb_id).await.unwrap();
@@ -6767,23 +6917,24 @@ mod tests {
         let report = svc
             .finalize_turn_writeback(TurnWritebackRequest {
                 mounts: vec![KnowledgeMountInfo {
-                    id: kb_id.clone(),
+                    id: KnowledgeBaseId::parse(kb_id.clone()).unwrap(),
                     name: "领域库".into(),
                     description: "项目复用知识".into(),
                     rel_path: ".nomi/knowledge/领域库".into(),
                     toc: vec!["terms.md — 术语表".into()],
-                    ..Default::default()
+                    summary: None,
+                    live_sources: Vec::new(),
                 }],
                 binding: KnowledgeBinding {
                     enabled: true,
                     writeback: true,
                     writeback_mode: "staged".into(),
                     writeback_eagerness: "aggressive".into(),
-                    kb_ids: vec![kb_id.clone()],
+                    kb_ids: vec![KnowledgeBaseId::parse(kb_id.clone()).unwrap()],
                     ..Default::default()
                 },
                 surface: WriteSurface::RegularChat,
-                scope: "conv-final".into(),
+                scope: TEST_CONVERSATION_ID.to_owned(),
                 user_text: "请分析为什么暂存没有产出。".into(),
                 assistant_text: "结论：触发时机应放在最终答复之后。".into(),
             })
@@ -6791,10 +6942,16 @@ mod tests {
 
         assert_eq!(report.status, TurnWritebackStatus::Written);
         assert_eq!(report.written.len(), 1);
-        assert_eq!(report.written[0].final_rel_path, "_inbox/conv-final/patterns/finalizer.md");
+        assert_eq!(
+            report.written[0].final_rel_path,
+            "_inbox/conv_0190f5fe-7c00-7a00-8000-000000000001/patterns/finalizer.md"
+        );
         assert_eq!(svc.read_file(&kb_id, "terms.md").await.unwrap().content, "ORIGINAL");
         assert!(
-            svc.read_file(&kb_id, "_inbox/conv-final/patterns/finalizer.md")
+            svc.read_file(
+                &kb_id,
+                "_inbox/conv_0190f5fe-7c00-7a00-8000-000000000001/patterns/finalizer.md",
+            )
                 .await
                 .unwrap()
                 .content
@@ -6816,21 +6973,24 @@ mod tests {
         let report = svc
             .finalize_turn_writeback(TurnWritebackRequest {
                 mounts: vec![KnowledgeMountInfo {
-                    id: kb_id.clone(),
+                    id: KnowledgeBaseId::parse(kb_id.clone()).unwrap(),
                     name: "领域库".into(),
+                    description: String::new(),
                     rel_path: ".nomi/knowledge/领域库".into(),
-                    ..Default::default()
+                    toc: Vec::new(),
+                    summary: None,
+                    live_sources: Vec::new(),
                 }],
                 binding: KnowledgeBinding {
                     enabled: true,
                     writeback: false,
                     writeback_mode: "direct".into(),
                     writeback_eagerness: "aggressive".into(),
-                    kb_ids: vec![kb_id],
+                    kb_ids: vec![KnowledgeBaseId::parse(kb_id).unwrap()],
                     ..Default::default()
                 },
                 surface: WriteSurface::RegularChat,
-                scope: "conv-final".into(),
+                scope: TEST_CONVERSATION_ID.to_owned(),
                 user_text: "u".into(),
                 assistant_text: "a".into(),
             })
@@ -6855,20 +7015,23 @@ mod tests {
         let report = svc
             .finalize_turn_writeback(TurnWritebackRequest {
                 mounts: vec![KnowledgeMountInfo {
-                    id: kb_id.clone(),
+                    id: KnowledgeBaseId::parse(kb_id.clone()).unwrap(),
                     name: "领域库".into(),
+                    description: String::new(),
                     rel_path: ".nomi/knowledge/领域库".into(),
-                    ..Default::default()
+                    toc: Vec::new(),
+                    summary: None,
+                    live_sources: Vec::new(),
                 }],
                 binding: KnowledgeBinding {
                     enabled: true,
                     writeback: true,
                     writeback_mode: "staged".into(),
-                    kb_ids: vec![kb_id],
+                    kb_ids: vec![KnowledgeBaseId::parse(kb_id).unwrap()],
                     ..Default::default()
                 },
                 surface: WriteSurface::RegularChat,
-                scope: "conv-final".into(),
+                scope: TEST_CONVERSATION_ID.to_owned(),
                 user_text: "u".into(),
                 assistant_text: "a".into(),
             })
@@ -6896,22 +7059,24 @@ mod tests {
         let report = svc
             .finalize_turn_writeback(TurnWritebackRequest {
                 mounts: vec![KnowledgeMountInfo {
-                    id: kb_id.clone(),
+                    id: KnowledgeBaseId::parse(kb_id.clone()).unwrap(),
                     name: "领域库".into(),
+                    description: String::new(),
                     rel_path: ".nomi/knowledge/领域库".into(),
                     toc: vec!["patterns/safe.md — Safe".into()],
-                    ..Default::default()
+                    summary: None,
+                    live_sources: Vec::new(),
                 }],
                 binding: KnowledgeBinding {
                     enabled: true,
                     writeback: true,
                     writeback_mode: "direct".into(),
                     writeback_eagerness: "aggressive".into(),
-                    kb_ids: vec![kb_id.clone()],
+                    kb_ids: vec![KnowledgeBaseId::parse(kb_id.clone()).unwrap()],
                     ..Default::default()
                 },
                 surface: WriteSurface::RegularChat,
-                scope: "conv-final".into(),
+                scope: TEST_CONVERSATION_ID.to_owned(),
                 user_text: "请补充这个经验。".into(),
                 assistant_text: "结论：应保留旧内容并追加新经验。".into(),
             })
@@ -6932,22 +7097,24 @@ mod tests {
 
         let request = |user_text: &str| TurnWritebackRequest {
             mounts: vec![KnowledgeMountInfo {
-                id: kb_id.clone(),
+                id: KnowledgeBaseId::parse(kb_id.clone()).unwrap(),
                 name: "领域库".into(),
+                description: String::new(),
                 rel_path: ".nomi/knowledge/领域库".into(),
                 toc: vec!["patterns/shared.md — Shared".into()],
-                ..Default::default()
+                summary: None,
+                live_sources: Vec::new(),
             }],
             binding: KnowledgeBinding {
                 enabled: true,
                 writeback: true,
                 writeback_mode: "direct".into(),
                 writeback_eagerness: "aggressive".into(),
-                kb_ids: vec![kb_id.clone()],
+                kb_ids: vec![KnowledgeBaseId::parse(kb_id.clone()).unwrap()],
                 ..Default::default()
             },
             surface: WriteSurface::RegularChat,
-            scope: "conv-final".into(),
+            scope: TEST_CONVERSATION_ID.to_owned(),
             user_text: user_text.into(),
             assistant_text: "final durable answer".into(),
         };
@@ -6973,7 +7140,11 @@ mod tests {
     #[tokio::test]
     async fn turn_finalizer_staged_collision_does_not_overwrite_existing_proposal() {
         let (svc, kb_id, _dir) = test_service_with_file("terms.md", "ORIGINAL").await;
-        svc.write_file(&kb_id, "_inbox/conv-final/patterns/note.md", "FIRST")
+        svc.write_file(
+            &kb_id,
+            "_inbox/conv_0190f5fe-7c00-7a00-8000-000000000001/patterns/note.md",
+            "FIRST",
+        )
             .await
             .unwrap();
         let reply = format!(
@@ -6984,20 +7155,23 @@ mod tests {
         let report = svc
             .finalize_turn_writeback(TurnWritebackRequest {
                 mounts: vec![KnowledgeMountInfo {
-                    id: kb_id.clone(),
+                    id: KnowledgeBaseId::parse(kb_id.clone()).unwrap(),
                     name: "领域库".into(),
+                    description: String::new(),
                     rel_path: ".nomi/knowledge/领域库".into(),
-                    ..Default::default()
+                    toc: Vec::new(),
+                    summary: None,
+                    live_sources: Vec::new(),
                 }],
                 binding: KnowledgeBinding {
                     enabled: true,
                     writeback: true,
                     writeback_mode: "staged".into(),
-                    kb_ids: vec![kb_id.clone()],
+                    kb_ids: vec![KnowledgeBaseId::parse(kb_id.clone()).unwrap()],
                     ..Default::default()
                 },
                 surface: WriteSurface::RegularChat,
-                scope: "conv-final".into(),
+                scope: TEST_CONVERSATION_ID.to_owned(),
                 user_text: "u".into(),
                 assistant_text: "a".into(),
             })
@@ -7005,13 +7179,19 @@ mod tests {
 
         assert_eq!(report.status, TurnWritebackStatus::Written, "{report:?}");
         assert_eq!(
-            svc.read_file(&kb_id, "_inbox/conv-final/patterns/note.md")
+            svc.read_file(
+                &kb_id,
+                "_inbox/conv_0190f5fe-7c00-7a00-8000-000000000001/patterns/note.md",
+            )
                 .await
                 .unwrap()
                 .content,
             "FIRST"
         );
-        assert_ne!(report.written[0].final_rel_path, "_inbox/conv-final/patterns/note.md");
+        assert_ne!(
+            report.written[0].final_rel_path,
+            "_inbox/conv_0190f5fe-7c00-7a00-8000-000000000001/patterns/note.md"
+        );
         assert!(
             svc.read_file(&kb_id, &report.written[0].final_rel_path)
                 .await
@@ -7035,7 +7215,7 @@ mod tests {
         let (svc, kb_id, _dir) = test_service_with_file("terms.md", "ORIGINAL").await;
         svc.write_file(
             &kb_id,
-            "_inbox/conv-final/patterns/note.md",
+            "_inbox/conv_0190f5fe-7c00-7a00-8000-000000000001/patterns/note.md",
             "# Durable\n\nAlready staged by knowledge_write.",
         )
         .await
@@ -7048,20 +7228,23 @@ mod tests {
         let report = svc
             .finalize_turn_writeback(TurnWritebackRequest {
                 mounts: vec![KnowledgeMountInfo {
-                    id: kb_id.clone(),
+                    id: KnowledgeBaseId::parse(kb_id.clone()).unwrap(),
                     name: "领域库".into(),
+                    description: String::new(),
                     rel_path: ".nomi/knowledge/领域库".into(),
-                    ..Default::default()
+                    toc: Vec::new(),
+                    summary: None,
+                    live_sources: Vec::new(),
                 }],
                 binding: KnowledgeBinding {
                     enabled: true,
                     writeback: true,
                     writeback_mode: "staged".into(),
-                    kb_ids: vec![kb_id.clone()],
+                    kb_ids: vec![KnowledgeBaseId::parse(kb_id.clone()).unwrap()],
                     ..Default::default()
                 },
                 surface: WriteSurface::RegularChat,
-                scope: "conv-final/msg-1".into(),
+                scope: "conv_0190f5fe-7c00-7a00-8000-000000000001/msg_0190f5fe-7c00-7a00-8000-000000000001".into(),
                 user_text: "u".into(),
                 assistant_text: "a".into(),
             })
@@ -7070,7 +7253,10 @@ mod tests {
         assert_eq!(report.status, TurnWritebackStatus::NoCandidate, "{report:?}");
         assert_eq!(report.written.len(), 0);
         assert!(
-            svc.read_file(&kb_id, "_inbox/conv-final/msg-1/patterns/note.md")
+            svc.read_file(
+                &kb_id,
+                "_inbox/conv_0190f5fe-7c00-7a00-8000-000000000001/msg_0190f5fe-7c00-7a00-8000-000000000001/patterns/note.md",
+            )
                 .await
                 .is_err(),
             "finalizer must not duplicate a same-content explicit knowledge_write proposal"
@@ -7098,8 +7284,8 @@ mod tests {
             async fn list(&self) -> Result<Vec<ConnectorCredentialRow>, DbError> {
                 Ok(self.rows.lock().unwrap().clone())
             }
-            async fn get(&self, id: &str) -> Result<Option<ConnectorCredentialRow>, DbError> {
-                Ok(self.rows.lock().unwrap().iter().find(|r| r.id == id).cloned())
+            async fn get(&self, id: &ConnectorCredentialId) -> Result<Option<ConnectorCredentialRow>, DbError> {
+                Ok(self.rows.lock().unwrap().iter().find(|r| &r.id == id).cloned())
             }
             async fn create(
                 &self,
@@ -7109,7 +7295,7 @@ mod tests {
             ) -> Result<ConnectorCredentialRow, DbError> {
                 let mut rows = self.rows.lock().unwrap();
                 let row = ConnectorCredentialRow {
-                    id: format!("cred_{}", rows.len() + 1),
+                    id: ConnectorCredentialId::new(),
                     kind: kind.to_owned(),
                     name: name.to_owned(),
                     payload_encrypted: payload_encrypted.to_owned(),
@@ -7119,8 +7305,8 @@ mod tests {
                 rows.push(row.clone());
                 Ok(row)
             }
-            async fn delete(&self, id: &str) -> Result<(), DbError> {
-                self.rows.lock().unwrap().retain(|r| r.id != id);
+            async fn delete(&self, id: &ConnectorCredentialId) -> Result<(), DbError> {
+                self.rows.lock().unwrap().retain(|r| &r.id != id);
                 Ok(())
             }
         }
@@ -7219,7 +7405,7 @@ mod tests {
         assert!(a_body.contains("https://mock/DOCAAA"), "frontmatter carries web source_url");
 
         // Cursor + stamp persisted; no error.
-        let stored = extra_source(&repo, &kb.id).unwrap();
+        let stored = extra_source(&repo, kb.id.as_str()).unwrap();
         let sync = stored.sync.expect("sync state persisted");
         assert_eq!(sync.last_error, None);
         assert!(sync.last_sync_at.is_some());
@@ -7255,8 +7441,12 @@ mod tests {
             },
             bound_kb_ids: vec![kb_id.clone()],
         };
-        svc.write_document(stage("terms.md", "UPDATED\n", "conv-1")).await.unwrap();
-        svc.write_document(stage("new-note.md", "BRAND NEW\n", "conv-2")).await.unwrap();
+        svc.write_document(stage("terms.md", "UPDATED\n", TEST_CONVERSATION_ID))
+            .await
+            .unwrap();
+        svc.write_document(stage("new-note.md", "BRAND NEW\n", TEST_CONVERSATION_ID_2))
+            .await
+            .unwrap();
 
         // Main document list excludes `_inbox/`.
         let files = svc.list_files(&kb_id).await.unwrap();
@@ -7266,31 +7456,52 @@ mod tests {
         // Inbox lists both proposals (grouped by scope client-side).
         let inbox = svc.list_inbox(&kb_id).await.unwrap();
         assert_eq!(inbox.len(), 2, "two staged proposals: {inbox:?}");
-        assert_eq!(inbox.iter().find(|e| e.rel_path == "terms.md").unwrap().scope, "conv-1");
+        assert_eq!(
+            inbox.iter().find(|e| e.rel_path == "terms.md").unwrap().scope,
+            TEST_CONVERSATION_ID
+        );
         assert_eq!(svc.count_pending_inbox().await.unwrap(), 2, "global pending count reflects staged proposals");
 
         // Update diff carries old+new; new-doc diff flags is_new.
-        let d = svc.inbox_diff(&kb_id, "conv-1", "terms.md").await.unwrap();
+        let d = svc
+            .inbox_diff(&kb_id, TEST_CONVERSATION_ID, "terms.md")
+            .await
+            .unwrap();
         assert!(!d.is_new);
         assert_eq!(d.base_content.as_deref(), Some("ORIGINAL\n"));
         assert!(d.unified_diff.contains("-ORIGINAL") && d.unified_diff.contains("+UPDATED"), "diff: {}", d.unified_diff);
-        let dn = svc.inbox_diff(&kb_id, "conv-2", "new-note.md").await.unwrap();
+        let dn = svc
+            .inbox_diff(&kb_id, TEST_CONVERSATION_ID_2, "new-note.md")
+            .await
+            .unwrap();
         assert!(dn.is_new && dn.base_content.is_none());
 
         // Merge → base overwritten, inbox copy gone, scope dir pruned.
-        assert_eq!(svc.merge_inbox(&kb_id, "conv-1", "terms.md").await.unwrap().merged_path, "terms.md");
+        assert_eq!(
+            svc.merge_inbox(&kb_id, TEST_CONVERSATION_ID, "terms.md")
+                .await
+                .unwrap()
+                .merged_path,
+            "terms.md"
+        );
         assert_eq!(svc.read_file(&kb_id, "terms.md").await.unwrap().content, "UPDATED\n");
         let after = svc.list_inbox(&kb_id).await.unwrap();
         assert_eq!(after.len(), 1, "merged proposal removed");
         assert_eq!(after[0].rel_path, "new-note.md");
 
         // Discard → gone, base never created.
-        svc.discard_inbox(&kb_id, "conv-2", "new-note.md").await.unwrap();
+        svc.discard_inbox(&kb_id, TEST_CONVERSATION_ID_2, "new-note.md")
+            .await
+            .unwrap();
         assert!(svc.list_inbox(&kb_id).await.unwrap().is_empty());
         assert!(svc.read_file(&kb_id, "new-note.md").await.is_err(), "discarded proposal never merged");
 
         // Vanished proposal → NotFound; traversal scope → BadRequest.
-        assert!(svc.inbox_diff(&kb_id, "conv-1", "terms.md").await.is_err());
+        assert!(
+            svc.inbox_diff(&kb_id, TEST_CONVERSATION_ID, "terms.md")
+                .await
+                .is_err()
+        );
         assert!(svc.inbox_diff(&kb_id, "..", "terms.md").await.is_err());
     }
 
@@ -7309,8 +7520,12 @@ mod tests {
             },
             bound_kb_ids: vec![kb_id.clone()],
         };
-        svc.write_document(stage("terms.md", "UPDATED\n", "conv-1")).await.unwrap();
-        svc.write_document(stage("new-note.md", "BRAND NEW\n", "conv-2")).await.unwrap();
+        svc.write_document(stage("terms.md", "UPDATED\n", TEST_CONVERSATION_ID))
+            .await
+            .unwrap();
+        svc.write_document(stage("new-note.md", "BRAND NEW\n", TEST_CONVERSATION_ID_2))
+            .await
+            .unwrap();
         assert_eq!(svc.count_pending_inbox().await.unwrap(), 2);
 
         let merged = svc.merge_all_inbox(&kb_id, None).await.unwrap();
@@ -7336,8 +7551,12 @@ mod tests {
             },
             bound_kb_ids: vec![kb_id.clone()],
         };
-        svc.write_document(stage("terms.md", "UPDATED\n", "conv-1")).await.unwrap();
-        svc.write_document(stage("new-note.md", "BRAND NEW\n", "conv-2")).await.unwrap();
+        svc.write_document(stage("terms.md", "UPDATED\n", TEST_CONVERSATION_ID))
+            .await
+            .unwrap();
+        svc.write_document(stage("new-note.md", "BRAND NEW\n", TEST_CONVERSATION_ID_2))
+            .await
+            .unwrap();
         assert_eq!(svc.count_pending_inbox().await.unwrap(), 2);
 
         let discarded = svc.discard_all_inbox(&kb_id, None).await.unwrap();
@@ -7363,12 +7582,19 @@ mod tests {
             },
             bound_kb_ids: vec![kb_id.clone()],
         };
-        svc.write_document(stage("terms.md", "UPDATED\n", "conv-1")).await.unwrap();
-        svc.write_document(stage("new-note.md", "BRAND NEW\n", "conv-2")).await.unwrap();
+        svc.write_document(stage("terms.md", "UPDATED\n", TEST_CONVERSATION_ID))
+            .await
+            .unwrap();
+        svc.write_document(stage("new-note.md", "BRAND NEW\n", TEST_CONVERSATION_ID_2))
+            .await
+            .unwrap();
         assert_eq!(svc.count_pending_inbox().await.unwrap(), 2);
 
         // Only merge scope conv-1.
-        let merged = svc.merge_all_inbox(&kb_id, Some("conv-1")).await.unwrap();
+        let merged = svc
+            .merge_all_inbox(&kb_id, Some(TEST_CONVERSATION_ID))
+            .await
+            .unwrap();
         assert_eq!(merged, 1);
         assert_eq!(svc.count_pending_inbox().await.unwrap(), 1);
         // conv-1 was merged.
@@ -7376,7 +7602,7 @@ mod tests {
         // conv-2 still pending.
         let remaining = svc.list_inbox(&kb_id).await.unwrap();
         assert_eq!(remaining.len(), 1);
-        assert_eq!(remaining[0].scope, "conv-2");
+        assert_eq!(remaining[0].scope, TEST_CONVERSATION_ID_2);
     }
 
     /// **P4 consumers**: `list_consumers` returns every binding that mounts the
@@ -7386,15 +7612,23 @@ mod tests {
         let (svc, kb_id, _dir) = test_service_with_file("a.md", "x").await;
         svc.set_binding(
             "conversation",
-            "1",
-            KnowledgeBinding { enabled: true, kb_ids: vec![kb_id.clone()], ..Default::default() },
+            TEST_CONVERSATION_ID,
+            KnowledgeBinding {
+                enabled: true,
+                kb_ids: vec![KnowledgeBaseId::parse(kb_id.clone()).unwrap()],
+                ..Default::default()
+            },
         )
         .await
         .unwrap();
         svc.set_binding(
             "workpath",
             "/Users/me/proj",
-            KnowledgeBinding { enabled: false, kb_ids: vec![kb_id.clone()], ..Default::default() },
+            KnowledgeBinding {
+                enabled: false,
+                kb_ids: vec![KnowledgeBaseId::parse(kb_id.clone()).unwrap()],
+                ..Default::default()
+            },
         )
         .await
         .unwrap();
@@ -7402,7 +7636,7 @@ mod tests {
         let other = svc.create_base("其他", "", None, None).await.unwrap();
         svc.set_binding(
             "terminal",
-            "9",
+            TEST_TERMINAL_ID_9,
             KnowledgeBinding { enabled: true, kb_ids: vec![other.id.clone()], ..Default::default() },
         )
         .await
@@ -7411,7 +7645,7 @@ mod tests {
         let consumers = svc.list_consumers(&kb_id).await.unwrap();
         assert_eq!(consumers.len(), 2, "only bindings using this kb: {consumers:?}");
         let conv = consumers.iter().find(|c| c.target_kind == "conversation").unwrap();
-        assert_eq!(conv.target_id.as_deref(), Some("1"));
+        assert_eq!(conv.target_id.as_deref(), Some(TEST_CONVERSATION_ID));
         assert!(conv.enabled);
         assert!(!consumers.iter().find(|c| c.target_kind == "workpath").unwrap().enabled, "disabled included");
     }
@@ -7518,20 +7752,21 @@ mod tests {
     async fn create_base_with_feishu_source_persists_kind_and_credential() {
         let dir = tempfile::TempDir::new().unwrap();
         let (service, repo) = service_with_repo(&dir.path().join("data"));
+        let credential_id = ConnectorCredentialId::new();
         let source = KnowledgeSource {
             kind: "feishu".into(),
             mode: KnowledgeSourceMode::Snapshot,
             entries: vec![],
             last_fetched_at: None,
-            credential_ref: Some("cred_abc".into()),
+            credential_ref: Some(credential_id.clone()),
             scope: Some(serde_json::json!({ "space_id": "sp1" })),
             sync: Some(Default::default()),
         };
         let info = service.create_base("飞书库", "", None, Some(source)).await.unwrap();
         assert_eq!(info.kind, "feishu", "kind must derive to feishu");
         // Verify credential_ref persisted in extra.source
-        let stored = extra_source(&repo, &info.id).expect("source stored in extra");
-        assert_eq!(stored.credential_ref.as_deref(), Some("cred_abc"));
+        let stored = extra_source(&repo, info.id.as_str()).expect("source stored in extra");
+        assert_eq!(stored.credential_ref, Some(credential_id));
         assert_eq!(stored.scope.unwrap()["space_id"], "sp1");
         assert_eq!(stored.kind, "feishu");
     }
@@ -7558,7 +7793,7 @@ mod tests {
             mode: KnowledgeSourceMode::Snapshot,
             entries: vec![],
             last_fetched_at: None,
-            credential_ref: Some("cred1".into()),
+            credential_ref: Some(ConnectorCredentialId::new()),
             scope: None,
             sync: None,
         };
@@ -7569,7 +7804,7 @@ mod tests {
             mode: KnowledgeSourceMode::Live,
             entries: vec![],
             last_fetched_at: None,
-            credential_ref: Some("cred1".into()),
+            credential_ref: Some(ConnectorCredentialId::new()),
             scope: Some(serde_json::json!({ "space_id": "sp1" })),
             sync: None,
         };

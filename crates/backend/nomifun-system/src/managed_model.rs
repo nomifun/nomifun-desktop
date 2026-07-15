@@ -17,7 +17,7 @@ use nomifun_api_types::{
     ManagedModelHealthResult, ManagedModelHealthStatus, ManagedModelServiceAvailability,
     ManagedModelServiceKind, ManagedModelServiceStatus,
 };
-use nomifun_common::{AppError, encrypt_string, now_ms};
+use nomifun_common::{AppError, ProviderId, encrypt_string, now_ms};
 use nomifun_db::{
     CreateProviderParams, IClientPreferenceRepository, IProviderRepository,
     UpdateProviderParams, models::Provider,
@@ -30,8 +30,8 @@ use tokio::sync::{Mutex, RwLock, Semaphore};
 use tokio::task::JoinSet;
 use tracing::{debug, info, warn};
 
-pub const FREE_MODEL_PROVIDER_ID: &str = "nomifun-free-model";
-pub const LOCAL_MODEL_PROVIDER_ID: &str = "nomifun-local-model";
+pub const FREE_MODEL_PLATFORM: &str = "nomifun-free-model";
+pub const LOCAL_MODEL_PLATFORM: &str = "nomifun-local-model";
 pub const MANAGED_MODEL_PROTOCOL_VERSION: &str = "1";
 
 const FREE_MODEL_PROVIDER_NAME: &str = "NomiFun Free Model";
@@ -68,13 +68,13 @@ const FREE_SEED_MODELS: &[&str] = &[
 
 fn is_managed_provider(value: &str) -> bool {
     let value = value.trim();
-    value.eq_ignore_ascii_case(FREE_MODEL_PROVIDER_ID)
-        || value.eq_ignore_ascii_case(LOCAL_MODEL_PROVIDER_ID)
+    value.eq_ignore_ascii_case(FREE_MODEL_PLATFORM)
+        || value.eq_ignore_ascii_case(LOCAL_MODEL_PLATFORM)
 }
 
-/// Return true when an id or platform belongs to a protected managed provider.
-pub fn is_managed_provider_identity(id: Option<&str>, platform: Option<&str>) -> bool {
-    id.is_some_and(is_managed_provider) || platform.is_some_and(is_managed_provider)
+/// Return true when a provider platform belongs to a protected managed supply.
+pub fn is_managed_provider_platform(platform: &str) -> bool {
+    is_managed_provider(platform)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -115,6 +115,7 @@ struct LoopbackState {
 /// The service owns no arbitrary upstream URL. Both discovery and inference
 /// are fixed to the OpenCode Zen HTTPS endpoints above.
 pub struct ManagedModelService {
+    provider_id: String,
     provider_repo: Arc<dyn IProviderRepository>,
     preference_repo: Option<Arc<dyn IClientPreferenceRepository>>,
     http_client: reqwest::Client,
@@ -127,7 +128,12 @@ pub struct ManagedModelService {
 
 impl ManagedModelService {
     pub fn new(provider_repo: Arc<dyn IProviderRepository>) -> Arc<Self> {
-        Self::new_with_client_and_preferences(provider_repo, None, managed_http_client())
+        Self::new_with_client_and_preferences(
+            ProviderId::new().into_string(),
+            provider_repo,
+            None,
+            managed_http_client(),
+        )
     }
 
     pub fn new_with_preferences(
@@ -135,6 +141,7 @@ impl ManagedModelService {
         preference_repo: Arc<dyn IClientPreferenceRepository>,
     ) -> Arc<Self> {
         Self::new_with_client_and_preferences(
+            ProviderId::new().into_string(),
             provider_repo,
             Some(preference_repo),
             managed_http_client(),
@@ -145,15 +152,22 @@ impl ManagedModelService {
         provider_repo: Arc<dyn IProviderRepository>,
         http_client: reqwest::Client,
     ) -> Arc<Self> {
-        Self::new_with_client_and_preferences(provider_repo, None, http_client)
+        Self::new_with_client_and_preferences(
+            ProviderId::new().into_string(),
+            provider_repo,
+            None,
+            http_client,
+        )
     }
 
     fn new_with_client_and_preferences(
+        provider_id: String,
         provider_repo: Arc<dyn IProviderRepository>,
         preference_repo: Option<Arc<dyn IClientPreferenceRepository>>,
         http_client: reqwest::Client,
     ) -> Arc<Self> {
         Arc::new(Self {
+            provider_id,
             provider_repo,
             preference_repo,
             http_client,
@@ -231,14 +245,14 @@ impl ManagedModelService {
 
     pub async fn free_status(&self) -> ManagedModelServiceStatus {
         let state = self.free.read().await;
-        status_from_free_state(&state)
+        status_from_free_state(&state, &self.provider_id)
     }
 
     pub fn local_status(&self) -> ManagedModelServiceStatus {
         ManagedModelServiceStatus {
             kind: ManagedModelServiceKind::Local,
             protocol_version: MANAGED_MODEL_PROTOCOL_VERSION.into(),
-            provider_id: LOCAL_MODEL_PROVIDER_ID.into(),
+            provider_id: None,
             enabled: false,
             ready: false,
             upstream: "NomiFun Local Model".into(),
@@ -521,7 +535,7 @@ impl ManagedModelService {
                             "Failed to persist managed-model projection diagnostic"
                         );
                     }
-                    return Ok(status_from_free_state(&state));
+                    return Ok(status_from_free_state(&state, &self.provider_id));
                 }
                 *state = next;
                 if let Err(error) = self
@@ -533,7 +547,7 @@ impl ManagedModelService {
                         "Failed to persist managed-model refresh diagnostics"
                     );
                 }
-                Ok(status_from_free_state(&state))
+                Ok(status_from_free_state(&state, &self.provider_id))
             }
             Err(error) => {
                 let message = refresh_error_message(&error);
@@ -548,7 +562,7 @@ impl ManagedModelService {
                         "Failed to persist managed-model refresh diagnostics"
                     );
                 }
-                Ok(status_from_free_state(&state))
+                Ok(status_from_free_state(&state, &self.provider_id))
             }
         }
     }
@@ -604,7 +618,7 @@ impl ManagedModelService {
         self.sync_provider_projection(enabled, &next.catalog, &next.model_enabled)
             .await?;
         *state = next;
-        Ok(status_from_free_state(&state))
+        Ok(status_from_free_state(&state, &self.provider_id))
     }
 
     pub async fn set_free_model_enabled(
@@ -629,7 +643,7 @@ impl ManagedModelService {
         self.sync_provider_projection(next.enabled, &next.catalog, &next.model_enabled)
             .await?;
         *state = next;
-        Ok(status_from_free_state(&state))
+        Ok(status_from_free_state(&state, &self.provider_id))
     }
 
     async fn fetch_free_catalog(&self) -> Result<Vec<CatalogModel>, AppError> {
@@ -719,9 +733,9 @@ impl ManagedModelService {
 
         self.provider_repo
             .update(
-                FREE_MODEL_PROVIDER_ID,
+                &self.provider_id,
                 UpdateProviderParams {
-                    platform: Some(FREE_MODEL_PROVIDER_ID),
+                    platform: Some(FREE_MODEL_PLATFORM),
                     name: Some(FREE_MODEL_PROVIDER_NAME),
                     models: Some(&models_json),
                     enabled: Some(enabled),
@@ -1136,41 +1150,43 @@ pub async fn start_and_provision_free_model_with_preferences(
     preference_repo: Option<Arc<dyn IClientPreferenceRepository>>,
     encryption_key: [u8; 32],
 ) -> Result<(Arc<ManagedModelService>, ManagedModelServer), AppError> {
-    // Refuse ambiguous legacy/direct-write rows before creating the canonical
-    // provider. Two rows advertising the managed platform would both enter the
-    // ordinary provider catalog and could be selected independently, while only
-    // the canonical row receives this process's loopback token/port.
-    if let Some(alias) = provider_repo
+    let mut managed_rows = provider_repo
         .list()
         .await?
         .into_iter()
-        .find(|row| {
-            row.id != FREE_MODEL_PROVIDER_ID
-                && row
-                    .platform
-                    .trim()
-                    .eq_ignore_ascii_case(FREE_MODEL_PROVIDER_ID)
-        })
-    {
+        .filter(|row| row.platform.trim().eq_ignore_ascii_case(FREE_MODEL_PLATFORM));
+    let existing = managed_rows.next();
+    if let Some(alias) = managed_rows.next() {
         return Err(AppError::Conflict(format!(
-            "Reserved managed platform '{}' is already used by provider '{}'; remove or migrate that row before starting the managed model service",
-            alias.platform, alias.id
+            "Reserved managed platform '{FREE_MODEL_PLATFORM}' has multiple provider rows (including '{}')",
+            alias.id
         )));
     }
-
-    let existing = provider_repo.find_by_id(FREE_MODEL_PROVIDER_ID).await?;
-    if let Some(row) = &existing
-        && row.platform != FREE_MODEL_PROVIDER_ID
-    {
-        return Err(AppError::Conflict(format!(
-            "Reserved provider id '{FREE_MODEL_PROVIDER_ID}' is already used by platform '{}'",
-            row.platform
-        )));
-    }
+    let provider_id = match existing.as_ref() {
+        Some(row) => ProviderId::parse(&row.id)
+            .map_err(|error| {
+                AppError::Conflict(format!(
+                    "Managed free-model provider has a non-canonical id '{}': {error}",
+                    row.id
+                ))
+            })?
+            .into_string(),
+        None => ProviderId::new().into_string(),
+    };
 
     let service = match preference_repo {
-        Some(repo) => ManagedModelService::new_with_preferences(provider_repo.clone(), repo),
-        None => ManagedModelService::new(provider_repo.clone()),
+        Some(repo) => ManagedModelService::new_with_client_and_preferences(
+            provider_id.clone(),
+            provider_repo.clone(),
+            Some(repo),
+            managed_http_client(),
+        ),
+        None => ManagedModelService::new_with_client_and_preferences(
+            provider_id.clone(),
+            provider_repo.clone(),
+            None,
+            managed_http_client(),
+        ),
     };
     service.hydrate_from_provider(existing.as_ref()).await;
     if let Err(error) = service.hydrate_refresh_metadata().await {
@@ -1190,7 +1206,10 @@ pub async fn start_and_provision_free_model_with_preferences(
     let base_url = server.base_url();
     let (status, model_enabled) = {
         let state = service.free.read().await;
-        (status_from_free_state(&state), state.model_enabled.clone())
+        (
+            status_from_free_state(&state, &service.provider_id),
+            state.model_enabled.clone(),
+        )
     };
     let models_json = serde_json::to_string(
         &status
@@ -1223,9 +1242,9 @@ pub async fn start_and_provision_free_model_with_preferences(
         Some(_) => {
             provider_repo
                 .update(
-                    FREE_MODEL_PROVIDER_ID,
+                    &provider_id,
                     UpdateProviderParams {
-                        platform: Some(FREE_MODEL_PROVIDER_ID),
+                        platform: Some(FREE_MODEL_PLATFORM),
                         name: Some(FREE_MODEL_PROVIDER_NAME),
                         base_url: Some(&base_url),
                         api_key_encrypted: Some(&token_encrypted),
@@ -1244,8 +1263,8 @@ pub async fn start_and_provision_free_model_with_preferences(
         None => {
             provider_repo
                 .create(CreateProviderParams {
-                    id: Some(FREE_MODEL_PROVIDER_ID),
-                    platform: FREE_MODEL_PROVIDER_ID,
+                    id: Some(&provider_id),
+                    platform: FREE_MODEL_PLATFORM,
                     name: FREE_MODEL_PROVIDER_NAME,
                     base_url: &base_url,
                     api_key_encrypted: &token_encrypted,
@@ -1292,7 +1311,7 @@ async fn loopback_models(
                 "id": model.id,
                 "object": "model",
                 "created": 0,
-                "owned_by": FREE_MODEL_PROVIDER_ID
+                "owned_by": FREE_MODEL_PLATFORM
             }))
             .collect::<Vec<_>>()
     }))
@@ -1548,7 +1567,7 @@ fn parse_model_enabled(raw: Option<&str>) -> HashMap<String, bool> {
         .unwrap_or_default()
 }
 
-fn status_from_free_state(state: &FreeState) -> ManagedModelServiceStatus {
+fn status_from_free_state(state: &FreeState, provider_id: &str) -> ManagedModelServiceStatus {
     let models = state
         .catalog
         .iter()
@@ -1573,7 +1592,7 @@ fn status_from_free_state(state: &FreeState) -> ManagedModelServiceStatus {
     ManagedModelServiceStatus {
         kind: ManagedModelServiceKind::Free,
         protocol_version: MANAGED_MODEL_PROTOCOL_VERSION.into(),
-        provider_id: FREE_MODEL_PROVIDER_ID.into(),
+        provider_id: Some(provider_id.to_owned()),
         enabled: state.enabled,
         ready,
         upstream: PUBLIC_SOURCE_ALIAS.into(),
@@ -1814,8 +1833,9 @@ mod tests {
         let (service, mut server) =
             start_and_provision_free_model(repo.clone(), TEST_KEY).await.unwrap();
 
-        let row = repo.find_by_id(FREE_MODEL_PROVIDER_ID).await.unwrap().unwrap();
-        assert_eq!(row.platform, FREE_MODEL_PROVIDER_ID);
+        let provider_id = service.free_status().await.provider_id.unwrap();
+        let row = repo.find_by_id(&provider_id).await.unwrap().unwrap();
+        assert_eq!(row.platform, FREE_MODEL_PLATFORM);
         assert!(row.base_url.starts_with("http://127.0.0.1:"));
         assert!(row.base_url.ends_with("/v1"));
         assert_eq!(
@@ -1832,11 +1852,12 @@ mod tests {
         let db = init_database_memory().await.unwrap();
         let repo: Arc<dyn IProviderRepository> =
             Arc::new(SqliteProviderRepository::new(db.pool().clone()));
-        let (_service, mut first_server) =
+        let (first_service, mut first_server) =
             start_and_provision_free_model(repo.clone(), TEST_KEY).await.unwrap();
+        let provider_id = first_service.free_status().await.provider_id.unwrap();
         first_server.stop();
         repo.update(
-            FREE_MODEL_PROVIDER_ID,
+            &provider_id,
             UpdateProviderParams {
                 enabled: Some(false),
                 model_enabled: Some(Some(r#"{"big-pickle":false}"#)),
@@ -1858,7 +1879,7 @@ mod tests {
                 .map(|model| model.enabled),
             Some(false)
         );
-        let row = repo.find_by_id(FREE_MODEL_PROVIDER_ID).await.unwrap().unwrap();
+        let row = repo.find_by_id(&provider_id).await.unwrap().unwrap();
         assert!(!row.enabled);
         second_server.stop();
     }
@@ -1868,11 +1889,12 @@ mod tests {
         let db = init_database_memory().await.unwrap();
         let repo: Arc<dyn IProviderRepository> =
             Arc::new(SqliteProviderRepository::new(db.pool().clone()));
-        let (_service, mut first_server) =
+        let (first_service, mut first_server) =
             start_and_provision_free_model(repo.clone(), TEST_KEY).await.unwrap();
+        let provider_id = first_service.free_status().await.provider_id.unwrap();
         first_server.stop();
         repo.update(
-            FREE_MODEL_PROVIDER_ID,
+            &provider_id,
             UpdateProviderParams {
                 models: Some(r#"["big-pickle"]"#),
                 model_enabled: Some(Some(r#"{"temporarily-missing-free":false}"#)),
@@ -1884,7 +1906,7 @@ mod tests {
 
         let (_service, mut second_server) =
             start_and_provision_free_model(repo.clone(), TEST_KEY).await.unwrap();
-        let row = repo.find_by_id(FREE_MODEL_PROVIDER_ID).await.unwrap().unwrap();
+        let row = repo.find_by_id(&provider_id).await.unwrap().unwrap();
         let flags: HashMap<String, bool> =
             serde_json::from_str(row.model_enabled.as_deref().unwrap()).unwrap();
         assert_eq!(flags.get("temporarily-missing-free"), Some(&false));
@@ -1925,10 +1947,7 @@ mod tests {
         };
         assert!(matches!(error, AppError::Conflict(_)));
         assert!(
-            repo.find_by_id(FREE_MODEL_PROVIDER_ID)
-                .await
-                .unwrap()
-                .is_none()
+            repo.list().await.unwrap().iter().all(|row| row.platform != FREE_MODEL_PLATFORM)
         );
     }
 
@@ -1938,9 +1957,10 @@ mod tests {
         let repo: Arc<dyn IProviderRepository> =
             Arc::new(SqliteProviderRepository::new(db.pool().clone()));
         let encrypted = encrypt_string("local-token", &TEST_KEY).unwrap();
+        let local_provider_id = ProviderId::new().into_string();
         repo.create(CreateProviderParams {
-            id: Some(LOCAL_MODEL_PROVIDER_ID),
-            platform: LOCAL_MODEL_PROVIDER_ID,
+            id: Some(&local_provider_id),
+            platform: LOCAL_MODEL_PLATFORM,
             name: "NomiFun Local Model",
             base_url: "http://127.0.0.1:12346/v1",
             api_key_encrypted: &encrypted,
@@ -1960,10 +1980,11 @@ mod tests {
         .await
         .unwrap();
 
-        let (_service, mut server) =
+        let (service, mut server) =
             start_and_provision_free_model(repo.clone(), TEST_KEY).await.unwrap();
-        assert!(repo.find_by_id(FREE_MODEL_PROVIDER_ID).await.unwrap().is_some());
-        assert!(repo.find_by_id(LOCAL_MODEL_PROVIDER_ID).await.unwrap().is_some());
+        let free_provider_id = service.free_status().await.provider_id.unwrap();
+        assert!(repo.find_by_id(&free_provider_id).await.unwrap().is_some());
+        assert!(repo.find_by_id(&local_provider_id).await.unwrap().is_some());
         server.stop();
     }
 
@@ -1973,9 +1994,10 @@ mod tests {
         let repo: Arc<dyn IProviderRepository> =
             Arc::new(SqliteProviderRepository::new(db.pool().clone()));
         let encrypted = encrypt_string("old-token", &TEST_KEY).unwrap();
+        let provider_id = ProviderId::new().into_string();
         repo.create(CreateProviderParams {
-            id: Some(FREE_MODEL_PROVIDER_ID),
-            platform: FREE_MODEL_PROVIDER_ID,
+            id: Some(&provider_id),
+            platform: FREE_MODEL_PLATFORM,
             name: FREE_MODEL_PROVIDER_NAME,
             base_url: "http://127.0.0.1:1/v1",
             api_key_encrypted: &encrypted,
@@ -1996,7 +2018,7 @@ mod tests {
         .unwrap();
 
         let service = ManagedModelService::new(repo.clone());
-        let row = repo.find_by_id(FREE_MODEL_PROVIDER_ID).await.unwrap();
+        let row = repo.find_by_id(&provider_id).await.unwrap();
         service.hydrate_from_provider(row.as_ref()).await;
         let status = service.free_status().await;
         assert_eq!(status.models[0].name, "big-pickle");
@@ -2097,7 +2119,8 @@ mod tests {
             refresh_interval: DEFAULT_FREE_REFRESH_INTERVAL,
             next_refresh: None,
         };
-        let status = status_from_free_state(&state);
+        let provider_id = ProviderId::new().into_string();
+        let status = status_from_free_state(&state, &provider_id);
         assert_eq!(status.upstream, "oc");
         assert_eq!(status.models[0].source, "oc");
         assert!(!status.privacy_notice.to_ascii_lowercase().contains("opencode"));
@@ -2110,7 +2133,8 @@ mod tests {
                 .contains("opencode")
         );
         state.last_error = None;
-        assert_eq!(status_from_free_state(&state).models[0].source, "oc");
+        let provider_id = ProviderId::new().into_string();
+        assert_eq!(status_from_free_state(&state, &provider_id).models[0].source, "oc");
     }
 
     #[test]

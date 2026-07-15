@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use nomifun_common::{
     AgentKillReason, AgentType, AppError, Confirmation, ConversationStatus, ErrorChain, RemoteAgentProtocol,
-    RemoteAgentStatus, TimestampMs,
+    RemoteAgentId, RemoteAgentStatus, TimestampMs,
 };
 use serde_json::{Value, json};
 use tokio::sync::{Mutex, RwLock, broadcast};
@@ -38,7 +38,7 @@ struct RemoteState {
 /// Configuration for connecting to a remote agent.
 #[derive(Clone)]
 pub struct RemoteAgentConfig {
-    pub remote_agent_id: String,
+    pub remote_agent_id: RemoteAgentId,
     pub protocol: RemoteAgentProtocol,
     pub url: String,
     pub auth_type: String,
@@ -605,7 +605,7 @@ mod tests {
     #[test]
     fn remote_agent_config_clone() {
         let config = RemoteAgentConfig {
-            remote_agent_id: "ra-1".into(),
+            remote_agent_id: RemoteAgentId::new(),
             protocol: RemoteAgentProtocol::OpenClaw,
             url: "wss://example.com".into(),
             auth_type: "bearer".into(),
@@ -616,7 +616,7 @@ mod tests {
             device_identity: None,
         };
         let cloned = config.clone();
-        assert_eq!(cloned.remote_agent_id, "ra-1");
+        assert_eq!(cloned.remote_agent_id, config.remote_agent_id);
         assert_eq!(cloned.url, "wss://example.com");
         assert_eq!(cloned.resume_session_key.as_deref(), Some("session-1"));
         assert_eq!(cloned.device_token.as_deref(), Some("device-token"));

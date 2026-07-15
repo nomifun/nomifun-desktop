@@ -462,7 +462,7 @@ async fn bind_lan(preferred: u16) -> Result<(u16, TcpListener)> {
 
 /// Resolve the persisted admin identity from the DB: `(username, password_set)`.
 ///
-/// `password_set` is true when the system user has a non-empty `password_hash`
+/// `password_set` is true when the installation owner has a non-empty `password_hash`
 /// (i.e. a real credential exists). Falls back to `("admin", false)` on any DB
 /// error or missing row, so callers always get a displayable username.
 async fn resolve_admin(user_repo: &dyn IUserRepository) -> (String, bool) {

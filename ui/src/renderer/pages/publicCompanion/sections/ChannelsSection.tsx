@@ -5,6 +5,7 @@
  */
 
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import type { ChannelId } from '@/common/types/ids';
 import { useTranslation } from 'react-i18next';
 import { Button, Modal, Spin, Switch, Tag } from '@arco-design/web-react';
 import { Connection } from '@icon-park/react';
@@ -21,7 +22,12 @@ import {
   PLUGIN_ENABLED_KEY,
   PlatformConfigBody,
 } from '@renderer/components/channels/PlatformConfigBody';
-import { retargetConfigAfterStatus, statusOwnedBy, statusIsUnbound } from '@renderer/components/channels/channelStatusSelection';
+import {
+  retargetConfigAfterStatus,
+  statusOwnedBy,
+  statusIsUnbound,
+  type ChannelConfigTarget,
+} from '@renderer/components/channels/channelStatusSelection';
 import type { ArcoMessageInstance } from '@renderer/utils/ui/useArcoMessage';
 import { SectionCard } from '../components';
 
@@ -49,11 +55,11 @@ const ChannelsSection: React.FC<Props> = ({ agent, message }) => {
   // All channel rows, indexed by row id (NOT platform type — one platform may have many rows).
   const [statuses, setStatuses] = useState<Record<string, IChannelPluginStatus>>({});
   const [pendingCounts, setPendingCounts] = useState<Record<string, number>>({});
-  const [busyRowId, setBusyRowId] = useState<string | null>(null);
+  const [busyRowId, setBusyRowId] = useState<ChannelId | null>(null);
   const [loaded, setLoaded] = useState(false);
   // Config modal target: with channelId = edit that row; without = create mode
   // (the form's first save creates a row bound to this public agent).
-  const [configTarget, setConfigTarget] = useState<{ platform: ChannelPlatform; channelId?: string } | null>(null);
+  const [configTarget, setConfigTarget] = useState<ChannelConfigTarget>(null);
 
   // ── Channel plugin statuses (REST snapshot + WS live updates) ──
   const refreshStatuses = useCallback(async () => {
@@ -156,7 +162,7 @@ const ChannelsSection: React.FC<Props> = ({ agent, message }) => {
   );
 
   const applyRowBinding = useCallback(
-    async (rowId: string, bind: boolean) => {
+    async (rowId: ChannelId, bind: boolean) => {
       setBusyRowId(rowId);
       try {
         // Backend contract: null public_agent_id clears the binding. Atomic — persists
@@ -440,7 +446,10 @@ const ChannelsSection: React.FC<Props> = ({ agent, message }) => {
             key={configTarget.channelId ?? `${configTarget.platform}:new`}
             platform={configTarget.platform}
             status={configTarget.channelId ? (statuses[configTarget.channelId] ?? null) : null}
-            channelTarget={{ channelId: configTarget.channelId, publicAgentId: agent.id }}
+            channelTarget={{
+              channelId: configTarget.channelId,
+              publicAgentId: agent.id,
+            }}
             onStatusChange={(status) => {
               // Forms report the row they saved; merge by row id, then let the
               // snapshot reconcile (create mode discovers the new row there).

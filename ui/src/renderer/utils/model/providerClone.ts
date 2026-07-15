@@ -5,8 +5,9 @@
  */
 
 import type { IProvider } from '@/common/config/storage';
+import type { ProviderId } from '@/common/types/ids';
 
-export function cloneProviderConfig(provider: IProvider, nextId: string, copyLabel: string): IProvider {
+export function cloneProviderConfig(provider: IProvider, nextId: ProviderId, copyLabel: string): IProvider {
   return {
     ...provider,
     id: nextId,

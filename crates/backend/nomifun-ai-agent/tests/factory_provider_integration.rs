@@ -6,11 +6,16 @@ use nomifun_ai_agent::AcpSkillManager;
 use nomifun_ai_agent::factory::{AgentFactoryDeps, build_agent_factory};
 use nomifun_ai_agent::registry::AgentRegistry;
 use nomifun_ai_agent::types::AgentRuntimeBuildOptions;
-use nomifun_common::{AgentType, ProviderWithModel, encrypt_string};
+use nomifun_common::{AgentType, ConversationId, ProviderWithModel, encrypt_string};
 use nomifun_db::{
     CreateProviderParams, IAcpSessionRepository, IProviderRepository, SqliteAcpSessionRepository,
     SqliteAgentMetadataRepository, SqliteProviderRepository, SqliteRemoteAgentRepository, init_database_memory,
 };
+
+const TEST_OWNER_ID: &str = "user_0190f5fe-7c00-7a00-8000-000000000001";
+const PROVIDER_ID_1: &str = "prov_0190f5fe-7c00-7a00-8000-000000000001";
+const PROVIDER_ID_2: &str = "prov_0190f5fe-7c00-7a00-8000-000000000002";
+const MISSING_PROVIDER_ID: &str = "prov_0190f5fe-7c00-7a00-8000-000000000099";
 
 fn test_encryption_key() -> [u8; 32] {
     [0xABu8; 32]
@@ -69,7 +74,7 @@ fn make_factory(
     let tmp = tempfile::TempDir::new().unwrap();
     let skill_paths = Arc::new(nomifun_extension::resolve_skill_paths(tmp.path(), tmp.path()));
     build_agent_factory(AgentFactoryDeps {
-        authoritative_user_id: Arc::from("system_default_user"),
+        authoritative_user_id: Arc::from(TEST_OWNER_ID),
         cron_sink_factory: None,
         gateway_mcp_config: None,
         open_mcp_config: None,
@@ -108,15 +113,15 @@ async fn nomi_factory_returns_unavailable_when_no_providers_configured() {
     let factory = make_factory(provider_repo, remote_agent_repo, agent_registry, acp_agent_service);
 
     let options = AgentRuntimeBuildOptions {
-        user_id: "system_default_user".into(),
+        user_id: TEST_OWNER_ID.into(),
         agent_type: AgentType::Nomi,
-        workspace: String::new(),
-        model: ProviderWithModel {
-            provider_id: "nonexistent-provider".into(),
+        workspace: "/tmp/test-workspace".into(),
+        model: Some(ProviderWithModel {
+            provider_id: MISSING_PROVIDER_ID.into(),
             model: "gpt-4o".into(),
             use_model: None,
-        },
-        conversation_id: "conv-test-1".into(),
+        }),
+        conversation_id: ConversationId::new().into_string(),
         delegation_policy: Default::default(),
         conversation_created_at: None,
         extra: serde_json::json!({}),
@@ -141,19 +146,19 @@ async fn nomi_factory_falls_back_to_first_enabled_when_bound_provider_missing() 
     // enabled provider still exists — it falls back to the first enabled model
     // instead of erroring with "Provider '<id>' not found".
     let (provider_repo, remote_agent_repo, agent_registry, acp_agent_service) = setup().await;
-    insert_test_provider(&*provider_repo, "prov-001", "openai").await;
+    insert_test_provider(&*provider_repo, PROVIDER_ID_1, "openai").await;
     let factory = make_factory(provider_repo, remote_agent_repo, agent_registry, acp_agent_service);
 
     let options = AgentRuntimeBuildOptions {
-        user_id: "system_default_user".into(),
+        user_id: TEST_OWNER_ID.into(),
         agent_type: AgentType::Nomi,
         workspace: "/tmp/test-workspace".into(),
-        model: ProviderWithModel {
-            provider_id: "deleted-provider".into(),
+        model: Some(ProviderWithModel {
+            provider_id: MISSING_PROVIDER_ID.into(),
             model: "gpt-4o".into(),
             use_model: None,
-        },
-        conversation_id: "conv-test-fallback".into(),
+        }),
+        conversation_id: ConversationId::new().into_string(),
         delegation_policy: Default::default(),
         conversation_created_at: None,
         extra: serde_json::json!({}),
@@ -166,19 +171,19 @@ async fn nomi_factory_falls_back_to_first_enabled_when_bound_provider_missing() 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn nomi_factory_resolves_provider_from_db() {
     let (provider_repo, remote_agent_repo, agent_registry, acp_agent_service) = setup().await;
-    insert_test_provider(&*provider_repo, "prov-001", "openai").await;
+    insert_test_provider(&*provider_repo, PROVIDER_ID_1, "openai").await;
     let factory = make_factory(provider_repo, remote_agent_repo, agent_registry, acp_agent_service);
 
     let options = AgentRuntimeBuildOptions {
-        user_id: "system_default_user".into(),
+        user_id: TEST_OWNER_ID.into(),
         agent_type: AgentType::Nomi,
         workspace: "/tmp/test-workspace".into(),
-        model: ProviderWithModel {
-            provider_id: "prov-001".into(),
+        model: Some(ProviderWithModel {
+            provider_id: PROVIDER_ID_1.into(),
             model: "gpt-4o".into(),
             use_model: None,
-        },
-        conversation_id: "conv-test-2".into(),
+        }),
+        conversation_id: ConversationId::new().into_string(),
         delegation_policy: Default::default(),
         conversation_created_at: None,
         extra: serde_json::json!({ "max_tokens": 2048 }),
@@ -191,19 +196,19 @@ async fn nomi_factory_resolves_provider_from_db() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn nomi_factory_respects_use_model_override() {
     let (provider_repo, remote_agent_repo, agent_registry, acp_agent_service) = setup().await;
-    insert_test_provider(&*provider_repo, "prov-002", "openai").await;
+    insert_test_provider(&*provider_repo, PROVIDER_ID_2, "openai").await;
     let factory = make_factory(provider_repo, remote_agent_repo, agent_registry, acp_agent_service);
 
     let options = AgentRuntimeBuildOptions {
-        user_id: "system_default_user".into(),
+        user_id: TEST_OWNER_ID.into(),
         agent_type: AgentType::Nomi,
         workspace: "/tmp/test-workspace".into(),
-        model: ProviderWithModel {
-            provider_id: "prov-002".into(),
+        model: Some(ProviderWithModel {
+            provider_id: PROVIDER_ID_2.into(),
             model: "gpt-4o".into(),
             use_model: Some("gpt-5.4".into()),
-        },
-        conversation_id: "conv-test-3".into(),
+        }),
+        conversation_id: ConversationId::new().into_string(),
         delegation_policy: Default::default(),
         conversation_created_at: None,
         extra: serde_json::json!({}),

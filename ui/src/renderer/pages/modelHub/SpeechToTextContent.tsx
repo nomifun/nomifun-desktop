@@ -23,12 +23,13 @@ import {
 } from '@/renderer/services/speechToTextConfig';
 import { useArcoMessage } from '@/renderer/utils/ui/useArcoMessage';
 import { useLocalAsrModels } from './useLocalAsrModels';
+import type { ProviderId } from '@/common/types/ids';
 
 type SpeechSourceOption = {
   value: string;
   label: string;
   provider: SpeechToTextProvider;
-  providerId?: string;
+  providerId?: ProviderId;
   model: string;
 };
 

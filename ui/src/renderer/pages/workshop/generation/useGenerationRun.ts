@@ -23,6 +23,7 @@ import type { ModelOption } from './genTypes';
 import { buildRunPlan } from './pipeline';
 import { spawnResultNodes } from './spawn';
 import { normalizeImageParamsForModel, validateLocalZImageRun } from './localZImage';
+import type { CreationTaskId, WorkshopNodeId } from '@/common/types/ids';
 
 const POLL_INTERVAL_MS = 2000;
 
@@ -46,12 +47,12 @@ function mapStatus(s: CreationTaskStatus): WorkshopGeneratorStatus {
 }
 
 export interface UseGenerationRunArgs {
-  nodeId: string;
-  canvasId: string;
+  nodeId: WorkshopNodeId;
+  canvasId: import('@/common/types/ids').CanvasId;
   data: WorkshopGeneratorNodeData;
   /** The model a run should use (explicit selection, else first available). */
   effectiveModel: ModelOption | null;
-  updateNodeData: (nodeId: string, patch: Partial<WorkshopGeneratorNodeData>) => void;
+  updateNodeData: (nodeId: WorkshopNodeId, patch: Partial<WorkshopGeneratorNodeData>) => void;
 }
 
 export interface GenerationRun {
@@ -74,8 +75,8 @@ export function useGenerationRun(args: UseGenerationRunArgs): GenerationRun {
 
   const mountedRef = useRef(true);
   const timerRef = useRef<number | null>(null);
-  const activeTaskRef = useRef<string | null>(null);
-  const spawnedTaskRef = useRef<string | null>(null);
+  const activeTaskRef = useRef<CreationTaskId | null>(null);
+  const spawnedTaskRef = useRef<CreationTaskId | null>(null);
 
   const patch = useCallback((p: Partial<WorkshopGeneratorNodeData>) => updateRef.current(nodeId, p), [nodeId]);
 
@@ -116,7 +117,7 @@ export function useGenerationRun(args: UseGenerationRunArgs): GenerationRun {
   );
 
   const poll = useCallback(
-    async (taskId: string) => {
+    async (taskId: CreationTaskId) => {
       let task: CreationTask;
       try {
         task = await getTask(taskId);
@@ -139,7 +140,7 @@ export function useGenerationRun(args: UseGenerationRunArgs): GenerationRun {
   );
 
   const startPolling = useCallback(
-    (taskId: string) => {
+    (taskId: CreationTaskId) => {
       activeTaskRef.current = taskId;
       clearTimer();
       timerRef.current = window.setTimeout(() => void poll(taskId), POLL_INTERVAL_MS);
@@ -202,6 +203,7 @@ export function useGenerationRun(args: UseGenerationRunArgs): GenerationRun {
         canvas_id: canvasId,
         node_id: nodeId,
         provider_id: model.providerId,
+        provider_platform: model.platform,
         model: model.model,
         capability: plan.capability,
         params,

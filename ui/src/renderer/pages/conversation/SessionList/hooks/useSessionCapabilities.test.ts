@@ -7,6 +7,7 @@
 import { describe, expect, test } from 'bun:test';
 
 import type { IIdmmState } from '@/common/adapter/ipcBridge';
+import { parseConversationId } from '@/common/types/ids';
 
 import {
   applyIdmmStateToSessionCapabilities,
@@ -17,7 +18,7 @@ import {
 
 const idmmState = (overrides: Partial<IIdmmState> = {}): IIdmmState => ({
   kind: 'conversation',
-  target_id: 7,
+  target_id: parseConversationId('conv_0190f5fe-7c00-7a00-8000-000000000007'),
   enabled: true,
   run_state: 'armed',
   interventions_count: 0,
@@ -26,13 +27,15 @@ const idmmState = (overrides: Partial<IIdmmState> = {}): IIdmmState => ({
 });
 
 describe('SessionList capability snapshot', () => {
+  const conversationId = parseConversationId('conv_0190f5fe-7c00-7a00-8000-000000000007');
+
   test('applies an enabled IDMM state returned from the control save flow', () => {
     resetSessionCapabilitiesForTest();
 
     applyIdmmStateToSessionCapabilities(idmmState());
 
     const snapshot = getSessionCapabilitySnapshot();
-    expect(snapshot.idmm.get(capabilityKey('conversation', 7))).toBe('armed');
+    expect(snapshot.idmm.get(capabilityKey('conversation', conversationId))).toBe('armed');
   });
 
   test('removes IDMM state when the control save flow disables it', () => {
@@ -42,6 +45,6 @@ describe('SessionList capability snapshot', () => {
     applyIdmmStateToSessionCapabilities(idmmState({ enabled: false, run_state: 'off' }));
 
     const snapshot = getSessionCapabilitySnapshot();
-    expect(snapshot.idmm.has(capabilityKey('conversation', 7))).toBe(false);
+    expect(snapshot.idmm.has(capabilityKey('conversation', conversationId))).toBe(false);
   });
 });

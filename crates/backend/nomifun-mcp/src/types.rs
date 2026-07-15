@@ -186,7 +186,7 @@ pub struct McpServer {
     /// Local-only integer primary key (cross-device classification: MCP is a
     /// host-local INTEGER entity). Carried through to `McpServerResponse.id`
     /// unchanged (number on the API boundary).
-    pub id: i64,
+    pub id: nomifun_common::McpServerId,
     pub name: String,
     pub description: Option<String>,
     pub enabled: bool,
@@ -444,7 +444,7 @@ mod tests {
 
     fn make_test_row(transport_type: &str, transport_config: &str, tools: Option<&str>, status: &str) -> McpServerRow {
         McpServerRow {
-            id: 123,
+            id: nomifun_common::McpServerId::parse("mcp_0190f5fe-7c00-7a00-8000-000000000123").unwrap(),
             name: "test-server".into(),
             description: Some("A test server".into()),
             enabled: true,
@@ -471,7 +471,7 @@ mod tests {
         );
         let server = McpServer::from_row(row).unwrap();
 
-        assert_eq!(server.id, 123);
+        assert_eq!(server.id.as_str(), "mcp_0190f5fe-7c00-7a00-8000-000000000123");
         assert_eq!(server.name, "test-server");
         assert!(server.enabled);
         assert_eq!(server.last_test_status, McpServerStatus::Connected);
@@ -542,7 +542,7 @@ mod tests {
     #[test]
     fn into_response_with_tools() {
         let server = McpServer {
-            id: 1,
+            id: nomifun_common::McpServerId::parse("mcp_0190f5fe-7c00-7a00-8000-000000000123").unwrap(),
             name: "test".into(),
             description: None,
             enabled: true,
@@ -564,7 +564,7 @@ mod tests {
             updated_at: 600,
         };
         let resp = server.into_response();
-        assert_eq!(resp.id, 1);
+        assert_eq!(resp.id, nomifun_common::McpServerId::parse("mcp_0190f5fe-7c00-7a00-8000-000000000123").unwrap());
         assert!(resp.tools.is_some());
         assert_eq!(resp.tools.unwrap().len(), 1);
     }
@@ -572,7 +572,7 @@ mod tests {
     #[test]
     fn into_response_empty_tools_is_none() {
         let server = McpServer {
-            id: 2,
+            id: nomifun_common::McpServerId::parse("mcp_0190f5fe-7c00-7a00-8000-000000000123").unwrap(),
             name: "test".into(),
             description: Some("desc".into()),
             enabled: false,

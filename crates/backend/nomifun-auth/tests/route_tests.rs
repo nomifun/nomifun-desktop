@@ -29,6 +29,7 @@ async fn test_app() -> (Router, TestContext) {
 
 async fn test_app_with_local(local: bool) -> (Router, TestContext) {
     let db = init_database_memory().await.unwrap();
+    let installation_owner = nomifun_db::installation_owner_id(db.pool()).await.unwrap();
     let user_repo = Arc::new(SqliteUserRepository::new(db.pool().clone())) as Arc<dyn IUserRepository>;
     let jwt_service = Arc::new(JwtService::new("test_secret_for_routes".into()));
     let cookie_config = Arc::new(CookieConfig {
@@ -45,19 +46,20 @@ async fn test_app_with_local(local: bool) -> (Router, TestContext) {
     };
 
     // Mirror `create_router`: the global trust middleware resolves local trust
-    // (and injects the system user / `LocalTrusted` marker) before the per-route
+    // (and injects the installation owner / `LocalTrusted` marker) before the per-route
     // auth + local-only gates run. `local` maps to NoAuth (everything trusted),
     // otherwise Required (JWT enforced).
     let trust_state = TrustState {
         policy: if local { AuthPolicy::NoAuth } else { AuthPolicy::Required },
         local_trust_secret: None,
-        authoritative_user_id: Arc::from(nomifun_auth::SYSTEM_USER_ID),
+        authoritative_user_id: Arc::from(installation_owner.as_str()),
     };
     let app = auth_routes(state).layer(axum::middleware::from_fn_with_state(trust_state, trust_resolve_middleware));
     let ctx = TestContext {
         jwt_service,
         user_repo,
         qr_token_store,
+        installation_owner,
         _db: db,
     };
     (app, ctx)
@@ -68,13 +70,14 @@ struct TestContext {
     jwt_service: Arc<JwtService>,
     user_repo: Arc<dyn IUserRepository>,
     qr_token_store: Arc<QrTokenStore>,
+    installation_owner: String,
     _db: nomifun_db::Database,
 }
 
 /// Helper: create a test user with known credentials.
 ///
-/// The seeded `system_default_user` row already uses `username = "admin"` with
-/// an empty password hash. If the test asks for that username, update the seed
+/// The installation owner already uses `username = "admin"` with an empty
+/// password hash. If the test asks for that username, update the owner
 /// row in place instead of trying to INSERT a duplicate. Any other username
 /// takes the normal create_user path.
 async fn create_test_user(ctx: &TestContext, username: &str, password: &str) {
@@ -225,7 +228,7 @@ async fn t4_4_login_missing_fields() {
 
 #[tokio::test]
 async fn t4_5_login_empty_password_hash_returns_401() {
-    // Regression: when the seeded system user has an empty password_hash
+    // Regression: when the installation owner has an empty password_hash
     // (first-run local mode), POST /login must return 401, not 500.
     let (app, _ctx) = test_app_with_local(true).await;
 
@@ -615,7 +618,7 @@ async fn t10_2_ws_token_unauthenticated() {
 async fn t11_1_qr_login_success() {
     let (app, ctx) = test_app().await;
 
-    // Set up system user with credentials so login works
+    // Set up installation-owner credentials so login works
     let hash = hash_password("syspass123").unwrap();
     ctx.user_repo
         .set_system_user_credentials("sysadmin", &hash)
@@ -801,7 +804,7 @@ async fn t12_2_internal_user_routes_work_in_local_mode() {
         .unwrap();
     assert_eq!(system_resp.status(), StatusCode::OK);
     let system_json = body_json(system_resp).await;
-    assert_eq!(system_json["data"]["id"], "system_default_user");
+    assert_eq!(system_json["data"]["id"], ctx.installation_owner);
 
     let user_resp = app
         .clone()

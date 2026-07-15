@@ -360,13 +360,13 @@ pub fn build_conversation_state(
     );
     // Drop the conversation's knowledge binding when the conversation goes away.
     conversation_service.with_delete_hook(services.knowledge_service.clone());
-    // Clear the dual-domain owner of any requirement this conversation owned —
-    // requirements.owner_session_id has no FK to cascade (spec §9.B).
+    // Clear the conversation-domain owner of any requirement this conversation
+    // owned; the ownership boundary has no FK cascade (spec §9.B).
     conversation_service.with_delete_hook(
         services.requirement_service.clone() as Arc<dyn OnConversationDelete>,
     );
     // Drop this conversation's IDMM decision records (disposable audit trail,
-    // polymorphic target_id with no FK — app-level cascade).
+    // polymorphic target_id with no FK —app-level cascade).
     conversation_service.with_delete_hook(Arc::new(IdmmRecordCascade {
         records: Arc::new(SqliteIdmmInterventionRepository::new(services.database.pool().clone())),
     }) as Arc<dyn OnConversationDelete>);
@@ -466,7 +466,7 @@ pub fn build_mcp_state(services: &AppServices) -> McpRouterState {
 /// The channel layer resolves a session's companion via the channel row's own
 /// `companion_id` first; this profile supplies the legacy per-platform binding
 /// (when present and alive) and the per-companion model lookup. There is **no
-/// default-companion fallback** — an unbound channel is hosted by no companion.
+/// default-companion fallback** —an unbound channel is hosted by no companion.
 /// Channel sessions with no per-platform model fall back to the bound
 /// companion's configured model, so its model choice travels with it to remote
 /// sessions.
@@ -480,7 +480,7 @@ struct CompanionChannelAgentProfile {
     channel_settings: Arc<nomifun_channel::channel_settings::ChannelSettingsService>,
     public_agent_service: Arc<nomifun_public_agent::PublicAgentService>,
     /// Provider catalog, used to resolve the app's DEFAULT model when a public
-    /// agent has no model of its own — so it answers as soon as ANY provider is
+    /// agent has no model of its own —so it answers as soon as ANY provider is
     /// configured (no per-agent model setup required).
     provider_repo: Arc<dyn IProviderRepository>,
 }
@@ -493,7 +493,7 @@ impl nomifun_channel::message_service::ChannelAgentProfile for CompanionChannelA
         // 远程连接). The legacy per-platform binding still resolves here when present AND
         // alive, but there is **no default-companion fallback** — an unbound channel is
         // hosted by no companion (历史债「渠道与远程连接默认由默认伙伴接待」已废除；连接由
-        // 用户为每个伙伴显式配置). A stale legacy binding (deleted companion) degrades to
+        // 用户为每个伙伴显式配置. A stale legacy binding (deleted companion) degrades to
         // None too, rather than pinning sessions to a ghost.
         if let Some(plugin) = nomifun_channel::types::PluginType::from_str_opt(platform)
             && let Ok(Some(bound)) = self.channel_settings.get_channel_companion_id(plugin).await
@@ -506,14 +506,7 @@ impl nomifun_channel::message_service::ChannelAgentProfile for CompanionChannelA
 
     async fn companion_model(&self, companion_id: &str) -> Option<nomifun_common::ProviderWithModel> {
         let profile = self.companion_service.get_companion(companion_id).await.ok()?;
-        if !profile.model.is_configured() {
-            return None;
-        }
-        Some(nomifun_common::ProviderWithModel {
-            provider_id: profile.model.provider_id.clone(),
-            model: profile.model.model.clone(),
-            use_model: Some(profile.model.model),
-        })
+        profile.model
     }
 
     async fn companion_exists(&self, companion_id: &str) -> bool {
@@ -529,27 +522,22 @@ impl nomifun_channel::message_service::ChannelAgentProfile for CompanionChannelA
             .filter(|n| !n.trim().is_empty())
     }
 
-    async fn ensure_companion_session(&self, companion_id: &str) -> Option<i64> {
-        // Idempotent: returns the companion's existing single session or mints a
-        // new one (requires the companion's chat model to be configured, else
-        // AppError::BadRequest → None so the channel layer refuses the turn with
-        // a notice). companion_threads stores the id as a String (the i64 bridged
-        // at the boundary); parse it back here.
+    async fn ensure_companion_session(&self, companion_id: &str) -> Option<String> {
         match self.companion_service.create_companion_thread(companion_id, None).await {
-            Ok(thread) => match thread.conversation_id.parse::<i64>() {
-                Ok(id) => Some(id),
-                Err(e) => {
+            Ok(thread) => match nomifun_common::ConversationId::try_from(thread.conversation_id.as_str()) {
+                Ok(_) => Some(thread.conversation_id),
+                Err(error) => {
                     tracing::warn!(
                         companion_id = %companion_id,
                         conversation_id = %thread.conversation_id,
-                        error = %e,
-                        "companion session conversation_id is not a valid i64"
+                        %error,
+                        "companion session returned an invalid canonical conversation ID"
                     );
                     None
                 }
             },
-            Err(e) => {
-                tracing::warn!(companion_id = %companion_id, error = %e, "ensure_companion_session failed (likely no model configured)");
+            Err(error) => {
+                tracing::warn!(companion_id = %companion_id, %error, "ensure_companion_session failed (likely no model configured)");
                 None
             }
         }
@@ -581,8 +569,9 @@ impl nomifun_channel::message_service::ChannelAgentProfile for CompanionChannelA
         // The agent's OWN configured model wins.
         if let Ok(cfg) = self.public_agent_service.get(id).await {
             if cfg.model.is_configured() {
+                let provider_id = cfg.model.provider_id.clone()?.into_string();
                 return Some(nomifun_common::ProviderWithModel {
-                    provider_id: cfg.model.provider_id.clone(),
+                    provider_id,
                     model: cfg.model.model.clone(),
                     // Prefer the explicit concrete model id; fall back to the label so a
                     // usable id always reaches the provider.
@@ -644,7 +633,7 @@ pub async fn build_channel_state(
         owner_user_id.clone(),
     ));
 
-    // Expired pairing codes are purged only by this background sweep — the
+    // Expired pairing codes are purged only by this background sweep —the
     // timer existed but had no caller, so stale codes lingered in the DB
     // indefinitely. Deliberately detached (handle dropped): like the channel
     // message loop and plugin restore tasks, it runs for the process lifetime.
@@ -746,7 +735,7 @@ pub async fn build_channel_state(
         // resolution falls back to the bound companion when the
         // platform has no config of its own.
         .with_channel_agent_profile(Arc::clone(&channel_agent_profile))
-        // Outbound media: resolve `wsa_…` ids to bytes so channel replies can
+        // Outbound media: resolve `wsa_...` IDs to bytes so channel replies can
         // send AI-generated images/files.
         .with_asset_resolver(Arc::new(crate::channel_asset_resolver::ChannelAssetResolver::new(
             services.workshop_service.clone(),
@@ -792,14 +781,14 @@ pub fn build_terminal_state(services: &AppServices) -> TerminalRouterState {
     services
         .terminal_service
         .with_knowledge_service(services.knowledge_service.clone());
-    // Clear the dual-domain owner of any requirement this terminal owned —
-    // requirements.owner_session_id (owner_kind='terminal') has no FK to
-    // cascade (spec §9.B). Mirror of the conversation delete hook.
+    // Clear the terminal-domain owner of any requirement this terminal owned;
+    // the ownership boundary has no FK cascade (spec §9.B). Mirror of the
+    // conversation delete hook.
     services
         .terminal_service
         .with_delete_hook(services.requirement_service.clone() as Arc<dyn OnTerminalDelete>);
     // Drop this terminal's IDMM decision records (disposable audit trail,
-    // polymorphic target_id with no FK — app-level cascade, mirror of the
+    // polymorphic target_id with no FK —app-level cascade, mirror of the
     // conversation delete hook).
     services
         .terminal_service
@@ -845,7 +834,7 @@ pub fn build_requirement_state(services: &AppServices) -> (RequirementRouterStat
     )
     .with_runtime_state(services.conversation_runtime_state.clone());
     // Phase 3: AutoWork-driven nomi turns run the send loop, and IDMM fault
-    // supervision (Task 3) reuses `perform_model_failover` — wire the deps here too.
+    // supervision (Task 3) reuses `perform_model_failover` —wire the deps here too.
     conv_service.with_failover_deps(
         Arc::new(SqliteProviderRepository::new(pool.clone())),
         Arc::new(SqliteClientPreferenceRepository::new(pool.clone())),
@@ -853,7 +842,7 @@ pub fn build_requirement_state(services: &AppServices) -> (RequirementRouterStat
 
     // Router-state service: the singleton plus conversation service + repo for
     // AutoWork config, plus the terminal driver for terminal-target AutoWork. The
-    // sink (built in AppServices) keeps using the plain singleton — it never needs
+    // sink (built in AppServices) keeps using the plain singleton —it never needs
     // the autowork-config methods.
     let terminal_driver: Arc<dyn nomifun_terminal::TerminalDriver> = services.terminal_service.clone();
     let terminal_repo: Arc<dyn nomifun_db::ITerminalRepository> =
@@ -870,7 +859,7 @@ pub fn build_requirement_state(services: &AppServices) -> (RequirementRouterStat
             .with_autowork_waker(autowork_waker.clone()),
     );
 
-    // ── IDMM: build the supervisor manager + service, sharing the same
+    // -- IDMM: build the supervisor manager + service, sharing the same
     // ConversationService / repo / terminal driver this AutoWork runner drives, so
     // IDMM observes the exact same live sessions. The manager is threaded into
     // AutoWorkRunnerDeps.idmm so AutoWork ensures supervision per turn.
@@ -884,7 +873,7 @@ pub fn build_requirement_state(services: &AppServices) -> (RequirementRouterStat
 
     // NOTE: the ConversationSupervisionHook for user-driven chat turns is
     // registered in `build_module_states` on the ROUTE ConversationService
-    // (`build_conversation_state`'s instance), not here — this `conv_service` is
+    // (`build_conversation_state`'s instance), not here —this `conv_service` is
     // moved into `AutoWorkRunnerDeps` below and only drives AutoWork, which arms
     // IDMM per loop iteration via `AutoWorkRunnerDeps.idmm` (so a hook here was
     // dead code that fooled debugging into thinking arming was wired).
@@ -907,7 +896,7 @@ pub fn build_requirement_state(services: &AppServices) -> (RequirementRouterStat
     // Start the periodic lease sweeper (re-pends stale claims from dead sessions).
     auto_work_runner.start_sweeper();
     // Resume every persisted-enabled binding so bound sessions work in the
-    // background from boot — no foreground/session-page visit required.
+    // background from boot —no foreground/session-page visit required.
     auto_work_runner.resume_persisted_bindings();
 
     (
@@ -994,7 +983,7 @@ pub fn build_agent_execution_engine(
 
 /// **P3-X2**: build the `SecretRouterState` (browser-use credential CRUD).
 /// The service holds the app data dir (去 per-pet 键化: browser identity globally
-/// shared — one vault under `{data_dir}/browser-secrets/shared`) + the machine-bound
+/// shared —one vault under `{data_dir}/browser-secrets/shared`) + the machine-bound
 /// `encryption_key` (the same persistent `[u8; 32]` the session/factory
 /// side uses to build the `SecretStore`), so a secret registered here decrypts in a session.
 pub fn build_secret_state(services: &AppServices) -> SecretRouterState {
@@ -1053,7 +1042,7 @@ pub fn build_idmm_state(
 
     // TTL janitor: IDMM records are deliberately disposable (per-target cap is
     // enforced on insert; this enforces the shared TTL + per-owner backstop). Sweep
-    // once at boot, then hourly. Best-effort — a failed sweep only warns and the
+    // once at boot, then hourly. Best-effort —a failed sweep only warns and the
     // next tick retries.
     spawn_idmm_record_janitor(records);
 
@@ -1062,7 +1051,7 @@ pub fn build_idmm_state(
 
 /// Spawn the IDMM record TTL janitor: sweeps rows older than `TTL_MS` and
 /// enforces the per-owner hard cap `PER_USER_ACTIVITY_CAP`. Runs once immediately (boot
-/// sweep) then on a ~1h interval. Best-effort — a sweep error only warns and
+/// sweep) then on a ~1h interval. Best-effort —a sweep error only warns and
 /// the next tick retries; the sweep is a backstop on top of the per-target cap
 /// already enforced at insert time.
 fn spawn_idmm_record_janitor(records: Arc<dyn IIdmmInterventionRepository>) {
@@ -1122,8 +1111,8 @@ pub fn build_companion_state(
     conv_service.with_mcp_server_repo(Arc::new(nomifun_db::SqliteMcpServerRepository::new(
         services.database.pool().clone(),
     )));
-    // Companion threads carry `extra.companionId`, so the conversation service
-    // mounts the companion-level knowledge binding ('companion', companionId) at task start —
+    // Companion threads carry `extra.companion_id`, so the conversation service
+    // mounts the companion-level knowledge binding ('companion', companion_id) at task start —
     // same injection as the main conversation assembly.
     conv_service.with_knowledge_service(services.knowledge_service.clone());
     conv_service.with_preset_service(preset_service);
@@ -1157,7 +1146,7 @@ pub fn build_companion_state(
 
 /// Companion-delete cascade hook: drops the deleted companion's knowledge binding via
 /// `KnowledgeService::delete_binding("companion", …)`. Failures are logged, never
-/// propagated (hook contract — the companion is already gone).
+/// propagated (hook contract —the companion is already gone).
 struct CompanionKnowledgeCleanup {
     knowledge: Arc<nomifun_knowledge::KnowledgeService>,
 }
@@ -1174,7 +1163,7 @@ impl nomifun_companion::service::CompanionCleanupHook for CompanionKnowledgeClea
 /// Session-delete cascade for IDMM decision records: `idmm_interventions` has a
 /// polymorphic `target_id` (no FK to cascade), so when a conversation or terminal
 /// is deleted the app layer clears its disposable audit trail here. Best-effort:
-/// failures are logged, never propagated (hook contract — the session is already
+/// failures are logged, never propagated (hook contract —the session is already
 /// gone). Lives in `nomifun-app` so `nomifun-conversation` / `nomifun-terminal`
 /// stay unaware of the IDMM record repo. The `target_id` string matches the
 /// supervisor's probe target (`conversation_id` / `terminal_id` as decimal).
@@ -1184,7 +1173,7 @@ struct IdmmRecordCascade {
 
 #[async_trait::async_trait]
 impl OnConversationDelete for IdmmRecordCascade {
-    async fn on_conversation_deleted(&self, user_id: &str, conversation_id: i64) {
+    async fn on_conversation_deleted(&self, user_id: &str, conversation_id: &str) {
         if let Err(e) = self
             .records
             .delete_for_target(user_id, "conversation", &conversation_id.to_string())
@@ -1197,10 +1186,10 @@ impl OnConversationDelete for IdmmRecordCascade {
 
 #[async_trait::async_trait]
 impl OnTerminalDelete for IdmmRecordCascade {
-    async fn on_terminal_deleted(&self, user_id: &str, terminal_id: i64) {
+    async fn on_terminal_deleted(&self, user_id: &str, terminal_id: &str) {
         if let Err(e) = self
             .records
-            .delete_for_target(user_id, "terminal", &terminal_id.to_string())
+            .delete_for_target(user_id, "terminal", terminal_id)
             .await
         {
             tracing::warn!(terminal_id, error = %e, "failed to clear IDMM records on terminal delete");
@@ -1430,7 +1419,7 @@ pub fn build_ws_state(services: &AppServices) -> WsHandlerState {
         {
             return Some(authoritative_user_id.clone());
         }
-        jwt_service.verify(token).ok().map(|claims| claims.user_id)
+        jwt_service.verify(token).ok().map(|claims| claims.user_id.into_string())
     });
 
     let token_extractor = Arc::new(|headers: &axum::http::HeaderMap| extract_token_from_ws_headers(headers));

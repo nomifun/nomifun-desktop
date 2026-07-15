@@ -13,12 +13,13 @@ import { useCompanions } from '@/renderer/pages/nomi/useNomi';
 import React, { useMemo } from 'react';
 import { useTranslation } from 'react-i18next';
 import styles from '../index.module.css';
+import type { CompanionId } from '@/common/types/ids';
 
 type PosterFigure = {
   id: string;
   name: string;
   character: string;
-  companionId?: string;
+  companionId?: CompanionId;
   customFigure?: CustomFigureMeta | null;
   mood: CompanionMood;
   activity: CompanionActivity;

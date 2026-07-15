@@ -5,6 +5,7 @@
  */
 
 import { describe, expect, test } from 'bun:test';
+import { parseConversationId } from '@/common/types/ids';
 import type { IMessagePlan, TMessage } from '@/common/chat/chatLib';
 import { derivePinnedPlan } from './pinnedPlanModel';
 
@@ -14,7 +15,7 @@ function planMsg(entries: PlanEntry[], id = 'p1'): IMessagePlan {
   return {
     id,
     type: 'plan',
-    conversation_id: 1,
+    conversation_id: parseConversationId('conv_0190f5fe-7c00-7a00-8000-000000000006'),
     content: { session_id: 's1', entries },
   };
 }
@@ -23,7 +24,7 @@ function textMsg(id = 't1'): TMessage {
   return {
     id,
     type: 'text',
-    conversation_id: 1,
+    conversation_id: parseConversationId('conv_0190f5fe-7c00-7a00-8000-000000000006'),
     content: { content: 'hi' },
   } as TMessage;
 }

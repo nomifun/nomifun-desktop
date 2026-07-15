@@ -3,6 +3,7 @@
  * Copyright 2025-2026 NomiFun (nomifun.com)
  * SPDX-License-Identifier: Apache-2.0
  */
+import type { ConversationId } from '@/common/types/ids';
 
 import { ipcBridge } from '@/common';
 import { AgentLogoIcon } from '@/renderer/components/agent/AgentBadge';
@@ -11,7 +12,7 @@ import React from 'react';
 import useSWR from 'swr';
 
 type MobileConversationBrandProps = {
-  conversation_id: number;
+  conversation_id: ConversationId;
   fallbackTitle: string;
 };
 

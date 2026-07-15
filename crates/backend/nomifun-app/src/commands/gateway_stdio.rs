@@ -266,10 +266,14 @@ mod tests {
     use nomifun_api_types::GatewayCapabilityScope;
     use nomifun_common::LoopbackSessionBinding;
 
+    const TEST_OWNER_ID: &str = "user_0190f5fe-7c00-7a00-8000-000000000001";
+
     fn test_claims() -> GatewayCapabilityClaims {
         GatewayCapabilityClaims::issue(
-            "system_default_user",
-            LoopbackSessionBinding::conversation("1"),
+            TEST_OWNER_ID,
+            LoopbackSessionBinding::conversation(
+                "conv_0190f5fe-7c00-7a00-8000-000000000001",
+            ),
             [
                 GATEWAY_LIST_TOOLS_OPERATION,
                 GATEWAY_CALL_TOOL_OPERATION,
@@ -420,7 +424,12 @@ mod tests {
                 .is_some()
         );
 
-        claims.scope.companion_id = Some("companion-1".to_owned());
+        claims.scope.companion_id = Some(
+            nomifun_common::CompanionId::parse(
+                "companion_0190f5fe-7c00-7a00-8000-000000000001",
+            )
+            .unwrap(),
+        );
         let companion_names: Vec<&str> = GatewayStdioServer::visible_tool_specs(&claims)
             .iter()
             .map(|spec| spec.name)
@@ -435,7 +444,10 @@ mod tests {
     #[test]
     fn secondary_session_keeps_user_tools_and_never_sees_owner_tools() {
         let mut claims = test_claims();
-        claims.user_id = "secondary-user".into();
+        claims.user_id = nomifun_common::UserId::parse(
+            "user_0190f5fe-7c00-7a00-8000-000000000002",
+        )
+        .unwrap();
         claims.scope.instance_owner = false;
         claims.scope.profile = GatewayMcpConfig::PROFILE_WORK.into();
 

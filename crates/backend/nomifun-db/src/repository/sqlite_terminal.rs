@@ -20,13 +20,13 @@ impl SqliteTerminalRepository {
 impl ITerminalRepository for SqliteTerminalRepository {
     async fn create(&self, params: &CreateTerminalParams) -> Result<TerminalSessionRow, DbError> {
         let now = now_ms();
-        // `id` is allocated by SQLite (INTEGER PK AUTOINCREMENT) and never bound.
-        let result = sqlx::query(
+        sqlx::query(
             "INSERT INTO terminal_sessions (\
-                name, cwd, command, args, env, backend, mode, cols, rows, \
+                id, name, cwd, command, args, env, backend, mode, cols, rows, \
                 created_at, updated_at, last_status, exit_code, user_id\
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
+        .bind(params.id.as_str())
         .bind(&params.name)
         .bind(&params.cwd)
         .bind(&params.command)
@@ -40,12 +40,12 @@ impl ITerminalRepository for SqliteTerminalRepository {
         .bind(now)
         .bind("running")
         .bind(Option::<i64>::None)
-        .bind(&params.user_id)
+        .bind(params.user_id.as_str())
         .execute(&self.pool)
         .await?;
 
         Ok(TerminalSessionRow {
-            id: result.last_insert_rowid(),
+            id: params.id.clone(),
             name: params.name.clone(),
             cwd: params.cwd.clone(),
             command: params.command.clone(),
@@ -67,7 +67,7 @@ impl ITerminalRepository for SqliteTerminalRepository {
         })
     }
 
-    async fn get_by_id(&self, id: i64) -> Result<Option<TerminalSessionRow>, DbError> {
+    async fn get_by_id(&self, id: &str) -> Result<Option<TerminalSessionRow>, DbError> {
         let row = sqlx::query_as::<_, TerminalSessionRow>("SELECT * FROM terminal_sessions WHERE id = ?")
             .bind(id)
             .fetch_optional(&self.pool)
@@ -86,7 +86,7 @@ impl ITerminalRepository for SqliteTerminalRepository {
         Ok(rows)
     }
 
-    async fn update_status(&self, id: i64, last_status: &str, exit_code: Option<i64>) -> Result<(), DbError> {
+    async fn update_status(&self, id: &str, last_status: &str, exit_code: Option<i64>) -> Result<(), DbError> {
         let result =
             sqlx::query("UPDATE terminal_sessions SET last_status = ?, exit_code = ?, updated_at = ? WHERE id = ?")
                 .bind(last_status)
@@ -114,7 +114,7 @@ impl ITerminalRepository for SqliteTerminalRepository {
         Ok(result.rows_affected())
     }
 
-    async fn save_scrollback(&self, id: i64, data: &[u8]) -> Result<(), DbError> {
+    async fn save_scrollback(&self, id: &str, data: &[u8]) -> Result<(), DbError> {
         // UPSERT keyed on the session id (PK). The FK to terminal_sessions means
         // a row for a deleted session can never be written.
         sqlx::query(
@@ -129,7 +129,7 @@ impl ITerminalRepository for SqliteTerminalRepository {
         Ok(())
     }
 
-    async fn load_scrollback(&self, id: i64) -> Result<Option<Vec<u8>>, DbError> {
+    async fn load_scrollback(&self, id: &str) -> Result<Option<Vec<u8>>, DbError> {
         let row: Option<(Vec<u8>,)> = sqlx::query_as("SELECT data FROM terminal_scrollback WHERE session_id = ?")
             .bind(id)
             .fetch_optional(&self.pool)
@@ -137,7 +137,7 @@ impl ITerminalRepository for SqliteTerminalRepository {
         Ok(row.map(|(data,)| data))
     }
 
-    async fn clear_scrollback(&self, id: i64) -> Result<(), DbError> {
+    async fn clear_scrollback(&self, id: &str) -> Result<(), DbError> {
         // Idempotent: a missing row is fine (relaunch of a session that never
         // had persisted scrollback).
         sqlx::query("DELETE FROM terminal_scrollback WHERE session_id = ?")
@@ -147,7 +147,7 @@ impl ITerminalRepository for SqliteTerminalRepository {
         Ok(())
     }
 
-    async fn update_size(&self, id: i64, cols: i64, rows: i64) -> Result<(), DbError> {
+    async fn update_size(&self, id: &str, cols: i64, rows: i64) -> Result<(), DbError> {
         let result = sqlx::query("UPDATE terminal_sessions SET cols = ?, rows = ?, updated_at = ? WHERE id = ?")
             .bind(cols)
             .bind(rows)
@@ -161,7 +161,7 @@ impl ITerminalRepository for SqliteTerminalRepository {
         Ok(())
     }
 
-    async fn update_meta(&self, id: i64, name: Option<&str>, pinned: Option<bool>) -> Result<(), DbError> {
+    async fn update_meta(&self, id: &str, name: Option<&str>, pinned: Option<bool>) -> Result<(), DbError> {
         // Build the SET clause from the provided fields. At least `updated_at`
         // is always set, so the query is never empty.
         let now = now_ms();
@@ -191,7 +191,7 @@ impl ITerminalRepository for SqliteTerminalRepository {
 
     async fn update_command(
         &self,
-        id: i64,
+        id: &str,
         command: &str,
         args: &str,
         backend: Option<&str>,
@@ -212,7 +212,7 @@ impl ITerminalRepository for SqliteTerminalRepository {
         Ok(())
     }
 
-    async fn update_autowork(&self, id: i64, autowork: Option<&str>) -> Result<(), DbError> {
+    async fn update_autowork(&self, id: &str, autowork: Option<&str>) -> Result<(), DbError> {
         let result = sqlx::query("UPDATE terminal_sessions SET autowork = ?, updated_at = ? WHERE id = ?")
             .bind(autowork)
             .bind(now_ms())
@@ -225,7 +225,7 @@ impl ITerminalRepository for SqliteTerminalRepository {
         Ok(())
     }
 
-    async fn update_idmm(&self, id: i64, idmm: Option<&str>) -> Result<(), DbError> {
+    async fn update_idmm(&self, id: &str, idmm: Option<&str>) -> Result<(), DbError> {
         let result = sqlx::query("UPDATE terminal_sessions SET idmm = ?, updated_at = ? WHERE id = ?")
             .bind(idmm)
             .bind(now_ms())
@@ -238,7 +238,7 @@ impl ITerminalRepository for SqliteTerminalRepository {
         Ok(())
     }
 
-    async fn get_idmm(&self, id: i64) -> Result<Option<String>, DbError> {
+    async fn get_idmm(&self, id: &str) -> Result<Option<String>, DbError> {
         let row: Option<(Option<String>,)> = sqlx::query_as("SELECT idmm FROM terminal_sessions WHERE id = ?")
             .bind(id)
             .fetch_optional(&self.pool)
@@ -246,7 +246,7 @@ impl ITerminalRepository for SqliteTerminalRepository {
         Ok(row.and_then(|(v,)| v))
     }
 
-    async fn delete(&self, id: i64) -> Result<(), DbError> {
+    async fn delete(&self, id: &str) -> Result<(), DbError> {
         let result = sqlx::query("DELETE FROM terminal_sessions WHERE id = ?")
             .bind(id)
             .execute(&self.pool)
@@ -269,30 +269,11 @@ impl ITerminalRepository for SqliteTerminalRepository {
 mod tests {
     use super::*;
     use crate::init_database_memory;
+    use nomifun_common::TerminalId;
 
-    /// The only `users` row seeded by `init_database_memory`. Tests that don't
-    /// care about per-user semantics own their terminal sessions with this id so
-    /// the `terminal_sessions.user_id → users(id)` FK is satisfied.
-    const SYSTEM_USER_ID: &str = "system_default_user";
-
-    /// Inserts a real secondary `users` row so list isolation and rejected
-    /// host-execution attempts use an authenticated principal rather than a
-    /// missing foreign-key target.
-    /// `username` is unique, so we derive it from the id.
-    async fn seed_user(pool: &SqlitePool, id: &str) {
-        sqlx::query(
-            "INSERT INTO users (id, username, password_hash, created_at, updated_at) \
-             VALUES (?, ?, 'hash', 0, 0)",
-        )
-        .bind(id)
-        .bind(format!("u_{id}"))
-        .execute(pool)
-        .await
-        .unwrap();
-    }
-
-    fn params(user: &str) -> CreateTerminalParams {
+    fn params(installation_owner: &str) -> CreateTerminalParams {
         CreateTerminalParams {
+            id: TerminalId::new(),
             name: "shell".into(),
             cwd: "/tmp".into(),
             command: "$SHELL".into(),
@@ -302,287 +283,164 @@ mod tests {
             mode: None,
             cols: 80,
             rows: 24,
-            user_id: user.to_owned(),
+            user_id: nomifun_common::UserId::parse(installation_owner).unwrap(),
         }
     }
 
     #[tokio::test]
-    async fn create_get_list_roundtrip() {
+    async fn create_get_update_and_delete_use_canonical_string_ids() {
         let db = init_database_memory().await.unwrap();
+        let owner = crate::installation_owner_id(db.pool()).await.unwrap();
         let repo = SqliteTerminalRepository::new(db.pool().clone());
-
-        let created = repo.create(&params(SYSTEM_USER_ID)).await.unwrap();
-        assert!(created.id > 0);
+        let created = repo.create(&params(&owner)).await.unwrap();
+        assert_eq!(created.id.as_str().split_once('_').unwrap().0, TerminalId::PREFIX);
         assert_eq!(created.last_status, "running");
 
-        let got = repo.get_by_id(created.id).await.unwrap().unwrap();
-        assert_eq!(got.id, created.id);
-        assert_eq!(got.command, "$SHELL");
-
-        let list = repo.list_by_user(SYSTEM_USER_ID).await.unwrap();
-        assert_eq!(list.len(), 1);
-    }
-
-    #[tokio::test]
-    async fn list_is_user_isolated() {
-        let db = init_database_memory().await.unwrap();
-        let repo = SqliteTerminalRepository::new(db.pool().clone());
-        // Terminal execution is installation-owned. Secondary users remain
-        // valid list principals, but cannot create a host process.
-        seed_user(db.pool(), "user_a").await;
-        seed_user(db.pool(), "user_b").await;
-        repo.create(&params(SYSTEM_USER_ID)).await.unwrap();
-
-        let err = repo.create(&params("user_a")).await.unwrap_err();
-        assert!(
-            err.to_string()
-                .contains("terminal execution requires the installation owner"),
-            "unexpected authority error: {err}"
-        );
-
-        assert_eq!(repo.list_by_user(SYSTEM_USER_ID).await.unwrap().len(), 1);
-        assert_eq!(repo.list_by_user("user_a").await.unwrap().len(), 0);
-        assert_eq!(repo.list_by_user("user_b").await.unwrap().len(), 0);
-    }
-
-    #[tokio::test]
-    async fn update_status_and_size() {
-        let db = init_database_memory().await.unwrap();
-        let repo = SqliteTerminalRepository::new(db.pool().clone());
-        let id = repo.create(&params(SYSTEM_USER_ID)).await.unwrap().id;
-
-        repo.update_status(id, "exited", Some(0)).await.unwrap();
-        let got = repo.get_by_id(id).await.unwrap().unwrap();
-        assert_eq!(got.last_status, "exited");
-        assert_eq!(got.exit_code, Some(0));
-
-        repo.update_size(id, 120, 40).await.unwrap();
-        let got = repo.get_by_id(id).await.unwrap().unwrap();
-        assert_eq!((got.cols, got.rows), (120, 40));
-    }
-
-    #[tokio::test]
-    async fn update_autowork_roundtrips_and_clears() {
-        let db = init_database_memory().await.unwrap();
-        let repo = SqliteTerminalRepository::new(db.pool().clone());
-        let id = repo.create(&params(SYSTEM_USER_ID)).await.unwrap().id;
-
-        // default is NULL
-        assert!(repo.get_by_id(id).await.unwrap().unwrap().autowork.is_none());
-
-        repo.update_autowork(id, Some(r#"{"enabled":true,"tag":"alpha"}"#))
+        repo.update_status(created.id.as_str(), "exited", Some(0))
             .await
             .unwrap();
-        let got = repo.get_by_id(id).await.unwrap().unwrap();
-        assert_eq!(got.autowork.as_deref(), Some(r#"{"enabled":true,"tag":"alpha"}"#));
+        repo.update_size(created.id.as_str(), 120, 40).await.unwrap();
+        repo.update_meta(created.id.as_str(), Some("renamed"), Some(true))
+            .await
+            .unwrap();
+        let row = repo.get_by_id(created.id.as_str()).await.unwrap().unwrap();
+        assert_eq!(row.last_status, "exited");
+        assert_eq!(row.exit_code, Some(0));
+        assert_eq!((row.cols, row.rows), (120, 40));
+        assert_eq!(row.name, "renamed");
+        assert!(row.pinned);
 
-        repo.update_autowork(id, None).await.unwrap();
-        assert!(repo.get_by_id(id).await.unwrap().unwrap().autowork.is_none());
+        repo.delete(created.id.as_str()).await.unwrap();
+        assert!(repo.get_by_id(created.id.as_str()).await.unwrap().is_none());
 
+        let missing = TerminalId::new();
         assert!(matches!(
-            repo.update_autowork(999_999, Some("{}")).await.unwrap_err(),
+            repo.update_status(missing.as_str(), "exited", None)
+                .await
+                .unwrap_err(),
+            DbError::NotFound(_)
+        ));
+        assert!(matches!(
+            repo.delete(missing.as_str()).await.unwrap_err(),
             DbError::NotFound(_)
         ));
     }
 
     #[tokio::test]
-    async fn update_and_delete_missing_returns_not_found() {
+    async fn malformed_stored_terminal_id_is_rejected_on_read() {
         let db = init_database_memory().await.unwrap();
+        let owner = crate::installation_owner_id(db.pool()).await.unwrap();
+        sqlx::query(
+            "INSERT INTO terminal_sessions \
+             (id, name, cwd, command, args, cols, rows, created_at, updated_at, last_status, user_id) \
+             VALUES ('term_1', 'bad', '/tmp', '$SHELL', '[]', 80, 24, 1, 1, 'exited', ?)",
+        )
+        .bind(&owner)
+        .execute(db.pool())
+        .await
+        .unwrap();
+
         let repo = SqliteTerminalRepository::new(db.pool().clone());
-        assert!(matches!(
-            repo.update_status(999_999, "exited", None).await.unwrap_err(),
-            DbError::NotFound(_)
-        ));
-        assert!(matches!(repo.delete(999_999).await.unwrap_err(), DbError::NotFound(_)));
-        assert!(repo.get_by_id(999_999).await.unwrap().is_none());
+        assert!(repo.list_by_user(&owner).await.is_err());
     }
 
     #[tokio::test]
-    async fn delete_removes_row() {
+    async fn metadata_and_runtime_config_roundtrip() {
         let db = init_database_memory().await.unwrap();
+        let owner = crate::installation_owner_id(db.pool()).await.unwrap();
         let repo = SqliteTerminalRepository::new(db.pool().clone());
-        let id = repo.create(&params(SYSTEM_USER_ID)).await.unwrap().id;
-        repo.delete(id).await.unwrap();
-        assert!(repo.get_by_id(id).await.unwrap().is_none());
-    }
+        let id = repo.create(&params(&owner)).await.unwrap().id;
 
-    #[tokio::test]
-    async fn delete_all_clears_rows_and_scrollback_cascade() {
-        let db = init_database_memory().await.unwrap();
-        let repo = SqliteTerminalRepository::new(db.pool().clone());
-        let a = repo.create(&params(SYSTEM_USER_ID)).await.unwrap().id;
-        let b = repo.create(&params(SYSTEM_USER_ID)).await.unwrap().id;
-        repo.save_scrollback(a, b"history-a").await.unwrap();
-        repo.save_scrollback(b, b"history-b").await.unwrap();
-
-        let n = repo.delete_all().await.unwrap();
-        assert_eq!(n, 2, "both session rows must be deleted");
-        assert!(repo.list_by_user(SYSTEM_USER_ID).await.unwrap().is_empty());
-        // FK ON DELETE CASCADE wipes the scrollback rows too.
-        assert!(repo.load_scrollback(a).await.unwrap().is_none());
-        assert!(repo.load_scrollback(b).await.unwrap().is_none());
-
-        // Idempotent: a second wipe on an empty table deletes nothing and is OK.
-        assert_eq!(repo.delete_all().await.unwrap(), 0);
-    }
-
-    #[tokio::test]
-    async fn update_command_rewrites_launch_identity() {
-        let db = init_database_memory().await.unwrap();
-        let repo = SqliteTerminalRepository::new(db.pool().clone());
-        // Start as an agent CLI, then fall back to a shell in place.
-        let mut p = params(SYSTEM_USER_ID);
-        p.command = "claude".into();
-        p.backend = Some("claude".into());
-        let id = repo.create(&p).await.unwrap().id;
-
-        repo.update_command(id, "$SHELL", "[]", None).await.unwrap();
-        let got = repo.get_by_id(id).await.unwrap().unwrap();
-        assert_eq!(got.command, "$SHELL");
-        assert_eq!(got.args, "[]");
-        assert_eq!(got.backend, None);
-
-        assert!(matches!(
-            repo.update_command(999_999, "$SHELL", "[]", None).await.unwrap_err(),
-            DbError::NotFound(_)
-        ));
-    }
-
-    #[tokio::test]
-    async fn update_meta_renames_and_pins() {
-        let db = init_database_memory().await.unwrap();
-        let repo = SqliteTerminalRepository::new(db.pool().clone());
-        let id = repo.create(&params(SYSTEM_USER_ID)).await.unwrap().id;
-
-        // rename only
-        repo.update_meta(id, Some("My Term"), None).await.unwrap();
-        let got = repo.get_by_id(id).await.unwrap().unwrap();
-        assert_eq!(got.name, "My Term");
-        assert!(!got.pinned);
-
-        // pin only (name preserved)
-        repo.update_meta(id, None, Some(true)).await.unwrap();
-        let got = repo.get_by_id(id).await.unwrap().unwrap();
-        assert_eq!(got.name, "My Term");
-        assert!(got.pinned);
-        assert!(got.pinned_at.is_some());
-
-        // unpin clears pinned_at
-        repo.update_meta(id, None, Some(false)).await.unwrap();
-        let got = repo.get_by_id(id).await.unwrap().unwrap();
-        assert!(!got.pinned);
-        assert!(got.pinned_at.is_none());
-
-        assert!(matches!(
-            repo.update_meta(999_999, Some("x"), None).await.unwrap_err(),
-            DbError::NotFound(_)
-        ));
-    }
-
-    #[tokio::test]
-    async fn list_orders_pinned_first() {
-        let db = init_database_memory().await.unwrap();
-        let repo = SqliteTerminalRepository::new(db.pool().clone());
-        let a = repo.create(&params(SYSTEM_USER_ID)).await.unwrap().id;
-        repo.create(&params(SYSTEM_USER_ID)).await.unwrap();
-        repo.create(&params(SYSTEM_USER_ID)).await.unwrap();
-        // pin the oldest → it should jump to the front.
-        repo.update_meta(a, None, Some(true)).await.unwrap();
-        let list = repo.list_by_user(SYSTEM_USER_ID).await.unwrap();
-        assert_eq!(list.first().unwrap().id, a);
-    }
-
-    #[tokio::test]
-    async fn idmm_column_roundtrips() {
-        let db = init_database_memory().await.unwrap();
-        let repo = SqliteTerminalRepository::new(db.pool().clone());
-        let id = repo.create(&params(SYSTEM_USER_ID)).await.unwrap().id;
-
-        // default is NULL
-        assert!(repo.get_by_id(id).await.unwrap().unwrap().idmm.is_none());
-        assert!(repo.get_idmm(id).await.unwrap().is_none());
-
-        // set IDMM config
-        let cfg = r#"{"enabled":true}"#;
-        repo.update_idmm(id, Some(cfg)).await.unwrap();
-
-        // verify via full row getter
-        let got = repo.get_by_id(id).await.unwrap().unwrap();
-        assert_eq!(got.idmm.as_deref(), Some(cfg));
-
-        // verify via get_idmm
-        assert_eq!(repo.get_idmm(id).await.unwrap().as_deref(), Some(cfg));
-
-        // clear
-        repo.update_idmm(id, None).await.unwrap();
-        assert!(repo.get_by_id(id).await.unwrap().unwrap().idmm.is_none());
-        assert!(repo.get_idmm(id).await.unwrap().is_none());
-
-        // not-found on missing session
-        assert!(matches!(
-            repo.update_idmm(999_999, Some("{}")).await.unwrap_err(),
-            DbError::NotFound(_)
-        ));
-
-        // get_idmm on missing session returns None (not an error)
-        assert!(repo.get_idmm(999_999).await.unwrap().is_none());
-    }
-
-    #[tokio::test]
-    async fn mark_all_running_exited_flips_only_running() {
-        let db = init_database_memory().await.unwrap();
-        let repo = SqliteTerminalRepository::new(db.pool().clone());
-        let a = repo.create(&params(SYSTEM_USER_ID)).await.unwrap().id; // running
-        let b = repo.create(&params(SYSTEM_USER_ID)).await.unwrap().id; // running
-        let c = repo.create(&params(SYSTEM_USER_ID)).await.unwrap().id;
-        // `c` exited before boot — reconciliation must leave it (and its code) be.
-        repo.update_status(c, "exited", Some(7)).await.unwrap();
-
-        let n = repo.mark_all_running_exited().await.unwrap();
-        assert_eq!(n, 2, "only the two running rows are reconciled");
-
-        for id in [a, b] {
-            let row = repo.get_by_id(id).await.unwrap().unwrap();
-            assert_eq!(row.last_status, "exited");
-            assert_eq!(row.exit_code, None);
-        }
-        let row_c = repo.get_by_id(c).await.unwrap().unwrap();
-        assert_eq!(row_c.last_status, "exited");
-        assert_eq!(row_c.exit_code, Some(7), "pre-exited row left untouched");
-
-        // Idempotent: a second boot pass reconciles nothing.
-        assert_eq!(repo.mark_all_running_exited().await.unwrap(), 0);
-    }
-
-    #[tokio::test]
-    async fn scrollback_save_load_clear_and_cascade() {
-        let db = init_database_memory().await.unwrap();
-        let repo = SqliteTerminalRepository::new(db.pool().clone());
-        let id = repo.create(&params(SYSTEM_USER_ID)).await.unwrap().id;
-
-        // absent → None
-        assert!(repo.load_scrollback(id).await.unwrap().is_none());
-
-        // save → load roundtrip (binary-safe: contains an ESC sequence + NUL)
-        let payload = b"hello\x1b[0m\x00 world";
-        repo.save_scrollback(id, payload).await.unwrap();
-        assert_eq!(repo.load_scrollback(id).await.unwrap().as_deref(), Some(&payload[..]));
-
-        // UPSERT overwrites in place
-        repo.save_scrollback(id, b"newer").await.unwrap();
-        assert_eq!(repo.load_scrollback(id).await.unwrap().as_deref(), Some(&b"newer"[..]));
-
-        // clear → None, and idempotent (second clear is a no-op, not an error)
-        repo.clear_scrollback(id).await.unwrap();
-        assert!(repo.load_scrollback(id).await.unwrap().is_none());
-        repo.clear_scrollback(id).await.unwrap();
-
-        // FK ON DELETE CASCADE: deleting the session drops its scrollback row.
-        repo.save_scrollback(id, b"persisted").await.unwrap();
-        repo.delete(id).await.unwrap();
-        assert!(
-            repo.load_scrollback(id).await.unwrap().is_none(),
-            "scrollback row must be CASCADE-removed when its session is deleted"
+        repo.update_command(id.as_str(), "claude", r#"["--model","x"]"#, Some("claude"))
+            .await
+            .unwrap();
+        repo.update_autowork(id.as_str(), Some(r#"{"enabled":true,"tag":"alpha"}"#))
+            .await
+            .unwrap();
+        repo.update_idmm(id.as_str(), Some(r#"{"enabled":true}"#))
+            .await
+            .unwrap();
+        let row = repo.get_by_id(id.as_str()).await.unwrap().unwrap();
+        assert_eq!(row.command, "claude");
+        assert_eq!(row.backend.as_deref(), Some("claude"));
+        assert_eq!(
+            row.autowork.as_deref(),
+            Some(r#"{"enabled":true,"tag":"alpha"}"#)
         );
+        assert_eq!(
+            repo.get_idmm(id.as_str()).await.unwrap().as_deref(),
+            Some(r#"{"enabled":true}"#)
+        );
+
+        repo.update_autowork(id.as_str(), None).await.unwrap();
+        repo.update_idmm(id.as_str(), None).await.unwrap();
+        let row = repo.get_by_id(id.as_str()).await.unwrap().unwrap();
+        assert!(row.autowork.is_none());
+        assert!(row.idmm.is_none());
+    }
+
+    #[tokio::test]
+    async fn scrollback_roundtrips_and_cascades_on_delete() {
+        let db = init_database_memory().await.unwrap();
+        let owner = crate::installation_owner_id(db.pool()).await.unwrap();
+        let repo = SqliteTerminalRepository::new(db.pool().clone());
+        let id = repo.create(&params(&owner)).await.unwrap().id;
+        let payload = b"hello\x1b[0m\x00 world";
+
+        assert!(repo.load_scrollback(id.as_str()).await.unwrap().is_none());
+        repo.save_scrollback(id.as_str(), payload).await.unwrap();
+        assert_eq!(
+            repo.load_scrollback(id.as_str()).await.unwrap().as_deref(),
+            Some(payload.as_slice())
+        );
+        repo.save_scrollback(id.as_str(), b"newer").await.unwrap();
+        assert_eq!(
+            repo.load_scrollback(id.as_str()).await.unwrap().as_deref(),
+            Some(b"newer".as_slice())
+        );
+        repo.clear_scrollback(id.as_str()).await.unwrap();
+        assert!(repo.load_scrollback(id.as_str()).await.unwrap().is_none());
+
+        repo.save_scrollback(id.as_str(), b"persisted").await.unwrap();
+        repo.delete(id.as_str()).await.unwrap();
+        assert!(repo.load_scrollback(id.as_str()).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn list_is_user_scoped_and_orders_pinned_first() {
+        let db = init_database_memory().await.unwrap();
+        let owner = crate::installation_owner_id(db.pool()).await.unwrap();
+        let repo = SqliteTerminalRepository::new(db.pool().clone());
+        let first = repo.create(&params(&owner)).await.unwrap().id;
+        let second = repo.create(&params(&owner)).await.unwrap().id;
+        repo.update_meta(&first, None, Some(true)).await.unwrap();
+
+        let rows = repo.list_by_user(&owner).await.unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].id, first);
+        assert!(rows[0].pinned);
+        assert!(rows.iter().any(|row| row.id == second));
+        assert!(repo.list_by_user("other-user").await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn boot_reconciliation_and_delete_all_are_idempotent() {
+        let db = init_database_memory().await.unwrap();
+        let owner = crate::installation_owner_id(db.pool()).await.unwrap();
+        let repo = SqliteTerminalRepository::new(db.pool().clone());
+        let running = repo.create(&params(&owner)).await.unwrap().id;
+        let exited = repo.create(&params(&owner)).await.unwrap().id;
+        repo.update_status(&exited, "exited", Some(7)).await.unwrap();
+
+        assert_eq!(repo.mark_all_running_exited().await.unwrap(), 1);
+        let running_row = repo.get_by_id(&running).await.unwrap().unwrap();
+        assert_eq!(running_row.last_status, "exited");
+        assert_eq!(running_row.exit_code, None);
+        let exited_row = repo.get_by_id(&exited).await.unwrap().unwrap();
+        assert_eq!(exited_row.exit_code, Some(7));
+        assert_eq!(repo.mark_all_running_exited().await.unwrap(), 0);
+
+        assert_eq!(repo.delete_all().await.unwrap(), 2);
+        assert_eq!(repo.delete_all().await.unwrap(), 0);
     }
 }

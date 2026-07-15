@@ -3,6 +3,7 @@
  * Copyright 2025-2026 NomiFun (nomifun.com)
  * SPDX-License-Identifier: Apache-2.0
  */
+import type { ConversationId, MessageId } from '@/common/types/ids';
 
 import EventEmitter from 'eventemitter3';
 import type { DependencyList } from 'react';
@@ -22,7 +23,7 @@ interface EventTypes {
   'nomi.selected.file.append': [Array<string | FileOrFolderItem>];
   'nomi.selected.file.clear': void;
   'nomi.workspace.refresh': void;
-  'nomi.usage.updated': [{ conversation_id: number; tokenUsage: TokenUsageData }];
+  'nomi.usage.updated': [{ conversation_id: ConversationId; tokenUsage: TokenUsageData }];
   'acp.selected.file': [Array<string | FileOrFolderItem>];
   'acp.selected.file.append': [Array<string | FileOrFolderItem>];
   'acp.selected.file.clear': void;
@@ -63,9 +64,9 @@ interface EventTypes {
   'sendbox.fill': [string]; // prompt text to fill
   'sendbox.reply': [ReplyQuote]; // reply/quote a message
   'sendbox.reply.clear': void; // clear reply quote
-  'sendbox.edit': [{ msgId: string; createdAt: number; content: string }]; // edit a sent user message (recall into composer)
-  'staroffice.install.request': [{ conversation_id: string; text: string; detectedUrl?: string | null }];
-  'staroffice.install.finished': [{ conversation_id: string }];
+  'sendbox.edit': [{ msgId: MessageId; createdAt: number; content: string }]; // edit a sent user message (recall into composer)
+  'staroffice.install.request': [{ conversation_id: ConversationId; text: string; detectedUrl?: string | null }];
+  'staroffice.install.finished': [{ conversation_id: ConversationId }];
 }
 
 export const emitter = new EventEmitter<EventTypes>();

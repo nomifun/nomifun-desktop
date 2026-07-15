@@ -9,6 +9,7 @@ import type { TChatConversation } from '../config/storage';
 import type { IMessageSearchItem } from '../types/conversationSearch';
 import type { PaginatedResult } from './ipcBridge';
 import { fromApiConversation } from './apiModelMapper';
+import { parseMessageId } from '../types/ids';
 
 export interface ApiMessageSearchItem {
   message_id: string;
@@ -48,7 +49,7 @@ function fromApiSearchItem(item: ApiMessageSearchItem): IMessageSearchItem {
       ...item.conversation,
       model: item.conversation.model ?? undefined,
     }) as unknown as TChatConversation,
-    message_id: item.message_id,
+    message_id: parseMessageId(item.message_id),
     message_type: item.message_type as TMessage['type'],
     message_created_at: item.message_created_at,
     preview_text: item.preview_text,

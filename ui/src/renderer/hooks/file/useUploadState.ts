@@ -16,6 +16,7 @@
  */
 
 import { useSyncExternalStore } from 'react';
+import type { ConversationId } from '@/common/types/ids';
 
 export type UploadSource = 'sendbox' | 'workspace' | 'requirement';
 
@@ -35,7 +36,7 @@ export interface ActiveUpload {
   size: number;
   percent: number;
   source: UploadSource;
-  conversationId?: string;
+  conversationId?: ConversationId;
 }
 
 interface UploadEntry {
@@ -43,7 +44,7 @@ interface UploadEntry {
   size: number;
   source: UploadSource;
   name: string;
-  conversationId?: string;
+  conversationId?: ConversationId;
   /** Per-upload aborter — fires when user clicks cancel or conversation switches. */
   abort: () => void;
 }
@@ -135,7 +136,7 @@ export interface TrackUploadOptions {
   /** Display name shown in the UI per-file row. Defaults to "Uploading file". */
   name?: string;
   /** Bind the upload to a conversation; used by abortUploads({ conversationId }). */
-  conversationId?: string;
+  conversationId?: ConversationId;
   /** Called when the upload is aborted via abortUpload(id) / abortUploads(...). */
   onAbort?: () => void;
 }
@@ -209,9 +210,9 @@ export function abortUpload(id: number): void {
 export interface AbortUploadsFilter {
   source?: UploadSource;
   /** Only abort uploads whose conversationId matches (use null for the unbound bucket). */
-  conversationId?: string | null;
+  conversationId?: ConversationId | null;
   /** Only abort uploads whose conversationId does NOT match the given value. */
-  exceptConversationId?: string | null;
+  exceptConversationId?: ConversationId | null;
 }
 
 /**

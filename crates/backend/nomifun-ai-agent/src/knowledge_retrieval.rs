@@ -6,6 +6,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use nomi_agent::knowledge_tools::{KnowledgeHit, KnowledgeRetrievalSink};
+use nomifun_common::KnowledgeBaseId;
 use nomifun_knowledge::KnowledgeService;
 
 /// Bridges the agent-facing retrieval trait to the backend KnowledgeService.
@@ -15,7 +16,12 @@ pub struct LiveKnowledgeRetrievalSink {
 
 #[async_trait]
 impl KnowledgeRetrievalSink for LiveKnowledgeRetrievalSink {
-    async fn search(&self, kb_ids: &[String], query: &str, limit: usize) -> Result<Vec<KnowledgeHit>, String> {
+    async fn search(
+        &self,
+        kb_ids: &[KnowledgeBaseId],
+        query: &str,
+        limit: usize,
+    ) -> Result<Vec<KnowledgeHit>, String> {
         let hits = self
             .service
             .search_bases(kb_ids, query, limit)
@@ -34,13 +40,17 @@ impl KnowledgeRetrievalSink for LiveKnowledgeRetrievalSink {
             .collect())
     }
 
-    async fn read_document(&self, kb_ids: &[String], handle: &str) -> Result<String, String> {
+    async fn read_document(
+        &self,
+        kb_ids: &[KnowledgeBaseId],
+        handle: &str,
+    ) -> Result<String, String> {
         let (kb_id, rel_path) =
             nomifun_knowledge::decode_doc_handle(handle).ok_or_else(|| format!("invalid handle: {handle}"))?;
-        if !kb_ids.iter().any(|b| b == &kb_id) {
+        if !kb_ids.contains(&kb_id) {
             return Err("handle points to a base not mounted in this session".to_owned());
         }
-        let file = self.service.read_file(&kb_id, &rel_path).await.map_err(|e| e.to_string())?;
+        let file = self.service.read_file(kb_id.as_str(), &rel_path).await.map_err(|e| e.to_string())?;
         Ok(file.content)
     }
 }

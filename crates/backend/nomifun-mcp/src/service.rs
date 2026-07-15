@@ -4,7 +4,7 @@ use nomifun_api_types::{
     BatchImportMcpServersRequest, CreateMcpServerRequest, McpConnectionTestResult, McpServerResponse,
     UpdateMcpServerRequest,
 };
-use nomifun_common::now_ms;
+use nomifun_common::{McpServerId, now_ms};
 use nomifun_db::{CreateMcpServerParams, IMcpServerRepository, UpdateMcpServerParams};
 use tracing::{info, warn};
 
@@ -45,11 +45,10 @@ impl McpConfigService {
     }
 
     /// Get a single MCP server by ID.
-    pub async fn get_server(&self, id: &str) -> Result<McpServerResponse, McpError> {
-        let id = parse_server_id(id)?;
+    pub async fn get_server(&self, id: &McpServerId) -> Result<McpServerResponse, McpError> {
         let row = self
             .repo
-            .find_by_id(id)
+            .find_by_id(&id)
             .await?
             .ok_or_else(|| McpError::NotFound(id.to_string()))?;
         let server = McpServer::from_row(row)?;
@@ -74,12 +73,11 @@ impl McpConfigService {
     }
 
     /// Edit an existing MCP server (partial update).
-    pub async fn edit_server(&self, id: &str, req: UpdateMcpServerRequest) -> Result<McpServerResponse, McpError> {
-        let id = parse_server_id(id)?;
+    pub async fn edit_server(&self, id: &McpServerId, req: UpdateMcpServerRequest) -> Result<McpServerResponse, McpError> {
         // Verify the server exists
         let existing_server = self
             .repo
-            .find_by_id(id)
+            .find_by_id(&id)
             .await?
             .ok_or_else(|| McpError::NotFound(id.to_string()))?;
 
@@ -95,7 +93,7 @@ impl McpConfigService {
         // Check name uniqueness if renaming
         if let Some(ref new_name) = req.name
             && let Some(existing) = self.repo.find_by_name_any(new_name).await?
-            && existing.id != id
+            && &existing.id != id
         {
             if existing.builtin {
                 return Err(McpError::Conflict(format!(
@@ -123,7 +121,7 @@ impl McpConfigService {
             ..Default::default()
         };
 
-        let row = self.repo.update(id, params).await?;
+        let row = self.repo.update(&id, params).await?;
         let server = McpServer::from_row(row)?;
         Ok(server.into_response())
     }
@@ -131,26 +129,24 @@ impl McpConfigService {
     /// Soft-delete an MCP server by ID.
     ///
     /// Returns whether the deleted server was enabled.
-    pub async fn delete_server(&self, id: &str) -> Result<bool, McpError> {
-        let id = parse_server_id(id)?;
+    pub async fn delete_server(&self, id: &McpServerId) -> Result<bool, McpError> {
         let row = self
             .repo
-            .find_by_id(id)
+            .find_by_id(&id)
             .await?
             .ok_or_else(|| McpError::NotFound(id.to_string()))?;
         let was_enabled = row.enabled;
-        self.repo.delete(id).await?;
+        self.repo.delete(&id).await?;
         Ok(was_enabled)
     }
 
     /// Toggle the enabled state of an MCP server.
     ///
     /// Returns the updated server response.
-    pub async fn toggle_server(&self, id: &str) -> Result<McpServerResponse, McpError> {
-        let id = parse_server_id(id)?;
+    pub async fn toggle_server(&self, id: &McpServerId) -> Result<McpServerResponse, McpError> {
         let row = self
             .repo
-            .find_by_id(id)
+            .find_by_id(&id)
             .await?
             .ok_or_else(|| McpError::NotFound(id.to_string()))?;
 
@@ -159,7 +155,7 @@ impl McpConfigService {
             enabled: Some(new_enabled),
             ..Default::default()
         };
-        let updated = self.repo.update(id, params).await?;
+        let updated = self.repo.update(&id, params).await?;
         let server = McpServer::from_row(updated)?;
         Ok(server.into_response())
     }
@@ -208,7 +204,7 @@ impl McpConfigService {
     }
 
     /// Persist the latest connection test result for an existing MCP server.
-    pub async fn persist_test_result(&self, id: i64, result: &McpConnectionTestResult) -> Result<(), McpError> {
+    pub async fn persist_test_result(&self, id: &McpServerId, result: &McpConnectionTestResult) -> Result<(), McpError> {
         let status = if result.success { "connected" } else { "error" };
         let last_connected = if result.success { Some(now_ms()) } else { None };
         let tools_json = result.tools.as_ref().map(serde_json::to_string).transpose()?;
@@ -246,7 +242,7 @@ impl McpConfigService {
                 deleted_at: Some(None),
                 ..Default::default()
             };
-            let updated = self.repo.update(existing.id, params).await?;
+            let updated = self.repo.update(&existing.id, params).await?;
             let server = McpServer::from_row(updated)?;
             return Ok(server.into_response());
         }
@@ -265,13 +261,6 @@ impl McpConfigService {
         let server = McpServer::from_row(row)?;
         Ok(server.into_response())
     }
-}
-
-/// Parses a host-local MCP server primary key carried as a URL path string into
-/// an `i64`. A non-numeric id can never match a stored row, so it is reported
-/// as `NotFound` rather than a parse error.
-fn parse_server_id(id: &str) -> Result<i64, McpError> {
-    id.parse::<i64>().map_err(|_| McpError::NotFound(id.to_owned()))
 }
 
 fn normalize_transport(transport: McpServerTransport) -> Result<McpServerTransport, McpError> {    match transport {
@@ -376,22 +365,15 @@ mod tests {
     #[derive(Debug)]
     struct MockMcpServerRepo {
         servers: Mutex<Vec<McpServerRow>>,
-        id_counter: Mutex<i64>,
     }
 
     impl MockMcpServerRepo {
         fn new() -> Self {
             Self {
                 servers: Mutex::new(Vec::new()),
-                id_counter: Mutex::new(0),
             }
         }
 
-        fn next_id(&self) -> i64 {
-            let mut counter = self.id_counter.lock().unwrap();
-            *counter += 1;
-            *counter
-        }
 
         fn now() -> TimestampMs {
             1000
@@ -405,9 +387,9 @@ mod tests {
             Ok(servers.iter().filter(|s| s.deleted_at.is_none()).cloned().collect())
         }
 
-        async fn find_by_id(&self, id: i64) -> Result<Option<McpServerRow>, DbError> {
+        async fn find_by_id(&self, id: &nomifun_common::McpServerId) -> Result<Option<McpServerRow>, DbError> {
             let servers = self.servers.lock().unwrap();
-            Ok(servers.iter().find(|s| s.id == id && s.deleted_at.is_none()).cloned())
+            Ok(servers.iter().find(|s| s.id == *id && s.deleted_at.is_none()).cloned())
         }
 
         async fn find_by_name(&self, name: &str) -> Result<Option<McpServerRow>, DbError> {
@@ -418,9 +400,9 @@ mod tests {
                 .cloned())
         }
 
-        async fn find_by_id_any(&self, id: i64) -> Result<Option<McpServerRow>, DbError> {
+        async fn find_by_id_any(&self, id: &nomifun_common::McpServerId) -> Result<Option<McpServerRow>, DbError> {
             let servers = self.servers.lock().unwrap();
-            Ok(servers.iter().find(|s| s.id == id).cloned())
+            Ok(servers.iter().find(|s| s.id == *id).cloned())
         }
 
         async fn find_by_name_any(&self, name: &str) -> Result<Option<McpServerRow>, DbError> {
@@ -428,7 +410,7 @@ mod tests {
             Ok(servers.iter().find(|s| s.name == name).cloned())
         }
 
-        async fn list_by_ids_any(&self, ids: &[i64]) -> Result<Vec<McpServerRow>, DbError> {
+        async fn list_by_ids_any(&self, ids: &[nomifun_common::McpServerId]) -> Result<Vec<McpServerRow>, DbError> {
             let servers = self.servers.lock().unwrap();
             Ok(servers
                 .iter()
@@ -446,7 +428,7 @@ mod tests {
                 )));
             }
             let row = McpServerRow {
-                id: self.next_id(),
+                id: nomifun_common::McpServerId::new(),
                 name: params.name.to_owned(),
                 description: params.description.map(String::from),
                 enabled: params.enabled,
@@ -465,16 +447,16 @@ mod tests {
             Ok(row)
         }
 
-        async fn update(&self, id: i64, params: UpdateMcpServerParams<'_>) -> Result<McpServerRow, DbError> {
+        async fn update(&self, id: &nomifun_common::McpServerId, params: UpdateMcpServerParams<'_>) -> Result<McpServerRow, DbError> {
             let mut servers = self.servers.lock().unwrap();
             let idx = servers
                 .iter()
-                .position(|s| s.id == id)
+                .position(|s| s.id == *id)
                 .ok_or_else(|| DbError::NotFound(format!("MCP server {id}")))?;
 
             // Check name conflict
             if let Some(new_name) = params.name {
-                if servers.iter().any(|s| s.name == new_name && s.id != id) {
+                if servers.iter().any(|s| s.name == new_name && s.id != *id) {
                     return Err(DbError::Conflict(format!(
                         "MCP server name '{new_name}' already exists"
                     )));
@@ -509,11 +491,11 @@ mod tests {
             Ok(servers[idx].clone())
         }
 
-        async fn delete(&self, id: i64) -> Result<(), DbError> {
+        async fn delete(&self, id: &nomifun_common::McpServerId) -> Result<(), DbError> {
             let mut servers = self.servers.lock().unwrap();
             let idx = servers
                 .iter()
-                .position(|s| s.id == id && s.deleted_at.is_none())
+                .position(|s| s.id == *id && s.deleted_at.is_none())
                 .ok_or_else(|| DbError::NotFound(format!("MCP server {id}")))?;
             servers[idx].enabled = false;
             servers[idx].deleted_at = Some(Self::now());
@@ -536,7 +518,7 @@ mod tests {
                 } else {
                     // Create new
                     let row = McpServerRow {
-                        id: self.next_id(),
+                        id: nomifun_common::McpServerId::new(),
                         name: params.name.to_owned(),
                         description: params.description.map(String::from),
                         enabled: params.enabled,
@@ -560,14 +542,14 @@ mod tests {
 
         async fn update_status(
             &self,
-            id: i64,
+            id: &nomifun_common::McpServerId,
             status: &str,
             last_connected: Option<TimestampMs>,
         ) -> Result<(), DbError> {
             let mut servers = self.servers.lock().unwrap();
             let idx = servers
                 .iter()
-                .position(|s| s.id == id)
+                .position(|s| s.id == *id)
                 .ok_or_else(|| DbError::NotFound(format!("MCP server {id}")))?;
             servers[idx].last_test_status = status.to_owned();
             if let Some(lc) = last_connected {
@@ -576,11 +558,11 @@ mod tests {
             Ok(())
         }
 
-        async fn update_tools(&self, id: i64, tools: Option<&str>) -> Result<(), DbError> {
+        async fn update_tools(&self, id: &nomifun_common::McpServerId, tools: Option<&str>) -> Result<(), DbError> {
             let mut servers = self.servers.lock().unwrap();
             let idx = servers
                 .iter()
-                .position(|s| s.id == id)
+                .position(|s| s.id == *id)
                 .ok_or_else(|| DbError::NotFound(format!("MCP server {id}")))?;
             servers[idx].tools = tools.map(String::from);
             Ok(())
@@ -672,7 +654,7 @@ mod tests {
     async fn get_server_found() {
         let svc = make_service();
         let created = svc.add_server(stdio_create_req("test")).await.unwrap();
-        let found = svc.get_server(&created.id.to_string()).await.unwrap();
+        let found = svc.get_server(&created.id).await.unwrap();
         assert_eq!(found.id, created.id);
         assert_eq!(found.name, "test");
     }
@@ -680,7 +662,7 @@ mod tests {
     #[tokio::test]
     async fn get_server_not_found() {
         let svc = make_service();
-        let result = svc.get_server("nonexistent").await;
+        let result = svc.get_server(&McpServerId::new()).await;
         assert!(matches!(result, Err(McpError::NotFound(_))));
     }
 
@@ -743,7 +725,7 @@ mod tests {
         let created = svc.add_server(stdio_create_req("old-name")).await.unwrap();
         let err = svc
             .edit_server(
-                &created.id.to_string(),
+                &created.id,
                 UpdateMcpServerRequest {
                     name: Some("new-name".into()),
                     description: None,
@@ -763,7 +745,7 @@ mod tests {
         let created = svc.add_server(stdio_create_req("test")).await.unwrap();
         let updated = svc
             .edit_server(
-                &created.id.to_string(),
+                &created.id,
                 UpdateMcpServerRequest {
                     name: None,
                     description: None,
@@ -791,7 +773,7 @@ mod tests {
 
         let updated = svc
             .edit_server(
-                &created.id.to_string(),
+                &created.id,
                 UpdateMcpServerRequest {
                     name: None,
                     description: Some(None), // clear
@@ -810,7 +792,7 @@ mod tests {
         let svc = make_service();
         let result = svc
             .edit_server(
-                "nonexistent",
+                &McpServerId::new(),
                 UpdateMcpServerRequest {
                     name: Some("x".into()),
                     description: None,
@@ -831,7 +813,7 @@ mod tests {
 
         let result = svc
             .edit_server(
-                &b.id.to_string(),
+                &b.id,
                 UpdateMcpServerRequest {
                     name: Some("server-a".into()), // conflict
                     description: None,
@@ -852,7 +834,7 @@ mod tests {
         // Renaming to the same name should succeed
         let result = svc
             .edit_server(
-                &a.id.to_string(),
+                &a.id,
                 UpdateMcpServerRequest {
                     name: Some("server-a".into()),
                     description: None,
@@ -873,7 +855,7 @@ mod tests {
 
         let updated = svc
             .edit_server(
-                &created.id.to_string(),
+                &created.id,
                 UpdateMcpServerRequest {
                     name: None,
                     description: None,
@@ -895,11 +877,11 @@ mod tests {
         let created = svc.add_server(stdio_create_req("test")).await.unwrap();
 
         // Not enabled
-        let was_enabled = svc.delete_server(&created.id.to_string()).await.unwrap();
+        let was_enabled = svc.delete_server(&created.id).await.unwrap();
         assert!(!was_enabled);
 
         // Should be hidden from active queries
-        let result = svc.get_server(&created.id.to_string()).await;
+        let result = svc.get_server(&created.id).await;
         assert!(matches!(result, Err(McpError::NotFound(_))));
     }
 
@@ -907,16 +889,16 @@ mod tests {
     async fn delete_enabled_server_returns_true() {
         let svc = make_service();
         let created = svc.add_server(stdio_create_req("test")).await.unwrap();
-        svc.toggle_server(&created.id.to_string()).await.unwrap(); // enable
+        svc.toggle_server(&created.id).await.unwrap(); // enable
 
-        let was_enabled = svc.delete_server(&created.id.to_string()).await.unwrap();
+        let was_enabled = svc.delete_server(&created.id).await.unwrap();
         assert!(was_enabled);
     }
 
     #[tokio::test]
     async fn delete_server_not_found() {
         let svc = make_service();
-        let result = svc.delete_server("nonexistent").await;
+        let result = svc.delete_server(&McpServerId::new()).await;
         assert!(matches!(result, Err(McpError::NotFound(_))));
     }
 
@@ -928,17 +910,17 @@ mod tests {
         let created = svc.add_server(stdio_create_req("toggle")).await.unwrap();
         assert!(!created.enabled);
 
-        let toggled = svc.toggle_server(&created.id.to_string()).await.unwrap();
+        let toggled = svc.toggle_server(&created.id).await.unwrap();
         assert!(toggled.enabled);
 
-        let toggled_back = svc.toggle_server(&created.id.to_string()).await.unwrap();
+        let toggled_back = svc.toggle_server(&created.id).await.unwrap();
         assert!(!toggled_back.enabled);
     }
 
     #[tokio::test]
     async fn toggle_server_not_found() {
         let svc = make_service();
-        let result = svc.toggle_server("nonexistent").await;
+        let result = svc.toggle_server(&McpServerId::new()).await;
         assert!(matches!(result, Err(McpError::NotFound(_))));
     }
 
@@ -979,7 +961,7 @@ mod tests {
     async fn add_server_restores_soft_deleted_row() {
         let svc = make_service();
         let created = svc.add_server(stdio_create_req("restored")).await.unwrap();
-        svc.delete_server(&created.id.to_string()).await.unwrap();
+        svc.delete_server(&created.id).await.unwrap();
 
         let restored = svc.add_server(http_create_req("restored")).await.unwrap();
         assert_eq!(restored.id, created.id);
@@ -1163,9 +1145,9 @@ mod tests {
             www_authenticate: None,
         };
 
-        svc.persist_test_result(created.id, &result).await.unwrap();
+        svc.persist_test_result(&created.id, &result).await.unwrap();
 
-        let updated = svc.get_server(&created.id.to_string()).await.unwrap();
+        let updated = svc.get_server(&created.id).await.unwrap();
         assert_eq!(updated.last_test_status, nomifun_common::McpServerStatus::Connected);
         assert_eq!(updated.tools.unwrap().len(), 1);
         assert!(updated.last_connected.is_some());
@@ -1190,7 +1172,7 @@ mod tests {
             auth_method: None,
             www_authenticate: None,
         };
-        svc.persist_test_result(created.id, &success).await.unwrap();
+        svc.persist_test_result(&created.id, &success).await.unwrap();
 
         let failure = McpConnectionTestResult {
             success: false,
@@ -1202,9 +1184,9 @@ mod tests {
             auth_method: None,
             www_authenticate: None,
         };
-        svc.persist_test_result(created.id, &failure).await.unwrap();
+        svc.persist_test_result(&created.id, &failure).await.unwrap();
 
-        let updated = svc.get_server(&created.id.to_string()).await.unwrap();
+        let updated = svc.get_server(&created.id).await.unwrap();
         assert_eq!(updated.last_test_status, nomifun_common::McpServerStatus::Error);
         assert!(updated.tools.is_none());
         assert!(updated.last_connected.is_some());

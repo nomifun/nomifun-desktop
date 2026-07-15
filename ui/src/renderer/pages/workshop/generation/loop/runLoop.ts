@@ -48,6 +48,7 @@ import {
 import { buildRunPlan, loadWorkshopText, type RunPlan } from '../pipeline';
 import { beginLoopRun, endLoopRun, patchLoopProgress, recordLoopRound } from './loopRegistry';
 import { injectCount, LOOP_PARALLEL_LIMIT, LOOP_POLL_INTERVAL_MS, type LoopConfig, type LoopRoundResult } from './loopTypes';
+import type { AssetId, CreationTaskId, WorkshopNodeId } from '@/common/types/ids';
 
 type RF = ReactFlowInstance<WorkshopFlowNode, WorkshopFlowEdge>;
 
@@ -60,9 +61,9 @@ const isTerminal = (s: CreationTaskStatus): boolean => TERMINAL.includes(s);
 
 export interface StartLoopArgs {
   rf: RF;
-  loopId: string;
-  targetId: string;
-  canvasId: string;
+  loopId: WorkshopNodeId;
+  targetId: WorkshopNodeId;
+  canvasId: import('@/common/types/ids').CanvasId;
   config: LoopConfig;
   model: ModelOption;
   localZImageInputError: string;
@@ -123,7 +124,7 @@ function delay(ms: number, signal: AbortSignal): Promise<void> {
 }
 
 /** Poll a task to a terminal state, cancelling it if the run is aborted. */
-async function pollToTerminal(taskId: string, signal: AbortSignal): Promise<CreationTask | null> {
+async function pollToTerminal(taskId: CreationTaskId, signal: AbortSignal): Promise<CreationTask | null> {
   // eslint-disable-next-line no-constant-condition
   while (true) {
     if (signal.aborted) {
@@ -227,6 +228,7 @@ async function executeRound(ctx: RunContext, round: number): Promise<LoopRoundEx
       canvas_id: canvasId,
       node_id: targetId,
       provider_id: model.providerId,
+      provider_platform: model.platform,
       model: model.model,
       capability: plan.capability,
       params,
@@ -249,7 +251,7 @@ async function executeRound(ctx: RunContext, round: number): Promise<LoopRoundEx
         .filter((n): n is WorkshopFlowNode => n !== null);
       spawnRoundResults(rf, target, created);
     } else {
-      const factory = (assetId: string) =>
+      const factory = (assetId: AssetId) =>
         mode === 'video'
           ? (pos: { x: number; y: number }) => makeVideoNode(pos, { assetId })
           : (pos: { x: number; y: number }) => makeImageNode(pos, { assetId });

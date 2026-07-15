@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use nomifun_api_types::WebSocketMessage;
-use nomifun_common::now_ms;
+use nomifun_common::{CompanionId, now_ms};
 use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
 
@@ -146,7 +146,7 @@ impl Collector {
 
     /// Companion determination for one event: the wire marker
     /// (`companion: true`, stamped by the conversation domain from
-    /// `extra.companionSession`) wins, falling back to the local thread registry
+    /// `extra.companion_session`) wins, falling back to the local thread registry
     /// for events that predate the marker. The marker also covers entry
     /// points the registry never sees (Channel Agent sessions).
     async fn is_companion_event(&self, data: &serde_json::Value) -> bool {
@@ -167,17 +167,16 @@ impl Collector {
             .get("companion_id")
             .and_then(|v| v.as_str())
             .map(str::trim)
-            .filter(|s| !s.is_empty())
+            .and_then(|id| CompanionId::try_from(id).ok())
         {
-            return Some(id.to_owned());
+            return Some(id.into_string());
         }
         if let Some(conv) = data.get("conversation_id").and_then(|v| v.as_str())
             && let Some(id) = self.store.thread_companion_id(conv).await.ok().flatten()
         {
             return Some(id);
         }
-        let default = self.config.read().await.default_companion_id.clone();
-        (!default.is_empty()).then_some(default)
+        self.config.read().await.default_companion_id.clone()
     }
 
     /// Spawn the bus-tap loop. The collector observes both instance-public and
@@ -618,10 +617,21 @@ pub fn clear_events(companion_dir: &Path) -> std::io::Result<()> {
 mod tests {
     use super::*;
 
+    fn companion_fixture(sequence: u64) -> String {
+        let raw = format!("companion_0190f5fe-7c00-7a00-8abc-{sequence:012}");
+        nomifun_common::CompanionId::try_from(raw.as_str()).unwrap().into_string()
+    }
+
+    fn conversation_fixture(sequence: u64) -> String {
+        let raw = format!("conv_0190f5fe-7c00-7a00-8abc-{sequence:012}");
+        nomifun_common::ConversationId::try_from(raw.as_str()).unwrap().into_string()
+    }
+
     #[tokio::test]
     async fn tool_calls_collected_as_name_and_shape_without_values() {
         let dir = tempfile::tempdir().unwrap();
         let store = crate::store::CompanionStore::open_memory().await.unwrap();
+        let conversation = conversation_fixture(10);
         let mut config = SharedCompanionConfig::default();
         config.collect.tool_calls = true;
         let mut collector = Collector::new(dir.path().to_path_buf(), Arc::new(RwLock::new(config)), store);
@@ -631,7 +641,7 @@ mod tests {
             .handle(&WebSocketMessage::new(
                 "message.stream",
                 serde_json::json!({
-                    "conversation_id": "conv_work",
+                    "conversation_id": conversation,
                     "msg_id": "m1",
                     "type": "tool_call",
                     "data": {"call_id": "tc1", "name": "grep", "args": {"pattern": "SECRET_TOKEN", "path": "/x"}, "status": "completed"}
@@ -682,6 +692,7 @@ mod tests {
     async fn running_tool_calls_and_origin_marked_are_not_collected() {
         let dir = tempfile::tempdir().unwrap();
         let store = crate::store::CompanionStore::open_memory().await.unwrap();
+        let conversation = conversation_fixture(20);
         let mut config = SharedCompanionConfig::default();
         config.collect.tool_calls = true;
         let mut collector = Collector::new(dir.path().to_path_buf(), Arc::new(RwLock::new(config)), store);
@@ -690,7 +701,7 @@ mod tests {
         collector
             .handle(&WebSocketMessage::new(
                 "message.stream",
-                serde_json::json!({"conversation_id": "c", "msg_id": "m", "type": "tool_call",
+                serde_json::json!({"conversation_id": &conversation, "msg_id": "m", "type": "tool_call",
                     "data": {"call_id": "t", "name": "grep", "args": {}, "status": "running"}}),
             ))
             .await;
@@ -698,7 +709,7 @@ mod tests {
         collector
             .handle(&WebSocketMessage::new(
                 "message.stream",
-                serde_json::json!({"conversation_id": "c", "msg_id": "m2", "type": "tool_call", "origin": "companion",
+                serde_json::json!({"conversation_id": &conversation, "msg_id": "m2", "type": "tool_call", "origin": "companion",
                     "data": {"call_id": "t2", "name": "read", "args": {}, "status": "completed"}}),
             ))
             .await;
@@ -710,13 +721,14 @@ mod tests {
     async fn tool_calls_not_collected_when_disabled() {
         let dir = tempfile::tempdir().unwrap();
         let store = crate::store::CompanionStore::open_memory().await.unwrap();
+        let conversation = conversation_fixture(21);
         // tool_calls defaults false; companion_dialogues default true keeps the arm guard active.
         let config = SharedCompanionConfig::default();
         let mut collector = Collector::new(dir.path().to_path_buf(), Arc::new(RwLock::new(config)), store);
         collector
             .handle(&WebSocketMessage::new(
                 "message.stream",
-                serde_json::json!({"conversation_id": "c", "msg_id": "m", "type": "tool_call",
+                serde_json::json!({"conversation_id": conversation, "msg_id": "m", "type": "tool_call",
                     "data": {"call_id": "t", "name": "grep", "args": {}, "status": "completed"}}),
             ))
             .await;
@@ -728,7 +740,11 @@ mod tests {
     async fn companion_turns_earn_xp_and_skip_collection_when_companion_dialogues_off() {
         let dir = tempfile::tempdir().unwrap();
         let store = crate::store::CompanionStore::open_memory().await.unwrap();
-        store.insert_companion_thread("conv_companion", "companion_a", "聊天").await.unwrap();
+        let companion_conversation = conversation_fixture(1);
+        let work_conversation = conversation_fixture(2);
+        let companion = companion_fixture(1);
+        let other_companion = companion_fixture(2);
+        store.insert_companion_thread(&companion_conversation, &companion, "聊天").await.unwrap();
         let mut config = SharedCompanionConfig::default();
         config.collect.chat_user_messages = true;
         config.collect.chat_assistant_replies = true;
@@ -743,64 +759,67 @@ mod tests {
         collector
             .handle(&WebSocketMessage::new(
                 "message.userCreated",
-                serde_json::json!({"conversation_id": "conv_companion", "content": "你好 nomi"}),
+                serde_json::json!({"conversation_id": companion_conversation, "content": "你好 nomi"}),
             ))
             .await;
         // Normal conversation user message: collected.
         collector
             .handle(&WebSocketMessage::new(
                 "message.userCreated",
-                serde_json::json!({"conversation_id": "conv_work", "content": "帮我修 bug"}),
+                serde_json::json!({"conversation_id": work_conversation, "content": "帮我修 bug"}),
             ))
             .await;
         let (events, _) = read_events_since(dir.path(), 0, 10);
         assert_eq!(events.len(), 1);
-        assert_eq!(events[0].data["conversation_id"], "conv_work");
+        assert_eq!(events[0].data["conversation_id"], work_conversation);
 
         // Companion reply stream + turn.completed: buffered text dropped, XP
         // awarded to the owning companion only.
         collector
             .handle(&WebSocketMessage::new(
                 "message.stream",
-                serde_json::json!({"conversation_id": "conv_companion", "msg_id": "m1", "type": "content", "data": "我自己的回复"}),
+                serde_json::json!({"conversation_id": companion_conversation, "msg_id": "m1", "type": "content", "data": "我自己的回复"}),
             ))
             .await;
         collector
             .handle(&WebSocketMessage::new(
                 "turn.completed",
-                serde_json::json!({"conversation_id": "conv_companion"}),
+                serde_json::json!({"conversation_id": companion_conversation}),
             ))
             .await;
         let (events, _) = read_events_since(dir.path(), 0, 10);
         assert_eq!(events.len(), 1, "companion reply must not be collected with companion_dialogues off");
-        assert_eq!(store.get_companion_state_i64("companion_a", "xp").await.unwrap(), 2);
+        assert_eq!(store.get_companion_state_i64(&companion, "xp").await.unwrap(), 2);
         // Legacy global xp untouched; other companions untouched.
         assert_eq!(store.get_state_i64("xp").await.unwrap(), 0);
-        assert_eq!(store.get_companion_state_i64("companion_b", "xp").await.unwrap(), 0);
+        assert_eq!(store.get_companion_state_i64(&other_companion, "xp").await.unwrap(), 0);
 
         // Normal conversation turn: reply collected, no XP.
         collector
             .handle(&WebSocketMessage::new(
                 "message.stream",
-                serde_json::json!({"conversation_id": "conv_work", "msg_id": "m2", "type": "content", "data": "修好了"}),
+                serde_json::json!({"conversation_id": work_conversation, "msg_id": "m2", "type": "content", "data": "修好了"}),
             ))
             .await;
         collector
             .handle(&WebSocketMessage::new(
                 "turn.completed",
-                serde_json::json!({"conversation_id": "conv_work"}),
+                serde_json::json!({"conversation_id": work_conversation}),
             ))
             .await;
         let (events, _) = read_events_since(dir.path(), 0, 10);
         assert_eq!(events.len(), 2);
-        assert_eq!(store.get_companion_state_i64("companion_a", "xp").await.unwrap(), 2);
+        assert_eq!(store.get_companion_state_i64(&companion, "xp").await.unwrap(), 2);
     }
 
     #[tokio::test]
     async fn companion_dialogues_collects_companion_dialogue_by_default() {
         let dir = tempfile::tempdir().unwrap();
         let store = crate::store::CompanionStore::open_memory().await.unwrap();
-        store.insert_companion_thread("conv_companion", "companion_a", "聊天").await.unwrap();
+        let companion_conversation = conversation_fixture(1);
+        let work_conversation = conversation_fixture(2);
+        let companion = companion_fixture(1);
+        store.insert_companion_thread(&companion_conversation, &companion, "聊天").await.unwrap();
         // Default config: every work-event source OFF, companion_dialogues ON.
         let config = SharedCompanionConfig::default();
         assert!(config.collect.companion_dialogues);
@@ -814,20 +833,20 @@ mod tests {
         collector
             .handle(&WebSocketMessage::new(
                 "message.userCreated",
-                serde_json::json!({"conversation_id": "conv_companion", "content": "记得我喜欢深色主题"}),
+                serde_json::json!({"conversation_id": companion_conversation, "content": "记得我喜欢深色主题"}),
             ))
             .await;
         // Companion replying → buffered, flushed as companion.reply on turn.completed.
         collector
             .handle(&WebSocketMessage::new(
                 "message.stream",
-                serde_json::json!({"conversation_id": "conv_companion", "msg_id": "m1", "type": "content", "data": "记住啦！"}),
+                serde_json::json!({"conversation_id": companion_conversation, "msg_id": "m1", "type": "content", "data": "记住啦！"}),
             ))
             .await;
         collector
             .handle(&WebSocketMessage::new(
                 "turn.completed",
-                serde_json::json!({"conversation_id": "conv_companion"}),
+                serde_json::json!({"conversation_id": companion_conversation}),
             ))
             .await;
 
@@ -835,19 +854,19 @@ mod tests {
         assert_eq!(events.len(), 2);
         assert_eq!(events[0].source, "companion_dialogues");
         assert_eq!(events[0].name, "companion.user_message");
-        assert_eq!(events[0].data["companion_id"], "companion_a");
+        assert_eq!(events[0].data["companion_id"], companion);
         assert_eq!(events[0].data["content"], "记得我喜欢深色主题");
         assert_eq!(events[1].name, "companion.reply");
         assert_eq!(events[1].data["content"], "记住啦！");
-        assert_eq!(events[1].data["companion_id"], "companion_a");
+        assert_eq!(events[1].data["companion_id"], companion);
         // +2 turn XP preserved.
-        assert_eq!(store.get_companion_state_i64("companion_a", "xp").await.unwrap(), 2);
+        assert_eq!(store.get_companion_state_i64(&companion, "xp").await.unwrap(), 2);
 
         // Normal conversation messages stay un-collected (work sources off).
         collector
             .handle(&WebSocketMessage::new(
                 "message.userCreated",
-                serde_json::json!({"conversation_id": "conv_work", "content": "帮我修 bug"}),
+                serde_json::json!({"conversation_id": work_conversation, "content": "帮我修 bug"}),
             ))
             .await;
         let (events, _) = read_events_since(dir.path(), 0, 10);
@@ -860,6 +879,8 @@ mod tests {
         // the wire markers (companion / companion_id) must be enough.
         let dir = tempfile::tempdir().unwrap();
         let store = crate::store::CompanionStore::open_memory().await.unwrap();
+        let conversation = conversation_fixture(3);
+        let companion = companion_fixture(3);
         let mut config = SharedCompanionConfig::default();
         config.collect.chat_user_messages = true;
         let mut collector = Collector::new(
@@ -872,34 +893,34 @@ mod tests {
             .handle(&WebSocketMessage::new(
                 "message.userCreated",
                 serde_json::json!({
-                    "conversation_id": "conv_tg",
+                    "conversation_id": conversation,
                     "content": "今晚提醒我备份",
                     "companion": true,
-                    "companion_id": "companion_tg",
+                    "companion_id": companion,
                 }),
             ))
             .await;
         collector
             .handle(&WebSocketMessage::new(
                 "message.stream",
-                serde_json::json!({"conversation_id": "conv_tg", "msg_id": "m1", "type": "content", "data": "好～到点喊你",
-                                   "companion": true, "companion_id": "companion_tg"}),
+                serde_json::json!({"conversation_id": conversation, "msg_id": "m1", "type": "content", "data": "好～到点喊你",
+                                   "companion": true, "companion_id": companion}),
             ))
             .await;
         collector
             .handle(&WebSocketMessage::new(
                 "turn.completed",
-                serde_json::json!({"conversation_id": "conv_tg", "companion": true, "companion_id": "companion_tg"}),
+                serde_json::json!({"conversation_id": conversation, "companion": true, "companion_id": companion}),
             ))
             .await;
 
         let (events, _) = read_events_since(dir.path(), 0, 10);
         assert_eq!(events.len(), 2);
         assert_eq!(events[0].name, "companion.user_message");
-        assert_eq!(events[0].data["companion_id"], "companion_tg");
+        assert_eq!(events[0].data["companion_id"], companion);
         assert_eq!(events[1].name, "companion.reply");
         // XP credited via the wire companion_id, not the (empty) registry chain.
-        assert_eq!(store.get_companion_state_i64("companion_tg", "xp").await.unwrap(), 2);
+        assert_eq!(store.get_companion_state_i64(&companion, "xp").await.unwrap(), 2);
         // And the message never leaked into the generic work-chat source.
         assert!(events.iter().all(|e| e.source == "companion_dialogues"));
     }
@@ -908,7 +929,10 @@ mod tests {
     async fn origin_marked_messages_are_never_collected_as_owner_speech() {
         let dir = tempfile::tempdir().unwrap();
         let store = crate::store::CompanionStore::open_memory().await.unwrap();
-        store.insert_companion_thread("conv_companion", "companion_a", "聊天").await.unwrap();
+        let companion_conversation = conversation_fixture(1);
+        let work_conversation = conversation_fixture(2);
+        let companion = companion_fixture(1);
+        store.insert_companion_thread(&companion_conversation, &companion, "聊天").await.unwrap();
         let mut config = SharedCompanionConfig::default();
         config.collect.chat_user_messages = true;
         let mut collector = Collector::new(
@@ -922,7 +946,7 @@ mod tests {
         collector
             .handle(&WebSocketMessage::new(
                 "message.userCreated",
-                serde_json::json!({"conversation_id": "conv_work", "content": "请创建报表任务", "origin": "companion"}),
+                serde_json::json!({"conversation_id": work_conversation, "content": "请创建报表任务", "origin": "companion"}),
             ))
             .await;
         // Cron kickoff into a companion conversation: skipped for
@@ -930,7 +954,7 @@ mod tests {
         collector
             .handle(&WebSocketMessage::new(
                 "message.userCreated",
-                serde_json::json!({"conversation_id": "conv_companion", "content": "定时唤醒", "origin": "cron"}),
+                serde_json::json!({"conversation_id": companion_conversation, "content": "定时唤醒", "origin": "cron"}),
             ))
             .await;
         let (events, _) = read_events_since(dir.path(), 0, 10);
@@ -940,7 +964,7 @@ mod tests {
         collector
             .handle(&WebSocketMessage::new(
                 "message.userCreated",
-                serde_json::json!({"conversation_id": "conv_work", "content": "我自己说的", "origin": null}),
+                serde_json::json!({"conversation_id": work_conversation, "content": "我自己说的", "origin": null}),
             ))
             .await;
         let (events, _) = read_events_since(dir.path(), 0, 10);
@@ -952,6 +976,8 @@ mod tests {
     async fn origin_marked_turn_replies_are_never_collected() {
         let dir = tempfile::tempdir().unwrap();
         let store = crate::store::CompanionStore::open_memory().await.unwrap();
+        let work_conversation = conversation_fixture(2);
+        let cron_conversation = conversation_fixture(4);
         let mut config = SharedCompanionConfig::default();
         config.collect.chat_assistant_replies = true;
         let mut collector = Collector::new(
@@ -966,14 +992,14 @@ mod tests {
         collector
             .handle(&WebSocketMessage::new(
                 "message.stream",
-                serde_json::json!({"conversation_id": "conv_work", "msg_id": "m1", "type": "content",
+                serde_json::json!({"conversation_id": work_conversation, "msg_id": "m1", "type": "content",
                                    "data": "报表任务已创建", "origin": "companion"}),
             ))
             .await;
         collector
             .handle(&WebSocketMessage::new(
                 "turn.completed",
-                serde_json::json!({"conversation_id": "conv_work", "origin": "companion"}),
+                serde_json::json!({"conversation_id": work_conversation, "origin": "companion"}),
             ))
             .await;
         let (events, _) = read_events_since(dir.path(), 0, 10);
@@ -985,13 +1011,13 @@ mod tests {
         collector
             .handle(&WebSocketMessage::new(
                 "message.stream",
-                serde_json::json!({"conversation_id": "conv_cron", "msg_id": "m2", "type": "content", "data": "先囤一点"}),
+                serde_json::json!({"conversation_id": cron_conversation, "msg_id": "m2", "type": "content", "data": "先囤一点"}),
             ))
             .await;
         collector
             .handle(&WebSocketMessage::new(
                 "turn.completed",
-                serde_json::json!({"conversation_id": "conv_cron", "origin": "cron"}),
+                serde_json::json!({"conversation_id": cron_conversation, "origin": "cron"}),
             ))
             .await;
         let (events, _) = read_events_since(dir.path(), 0, 10);
@@ -1002,14 +1028,14 @@ mod tests {
         collector
             .handle(&WebSocketMessage::new(
                 "message.stream",
-                serde_json::json!({"conversation_id": "conv_work", "msg_id": "m3", "type": "content",
+                serde_json::json!({"conversation_id": work_conversation, "msg_id": "m3", "type": "content",
                                    "data": "修好了", "origin": null}),
             ))
             .await;
         collector
             .handle(&WebSocketMessage::new(
                 "turn.completed",
-                serde_json::json!({"conversation_id": "conv_work", "origin": null}),
+                serde_json::json!({"conversation_id": work_conversation, "origin": null}),
             ))
             .await;
         let (events, _) = read_events_since(dir.path(), 0, 10);
@@ -1022,6 +1048,8 @@ mod tests {
     async fn replace_override_rewrites_buffer_even_when_hidden() {
         let dir = tempfile::tempdir().unwrap();
         let store = crate::store::CompanionStore::open_memory().await.unwrap();
+        let conversation_a = conversation_fixture(11);
+        let conversation_b = conversation_fixture(12);
         let mut config = SharedCompanionConfig::default();
         config.collect.chat_assistant_replies = true;
         let mut collector = Collector::new(
@@ -1034,21 +1062,21 @@ mod tests {
         collector
             .handle(&WebSocketMessage::new(
                 "message.stream",
-                serde_json::json!({"conversation_id": "conv_a", "msg_id": "m1", "type": "content",
+                serde_json::json!({"conversation_id": conversation_a, "msg_id": "m1", "type": "content",
                                    "data": "好的 [CRON_CREATE {\"name\":\"备份\"}]"}),
             ))
             .await;
         collector
             .handle(&WebSocketMessage::new(
                 "message.stream",
-                serde_json::json!({"conversation_id": "conv_a", "msg_id": "m1", "type": "content",
+                serde_json::json!({"conversation_id": conversation_a, "msg_id": "m1", "type": "content",
                                    "data": {"content": "好的"}, "hidden": false, "replace": true}),
             ))
             .await;
         collector
             .handle(&WebSocketMessage::new(
                 "turn.completed",
-                serde_json::json!({"conversation_id": "conv_a"}),
+                serde_json::json!({"conversation_id": conversation_a}),
             ))
             .await;
         let (events, _) = read_events_since(dir.path(), 0, 10);
@@ -1060,21 +1088,21 @@ mod tests {
         collector
             .handle(&WebSocketMessage::new(
                 "message.stream",
-                serde_json::json!({"conversation_id": "conv_b", "msg_id": "m2", "type": "content",
+                serde_json::json!({"conversation_id": conversation_b, "msg_id": "m2", "type": "content",
                                    "data": "[CRON_DELETE job_1]"}),
             ))
             .await;
         collector
             .handle(&WebSocketMessage::new(
                 "message.stream",
-                serde_json::json!({"conversation_id": "conv_b", "msg_id": "m2", "type": "content",
+                serde_json::json!({"conversation_id": conversation_b, "msg_id": "m2", "type": "content",
                                    "data": {"content": ""}, "hidden": true, "replace": true}),
             ))
             .await;
         collector
             .handle(&WebSocketMessage::new(
                 "turn.completed",
-                serde_json::json!({"conversation_id": "conv_b"}),
+                serde_json::json!({"conversation_id": conversation_b}),
             ))
             .await;
         let (events, _) = read_events_since(dir.path(), 0, 10);
@@ -1096,10 +1124,11 @@ mod tests {
         // 10 over the cap, no turn.completed in between (orphan scenario).
         let total = MAX_REPLY_BUFFERS + 10;
         for i in 0..total {
+            let conversation_id = conversation_fixture(i as u64 + 100);
             collector
                 .handle(&WebSocketMessage::new(
                     "message.stream",
-                    serde_json::json!({"conversation_id": format!("conv_{i}"), "msg_id": "m", "type": "content",
+                    serde_json::json!({"conversation_id": conversation_id, "msg_id": "m", "type": "content",
                                        "data": format!("回复 {i}")}),
                 ))
                 .await;
@@ -1109,18 +1138,18 @@ mod tests {
         assert!(
             !collector
                 .reply_buffers
-                .contains_key(&("conv_0".to_owned(), "m".to_owned()))
+                .contains_key(&(conversation_fixture(100), "m".to_owned()))
         );
         assert!(
             collector
                 .reply_buffers
-                .contains_key(&(format!("conv_{}", total - 1), "m".to_owned()))
+                .contains_key(&(conversation_fixture(total as u64 + 99), "m".to_owned()))
         );
         // A surviving buffer still flushes normally.
         collector
             .handle(&WebSocketMessage::new(
                 "turn.completed",
-                serde_json::json!({"conversation_id": format!("conv_{}", total - 1)}),
+                serde_json::json!({"conversation_id": conversation_fixture(total as u64 + 99)}),
             ))
             .await;
         let (events, _) = read_events_since(dir.path(), 0, 200);
@@ -1166,33 +1195,33 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn unattributed_companion_turn_falls_back_to_default_companion() {
+    async fn unregistered_companion_turn_falls_back_to_default_companion() {
         let dir = tempfile::tempdir().unwrap();
         let store = crate::store::CompanionStore::open_memory().await.unwrap();
-        // Legacy thread row not yet backfilled (empty companion_id).
-        store.insert_companion_thread("conv_legacy", "", "旧聊天").await.unwrap();
+        let conversation = conversation_fixture(5);
+        let default_companion = companion_fixture(5);
         let mut config = SharedCompanionConfig::default();
-        config.default_companion_id = "companion_def".into();
+        config.default_companion_id = Some(default_companion.clone());
         let config = Arc::new(RwLock::new(config));
         let mut collector = Collector::new(dir.path().to_path_buf(), config.clone(), store.clone());
 
         collector
             .handle(&WebSocketMessage::new(
                 "turn.completed",
-                serde_json::json!({"conversation_id": "conv_legacy"}),
+                serde_json::json!({"conversation_id": conversation, "companion": true}),
             ))
             .await;
-        assert_eq!(store.get_companion_state_i64("companion_def", "xp").await.unwrap(), 2);
+        assert_eq!(store.get_companion_state_i64(&default_companion, "xp").await.unwrap(), 2);
 
         // No default companion either: the XP is skipped entirely.
-        config.write().await.default_companion_id.clear();
+        config.write().await.default_companion_id = None;
         collector
             .handle(&WebSocketMessage::new(
                 "turn.completed",
-                serde_json::json!({"conversation_id": "conv_legacy"}),
+                serde_json::json!({"conversation_id": conversation, "companion": true}),
             ))
             .await;
-        assert_eq!(store.get_companion_state_i64("companion_def", "xp").await.unwrap(), 2);
+        assert_eq!(store.get_companion_state_i64(&default_companion, "xp").await.unwrap(), 2);
         assert_eq!(store.get_state_i64("xp").await.unwrap(), 0);
     }
 

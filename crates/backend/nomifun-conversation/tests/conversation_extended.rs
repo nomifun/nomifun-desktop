@@ -4,11 +4,11 @@ use nomifun_ai_agent::AgentRuntimeRegistry;
 use nomifun_api_types::{
     CloneConversationRequest, CreateConversationRequest, ListMessagesQuery, SearchMessagesQuery, WebSocketMessage,
 };
-use nomifun_common::{AgentKillReason, AppError, ConversationStatus, TimestampMs, generate_prefixed_id, now_ms};
+use nomifun_common::{AgentKillReason, AppError, ConversationStatus, TimestampMs, now_ms};
 use nomifun_conversation::ConversationService;
 use nomifun_conversation::skill_resolver::SkillResolver;
 use nomifun_db::models::MessageRow;
-use nomifun_db::{IConversationRepository, SqliteConversationRepository, init_database_memory};
+use nomifun_db::{IProviderRepository, IConversationRepository, SqliteConversationRepository};
 use nomifun_realtime::UserEventSink;
 use serde_json::json;
 use std::sync::Mutex;
@@ -95,6 +95,8 @@ async fn setup() -> (
 ) {
     let db = init_database_memory().await.unwrap();
     let repo = Arc::new(SqliteConversationRepository::new(db.pool().clone()));
+    let provider_repo = nomifun_db::SqliteProviderRepository::new(db.pool().clone());
+    provider_repo.create(nomifun_db::CreateProviderParams { id: Some("prov_0190f5fe-7c00-7a00-8000-000000000001"), platform: "openai", name: "test", base_url: "https://example.invalid", api_key_encrypted: "", models: "[\"m1\",\"gpt-4o\",\"claude-sonnet-4-20250514\"]", enabled: true, capabilities: "[]", context_limit: None, model_context_limits: None, model_protocols: None, model_descriptions: None, model_enabled: None, model_health: None, bedrock_config: None, is_full_url: false, sort_order: Some(0) }).await.unwrap();
     let broadcaster = Arc::new(TestBroadcaster::new());
     let agent_metadata_repo: Arc<dyn nomifun_db::IAgentMetadataRepository> =
         Arc::new(nomifun_db::SqliteAgentMetadataRepository::new(db.pool().clone()));
@@ -115,7 +117,14 @@ async fn setup() -> (
     (svc, repo, broadcaster)
 }
 
-const USER_ID: &str = "system_default_user";
+const USER_ID: &str = "user_0190f5fe-7c00-7a00-8000-000000000001";
+
+async fn init_database_memory() -> Result<nomifun_db::Database, nomifun_db::DbError> {
+    nomifun_db::init_database_memory_with_owner(
+        nomifun_common::UserId::parse(USER_ID.to_owned()).expect("canonical fixture owner"),
+    )
+    .await
+}
 
 fn make_create_req() -> CreateConversationRequest {
     serde_json::from_value(json!({
@@ -125,11 +134,11 @@ fn make_create_req() -> CreateConversationRequest {
     .unwrap()
 }
 
-fn make_message(conv_id: i64, content: &str, offset_ms: i64) -> MessageRow {
+fn make_message(conv_id: String, content: &str, offset_ms: i64) -> MessageRow {
     MessageRow {
-        id: generate_prefixed_id("msg"),
+        id: nomifun_common::MessageId::new().into_string(),
         conversation_id: conv_id,
-        msg_id: Some(generate_prefixed_id("client")),
+        msg_id: Some(nomifun_common::MessageId::new().into_string()),
         r#type: "text".to_string(),
         content: format!(r#"{{"content":"{content}"}}"#),
         position: Some("right".to_string()),
@@ -139,7 +148,7 @@ fn make_message(conv_id: i64, content: &str, offset_ms: i64) -> MessageRow {
     }
 }
 
-fn make_acp_tool_message(conv_id: i64, id: &str, output: &str, offset_ms: i64) -> MessageRow {
+fn make_acp_tool_message(conv_id: String, id: &str, output: &str, offset_ms: i64) -> MessageRow {
     MessageRow {
         id: id.to_string(),
         conversation_id: conv_id,
@@ -198,7 +207,7 @@ async fn t7_1_reset_clears_messages_and_status() {
     let conv = svc.create(USER_ID, make_create_req()).await.unwrap();
     // Insert messages
     for i in 0..3 {
-        repo.insert_message(&make_message(conv.id, &format!("msg {i}"), i))
+        repo.insert_message(&make_message(conv.id.clone(), &format!("msg {i}"), i))
             .await
             .unwrap();
     }
@@ -219,7 +228,8 @@ async fn t7_1_reset_clears_messages_and_status() {
 #[tokio::test]
 async fn t7_3_reset_not_found() {
     let (svc, _repo, _b) = setup().await;
-    let err = svc.reset(USER_ID, "nonexistent").await.unwrap_err();
+    let missing = nomifun_common::ConversationId::new();
+    let err = svc.reset(USER_ID, missing.as_str()).await.unwrap_err();
     assert!(matches!(err, nomifun_common::AppError::NotFound(_)));
 }
 
@@ -244,7 +254,7 @@ async fn t8_2_pagination() {
     let conv = svc.create(USER_ID, make_create_req()).await.unwrap();
 
     for i in 0..10 {
-        repo.insert_message(&make_message(conv.id, &format!("msg {i}"), i * 100))
+        repo.insert_message(&make_message(conv.id.clone(), &format!("msg {i}"), i * 100))
             .await
             .unwrap();
     }
@@ -268,7 +278,7 @@ async fn t8_3_asc_order_default() {
     let conv = svc.create(USER_ID, make_create_req()).await.unwrap();
 
     for i in 0..3 {
-        repo.insert_message(&make_message(conv.id, &format!("msg {i}"), i * 1000))
+        repo.insert_message(&make_message(conv.id.clone(), &format!("msg {i}"), i * 1000))
             .await
             .unwrap();
     }
@@ -288,7 +298,7 @@ async fn t8_4_asc_order() {
     let conv = svc.create(USER_ID, make_create_req()).await.unwrap();
 
     for i in 0..3 {
-        repo.insert_message(&make_message(conv.id, &format!("msg {i}"), i * 1000))
+        repo.insert_message(&make_message(conv.id.clone(), &format!("msg {i}"), i * 1000))
             .await
             .unwrap();
     }
@@ -305,8 +315,9 @@ async fn t8_4_asc_order() {
 #[tokio::test]
 async fn t8_5_conversation_not_found() {
     let (svc, _repo, _b) = setup().await;
+    let missing = nomifun_common::ConversationId::new();
     let err = svc
-        .list_messages(USER_ID, "nonexistent", ListMessagesQuery::default())
+        .list_messages(USER_ID, missing.as_str(), ListMessagesQuery::default())
         .await
         .unwrap_err();
     assert!(matches!(err, nomifun_common::AppError::NotFound(_)));
@@ -320,7 +331,13 @@ async fn t8_6_compact_mode_truncates_large_tool_content_only_for_list_response()
     let conv = svc.create(USER_ID, make_create_req()).await.unwrap();
     let large_output = "match line\n".repeat(10_000);
 
-    repo.insert_message(&make_acp_tool_message(conv.id, "tool-big", &large_output, 0))
+    let message_id = nomifun_common::MessageId::new();
+    repo.insert_message(&make_acp_tool_message(
+        conv.id.clone(),
+        message_id.as_str(),
+        &large_output,
+        0,
+    ))
         .await
         .unwrap();
 
@@ -363,7 +380,13 @@ async fn t8_7_get_message_returns_full_tool_content_after_compact_list() {
     let conv = svc.create(USER_ID, make_create_req()).await.unwrap();
     let large_output = "wide rg output\n".repeat(10_000);
 
-    repo.insert_message(&make_acp_tool_message(conv.id, "tool-detail", &large_output, 0))
+    let message_id = nomifun_common::MessageId::new();
+    repo.insert_message(&make_acp_tool_message(
+        conv.id.clone(),
+        message_id.as_str(),
+        &large_output,
+        0,
+    ))
         .await
         .unwrap();
 
@@ -379,7 +402,10 @@ async fn t8_7_get_message_returns_full_tool_content_after_compact_list() {
         .await
         .unwrap();
 
-    let detail = svc.get_message(USER_ID, &conv.id.to_string(), "tool-detail").await.unwrap();
+    let detail = svc
+        .get_message(USER_ID, &conv.id.to_string(), message_id.as_str())
+        .await
+        .unwrap();
 
     assert_eq!(
         detail.content["update"]["content"][0]["content"]["text"]
@@ -394,10 +420,10 @@ async fn t9_1_keyword_match() {
     let (svc, repo, _b) = setup().await;
     let conv = svc.create(USER_ID, make_create_req()).await.unwrap();
 
-    repo.insert_message(&make_message(conv.id, "Rust review report", 0))
+    repo.insert_message(&make_message(conv.id.clone(), "Rust review report", 0))
         .await
         .unwrap();
-    repo.insert_message(&make_message(conv.id, "Python test", 100))
+    repo.insert_message(&make_message(conv.id.clone(), "Python test", 100))
         .await
         .unwrap();
 
@@ -424,7 +450,7 @@ async fn t9_1_keyword_match() {
 async fn t9_2_no_match() {
     let (svc, repo, _b) = setup().await;
     let conv = svc.create(USER_ID, make_create_req()).await.unwrap();
-    repo.insert_message(&make_message(conv.id, "hello world", 0))
+    repo.insert_message(&make_message(conv.id.clone(), "hello world", 0))
         .await
         .unwrap();
 
@@ -444,7 +470,7 @@ async fn t9_3_search_pagination() {
     let conv = svc.create(USER_ID, make_create_req()).await.unwrap();
 
     for i in 0..5 {
-        repo.insert_message(&make_message(conv.id, &format!("match keyword item {i}"), i * 100))
+        repo.insert_message(&make_message(conv.id.clone(), &format!("match keyword item {i}"), i * 100))
             .await
             .unwrap();
     }
@@ -479,7 +505,7 @@ async fn t9_5_preview_text_extracts_from_json_content() {
     let conv = svc.create(USER_ID, make_create_req()).await.unwrap();
 
     let complex_msg = MessageRow {
-        id: generate_prefixed_id("msg"),
+        id: nomifun_common::MessageId::new().into_string(),
         conversation_id: conv.id.clone(),
         msg_id: None,
         r#type: "text".to_string(),
@@ -514,13 +540,13 @@ async fn t9_6_search_result_includes_conversation_model() {
     // carries a top-level model under the nomi-only rule).
     let nomi_req: CreateConversationRequest = serde_json::from_value(json!({
         "type": "nomi",
-        "model": { "provider_id": "p1", "model": "claude-sonnet-4-20250514" },
+        "model": { "provider_id": "prov_0190f5fe-7c00-7a00-8000-000000000001", "model": "claude-sonnet-4-20250514" },
         "extra": { "workspace": "/home/user/project" }
     }))
     .unwrap();
     let conv = svc.create(USER_ID, nomi_req).await.unwrap();
 
-    repo.insert_message(&make_message(conv.id, "model test keyword", 0))
+    repo.insert_message(&make_message(conv.id.clone(), "model test keyword", 0))
         .await
         .unwrap();
 
@@ -534,7 +560,7 @@ async fn t9_6_search_result_includes_conversation_model() {
 
     let item = &result.items[0];
     let model = item.conversation.model.as_ref().unwrap();
-    assert_eq!(model.provider_id, "p1");
+    assert_eq!(model.provider_id, "prov_0190f5fe-7c00-7a00-8000-000000000001");
     assert_eq!(model.model, "claude-sonnet-4-20250514");
 }
 
@@ -543,7 +569,7 @@ async fn t9_7_search_does_not_leak_other_users_messages() {
     let (svc, repo, _b) = setup().await;
 
     let conv = svc.create(USER_ID, make_create_req()).await.unwrap();
-    repo.insert_message(&make_message(conv.id, "secret keyword data", 0))
+    repo.insert_message(&make_message(conv.id.clone(), "secret keyword data", 0))
         .await
         .unwrap();
 
@@ -611,7 +637,8 @@ async fn t10_2_no_associated() {
 #[tokio::test]
 async fn t10_3_associated_not_found() {
     let (svc, _repo, _b) = setup().await;
-    let err = svc.list_associated(USER_ID, "nonexistent").await.unwrap_err();
+    let missing = nomifun_common::ConversationId::new();
+    let err = svc.list_associated(USER_ID, missing.as_str()).await.unwrap_err();
     assert!(matches!(err, nomifun_common::AppError::NotFound(_)));
 }
 
@@ -621,7 +648,7 @@ async fn t10_3_associated_not_found() {
 async fn t12_4_search_sql_injection() {
     let (svc, repo, _b) = setup().await;
     let conv = svc.create(USER_ID, make_create_req()).await.unwrap();
-    repo.insert_message(&make_message(conv.id, "safe content", 0))
+    repo.insert_message(&make_message(conv.id.clone(), "safe content", 0))
         .await
         .unwrap();
 
@@ -641,10 +668,11 @@ async fn t12_4_search_sql_injection() {
 async fn messages_wrong_user_returns_not_found() {
     let (svc, repo, _b) = setup().await;
     let conv = svc.create(USER_ID, make_create_req()).await.unwrap();
-    repo.insert_message(&make_message(conv.id, "hello", 0)).await.unwrap();
+    repo.insert_message(&make_message(conv.id.clone(), "hello", 0)).await.unwrap();
 
+    let other_user = nomifun_common::UserId::new();
     let err = svc
-        .list_messages("other_user", &conv.id.to_string(), ListMessagesQuery::default())
+        .list_messages(other_user.as_str(), &conv.id.to_string(), ListMessagesQuery::default())
         .await
         .unwrap_err();
     assert!(matches!(err, nomifun_common::AppError::NotFound(_)));
@@ -655,6 +683,7 @@ async fn reset_wrong_user_returns_not_found() {
     let (svc, _repo, _b) = setup().await;
     let conv = svc.create(USER_ID, make_create_req()).await.unwrap();
 
-    let err = svc.reset("other_user", &conv.id.to_string()).await.unwrap_err();
+    let other_user = nomifun_common::UserId::new();
+    let err = svc.reset(other_user.as_str(), &conv.id.to_string()).await.unwrap_err();
     assert!(matches!(err, nomifun_common::AppError::NotFound(_)));
 }

@@ -8,7 +8,6 @@
 //! OC-1, SR-1, ICronService trait integration.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use nomifun_ai_agent::AgentRegistry;
@@ -18,14 +17,14 @@ use nomifun_api_types::{
     CreateCronJobRequest, CronAgentConfigDto, CronScheduleDto, ListCronJobsQuery,
     SaveCronSkillRequest, UpdateCronJobRequest, WebSocketMessage,
 };
-use nomifun_common::{PaginatedResult, TimestampMs, now_ms};
+use nomifun_common::{ConversationArtifactId, PaginatedResult, TimestampMs, now_ms};
 use nomifun_conversation::ConversationService;
 use nomifun_conversation::response_middleware::{CronCreateParams, CronUpdateParams};
 use nomifun_db::{
     ConversationFilters, ConversationRowUpdate, IAcpSessionRepository, IAgentMetadataRepository,
     IConversationRepository, ICronRepository, MessageRowUpdate, MessageSearchRow, SortOrder,
     SqliteAcpSessionRepository, SqliteAgentMetadataRepository, SqliteConversationRepository,
-    SqliteCronRepository, init_database_memory, models::MessageRow,
+    SqliteCronRepository, models::MessageRow,
 };
 use nomifun_realtime::UserEventSink;
 
@@ -37,7 +36,38 @@ use nomifun_cron::service::CronService;
 use nomifun_cron::skill_file::{has_skill_file, write_raw_skill_file};
 use nomifun_cron::types::JobStatus;
 
-const TEST_USER_ID: &str = "system_default_user";
+const TEST_USER_ID: &str = "user_0190f5fe-7c00-7a00-8000-000000000001";
+const CONV_1: &str = "conv_0190f5fe-7c00-7a00-8abc-012345678901";
+const CONV_2: &str = "conv_0190f5fe-7c00-7a00-8abc-012345678902";
+const CONV_3: &str = "conv_0190f5fe-7c00-7a00-8abc-012345678903";
+const CONV_4: &str = "conv_0190f5fe-7c00-7a00-8abc-012345678904";
+const CONV_5: &str = "conv_0190f5fe-7c00-7a00-8abc-012345678905";
+const CONV_6: &str = "conv_0190f5fe-7c00-7a00-8abc-012345678906";
+const CONV_7: &str = "conv_0190f5fe-7c00-7a00-8abc-012345678907";
+const CONV_8: &str = "conv_0190f5fe-7c00-7a00-8abc-012345678908";
+const CONV_MISSING: &str = "conv_0190f5fe-7c00-7a00-8abc-012345678909";
+const CONV_MODE: &str = "conv_0190f5fe-7c00-7a00-8abc-012345678910";
+const CONV_MODE_DEFAULT: &str = "conv_0190f5fe-7c00-7a00-8abc-012345678911";
+const CONV_MODE_CODEX: &str = "conv_0190f5fe-7c00-7a00-8abc-012345678912";
+const CONV_MODE_CLAUDE: &str = "conv_0190f5fe-7c00-7a00-8abc-012345678913";
+const CONV_MODE_NOMI: &str = "conv_0190f5fe-7c00-7a00-8abc-012345678914";
+const MISSING_JOB_ID: &str = "cron_0190f5fe-7c00-7a00-8000-000000009999";
+const SECONDARY_USER_ID: &str = "user_0190f5fe-7c00-7a00-8000-000000000002";
+const SAFE_PROVIDER_ID: &str = "prov_0190f5fe-7c00-7a00-8000-000000000002";
+const FOREIGN_USER_ID: &str = "user_0190f5fe-7c00-7a00-8000-000000000003";
+const OWNER_A_ID: &str = "user_0190f5fe-7c00-7a00-8000-000000000004";
+const OWNER_B_ID: &str = "user_0190f5fe-7c00-7a00-8000-000000000005";
+const GEMINI_PROVIDER_ID: &str = "prov_0190f5fe-7c00-7a00-8000-000000000003";
+const CODEX_PROVIDER_ID: &str = "prov_0190f5fe-7c00-7a00-8000-000000000004";
+const CLAUDE_PROVIDER_ID: &str = "prov_0190f5fe-7c00-7a00-8000-000000000005";
+const NOMI_PROVIDER_ID: &str = "prov_0190f5fe-7c00-7a00-8000-000000000006";
+
+async fn init_database_memory() -> Result<nomifun_db::Database, nomifun_db::DbError> {
+    nomifun_db::init_database_memory_with_owner(
+        nomifun_common::UserId::parse(TEST_USER_ID.to_owned()).expect("canonical fixture owner"),
+    )
+    .await
+}
 
 // ── Test infrastructure ────────────────────────────────────────────
 
@@ -115,9 +145,7 @@ impl nomifun_ai_agent::runtime_registry::AgentRuntimeRegistry for StubAgentRunti
 struct StubConvRepo {
     messages: Mutex<Vec<MessageRow>>,
     artifacts: Mutex<Vec<nomifun_db::ConversationArtifactRow>>,
-    rows: Mutex<HashMap<i64, nomifun_db::models::ConversationRow>>,
-    /// Mimics SQLite's AUTOINCREMENT for `conversation_artifacts.id`.
-    next_artifact_id: AtomicI64,
+    rows: Mutex<HashMap<String, nomifun_db::models::ConversationRow>>,
 }
 
 impl StubConvRepo {
@@ -126,7 +154,6 @@ impl StubConvRepo {
             messages: Mutex::new(Vec::new()),
             artifacts: Mutex::new(Vec::new()),
             rows: Mutex::new(HashMap::new()),
-            next_artifact_id: AtomicI64::new(1),
         }
     }
 
@@ -137,8 +164,8 @@ impl StubConvRepo {
 
     fn upsert_artifact_row(&self, mut artifact: nomifun_db::ConversationArtifactRow) {
         let mut guard = self.artifacts.lock().unwrap();
-        if artifact.id == 0 {
-            artifact.id = self.next_artifact_id.fetch_add(1, Ordering::Relaxed);
+        if artifact.id.is_empty() {
+            artifact.id = ConversationArtifactId::new().into_string();
         }
         if let Some(existing) = guard.iter_mut().find(|row| row.id == artifact.id) {
             *existing = artifact;
@@ -156,22 +183,22 @@ impl StubConvRepo {
 impl IConversationRepository for StubConvRepo {
     async fn get(
         &self,
-        id: i64,
+        id: &str,
     ) -> Result<Option<nomifun_db::models::ConversationRow>, nomifun_db::DbError> {
         let mut rows = self.rows.lock().unwrap();
 
-        if let Some(existing) = rows.get(&id) {
+        if let Some(existing) = rows.get(id) {
             return Ok(Some(existing.clone()));
         }
         // Id 9 == "missing-conv-1": reported absent so orphan cleanup fires.
-        if id == 9 {
+        if id == CONV_MISSING {
             return Ok(None);
         }
 
-        let row = if id == 10 {
+        let row = if id == CONV_MODE {
             // conv_mode
             nomifun_db::models::ConversationRow {
-                id,
+                id: id.to_owned(),
                 user_id: TEST_USER_ID.into(),
                 name: "Gemini Chat".into(),
                 r#type: "acp".into(),
@@ -181,7 +208,7 @@ impl IConversationRepository for StubConvRepo {
                 execution_template_id: None,
                 model: Some(
                     serde_json::json!({
-                        "provider_id": "gemini",
+                        "provider_id": GEMINI_PROVIDER_ID,
                         "model": "gemini-2.5-pro",
                         "use_model": "gemini-2.5-pro"
                     })
@@ -207,10 +234,10 @@ impl IConversationRepository for StubConvRepo {
                 created_at: 1000,
                 updated_at: 1000,
             }
-        } else if id == 11 {
+        } else if id == CONV_MODE_DEFAULT {
             // conv_mode_default
             nomifun_db::models::ConversationRow {
-                id,
+                id: id.to_owned(),
                 user_id: TEST_USER_ID.into(),
                 name: "Gemini Default Chat".into(),
                 r#type: "acp".into(),
@@ -220,7 +247,7 @@ impl IConversationRepository for StubConvRepo {
                 execution_template_id: None,
                 model: Some(
                     serde_json::json!({
-                        "provider_id": "gemini",
+                        "provider_id": GEMINI_PROVIDER_ID,
                         "model": "gemini-2.5-pro",
                         "use_model": "gemini-2.5-pro"
                     })
@@ -246,10 +273,10 @@ impl IConversationRepository for StubConvRepo {
                 created_at: 1000,
                 updated_at: 1000,
             }
-        } else if id == 12 {
+        } else if id == CONV_MODE_CODEX {
             // conv_mode_codex
             nomifun_db::models::ConversationRow {
-                id,
+                id: id.to_owned(),
                 user_id: TEST_USER_ID.into(),
                 name: "Codex Chat".into(),
                 r#type: "acp".into(),
@@ -259,7 +286,7 @@ impl IConversationRepository for StubConvRepo {
                 execution_template_id: None,
                 model: Some(
                     serde_json::json!({
-                        "provider_id": "codex",
+                        "provider_id": CODEX_PROVIDER_ID,
                         "model": "gpt-5-codex",
                         "use_model": "gpt-5-codex"
                     })
@@ -285,10 +312,10 @@ impl IConversationRepository for StubConvRepo {
                 created_at: 1000,
                 updated_at: 1000,
             }
-        } else if id == 13 {
+        } else if id == CONV_MODE_CLAUDE {
             // conv_mode_claude
             nomifun_db::models::ConversationRow {
-                id,
+                id: id.to_owned(),
                 user_id: TEST_USER_ID.into(),
                 name: "Claude Chat".into(),
                 r#type: "acp".into(),
@@ -298,7 +325,7 @@ impl IConversationRepository for StubConvRepo {
                 execution_template_id: None,
                 model: Some(
                     serde_json::json!({
-                        "provider_id": "claude",
+                        "provider_id": CLAUDE_PROVIDER_ID,
                         "model": "claude-sonnet-4-20250514",
                         "use_model": "claude-sonnet-4-20250514"
                     })
@@ -324,10 +351,10 @@ impl IConversationRepository for StubConvRepo {
                 created_at: 1000,
                 updated_at: 1000,
             }
-        } else if id == 14 {
+        } else if id == CONV_MODE_NOMI {
             // conv_mode_nomi
             nomifun_db::models::ConversationRow {
-                id,
+                id: id.to_owned(),
                 user_id: TEST_USER_ID.into(),
                 name: "Nomi Chat".into(),
                 r#type: "nomi".into(),
@@ -337,7 +364,7 @@ impl IConversationRepository for StubConvRepo {
                 execution_template_id: None,
                 model: Some(
                     serde_json::json!({
-                        "provider_id": "anthropic",
+                        "provider_id": NOMI_PROVIDER_ID,
                         "model": "claude-sonnet-4-20250514",
                         "use_model": "claude-sonnet-4-20250514"
                     })
@@ -365,7 +392,7 @@ impl IConversationRepository for StubConvRepo {
             }
         } else {
             nomifun_db::models::ConversationRow {
-                id,
+                id: id.to_owned(),
                 user_id: TEST_USER_ID.into(),
                 name: "stub".into(),
                 r#type: "default".into(),
@@ -389,26 +416,29 @@ impl IConversationRepository for StubConvRepo {
             }
         };
 
-        rows.insert(id, row.clone());
+        rows.insert(id.to_owned(), row.clone());
         Ok(Some(row))
     }
     async fn create(
         &self,
         row: &nomifun_db::models::ConversationRow,
-    ) -> Result<i64, nomifun_db::DbError> {
-        self.rows.lock().unwrap().insert(row.id, row.clone());
-        Ok(row.id)
+    ) -> Result<String, nomifun_db::DbError> {
+        self.rows
+            .lock()
+            .unwrap()
+            .insert(row.id.clone(), row.clone());
+        Ok(row.id.clone())
     }
     async fn update(
         &self,
-        id: i64,
+        id: &str,
         updates: &ConversationRowUpdate,
     ) -> Result<(), nomifun_db::DbError> {
         let mut rows = self.rows.lock().unwrap();
         let row = rows
-            .entry(id)
+            .entry(id.to_owned())
             .or_insert_with(|| nomifun_db::models::ConversationRow {
-                id,
+                id: id.to_owned(),
                 user_id: TEST_USER_ID.into(),
                 name: "stub".into(),
                 r#type: "default".into(),
@@ -441,7 +471,7 @@ impl IConversationRepository for StubConvRepo {
         }
         Ok(())
     }
-    async fn delete(&self, _id: i64) -> Result<(), nomifun_db::DbError> {
+    async fn delete(&self, _id: &str) -> Result<(), nomifun_db::DbError> {
         Ok(())
     }
     async fn list_paginated(
@@ -479,13 +509,13 @@ impl IConversationRepository for StubConvRepo {
     async fn list_associated(
         &self,
         _user_id: &str,
-        _conversation_id: i64,
+        _conversation_id: &str,
     ) -> Result<Vec<nomifun_db::models::ConversationRow>, nomifun_db::DbError> {
         Ok(vec![])
     }
     async fn get_messages(
         &self,
-        _conv_id: i64,
+        _conv_id: &str,
         _page: u32,
         _page_size: u32,
         _order: SortOrder,
@@ -512,13 +542,13 @@ impl IConversationRepository for StubConvRepo {
     }
     async fn delete_messages_by_conversation(
         &self,
-        _conv_id: i64,
+        _conv_id: &str,
     ) -> Result<(), nomifun_db::DbError> {
         Ok(())
     }
     async fn get_message_by_msg_id(
         &self,
-        _conv_id: i64,
+        _conv_id: &str,
         _msg_id: &str,
         _msg_type: &str,
     ) -> Result<Option<nomifun_db::models::MessageRow>, nomifun_db::DbError> {
@@ -539,7 +569,7 @@ impl IConversationRepository for StubConvRepo {
     }
     async fn list_artifacts(
         &self,
-        conversation_id: i64,
+        conversation_id: &str,
     ) -> Result<Vec<nomifun_db::ConversationArtifactRow>, nomifun_db::DbError> {
         Ok(self
             .artifacts
@@ -552,8 +582,8 @@ impl IConversationRepository for StubConvRepo {
     }
     async fn get_artifact(
         &self,
-        conversation_id: i64,
-        artifact_id: i64,
+        conversation_id: &str,
+        artifact_id: &str,
     ) -> Result<Option<nomifun_db::ConversationArtifactRow>, nomifun_db::DbError> {
         Ok(self
             .artifacts
@@ -577,20 +607,20 @@ impl IConversationRepository for StubConvRepo {
                     && row.cron_job_id == artifact.cron_job_id
             })
         {
-            let id = existing.id;
+            let id = existing.id.clone();
             *existing = artifact.clone();
             existing.id = id;
             return Ok(existing.clone());
         }
         let mut stored = artifact.clone();
-        stored.id = self.next_artifact_id.fetch_add(1, Ordering::Relaxed);
+        stored.id = ConversationArtifactId::new().into_string();
         guard.push(stored.clone());
         Ok(stored)
     }
     async fn update_artifact_status(
         &self,
-        conversation_id: i64,
-        artifact_id: i64,
+        conversation_id: &str,
+        artifact_id: &str,
         status: &str,
         updated_at: TimestampMs,
     ) -> Result<Option<nomifun_db::ConversationArtifactRow>, nomifun_db::DbError> {
@@ -649,31 +679,29 @@ async fn setup_with_conv_repo() -> (
     .await
     .unwrap();
 
-    // Seed the conversations that cron tests bind jobs to into the REAL DB so
-    // the new `cron_jobs.conversation_id → conversations(id)` FK (foreign_keys=ON)
-    // is satisfied at insert time. Conversation *state* (existence for orphan
-    // cleanup, bind targets) is still driven by the in-memory `StubConvRepo`
-    // the service actually queries; this real-DB seed only satisfies the FK.
-    //
-    // Conversation ids are now integer PKs allocated by AUTOINCREMENT. Inserting
-    // 14 rows into a fresh in-memory DB allocates ids 1..=14 in order; the tests
-    // reference these by their fixed integer (see the id map below). The id 9
-    // ("missing-conv-1") and id 8 ("conv-that-no-longer-exists") rows exist for
-    // the FK, while `StubConvRepo::get` independently reports id 9 absent so
-    // orphan-cleanup logic still fires.
-    //
-    // Id map: 1=conv_1, 2=conv_target, 3=conv_other, 4=conv_existing_bind,
-    // 5=conv_cascade, 6=conv_trait_del, 7=conv-existing,
-    // 8=conv-that-no-longer-exists, 9=missing-conv-1, 10=conv_mode,
-    // 11=conv_mode_default, 12=conv_mode_codex, 13=conv_mode_claude,
-    // 14=conv_mode_nomi.
+    // Seed canonical conversation IDs into the real DB so cron-job foreign keys
+    // exercise the same string-only ID contract as production.
     {
         let real_conv_repo = SqliteConversationRepository::new(pool.clone());
-        for _ in 1..=14 {
+        for id in [
+            CONV_1,
+            CONV_2,
+            CONV_3,
+            CONV_4,
+            CONV_5,
+            CONV_6,
+            CONV_7,
+            CONV_8,
+            CONV_MISSING,
+            CONV_MODE,
+            CONV_MODE_DEFAULT,
+            CONV_MODE_CODEX,
+            CONV_MODE_CLAUDE,
+            CONV_MODE_NOMI,
+        ] {
             real_conv_repo
                 .create(&nomifun_db::models::ConversationRow {
-                    // `create` allocates the PK (AUTOINCREMENT) and ignores this.
-                    id: 0,
+                    id: id.to_owned(),
                     user_id: TEST_USER_ID.into(),
                     name: "Seed Conversation".into(),
                     r#type: "acp".into(),
@@ -786,7 +814,7 @@ fn make_create_req(name: &str, schedule: CronScheduleDto) -> CreateCronJobReques
         schedule,
         prompt: None,
         message: Some("test message".into()),
-        conversation_id: 1,
+        conversation_id: Some(CONV_1.to_owned()),
         conversation_title: Some("Test Conv".into()),
         agent_type: "acp".into(),
         created_by: "user".into(),
@@ -821,7 +849,7 @@ fn cron_every_5min() -> CronScheduleDto {
 async fn secondary_cron_keeps_model_selection_but_cannot_gain_host_configuration() {
     let (svc, _repo, _events, _conversations, pool, data_dir) =
         setup_with_conv_repo().await;
-    let secondary = "secondary-cron-user";
+    let secondary = SECONDARY_USER_ID;
     sqlx::query(
         "INSERT INTO users (id, username, password_hash, created_at, updated_at) \
          VALUES (?, 'secondary-cron-user', 'hash', 1, 1)",
@@ -840,13 +868,13 @@ async fn secondary_cron_keeps_model_selection_but_cannot_gain_host_configuration
                 schedule: every_60s(),
                 prompt: None,
                 message: Some("summarize this".into()),
-                conversation_id: 0,
+                conversation_id: None,
                 conversation_title: None,
                 agent_type: "nomi".into(),
                 created_by: "user".into(),
                 execution_mode: Some("new_conversation".into()),
                 agent_config: Some(CronAgentConfigDto {
-                    backend: "provider-safe".into(),
+                    backend: SAFE_PROVIDER_ID.into(),
                     name: "Nomi".into(),
                     cli_path: Some("/bin/sh".into()),
                     custom_agent_id: Some("custom-host-agent".into()),
@@ -865,7 +893,7 @@ async fn secondary_cron_keeps_model_selection_but_cannot_gain_host_configuration
         .unwrap();
 
     let config = job.agent_config.as_ref().unwrap();
-    assert_eq!(config.backend, "provider-safe");
+    assert_eq!(config.backend, SAFE_PROVIDER_ID);
     assert_eq!(config.model_id.as_deref(), Some("model-safe"));
     assert!(config.clear_context_each_run);
     assert!(config.cli_path.is_none());
@@ -907,7 +935,7 @@ async fn secondary_cron_keeps_model_selection_but_cannot_gain_host_configuration
     assert!(skill_error.to_string().contains("installation owner"));
 
     let mut forbidden = make_create_req("Host agent", every_60s());
-    forbidden.conversation_id = 0;
+    forbidden.conversation_id = None;
     let error = svc.add_job(secondary, forbidden).await.unwrap_err();
     assert!(error.to_string().contains("model-only"));
 
@@ -987,13 +1015,13 @@ async fn cron_crud_run_history_and_skill_boundaries_are_owner_scoped() {
     // aggregate unbound so its result depends only on Cron ownership and host
     // capability ordering, not on the StubConvRepo's legacy `u1` fixture.
     let mut owner_request = make_create_req("Owner Boundary", every_60s());
-    owner_request.conversation_id = 0;
+    owner_request.conversation_id = None;
     owner_request.execution_mode = Some("new_conversation".into());
     let job = svc
         .add_job(TEST_USER_ID, owner_request)
         .await
         .unwrap();
-    let foreign = "foreign-user";
+    let foreign = FOREIGN_USER_ID;
 
     assert!(matches!(
         svc.get_job(foreign, &job.id).await,
@@ -1081,7 +1109,7 @@ async fn cj1_private_job_events_are_scoped_to_each_conversation_owner() {
     let (svc, _repo, user_events, conversation_repo, pool, _) =
         setup_with_conv_repo().await;
 
-    for owner in ["owner-a", "owner-b"] {
+    for owner in [OWNER_A_ID, OWNER_B_ID] {
         sqlx::query(
             "INSERT INTO users (id, username, password_hash, created_at, updated_at) \
              VALUES (?, ?, 'hash', 0, 0)",
@@ -1096,7 +1124,7 @@ async fn cj1_private_job_events_are_scoped_to_each_conversation_owner() {
         "INSERT INTO providers (\
             id, platform, name, base_url, api_key_encrypted, models, enabled, \
             capabilities, created_at, updated_at\
-         ) VALUES ('provider_multiuser', 'openai', 'multiuser', \
+         ) VALUES ('prov_0190f5fe-7c00-7a00-8000-000000000008', 'openai', 'multiuser', \
                    'https://example.invalid', 'encrypted', \
                    '[\"model-multiuser\"]', 1, '[]', 1, 1)",
     )
@@ -1106,17 +1134,17 @@ async fn cj1_private_job_events_are_scoped_to_each_conversation_owner() {
     // Ownership is immutable after migration 041, so replace the setup's
     // installation-owner seed rows with legal model-only rows instead of
     // rewriting user_id in place.
-    sqlx::query("DELETE FROM conversations WHERE id IN (1, 2)")
+    sqlx::query("DELETE FROM conversations WHERE id IN (?, ?)").bind(CONV_1).bind(CONV_2)
         .execute(&pool)
         .await
         .unwrap();
-    for (id, owner) in [(1_i64, "owner-a"), (2_i64, "owner-b")] {
+    for (id, owner) in [(CONV_1, OWNER_A_ID), (CONV_2, OWNER_B_ID)] {
         sqlx::query(
             "INSERT INTO conversations (\
                 id, user_id, name, type, model, status, delegation_policy, \
                 decision_policy, extra, created_at, updated_at\
              ) VALUES (?, ?, 'Private model-only cron conversation', 'nomi', \
-                       '{\"provider_id\":\"provider_multiuser\",\"model\":\"model-multiuser\"}', \
+                       '{\"provider_id\":\"prov_0190f5fe-7c00-7a00-8000-000000000008\",\"model\":\"model-multiuser\"}', \
                        'finished', 'disabled', 'automatic', '{}', 1, 1)",
         )
         .bind(id)
@@ -1126,13 +1154,13 @@ async fn cj1_private_job_events_are_scoped_to_each_conversation_owner() {
         .unwrap();
     }
 
-    let mut owner_a_conversation = conversation_repo.get(1).await.unwrap().unwrap();
-    owner_a_conversation.user_id = "owner-a".into();
+    let mut owner_a_conversation = conversation_repo.get(CONV_1).await.unwrap().unwrap();
+    owner_a_conversation.user_id = OWNER_A_ID.into();
     owner_a_conversation.r#type = "nomi".into();
     owner_a_conversation.delegation_policy = "disabled".into();
     owner_a_conversation.model = Some(
         serde_json::json!({
-            "provider_id": "provider_multiuser",
+            "provider_id": "prov_0190f5fe-7c00-7a00-8000-000000000008",
             "model": "model-multiuser"
         })
         .to_string(),
@@ -1142,8 +1170,8 @@ async fn cj1_private_job_events_are_scoped_to_each_conversation_owner() {
         .create(&owner_a_conversation)
         .await
         .unwrap();
-    let mut owner_b_conversation = conversation_repo.get(2).await.unwrap().unwrap();
-    owner_b_conversation.user_id = "owner-b".into();
+    let mut owner_b_conversation = conversation_repo.get(CONV_2).await.unwrap().unwrap();
+    owner_b_conversation.user_id = OWNER_B_ID.into();
     owner_b_conversation.r#type = "nomi".into();
     owner_b_conversation.delegation_policy = "disabled".into();
     owner_b_conversation.model = owner_a_conversation.model.clone();
@@ -1154,20 +1182,20 @@ async fn cj1_private_job_events_are_scoped_to_each_conversation_owner() {
         .unwrap();
 
     let mut owner_a_job = make_create_req("Owner A Job", every_60s());
-    owner_a_job.conversation_id = 1;
+    owner_a_job.conversation_id = Some(CONV_1.to_owned());
     owner_a_job.agent_type = "nomi".into();
-    svc.add_job("owner-a", owner_a_job).await.unwrap();
+    svc.add_job(OWNER_A_ID, owner_a_job).await.unwrap();
 
     let mut owner_b_job = make_create_req("Owner B Job", every_60s());
-    owner_b_job.conversation_id = 2;
+    owner_b_job.conversation_id = Some(CONV_2.to_owned());
     owner_b_job.agent_type = "nomi".into();
-    svc.add_job("owner-b", owner_b_job).await.unwrap();
+    svc.add_job(OWNER_B_ID, owner_b_job).await.unwrap();
 
     let deliveries = user_events.take_deliveries();
     assert_eq!(deliveries.len(), 2);
-    assert_eq!(deliveries[0].0, "owner-a");
+    assert_eq!(deliveries[0].0, OWNER_A_ID);
     assert_eq!(deliveries[0].1.name, "cron.job-created");
-    assert_eq!(deliveries[1].0, "owner-b");
+    assert_eq!(deliveries[1].0, OWNER_B_ID);
     assert_eq!(deliveries[1].1.name, "cron.job-created");
 }
 
@@ -1218,7 +1246,7 @@ async fn cj4_get_single_job() {
 #[tokio::test]
 async fn cj5_get_nonexistent_job() {
     let (svc, _, _) = setup().await;
-    let err = svc.get_job(TEST_USER_ID, "cron_nonexistent").await.unwrap_err();
+    let err = svc.get_job(TEST_USER_ID, MISSING_JOB_ID).await.unwrap_err();
     assert!(matches!(
         err,
         nomifun_cron::error::CronError::JobNotFound(_)
@@ -1247,19 +1275,19 @@ async fn cj7_list_by_conversation() {
     let (svc, _, _) = setup().await;
 
     let mut req1 = make_create_req("Job A", every_60s());
-    req1.conversation_id = 2;
+    req1.conversation_id = Some(CONV_2.to_owned());
     svc.add_job(TEST_USER_ID, req1).await.unwrap();
 
     let mut req2 = make_create_req("Job B", every_60s());
-    req2.conversation_id = 2;
+    req2.conversation_id = Some(CONV_2.to_owned());
     svc.add_job(TEST_USER_ID, req2).await.unwrap();
 
     let mut req3 = make_create_req("Job C", every_60s());
-    req3.conversation_id = 3;
+    req3.conversation_id = Some(CONV_3.to_owned());
     svc.add_job(TEST_USER_ID, req3).await.unwrap();
 
     let query = ListCronJobsQuery {
-        conversation_id: Some(2),
+        conversation_id: Some(CONV_2.to_owned()),
     };
     let jobs = svc.list_jobs(TEST_USER_ID, &query).await.unwrap();
     assert_eq!(jobs.len(), 2);
@@ -1270,11 +1298,11 @@ async fn cj7b_add_job_binds_existing_conversation_to_job() {
     let (svc, _, _, conv_repo, _, _) = setup_with_conv_repo().await;
 
     let mut req = make_create_req("Bound Existing Conversation", every_60s());
-    req.conversation_id = 4;
+    req.conversation_id = Some(CONV_4.to_owned());
 
     let job = svc.add_job(TEST_USER_ID, req).await.unwrap();
 
-    let bound = conv_repo.get(4).await.unwrap().unwrap();
+    let bound = conv_repo.get(CONV_4).await.unwrap().unwrap();
     assert_eq!(bound.cron_job_id.as_deref(), Some(job.id.as_str()));
 
     let linked = conv_repo
@@ -1282,7 +1310,7 @@ async fn cj7b_add_job_binds_existing_conversation_to_job() {
         .await
         .unwrap();
     assert_eq!(linked.len(), 1);
-    assert_eq!(linked[0].id, 4);
+    assert_eq!(linked[0].id, CONV_4);
 }
 
 // ── CJ-8: Update job ──────────────────────────────────────────────
@@ -1365,7 +1393,7 @@ async fn cj10_update_nonexistent() {
         conversation_title: None,
         max_retries: None,
     };
-    let err = svc.update_job(TEST_USER_ID, "cron_nonexistent", req).await.unwrap_err();
+    let err = svc.update_job(TEST_USER_ID, MISSING_JOB_ID, req).await.unwrap_err();
     assert!(matches!(
         err,
         nomifun_cron::error::CronError::JobNotFound(_)
@@ -1401,7 +1429,7 @@ async fn cj11_delete_job() {
 #[tokio::test]
 async fn cj12_delete_nonexistent() {
     let (svc, _, _) = setup().await;
-    let err = svc.remove_job(TEST_USER_ID, "cron_nonexistent").await.unwrap_err();
+    let err = svc.remove_job(TEST_USER_ID, MISSING_JOB_ID).await.unwrap_err();
     assert!(matches!(
         err,
         nomifun_cron::error::CronError::JobNotFound(_)
@@ -1433,8 +1461,8 @@ async fn sk1_1_save_skill_marks_related_skill_suggest_artifacts_saved() {
         .unwrap();
 
     conv_repo.upsert_artifact_row(nomifun_db::ConversationArtifactRow {
-        id: 0,
-        conversation_id: 1,
+        id: ConversationArtifactId::new().into_string(),
+        conversation_id: CONV_1.to_owned(),
         cron_job_id: Some(job.id.clone()),
         kind: "skill_suggest".into(),
         status: "active".into(),
@@ -1472,7 +1500,7 @@ async fn sk1_1_save_skill_marks_related_skill_suggest_artifacts_saved() {
                 && event.data["status"] == "saved"
         })
         .expect("save_skill should broadcast saved artifact upsert");
-    assert_eq!(saved_event.data["conversation_id"], 1);
+    assert_eq!(saved_event.data["conversation_id"], CONV_1);
 }
 
 // ── SK-2: Has skill (true) ────────────────────────────────────────
@@ -1567,7 +1595,7 @@ async fn sk6_save_skill_nonexistent() {
     let err = svc
         .save_skill(
             TEST_USER_ID,
-            "cron_nonexistent",
+            MISSING_JOB_ID,
             SaveCronSkillRequest {
                 content: "---\nname: x\n---\nOk".into(),
             },
@@ -1711,7 +1739,7 @@ async fn oc1_init_preserves_lazy_existing_jobs() {
     let (svc, _repo, _) = setup().await;
 
     let mut req = make_create_req("Lazy Existing", every_60s());
-    req.conversation_id = 0;
+    req.conversation_id = None;
     req.execution_mode = Some("existing".into());
     let lazy = svc.add_job(TEST_USER_ID, req).await.unwrap();
 
@@ -1737,12 +1765,12 @@ async fn oc1b_init_preserves_new_conversation_jobs() {
     let (svc, _repo, _) = setup().await;
 
     let mut empty_req = make_create_req("New-conv empty", every_60s());
-    empty_req.conversation_id = 0;
+    empty_req.conversation_id = None;
     empty_req.execution_mode = Some("new_conversation".into());
     let empty = svc.add_job(TEST_USER_ID, empty_req).await.unwrap();
 
     let mut stale_req = make_create_req("New-conv with stale id", every_60s());
-    stale_req.conversation_id = 8;
+    stale_req.conversation_id = Some(CONV_8.to_owned());
     stale_req.execution_mode = Some("new_conversation".into());
     let stale = svc.add_job(TEST_USER_ID, stale_req).await.unwrap();
 
@@ -1766,13 +1794,13 @@ async fn oc2_init_cleans_jobs_with_missing_conversation() {
     // Create through a valid owner-scoped boundary, then mutate the persisted
     // fixture to emulate a legacy/orphaned row discovered during boot. New API
     // writes correctly reject a missing Conversation before persistence.
-    missing_req.conversation_id = 7;
+    missing_req.conversation_id = Some(CONV_7.to_owned());
     let missing = svc.add_job(TEST_USER_ID, missing_req).await.unwrap();
     repo.update(
         TEST_USER_ID,
         &missing.id,
         &nomifun_db::UpdateCronJobParams {
-            conversation_id: Some(Some(9)),
+            conversation_id: Some(Some(CONV_MISSING.to_owned())),
             ..Default::default()
         },
     )
@@ -1780,7 +1808,7 @@ async fn oc2_init_cleans_jobs_with_missing_conversation() {
     .unwrap();
 
     let mut normal_req = make_create_req("Existing Conversation", every_60s());
-    normal_req.conversation_id = 7;
+    normal_req.conversation_id = Some(CONV_7.to_owned());
     let normal = svc.add_job(TEST_USER_ID, normal_req).await.unwrap();
 
     svc.init().await;
@@ -1832,11 +1860,11 @@ async fn icron_service_create_job() {
         message: "do agent work".into(),
     };
 
-    let result = ICronService::create_job(&svc, TEST_USER_ID, "1", &params).await;
+    let result = ICronService::create_job(&svc, TEST_USER_ID, CONV_1, &params).await;
     assert!(result.success);
     assert!(result.message.contains("Agent Job"));
 
-    let bound = conv_repo.get(1).await.unwrap().unwrap();
+    let bound = conv_repo.get(CONV_1).await.unwrap().unwrap();
     assert!(bound.cron_job_id.is_some());
 }
 
@@ -1853,12 +1881,12 @@ async fn icron_service_create_job_inherits_conversation_mode_and_backend() {
         message: "do agent work".into(),
     };
 
-    let result = ICronService::create_job(&svc, TEST_USER_ID, "10", &params).await;
+    let result = ICronService::create_job(&svc, TEST_USER_ID, CONV_MODE, &params).await;
     assert!(result.success);
 
     let jobs = svc
         .list_jobs(TEST_USER_ID, &ListCronJobsQuery {
-            conversation_id: Some(10),
+            conversation_id: Some(CONV_MODE.to_owned()),
         })
         .await
         .unwrap();
@@ -1891,21 +1919,21 @@ async fn icron_service_create_job_forces_full_auto_mode_for_generated_crons() {
         message: "do agent work".into(),
     };
 
-    let gemini = ICronService::create_job(&svc, TEST_USER_ID, "11", &params).await;
+    let gemini = ICronService::create_job(&svc, TEST_USER_ID, CONV_MODE_DEFAULT, &params).await;
     assert!(gemini.success);
 
-    let codex = ICronService::create_job(&svc, TEST_USER_ID, "12", &params).await;
+    let codex = ICronService::create_job(&svc, TEST_USER_ID, CONV_MODE_CODEX, &params).await;
     assert!(codex.success);
 
-    let claude = ICronService::create_job(&svc, TEST_USER_ID, "13", &params).await;
+    let claude = ICronService::create_job(&svc, TEST_USER_ID, CONV_MODE_CLAUDE, &params).await;
     assert!(claude.success);
 
-    let nomi = ICronService::create_job(&svc, TEST_USER_ID, "14", &params).await;
+    let nomi = ICronService::create_job(&svc, TEST_USER_ID, CONV_MODE_NOMI, &params).await;
     assert!(nomi.success);
 
     let gemini_jobs = svc
         .list_jobs(TEST_USER_ID, &ListCronJobsQuery {
-            conversation_id: Some(11),
+            conversation_id: Some(CONV_MODE_DEFAULT.to_owned()),
         })
         .await
         .unwrap();
@@ -1919,7 +1947,7 @@ async fn icron_service_create_job_forces_full_auto_mode_for_generated_crons() {
 
     let codex_jobs = svc
         .list_jobs(TEST_USER_ID, &ListCronJobsQuery {
-            conversation_id: Some(12),
+            conversation_id: Some(CONV_MODE_CODEX.to_owned()),
         })
         .await
         .unwrap();
@@ -1933,7 +1961,7 @@ async fn icron_service_create_job_forces_full_auto_mode_for_generated_crons() {
 
     let claude_jobs = svc
         .list_jobs(TEST_USER_ID, &ListCronJobsQuery {
-            conversation_id: Some(13),
+            conversation_id: Some(CONV_MODE_CLAUDE.to_owned()),
         })
         .await
         .unwrap();
@@ -1947,7 +1975,7 @@ async fn icron_service_create_job_forces_full_auto_mode_for_generated_crons() {
 
     let nomi_jobs = svc
         .list_jobs(TEST_USER_ID, &ListCronJobsQuery {
-            conversation_id: Some(14),
+            conversation_id: Some(CONV_MODE_NOMI.to_owned()),
         })
         .await
         .unwrap();
@@ -1968,24 +1996,24 @@ async fn icron_service_list_jobs() {
 
     use nomifun_conversation::response_middleware::ICronService;
 
-    let result = ICronService::list_jobs(&svc, TEST_USER_ID, "1").await;
+    let result = ICronService::list_jobs(&svc, TEST_USER_ID, CONV_1).await;
     assert!(result.success);
     assert!(
         result
             .message
-            .contains("No cron jobs found for conversation '1'")
+            .contains(&format!("No cron jobs found for conversation '{}'", CONV_1))
     );
 
     let mut req = make_create_req("Listed Job", every_60s());
-    req.conversation_id = 1;
+    req.conversation_id = Some(CONV_1.to_owned());
     svc.add_job(TEST_USER_ID, req).await.unwrap();
 
-    let result = ICronService::list_jobs(&svc, TEST_USER_ID, "1").await;
+    let result = ICronService::list_jobs(&svc, TEST_USER_ID, CONV_1).await;
     assert!(result.success);
     assert!(
         result
             .message
-            .contains("1 cron job(s) for conversation '1'")
+            .contains(&format!("Found 1 cron job(s) for conversation '{}'", CONV_1))
     );
     assert!(result.message.contains("Listed Job"));
 }
@@ -2011,11 +2039,11 @@ async fn icron_service_update_job() {
         message: "do updated work".into(),
     };
 
-    let result = ICronService::update_job(&svc, TEST_USER_ID, "1", &params).await;
+    let result = ICronService::update_job(&svc, TEST_USER_ID, CONV_1, &params).await;
     assert!(result.success);
     assert!(result.message.contains("Updated Via Trait"));
 
-    let bound = conv_repo.get(1).await.unwrap().unwrap();
+    let bound = conv_repo.get(CONV_1).await.unwrap().unwrap();
     assert_eq!(bound.cron_job_id.as_deref(), Some(job.id.as_str()));
 
     let linked = conv_repo
@@ -2023,7 +2051,7 @@ async fn icron_service_update_job() {
         .await
         .unwrap();
     assert_eq!(linked.len(), 1);
-    assert_eq!(linked[0].id, 1);
+    assert_eq!(linked[0].id, CONV_1);
 }
 
 // ── ICronService trait: delete ─────────────────────────────────────
@@ -2042,7 +2070,7 @@ async fn icron_service_delete_job() {
     let result = ICronService::delete_job(&svc, TEST_USER_ID, &job.id).await;
     assert!(result.success);
 
-    let result = ICronService::delete_job(&svc, TEST_USER_ID, "cron_nonexistent").await;
+    let result = ICronService::delete_job(&svc, TEST_USER_ID, MISSING_JOB_ID).await;
     assert!(!result.success);
 }
 
@@ -2157,7 +2185,7 @@ async fn sr1_system_resume_missed_job() {
         events.iter().any(|event| {
             event.name == "message.stream"
                 && event.data["type"] == "tips"
-                && event.data["conversation_id"] == "1"
+                && event.data["conversation_id"] == CONV_1
         }),
         "resume should emit a tips websocket message"
     );
@@ -2170,20 +2198,20 @@ async fn cd1_cascade_delete_by_conversation() {
     let (svc, _repo, bc) = setup().await;
 
     let mut req_a = make_create_req("Cascade A", every_60s());
-    req_a.conversation_id = 5;
+    req_a.conversation_id = Some(CONV_5.to_owned());
     let job_a = svc.add_job(TEST_USER_ID, req_a).await.unwrap();
 
     let mut req_b = make_create_req("Cascade B", every_60s());
-    req_b.conversation_id = 5;
+    req_b.conversation_id = Some(CONV_5.to_owned());
     let job_b = svc.add_job(TEST_USER_ID, req_b).await.unwrap();
 
     let mut req_c = make_create_req("Unrelated", every_60s());
-    req_c.conversation_id = 3;
+    req_c.conversation_id = Some(CONV_3.to_owned());
     let _job_c = svc.add_job(TEST_USER_ID, req_c).await.unwrap();
 
     bc.take_events();
 
-    svc.delete_jobs_by_conversation(TEST_USER_ID, 5)
+    svc.delete_jobs_by_conversation(TEST_USER_ID, CONV_5)
         .await;
 
     assert!(svc.get_job(TEST_USER_ID, &job_a.id).await.is_err());
@@ -2211,7 +2239,7 @@ async fn cd2_cascade_delete_no_matching_jobs() {
         .unwrap();
     bc.take_events();
 
-    svc.delete_jobs_by_conversation(TEST_USER_ID, 999)
+    svc.delete_jobs_by_conversation(TEST_USER_ID, "conv_0190f5fe-7c00-7a00-8abc-012345679999")
         .await;
 
     let events = bc.take_events();
@@ -2233,11 +2261,11 @@ async fn cd3_on_conversation_delete_trait() {
     let (svc, _repo, bc) = setup().await;
 
     let mut req = make_create_req("Trait Cascade", every_60s());
-    req.conversation_id = 6;
+    req.conversation_id = Some(CONV_6.to_owned());
     let job = svc.add_job(TEST_USER_ID, req).await.unwrap();
     bc.take_events();
 
-    svc.on_conversation_deleted(TEST_USER_ID, 6).await;
+    svc.on_conversation_deleted(TEST_USER_ID, CONV_6).await;
 
     assert!(svc.get_job(TEST_USER_ID, &job.id).await.is_err());
 

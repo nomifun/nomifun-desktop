@@ -425,7 +425,7 @@ mod tests {
 
     fn mount(name: &str, rel: &str) -> KnowledgeMountInfo {
         KnowledgeMountInfo {
-            id: format!("kb_{name}"),
+            id: nomifun_common::KnowledgeBaseId::new(),
             name: name.to_owned(),
             description: String::new(),
             rel_path: rel.to_owned(),
@@ -469,13 +469,23 @@ mod tests {
 
     #[test]
     fn empty_mounts_build_nothing() {
-        assert_eq!(build_knowledge_context(&[], &prompt_opts(false, None, "conv-1")), None);
+        assert_eq!(
+            build_knowledge_context(
+                &[],
+                &prompt_opts(
+                    false,
+                    None,
+                    "conv_0190f5fe-7c00-7a00-8000-000000000001",
+                ),
+            ),
+            None
+        );
         let readme_opts = KnowledgeContextOptions {
             format: KnowledgeContextFormat::TerminalReadme,
             writeback: true,
             writeback_mode: None,
             writeback_eagerness: None,
-            target_id: "term-1",
+            target_id: "term_0190f5fe-7c00-7a00-8000-000000000001",
             has_search_tool: false,
             has_write_tool: false,
         };
@@ -491,7 +501,11 @@ mod tests {
         m.summary = Some("Covers deployment flows and on-call runbooks.".into());
         m.toc = vec!["concepts/术语.md — 术语表".into(), "(+3 more files)".into()];
 
-        let out = build_knowledge_context(&[m], &prompt_opts(false, None, "conv-1")).unwrap();
+        let out = build_knowledge_context(
+            &[m],
+            &prompt_opts(false, None, "conv_0190f5fe-7c00-7a00-8000-000000000001"),
+        )
+        .unwrap();
 
         // Section heading stays compatible with the historical one.
         assert!(out.starts_with("## Knowledge bases (extended knowledge source)"), "got: {out}");
@@ -521,7 +535,11 @@ mod tests {
     #[test]
     fn empty_description_and_summary_lines_are_omitted() {
         let m = mount("库A", ".nomi/knowledge/库A");
-        let out = build_knowledge_context(&[m], &prompt_opts(false, None, "conv-1")).unwrap();
+        let out = build_knowledge_context(
+            &[m],
+            &prompt_opts(false, None, "conv_0190f5fe-7c00-7a00-8000-000000000001"),
+        )
+        .unwrap();
         assert!(!out.contains("Description:"), "got: {out}");
         assert!(!out.contains("Summary:"), "got: {out}");
         // The when-to-consult guidance survives even without description.
@@ -537,7 +555,11 @@ mod tests {
             "docs/ — 12 files".into(),
             "(+3 more files)".into(),
         ];
-        let out = build_knowledge_context(&[m], &prompt_opts(false, None, "conv-1")).unwrap();
+        let out = build_knowledge_context(
+            &[m],
+            &prompt_opts(false, None, "conv_0190f5fe-7c00-7a00-8000-000000000001"),
+        )
+        .unwrap();
         assert!(out.contains("Topics include:"), "got: {out}");
         assert!(out.contains("回滚流程"), "got: {out}");
         assert!(out.contains("术语表"), "got: {out}");
@@ -557,7 +579,11 @@ mod tests {
         let mut m = mount("库A", ".nomi/knowledge/库A");
         m.description = "团队约定".into();
         m.toc = vec!["x.md — 标题".into()];
-        let out = build_knowledge_context(&[m], &prompt_opts(false, None, "conv-1")).unwrap();
+        let out = build_knowledge_context(
+            &[m],
+            &prompt_opts(false, None, "conv_0190f5fe-7c00-7a00-8000-000000000001"),
+        )
+        .unwrap();
         assert!(!out.contains("Topics include:"), "described base needs no hint line: {out}");
         assert!(out.contains("团队约定"));
     }
@@ -568,7 +594,11 @@ mod tests {
     fn multi_base_renders_protocol_once() {
         let a = mount("库A", ".nomi/knowledge/库A");
         let b = mount("库B", ".nomi/knowledge/库B");
-        let out = build_knowledge_context(&[a, b], &prompt_opts(false, None, "conv-1")).unwrap();
+        let out = build_knowledge_context(
+            &[a, b],
+            &prompt_opts(false, None, "conv_0190f5fe-7c00-7a00-8000-000000000001"),
+        )
+        .unwrap();
         assert_eq!(out.matches("Retrieval protocol").count(), 1, "got: {out}");
         assert_eq!(out.matches("Write-back is DISABLED").count(), 1, "got: {out}");
         assert!(out.contains("### 库A"), "got: {out}");
@@ -580,7 +610,11 @@ mod tests {
     #[test]
     fn protocol_mentions_search_tool_when_available() {
         let m = mount("库A", ".nomi/knowledge/库A");
-        let mut opts = prompt_opts(false, None, "conv-1");
+        let mut opts = prompt_opts(
+            false,
+            None,
+            "conv_0190f5fe-7c00-7a00-8000-000000000001",
+        );
         opts.has_search_tool = true;
         let out = build_knowledge_context(std::slice::from_ref(&m), &opts).unwrap();
         assert!(out.contains("call the `knowledge_search` tool"), "got: {out}");
@@ -590,7 +624,11 @@ mod tests {
     #[test]
     fn protocol_keeps_grep_wording_without_search_tool() {
         let m = mount("库A", ".nomi/knowledge/库A");
-        let out = build_knowledge_context(&[m], &prompt_opts(false, None, "conv-1")).unwrap();
+        let out = build_knowledge_context(
+            &[m],
+            &prompt_opts(false, None, "conv_0190f5fe-7c00-7a00-8000-000000000001"),
+        )
+        .unwrap();
         assert!(out.contains("Grep/Glob"), "got: {out}");
         assert!(!out.contains("knowledge_search"), "got: {out}");
     }
@@ -681,19 +719,42 @@ mod tests {
     fn staged_writeback_scopes_inbox_to_target_id() {
         let m = mount("库A", ".nomi/knowledge/库A");
         // Default mode (None) is staged.
-        let out = build_knowledge_context(std::slice::from_ref(&m), &prompt_opts(true, None, "term_42")).unwrap();
+        let out = build_knowledge_context(
+            std::slice::from_ref(&m),
+            &prompt_opts(true, None, "term_0190f5fe-7c00-7a00-8000-000000000001"),
+        )
+        .unwrap();
         assert!(out.contains("STAGED mode"), "got: {out}");
-        assert!(out.contains("_inbox/term_42/"), "got: {out}");
+        assert!(
+            out.contains("_inbox/term_0190f5fe-7c00-7a00-8000-000000000001/"),
+            "got: {out}"
+        );
         assert!(out.contains("READ-ONLY"), "got: {out}");
         // Explicit "staged" renders identically.
-        let explicit = build_knowledge_context(&[m], &prompt_opts(true, Some("staged"), "term_42")).unwrap();
+        let explicit = build_knowledge_context(
+            &[m],
+            &prompt_opts(
+                true,
+                Some("staged"),
+                "term_0190f5fe-7c00-7a00-8000-000000000001",
+            ),
+        )
+        .unwrap();
         assert_eq!(out, explicit);
     }
 
     #[test]
     fn direct_writeback_never_mentions_inbox() {
         let m = mount("库A", ".nomi/knowledge/库A");
-        let out = build_knowledge_context(&[m], &prompt_opts(true, Some("direct"), "conv-1")).unwrap();
+        let out = build_knowledge_context(
+            &[m],
+            &prompt_opts(
+                true,
+                Some("direct"),
+                "conv_0190f5fe-7c00-7a00-8000-000000000001",
+            ),
+        )
+        .unwrap();
         assert!(out.contains("DIRECT mode"), "got: {out}");
         assert!(!out.contains("_inbox"), "got: {out}");
     }
@@ -702,7 +763,11 @@ mod tests {
     fn tool_writeback_contract_directs_handle_use_for_updates() {
         let m = mount("库A", ".nomi/knowledge/库A");
         // DIRECT + tools available: update via handle, read via knowledge_read.
-        let mut direct = prompt_opts(true, Some("direct"), "conv-1");
+        let mut direct = prompt_opts(
+            true,
+            Some("direct"),
+            "conv_0190f5fe-7c00-7a00-8000-000000000001",
+        );
         direct.has_write_tool = true;
         direct.has_search_tool = true;
         let out = build_knowledge_context(std::slice::from_ref(&m), &direct).unwrap();
@@ -710,7 +775,11 @@ mod tests {
         assert!(out.contains("handle"), "update path must reference the handle: {out}");
         assert!(out.contains("knowledge_read"), "got: {out}");
         // STAGED + tools: emphasize auto-placement + original untouched.
-        let mut staged = prompt_opts(true, Some("staged"), "conv-1");
+        let mut staged = prompt_opts(
+            true,
+            Some("staged"),
+            "conv_0190f5fe-7c00-7a00-8000-000000000001",
+        );
         staged.has_write_tool = true;
         staged.has_search_tool = true;
         let s = build_knowledge_context(&[m], &staged).unwrap();
@@ -737,7 +806,11 @@ mod tests {
         ];
         let plain = mount("普通库", ".nomi/knowledge/普通库");
 
-        let out = build_knowledge_context(&[m, plain], &prompt_opts(false, None, "conv-1")).unwrap();
+        let out = build_knowledge_context(
+            &[m, plain],
+            &prompt_opts(false, None, "conv_0190f5fe-7c00-7a00-8000-000000000001"),
+        )
+        .unwrap();
         assert!(out.contains("Realtime sources"), "got: {out}");
         assert!(out.contains("API docs"), "got: {out}");
         assert!(out.contains("https://example.com/api-docs"), "got: {out}");
@@ -772,9 +845,20 @@ mod tests {
     #[test]
     fn unknown_writeback_mode_renders_staged_contract() {
         let m = mount("库A", ".nomi/knowledge/库A");
-        let out = build_knowledge_context(&[m], &prompt_opts(true, Some("yolo"), "conv-7")).unwrap();
+        let out = build_knowledge_context(
+            &[m],
+            &prompt_opts(
+                true,
+                Some("yolo"),
+                "conv_0190f5fe-7c00-7a00-8000-000000000007",
+            ),
+        )
+        .unwrap();
         assert!(out.contains("STAGED mode"), "got: {out}");
-        assert!(out.contains("_inbox/conv-7/"), "got: {out}");
+        assert!(
+            out.contains("_inbox/conv_0190f5fe-7c00-7a00-8000-000000000007/"),
+            "got: {out}"
+        );
         assert!(!out.contains("DIRECT mode"), "got: {out}");
     }
 
@@ -798,12 +882,24 @@ mod tests {
     fn enabled_writeback_appends_conservative_clause_by_default() {
         let m = mount("库A", ".nomi/knowledge/库A");
         // Default eagerness (None) under staged mode.
-        let staged = build_knowledge_context(&[m.clone()], &prompt_opts(true, None, "conv-1")).unwrap();
+        let staged = build_knowledge_context(
+            &[m.clone()],
+            &prompt_opts(true, None, "conv_0190f5fe-7c00-7a00-8000-000000000001"),
+        )
+        .unwrap();
         assert!(staged.contains("STAGED mode"), "got: {staged}");
         assert!(staged.contains("Disposition — CONSERVATIVE"), "got: {staged}");
         assert!(!staged.contains("Disposition — AGGRESSIVE"), "got: {staged}");
         // Default eagerness under direct mode too.
-        let direct = build_knowledge_context(&[m], &prompt_opts(true, Some("direct"), "conv-1")).unwrap();
+        let direct = build_knowledge_context(
+            &[m],
+            &prompt_opts(
+                true,
+                Some("direct"),
+                "conv_0190f5fe-7c00-7a00-8000-000000000001",
+            ),
+        )
+        .unwrap();
         assert!(direct.contains("DIRECT mode"), "got: {direct}");
         assert!(direct.contains("Disposition — CONSERVATIVE"), "got: {direct}");
     }
@@ -814,18 +910,31 @@ mod tests {
         let m = mount("库A", ".nomi/knowledge/库A");
         let staged = build_knowledge_context(
             &[m.clone()],
-            &prompt_opts_eager(true, Some("staged"), Some("aggressive"), "conv-1"),
+            &prompt_opts_eager(
+                true,
+                Some("staged"),
+                Some("aggressive"),
+                "conv_0190f5fe-7c00-7a00-8000-000000000001",
+            ),
         )
         .unwrap();
         assert!(staged.contains("STAGED mode"), "got: {staged}");
         assert!(staged.contains("Disposition — AGGRESSIVE"), "got: {staged}");
         assert!(!staged.contains("Disposition — CONSERVATIVE"), "got: {staged}");
         // Staged placement survives an aggressive disposition (inbox still scoped).
-        assert!(staged.contains("_inbox/conv-1/"), "got: {staged}");
+        assert!(
+            staged.contains("_inbox/conv_0190f5fe-7c00-7a00-8000-000000000001/"),
+            "got: {staged}"
+        );
 
         let direct = build_knowledge_context(
             &[m],
-            &prompt_opts_eager(true, Some("direct"), Some("aggressive"), "conv-1"),
+            &prompt_opts_eager(
+                true,
+                Some("direct"),
+                Some("aggressive"),
+                "conv_0190f5fe-7c00-7a00-8000-000000000001",
+            ),
         )
         .unwrap();
         assert!(direct.contains("DIRECT mode"), "got: {direct}");
@@ -840,7 +949,12 @@ mod tests {
         let m = mount("库A", ".nomi/knowledge/库A");
         let out = build_knowledge_context(
             &[m],
-            &prompt_opts_eager(false, None, Some("aggressive"), "conv-1"),
+            &prompt_opts_eager(
+                false,
+                None,
+                Some("aggressive"),
+                "conv_0190f5fe-7c00-7a00-8000-000000000001",
+            ),
         )
         .unwrap();
         assert!(out.contains("Write-back is DISABLED"), "got: {out}");
@@ -868,14 +982,28 @@ mod tests {
     #[test]
     fn tool_contract_directs_to_knowledge_write_in_both_modes() {
         let m = mount("库A", ".nomi/knowledge/库A");
-        let staged = build_knowledge_context(&[m.clone()], &prompt_opts_tooled(Some("staged"), "conv-1")).unwrap();
+        let staged = build_knowledge_context(
+            &[m.clone()],
+            &prompt_opts_tooled(
+                Some("staged"),
+                "conv_0190f5fe-7c00-7a00-8000-000000000001",
+            ),
+        )
+        .unwrap();
         assert!(staged.contains("knowledge_write"), "got: {staged}");
         assert!(staged.contains("STAGED mode"), "got: {staged}");
         assert!(staged.contains("Do NOT use the generic Write/Edit"), "got: {staged}");
         // The staged inbox PATH is now internal to the tool — never leaked to the model.
         assert!(!staged.contains("_inbox/"), "tool contract must not advertise the inbox path: {staged}");
 
-        let direct = build_knowledge_context(&[m], &prompt_opts_tooled(Some("direct"), "conv-1")).unwrap();
+        let direct = build_knowledge_context(
+            &[m],
+            &prompt_opts_tooled(
+                Some("direct"),
+                "conv_0190f5fe-7c00-7a00-8000-000000000001",
+            ),
+        )
+        .unwrap();
         assert!(direct.contains("knowledge_write"), "got: {direct}");
         assert!(direct.contains("DIRECT mode"), "got: {direct}");
         assert!(direct.contains("Do NOT use the generic Write/Edit"), "got: {direct}");
@@ -892,7 +1020,7 @@ mod tests {
             writeback: false,
             writeback_mode: None,
             writeback_eagerness: None,
-            target_id: "conv-1",
+            target_id: "conv_0190f5fe-7c00-7a00-8000-000000000001",
             has_search_tool: true,
             has_write_tool: true,
         };
@@ -908,7 +1036,12 @@ mod tests {
         let m = mount("库A", ".nomi/knowledge/库A");
         let out = build_knowledge_context(
             &[m],
-            &prompt_opts_eager(true, None, Some("yolo"), "conv-1"),
+            &prompt_opts_eager(
+                true,
+                None,
+                Some("yolo"),
+                "conv_0190f5fe-7c00-7a00-8000-000000000001",
+            ),
         )
         .unwrap();
         assert!(out.contains("Disposition — CONSERVATIVE"), "got: {out}");
@@ -926,7 +1059,7 @@ mod tests {
             writeback: true,
             writeback_mode: None,
             writeback_eagerness: None,
-            target_id: "conv-9",
+            target_id: "conv_0190f5fe-7c00-7a00-8000-000000000009",
             has_search_tool: false,
             has_write_tool: false,
         };
@@ -941,23 +1074,27 @@ mod tests {
         assert!(out.contains("### 领域知识"), "got: {out}");
         assert!(out.contains("intro.md — 简介"), "got: {out}");
         assert!(out.contains("STAGED mode"), "got: {out}");
-        assert!(out.contains("_inbox/conv-9/"), "got: {out}");
+        assert!(
+            out.contains("_inbox/conv_0190f5fe-7c00-7a00-8000-000000000009/"),
+            "got: {out}"
+        );
         // The prompt-section heading must not leak into the readme format.
         assert!(!out.contains("## Knowledge bases (extended knowledge source)"), "got: {out}");
     }
 
-    // ── serde backward compatibility of the extra shape ──────────────
+    // ── serde defaults for optional extra fields ─────────────────────
 
     #[test]
-    fn mount_info_deserializes_legacy_extra_without_new_fields() {
-        let legacy = serde_json::json!({
-            "id": "kb1",
+    fn mount_info_deserializes_extra_without_new_fields() {
+        let minimal = serde_json::json!({
+            "id": "kb_0190f5fe-7c00-7a00-8000-000000000001",
             "name": "运维手册",
             "description": "",
             "rel_path": ".nomi/knowledge/运维手册",
             "toc": ["deploy.md — 部署"],
         });
-        let m: KnowledgeMountInfo = serde_json::from_value(legacy).expect("legacy extra must deserialize");
+        let m: KnowledgeMountInfo =
+            serde_json::from_value(minimal).expect("optional fields may be omitted");
         assert_eq!(m.summary, None);
         assert!(m.live_sources.is_empty());
 

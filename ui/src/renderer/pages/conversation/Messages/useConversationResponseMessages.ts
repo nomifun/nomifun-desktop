@@ -3,6 +3,7 @@
  * Copyright 2025-2026 NomiFun (nomifun.com)
  * SPDX-License-Identifier: Apache-2.0
  */
+import type { ConversationId } from '@/common/types/ids';
 
 import { ipcBridge } from '@/common';
 import { transformMessage } from '@/common/chat/chatLib';
@@ -14,7 +15,7 @@ import { useAddOrUpdateMessage } from './hooks';
  * only needs to track local busy state. Keeping this subscription at the chat
  * surface lets immutable transcripts stay live even when no SendBox is mounted.
  */
-export function useConversationResponseMessages(conversation_id: number): void {
+export function useConversationResponseMessages(conversation_id: ConversationId): void {
   const addOrUpdateMessage = useAddOrUpdateMessage();
 
   useEffect(() => {

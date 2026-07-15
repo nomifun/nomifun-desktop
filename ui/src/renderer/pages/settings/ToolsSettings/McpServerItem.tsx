@@ -1,6 +1,7 @@
 import { Collapse } from '@arco-design/web-react';
 import React from 'react';
 import type { IMcpServer } from '@/common/config/storage';
+import type { McpServerId } from '@/common/types/ids';
 import McpServerHeader from './McpServerHeader';
 import McpServerToolsList from './McpServerToolsList';
 import type { McpOAuthStatus } from '@/renderer/hooks/mcp/useMcpOAuth';
@@ -16,7 +17,7 @@ interface McpServerItemProps {
   onToggleCollapse: () => void;
   onTestConnection: (server: IMcpServer) => void;
   onEditServer: (server: IMcpServer) => void;
-  onDeleteServer: (serverId: number) => void;
+  onDeleteServer: (serverId: McpServerId) => void;
   onOAuthLogin?: (server: IMcpServer) => void;
 }
 

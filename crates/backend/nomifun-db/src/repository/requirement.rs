@@ -10,13 +10,13 @@ pub struct ListRequirementsParams {
     pub status: Option<String>,
     /// Filter by the executing session (a conversation or terminal id). Matches
     /// the `owner_session_id` column (`idx_requirements_owner`).
-    pub owner_session_id: Option<i64>,
+    pub owner_conversation_id: Option<String>,
     /// Filter by the owner domain (`"conversation"` | `"terminal"`). Paired with
     /// `owner_session_id` it disambiguates the dual-domain owner column — after
     /// integerization a conversation and a terminal can share a numeric id, so a
     /// session-scoped query (e.g. clearing a deleted session's requirements) MUST
     /// constrain `owner_kind` too, or it crosses domains (spec §2.2).
-    pub owner_kind: Option<String>,
+    pub owner_terminal_id: Option<String>,
     /// Substring search over title + content (case-insensitive).
     pub q: Option<String>,
     /// Sort column (whitelisted in the repository). Recognized values:
@@ -37,18 +37,18 @@ pub struct ListRequirementsParams {
 /// Data access abstraction for the `requirements` table.
 #[async_trait::async_trait]
 pub trait IRequirementRepository: Send + Sync {
-    /// Insert a new requirement row. The `id` field of `row` is ignored: the id
-    /// is allocated by SQLite (INTEGER PK AUTOINCREMENT) and returned.
-    async fn insert(&self, row: &RequirementRow) -> Result<i64, DbError>;
+    /// Insert a new requirement row with its caller-supplied canonical
+    /// `req_<UUIDv7>` entity ID.
+    async fn insert(&self, row: &RequirementRow) -> Result<String, DbError>;
 
     /// Partial update by ID. Returns `DbError::NotFound` if absent.
-    async fn update(&self, id: i64, params: &RequirementRowUpdate) -> Result<(), DbError>;
+    async fn update(&self, id: &str, params: &RequirementRowUpdate) -> Result<(), DbError>;
 
     /// Delete by ID. Returns `DbError::NotFound` if absent.
-    async fn delete(&self, id: i64) -> Result<(), DbError>;
+    async fn delete(&self, id: &str) -> Result<(), DbError>;
 
     /// Fetch a single requirement by ID.
-    async fn get_by_id(&self, id: i64) -> Result<Option<RequirementRow>, DbError>;
+    async fn get_by_id(&self, id: &str) -> Result<Option<RequirementRow>, DbError>;
 
     /// List with filters + pagination. Returns `(rows, total_matching)`.
     async fn list(&self, params: &ListRequirementsParams) -> Result<(Vec<RequirementRow>, u64), DbError>;
@@ -70,15 +70,22 @@ pub trait IRequirementRepository: Send + Sync {
     async fn claim_next(
         &self,
         tag: &str,
-        owner_session_id: i64,
-        owner_kind: &str,
+        owner_conversation_id: Option<&str>,
+        owner_terminal_id: Option<&str>,
         lease_ms: i64,
         now: TimestampMs,
     ) -> Result<Option<RequirementRow>, DbError>;
 
     /// Renew the lease for a requirement currently claimed by `owner` (matched
     /// against `owner_session_id`). Returns true if a row was renewed.
-    async fn renew_lease(&self, id: i64, owner: i64, lease_ms: i64, now: TimestampMs) -> Result<bool, DbError>;
+    async fn renew_lease(
+        &self,
+        id: &str,
+        owner_conversation_id: Option<&str>,
+        owner_terminal_id: Option<&str>,
+        lease_ms: i64,
+        now: TimestampMs,
+    ) -> Result<bool, DbError>;
 
     /// Re-pend in_progress requirements whose lease expired and whose owning
     /// session is no longer active. Each active entry is a `(owner_kind,
@@ -88,7 +95,8 @@ pub trait IRequirementRepository: Send + Sync {
     /// as keeping a stale `term#5` claim alive (spec §2.2). Returns the count reset.
     async fn sweep_expired_leases(
         &self,
-        active_sessions: &[(String, i64)],
+        active_conversation_ids: &[String],
+        active_terminal_ids: &[String],
         now: TimestampMs,
     ) -> Result<u64, DbError>;
 
@@ -101,7 +109,7 @@ pub trait IRequirementRepository: Send + Sync {
         &self,
         tag: &str,
         reason: &str,
-        req_id: Option<i64>,
+        req_id: Option<&str>,
         now: TimestampMs,
     ) -> Result<(), DbError>;
 
@@ -122,5 +130,10 @@ pub trait IRequirementRepository: Send + Sync {
     /// `status='in_progress' AND owner_session_id=owner`. Returns whether a
     /// row was reverted. Distinct from the error re-pend path, which DOES keep
     /// the consumed attempt.
-    async fn unclaim(&self, id: i64, owner: i64) -> Result<bool, DbError>;
+    async fn unclaim(
+        &self,
+        id: &str,
+        owner_conversation_id: Option<&str>,
+        owner_terminal_id: Option<&str>,
+    ) -> Result<bool, DbError>;
 }

@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use nomifun_common::{generate_prefixed_id, now_ms};
+use nomifun_common::{ConversationId, generate_prefixed_id, now_ms};
 use nomifun_db::IChannelRepository;
 use nomifun_db::models::ChannelSessionRow;
 use tracing::{debug, info};
@@ -182,12 +182,11 @@ impl SessionManager {
     /// Called after a new conversation is created for this session,
     /// linking the session to its backing conversation in the database.
     pub async fn bind_conversation(&self, session_id: &str, conversation_id: &str) -> Result<(), ChannelError> {
-        // Public API stays &str (Option A); the repo FK is now i64.
-        let conversation_id_i64 = conversation_id.parse::<i64>().map_err(|_| {
+        ConversationId::try_from(conversation_id).map_err(|_| {
             ChannelError::MessageSendFailed(format!("invalid conversation id: {conversation_id}"))
         })?;
         self.repo
-            .update_session_conversation(session_id, conversation_id_i64)
+            .update_session_conversation(session_id, conversation_id)
             .await?;
 
         debug!(
@@ -318,10 +317,10 @@ mod tests {
             }
         }
 
-        async fn update_session_conversation(&self, id: &str, conversation_id: i64) -> Result<(), DbError> {
+        async fn update_session_conversation(&self, id: &str, conversation_id: &str) -> Result<(), DbError> {
             let mut sessions = self.sessions.lock().unwrap();
             if let Some(s) = sessions.iter_mut().find(|s| s.id == id) {
-                s.conversation_id = Some(conversation_id);
+                s.conversation_id = Some(conversation_id.to_owned());
                 s.last_activity = nomifun_common::now_ms();
                 Ok(())
             } else {
@@ -541,18 +540,34 @@ mod tests {
         let (mgr, repo) = make_manager();
         let session = mgr.get_or_create_session("u1", "c1", "tg-1", "acp", None).await.unwrap();
         assert!(session.conversation_id.is_none());
+        let conversation_id = ConversationId::new();
 
-        mgr.bind_conversation(&session.id, "123").await.unwrap();
+        mgr.bind_conversation(&session.id, conversation_id.as_ref()).await.unwrap();
 
         let updated = repo.get_sessions().into_iter().find(|s| s.id == session.id).unwrap();
-        assert_eq!(updated.conversation_id, Some(123));
+        assert_eq!(updated.conversation_id.as_deref(), Some(conversation_id.as_ref()));
     }
 
     #[tokio::test]
     async fn bind_conversation_not_found() {
         let (mgr, _repo) = make_manager();
-        let err = mgr.bind_conversation("nonexistent", "123").await;
+        let conversation_id = ConversationId::new();
+        let err = mgr
+            .bind_conversation("nonexistent", conversation_id.as_ref())
+            .await;
         assert!(err.is_err());
+    }
+
+    #[tokio::test]
+    async fn bind_conversation_rejects_noncanonical_id() {
+        let (mgr, repo) = make_manager();
+        let session = mgr.get_or_create_session("u1", "c1", "tg-1", "acp", None).await.unwrap();
+
+        let err = mgr.bind_conversation(&session.id, "123").await;
+
+        assert!(err.is_err());
+        let updated = repo.get_sessions().into_iter().find(|s| s.id == session.id).unwrap();
+        assert!(updated.conversation_id.is_none());
     }
 
     // ── reset_session ─────────────────────────────────────────────────

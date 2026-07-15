@@ -12,6 +12,7 @@ import { CheckOne, Loading, Pause, PauseOne, PlayOne, Refresh } from '@icon-park
 import { ipcBridge } from '@/common';
 import { useArcoMessage } from '@/renderer/utils/ui/useArcoMessage';
 import { refreshOnVersionConflict } from './refreshOnVersionConflict';
+import type { ExecutionId } from '@/common/types/ids';
 
 /** A single status-gated header control. Never a bare `<button>` — a
  * `role="button"` div, busy-aware (greyed + click-suppressed while in flight). */
@@ -62,7 +63,7 @@ const HeaderControl: React.FC<{
 
 /** Status-aware controls for a single agent execution. */
 export const ExecutionControls: React.FC<{
-  executionId: string;
+  executionId: ExecutionId;
   executionVersion: number;
   status: string;
   inFlightCount?: number;

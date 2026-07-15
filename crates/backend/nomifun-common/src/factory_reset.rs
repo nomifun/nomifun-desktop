@@ -79,6 +79,8 @@ const DB_FAMILY: &[&str] = &[
     "nomifun-backend.db",
 ];
 
+const DATASET_IDENTITY_FILES: &[&str] = &["storage-generation"];
+
 /// Derived data directories (relative to data_dir) wiped on a `Full` reset.
 /// Names are kept as literals here so `nomifun-common` need not depend on the
 /// domain crates; they mirror those crates' constants:
@@ -87,6 +89,8 @@ const DB_FAMILY: &[&str] = &[
 ///   `attachments` → `nomifun_requirement` `ATTACHMENTS_REL_DIR`
 ///   `cron`        → parent of `nomifun_cron::CRON_SKILLS_REL_DIR`
 ///   `conversations` → per-conversation workspaces (also handled under work_dir)
+/// The list also includes Workshop documents/assets and both the legacy
+/// `browser-profile` tree and the current `browser-profiles` tree.
 /// Intentionally NOT wiped (regenerable or in-use): `logs` (tracing holds an
 /// open handle), `runtime`, `bun-cache`, `bun-tmp`, `builtin-skills` (the next
 /// boot re-materializes them).
@@ -96,10 +100,12 @@ const DERIVED_DIRS: &[&str] = &[
     "knowledge",
     "companion",
     "cron",
+    "workshop",
     "preview-history",
     "nomi-sessions",
     "nomi-health-check-sessions",
     "browser-profile",
+    "browser-profiles",
 ];
 
 fn marker_path(data_dir: &Path) -> PathBuf {
@@ -169,6 +175,21 @@ pub fn apply_pending_reset(data_dir: &Path, work_dir: &Path) -> Result<bool, App
                 path = %path.display(),
                 error = %e,
                 "factory reset: could not remove derived path (continuing)"
+            );
+        }
+    }
+
+    // Rotate the dataset identity used to scope browser-side caches and backup
+    // manifests. Keeping it after the database is wiped would make a fresh
+    // dataset indistinguishable from the removed one.
+    for name in DATASET_IDENTITY_FILES {
+        let path = data_dir.join(name);
+        if let Err(e) = remove_path_with_retry(&path) {
+            tracing::warn!(
+                target: "factory_reset",
+                path = %path.display(),
+                error = %e,
+                "factory reset: could not remove dataset identity (continuing)"
             );
         }
     }
@@ -249,8 +270,18 @@ mod tests {
         touch(&dir.join("nomifun-backend.db-wal"));
         touch(&dir.join("nomifun-backend.db-shm"));
         touch(&dir.join("nomifun-backend.db.migrate.lock"));
+        touch(&dir.join("storage-generation"));
         // Derived data dirs.
-        for d in ["conversations", "attachments", "knowledge", "companion", "cron", "browser-profile"] {
+        for d in [
+            "conversations",
+            "attachments",
+            "knowledge",
+            "companion",
+            "cron",
+            "workshop",
+            "browser-profile",
+            "browser-profiles",
+        ] {
             std::fs::create_dir_all(dir.join(d)).unwrap();
             touch(&dir.join(d).join("inner.txt"));
         }
@@ -269,8 +300,18 @@ mod tests {
         for f in DB_FAMILY {
             assert!(!dir.join(f).exists(), "{f} should be deleted");
         }
+        assert!(!dir.join("storage-generation").exists());
         // Derived data gone.
-        for d in ["conversations", "attachments", "knowledge", "companion", "cron", "browser-profile"] {
+        for d in [
+            "conversations",
+            "attachments",
+            "knowledge",
+            "companion",
+            "cron",
+            "workshop",
+            "browser-profile",
+            "browser-profiles",
+        ] {
             assert!(!dir.join(d).exists(), "{d} should be deleted");
         }
         // Preserved.

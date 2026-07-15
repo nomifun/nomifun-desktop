@@ -199,6 +199,11 @@ mod tests {
         init_database_memory,
     };
 
+    const EXECUTION_ID: &str = "exec_0190f5fe-7c00-7a00-8000-000000000001";
+    const PARTICIPANT_ID: &str = "execpart_0190f5fe-7c00-7a00-8000-000000000001";
+    const PROVIDER_ID: &str = "prov_0190f5fe-7c00-7a00-8000-000000000001";
+    const USER_ID: &str = "user_0190f5fe-7c00-7a00-8000-000000000001";
+
     struct RecordingSink(std::sync::Mutex<Vec<(String, WebSocketMessage<serde_json::Value>)>>);
 
     impl UserEventSink for RecordingSink {
@@ -211,17 +216,17 @@ mod tests {
     fn change_event_is_the_only_durable_wire_shape() {
         let sink = Arc::new(RecordingSink(std::sync::Mutex::new(vec![])));
         AgentExecutionEventPublisher::new(sink.clone()).publish_change(
-            "owner_1",
+            USER_ID,
             AgentExecutionChangedEvent {
-                execution_id: "exec_1".to_owned(),
+                execution_id: EXECUTION_ID.to_owned(),
                 sequence: 9,
                 change_kind: AgentExecutionEventKind::StepChanged,
             },
         );
         let events = sink.0.lock().unwrap();
-        assert_eq!(events[0].0, "owner_1");
+        assert_eq!(events[0].0, USER_ID);
         assert_eq!(events[0].1.name, "agentExecution.changed");
-        assert_eq!(events[0].1.data["execution_id"], "exec_1");
+        assert_eq!(events[0].1.data["execution_id"], EXECUTION_ID);
         assert_eq!(events[0].1.data["sequence"], 9);
         assert_eq!(events[0].1.data["change_kind"], "step_changed");
     }
@@ -230,8 +235,8 @@ mod tests {
     fn full_lead_content_is_sent_only_to_the_named_owner() {
         let sink = Arc::new(RecordingSink(std::sync::Mutex::new(vec![])));
         AgentExecutionEventPublisher::new(sink.clone()).publish_lead_thinking(
-            "owner_1",
-            "exec_1",
+            USER_ID,
+            EXECUTION_ID,
             LeadThinkingPhase::Planning,
             LeadThinkingKind::Reasoning,
             Some("private delta"),
@@ -241,7 +246,7 @@ mod tests {
 
         let events = sink.0.lock().unwrap();
         assert_eq!(events.len(), 1);
-        assert_eq!(events[0].0, "owner_1");
+        assert_eq!(events[0].0, USER_ID);
         assert_eq!(events[0].1.name, "agentExecution.leadThinking");
         assert_eq!(events[0].1.data["phase"], "planning");
         assert_eq!(events[0].1.data["kind"], "reasoning");
@@ -256,7 +261,7 @@ mod tests {
             preset_id: None,
             preset_revision: None,
             preset_snapshot: None,
-            provider_id: Some("provider".to_owned()),
+            provider_id: Some(PROVIDER_ID.to_owned()),
             model: Some("model".to_owned()),
             role: None,
             capability: None,
@@ -297,22 +302,24 @@ mod tests {
     #[tokio::test]
     async fn outbox_drain_targets_installation_owner_and_marks_every_event_published() {
         let database = init_database_memory().await.unwrap();
+        let installation_owner = nomifun_db::installation_owner_id(database.pool()).await.unwrap();
         sqlx::query(
             "INSERT INTO providers (\
                 id, platform, name, base_url, api_key_encrypted, models, enabled, \
                 capabilities, created_at, updated_at\
-             ) VALUES ('provider', 'openai', 'provider', 'https://example.invalid', \
+             ) VALUES (?1, 'openai', 'provider', 'https://example.invalid', \
                        'encrypted', '[\"model\"]', 1, '[]', 1, 1)",
         )
+        .bind(PROVIDER_ID)
         .execute(database.pool())
         .await
         .unwrap();
         let repository = Arc::new(SqliteAgentExecutionRepository::new(database.pool().clone()));
         let execution = repository
             .create_execution_with_participants(
-                "system_default_user",
+                &installation_owner,
                 &create_params(),
-                &[participant("owner_participant")],
+                &[participant(PARTICIPANT_ID)],
                 &created_event(),
             )
             .await
@@ -324,7 +331,7 @@ mod tests {
 
         let events = sink.0.lock().unwrap();
         assert_eq!(events.len(), 1);
-        assert_eq!(events[0].0, "system_default_user");
+        assert_eq!(events[0].0, installation_owner);
         assert_eq!(events[0].1.data["execution_id"], execution.id);
         drop(events);
         assert!(repository.list_unpublished_events(100).await.unwrap().is_empty());

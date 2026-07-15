@@ -1,3 +1,4 @@
+import type { McpServerId } from '@/common/types/ids';
 import { useState, useCallback } from 'react';
 import { mcpService } from '@/common/adapter/ipcBridge';
 import type { IMcpServer } from '@/common/config/storage';
@@ -167,7 +168,7 @@ export const useMcpOAuth = () => {
     loggingIn,
     checkOAuthStatus,
     checkMultipleServers,
-    markLoginRequired: useCallback((serverId: number) => {
+    markLoginRequired: useCallback((serverId: McpServerId) => {
       setOAuthStatus((prev) => ({
         ...prev,
         [serverId]: {
@@ -177,7 +178,7 @@ export const useMcpOAuth = () => {
         },
       }));
     }, []),
-    clearLoginRequired: useCallback((serverId: number) => {
+    clearLoginRequired: useCallback((serverId: McpServerId) => {
       setOAuthStatus((prev) => ({
         ...prev,
         [serverId]: {

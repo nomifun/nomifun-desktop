@@ -2,10 +2,9 @@
 //! `IKnowledgeRepository`, a no-op event broadcaster, and a service factory.
 
 use std::path::Path;
-use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::{Arc, Mutex};
 
-use nomifun_common::TimestampMs;
+use nomifun_common::{CompanionId, ConversationId, KnowledgeBindingId, TerminalId, TimestampMs};
 use nomifun_db::models::{CreateKnowledgeTagParams, KnowledgeBaseRow, KnowledgeBindingRow, KnowledgeTagRow, UpdateKnowledgeTagParams};
 use nomifun_db::{DbError, IKnowledgeRepository};
 
@@ -18,14 +17,13 @@ pub(crate) struct MemRepo {
     /// Each binding row plus its ordered `kb_id` list (mirrors the
     /// `knowledge_binding_bases` junction).
     pub bindings: Mutex<Vec<(KnowledgeBindingRow, Vec<String>)>>,
-    next_binding_id: AtomicI64,
     pub tags: Mutex<Vec<KnowledgeTagRow>>,
 }
 
 /// Build a binding row with the `target_id` written to the column selected by
 /// `target_kind` (the in-memory analogue of the CHECK-constrained columns).
 fn binding_row(
-    binding_id: i64,
+    binding_id: KnowledgeBindingId,
     kind: &str,
     target_id: &str,
     enabled: bool,
@@ -49,14 +47,11 @@ fn binding_row(
         channel_write_enabled,
         updated_at,
     };
-    // `target_conv_id` / `target_term_id` are integer FKs now; `target_workpath`
-    // / `target_companion_id` stay string keys. Route the test id to the right column
-    // with the right type.
     match kind {
         "workpath" => row.target_workpath = Some(target_id.to_owned()),
-        "conversation" => row.target_conv_id = target_id.parse::<i64>().ok(),
-        "terminal" => row.target_term_id = target_id.parse::<i64>().ok(),
-        "companion" => row.target_companion_id = Some(target_id.to_owned()),
+        "conversation" => row.target_conv_id = ConversationId::parse(target_id).ok(),
+        "terminal" => row.target_term_id = TerminalId::parse(target_id).ok(),
+        "companion" => row.target_companion_id = CompanionId::parse(target_id).ok(),
         _ => {}
     }
     row
@@ -75,13 +70,13 @@ impl IKnowledgeRepository for MemRepo {
                 *r = row.clone();
                 Ok(())
             }
-            None => Err(DbError::NotFound(row.id.clone())),
+            None => Err(DbError::NotFound(row.id.to_string())),
         }
     }
     async fn delete_base(&self, id: &str) -> Result<(), DbError> {
         let mut bases = self.bases.lock().unwrap();
         let before = bases.len();
-        bases.retain(|r| r.id != id);
+        bases.retain(|r| r.id.as_str() != id);
         if bases.len() == before {
             Err(DbError::NotFound(id.to_owned()))
         } else {
@@ -89,7 +84,7 @@ impl IKnowledgeRepository for MemRepo {
         }
     }
     async fn get_base(&self, id: &str) -> Result<Option<KnowledgeBaseRow>, DbError> {
-        Ok(self.bases.lock().unwrap().iter().find(|r| r.id == id).cloned())
+        Ok(self.bases.lock().unwrap().iter().find(|r| r.id.as_str() == id).cloned())
     }
     async fn list_bases(&self) -> Result<Vec<KnowledgeBaseRow>, DbError> {
         Ok(self.bases.lock().unwrap().clone())
@@ -118,19 +113,19 @@ impl IKnowledgeRepository for MemRepo {
         writeback_eagerness: &str,
         channel_write_enabled: bool,
         updated_at: TimestampMs,
-    ) -> Result<i64, DbError> {
+    ) -> Result<String, DbError> {
         let mut bindings = self.bindings.lock().unwrap();
         // Reuse the existing binding_id on upsert; allocate a fresh one
         // otherwise (the surrogate-key analogue of the real table).
         let binding_id = bindings
             .iter()
             .find(|(b, _)| b.target_kind == kind && b.target_id().as_deref() == Some(id))
-            .map(|(b, _)| b.binding_id)
-            .unwrap_or_else(|| self.next_binding_id.fetch_add(1, Ordering::SeqCst) + 1);
+            .map(|(b, _)| b.binding_id.clone())
+            .unwrap_or_else(KnowledgeBindingId::new);
         bindings.retain(|(b, _)| !(b.target_kind == kind && b.target_id().as_deref() == Some(id)));
-        let row = binding_row(binding_id, kind, id, enabled, writeback, writeback_mode, writeback_eagerness, channel_write_enabled, updated_at);
+        let row = binding_row(binding_id.clone(), kind, id, enabled, writeback, writeback_mode, writeback_eagerness, channel_write_enabled, updated_at);
         bindings.push((row, kb_ids.to_vec()));
-        Ok(binding_id)
+        Ok(binding_id.into_string())
     }
     async fn delete_binding(&self, kind: &str, id: &str) -> Result<(), DbError> {
         self.bindings
@@ -212,9 +207,13 @@ impl nomifun_realtime::UserEventSink for NoopBroadcaster {
 }
 
 pub(crate) fn make_service(data_dir: &Path) -> KnowledgeService {
+    let owner_id = nomifun_common::UserId::new();
     KnowledgeService::new(
         Arc::new(MemRepo::default()),
         data_dir,
-        KnowledgeEventEmitter::new(Arc::new(NoopBroadcaster), Arc::from("test-owner")),
+        KnowledgeEventEmitter::new(
+            Arc::new(NoopBroadcaster),
+            Arc::from(owner_id.into_string()),
+        ),
     )
 }

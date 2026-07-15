@@ -1,6 +1,12 @@
 # 会话输入框交互优化 实现计划（Enter 防误触 + 暂停后编辑重发）
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **ID-contract v2 note:** This is a historical feature plan, not executable
+> current guidance. Entity-ID examples are superseded by
+> [`../../architecture/id-system.md`](../../architecture/id-system.md): use
+> canonical typed IDs and reject alternate representations without coercion.
+
+> **Archived plan:** The steps below record the original implementation history
+> and must not be executed against the ID-v2 codebase.
 
 **Goal:** 修复输入法上屏 Enter 被误发送、新增发送键偏好；并为 Nomi 原生会话支持「编辑最近一条用户消息并截断重跑」。
 
@@ -377,7 +383,7 @@ git -c user.name=nomifun -c user.email=rika00@qq.com commit --author="nomifun <r
 - Modify: `crates/backend/nomifun-db/src/repository/sqlite_conversation.rs`（impl + 测试）
 
 **Interfaces:**
-- Produces: `async fn delete_messages_from(&self, conv_id: i64, from_created_at: i64, from_id: &str) -> Result<u64, DbError>`（删除 `(created_at,id) >= (from_created_at, from_id)` 的行，返回删除条数）。
+- Produces: `async fn delete_messages_from(&self, conv_id: &str, from_created_at: i64, from_id: &str) -> Result<u64, DbError>`（`conv_id`/`from_id` 在上游分别校验为 `ConversationId`/`MessageId`；删除 `(created_at,id) >= (from_created_at, from_id)` 的行，返回删除条数）。
 
 - [ ] **Step 1: trait 加带默认体的方法** — `conversation.rs`，紧邻 `delete_messages_by_conversation`（:115-116）后：
 
@@ -387,7 +393,7 @@ git -c user.name=nomifun -c user.email=rika00@qq.com commit --author="nomifun <r
     /// deleted. Default no-op so mock repos compile; SQLite overrides it.
     async fn delete_messages_from(
         &self,
-        _conv_id: i64,
+        _conv_id: &str,
         _from_created_at: i64,
         _from_id: &str,
     ) -> Result<u64, DbError> {
@@ -401,7 +407,9 @@ git -c user.name=nomifun -c user.email=rika00@qq.com commit --author="nomifun <r
     #[tokio::test]
     async fn delete_messages_from_removes_cursor_and_newer() {
         let (repo, _db) = setup().await;
-        let conv = repo.create(&sample_conversation(SYSTEM_USER_ID)).await.unwrap();
+        // Historical fixture: current tests resolve the installation owner
+        // dynamically from installation_identity.
+        let conv = repo.create(&sample_conversation(installation_owner)).await.unwrap();
 
         let mk = |id: &str, created_at: i64| MessageRow {
             id: id.to_string(),
@@ -439,7 +447,7 @@ Expected: FAIL（默认体返回 0，断言 `deleted == 2` 失败）
 ```rust
     async fn delete_messages_from(
         &self,
-        conv_id: i64,
+        conv_id: &str,
         from_created_at: i64,
         from_id: &str,
     ) -> Result<u64, DbError> {
@@ -781,7 +789,7 @@ git -c user.name=nomifun -c user.email=rika00@qq.com commit --author="nomifun <r
 - [ ] **Step 1: ipcBridge 方法** — `ipcBridge.ts`，紧邻 `steer`（:270-277）后加：
 
 ```ts
-  editResubmit: httpPost<ISendMessageResult, { conversation_id: number; msg_id: string; input: string; files?: string[] }>(
+  editResubmit: httpPost<ISendMessageResult, { conversation_id: ConversationId; msg_id: MessageId; input: string; files?: string[] }>(
     (p) => `/api/conversations/${p.conversation_id}/messages/${p.msg_id}/edit-resubmit`,
     (p) => ({
       content: p.input,

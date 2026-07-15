@@ -1,4 +1,5 @@
 use nomifun_api_types::{ConversationArtifactResponse, WebSocketMessage};
+use nomifun_common::{ConversationArtifactId, ConversationId, CronJobId, UserId};
 use nomifun_db::ConversationArtifactRow;
 use nomifun_realtime::UserEventSink;
 use serde::de::DeserializeOwned;
@@ -7,39 +8,32 @@ use serde_json::json;
 use crate::error::CronError;
 use crate::types::CronJob;
 
-/// Parse a string-keyed conversation id into the integer DB key. Cron carries
-/// conversation ids as `String` through the agent path (Option A); artifact
-/// rows are keyed by `i64`, so we convert at this boundary. An unparseable id
-/// degrades to `0`, which matches no conversation row (the upsert/broadcast is
-/// then a harmless no-op rather than a panic).
-fn parse_conversation_id(conversation_id: &str) -> i64 {
-    conversation_id.parse::<i64>().unwrap_or(0)
-}
-
 pub(crate) fn build_cron_trigger_artifact(
     conversation_id: &str,
     job: &CronJob,
     created_at: i64,
-) -> ConversationArtifactRow {
+) -> Result<ConversationArtifactRow, CronError> {
+    ConversationId::try_from(conversation_id).map_err(|error| {
+        CronError::Scheduler(format!("invalid artifact conversation id: {error}"))
+    })?;
+    CronJobId::try_from(job.id.as_str())
+        .map_err(|error| CronError::Scheduler(format!("invalid artifact cron job id: {error}")))?;
     let payload = json!({
         "cron_job_id": job.id,
         "cron_job_name": job.name,
         "triggered_at": created_at,
     });
 
-    ConversationArtifactRow {
-        // `id` is assigned by SQLite on insert; `upsert_artifact` ignores this
-        // placeholder. `cron_trigger` rows are always fresh inserts (one per
-        // trigger), no longer deduplicated by a composite string id.
-        id: 0,
-        conversation_id: parse_conversation_id(conversation_id),
+    Ok(ConversationArtifactRow {
+        id: ConversationArtifactId::new().into_string(),
+        conversation_id: conversation_id.to_owned(),
         cron_job_id: Some(job.id.clone()),
         kind: "cron_trigger".into(),
         status: "active".into(),
         payload: payload.to_string(),
         created_at,
         updated_at: created_at,
-    }
+    })
 }
 
 pub(crate) fn build_skill_suggest_artifact(
@@ -49,7 +43,12 @@ pub(crate) fn build_skill_suggest_artifact(
     description: &str,
     skill_content: &str,
     now: i64,
-) -> ConversationArtifactRow {
+) -> Result<ConversationArtifactRow, CronError> {
+    ConversationId::try_from(conversation_id).map_err(|error| {
+        CronError::Scheduler(format!("invalid artifact conversation id: {error}"))
+    })?;
+    CronJobId::try_from(job_id)
+        .map_err(|error| CronError::Scheduler(format!("invalid artifact cron job id: {error}")))?;
     let payload = json!({
         "cron_job_id": job_id,
         "name": name,
@@ -57,26 +56,31 @@ pub(crate) fn build_skill_suggest_artifact(
         "skillContent": skill_content,
     });
 
-    ConversationArtifactRow {
-        // `id` is assigned by SQLite; idempotency for `skill_suggest` is the
-        // partial-unique `(conversation_id, cron_job_id)` constraint that
-        // `upsert_artifact` targets, not this placeholder.
-        id: 0,
-        conversation_id: parse_conversation_id(conversation_id),
+    Ok(ConversationArtifactRow {
+        id: ConversationArtifactId::new().into_string(),
+        conversation_id: conversation_id.to_owned(),
         cron_job_id: Some(job_id.to_owned()),
         kind: "skill_suggest".into(),
         status: "pending".into(),
         payload: payload.to_string(),
         created_at: now,
         updated_at: now,
-    }
+    })
 }
 
 pub(crate) fn artifact_response_from_row(
     row: &ConversationArtifactRow,
 ) -> Result<ConversationArtifactResponse, CronError> {
+    ConversationArtifactId::try_from(row.id.as_str())
+        .map_err(|error| CronError::Scheduler(format!("invalid artifact id: {error}")))?;
+    ConversationId::try_from(row.conversation_id.as_str())
+        .map_err(|error| CronError::Scheduler(format!("invalid artifact conversation id: {error}")))?;
+    if let Some(job_id) = row.cron_job_id.as_deref() {
+        CronJobId::try_from(job_id)
+            .map_err(|error| CronError::Scheduler(format!("invalid artifact cron job id: {error}")))?;
+    }
     Ok(ConversationArtifactResponse {
-        id: row.id,
+        id: row.id.clone(),
         conversation_id: row.conversation_id.clone(),
         cron_job_id: row.cron_job_id.clone(),
         kind: parse_enum(&row.kind)?,
@@ -93,6 +97,8 @@ pub(crate) fn emit_artifact(
     owner_id: &str,
     row: &ConversationArtifactRow,
 ) -> Result<(), CronError> {
+    UserId::try_from(owner_id)
+        .map_err(|error| CronError::Scheduler(format!("invalid artifact owner id: {error}")))?;
     let payload = serde_json::to_value(artifact_response_from_row(row)?)
         .map_err(|e| CronError::Scheduler(format!("failed to serialize artifact event: {e}")))?;
     user_events.send_to_user(
@@ -112,6 +118,12 @@ mod tests {
     use super::*;
     use crate::types::{CreatedBy, CronJob, CronSchedule, ExecutionMode};
     use std::sync::Mutex;
+
+    const JOB_ID: &str = "cron_0190f5fe-7c00-7a00-8000-000000000001";
+    const USER_ID: &str = "user_0190f5fe-7c00-7a00-8000-000000000001";
+    const USER_ID_2: &str = "user_0190f5fe-7c00-7a00-8000-000000000002";
+    const CONVERSATION_ID: &str = "conv_0190f5fe-7c00-7a00-8000-000000000001";
+    const CONVERSATION_ID_2: &str = "conv_0190f5fe-7c00-7a00-8000-000000000002";
 
     struct RecordingUserEvents {
         deliveries: Mutex<Vec<(String, WebSocketMessage<serde_json::Value>)>>,
@@ -136,8 +148,8 @@ mod tests {
 
     fn sample_job() -> CronJob {
         CronJob {
-            id: "cron_1".into(),
-            user_id: "user_1".into(),
+            id: JOB_ID.into(),
+            user_id: USER_ID.into(),
             name: "Daily Report".into(),
             enabled: true,
             schedule: CronSchedule::Every {
@@ -147,7 +159,7 @@ mod tests {
             message: "Run".into(),
             execution_mode: ExecutionMode::NewConversation,
             agent_config: None,
-            conversation_id: "conv_1".into(),
+            conversation_id: Some(CONVERSATION_ID.into()),
             conversation_title: None,
             agent_type: "acp".into(),
             created_by: CreatedBy::User,
@@ -168,13 +180,14 @@ mod tests {
     #[test]
     fn builds_skill_suggest_response() {
         let row = build_skill_suggest_artifact(
-            "conv_1",
-            "cron_1",
+            CONVERSATION_ID,
+            JOB_ID,
             "daily-report",
             "Daily report",
             "---\nname: daily-report\n---\nUse it.",
             1234,
-        );
+        )
+        .unwrap();
 
         let response = artifact_response_from_row(&row).unwrap();
         assert_eq!(response.kind, nomifun_api_types::ConversationArtifactKind::SkillSuggest);
@@ -185,28 +198,30 @@ mod tests {
     #[test]
     fn private_artifact_events_are_scoped_to_each_conversation_owner() {
         let user_events = RecordingUserEvents::new();
-        let owner_a = build_cron_trigger_artifact("1", &sample_job(), 1000);
-        let owner_b = build_cron_trigger_artifact("2", &sample_job(), 2000);
+        let owner_a_id = CONVERSATION_ID;
+        let owner_b_id = CONVERSATION_ID_2;
+        let owner_a = build_cron_trigger_artifact(owner_a_id, &sample_job(), 1000).unwrap();
+        let owner_b = build_cron_trigger_artifact(owner_b_id, &sample_job(), 2000).unwrap();
 
-        emit_artifact(&user_events, "owner-a", &owner_a).unwrap();
-        emit_artifact(&user_events, "owner-b", &owner_b).unwrap();
+        emit_artifact(&user_events, USER_ID, &owner_a).unwrap();
+        emit_artifact(&user_events, USER_ID_2, &owner_b).unwrap();
 
         let deliveries = user_events.deliveries.lock().unwrap();
         assert_eq!(deliveries.len(), 2);
-        assert_eq!(deliveries[0].0, "owner-a");
+        assert_eq!(deliveries[0].0, USER_ID);
         assert_eq!(deliveries[0].1.name, "conversation.artifact");
-        assert_eq!(deliveries[0].1.data["conversation_id"], 1);
-        assert_eq!(deliveries[1].0, "owner-b");
+        assert_eq!(deliveries[0].1.data["conversation_id"], owner_a_id);
+        assert_eq!(deliveries[1].0, USER_ID_2);
         assert_eq!(deliveries[1].1.name, "conversation.artifact");
-        assert_eq!(deliveries[1].1.data["conversation_id"], 2);
+        assert_eq!(deliveries[1].1.data["conversation_id"], owner_b_id);
     }
 
     #[test]
     fn builds_cron_trigger_payload() {
-        let row = build_cron_trigger_artifact("conv_1", &sample_job(), 1234);
+        let row = build_cron_trigger_artifact(CONVERSATION_ID, &sample_job(), 1234).unwrap();
         let response = artifact_response_from_row(&row).unwrap();
         assert_eq!(response.kind, nomifun_api_types::ConversationArtifactKind::CronTrigger);
-        assert_eq!(response.payload["cron_job_id"], "cron_1");
+        assert_eq!(response.payload["cron_job_id"], JOB_ID);
         assert_eq!(response.payload["cron_job_name"], "Daily Report");
     }
 }

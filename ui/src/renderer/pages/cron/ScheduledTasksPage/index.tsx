@@ -13,6 +13,7 @@ import { useLayoutContext } from '@renderer/hooks/context/LayoutContext';
 import { useAllCronJobs } from '@renderer/pages/cron/useCronJobs';
 import { formatSchedule, formatNextRun } from '@renderer/pages/cron/cronUtils';
 import { type ICronJob } from '@/common/adapter/ipcBridge';
+import type { ConversationId } from '@/common/types/ids';
 import { useKeepAwake } from '@renderer/hooks/ui/useKeepAwake';
 import { useConversationAgents } from '@renderer/pages/conversation/hooks/useConversationAgents';
 import CronStatusTag from './CronStatusTag';
@@ -33,7 +34,7 @@ const ScheduledTasksPage: React.FC = () => {
   const { jobs, loading, pauseJob, resumeJob, deleteJob } = useAllCronJobs();
   const { cliAgents } = useConversationAgents();
   const [createDialogVisible, setCreateDialogVisible] = useState(false);
-  const [lockedCreateConversationId, setLockedCreateConversationId] = useState<number | undefined>(undefined);
+  const [lockedCreateConversationId, setLockedCreateConversationId] = useState<ConversationId | undefined>(undefined);
   const [searchQuery, setSearchQuery] = useState('');
   const { keepAwake, setKeepAwake } = useKeepAwake();
 

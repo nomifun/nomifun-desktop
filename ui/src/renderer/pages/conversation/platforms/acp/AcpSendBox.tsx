@@ -1,3 +1,4 @@
+import type { ConversationId } from '@/common/types/ids';
 import { ipcBridge } from '@/common';
 import type { IConversationMcpStatus } from '@/common/config/storage';
 import { isBackendHttpError } from '@/common/adapter/httpBridge';
@@ -56,8 +57,8 @@ const useAcpSendBoxDraft = getSendBoxDraftHook('acp', {
 const EMPTY_AT_PATH: Array<string | FileOrFolderItem> = [];
 const EMPTY_UPLOAD_FILES: string[] = [];
 
-const useSendBoxDraft = (conversation_id: number) => {
-  const { data, mutate } = useAcpSendBoxDraft(String(conversation_id));
+const useSendBoxDraft = (conversation_id: ConversationId) => {
+  const { data, mutate } = useAcpSendBoxDraft(conversation_id);
   const atPath = data?.atPath ?? EMPTY_AT_PATH;
   const uploadFile = data?.uploadFile ?? EMPTY_UPLOAD_FILES;
   const content = data?.content ?? '';
@@ -89,7 +90,7 @@ const useSendBoxDraft = (conversation_id: number) => {
 };
 
 const AcpSendBox: React.FC<{
-  conversation_id: number;
+  conversation_id: ConversationId;
   backend: string;
   initialModelId?: string;
   session_mode?: string;
@@ -273,28 +274,34 @@ const AcpSendBox: React.FC<{
           errorMsg.includes('authentication failed') ||
           errorMsg.includes('认证失败');
         if (isAuthError) {
-          const errorMessage = {
-            id: prefixedId('msg'),
-            msg_id: prefixedId('msg'),
-            conversation_id,
-            type: 'error',
-            data: t('acp.auth.failed', {
-              backend,
-              error: errorMsg,
-              defaultValue: `${backend} authentication failed:
+          const content = t('acp.auth.failed', {
+            backend,
+            error: errorMsg,
+            defaultValue: `${backend} authentication failed:
 
 {{error}}
 
 Please check your local CLI tool authentication status`,
-            }),
-          };
-
-          ipcBridge.acpConversation.responseStream.emit(errorMessage);
+          });
+          addOrUpdateMessageRef.current(
+            {
+              id: prefixedId('msg'),
+              type: 'tips',
+              position: 'center',
+              conversation_id,
+              created_at: Date.now(),
+              content: {
+                content,
+                type: 'error',
+                error: buildSendFailureError(error, content),
+              },
+            },
+            true
+          );
         } else {
           addOrUpdateMessageRef.current(
             {
               id: prefixedId('msg'),
-              msg_id: prefixedId('msg'),
               type: 'tips',
               position: 'center',
               conversation_id,

@@ -8,11 +8,12 @@ import React from 'react';
 import useSWR from 'swr';
 import { usePresetInfo } from '@renderer/hooks/agent/usePresetInfo';
 import { getConversationOrNull } from '@/renderer/pages/conversation/utils/conversationCache';
+import type { ConversationId } from '@/common/types/ids';
 
 type Props = {
   senderName: string;
   /** Sender Agent's conversation id — enables preset-aware avatar resolution via conversation extras. */
-  senderConversationId?: number;
+  senderConversationId?: ConversationId;
   /** Precomputed backend logo URL (fallback when no preset avatar is found). */
   backendLogo: string | null;
 };

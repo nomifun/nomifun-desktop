@@ -11,6 +11,7 @@
 
 use std::sync::Arc;
 
+use nomifun_common::{WorkshopAssetId, WorkshopNodeId};
 use nomifun_creation::{CreationInput, NewCreationTask};
 use nomifun_workshop::AgentOp;
 use nomifun_workshop::service::AssetQuery;
@@ -177,11 +178,13 @@ async fn list_assets(deps: Arc<GatewayDeps>, p: ListAssetsParams) -> Value {
 
 async fn apply_ops(deps: Arc<GatewayDeps>, ctx: CallerCtx, p: ApplyOpsParams) -> Value {
     // Attribution only (not an access scope) — recorded on the service log.
-    let source = ctx
-        .companion_id
-        .as_deref()
-        .map(|c| format!("companion:{c}"))
-        .unwrap_or_else(|| format!("conversation:{}", ctx.conversation_id));
+    let source = if let Some(companion_id) = &ctx.companion_id {
+        format!("companion:{companion_id}")
+    } else if let Some(conversation_id) = &ctx.conversation_id {
+        format!("conversation:{conversation_id}")
+    } else {
+        "remote".to_owned()
+    };
     match deps.workshop_service.apply_agent_ops(&p.canvas_id, p.ops, &source).await {
         Ok(applied) => ok(json!({ "ops": applied })),
         Err(e) => json!({ "error": e.to_string() }),
@@ -200,7 +203,6 @@ async fn generate(deps: Arc<GatewayDeps>, p: GenerateParams) -> Value {
         .ref_asset_ids
         .unwrap_or_default()
         .into_iter()
-        .filter(|id| !id.trim().is_empty())
         .map(|asset_id| CreationInput { asset_id, role: "reference".into() })
         .collect();
     let task = NewCreationTask {
@@ -251,7 +253,7 @@ fn summarize_canvas(meta: &nomifun_workshop::WorkshopCanvasMeta, doc: &Value) ->
     let node_arr = doc.get("nodes").and_then(Value::as_array);
     let total_nodes = node_arr.map(Vec::len).unwrap_or(0);
     let nodes: Vec<Value> = node_arr
-        .map(|arr| arr.iter().take(MAX_SUMMARY_NODES).map(summarize_node).collect())
+        .map(|arr| arr.iter().filter_map(summarize_node).take(MAX_SUMMARY_NODES).collect())
         .unwrap_or_default();
     let edge_arr = doc.get("edges").and_then(Value::as_array);
     let total_edges = edge_arr.map(Vec::len).unwrap_or(0);
@@ -261,6 +263,8 @@ fn summarize_canvas(meta: &nomifun_workshop::WorkshopCanvasMeta, doc: &Value) ->
                 .filter_map(|e| {
                     let from = e.get("from").and_then(Value::as_str)?;
                     let to = e.get("to").and_then(Value::as_str)?;
+                    WorkshopNodeId::parse(from).ok()?;
+                    WorkshopNodeId::parse(to).ok()?;
                     Some(json!({ "from": from, "to": to }))
                 })
                 .take(MAX_SUMMARY_EDGES)
@@ -283,7 +287,9 @@ fn summarize_canvas(meta: &nomifun_workshop::WorkshopCanvasMeta, doc: &Value) ->
 
 /// One node's brief: id/kind plus (when present) a truncated text (prompt →
 /// content → caption), status, referenced asset id, and result asset count.
-fn summarize_node(node: &Value) -> Value {
+fn summarize_node(node: &Value) -> Option<Value> {
+    let id = node.get("id").and_then(Value::as_str)?;
+    WorkshopNodeId::parse(id).ok()?;
     let data = node.get("data");
     let text = data.and_then(|d| {
         d.get("prompt")
@@ -292,25 +298,35 @@ fn summarize_node(node: &Value) -> Value {
             .or_else(|| d.get("caption").and_then(Value::as_str))
     });
     let mut obj = serde_json::Map::new();
-    obj.insert("id".into(), json!(node.get("id").and_then(Value::as_str).unwrap_or_default()));
-    obj.insert("kind".into(), json!(node.get("kind").and_then(Value::as_str).unwrap_or_default()));
+    obj.insert("id".into(), json!(id));
+    if let Some(kind) = node.get("kind").and_then(Value::as_str).filter(|kind| !kind.is_empty()) {
+        obj.insert("kind".into(), json!(kind));
+    }
     if let Some(t) = text.filter(|t| !t.trim().is_empty()) {
         obj.insert("text".into(), json!(truncate_chars(t, SUMMARY_TEXT_MAX)));
     }
     if let Some(s) = data.and_then(|d| d.get("status").and_then(Value::as_str)) {
         obj.insert("status".into(), json!(s));
     }
-    if let Some(a) = data.and_then(|d| d.get("assetId").and_then(Value::as_str)) {
+    if let Some(a) = data
+        .and_then(|d| d.get("assetId").and_then(Value::as_str))
+        .filter(|id| WorkshopAssetId::parse(*id).is_ok())
+    {
         obj.insert("asset_id".into(), json!(a));
     }
     let result_count = data
         .and_then(|d| d.get("resultAssetIds").and_then(Value::as_array))
-        .map(Vec::len)
+        .map(|ids| {
+            ids.iter()
+                .filter_map(Value::as_str)
+                .filter(|id| WorkshopAssetId::parse(*id).is_ok())
+                .count()
+        })
         .unwrap_or(0);
     if result_count > 0 {
         obj.insert("result_asset_count".into(), json!(result_count));
     }
-    Value::Object(obj)
+    Some(Value::Object(obj))
 }
 
 /// Truncate to `max` chars (char-safe for CJK) with an ellipsis when clipped.
@@ -383,10 +399,11 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use nomifun_common::WorkshopCanvasId;
 
     fn meta() -> nomifun_workshop::WorkshopCanvasMeta {
         nomifun_workshop::WorkshopCanvasMeta {
-            id: "wsc_1".into(),
+            id: WorkshopCanvasId::new().into_string(),
             title: "c".into(),
             thumbnail_url: None,
             node_count: 250,
@@ -397,11 +414,14 @@ mod tests {
 
     #[test]
     fn summarize_canvas_caps_nodes_and_edges() {
-        let nodes: Vec<Value> = (0..250)
-            .map(|i| json!({ "id": format!("n{i}"), "kind": "image", "data": {} }))
+        let node_ids: Vec<String> = (0..451).map(|_| WorkshopNodeId::new().into_string()).collect();
+        let nodes: Vec<Value> = node_ids
+            .iter()
+            .take(250)
+            .map(|id| json!({ "id": id, "kind": "image", "data": {} }))
             .collect();
         let edges: Vec<Value> = (0..450)
-            .map(|i| json!({ "from": format!("n{i}"), "to": format!("n{}", i + 1) }))
+            .map(|i| json!({ "from": node_ids[i], "to": node_ids[i + 1] }))
             .collect();
         let doc = json!({ "nodes": nodes, "edges": edges });
         let summary = summarize_canvas(&meta(), &doc);
@@ -415,7 +435,8 @@ mod tests {
 
     #[test]
     fn summarize_canvas_small_not_truncated() {
-        let doc = json!({ "nodes": [ { "id": "a", "kind": "image" } ], "edges": [] });
+        let node_id = WorkshopNodeId::new().into_string();
+        let doc = json!({ "nodes": [ { "id": node_id, "kind": "image" } ], "edges": [] });
         let summary = summarize_canvas(&meta(), &doc);
         assert_eq!(summary["nodes_truncated"], false);
         assert_eq!(summary["edges_truncated"], false);

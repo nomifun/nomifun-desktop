@@ -2,18 +2,27 @@ use nomifun_db::{
     CreateAgentExecutionTemplateParams, IAgentExecutionTemplateRepository,
     IConversationRepository, NewAgentExecutionTemplateParticipant,
     SqliteAgentExecutionTemplateRepository, SqliteConversationRepository,
-    UpdateAgentExecutionTemplateParams, init_database_memory,
+    UpdateAgentExecutionTemplateParams,
 };
+use nomifun_common::ConversationId;
 use nomifun_db::models::ConversationRow;
 
-const USER_ID: &str = "system_default_user";
+const USER_ID: &str = "user_0190f5fe-7c00-7a00-8000-000000000001";
+const LIVE_OVERRIDE_PROVIDER_ID: &str = "prov_0190f5fe-7c00-7a00-8000-000000000007";
+
+async fn init_database_memory() -> Result<nomifun_db::Database, nomifun_db::DbError> {
+    nomifun_db::init_database_memory_with_owner(
+        nomifun_common::UserId::parse(USER_ID.to_owned()).expect("canonical fixture owner"),
+    )
+    .await
+}
 
 async fn test_database() -> nomifun_db::Database {
     let database = init_database_memory().await.unwrap();
     for provider_id in [
-        "provider_from_preset",
-        "provider_live_override",
-        "provider_shared",
+        "prov_0190f5fe-7c00-7a00-8000-000000000004",
+        LIVE_OVERRIDE_PROVIDER_ID,
+        "prov_0190f5fe-7c00-7a00-8000-000000000006",
     ] {
         nomifun_db::sqlx::query(
             "INSERT INTO providers (\
@@ -37,7 +46,7 @@ fn participant(index: usize) -> NewAgentExecutionTemplateParticipant {
         preset_id: None,
         preset_revision: None,
         preset_snapshot: None,
-        provider_id: Some("provider_shared".to_owned()),
+        provider_id: Some("prov_0190f5fe-7c00-7a00-8000-000000000006".to_owned()),
         model: Some(format!("model_{index}")),
         role: Some(format!("role {index}")),
         capability: Some(r#"{"coding":true}"#.to_owned()),
@@ -110,7 +119,7 @@ async fn template_crud_is_owner_scoped_and_keeps_only_executable_configuration()
     );
 
     let usages = repository
-        .list_templates_using_provider("provider_shared")
+        .list_templates_using_provider("prov_0190f5fe-7c00-7a00-8000-000000000006")
         .await
         .unwrap();
     assert_eq!(
@@ -245,7 +254,7 @@ async fn template_repository_rejects_runtime_ceiling_and_unresolved_model_debt()
     preset_resolved.preset_id = Some("preset_1".to_owned());
     preset_resolved.preset_revision = Some(1);
     preset_resolved.preset_snapshot = Some(
-        r#"{"preset_id":"preset_1","preset_revision":1,"target":"execution_step","resolved_model":{"provider_id":"provider_from_preset","model":"model_from_preset"}}"#
+        r#"{"preset_id":"preset_1","preset_revision":1,"target":"execution_step","resolved_model":{"provider_id":"prov_0190f5fe-7c00-7a00-8000-000000000004","model":"model_from_preset"}}"#
             .to_owned(),
     );
     let created = repository
@@ -254,7 +263,7 @@ async fn template_repository_rejects_runtime_ceiling_and_unresolved_model_debt()
         .unwrap();
     assert_eq!(
         created.participants[0].provider_id.as_deref(),
-        Some("provider_from_preset")
+        Some("prov_0190f5fe-7c00-7a00-8000-000000000004")
     );
     assert_eq!(
         created.participants[0].model.as_deref(),
@@ -262,12 +271,12 @@ async fn template_repository_rejects_runtime_ceiling_and_unresolved_model_debt()
     );
 
     let mut explicit_override = participant(1);
-    explicit_override.provider_id = Some("provider_live_override".to_owned());
+    explicit_override.provider_id = Some(LIVE_OVERRIDE_PROVIDER_ID.to_owned());
     explicit_override.model = Some("model_live_override".to_owned());
     explicit_override.preset_id = Some("preset_audit".to_owned());
     explicit_override.preset_revision = Some(3);
     explicit_override.preset_snapshot = Some(
-        r#"{"preset_id":"preset_audit","preset_revision":3,"target":"execution_step","resolved_model":{"provider_id":"provider_snapshot_only","model":"model_snapshot_only"}}"#
+        r#"{"preset_id":"preset_audit","preset_revision":3,"target":"execution_step","resolved_model":{"provider_id":"prov_0190f5fe-7c00-7a00-8000-000000000005","model":"model_snapshot_only"}}"#
             .to_owned(),
     );
     let overridden = repository
@@ -276,7 +285,7 @@ async fn template_repository_rejects_runtime_ceiling_and_unresolved_model_debt()
         .unwrap();
     assert_eq!(
         repository
-            .list_templates_using_provider("provider_live_override")
+            .list_templates_using_provider(LIVE_OVERRIDE_PROVIDER_ID)
             .await
             .unwrap(),
         vec![(
@@ -286,7 +295,7 @@ async fn template_repository_rejects_runtime_ceiling_and_unresolved_model_debt()
     );
     assert!(
         repository
-            .list_templates_using_provider("provider_snapshot_only")
+            .list_templates_using_provider("prov_0190f5fe-7c00-7a00-8000-000000000005")
             .await
             .unwrap()
             .is_empty(),
@@ -315,7 +324,7 @@ async fn conversation_template_selection_is_typed_owner_scoped_and_cleared_on_de
         .unwrap();
     let now = nomifun_common::now_ms();
     let row = |user_id: &str, selection: Option<String>| ConversationRow {
-        id: 0,
+        id: ConversationId::new().into_string(),
         user_id: user_id.to_owned(),
         name: "template selection".to_owned(),
         r#type: "nomi".to_owned(),
@@ -325,7 +334,7 @@ async fn conversation_template_selection_is_typed_owner_scoped_and_cleared_on_de
         decision_policy: "automatic".to_owned(),
         execution_template_id: selection,
         model: Some(
-            r#"{"provider_id":"provider_shared","model":"model_0","use_model":""}"#
+            r#"{"provider_id":"prov_0190f5fe-7c00-7a00-8000-000000000006","model":"model_0"}"#
                 .to_owned(),
         ),
         status: Some("pending".to_owned()),
@@ -347,7 +356,7 @@ async fn conversation_template_selection_is_typed_owner_scoped_and_cleared_on_de
         .unwrap();
     assert_eq!(
         conversations
-            .get(conversation_id)
+            .get(&conversation_id)
             .await
             .unwrap()
             .unwrap()
@@ -363,7 +372,7 @@ async fn conversation_template_selection_is_typed_owner_scoped_and_cleared_on_de
     );
     let mut mismatched_lead = row(USER_ID, Some(template.template.id.clone()));
     mismatched_lead.model = Some(
-        r#"{"provider_id":"provider_outside","model":"model_outside"}"#.to_owned(),
+        r#"{"provider_id":"prov_0190f5fe-7c00-7a00-8000-000000000007","model":"model_outside"}"#.to_owned(),
     );
     assert!(
         conversations.create(&mismatched_lead).await.is_err(),
@@ -392,7 +401,7 @@ async fn conversation_template_selection_is_typed_owner_scoped_and_cleared_on_de
         nomifun_db::sqlx::query(
             "UPDATE conversations SET execution_template_id = 'missing' WHERE id = ?",
         )
-        .bind(conversation_id)
+        .bind(&conversation_id)
         .execute(database.pool())
         .await
         .is_err(),
@@ -401,10 +410,10 @@ async fn conversation_template_selection_is_typed_owner_scoped_and_cleared_on_de
     assert!(
         nomifun_db::sqlx::query(
             "UPDATE conversations \
-             SET model = '{\"provider_id\":\"provider_outside\",\"model\":\"model_outside\"}' \
+             SET model = '{\"provider_id\":\"prov_0190f5fe-7c00-7a00-8000-000000000007\",\"model\":\"model_outside\"}' \
              WHERE id = ?",
         )
-        .bind(conversation_id)
+        .bind(&conversation_id)
         .execute(database.pool())
         .await
         .is_err(),
@@ -425,7 +434,7 @@ async fn conversation_template_selection_is_typed_owner_scoped_and_cleared_on_de
         .unwrap();
     assert_eq!(
         conversations
-            .get(conversation_id)
+            .get(&conversation_id)
             .await
             .unwrap()
             .unwrap()
@@ -446,7 +455,7 @@ async fn conversation_template_selection_is_typed_owner_scoped_and_cleared_on_de
     );
     assert_eq!(
         conversations
-            .get(conversation_id)
+            .get(&conversation_id)
             .await
             .unwrap()
             .unwrap()

@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import type { ConversationId, MessageId } from '@/common/types/ids';
 import { ipcBridge } from '@/common';
 import { transformMessage, transformUserCreatedEvent } from '@/common/chat/chatLib';
 import { extractResponseTextChunk, optionalDisplayText, toDisplayText } from '@/common/chat/displayText';
@@ -74,7 +75,7 @@ const normalizeThoughtData = (data: unknown): ThoughtData => {
 };
 
 export const useNomiMessage = (
-  conversation_id: number,
+  conversation_id: ConversationId,
   options?: {
     onError?: (message: IResponseMessage) => void;
     onConfigChanged?: (capabilities: Record<string, unknown>) => void;
@@ -169,7 +170,7 @@ export const useNomiMessage = (
   }, []);
 
   const processCompletedAssistantMessage = useCallback(
-    async (msgId: string) => {
+    async (msgId: MessageId) => {
       if (readOnly || !msgId || processedCronMsgIdsRef.current.has(msgId)) {
         return;
       }
@@ -202,10 +203,6 @@ export const useNomiMessage = (
           addOrUpdateMessage(
             {
               id: prefixedId('msg'),
-              // Local-only placeholder key (never sent to the backend): the
-              // `cron-local-` prefix marks locally generated cron system
-              // responses for de-dup, so it keeps the legacy uuid() format.
-              msg_id: `cron-local-${uuid()}`,
               type: 'tips',
               position: 'center',
               conversation_id,

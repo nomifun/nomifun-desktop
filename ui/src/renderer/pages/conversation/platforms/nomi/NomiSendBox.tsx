@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { conversationTarget, type ConversationId, type MessageId } from '@/common/types/ids';
+import { sessionStorageKey } from '@/common/utils/browserStorageKey';
 import { ipcBridge } from '@/common';
 import type { IConversationMcpStatus } from '@/common/config/storage';
 import AgentModeSelector from '@/renderer/components/agent/AgentModeSelector';
@@ -61,8 +63,8 @@ const useNomiSendBoxDraft = getSendBoxDraftHook('nomi', {
 const EMPTY_AT_PATH: Array<string | FileOrFolderItem> = [];
 const EMPTY_UPLOAD_FILES: string[] = [];
 
-const useSendBoxDraft = (conversation_id: number) => {
-  const { data, mutate } = useNomiSendBoxDraft(String(conversation_id));
+const useSendBoxDraft = (conversation_id: ConversationId) => {
+  const { data, mutate } = useNomiSendBoxDraft(conversation_id);
 
   const atPath = data?.atPath ?? EMPTY_AT_PATH;
   const uploadFile = data?.uploadFile ?? EMPTY_UPLOAD_FILES;
@@ -95,7 +97,7 @@ const useSendBoxDraft = (conversation_id: number) => {
 };
 
 const NomiSendBox: React.FC<{
-  conversation_id: number;
+  conversation_id: ConversationId;
   modelSelection: NomiModelSelection;
   session_mode?: string;
   agent_name?: string;
@@ -235,7 +237,7 @@ const NomiSendBox: React.FC<{
       setWaitingResponse(true);
 
       const displayMessage = buildDisplayMessage(input, files, workspacePath);
-      let msg_id: string | null = null;
+      let msg_id: MessageId | null = null;
       try {
         void checkAndUpdateTitle(conversation_id, input);
         // Wait for the server-assigned msg_id before rendering the optimistic
@@ -312,8 +314,9 @@ const NomiSendBox: React.FC<{
   useEffect(() => {
     if (!conversation_id || !current_model?.use_model) return;
 
-    const draftStorageKey = `nomi_draft_message_${conversation_id}`;
-    const draftProcessedKey = `nomi_draft_processed_${conversation_id}`;
+    const target = conversationTarget(conversation_id);
+    const draftStorageKey = sessionStorageKey('draft', target);
+    const draftProcessedKey = sessionStorageKey('initial-message-processed-draft', target);
     if (!sessionStorage.getItem(draftProcessedKey)) {
       const storedDraft = sessionStorage.getItem(draftStorageKey);
       if (storedDraft) {
@@ -332,8 +335,8 @@ const NomiSendBox: React.FC<{
       }
     }
 
-    const storageKey = `nomi_initial_message_${conversation_id}`;
-    const processedKey = `nomi_initial_processed_${conversation_id}`;
+    const storageKey = sessionStorageKey('initial-message-nomi', target);
+    const processedKey = sessionStorageKey('initial-message-processed-nomi', target);
 
     const processInitialMessage = async () => {
       if (sessionStorage.getItem(processedKey)) return;
@@ -379,7 +382,7 @@ const NomiSendBox: React.FC<{
   // 删除该条及其后的 DB 消息），再乐观插入新的用户气泡（与 executeCommand 一致，
   // 因为消息列表不会随 chat.history.refresh 重载，气泡只能靠乐观插入渲染）。
   const handleEditResubmit = useCallback(
-    async (msgId: string, createdAt: number, message: string) => {
+    async (msgId: MessageId, createdAt: number, message: string) => {
       const filesToSend = collectSelectedFiles(uploadFile, atPath);
       clearFiles();
       emitter.emit('nomi.selected.file.clear');
@@ -441,7 +444,7 @@ const NomiSendBox: React.FC<{
   const executeSteer = useCallback(
     async ({ input, files }: Pick<ConversationCommandQueueItem, 'input' | 'files'>) => {
       const displayMessage = buildDisplayMessage(input, files, workspacePath);
-      let msg_id: string | null = null;
+      let msg_id: MessageId | null = null;
       try {
         const res = await ipcBridge.conversation.steer.invoke({
           input: displayMessage,

@@ -76,9 +76,10 @@ pub struct PublicAgentRuntime {
     /// The bound platform knowledge-base ids. The factory feeds these verbatim
     /// into the scoped `knowledge_search` tool so a turn can never widen the base
     /// set beyond the agent's configuration (the retrieval security boundary).
-    pub knowledge_base_ids: Vec<String>,
+    pub knowledge_base_ids: Vec<nomifun_common::KnowledgeBaseId>,
     /// The model the agent answers with (used by the channel layer to pick the
-    /// conversation model; the factory itself uses `options.model`).
+    /// conversation model; the Nomi factory itself requires
+    /// `options.model.as_ref()`).
     pub model: nomifun_common::ProviderWithModel,
 }
 
@@ -197,11 +198,11 @@ pub struct AgentFactoryDeps {
         Option<Arc<dyn Fn(&str, &str) -> Arc<dyn crate::CronSink> + Send + Sync>>,
     /// Optional sink enabling the companion-companion memory tools
     /// (`recall_memories` / `save_memory` / `list_recent_events`). Only
-    /// registered for conversations whose `extra.companionSession` is true.
+    /// registered for conversations whose `extra.companion_session` is true.
     pub companion_sink: Option<Arc<dyn CompanionMemorySink>>,
     /// Optional sink enabling the companion's self-evolved skill auto-use
     /// (`companion_skill` tool + per-turn when_to_use ContextContributor). Only
-    /// registered for companion sessions (`extra.companionSession` true).
+    /// registered for companion sessions (`extra.companion_session` true).
     pub companion_skill_sink: Option<Arc<dyn CompanionSkillSink>>,
     /// Optional sink enabling the nomi native `knowledge_search` tool. When
     /// `Some` AND the session has bound knowledge bases, the tool is registered
@@ -212,7 +213,7 @@ pub struct AgentFactoryDeps {
     /// the tool is registered into the in-process engine and allow-listed past
     /// the approval gate. `None` (standalone) leaves it unregistered.
     pub knowledge_writeback: Option<Arc<dyn nomi_agent::knowledge_tools::KnowledgeWritebackSink>>,
-    /// Optional persona prompt provider for companionSession conversations that
+    /// Optional persona prompt provider for companion_session conversations that
     /// carry no `extra.system_prompt` (Channel Agent sessions).
     pub companion_prompt: Option<Arc<dyn CompanionPromptProvider>>,
     /// Optional 对外伙伴 (public agent) runtime provider. When `Some` AND a
@@ -242,12 +243,9 @@ pub fn build_agent_factory(deps: AgentFactoryDeps) -> AgentRuntimeFactory {
 }
 
 fn validate_runtime_user_id(user_id: &str) -> Result<(), AppError> {
-    if user_id.is_empty() || user_id.trim() != user_id {
-        return Err(AppError::BadRequest(
-            "Agent runtime owner must be a non-empty canonical user id".into(),
-        ));
-    }
-    Ok(())
+    nomifun_common::UserId::parse(user_id)
+        .map(|_| ())
+        .map_err(|error| AppError::BadRequest(format!("invalid Agent runtime owner id: {error}")))
 }
 
 async fn build_agent(
@@ -291,6 +289,8 @@ async fn build_agent(
 mod tests {
     use super::*;
 
+    const TEST_OWNER_ID: &str = "user_0190f5fe-7c00-7a00-8000-000000000001";
+
     #[test]
     fn factory_deps_can_be_constructed() {
         // Verify types compile — actual construction requires DB
@@ -302,25 +302,26 @@ mod tests {
     #[test]
     fn installation_owner_identity_is_exact_and_fail_closed() {
         assert_eq!(
-            ExecutionAuthority::resolve("system_default_user", "system_default_user"),
+            ExecutionAuthority::resolve(TEST_OWNER_ID, TEST_OWNER_ID),
             ExecutionAuthority::InstanceOwner
         );
         assert_eq!(
-            ExecutionAuthority::resolve("secondary", "system_default_user"),
+            ExecutionAuthority::resolve("secondary", TEST_OWNER_ID),
             ExecutionAuthority::ModelOnly
         );
         assert_eq!(
-            ExecutionAuthority::resolve("admin", "system_default_user"),
+            ExecutionAuthority::resolve("admin", TEST_OWNER_ID),
             ExecutionAuthority::ModelOnly
         );
     }
 
     #[test]
     fn runtime_owner_identity_is_first_class_and_canonical() {
-        assert!(validate_runtime_user_id("user-1").is_ok());
+        assert!(validate_runtime_user_id("user_0190f5fe-7c00-7a00-8000-000000000001").is_ok());
         assert!(validate_runtime_user_id("").is_err());
         assert!(validate_runtime_user_id("   ").is_err());
-        assert!(validate_runtime_user_id(" user-1").is_err());
-        assert!(validate_runtime_user_id("user-1 ").is_err());
+        assert!(validate_runtime_user_id(" user_0190f5fe-7c00-7a00-8000-000000000001").is_err());
+        assert!(validate_runtime_user_id("user_0190f5fe-7c00-7a00-8000-000000000001 ").is_err());
+        assert!(validate_runtime_user_id("user-1").is_err());
     }
 }

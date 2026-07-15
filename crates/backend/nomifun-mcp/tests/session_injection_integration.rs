@@ -18,7 +18,7 @@ use nomifun_mcp::{
 fn make_server(name: &str, enabled: bool, transport: McpServerTransport) -> McpServer {
     McpServer {
         // Injection keys on `name`, never `id`; any stable value works here.
-        id: name.bytes().map(i64::from).sum::<i64>().max(1),
+        id: nomifun_common::McpServerId::new(),
         name: name.into(),
         description: None,
         enabled,

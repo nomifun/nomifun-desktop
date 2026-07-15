@@ -15,7 +15,7 @@ use nomifun_api_types::{
     RefreshResponse, RefreshTokenRequest, UserInfoResponse, WebuiChangePasswordRequest, WebuiChangeUsernameRequest,
     WebuiChangeUsernameResponse, WebuiGenerateQrTokenResponse, WebuiResetPasswordResponse, WsTokenResponse,
 };
-use nomifun_common::AppError;
+use nomifun_common::{AppError, UserId};
 use nomifun_common::constants::SESSION_MAX_AGE_SECONDS;
 use nomifun_db::{IUserRepository, models::User};
 
@@ -64,6 +64,13 @@ struct UpdateUsernameRequest {
 #[derive(Debug, Deserialize)]
 struct UpdateJwtSecretRequest {
     jwt_secret: String,
+}
+
+fn into_public_user(user: User) -> Result<PublicUser, AppError> {
+    Ok(PublicUser {
+        id: user.id,
+        username: user.username,
+    })
 }
 
 /// Build the auth router with all endpoints and middleware layers.
@@ -255,13 +262,7 @@ async fn login_handler(
     }
 
     let cookie = state.cookie_config.build_session_cookie(&token);
-    let resp = LoginResponse::new(
-        PublicUser {
-            id: user.id,
-            username: user.username,
-        },
-        token,
-    );
+    let resp = LoginResponse::new(into_public_user(user)?, token);
 
     Ok(([(header::SET_COOKIE, cookie)], Json(resp)).into_response())
 }
@@ -323,7 +324,7 @@ async fn status_handler(
 /// Available ONLY while the install is uninitialised: the very first visitor's
 /// chosen username + password become the admin credentials, and the response
 /// sets the session cookie so they are immediately logged in. The write is an
-/// atomic conditional UPDATE (only matches the empty-password system user), so
+/// atomic conditional UPDATE (only matches the empty-password installation owner), so
 /// even two concurrent first-run requests cannot both win — the loser gets
 /// `409 Conflict` and never overwrites the winner's account.
 ///
@@ -392,13 +393,7 @@ async fn setup_handler(
     }
 
     let cookie = state.cookie_config.build_session_cookie(&token);
-    let resp = LoginResponse::new(
-        PublicUser {
-            id: user.id,
-            username: user.username,
-        },
-        token,
-    );
+    let resp = LoginResponse::new(into_public_user(user)?, token);
 
     tracing::info!("first-run setup: initial admin account created");
     Ok(([(header::SET_COOKIE, cookie)], Json(resp)).into_response())
@@ -435,10 +430,10 @@ async fn find_user_by_username_handler(
 
 async fn find_user_by_id_handler(
     State(state): State<AuthRouterState>,
-    Path(id): Path<String>,
+    Path(id): Path<UserId>,
 ) -> Result<Json<ApiResponse<Option<User>>>, AppError> {
 
-    let user = state.user_repo.find_by_id(&id).await?;
+    let user = state.user_repo.find_by_id(id.as_str()).await?;
     Ok(Json(ApiResponse::ok(user)))
 }
 
@@ -467,43 +462,43 @@ async fn set_system_user_credentials_handler(
 
 async fn update_user_password_hash_handler(
     State(state): State<AuthRouterState>,
-    Path(id): Path<String>,
+    Path(id): Path<UserId>,
     body: Result<Json<UpdatePasswordHashRequest>, JsonRejection>,
 ) -> Result<Json<ApiResponse<()>>, AppError> {
 
     let Json(req) = body.map_err(|e| AppError::BadRequest(e.to_string()))?;
-    state.user_repo.update_password(&id, &req.password_hash).await?;
+    state.user_repo.update_password(id.as_str(), &req.password_hash).await?;
     Ok(Json(ApiResponse::ok(())))
 }
 
 async fn update_user_username_handler(
     State(state): State<AuthRouterState>,
-    Path(id): Path<String>,
+    Path(id): Path<UserId>,
     body: Result<Json<UpdateUsernameRequest>, JsonRejection>,
 ) -> Result<Json<ApiResponse<()>>, AppError> {
 
     let Json(req) = body.map_err(|e| AppError::BadRequest(e.to_string()))?;
-    state.user_repo.update_username(&id, &req.username).await?;
+    state.user_repo.update_username(id.as_str(), &req.username).await?;
     Ok(Json(ApiResponse::ok(())))
 }
 
 async fn update_user_jwt_secret_handler(
     State(state): State<AuthRouterState>,
-    Path(id): Path<String>,
+    Path(id): Path<UserId>,
     body: Result<Json<UpdateJwtSecretRequest>, JsonRejection>,
 ) -> Result<Json<ApiResponse<()>>, AppError> {
 
     let Json(req) = body.map_err(|e| AppError::BadRequest(e.to_string()))?;
-    state.user_repo.update_jwt_secret(&id, &req.jwt_secret).await?;
+    state.user_repo.update_jwt_secret(id.as_str(), &req.jwt_secret).await?;
     Ok(Json(ApiResponse::ok(())))
 }
 
 async fn update_user_last_login_handler(
     State(state): State<AuthRouterState>,
-    Path(id): Path<String>,
+    Path(id): Path<UserId>,
 ) -> Result<Json<ApiResponse<()>>, AppError> {
 
-    state.user_repo.update_last_login(&id).await?;
+    state.user_repo.update_last_login(id.as_str()).await?;
     Ok(Json(ApiResponse::ok(())))
 }
 
@@ -538,7 +533,7 @@ async fn change_password_handler(
     // Fetch user record
     let user = state
         .user_repo
-        .find_by_id(&current_user.id)
+        .find_by_id(current_user.id.as_str())
         .await
         .map_err(|e| AppError::Internal(format!("Database error: {e}")))?
         .ok_or_else(|| AppError::NotFound("User not found".into()))?;
@@ -558,7 +553,7 @@ async fn change_password_handler(
     // Persist new password hash
     state
         .user_repo
-        .update_password(&current_user.id, &new_hash)
+        .update_password(current_user.id.as_str(), &new_hash)
         .await
         .map_err(|e| AppError::Internal(format!("Database error: {e}")))?;
 
@@ -571,7 +566,7 @@ async fn change_password_handler(
     // Persist new secret to database
     state
         .user_repo
-        .update_jwt_secret(&current_user.id, &new_secret)
+        .update_jwt_secret(current_user.id.as_str(), &new_secret)
         .await
         .map_err(|e| AppError::Internal(format!("Database error: {e}")))?;
 
@@ -595,7 +590,7 @@ async fn refresh_handler(
 
     let new_token = state
         .jwt_service
-        .sign(&payload.user_id, &payload.username)
+        .sign(payload.user_id.as_str(), &payload.username)
         .map_err(|e| AppError::Internal(format!("Token signing error: {e}")))?;
 
     Ok(Json(RefreshResponse {
@@ -619,7 +614,7 @@ async fn ws_token_handler(
     // Ensure user still exists
     state
         .user_repo
-        .find_by_id(&current_user.id)
+        .find_by_id(current_user.id.as_str())
         .await
         .map_err(|e| AppError::Internal(format!("Database error: {e}")))?
         .ok_or_else(|| AppError::Unauthorized("User not found".into()))?;
@@ -666,13 +661,7 @@ async fn qr_login_handler(
     }
 
     let cookie = state.cookie_config.build_session_cookie(&token);
-    let resp = LoginResponse::new(
-        PublicUser {
-            id: user.id,
-            username: user.username,
-        },
-        token,
-    );
+    let resp = LoginResponse::new(into_public_user(user)?, token);
 
     Ok(([(header::SET_COOKIE, cookie)], Json(resp)).into_response())
 }

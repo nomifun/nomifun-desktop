@@ -28,6 +28,7 @@ import type {
 } from '@/common/adapter/ipcBridge';
 import { useRequirementTags } from '../useRequirements';
 import AttachmentsField from './AttachmentsField';
+import type { AttachmentId } from '@/common/types/ids';
 
 /** All requirement statuses, in a stable display order for the edit picker. */
 const STATUSES: RequirementStatus[] = [
@@ -47,7 +48,7 @@ export interface RequirementFormPayload {
   /** Only meaningful in edit mode. */
   status?: RequirementStatus;
   newAttachments: INewAttachmentRef[];
-  removeAttachmentIds: string[];
+  removeAttachmentIds: AttachmentId[];
 }
 
 interface RequirementFormProps {
@@ -85,7 +86,7 @@ const RequirementForm: React.FC<RequirementFormProps> = ({
   // Newly-uploaded attachment refs (temp paths). Existing attachments come from
   // `initial.attachments`; ids queued for removal live in `removeAttachmentIds`.
   const [newAttachments, setNewAttachments] = useState<INewAttachmentRef[]>([]);
-  const [removeAttachmentIds, setRemoveAttachmentIds] = useState<string[]>([]);
+  const [removeAttachmentIds, setRemoveAttachmentIds] = useState<AttachmentId[]>([]);
   const [uploading, setUploading] = useState(false);
 
   // Existing attachments still shown (i.e. not queued for removal).
@@ -125,7 +126,7 @@ const RequirementForm: React.FC<RequirementFormProps> = ({
 
   const tagOptions = useMemo(() => tags.map((tg) => ({ label: tg.tag, value: tg.tag })), [tags]);
 
-  const handleRemoveExisting = useCallback((id: string) => {
+  const handleRemoveExisting = useCallback((id: AttachmentId) => {
     setRemoveAttachmentIds((prev) => (prev.includes(id) ? prev : [...prev, id]));
   }, []);
 

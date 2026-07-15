@@ -12,7 +12,7 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::routing::post;
 use axum::{Json, Router};
 use dashmap::DashMap;
-use nomifun_common::generate_id;
+use nomifun_common::{TerminalId, generate_id};
 use serde::{Deserialize, Serialize};
 use tokio::net::TcpListener;
 use tokio::sync::broadcast;
@@ -49,7 +49,7 @@ impl LifecycleKind {
 /// One lifecycle event broadcast to subscribers of a terminal.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TerminalLifecycleEvent {
-    pub terminal_id: i64,
+    pub terminal_id: TerminalId,
     pub kind: LifecycleKind,
     /// The CLI's raw hook payload (StopRequest/PostToolUse JSON), opaque to the
     /// channel; consumers extract what they need (e.g. last_assistant_message).
@@ -63,7 +63,7 @@ pub struct TerminalLifecycleEvent {
 #[derive(Clone)]
 struct LifecycleState {
     auth_token: String,
-    channels: Arc<DashMap<i64, broadcast::Sender<TerminalLifecycleEvent>>>,
+    channels: Arc<DashMap<TerminalId, broadcast::Sender<TerminalLifecycleEvent>>>,
 }
 
 /// In-process HTTP server that receives lifecycle hook POSTs from the
@@ -71,13 +71,13 @@ struct LifecycleState {
 pub struct TerminalLifecycleServer {
     http_port: u16,
     auth_token: String,
-    channels: Arc<DashMap<i64, broadcast::Sender<TerminalLifecycleEvent>>>,
+    channels: Arc<DashMap<TerminalId, broadcast::Sender<TerminalLifecycleEvent>>>,
     _handle: tokio::task::JoinHandle<()>,
 }
 
 #[derive(Deserialize)]
 struct HookPost {
-    terminal_id: i64,
+    terminal_id: TerminalId,
     kind: LifecycleKind,
     #[serde(default)]
     payload: serde_json::Value,
@@ -88,7 +88,7 @@ impl TerminalLifecycleServer {
     /// `POST /hook`. Mirrors `KnowledgeMcpServer::start()`.
     pub async fn start() -> Result<Self, String> {
         let auth_token = generate_id();
-        let channels: Arc<DashMap<i64, broadcast::Sender<TerminalLifecycleEvent>>> =
+        let channels: Arc<DashMap<TerminalId, broadcast::Sender<TerminalLifecycleEvent>>> =
             Arc::new(DashMap::new());
         let listener = TcpListener::bind("127.0.0.1:0")
             .await
@@ -129,9 +129,9 @@ impl TerminalLifecycleServer {
     }
 
     /// Subscribe to a terminal's lifecycle events (lazily creates the channel).
-    pub fn subscribe(&self, terminal_id: i64) -> broadcast::Receiver<TerminalLifecycleEvent> {
+    pub fn subscribe(&self, terminal_id: &TerminalId) -> broadcast::Receiver<TerminalLifecycleEvent> {
         self.channels
-            .entry(terminal_id)
+            .entry(terminal_id.clone())
             .or_insert_with(|| broadcast::channel(64).0)
             .subscribe()
     }
@@ -151,7 +151,7 @@ async fn handle_hook(
         return StatusCode::UNAUTHORIZED;
     }
     let ev = TerminalLifecycleEvent {
-        terminal_id: post.terminal_id,
+        terminal_id: post.terminal_id.clone(),
         kind: post.kind,
         payload: post.payload,
     };
@@ -190,9 +190,10 @@ mod tests {
     #[tokio::test]
     async fn post_hook_broadcasts_to_subscriber_and_rejects_bad_token() {
         let srv = TerminalLifecycleServer::start().await.expect("start");
-        let mut rx = srv.subscribe(42);
+        let terminal_id = nomifun_common::TerminalId::new();
+        let mut rx = srv.subscribe(&terminal_id);
         let url = format!("http://127.0.0.1:{}/hook", srv.http_port());
-        let body = serde_json::json!({"terminal_id":42,"kind":"turn_end","payload":{"last_assistant_message":"done"}});
+        let body = serde_json::json!({"terminal_id":terminal_id,"kind":"turn_end","payload":{"last_assistant_message":"done"}});
         let client = reqwest::Client::builder().no_proxy().build().unwrap();
         // bad token → 401
         let bad = client
@@ -216,7 +217,25 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(ev.terminal_id, 42);
+        assert_eq!(ev.terminal_id.to_string(), terminal_id.to_string());
         assert_eq!(ev.kind, LifecycleKind::TurnEnd);
+    }
+
+    #[tokio::test]
+    async fn post_hook_rejects_noncanonical_terminal_id() {
+        let srv = TerminalLifecycleServer::start().await.expect("start");
+        let url = format!("http://127.0.0.1:{}/hook", srv.http_port());
+        let body = serde_json::json!({"terminal_id":"term_test","kind":"turn_end","payload":{}});
+        let response = reqwest::Client::builder()
+            .no_proxy()
+            .build()
+            .unwrap()
+            .post(url)
+            .json(&body)
+            .bearer_auth(srv.auth_token())
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
     }
 }
