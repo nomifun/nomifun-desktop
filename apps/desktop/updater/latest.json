@@ -1,11 +1,15 @@
 {
   "version": "0.2.20",
   "notes": "## Highlights\n\n- Added a full Skill Market with ClawHub and SkillHub rankings, search/tag filtering, localized descriptions, skill detail views, and a reviewed installation handoff to Nomi.\n- Replaced one-off assistants with reusable presets and unified the agent execution architecture for more consistent conversations and orchestration.\n- Restored OpenClaw remote control and added safer remote integration validation.\n- Improved Windows reliability by isolating shell consoles, while fixing sidebar scrolling, linked-skill removal, MCP session ID normalization, stale completion/thinking states, and canonical UUIDv7 identifiers.\n- Refined figure-library cards, themed checkbox selection, compact controls, and dark-mode capability readability.\n\n## Upgrade notes\n\n- No known manual configuration change is required for this release.\n- This Windows-first release includes the Windows x64 installer and signed Tauri updater assets. macOS and Linux packages will be appended from their native build machines.\n- The Windows installer is protected by the Tauri updater signature but is not Authenticode-signed, so manual downloads may show a SmartScreen or unknown-publisher warning.",
-  "pub_date": "2026-07-15T18:08:53.449Z",
+  "pub_date": "2026-07-15T18:20:41.758Z",
   "platforms": {
     "windows-x86_64": {
       "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSU2VhcGdMaWVxODMrdTM2allHTWYyYUFSc21DajRvbmd4YWNONjBCUjN6RW4vQzBGTUN4clJlSkgyU1JuSmtzdmV0WGczN3A2eHpiSDRwWWJLMXM5dnI1cVZHOFRMOGdFPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzg0MTM4OTMwCWZpbGU6Tm9taUZ1bl8wLjIuMjBfeDY0LXNldHVwLmV4ZQo4ckd3M1dXVDM5V21GcUZRR0E1dXh4dGozZE5BMDhrRzJpVytLMUZjTzR6Q0p4dHZlWEMyeVFpaGdoNytQaDFBeWZsck9HeStaWFpTUzFqZDRITGNDQT09Cg==",
       "url": "https://github.com/nomifun/nomifun-tauri/releases/download/v0.2.20/NomiFun_0.2.20_x64-setup.exe"
+    },
+    "linux-x86_64": {
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSU2VhcGdMaWVxODArOXdwd3kvOWtIaFhjWTlPblRZcWIvZXB5dkd5d3Z6alpUMk12MC9TVGNnUDI5SjJPdnl0b3IxT1grbDRRVGdkS1gzVGE5YkxyMFNjYzRTS2JrRUE0PQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzg0MTM5NjQxCWZpbGU6Tm9taUZ1bl8wLjIuMjBfYW1kNjQuQXBwSW1hZ2UKaGVNUU56cTBXdjM1OEErblNLSzJEKzhMazl2TUI0cldkVExhcGczMFByWDhvZThiY2lSL1FNMHV0OWNXOEozbDdDdEsvMm1HZE1WSkpaMzMzSTAxQmc9PQo=",
+      "url": "https://github.com/nomifun/nomifun-tauri/releases/download/v0.2.20/NomiFun_0.2.20_amd64.AppImage"
     }
   }
 }
