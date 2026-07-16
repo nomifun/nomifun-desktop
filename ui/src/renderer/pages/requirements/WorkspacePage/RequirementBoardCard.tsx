@@ -24,6 +24,7 @@ import { Tag, User } from '@icon-park/react';
 import React from 'react';
 import { useTranslation } from 'react-i18next';
 import type { RequirementId } from '@/common/types/ids';
+import RequirementDisplayNumber from '../components/RequirementDisplayNumber';
 
 interface RequirementBoardCardProps {
   item: IRequirement;
@@ -62,17 +63,20 @@ const RequirementBoardCard: React.FC<RequirementBoardCardProps> = ({ item, onOpe
         'focus-visible:border-[rgb(var(--primary-5))] focus-visible:shadow-[0_0_0_3px_rgba(var(--primary-6),0.12)]',
       ].join(' ')}
     >
-      {/* Title — two-line clamp keeps cards tidy when dragging across columns. */}
-      <div
-        className='text-13px font-medium leading-18px text-[var(--color-text-1)] break-words'
-        style={{
-          display: '-webkit-box',
-          WebkitLineClamp: 2,
-          WebkitBoxOrient: 'vertical',
-          overflow: 'hidden',
-        }}
-      >
-        {item.title}
+      <div className='flex items-start gap-8px'>
+        <RequirementDisplayNumber displayNo={item.display_no} fullId={item.id} />
+        {/* Title — two-line clamp keeps cards tidy when dragging across columns. */}
+        <div
+          className='min-w-0 flex-1 text-13px font-medium leading-18px text-[var(--color-text-1)] break-words'
+          style={{
+            display: '-webkit-box',
+            WebkitLineClamp: 2,
+            WebkitBoxOrient: 'vertical',
+            overflow: 'hidden',
+          }}
+        >
+          {item.title}
+        </div>
       </div>
 
       {/* Meta row: order-key chip, tag chip, optional session marker. */}

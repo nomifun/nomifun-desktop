@@ -23,6 +23,7 @@ import { useTranslation } from 'react-i18next';
 
 import type { IRequirement, RequirementStatus } from '@/common/adapter/ipcBridge';
 import StatusPill from '../components/StatusPill';
+import RequirementDisplayNumber from '../components/RequirementDisplayNumber';
 import type { RequirementId } from '@/common/types/ids';
 
 interface RequirementListRowProps {
@@ -89,13 +90,8 @@ const RequirementListRow: React.FC<RequirementListRowProps> = ({
         />
       </div>
 
-      {/* `#id` badge — tabular-nums so digits stay aligned column-to-column */}
-      <span
-        className='flex-shrink-0 text-12px text-[var(--color-text-3)] tabular-nums'
-        style={{ fontVariantNumeric: 'tabular-nums' }}
-      >
-        {item.id}
-      </span>
+      {/* Human-facing number stays compact; clicking it copies the canonical ID. */}
+      <RequirementDisplayNumber displayNo={item.display_no} fullId={item.id} />
 
       {/* Title + snippet — flexes, truncates gracefully on narrow widths */}
       <div className='flex min-w-0 flex-1 flex-col gap-2px'>

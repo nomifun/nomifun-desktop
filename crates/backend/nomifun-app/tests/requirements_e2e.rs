@@ -37,6 +37,7 @@ async fn create_list_get_update_delete_happy_path() {
     assert_eq!(resp.status(), StatusCode::CREATED);
     let json = body_json(resp).await;
     assert_eq!(json["data"]["status"], "pending");
+    assert_eq!(json["data"]["display_no"], 1);
     let id = json["data"]["id"].as_str().unwrap().to_owned();
     assert!(id.parse::<RequirementId>().is_ok());
 
@@ -50,6 +51,7 @@ async fn create_list_get_update_delete_happy_path() {
     let json = body_json(resp).await;
     assert_eq!(json["data"]["total"], 1);
     assert_eq!(json["data"]["items"][0]["id"], id);
+    assert_eq!(json["data"]["items"][0]["display_no"], 1);
 
     // get
     let resp = app
