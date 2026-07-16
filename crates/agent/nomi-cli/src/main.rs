@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::Path;
 use std::sync::Arc;
 
@@ -18,6 +18,28 @@ use nomi_protocol::events::ProtocolEvent;
 use nomi_protocol::reader::spawn_stdin_reader;
 use nomi_protocol::writer::{ProtocolEmitter, ProtocolWriter};
 use nomi_protocol::{ToolApprovalManager, ToolApprovalResult};
+
+#[derive(Default)]
+struct ConnectedMcpServerNames {
+    names: BTreeSet<String>,
+}
+
+impl ConnectedMcpServerNames {
+    fn new(names: impl IntoIterator<Item = String>) -> Self {
+        Self {
+            names: names.into_iter().collect(),
+        }
+    }
+
+    fn contains(&self, name: &str) -> bool {
+        self.names.contains(name)
+    }
+
+    /// Record only a fully connected, atomically registered server.
+    fn record_success(&mut self, name: String) -> bool {
+        self.names.insert(name)
+    }
+}
 
 #[derive(Parser)]
 #[command(
@@ -316,6 +338,25 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
+#[cfg(test)]
+mod tests {
+    use super::ConnectedMcpServerNames;
+
+    #[test]
+    fn mcp_server_name_is_claimed_only_after_success_and_includes_static_connections() {
+        let mut names = ConnectedMcpServerNames::new(["static-server".to_owned()]);
+        assert!(names.contains("static-server"));
+        assert!(!names.contains("dynamic-server"));
+
+        // A failed connection/registration records nothing, so retry remains possible.
+        assert!(!names.contains("dynamic-server"));
+
+        assert!(names.record_success("dynamic-server".to_owned()));
+        assert!(names.contains("dynamic-server"));
+        assert!(!names.record_success("dynamic-server".to_owned()));
+    }
+}
+
 async fn repl_loop(
     engine: &mut nomi_agent::engine::AgentEngine,
     terminal: &Arc<TerminalSink>,
@@ -465,6 +506,12 @@ async fn run_json_stream_mode(
     }
 
     let result = bootstrap.build().await?;
+    let mut connected_mcp_server_names = ConnectedMcpServerNames::new(
+        result
+            .mcp_managers
+            .iter()
+            .flat_map(|manager| manager.server_names()),
+    );
     let mut engine = result.engine;
     let initial_has_mcp = result.has_mcp;
 
@@ -500,6 +547,12 @@ async fn run_json_stream_mode(
                 url,
                 headers,
             } => {
+                if connected_mcp_server_names.contains(&name) {
+                    output.emit_error(&format!(
+                        "AddMcpServer '{name}': rejected — a connected MCP server already uses this name"
+                    ));
+                    continue;
+                }
                 tracing::info!(target: "nomi_mcp", %name, %transport, ?command, "AddMcpServer received");
                 let config =
                     match to_mcp_server_config(&transport, command, args, env, url, headers) {
@@ -515,25 +568,51 @@ async fn run_json_stream_mode(
                 tracing::info!(target: "nomi_mcp", %name, "connecting to mcp server");
                 match McpManager::connect_all(&single_configs).await {
                     Ok(mgr) => {
-                        let tool_names: Vec<String> = mgr
+                        if !mgr.server_names().iter().any(|server| server == &name) {
+                            output.emit_error(&format!(
+                                "AddMcpServer '{name}' failed: the server did not connect"
+                            ));
+                            continue;
+                        }
+                        let advertised_tool_names: Vec<String> = mgr
                             .all_tools()
                             .iter()
                             .map(|(_, t)| t.name.clone())
                             .collect();
-                        tracing::info!(target: "nomi_mcp", %name, tools = tool_names.len(), "mcp server connected");
+                        tracing::info!(target: "nomi_mcp", %name, tools = advertised_tool_names.len(), "mcp server connected");
                         let mgr_arc = Arc::new(mgr);
-                        let builtin_names = engine.tool_names();
-                        register_single_server_tools(
+                        let registrations = match register_single_server_tools(
                             engine.registry_mut(),
                             &mgr_arc,
                             &name,
-                            &builtin_names,
                             config.deferred.unwrap_or(true),
-                        );
+                        ) {
+                            Ok(registrations) => registrations,
+                            Err(error) => {
+                                mgr_arc.shutdown().await;
+                                output.emit_error(&format!(
+                                    "AddMcpServer '{name}' rejected: {error}"
+                                ));
+                                continue;
+                            }
+                        };
+                        let newly_recorded = connected_mcp_server_names.record_success(name.clone());
+                        debug_assert!(newly_recorded);
+                        let tool_names = registrations
+                            .iter()
+                            .map(|registration| registration.original_name.clone())
+                            .collect();
+                        let provider_tools: BTreeMap<String, String> = registrations
+                            .into_iter()
+                            .map(|registration| {
+                                (registration.original_name, registration.provider_name)
+                            })
+                            .collect();
                         dynamic_managers.push(mgr_arc);
                         let _ = writer.emit(&ProtocolEvent::McpReady {
                             name,
                             tools: tool_names,
+                            provider_tools,
                         });
                     }
                     Err(e) => {

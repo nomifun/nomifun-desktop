@@ -576,26 +576,26 @@ fn bootstrap_creates_one_supervisor_and_shares_it_with_all_command_tools() {
 }
 
 #[test]
-fn native_exec_tools_are_registered_before_mcp_collision_snapshot() {
+fn mcp_routing_uses_origin_stable_reserved_names_without_a_collision_snapshot() {
     let bootstrap = without_whitespace(&production_source(
         "crates/agent/nomi-agent/src/bootstrap.rs",
     ));
-    let snapshot = bootstrap
-        .find("letbuiltin_names:Vec<String>=registry.tool_names();")
-        .expect("bootstrap must snapshot builtin names before MCP registration");
+    assert!(
+        !bootstrap.contains("letbuiltin_names:Vec<String>=registry.tool_names();"),
+        "MCP routing must not depend on a registration-order name snapshot"
+    );
 
-    for native in [
-        "nomi_tools::exec_command::ExecCommandTool::new(",
-        "nomi_tools::write_stdin::WriteStdinTool::new(",
-    ] {
-        let registration = bootstrap
-            .find(native)
-            .unwrap_or_else(|| panic!("missing native registration: {native}"));
-        assert!(
-            registration < snapshot,
-            "{native} must be included in the MCP collision snapshot"
-        );
-    }
+    let proxy = without_whitespace(&production_source(
+        "crates/agent/nomi-mcp/src/tool_proxy.rs",
+    ));
+    assert!(
+        proxy.contains("canonical_mcp_display_name(&server_name,&tool_name)"),
+        "every MCP proxy must derive its provider name from immutable origin"
+    );
+    assert!(
+        proxy.contains("Some(MCP_PROVIDER_NAME_PREFIX)"),
+        "MCP proxies must claim their reserved provider namespace"
+    );
 }
 
 #[test]

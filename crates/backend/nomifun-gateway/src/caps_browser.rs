@@ -81,18 +81,20 @@ fn sanitize_out_of_band(mut input: Value) -> Value {
 
 fn approval_required_value(call_id: &str, action: &str, args: &Value) -> Value {
     json!({
-        "approval_required": {
-            "call_id": call_id,
-            "title": format!("Approve irreversible browser action: {action}"),
-            "description": describe_pending(action, args),
-            "how_to": "This action is irreversible (submit / payment / delete / send) and the \
-                       caller does not auto-approve Browser approval. Relay this to the user; \
-                       once they approve, call nomi_browser_confirm with this call_id and option \
-                       \"proceed_once\" (or \"cancel\" to deny).",
-            "options": [
-                {"label": "Approve once", "value": "proceed_once"},
-                {"label": "Deny", "value": "cancel"},
-            ],
+        "result": {
+            "approval_required": {
+                "call_id": call_id,
+                "title": format!("Approve irreversible browser action: {action}"),
+                "description": describe_pending(action, args),
+                "how_to": "This action is irreversible (submit / payment / delete / send) and the \
+                           caller does not auto-approve Browser approval. Relay this to the user; \
+                           once they approve, call nomi_browser_confirm with this call_id and option \
+                           \"proceed_once\" (or \"cancel\" to deny).",
+                "options": [
+                    {"label": "Approve once", "value": "proceed_once"},
+                    {"label": "Deny", "value": "cancel"},
+                ],
+            }
         }
     })
 }
@@ -195,12 +197,18 @@ async fn confirm(deps: Arc<GatewayDeps>, ctx: CallerCtx, p: ConfirmParams) -> Va
         return json!({"error": "this pending browser approval belongs to a different session and cannot be resolved here"});
     }
     if !approve {
-        return json!({"resolved": p.call_id, "approved": false, "result": {"text": "Denied. The irreversible browser action was not run."}});
+        return json!({
+            "result": {
+                "resolved": p.call_id,
+                "approved": false,
+                "text": "Denied. The irreversible browser action was not run."
+            }
+        });
     }
     let mut envelope = tool_result_to_value(registry.execute_confirmed(&key, pending.input).await);
-    if let Some(obj) = envelope.as_object_mut() {
-        obj.insert("resolved".to_string(), json!(p.call_id));
-        obj.insert("approved".to_string(), json!(true));
+    if let Some(result) = envelope.get_mut("result").and_then(Value::as_object_mut) {
+        result.insert("resolved".to_string(), json!(p.call_id));
+        result.insert("approved".to_string(), json!(true));
     }
     envelope
 }
@@ -251,7 +259,9 @@ mod tests {
             "click",
             &json!({"ref": "f0e3"}),
         );
-        let ar = v.get("approval_required").expect("approval_required envelope");
+        let ar = v
+            .pointer("/result/approval_required")
+            .expect("approval_required result");
         assert_eq!(
             ar.get("call_id").and_then(Value::as_str),
             Some("browseroob_019f6672-ed10-7193-8a86-7981f6c6feae")
@@ -271,7 +281,9 @@ mod tests {
         let result = gw2_gate(&ctx, &registry, key, "press_key", &input);
 
         assert!(
-            result.and_then(|v| v.get("approval_required").cloned()).is_some(),
+            result
+                .and_then(|v| v.pointer("/result/approval_required").cloned())
+                .is_some(),
             "default gateway browser context should keep the explicit irreversible-action approval"
         );
     }

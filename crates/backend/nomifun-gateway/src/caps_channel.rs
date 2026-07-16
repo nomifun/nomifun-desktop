@@ -418,12 +418,12 @@ async fn send_file(deps: Arc<GatewayDeps>, p: SendFileParams) -> Value {
         // `result_asset_ids` is the SAME signal the channel relay already keys off
         // (it resolves the asset bytes by id and uploads them via the plugin's
         // media-send). The key name must match so the relay's detector picks it up.
-        Ok(row) => json!({
+        Ok(row) => ok(json!({
             "result_asset_ids": [row.id],
             "file_name": file_name,
             "delivered": true,
             "note": "文件已通过当前渠道发送给用户。"
-        }),
+        })),
         Err(e) => json!({ "error": format!("failed to prepare file for sending: {e}") }),
     }
 }

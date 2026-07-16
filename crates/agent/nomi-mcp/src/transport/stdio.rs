@@ -388,6 +388,7 @@ fn is_handshake_method(method: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(not(windows))]
     use serde_json::json;
 
     /// Pure-unit checks on the failure classifier — these need no child process.

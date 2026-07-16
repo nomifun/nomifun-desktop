@@ -27,8 +27,11 @@ use nomifun_api_types::{
 use nomifun_common::{LoopbackCapabilityError, LoopbackCapabilityClaims};
 use nomifun_common::RequirementId;
 use rmcp::handler::server::wrapper::Parameters;
+use rmcp::model::CallToolResult;
 use rmcp::{schemars, service::ServiceExt, tool, tool_router, transport};
 use serde::Deserialize;
+
+use super::stdio_common::{ForwardToolOutcome, into_mcp_tool_result};
 
 pub async fn run_requirement_stdio() -> ExitCode {
     let client = match super::stdio_common::ScopedBridgeClient::from_env(
@@ -120,7 +123,10 @@ impl RequirementStdioServer {
         name = "requirement_complete",
         description = "Mark the current AutoWork requirement as successfully completed. Call this exactly once, with the requirement id from the prompt, when the work is fully done."
     )]
-    async fn requirement_complete(&self, Parameters(params): Parameters<CompleteParams>) -> String {
+    async fn requirement_complete(
+        &self,
+        Parameters(params): Parameters<CompleteParams>,
+    ) -> CallToolResult {
         eprintln!("[mcp-requirement-stdio] tools/call: requirement_complete");
         self.forward_tool(
             "requirement_complete",
@@ -136,7 +142,10 @@ impl RequirementStdioServer {
         name = "requirement_update_status",
         description = "Update the status of the current AutoWork requirement. Use status=\"failed\" with a reason if you cannot complete it; status=\"done\" is equivalent to requirement_complete."
     )]
-    async fn requirement_update_status(&self, Parameters(params): Parameters<UpdateStatusParams>) -> String {
+    async fn requirement_update_status(
+        &self,
+        Parameters(params): Parameters<UpdateStatusParams>,
+    ) -> CallToolResult {
         eprintln!("[mcp-requirement-stdio] tools/call: requirement_update_status");
         self.forward_tool(
             "requirement_update_status",
@@ -196,6 +205,10 @@ fn capability_request_error(error: String) -> rmcp::ErrorData {
     )
 }
 
+fn forwarded_tool_result(outcome: ForwardToolOutcome) -> CallToolResult {
+    into_mcp_tool_result(outcome)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -222,14 +235,34 @@ mod tests {
         assert!(names.contains(&"requirement_complete".to_string()), "got {names:?}");
         assert!(names.contains(&"requirement_update_status".to_string()), "got {names:?}");
     }
+
+    #[test]
+    fn forwarded_requirement_error_sets_mcp_is_error() {
+        let result = forwarded_tool_result(ForwardToolOutcome::Error(
+            r#"{"error":"requirement update rejected"}"#.into(),
+        ));
+        assert_eq!(result.is_error, Some(true));
+    }
+
+    #[test]
+    fn forwarded_requirement_success_does_not_guess_from_text() {
+        let result = forwarded_tool_result(ForwardToolOutcome::Success(
+            "Error: ordinary completion note".into(),
+        ));
+        assert_ne!(result.is_error, Some(true));
+    }
 }
 
 impl RequirementStdioServer {
-    async fn forward_tool(&self, tool_name: &str, args: &serde_json::Value) -> String {
+    async fn forward_tool(&self, tool_name: &str, args: &serde_json::Value) -> CallToolResult {
         let body = serde_json::json!({
             "tool": tool_name,
             "args": args,
         });
-        self.client.forward_tool(tool_name, body, false).await
+        forwarded_tool_result(
+            self.client
+                .forward_tool_outcome(tool_name, body, false)
+                .await,
+        )
     }
 }

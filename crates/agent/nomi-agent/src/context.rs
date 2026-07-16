@@ -98,7 +98,8 @@ print a concise summary. Keep separate calls for state-dependent work and for br
 external-system, destructive, or approval-sensitive actions. Never use a script to bypass a \
 dedicated tool or read-before-edit protection.
  - Some tools are deferred — only their names are visible. Before calling \
-a deferred tool, use ToolSearch to load its full schema first.
+a deferred tool, call ToolSearch, wait for its result, then invoke the tool in a subsequent \
+model turn after its full schema has been activated.
  - When update_plan is available, use it for non-trivial multi-step work and synchronize it at each meaningful milestone, \
 not after each individual tool call or internal sub-step. Use a few user-relevant phases. At a \
 milestone transition, send one full snapshot that marks the previous milestone completed and the \
@@ -1306,6 +1307,10 @@ mod tests {
         assert!(
             result.contains("ToolSearch"),
             "tool guidance should mention ToolSearch"
+        );
+        assert!(
+            result.contains("subsequent model turn"),
+            "tool guidance should make deferred activation timing explicit"
         );
     }
 

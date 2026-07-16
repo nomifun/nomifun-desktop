@@ -2,7 +2,7 @@ use std::sync::{Arc, Mutex};
 
 use nomi_agent::confirm::ToolConfirmer;
 use nomi_agent::engine::AgentEngine;
-use nomi_agent::tool_execution::execute_tool_calls;
+use nomi_agent::tool_execution::{ProviderToolAuthority, execute_tool_calls};
 use nomi_agent::output::OutputSink;
 use nomi_agent::output::null_sink::NullSink;
 use nomi_compact::CompactionLevel;
@@ -145,6 +145,7 @@ async fn case_9_off_vs_safe_content() {
     let outcome_off = execute_tool_calls(
         &registry,
         &tool_calls,
+        &ProviderToolAuthority::from_request_tools(&registry.to_tool_defs()),
         &confirmer,
         None,
         CompactionLevel::Off,
@@ -158,6 +159,7 @@ async fn case_9_off_vs_safe_content() {
     let outcome_safe = execute_tool_calls(
         &registry,
         &tool_calls,
+        &ProviderToolAuthority::from_request_tools(&registry.to_tool_defs()),
         &confirmer,
         None,
         CompactionLevel::Safe,
@@ -346,6 +348,7 @@ async fn case_11_toon_comprehension_and_system_prompt() {
     let outcome = execute_tool_calls(
         &registry_check,
         &tool_calls,
+        &ProviderToolAuthority::from_request_tools(&registry_check.to_tool_defs()),
         &confirmer,
         None,
         CompactionLevel::Full,
