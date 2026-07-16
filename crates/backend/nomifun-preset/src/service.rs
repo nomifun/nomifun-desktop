@@ -88,7 +88,9 @@ impl PresetService {
         for item in self.extension_registry.get_presets().await { output.push(extension_to_response(&item)); }
         output.sort_by(|a, b| a.sort_order.cmp(&b.sort_order).then_with(|| b.last_used_at.cmp(&a.last_used_at)));
         let ids: Vec<_> = output.iter().map(|p| p.id.as_str()).collect();
-        let _ = self.state_repo.delete_orphans(&ids).await;
+        if let Err(error) = self.state_repo.delete_orphans(&ids).await {
+            tracing::warn!(%error, "failed to remove state for presets no longer in the catalog");
+        }
         Ok(output)
     }
 
@@ -105,6 +107,13 @@ impl PresetService {
                 Ok(extension_to_response(&item))
             }
             PresetSource::User => {
+                // Builtin and extension ids use catalog slugs, while user
+                // presets use the canonical `preset_*` entity namespace. A
+                // removed catalog slug is therefore missing, not malformed
+                // user input; report 404 so stale selections self-heal cleanly.
+                if !id.starts_with("preset_") {
+                    return Err(AppError::NotFound(format!("preset '{id}' not found")));
+                }
                 PresetId::parse(id).map_err(|error| {
                     AppError::BadRequest(format!("invalid user preset id: {error}"))
                 })?;

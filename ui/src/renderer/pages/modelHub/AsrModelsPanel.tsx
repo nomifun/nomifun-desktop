@@ -330,11 +330,26 @@ const AsrModelsPanel: React.FC<AsrModelsPanelProps> = ({ controller }) => {
           },
           {
             label: t('settings.modelHub.local.runtime.title'),
-            value: runtime ? runtimeLabel(runtime.phase) : t('settings.modelHub.local.runtime.checking'),
-            tone: runtime?.phase === 'failed' ? 'danger' : runtime?.phase === 'ready' ? 'success' : 'neutral',
+            value: runtime
+              ? runtime.errorKind
+                ? errorLabel(runtime.errorKind)
+                : runtimeLabel(runtime.phase)
+              : t('settings.modelHub.local.runtime.checking'),
+            tone:
+              runtime?.errorKind || runtime?.phase === 'failed'
+                ? 'danger'
+                : runtime?.phase === 'ready'
+                  ? 'success'
+                  : 'neutral',
           },
         ]}
       />
+
+      {runtime?.errorKind && (
+        <div className='mt-12px rd-8px bg-[rgba(var(--danger-6),0.07)] px-10px py-8px text-12px text-[rgb(var(--danger-6))]'>
+          {errorLabel(runtime.errorKind)}
+        </div>
+      )}
 
       <div className='mt-12px'>
         {isLoading && !catalog ? (

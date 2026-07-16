@@ -17,12 +17,13 @@ fn row(id: &str, requirement_id: &str, name: &str) -> AttachmentRow {
 
 /// Insert a minimal `requirements` row so attachment FK
 /// (`attachments.requirement_id → requirements(id)`) is satisfiable. The
-async fn seed_requirement(pool: &sqlx::SqlitePool, id: &str) {
+async fn seed_requirement(pool: &sqlx::SqlitePool, id: &str, display_no: i64) {
     sqlx::query(
-        "INSERT INTO requirements (id, title, tag, created_at, updated_at) \
-         VALUES (?, 'Req', 'default', 0, 0)",
+        "INSERT INTO requirements (id, display_no, title, tag, created_at, updated_at) \
+         VALUES (?, ?, 'Req', 'default', 0, 0)",
     )
     .bind(id)
+    .bind(display_no)
     .execute(pool)
     .await
     .unwrap();
@@ -36,8 +37,8 @@ async fn insert_list_get_delete_roundtrip() {
     let requirement_1 = RequirementId::new().into_string();
     let requirement_2 = RequirementId::new().into_string();
     let requirement_3 = RequirementId::new().into_string();
-    seed_requirement(db.pool(), &requirement_1).await;
-    seed_requirement(db.pool(), &requirement_2).await;
+    seed_requirement(db.pool(), &requirement_1, 1).await;
+    seed_requirement(db.pool(), &requirement_2, 2).await;
 
     repo.insert(&row("att_1", &requirement_1, "one.png")).await.unwrap();
     repo.insert(&row("att_2", &requirement_1, "two.png")).await.unwrap();
@@ -61,7 +62,7 @@ async fn insert_list_get_delete_roundtrip() {
     assert_eq!(repo.list_for_requirement(&requirement_1).await.unwrap().len(), 1);
 
     // a requirement with no attachments returns nothing
-    seed_requirement(db.pool(), &requirement_3).await;
+    seed_requirement(db.pool(), &requirement_3, 3).await;
     assert!(
         repo.list_for_requirement(&requirement_3)
             .await

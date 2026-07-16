@@ -18,11 +18,11 @@ import sunsetAfterglowCss from './presets/sunset-afterglow.css?raw';
  * 无显式选择时（空 activeThemeId）回退并应用此主题；也是主题缺失时的兜底。
  * Applied when no theme is explicitly selected (empty activeThemeId); also the fallback when a theme is missing.
  */
-export const DEFAULT_THEME_ID = 'codex-neutral';
+export const DEFAULT_THEME_ID = 'rhythm-dark';
 
 export const PRESET_THEME_NAME_KEYS = {
-  [DEFAULT_THEME_ID]: 'settings.cssTheme.presets.codexNeutral',
   'rhythm-dark': 'settings.cssTheme.presets.rhythmDark',
+  'codex-neutral': 'settings.cssTheme.presets.codexNeutral',
   'neon-rainbow': 'settings.cssTheme.presets.neonRainbow',
   'frosted-glass': 'settings.cssTheme.presets.frostedGlass',
   'sunset-afterglow': 'settings.cssTheme.presets.sunsetAfterglow',
@@ -47,23 +47,23 @@ export const getCssThemeDisplayName = (
  * 预设 CSS 主题列表 / Preset CSS themes list
  * 这些主题是内置的，用户可以直接选择使用 / These themes are built-in and can be directly used by users
  * 新增主题请遵循 presets/README.md 的主题契约 / New themes must follow the contract in presets/README.md
- * 数组顺序 = 卡片展示顺序：默认主题「经典」置首。
- * Array order = card display order: the default "Classic" first.
+ * 数组顺序 = 卡片展示顺序：系统默认主题「律动暗黑」置首。
+ * Array order = card display order: the system default "Rhythm Dark" first.
  */
 export const PRESET_THEMES: ICssTheme[] = [
   {
     id: DEFAULT_THEME_ID,
-    name: '经典',
+    name: '律动暗黑',
     is_preset: true,
-    css: codexNeutralCss,
+    css: rhythmDarkCss,
     created_at: Date.now(),
     updated_at: Date.now(),
   },
   {
-    id: 'rhythm-dark',
-    name: '律动暗黑',
+    id: 'codex-neutral',
+    name: '经典',
     is_preset: true,
-    css: rhythmDarkCss,
+    css: codexNeutralCss,
     created_at: Date.now(),
     updated_at: Date.now(),
   },

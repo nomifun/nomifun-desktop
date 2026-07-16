@@ -1061,9 +1061,9 @@ pub struct ResolvedAgentSkill {
 /// Resolve each requested skill name to its on-disk source directory.
 ///
 /// Search order per name (first match wins):
-/// 1. `{builtin_skills_dir}/{name}/` — top-level opt-in builtin.
-/// 2. `{builtin_skills_dir}/auto-inject/{name}/` — auto-inject builtin.
-/// 3. `{user_skills_dir}/{name}/` — user-created custom skill.
+/// 1. `{user_skills_dir}/{name}/` — user-created custom skill.
+/// 2. `{builtin_skills_dir}/{name}/` — top-level opt-in builtin.
+/// 3. `{builtin_skills_dir}/auto-inject/{name}/` — auto-inject builtin.
 /// 4. `{cron_skills_dir}/{name}/` — per-job cron skill.
 ///
 /// No files are copied and no per-conversation directory is created —
@@ -1176,6 +1176,12 @@ pub async fn link_workspace_skills(
 /// search order as [`materialize_skills_for_agent`]. Returns `None` if
 /// no matching directory exists in any known source.
 fn resolve_skill_source_path(paths: &SkillPaths, name: &str) -> Option<PathBuf> {
+    // Keep execution precedence aligned with `list_available_skills`: a
+    // user-authored skill intentionally overrides a same-name builtin.
+    let user = paths.user_skills_dir.join(name);
+    if user.is_dir() {
+        return Some(user);
+    }
     let top = paths.builtin_skills_dir.join(name);
     if top.is_dir() {
         return Some(top);
@@ -1186,10 +1192,6 @@ fn resolve_skill_source_path(paths: &SkillPaths, name: &str) -> Option<PathBuf> 
         .join(name);
     if auto.is_dir() {
         return Some(auto);
-    }
-    let user = paths.user_skills_dir.join(name);
-    if user.is_dir() {
-        return Some(user);
     }
     let cron = paths.cron_skills_dir.join(name);
     if cron.is_dir() {
@@ -3135,6 +3137,31 @@ mod tests {
         assert_eq!(
             resolved[0].source_path,
             paths.user_skills_dir.join("my-custom")
+        );
+    }
+
+    #[tokio::test]
+    async fn materialize_user_skill_overrides_same_name_builtin() {
+        let tmp = TempDir::new().unwrap();
+        let paths = make_embedded_paths(tmp.path()).await;
+        create_skill_in_dir(
+            &paths.user_skills_dir,
+            "planning-with-files",
+            "User override",
+        );
+
+        let resolved = materialize_skills_for_agent(
+            &paths,
+            "conv-user-override",
+            &["planning-with-files".to_owned()],
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(resolved.len(), 1);
+        assert_eq!(
+            resolved[0].source_path,
+            paths.user_skills_dir.join("planning-with-files")
         );
     }
 

@@ -123,6 +123,8 @@
       "clearFolder": "清除",
       "model": "模型",
       "nomiModelRequired": "请为 Nomi 选择模型",
+      "removedPresetLabel": "已移除的设定（{{id}}）",
+      "removedPresetRequired": "此定时任务引用的设定已被移除，请重新选择设定或 Agent",
       "nomiNoProvider": "暂无可用模型",
       "specifiedConversation": "指定会话",
       "specifiedConversationRequired": "请选择要复用的会话",

@@ -23,6 +23,7 @@ import { iconColors } from '@/renderer/styles/colors';
 import ocStyles from '@/renderer/pages/conversation/execution/executionPlanEditor.module.css';
 import GuidCollaborationTemplatePicker from './GuidCollaborationTemplatePicker';
 import type { AppliedCollaborationTemplate } from '@/renderer/components/collaboration/collaborationTemplateModel';
+import { useModelSelectorProviderLabel } from '@/renderer/hooks/agent/useModelSelectorProviderLabel';
 
 export type GuidAppliedCollaborationTemplate = AppliedCollaborationTemplate;
 
@@ -63,6 +64,7 @@ const GuidCollaboratorSelector: React.FC<GuidCollaboratorSelectorProps> = ({
   const { t } = useTranslation();
   const { providers, getAvailableModels, formatModelLabel, allPairs, hasModels, isLoading } = useExecutionModelPool();
   const [open, setOpen] = useState(false);
+  const providerLabel = useModelSelectorProviderLabel();
 
   const availableKeys = useMemo(() => new Set(allPairs.map(encodePair)), [allPairs]);
   const mainKey = useMemo(() => {
@@ -130,7 +132,7 @@ const GuidCollaboratorSelector: React.FC<GuidCollaboratorSelectorProps> = ({
                 const models = getAvailableModels(p);
                 if (models.length === 0) return null;
                 return (
-                  <NomiSelect.OptGroup key={p.id} label={p.name || p.platform}>
+                  <NomiSelect.OptGroup key={p.id} label={providerLabel(p)}>
                     {models.map((m) => {
                       const ref: TExecutionModelRef = {
                         provider_id: p.id,

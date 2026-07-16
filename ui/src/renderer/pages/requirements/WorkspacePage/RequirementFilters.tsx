@@ -149,7 +149,7 @@ const RequirementFilters: React.FC<RequirementFiltersProps> = ({
   const selectedStatusLabel = status ? t(`requirements.status.${status}`) : undefined;
   const sortOptions: Array<{ label: string; value: RequirementOrderBy | typeof DEFAULT_SORT }> = [
     { label: t('requirements.sort.default'), value: DEFAULT_SORT },
-    { label: t('requirements.sort.byId'), value: 'id' },
+    { label: t('requirements.sort.byId'), value: 'display_no' },
     { label: t('requirements.sort.byCreatedAt'), value: 'created_at' },
     { label: t('requirements.sort.byUpdatedAt'), value: 'updated_at' },
     { label: t('requirements.sort.byStatus'), value: 'status' },

@@ -1,4 +1,4 @@
-//! Built-in preset registry — embeds the manifest + rule/skill/avatar
+//! Built-in preset registry — embeds the manifest + rule/avatar
 //! assets into the binary via `include_dir`, with an optional filesystem
 //! fallback for E2E tests.
 //!
@@ -51,9 +51,6 @@ pub struct BuiltinPreset {
     /// Relative to the asset root; may contain `{locale}`.
     #[serde(default)]
     pub rule_file: Option<String>,
-    /// Parallel to `rule_file`, for `/api/skills/preset-skill/*` dispatch.
-    #[serde(default)]
-    pub skill_file: Option<String>,
     #[serde(default)]
     pub prompts: Vec<String>,
     #[serde(default)]
@@ -230,12 +227,6 @@ impl BuiltinPresetRegistry {
         self.read_asset(&rel.replace("{locale}", locale))
     }
 
-    /// Read the skill file bytes for a built-in preset.
-    pub fn skill_bytes(&self, id: &str, locale: &str) -> Option<Vec<u8>> {
-        let rel = self.presets.get(id)?.skill_file.as_ref()?;
-        self.read_asset(&rel.replace("{locale}", locale))
-    }
-
     /// Read the avatar asset for a built-in preset along with its
     /// extension (for Content-Type inference). Returns `None` when the
     /// manifest does not declare an avatar or the file is missing.
@@ -322,19 +313,15 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Embedded-source sanity: the bundle shipped with the crate must be
-    // well-formed and non-empty. Acts as a compile-time → runtime bridge
-    // guard (if the manifest is ever broken or the include_dir path is
-    // wrong, this test fails immediately rather than at user-hit-404 time).
+    // Embedded-source sanity. NomiFun currently ships no presets because
+    // task workflows live in builtin Skills; user and extension presets are
+    // still fully supported by the registry and service layers.
     // -----------------------------------------------------------------------
 
     #[test]
-    fn load_embedded_has_expected_builtins() {
+    fn load_embedded_manifest_is_intentionally_empty() {
         let reg = BuiltinPresetRegistry::load_embedded();
-        assert!(!reg.is_empty(), "embedded registry should contain the shipped presets");
-        // Sanity-check a couple of known ids from the committed manifest.
-        assert!(reg.has("word-creator"));
-        assert!(reg.has("cowork"));
+        assert!(reg.is_empty(), "task workflows must be shipped as Skills, not builtin presets");
     }
 
     #[test]
@@ -343,43 +330,6 @@ mod tests {
         assert!(reg.tags().iter().any(|t| t.dimension == "audience"));
         assert!(reg.tags().iter().any(|t| t.dimension == "scenario"));
         assert!(reg.tags().iter().any(|t| t.key == "office"));
-    }
-
-    #[test]
-    fn embedded_builtins_carry_tags() {
-        let reg = BuiltinPresetRegistry::load_embedded();
-        let w = reg.get("word-creator").expect("word-creator present");
-        assert!(!w.audience_tags.is_empty());
-        assert!(!w.scenario_tags.is_empty());
-    }
-
-    #[test]
-    fn load_embedded_rule_bytes_available_for_shipped_preset() {
-        let reg = BuiltinPresetRegistry::load_embedded();
-        let bytes = reg
-            .rule_bytes("word-creator", "en-US")
-            .expect("shipped word-creator en-US rule should resolve from the embedded bundle");
-        assert!(!bytes.is_empty());
-        let text = std::str::from_utf8(&bytes).expect("rule file should be valid utf-8");
-        assert!(text.len() > 100, "rule file should have real content");
-    }
-
-    #[test]
-    fn load_embedded_skill_bytes_available_for_cowork() {
-        // cowork is one of the three presets that ships a skill_file too.
-        let reg = BuiltinPresetRegistry::load_embedded();
-        let bytes = reg
-            .skill_bytes("cowork", "en-US")
-            .expect("cowork en-US skill should resolve from the embedded bundle");
-        assert!(!bytes.is_empty());
-    }
-
-    #[test]
-    fn embedded_rule_missing_locale_returns_none() {
-        let reg = BuiltinPresetRegistry::load_embedded();
-        // The manifest declares rule_file as "rules/{id}.{locale}.md"; a
-        // made-up locale can't resolve.
-        assert!(reg.rule_bytes("word-creator", "xx-YY").is_none());
     }
 
     // -----------------------------------------------------------------------
@@ -494,13 +444,6 @@ mod tests {
     // -----------------------------------------------------------------------
     // Avatar asset — emoji vs file
     // -----------------------------------------------------------------------
-
-    #[test]
-    fn avatar_asset_is_none_for_emoji_avatar() {
-        let reg = BuiltinPresetRegistry::load_embedded();
-        // word-creator ships with avatar: "📝" in the manifest.
-        assert!(reg.avatar_asset("word-creator").is_none());
-    }
 
     #[test]
     fn avatar_asset_returns_bytes_and_extension_for_file_avatar() {

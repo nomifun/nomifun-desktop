@@ -19,6 +19,7 @@ import { useCompositionInput } from '@/renderer/hooks/chat/useCompositionInput';
 import { iconColors } from '@/renderer/styles/colors';
 import { type ExecutionModelMode, encodePair, useExecutionModelPool } from './useExecutionModelPool';
 import styles from './executionPlanEditor.module.css';
+import { useModelSelectorProviderLabel } from '@/renderer/hooks/agent/useModelSelectorProviderLabel';
 
 /** The model-range selection the composer's pill edits. Carries the mode plus
  * the encoded-pair selections for `single` / `range`; the parent resolves it
@@ -85,6 +86,7 @@ const ExecutionPlanEditor: React.FC<ExecutionPlanEditorProps> = ({
   const { activeBorderColor, inactiveBorderColor, activeShadow } = useInputFocusRing();
   const { isComposing, compositionHandlers } = useCompositionInput();
   const { providers, getAvailableModels, formatModelLabel, allPairs, hasModels } = useExecutionModelPool();
+  const providerLabel = useModelSelectorProviderLabel();
 
   const [isFocused, setIsFocused] = useState(false);
   const [modelOpen, setModelOpen] = useState(false);
@@ -207,7 +209,7 @@ const ExecutionPlanEditor: React.FC<ExecutionPlanEditorProps> = ({
                 className='w-full'
               >
                 {providers.map((p) => (
-                  <NomiSelect.OptGroup key={p.id} label={p.name || p.platform}>
+                  <NomiSelect.OptGroup key={p.id} label={providerLabel(p)}>
                     {getAvailableModels(p).map((m) => {
                       const ref: TExecutionModelRef = {
                         provider_id: p.id,
@@ -240,7 +242,7 @@ const ExecutionPlanEditor: React.FC<ExecutionPlanEditorProps> = ({
                 className='w-full'
               >
                 {providers.map((p) => (
-                  <NomiSelect.OptGroup key={p.id} label={p.name || p.platform}>
+                  <NomiSelect.OptGroup key={p.id} label={providerLabel(p)}>
                     {getAvailableModels(p).map((m) => {
                       const ref: TExecutionModelRef = {
                         provider_id: p.id,

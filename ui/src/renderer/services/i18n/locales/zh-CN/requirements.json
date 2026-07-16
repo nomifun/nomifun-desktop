@@ -20,7 +20,7 @@
     "label": "排序",
     "direction": "排序方向",
     "default": "默认顺序",
-    "byId": "ID",
+    "byId": "编号",
     "byCreatedAt": "创建时间",
     "byUpdatedAt": "更新时间",
     "byStatus": "状态",

@@ -163,7 +163,7 @@ const ConversationRow: React.FC<ConversationRowProps> = (props) => {
               onToggleChecked(conversation);
             }}
           >
-            <Checkbox checked={checked} />
+            <Checkbox checked={checked} className='session-batch-selection-checkbox' />
           </span>
         )}
         <span className='size-22px flex items-center justify-center shrink-0 relative'>
