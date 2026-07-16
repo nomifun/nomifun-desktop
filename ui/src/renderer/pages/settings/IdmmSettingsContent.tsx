@@ -12,6 +12,7 @@ import { isHandledAuthExpiredHttpError } from '@/common/adapter/httpBridge';
 import type { IIdmmSettings } from '@/common/adapter/ipcBridge';
 import { useProvidersQuery } from '@renderer/hooks/agent/useModelProviderList';
 import type { ProviderId } from '@/common/types/ids';
+import { useModelSelectorProviderLabel } from '@/renderer/hooks/agent/useModelSelectorProviderLabel';
 
 /**
  * Global IDMM defaults: the backup provider/model the sidecar uses when a
@@ -21,6 +22,7 @@ import type { ProviderId } from '@/common/types/ids';
 const IdmmSettingsContent: React.FC = () => {
   const { t } = useTranslation();
   const { data: providers } = useProvidersQuery();
+  const providerLabel = useModelSelectorProviderLabel();
   const [settings, setSettings] = useState<IIdmmSettings>({ default_steering_prompt: '' });
   const [saving, setSaving] = useState(false);
 
@@ -31,7 +33,10 @@ const IdmmSettingsContent: React.FC = () => {
       .catch(() => {});
   }, []);
 
-  const providerOptions = useMemo(() => (providers ?? []).map((p) => ({ label: p.name, value: p.id })), [providers]);
+  const providerOptions = useMemo(
+    () => (providers ?? []).map((p) => ({ label: providerLabel(p), value: p.id })),
+    [providers, providerLabel]
+  );
 
   const modelOptions = useMemo(() => {
     const p = (providers ?? []).find((x) => x.id === settings.backup_provider_id);
