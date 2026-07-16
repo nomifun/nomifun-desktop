@@ -217,6 +217,7 @@ mod tests {
     fn req() -> Requirement {
         Requirement {
             id: nomifun_common::RequirementId::new().into_string(),
+            display_no: 1,
             title: "Do X".into(),
             content: "Detailed body".into(),
             tag: "t".into(),

@@ -2980,6 +2980,8 @@ export interface INewAttachmentRef {
 export interface IRequirement {
   /** Canonical globally unique requirement id (`req_<uuid-v7>`). */
   id: RequirementId;
+  /** Compact, immutable human-facing identifier, rendered as `#N`. */
+  display_no: number;
   title: string;
   content: string;
   tag: string;
@@ -2999,7 +3001,7 @@ export interface IRequirement {
 }
 
 /** Whitelisted sort columns for the requirements list (server validates too). */
-export type RequirementOrderBy = 'id' | 'created_at' | 'updated_at' | 'status';
+export type RequirementOrderBy = 'display_no' | 'id' | 'created_at' | 'updated_at' | 'status';
 
 export interface IListRequirementsParams {
   tag?: string;
