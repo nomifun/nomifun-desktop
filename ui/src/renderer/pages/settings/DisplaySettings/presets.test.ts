@@ -25,15 +25,15 @@ const getLocaleString = (settings: unknown, key: string): string => {
 };
 
 describe('display theme presets', () => {
-  test('uses the quiet Codex neutral preset as the first default theme', () => {
+  test('uses Rhythm Dark as the first system default theme', () => {
     const ids = PRESET_THEMES.map((theme) => theme.id);
-    const codexIndex = ids.indexOf('codex-neutral');
+    const rhythmDarkIndex = ids.indexOf('rhythm-dark');
 
-    expect(DEFAULT_THEME_ID).toBe('codex-neutral');
-    expect(codexIndex).toBe(0);
-    expect(codexIndex).toBeLessThan(ids.indexOf('rhythm-dark'));
-    expect(codexIndex).toBeLessThan(ids.indexOf('neon-rainbow'));
-    expect(PRESET_THEMES[codexIndex]?.name).toBe('经典');
+    expect(DEFAULT_THEME_ID).toBe('rhythm-dark');
+    expect(rhythmDarkIndex).toBe(0);
+    expect(rhythmDarkIndex).toBeLessThan(ids.indexOf('codex-neutral'));
+    expect(rhythmDarkIndex).toBeLessThan(ids.indexOf('neon-rainbow'));
+    expect(PRESET_THEMES[rhythmDarkIndex]?.name).toBe('律动暗黑');
   });
 
   test('defines a localized display name key for every built-in preset', () => {
@@ -50,15 +50,15 @@ describe('display theme presets', () => {
     const en = (key: string) => getLocaleString(enSettings, key);
 
     expect(PRESET_THEMES.map((theme) => getCssThemeDisplayName(theme, zh))).toEqual([
-      '经典',
       '律动暗黑',
+      '经典',
       '暗夜霓虹',
       '冰晶幻境',
       '落日余晖',
     ]);
     expect(PRESET_THEMES.map((theme) => getCssThemeDisplayName(theme, en))).toEqual([
-      'Classic',
       'Rhythm Dark',
+      'Classic',
       'Neon Night',
       'Frosted Glass',
       'Sunset Afterglow',
@@ -67,7 +67,8 @@ describe('display theme presets', () => {
 
   test('keeps user theme names literal instead of translating them', () => {
     const customTheme = { ...PRESET_THEMES[0]!, id: 'custom-user-theme', name: '我的 Theme', is_preset: false };
-    const customThemeWithPresetId = { ...PRESET_THEMES[1]!, name: 'My Rhythm Copy', is_preset: false };
+    const rhythmDark = PRESET_THEMES.find((theme) => theme.id === 'rhythm-dark')!;
+    const customThemeWithPresetId = { ...rhythmDark, name: 'My Rhythm Copy', is_preset: false };
 
     expect(getCssThemeDisplayName(customTheme, (key) => getLocaleString(enSettings, key))).toBe('我的 Theme');
     expect(getCssThemeDisplayName(customThemeWithPresetId, (key) => getLocaleString(enSettings, key))).toBe(
