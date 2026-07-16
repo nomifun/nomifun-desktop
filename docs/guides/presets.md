@@ -16,6 +16,10 @@ capability library at **`/skills`**.
 | Companion | Persistent identity, persona, figure, memory, and relationship state | The reusable launch template itself |
 | Skill | One focused capability that can be discovered and loaded | Agent/model selection or a complete persona |
 
+Reusable procedures, tool instructions, and domain knowledge belong in Skills,
+not in preset instructions. A preset may select those Skills, but it only owns
+the launch combination and stable preferences.
+
 This separation lets the same preset launch a normal conversation, materialize
 an Agent Execution step, configure a companion, or seed a scheduled task. It also
 lets a companion profile or a successful collaboration role be copied into a reusable
@@ -42,7 +46,7 @@ The catalog merges three sources:
 
 | Source | Origin | Editing behavior |
 | --- | --- | --- |
-| Builtin | Embedded catalog under `crates/backend/nomifun-app/assets/builtin-presets/` | Content is read-only. Duplicate it to customize; user state such as enabled/order/preferred agent is stored separately. |
+| Builtin | Embedded catalog under `crates/backend/nomifun-app/assets/builtin-presets/`; the current release preinstalls none | Content is read-only. Duplicate it to customize; user state such as enabled/order/preferred agent is stored separately. |
 | User | Relational preset records in SQLite | Fully editable and deletable. |
 | Extension | Installed extension `presets` contributions | Read-only in the preset library; manage the owning extension instead. |
 

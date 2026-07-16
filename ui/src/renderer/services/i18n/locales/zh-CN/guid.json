@@ -73,9 +73,13 @@
     "selectedCount": "已选 {{count}} 个 Skill",
     "sourceCustom": "自定义",
     "sourceBuiltin": "内置",
+    "sourceExtension": "扩展",
     "autoInject": "自动注入",
     "presetCount": "个设定",
     "skillCount": "个 Skill",
-    "presetHint": "选择一个设定，本次会话将由后端解析并固化配置快照。"
+    "presetHint": "选择一个设定，本次会话将由后端解析并固化配置快照。",
+    "presetEmpty": "还没有设定。可前往设定页创建，或保持自由发挥。",
+    "presetNoMatch": "没有匹配当前搜索与筛选条件的设定。",
+    "skillNoMatch": "没有匹配当前搜索与筛选条件的 Skill。"
   }
 }

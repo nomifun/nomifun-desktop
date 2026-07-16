@@ -21,7 +21,6 @@ import { usePresetTags } from '@/renderer/hooks/preset';
 import PresetTagFilterBar from '@/renderer/pages/settings/PresetSettings/PresetTagFilterBar';
 import { filterPresetsByTags } from '@/renderer/pages/settings/PresetSettings/presetUtils';
 import { filterSkillsByTags } from '@/renderer/pages/settings/skill/skillFilter';
-import coworkSvg from '@/renderer/assets/icons/cowork.svg';
 import DrawerPresetCard from './DrawerPresetCard';
 import DrawerSkillCard from './DrawerSkillCard';
 import styles from '../index.module.css';
@@ -53,11 +52,7 @@ function computeDrawerWidth(): number {
   return Math.min(1024, targetWidth, Math.max(280, viewportWidth - 24));
 }
 
-// Avatar image map for PresetAvatar (same as PresetSettings)
-const AVATAR_IMAGE_MAP: Record<string, string> = {
-  'cowork.svg': coworkSvg,
-  '\u{1F6E0}\u{FE0F}': coworkSvg,
-};
+const AVATAR_IMAGE_MAP: Record<string, string> = {};
 
 // ─── Component ────────────────────────────────────────────────────────────────
 
@@ -262,8 +257,8 @@ const PresetPickerDrawer: React.FC<PresetPickerDrawerProps> = ({
 
         {/* Card list */}
         <div className={styles.drawerList}>
-          {mode === 'preset'
-            ? filteredPresets.map((a) => (
+          {mode === 'preset' ? (
+            filteredPresets.length > 0 ? filteredPresets.map((a) => (
                 <DrawerPresetCard
                   key={a.id}
                   preset={a}
@@ -272,8 +267,19 @@ const PresetPickerDrawer: React.FC<PresetPickerDrawerProps> = ({
                   avatarImageMap={AVATAR_IMAGE_MAP}
                   onSelect={handleSelectPreset}
                 />
-              ))
-            : filteredSkills.map((skill) => (
+              )) : (
+                <div className={styles.drawerEmptyState}>
+                  {presets.length === 0
+                    ? t('guid.drawer.presetEmpty', {
+                        defaultValue: 'No presets yet. Create one in Presets, or stay free-form.',
+                      })
+                    : t('guid.drawer.presetNoMatch', {
+                        defaultValue: 'No presets match the current search and filters.',
+                      })}
+                </div>
+              )
+          ) : (
+            filteredSkills.length > 0 ? filteredSkills.map((skill) => (
                 <DrawerSkillCard
                   key={skill.name}
                   skill={skill}
@@ -281,7 +287,14 @@ const PresetPickerDrawer: React.FC<PresetPickerDrawerProps> = ({
                   isAuto={builtinAutoNames.has(skill.name)}
                   onToggle={onToggleSkill}
                 />
-              ))}
+              )) : (
+                <div className={styles.drawerEmptyState}>
+                  {t('guid.drawer.skillNoMatch', {
+                    defaultValue: 'No Skills match the current search and filters.',
+                  })}
+                </div>
+              )
+          )}
         </div>
 
         {/* Footer */}

@@ -219,9 +219,13 @@ const PresetListPanel: React.FC<PresetListPanelProps> = ({
           </div>
         ) : (
           <div className='text-center text-t-secondary py-32px'>
-            {t('settings.presetNoMatch', {
-              defaultValue: 'No presets match the current filters.',
-            })}
+            {presets.length === 0
+              ? t('settings.presetsEmpty', {
+                  defaultValue: 'No presets yet. Create one to save a reusable launch configuration.',
+                })
+              : t('settings.presetNoMatch', {
+                  defaultValue: 'No presets match the current filters.',
+                })}
           </div>
         )}
       </div>
