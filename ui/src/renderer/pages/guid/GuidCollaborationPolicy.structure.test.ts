@@ -24,6 +24,9 @@ describe('Guid collaboration policy', () => {
     expect(controlSource.includes("role='radiogroup'")).toBe(true);
     expect(controlSource.includes("role='radio'")).toBe(true);
     expect(controlSource.includes('aria-checked={active}')).toBe(true);
+    expect(controlSource.includes('getPopupContainer={() => document.body}')).toBe(true);
+    expect(controlSource.includes('collaboration.policy.description')).toBe(false);
+    expect(controlSource.includes('collaboration.policy.askUserDescription')).toBe(false);
   });
 
   test('stores canonical policy fields on the created Nomi conversation', () => {

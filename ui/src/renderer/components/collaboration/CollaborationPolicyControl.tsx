@@ -29,30 +29,21 @@ const CollaborationPolicyControl: React.FC<CollaborationPolicyControlProps> = ({
 }) => {
   const { t } = useTranslation();
   const titleId = React.useId();
-  const descriptionId = React.useId();
   if (runtimeType !== 'nomi') return null;
 
   const title = t('collaboration.policy.title', { defaultValue: '协作策略' });
-  const description = t('collaboration.policy.description', {
-    defaultValue: '决定当前对话是否拆分任务，以及是否优先并行推进。',
-  });
   const askUserLabel = t('collaboration.policy.askUser', {
-    defaultValue: '关键决策时询问我',
+    defaultValue: '拿不准时问我',
   });
 
   const content = (
-    <section className={styles.panel} aria-labelledby={titleId} aria-describedby={descriptionId}>
+    <section className={styles.panel} aria-labelledby={titleId}>
       <div className={styles.header}>
         <span className={styles.headerIcon} aria-hidden='true'>
           <EveryUser theme='outline' size='17' strokeWidth={3} />
         </span>
-        <div className={styles.headerCopy}>
-          <div id={titleId} className={styles.title}>
-            {title}
-          </div>
-          <div id={descriptionId} className={styles.description}>
-            {description}
-          </div>
+        <div id={titleId} className={styles.title}>
+          {title}
         </div>
       </div>
 
@@ -84,14 +75,7 @@ const CollaborationPolicyControl: React.FC<CollaborationPolicyControlProps> = ({
       </div>
 
       <div className={styles.decisionCard} data-disabled={delegationPolicy === 'disabled'}>
-        <div className={styles.decisionCopy}>
-          <div className={styles.decisionTitle}>{askUserLabel}</div>
-          <div className={styles.decisionDescription}>
-            {t('collaboration.policy.askUserDescription', {
-              defaultValue: '协作者遇到无法安全判断的选择时暂停并询问。',
-            })}
-          </div>
-        </div>
+        <div className={styles.decisionTitle}>{askUserLabel}</div>
         <Switch
           size='small'
           className={styles.decisionSwitch}
@@ -111,7 +95,14 @@ const CollaborationPolicyControl: React.FC<CollaborationPolicyControlProps> = ({
 
   const active = delegationPolicy !== 'disabled';
   return (
-    <Popover className={styles.popover} content={content} trigger='click' position='top' unmountOnExit>
+    <Popover
+      className={styles.popover}
+      content={content}
+      trigger='click'
+      position='top'
+      getPopupContainer={() => document.body}
+      unmountOnExit
+    >
       <Button
         type={compact ? 'text' : 'secondary'}
         shape={compact ? 'circle' : 'round'}

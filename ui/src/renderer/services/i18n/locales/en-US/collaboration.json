@@ -1,14 +1,12 @@
 {
   "policy": {
     "title": "Collaboration policy",
-    "description": "Choose whether to delegate tasks and whether parallel work should be preferred.",
     "delegation": {
       "disabled": "Off",
       "automatic": "Automatic",
       "prefer_parallel": "Prefer parallel"
     },
-    "askUser": "Ask me for key decisions",
-    "askUserDescription": "Pause and ask when collaborators cannot safely make a decision.",
+    "askUser": "Ask when unsure",
     "open": "Collaboration policy",
     "button": "Collaboration"
   },
