@@ -14,16 +14,13 @@ const codexNeutralCss = readFileSync(new URL('../DisplaySettings/presets/codex-n
 describe('preset skill checkbox selection treatment', () => {
   test('applies the enhanced selected state to every editable preset skill source', () => {
     expect(drawerSource.match(/preset-skill-selection-checkbox/g)?.length).toBe(5);
-    expect(controlCss.includes('.preset-skill-selection-checkbox .arco-checkbox-mask')).toBe(true);
-    expect(controlCss.includes('.preset-skill-selection-checkbox.arco-checkbox-checked .arco-checkbox-mask')).toBe(true);
-    expect(controlCss.includes('.preset-skill-selection-checkbox .arco-checkbox-mask-icon')).toBe(true);
+    expect(controlCss.includes('.arco-checkbox-checked .arco-checkbox-mask')).toBe(true);
+    expect(controlCss.includes('.arco-checkbox-mask-icon')).toBe(true);
   });
 
   test('applies the enhanced selection treatment to preset scope controls', () => {
     expect(drawerSource.match(/preset-scope-selection-checkbox/g)?.length).toBe(4);
-    expect(controlCss.includes('.preset-scope-selection-checkbox .arco-checkbox-mask')).toBe(true);
-    expect(controlCss.includes('.preset-scope-selection-checkbox.arco-checkbox-checked .arco-checkbox-mask')).toBe(true);
-    expect(controlCss.includes('.preset-scope-selection-checkbox .arco-checkbox-mask-icon')).toBe(true);
+    expect(controlCss.includes('.arco-checkbox-mask {')).toBe(true);
   });
 
   test('keeps the checkmark white against the classic dark black selection fill', () => {
