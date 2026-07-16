@@ -167,7 +167,9 @@ const AgentCard: React.FC<AgentCardProps> = (props) => {
           {agent.icon || <Robot theme='outline' size='20' />}
         </Avatar>
         <div className='min-w-0 flex-1'>
-          <Typography.Text className='block truncate font-medium text-14px'>{agent.name || 'Custom Agent'}</Typography.Text>
+          <Typography.Text className='block truncate font-medium text-14px'>
+            {agent.name || t('settings.agentManagement.customEngineDefaultName')}
+          </Typography.Text>
           <div className='text-12px text-t-secondary truncate'>
             {agent.command}
             {agent.args && agent.args.length > 0 ? ` ${agent.args.join(' ')}` : ''}

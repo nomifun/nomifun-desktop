@@ -95,7 +95,7 @@ export const AgentHubModal: React.FC<AgentHubModalProps> = ({ visible, onCancel 
         <div className='mb-12px flex flex-wrap items-center justify-start gap-x-6px gap-y-2px text-left'>
           <Typography.Text type='secondary' className='text-12px leading-18px text-t-secondary'>
             {t('settings.agentManagement.marketContributionHint', {
-              defaultValue: 'Want a new Agent listed here?',
+              defaultValue: 'Want a new execution engine listed here?',
             })}
           </Typography.Text>
           <Link className='text-12px leading-18px' onClick={openNomiHubRepo}>
@@ -120,7 +120,9 @@ export const AgentHubModal: React.FC<AgentHubModalProps> = ({ visible, onCancel 
         ) : agents.length === 0 ? (
           <div className='flex items-center justify-center py-48px text-center'>
             <Typography.Text type='secondary' className='text-13px text-t-secondary'>
-              {t('settings.agentManagement.marketEmpty', { defaultValue: 'No agents available in the market.' })}
+              {t('settings.agentManagement.marketEmpty', {
+                defaultValue: 'No execution engines are available in the market.',
+              })}
             </Typography.Text>
           </div>
         ) : (

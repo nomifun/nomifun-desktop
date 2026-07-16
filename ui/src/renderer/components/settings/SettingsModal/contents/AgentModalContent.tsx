@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { Tabs, Message } from '@arco-design/web-react';
+import { Tabs } from '@arco-design/web-react';
 import { useArcoMessage } from '@/renderer/utils/ui/useArcoMessage';
 import React, { useState, useEffect } from 'react';
 import { useSearchParams } from 'react-router-dom';
@@ -13,10 +13,11 @@ import LocalAgents from '@/renderer/pages/settings/AgentSettings/LocalAgents';
 import RemoteAgents from '@/renderer/pages/settings/AgentSettings/RemoteAgents';
 import NomiScrollArea from '@/renderer/components/base/NomiScrollArea';
 import { useSettingsViewMode } from '../settingsViewContext';
+import AgentRuntimeSettingsContent from './AgentRuntimeSettingsContent';
 
 const AgentModalContent: React.FC = () => {
   const { t } = useTranslation();
-  const [agentMessage, agentMessageContext] = useArcoMessage({ maxCount: 10 });
+  const [, agentMessageContext] = useArcoMessage({ maxCount: 10 });
   const viewMode = useSettingsViewMode();
   const isPageMode = viewMode === 'page';
   const [searchParams, setSearchParams] = useSearchParams();
@@ -24,15 +25,13 @@ const AgentModalContent: React.FC = () => {
 
   useEffect(() => {
     const tabParam = searchParams.get('tab');
-    if (tabParam === 'remote' || tabParam === 'local') {
+    if (tabParam === 'remote' || tabParam === 'local' || tabParam === 'runtime') {
       setActiveTab(tabParam);
     }
   }, [searchParams]);
 
   const handleTabChange = (key: string) => {
     setActiveTab(key);
-    // Merge (not replace) so sibling query params like ?section survive when
-    // this content is embedded inside the Model Management hub (/models).
     const next = new URLSearchParams(searchParams);
     next.set('tab', key);
     setSearchParams(next, { replace: true });
@@ -57,6 +56,9 @@ const AgentModalContent: React.FC = () => {
           <NomiScrollArea className='flex-1 min-h-0 pb-16px scrollbar-hide' disableOverflow={isPageMode}>
             <RemoteAgents />
           </NomiScrollArea>
+        </Tabs.TabPane>
+        <Tabs.TabPane key='runtime' title={t('settings.executionEngineHub.runtimeTab')}>
+          <AgentRuntimeSettingsContent />
         </Tabs.TabPane>
       </Tabs>
     </div>

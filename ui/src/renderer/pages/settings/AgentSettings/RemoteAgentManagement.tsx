@@ -655,7 +655,7 @@ const RemoteAgentManagement: React.FC = () => {
         <Typography.Text className='mt-4px block text-11px leading-17px text-t-tertiary'>
           {t('settings.remoteAgent.hermesLocalHint', {
             defaultValue:
-              'Hermes is supported locally through the standard `hermes acp` CLI. Its separate remote JSON-RPC gateway is not ACP-over-WebSocket and requires a dedicated adapter.',
+              'Hermes is available as a local execution engine through the standard `hermes acp` CLI. Its separate remote JSON-RPC gateway is not ACP-over-WebSocket and requires a dedicated adapter.',
           })}
         </Typography.Text>
       </div>

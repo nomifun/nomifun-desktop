@@ -5,7 +5,7 @@ import { SettingsViewModeProvider } from '@/renderer/components/settings/Setting
 import { resolveExtensionAssetUrl } from '@/renderer/utils/platform';
 import { type IExtensionSettingsTab } from '@/common/adapter/ipcBridge';
 import { useExtensionSettingsTabs } from '@/renderer/hooks/system/useExtensionSettingsTabs';
-import { Computer, Earth, Info, Lightning, LinkCloud, Puzzle, Robot, Send, Speed, System } from '@icon-park/react';
+import { Computer, Cpu, Earth, Info, Lightning, Puzzle, Send, System } from '@icon-park/react';
 import { useTranslation } from 'react-i18next';
 import { useLocation, useNavigate } from 'react-router-dom';
 import { useExtI18n } from '@/renderer/hooks/system/useExtI18n';
@@ -24,12 +24,11 @@ type TranslateFn = (key: string, options?: { defaultValue?: string }) => string;
 
 export function getBuiltinSettingsNavItems(t: TranslateFn): NavItem[] {
   const builtinMap: Record<string, NavItem> = {
-    model: { id: 'model', label: t('settings.model'), icon: <LinkCloud theme='outline' size='16' />, path: 'model' },
-    agent: {
-      id: 'agent',
-      label: t('settings.agents', { defaultValue: 'Agents' }),
-      icon: <Robot theme='outline' size='16' />,
-      path: 'agent',
+    'execution-engines': {
+      id: 'execution-engines',
+      label: t('settings.executionEngineHub.railTitle'),
+      icon: <Cpu theme='outline' size='16' />,
+      path: 'execution-engines',
     },
     capabilities: {
       id: 'capabilities',
@@ -58,12 +57,6 @@ export function getBuiltinSettingsNavItems(t: TranslateFn): NavItem[] {
       path: 'webui',
     },
     system: { id: 'system', label: t('settings.system'), icon: <System theme='outline' size='16' />, path: 'system' },
-    'agent-runtime': {
-      id: 'agent-runtime',
-      label: t('settings.agentLimits'),
-      icon: <Speed theme='outline' size='16' />,
-      path: 'agent-runtime',
-    },
     'browser-use': {
       id: 'browser-use',
       label: t('settings.browserUseNav'),

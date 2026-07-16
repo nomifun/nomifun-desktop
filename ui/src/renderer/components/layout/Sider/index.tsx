@@ -48,7 +48,8 @@ interface SiderProps {
  * by small-text section headers (`SiderSectionHeader`): 常用 (会话 / 桌面伙伴),
  * 对外服务 (对外伙伴), 数据空间 (知识库), 自动化 (定时任务 / 需求平台),
  * 增强工具 (设定 / Skill / MCP), and a bottom-pinned 设置 group
- * (模型&Agent + the footer).
+ * (模型管理 + the footer). Execution engines live as an independent tab
+ * inside Settings rather than being mixed into model management.
  */
 const Sider: React.FC<SiderProps> = ({ onSessionClick, collapsed = false }) => {
   const { t } = useTranslation();

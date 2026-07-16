@@ -6,16 +6,15 @@
 
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { useSearchParams } from 'react-router-dom';
+import { Navigate, useSearchParams } from 'react-router-dom';
 import classNames from 'classnames';
-import { DataServer, HeadsetOne, LinkCloud, Robot, SettingTwo, Platte, Lightning } from '@icon-park/react';
+import { DataServer, HeadsetOne, LinkCloud, SettingTwo, Platte, Lightning } from '@icon-park/react';
 import ContentSider from '@/renderer/components/layout/ContentSider';
 import SegmentedTabs, { type SegmentedTabItem } from '@/renderer/components/base/SegmentedTabs';
 import { SettingsViewModeProvider } from '@/renderer/components/settings/SettingsModal/settingsViewContext';
 import { useLayoutContext } from '@/renderer/hooks/context/LayoutContext';
 import { useResizableSplit } from '@/renderer/hooks/ui/useResizableSplit';
 import { useContainerWidth } from '@/renderer/hooks/ui/useContainerWidth';
-import AgentModalContent from '@/renderer/components/settings/SettingsModal/contents/AgentModalContent';
 import ModelModalContent from '@/renderer/components/settings/SettingsModal/contents/ModelModalContent';
 import GlobalModelConfig from './GlobalModelConfig';
 import CreationModelsContent from './CreationModelsContent';
@@ -23,10 +22,9 @@ import FreeModelsContent from './FreeModelsContent';
 import LocalModelsContent from './LocalModelsContent';
 import SpeechToTextContent from './SpeechToTextContent';
 
-type Section = 'agents' | 'models' | 'free' | 'local' | 'speech' | 'creation' | 'global';
+type Section = 'models' | 'free' | 'local' | 'speech' | 'creation' | 'global';
 
 const isSection = (value: string | null): value is Section =>
-  value === 'agents' ||
   value === 'models' ||
   value === 'free' ||
   value === 'local' ||
@@ -45,14 +43,14 @@ interface SectionDef {
 /**
  * ModelHubPage (/models) — "Model Management". The primary level is a
  * content-area secondary sidebar (mirroring the conversation `ContentSider`):
- * a left section list (Agents / Models / Global Model Config) drives the right
- * content pane. The agents section keeps its own local/remote second-level tabs.
+ * a left section list (provider / free / local / creation / global settings)
+ * drives the right content pane. Execution engines live independently under
+ * Settings and are intentionally not mixed into model management.
  *
  * The sidebar width is drag-resizable and persisted. On mobile the left sidebar
  * collapses to a horizontal segmented bar above the content.
  *
- * The level syncs to `?section=` (not `?tab=`) so it never collides with the
- * local/remote `?tab=` used inside AgentModalContent.
+ * The level syncs to `?section=`.
  */
 const ModelHubPage: React.FC = () => {
   const { t } = useTranslation();
@@ -108,7 +106,6 @@ const ModelHubPage: React.FC = () => {
       { key: 'free', label: t('settings.modelHub.sectionFree'), icon: <Lightning theme='outline' size='16' strokeWidth={3} /> },
       { key: 'local', label: t('settings.modelHub.sectionLocal'), icon: <DataServer theme='outline' size='16' strokeWidth={3} /> },
       { key: 'speech', label: t('settings.modelHub.sectionSpeech'), icon: <HeadsetOne theme='outline' size='16' strokeWidth={3} /> },
-      { key: 'agents', label: t('settings.modelHub.sectionAgents'), icon: <Robot theme='outline' size='16' strokeWidth={3} /> },
       { key: 'creation', label: t('settings.modelHub.sectionCreation'), icon: <Platte theme='outline' size='16' strokeWidth={3} /> },
       { key: 'global', label: t('settings.modelHub.sectionGlobal'), icon: <SettingTwo theme='outline' size='16' strokeWidth={3} /> },
     ],
@@ -117,7 +114,6 @@ const ModelHubPage: React.FC = () => {
 
   const content = (
     <>
-      {section === 'agents' && <AgentModalContent />}
       {section === 'models' && <ModelModalContent />}
       {section === 'free' && <FreeModelsContent />}
       {section === 'local' && <LocalModelsContent />}
@@ -126,6 +122,14 @@ const ModelHubPage: React.FC = () => {
       {section === 'global' && <GlobalModelConfig />}
     </>
   );
+
+  // Compatibility for bookmarks and links from builds where execution engines
+  // were embedded in model management. Preserve the local/remote sub-tab.
+  if (searchParams.get('section') === 'agents') {
+    const tab = searchParams.get('tab');
+    const target = tab === 'remote' ? '/settings/execution-engines?tab=remote' : '/settings/execution-engines?tab=local';
+    return <Navigate to={target} replace />;
+  }
 
   // Mobile: horizontal segmented nav above the content (no left sidebar).
   if (isMobile) {

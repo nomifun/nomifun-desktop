@@ -5,6 +5,15 @@ const readSource = (relativePath: string) =>
   readFileSync(new URL(relativePath, import.meta.url), 'utf8');
 
 describe('model-owned tool configuration placement', () => {
+  test('execution engines are not part of model management', () => {
+    const hubSource = readSource('./index.tsx');
+
+    expect(hubSource.includes("key: 'agents'")).toBe(false);
+    expect(hubSource.includes('AgentModalContent')).toBe(false);
+    expect(hubSource.includes("searchParams.get('section') === 'agents'")).toBe(true);
+    expect(hubSource.includes("'/settings/execution-engines?tab=remote'")).toBe(true);
+  });
+
   test('the MCP page contains only MCP server management', () => {
     const source = readSource(
       '../../components/settings/SettingsModal/contents/ToolsModalContent.tsx'

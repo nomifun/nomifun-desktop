@@ -279,7 +279,7 @@ const InlineAgentEditor: React.FC<InlineAgentEditorProps> = ({ agent, onSave, on
     const envEntries = Object.entries(envObj).map(([envName, value]) => ({ name: envName, value }));
     const draft: CustomAgentDraft = {
       id: agent?.id || uuid(),
-      name: name.trim() || 'Custom Agent',
+      name: name.trim() || t('settings.agentManagement.customEngineDefaultName'),
       icon: avatar,
       command: command.trim(),
       enabled: agent?.enabled !== false,
@@ -288,7 +288,7 @@ const InlineAgentEditor: React.FC<InlineAgentEditorProps> = ({ agent, onSave, on
       advanced: hasAdvanced ? advanced : undefined,
     };
     onSave(draft);
-  }, [agent, name, avatar, command, argsString, envVars, advanced, onSave]);
+  }, [agent, name, avatar, command, argsString, envVars, advanced, onSave, t]);
 
   const isSubmitDisabled = !name.trim() || !command.trim();
   const isTestDisabled = !command.trim() || testStatus === 'testing';
@@ -316,7 +316,7 @@ const InlineAgentEditor: React.FC<InlineAgentEditorProps> = ({ agent, onSave, on
             size='large'
             value={name}
             onChange={handleNameChange}
-            placeholder={t('settings.agent_namePlaceholder')}
+            placeholder={t('settings.agentNamePlaceholder')}
           />
         </div>
       </div>
