@@ -67,4 +67,11 @@ describe('filterCronJobsByQuery', () => {
     expect(filterCronJobsByQuery(jobs, 'MERGED prs').map((item) => item.id)).toEqual([jobs[1].id]);
     expect(filterCronJobsByQuery(jobs, '09:00').map((item) => item.id)).toEqual([jobs[0].id]);
   });
+
+  test('does not index a placeholder conversation ID for an unbound task', () => {
+    const unbound = job({ name: 'Not run yet' });
+    unbound.metadata = { ...unbound.metadata, conversation_id: undefined };
+
+    expect(filterCronJobsByQuery([unbound], '#undefined')).toEqual([]);
+  });
 });
