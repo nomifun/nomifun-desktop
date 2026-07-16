@@ -2,8 +2,8 @@ import { useCallback, useEffect, useState } from 'react';
 import { ipcBridge } from '@/common';
 import { configService } from '@/common/config/configService';
 import type { IMcpServer } from '@/common/config/storage';
-import { parseMcpServerId } from '@/common/types/ids';
 import { ensureBackendMcpCatalog } from './catalog';
+import { parseExtensionMcpServers, type ExtensionMcpServerContribution } from './extensionCatalog';
 
 /**
  * MCP server state hook.
@@ -11,7 +11,7 @@ import { ensureBackendMcpCatalog } from './catalog';
  */
 export const useMcpServers = () => {
   const [mcpServers, setMcpServers] = useState<IMcpServer[]>([]);
-  const [extensionMcpServers, setExtensionMcpServers] = useState<IMcpServer[]>([]);
+  const [extensionMcpServers, setExtensionMcpServers] = useState<ExtensionMcpServerContribution[]>([]);
   const [isMcpServersLoading, setIsMcpServersLoading] = useState(true);
 
   useEffect(() => {
@@ -35,17 +35,12 @@ export const useMcpServers = () => {
           return;
         }
 
-        const converted: IMcpServer[] = extServers.map((server) => ({
-          id: parseMcpServerId(server.id),
-          name: String(server.name || ''),
-          description: server.description as string | undefined,
-          enabled: server.enabled !== false,
-          transport: server.transport as IMcpServer['transport'],
-          created_at: (server.created_at as number) || Date.now(),
-          updated_at: (server.updated_at as number) || Date.now(),
-          original_json: String(server.original_json || '{}'),
-          builtin: false,
-        }));
+        const converted = parseExtensionMcpServers(extServers);
+        if (converted.length !== extServers.length) {
+          console.warn(
+            `[useMcpServers] Ignored ${extServers.length - converted.length} malformed extension MCP contribution(s)`
+          );
+        }
         setExtensionMcpServers(converted);
       })
       .catch((error) => {

@@ -13,8 +13,13 @@ import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import NomiScrollArea from '@/renderer/components/base/NomiScrollArea';
 import AddMcpServerModal from '@/renderer/pages/settings/components/AddMcpServerModal';
+import ExtensionMcpServerItem from '@/renderer/pages/settings/ToolsSettings/ExtensionMcpServerItem';
 import McpServerItem from '@/renderer/pages/settings/ToolsSettings/McpServerItem';
 import { useMcpServers, useMcpConnection, useMcpModal, useMcpServerCRUD, useMcpOAuth } from '@/renderer/hooks/mcp';
+import {
+  extensionMcpUiKey,
+  type ExtensionMcpServerContribution,
+} from '@/renderer/hooks/mcp/extensionCatalog';
 import classNames from 'classnames';
 import { useSettingsViewMode } from '../settingsViewContext';
 
@@ -26,7 +31,7 @@ const isBuiltinImageGenServer = (server: IMcpServer) =>
 const ModalMcpManagementSection: React.FC<{
   message: MessageInstance;
   mcpServers: IMcpServer[];
-  extensionMcpServers: IMcpServer[];
+  extensionMcpServers: ExtensionMcpServerContribution[];
   setMcpServers: React.Dispatch<React.SetStateAction<IMcpServer[]>>;
   saveMcpServers: (serversOrUpdater: IMcpServer[] | ((prev: IMcpServer[]) => IMcpServer[])) => Promise<void>;
   isPageMode?: boolean;
@@ -240,19 +245,17 @@ const ModalMcpManagementSection: React.FC<{
                   onOAuthLogin={handleOAuthLogin}
                 />
               ))}
-              {extensionMcpServers.map((server) => (
-                <McpServerItem
-                  key={server.id}
-                  server={server}
-                  isCollapsed={mcpCollapseKey[server.id] || false}
-                  isTestingConnection={false}
-                  onToggleCollapse={() => toggleServerCollapse(server.id)}
-                  onTestConnection={handleTestMcpConnection}
-                  onEditServer={() => {}}
-                  onDeleteServer={() => {}}
-                  isReadOnly
-                />
-              ))}
+              {extensionMcpServers.map((server) => {
+                const uiKey = extensionMcpUiKey(server.contributionKey);
+                return (
+                  <ExtensionMcpServerItem
+                    key={uiKey}
+                    server={server}
+                    isCollapsed={mcpCollapseKey[uiKey] || false}
+                    onToggleCollapse={() => toggleServerCollapse(uiKey)}
+                  />
+                );
+              })}
             </div>
           </NomiScrollArea>
         )}
