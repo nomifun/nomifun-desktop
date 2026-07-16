@@ -41,7 +41,7 @@ fn preset_asset_templates_have_all_supported_locale_files() {
         .expect("presets.json must contain presets array");
 
     for preset in presets {
-        for field in ["rule_file", "skill_file"] {
+        for field in ["rule_file"] {
             let Some(template) = preset[field].as_str() else {
                 continue;
             };
@@ -62,79 +62,7 @@ fn preset_asset_templates_have_all_supported_locale_files() {
 }
 
 #[test]
-fn preset_markdown_does_not_reference_non_materialized_helper_paths() {
-    let mut preset_markdown_files = Vec::new();
-    collect_markdown_files(
-        &builtin_presets_root().join("rules"),
-        &mut preset_markdown_files,
-    );
-    collect_markdown_files(
-        &builtin_presets_root().join("skills"),
-        &mut preset_markdown_files,
-    );
-
-    for path in preset_markdown_files {
-        let content = read_to_string(&path);
-        assert!(
-            !content.contains("preset/"),
-            "{} references the non-materialized preset resource tree",
-            path.display()
-        );
-        for old_office_path in ["skills/pptx", "skills/docx", "skills/xlsx"] {
-            assert!(
-                !content.contains(old_office_path),
-                "{} references old Office helper path {old_office_path}",
-                path.display()
-            );
-        }
-    }
-}
-
-#[test]
-fn ui_ux_pro_max_preset_points_to_materializable_skill_assets() {
-    let manifest_path = builtin_presets_root().join("presets.json");
-    let manifest: Value = serde_json::from_str(&read_to_string(&manifest_path)).unwrap();
-    let presets = manifest["presets"]
-        .as_array()
-        .expect("presets.json must contain presets array");
-    let preset = presets
-        .iter()
-        .find(|preset| preset["id"] == "ui-ux-pro-max")
-        .expect("ui-ux-pro-max preset must be present");
-
-    let enabled_skills: HashSet<_> = preset["enabled_skills"]
-        .as_array()
-        .expect("ui-ux-pro-max enabled_skills must be an array")
-        .iter()
-        .map(|skill| {
-            skill
-                .as_str()
-                .expect("enabled skill names must be strings")
-                .to_owned()
-        })
-        .collect();
-    assert!(
-        enabled_skills.contains("ui-ux-pro-max"),
-        "ui-ux-pro-max preset must enable its bundled skill"
-    );
-
-    for locale in ["en-US", "zh-CN", "ru-RU"] {
-        let rule_path = builtin_presets_root()
-            .join("rules")
-            .join(format!("ui-ux-pro-max.{locale}.md"));
-        let rule = read_to_string(&rule_path);
-        assert!(
-            !rule.contains("preset/ui-ux-pro-max"),
-            "{} still points to the non-materialized preset resource tree",
-            rule_path.display()
-        );
-        assert!(
-            rule.contains(".nomi/skills/ui-ux-pro-max/scripts/search.py"),
-            "{} must point agents at the materialized builtin skill script",
-            rule_path.display()
-        );
-    }
-
+fn ui_ux_pro_max_is_a_self_contained_skill() {
     let skill_root = builtin_skills_root().join("ui-ux-pro-max");
     assert!(
         skill_root.join("SKILL.md").is_file(),
@@ -147,6 +75,67 @@ fn ui_ux_pro_max_preset_points_to_materializable_skill_assets() {
     assert!(
         skill_root.join("data/catalog.json").is_file(),
         "ui-ux-pro-max skill must include searchable data/catalog.json"
+    );
+}
+
+#[test]
+fn migrated_workflows_are_self_contained_skills_with_display_metadata() {
+    let metadata: Value =
+        serde_json::from_str(&read_to_string(builtin_skills_root().join("skill-tags.json"))).unwrap();
+    let entries = metadata["skills"]
+        .as_array()
+        .expect("skill-tags.json must contain a skills array");
+
+    for name in ["planning-with-files", "social-job-publisher"] {
+        let skill_path = builtin_skills_root().join(name).join("SKILL.md");
+        let skill = read_to_string(&skill_path);
+        assert!(skill.starts_with("---\n"), "{} must start with YAML frontmatter", skill_path.display());
+        assert!(skill.contains(&format!("name: {name}")), "{} must declare its folder name", skill_path.display());
+        assert!(
+            entries.iter().any(|entry| entry["name"] == name),
+            "{name} must have localized display metadata"
+        );
+    }
+}
+
+#[test]
+fn builtin_skill_display_metadata_matches_the_packaged_corpus() {
+    let metadata: Value =
+        serde_json::from_str(&read_to_string(builtin_skills_root().join("skill-tags.json"))).unwrap();
+    let metadata_names: HashSet<String> = metadata["skills"]
+        .as_array()
+        .expect("skill-tags.json must contain a skills array")
+        .iter()
+        .map(|entry| {
+            entry["name"]
+                .as_str()
+                .expect("every display metadata entry must have a name")
+                .to_owned()
+        })
+        .collect();
+
+    let root = builtin_skills_root();
+    let mut packaged_names = HashSet::new();
+    for entry in std::fs::read_dir(&root).unwrap() {
+        let path = entry.unwrap().path();
+        if !path.is_dir() {
+            continue;
+        }
+        if path.file_name().and_then(|name| name.to_str()) == Some("auto-inject") {
+            for child in std::fs::read_dir(&path).unwrap() {
+                let child = child.unwrap().path();
+                if child.join("SKILL.md").is_file() {
+                    packaged_names.insert(child.file_name().unwrap().to_string_lossy().into_owned());
+                }
+            }
+        } else if path.join("SKILL.md").is_file() {
+            packaged_names.insert(path.file_name().unwrap().to_string_lossy().into_owned());
+        }
+    }
+
+    assert_eq!(
+        metadata_names, packaged_names,
+        "every packaged builtin Skill must have exactly one display metadata entry"
     );
 }
 

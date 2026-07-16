@@ -201,6 +201,12 @@ const CreateTaskDialog: React.FC<CreateTaskDialogProps> = ({
   const [workspace, setWorkspace] = useState<string | undefined>(undefined);
   const [selectedAgent, setSelectedAgent] = useState<string | undefined>(undefined);
 
+  const removedPresetId = useMemo(() => {
+    const presetId = editJob?.metadata.agent_config?.preset_id;
+    if (!presetId || presetPresets.some((preset) => preset.id === presetId)) return undefined;
+    return presetId;
+  }, [editJob?.metadata.agent_config?.preset_id, presetPresets]);
+
   const { data: detectedAgents } = useSWR<AgentMetadata[]>(DETECTED_AGENTS_SWR_KEY, fetchDetectedAgents);
 
   // Populate form when entering edit mode
@@ -447,17 +453,18 @@ const CreateTaskDialog: React.FC<CreateTaskDialogProps> = ({
       }
     } else if (agentKind === 'preset') {
       const preset = presetPresets.find((a) => a.id === agentId);
-      if (preset) {
-        const preferredAgentId = preset.preferred_agent_id || preset.agent_preferences[0]?.agent_id;
-        const preferredAgent = cliAgents.find((agent) => agent.id === preferredAgentId);
-        const presetBackend = preferredAgent?.backend || preferredAgent?.agent_type || 'nomi';
-        resolvedAgentType = presetBackend as string;
-        agent_config = {
-          preset_id: preset.id,
-          workspace,
-          clear_context_each_run: clearContextEachRun,
-        };
+      if (!preset) {
+        throw new Error(t('cron.page.form.removedPresetRequired'));
       }
+      const preferredAgentId = preset.preferred_agent_id || preset.agent_preferences[0]?.agent_id;
+      const preferredAgent = cliAgents.find((agent) => agent.id === preferredAgentId);
+      const presetBackend = preferredAgent?.backend || preferredAgent?.agent_type || 'nomi';
+      resolvedAgentType = presetBackend as string;
+      agent_config = {
+        preset_id: preset.id,
+        workspace,
+        clear_context_each_run: clearContextEachRun,
+      };
     }
 
     return { agent_config, resolvedAgentType };
@@ -604,6 +611,8 @@ const CreateTaskDialog: React.FC<CreateTaskDialogProps> = ({
               } else if (isEmoji) {
                 logo = <span className='text-14px leading-16px'>{preset.avatar}</span>;
               }
+            } else if (removedPresetId === id) {
+              name = t('cron.page.form.removedPresetLabel', { id });
             }
           }
           return (
@@ -639,8 +648,16 @@ const CreateTaskDialog: React.FC<CreateTaskDialogProps> = ({
             })}
           </OptGroup>
         )}
-        {presetPresets.length > 0 && (
+        {(presetPresets.length > 0 || removedPresetId) && (
           <OptGroup label={t('conversation.dropdown.presetPresets')}>
+            {removedPresetId && (
+              <Option key={`preset:${removedPresetId}`} value={`preset:${removedPresetId}`} disabled>
+                <div className='flex items-center gap-8px text-t-tertiary'>
+                  <Robot size='16' />
+                  <span>{t('cron.page.form.removedPresetLabel', { id: removedPresetId })}</span>
+                </div>
+              </Option>
+            )}
             {presetPresets.map((preset) => {
               const avatarImage = preset.avatar ? CUSTOM_AVATAR_IMAGE_MAP[preset.avatar] : undefined;
               const isEmoji = preset.avatar && !avatarImage && !preset.avatar.endsWith('.svg');

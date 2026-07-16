@@ -177,7 +177,7 @@ export const useGuidAgentSelection = ({
   const getAgentKey = getAgentKeyUtil;
 
   // --- Sub-hooks ---
-  const { presets, customAgents, customAgentAvatarMap, refreshCustomAgents } = useCustomAgentsLoader({
+  const { presets, presetsLoaded, customAgents, customAgentAvatarMap, refreshCustomAgents } = useCustomAgentsLoader({
     availableCustomAgentIds,
   });
 
@@ -350,10 +350,13 @@ export const useGuidAgentSelection = ({
         if (cancelled) return;
 
         if (savedKey) {
-          // Preset preset key — trust directly, presets list resolves later
           if (savedKey.startsWith('preset:')) {
-            _setSelectedAgentKey(savedKey);
-            return;
+            if (!presetsLoaded) return;
+            const presetId = savedKey.slice('preset:'.length);
+            if (presets.some((preset) => preset.id === presetId)) {
+              _setSelectedAgentKey(savedKey);
+              return;
+            }
           }
           // Plain row key — verify it still exists in detected engines
           if (availableAgents.some((agent) => getAgentKey(agent) === savedKey)) {
@@ -365,7 +368,11 @@ export const useGuidAgentSelection = ({
         // No saved preference or stale key — default to first detected engine
         const firstAgent = availableAgents[0];
         if (firstAgent) {
-          _setSelectedAgentKey(getAgentKey(firstAgent));
+          const fallbackKey = getAgentKey(firstAgent);
+          _setSelectedAgentKey(fallbackKey);
+          if (savedKey && savedKey !== fallbackKey) {
+            void configService.set('guid.lastSelectedAgent', fallbackKey);
+          }
         }
       } catch (error) {
         console.error('Failed to load last selected agent:', error);
@@ -377,7 +384,7 @@ export const useGuidAgentSelection = ({
     return () => {
       cancelled = true;
     };
-  }, [availableAgents, resetPreset, preselectAgentKey, locationKey]);
+  }, [availableAgents, presets, presetsLoaded, resetPreset, preselectAgentKey, locationKey]);
 
   const currentEffectiveAgentInfo = useMemo(() => {
     if (!is_presetAgent) {

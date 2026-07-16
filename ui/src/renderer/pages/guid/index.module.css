@@ -1164,6 +1164,19 @@ button.guidResourceCard:focus-visible {
   padding: 0 20px 18px;
 }
 
+.drawerEmptyState {
+  display: flex;
+  flex: 1;
+  align-items: center;
+  justify-content: center;
+  min-height: 160px;
+  padding: 24px;
+  color: var(--color-text-3);
+  font-size: 13px;
+  line-height: 1.6;
+  text-align: center;
+}
+
 .drawerCard {
   position: relative;
   display: grid;
