@@ -2,7 +2,7 @@ use nomifun_common::{TimestampMs, now_ms};
 use sqlx::SqlitePool;
 
 use crate::error::DbError;
-use crate::models::{RequirementRow, RequirementRowUpdate, RequirementTagRow};
+use crate::models::{NewRequirementRow, RequirementRow, RequirementRowUpdate, RequirementTagRow};
 use crate::repository::bind::{BindValue, bind_value, bind_value_as, bind_value_scalar};
 use crate::repository::requirement::{IRequirementRepository, ListRequirementsParams};
 
@@ -28,6 +28,7 @@ impl SqliteRequirementRepository {
 fn build_order_clause(order_by: Option<&str>, order: Option<&str>) -> String {
     const DEFAULT: &str = "ORDER BY sort_seq ASC, priority DESC, created_at ASC";
     let col = match order_by {
+        Some("display_no") => "display_no",
         Some("id") => "id",
         Some("created_at") => "created_at",
         Some("updated_at") => "updated_at",
@@ -49,17 +50,28 @@ fn build_order_clause(order_by: Option<&str>, order: Option<&str>) -> String {
 
 #[async_trait::async_trait]
 impl IRequirementRepository for SqliteRequirementRepository {
-    async fn insert(&self, row: &RequirementRow) -> Result<String, DbError> {
+    async fn insert(&self, row: &NewRequirementRow) -> Result<RequirementRow, DbError> {
+        let mut transaction = self.pool.begin().await?;
+        let display_no: i64 = sqlx::query_scalar(
+            "UPDATE requirement_display_sequence \
+             SET last_no = last_no + 1 \
+             WHERE singleton = 'requirements' \
+             RETURNING last_no",
+        )
+        .fetch_one(&mut *transaction)
+        .await?;
+
         sqlx::query(
             "INSERT INTO requirements (\
-                id, title, content, tag, order_key, sort_seq, status, priority, \
+                id, display_no, title, content, tag, order_key, sort_seq, status, priority, \
                 completion_note, owner_conversation_id, owner_terminal_id, active_turn_started_at, lease_expires_at, \
                 started_at, completed_at, attempt_count, created_by, extra, created_at, updated_at\
             ) VALUES (\
-                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?\
+                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?\
             )",
         )
         .bind(&row.id)
+        .bind(display_no)
         .bind(&row.title)
         .bind(&row.content)
         .bind(&row.tag)
@@ -79,9 +91,16 @@ impl IRequirementRepository for SqliteRequirementRepository {
         .bind(&row.extra)
         .bind(row.created_at)
         .bind(row.updated_at)
-        .execute(&self.pool)
+        .execute(&mut *transaction)
         .await?;
-        Ok(row.id.clone())
+        let inserted = sqlx::query_as::<_, RequirementRow>(
+            "SELECT * FROM requirements WHERE id = ?",
+        )
+        .bind(&row.id)
+        .fetch_one(&mut *transaction)
+        .await?;
+        transaction.commit().await?;
+        Ok(inserted)
     }
 
     async fn update(&self, id: &str, params: &RequirementRowUpdate) -> Result<(), DbError> {
@@ -199,15 +218,22 @@ impl IRequirementRepository for SqliteRequirementRepository {
             binds.push(BindValue::Str(owner.clone()));
         }
         if let Some(q) = &params.q
-            && !q.is_empty()
+            && !q.trim().is_empty()
         {
-            // Escape LIKE metacharacters so a user typing `%` or `_` searches
-            // literally rather than as wildcards. `\` is the ESCAPE char.
-            let escaped = q.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_");
-            let like = format!("%{escaped}%");
-            where_parts.push("(title LIKE ? ESCAPE '\\' OR content LIKE ? ESCAPE '\\')".to_string());
-            binds.push(BindValue::Str(like.clone()));
-            binds.push(BindValue::Str(like));
+            let q = q.trim();
+            if let Some(number) = q.strip_prefix('#').and_then(|value| value.parse::<i64>().ok()) {
+                where_parts.push("display_no = ?".to_string());
+                binds.push(BindValue::I64(number));
+            } else {
+                // Escape LIKE metacharacters so a user typing `%` or `_` searches
+                // literally rather than as wildcards. `\` is the ESCAPE char.
+                let escaped = q.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_");
+                let like = format!("%{escaped}%");
+                where_parts
+                    .push("(title LIKE ? ESCAPE '\\' OR content LIKE ? ESCAPE '\\')".to_string());
+                binds.push(BindValue::Str(like.clone()));
+                binds.push(BindValue::Str(like));
+            }
         }
 
         let where_clause = if where_parts.is_empty() {
@@ -486,9 +512,9 @@ mod tests {
         (repo, db, conversation_id, terminal_id)
     }
 
-    fn make_row(tag: &str, sort_seq: &str) -> RequirementRow {
+    fn make_row(tag: &str, sort_seq: &str) -> NewRequirementRow {
         let now = now_ms();
-        RequirementRow {
+        NewRequirementRow {
             id: RequirementId::new().into_string(),
             title: format!("Req {tag}/{sort_seq}"),
             content: "do the thing".into(),
@@ -516,8 +542,10 @@ mod tests {
     async fn insert_update_get_delete_use_canonical_string_ids() {
         let (repo, _db, _conversation_id, _terminal_id) = setup().await;
         let row = make_row("t", "00000001");
-        let id = repo.insert(&row).await.unwrap();
+        let inserted = repo.insert(&row).await.unwrap();
+        let id = inserted.id;
         assert_eq!(id, row.id);
+        assert_eq!(inserted.display_no, 1);
         assert!(id.parse::<RequirementId>().is_ok());
 
         repo.update(
@@ -555,8 +583,8 @@ mod tests {
     #[tokio::test]
     async fn list_filters_paginates_and_sorts_without_interpolating_input() {
         let (repo, _db, _conversation_id, _terminal_id) = setup().await;
-        let low = repo.insert(&make_row("alpha", "00000001")).await.unwrap();
-        repo.insert(&make_row("alpha", "00000002")).await.unwrap();
+        let low = repo.insert(&make_row("alpha", "00000001")).await.unwrap().id;
+        let high = repo.insert(&make_row("alpha", "00000002")).await.unwrap();
         repo.insert(&make_row("beta", "00000001")).await.unwrap();
 
         let (rows, total) = repo
@@ -583,13 +611,42 @@ mod tests {
         assert_eq!(total, 3);
         assert_eq!(rows.len(), 3);
         assert!(repo.get_by_id(&low).await.unwrap().is_some());
+
+        let (rows, total) = repo
+            .list(&ListRequirementsParams {
+                q: Some(format!("#{}", high.display_no)),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(total, 1);
+        assert_eq!(rows[0].id, high.id);
+    }
+
+    #[tokio::test]
+    async fn display_numbers_are_monotonic_non_reusable_and_immutable() {
+        let (repo, db, _conversation_id, _terminal_id) = setup().await;
+        let first = repo.insert(&make_row("alpha", "1")).await.unwrap();
+        let second = repo.insert(&make_row("alpha", "2")).await.unwrap();
+        assert_eq!((first.display_no, second.display_no), (1, 2));
+
+        repo.delete(&second.id).await.unwrap();
+        let third = repo.insert(&make_row("alpha", "3")).await.unwrap();
+        assert_eq!(third.display_no, 3, "deleted display numbers must never be reused");
+
+        let error = sqlx::query("UPDATE requirements SET display_no = 99 WHERE id = ?")
+            .bind(&first.id)
+            .execute(db.pool())
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("requirement display_no is immutable"));
     }
 
     #[tokio::test]
     async fn claim_and_lease_guards_are_domain_typed() {
         let (repo, _db, conversation_id, terminal_id) = setup().await;
-        let conversation_req = repo.insert(&make_row("conv", "1")).await.unwrap();
-        let terminal_req = repo.insert(&make_row("term", "1")).await.unwrap();
+        let conversation_req = repo.insert(&make_row("conv", "1")).await.unwrap().id;
+        let terminal_req = repo.insert(&make_row("term", "1")).await.unwrap().id;
 
         let conversation_claim = repo
             .claim_next("conv", Some(&conversation_id), None, 60_000, now_ms())
@@ -663,7 +720,7 @@ mod tests {
     #[tokio::test]
     async fn expired_lease_sweep_respects_separate_owner_domains() {
         let (repo, _db, conversation_id, terminal_id) = setup().await;
-        let req_id = repo.insert(&make_row("t", "1")).await.unwrap();
+        let req_id = repo.insert(&make_row("t", "1")).await.unwrap().id;
         let expired_at = now_ms() - 10_000;
         repo.claim_next(
             "t",
@@ -714,7 +771,7 @@ mod tests {
     #[tokio::test]
     async fn pause_resume_blocks_and_restores_claiming() {
         let (repo, _db, conversation_id, _terminal_id) = setup().await;
-        let req_id = repo.insert(&make_row("paused", "1")).await.unwrap();
+        let req_id = repo.insert(&make_row("paused", "1")).await.unwrap().id;
         repo.pause_tag(
             "paused",
             "requirement_failed",
@@ -745,6 +802,10 @@ mod tests {
 
     #[test]
     fn order_clause_is_whitelisted() {
+        assert_eq!(
+            build_order_clause(Some("display_no"), Some("asc")),
+            "ORDER BY display_no ASC, id ASC"
+        );
         assert_eq!(build_order_clause(Some("id"), Some("asc")), "ORDER BY id ASC");
         assert_eq!(
             build_order_clause(Some("status"), Some("desc")),

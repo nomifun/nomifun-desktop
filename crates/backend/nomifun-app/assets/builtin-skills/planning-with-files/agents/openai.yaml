@@ -1,0 +1,4 @@
+interface:
+  display_name: "Planning with Files"
+  short_description: "Persist plans and findings for long-running work"
+  default_prompt: "Use $planning-with-files to organize this complex task with persistent planning files."

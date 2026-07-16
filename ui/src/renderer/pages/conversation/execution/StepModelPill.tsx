@@ -14,6 +14,7 @@ import { decodePair, encodePair, useExecutionModelPool } from './useExecutionMod
 import { iconColors } from '@/renderer/styles/colors';
 import { useArcoMessage } from '@/renderer/utils/ui/useArcoMessage';
 import composerStyles from './executionPlanEditor.module.css';
+import { useModelSelectorProviderLabel } from '@/renderer/hooks/agent/useModelSelectorProviderLabel';
 
 /** Sentinel select value = "跟随自动路由" (clears the per-task model override). */
 const FOLLOW_AUTO = '__follow_auto__';
@@ -41,6 +42,7 @@ const StepModelPill: React.FC<StepModelPillProps> = ({ currentModel, onApply, cl
   const [message, msgCtx] = useArcoMessage();
   const { providers, getAvailableModels, formatModelLabel, hasModels } = useExecutionModelPool();
   const [open, setOpen] = useState(false);
+  const providerLabel = useModelSelectorProviderLabel();
 
   const value = currentModel ? encodePair(currentModel) : FOLLOW_AUTO;
 
@@ -80,7 +82,7 @@ const StepModelPill: React.FC<StepModelPillProps> = ({ currentModel, onApply, cl
               })}
             </NomiSelect.Option>
             {providers.map((p) => (
-              <NomiSelect.OptGroup key={p.id} label={p.name || p.platform}>
+              <NomiSelect.OptGroup key={p.id} label={providerLabel(p)}>
                 {getAvailableModels(p).map((m) => {
                   const ref: TExecutionModelRef = {
                     provider_id: p.id,

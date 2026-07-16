@@ -15,6 +15,7 @@ import { Brain, Down } from '@icon-park/react';
 import React from 'react';
 import { useTranslation } from 'react-i18next';
 import classNames from 'classnames';
+import { useModelSelectorProviderLabel } from '@/renderer/hooks/agent/useModelSelectorProviderLabel';
 
 const NomiModelSelector: React.FC<{
   selection?: NomiModelSelection;
@@ -28,6 +29,7 @@ const NomiModelSelector: React.FC<{
   const compact = compactProp ?? (isPreviewOpen || layout?.isMobile);
   const isMobileHeaderCompact = Boolean(layout?.isMobile);
   const defaultModelLabel = t('common.defaultModel');
+  const providerLabel = useModelSelectorProviderLabel();
 
   const current_model = selection?.current_model;
 
@@ -78,7 +80,7 @@ const NomiModelSelector: React.FC<{
             if (!models.length) return null;
 
             return (
-              <Menu.ItemGroup title={provider.name} key={provider.id}>
+              <Menu.ItemGroup title={providerLabel(provider)} key={provider.id}>
                 {models.map((modelName) => (
                   <Menu.Item
                     key={compositeKey(provider.id, modelName)}

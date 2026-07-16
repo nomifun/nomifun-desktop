@@ -10,15 +10,23 @@ import type { ICssTheme } from '@/common/config/storage';
 import { parseConversationId } from '@/common/types/ids';
 import PwaPullToRefresh from '@/renderer/components/layout/PwaPullToRefresh';
 import Titlebar from '@/renderer/components/layout/Titlebar';
+import InstantHoverTooltip from '@/renderer/components/base/InstantHoverTooltip';
 import { Layout as ArcoLayout } from '@arco-design/web-react';
+import { Download } from '@icon-park/react';
 import classNames from 'classnames';
 import React, { Suspense, useCallback, useEffect, useRef, useState } from 'react';
+import { useTranslation } from 'react-i18next';
 import { Outlet, useLocation, useNavigate } from 'react-router-dom';
 import { LayoutContext } from '@renderer/hooks/context/LayoutContext';
 import { NavigationHistoryProvider } from '@renderer/hooks/context/NavigationHistoryContext';
 import { WebuiServerProvider } from '@renderer/hooks/context/WebuiServerContext';
 import { useDeepLink } from '@renderer/hooks/system/useDeepLink';
 import { useNotificationClick } from '@renderer/hooks/system/useNotificationClick';
+import {
+  reportNoUpdateAvailable,
+  reportUpdateAvailable,
+  useUpdateAvailability,
+} from '@renderer/hooks/system/useUpdateAvailability';
 import { useDirectorySelection } from '@renderer/hooks/file/useDirectorySelection';
 import { processCustomCss } from '@renderer/utils/theme/customCssProcessor';
 import {
@@ -135,6 +143,7 @@ const Layout: React.FC<{
   sider: React.ReactNode;
   onSessionClick?: () => void;
 }> = ({ sider, onSessionClick: _onSessionClick }) => {
+  const { t } = useTranslation();
   const [collapsed, setCollapsed] = useState(false);
   const [railWidth, setRailWidth] = useState<number>(() => readStoredRailWidth());
   const [isMobile, setIsMobile] = useState(false);
@@ -143,6 +152,7 @@ const Layout: React.FC<{
   );
   const [customCss, setCustomCss] = useState<string>('');
   const [shouldMountUpdateModal, setShouldMountUpdateModal] = useState(false);
+  const updateAvailability = useUpdateAvailability();
   const { onClick } = useDebug();
   const { contextHolder: directorySelectionContextHolder } = useDirectorySelection();
   useDeepLink();
@@ -150,6 +160,9 @@ const Layout: React.FC<{
   const navigate = useNavigate();
   useConversationShortcuts({ navigate });
   const location = useLocation();
+  const updateButtonLabel = updateAvailability.version
+    ? `${t('update.availableTitle')}: ${updateAvailability.version}`
+    : t('update.availableTitle');
   // The titlebar workspace toggle drives the right rail on the conversation and
   // terminal session pages (both render a workspace rail via the shared
   // useWorkspaceCollapse + WORKSPACE_TOGGLE_EVENT protocol).
@@ -422,10 +435,10 @@ const Layout: React.FC<{
     };
   }, [navigate]);
 
-  // 启动后静默检查一次更新（仅桌面壳）：发现新版本才弹出更新弹窗；无更新 / 离线 / 出错都完全静默。
-  // Startup silent update check (desktop shell only): surface the modal ONLY when a
-  // newer version is available; stay silent when up to date or offline. The modal
-  // (always mounted below) then runs its own full check to render the details.
+  // 启动后静默检查一次更新（仅桌面壳）：发现新版本时同步全局 Logo 入口并沿用现有弹窗提醒；
+  // 无更新 / 离线 / 出错时不显示 Logo 入口。
+  // Startup silent update check (desktop shell only): keep the persistent Logo
+  // entry in sync and preserve the existing modal prompt when an update exists.
   useEffect(() => {
     if (!isDesktopShell()) return;
     let cancelled = false;
@@ -434,7 +447,10 @@ const Layout: React.FC<{
       try {
         const res = await ipcBridge.autoUpdate.check.invoke({ includePrerelease });
         if (!cancelled && res?.success && res.data?.updateInfo) {
+          reportUpdateAvailable(res.data.updateInfo.version);
           window.dispatchEvent(new CustomEvent('nomifun-open-update-modal', { detail: { source: 'startup' } }));
+        } else if (!cancelled && res?.success) {
+          reportNoUpdateAvailable();
         }
       } catch {
         /* offline / endpoint unreachable — silent; the About page button still works */
@@ -624,7 +640,25 @@ const Layout: React.FC<{
                     <path key='logo-bowl' d='M14 49 H66 Q61.5 70 40 70 Q18.5 70 14 49 Z' fill='url(#sidebar-logo-bowl)'></path>
                   </svg>
                 </div>
-                <div className='text-16px text-t-primary collapsed-hidden font-semibold'>NomiFun</div>
+                <div className='min-w-0 flex-1 truncate text-16px text-t-primary collapsed-hidden font-semibold'>
+                  NomiFun
+                </div>
+                {updateAvailability.available && !collapsed && (
+                  <InstantHoverTooltip content={updateButtonLabel} position='right' className='ml-auto'>
+                    <button
+                      type='button'
+                      className='sidebar-update-button'
+                      aria-label={updateButtonLabel}
+                      onClick={() => {
+                        window.dispatchEvent(
+                          new CustomEvent('nomifun-open-update-modal', { detail: { source: 'sidebar' } })
+                        );
+                      }}
+                    >
+                      <Download theme='outline' size={11} fill='currentColor' strokeWidth={4} />
+                    </button>
+                  </InstantHoverTooltip>
+                )}
                 {isMobile && !collapsed && (
                   <button
                     type='button'

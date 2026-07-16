@@ -8,6 +8,7 @@ import { Brain, Down } from '@icon-park/react';
 import React from 'react';
 import { useTranslation } from 'react-i18next';
 import classNames from 'classnames';
+import { useModelSelectorProviderLabel } from '@/renderer/hooks/agent/useModelSelectorProviderLabel';
 
 // Unified model dropdown for chat header, send box, and channel settings
 const GoogleModelSelector: React.FC<{
@@ -22,6 +23,7 @@ const GoogleModelSelector: React.FC<{
   const compact = variant === 'header' && (isPreviewOpen || layout?.isMobile);
   const isMobileHeaderCompact = variant === 'header' && Boolean(layout?.isMobile);
   const defaultModelLabel = t('common.defaultModel');
+  const providerLabel = useModelSelectorProviderLabel();
 
   const current_model = selection?.current_model;
 
@@ -108,7 +110,7 @@ const GoogleModelSelector: React.FC<{
             if (!models.length) return null;
 
             return (
-              <Menu.ItemGroup title={provider.name} key={provider.id}>
+              <Menu.ItemGroup title={providerLabel(provider)} key={provider.id}>
                 {models.map((modelName) => (
                   <Menu.Item
                     key={`${provider.id}-${modelName}`}

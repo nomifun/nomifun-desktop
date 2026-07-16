@@ -54,7 +54,7 @@ pub use oauth_token::OAuthTokenRow;
 pub use provider::Provider;
 pub use preset::*;
 pub use remote_agent::RemoteAgentRow;
-pub use requirement::{RequirementRow, RequirementRowUpdate, RequirementTagRow};
+pub use requirement::{NewRequirementRow, RequirementRow, RequirementRowUpdate, RequirementTagRow};
 pub use skill_tag::{SkillTagRow, UpsertSkillTagParams};
 pub use system_settings::SystemSettings;
 pub use tag_setting::TagSettingRow;

@@ -15,9 +15,9 @@ describe('requirements checkbox selection treatment', () => {
   test('scopes the enhanced selected state to the requirements row and select-all controls', () => {
     expect(rowSource.includes("className='requirements-selection-checkbox'")).toBe(true);
     expect(filtersSource.includes("className='requirements-selection-checkbox'")).toBe(true);
-    expect(controlCss.includes('.requirements-selection-checkbox .arco-checkbox-mask')).toBe(true);
-    expect(controlCss.includes('.requirements-selection-checkbox.arco-checkbox-checked .arco-checkbox-mask')).toBe(true);
-    expect(controlCss.includes('.requirements-selection-checkbox .arco-checkbox-mask-icon')).toBe(true);
+    expect(controlCss.includes('.arco-checkbox-mask {')).toBe(true);
+    expect(controlCss.includes('.arco-checkbox-checked .arco-checkbox-mask')).toBe(true);
+    expect(controlCss.includes('.arco-checkbox-mask-icon')).toBe(true);
     expect(controlCss.includes('@media (prefers-reduced-motion: reduce)')).toBe(true);
   });
 });

@@ -24,6 +24,8 @@ const presetTagFilterSource = readFileSync(
   new URL('../pages/settings/PresetSettings/PresetTagFilterBar.tsx', import.meta.url),
   'utf8'
 );
+const diff2HtmlSource = readFileSync(new URL('../components/media/Diff2Html.tsx', import.meta.url), 'utf8');
+const loginCheckboxCss = readFileSync(new URL('../pages/login/LoginPage.css', import.meta.url), 'utf8');
 
 const CONTROL_TOKENS = [
   '--control-selected-bg',
@@ -61,6 +63,16 @@ describe('theme control contract', () => {
     }
 
     expect(controlCss.includes('rgb(var(--primary-6))')).toBe(false);
+  });
+
+  test('gives unscoped Arco and native checkboxes the same theme-aware visual contract', () => {
+    expect(diff2HtmlSource.includes('<Checkbox className=')).toBe(true);
+    expect(controlCss.includes('.arco-checkbox-mask {\n  position: relative;\n  overflow: hidden;')).toBe(true);
+    expect(controlCss.includes('background-color: var(--enhanced-checkbox-selected-bg, var(--control-selected-bg, var(--color-primary))) !important;')).toBe(true);
+    expect(controlCss.includes('color: var(--enhanced-checkbox-selected-fg, var(--control-selected-fg, var(--color-white))) !important;')).toBe(true);
+    expect(controlCss.includes('.arco-checkbox.arco-checkbox-disabled.arco-checkbox-checked .arco-checkbox-mask')).toBe(true);
+    expect(loginCheckboxCss.includes('appearance: none;')).toBe(true);
+    expect(loginCheckboxCss.includes('var(--enhanced-checkbox-selected-bg, var(--control-selected-bg, #667eea))')).toBe(true);
   });
 
   test('keeps a visual regression matrix for the core interactive controls', () => {

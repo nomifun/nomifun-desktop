@@ -30,6 +30,7 @@ import { useArcoMessage } from '@renderer/utils/ui/useArcoMessage';
 import CopyFullIdButton from '@/renderer/components/base/CopyFullIdButton';
 import FilePreview from '@/renderer/components/media/FilePreview';
 import StatusPill from '../components/StatusPill';
+import RequirementDisplayNumber from '../components/RequirementDisplayNumber';
 import RequirementForm, { type RequirementFormPayload } from './RequirementForm';
 
 interface RequirementDrawerProps {
@@ -228,7 +229,11 @@ const RequirementDrawer: React.FC<RequirementDrawerProps> = ({
                 colon=' :'
                 labelStyle={{ width: 96, color: 'var(--color-text-3)' }}
                 data={[
-                  // The long ID is no longer rendered as text — only a copy action.
+                  {
+                    label: t('requirements.columns.seq'),
+                    value: <RequirementDisplayNumber displayNo={data.display_no} />,
+                  },
+                  // The canonical ID remains available without dominating the layout.
                   { label: t('requirements.columns.id'), value: <CopyFullIdButton id={data.id} /> },
                   { label: t('requirements.columns.tag'), value: data.tag },
                   { label: t('requirements.columns.order'), value: data.order_key || '-' },

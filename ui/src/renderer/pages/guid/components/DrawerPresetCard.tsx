@@ -29,7 +29,12 @@ const DrawerPresetCard: React.FC<DrawerPresetCardProps> = ({
   const name = preset.name_i18n?.[localeKey] || preset.name_i18n?.['en-US'] || preset.name;
   const description =
     preset.description_i18n?.[localeKey] || preset.description_i18n?.['en-US'] || preset.description || '';
-  const isCustom = preset.source === 'user';
+  const sourceLabel =
+    preset.source === 'user'
+      ? t('guid.drawer.sourceCustom', { defaultValue: '自定义' })
+      : preset.source === 'extension'
+        ? t('guid.drawer.sourceExtension', { defaultValue: '扩展' })
+        : t('guid.drawer.sourceBuiltin', { defaultValue: '内置' });
   const handleKeyDown = (event: React.KeyboardEvent<HTMLDivElement>) => {
     if (event.key === 'Enter' || event.key === ' ') {
       event.preventDefault();
@@ -71,10 +76,10 @@ const DrawerPresetCard: React.FC<DrawerPresetCardProps> = ({
           <span
             className={[
               styles.drawerBadge,
-              isCustom ? styles.drawerBadgePrimary : styles.drawerBadgeMuted,
+              preset.source === 'user' ? styles.drawerBadgePrimary : styles.drawerBadgeMuted,
             ].filter(Boolean).join(' ')}
           >
-            {isCustom ? t('guid.drawer.sourceCustom', { defaultValue: '自定义' }) : t('guid.drawer.sourceBuiltin', { defaultValue: '内置' })}
+            {sourceLabel}
           </span>
         </div>
 

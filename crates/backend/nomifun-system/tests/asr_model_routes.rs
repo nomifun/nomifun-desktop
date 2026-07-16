@@ -89,6 +89,11 @@ async fn fresh_catalog_and_status_are_side_effect_free() {
     let status = json(status).await;
     assert_eq!(status["data"]["enabled"], false);
     assert_eq!(status["data"]["activeModelId"], serde_json::Value::Null);
+    for model in status["data"]["models"].as_array().unwrap() {
+        assert_eq!(model["installPhase"], "not_installed");
+        assert_eq!(model["installedBytes"], 0);
+        assert_eq!(model["errorKind"], serde_json::Value::Null);
+    }
     assert!(!lazy.is_asr_started());
     assert!(!lazy.is_started());
     assert!(!temp.path().join("local-ai").exists());

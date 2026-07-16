@@ -9,7 +9,7 @@ use nomifun_common::{
     AppError, AttachmentId, ConversationId, PaginatedResult, RequirementId, TerminalId, UserId,
     now_ms,
 };
-use nomifun_db::models::{RequirementRow, RequirementRowUpdate, RequirementTagRow};
+use nomifun_db::models::{RequirementRowUpdate, RequirementTagRow};
 use nomifun_db::{
     ConversationFilters, IConversationRepository, IRequirementRepository, ITerminalRepository, ListRequirementsParams,
 };
@@ -201,7 +201,7 @@ impl RequirementService {
         let now = now_ms();
         let order_key = req.order_key.unwrap_or_default();
         let status = req.status.unwrap_or(RequirementStatus::Pending);
-        let row = RequirementRow {
+        let new_row = nomifun_db::models::NewRequirementRow {
             id: RequirementId::new().into_string(),
             title: req.title,
             content: req.content,
@@ -225,7 +225,7 @@ impl RequirementService {
             created_at: now,
             updated_at: now,
         };
-        self.repo.insert(&row).await?;
+        let row = self.repo.insert(&new_row).await?;
         let mut dto = row_to_dto(&row);
         if !new_attachments.is_empty() {
             let Some(store) = &self.attachments else {
