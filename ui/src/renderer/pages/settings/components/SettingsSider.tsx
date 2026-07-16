@@ -5,12 +5,11 @@ import { useExtI18n } from '@/renderer/hooks/system/useExtI18n';
 import { useExtensionSettingsTabs } from '@/renderer/hooks/system/useExtensionSettingsTabs';
 import {
   Computer,
+  Cpu,
   Earth,
   Info,
   Lightning,
-  LinkCloud,
   Puzzle,
-  Speed,
   System,
 } from '@icon-park/react';
 import classNames from 'classnames';
@@ -21,7 +20,13 @@ import { Tooltip } from '@arco-design/web-react';
 import { getSiderTooltipProps } from '@/renderer/utils/ui/siderTooltip';
 
 /** Builtin settings tab IDs in display order (must match router paths). */
-export const BUILTIN_TAB_IDS = ['system', 'agent-runtime', 'browser-use', 'computer-use', 'about'] as const;
+export const BUILTIN_TAB_IDS = [
+  'system',
+  'execution-engines',
+  'browser-use',
+  'computer-use',
+  'about',
+] as const;
 
 /**
  * Legacy anchor IDs that have been merged into other tabs.
@@ -29,6 +34,8 @@ export const BUILTIN_TAB_IDS = ['system', 'agent-runtime', 'browser-use', 'compu
  * This keeps older extensions working without requiring them to update.
  */
 export const LEGACY_ANCHOR_REMAP: Record<string, string> = {
+  agent: 'execution-engines',
+  'agent-runtime': 'execution-engines',
   'skills-hub': 'capabilities',
   tools: 'capabilities',
 };
@@ -66,12 +73,11 @@ const SettingsSider: React.FC<{ collapsed?: boolean; tooltipEnabled?: boolean }>
   const { menus, groupHeaderAt } = useMemo(() => {
     // Build builtin items
     const builtinMap: Record<string, SiderItem> = {
-      model: { id: 'model', label: t('settings.model'), icon: <LinkCloud />, path: 'model' },
-      agent: {
-        id: 'agent',
-        label: t('settings.agents', { defaultValue: 'Agents' }),
-        icon: <Speed />,
-        path: 'agent',
+      'execution-engines': {
+        id: 'execution-engines',
+        label: t('settings.executionEngineHub.railTitle'),
+        icon: <Cpu />,
+        path: 'execution-engines',
       },
       capabilities: {
         id: 'capabilities',
@@ -80,12 +86,6 @@ const SettingsSider: React.FC<{ collapsed?: boolean; tooltipEnabled?: boolean }>
         path: 'capabilities',
       },
       system: { id: 'system', label: t('settings.system'), icon: <System />, path: 'system' },
-      'agent-runtime': {
-        id: 'agent-runtime',
-        label: t('settings.agentLimits'),
-        icon: <Speed />,
-        path: 'agent-runtime',
-      },
       'browser-use': {
         id: 'browser-use',
         label: t('settings.browserUseNav'),
