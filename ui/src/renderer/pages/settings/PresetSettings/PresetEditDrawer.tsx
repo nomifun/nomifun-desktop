@@ -21,6 +21,7 @@ import EmojiPicker from '@/renderer/components/chat/EmojiPicker';
 import MarkdownView from '@/renderer/components/Markdown';
 import NomiSelect from '@/renderer/components/base/NomiSelect';
 import { useModelProviderList } from '@/renderer/hooks/agent/useModelProviderList';
+import { useModelSelectorProviderLabel } from '@/renderer/hooks/agent/useModelSelectorProviderLabel';
 import { useKnowledgeBases } from '@/renderer/pages/knowledge/useKnowledge';
 import { Avatar, Button, Checkbox, Collapse, Drawer, Input, Select, Tag, Typography } from '@arco-design/web-react';
 import { Close, Delete, Info, Plus, Robot } from '@icon-park/react';
@@ -223,12 +224,13 @@ const PresetEditDrawer: React.FC<PresetEditDrawerProps> = ({
   const agentOptions = availableBackends;
 
   const { providers, getAvailableModels } = useModelProviderList();
+  const providerLabel = useModelSelectorProviderLabel();
   const modelOptions = useMemo(() => {
     const options = new Map<string, { value: string; label: string }>();
     for (const provider of providers) {
       for (const modelName of getAvailableModels(provider)) {
         const value = `${provider.id}::${modelName}`;
-        options.set(value, { value, label: `${provider.name} · ${modelName}` });
+        options.set(value, { value, label: `${providerLabel(provider)} · ${modelName}` });
       }
     }
     for (const item of editModels) {
@@ -236,7 +238,7 @@ const PresetEditDrawer: React.FC<PresetEditDrawerProps> = ({
       if (!options.has(value)) options.set(value, { value, label: item.model });
     }
     return Array.from(options.values());
-  }, [providers, getAvailableModels, editModels]);
+  }, [providers, getAvailableModels, editModels, providerLabel]);
   const selectedModelValues = editModels.map((item) => `${item.provider_id ?? ANY_PROVIDER_TOKEN}::${item.model}`);
   const { bases: knowledgeBases } = useKnowledgeBases();
 

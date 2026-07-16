@@ -10,6 +10,7 @@ import { Select } from '@arco-design/web-react';
 import { useModelProviderList } from '@renderer/hooks/agent/useModelProviderList';
 import type { IPublicAgentModel } from '@/common/adapter/ipcBridge';
 import type { ProviderId } from '@/common/types/ids';
+import { useModelSelectorProviderLabel } from '@/renderer/hooks/agent/useModelSelectorProviderLabel';
 
 interface Props {
   value: IPublicAgentModel;
@@ -24,6 +25,7 @@ interface Props {
 const PublicAgentModelPicker: React.FC<Props> = ({ value, onChange }) => {
   const { t } = useTranslation();
   const { providers, getAvailableModels } = useModelProviderList();
+  const providerLabel = useModelSelectorProviderLabel();
 
   const currentProvider = useMemo(
     () => providers.find((p) => p.id === value.provider_id),
@@ -41,7 +43,7 @@ const PublicAgentModelPicker: React.FC<Props> = ({ value, onChange }) => {
       >
         {providers.map((p) => (
           <Select.Option key={p.id} value={p.id}>
-            {p.name}
+            {providerLabel(p)}
           </Select.Option>
         ))}
       </Select>

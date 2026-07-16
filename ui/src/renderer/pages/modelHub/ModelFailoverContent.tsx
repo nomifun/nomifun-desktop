@@ -14,6 +14,7 @@ import { useArcoMessage } from '@/renderer/utils/ui/useArcoMessage';
 import { useProvidersQuery } from '@renderer/hooks/agent/useModelProviderList';
 import { buildModelFailoverConfigForSave } from './modelFailoverQueue';
 import type { ProviderId } from '@/common/types/ids';
+import { useModelSelectorProviderLabel } from '@/renderer/hooks/agent/useModelSelectorProviderLabel';
 
 const DEFAULT_CONFIG: IModelFailoverConfig = {
   enabled: false,
@@ -33,6 +34,7 @@ const ModelFailoverContent: React.FC = () => {
   const { t } = useTranslation();
   const [message, messageContext] = useArcoMessage();
   const { data: providers } = useProvidersQuery();
+  const providerLabel = useModelSelectorProviderLabel();
   const [config, setConfig] = useState<IModelFailoverConfig>(DEFAULT_CONFIG);
   const [saving, setSaving] = useState(false);
 
@@ -48,8 +50,8 @@ const ModelFailoverContent: React.FC = () => {
   }, []);
 
   const providerOptions = useMemo(
-    () => (providers ?? []).map((p) => ({ label: p.name, value: p.id })),
-    [providers]
+    () => (providers ?? []).map((p) => ({ label: providerLabel(p), value: p.id })),
+    [providers, providerLabel]
   );
 
   const draftModelOptions = useMemo(() => {
@@ -57,7 +59,10 @@ const ModelFailoverContent: React.FC = () => {
     return (p?.models ?? []).map((m) => ({ label: m, value: m }));
   }, [providers, draftProvider]);
 
-  const providerName = (id: ProviderId) => (providers ?? []).find((p) => p.id === id)?.name ?? id;
+  const providerName = (id: ProviderId) => {
+    const provider = (providers ?? []).find((item) => item.id === id);
+    return provider ? providerLabel(provider) : id;
+  };
 
   const moveCandidate = (index: number, delta: number) => {
     setConfig((c) => {
