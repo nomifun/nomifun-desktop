@@ -6,6 +6,11 @@
 
 import { ipcBridge } from '@/common';
 import type { ICronJob, ICronJobRun } from '@/common/adapter/ipcBridge';
+import {
+  indexCronJobsByConversation,
+  reconcileCronJobsForConversation,
+  upsertCronJobByConversation,
+} from './cronJobConversationMap';
 import { parseConversationId, type ConversationId, type CronJobId } from '@/common/types/ids';
 import { emitter } from '@/renderer/utils/emitter';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
@@ -133,14 +138,13 @@ export function useCronJobs(conversation_id?: ConversationId) {
   const eventHandlers = useMemo<CronJobEventHandlers>(
     () => ({
       onJobCreated: (job: ICronJob) => {
-        if (job.metadata.conversation_id === conversation_id) {
+        if (conversation_id && job.metadata.conversation_id === conversation_id) {
           setJobs((prev) => (prev.some((j) => j.id === job.id) ? prev : [...prev, job]));
         }
       },
       onJobUpdated: (job: ICronJob) => {
-        if (job.metadata.conversation_id === conversation_id) {
-          setJobs((prev) => prev.map((j) => (j.id === job.id ? job : j)));
-        }
+        if (!conversation_id) return;
+        setJobs((prev) => reconcileCronJobsForConversation(prev, conversation_id, job));
       },
       onJobRemoved: ({ job_id }: { job_id: CronJobId }) => {
         setJobs((prev) => prev.filter((j) => j.id !== job_id));
@@ -288,14 +292,10 @@ export function useCronJobsMap() {
     setLoading(true);
     try {
       const allJobs = await repairCronJobTimeZones(await ipcBridge.cron.listJobs.invoke());
-      const map = new Map<ConversationId, ICronJob[]>();
+      const jobs = allJobs || [];
+      const map = indexCronJobsByConversation(jobs);
 
-      for (const job of allJobs || []) {
-        const convId = job.metadata.conversation_id;
-        if (!map.has(convId)) {
-          map.set(convId, []);
-        }
-        map.get(convId)!.push(job);
+      for (const job of jobs) {
         // Initialize lastRunAtMap for detecting new executions
         if (job.state.last_run_at_ms) {
           lastRunAtMapRef.current.set(job.id, job.state.last_run_at_ms);
@@ -319,16 +319,9 @@ export function useCronJobsMap() {
   const eventHandlers = useMemo<CronJobEventHandlers>(
     () => ({
       onJobCreated: (job: ICronJob) => {
-        setJobsMap((prev) => {
-          const convId = job.metadata.conversation_id;
-          const existing = prev.get(convId) || [];
-          if (existing.some((j) => j.id === job.id)) {
-            return prev;
-          }
-          const newMap = new Map(prev);
-          newMap.set(convId, [...existing, job]);
-          return newMap;
-        });
+        const convId = job.metadata.conversation_id;
+        if (!convId) return;
+        setJobsMap((prev) => upsertCronJobByConversation(prev, job));
         // Refresh conversation list to update sorting (modifyTime was updated)
         console.log('[useCronJobsMap] onJobCreated, triggering chat.history.refresh');
         emitter.emit('chat.history.refresh');
@@ -339,7 +332,7 @@ export function useCronJobsMap() {
         // Check if this is a new execution (last_run_at_ms changed)
         const prevLastRunAt = lastRunAtMapRef.current.get(job.id);
         const newLastRunAt = job.state.last_run_at_ms;
-        if (newLastRunAt && newLastRunAt !== prevLastRunAt) {
+        if (convId && newLastRunAt && newLastRunAt !== prevLastRunAt) {
           lastRunAtMapRef.current.set(job.id, newLastRunAt);
 
           // Mark as unread only if user is not currently viewing this conversation
@@ -357,15 +350,7 @@ export function useCronJobsMap() {
           emitter.emit('chat.history.refresh');
         }
 
-        setJobsMap((prev) => {
-          const newMap = new Map(prev);
-          const existing = newMap.get(convId) || [];
-          newMap.set(
-            convId,
-            existing.map((j) => (j.id === job.id ? job : j))
-          );
-          return newMap;
-        });
+        setJobsMap((prev) => upsertCronJobByConversation(prev, job));
       },
       onJobRemoved: ({ job_id }: { job_id: CronJobId }) => {
         setJobsMap((prev) => {

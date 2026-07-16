@@ -190,6 +190,14 @@ export function parseEntityId<Kind extends EntityKind>(kind: Kind, value: unknow
   return value as EntityId<Kind>;
 }
 
+/** Parse an optional boundary ID while keeping strict UUIDv7 validation for present values. */
+export function parseOptionalEntityId<Kind extends EntityKind>(
+  kind: Kind,
+  value: unknown,
+): EntityId<Kind> | undefined {
+  return value == null ? undefined : parseEntityId(kind, value);
+}
+
 export function tryParseEntityId<Kind extends EntityKind>(kind: Kind, value: unknown): EntityId<Kind> | null {
   try {
     return parseEntityId(kind, value);

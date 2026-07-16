@@ -2175,6 +2175,22 @@ async fn sr1_system_resume_missed_job() {
     assert!(messages[0].content.contains("not run automatically"));
 
     let events = bc.take_events();
+    let updated_event = events
+        .iter()
+        .find(|event| event.name == "cron.job-updated")
+        .expect("resume should broadcast the fully persisted job before the execution event");
+    assert_eq!(updated_event.data["metadata"]["conversation_id"], CONV_1);
+    assert_eq!(updated_event.data["state"]["last_status"], "missed");
+    assert!(updated_event.data["state"]["next_run_at_ms"].as_i64().is_some());
+    let updated_index = events
+        .iter()
+        .position(|event| event.name == "cron.job-updated")
+        .unwrap();
+    let executed_index = events
+        .iter()
+        .position(|event| event.name == "cron.job-executed")
+        .unwrap();
+    assert!(updated_index < executed_index, "job-updated must precede job-executed");
     assert!(
         events
             .iter()

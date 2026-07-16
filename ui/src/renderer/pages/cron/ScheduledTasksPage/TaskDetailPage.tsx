@@ -363,7 +363,7 @@ const TaskDetailPage: React.FC = () => {
                   </p>
                 </div>
               </div>
-              {job.metadata.agent_config?.clear_context_each_run && (
+              {job.execution_mode === 'existing' && job.metadata.agent_config?.clear_context_each_run && (
                 <div className='inline-flex items-center gap-4px'>
                   <span className='text-13px leading-20px text-t-secondary'>
                     {t('cron.page.form.clearContextEachRun', { defaultValue: 'Clear context each run' })}

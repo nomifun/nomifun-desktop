@@ -31,6 +31,11 @@ import CronExpressionBuilder, { validateCronExpression } from './CronExpressionB
 import { useConversationListSync } from '@renderer/pages/conversation/SessionList/hooks/useConversationListSync';
 import { getBackendKeyFromConversation } from '@renderer/pages/conversation/SessionList/utils/exportHelpers';
 import { renderConversationOption } from '@renderer/pages/conversation/components/renderConversationOption';
+import {
+  buildCronConversationRequestFields,
+  resolveCronConversationTarget,
+  type ConversationExecutionMode,
+} from './cronConversationTarget';
 
 const FormItem = Form.Item;
 const TextArea = Input.TextArea;
@@ -42,9 +47,6 @@ interface CreateTaskDialogProps {
   onClose: () => void;
   /** When provided, the dialog operates in edit mode */
   editJob?: ICronJob;
-  conversation_id?: ConversationId;
-  conversation_title?: string;
-  agent_type?: string;
   /** Preset the specified conversation target on open (create mode only). */
   initialSpecifiedConversationId?: ConversationId;
   /** Prevent changing the preset target fields while still allowing task details to be edited. */
@@ -54,9 +56,6 @@ interface CreateTaskDialogProps {
 type FrequencyType = 'manual' | 'hourly' | 'daily' | 'weekdays' | 'weekly' | 'custom';
 // UI-level execution mode. 'specified' is a frontend affordance that maps to the
 // backend `existing` mode bound to a user-picked conversation_id.
-type ConversationExecutionMode = 'new_conversation' | 'existing' | 'specified';
-type BackendExecutionMode = 'new_conversation' | 'existing';
-
 const WEEKDAYS = [
   { value: 'MON', label: 'monday' },
   { value: 'TUE', label: 'tuesday' },
@@ -136,9 +135,6 @@ const CreateTaskDialog: React.FC<CreateTaskDialogProps> = ({
   visible,
   onClose,
   editJob,
-  conversation_id: _conversation_id,
-  conversation_title,
-  agent_type,
   initialSpecifiedConversationId,
   lockInitialTarget = false,
 }) => {
@@ -177,7 +173,7 @@ const CreateTaskDialog: React.FC<CreateTaskDialogProps> = ({
       // Only 'existing' execution reuses metadata.conversation_id as its bound
       // target. (new_conversation jobs merely anchor there for UI grouping and
       // spawn a fresh conversation each run — not a reuse bind, so don't hide it.)
-      if (job.execution_mode === 'existing') {
+      if (job.execution_mode === 'existing' && job.metadata.conversation_id) {
         set.add(job.metadata.conversation_id);
       }
     }
@@ -416,8 +412,8 @@ const CreateTaskDialog: React.FC<CreateTaskDialogProps> = ({
     const agentId = colonIdx >= 0 ? agentValue.substring(colonIdx + 1) : agentValue;
 
     let agent_config: ICronAgentConfig | undefined;
-    let resolvedAgentType: ICreateCronJobParams['agent_type'] = (agent_type ||
-      'claude') as ICreateCronJobParams['agent_type'];
+    let resolvedAgentType: ICreateCronJobParams['agent_type'] = 'claude';
+    const shouldClearContextEachRun = execution_mode === 'existing' && clearContextEachRun;
 
     if (agentKind === 'cli') {
       const agent = cliAgents.find((a) => a.backend === agentId || a.agent_type === agentId);
@@ -434,7 +430,7 @@ const CreateTaskDialog: React.FC<CreateTaskDialogProps> = ({
           mode: getFullAutoMode('nomi'),
           model_id,
           workspace,
-          clear_context_each_run: clearContextEachRun,
+          clear_context_each_run: shouldClearContextEachRun,
         };
       } else if (agent?.agent_type === 'acp') {
         const capitalizedBackend = backend.charAt(0).toUpperCase() + backend.slice(1);
@@ -446,7 +442,7 @@ const CreateTaskDialog: React.FC<CreateTaskDialogProps> = ({
           model_id,
           config_options,
           workspace,
-          clear_context_each_run: clearContextEachRun,
+          clear_context_each_run: shouldClearContextEachRun,
         };
       } else if (agent) {
         resolvedAgentType = backend as ICreateCronJobParams['agent_type'];
@@ -461,9 +457,11 @@ const CreateTaskDialog: React.FC<CreateTaskDialogProps> = ({
       const presetBackend = preferredAgent?.backend || preferredAgent?.agent_type || 'nomi';
       resolvedAgentType = presetBackend as string;
       agent_config = {
+        backend: presetBackend,
+        name: preset.name,
         preset_id: preset.id,
         workspace,
-        clear_context_each_run: clearContextEachRun,
+        clear_context_each_run: shouldClearContextEachRun,
       };
     }
 
@@ -480,17 +478,20 @@ const CreateTaskDialog: React.FC<CreateTaskDialogProps> = ({
       }
 
       const schedule = createCronSchedule(scheduleInfo.expr, scheduleInfo.description);
+      const conversationTarget = resolveCronConversationTarget(execution_mode, specifiedConversationId);
+
+      if (!conversationTarget) {
+        Message.error(t('cron.page.form.specifiedConversationRequired'));
+        return;
+      }
 
       // ─── 指定会话 — 复用已存在的会话 ─────────────────────────────────
       // 复用的会话已经带有自己的执行 Agent 和项目（workspace），这里不再重复配置，
       // 也绝不能传 agent_config：否则 agent_config.workspace 会覆盖会话自身的工作目录
       // （见 nomifun-cron executor::resolve_execution_workspace_raw）。
       // 指定会话仅在新建模式提供，因此直接构造创建参数并返回。
-      if (execution_mode === 'specified') {
-        if (!specifiedConversationId) {
-          Message.error(t('cron.page.form.specifiedConversationRequired'));
-          return;
-        }
+      if (conversationTarget.kind === 'specified') {
+        const specifiedConversationId = conversationTarget.conversationId;
         // Guard against reusing a conversation already bound by another task
         // (the picker hides bound targets, but a stale value can slip through).
         if (boundConversationIds.has(specifiedConversationId)) {
@@ -499,7 +500,7 @@ const CreateTaskDialog: React.FC<CreateTaskDialogProps> = ({
         }
         const selectedConversation = conversations.find((c) => c.id === specifiedConversationId);
         const specifiedAgentType =
-          (selectedConversation && getBackendKeyFromConversation(selectedConversation)) || agent_type || 'claude';
+          (selectedConversation && getBackendKeyFromConversation(selectedConversation)) || 'claude';
 
         setSubmitting(true);
         const params: ICreateCronJobParams = {
@@ -507,11 +508,10 @@ const CreateTaskDialog: React.FC<CreateTaskDialogProps> = ({
           description: values.description,
           schedule,
           prompt: values.prompt,
-          conversation_id: specifiedConversationId,
-          conversation_title: selectedConversation?.name ?? conversation_title,
+          conversation_title: selectedConversation?.name,
           agent_type: specifiedAgentType,
           created_by: 'user',
-          execution_mode: 'existing',
+          ...buildCronConversationRequestFields(conversationTarget),
         };
         await ipcBridge.cron.addJob.invoke(params);
         Message.success(t('cron.page.createSuccess'));
@@ -520,9 +520,9 @@ const CreateTaskDialog: React.FC<CreateTaskDialogProps> = ({
       }
 
       // ─── Agent / conversation target (new_conversation / existing) ───
-      // `specified` is handled above, so execution_mode is already a backend mode here.
-      const backendExecutionMode: BackendExecutionMode = execution_mode;
-      const effectiveConversationTitle = conversation_title;
+      // Both modes intentionally start unbound; the backend materializes their
+      // first conversation and only the continuing mode reuses it later.
+      const backendExecutionMode = conversationTarget.executionMode;
 
       setSubmitting(true);
       const { agent_config, resolvedAgentType } = resolveAgentConfig(values.agent);
@@ -546,21 +546,15 @@ const CreateTaskDialog: React.FC<CreateTaskDialogProps> = ({
         });
         Message.success(t('cron.page.updateSuccess'));
       } else {
-        if (_conversation_id == null) {
-          Message.error(t('cron.page.form.specifiedConversationRequired'));
-          return;
-        }
         const params: ICreateCronJobParams = {
           name: values.name,
           description: values.description,
           schedule,
           prompt: values.prompt,
-          conversation_id: _conversation_id,
-          conversation_title: effectiveConversationTitle,
           agent_type: resolvedAgentType,
           created_by: 'user',
-          execution_mode: backendExecutionMode,
           agent_config,
+          ...buildCronConversationRequestFields(conversationTarget),
         };
         await ipcBridge.cron.addJob.invoke(params);
         Message.success(t('cron.page.createSuccess'));
@@ -726,7 +720,7 @@ const CreateTaskDialog: React.FC<CreateTaskDialogProps> = ({
           <FormItem label={t('cron.page.form.executionMode')}>
             <Radio.Group
               value={execution_mode}
-              disabled={lockInitialTarget}
+              disabled={lockInitialTarget || isEditMode}
               onChange={(value) => setExecutionMode(value as ConversationExecutionMode)}
               className='flex flex-wrap items-center gap-20px'
             >
@@ -739,7 +733,7 @@ const CreateTaskDialog: React.FC<CreateTaskDialogProps> = ({
             <div className='mt-10px rounded-12px border border-solid border-[var(--color-border-2)] bg-fill-2 px-14px py-12px'>
               <p className='m-0 text-12px leading-18px text-t-primary'>{selectedModeDescription}</p>
             </div>
-            {(execution_mode === 'existing' || execution_mode === 'specified') && (
+            {execution_mode === 'existing' && (
               <div className='mt-10px flex items-center justify-between gap-12px rounded-12px border border-solid border-[var(--color-border-2)] bg-fill-2 px-14px py-10px'>
                 <div className='flex flex-col gap-2px'>
                   <span className='text-13px font-medium text-t-primary'>
