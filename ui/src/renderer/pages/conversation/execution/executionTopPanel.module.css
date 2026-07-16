@@ -46,23 +46,12 @@
   background: color-mix(in srgb, rgb(var(--primary-6)) 55%, transparent);
 }
 
-/* Header strip — always visible while expanded. */
+/* Lifecycle controls only. Completed executions omit this strip entirely so
+ * progress begins at the top of the collaboration pane. */
 .header {
   flex-shrink: 0;
   padding: 8px 16px;
   background: color-mix(in srgb, var(--bg-2) 60%, transparent);
-}
-
-/* Collapse toggle hit area. */
-.toggle {
-  color: var(--color-text-2);
-  border-radius: 8px;
-  padding: 2px 4px;
-  transition: color 0.15s ease;
-}
-
-.toggle:hover {
-  color: rgb(var(--primary-6));
 }
 
 /* Canvas body — fills the remaining column height so react-flow lays out and

@@ -23,6 +23,10 @@ describe('conversation execution canvas integration', () => {
     expect(panelSource.includes("data-testid='execution-canvas-progress'")).toBe(true);
     expect(panelSource.includes('stepStatusMeta(step.status)')).toBe(true);
     expect(panelSource.includes('projectStep({')).toBe(true);
+    expect(panelSource.includes('agentExecution.panel.title')).toBe(false);
+    expect(panelSource.includes('agentExecution.panel.collapse')).toBe(false);
+    expect(panelSource.includes('agentExecution.status.execution.')).toBe(false);
+    expect(panelSource.includes('(showControls || leadThinking.active) &&')).toBe(true);
   });
 
   test('renders only the current plan revision while retaining history in the detail model', () => {
@@ -41,6 +45,7 @@ describe('conversation execution canvas integration', () => {
     const projectedSource = readSource(new URL('./ProjectedAttemptView.tsx', import.meta.url));
 
     expect(controlsSource.includes("status === 'running' || status === 'waiting_input'")).toBe(true);
+    expect(controlsSource.includes('const isTerminal = isTerminalExecutionStatus(status)')).toBe(true);
     expect(controlsSource.includes("status !== '' && !isBusyPlaceholder && !isTerminal")).toBe(true);
     expect(projectedSource.includes("step.kind === 'agent' && step.status === 'pending'")).toBe(true);
     expect(projectedSource.includes('participant.retired_in_revision == null')).toBe(true);
