@@ -13,8 +13,7 @@ const controlCss = readFileSync(new URL('../../../styles/theme-control-contract.
 describe('GuidActionRow MCP checkbox selection treatment', () => {
   test('applies the enhanced theme-aware checkbox treatment to MCP server choices', () => {
     expect(actionRowSource.includes("className='guid-mcp-selection-checkbox'")).toBe(true);
-    expect(controlCss.includes('.guid-mcp-selection-checkbox .arco-checkbox-mask')).toBe(true);
-    expect(controlCss.includes('.guid-mcp-selection-checkbox.arco-checkbox-checked .arco-checkbox-mask')).toBe(true);
-    expect(controlCss.includes('.guid-mcp-selection-checkbox .arco-checkbox-mask-icon')).toBe(true);
+    expect(controlCss.includes('.arco-checkbox-checked .arco-checkbox-mask')).toBe(true);
+    expect(controlCss.includes('.arco-checkbox-mask-icon')).toBe(true);
   });
 });

@@ -98,6 +98,7 @@ const SessionKindGroup: React.FC<SessionKindGroupProps> = ({
               checked={selectionChecked}
               indeterminate={selectionIndeterminate}
               disabled={selectionDisabled}
+              className='session-batch-selection-checkbox'
               onChange={() => onToggleSelection?.()}
             />
           </span>
