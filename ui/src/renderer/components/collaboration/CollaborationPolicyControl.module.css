@@ -29,16 +29,16 @@
   box-sizing: border-box;
   display: flex;
   flex-direction: column;
-  gap: 16px;
-  padding: 18px;
-  width: min(296px, calc(100vw - 32px));
+  gap: 12px;
+  padding: 14px;
+  width: min(280px, calc(100vw - 32px));
 }
 
 .header {
-  align-items: flex-start;
+  align-items: center;
   display: grid;
-  gap: 11px;
-  grid-template-columns: 32px minmax(0, 1fr);
+  gap: 9px;
+  grid-template-columns: 28px minmax(0, 1fr);
 }
 
 .headerIcon {
@@ -49,14 +49,9 @@
   box-shadow: inset 0 1px 0 color-mix(in srgb, #fff 45%, transparent);
   color: var(--policy-accent);
   display: inline-flex;
-  height: 32px;
+  height: 28px;
   justify-content: center;
-  width: 32px;
-}
-
-.headerCopy {
-  min-width: 0;
-  padding-top: 1px;
+  width: 28px;
 }
 
 .title {
@@ -65,13 +60,6 @@
   font-weight: 650;
   letter-spacing: -0.01em;
   line-height: 20px;
-}
-
-.description {
-  color: var(--color-text-3);
-  font-size: 12px;
-  line-height: 18px;
-  margin-top: 3px;
 }
 
 .segmentedControl {
@@ -146,7 +134,7 @@
   display: flex;
   gap: 12px;
   justify-content: space-between;
-  padding: 12px;
+  padding: 10px 12px;
   transition:
     border-color 150ms ease,
     opacity 150ms ease;
@@ -160,22 +148,11 @@
   opacity: 0.58;
 }
 
-.decisionCopy {
-  min-width: 0;
-}
-
 .decisionTitle {
   color: var(--color-text-1);
   font-size: 13px;
   font-weight: 600;
   line-height: 19px;
-}
-
-.decisionDescription {
-  color: var(--color-text-3);
-  font-size: 11px;
-  line-height: 16px;
-  margin-top: 2px;
 }
 
 .decisionSwitch {
