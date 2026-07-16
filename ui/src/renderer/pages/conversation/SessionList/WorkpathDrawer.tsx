@@ -290,6 +290,7 @@ const WorkpathDrawer: React.FC<WorkpathDrawerProps> = ({
               checked={workpathSelectionState.checked}
               indeterminate={workpathSelectionState.indeterminate}
               disabled={workpathSelectionState.disabled}
+              className='session-batch-selection-checkbox'
               onChange={() => onToggleBatchSelectionScope?.(workpathSelectionScope)}
             />
           </span>
