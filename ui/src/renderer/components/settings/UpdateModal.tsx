@@ -13,6 +13,7 @@ import MarkdownView from '@/renderer/components/Markdown';
 import type { UpdateDownloadProgressEvent, UpdateReleaseInfo, AutoUpdateStatus } from '@/common/update/updateTypes';
 import { useTranslation } from 'react-i18next';
 import { getUpdateErrorMessageKey } from './updateErrorMessage';
+import { reportNoUpdateAvailable, reportUpdateAvailable } from '@renderer/hooks/system/useUpdateAvailability';
 
 type UpdateStatus = 'checking' | 'upToDate' | 'available' | 'downloading' | 'downloaded' | 'success' | 'error';
 
@@ -81,6 +82,7 @@ const UpdateModal: React.FC = () => {
         const res = await ipcBridge.autoUpdate.check.invoke({ includePrerelease });
         if (res?.success && res.data?.updateInfo) {
           autoUpdateOk = true;
+          reportUpdateAvailable(res.data.updateInfo.version);
           setAutoUpdateInfo({
             version: res.data.updateInfo.version,
             releaseNotes: res.data.updateInfo.releaseNotes,
@@ -112,6 +114,7 @@ const UpdateModal: React.FC = () => {
 
       // Manual mode
       if (res.data?.updateAvailable && res.data.latest) {
+        reportUpdateAvailable(res.data.latest.version);
         setUpdateInfo(res.data.latest);
         setReleasePageUrl(res.data.latest.htmlUrl || '');
         if (!res.data.latest.recommendedAsset) {
@@ -123,6 +126,7 @@ const UpdateModal: React.FC = () => {
 
       setUpdateInfo(res.data?.latest || null);
       setReleasePageUrl(res.data?.latest?.htmlUrl || '');
+      reportNoUpdateAvailable();
       setStatus('upToDate');
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
@@ -226,6 +230,7 @@ const UpdateModal: React.FC = () => {
         case 'checking':
           break;
         case 'available':
+          reportUpdateAvailable(evt.version);
           setAutoUpdateAvailable(true);
           setAutoUpdateInfo({
             version: evt.version || '',
@@ -235,6 +240,7 @@ const UpdateModal: React.FC = () => {
           setVisible(true);
           break;
         case 'not-available':
+          reportNoUpdateAvailable();
           setStatus('upToDate');
           break;
         case 'downloading':
