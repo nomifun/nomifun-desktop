@@ -44,8 +44,8 @@ export const useMcpModal = () => {
   }, []);
 
   // 切换服务器折叠状态
-  const toggleServerCollapse = useCallback((serverId: McpServerId) => {
-    setMcpCollapseKey((prev) => ({ ...prev, [serverId]: !prev[serverId] }));
+  const toggleServerCollapse = useCallback((serverKey: string) => {
+    setMcpCollapseKey((prev) => ({ ...prev, [serverKey]: !prev[serverKey] }));
   }, []);
 
   return {
