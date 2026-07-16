@@ -1,5 +1,6 @@
 mod common;
 
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -8,13 +9,20 @@ use nomi_agent::engine::{AgentEngine, AgentError};
 use nomi_agent::output::OutputSink;
 use nomi_agent::output::terminal::TerminalSink;
 use nomi_agent::session::SessionManager;
+use nomi_config::compat::ProviderCompat;
+use nomi_protocol::events::ToolCategory;
+use nomi_providers::openai::OpenAIProvider;
 use nomi_providers::{LlmProvider, ProviderError};
+use nomi_tools::Tool;
 use nomi_tools::registry::ToolRegistry;
 use nomi_types::llm::{LlmEvent, LlmRequest};
 use nomi_types::message::{ContentBlock, Message, Role, StopReason, TokenUsage};
+use nomi_types::tool::ToolResult;
 use serde_json::json;
 use tempfile::tempdir;
 use tokio::sync::mpsc;
+use wiremock::matchers::method;
+use wiremock::{Mock, MockServer, ResponseTemplate};
 
 use common::{MockLlmProvider, MockTool, test_config};
 
@@ -27,7 +35,6 @@ fn silent_output() -> Arc<dyn OutputSink> {
 
 #[derive(Default)]
 struct RecordingOutputSink {
-    tool_call_deltas: Mutex<Vec<(String, String, Option<String>)>>,
     tool_calls: Mutex<Vec<(String, String)>>,
     tool_results: Mutex<Vec<(String, String, bool)>>,
     model_activity: Mutex<Vec<(String, String)>>,
@@ -42,14 +49,6 @@ impl OutputSink for RecordingOutputSink {
             .lock()
             .unwrap()
             .push((tool_use_id.to_owned(), name.to_owned()));
-    }
-
-    fn emit_tool_call_delta(&self, tool_use_id: &str, name: &str, input: Option<&str>) {
-        self.tool_call_deltas.lock().unwrap().push((
-            tool_use_id.to_owned(),
-            name.to_owned(),
-            input.map(ToOwned::to_owned),
-        ));
     }
 
     fn emit_model_activity(&self, msg_id: &str, status: &str) {
@@ -149,6 +148,496 @@ impl LlmProvider for RecordingRequestProvider {
     }
 }
 
+struct CountingTool {
+    calls: Arc<AtomicUsize>,
+}
+
+#[async_trait]
+impl Tool for CountingTool {
+    fn name(&self) -> &str {
+        "counted_tool"
+    }
+
+    fn description(&self) -> &str {
+        "Counts actual dispatches"
+    }
+
+    fn input_schema(&self) -> serde_json::Value {
+        json!({"type": "object", "properties": {}})
+    }
+
+    fn category(&self) -> ToolCategory {
+        ToolCategory::Info
+    }
+
+    fn is_concurrency_safe(&self, _input: &serde_json::Value) -> bool {
+        true
+    }
+
+    async fn execute(&self, _input: serde_json::Value) -> ToolResult {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        ToolResult::text("executed")
+    }
+}
+
+struct FilteredCountingTool {
+    name: &'static str,
+    category: ToolCategory,
+    calls: Arc<AtomicUsize>,
+}
+
+#[async_trait]
+impl Tool for FilteredCountingTool {
+    fn name(&self) -> &str {
+        self.name
+    }
+
+    fn description(&self) -> &str {
+        "Counts dispatches of a tool omitted from the current provider request"
+    }
+
+    fn input_schema(&self) -> serde_json::Value {
+        json!({"type": "object", "properties": {}})
+    }
+
+    fn category(&self) -> ToolCategory {
+        self.category
+    }
+
+    fn is_concurrency_safe(&self, _input: &serde_json::Value) -> bool {
+        false
+    }
+
+    async fn execute(&self, _input: serde_json::Value) -> ToolResult {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        ToolResult::text("must not execute")
+    }
+}
+
+fn complete_counted_call() -> LlmEvent {
+    LlmEvent::ToolUse {
+        id: "call_counted".to_string(),
+        name: "counted_tool".to_string(),
+        input: json!({}),
+        extra: None,
+    }
+}
+
+fn done(stop_reason: StopReason) -> LlmEvent {
+    LlmEvent::Done {
+        stop_reason,
+        usage: TokenUsage::default(),
+    }
+}
+
+async fn assert_provider_protocol_rejected_without_dispatch(
+    label: &str,
+    events: Vec<LlmEvent>,
+) {
+    let provider = Arc::new(MockLlmProvider::with_events(events));
+    let calls = Arc::new(AtomicUsize::new(0));
+    let mut registry = ToolRegistry::new();
+    registry.register(Box::new(CountingTool {
+        calls: Arc::clone(&calls),
+    }));
+    let output = Arc::new(RecordingOutputSink::default());
+    let mut engine = AgentEngine::new_with_provider(
+        provider,
+        test_config(),
+        registry,
+        output.clone(),
+        std::env::temp_dir(),
+    );
+
+    let result = engine.execute_turn("exercise terminal contract", label).await;
+
+    assert!(
+        matches!(&result, Err(AgentError::ApiError(message)) if message.contains("provider stream protocol violation")),
+        "{label}: expected provider protocol error, got {result:?}"
+    );
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        0,
+        "{label}: invalid provider turn reached Tool::execute"
+    );
+    assert!(
+        output.tool_results.lock().unwrap().is_empty(),
+        "{label}: invalid provider turn emitted a tool result"
+    );
+}
+
+#[tokio::test]
+async fn plan_mode_rejects_registered_write_tool_omitted_from_provider_request() {
+    let provider = Arc::new(MockLlmProvider::with_turns(vec![
+        vec![
+            LlmEvent::ToolUse {
+                id: "enter-plan".to_string(),
+                name: "EnterPlanMode".to_string(),
+                input: json!({}),
+                extra: None,
+            },
+            done(StopReason::ToolUse),
+        ],
+        vec![
+            LlmEvent::ToolUse {
+                id: "hidden-write".to_string(),
+                name: "hidden_write".to_string(),
+                input: json!({}),
+                extra: None,
+            },
+            done(StopReason::ToolUse),
+        ],
+    ]));
+    let calls = Arc::new(AtomicUsize::new(0));
+    let plan_active = Arc::new(AtomicBool::new(false));
+    let mut registry = ToolRegistry::new();
+    registry.register(Box::new(
+        nomi_agent::plan::tools::EnterPlanModeTool::new(Arc::clone(&plan_active)),
+    ));
+    let search = nomi_tools::tool_search::ToolSearchTool::new(registry.deferred_state());
+    assert!(
+        !search
+            .execute(json!({"query": "EnterPlanMode"}))
+            .await
+            .is_error
+    );
+    registry.register(Box::new(FilteredCountingTool {
+        name: "hidden_write",
+        category: ToolCategory::Edit,
+        calls: Arc::clone(&calls),
+    }));
+    let mut engine = AgentEngine::new_with_provider(
+        provider,
+        test_config(),
+        registry,
+        silent_output(),
+        std::env::temp_dir(),
+    );
+    engine.set_plan_active_flag(plan_active);
+
+    let result = engine.execute_turn("plan first", "plan-hidden-write").await;
+
+    assert!(
+        matches!(&result, Err(AgentError::ApiError(message)) if message.contains("hidden_write") && message.contains("not advertised")),
+        "expected the plan-hidden write call to fail at the provider boundary, got {result:?}"
+    );
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn normal_mode_rejects_registered_exit_plan_tool_omitted_from_provider_request() {
+    let provider = Arc::new(MockLlmProvider::with_tool_use(
+        "hidden-exit",
+        "ExitPlanMode",
+        json!({}),
+    ));
+    let calls = Arc::new(AtomicUsize::new(0));
+    let mut registry = ToolRegistry::new();
+    registry.register(Box::new(FilteredCountingTool {
+        name: "ExitPlanMode",
+        category: ToolCategory::Info,
+        calls: Arc::clone(&calls),
+    }));
+    let mut engine = AgentEngine::new_with_provider(
+        provider,
+        test_config(),
+        registry,
+        silent_output(),
+        std::env::temp_dir(),
+    );
+
+    let result = engine.execute_turn("stay in normal mode", "normal-hidden-exit").await;
+
+    assert!(
+        matches!(&result, Err(AgentError::ApiError(message)) if message.contains("ExitPlanMode") && message.contains("not advertised")),
+        "expected the normal-mode ExitPlanMode call to fail at the provider boundary, got {result:?}"
+    );
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn invalid_provider_terminal_sequences_never_dispatch_tools() {
+    let cases = vec![
+        ("tool call without Done", vec![complete_counted_call()]),
+        (
+            "duplicate Done",
+            vec![
+                complete_counted_call(),
+                done(StopReason::ToolUse),
+                done(StopReason::ToolUse),
+            ],
+        ),
+        (
+            "EndTurn carrying ToolUse",
+            vec![complete_counted_call(), done(StopReason::EndTurn)],
+        ),
+        (
+            "MaxTokens carrying ToolUse",
+            vec![complete_counted_call(), done(StopReason::MaxTokens)],
+        ),
+        (
+            "ToolUse terminal without a complete call",
+            vec![done(StopReason::ToolUse)],
+        ),
+        (
+            "duplicate tool call ids",
+            vec![
+                complete_counted_call(),
+                LlmEvent::ToolUse {
+                    id: "call_counted".to_string(),
+                    name: "counted_tool".to_string(),
+                    input: json!({"second": true}),
+                    extra: None,
+                },
+                done(StopReason::ToolUse),
+            ],
+        ),
+        (
+            "text response without Done",
+            vec![LlmEvent::TextDelta("unterminated".to_string())],
+        ),
+    ];
+
+    for (label, events) in cases {
+        assert_provider_protocol_rejected_without_dispatch(label, events).await;
+    }
+}
+
+#[tokio::test]
+async fn incomplete_tool_use_events_never_dispatch_tools() {
+    let incomplete_calls = vec![
+        LlmEvent::ToolUse {
+            id: String::new(),
+            name: "counted_tool".to_string(),
+            input: json!({}),
+            extra: None,
+        },
+        LlmEvent::ToolUse {
+            id: "call_missing_name".to_string(),
+            name: String::new(),
+            input: json!({}),
+            extra: None,
+        },
+        LlmEvent::ToolUse {
+            id: "call_non_object".to_string(),
+            name: "counted_tool".to_string(),
+            input: json!([]),
+            extra: None,
+        },
+    ];
+
+    for (index, call) in incomplete_calls.into_iter().enumerate() {
+        assert_provider_protocol_rejected_without_dispatch(
+            &format!("incomplete tool call {index}"),
+            vec![call, done(StopReason::ToolUse)],
+        )
+        .await;
+    }
+}
+
+#[tokio::test]
+async fn malformed_openai_sse_cannot_dispatch_a_later_valid_tool_finish() {
+    let server = MockServer::start().await;
+    let body = concat!(
+        "data: {\"choices\":[\n\n",
+        "data: {\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_late\",\"type\":\"function\",\"function\":{\"name\":\"counted_tool\",\"arguments\":\"{}\"}}]},\"finish_reason\":\"tool_calls\"}]}\n\n",
+        "data: [DONE]\n\n",
+    );
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(body, "text/event-stream"))
+        .mount(&server)
+        .await;
+
+    let provider = Arc::new(OpenAIProvider::new(
+        "test-key",
+        &server.uri(),
+        ProviderCompat::openai_defaults(),
+    ));
+    let calls = Arc::new(AtomicUsize::new(0));
+    let mut registry = ToolRegistry::new();
+    registry.register(Box::new(CountingTool {
+        calls: Arc::clone(&calls),
+    }));
+    let output = Arc::new(RecordingOutputSink::default());
+    let mut engine = AgentEngine::new_with_provider(
+        provider,
+        test_config(),
+        registry,
+        output.clone(),
+        std::env::temp_dir(),
+    );
+
+    let result = engine
+        .execute_turn("exercise malformed OpenAI SSE", "malformed-openai-sse")
+        .await;
+
+    assert!(
+        matches!(&result, Err(AgentError::ApiError(message)) if message.contains("malformed SSE JSON")),
+        "expected the parser error to terminate the engine turn, got {result:?}"
+    );
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        0,
+        "a tool call appearing after malformed SSE JSON reached Tool::execute"
+    );
+    assert!(output.tool_results.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn textual_tool_call_markup_round_trips_exactly_without_dispatch() {
+    let server = MockServer::start().await;
+    let literal = concat!(
+        "valid: <tool_call>{\"name\":\"counted_tool\",\"arguments\":{}}</tool_call>\n",
+        "malformed: <tool_call>not json</tool_call>\n",
+        "unclosed: <tool_call>{\"name\":\"counted_tool\"",
+    );
+    let splits = [13, 41, 78, literal.len() - 11];
+    let mut body = String::new();
+    let mut start = 0;
+    for split in splits {
+        let chunk = json!({
+            "choices": [{
+                "delta": { "content": &literal[start..split] },
+                "finish_reason": null,
+                "index": 0
+            }]
+        })
+        .to_string();
+        body.push_str(&format!("data: {chunk}\n\n"));
+        start = split;
+    }
+    let finish = json!({
+        "choices": [{
+            "delta": { "content": &literal[start..] },
+            "finish_reason": "stop",
+            "index": 0
+        }]
+    })
+    .to_string();
+    body.push_str(&format!("data: {finish}\n\ndata: [DONE]\n\n"));
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(body, "text/event-stream"))
+        .mount(&server)
+        .await;
+
+    let provider = Arc::new(OpenAIProvider::new(
+        "test-key",
+        &server.uri(),
+        ProviderCompat::openai_defaults(),
+    ));
+    let calls = Arc::new(AtomicUsize::new(0));
+    let mut registry = ToolRegistry::new();
+    registry.register(Box::new(CountingTool {
+        calls: Arc::clone(&calls),
+    }));
+    let output = Arc::new(RecordingOutputSink::default());
+    let mut engine = AgentEngine::new_with_provider(
+        provider,
+        test_config(),
+        registry,
+        output.clone(),
+        std::env::temp_dir(),
+    );
+
+    let result = engine
+        .execute_turn("show literal syntax", "literal-tool-markup")
+        .await
+        .expect("literal markup is ordinary assistant text");
+
+    assert_eq!(result.text, literal);
+    assert_eq!(result.stop_reason, StopReason::EndTurn);
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+    assert!(output.tool_calls.lock().unwrap().is_empty());
+    assert!(output.tool_results.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn text_only_tool_calls_finish_is_rejected_without_dispatch() {
+    let server = MockServer::start().await;
+    let body = concat!(
+        "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"<tool_call>{\\\"name\\\":\\\"counted_tool\\\",\\\"arguments\\\":{}}</tool_call>\"},\"finish_reason\":\"tool_calls\"}]}\n\n",
+        "data: [DONE]\n\n",
+    );
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(body, "text/event-stream"))
+        .mount(&server)
+        .await;
+
+    let provider = Arc::new(OpenAIProvider::new(
+        "test-key",
+        &server.uri(),
+        ProviderCompat::openai_defaults(),
+    ));
+    let calls = Arc::new(AtomicUsize::new(0));
+    let mut registry = ToolRegistry::new();
+    registry.register(Box::new(CountingTool {
+        calls: Arc::clone(&calls),
+    }));
+    let output = Arc::new(RecordingOutputSink::default());
+    let mut engine = AgentEngine::new_with_provider(
+        provider,
+        test_config(),
+        registry,
+        output.clone(),
+        std::env::temp_dir(),
+    );
+
+    let result = engine
+        .execute_turn("exercise text-only tool finish", "text-only-tool-finish")
+        .await;
+
+    assert!(
+        matches!(&result, Err(AgentError::ApiError(message)) if message.contains("no complete structured tool call")),
+        "expected structured-only provider error, got {result:?}"
+    );
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+    assert!(output.tool_results.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn openai_content_after_finish_cannot_dispatch_the_staged_call() {
+    let server = MockServer::start().await;
+    let body = concat!(
+        "data: {\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_staged\",\"type\":\"function\",\"function\":{\"name\":\"counted_tool\",\"arguments\":\"{}\"}}]},\"finish_reason\":\"tool_calls\"}]}\n\n",
+        "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"illegal tail\"},\"finish_reason\":null}]}\n\n",
+        "data: [DONE]\n\n",
+    );
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(body, "text/event-stream"))
+        .mount(&server)
+        .await;
+
+    let provider = Arc::new(OpenAIProvider::new(
+        "test-key",
+        &server.uri(),
+        ProviderCompat::openai_defaults(),
+    ));
+    let calls = Arc::new(AtomicUsize::new(0));
+    let mut registry = ToolRegistry::new();
+    registry.register(Box::new(CountingTool {
+        calls: Arc::clone(&calls),
+    }));
+    let output = Arc::new(RecordingOutputSink::default());
+    let mut engine = AgentEngine::new_with_provider(
+        provider,
+        test_config(),
+        registry,
+        output.clone(),
+        std::env::temp_dir(),
+    );
+
+    let result = engine
+        .execute_turn("exercise post-finish tail", "post-finish-tail")
+        .await;
+
+    assert!(
+        matches!(&result, Err(AgentError::ApiError(message)) if message.contains("after finish_reason")),
+        "expected post-finish protocol error, got {result:?}"
+    );
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+    assert!(output.tool_results.lock().unwrap().is_empty());
+}
+
 // ---------------------------------------------------------------------------
 // test_engine_text_response_ends_turn
 //
@@ -232,7 +721,7 @@ async fn test_engine_tool_use_executes_and_continues() {
 }
 
 #[tokio::test]
-async fn test_engine_forwards_tool_use_delta_before_final_tool_call() {
+async fn test_engine_publishes_running_only_after_complete_tool_call() {
     let turn1 = vec![
         LlmEvent::ToolUseDelta {
             id: "tool-1".to_string(),
@@ -276,14 +765,6 @@ async fn test_engine_forwards_tool_use_delta_before_final_tool_call() {
         .expect("engine should succeed");
 
     assert_eq!(result.text, "Done");
-    assert_eq!(
-        *output.tool_call_deltas.lock().unwrap(),
-        vec![(
-            "tool-1".to_string(),
-            "mock_tool".to_string(),
-            Some(r#"{"file_path":"snake.html"}"#.to_string())
-        )]
-    );
     assert_eq!(
         *output.tool_calls.lock().unwrap(),
         vec![("tool-1".to_string(), "mock_tool".to_string())]

@@ -3,7 +3,9 @@ mod common;
 use std::sync::Arc;
 
 use common::{MockTool, auto_approve_confirmer};
-use nomi_agent::tool_execution::{execute_tool_calls, execute_tool_calls_with_approval};
+use nomi_agent::tool_execution::{
+    ProviderToolAuthority, execute_tool_calls, execute_tool_calls_with_approval,
+};
 use nomi_compact::CompactionLevel;
 use nomi_config::hooks::{HookDef, HookEngine, HooksConfig};
 use nomi_protocol::events::ProtocolEvent;
@@ -90,6 +92,7 @@ async fn test_execute_single_tool_call() {
     let results = execute_tool_calls(
         &registry,
         &tool_calls,
+        &ProviderToolAuthority::from_request_tools(&registry.to_tool_defs()),
         &confirmer,
         None,
         CompactionLevel::Off,
@@ -130,6 +133,7 @@ async fn test_execute_concurrent_safe_tools() {
     let results = execute_tool_calls(
         &registry,
         &tool_calls,
+        &ProviderToolAuthority::from_request_tools(&registry.to_tool_defs()),
         &confirmer,
         None,
         CompactionLevel::Off,
@@ -173,6 +177,7 @@ async fn test_execute_non_concurrent_tools_sequential() {
     let results = execute_tool_calls(
         &registry,
         &tool_calls,
+        &ProviderToolAuthority::from_request_tools(&registry.to_tool_defs()),
         &confirmer,
         None,
         CompactionLevel::Off,
@@ -217,6 +222,7 @@ async fn test_execute_non_concurrent_tools_stops_after_error() {
     let results = execute_tool_calls(
         &registry,
         &tool_calls,
+        &ProviderToolAuthority::from_request_tools(&registry.to_tool_defs()),
         &confirmer,
         None,
         CompactionLevel::Off,
@@ -258,6 +264,7 @@ async fn test_protocol_execution_stops_after_sequential_error() {
     let outcome = execute_tool_calls_with_approval(
         &registry,
         &tool_calls,
+        &ProviderToolAuthority::from_request_tools(&registry.to_tool_defs()),
         &approval_manager,
         &writer,
         "msg-sequential-error",
@@ -304,6 +311,7 @@ async fn test_unknown_tool_returns_error() {
     let results = execute_tool_calls(
         &registry,
         &tool_calls,
+        &ProviderToolAuthority::from_request_tools(&registry.to_tool_defs()),
         &confirmer,
         None,
         CompactionLevel::Off,
@@ -340,6 +348,7 @@ async fn test_tool_error_returns_error_result() {
     let results = execute_tool_calls(
         &registry,
         &tool_calls,
+        &ProviderToolAuthority::from_request_tools(&registry.to_tool_defs()),
         &confirmer,
         None,
         CompactionLevel::Off,
@@ -379,6 +388,7 @@ async fn test_pre_hook_blocks_tool() {
     let results = execute_tool_calls(
         &registry,
         &tool_calls,
+        &ProviderToolAuthority::from_request_tools(&registry.to_tool_defs()),
         &confirmer,
         Some(&mut hook_engine),
         CompactionLevel::Off,
@@ -425,6 +435,7 @@ async fn test_post_hook_runs_after_tool() {
     let results = execute_tool_calls(
         &registry,
         &tool_calls,
+        &ProviderToolAuthority::from_request_tools(&registry.to_tool_defs()),
         &confirmer,
         Some(&mut hook_engine),
         CompactionLevel::Off,
@@ -461,6 +472,7 @@ async fn test_tool_result_truncation() {
     let results = execute_tool_calls(
         &registry,
         &tool_calls,
+        &ProviderToolAuthority::from_request_tools(&registry.to_tool_defs()),
         &confirmer,
         None,
         CompactionLevel::Off,

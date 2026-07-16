@@ -1,8 +1,9 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
 use async_trait::async_trait;
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 
 use super::config::McpServerConfig;
 use super::manager::McpManager;
@@ -19,6 +20,16 @@ use nomi_types::tool::{JsonSchema, ToolImage, ToolResult};
 /// size from the base64 length (decoded ≈ len * 3 / 4) to avoid decoding the
 /// whole payload just to measure it.
 const MCP_MAX_IMAGE_BYTES: usize = 5 * 1024 * 1024;
+const MCP_PROVIDER_NAME_PREFIX: &str = "mcp__";
+const MAX_PROVIDER_TOOL_NAME_LEN: usize = 64;
+const MCP_DISPLAY_SEPARATOR: &str = "__";
+/// 80 bits is ample origin disambiguation while leaving most of the provider
+/// name available for a human-readable `server__tool` slug.
+const MCP_DISPLAY_HASH_LEN: usize = 16;
+const MCP_DISPLAY_SLUG_LEN: usize = MAX_PROVIDER_TOOL_NAME_LEN
+    - MCP_PROVIDER_NAME_PREFIX.len()
+    - MCP_DISPLAY_SEPARATOR.len()
+    - MCP_DISPLAY_HASH_LEN;
 
 /// Estimate the decoded byte length of a (possibly padded) base64 string
 /// without allocating/decoding it. Standard base64 encodes every 3 bytes as 4
@@ -45,12 +56,14 @@ fn decoded_base64_len(data: &str) -> usize {
     bytes.saturating_sub(padding.min(2))
 }
 
-/// Wraps an MCP server tool as a local Tool trait implementation.
-/// Uses naming convention "mcp__{server}__{tool}" when collisions exist,
-/// otherwise uses the tool's original name.
+/// Wraps an MCP server tool as a local Tool trait implementation. Every MCP
+/// tool uses an origin-derived canonical provider name, so transcripts remain
+/// routable even when server registration order changes between sessions.
 pub struct McpToolProxy {
-    /// Display name used for registration (may be prefixed)
+    /// Canonical origin-derived name exposed to the model/provider.
     display_name: String,
+    /// Stable deferred-activation identity, independent of display collisions.
+    activation_identity: String,
     /// Original tool name on the MCP server
     tool_name: String,
     /// Server this tool belongs to
@@ -66,12 +79,7 @@ pub struct McpToolProxy {
 }
 
 impl McpToolProxy {
-    // One positional arg per proxy field; a builder would add ceremony without
-    // value for two internal call sites. The `annotations` param (added for
-    // approval classification) pushes this past clippy's 7-arg threshold.
-    #[allow(clippy::too_many_arguments)]
     pub fn new(
-        display_name: String,
         tool_name: String,
         server_name: String,
         description: String,
@@ -80,8 +88,11 @@ impl McpToolProxy {
         deferred: bool,
         annotations: Option<ToolAnnotations>,
     ) -> Self {
+        let display_name = canonical_mcp_display_name(&server_name, &tool_name);
+        let activation_identity = canonical_mcp_tool_identity(&server_name, &tool_name);
         Self {
             display_name,
+            activation_identity,
             tool_name,
             server_name,
             description,
@@ -126,6 +137,22 @@ impl Tool for McpToolProxy {
         &self.display_name
     }
 
+    fn activation_identity(&self) -> &str {
+        &self.activation_identity
+    }
+
+    fn reserved_provider_name_prefix(&self) -> Option<&'static str> {
+        Some(MCP_PROVIDER_NAME_PREFIX)
+    }
+
+    fn deferred_search_aliases(&self) -> Vec<String> {
+        vec![
+            self.tool_name.clone(),
+            self.server_name.clone(),
+            format!("{}/{}", self.server_name, self.tool_name),
+        ]
+    }
+
     fn description(&self) -> &str {
         &self.description
     }
@@ -153,6 +180,7 @@ impl Tool for McpToolProxy {
         {
             Ok(out) => {
                 let mut text = out.text;
+                let is_error = out.is_error;
                 let mut images: Vec<ToolImage> = Vec::with_capacity(out.images.len());
 
                 for img in out.images {
@@ -184,13 +212,18 @@ impl Tool for McpToolProxy {
                     });
                 }
 
+                let result = if is_error {
+                    ToolResult::error(text)
+                } else {
+                    ToolResult::text(text)
+                };
                 if images.is_empty() {
                     // Pure-text MCP tool: behaviour identical to before this change.
-                    ToolResult::text(text)
+                    result
                 } else {
                     // Multimodal: text → content, images → ToolResult.images so the
                     // downstream provider adapters feed them back to the model.
-                    ToolResult::text(text).with_images(images)
+                    result.with_images(images)
                 }
             }
             Err(e) => ToolResult::error(format!("MCP tool error: {}", e)),
@@ -215,87 +248,97 @@ impl Tool for McpToolProxy {
     }
 }
 
-/// Register all MCP tools into the tool registry, handling name collisions.
-///
-/// Strategy:
-/// - If tool name doesn't collide with built-in or other MCP tools → use as-is
-/// - If collision detected → prefix with "mcp__{server_name}__"
+/// Register all MCP tools under origin-stable canonical provider names.
 ///
 /// Each tool's deferred flag is read from the server's config:
 /// `McpServerConfig::deferred` — defaults to `true` when absent.
 pub fn register_mcp_tools(
     registry: &mut nomi_tools::registry::ToolRegistry,
     manager: &Arc<McpManager>,
-    builtin_names: &[String],
     server_configs: &HashMap<String, McpServerConfig>,
 ) {
-    let all_tools = manager.all_tools();
+    let mut registrations: BTreeMap<String, Vec<_>> = BTreeMap::new();
+    for (server_name, tool_def) in manager.all_tools() {
+        registrations
+            .entry(server_name.to_owned())
+            .or_default()
+            .push(tool_def);
+    }
 
-    // Determine which names need prefixing
-    for (server_name, tool_def) in &all_tools {
-        let original_name = &tool_def.name;
-
-        // Check collision with built-in tools
-        let collides_builtin = builtin_names.iter().any(|n| n == original_name);
-
-        // Check collision with other MCP servers' tools
-        let cross_server_collision = manager.tool_name_count(original_name) > 1;
-
-        let display_name = if collides_builtin || cross_server_collision {
-            format!("mcp__{}_{}", server_name, original_name)
-        } else {
-            original_name.clone()
-        };
-
-        // MCP tools are deferred by default; server config can override.
+    for (server_name, mut tool_defs) in registrations {
+        tool_defs.sort_by(|left, right| left.name.cmp(&right.name));
         let deferred = server_configs
-            .get(*server_name)
+            .get(&server_name)
             .and_then(|c| c.deferred)
             .unwrap_or(true);
-
-        let proxy = McpToolProxy::new(
-            display_name,
-            original_name.clone(),
-            server_name.to_string(),
-            tool_def.description.clone().unwrap_or_default(),
-            tool_def.input_schema.clone(),
-            Arc::clone(manager),
-            deferred,
-            tool_def.annotations.clone(),
-        );
-
-        registry.register(Box::new(proxy));
+        let proxies: Vec<Box<dyn Tool>> = tool_defs
+            .into_iter()
+            .map(|tool_def| {
+                Box::new(McpToolProxy::new(
+                    tool_def.name.clone(),
+                    server_name.clone(),
+                    tool_def.description.clone().unwrap_or_default(),
+                    tool_def.input_schema.clone(),
+                    Arc::clone(manager),
+                    deferred,
+                    tool_def.annotations.clone(),
+                )) as Box<dyn Tool>
+            })
+            .collect();
+        if registry.register_batch(proxies).is_empty() {
+            tracing::warn!(
+                target: "nomi_mcp",
+                server = %server_name,
+                "rejecting every tool from MCP server because its registration batch conflicts"
+            );
+        }
     }
 }
 
-/// Register tools from a single newly-connected MCP server.
-/// Uses the same collision-detection logic as `register_mcp_tools`.
+/// One dynamic MCP tool that survived registry policy and is provider-visible.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RegisteredMcpTool {
+    pub original_name: String,
+    pub provider_name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum McpToolRegistrationError {
+    #[error("MCP server '{server_name}' advertised no tools")]
+    NoTools { server_name: String },
+    #[error(
+        "MCP server '{server_name}' tool set conflicts with an existing route or registry policy"
+    )]
+    Rejected { server_name: String },
+}
+
+/// Register tools from a single newly-connected MCP server and return the
+/// accepted original-to-provider name mapping for `McpReady` metadata.
+/// Uses the same origin-stable naming as `register_mcp_tools`.
 pub fn register_single_server_tools(
     registry: &mut nomi_tools::registry::ToolRegistry,
     manager: &Arc<McpManager>,
     server_name: &str,
-    builtin_names: &[String],
     deferred: bool,
-) {
-    let all_tools = manager.all_tools();
-    let server_tools: Vec<_> = all_tools
-        .iter()
+) -> Result<Vec<RegisteredMcpTool>, McpToolRegistrationError> {
+    let mut server_tools: Vec<_> = manager
+        .all_tools()
+        .into_iter()
         .filter(|(sn, _)| *sn == server_name)
         .collect();
+    server_tools.sort_by(|left, right| left.1.name.cmp(&right.1.name));
+    if server_tools.is_empty() {
+        return Err(McpToolRegistrationError::NoTools {
+            server_name: server_name.to_owned(),
+        });
+    }
+    let mut registered = Vec::with_capacity(server_tools.len());
+    let mut proxies: Vec<Box<dyn Tool>> = Vec::with_capacity(server_tools.len());
 
-    for (_, tool_def) in &server_tools {
+    for (server_name, tool_def) in server_tools {
         let original_name = &tool_def.name;
-        let collides_builtin = builtin_names.iter().any(|n| n == original_name);
-        let cross_server_collision = manager.tool_name_count(original_name) > 1;
-
-        let display_name = if collides_builtin || cross_server_collision {
-            format!("mcp__{}_{}", server_name, original_name)
-        } else {
-            original_name.clone()
-        };
 
         let proxy = McpToolProxy::new(
-            display_name,
             original_name.clone(),
             server_name.to_string(),
             tool_def.description.clone().unwrap_or_default(),
@@ -304,9 +347,95 @@ pub fn register_single_server_tools(
             deferred,
             tool_def.annotations.clone(),
         );
+        let provider_name = proxy.name().to_owned();
 
-        registry.register(Box::new(proxy));
+        registered.push(RegisteredMcpTool {
+            original_name: original_name.clone(),
+            provider_name,
+        });
+        proxies.push(Box::new(proxy));
     }
+
+    let inserted_names = registry.register_batch(proxies);
+    if inserted_names.is_empty() {
+        return Err(McpToolRegistrationError::Rejected {
+            server_name: server_name.to_owned(),
+        });
+    }
+    let inserted_names: std::collections::BTreeSet<String> =
+        inserted_names.into_iter().collect();
+    registered.retain(|tool| inserted_names.contains(&tool.provider_name));
+
+    Ok(registered)
+}
+
+/// Provider-visible origin name. Keep as much of the sanitized
+/// `server__tool` origin as the strictest 64-character provider limit permits,
+/// then append a fixed 80-bit SHA-256 prefix to disambiguate origins whose
+/// readable slugs collide. The result never depends on registration order.
+pub fn canonical_mcp_display_name(server_name: &str, original_name: &str) -> String {
+    let identity = canonical_mcp_tool_identity(server_name, original_name);
+    let digest = Sha256::digest(identity.as_bytes());
+    let digest = base32_no_pad(&digest);
+    let digest = &digest[..MCP_DISPLAY_HASH_LEN];
+    let mut slug = sanitize_display_slug(&format!("{server_name}__{original_name}"));
+    slug.truncate(MCP_DISPLAY_SLUG_LEN);
+    let display_name =
+        format!("{MCP_PROVIDER_NAME_PREFIX}{slug}{MCP_DISPLAY_SEPARATOR}{digest}");
+    debug_assert!(display_name.len() <= MAX_PROVIDER_TOOL_NAME_LEN);
+    display_name
+}
+
+fn sanitize_display_slug(value: &str) -> String {
+    let mut slug = String::new();
+    let mut last_was_separator = false;
+    for byte in value.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-') {
+            slug.push(char::from(byte));
+            last_was_separator = false;
+        } else if !last_was_separator {
+            slug.push('_');
+            last_was_separator = true;
+        }
+    }
+    let slug = slug.trim_matches('_');
+    if slug.is_empty() {
+        "tool".to_owned()
+    } else {
+        slug.to_owned()
+    }
+}
+
+fn base32_no_pad(bytes: &[u8]) -> String {
+    const ALPHABET: &[u8; 32] = b"abcdefghijklmnopqrstuvwxyz234567";
+    let mut encoded = String::with_capacity((bytes.len() * 8).div_ceil(5));
+    let mut buffer = 0_u16;
+    let mut bits = 0_u8;
+    for byte in bytes {
+        buffer = (buffer << 8) | u16::from(*byte);
+        bits += 8;
+        while bits >= 5 {
+            bits -= 5;
+            let index = usize::from((buffer >> bits) & 0x1f);
+            encoded.push(char::from(ALPHABET[index]));
+            buffer &= (1_u16 << bits).saturating_sub(1);
+        }
+    }
+    if bits > 0 {
+        let index = usize::from((buffer << (5 - bits)) & 0x1f);
+        encoded.push(char::from(ALPHABET[index]));
+    }
+    encoded
+}
+
+/// Canonical origin identity for an MCP tool. This is persisted for deferred
+/// activation independently from its bounded provider-visible hash alias.
+fn canonical_mcp_tool_identity(server_name: &str, original_name: &str) -> String {
+    format!(
+        "mcp:{}:{server_name}:{}:{original_name}",
+        server_name.len(),
+        original_name.len()
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -323,9 +452,10 @@ mod tests {
     // Minimal MockTransport local to this test module (the one in manager.rs's
     // test mod is not cross-module visible). McpTransport is crate-visible with
     // 3 methods, so duplicating it keeps the modules decoupled.
-    use crate::protocol::{JsonRpcRequest, JsonRpcResponse};
+    use crate::protocol::{JsonRpcRequest, JsonRpcResponse, McpToolDef};
     use crate::transport::{McpError, McpTransport};
     use async_trait::async_trait;
+    use std::collections::BTreeSet;
     use std::sync::Mutex;
 
     struct MockTransport {
@@ -372,7 +502,6 @@ mod tests {
         let manager = Arc::new(McpManager::new_for_test(vec![]));
         McpToolProxy::new(
             "test_tool".into(),
-            "test_tool".into(),
             "test_server".into(),
             "A test tool".into(),
             json!({"type": "object"}),
@@ -387,7 +516,6 @@ mod tests {
     fn make_proxy_with_annotations(annotations: Option<ToolAnnotations>) -> McpToolProxy {
         let manager = Arc::new(McpManager::new_for_test(vec![]));
         McpToolProxy::new(
-            "test_tool".into(),
             "test_tool".into(),
             "test_server".into(),
             "A test tool".into(),
@@ -506,6 +634,102 @@ mod tests {
         }
     }
 
+    fn manager_with_tools(entries: &[(&str, &str)]) -> Arc<McpManager> {
+        let servers: Vec<crate::manager::TestMcpServerWithTools<'_>> = entries
+            .iter()
+            .map(|(server_name, tool_name)| {
+                (
+                    *server_name,
+                    false,
+                    vec![McpToolDef {
+                        name: (*tool_name).to_owned(),
+                        description: Some(format!("remote {server_name}/{tool_name}")),
+                        input_schema: json!({"type": "object"}),
+                        annotations: None,
+                    }],
+                    Box::new(MockTransport::new(vec![])) as Box<dyn McpTransport>,
+                )
+            })
+            .collect();
+        Arc::new(McpManager::new_for_test_with_tools(servers))
+    }
+
+    fn manager_with_tool(server_name: &str, tool_name: &str) -> Arc<McpManager> {
+        manager_with_tools(&[(server_name, tool_name)])
+    }
+
+    fn manager_with_server_tool_names(
+        server_name: &str,
+        tool_names: &[&str],
+    ) -> Arc<McpManager> {
+        let tools = tool_names
+            .iter()
+            .map(|tool_name| McpToolDef {
+                name: (*tool_name).to_owned(),
+                description: Some(format!("remote {server_name}/{tool_name}")),
+                input_schema: json!({"type": "object"}),
+                annotations: None,
+            })
+            .collect();
+        Arc::new(McpManager::new_for_test_with_tools(vec![(
+            server_name,
+            false,
+            tools,
+            Box::new(MockTransport::new(vec![])),
+        )]))
+    }
+
+    fn manager_with_tool_response(
+        server_name: &str,
+        tool_name: &str,
+        response_text: &str,
+    ) -> Arc<McpManager> {
+        Arc::new(McpManager::new_for_test_with_tools(vec![(
+            server_name,
+            false,
+            vec![McpToolDef {
+                name: tool_name.to_owned(),
+                description: Some(format!("remote {server_name}/{tool_name}")),
+                input_schema: json!({"type": "object"}),
+                annotations: None,
+            }],
+            Box::new(MockTransport::new(vec![json!({
+                "content": [{"type": "text", "text": response_text}]
+            })])),
+        )]))
+    }
+
+    struct NamedNativeTool {
+        name: String,
+    }
+
+    #[async_trait]
+    impl Tool for NamedNativeTool {
+        fn name(&self) -> &str {
+            &self.name
+        }
+
+        fn description(&self) -> &str {
+            "native collision fixture"
+        }
+
+        fn input_schema(&self) -> JsonSchema {
+            json!({"type": "object"})
+        }
+
+        fn is_concurrency_safe(&self, _input: &Value) -> bool {
+            true
+        }
+
+        async fn execute(&self, _input: Value) -> ToolResult {
+            ToolResult::text("native")
+        }
+
+        fn category(&self) -> ToolCategory {
+            ToolCategory::Info
+        }
+    }
+
     #[test]
     fn register_defaults_to_deferred_when_config_omits_field() {
         let manager = Arc::new(McpManager::new_for_test(vec![]));
@@ -513,11 +737,437 @@ mod tests {
         // Empty server configs — deferred field absent
         let configs = HashMap::new();
 
-        register_mcp_tools(&mut registry, &manager, &[], &configs);
+        register_mcp_tools(&mut registry, &manager, &configs);
 
         // No tools registered because manager has no tools, but the logic
         // is tested via the deferred default path. Test with a real config below.
         assert!(registry.tool_names().is_empty());
+    }
+
+    #[test]
+    fn static_mcp_always_uses_origin_stable_canonical_namespace() {
+        let manager = manager_with_tool("static_server", "ToolSearch");
+        let mut registry = nomi_tools::registry::ToolRegistry::new();
+        let state = registry.deferred_state();
+        registry.register(Box::new(
+            nomi_tools::tool_search::ToolSearchTool::new(state),
+        ));
+        let mut configs = HashMap::new();
+        configs.insert("static_server".to_owned(), make_server_config(Some(true)));
+
+        register_mcp_tools(&mut registry, &manager, &configs);
+
+        let alias = canonical_mcp_display_name("static_server", "ToolSearch");
+        assert_eq!(
+            registry.tool_names(),
+            vec!["ToolSearch".to_owned(), alias]
+        );
+        assert_eq!(registry.to_tool_defs().len(), 2);
+    }
+
+    #[test]
+    fn dynamic_mcp_uses_the_same_origin_stable_canonical_namespace() {
+        let manager = manager_with_tool("late_server", "ToolSearch");
+        let mut registry = nomi_tools::registry::ToolRegistry::new();
+        let state = registry.deferred_state();
+        registry.register(Box::new(
+            nomi_tools::tool_search::ToolSearchTool::new(state),
+        ));
+        let registrations =
+            register_single_server_tools(&mut registry, &manager, "late_server", true).unwrap();
+
+        let alias = canonical_mcp_display_name("late_server", "ToolSearch");
+        assert_eq!(
+            registrations,
+            vec![RegisteredMcpTool {
+                original_name: "ToolSearch".to_owned(),
+                provider_name: alias.clone(),
+            }]
+        );
+        assert_eq!(
+            registry.tool_names(),
+            vec!["ToolSearch".to_owned(), alias.clone()]
+        );
+        assert!(alias.starts_with("mcp__late_server__ToolSearch__"));
+        assert!(alias.len() <= MAX_PROVIDER_TOOL_NAME_LEN);
+    }
+
+    #[test]
+    fn reserved_mcp_namespace_prevents_native_transcript_route_capture() {
+        let manager = manager_with_tool("A", "search");
+        let mut registry = nomi_tools::registry::ToolRegistry::new();
+        registry.register(Box::new(NamedNativeTool {
+            name: "search".to_owned(),
+        }));
+        let alias = canonical_mcp_display_name("A", "search");
+        registry.register(Box::new(NamedNativeTool {
+            name: alias.clone(),
+        }));
+        assert!(registry.get(&alias).is_none());
+
+        register_single_server_tools(&mut registry, &manager, "A", true).unwrap();
+
+        assert_eq!(registry.tool_names(), vec!["search".to_owned(), alias.clone()]);
+        assert_eq!(
+            registry.get(&alias).unwrap().activation_identity(),
+            canonical_mcp_tool_identity("A", "search")
+        );
+    }
+
+    #[test]
+    fn static_mcp_alias_allocation_is_unique_for_ambiguous_display_segments() {
+        let manager = manager_with_tools(&[("a__b", "c"), ("a", "b__c")]);
+        let mut registry = nomi_tools::registry::ToolRegistry::new();
+        registry.register(Box::new(NamedNativeTool {
+            name: "c".to_owned(),
+        }));
+        registry.register(Box::new(NamedNativeTool {
+            name: "b__c".to_owned(),
+        }));
+        let mut configs = HashMap::new();
+        configs.insert("a__b".to_owned(), make_server_config(Some(true)));
+        configs.insert("a".to_owned(), make_server_config(Some(true)));
+
+        register_mcp_tools(&mut registry, &manager, &configs);
+
+        let a_alias = canonical_mcp_display_name("a", "b__c");
+        let ab_alias = canonical_mcp_display_name("a__b", "c");
+        assert!(a_alias.starts_with("mcp__a__b__c__"));
+        assert!(ab_alias.starts_with("mcp__a__b__c__"));
+        assert_ne!(a_alias, ab_alias);
+        assert_eq!(
+            registry.tool_names(),
+            vec![
+                "c".to_owned(),
+                "b__c".to_owned(),
+                a_alias.clone(),
+                ab_alias.clone()
+            ]
+        );
+        assert_eq!(
+            registry.get(&a_alias).unwrap().activation_identity(),
+            canonical_mcp_tool_identity("a", "b__c")
+        );
+        assert_eq!(
+            registry.get(&ab_alias).unwrap().activation_identity(),
+            canonical_mcp_tool_identity("a__b", "c")
+        );
+        let provider_names: BTreeSet<_> = registry
+            .to_tool_defs()
+            .into_iter()
+            .map(|definition| definition.name)
+            .collect();
+        assert_eq!(provider_names.len(), registry.tool_names().len());
+    }
+
+    #[test]
+    fn activation_identity_is_unambiguous_when_segments_contain_display_separator() {
+        assert_ne!(
+            canonical_mcp_tool_identity("a__b", "c"),
+            canonical_mcp_tool_identity("a", "b__c")
+        );
+        assert_ne!(
+            canonical_mcp_tool_identity("alpha__beta", "gamma__delta"),
+            canonical_mcp_tool_identity("alpha", "beta__gamma__delta")
+        );
+    }
+
+    #[test]
+    fn canonical_provider_name_is_bounded_safe_and_origin_unique() {
+        let long_server = "知识库-server-with-a-very-long-name-and spaces";
+        let long_tool = "检索/tool-with-an-equally-long-name-and symbols!?";
+        let alias = canonical_mcp_display_name(long_server, long_tool);
+        let readable_alias =
+            canonical_mcp_display_name("knowledge_gateway", "search_documents");
+
+        assert!(alias.starts_with(MCP_PROVIDER_NAME_PREFIX));
+        assert_eq!(alias.len(), MAX_PROVIDER_TOOL_NAME_LEN);
+        assert!(
+            alias
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+        );
+        assert!(readable_alias.starts_with("mcp__knowledge_gateway__search_documents__"));
+        let (_, hash) = readable_alias.rsplit_once(MCP_DISPLAY_SEPARATOR).unwrap();
+        assert_eq!(hash.len(), MCP_DISPLAY_HASH_LEN);
+        assert!(
+            hash.bytes()
+                .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
+        );
+        assert_eq!(alias, canonical_mcp_display_name(long_server, long_tool));
+        assert_ne!(alias, canonical_mcp_display_name(long_tool, long_server));
+        assert_ne!(
+            canonical_mcp_display_name("a__b", "c"),
+            canonical_mcp_display_name("a", "b__c")
+        );
+    }
+
+    #[tokio::test]
+    async fn tool_search_finds_mcp_by_original_tool_name_and_server_alias() {
+        // Pure Unicode origins sanitize to an opaque `tool` slug, so these
+        // matches prove ToolSearch uses explicit origin metadata rather than
+        // accidentally finding readable text in the canonical provider name.
+        let manager = manager_with_tool("知识库", "精准检索");
+        let alias = canonical_mcp_display_name("知识库", "精准检索");
+        assert!(alias.starts_with("mcp__tool__"));
+
+        let mut registry = nomi_tools::registry::ToolRegistry::new();
+        let state = registry.deferred_state();
+        let search = nomi_tools::tool_search::ToolSearchTool::new(state.clone());
+        let registrations =
+            register_single_server_tools(&mut registry, &manager, "知识库", true).unwrap();
+        assert_eq!(registrations[0].provider_name, alias);
+
+        for query in ["精准检索", "知识库"] {
+            let result = search.execute(json!({"query": query})).await;
+            assert!(!result.is_error, "query {query:?} should be accepted");
+            let matches: Vec<Value> = serde_json::from_str(&result.content).unwrap();
+            assert_eq!(matches.len(), 1);
+            assert_eq!(matches[0]["name"], alias);
+        }
+        assert_eq!(
+            state.activated_identities(),
+            vec![canonical_mcp_tool_identity("知识库", "精准检索")]
+        );
+    }
+
+    #[tokio::test]
+    async fn restored_mcp_activation_and_display_routing_follow_the_same_origin() {
+        let manager_a = manager_with_tool("A", "search");
+        let a_alias = canonical_mcp_display_name("A", "search");
+
+        let mut original = nomi_tools::registry::ToolRegistry::new();
+        register_single_server_tools(&mut original, &manager_a, "A", true).unwrap();
+        assert_eq!(original.tool_names(), vec![a_alias.clone()]);
+        let search = nomi_tools::tool_search::ToolSearchTool::new(original.deferred_state());
+        let search_result = search.execute(json!({"query": a_alias})).await;
+        assert!(!search_result.is_error);
+        let persisted = original.session_deferred_tool_identities();
+        assert_eq!(persisted, vec![canonical_mcp_tool_identity("A", "search")]);
+
+        // B registers first after resume. Both display routing and deferred
+        // activation remain bound to origin rather than registration order.
+        let manager_b = manager_with_tool("B", "search");
+        let b_alias = canonical_mcp_display_name("B", "search");
+        let mut resumed = nomi_tools::registry::ToolRegistry::new();
+        for identity in persisted {
+            resumed.restore_deferred_tool_activation(&identity);
+        }
+        register_single_server_tools(&mut resumed, &manager_b, "B", true).unwrap();
+        let b_definition = resumed
+            .to_tool_defs()
+            .into_iter()
+            .find(|definition| definition.name == b_alias)
+            .unwrap();
+        assert!(b_definition.deferred, "B must not consume A's activation");
+
+        register_single_server_tools(&mut resumed, &manager_a, "A", true).unwrap();
+        let definitions = resumed.to_tool_defs();
+        assert!(
+            definitions
+                .iter()
+                .find(|definition| definition.name == b_alias)
+                .unwrap()
+                .deferred
+        );
+        assert!(
+            !definitions
+                .iter()
+                .find(|definition| definition.name == a_alias)
+                .unwrap()
+                .deferred,
+            "A must restore independently from B's registration order"
+        );
+    }
+
+    #[test]
+    fn provider_display_names_do_not_change_when_dynamic_registration_order_reverses() {
+        let manager_a = manager_with_tool("A", "search");
+        let manager_b = manager_with_tool("B", "search");
+        let a_alias = canonical_mcp_display_name("A", "search");
+        let b_alias = canonical_mcp_display_name("B", "search");
+
+        let mut a_then_b = nomi_tools::registry::ToolRegistry::new();
+        register_single_server_tools(&mut a_then_b, &manager_a, "A", true).unwrap();
+        register_single_server_tools(&mut a_then_b, &manager_b, "B", true).unwrap();
+
+        let mut b_then_a = nomi_tools::registry::ToolRegistry::new();
+        register_single_server_tools(&mut b_then_a, &manager_b, "B", true).unwrap();
+        register_single_server_tools(&mut b_then_a, &manager_a, "A", true).unwrap();
+
+        for registry in [&a_then_b, &b_then_a] {
+            assert_eq!(
+                registry.get(&a_alias).unwrap().activation_identity(),
+                canonical_mcp_tool_identity("A", "search")
+            );
+            assert_eq!(
+                registry.get(&b_alias).unwrap().activation_identity(),
+                canonical_mcp_tool_identity("B", "search")
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn repeated_dynamic_origin_is_rejected_and_keeps_the_old_manager_route() {
+        let old_manager = manager_with_tool_response("gateway", "search", "old-manager");
+        let new_manager = manager_with_tool_response("gateway", "search", "new-manager");
+        let alias = canonical_mcp_display_name("gateway", "search");
+        let mut registry = nomi_tools::registry::ToolRegistry::new();
+
+        let first =
+            register_single_server_tools(&mut registry, &old_manager, "gateway", false).unwrap();
+        let second = register_single_server_tools(
+            &mut registry,
+            &new_manager,
+            "gateway",
+            false,
+        )
+        .unwrap_err();
+
+        assert_eq!(first.len(), 1);
+        assert!(matches!(
+            second,
+            McpToolRegistrationError::Rejected { .. }
+        ));
+        assert_eq!(registry.tool_names(), vec![alias.clone()]);
+        let result = registry.get(&alias).unwrap().execute(json!({})).await;
+        assert_eq!(result.content, "old-manager");
+    }
+
+    #[test]
+    fn dynamic_server_registration_is_atomic_when_only_one_tool_conflicts() {
+        let old_manager = manager_with_tool("gateway", "search");
+        let mixed_manager =
+            manager_with_server_tool_names("gateway", &["fresh_tool", "search"]);
+        let old_alias = canonical_mcp_display_name("gateway", "search");
+        let fresh_alias = canonical_mcp_display_name("gateway", "fresh_tool");
+        let mut registry = nomi_tools::registry::ToolRegistry::new();
+        register_single_server_tools(&mut registry, &old_manager, "gateway", true).unwrap();
+
+        let error = register_single_server_tools(
+            &mut registry,
+            &mixed_manager,
+            "gateway",
+            true,
+        )
+        .unwrap_err();
+
+        assert!(matches!(
+            error,
+            McpToolRegistrationError::Rejected { .. }
+        ));
+        assert_eq!(registry.tool_names(), vec![old_alias]);
+        assert!(registry.get(&fresh_alias).is_none());
+    }
+
+    #[test]
+    fn static_duplicate_tool_catalog_is_rejected_as_one_atomic_server_batch() {
+        let manager = manager_with_server_tool_names("duplicate", &["same", "same"]);
+        let mut registry = nomi_tools::registry::ToolRegistry::new();
+        let mut configs = HashMap::new();
+        configs.insert("duplicate".to_owned(), make_server_config(Some(true)));
+
+        register_mcp_tools(&mut registry, &manager, &configs);
+
+        assert!(registry.tool_names().is_empty());
+        assert!(registry.to_tool_defs().is_empty());
+    }
+
+    #[test]
+    fn dynamic_mcp_registration_cannot_bypass_persisted_registry_policy() {
+        let manager = manager_with_tool("late", "remote_tool");
+        let alias = canonical_mcp_display_name("late", "remote_tool");
+        let mut registry = nomi_tools::registry::ToolRegistry::new();
+        let state = registry.deferred_state();
+        registry.register(Box::new(
+            nomi_tools::tool_search::ToolSearchTool::new(state),
+        ));
+        registry.retain_named(&["ToolSearch".to_string()]);
+        let error =
+            register_single_server_tools(&mut registry, &manager, "late", true).unwrap_err();
+
+        assert_eq!(registry.tool_names(), vec!["ToolSearch"]);
+        assert!(registry.get(&alias).is_none());
+        assert!(matches!(error, McpToolRegistrationError::Rejected { .. }));
+    }
+
+    #[test]
+    fn dynamic_mcp_allowlist_requires_the_stable_canonical_provider_name() {
+        let manager = manager_with_tool("late", "remote_tool");
+        let alias = canonical_mcp_display_name("late", "remote_tool");
+
+        let mut raw_name_policy = nomi_tools::registry::ToolRegistry::new();
+        raw_name_policy.retain_named(&["remote_tool".to_owned()]);
+        let raw_error =
+            register_single_server_tools(&mut raw_name_policy, &manager, "late", true)
+                .unwrap_err();
+        assert!(raw_name_policy.tool_names().is_empty());
+        assert!(matches!(
+            raw_error,
+            McpToolRegistrationError::Rejected { .. }
+        ));
+
+        let mut canonical_policy = nomi_tools::registry::ToolRegistry::new();
+        canonical_policy.retain_named(std::slice::from_ref(&alias));
+        let canonical_registrations =
+            register_single_server_tools(&mut canonical_policy, &manager, "late", true).unwrap();
+        assert_eq!(canonical_policy.tool_names(), vec![alias.clone()]);
+        assert_eq!(
+            canonical_registrations,
+            vec![RegisteredMcpTool {
+                original_name: "remote_tool".to_owned(),
+                provider_name: alias.clone(),
+            }]
+        );
+        assert!(canonical_policy.get("remote_tool").is_none());
+        assert_eq!(
+            canonical_policy.get(&alias).unwrap().category(),
+            ToolCategory::Exec,
+            "approval classification must resolve through the unique canonical route"
+        );
+    }
+
+    #[test]
+    fn dynamic_mcp_allowlist_registers_only_the_canonical_allowed_subset() {
+        let manager = manager_with_server_tool_names(
+            "late",
+            &["allowed_tool", "raw_name_must_not_authorize"],
+        );
+        let allowed_alias = canonical_mcp_display_name("late", "allowed_tool");
+        let denied_alias = canonical_mcp_display_name("late", "raw_name_must_not_authorize");
+        let mut registry = nomi_tools::registry::ToolRegistry::new();
+        registry.retain_named(&[
+            allowed_alias.clone(),
+            "raw_name_must_not_authorize".to_owned(),
+        ]);
+
+        let registrations =
+            register_single_server_tools(&mut registry, &manager, "late", true).unwrap();
+
+        assert_eq!(
+            registrations,
+            vec![RegisteredMcpTool {
+                original_name: "allowed_tool".to_owned(),
+                provider_name: allowed_alias.clone(),
+            }]
+        );
+        assert_eq!(registry.tool_names(), vec![allowed_alias.clone()]);
+        assert!(registry.get(&allowed_alias).is_some());
+        assert!(registry.get(&denied_alias).is_none());
+        assert!(registry.get("raw_name_must_not_authorize").is_none());
+    }
+
+    #[test]
+    fn dynamic_mcp_registration_cannot_bypass_clear_deny_all() {
+        let manager = manager_with_tool("late", "remote_tool");
+        let mut registry = nomi_tools::registry::ToolRegistry::new();
+        registry.clear();
+
+        let error =
+            register_single_server_tools(&mut registry, &manager, "late", true).unwrap_err();
+
+        assert!(registry.tool_names().is_empty());
+        assert!(matches!(error, McpToolRegistrationError::Rejected { .. }));
     }
 
     #[test]
@@ -556,7 +1206,6 @@ mod tests {
         )]));
         McpToolProxy::new(
             tool.into(),
-            tool.into(),
             "srv".into(),
             "desc".into(),
             json!({"type":"object"}),
@@ -589,6 +1238,32 @@ mod tests {
         assert!(!r.is_error);
         assert_eq!(r.content, "plain");
         assert!(r.images.is_empty());
+    }
+
+    #[tokio::test]
+    async fn proxy_execute_maps_mcp_is_error_to_tool_result() {
+        let resp = json!({
+            "content": [{
+                "type":"text",
+                "text":"Error: invalid arguments for this tool: missing field `kb_id`"
+            }],
+            "isError": true
+        });
+        let proxy = proxy_with_response("update_base", resp);
+        let r = proxy.execute(json!({})).await;
+        assert!(r.is_error);
+        assert!(r.content.contains("kb_id"));
+    }
+
+    #[tokio::test]
+    async fn proxy_execute_does_not_infer_error_from_text() {
+        let resp = json!({
+            "content": [{"type":"text","text":"Error: ordinary successful output"}]
+        });
+        let proxy = proxy_with_response("echo", resp);
+        let r = proxy.execute(json!({})).await;
+        assert!(!r.is_error);
+        assert_eq!(r.content, "Error: ordinary successful output");
     }
 
     #[tokio::test]

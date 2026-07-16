@@ -78,6 +78,14 @@ impl Tool for WriteStdinTool {
         false
     }
 
+    fn is_polling_invocation(&self, input: &Value) -> bool {
+        match input.get("chars") {
+            None => true,
+            Some(Value::String(chars)) => chars.is_empty(),
+            Some(_) => false,
+        }
+    }
+
     fn category(&self) -> ToolCategory {
         ToolCategory::Exec
     }
@@ -330,6 +338,15 @@ mod tests {
             .and_then(|value| value.trim().parse().ok())
     }
 
+    #[test]
+    fn only_empty_write_stdin_calls_are_polling_invocations() {
+        let (_, writer, _) = tools();
+        assert!(writer.is_polling_invocation(&json!({"session_id": 1})));
+        assert!(writer.is_polling_invocation(&json!({"session_id": 1, "chars": ""})));
+        assert!(!writer.is_polling_invocation(&json!({"session_id": 1, "chars": "status"})));
+        assert!(!writer.is_polling_invocation(&json!({"session_id": 1, "chars": 42})));
+    }
+
     #[tokio::test]
     async fn unknown_session_is_error() {
         let (_, writer, _) = tools();
@@ -339,17 +356,6 @@ mod tests {
                 .await
                 .is_error
         );
-    }
-
-    #[tokio::test]
-    async fn string_session_id_is_usable_after_schema_coercion() {
-        let (_, writer, _) = tools();
-        let input = crate::coerce_input_to_schema(
-            &writer.input_schema(),
-            json!({"session_id": "4242", "yield_time_ms": "5000"}),
-        );
-        assert_eq!(input["session_id"].as_u64(), Some(4242));
-        assert!(writer.execute(input).await.is_error);
     }
 
     #[tokio::test]

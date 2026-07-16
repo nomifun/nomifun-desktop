@@ -8,6 +8,8 @@ export interface NormalizedToolCall {
   key: string;
   name: string;
   status: NormalizedToolStatus;
+  /** Explicit protocol/tool semantic kind when the source provides one. */
+  kind?: string;
   /** Tool reported an error-like outcome, but it should not fail the turn-level process receipt. */
   nonFatalFailure?: boolean;
   /** Tool was not executed because an earlier call in the same assistant turn failed. */
@@ -85,6 +87,11 @@ export function normalizeToolGroup(message: IMessageToolGroup): NormalizedToolCa
       key: toDisplayText(call_id),
       name: toDisplayText(name, 'Tool'),
       status: normalizeToolGroupStatus(status),
+      ...(confirmationDetails?.type === 'exec'
+        ? { kind: 'execute' }
+        : confirmationDetails?.type === 'edit'
+          ? { kind: 'edit' }
+          : {}),
       ...(status === 'Error' && confirmationDetails?.type === 'exec' ? { nonFatalFailure: true } : {}),
       description: desc,
       input,
@@ -225,6 +232,7 @@ export function normalizeAcpToolCall(message: IMessageAcpToolCall): NormalizedTo
     key: toDisplayText(update.tool_call_id),
     name: toDisplayText(update.title, 'Tool'),
     status: normalizeAcpStatus(update.status),
+    kind,
     ...(isNonFatalAcpToolFailure(update, rawInput, output) ? { nonFatalFailure: true } : {}),
     description: keyParam || commandText || kind,
     input,

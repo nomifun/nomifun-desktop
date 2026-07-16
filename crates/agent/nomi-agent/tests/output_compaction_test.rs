@@ -8,7 +8,7 @@ use tokio::sync::mpsc;
 use common::{MockLlmProvider, MockTool, auto_approve_confirmer, test_config};
 use nomi_agent::context::{SystemPromptCache, build_system_prompt};
 use nomi_agent::engine::AgentEngine;
-use nomi_agent::tool_execution::execute_tool_calls;
+use nomi_agent::tool_execution::{ProviderToolAuthority, execute_tool_calls};
 use nomi_agent::output::OutputSink;
 use nomi_agent::output::null_sink::NullSink;
 use nomi_compact::CompactionLevel;
@@ -56,6 +56,7 @@ async fn case_1_off_passthrough() {
     let outcome = execute_tool_calls(
         &registry,
         &tool_calls,
+        &ProviderToolAuthority::from_request_tools(&registry.to_tool_defs()),
         &confirmer,
         None,
         CompactionLevel::Off,
@@ -95,6 +96,7 @@ async fn case_2_safe_sanitizes() {
     let outcome = execute_tool_calls(
         &registry,
         &tool_calls,
+        &ProviderToolAuthority::from_request_tools(&registry.to_tool_defs()),
         &confirmer,
         None,
         CompactionLevel::Safe,
@@ -144,6 +146,7 @@ async fn case_3_full_folds_and_compacts() {
     let outcome = execute_tool_calls(
         &registry,
         &tool_calls,
+        &ProviderToolAuthority::from_request_tools(&registry.to_tool_defs()),
         &confirmer,
         None,
         CompactionLevel::Full,
@@ -191,6 +194,7 @@ async fn case_4_toon_encodes_array() {
     let outcome = execute_tool_calls(
         &registry,
         &tool_calls,
+        &ProviderToolAuthority::from_request_tools(&registry.to_tool_defs()),
         &confirmer,
         None,
         CompactionLevel::Full,
@@ -225,6 +229,7 @@ async fn case_5_toon_disabled_no_encoding() {
     let outcome = execute_tool_calls(
         &registry,
         &tool_calls,
+        &ProviderToolAuthority::from_request_tools(&registry.to_tool_defs()),
         &confirmer,
         None,
         CompactionLevel::Full,
@@ -370,6 +375,7 @@ async fn case_7_runtime_compaction_switch() {
     let outcome_off = execute_tool_calls(
         &registry,
         &tool_calls,
+        &ProviderToolAuthority::from_request_tools(&registry.to_tool_defs()),
         &confirmer,
         None,
         CompactionLevel::Off,
@@ -382,6 +388,7 @@ async fn case_7_runtime_compaction_switch() {
     let outcome_full = execute_tool_calls(
         &registry,
         &tool_calls,
+        &ProviderToolAuthority::from_request_tools(&registry.to_tool_defs()),
         &confirmer,
         None,
         CompactionLevel::Full,

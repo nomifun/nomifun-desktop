@@ -13,6 +13,11 @@ use nomi_types::tool::{ToolDef, truncate_deferred_description};
 use crate::anthropic_shared::StreamOutcome;
 use crate::{LlmProvider, ProviderError};
 
+/// Bound sparse provider indices before they reach `Vec` growth. A malformed
+/// OpenAI-compatible stream can otherwise request an enormous index in a tiny
+/// payload and exhaust the process before terminal validation runs.
+const MAX_STRUCTURED_TOOL_CALLS_PER_TURN: usize = 128;
+
 pub struct OpenAIProvider {
     api_keys: Vec<String>,
     current_api_key: AtomicUsize,
@@ -656,15 +661,8 @@ struct ToolCallAccumulator {
     last_progress_signature: String,
 }
 
-struct TextToolCallAccumulator {
-    id: String,
-    announced: bool,
-    last_progress_signature: String,
-}
-
 struct StreamState {
     tool_calls: Vec<ToolCallAccumulator>,
-    text_tool_calls: Vec<TextToolCallAccumulator>,
     input_tokens: u64,
     output_tokens: u64,
     /// Cache-read (prompt-cache hit) tokens reported by the provider, if any.
@@ -675,44 +673,62 @@ struct StreamState {
     /// Deferred Done event: populated when finish_reason arrives, emitted on
     /// [DONE] so the final usage-only chunk has a chance to update token counts.
     pending_done: Option<LlmEvent>,
-    /// Accumulated `content` / `reasoning_content` text across the stream. Used
-    /// ONLY as a fallback at finish: some models (e.g. Qwen/Hermes-style, and
-    /// step reasoning models under load) intermittently emit a tool call as a
-    /// `<tool_call>…</tool_call>` block in the TEXT/REASONING channel instead of
-    /// the structured `tool_calls` field. Without recovery the turn dead-ends with
-    /// no action (looks "stuck"). When finish arrives with NO structured tool calls
-    /// we scan these buffers and parse any embedded call. The happy path (structured
-    /// tool_calls present) never touches this.
-    content_buf: String,
-    reasoning_buf: String,
-    visible_content_buf: String,
-    visible_reasoning_buf: String,
+    /// Final structured calls are staged alongside Done and atomically released
+    /// only after the legal usage-only tail and explicit `[DONE]`. A clean EOF
+    /// may complete a non-tool terminal but never commits side-effecting calls.
+    pending_tool_calls: Vec<LlmEvent>,
+    /// Once finish_reason appears, only usage-only metadata may follow before
+    /// `[DONE]`; content, tool deltas, or a second finish poison the turn.
+    finish_seen: bool,
+    /// A malformed SSE payload makes the rest of the provider turn
+    /// untrustworthy. Once poisoned, no later chunk or `[DONE]` sentinel may
+    /// resurrect accumulated calls or commit a terminal Done.
+    fatal_error: bool,
 }
 
 impl StreamState {
     fn new() -> Self {
         Self {
             tool_calls: Vec::new(),
-            text_tool_calls: Vec::new(),
             input_tokens: 0,
             output_tokens: 0,
             cache_read_tokens: 0,
             pending_done: None,
-            content_buf: String::new(),
-            reasoning_buf: String::new(),
-            visible_content_buf: String::new(),
-            visible_reasoning_buf: String::new(),
+            pending_tool_calls: Vec::new(),
+            finish_seen: false,
+            fatal_error: false,
         }
     }
 
-    /// Emit the deferred Done event with up-to-date token counts.
+    fn poison(&mut self, message: impl Into<String>) -> Vec<LlmEvent> {
+        self.tool_calls.clear();
+        self.pending_tool_calls.clear();
+        self.pending_done = None;
+        self.fatal_error = true;
+        vec![LlmEvent::Error(message.into())]
+    }
+
+    fn fatal_error(&self) -> bool {
+        self.fatal_error
+    }
+
+    /// Atomically emit staged structured calls and the deferred Done event with
+    /// up-to-date token counts.
     ///
     /// OpenAI sends usage in a separate trailing chunk (choices:[]) *after* the
     /// chunk that carries `finish_reason`. We defer the Done event until [DONE]
     /// so that token counts are always accurate.
-    fn flush_done(&mut self) -> Option<LlmEvent> {
-        let pending = self.pending_done.take()?;
-        Some(match pending {
+    fn drain_terminal_events(&mut self) -> Vec<LlmEvent> {
+        if self.fatal_error {
+            self.pending_tool_calls.clear();
+            self.pending_done = None;
+            return Vec::new();
+        }
+        let Some(pending) = self.pending_done.take() else {
+            self.pending_tool_calls.clear();
+            return Vec::new();
+        };
+        let done = match pending {
             LlmEvent::Done { stop_reason, .. } => LlmEvent::Done {
                 stop_reason,
                 usage: TokenUsage {
@@ -723,7 +739,17 @@ impl StreamState {
                 },
             },
             other => other,
-        })
+        };
+        let mut events = std::mem::take(&mut self.pending_tool_calls);
+        events.push(done);
+        events
+    }
+
+    #[cfg(test)]
+    fn flush_done(&mut self) -> Option<LlmEvent> {
+        self.drain_terminal_events()
+            .into_iter()
+            .find(|event| matches!(event, LlmEvent::Done { .. }))
     }
 
     fn get_or_create_tool(&mut self, index: usize) -> &mut ToolCallAccumulator {
@@ -738,17 +764,6 @@ impl StreamState {
             });
         }
         &mut self.tool_calls[index]
-    }
-
-    fn get_or_create_text_tool(&mut self, index: usize) -> &mut TextToolCallAccumulator {
-        while self.text_tool_calls.len() <= index {
-            self.text_tool_calls.push(TextToolCallAccumulator {
-                id: String::new(),
-                announced: false,
-                last_progress_signature: String::new(),
-            });
-        }
-        &mut self.text_tool_calls[index]
     }
 }
 
@@ -889,10 +904,20 @@ async fn process_sse_stream(
             if let Some(data) = line.strip_prefix("data: ") {
                 tracing::debug!(target: "nomi_providers", chunk = %data, "sse chunk received");
                 if data == "[DONE]" {
-                    // Flush the deferred Done event now that the final
-                    // usage-only chunk (choices:[]) has updated token counts.
-                    if let Some(done) = state.flush_done() {
-                        let _ = tx.send(done).await;
+                    if !state.finish_seen {
+                        for event in state.poison(
+                            "OpenAI-compatible provider sent [DONE] before finish_reason",
+                        ) {
+                            let _ = tx.send(event).await;
+                        }
+                        return StreamOutcome::Ok;
+                    }
+                    // Atomically release staged calls and Done now that the
+                    // legal usage-only tail has updated token counts.
+                    for event in state.drain_terminal_events() {
+                        if tx.send(event).await.is_err() {
+                            return StreamOutcome::Ok;
+                        }
                     }
                     return StreamOutcome::Ok;
                 }
@@ -912,224 +937,95 @@ async fn process_sse_stream(
                         return StreamOutcome::Ok;
                     }
                 }
-            }
-        }
-    }
-
-    // The stream ended without an explicit `[DONE]` sentinel — some
-    // OpenAI-compatible servers (vLLM, local deployments) just close the
-    // connection after the final chunk. Flush any deferred Done so the consumer
-    // always receives a terminal event instead of hanging. (Phase 1)
-    if let Some(done) = state.flush_done() {
-        let _ = tx.send(done).await;
-    }
-    StreamOutcome::Ok
-}
-
-/// Fallback tool-call recovery: some models (Qwen/Hermes-style, and step
-/// reasoning models intermittently under load) emit a tool call as a
-/// `<tool_call>…</tool_call>` block in the TEXT/REASONING channel instead of the
-/// structured `tool_calls` field. This is only consulted when the structured
-/// accumulator is empty at finish, so it never affects the normal path. Reasoning
-/// is scanned first (step puts the call there), then content. Returns `None` when
-/// no parseable call is found (turn dead-ends as before — no regression).
-fn recover_text_tool_calls(state: &mut StreamState) -> Option<Vec<LlmEvent>> {
-    let mut calls = parse_text_tool_calls(&state.reasoning_buf);
-    if calls.is_empty() {
-        calls = parse_text_tool_calls(&state.content_buf);
-    }
-    if calls.is_empty() {
-        return None;
-    }
-    Some(
-        calls
-            .into_iter()
-            .enumerate()
-            .map(|(index, (name, input))| {
-                let progress = state.get_or_create_text_tool(index);
-                if progress.id.is_empty() {
-                    progress.id = generate_call_id();
+                if state.fatal_error() {
+                    // The parser already emitted the one actionable Error.
+                    // Stop consuming immediately so a later valid-looking
+                    // finish chunk or [DONE] cannot commit this turn.
+                    return StreamOutcome::Ok;
                 }
-                LlmEvent::ToolUse {
-                    id: progress.id.clone(),
-                    name,
-                    input,
-                    extra: None,
+            }
+        }
+    }
+
+    // EOF may terminate a final SSE line without a newline. Parse that line
+    // before deciding whether the stream is clean; otherwise an invalid or
+    // truncated tail after finish_reason could be silently ignored while its
+    // already-staged tool calls were committed.
+    let trailing = buffer.trim();
+    if !trailing.is_empty() && !trailing.starts_with(':') {
+        let Some(data) = trailing.strip_prefix("data: ") else {
+            for event in state.poison(
+                "OpenAI-compatible stream ended with an invalid trailing SSE line",
+            ) {
+                let _ = tx.send(event).await;
+            }
+            return StreamOutcome::Ok;
+        };
+        if data == "[DONE]" {
+            if !state.finish_seen {
+                for event in
+                    state.poison("OpenAI-compatible provider sent [DONE] before finish_reason")
+                {
+                    let _ = tx.send(event).await;
                 }
-            })
-            .collect(),
-    )
-}
-
-fn visible_text_without_tool_call_blocks(text: &str) -> String {
-    let mut visible = String::new();
-    let mut rest = text;
-
-    loop {
-        let Some(start) = rest.find("<tool_call>") else {
-            visible.push_str(rest);
-            break;
-        };
-        visible.push_str(&rest[..start]);
-        let after = &rest[start + "<tool_call>".len()..];
-        let Some(end) = after.find("</tool_call>") else {
-            break;
-        };
-        rest = &after[end + "</tool_call>".len()..];
-    }
-
-    visible
-}
-
-fn append_raw_text_and_visible_delta(
-    raw_buffer: &mut String,
-    visible_buffer: &mut String,
-    delta: &str,
-) -> String {
-    raw_buffer.push_str(delta);
-    let next_visible = visible_text_without_tool_call_blocks(raw_buffer);
-    let visible_delta = next_visible
-        .strip_prefix(visible_buffer.as_str())
-        .unwrap_or_default()
-        .to_string();
-    *visible_buffer = next_visible;
-    visible_delta
-}
-
-struct TextToolCallPreview {
-    name: String,
-    input: Option<Value>,
-}
-
-/// Extract every `<tool_call>…</tool_call>` block from `text` and parse each into
-/// (name, arguments). Handles both the Hermes JSON form
-/// (`<tool_call>{"name":..,"arguments":{..}}</tool_call>`) and the Qwen XML form
-/// (`<tool_call><function=NAME><parameter=KEY>VALUE</parameter>…</function></tool_call>`).
-fn parse_text_tool_calls(text: &str) -> Vec<(String, Value)> {
-    let mut out = Vec::new();
-    let mut rest = text;
-    while let Some(start) = rest.find("<tool_call>") {
-        let after = &rest[start + "<tool_call>".len()..];
-        let (block, next) = match after.find("</tool_call>") {
-            Some(end) => (&after[..end], &after[end + "</tool_call>".len()..]),
-            None => (after, ""),
-        };
-        if let Some(call) = parse_one_tool_call(block.trim()) {
-            out.push(call);
-        }
-        rest = next;
-    }
-    out
-}
-
-fn parse_text_tool_call_progress(text: &str) -> Vec<TextToolCallPreview> {
-    let mut out = Vec::new();
-    let mut rest = text;
-    while let Some(start) = rest.find("<tool_call>") {
-        let after = &rest[start + "<tool_call>".len()..];
-        let (block, next) = match after.find("</tool_call>") {
-            Some(end) => (&after[..end], &after[end + "</tool_call>".len()..]),
-            None => (after, ""),
-        };
-        if let Some(call) = parse_one_tool_call_progress(block.trim()) {
-            out.push(call);
-        }
-        if next.is_empty() {
-            break;
-        }
-        rest = next;
-    }
-    out
-}
-
-fn parse_one_tool_call_progress(block: &str) -> Option<TextToolCallPreview> {
-    if block.starts_with('{') {
-        if let Some((name, input)) = parse_one_tool_call(block) {
-            return Some(TextToolCallPreview {
-                name,
-                input: tool_argument_value_progress_preview(&input),
-            });
-        }
-
-        let name = extract_json_string_field(block, "name")?.trim().to_string();
-        if name.is_empty() {
-            return None;
-        }
-
-        let input = tool_argument_progress_preview(block).or_else(|| {
-            let unescaped = block.replace("\\\"", "\"");
-            if unescaped == block {
-                None
-            } else {
-                tool_argument_progress_preview(&unescaped)
+                return StreamOutcome::Ok;
             }
-        });
-        return Some(TextToolCallPreview { name, input });
-    }
-
-    let name = str_between(block, "<function=", ">")?.trim().to_string();
-    if name.is_empty() {
-        return None;
-    }
-
-    Some(TextToolCallPreview {
-        name,
-        input: xml_parameter_progress_preview(block),
-    })
-}
-
-fn parse_one_tool_call(block: &str) -> Option<(String, Value)> {
-    // Hermes JSON form.
-    if block.starts_with('{') {
-        let v: Value = serde_json::from_str(block).ok()?;
-        let name = v.get("name")?.as_str()?.trim().to_string();
-        if name.is_empty() {
-            return None;
-        }
-        let args = match v.get("arguments").cloned() {
-            Some(Value::String(s)) => {
-                serde_json::from_str(&s).unwrap_or(Value::Object(serde_json::Map::new()))
+            for event in state.drain_terminal_events() {
+                if tx.send(event).await.is_err() {
+                    return StreamOutcome::Ok;
+                }
             }
-            Some(other) => other,
-            None => Value::Object(serde_json::Map::new()),
-        };
-        return Some((name, args));
-    }
-    // Qwen XML form.
-    let name = str_between(block, "<function=", ">")?.trim().to_string();
-    if name.is_empty() {
-        return None;
-    }
-    let mut args = serde_json::Map::new();
-    let mut rest = block;
-    while let Some(ps) = rest.find("<parameter=") {
-        let after = &rest[ps + "<parameter=".len()..];
-        let Some(key_end) = after.find('>') else { break };
-        let key = after[..key_end].trim().to_string();
-        let val_start = &after[key_end + 1..];
-        let (raw_val, next) = match val_start.find("</parameter>") {
-            Some(e) => (&val_start[..e], &val_start[e + "</parameter>".len()..]),
-            None => (val_start, ""),
-        };
-        let val_trim = raw_val.trim();
-        // Parse the value as JSON when it is (arrays/objects/numbers/bools); else
-        // keep the raw string.
-        let val = serde_json::from_str::<Value>(val_trim)
-            .unwrap_or_else(|_| Value::String(val_trim.to_string()));
-        if !key.is_empty() {
-            args.insert(key, val);
+            return StreamOutcome::Ok;
         }
-        rest = next;
-    }
-    Some((name, Value::Object(args)))
-}
 
-/// The substring of `s` strictly between the first `start` and the next `end`
-/// after it, or `None` if either delimiter is absent.
-fn str_between<'a>(s: &'a str, start: &str, end: &str) -> Option<&'a str> {
-    let i = s.find(start)? + start.len();
-    let j = s[i..].find(end)? + i;
-    Some(&s[i..j])
+        for event in parse_sse_chunk(data, &mut state, auto_tool_id) {
+            if matches!(
+                event,
+                LlmEvent::TextDelta(_)
+                    | LlmEvent::ThinkingDelta(_)
+                    | LlmEvent::ToolUseDelta { .. }
+                    | LlmEvent::ToolUse { .. }
+            ) {
+                emitted_content = true;
+            }
+            if tx.send(event).await.is_err() {
+                return StreamOutcome::Ok;
+            }
+        }
+        if state.fatal_error() {
+            return StreamOutcome::Ok;
+        }
+    }
+
+    // Some OpenAI-compatible servers close after finish_reason without an
+    // explicit `[DONE]`. A clean EOF may complete a side-effect-free terminal,
+    // but structured tool calls require the protocol's explicit commit marker:
+    // a connection truncated immediately after finish_reason must not execute.
+    if state.finish_seen {
+        if !state.pending_tool_calls.is_empty() {
+            for event in state.poison(
+                "OpenAI-compatible stream ended before [DONE] with structured tool calls pending",
+            ) {
+                let _ = tx.send(event).await;
+            }
+            return StreamOutcome::Ok;
+        }
+        for event in state.drain_terminal_events() {
+            if tx.send(event).await.is_err() {
+                return StreamOutcome::Ok;
+            }
+        }
+        StreamOutcome::Ok
+    } else {
+        let error = ProviderError::Connection(
+            "OpenAI-compatible stream ended before finish_reason".to_string(),
+        );
+        if emitted_content {
+            StreamOutcome::FailedPartial(error)
+        } else {
+            StreamOutcome::FailedEmpty(error)
+        }
+    }
 }
 
 const TOOL_PROGRESS_PREVIEW_FIELDS: &[&str] = &[
@@ -1150,8 +1046,6 @@ const TOOL_PROGRESS_PREVIEW_FIELDS: &[&str] = &[
     "url",
     "skill",
 ];
-
-const RECOVERED_PARTIAL_WRITE_KEY: &str = "__nomi_recovered_partial_write";
 
 fn tool_argument_value_progress_preview(input: &Value) -> Option<Value> {
     let Value::Object(map) = input else {
@@ -1191,39 +1085,6 @@ fn tool_argument_progress_preview(arguments: &str) -> Option<Value> {
         None
     } else {
         Some(Value::Object(preview))
-    }
-}
-
-fn xml_parameter_progress_preview(block: &str) -> Option<Value> {
-    let mut preview = serde_json::Map::new();
-
-    for key in TOOL_PROGRESS_PREVIEW_FIELDS {
-        if let Some(value) = extract_xml_parameter_text(block, key)
-            && value.len() <= 2_000
-        {
-            preview.insert((*key).to_string(), Value::String(value));
-        }
-    }
-
-    if preview.is_empty() {
-        None
-    } else {
-        Some(Value::Object(preview))
-    }
-}
-
-fn extract_xml_parameter_text(block: &str, key: &str) -> Option<String> {
-    let start_tag = format!("<parameter={key}>");
-    let start = block.find(&start_tag)? + start_tag.len();
-    let raw = match block[start..].find("</parameter>") {
-        Some(end) => &block[start..start + end],
-        None => &block[start..],
-    };
-    let value = raw.trim();
-    if value.is_empty() {
-        None
-    } else {
-        Some(value.to_string())
     }
 }
 
@@ -1280,229 +1141,40 @@ fn extract_json_string_field(arguments: &str, key: &str) -> Option<String> {
     None
 }
 
-fn extract_json_string_field_lossy(arguments: &str, key: &str) -> Option<String> {
-    if let Some(value) = extract_json_string_field(arguments, key) {
-        return Some(value);
-    }
-
-    let quoted_key = format!("\"{key}\"");
-    let mut search_from = 0usize;
-
-    while let Some(relative_pos) = arguments[search_from..].find(&quoted_key) {
-        let mut cursor = search_from + relative_pos + quoted_key.len();
-        cursor = skip_json_whitespace(arguments, cursor);
-        if arguments[cursor..].chars().next()? != ':' {
-            search_from = cursor;
-            continue;
-        }
-        cursor += ':'.len_utf8();
-        cursor = skip_json_whitespace(arguments, cursor);
-        if arguments[cursor..].chars().next()? != '"' {
-            search_from = cursor;
-            continue;
-        }
-        cursor += '"'.len_utf8();
-
-        let mut escaped = false;
-        for (offset, ch) in arguments[cursor..].char_indices() {
-            if escaped {
-                escaped = false;
-                continue;
-            }
-            if ch == '\\' {
-                escaped = true;
-                continue;
-            }
-            if ch == '"' {
-                let end = cursor + offset;
-                return decode_json_string_fragment_lossy(&arguments[cursor..end]);
-            }
-        }
-
-        return decode_json_string_fragment_lossy(&arguments[cursor..]);
-    }
-
-    None
-}
-
-fn decode_json_string_fragment_lossy(raw: &str) -> Option<String> {
-    if raw.is_empty() {
-        return None;
-    }
-
-    let mut decoded = String::with_capacity(raw.len());
-    let mut chars = raw.chars();
-    while let Some(ch) = chars.next() {
-        if ch != '\\' {
-            decoded.push(ch);
-            continue;
-        }
-
-        match chars.next() {
-            Some('"') => decoded.push('"'),
-            Some('\\') => decoded.push('\\'),
-            Some('/') => decoded.push('/'),
-            Some('b') => decoded.push('\u{0008}'),
-            Some('f') => decoded.push('\u{000C}'),
-            Some('n') => decoded.push('\n'),
-            Some('r') => decoded.push('\r'),
-            Some('t') => decoded.push('\t'),
-            Some('u') => {
-                let mut hex = String::with_capacity(4);
-                for _ in 0..4 {
-                    if let Some(h) = chars.next() {
-                        hex.push(h);
-                    }
-                }
-                if hex.len() == 4
-                    && let Ok(code) = u32::from_str_radix(&hex, 16)
-                    && let Some(c) = char::from_u32(code)
-                {
-                    decoded.push(c);
-                }
-            }
-            Some(other) => decoded.push(other),
-            None => break,
-        }
-    }
-
-    Some(decoded)
-}
-
-fn partial_write_input(file_path: String, content: String) -> Option<Value> {
-    if file_path.trim().is_empty() || content.trim().is_empty() {
-        return None;
-    }
-
-    Some(json!({
-        "file_path": file_path,
-        "content": content,
-        RECOVERED_PARTIAL_WRITE_KEY: true
-    }))
-}
-
-fn partial_write_input_from_jsonish(arguments: &str) -> Option<Value> {
-    let file_path = extract_json_string_field_lossy(arguments, "file_path")
-        .or_else(|| extract_json_string_field_lossy(arguments, "filePath"))
-        .or_else(|| extract_json_string_field_lossy(arguments, "path"))?;
-    let content = extract_json_string_field_lossy(arguments, "content")?;
-    partial_write_input(file_path, content)
-}
-
-fn partial_write_input_from_text_block(block: &str) -> Option<Value> {
-    if block.starts_with('{') {
-        let name = extract_json_string_field_lossy(block, "name")?;
-        if name.trim() != "Write" {
-            return None;
-        }
-        return partial_write_input_from_jsonish(block);
-    }
-
-    let name = str_between(block, "<function=", ">")?.trim();
-    if name != "Write" {
-        return None;
-    }
-    let file_path = extract_xml_parameter_text(block, "file_path")
-        .or_else(|| extract_xml_parameter_text(block, "filePath"))
-        .or_else(|| extract_xml_parameter_text(block, "path"))?;
-    let content = extract_xml_parameter_text(block, "content")?;
-    partial_write_input(file_path, content)
-}
-
-fn recover_length_structured_tool_calls(
+/// Atomically finalize structured OpenAI tool calls.
+///
+/// If any call has malformed arguments, return an error and emit none of the
+/// calls. This prevents a valid parallel call from being executed alongside a
+/// malformed sibling and, critically, prevents malformed JSON from becoming
+/// an executable `{}` payload.
+fn finalize_structured_tool_calls(
     state: &mut StreamState,
     auto_tool_id: bool,
-) -> Vec<LlmEvent> {
-    let mut events = Vec::new();
+) -> Result<Vec<LlmEvent>, String> {
+    let calls = std::mem::take(&mut state.tool_calls);
+    let mut events = Vec::with_capacity(calls.len());
 
-    for tc in state.tool_calls.drain(..) {
-        if tc.name.trim().is_empty() {
-            continue;
-        }
+    for tc in calls {
         let id = if tc.id.is_empty() && auto_tool_id {
             generate_call_id()
         } else {
             tc.id
         };
-        if id.trim().is_empty() {
-            continue;
-        }
-
-        if let Ok(input) = serde_json::from_str::<Value>(&tc.arguments) {
-            events.push(LlmEvent::ToolUse {
-                id,
-                name: tc.name,
-                input,
-                extra: tc.extra,
-            });
-            continue;
-        }
-
-        if tc.name == "Write"
-            && let Some(input) = partial_write_input_from_jsonish(&tc.arguments)
-        {
-            events.push(LlmEvent::ToolUse {
-                id,
-                name: tc.name,
-                input,
-                extra: tc.extra,
-            });
-        }
-    }
-
-    events
-}
-
-fn text_tool_call_blocks(text: &str) -> Vec<(String, bool)> {
-    let mut out = Vec::new();
-    let mut rest = text;
-    while let Some(start) = rest.find("<tool_call>") {
-        let after = &rest[start + "<tool_call>".len()..];
-        match after.find("</tool_call>") {
-            Some(end) => {
-                out.push((after[..end].to_string(), true));
-                rest = &after[end + "</tool_call>".len()..];
-            }
-            None => {
-                out.push((after.to_string(), false));
-                break;
-            }
-        }
-    }
-    out
-}
-
-fn recover_length_text_tool_calls(state: &mut StreamState) -> Vec<LlmEvent> {
-    let mut blocks = text_tool_call_blocks(&state.reasoning_buf);
-    if blocks.is_empty() {
-        blocks = text_tool_call_blocks(&state.content_buf);
-    }
-
-    let mut events = Vec::new();
-    for (index, (block, closed)) in blocks.into_iter().enumerate() {
-        if closed {
-            continue;
-        }
-        let Some(input) = partial_write_input_from_text_block(block.trim()) else {
-            continue;
-        };
-        let progress = state.get_or_create_text_tool(index);
-        if progress.id.is_empty() {
-            progress.id = generate_call_id();
-        }
+        let input = crate::parse_tool_call_arguments(
+            "OpenAI-compatible provider",
+            &tc.name,
+            &id,
+            &tc.arguments,
+        )?;
         events.push(LlmEvent::ToolUse {
-            id: progress.id.clone(),
-            name: "Write".to_string(),
+            id,
+            name: tc.name,
             input,
-            extra: None,
+            extra: tc.extra,
         });
     }
 
-    if events.is_empty() {
-        recover_text_tool_calls(state).unwrap_or_default()
-    } else {
-        events
-    }
+    Ok(events)
 }
 
 fn skip_json_whitespace(input: &str, mut index: usize) -> usize {
@@ -1550,41 +1222,6 @@ fn maybe_tool_progress_event(
     }
 }
 
-fn text_tool_progress_events(state: &mut StreamState) -> Vec<LlmEvent> {
-    let mut previews = parse_text_tool_call_progress(&state.reasoning_buf);
-    if previews.is_empty() {
-        previews = parse_text_tool_call_progress(&state.content_buf);
-    }
-
-    let mut events = Vec::new();
-    for (index, preview) in previews.into_iter().enumerate() {
-        let progress = state.get_or_create_text_tool(index);
-        if progress.id.is_empty() {
-            progress.id = generate_call_id();
-        }
-
-        let signature = preview
-            .input
-            .as_ref()
-            .and_then(|value| serde_json::to_string(value).ok())
-            .unwrap_or_default();
-
-        if !progress.announced
-            || (!signature.is_empty() && signature != progress.last_progress_signature)
-        {
-            progress.announced = true;
-            progress.last_progress_signature = signature;
-            events.push(LlmEvent::ToolUseDelta {
-                id: progress.id.clone(),
-                name: preview.name,
-                input: preview.input,
-            });
-        }
-    }
-
-    events
-}
-
 /// Extract one reasoning delta from the OpenAI-compatible variants used by
 /// different gateways. Prefer the scalar fields to avoid duplicating output
 /// when a provider includes both a normalized field and `reasoning_details`.
@@ -1613,93 +1250,290 @@ fn extract_reasoning_delta(delta: &Value) -> Option<String> {
     (!reasoning.is_empty()).then_some(reasoning)
 }
 
+fn optional_usage_u64(
+    usage: &serde_json::Map<String, Value>,
+    field: &str,
+) -> Result<Option<u64>, String> {
+    match usage.get(field) {
+        None | Some(Value::Null) => Ok(None),
+        Some(value) => value.as_u64().map(Some).ok_or_else(|| {
+            format!(
+                "OpenAI-compatible provider returned non-integer usage field '{field}'"
+            )
+        }),
+    }
+}
+
+fn update_stream_usage(json: &Value, state: &mut StreamState) -> Result<(), String> {
+    let usage = match json.get("usage") {
+        None | Some(Value::Null) => return Ok(()),
+        Some(Value::Object(usage)) => usage,
+        Some(_) => {
+            return Err(
+                "OpenAI-compatible provider returned a non-object usage payload".to_string(),
+            );
+        }
+    };
+
+    let base_prompt = optional_usage_u64(usage, "prompt_tokens")?.unwrap_or(state.input_tokens);
+    let cache_hit = optional_usage_u64(usage, "prompt_cache_hit_tokens")?.unwrap_or(0);
+    state.input_tokens = base_prompt.checked_add(cache_hit).ok_or_else(|| {
+        "OpenAI-compatible provider returned overflowing prompt token usage".to_string()
+    })?;
+    state.output_tokens =
+        optional_usage_u64(usage, "completion_tokens")?.unwrap_or(state.output_tokens);
+
+    let detail_cached = match usage.get("prompt_tokens_details") {
+        None | Some(Value::Null) => 0,
+        Some(Value::Object(details)) => {
+            optional_usage_u64(details, "cached_tokens")?.unwrap_or(0)
+        }
+        Some(_) => {
+            return Err(
+                "OpenAI-compatible provider returned non-object prompt_tokens_details"
+                    .to_string(),
+            );
+        }
+    };
+    let cached = if cache_hit > 0 {
+        cache_hit
+    } else {
+        detail_cached
+    };
+    if cached > 0 {
+        state.cache_read_tokens = cached;
+    }
+
+    Ok(())
+}
+
 fn parse_sse_chunk(data: &str, state: &mut StreamState, auto_tool_id: bool) -> Vec<LlmEvent> {
+    if state.fatal_error {
+        return Vec::new();
+    }
+
     let mut events = Vec::new();
 
     let json: Value = match serde_json::from_str(data) {
         Ok(v) => v,
-        Err(_) => return events,
+        Err(error) => {
+            return state.poison(format!(
+                "OpenAI-compatible provider returned malformed SSE JSON: {error}"
+            ));
+        }
     };
 
-    // Extract usage if present
-    if let Some(usage) = json.get("usage") {
-        let base_prompt = usage["prompt_tokens"]
-            .as_u64()
-            .unwrap_or(state.input_tokens);
+    if !json.is_object() {
+        return state.poison(
+            "OpenAI-compatible provider returned a non-object SSE payload",
+        );
+    }
 
-        // DeepSeek-style: prompt_cache_hit_tokens is reported separately and
-        // prompt_tokens only contains the cache-miss portion.
-        // Add it to get the true total prompt size.
-        let cache_hit = usage["prompt_cache_hit_tokens"].as_u64().unwrap_or(0);
+    let post_finish_usage_only = state.finish_seen;
+    if post_finish_usage_only {
+        let is_usage_only = json.get("usage").is_some_and(Value::is_object)
+            && json
+                .get("choices")
+                .and_then(Value::as_array)
+                .is_some_and(Vec::is_empty);
+        if !is_usage_only {
+            return state.poison(
+                "OpenAI-compatible provider emitted non-usage data after finish_reason",
+            );
+        }
+        if let Err(error) = update_stream_usage(&json, state) {
+            return state.poison(error);
+        }
+        return events;
+    }
 
-        state.input_tokens = base_prompt + cache_hit;
-        state.output_tokens = usage["completion_tokens"]
-            .as_u64()
-            .unwrap_or(state.output_tokens);
+    if let Err(error) = update_stream_usage(&json, state) {
+        return state.poison(error);
+    }
 
-        // Cache-read tokens for diagnostics only (does not alter the input_tokens
-        // accounting above). Domestic OpenAI-compatible providers do automatic
-        // prefix caching: DeepSeek reports `prompt_cache_hit_tokens`; OpenAI-style
-        // endpoints report `prompt_tokens_details.cached_tokens`. Surfacing this
-        // into the Done usage lets the shared CacheBreakDetector observe their
-        // cache-hit rate (previously hardcoded to 0 → reported as "no caching").
-        let cached = if cache_hit > 0 {
-            cache_hit
-        } else {
-            usage["prompt_tokens_details"]["cached_tokens"]
-                .as_u64()
-                .unwrap_or(0)
+    let Some(choices) = json.get("choices").and_then(Value::as_array) else {
+        return state.poison(
+            "OpenAI-compatible provider returned an SSE payload without a choices array",
+        );
+    };
+    if choices.len() != 1 {
+        return state.poison(format!(
+            "OpenAI-compatible provider returned {} choices in a streamed response; expected exactly one",
+            choices.len()
+        ));
+    }
+    let Some(choice) = choices[0].as_object() else {
+        return state.poison(
+            "OpenAI-compatible provider returned a non-object streamed choice",
+        );
+    };
+    let Some(delta_value) = choice.get("delta") else {
+        return state.poison(
+            "OpenAI-compatible provider returned a streamed choice without an object delta",
+        );
+    };
+    let Some(delta) = delta_value.as_object() else {
+        return state.poison(
+            "OpenAI-compatible provider returned a streamed choice without an object delta",
+        );
+    };
+    let finish_reason = match choice.get("finish_reason") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(reason)) => Some(reason.as_str()),
+        Some(_) => {
+            return state.poison(
+                "OpenAI-compatible provider returned a non-string finish_reason",
+            );
+        }
+    };
+
+    for field in ["role", "content", "reasoning_content", "reasoning"] {
+        if let Some(value) = delta.get(field)
+            && !value.is_null()
+            && !value.is_string()
+        {
+            return state.poison(format!(
+                "OpenAI-compatible provider returned non-string delta field '{field}'"
+            ));
+        }
+    }
+    if let Some(details) = delta.get("reasoning_details")
+        && !details.is_null()
+    {
+        let Some(details) = details.as_array() else {
+            return state.poison(
+                "OpenAI-compatible provider returned non-array reasoning_details",
+            );
         };
-        if cached > 0 {
-            state.cache_read_tokens = cached;
+        for detail in details {
+            let Some(detail) = detail.as_object() else {
+                return state.poison(
+                    "OpenAI-compatible provider returned a non-object reasoning detail",
+                );
+            };
+            for field in ["text", "content"] {
+                if let Some(value) = detail.get(field)
+                    && !value.is_null()
+                    && !value.is_string()
+                {
+                    return state.poison(format!(
+                        "OpenAI-compatible provider returned non-string reasoning detail field '{field}'"
+                    ));
+                }
+            }
         }
     }
 
-    let Some(choice) = json["choices"].as_array().and_then(|c| c.first()) else {
-        return events;
-    };
-
-    let delta = &choice["delta"];
-
     // Reasoning content (OpenAI reasoning models)
-    if let Some(reasoning) = extract_reasoning_delta(delta) {
-        let visible_delta = append_raw_text_and_visible_delta(
-            &mut state.reasoning_buf,
-            &mut state.visible_reasoning_buf,
-            &reasoning,
-        );
-        if !visible_delta.is_empty() {
-            events.push(LlmEvent::ThinkingDelta(visible_delta));
-        }
+    if let Some(reasoning) = extract_reasoning_delta(delta_value) {
+        events.push(LlmEvent::ThinkingDelta(reasoning));
     }
 
     // Text content
-    if let Some(content) = delta["content"].as_str()
+    if let Some(content) = delta.get("content").and_then(Value::as_str)
         && !content.is_empty()
     {
-        let visible_delta =
-            append_raw_text_and_visible_delta(&mut state.content_buf, &mut state.visible_content_buf, content);
-        if !visible_delta.is_empty() {
-            events.push(LlmEvent::TextDelta(visible_delta));
-        }
+        events.push(LlmEvent::TextDelta(content.to_string()));
     }
 
     // Tool calls
-    if let Some(tool_calls) = delta["tool_calls"].as_array() {
+    let tool_calls = match delta.get("tool_calls") {
+        None | Some(Value::Null) => None,
+        Some(Value::Array(tool_calls)) => Some(tool_calls),
+        Some(_) => {
+            return state.poison(
+                "OpenAI-compatible provider returned non-array delta.tool_calls",
+            );
+        }
+    };
+    if let Some(tool_calls) = tool_calls {
         for tc in tool_calls {
-            let index = tc["index"].as_u64().unwrap_or(0) as usize;
+            let Some(tc) = tc.as_object() else {
+                return state.poison(
+                    "OpenAI-compatible provider returned a non-object tool_calls item",
+                );
+            };
+            let Some(raw_index) = tc.get("index").and_then(Value::as_u64) else {
+                return state.poison(
+                    "OpenAI-compatible provider returned a tool_calls item without a non-negative integer index",
+                );
+            };
+            if raw_index >= MAX_STRUCTURED_TOOL_CALLS_PER_TURN as u64 {
+                return state.poison(format!(
+                    "OpenAI-compatible provider returned tool-call index {raw_index}; maximum supported index is {}",
+                    MAX_STRUCTURED_TOOL_CALLS_PER_TURN - 1
+                ));
+            }
+            let index = raw_index as usize;
+            if let Some(kind) = tc.get("type")
+                && kind.as_str() != Some("function")
+            {
+                return state.poison(
+                    "OpenAI-compatible provider returned a tool_calls item with a non-function type",
+                );
+            }
+            let id = match tc.get("id") {
+                None => None,
+                Some(Value::String(id)) if !id.trim().is_empty() => Some(id.as_str()),
+                Some(_) => {
+                    return state.poison(
+                        "OpenAI-compatible provider returned an empty or non-string tool call id",
+                    );
+                }
+            };
+            let Some(function) = tc.get("function").and_then(Value::as_object) else {
+                return state.poison(
+                    "OpenAI-compatible provider returned a tool_calls item without an object function",
+                );
+            };
+            let name = match function.get("name") {
+                None => None,
+                Some(Value::String(name)) if !name.trim().is_empty() => Some(name.as_str()),
+                Some(_) => {
+                    return state.poison(
+                        "OpenAI-compatible provider returned an empty or non-string function name",
+                    );
+                }
+            };
+            let arguments = match function.get("arguments") {
+                None => None,
+                Some(Value::String(arguments)) => Some(arguments.as_str()),
+                Some(_) => {
+                    return state.poison(
+                        "OpenAI-compatible provider returned non-string function arguments",
+                    );
+                }
+            };
+
+            if let Some(existing) = state.tool_calls.get(index) {
+                if let Some(id) = id
+                    && !existing.id.is_empty()
+                    && existing.id != id
+                {
+                    return state.poison(format!(
+                        "OpenAI-compatible provider changed the id for tool-call index {index}"
+                    ));
+                }
+                if let Some(name) = name
+                    && !existing.name.is_empty()
+                    && existing.name != name
+                {
+                    return state.poison(format!(
+                        "OpenAI-compatible provider changed the function name for tool-call index {index}"
+                    ));
+                }
+            }
+
             let acc = state.get_or_create_tool(index);
 
-            if let Some(id) = tc["id"].as_str() {
+            if let Some(id) = id {
                 acc.id = id.to_string();
             }
-            // Only overwrite when non-empty — some third-party APIs send `"name":""`
-            // in every delta chunk which would erase the real name from the first chunk.
-            if let Some(name) = tc["function"]["name"].as_str().filter(|n| !n.is_empty()) {
+            if let Some(name) = name {
                 acc.name = name.to_string();
             }
-            if let Some(args) = tc["function"]["arguments"].as_str() {
-                acc.arguments.push_str(args);
+            if let Some(arguments) = arguments {
+                acc.arguments.push_str(arguments);
             }
             if let Some(extra) = tc.get("extra_content").filter(|v| !v.is_null()) {
                 acc.extra = Some(extra.clone());
@@ -1710,85 +1544,56 @@ fn parse_sse_chunk(data: &str, state: &mut StreamState, auto_tool_id: bool) -> V
         }
     }
 
-    if state.tool_calls.is_empty() {
-        events.extend(text_tool_progress_events(state));
-    }
-
-    // Check finish_reason — defer Done until [DONE] so the trailing usage
-    // chunk (choices:[]) can update token counts first.
-    if let Some(finish_reason) = choice["finish_reason"].as_str() {
+    // Defer final structured calls and Done until [DONE] so the trailing
+    // usage-only chunk can update token counts first.
+    if let Some(finish_reason) = finish_reason {
+        state.finish_seen = true;
         match finish_reason {
-            "tool_calls" | "stop" => {
-                if !state.tool_calls.is_empty() {
-                    // Emit accumulated tool calls. Gemini uses "stop" instead of
-                    // "tool_calls" as finish_reason, so we handle both here.
-                    for tc in state.tool_calls.drain(..) {
-                        let id = if tc.id.is_empty() && auto_tool_id {
-                            generate_call_id()
-                        } else {
-                            tc.id
-                        };
-                        let input: Value = serde_json::from_str(&tc.arguments)
-                            .unwrap_or(Value::Object(serde_json::Map::new()));
-                        events.push(LlmEvent::ToolUse {
-                            id,
-                            name: tc.name,
-                            input,
-                            extra: tc.extra,
+            "tool_calls" => {
+                if state.tool_calls.is_empty() {
+                    return state.poison(
+                        "OpenAI-compatible provider finished with tool_calls but supplied no complete structured tool call",
+                    );
+                }
+                match finalize_structured_tool_calls(state, auto_tool_id) {
+                    Ok(tool_events) => {
+                        state.pending_tool_calls = tool_events;
+                        state.pending_done = Some(LlmEvent::Done {
+                            stop_reason: StopReason::ToolUse,
+                            usage: TokenUsage::default(),
                         });
                     }
-                    state.pending_done = Some(LlmEvent::Done {
-                        stop_reason: StopReason::ToolUse,
-                        usage: TokenUsage::default(),
-                    });
-                } else if let Some(recovered) = recover_text_tool_calls(state) {
-                    // FALLBACK: no STRUCTURED tool calls, but the model emitted a
-                    // `<tool_call>…</tool_call>` block in the text/reasoning channel
-                    // (Qwen/Hermes format — step reasoning models do this
-                    // intermittently under load). Recover + emit it so the turn ACTS
-                    // instead of dead-ending with no output (the "卡死" symptom).
-                    // Only reached when the structured accumulator is empty, so the
-                    // normal path is untouched.
-                    for ev in recovered {
-                        events.push(ev);
-                    }
-                    state.pending_done = Some(LlmEvent::Done {
-                        stop_reason: StopReason::ToolUse,
-                        usage: TokenUsage::default(),
-                    });
-                } else if finish_reason == "stop" {
-                    state.pending_done = Some(LlmEvent::Done {
-                        stop_reason: StopReason::EndTurn,
-                        usage: TokenUsage::default(),
-                    });
-                } else {
-                    // "tool_calls" with empty accumulator — shouldn't happen,
-                    // but treat as ToolUse for safety.
-                    state.pending_done = Some(LlmEvent::Done {
-                        stop_reason: StopReason::ToolUse,
-                        usage: TokenUsage::default(),
-                    });
+                    Err(error) => return state.poison(error),
                 }
+            }
+            "stop" => {
+                if !state.tool_calls.is_empty() {
+                    return state.poison(
+                        "OpenAI-compatible provider finished with stop after supplying structured tool-call data",
+                    );
+                }
+                state.pending_done = Some(LlmEvent::Done {
+                    stop_reason: StopReason::EndTurn,
+                    usage: TokenUsage::default(),
+                });
             }
             "length" => {
-                let mut recovered = recover_length_structured_tool_calls(state, auto_tool_id);
-                if recovered.is_empty() {
-                    recovered = recover_length_text_tool_calls(state);
-                }
-                if recovered.is_empty() {
-                    state.pending_done = Some(LlmEvent::Done {
-                        stop_reason: StopReason::MaxTokens,
-                        usage: TokenUsage::default(),
-                    });
-                } else {
-                    events.extend(recovered);
-                    state.pending_done = Some(LlmEvent::Done {
-                        stop_reason: StopReason::ToolUse,
-                        usage: TokenUsage::default(),
-                    });
-                }
+                // A length-truncated argument stream is never safe to execute,
+                // even if the accumulated JSON happens to parse. Report the
+                // actual terminal condition and discard all incomplete call
+                // accumulators; the caller can retry with a larger token budget.
+                state.tool_calls.clear();
+                state.pending_tool_calls.clear();
+                state.pending_done = Some(LlmEvent::Done {
+                    stop_reason: StopReason::MaxTokens,
+                    usage: TokenUsage::default(),
+                });
             }
-            _ => {}
+            other => {
+                return state.poison(format!(
+                    "OpenAI-compatible provider returned unsupported finish_reason '{other}'"
+                ));
+            }
         }
     }
 
@@ -1797,9 +1602,7 @@ fn parse_sse_chunk(data: &str, state: &mut StreamState, auto_tool_id: bool) -> V
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        extract_reasoning_delta, parse_sse_chunk, parse_text_tool_calls, StreamState,
-    };
+    use super::{extract_reasoning_delta, parse_sse_chunk, StreamState};
     use nomi_types::llm::LlmEvent;
     use nomi_types::message::StopReason;
     use serde_json::json;
@@ -1859,190 +1662,376 @@ mod tests {
         }
     }
 
-    /// Qwen XML form (the exact shape step-3.7-flash emitted in session 18 that
-    /// dead-ended): a `<tool_call><function=NAME><parameter=KEY>JSON</parameter>`
-    /// block in the reasoning channel → recovered as a structured call.
     #[test]
-    fn recovers_qwen_xml_tool_call_from_text() {
-        let text = "I will now delegate two Agent steps.<tool_call>\n<function=nomi_delegate>\n<parameter=strategy>\n\"parallel\"\n</parameter>\n<parameter=steps>\n[{\"name\": \"北京天气\", \"prompt\": \"查北京天气\"}, {\"name\": \"广州天气\", \"prompt\": \"查广州天气\"}]\n</parameter>\n</function>\n</tool_call>";
-        let calls = parse_text_tool_calls(text);
-        assert_eq!(calls.len(), 1, "one tool call recovered");
-        let (name, input) = &calls[0];
-        assert_eq!(name, "nomi_delegate");
-        assert_eq!(input["strategy"], json!("parallel"));
-        let steps = input
-            .get("steps")
-            .and_then(|value| value.as_array())
-            .expect("steps array parsed as JSON");
-        assert_eq!(steps.len(), 2, "both steps parsed");
-        assert_eq!(steps[0]["name"], json!("北京天气"));
-    }
+    fn literal_tool_call_markup_is_exact_text_and_never_a_tool() {
+        for literal in [
+            r#"<tool_call>{"name":"counted_tool","arguments":{}}</tool_call>"#,
+            r#"<tool_call>not json</tool_call>"#,
+            r#"<tool_call>{"name":"counted_tool""#,
+        ] {
+            let mut state = StreamState::new();
+            let chunk = json!({
+                "choices": [{
+                    "delta": { "content": literal },
+                    "finish_reason": "stop",
+                    "index": 0
+                }]
+            })
+            .to_string();
 
-    /// Hermes JSON form: `<tool_call>{"name":..,"arguments":{..}}</tool_call>`.
-    #[test]
-    fn recovers_hermes_json_tool_call_from_text() {
-        let text = "<tool_call>{\"name\": \"nomi_process_runtime_get\", \"arguments\": {\"execution_id\": \"exec_x\"}}</tool_call>";
-        let calls = parse_text_tool_calls(text);
-        assert_eq!(calls.len(), 1);
-        assert_eq!(calls[0].0, "nomi_process_runtime_get");
-        assert_eq!(calls[0].1["execution_id"], json!("exec_x"));
-    }
+            let events = parse_sse_chunk(&chunk, &mut state, true);
+            let text = events
+                .iter()
+                .filter_map(|event| match event {
+                    LlmEvent::TextDelta(text) => Some(text.as_str()),
+                    _ => None,
+                })
+                .collect::<String>();
 
-    /// Multiple blocks recovered; plain text with no block yields nothing (no false
-    /// positives — normal turns never trigger the fallback).
-    #[test]
-    fn multiple_blocks_and_no_false_positives() {
-        assert!(parse_text_tool_calls("just a normal answer, no tools here").is_empty());
-        assert!(parse_text_tool_calls("<tool_call>not json and no function tag</tool_call>").is_empty());
-        let two = "<tool_call><function=a><parameter=x>1</parameter></function></tool_call> then <tool_call><function=b><parameter=y>2</parameter></function></tool_call>";
-        assert_eq!(parse_text_tool_calls(two).len(), 2);
-    }
-
-    /// The buffers default empty and only fill from deltas — a fresh state recovers
-    /// nothing (guards against the fallback firing on an empty turn).
-    #[test]
-    fn empty_state_recovers_nothing() {
-        let mut state = StreamState::new();
-        assert!(super::recover_text_tool_calls(&mut state).is_none());
-    }
-
-    #[test]
-    fn text_tool_call_stream_emits_write_preview_before_finish() {
-        let mut state = StreamState::new();
-
-        let chunk = r#"{"choices":[{"delta":{"reasoning_content":"<tool_call>{\"name\":\"Write\",\"arguments\":{\"file_path\":\"/tmp/snake.html\",\"content\":\""},"finish_reason":null,"index":0}]}"#;
-        let events = parse_sse_chunk(chunk, &mut state, true);
-
-        let progress = events
-            .iter()
-            .find(|event| matches!(event, LlmEvent::ToolUseDelta { .. }))
-            .expect("text-form tool calls should announce running work before the tool block closes");
-
-        if let LlmEvent::ToolUseDelta { name, input, .. } = progress {
-            assert_eq!(name, "Write");
-            assert_eq!(input.as_ref().unwrap()["file_path"], "/tmp/snake.html");
-            assert!(
-                input.as_ref().unwrap().get("content").is_none(),
-                "large generated file content must not be surfaced as progress input"
-            );
+            assert_eq!(text, literal);
+            assert!(events.iter().all(|event| !matches!(
+                event,
+                LlmEvent::ToolUse { .. } | LlmEvent::ToolUseDelta { .. } | LlmEvent::Error(_)
+            )));
+            assert!(matches!(
+                state.drain_terminal_events().as_slice(),
+                [LlmEvent::Done {
+                    stop_reason: StopReason::EndTurn,
+                    ..
+                }]
+            ));
         }
     }
 
     #[test]
-    fn text_tool_call_stream_hides_tool_markup_from_visible_thinking() {
-        let mut state = StreamState::new();
+    fn split_literal_tool_tags_round_trip_exactly_without_progress() {
+        let literal =
+            r#"prefix <tool_call>{"name":"counted_tool","arguments":{}}</tool_call> suffix"#;
+        for split in [1, 8, 15, 27, 48, literal.len() - 3] {
+            let mut state = StreamState::new();
+            let first = json!({
+                "choices": [{
+                    "delta": { "content": &literal[..split] },
+                    "finish_reason": null,
+                    "index": 0
+                }]
+            })
+            .to_string();
+            let second = json!({
+                "choices": [{
+                    "delta": { "content": &literal[split..] },
+                    "finish_reason": "stop",
+                    "index": 0
+                }]
+            })
+            .to_string();
 
-        let chunk = r#"{"choices":[{"delta":{"reasoning_content":"<tool_call>{\"name\":\"Write\",\"arguments\":{\"file_path\":\"/tmp/snake.html\",\"content\":\""},"finish_reason":null,"index":0}]}"#;
-        let events = parse_sse_chunk(chunk, &mut state, true);
-
-        assert!(
-            events
+            let mut events = parse_sse_chunk(&first, &mut state, true);
+            events.extend(parse_sse_chunk(&second, &mut state, true));
+            let text = events
                 .iter()
-                .all(|event| !matches!(event, LlmEvent::ThinkingDelta(_) | LlmEvent::TextDelta(_))),
-            "text-form tool call markup should not be streamed as visible assistant or thinking text"
-        );
+                .filter_map(|event| match event {
+                    LlmEvent::TextDelta(text) => Some(text.as_str()),
+                    _ => None,
+                })
+                .collect::<String>();
+
+            assert_eq!(text, literal, "split at byte {split}");
+            assert!(events.iter().all(|event| !matches!(
+                event,
+                LlmEvent::ToolUse { .. } | LlmEvent::ToolUseDelta { .. } | LlmEvent::Error(_)
+            )));
+        }
     }
 
     #[test]
-    fn length_finish_recovers_partial_structured_write_tool_call() {
+    fn reasoning_tool_markup_is_exact_thinking_and_never_a_tool() {
+        let literal = r#"<tool_call>{"name":"counted_tool","arguments":{}}</tool_call>"#;
+        let mut state = StreamState::new();
+        let chunk = json!({
+            "choices": [{
+                "delta": { "reasoning_content": literal },
+                "finish_reason": "stop",
+                "index": 0
+            }]
+        })
+        .to_string();
+
+        let events = parse_sse_chunk(&chunk, &mut state, true);
+        assert!(matches!(
+            events.as_slice(),
+            [LlmEvent::ThinkingDelta(text)] if text == literal
+        ));
+        assert!(matches!(
+            state.drain_terminal_events().as_slice(),
+            [LlmEvent::Done {
+                stop_reason: StopReason::EndTurn,
+                ..
+            }]
+        ));
+    }
+
+    #[test]
+    fn tool_calls_finish_without_structured_delta_is_an_error() {
+        let mut state = StreamState::new();
+        let chunk = json!({
+            "choices": [{
+                "delta": {
+                    "content": r#"<tool_call>{"name":"counted_tool","arguments":{}}</tool_call>"#
+                },
+                "finish_reason": "tool_calls",
+                "index": 0
+            }]
+        })
+        .to_string();
+
+        let events = parse_sse_chunk(&chunk, &mut state, true);
+        assert!(events.iter().any(
+            |event| matches!(event, LlmEvent::Error(message) if message.contains("no complete structured tool call"))
+        ));
+        assert!(state.drain_terminal_events().is_empty());
+    }
+
+    #[test]
+    fn sparse_tool_call_index_is_rejected_before_vector_growth() {
+        let mut state = StreamState::new();
+        let chunk = json!({
+            "choices": [{
+                "delta": {
+                    "tool_calls": [{
+                        "index": u64::MAX,
+                        "id": "call_sparse",
+                        "function": {"name": "Read", "arguments": "{}"}
+                    }]
+                },
+                "finish_reason": "tool_calls",
+                "index": 0
+            }]
+        })
+        .to_string();
+
+        let events = parse_sse_chunk(&chunk, &mut state, false);
+
+        assert!(matches!(
+            events.as_slice(),
+            [LlmEvent::Error(message)] if message.contains("tool-call index")
+        ));
+        assert!(state.fatal_error());
+        assert!(state.tool_calls.is_empty());
+        assert!(state.drain_terminal_events().is_empty());
+    }
+
+    #[test]
+    fn missing_or_invalid_tool_call_index_is_rejected() {
+        for item in [
+            json!({
+                "id": "call_missing_index",
+                "function": {"name": "Read", "arguments": "{}"}
+            }),
+            json!({
+                "index": "0",
+                "id": "call_string_index",
+                "function": {"name": "Read", "arguments": "{}"}
+            }),
+            json!({
+                "index": -1,
+                "id": "call_negative_index",
+                "function": {"name": "Read", "arguments": "{}"}
+            }),
+        ] {
+            let mut state = StreamState::new();
+            let chunk = json!({
+                "choices": [{
+                    "delta": {"tool_calls": [item]},
+                    "finish_reason": "tool_calls",
+                    "index": 0
+                }]
+            })
+            .to_string();
+
+            let events = parse_sse_chunk(&chunk, &mut state, false);
+
+            assert!(matches!(
+                events.as_slice(),
+                [LlmEvent::Error(message)] if message.contains("integer index")
+            ));
+            assert!(state.fatal_error());
+            assert!(state.drain_terminal_events().is_empty());
+        }
+    }
+
+    #[test]
+    fn malformed_envelope_cannot_be_washed_by_a_later_valid_finish() {
+        for malformed in [
+            r#"{}"#,
+            r#"[]"#,
+            r#"{"choices":[]}"#,
+            r#"{"choices":[null]}"#,
+            r#"{"choices":[{"delta":null,"finish_reason":null}]}"#,
+        ] {
+            let mut state = StreamState::new();
+            let partial = r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_partial","type":"function","function":{"name":"Read","arguments":"{"}}]},"finish_reason":null,"index":0}]}"#;
+            parse_sse_chunk(partial, &mut state, false);
+
+            let malformed_events = parse_sse_chunk(malformed, &mut state, false);
+            let finish = r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"}"}}]},"finish_reason":"tool_calls","index":0}]}"#;
+            let later_events = parse_sse_chunk(finish, &mut state, false);
+
+            assert!(malformed_events
+                .iter()
+                .any(|event| matches!(event, LlmEvent::Error(_))),
+                "payload should poison: {malformed}"
+            );
+            assert!(later_events.is_empty());
+            assert!(state.drain_terminal_events().is_empty());
+        }
+    }
+
+    #[test]
+    fn changed_tool_identity_for_one_index_is_rejected() {
+        for second in [
+            r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_other","function":{"arguments":"}"}}]},"finish_reason":"tool_calls","index":0}]}"#,
+            r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"name":"Write","arguments":"}"}}]},"finish_reason":"tool_calls","index":0}]}"#,
+        ] {
+            let mut state = StreamState::new();
+            let first = r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_same","type":"function","function":{"name":"Read","arguments":"{"}}]},"finish_reason":null,"index":0}]}"#;
+            parse_sse_chunk(first, &mut state, false);
+
+            let events = parse_sse_chunk(second, &mut state, false);
+
+            assert!(events.iter().any(
+                |event| matches!(event, LlmEvent::Error(message) if message.contains("changed the"))
+            ));
+            assert!(state.drain_terminal_events().is_empty());
+        }
+    }
+
+    #[test]
+    fn length_finish_never_executes_partial_structured_tool_call() {
         let mut state = StreamState::new();
 
         let chunk = r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_write","type":"function","function":{"name":"Write","arguments":"{\"file_path\":\"/tmp/index.html\",\"content\":\"<html><body>hello"}}]},"finish_reason":"length","index":0}]}"#;
         let events = parse_sse_chunk(chunk, &mut state, true);
 
-        let recovered = events
-            .iter()
-            .find_map(|event| match event {
-                LlmEvent::ToolUse { id, name, input, .. } => Some((id, name, input)),
-                _ => None,
-            })
-            .expect("length-truncated Write arguments should be recovered as an executable tool call");
-
-        assert_eq!(recovered.0, "call_write");
-        assert_eq!(recovered.1, "Write");
-        assert_eq!(recovered.2["file_path"], "/tmp/index.html");
-        assert_eq!(recovered.2["content"], "<html><body>hello");
-        assert_eq!(recovered.2[super::RECOVERED_PARTIAL_WRITE_KEY], true);
+        assert!(
+            events
+                .iter()
+                .all(|event| !matches!(event, LlmEvent::ToolUse { .. })),
+            "length-truncated arguments must never execute"
+        );
+        assert!(state.tool_calls.is_empty());
         assert!(matches!(
             state.pending_done,
             Some(LlmEvent::Done {
-                stop_reason: StopReason::ToolUse,
+                stop_reason: StopReason::MaxTokens,
                 ..
             })
         ));
     }
 
     #[test]
-    fn length_finish_recovers_partial_text_write_tool_call() {
+    fn length_finish_does_not_execute_even_complete_tool_arguments() {
         let mut state = StreamState::new();
 
-        let chunk = r#"{"choices":[{"delta":{"reasoning_content":"<tool_call>{\"name\":\"Write\",\"arguments\":{\"file_path\":\"/tmp/index.html\",\"content\":\"<main>hello"},"finish_reason":"length","index":0}]}"#;
+        let chunk = r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_complete","type":"function","function":{"name":"Read","arguments":"{\"path\":\"/tmp/file\"}"}}]},"finish_reason":"length","index":0}]}"#;
         let events = parse_sse_chunk(chunk, &mut state, true);
 
-        let recovered = events
-            .iter()
-            .find_map(|event| match event {
-                LlmEvent::ToolUse { name, input, .. } => Some((name, input)),
-                _ => None,
-            })
-            .expect("length-truncated text-form Write should be recovered as an executable tool call");
-
-        assert_eq!(recovered.0, "Write");
-        assert_eq!(recovered.1["file_path"], "/tmp/index.html");
-        assert_eq!(recovered.1["content"], "<main>hello");
-        assert_eq!(recovered.1[super::RECOVERED_PARTIAL_WRITE_KEY], true);
+        assert!(
+            events
+                .iter()
+                .all(|event| !matches!(event, LlmEvent::ToolUse { .. }))
+        );
         assert!(matches!(
             state.pending_done,
             Some(LlmEvent::Done {
-                stop_reason: StopReason::ToolUse,
+                stop_reason: StopReason::MaxTokens,
                 ..
             })
         ));
     }
 
     #[test]
-    fn text_tool_call_progress_id_is_reused_by_recovered_tool_use() {
+    fn length_finish_treats_text_markup_as_text_and_never_a_tool() {
+        let literal =
+            r#"<tool_call>{"name":"Write","arguments":{"file_path":"/tmp/index.html""#;
         let mut state = StreamState::new();
+        let chunk = json!({
+            "choices": [{
+                "delta": { "reasoning_content": literal },
+                "finish_reason": "length",
+                "index": 0
+            }]
+        })
+        .to_string();
 
-        let chunk1 = r#"{"choices":[{"delta":{"reasoning_content":"<tool_call>{\"name\":\"Write\",\"arguments\":{\"file_path\":\"/tmp/snake.html\",\"content\":\""},"finish_reason":null,"index":0}]}"#;
-        let events1 = parse_sse_chunk(chunk1, &mut state, true);
-        let progress_id = events1
-            .iter()
-            .find_map(|event| match event {
-                LlmEvent::ToolUseDelta { id, .. } => Some(id.clone()),
-                _ => None,
-            })
-            .expect("partial text tool call should announce a progress id");
+        let events = parse_sse_chunk(&chunk, &mut state, true);
 
-        let chunk2 = r#"{"choices":[{"delta":{"reasoning_content":"hello\"}}</tool_call>"},"finish_reason":"stop","index":0}]}"#;
-        let events2 = parse_sse_chunk(chunk2, &mut state, true);
-        let final_id = events2
-            .iter()
-            .find_map(|event| match event {
-                LlmEvent::ToolUse { id, .. } => Some(id.clone()),
-                _ => None,
-            })
-            .expect("closed text tool call should recover a final ToolUse");
-
-        assert_eq!(progress_id, final_id);
+        assert!(matches!(
+            events.as_slice(),
+            [LlmEvent::ThinkingDelta(text)] if text == literal
+        ));
+        assert!(matches!(
+            state.drain_terminal_events().as_slice(),
+            [LlmEvent::Done {
+                stop_reason: StopReason::MaxTokens,
+                ..
+            }]
+        ));
     }
 
     #[test]
-    fn qwen_xml_text_tool_call_stream_emits_file_preview_before_finish() {
+    fn post_finish_content_poison_clears_staged_structured_calls() {
         let mut state = StreamState::new();
+        let finish = r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_staged","type":"function","function":{"name":"Read","arguments":"{\"path\":\"/tmp/file\"}"}}]},"finish_reason":"tool_calls","index":0}]}"#;
+        let finish_events = parse_sse_chunk(finish, &mut state, true);
 
-        let chunk = r#"{"choices":[{"delta":{"reasoning_content":"<tool_call><function=Write><parameter=file_path>/tmp/snake.html</parameter><parameter=content>"},"finish_reason":null,"index":0}]}"#;
-        let events = parse_sse_chunk(chunk, &mut state, true);
-
-        let progress = events
+        assert!(finish_events
             .iter()
-            .find(|event| matches!(event, LlmEvent::ToolUseDelta { .. }))
-            .expect("Qwen XML text tool calls should announce running work before finish");
+            .all(|event| !matches!(event, LlmEvent::ToolUse { .. })));
+        assert_eq!(state.pending_tool_calls.len(), 1);
 
-        if let LlmEvent::ToolUseDelta { name, input, .. } = progress {
-            assert_eq!(name, "Write");
-            assert_eq!(input.as_ref().unwrap()["file_path"], "/tmp/snake.html");
-        }
+        let tail = r#"{"choices":[{"delta":{"content":"illegal tail"},"finish_reason":null,"index":0}]}"#;
+        let tail_events = parse_sse_chunk(tail, &mut state, true);
+
+        assert!(tail_events.iter().any(
+            |event| matches!(event, LlmEvent::Error(message) if message.contains("after finish_reason"))
+        ));
+        assert!(state.drain_terminal_events().is_empty());
+    }
+
+    #[test]
+    fn second_finish_after_finish_reason_poison_clears_staged_calls() {
+        let mut state = StreamState::new();
+        let finish = r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_staged","type":"function","function":{"name":"Read","arguments":"{\"path\":\"/tmp/file\"}"}}]},"finish_reason":"tool_calls","index":0}]}"#;
+        parse_sse_chunk(finish, &mut state, true);
+        assert_eq!(state.pending_tool_calls.len(), 1);
+
+        let second_finish =
+            r#"{"choices":[{"delta":{},"finish_reason":"stop","index":0}]}"#;
+        let events = parse_sse_chunk(second_finish, &mut state, true);
+
+        assert!(events.iter().any(|event| matches!(event, LlmEvent::Error(_))));
+        assert!(state.drain_terminal_events().is_empty());
+    }
+
+    #[test]
+    fn usage_only_tail_preserves_staged_calls_and_updates_done_usage() {
+        let mut state = StreamState::new();
+        let finish = r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_staged","type":"function","function":{"name":"Read","arguments":"{\"path\":\"/tmp/file\"}"}}]},"finish_reason":"tool_calls","index":0}]}"#;
+        parse_sse_chunk(finish, &mut state, true);
+
+        let usage = r#"{"choices":[],"usage":{"prompt_tokens":11,"completion_tokens":7}}"#;
+        assert!(parse_sse_chunk(usage, &mut state, true).is_empty());
+
+        let terminal = state.drain_terminal_events();
+        assert!(matches!(terminal.first(), Some(LlmEvent::ToolUse { .. })));
+        assert!(matches!(
+            terminal.last(),
+            Some(LlmEvent::Done {
+                stop_reason: StopReason::ToolUse,
+                usage
+            }) if usage.input_tokens == 11 && usage.output_tokens == 7
+        ));
     }
 
     #[tokio::test]
@@ -2050,8 +2039,7 @@ mod tests {
         use super::{StreamOutcome, process_sse_stream};
         // Some OpenAI-compatible servers (vLLM, local deployments) close the
         // connection after the final chunk without sending the `[DONE]`
-        // sentinel. The parser must still flush the deferred Done so the
-        // consumer gets a terminal event instead of hanging. (Phase 1)
+        // sentinel. A side-effect-free EndTurn may still complete.
         let body = concat!(
             "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hi\"},\"finish_reason\":null}]}\n\n",
             "data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
@@ -2074,6 +2062,262 @@ mod tests {
         }
         assert!(saw_done, "stream ending without [DONE] must still emit a Done");
         assert!(matches!(outcome, StreamOutcome::Ok));
+    }
+
+    #[tokio::test]
+    async fn structured_tool_call_requires_explicit_done_sentinel() {
+        use super::{StreamOutcome, process_sse_stream};
+
+        let body = concat!(
+            "data: {\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_eof\",\"type\":\"function\",\"function\":{\"name\":\"update_base\",\"arguments\":\"{\\\"kb_id\\\":\\\"kb_1\\\"}\"}}]},\"finish_reason\":\"tool_calls\"}]}\n\n",
+        );
+        let response = reqwest::Response::from(
+            http::Response::builder()
+                .status(200)
+                .body(body.to_string())
+                .unwrap(),
+        );
+        let (tx, mut rx) = tokio::sync::mpsc::channel(16);
+
+        let outcome = process_sse_stream(response, &tx, false).await;
+        drop(tx);
+        let mut events = Vec::new();
+        while let Some(event) = rx.recv().await {
+            events.push(event);
+        }
+
+        assert!(matches!(outcome, StreamOutcome::Ok));
+        assert!(events.iter().any(
+            |event| matches!(event, LlmEvent::Error(message) if message.contains("before [DONE]"))
+        ));
+        assert!(events.iter().all(|event| !matches!(
+            event,
+            LlmEvent::ToolUse { .. } | LlmEvent::Done { .. }
+        )));
+    }
+
+    #[tokio::test]
+    async fn explicit_done_sentinel_commits_structured_tool_call() {
+        use super::{StreamOutcome, process_sse_stream};
+
+        let body = concat!(
+            "data: {\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_done\",\"type\":\"function\",\"function\":{\"name\":\"update_base\",\"arguments\":\"{\\\"kb_id\\\":\\\"kb_1\\\"}\"}}]},\"finish_reason\":\"tool_calls\"}]}\n\n",
+            "data: [DONE]\n\n",
+        );
+        let response = reqwest::Response::from(
+            http::Response::builder()
+                .status(200)
+                .body(body.to_string())
+                .unwrap(),
+        );
+        let (tx, mut rx) = tokio::sync::mpsc::channel(16);
+
+        let outcome = process_sse_stream(response, &tx, false).await;
+        drop(tx);
+        let mut events = Vec::new();
+        while let Some(event) = rx.recv().await {
+            events.push(event);
+        }
+
+        assert!(matches!(outcome, StreamOutcome::Ok));
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event, LlmEvent::ToolUse { .. }))
+                .count(),
+            1
+        );
+        assert!(events
+            .iter()
+            .any(|event| matches!(event, LlmEvent::ToolUse { id, .. } if id == "call_done")));
+        assert!(matches!(
+            events.last(),
+            Some(LlmEvent::Done {
+                stop_reason: StopReason::ToolUse,
+                ..
+            })
+        ));
+    }
+
+    #[tokio::test]
+    async fn unterminated_tail_after_finish_cannot_commit_staged_tool_call() {
+        use super::{StreamOutcome, process_sse_stream};
+
+        let body = concat!(
+            "data: {\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_staged\",\"type\":\"function\",\"function\":{\"name\":\"update_base\",\"arguments\":\"{\\\"kb_id\\\":\\\"kb_1\\\"}\"}}]},\"finish_reason\":\"tool_calls\"}]}\n\n",
+            "data: {\"choices\":["
+        );
+        let response = reqwest::Response::from(
+            http::Response::builder()
+                .status(200)
+                .body(body.to_string())
+                .unwrap(),
+        );
+        let (tx, mut rx) = tokio::sync::mpsc::channel(16);
+
+        let outcome = process_sse_stream(response, &tx, false).await;
+        drop(tx);
+        let mut events = Vec::new();
+        while let Some(event) = rx.recv().await {
+            events.push(event);
+        }
+
+        assert!(matches!(outcome, StreamOutcome::Ok));
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event, LlmEvent::Error(_)))
+                .count(),
+            1
+        );
+        assert!(events.iter().all(|event| !matches!(
+            event,
+            LlmEvent::ToolUse { .. } | LlmEvent::Done { .. }
+        )));
+    }
+
+    #[tokio::test]
+    async fn malformed_json_stream_stops_before_later_tool_finish_and_done() {
+        use super::{StreamOutcome, process_sse_stream};
+
+        let body = concat!(
+            "data: {\"choices\":[\n\n",
+            "data: {\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_late\",\"type\":\"function\",\"function\":{\"name\":\"update_base\",\"arguments\":\"{\\\"kb_id\\\":\\\"kb_1\\\"}\"}}]},\"finish_reason\":\"tool_calls\"}]}\n\n",
+            "data: [DONE]\n\n",
+        );
+        let response = reqwest::Response::from(
+            http::Response::builder()
+                .status(200)
+                .body(body.to_string())
+                .unwrap(),
+        );
+        let (tx, mut rx) = tokio::sync::mpsc::channel(16);
+
+        let outcome = process_sse_stream(response, &tx, true).await;
+        drop(tx);
+        let mut events = Vec::new();
+        while let Some(event) = rx.recv().await {
+            events.push(event);
+        }
+
+        assert!(matches!(outcome, StreamOutcome::Ok));
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event, LlmEvent::Error(_)))
+                .count(),
+            1
+        );
+        assert!(events.iter().all(|event| !matches!(
+            event,
+            LlmEvent::ToolUse { .. } | LlmEvent::ToolUseDelta { .. } | LlmEvent::Done { .. }
+        )));
+    }
+
+    #[tokio::test]
+    async fn stream_literal_tool_tags_round_trip_across_delta_splits() {
+        use super::{StreamOutcome, process_sse_stream};
+
+        for literal in [
+            r#"<tool_call>{"name":"counted_tool","arguments":{}}</tool_call>"#,
+            r#"<tool_call>not json</tool_call>"#,
+            r#"<tool_call>{"name":"counted_tool""#,
+        ] {
+            for split in [1, 7, literal.len() / 2, literal.len() - 1] {
+                let first = json!({
+                    "choices": [{
+                        "delta": { "content": &literal[..split] },
+                        "finish_reason": null,
+                        "index": 0
+                    }]
+                })
+                .to_string();
+                let second = json!({
+                    "choices": [{
+                        "delta": { "content": &literal[split..] },
+                        "finish_reason": "stop",
+                        "index": 0
+                    }]
+                })
+                .to_string();
+                let body = format!("data: {first}\n\ndata: {second}\n\ndata: [DONE]\n\n");
+                let response = reqwest::Response::from(
+                    http::Response::builder()
+                        .status(200)
+                        .body(body)
+                        .unwrap(),
+                );
+                let (tx, mut rx) = tokio::sync::mpsc::channel(16);
+
+                let outcome = process_sse_stream(response, &tx, true).await;
+                drop(tx);
+                let mut events = Vec::new();
+                while let Some(event) = rx.recv().await {
+                    events.push(event);
+                }
+                let text = events
+                    .iter()
+                    .filter_map(|event| match event {
+                        LlmEvent::TextDelta(text) => Some(text.as_str()),
+                        _ => None,
+                    })
+                    .collect::<String>();
+
+                assert!(matches!(outcome, StreamOutcome::Ok));
+                assert_eq!(text, literal, "split at byte {split}");
+                assert!(events.iter().all(|event| !matches!(
+                    event,
+                    LlmEvent::ToolUse { .. }
+                        | LlmEvent::ToolUseDelta { .. }
+                        | LlmEvent::Error(_)
+                )));
+                assert_eq!(
+                    events
+                        .iter()
+                        .filter(|event| matches!(
+                            event,
+                            LlmEvent::Done {
+                                stop_reason: StopReason::EndTurn,
+                                ..
+                            }
+                        ))
+                        .count(),
+                    1
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn post_finish_content_stream_clears_staged_call_and_emits_no_done() {
+        use super::{StreamOutcome, process_sse_stream};
+
+        let body = concat!(
+            "data: {\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_staged\",\"type\":\"function\",\"function\":{\"name\":\"Read\",\"arguments\":\"{\\\"path\\\":\\\"/tmp/file\\\"}\"}}]},\"finish_reason\":\"tool_calls\"}]}\n\n",
+            "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"illegal tail\"},\"finish_reason\":null}]}\n\n",
+            "data: [DONE]\n\n",
+        );
+        let response = reqwest::Response::from(
+            http::Response::builder()
+                .status(200)
+                .body(body.to_string())
+                .unwrap(),
+        );
+        let (tx, mut rx) = tokio::sync::mpsc::channel(16);
+
+        let outcome = process_sse_stream(response, &tx, true).await;
+        drop(tx);
+        let mut events = Vec::new();
+        while let Some(event) = rx.recv().await {
+            events.push(event);
+        }
+
+        assert!(matches!(outcome, StreamOutcome::Ok));
+        assert!(events.iter().any(|event| matches!(event, LlmEvent::Error(_))));
+        assert!(events.iter().all(|event| !matches!(
+            event,
+            LlmEvent::ToolUse { .. } | LlmEvent::Done { .. }
+        )));
     }
 
     #[test]
@@ -2678,15 +2922,13 @@ mod tests {
     }
 
     #[test]
-    fn tool_calls_with_stop_finish_reason() {
-        // Gemini uses finish_reason:"stop" even when tool_calls are present.
-        // The accumulated tool calls must still be emitted, and the first
-        // structured delta should be visible immediately so the UI is not blank
-        // while long arguments are still being generated.
+    fn tool_calls_with_stop_finish_reason_are_rejected() {
+        // A non-tool terminal cannot promote earlier structured fragments into
+        // executable calls.
         let mut state = StreamState::new();
 
         // chunk 1: tool call delta (name + partial args)
-        let chunk1 = r#"{"choices":[{"delta":{"role":"assistant","tool_calls":[{"extra_content":{},"function":{"arguments":"{\"skill\":\"test\",\"args\":\"hello\"}","name":"Skill"},"id":"call_abc123","type":"function"}]},"index":0}]}"#;
+        let chunk1 = r#"{"choices":[{"delta":{"role":"assistant","tool_calls":[{"index":0,"extra_content":{},"function":{"arguments":"{\"skill\":\"test\",\"args\":\"hello\"}","name":"Skill"},"id":"call_abc123","type":"function"}]},"index":0}]}"#;
         let events1 = parse_sse_chunk(chunk1, &mut state, false);
         let progress = events1
             .iter()
@@ -2704,31 +2946,139 @@ mod tests {
         let chunk2 = r#"{"choices":[{"delta":{"role":"assistant"},"finish_reason":"stop","index":0}],"usage":{"prompt_tokens":100,"completion_tokens":20,"total_tokens":120}}"#;
         let events2 = parse_sse_chunk(chunk2, &mut state, false);
 
-        // Tool call should be emitted
-        let tool_events: Vec<_> = events2
+        assert!(events2.iter().any(
+            |event| matches!(event, LlmEvent::Error(message) if message.contains("finished with stop"))
+        ));
+        assert!(events2
             .iter()
-            .filter(|e| matches!(e, LlmEvent::ToolUse { .. }))
-            .collect();
-        assert_eq!(tool_events.len(), 1, "tool call should be emitted on stop");
-        if let LlmEvent::ToolUse {
-            id, name, input, ..
-        } = &tool_events[0]
-        {
-            assert_eq!(id, "call_abc123");
-            assert_eq!(name, "Skill");
-            assert_eq!(input["skill"], "test");
-        }
+            .all(|event| !matches!(event, LlmEvent::ToolUse { .. } | LlmEvent::Done { .. })));
+        assert!(state.drain_terminal_events().is_empty());
+    }
 
-        // Done should be deferred with ToolUse stop reason
-        let done = state.flush_done().unwrap();
-        match done {
-            LlmEvent::Done { stop_reason, .. } => {
-                assert_eq!(stop_reason, StopReason::ToolUse);
-            }
-            other => panic!("expected Done with ToolUse, got {other:?}"),
-        }
+    #[test]
+    fn malformed_single_chunk_tool_arguments_emit_error_not_tool_use() {
+        let mut state = StreamState::new();
+        let chunk = json!({
+            "choices": [{
+                "delta": {
+                    "tool_calls": [{
+                        "index": 0,
+                        "id": "call_bad",
+                        "function": {
+                            "name": "update_base",
+                            "arguments": "{\"kb_id\":]"
+                        }
+                    }]
+                },
+                "finish_reason": "tool_calls",
+                "index": 0
+            }]
+        })
+        .to_string();
 
-        assert!(state.tool_calls.is_empty(), "tool calls should be drained");
+        let events = parse_sse_chunk(&chunk, &mut state, false);
+
+        assert!(
+            events
+                .iter()
+                .all(|event| !matches!(event, LlmEvent::ToolUse { .. })),
+            "malformed arguments must never become an executable tool call: {events:?}"
+        );
+        let message = events
+            .iter()
+            .find_map(|event| match event {
+                LlmEvent::Error(message) => Some(message),
+                _ => None,
+            })
+            .expect("malformed arguments should surface an explicit provider error");
+        assert!(message.contains("malformed JSON arguments"));
+        assert!(message.contains("update_base"));
+        assert!(message.contains("call_bad"));
+        assert!(state.pending_done.is_none());
+    }
+
+    #[test]
+    fn malformed_streamed_tool_arguments_emit_error_after_aggregation() {
+        let mut state = StreamState::new();
+        let first = json!({
+            "choices": [{
+                "delta": {
+                    "tool_calls": [{
+                        "index": 0,
+                        "id": "call_split_bad",
+                        "function": {
+                            "name": "create_base",
+                            "arguments": "{\"name\":"
+                        }
+                    }]
+                },
+                "finish_reason": null,
+                "index": 0
+            }]
+        })
+        .to_string();
+        let second = json!({
+            "choices": [{
+                "delta": {
+                    "tool_calls": [{
+                        "index": 0,
+                        "function": { "arguments": "]}" }
+                    }]
+                },
+                "finish_reason": "tool_calls",
+                "index": 0
+            }]
+        })
+        .to_string();
+
+        let first_events = parse_sse_chunk(&first, &mut state, false);
+        assert!(
+            first_events
+                .iter()
+                .all(|event| !matches!(event, LlmEvent::ToolUse { .. }))
+        );
+        let final_events = parse_sse_chunk(&second, &mut state, false);
+
+        assert!(
+            final_events
+                .iter()
+                .all(|event| !matches!(event, LlmEvent::ToolUse { .. }))
+        );
+        assert!(final_events.iter().any(
+            |event| matches!(event, LlmEvent::Error(message) if message.contains("call_split_bad"))
+        ));
+        assert!(state.pending_done.is_none());
+    }
+
+    #[test]
+    fn non_string_tool_arguments_are_rejected() {
+        let mut state = StreamState::new();
+        let chunk = json!({
+            "choices": [{
+                "delta": {
+                    "tool_calls": [{
+                        "index": 0,
+                        "id": "call_object_args",
+                        "function": {
+                            "name": "update_base",
+                            "arguments": { "kb_id": "kb_1" }
+                        }
+                    }]
+                },
+                "finish_reason": "tool_calls",
+                "index": 0
+            }]
+        })
+        .to_string();
+
+        let events = parse_sse_chunk(&chunk, &mut state, false);
+        assert!(events.iter().any(
+            |event| matches!(event, LlmEvent::Error(message) if message.contains("non-string function arguments"))
+        ));
+        assert!(events
+            .iter()
+            .all(|event| !matches!(event, LlmEvent::ToolUse { .. } | LlmEvent::Done { .. })));
+        assert!(state.drain_terminal_events().is_empty());
     }
 
     #[test]
@@ -2757,7 +3107,7 @@ mod tests {
     fn auto_tool_id_is_stable_between_progress_and_final_tool_use() {
         let mut state = StreamState::new();
 
-        let chunk1 = r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"name":"Bash","arguments":"{\"command\":\"bun test\""}}]},"finish_reason":null,"index":0}]}"#;
+        let chunk1 = r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"name":"Bash","arguments":"{\"command\":\"bun test\"}"}}]},"finish_reason":null,"index":0}]}"#;
         let events1 = parse_sse_chunk(chunk1, &mut state, true);
         let progress_id = events1
             .iter()
@@ -2769,7 +3119,11 @@ mod tests {
 
         let chunk2 = r#"{"choices":[{"delta":{},"finish_reason":"tool_calls","index":0}]}"#;
         let events2 = parse_sse_chunk(chunk2, &mut state, true);
-        let final_id = events2
+        assert!(events2
+            .iter()
+            .all(|event| !matches!(event, LlmEvent::ToolUse { .. })));
+        let terminal = state.drain_terminal_events();
+        let final_id = terminal
             .iter()
             .find_map(|e| match e {
                 LlmEvent::ToolUse { id, .. } => Some(id.clone()),
@@ -2811,8 +3165,12 @@ mod tests {
         // Simulate a provider that returns tool_calls without an id field
         let chunk = r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"name":"get_weather","arguments":"{\"city\":\"Beijing\"}"}}]},"finish_reason":"tool_calls","index":0}]}"#;
         let events = parse_sse_chunk(chunk, &mut state, true);
+        assert!(events
+            .iter()
+            .all(|event| !matches!(event, LlmEvent::ToolUse { .. })));
+        let terminal = state.drain_terminal_events();
 
-        let tool_use = events
+        let tool_use = terminal
             .iter()
             .find(|e| matches!(e, LlmEvent::ToolUse { .. }))
             .expect("should emit ToolUse event");
@@ -2830,8 +3188,12 @@ mod tests {
 
         let chunk = r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_existing_123","function":{"name":"read_file","arguments":"{}"}}]},"finish_reason":"tool_calls","index":0}]}"#;
         let events = parse_sse_chunk(chunk, &mut state, true);
+        assert!(events
+            .iter()
+            .all(|event| !matches!(event, LlmEvent::ToolUse { .. })));
+        let terminal = state.drain_terminal_events();
 
-        let tool_use = events
+        let tool_use = terminal
             .iter()
             .find(|e| matches!(e, LlmEvent::ToolUse { .. }))
             .expect("should emit ToolUse event");
@@ -2842,22 +3204,36 @@ mod tests {
     }
 
     #[test]
-    fn test_auto_tool_id_disabled_keeps_empty() {
+    fn missing_tool_id_emits_error_when_auto_id_is_disabled() {
         let mut state = StreamState::new();
 
         let chunk = r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"name":"get_weather","arguments":"{}"}}]},"finish_reason":"tool_calls","index":0}]}"#;
         let events = parse_sse_chunk(chunk, &mut state, false);
 
-        let tool_use = events
-            .iter()
-            .find(|e| matches!(e, LlmEvent::ToolUse { .. }))
-            .expect("should emit ToolUse event");
+        assert!(
+            events
+                .iter()
+                .all(|event| !matches!(event, LlmEvent::ToolUse { .. }))
+        );
+        assert!(events.iter().any(
+            |event| matches!(event, LlmEvent::Error(message) if message.contains("without a call id"))
+        ));
+    }
 
-        if let LlmEvent::ToolUse { id, .. } = tool_use {
-            assert!(
-                id.is_empty(),
-                "id should remain empty when auto_tool_id is disabled"
-            );
-        }
+    #[test]
+    fn missing_tool_name_emits_error() {
+        let mut state = StreamState::new();
+
+        let chunk = r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_missing_name","function":{"arguments":"{}"}}]},"finish_reason":"tool_calls","index":0}]}"#;
+        let events = parse_sse_chunk(chunk, &mut state, false);
+
+        assert!(
+            events
+                .iter()
+                .all(|event| !matches!(event, LlmEvent::ToolUse { .. }))
+        );
+        assert!(events.iter().any(
+            |event| matches!(event, LlmEvent::Error(message) if message.contains("missing function name") && message.contains("call_missing_name"))
+        ));
     }
 }
