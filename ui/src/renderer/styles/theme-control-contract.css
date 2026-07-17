@@ -17,11 +17,6 @@
     box-shadow 160ms ease-out;
 }
 
-.arco-checkbox:hover .arco-checkbox-mask {
-  background-color: var(--control-hover-bg, var(--color-fill-2)) !important;
-  border-color: var(--control-selected-bg, var(--color-primary)) !important;
-}
-
 .arco-checkbox-checked .arco-checkbox-mask,
 .arco-checkbox-indeterminate .arco-checkbox-mask {
   background-color: var(--enhanced-checkbox-selected-bg, var(--control-selected-bg, var(--color-primary))) !important;
