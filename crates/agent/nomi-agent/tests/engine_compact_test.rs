@@ -532,7 +532,9 @@ async fn tc_2_6_02_micro_before_auto_execution_order() {
                     LlmEvent::ToolUse {
                         id: format!("t{count}"),
                         name: "mock_tool".to_string(),
-                        input: serde_json::json!({}),
+                        // Distinct work items: this fixture is exercising
+                        // compaction, not an unchanged retry loop.
+                        input: serde_json::json!({"iteration": count}),
                         extra: None,
                     },
                     LlmEvent::Done {
@@ -688,7 +690,9 @@ async fn tc_2_6_e2e_02_micro_and_auto_cooperative() {
                     LlmEvent::ToolUse {
                         id: format!("t{count}"),
                         name: "mock_tool".to_string(),
-                        input: serde_json::json!({}),
+                        // Distinct work items: this fixture is exercising
+                        // compaction, not an unchanged retry loop.
+                        input: serde_json::json!({"iteration": count}),
                         extra: None,
                     },
                     LlmEvent::Done {

@@ -35,7 +35,7 @@ use crate::protocol::events::{AgentStreamEvent, TurnCompletedEventData, TurnStop
 use crate::protocol::send_error::AgentSendError;
 use crate::types::{NomiResolvedConfig, SendMessageData};
 
-use super::image_attachments::load_image_blocks;
+use super::image_attachments::{ImageAttachmentError, load_image_blocks};
 
 fn apply_provider_context_budget(config: &mut Config, context_limit: Option<u64>) {
     config.compact.context_window = nomi_config::compact::resolve_context_window(
@@ -110,6 +110,9 @@ pub struct NomiAgentManager {
 
 impl Drop for NomiAgentManager {
     fn drop(&mut self) {
+        self.backend_output_sink.cancel_active_tool_calls(
+            "The agent manager was dropped before this tool call reached a terminal state.",
+        );
         self.loopback_capability_leases.revoke_all();
     }
 }
@@ -309,9 +312,10 @@ impl NomiAgentManager {
         if config_extra.browser_use {
             config.tools.browser.enabled = true;
         }
-        // Per-session 工具白名单（工厂已算好；bootstrap 在全部注册后
-        // retain_named 收口）。Embedded AgentExecution 的 host composition
-        // 不写入 ToolsConfig，而是在 bootstrap builder 上单独注入。
+        // Per-session 工具白名单（工厂已算好；bootstrap 的 retain_named
+        // 会安装持久注册策略，后续 post-build / dynamic 工具也受同一策略约束）。
+        // Embedded AgentExecution 的 host composition 不写入 ToolsConfig，
+        // 而是在 bootstrap builder 上单独注入。
         config.tools.builtin_allowlist = config_extra.allowed_tools.clone();
         // 原生文件工具写根钳制（Write/Edit/ApplyPatch），按会话信任面由工厂解析：
         // 本地桌面 = None（不钳制，OS 用户全权，今日行为）；渠道/远程/对外 =
@@ -321,14 +325,6 @@ impl NomiAgentManager {
         if let Some(root) = config_extra.write_root.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
             config.tools.write_root = root.to_owned();
         }
-        // C3-fix: snapshot the per-session native allowlist. bootstrap applies it
-        // via `retain_named` at build time, but the memory / knowledge / companion
-        // / requirement tools below are registered AFTER build directly on
-        // `engine.registry_mut()`, so they would bypass the allowlist. We re-apply
-        // it once more after all post-build registration (see below). Empty = no-op
-        // = unrestricted (normal sessions), so this is inert unless a restricted
-        // session (restricted Agent attempt / PublicService exposure) pinned an allowlist.
-        let native_allowlist = config_extra.allowed_tools.clone();
         // F1-sec: 把会话的 evaluate「全权模式」LIVE 值灌进 BrowserConfig.full_power（bootstrap 据它
         // 构造 BrowserTool::with_policy 的 evaluate gate）。默认 false（default-deny）。
         config.tools.browser.full_power = config_extra.browser_full_power;
@@ -538,21 +534,6 @@ impl NomiAgentManager {
                 );
             }
         }
-        // C3-fix: all post-build native tools are now registered. Re-apply the
-        // per-session native allowlist so it actually constrains the memory /
-        // knowledge / companion / requirement tools registered above (they were
-        // added after bootstrap's own `retain_named`). Empty allowlist = no-op =
-        // unrestricted, so normal sessions are unaffected; a PublicService or
-        // Restricted Agent-attempt session keeps ONLY its whitelisted tools.
-        if !native_allowlist.is_empty() {
-            engine.registry_mut().retain_named(&native_allowlist);
-            debug!(
-                conversation_id = %conversation_id,
-                allow = ?native_allowlist,
-                "C3: re-applied native allowlist after post-build tool registration"
-            );
-        }
-
         if !is_resume && let Err(e) = engine.init_session(&provider_label, &workspace, Some(&conversation_id)) {
             error!(
                 conversation_id = %conversation_id,
@@ -625,9 +606,10 @@ impl NomiAgentManager {
         }
 
         if was_running {
-            // The durable token above wakes either the cooperative engine or
-            // the non-cooperative select branch. The active turn emits its own
-            // terminal event after unwinding.
+            // The durable token above wakes the active turn's select branch.
+            // That branch drops the in-flight engine/tool future before it
+            // settles frontend tool state, so a late success cannot race a
+            // cancellation Error.
         } else {
             // Idle / Pending / between turns: there is no in-flight run to wake,
             // so notify_waiters would be a no-op AND no terminal event would ever
@@ -635,6 +617,9 @@ impl NomiAgentManager {
             // forever in a 'running' spinner. Emit the terminal event directly.
             // Idempotent via AgentRuntimeState's absorbing-state guard (a later real
             // Finish is absorbed). A later reusable turn receives a fresh token.
+            self.backend_output_sink.cancel_active_tool_calls(
+                "The tool call was cancelled before the turn could finish.",
+            );
             self.runtime
                 .emit_finish_with_reason(None, Some(TurnStopReason::Cancelled));
         }
@@ -708,177 +693,198 @@ impl crate::runtime_handle::AgentRuntimeControl for NomiAgentManager {
         // after the real terminal event is emitted below. (Phase 0 F0.2)
         let mut term_guard = TurnTerminationGuard {
             runtime: self.runtime.clone(),
+            backend_output_sink: self.backend_output_sink.clone(),
             armed: true,
         };
 
-        // A provider already known not to support vision receives the text turn
-        // unchanged. Skip attachment IO entirely: this is both cheaper and is
-        // required by the conversation fallback that rebuilds an agent after a
-        // provider rejects image input.
-        let supports_image = self.engine.lock().await.compat().supports_image();
-        let image_blocks = if supports_image {
-            match load_image_blocks(&data.files, self.image_read_root.as_deref()).await {
-                Ok(blocks) => blocks,
+        // Every asynchronous operation after entering Running belongs to this
+        // durable cancellation domain. Preparation and execution converge on
+        // one cancellation terminal below.
+        let accepted_turn = 'accepted: {
+            let prepare_turn = async {
+                // A provider already known not to support vision receives the
+                // text turn unchanged. This capability lock and all attachment
+                // work remain cancellable.
+                let supports_image = self.engine.lock().await.compat().supports_image();
+                let image_blocks = if supports_image {
+                    load_image_blocks(&data.files, self.image_read_root.as_deref()).await?
+                } else {
+                    Vec::new()
+                };
+
+                // Proactive RAG is best-effort, but never allowed to make a
+                // cancelled turn wait forever.
+                let knowledge_hits = if let Some((sink, kb_ids)) = &self.knowledge_auto_rag {
+                    match sink.search(kb_ids, &data.content, 3).await {
+                        Ok(hits) if !hits.is_empty() => Some(hits),
+                        _ => None,
+                    }
+                } else {
+                    None
+                };
+
+                let engine = self.engine.lock().await;
+                Ok::<_, ImageAttachmentError>((image_blocks, knowledge_hits, engine))
+            };
+            let preparation = tokio::select! {
+                biased;
+                _ = turn_cancel.cancelled() => break 'accepted None,
+                prepared = prepare_turn => prepared,
+            };
+
+            let (image_blocks, knowledge_hits, mut engine) = match preparation {
+                Ok(prepared) => prepared,
                 Err(error) => {
                     let send_error = AgentSendError::from_app_error(AppError::BadRequest(format!(
                         "Invalid parameters: {error}"
                     )));
+                    self.backend_output_sink.fail_active_tool_calls(
+                        "The turn failed while loading its attachments.",
+                    );
                     self.runtime
                         .emit_error_data(send_error.stream_error().clone());
                     self.runtime.emit_finish(None);
                     term_guard.disarm();
                     return Err(send_error);
                 }
-            }
-        } else {
-            Vec::new()
-        };
+            };
 
-        let prelude = self
-            .knowledge_prelude
-            .lock()
-            .expect("knowledge_prelude lock poisoned")
-            .take();
-        let content = apply_knowledge_prelude(prelude, &data.content);
-        // Proactive RAG: retrieve top KB hits for this message and prepend them
-        // so the model has domain context up front. Best-effort — any failure or
-        // empty result leaves the message unchanged.
-        let content = if let Some((sink, kb_ids)) = &self.knowledge_auto_rag {
-            match sink.search(kb_ids, &data.content, 3).await {
-                Ok(hits) if !hits.is_empty() => prepend_knowledge_context(&hits, content),
-                _ => content,
-            }
-        } else {
-            content
-        };
+            // Consume the one-shot prelude only after every cancellable
+            // preparation await has completed successfully.
+            let prelude = self
+                .knowledge_prelude
+                .lock()
+                .expect("knowledge_prelude lock poisoned")
+                .take();
+            let content = apply_knowledge_prelude(prelude, &data.content);
+            let content = match knowledge_hits {
+                Some(hits) => prepend_knowledge_context(&hits, content),
+                None => content,
+            };
 
-        let mut engine = self.engine.lock().await;
-        engine.set_steering_inbox(Some(self.steering_inbox.clone()));
+            engine.set_steering_inbox(Some(self.steering_inbox.clone()));
 
-        // Each iteration runs one engine pass inside the same accepted Agent turn. Most
-        // passes finish naturally; this loop re-runs only to absorb steering
-        // race-tail interjections or to continue after bounded truncation.
-        let mut run_content = Vec::with_capacity(1 + image_blocks.len());
-        run_content.push(ContentBlock::Text { text: content });
-        run_content.extend(image_blocks);
-        let mut race_tail_reruns = 0usize;
-        let mut truncation_auto_continues = 0usize;
-        let result = loop {
-            let current_content = std::mem::take(&mut run_content);
-            let r = if self.distill_cfg.tools.cooperative_cancel {
-                // Cooperative cancel (F0.4, opt-in): install a token, cancel it on
-                // the stop signal, and AWAIT the run to a clean finish instead of
-                // dropping its future mid-flight — so `self.messages` stays
-                // consistent. Trades a little mid-tool stop-latency (the run is
-                // awaited, not dropped) for that consistency; the engine checks the
-                // token between turns and while awaiting the model stream.
-                let cancel = turn_cancel.clone();
-                engine.set_cancel_token(Some(cancel.clone()));
-                let res = engine
-                    .execute_turn_with_content(current_content, &data.msg_id)
-                    .await;
-                engine.set_cancel_token(None); // reset for the next reused turn
-                if cancel.is_cancelled() {
-                    info!(
-                        conversation_id = %self.runtime.conversation_id(),
-                        "Nomi engine.execute_turn() cooperatively cancelled by stop signal"
-                    );
-                    None
-                } else {
-                    Some(res)
-                }
-            } else {
-                tokio::select! {
-                    res = engine.execute_turn_with_content(current_content, &data.msg_id) => Some(res),
+            // Each iteration runs one engine pass inside the same accepted
+            // Agent turn. Re-run only for steering race-tail interjections or
+            // bounded output truncation continuation.
+            let mut run_content = Vec::with_capacity(1 + image_blocks.len());
+            run_content.push(ContentBlock::Text { text: content });
+            run_content.extend(image_blocks);
+            let mut race_tail_reruns = 0usize;
+            let mut truncation_auto_continues = 0usize;
+            let result = loop {
+                let current_content = std::mem::take(&mut run_content);
+                // Cancellation has one fail-closed lifecycle: drop the in-flight
+                // engine/tool future immediately, then roll back the provisional
+                // turn state. Awaiting arbitrary tool code here is unsafe because a
+                // tool is not required to observe a cancellation token.
+                let r = tokio::select! {
+                    biased;
                     _ = turn_cancel.cancelled() => {
                         info!(
                             conversation_id = %self.runtime.conversation_id(),
                             "Nomi engine.execute_turn() cancelled by stop signal"
                         );
                         engine.abort_current_turn("Tool execution canceled by user");
-                        None
+                        engine.set_steering_inbox(None);
+                        break 'accepted None;
+                    }
+                    res = engine.execute_turn_with_content(current_content, &data.msg_id) => res,
+                };
+
+                // Race-tail: only a clean Ok can carry leftover steering worth a
+                // re-run (a cancel/abort intentionally drops the turn). Bounded so a
+                // continuous steerer cannot spin this forever; leftover past the cap
+                // stays queued for the next turn.
+                if let Ok(agent_result) = &r
+                    && agent_result.stop_reason == nomi_types::message::StopReason::EndTurn
+                {
+                    if race_tail_reruns < MAX_STEERING_RACE_TAIL_RERUNS {
+                        let leftover: Vec<String> = {
+                            let mut q = self.steering_inbox.lock().unwrap_or_else(|e| e.into_inner());
+                            q.drain(..).collect()
+                        };
+                        if !leftover.is_empty() {
+                            race_tail_reruns += 1;
+                            info!(
+                                conversation_id = %self.runtime.conversation_id(),
+                                count = leftover.len(),
+                                "Nomi steering race-tail: re-running with leftover interjection(s)"
+                            );
+                            // NOTE: the re-run reuses `data.msg_id`, so the engine emits a
+                            // second StreamStart under the same id for this logical turn.
+                            // Benign — the UI keeps the same assistant bubble; a fresh id
+                            // would instead spawn a new bubble. Intentional for this rare tail.
+                            run_content = vec![ContentBlock::Text {
+                                text: leftover.join("\n\n"),
+                            }];
+                            continue;
+                        }
+                    } else {
+                        tracing::warn!(
+                            conversation_id = %self.runtime.conversation_id(),
+                            "Nomi steering race-tail cap reached; any leftover deferred to next turn"
+                        );
                     }
                 }
+                if let Ok(agent_result) = &r {
+                    // Only a token-length truncation can be continued safely. A
+                    // MaxTurns result means the model already consumed the full
+                    // per-pass request budget; starting a fresh pass resets the
+                    // engine's loop guard and used to multiply a deterministic
+                    // tool loop by the host continuation cap.
+                    if agent_result.stop_reason == nomi_types::message::StopReason::MaxTokens {
+                        let reason = "the output token limit";
+                        if truncation_auto_continues < MAX_TRUNCATION_AUTO_CONTINUES {
+                            truncation_auto_continues += 1;
+                            info!(
+                                conversation_id = %self.runtime.conversation_id(),
+                                attempt = truncation_auto_continues,
+                                max_attempts = MAX_TRUNCATION_AUTO_CONTINUES,
+                                stop_reason = ?agent_result.stop_reason,
+                                "Nomi turn truncated; auto-continuing before Finish"
+                            );
+                            self.backend_output_sink
+                                .truncate_active_tool_calls_for_auto_continue(reason);
+                            run_content = vec![ContentBlock::Text {
+                                text: truncation_continuation_prompt(
+                                    truncation_auto_continues,
+                                    MAX_TRUNCATION_AUTO_CONTINUES,
+                                    reason,
+                                ),
+                            }];
+                            continue;
+                        }
+                        tracing::warn!(
+                            conversation_id = %self.runtime.conversation_id(),
+                            attempts = truncation_auto_continues,
+                            stop_reason = ?agent_result.stop_reason,
+                            "Nomi truncation auto-continue cap reached; emitting final Finish"
+                        );
+                    }
+                }
+                break r;
             };
 
-            // Race-tail: only a clean Ok can carry leftover steering worth a
-            // re-run (a cancel/abort intentionally drops the turn). Bounded so a
-            // continuous steerer cannot spin this forever; leftover past the cap
-            // stays queued for the next turn.
-            if let Some(Ok(_)) = &r {
-                if race_tail_reruns < MAX_STEERING_RACE_TAIL_RERUNS {
-                    let leftover: Vec<String> = {
-                        let mut q = self.steering_inbox.lock().unwrap_or_else(|e| e.into_inner());
-                        q.drain(..).collect()
-                    };
-                    if !leftover.is_empty() {
-                        race_tail_reruns += 1;
-                        info!(
-                            conversation_id = %self.runtime.conversation_id(),
-                            count = leftover.len(),
-                            "Nomi steering race-tail: re-running with leftover interjection(s)"
-                        );
-                        // NOTE: the re-run reuses `data.msg_id`, so the engine emits a
-                        // second StreamStart under the same id for this logical turn.
-                        // Benign — the UI keeps the same assistant bubble; a fresh id
-                        // would instead spawn a new bubble. Intentional for this rare tail.
-                        run_content = vec![ContentBlock::Text {
-                            text: leftover.join("\n\n"),
-                        }];
-                        continue;
-                    }
-                } else {
-                    tracing::warn!(
-                        conversation_id = %self.runtime.conversation_id(),
-                        "Nomi steering race-tail cap reached; any leftover deferred to next turn"
-                    );
-                }
-            }
-            if let Some(Ok(agent_result)) = &r {
-                let reason = match agent_result.stop_reason {
-                    nomi_types::message::StopReason::MaxTokens => Some("the output token limit"),
-                    nomi_types::message::StopReason::MaxTurns => Some("the per-turn request cap"),
-                    _ => None,
-                };
-                if let Some(reason) = reason {
-                    if truncation_auto_continues < MAX_TRUNCATION_AUTO_CONTINUES {
-                        truncation_auto_continues += 1;
-                        info!(
-                            conversation_id = %self.runtime.conversation_id(),
-                            attempt = truncation_auto_continues,
-                            max_attempts = MAX_TRUNCATION_AUTO_CONTINUES,
-                            stop_reason = ?agent_result.stop_reason,
-                            "Nomi turn truncated; auto-continuing before Finish"
-                        );
-                        self.backend_output_sink
-                            .complete_active_tool_calls_for_auto_continue(reason);
-                        run_content = vec![ContentBlock::Text {
-                            text: truncation_continuation_prompt(
-                                truncation_auto_continues,
-                                MAX_TRUNCATION_AUTO_CONTINUES,
-                                reason,
-                            ),
-                        }];
-                        continue;
-                    }
-                    tracing::warn!(
-                        conversation_id = %self.runtime.conversation_id(),
-                        attempts = truncation_auto_continues,
-                        stop_reason = ?agent_result.stop_reason,
-                        "Nomi truncation auto-continue cap reached; emitting final Finish"
-                    );
-                }
-            }
-            break r;
+            engine.set_steering_inbox(None);
+            Some((result, engine))
         };
 
-        engine.set_steering_inbox(None);
+        let Some((result, engine)) = accepted_turn else {
+            self.backend_output_sink.cancel_active_tool_calls(
+                "The tool call was cancelled because the user stopped the turn.",
+            );
+            self.runtime
+                .emit_finish_with_reason(None, Some(TurnStopReason::Cancelled));
+            term_guard.disarm();
+            return Ok(());
+        };
 
         let elapsed_ms = now_ms() - started_at;
         self.runtime.bump_activity();
 
         let outcome = match result {
-            Some(Ok(agent_result)) => {
+            Ok(agent_result) => {
                 let stop_reason = map_engine_stop_reason(agent_result.stop_reason);
                 info!(
                     conversation_id = %self.runtime.conversation_id(),
@@ -889,6 +895,10 @@ impl crate::runtime_handle::AgentRuntimeControl for NomiAgentManager {
                     ?stop_reason,
                     "Nomi engine.execute_turn() completed, emitting Finish"
                 );
+
+                self.backend_output_sink.fail_active_tool_calls(&format!(
+                    "The model turn ended with {stop_reason:?} before this tool call reached a terminal state."
+                ));
 
                 // Phase 3 observability: a per-turn metrics event the UI shows as
                 // duration / token cost and telemetry records. Purely additive and
@@ -938,7 +948,7 @@ impl crate::runtime_handle::AgentRuntimeControl for NomiAgentManager {
                 self.runtime.emit_finish_with_reason(None, Some(stop_reason));
                 Ok(())
             }
-            Some(Err(e)) => {
+            Err(e) => {
                 let error_msg = format!("Nomi agent error: {e}");
                 error!(
                     conversation_id = %self.runtime.conversation_id(),
@@ -947,21 +957,12 @@ impl crate::runtime_handle::AgentRuntimeControl for NomiAgentManager {
                     "Nomi engine.execute_turn() failed, emitting Error+Finish"
                 );
                 let send_error = nomi_engine_error_to_send_error(error_msg);
+                self.backend_output_sink.fail_active_tool_calls(&format!(
+                    "The model/provider turn failed before this tool call completed: {e}"
+                ));
                 self.runtime.emit_error_data(send_error.stream_error().clone());
                 self.runtime.emit_finish(None);
                 Err(send_error)
-            }
-            None => {
-                // User-initiated stop: a deliberate, clean termination — NOT a
-                // fault. Emit Finish(Cancelled) instead of the historical
-                // Error("Stopped by user") + Finish(None): the Error made
-                // AutoWork classify the turn as failed (re-pend → re-claim →
-                // re-inject seconds after the user pressed stop) and made IDMM
-                // treat the stop as a recoverable stall (injecting a hidden
-                // "Please continue."). Downstream consumers now see the
-                // explicit Cancelled stop_reason and stand down.
-                self.runtime.emit_finish_with_reason(None, Some(TurnStopReason::Cancelled));
-                Ok(())
             }
         };
 
@@ -991,6 +992,7 @@ impl crate::runtime_handle::AgentRuntimeControl for NomiAgentManager {
 /// never leak a spurious terminal event past a real one. (Phase 0 F0.2)
 struct TurnTerminationGuard {
     runtime: AgentRuntimeState,
+    backend_output_sink: Arc<BackendOutputSink>,
     armed: bool,
 }
 
@@ -1003,6 +1005,9 @@ impl TurnTerminationGuard {
 impl Drop for TurnTerminationGuard {
     fn drop(&mut self) {
         if self.armed {
+            self.backend_output_sink.cancel_active_tool_calls(
+                "The turn ended unexpectedly before this tool call reached a terminal state.",
+            );
             self.runtime
                 .emit_finish_with_reason(None, Some(TurnStopReason::Cancelled));
         }
@@ -1207,11 +1212,14 @@ fn nomi_engine_error_to_send_error(error_msg: String) -> AgentSendError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::protocol::events::ToolCallStatus;
     use crate::runtime_handle::AgentRuntimeControl;
+    use nomi_protocol::events::ToolCategory;
     use nomi_providers::{LlmProvider, ProviderError};
-    use nomi_tools::registry::ToolRegistry;
+    use nomi_tools::{registry::ToolRegistry, Tool};
     use nomi_types::llm::{LlmEvent, LlmRequest};
     use nomi_types::message::{ContentBlock, Role, StopReason};
+    use nomi_types::tool::ToolResult;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     fn make_test_config() -> NomiResolvedConfig {
@@ -1332,6 +1340,63 @@ mod tests {
         }
     }
 
+    struct HangingTool {
+        started: Arc<tokio::sync::Semaphore>,
+    }
+
+    #[async_trait::async_trait]
+    impl Tool for HangingTool {
+        fn name(&self) -> &str {
+            "hanging_tool"
+        }
+
+        fn description(&self) -> &str {
+            "A test tool that never returns"
+        }
+
+        fn input_schema(&self) -> serde_json::Value {
+            serde_json::json!({"type": "object", "properties": {}})
+        }
+
+        fn is_concurrency_safe(&self, _input: &serde_json::Value) -> bool {
+            false
+        }
+
+        async fn execute(&self, _input: serde_json::Value) -> ToolResult {
+            self.started.add_permits(1);
+            std::future::pending::<ToolResult>().await
+        }
+
+        fn category(&self) -> ToolCategory {
+            ToolCategory::Exec
+        }
+    }
+
+    struct HangingKnowledgeSink {
+        started: Arc<tokio::sync::Semaphore>,
+    }
+
+    #[async_trait::async_trait]
+    impl nomi_agent::knowledge_tools::KnowledgeRetrievalSink for HangingKnowledgeSink {
+        async fn search(
+            &self,
+            _kb_ids: &[nomifun_common::KnowledgeBaseId],
+            _query: &str,
+            _limit: usize,
+        ) -> Result<Vec<nomi_agent::knowledge_tools::KnowledgeHit>, String> {
+            self.started.add_permits(1);
+            std::future::pending().await
+        }
+
+        async fn read_document(
+            &self,
+            _kb_ids: &[nomifun_common::KnowledgeBaseId],
+            _handle: &str,
+        ) -> Result<String, String> {
+            Err("not used by this test".to_owned())
+        }
+    }
+
     fn make_test_engine_config() -> Config {
         let mut config = Config::resolve(&CliArgs {
             provider: Some("anthropic".into()),
@@ -1365,10 +1430,18 @@ mod tests {
     }
 
     fn make_agent_with_provider(provider: Arc<dyn LlmProvider>) -> NomiAgentManager {
+        make_agent_with_provider_and_max_turns(provider, Some(10))
+    }
+
+    fn make_agent_with_provider_and_max_turns(
+        provider: Arc<dyn LlmProvider>,
+        max_turns: Option<usize>,
+    ) -> NomiAgentManager {
         let runtime = AgentRuntimeState::new("conv-auto-continue", "/project", 128);
         let backend_output_sink = Arc::new(BackendOutputSink::new(runtime.event_sender()));
         let output: Arc<dyn OutputSink> = backend_output_sink.clone();
-        let config = make_test_engine_config();
+        let mut config = make_test_engine_config();
+        config.max_turns = max_turns;
         let mut engine = AgentEngine::new_with_provider(
             provider,
             config.clone(),
@@ -1377,7 +1450,13 @@ mod tests {
             PathBuf::from("/project"),
         );
         let approval_manager = Arc::new(ToolApprovalManager::new());
+        let confirmations = Arc::new(std::sync::RwLock::new(Vec::new()));
+        let protocol_sink = BackendProtocolSink::new(
+            runtime.event_sender(),
+            confirmations.clone(),
+        );
         engine.set_approval_manager(approval_manager.clone());
+        engine.set_protocol_writer(Arc::new(protocol_sink));
 
         NomiAgentManager {
             runtime,
@@ -1387,7 +1466,7 @@ mod tests {
             mcp_managers: Vec::new(),
             loopback_capability_leases: Default::default(),
             approval_manager,
-            confirmations: Arc::new(std::sync::RwLock::new(Vec::new())),
+            confirmations,
             turn_cancel: std::sync::Mutex::new(tokio_util::sync::CancellationToken::new()),
             lifecycle_gate: std::sync::Mutex::new(()),
             turn_gate: Mutex::new(()),
@@ -1399,6 +1478,30 @@ mod tests {
             knowledge_prelude: std::sync::Mutex::new(None),
             knowledge_auto_rag: None,
         }
+    }
+
+    fn assert_single_cancelled_finish_without_running_tools(
+        agent: &NomiAgentManager,
+        rx: &mut broadcast::Receiver<AgentStreamEvent>,
+    ) {
+        let events = std::iter::from_fn(|| rx.try_recv().ok()).collect::<Vec<_>>();
+        let finish_reasons = events
+            .iter()
+            .filter_map(|event| match event {
+                AgentStreamEvent::Finish(data) => Some(data.stop_reason),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(finish_reasons, vec![Some(TurnStopReason::Cancelled)]);
+        assert!(
+            !events.iter().any(|event| matches!(
+                event,
+                AgentStreamEvent::ToolCall(data) if data.status == ToolCallStatus::Running
+            )),
+            "cancelled preparation must not leave a Running tool card"
+        );
+        assert_eq!(agent.status(), Some(ConversationStatus::Finished));
     }
 
     #[tokio::test]
@@ -1565,6 +1668,477 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn provider_error_never_publishes_uncommitted_tool_progress() {
+        let provider = Arc::new(ScriptedProvider::new(vec![
+            vec![
+                LlmEvent::ToolUseDelta {
+                    id: "stale-preview".into(),
+                    name: "Write".into(),
+                    input: Some(serde_json::json!({"file_path": "/tmp/stale.html"})),
+                },
+                LlmEvent::ToolUse {
+                    id: "stale-preview".into(),
+                    name: "Write".into(),
+                    input: serde_json::json!({
+                        "file_path": "/tmp/stale.html",
+                        "content": "not committed"
+                    }),
+                    extra: None,
+                },
+                LlmEvent::Error("malformed structured tool arguments".into()),
+            ],
+            vec![LlmEvent::Done {
+                stop_reason: StopReason::MaxTokens,
+                usage: Default::default(),
+            }],
+            vec![LlmEvent::Done {
+                stop_reason: StopReason::EndTurn,
+                usage: Default::default(),
+            }],
+        ]));
+        let agent = make_agent_with_provider(provider.clone());
+        let mut rx = agent.subscribe();
+
+        let first_result = agent
+            .send_message(SendMessageData {
+                content: "trigger malformed structured progress".into(),
+                msg_id: "msg-error".into(),
+                files: Vec::new(),
+                inject_skills: Vec::new(),
+                origin: None,
+            })
+            .await;
+        assert!(first_result.is_err());
+
+        let first_statuses = std::iter::from_fn(|| rx.try_recv().ok())
+            .filter_map(|event| match event {
+                AgentStreamEvent::ToolCall(data) if data.call_id == "nomi-stale-preview" => {
+                    Some(data.status)
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            first_statuses.is_empty(),
+            "partial provider progress must never enter the frontend lifecycle"
+        );
+
+        agent
+            .send_message(SendMessageData {
+                content: "start a clean turn".into(),
+                msg_id: "msg-next".into(),
+                files: Vec::new(),
+                inject_skills: Vec::new(),
+                origin: None,
+            })
+            .await
+            .unwrap();
+
+        let resurrected = std::iter::from_fn(|| rx.try_recv().ok()).any(|event| {
+            matches!(
+                event,
+                AgentStreamEvent::ToolCall(data) if data.call_id == "nomi-stale-preview"
+            )
+        });
+        assert!(
+            !resurrected,
+            "a later MaxTokens continuation must not recover a failed prior call"
+        );
+        assert_eq!(provider.calls(), 3);
+    }
+
+    #[tokio::test]
+    async fn cancel_drains_committed_tool_progress() {
+        let provider = Arc::new(BlockingProvider::new());
+        let started = Arc::new(tokio::sync::Semaphore::new(0));
+        let mut agent = make_agent_with_provider(provider.clone());
+        agent
+            .engine
+            .get_mut()
+            .registry_mut()
+            .register(Box::new(HangingTool {
+                started: Arc::clone(&started),
+            }));
+        let agent = Arc::new(agent);
+        let mut rx = agent.subscribe();
+        let send_task = {
+            let agent = Arc::clone(&agent);
+            tokio::spawn(async move {
+                agent
+                    .send_message(SendMessageData {
+                        content: "start a committed tool call".into(),
+                        msg_id: "msg-cancel-tool".into(),
+                        files: Vec::new(),
+                        inject_skills: Vec::new(),
+                        origin: None,
+                    })
+                    .await
+            })
+        };
+        provider.called.acquire().await.unwrap().forget();
+
+        let provider_tx = provider
+            .senders
+            .lock()
+            .expect("sender lock poisoned")
+            .last()
+            .expect("blocking provider sender")
+            .clone();
+        provider_tx
+            .send(LlmEvent::ToolUse {
+                id: "cancel-committed".into(),
+                name: "hanging_tool".into(),
+                input: serde_json::json!({}),
+                extra: None,
+            })
+            .await
+            .unwrap();
+        provider_tx
+            .send(LlmEvent::Done {
+                stop_reason: StopReason::ToolUse,
+                usage: Default::default(),
+            })
+            .await
+            .unwrap();
+        drop(provider_tx);
+        provider
+            .senders
+            .lock()
+            .expect("sender lock poisoned")
+            .pop()
+            .expect("blocking provider sender should still be registered");
+
+        tokio::time::timeout(std::time::Duration::from_secs(1), started.acquire())
+            .await
+            .expect("committed tool should start execution")
+            .expect("start semaphore should remain open")
+            .forget();
+
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            loop {
+                if let AgentStreamEvent::ToolCall(data) = rx.recv().await.unwrap()
+                    && data.call_id == "nomi-cancel-committed"
+                    && data.status == ToolCallStatus::Running
+                {
+                    break;
+                }
+            }
+        })
+        .await
+        .expect("tool progress should reach the frontend before cancellation");
+
+        agent.cancel().await.unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(1), send_task)
+            .await
+            .expect("cancelled send should unwind")
+            .unwrap()
+            .unwrap();
+
+        let remaining_events = std::iter::from_fn(|| rx.try_recv().ok()).collect::<Vec<_>>();
+        let terminal_events = remaining_events
+            .iter()
+            .filter_map(|event| match event {
+                AgentStreamEvent::ToolCall(data) if data.call_id == "nomi-cancel-committed" => {
+                    Some(data)
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(terminal_events.len(), 1);
+        assert_eq!(terminal_events[0].status, ToolCallStatus::Error);
+        assert_eq!(
+            terminal_events[0].output.as_deref(),
+            Some("Tool execution canceled by user")
+        );
+        assert_eq!(
+            remaining_events
+                .iter()
+                .filter_map(|event| match event {
+                    AgentStreamEvent::Finish(data) => Some(data.stop_reason),
+                    _ => None,
+                })
+                .collect::<Vec<_>>(),
+            vec![Some(TurnStopReason::Cancelled)]
+        );
+        assert_eq!(agent.status(), Some(ConversationStatus::Finished));
+    }
+
+    #[tokio::test]
+    async fn cancel_drops_a_hung_tool_and_emits_one_error_terminal() {
+        let provider = Arc::new(ScriptedProvider::new(vec![vec![
+            LlmEvent::ToolUse {
+                id: "hang-1".into(),
+                name: "hanging_tool".into(),
+                input: serde_json::json!({}),
+                extra: None,
+            },
+            LlmEvent::Done {
+                stop_reason: StopReason::ToolUse,
+                usage: Default::default(),
+            },
+        ]]));
+        let started = Arc::new(tokio::sync::Semaphore::new(0));
+        let mut agent = make_agent_with_provider(provider.clone());
+        agent
+            .engine
+            .get_mut()
+            .registry_mut()
+            .register(Box::new(HangingTool {
+                started: Arc::clone(&started),
+            }));
+        let agent = Arc::new(agent);
+        let mut rx = agent.subscribe();
+
+        let send_task = {
+            let agent = Arc::clone(&agent);
+            tokio::spawn(async move {
+                agent
+                    .send_message(SendMessageData {
+                        content: "run the hanging tool".into(),
+                        msg_id: "msg-hanging-tool".into(),
+                        files: Vec::new(),
+                        inject_skills: Vec::new(),
+                        origin: None,
+                    })
+                    .await
+            })
+        };
+
+        tokio::time::timeout(std::time::Duration::from_secs(1), started.acquire())
+            .await
+            .expect("hanging tool should start")
+            .expect("start semaphore should remain open")
+            .forget();
+
+        agent.cancel().await.unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(1), send_task)
+            .await
+            .expect("cancellation must not await a hung tool")
+            .unwrap()
+            .unwrap();
+
+        let statuses = std::iter::from_fn(|| rx.try_recv().ok())
+            .filter_map(|event| match event {
+                AgentStreamEvent::ToolCall(data) if data.call_id == "nomi-hang-1" => {
+                    Some(data.status)
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            statuses,
+            vec![ToolCallStatus::Running, ToolCallStatus::Error],
+            "a cancelled hung tool must terminate once and never complete"
+        );
+        assert_eq!(provider.calls(), 1);
+    }
+
+    #[tokio::test]
+    async fn cancel_interrupts_hung_knowledge_preparation() {
+        let provider = Arc::new(ScriptedProvider::new(Vec::new()));
+        let started = Arc::new(tokio::sync::Semaphore::new(0));
+        let retrieval: Arc<dyn nomi_agent::knowledge_tools::KnowledgeRetrievalSink> =
+            Arc::new(HangingKnowledgeSink {
+                started: Arc::clone(&started),
+            });
+        let mut agent = make_agent_with_provider(provider.clone());
+        agent.knowledge_auto_rag = Some((retrieval, vec![nomifun_common::KnowledgeBaseId::new()]));
+        let agent = Arc::new(agent);
+        let mut rx = agent.subscribe();
+
+        let send_task = {
+            let agent = Arc::clone(&agent);
+            tokio::spawn(async move {
+                agent
+                    .send_message(SendMessageData {
+                        content: "search the mounted knowledge base".into(),
+                        msg_id: "msg-hanging-rag".into(),
+                        files: Vec::new(),
+                        inject_skills: Vec::new(),
+                        origin: None,
+                    })
+                    .await
+            })
+        };
+
+        tokio::time::timeout(std::time::Duration::from_secs(1), started.acquire())
+            .await
+            .expect("knowledge preparation should start")
+            .expect("start semaphore should remain open")
+            .forget();
+        agent.cancel().await.unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(1), send_task)
+            .await
+            .expect("cancellation must interrupt a hung knowledge search")
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(provider.calls(), 0);
+        assert_single_cancelled_finish_without_running_tools(&agent, &mut rx);
+    }
+
+    #[tokio::test]
+    async fn cancel_interrupts_engine_lock_preparation() {
+        let provider = Arc::new(ScriptedProvider::new(Vec::new()));
+        let agent = Arc::new(make_agent_with_provider(provider.clone()));
+        let mut rx = agent.subscribe();
+        let engine_guard = agent.engine.lock().await;
+
+        let send_task = {
+            let agent = Arc::clone(&agent);
+            tokio::spawn(async move {
+                agent
+                    .send_message(SendMessageData {
+                        content: "wait for engine preparation".into(),
+                        msg_id: "msg-blocked-engine-lock".into(),
+                        files: Vec::new(),
+                        inject_skills: Vec::new(),
+                        origin: None,
+                    })
+                    .await
+            })
+        };
+
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            while agent.status() != Some(ConversationStatus::Running) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("turn should enter Running before waiting for the engine lock");
+
+        agent.cancel().await.unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(1), send_task)
+            .await
+            .expect("cancellation must interrupt engine-lock preparation")
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(provider.calls(), 0);
+        assert_single_cancelled_finish_without_running_tools(&agent, &mut rx);
+        drop(engine_guard);
+    }
+
+    #[tokio::test]
+    async fn send_message_does_not_auto_continue_after_max_turns() {
+        let provider = Arc::new(ScriptedProvider::new(vec![
+            vec![
+                LlmEvent::ToolUse {
+                    id: "loop-1".into(),
+                    name: "ToolSearch".into(),
+                    input: serde_json::json!({"query": "missing_loop_tool"}),
+                    extra: None,
+                },
+                LlmEvent::Done {
+                    stop_reason: StopReason::ToolUse,
+                    usage: Default::default(),
+                },
+            ],
+            // This response is present only to expose a regression: the old
+            // host policy issued a second provider pass after MaxTurns.
+            vec![LlmEvent::Done {
+                stop_reason: StopReason::EndTurn,
+                usage: Default::default(),
+            }],
+        ]));
+        let agent = make_agent_with_provider_and_max_turns(provider.clone(), Some(1));
+        {
+            let mut engine = agent.engine.lock().await;
+            let deferred_state = engine.registry_mut().deferred_state();
+            engine.registry_mut().register(Box::new(
+                nomi_tools::tool_search::ToolSearchTool::new(deferred_state),
+            ));
+        }
+        let mut rx = agent.subscribe();
+
+        agent
+            .send_message(SendMessageData {
+                content: "keep calling the tool".into(),
+                msg_id: "msg-max-turns".into(),
+                files: Vec::new(),
+                inject_skills: Vec::new(),
+                origin: None,
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(
+            provider.calls(),
+            1,
+            "MaxTurns must terminate the host turn instead of resetting the engine budget"
+        );
+
+        let mut completed_reasons = Vec::new();
+        let mut finish_reason = None;
+        while let Ok(event) = rx.try_recv() {
+            match event {
+                AgentStreamEvent::TurnCompleted(data) => completed_reasons.push(data.stop_reason),
+                AgentStreamEvent::Finish(data) => finish_reason = data.stop_reason,
+                _ => {}
+            }
+        }
+        assert_eq!(
+            completed_reasons,
+            vec![Some(TurnStopReason::MaxTurnRequests)]
+        );
+        assert_eq!(finish_reason, Some(TurnStopReason::MaxTurnRequests));
+    }
+
+    #[tokio::test]
+    async fn max_turns_does_not_consume_late_steering_or_restart_the_engine() {
+        let provider = Arc::new(ScriptedProvider::new(Vec::new()));
+        let agent = make_agent_with_provider_and_max_turns(provider.clone(), Some(0));
+        agent
+            .steering_inbox
+            .lock()
+            .unwrap()
+            .push_back("late user direction".to_owned());
+        let mut rx = agent.subscribe();
+
+        agent
+            .send_message(SendMessageData {
+                content: "start".into(),
+                msg_id: "msg-max-turns-late-steer".into(),
+                files: Vec::new(),
+                inject_skills: Vec::new(),
+                origin: None,
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(provider.calls(), 0);
+        assert_eq!(
+            agent
+                .steering_inbox
+                .lock()
+                .unwrap()
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            vec!["late user direction"],
+            "a MaxTurns terminal must leave late steering for the next user turn"
+        );
+
+        let mut starts = 0;
+        let mut completed_reasons = Vec::new();
+        let mut finish_reason = None;
+        while let Ok(event) = rx.try_recv() {
+            match event {
+                AgentStreamEvent::Start(_) => starts += 1,
+                AgentStreamEvent::TurnCompleted(data) => completed_reasons.push(data.stop_reason),
+                AgentStreamEvent::Finish(data) => finish_reason = data.stop_reason,
+                _ => {}
+            }
+        }
+        assert_eq!(starts, 1, "MaxTurns must not start a race-tail engine pass");
+        assert_eq!(
+            completed_reasons,
+            vec![Some(TurnStopReason::MaxTurnRequests)]
+        );
+        assert_eq!(finish_reason, Some(TurnStopReason::MaxTurnRequests));
+    }
+
+    #[tokio::test]
     async fn max_tokens_continuation_prompt_forbids_repeating_large_write() {
         let provider = Arc::new(ScriptedProvider::new(vec![
             vec![
@@ -1617,21 +2191,15 @@ mod tests {
         assert!(continuation_text.contains("append or edit in chunks"));
         assert!(continuation_text.contains("verify the target file exists"));
 
-        let mut recovered_tool_status = None;
-        while let Ok(event) = rx.try_recv() {
-            if let AgentStreamEvent::ToolCall(data) = event
-                && data.call_id == "nomi-call-large-write"
-                && data.status == crate::protocol::events::tool_call::ToolCallStatus::Completed
-            {
-                recovered_tool_status = data.output;
-            }
-        }
-
+        let leaked_partial_call = std::iter::from_fn(|| rx.try_recv().ok()).any(|event| {
+            matches!(
+                event,
+                AgentStreamEvent::ToolCall(data) if data.call_id == "nomi-call-large-write"
+            )
+        });
         assert!(
-            recovered_tool_status
-                .as_deref()
-                .is_some_and(|output| output.contains("Automatic continuation recovered from the output token limit")),
-            "automatic continuation should resolve the truncated tool card without marking it failed"
+            !leaked_partial_call,
+            "an uncommitted partial tool call must never enter the frontend lifecycle"
         );
     }
 
@@ -1993,15 +2561,27 @@ mod tests {
         // armed guard must still broadcast one so the relay does not hang. (F0.2)
         let rt = AgentRuntimeState::new("c-guard", "/w", 16);
         let mut rx = rt.subscribe();
+        let backend_output_sink = Arc::new(BackendOutputSink::new(rt.event_sender()));
+        backend_output_sink.emit_tool_call("guarded-call", "Write", "{}");
+        assert!(matches!(rx.try_recv(), Ok(AgentStreamEvent::ToolCall(_))));
         {
             let _g = TurnTerminationGuard {
                 runtime: rt.clone(),
+                backend_output_sink,
                 armed: true,
             };
         }
         match rx.try_recv() {
+            Ok(AgentStreamEvent::ToolCall(data)) => {
+                assert_eq!(data.call_id, "nomi-guarded-call");
+                assert_eq!(data.status, ToolCallStatus::Error);
+                assert_eq!(data.description.as_deref(), Some("Tool call cancelled"));
+            }
+            other => panic!("expected tool cleanup on armed drop, got {:?}", other),
+        }
+        match rx.try_recv() {
             Ok(AgentStreamEvent::Finish(_)) => {}
-            other => panic!("expected Finish on armed drop, got {:?}", other),
+            other => panic!("expected Finish after tool cleanup, got {:?}", other),
         }
         assert_eq!(rt.status(), Some(ConversationStatus::Finished));
     }
@@ -2012,9 +2592,11 @@ mod tests {
         // real terminal event; a disarmed guard must stay silent on drop.
         let rt = AgentRuntimeState::new("c-guard2", "/w", 16);
         let mut rx = rt.subscribe();
+        let backend_output_sink = Arc::new(BackendOutputSink::new(rt.event_sender()));
         {
             let mut g = TurnTerminationGuard {
                 runtime: rt.clone(),
+                backend_output_sink,
                 armed: true,
             };
             g.disarm();

@@ -1,7 +1,7 @@
 use nomifun_common::TimestampMs;
 
 use crate::error::DbError;
-use crate::models::{RequirementRow, RequirementRowUpdate, RequirementTagRow};
+use crate::models::{NewRequirementRow, RequirementRow, RequirementRowUpdate, RequirementTagRow};
 
 /// Filters + pagination for listing requirements.
 #[derive(Debug, Clone, Default)]
@@ -20,7 +20,7 @@ pub struct ListRequirementsParams {
     /// Substring search over title + content (case-insensitive).
     pub q: Option<String>,
     /// Sort column (whitelisted in the repository). Recognized values:
-    /// `"id" | "created_at" | "updated_at" | "status"`. Any other value — or
+    /// `"display_no" | "id" | "created_at" | "updated_at" | "status"`. Any other value — or
     /// `None` — falls back to the default queue order
     /// (`sort_seq ASC, priority DESC, created_at ASC`). User input is never
     /// interpolated into SQL; it only selects a fixed, hard-coded column.
@@ -37,9 +37,9 @@ pub struct ListRequirementsParams {
 /// Data access abstraction for the `requirements` table.
 #[async_trait::async_trait]
 pub trait IRequirementRepository: Send + Sync {
-    /// Insert a new requirement row with its caller-supplied canonical
-    /// `req_<UUIDv7>` entity ID.
-    async fn insert(&self, row: &RequirementRow) -> Result<String, DbError>;
+    /// Atomically allocate an immutable human-facing display number and insert
+    /// a new requirement with its caller-supplied canonical `req_<UUIDv7>` ID.
+    async fn insert(&self, row: &NewRequirementRow) -> Result<RequirementRow, DbError>;
 
     /// Partial update by ID. Returns `DbError::NotFound` if absent.
     async fn update(&self, id: &str, params: &RequirementRowUpdate) -> Result<(), DbError>;

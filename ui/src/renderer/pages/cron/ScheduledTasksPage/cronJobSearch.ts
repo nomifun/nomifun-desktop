@@ -26,8 +26,10 @@ function buildCronJobSearchText(job: ICronJob): string {
   if (job.schedule.kind === 'cron') pushSearchValue(parts, job.schedule.expr);
   pushSearchValue(parts, job.message);
   pushSearchValue(parts, job.execution_mode);
-  pushSearchValue(parts, job.metadata.conversation_id);
-  pushSearchValue(parts, `#${job.metadata.conversation_id}`);
+  if (job.metadata.conversation_id) {
+    pushSearchValue(parts, job.metadata.conversation_id);
+    pushSearchValue(parts, `#${job.metadata.conversation_id}`);
+  }
   pushSearchValue(parts, job.metadata.conversation_title);
   pushSearchValue(parts, job.metadata.agent_type);
   pushSearchValue(parts, job.metadata.agent_config?.backend);

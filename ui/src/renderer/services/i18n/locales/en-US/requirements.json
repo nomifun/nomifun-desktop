@@ -20,7 +20,7 @@
     "label": "Sort",
     "direction": "Direction",
     "default": "Default order",
-    "byId": "ID",
+    "byId": "Number",
     "byCreatedAt": "Created",
     "byUpdatedAt": "Updated",
     "byStatus": "Status",

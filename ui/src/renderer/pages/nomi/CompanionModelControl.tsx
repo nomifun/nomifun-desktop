@@ -10,6 +10,7 @@ import { Select, Tooltip } from '@arco-design/web-react';
 import { useModelProviderList, useProvidersQuery } from '@renderer/hooks/agent/useModelProviderList';
 import type { ProviderId } from '@/common/types/ids';
 import type { useCompanion } from './useNomi';
+import { useModelSelectorProviderLabel } from '@/renderer/hooks/agent/useModelSelectorProviderLabel';
 
 interface Props {
   /** 伙伴 profile + 乐观 patch 通道。 */
@@ -34,6 +35,7 @@ const CompanionModelControl: React.FC<Props> = ({ companion }) => {
   const { profile, patchCompanion } = companion;
   const { getAvailableModels } = useModelProviderList();
   const { data: rawProviders } = useProvidersQuery();
+  const providerLabel = useModelSelectorProviderLabel();
   const [draftProviderId, setDraftProviderId] = useState<ProviderId | null>(null);
 
   useEffect(() => {
@@ -110,7 +112,7 @@ const CompanionModelControl: React.FC<Props> = ({ companion }) => {
           )}
           {enabledProviders.map((p) => (
             <Select.Option key={p.id} value={p.id}>
-              {p.name}
+              {providerLabel(p)}
             </Select.Option>
           ))}
         </Select>

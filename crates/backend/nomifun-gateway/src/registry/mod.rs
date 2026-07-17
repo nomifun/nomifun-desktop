@@ -24,6 +24,38 @@ use serde_json::{Map, Value, json};
 use self::capability::coerce_args_to_schema;
 use crate::deps::{CallerCtx, GatewayDeps};
 
+/// Enforce the one gateway outcome protocol before a capability result reaches
+/// any transport adapter. Keeping this at the shared dispatch boundary means
+/// MCP, REST, stdio, and streaming calls cannot disagree about whether a
+/// malformed handler response succeeded.
+fn validate_dispatch_outcome(value: Value) -> Value {
+    let Some(object) = value.as_object() else {
+        return json!({
+            "error": "invalid capability response envelope: expected a JSON object"
+        });
+    };
+
+    let has_result = object.contains_key("result");
+    let has_error = object.contains_key("error");
+    let is_confirmation = object
+        .get("needs_confirmation")
+        .and_then(Value::as_bool)
+        == Some(true);
+
+    if is_confirmation && (has_result || has_error) {
+        return json!({
+            "error": "invalid capability response envelope: confirmation cannot be mixed with result or error"
+        });
+    }
+    if has_result ^ has_error || is_confirmation {
+        return value;
+    }
+
+    json!({
+        "error": "invalid capability response envelope: expected exactly one of result or error"
+    })
+}
+
 /// A tool advertised to MCP clients via `tools/list`.
 pub struct ToolSpec {
     pub name: &'static str,
@@ -257,10 +289,10 @@ impl Registry {
         if cap.meta.access_scope == AccessScope::InstanceOwner
             && ctx.user_id.as_str() != deps.authoritative_user_id.as_ref()
         {
-            return Some(json!({
+            return Some(validate_dispatch_outcome(json!({
                 "error": "installation_owner_required",
                 "tool": name,
-            }));
+            })));
         }
         let surface = ctx.surface();
         let args = coerce_args_to_schema(&Value::Object(cap.input_schema.clone()), args.clone());
@@ -280,7 +312,7 @@ impl Registry {
             }),
             Decision::Allow => (cap.handler)(deps, ctx, args).await,
         };
-        Some(result)
+        Some(validate_dispatch_outcome(result))
     }
 
     /// Streaming dispatch: like [`dispatch_opt`](Self::dispatch_opt) but a
@@ -301,10 +333,10 @@ impl Registry {
         if cap.meta.access_scope == AccessScope::InstanceOwner
             && ctx.user_id.as_str() != deps.authoritative_user_id.as_ref()
         {
-            return Some(json!({
+            return Some(validate_dispatch_outcome(json!({
                 "error": "installation_owner_required",
                 "tool": name,
-            }));
+            })));
         }
         let surface = ctx.surface();
         let args = coerce_args_to_schema(&Value::Object(cap.input_schema.clone()), args.clone());
@@ -327,7 +359,7 @@ impl Registry {
                 None => (cap.handler)(deps, ctx, args).await,
             },
         };
-        Some(result)
+        Some(validate_dispatch_outcome(result))
     }
 }
 
@@ -335,6 +367,36 @@ impl Registry {
 mod tests {
     use super::*;
     use nomifun_api_types::GatewayMcpConfig;
+
+    #[test]
+    fn dispatch_outcome_protocol_is_fail_closed() {
+        for valid in [
+            json!({"result": null}),
+            json!({"error": "failed"}),
+            json!({"needs_confirmation": true, "tool": "nomi_delete"}),
+        ] {
+            assert_eq!(validate_dispatch_outcome(valid.clone()), valid);
+        }
+
+        for invalid in [
+            json!(null),
+            json!(["bare"]),
+            json!({"ok": true}),
+            json!({"result": "ok", "error": "failed"}),
+            json!({"result": "ok", "needs_confirmation": true}),
+            json!({"error": "failed", "needs_confirmation": true}),
+        ] {
+            let outcome = validate_dispatch_outcome(invalid);
+            assert!(outcome.get("error").is_some());
+            assert!(outcome.get("result").is_none());
+        }
+
+        let nested_domain_error = json!({"result": {"error": "ordinary domain data"}});
+        assert_eq!(
+            validate_dispatch_outcome(nested_domain_error.clone()),
+            nested_domain_error
+        );
+    }
 
     /// Boot-time invariants for every registered capability: unique names
     /// (panics in `build` otherwise), `nomi_`-prefixed, a non-empty summary, a

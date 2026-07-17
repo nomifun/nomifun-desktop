@@ -7,8 +7,14 @@
  */
 
 .arco-checkbox-mask {
+  position: relative;
+  overflow: hidden;
   background-color: var(--control-idle-bg, var(--color-bg-2)) !important;
-  border-color: var(--control-idle-border, var(--color-border-3)) !important;
+  border: 1px solid var(--control-idle-border, var(--color-border-3)) !important;
+  transition:
+    background-color 160ms ease-out,
+    border-color 160ms ease-out,
+    box-shadow 160ms ease-out;
 }
 
 .arco-checkbox:hover .arco-checkbox-mask {
@@ -18,14 +24,29 @@
 
 .arco-checkbox-checked .arco-checkbox-mask,
 .arco-checkbox-indeterminate .arco-checkbox-mask {
-  background-color: var(--control-selected-bg, var(--color-primary)) !important;
-  border-color: transparent !important;
+  background-color: var(--enhanced-checkbox-selected-bg, var(--control-selected-bg, var(--color-primary))) !important;
+  border-color: var(--enhanced-checkbox-selected-bg, var(--control-selected-bg, var(--color-primary))) !important;
 }
 
-.arco-checkbox-checked .arco-checkbox-mask-icon,
+.arco-checkbox-mask-icon {
+  position: absolute;
+  inset: 0;
+  width: 8px;
+  height: 8px;
+  margin: auto;
+  color: var(--enhanced-checkbox-selected-fg, var(--control-selected-fg, var(--color-white))) !important;
+  background-color: transparent !important;
+  transform-origin: center;
+  transition: transform 160ms ease-out;
+}
+
+.arco-checkbox-checked .arco-checkbox-mask-icon {
+  transform: scale(1);
+}
+
 .arco-checkbox-indeterminate .arco-checkbox-mask::after {
-  color: var(--control-selected-fg, var(--color-white)) !important;
-  background-color: var(--control-selected-fg, var(--color-white)) !important;
+  background-color: var(--enhanced-checkbox-selected-fg, var(--control-selected-fg, var(--color-white))) !important;
+  transition: transform 160ms ease-out;
 }
 
 .arco-checkbox-disabled.arco-checkbox-checked .arco-checkbox-mask,
@@ -46,22 +67,6 @@
 
 .requirements-view-toggle [role='tab'][aria-selected='false'] {
   color: var(--color-text-2) !important;
-}
-
-/* Requirements workspace selection: a scoped, complete selected fill with an
- * inset indicator. This contract is injected after runtime theme CSS, so the
- * selected state stays legible with every preset. */
-.requirements-selection-checkbox .arco-checkbox-mask,
-.preset-skill-selection-checkbox .arco-checkbox-mask,
-.preset-scope-selection-checkbox .arco-checkbox-mask,
-.guid-mcp-selection-checkbox .arco-checkbox-mask,
-.migrate-events-checkbox .arco-checkbox-mask,
-.open-capabilities-domain-checkbox .arco-checkbox-mask {
-  overflow: hidden;
-  transition:
-    background-color 160ms ease-out,
-    border-color 160ms ease-out,
-    box-shadow 160ms ease-out;
 }
 
 .migrate-events-checkbox .arco-checkbox-mask {
@@ -103,51 +108,9 @@ body[arco-theme='dark'] .open-capabilities-page .text-t-secondary {
   color: var(--color-text-1) !important;
 }
 
-.requirements-selection-checkbox .arco-checkbox-mask-icon,
-.preset-skill-selection-checkbox .arco-checkbox-mask-icon,
-.preset-scope-selection-checkbox .arco-checkbox-mask-icon,
-.guid-mcp-selection-checkbox .arco-checkbox-mask-icon,
 .migrate-events-checkbox .arco-checkbox-mask-icon,
 .open-capabilities-domain-checkbox .arco-checkbox-mask-icon {
-  position: absolute;
-  inset: 0;
-  width: 8px;
-  height: 8px;
-  margin: auto;
-  color: var(--control-selected-fg, var(--color-white)) !important;
-  background-color: transparent !important;
-  transform-origin: center;
-  transition: transform 160ms ease-out;
-}
-
-.preset-scope-selection-checkbox .arco-checkbox-mask-icon {
-  color: var(--enhanced-checkbox-selected-fg, var(--control-selected-fg, var(--color-white))) !important;
-}
-
-.guid-mcp-selection-checkbox .arco-checkbox-mask-icon {
-  color: var(--enhanced-checkbox-selected-fg, var(--control-selected-fg, var(--color-white))) !important;
-}
-
-.requirements-selection-checkbox.arco-checkbox-checked .arco-checkbox-mask,
-.requirements-selection-checkbox.arco-checkbox-indeterminate .arco-checkbox-mask,
-.preset-skill-selection-checkbox.arco-checkbox-checked .arco-checkbox-mask,
-.preset-skill-selection-checkbox.arco-checkbox-indeterminate .arco-checkbox-mask {
-  background-color: var(--control-selected-bg, var(--color-primary)) !important;
-  border-color: var(--control-selected-bg, var(--color-primary)) !important;
-}
-
-.preset-scope-selection-checkbox.arco-checkbox-checked .arco-checkbox-mask,
-.preset-scope-selection-checkbox.arco-checkbox-indeterminate .arco-checkbox-mask,
-.preset-scope-selection-checkbox .arco-checkbox-checked .arco-checkbox-mask,
-.preset-scope-selection-checkbox .arco-checkbox-indeterminate .arco-checkbox-mask {
-  background-color: var(--enhanced-checkbox-selected-bg, var(--control-selected-bg, var(--color-primary))) !important;
-  border-color: var(--enhanced-checkbox-selected-bg, var(--control-selected-bg, var(--color-primary))) !important;
-}
-
-.guid-mcp-selection-checkbox.arco-checkbox-checked .arco-checkbox-mask,
-.guid-mcp-selection-checkbox.arco-checkbox-indeterminate .arco-checkbox-mask {
-  background-color: var(--enhanced-checkbox-selected-bg, var(--control-selected-bg, var(--color-primary))) !important;
-  border-color: var(--enhanced-checkbox-selected-bg, var(--control-selected-bg, var(--color-primary))) !important;
+  color: #ffffff !important;
 }
 
 /* Migration exports are privacy-sensitive. Theme selection tokens preserve
@@ -160,27 +123,6 @@ body[arco-theme='dark'] .open-capabilities-page .text-t-secondary {
   border: 1px solid var(--control-idle-border, var(--color-border-3)) !important;
 }
 
-.migrate-events-checkbox .arco-checkbox-mask-icon,
-.open-capabilities-domain-checkbox .arco-checkbox-mask-icon {
-  color: #ffffff !important;
-}
-
-.requirements-selection-checkbox.arco-checkbox-checked .arco-checkbox-mask-icon,
-.preset-skill-selection-checkbox.arco-checkbox-checked .arco-checkbox-mask-icon,
-.preset-scope-selection-checkbox.arco-checkbox-checked .arco-checkbox-mask-icon,
-.preset-scope-selection-checkbox .arco-checkbox-checked .arco-checkbox-mask-icon,
-.guid-mcp-selection-checkbox.arco-checkbox-checked .arco-checkbox-mask-icon,
-.migrate-events-checkbox.arco-checkbox-checked .arco-checkbox-mask-icon,
-.open-capabilities-domain-checkbox.arco-checkbox-checked .arco-checkbox-mask-icon {
-  transform: scale(1);
-}
-
-.requirements-selection-checkbox.arco-checkbox-indeterminate .arco-checkbox-mask::after,
-.preset-skill-selection-checkbox.arco-checkbox-indeterminate .arco-checkbox-mask::after {
-  background-color: var(--control-selected-fg, var(--color-white)) !important;
-  transition: transform 160ms ease-out;
-}
-
 .migrate-events-checkbox.arco-checkbox-indeterminate .arco-checkbox-mask::after {
   background-color: #ffffff !important;
   transition: transform 160ms ease-out;
@@ -191,40 +133,18 @@ body[arco-theme='dark'] .open-capabilities-page .text-t-secondary {
   transition: transform 160ms ease-out;
 }
 
-.requirements-selection-checkbox.arco-checkbox-disabled.arco-checkbox-checked .arco-checkbox-mask,
-.requirements-selection-checkbox.arco-checkbox-disabled.arco-checkbox-indeterminate .arco-checkbox-mask,
-.preset-skill-selection-checkbox.arco-checkbox-disabled.arco-checkbox-checked .arco-checkbox-mask,
-.preset-skill-selection-checkbox.arco-checkbox-disabled.arco-checkbox-indeterminate .arco-checkbox-mask {
-  border-color: var(--control-disabled-selected-bg, var(--color-primary-light-3)) !important;
-}
-
-.preset-scope-selection-checkbox.arco-checkbox-disabled.arco-checkbox-checked .arco-checkbox-mask,
-.preset-scope-selection-checkbox.arco-checkbox-disabled.arco-checkbox-indeterminate .arco-checkbox-mask,
-.preset-scope-selection-checkbox .arco-checkbox-disabled.arco-checkbox-checked .arco-checkbox-mask,
-.preset-scope-selection-checkbox .arco-checkbox-disabled.arco-checkbox-indeterminate .arco-checkbox-mask {
+/* This must follow legacy scope markers so disabled controls never inherit an
+ * active fill from a page-specific checkbox rule. */
+.arco-checkbox.arco-checkbox-disabled.arco-checkbox-checked .arco-checkbox-mask,
+.arco-checkbox.arco-checkbox-disabled.arco-checkbox-indeterminate .arco-checkbox-mask {
+  background-color: var(--control-disabled-selected-bg, var(--color-primary-light-3)) !important;
   border-color: var(--control-disabled-selected-bg, var(--color-primary-light-3)) !important;
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .requirements-selection-checkbox .arco-checkbox-mask,
-  .requirements-selection-checkbox .arco-checkbox-mask-icon,
-  .requirements-selection-checkbox.arco-checkbox-indeterminate .arco-checkbox-mask::after,
-  .preset-skill-selection-checkbox .arco-checkbox-mask,
-  .preset-skill-selection-checkbox .arco-checkbox-mask-icon,
-  .preset-skill-selection-checkbox.arco-checkbox-indeterminate .arco-checkbox-mask::after,
-  .preset-scope-selection-checkbox .arco-checkbox-mask,
-  .preset-scope-selection-checkbox .arco-checkbox-mask-icon,
-  .preset-scope-selection-checkbox.arco-checkbox-indeterminate .arco-checkbox-mask::after,
-  .preset-scope-selection-checkbox .arco-checkbox-indeterminate .arco-checkbox-mask::after,
-  .guid-mcp-selection-checkbox .arco-checkbox-mask,
-  .guid-mcp-selection-checkbox .arco-checkbox-mask-icon,
-  .guid-mcp-selection-checkbox.arco-checkbox-indeterminate .arco-checkbox-mask::after,
-  .migrate-events-checkbox .arco-checkbox-mask,
-  .migrate-events-checkbox .arco-checkbox-mask-icon,
-  .migrate-events-checkbox.arco-checkbox-indeterminate .arco-checkbox-mask::after,
-  .open-capabilities-domain-checkbox .arco-checkbox-mask,
-  .open-capabilities-domain-checkbox .arco-checkbox-mask-icon,
-  .open-capabilities-domain-checkbox.arco-checkbox-indeterminate .arco-checkbox-mask::after {
+  .arco-checkbox-mask,
+  .arco-checkbox-mask-icon,
+  .arco-checkbox-indeterminate .arco-checkbox-mask::after {
     transition: none;
   }
 }

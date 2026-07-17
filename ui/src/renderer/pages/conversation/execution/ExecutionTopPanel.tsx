@@ -1,5 +1,5 @@
 import { Modal, Spin } from '@arco-design/web-react';
-import { EveryUser, Help, Loading, Right } from '@icon-park/react';
+import { EveryUser, Help, Loading } from '@icon-park/react';
 import React, { Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { ipcBridge } from '@/common';
@@ -10,7 +10,7 @@ import ExecutionPlanEditor, { type ExecutionModelPoolSelection } from './Executi
 import ExecutionAdjustBox from './ExecutionAdjustBox';
 import { ExecutionControls } from './ExecutionControls';
 import { useExecution } from './ExecutionContext';
-import { EXECUTION_STATUS_META } from './executionStatusMeta';
+import { isTerminalExecutionStatus } from './executionStatusMeta';
 import { stepStatusMeta } from './nodes/StepNode';
 import { useExecutionModelPool } from './useExecutionModelPool';
 import styles from './executionTopPanel.module.css';
@@ -59,7 +59,6 @@ const ExecutionTopPanel: React.FC = () => {
     projectedStepId,
     returnToMain,
     canvasOpen,
-    setCanvasOpen,
   } = execution;
 
   useEffect(() => {
@@ -152,8 +151,7 @@ const ExecutionTopPanel: React.FC = () => {
   if (!executionId || !canvasOpen) return null;
 
   const status = detail?.execution.status ?? '';
-  const statusMeta = status ? EXECUTION_STATUS_META[status] : undefined;
-  const statusColor = statusMeta?.color ?? 'var(--color-text-3)';
+  const showControls = !isTerminalExecutionStatus(status);
   const steps = (detail?.steps ?? []).filter((step) => step.superseded_in_revision == null);
   const runningCount = steps.filter((step) => step.status === 'running').length;
   const completedCount = steps.filter((step) => step.status === 'completed').length;
@@ -177,50 +175,27 @@ const ExecutionTopPanel: React.FC = () => {
         onPointerCancel={onResizeEnd}
       />
 
-      <div className={`${styles.header} flex flex-wrap items-center gap-x-10px gap-y-6px`}>
-        <button
-          type='button'
-          className={`${styles.toggle} inline-flex items-center gap-6px cursor-pointer select-none`}
-          aria-label={t('agentExecution.panel.collapse', {
-            defaultValue: '收起协作任务',
-          })}
-          onClick={() => setCanvasOpen(false)}
-        >
-          <Right theme='outline' size='14' strokeWidth={3} />
-          <span className='text-13px font-600 text-t-primary'>{t('agentExecution.panel.title', { defaultValue: '协作任务' })}</span>
-        </button>
+      {(showControls || leadThinking.active) && (
+        <div className={`${styles.header} flex flex-wrap items-center justify-end gap-x-10px gap-y-6px`}>
+          {leadThinking.active && (
+            <span className='inline-flex items-center gap-5px text-11px text-primary-6'>
+              <Loading theme='outline' size='12' className='animate-spin' />
+              {t('agentExecution.thinking.short', { defaultValue: '规划中…' })}
+            </span>
+          )}
 
-        <span
-          className='inline-flex items-center gap-6px rd-full px-9px py-3px text-11px font-600 leading-none'
-          style={{
-            color: statusColor,
-            background: 'color-mix(in srgb, currentColor 12%, transparent)',
-          }}
-        >
-          <span className='size-6px rd-full shrink-0' style={{ background: statusColor }} />
-          {t(`agentExecution.status.execution.${status}`, {
-            defaultValue: status,
-          })}
-        </span>
-
-        {leadThinking.active && (
-          <span className='inline-flex items-center gap-5px text-11px text-primary-6'>
-            <Loading theme='outline' size='12' className='animate-spin' />
-            {t('agentExecution.thinking.short', { defaultValue: '规划中…' })}
-          </span>
-        )}
-
-        <div className='ml-auto'>
-          <ExecutionControls
-            executionId={executionId}
-            executionVersion={detail?.execution.version ?? 0}
-            status={status}
-            inFlightCount={runningCount}
-            refetch={refetch}
-            onReplan={openReplan}
-          />
+          {showControls && (
+            <ExecutionControls
+              executionId={executionId}
+              executionVersion={detail?.execution.version ?? 0}
+              status={status}
+              inFlightCount={runningCount}
+              refetch={refetch}
+              onReplan={openReplan}
+            />
+          )}
         </div>
-      </div>
+      )}
 
       {steps.length > 0 && (
         <div className={styles.canvasProgress} data-testid='execution-canvas-progress'>

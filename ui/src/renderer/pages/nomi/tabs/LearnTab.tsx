@@ -12,6 +12,7 @@ import type { ICompanionLearnRun } from '@/common/adapter/ipcBridge';
 import type { ProviderId } from '@/common/types/ids';
 import { useModelProviderList } from '@renderer/hooks/agent/useModelProviderList';
 import type { useCompanionShared } from '../useNomi';
+import { useModelSelectorProviderLabel } from '@/renderer/hooks/agent/useModelSelectorProviderLabel';
 
 const STATUS_COLOR: Record<string, string> = {
   ok: 'green',
@@ -30,6 +31,7 @@ const LearnTab: React.FC<Props> = ({ shared }) => {
   const { t } = useTranslation();
   const { sharedConfig, patchSharedConfig } = shared;
   const { providers, getAvailableModels } = useModelProviderList();
+  const providerLabel = useModelSelectorProviderLabel();
   const [runs, setRuns] = useState<ICompanionLearnRun[]>([]);
   const [running, setRunning] = useState(false);
   const [draftProviderId, setDraftProviderId] = useState<ProviderId | null>(null);
@@ -125,7 +127,7 @@ const LearnTab: React.FC<Props> = ({ shared }) => {
           >
             {providers.map((p) => (
               <Select.Option key={p.id} value={p.id}>
-                {p.name}
+                {providerLabel(p)}
               </Select.Option>
             ))}
           </Select>

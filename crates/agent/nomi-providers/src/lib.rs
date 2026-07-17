@@ -11,6 +11,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use async_trait::async_trait;
+use serde_json::Value;
 use tokio::sync::mpsc;
 
 use nomi_config::config::{Config, ProviderType};
@@ -91,6 +92,62 @@ pub(crate) fn is_api_key_rotation_error(error: &ProviderError) -> bool {
             ..
         } | ProviderError::RateLimited { .. }
     )
+}
+
+/// Parse the completed argument payload of a provider-emitted tool call.
+///
+/// OpenAI-compatible APIs encode function arguments as a JSON string, while
+/// Anthropic-compatible streaming APIs deliver JSON fragments. In both cases
+/// the completed payload must be a JSON object. A malformed payload must never
+/// be replaced with `{}`: doing so turns a provider/protocol failure into a
+/// seemingly valid no-argument tool call and can execute the wrong operation.
+pub(crate) fn parse_tool_call_arguments(
+    provider: &str,
+    tool_name: &str,
+    tool_id: &str,
+    raw: &str,
+) -> Result<Value, String> {
+    if tool_name.trim().is_empty() {
+        return Err(format!(
+            "{provider} returned a tool call with a missing function name (call `{}`)",
+            if tool_id.trim().is_empty() {
+                "<missing>"
+            } else {
+                tool_id
+            }
+        ));
+    }
+    if tool_id.trim().is_empty() {
+        return Err(format!(
+            "{provider} returned tool `{tool_name}` without a call id"
+        ));
+    }
+
+    let value = serde_json::from_str::<Value>(raw).map_err(|error| {
+        format!(
+            "{provider} returned malformed JSON arguments for tool `{tool_name}` (call `{tool_id}`): {error}"
+        )
+    })?;
+
+    if !value.is_object() {
+        return Err(format!(
+            "{provider} returned non-object arguments for tool `{tool_name}` (call `{tool_id}`); expected a JSON object, got {}",
+            json_value_kind(&value)
+        ));
+    }
+
+    Ok(value)
+}
+
+fn json_value_kind(value: &Value) -> &'static str {
+    match value {
+        Value::Null => "null",
+        Value::Bool(_) => "boolean",
+        Value::Number(_) => "number",
+        Value::String(_) => "string",
+        Value::Array(_) => "array",
+        Value::Object(_) => "object",
+    }
 }
 
 /// Parse a `Retry-After` HTTP header into milliseconds, honouring the provider's
@@ -218,7 +275,10 @@ pub fn create_provider(config: &Config) -> Arc<dyn LlmProvider> {
 #[cfg(test)]
 mod retryable_tests {
     use super::ProviderError;
-    use super::{is_api_key_rotation_error, parse_api_keys, parse_retry_after_ms};
+    use super::{
+        is_api_key_rotation_error, parse_api_keys, parse_retry_after_ms,
+        parse_tool_call_arguments,
+    };
 
     #[test]
     fn parse_retry_after_seconds_clamped() {
@@ -330,5 +390,44 @@ mod retryable_tests {
             status: 500,
             message: "server error".into(),
         }));
+    }
+
+    #[test]
+    fn tool_call_arguments_require_valid_json_object() {
+        assert_eq!(
+            parse_tool_call_arguments("test", "no_args", "call_ok", "{}")
+                .expect("an explicit empty object is a valid no-argument call"),
+            serde_json::json!({})
+        );
+        assert_eq!(
+            parse_tool_call_arguments(
+                "test",
+                "update",
+                "call_update",
+                r#"{"kb_id":"kb_1"}"#,
+            )
+            .expect("object arguments should parse")["kb_id"],
+            "kb_1"
+        );
+
+        let malformed =
+            parse_tool_call_arguments("test", "update", "call_bad", r#"{"kb_id":]"#)
+                .expect_err("malformed JSON must fail instead of becoming an empty object");
+        assert!(malformed.contains("malformed JSON arguments"));
+        assert!(malformed.contains("call_bad"));
+
+        let non_object = parse_tool_call_arguments("test", "update", "call_array", "[]")
+            .expect_err("tool arguments must be an object");
+        assert!(non_object.contains("non-object arguments"));
+        assert!(non_object.contains("array"));
+
+        let missing_name = parse_tool_call_arguments("test", " ", "call_named", "{}")
+            .expect_err("a call without a function name must fail");
+        assert!(missing_name.contains("missing function name"));
+        assert!(missing_name.contains("call_named"));
+
+        let missing_id = parse_tool_call_arguments("test", "update", "", "{}")
+            .expect_err("a call without an id must fail");
+        assert!(missing_id.contains("without a call id"));
     }
 }

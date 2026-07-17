@@ -4,6 +4,8 @@ use std::io::{self, BufRead, Write};
 pub struct ToolConfirmer {
     auto_approve: bool,
     allow_list: HashSet<String>,
+    #[cfg(test)]
+    check_count: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -18,6 +20,8 @@ impl ToolConfirmer {
         Self {
             auto_approve,
             allow_list: allow_list.into_iter().collect(),
+            #[cfg(test)]
+            check_count: 0,
         }
     }
 
@@ -34,6 +38,11 @@ impl ToolConfirmer {
 
     /// Check if the tool needs confirmation. Returns the user's decision.
     pub fn check(&mut self, tool_name: &str, tool_input_display: &str) -> ConfirmResult {
+        #[cfg(test)]
+        {
+            self.check_count += 1;
+        }
+
         if self.auto_approve || self.allow_list.contains(tool_name) {
             return ConfirmResult::Approved;
         }
@@ -58,6 +67,11 @@ impl ToolConfirmer {
             "q" | "quit" => ConfirmResult::Quit,
             _ => ConfirmResult::Denied,
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn check_count(&self) -> usize {
+        self.check_count
     }
 }
 

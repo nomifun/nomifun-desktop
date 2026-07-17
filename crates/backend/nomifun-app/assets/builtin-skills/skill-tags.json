@@ -137,6 +137,24 @@
       "scenario_tags": ["writing"]
     },
     {
+      "name": "planning-with-files",
+      "name_i18n": { "zh-CN": "文件化规划" },
+      "description_i18n": {
+        "zh-CN": "为长期、研究密集或跨会话任务维护持久的计划、发现与进度文件，降低上下文丢失风险并保留可审计证据。"
+      },
+      "audience_tags": ["general", "developer"],
+      "scenario_tags": ["planning"]
+    },
+    {
+      "name": "social-job-publisher",
+      "name_i18n": { "zh-CN": "社交招聘发布" },
+      "description_i18n": {
+        "zh-CN": "把招聘需求整理为完整职位说明、各平台文案与视觉方案，并通过最终确认门控安全发布到社交或招聘平台。"
+      },
+      "audience_tags": ["marketing"],
+      "scenario_tags": ["social"]
+    },
+    {
       "name": "xiaohongshu-recruiter",
       "name_i18n": { "zh-CN": "xiaohongshu-recruiter" },
       "description_i18n": {

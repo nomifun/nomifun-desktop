@@ -14,6 +14,10 @@ export function canSteerExecutionAttempt(
   return attemptStatus === 'running' && (executionStatus === 'running' || executionStatus === 'waiting_input');
 }
 
+export function isTerminalExecutionStatus(status: string | undefined): boolean {
+  return status === 'completed' || status === 'completed_with_failures' || status === 'failed' || status === 'cancelled';
+}
+
 export const EXECUTION_STATUS_META: Record<TAgentExecutionStatus, { color: string }> = {
   planning: { color: 'var(--warning)' },
   awaiting_approval: { color: 'rgb(var(--primary-6))' },

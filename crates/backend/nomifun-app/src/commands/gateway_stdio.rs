@@ -27,10 +27,12 @@ use nomifun_gateway::{Registry, Surface};
 use nomifun_common::{LoopbackCapabilityError, LoopbackSessionKind};
 use rmcp::ServerHandler;
 use rmcp::model::{
-    CallToolRequestParams, CallToolResult, Content, ListToolsResult, PaginatedRequestParams, Tool,
+    CallToolRequestParams, CallToolResult, ListToolsResult, PaginatedRequestParams, Tool,
 };
 use rmcp::service::{RequestContext, RoleServer, ServiceExt};
 use rmcp::transport;
+
+use super::stdio_common::{ForwardToolOutcome, into_mcp_tool_result};
 
 pub async fn run_gateway_stdio() -> ExitCode {
     let client = match super::stdio_common::ScopedBridgeClient::from_env(
@@ -151,15 +153,20 @@ impl GatewayStdioServer {
     }
 
     /// Forward a tool call to the in-process gateway server over authenticated
-    /// HTTP, carrying this session's identity. Returns the tool result JSON text.
-    async fn forward_tool(&self, tool_name: &str, args: &serde_json::Value) -> String {
+    /// HTTP, carrying this session's identity. Preserves the gateway's
+    /// structured success/error envelope for MCP `CallToolResult.isError`.
+    async fn forward_tool(
+        &self,
+        tool_name: &str,
+        args: &serde_json::Value,
+    ) -> ForwardToolOutcome {
         eprintln!("[mcp-gateway-stdio] tools/call: {tool_name}");
         let body = serde_json::json!({
             "tool": tool_name,
             "args": args,
         });
         self.client
-            .forward_tool(GATEWAY_CALL_TOOL_OPERATION, body, true)
+            .forward_tool_outcome(GATEWAY_CALL_TOOL_OPERATION, body, true)
             .await
     }
 
@@ -205,7 +212,7 @@ impl ServerHandler for GatewayStdioServer {
     ) -> Result<CallToolResult, rmcp::ErrorData> {
         let claims = self.require_operation(GATEWAY_CALL_TOOL_OPERATION).await?;
         if let Some(blocked) = Self::blocked_tool_message(&claims, &request.name) {
-            return Ok(build_tool_result(blocked));
+            return Ok(build_tool_result(ForwardToolOutcome::Error(blocked)));
         }
         let args = serde_json::Value::Object(request.arguments.unwrap_or_default());
         let result = self.forward_tool(&request.name, &args).await;
@@ -223,41 +230,8 @@ impl ServerHandler for GatewayStdioServer {
 /// the bytes. Capabilities that don't set it are unaffected (fast-path: we only
 /// parse when the marker is present). No registry/handler signature change is
 /// needed for a future image/binary-returning capability — it just sets the key.
-fn build_tool_result(text: String) -> CallToolResult {
-    if !text.contains("_mcp_images") {
-        return CallToolResult::success(vec![Content::text(text)]);
-    }
-    let parsed: Option<serde_json::Value> = serde_json::from_str(&text).ok();
-    let images: Vec<Content> = parsed
-        .as_ref()
-        .and_then(|v| v.get("_mcp_images"))
-        .and_then(serde_json::Value::as_array)
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|img| {
-                    let data = img.get("data").and_then(serde_json::Value::as_str)?;
-                    let mime = img.get("mime_type").and_then(serde_json::Value::as_str)?;
-                    Some(Content::image(data.to_owned(), mime.to_owned()))
-                })
-                .collect()
-        })
-        .unwrap_or_default();
-    if images.is_empty() {
-        // Marker substring present but no valid images (e.g. it appeared inside a
-        // normal string) — emit the original text unchanged.
-        return CallToolResult::success(vec![Content::text(text)]);
-    }
-    // Strip `_mcp_images` from the text so the base64 isn't also sent as tokens.
-    let text_out = match parsed {
-        Some(serde_json::Value::Object(mut m)) => {
-            m.remove("_mcp_images");
-            serde_json::to_string(&serde_json::Value::Object(m)).unwrap_or(text)
-        }
-        _ => text,
-    };
-    let mut contents = vec![Content::text(text_out)];
-    contents.extend(images);
-    CallToolResult::success(contents)
+fn build_tool_result(outcome: ForwardToolOutcome) -> CallToolResult {
+    into_mcp_tool_result(outcome)
 }
 
 #[cfg(test)]
@@ -288,6 +262,22 @@ mod tests {
             },
         )
         .expect("valid test capability")
+    }
+
+    #[test]
+    fn structured_forward_error_becomes_mcp_tool_error() {
+        let result = build_tool_result(ForwardToolOutcome::Error(
+            r#"{"error":"invalid arguments for this tool: missing field `kb_id`"}"#.into(),
+        ));
+        assert_eq!(result.is_error, Some(true));
+    }
+
+    #[test]
+    fn successful_text_is_not_reclassified_by_error_words() {
+        let result = build_tool_result(ForwardToolOutcome::Success(
+            "Error: this is ordinary successful output".into(),
+        ));
+        assert_ne!(result.is_error, Some(true));
     }
 
     /// The bridge lists exactly what the registry exposes to a desktop session,

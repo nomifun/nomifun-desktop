@@ -122,6 +122,8 @@
       "clearFolder": "Clear",
       "model": "Model",
       "nomiModelRequired": "Please select a model for Nomi",
+      "removedPresetLabel": "Removed preset ({{id}})",
+      "removedPresetRequired": "This scheduled task references a removed preset. Select another preset or agent",
       "nomiNoProvider": "No available models",
       "specifiedConversation": "Specified session",
       "specifiedConversationRequired": "Please select a conversation to reuse",

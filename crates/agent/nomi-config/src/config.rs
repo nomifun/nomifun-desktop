@@ -243,6 +243,9 @@ pub struct SkillsPermissionConfig {
 pub struct ToolsConfig {
     #[serde(default)]
     pub auto_approve: bool,
+    /// Exact provider-visible tool names that bypass per-call confirmation.
+    /// MCP entries must use their canonical `mcp__...__<hash>` names; an
+    /// original server-local tool name is informational and grants no authority.
     #[serde(default = "default_allow_list")]
     pub allow_list: Vec<String>,
     /// Skill-level deny/allow rules. Merged by concatenation across global + project configs.
@@ -282,15 +285,11 @@ pub struct ToolsConfig {
     /// platforms rather than silently running unrestricted (§3.6).
     #[serde(default)]
     pub bash_sandbox: bool,
-    /// Opt-in (default off): wind the engine down COOPERATIVELY on stop —
-    /// cancel a token and await a clean finish — instead of dropping the turn
-    /// future mid-flight. Cleaner message state; trades a little mid-tool
-    /// stop-latency (the turn is awaited, not dropped). (Phase 0 F0.4)
-    #[serde(default)]
-    pub cooperative_cancel: bool,
-    /// 非空时：bootstrap 注册完全部工具后只保留名字在此列表内的（含 MCP 代理
-    /// 工具）。受限执行角色（searcher/reviewer 只读等）用它做
-    /// per-node 工具白名单。空（默认）= 不限制。
+    /// 非空时：bootstrap 注册完全部工具后只保留 provider-visible 名字在此列表内的。
+    /// MCP 工具必须填写稳定 canonical `mcp__...__<hash>` 名，裸原始 tool 名不授权；
+    /// 可用 `nomi_mcp::tool_proxy::canonical_mcp_display_name` 统一生成。
+    /// 受限执行角色（searcher/reviewer 只读等）用它做 per-node 工具白名单。
+    /// 空（默认）= 不限制。
     #[serde(default)]
     pub builtin_allowlist: Vec<String>,
 }
@@ -320,7 +319,6 @@ impl Default for ToolsConfig {
             lsp_servers: Vec::new(),
             delegation_token_budget: None,
             bash_sandbox: false,
-            cooperative_cancel: false,
             builtin_allowlist: Vec::new(),
         }
     }
@@ -1118,7 +1116,6 @@ fn merge_config_files(global: ConfigFile, project: ConfigFile) -> ConfigFile {
             lsp_servers: [global.tools.lsp_servers, project.tools.lsp_servers].concat(),
             delegation_token_budget: project.tools.delegation_token_budget.or(global.tools.delegation_token_budget),
             bash_sandbox: global.tools.bash_sandbox || project.tools.bash_sandbox,
-            cooperative_cancel: global.tools.cooperative_cancel || project.tools.cooperative_cancel,
             // 项目层非空则覆盖全局（与 write_root 同模式）。
             builtin_allowlist: if !project.tools.builtin_allowlist.is_empty() {
                 project.tools.builtin_allowlist
@@ -1146,7 +1143,6 @@ fn merge_config_files(global: ConfigFile, project: ConfigFile) -> ConfigFile {
             lsp_servers: [global.tools.lsp_servers, project.tools.lsp_servers].concat(),
             delegation_token_budget: project.tools.delegation_token_budget.or(global.tools.delegation_token_budget),
             bash_sandbox: global.tools.bash_sandbox || project.tools.bash_sandbox,
-            cooperative_cancel: global.tools.cooperative_cancel || project.tools.cooperative_cancel,
             // 项目层非空则覆盖全局（与 write_root 同模式）。
             builtin_allowlist: if !project.tools.builtin_allowlist.is_empty() {
                 project.tools.builtin_allowlist

@@ -1557,6 +1557,7 @@ mod tests {
             total_usage: Default::default(),
             messages: Vec::new(),
             owner_token: None,
+            activated_deferred_tools: Vec::new(),
         };
 
         assert!(retarget_resumed_session(

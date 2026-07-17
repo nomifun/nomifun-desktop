@@ -12,6 +12,7 @@ import { CheckOne, Loading, Pause, PauseOne, PlayOne, Refresh } from '@icon-park
 import { ipcBridge } from '@/common';
 import { useArcoMessage } from '@/renderer/utils/ui/useArcoMessage';
 import { refreshOnVersionConflict } from './refreshOnVersionConflict';
+import { isTerminalExecutionStatus } from './executionStatusMeta';
 import type { ExecutionId } from '@/common/types/ids';
 
 /** A single status-gated header control. Never a bare `<button>` — a
@@ -74,7 +75,7 @@ export const ExecutionControls: React.FC<{
   const [message, msgCtx] = useArcoMessage();
   const [busy, setBusy] = useState(false);
 
-  const isTerminal = status === 'completed' || status === 'failed' || status === 'cancelled' || status === 'completed_with_failures';
+  const isTerminal = isTerminalExecutionStatus(status);
   // `planning` and `''` (detail not yet loaded) both
   // render a disabled busy placeholder so the header always shows a primary control.
   const isBusyPlaceholder = status === 'planning' || status === '';

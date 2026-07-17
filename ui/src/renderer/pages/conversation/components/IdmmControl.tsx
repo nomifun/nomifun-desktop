@@ -36,6 +36,7 @@ import IdmmInterventionRow from './IdmmInterventionRow';
 import { isLiveEventForTarget } from './liveEventMatch';
 import { capabilityHeaderButtonClass, capabilityHeaderButtonStyle } from './CapabilityHeaderButton';
 import type { ProviderId } from '@/common/types/ids';
+import { useModelSelectorProviderLabel } from '@/renderer/hooks/agent/useModelSelectorProviderLabel';
 import {
   getWatchBackupValidationErrorKey,
   type IdmmBackupValidationKey,
@@ -129,6 +130,7 @@ const IdmmControl: React.FC<IdmmControlProps> = ({ target, draft, disabledReason
   const [state, setState] = useState<IIdmmState | null>(null);
   const [persistedCfg, setPersistedCfg] = useState<IIdmmConfig>(defaultIdmmConfig);
   const { data: providers } = useProvidersQuery();
+  const providerLabel = useModelSelectorProviderLabel();
   const isDraft = !!draft;
   const draftRef = useRef(draft);
   draftRef.current = draft;
@@ -159,7 +161,10 @@ const IdmmControl: React.FC<IdmmControlProps> = ({ target, draft, disabledReason
   const updateDecision = (updater: (w: IIdmmDecisionWatchConfig) => IIdmmDecisionWatchConfig) =>
     updateCfg((c) => ({ ...c, decision_watch: updater(c.decision_watch) }));
 
-  const providerOptions = useMemo(() => (providers ?? []).map((p) => ({ label: p.name, value: p.id })), [providers]);
+  const providerOptions = useMemo(
+    () => (providers ?? []).map((p) => ({ label: providerLabel(p), value: p.id })),
+    [providers, providerLabel]
+  );
   const modelsForProvider = (providerId?: ProviderId | null) => {
     const p = (providers ?? []).find((x) => x.id === providerId);
     return (p?.models ?? []).map((m) => ({ label: m, value: m }));

@@ -1,14 +1,12 @@
 {
   "policy": {
     "title": "协作策略",
-    "description": "决定当前对话是否拆分任务，以及是否优先并行推进。",
     "delegation": {
       "disabled": "关闭",
       "automatic": "自动",
       "prefer_parallel": "优先并行"
     },
-    "askUser": "关键决策时询问我",
-    "askUserDescription": "协作者遇到无法安全判断的选择时暂停并询问。",
+    "askUser": "拿不准时问我",
     "open": "协作策略",
     "button": "协作"
   },

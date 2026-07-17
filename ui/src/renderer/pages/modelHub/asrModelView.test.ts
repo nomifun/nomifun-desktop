@@ -37,6 +37,12 @@ describe('local ASR UI integration', () => {
     expect(panel.includes('<details')).toBe(false);
   });
 
+  test('shows platform availability as a runtime diagnostic instead of an install result', () => {
+    const panel = readSource(new URL('./AsrModelsPanel.tsx', import.meta.url));
+    expect(panel.includes('runtime.errorKind')).toBe(true);
+    expect(panel.includes('errorLabel(runtime.errorKind)')).toBe(true);
+  });
+
   test('publishes speech-input availability changes observed by status polling', () => {
     const hook = readSource(new URL('./useLocalAsrModels.ts', import.meta.url));
     expect(hook.includes('onSuccess: observeStatus')).toBe(true);

@@ -14,6 +14,9 @@
 | 伙伴 | 持久身份、人格、形象、记忆和关系状态 | 可复用启动模板本身 |
 | Skill | 可发现、可加载的一项聚焦能力 | agent/模型选择或完整画像 |
 
+可复用的操作流程、工具用法和领域知识应写成 Skill，而不是伪装成设定指令。
+设定可以选择这些 Skill，但只负责保存启动组合与稳定偏好。
+
 因此，同一份设定可以启动普通会话、物化为 AgentExecution Step、配置伙伴，也可以
 作为定时任务模板。伙伴画像或一次成功的协作角色也可以复刻为设定，而不会与
 来源身份混为一谈。
@@ -38,7 +41,7 @@
 
 | 来源 | 来自哪里 | 编辑规则 |
 | --- | --- | --- |
-| Builtin | `crates/backend/nomifun-app/assets/builtin-presets/` 内嵌目录 | 内容只读，需要定制时先复制；启用、排序、首选 agent 等用户状态单独存储。 |
+| Builtin | `crates/backend/nomifun-app/assets/builtin-presets/` 内嵌目录；当前版本未预装内置设定 | 内容只读，需要定制时先复制；启用、排序、首选 agent 等用户状态单独存储。 |
 | User | SQLite 中的关系化设定记录 | 可完整编辑和删除。 |
 | Extension | 已安装扩展的 `presets` contribution | 在设定库只读；生命周期由所属扩展管理。 |
 

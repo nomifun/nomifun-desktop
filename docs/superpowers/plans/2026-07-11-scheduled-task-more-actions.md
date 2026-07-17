@@ -370,11 +370,11 @@ git commit -m "style(ui): move scheduled task actions into menu"
 ### Task 3: Browser interaction and design QA
 
 **Files:**
-- Create: `design-qa.md`
+- No repository files. Captures and notes remain under the ignored `.superpowers/qa/` directory.
 
 **Interfaces:**
 - Consumes: the user-provided desktop screenshot and the implemented `/scheduled` page.
-- Produces: visual evidence that the desktop hover/menu state matches the requested interaction and mobile layout has not changed.
+- Produces: a local QA result showing that the desktop hover/menu state matches the requested interaction and mobile layout has not changed.
 
 - [x] **Step 1: Start or reuse the local UI**
 
@@ -408,25 +408,8 @@ Set the Browser viewport to 390 × 844 and verify:
 - Manual-only cards still have no switch.
 - No desktop `More` menu is rendered.
 
-- [x] **Step 4: Compare captures and write the QA gate**
+- [x] **Step 4: Compare captures and complete the QA gate**
 
-Open the reference image and the latest desktop and mobile captures together. Fix any P0/P1/P2 mismatch, recapture, and repeat. When all blocking checks pass, create `design-qa.md` with:
+Open the reference image and the latest desktop and mobile captures together. Fix any P0/P1/P2 mismatch, recapture, and repeat. Keep captures and detailed notes in `.superpowers/qa/`; do not commit local screenshots, machine paths, or a standalone QA report.
 
-```md
-# Scheduled Task More Actions Design QA
-
-- Reference: `codex-clipboard-db57196a-7f7f-4137-b3e8-e8cbac38d78d.png`
-- Desktop result: passed — the action header/switch are removed, row hover reveals one More trigger, and the popup remains anchored while open.
-- Menu behavior: passed — enabled, paused, and manual-only jobs expose only their allowed actions; confirmation guards removal; menu clicks do not navigate.
-- Mobile result: passed — existing cards and scheduled-job switches remain unchanged with no desktop menu or horizontal overflow.
-- Remaining P0/P1/P2 issues: none.
-
-final result: passed
-```
-
-- [x] **Step 5: Commit QA evidence**
-
-```bash
-git add design-qa.md docs/superpowers/plans/2026-07-11-scheduled-task-more-actions.md
-git commit -m "test(ui): verify scheduled task action menu"
-```
+Record the final pass/fail outcome in the task handoff or commit message. No QA-only repository artifact is required.

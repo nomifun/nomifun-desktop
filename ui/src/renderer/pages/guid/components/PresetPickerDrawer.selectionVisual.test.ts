@@ -17,20 +17,27 @@ const classBlock = (className: string) => {
 };
 
 describe('PresetPickerDrawer selection visual language', () => {
-  test('uses a matte black and white selected tab/card/checkbox treatment without glow', () => {
-    for (const className of ['drawerSegmentActive', 'drawerCardSelected', 'drawerCardStatusSelected']) {
-      const block = classBlock(className);
-      expect(block.includes('var(--skill-selection-bg)')).toBe(true);
-      expect(block.includes('var(--skill-selection-fg)')).toBe(true);
-      expect(block.includes('box-shadow: none')).toBe(true);
-    }
+  test('uses a restrained theme-aware selection treatment instead of inverted black cards', () => {
+    const surface = classBlock('drawerSurface');
+    const tab = classBlock('drawerSegmentActive');
+    const card = classBlock('drawerCardSelected');
+    const status = classBlock('drawerCardStatusSelected');
+
+    expect(surface.includes('--drawer-selection-bg')).toBe(true);
+    expect(surface.includes('--drawer-selection-border')).toBe(true);
+    expect(surface.includes('--skill-selection-bg')).toBe(false);
+    expect(tab.includes('var(--drawer-selection-fg)')).toBe(true);
+    expect(card.includes('var(--drawer-selection-bg)')).toBe(true);
+    expect(card.includes('var(--drawer-selection-border)')).toBe(true);
+    expect(status.includes('var(--drawer-selection-fg)')).toBe(true);
+    expect(card.includes('#151515')).toBe(false);
   });
 
-  test('keeps the selected skills apply button aligned with the same black and white treatment', () => {
+  test('reserves the solid accent for the compact apply action', () => {
     const start = css.lastIndexOf('.drawerPrimaryButton {');
     const block = css.slice(start, css.indexOf('\n}', start));
-    expect(block.includes('var(--skill-selection-bg)')).toBe(true);
-    expect(block.includes('var(--skill-selection-fg)')).toBe(true);
+    expect(block.includes('rgb(var(--primary-6))')).toBe(true);
+    expect(block.includes('var(--drawer-selection-bg)')).toBe(false);
   });
 
   test('does not add a redundant left selection rail to selected Skill cards', () => {

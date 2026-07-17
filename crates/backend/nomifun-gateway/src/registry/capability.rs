@@ -44,6 +44,13 @@ pub type ProgressSink = tokio::sync::mpsc::Sender<Value>;
 pub type StreamingHandler =
     Arc<dyn Fn(Arc<GatewayDeps>, CallerCtx, Value, ProgressSink) -> BoxFut + Send + Sync>;
 
+/// Build the registry's tool-error envelope for typed argument failures.
+/// Transport adapters key off the top-level `error` member and map it to their
+/// native error marker (MCP `CallToolResult.isError`, REST error handling, etc.).
+fn invalid_arguments_error(error: serde_json::Error) -> Value {
+    json!({ "error": format!("invalid arguments for this tool: {error}") })
+}
+
 /// How dangerous an operation is. Drives the default per-surface permission
 /// decision (see [`default_decision`]). Promoted from IDMM's regex-on-command
 /// heuristic to a first-class, per-capability annotation.
@@ -258,7 +265,7 @@ impl Capability {
                 let args = strip_confirm(coerce_args_to_schema(&schema, args));
                 match serde_json::from_value::<P>(args) {
                     Ok(p) => f(deps, ctx, p).await,
-                    Err(e) => json!({ "error": format!("invalid arguments for this tool: {e}") }),
+                    Err(e) => invalid_arguments_error(e),
                 }
             })
         });
@@ -300,9 +307,7 @@ impl Capability {
                     let args = strip_confirm(coerce_args_to_schema(&schema, args));
                     match serde_json::from_value::<P>(args) {
                         Ok(p) => f(deps, ctx, p, sink).await,
-                        Err(e) => {
-                            json!({ "error": format!("invalid arguments for this tool: {e}") })
-                        }
+                        Err(e) => invalid_arguments_error(e),
                     }
                 })
             });
@@ -317,9 +322,7 @@ impl Capability {
                 let args = strip_confirm(coerce_args_to_schema(&schema, args));
                 let p = match serde_json::from_value::<P>(args) {
                     Ok(p) => p,
-                    Err(e) => {
-                        return json!({ "error": format!("invalid arguments for this tool: {e}") });
-                    }
+                    Err(e) => return invalid_arguments_error(e),
                 };
                 let (tx, mut rx) = tokio::sync::mpsc::channel::<Value>(64);
                 let drain = tokio::spawn(async move { while rx.recv().await.is_some() {} });
@@ -645,6 +648,25 @@ mod tests {
     fn confirmable_drives_schema_injection() {
         assert!(META_DESTRUCTIVE.confirmable());
         assert!(!META_WRITE_DENY_CHANNEL.confirmable());
+    }
+
+    #[derive(Debug, Deserialize)]
+    struct RequiredKbId {
+        #[allow(dead_code)]
+        kb_id: String,
+    }
+
+    #[test]
+    fn typed_argument_failure_is_a_top_level_error_envelope() {
+        let error = serde_json::from_value::<RequiredKbId>(json!({})).unwrap_err();
+        let value = invalid_arguments_error(error);
+        assert!(
+            value
+                .get("error")
+                .and_then(Value::as_str)
+                .is_some_and(|text| text.contains("kb_id"))
+        );
+        assert!(value.get("result").is_none());
     }
 
     #[derive(Deserialize, JsonSchema)]

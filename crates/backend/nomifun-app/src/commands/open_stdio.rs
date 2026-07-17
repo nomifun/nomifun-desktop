@@ -16,8 +16,11 @@ use std::sync::Arc;
 
 use nomifun_shell::{DefaultSystemOpener, ShellService};
 use rmcp::handler::server::wrapper::Parameters;
+use rmcp::model::CallToolResult;
 use rmcp::{schemars, service::ServiceExt, tool, tool_router, transport};
 use serde::Deserialize;
+
+use super::stdio_common::{ForwardToolOutcome, into_mcp_tool_result};
 
 pub async fn run_open_stdio() -> ExitCode {
     eprintln!("[mcp-open-stdio] Started OK.");
@@ -67,22 +70,31 @@ impl OpenStdioServer {
         name = "open",
         description = "Open a URL, file, folder, or application on the user's desktop reliably via the OS shell (ShellExecute). ALWAYS prefer this over running `cmd /c start`, `Start-Process`, or `explorer` in the shell to launch things — those are unreliable on Windows (the `start` builtin mis-parses URLs/paths as window titles and pops 'Windows cannot find' dialogs). `target` is a URL (https://…), a filesystem path, or an application name/path. Optionally pass `app` to open the target with a specific application (e.g. target a URL and app=\"msedge\" to open it in Microsoft Edge)."
     )]
-    async fn open(&self, Parameters(params): Parameters<OpenParams>) -> String {
+    async fn open(&self, Parameters(params): Parameters<OpenParams>) -> CallToolResult {
         let OpenParams { target, app } = params;
         eprintln!("[mcp-open-stdio] tools/call: open target={target:?} app={app:?}");
-        match self.shell.launch(&target, app.as_deref()).await {
+        let outcome = match self.shell.launch(&target, app.as_deref()).await {
             Ok(()) => match &app {
-                Some(a) => format!("Opened {target:?} with {a:?}."),
-                None => format!("Opened {target:?}."),
+                Some(a) => ForwardToolOutcome::Success(format!("Opened {target:?} with {a:?}.")),
+                None => ForwardToolOutcome::Success(format!("Opened {target:?}.")),
             },
-            Err(e) => format!("Error: {e}"),
-        }
+            Err(e) => ForwardToolOutcome::Error(format!("Error: {e}")),
+        };
+        into_mcp_tool_result(outcome)
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use nomifun_shell::NoopSystemOpener;
+
     use super::*;
+
+    fn test_server() -> OpenStdioServer {
+        OpenStdioServer {
+            shell: Arc::new(ShellService::new(Arc::new(NoopSystemOpener))),
+        }
+    }
 
     #[test]
     fn all_tool_schemas_have_properties_field() {
@@ -104,5 +116,35 @@ mod tests {
         let router = OpenStdioServer::tool_router();
         let names: Vec<String> = router.list_all().iter().map(|t| t.name.to_string()).collect();
         assert!(names.contains(&"open".to_string()), "got {names:?}");
+    }
+
+    #[tokio::test]
+    async fn failed_open_sets_mcp_is_error() {
+        let result = test_server()
+            .open(Parameters(OpenParams {
+                target: String::new(),
+                app: None,
+            }))
+            .await;
+
+        assert_eq!(result.is_error, Some(true));
+        assert!(serde_json::to_string(&result).unwrap().contains("Error:"));
+    }
+
+    #[tokio::test]
+    async fn successful_open_text_is_not_keyword_classified_as_error() {
+        let result = test_server()
+            .open(Parameters(OpenParams {
+                target: "Error report.txt".to_string(),
+                app: None,
+            }))
+            .await;
+
+        assert_ne!(result.is_error, Some(true));
+        assert!(
+            serde_json::to_string(&result)
+                .unwrap()
+                .contains("Error report.txt")
+        );
     }
 }

@@ -95,6 +95,13 @@ pub struct ToolAnnotations {
 #[derive(Debug, Deserialize)]
 pub struct McpToolResult {
     pub content: Vec<McpContent>,
+    /// MCP tool-level failure marker. This is distinct from a JSON-RPC
+    /// transport/protocol error: servers return a normal `result` object with
+    /// `isError: true` when the tool ran but failed (for example argument
+    /// validation). Missing means success for compatibility with older MCP
+    /// servers.
+    #[serde(rename = "isError", default)]
+    pub is_error: bool,
 }
 
 /// Content types returned by MCP tool calls

@@ -1588,15 +1588,16 @@ pub fn inactive_asr_model_status() -> AsrModelServiceStatus {
             .into_iter()
             .map(|entry| LocalModelState {
                 model_id: entry.id,
-                install_phase: if supported {
-                    LocalModelInstallPhase::NotInstalled
-                } else {
-                    LocalModelInstallPhase::Failed
-                },
+                // Platform capability is a service/runtime concern, not the
+                // result of a model installation. A fresh model has never had
+                // an install attempt and must stay `not_installed`; otherwise
+                // the UI offers retry/delete actions for files that do not
+                // exist and tells the user an installation failed silently.
+                install_phase: LocalModelInstallPhase::NotInstalled,
                 progress: None,
                 installed_bytes: 0,
                 runtime_phase: LocalModelRuntimePhase::Stopped,
-                error_kind: (!supported).then_some(LocalModelErrorKind::UnsupportedPlatform),
+                error_kind: None,
                 message: None,
             })
             .collect(),
@@ -2587,6 +2588,22 @@ mod tests {
                 .contains(&AsrCapability::LongAudioVad)
         );
         assert!(recommended.download_size_bytes >= 236_929_024);
+    }
+
+    #[test]
+    fn inactive_status_never_reports_unattempted_installs_as_failed() {
+        let status = inactive_asr_model_status();
+
+        assert!(!status.enabled);
+        assert!(status.active_model_id.is_none());
+        assert!(!status.models.is_empty());
+        for model in status.models {
+            assert_eq!(model.install_phase, LocalModelInstallPhase::NotInstalled);
+            assert_eq!(model.installed_bytes, 0);
+            assert!(model.progress.is_none());
+            assert!(model.error_kind.is_none());
+            assert!(model.message.is_none());
+        }
     }
 
     #[test]

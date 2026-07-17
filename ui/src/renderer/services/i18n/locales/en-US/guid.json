@@ -73,9 +73,13 @@
     "selectedCount": "{{count}} skill(s) selected",
     "sourceCustom": "Custom",
     "sourceBuiltin": "Built-in",
+    "sourceExtension": "Extension",
     "autoInject": "Auto-inject",
     "presetCount": "preset(s)",
     "skillCount": "skill(s)",
-    "presetHint": "Choose one preset; the backend resolves and snapshots it for this conversation."
+    "presetHint": "Choose one preset; the backend resolves and snapshots it for this conversation.",
+    "presetEmpty": "No presets yet. Create one in Presets, or stay free-form.",
+    "presetNoMatch": "No presets match the current search and filters.",
+    "skillNoMatch": "No Skills match the current search and filters."
   }
 }

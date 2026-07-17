@@ -173,7 +173,7 @@ const TerminalRow: React.FC<TerminalRowProps> = ({
               onToggleSelect?.();
             }}
           >
-            <Checkbox checked={!!selected} />
+            <Checkbox checked={!!selected} className='session-batch-selection-checkbox' />
           </span>
         )}
         {/* Leading icon with pin overlay for pinned sessions */}

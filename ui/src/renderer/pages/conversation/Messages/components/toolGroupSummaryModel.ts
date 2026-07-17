@@ -177,24 +177,129 @@ const getFileTarget = (tool: NormalizedToolCall): string | undefined => {
 
 const normalizeToolSearchText = (value: string): string => value.replace(/[_-]+/g, ' ').toLowerCase();
 
-const getToolSearchText = (tool: NormalizedToolCall): string =>
-  normalizeToolSearchText(`${compactToolText(tool.name)} ${compactToolText(tool.description)} ${tool.key ?? ''}`);
+// Receipt categories describe concrete UI affordances, so classify only tool
+// names whose semantics we actually know. Keyword matching arbitrary MCP names
+// (for example `nomi_knowledge_update_base`) incorrectly presented domain
+// operations as file edits.
+const commandToolNames = new Set(['bash', 'shell', 'exec', 'exec command', 'execute command', 'run command', 'terminal']);
+const codeSearchToolNames = new Set(['grep', 'rg', 'search', 'find']);
+const fileListToolNames = new Set(['glob', 'list', 'ls', 'directory', 'dir']);
+const fileEditToolNames = new Set(['write', 'edit', 'patch', 'apply patch', 'multi edit', 'replace']);
+const fileReadToolNames = new Set(['read', 'open', 'view', 'cat']);
+const toolLoaderNames = new Set(['toolsearch', 'tool search']);
 
-const getToolNameSearchText = (tool: NormalizedToolCall): string =>
-  normalizeToolSearchText(`${compactToolText(tool.name)} ${tool.key ?? ''}`);
+const commandActionTokens = new Set(['exec', 'execute', 'run']);
+const commandSuffixes = new Set(['command', 'commands']);
+const codeSearchActionTokens = new Set(['grep', 'rg', 'search', 'find']);
+const codeSearchSuffixes = new Set(['code', 'file', 'files']);
+const fileListActionTokens = new Set(['glob', 'list', 'ls']);
+const fileListSuffixes = new Set(['file', 'files', 'directory', 'directories', 'entry', 'entries']);
+const fileEditActionTokens = new Set(['write', 'edit', 'patch', 'replace', 'apply', 'multi']);
+const fileEditSuffixes = new Set(['file', 'files', 'patch', 'edit']);
+const fileReadActionTokens = new Set(['read', 'open', 'view', 'cat']);
+const fileReadSuffixes = new Set(['file', 'files']);
+
+interface ToolActionName {
+  name: string;
+  isMcp: boolean;
+}
+
+const getNamespacedToolActionName = (value?: unknown): ToolActionName => {
+  const fullName = compactToolText(value);
+  const segments = fullName.split('__');
+  const isMcp = fullName.startsWith('mcp__');
+  // Stable MCP provider names end in a 16-character base32 origin hash. It is
+  // routing metadata, not the tool action; remove only that exact canonical
+  // suffix so legacy/non-MCP names cannot be reinterpreted by accident.
+  if (isMcp && segments.length >= 4 && /^[a-z2-7]{16}$/.test(segments.at(-1) ?? '')) {
+    segments.pop();
+  }
+  const leafName = segments.at(-1) ?? fullName;
+  return { name: normalizeToolSearchText(leafName).trim(), isMcp };
+};
+
+const matchesAnchoredToolAction = (
+  name: string,
+  exactNames: Set<string>,
+  actionTokens: Set<string>,
+  suffixes: Set<string>,
+  allowExactName: boolean
+): boolean => {
+  if (allowExactName && exactNames.has(name)) return true;
+  const [action, ...suffixParts] = name.split(' ').filter(Boolean);
+  return actionTokens.has(action) && suffixParts.length > 0 && suffixes.has(suffixParts.join(' '));
+};
 
 const classifyToolForReceipt = (tool: NormalizedToolCall): ToolReceiptAction => {
-  const text = getToolSearchText(tool);
-  const nameText = getToolNameSearchText(tool);
+  const kind = normalizeToolSearchText(compactToolText(tool.kind)).trim();
+  const { name, isMcp } = getNamespacedToolActionName(tool.name);
 
-  if (normalizeToolSearchText(compactToolText(tool.name)) === 'update plan') return 'generic';
-  if (/\b(bash|shell|exec|execute|terminal|command|run)\b/.test(nameText)) return 'run_commands';
-  if (/\b(grep|rg|search|find)\b/.test(text)) return 'search_code';
-  if (/\b(glob|list|ls|directory|dir)\b/.test(text)) return 'list_files';
-  if (/\b(write|edit|patch|update|modify|replace)\b/.test(text)) return 'edit_files';
-  if (/\b(read|open|view|cat)\b/.test(text)) return 'read_files';
-  if (/\b(bash|shell|exec|execute|terminal|command|run)\b/.test(text)) return 'run_commands';
-  if (/\b(load|loaded)\b.*\btools?\b/.test(text)) return 'load_tools';
+  if (kind === 'execute') return 'run_commands';
+  if (['search', 'grep', 'find'].includes(kind)) return 'search_code';
+  if (['glob', 'list'].includes(kind)) return 'list_files';
+  if (['edit', 'write'].includes(kind)) return 'edit_files';
+  if (kind === 'read') return 'read_files';
+  // A server-local MCP name is descriptive metadata, not a trusted semantic
+  // kind. Preserve strong compound actions such as read_file/exec_command, but
+  // do not turn ambiguous one-word names such as search/read/run/list into
+  // code, file, or command receipts. Native built-ins keep their exact-name UI.
+  const allowExactName = !isMcp;
+  if (allowExactName && toolLoaderNames.has(name)) return 'load_tools';
+  if (
+    matchesAnchoredToolAction(
+      name,
+      commandToolNames,
+      commandActionTokens,
+      commandSuffixes,
+      allowExactName
+    )
+  ) {
+    return 'run_commands';
+  }
+  if (
+    matchesAnchoredToolAction(
+      name,
+      codeSearchToolNames,
+      codeSearchActionTokens,
+      codeSearchSuffixes,
+      allowExactName
+    )
+  ) {
+    return 'search_code';
+  }
+  if (
+    matchesAnchoredToolAction(
+      name,
+      fileListToolNames,
+      fileListActionTokens,
+      fileListSuffixes,
+      allowExactName
+    )
+  ) {
+    return 'list_files';
+  }
+  if (
+    matchesAnchoredToolAction(
+      name,
+      fileEditToolNames,
+      fileEditActionTokens,
+      fileEditSuffixes,
+      allowExactName
+    )
+  ) {
+    return 'edit_files';
+  }
+  if (
+    matchesAnchoredToolAction(
+      name,
+      fileReadToolNames,
+      fileReadActionTokens,
+      fileReadSuffixes,
+      allowExactName
+    )
+  ) {
+    return 'read_files';
+  }
   return 'generic';
 };
 

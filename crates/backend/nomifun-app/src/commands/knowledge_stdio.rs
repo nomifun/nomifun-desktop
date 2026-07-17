@@ -32,8 +32,11 @@ use nomifun_api_types::{
 use nomifun_common::{LoopbackCapabilityClaims, LoopbackCapabilityError};
 use nomifun_common::unix_time_secs;
 use rmcp::handler::server::wrapper::Parameters;
+use rmcp::model::CallToolResult;
 use rmcp::{schemars, service::ServiceExt, tool, tool_router, transport};
 use serde::Deserialize;
+
+use super::stdio_common::{ForwardToolOutcome, into_mcp_tool_result};
 
 pub async fn run_knowledge_stdio() -> ExitCode {
     let managed_capability_present =
@@ -177,7 +180,10 @@ impl KnowledgeStdioServer {
         name = "knowledge_search",
         description = "Search the knowledge bases mounted into THIS session for relevant documents. Call this FIRST, before answering from memory, when the task touches any topic the bases may cover. Returns ranked results with an opaque `handle`; read a full result by calling knowledge_read with that exact handle. Copy the handle unchanged and do not rebuild it from the path."
     )]
-    async fn knowledge_search(&self, Parameters(params): Parameters<SearchParams>) -> String {
+    async fn knowledge_search(
+        &self,
+        Parameters(params): Parameters<SearchParams>,
+    ) -> CallToolResult {
         eprintln!("[mcp-knowledge-stdio] tools/call: knowledge_search");
         self.forward_tool(params.query, params.limit).await
     }
@@ -186,7 +192,7 @@ impl KnowledgeStdioServer {
         name = "knowledge_read",
         description = "Read the FULL markdown of a knowledge document by the `handle` returned by knowledge_search. Use this before updating a document so you can merge into its current content, then write it back with knowledge_write passing the same `handle`."
     )]
-    async fn knowledge_read(&self, Parameters(params): Parameters<ReadParams>) -> String {
+    async fn knowledge_read(&self, Parameters(params): Parameters<ReadParams>) -> CallToolResult {
         eprintln!("[mcp-knowledge-stdio] tools/call: knowledge_read");
         self.forward_read(params.handle).await
     }
@@ -195,7 +201,7 @@ impl KnowledgeStdioServer {
         name = "knowledge_write",
         description = "Persist reusable knowledge INTO a mounted knowledge base. To UPDATE an existing document, pass its `handle` from a knowledge_search result; to CREATE a new one, pass `base` + a descriptive `.md` `rel_path`. Always include the full markdown `content`. Whether the write lands directly or is staged for review is decided by the workspace's write-back setting — you do not manage placement."
     )]
-    async fn knowledge_write(&self, Parameters(params): Parameters<WriteParams>) -> String {
+    async fn knowledge_write(&self, Parameters(params): Parameters<WriteParams>) -> CallToolResult {
         eprintln!("[mcp-knowledge-stdio] tools/call: knowledge_write");
         self.forward_write(params).await
     }
@@ -247,6 +253,10 @@ fn capability_request_error(error: String) -> rmcp::ErrorData {
     )
 }
 
+fn forwarded_tool_result(outcome: ForwardToolOutcome) -> CallToolResult {
+    into_mcp_tool_result(outcome)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -287,6 +297,22 @@ mod tests {
     fn build_search_body_with_none_limit() {
         let body = build_search_body("query", None);
         assert_eq!(body["args"]["limit"], serde_json::Value::Null);
+    }
+
+    #[test]
+    fn forwarded_knowledge_error_sets_mcp_is_error() {
+        let result = forwarded_tool_result(ForwardToolOutcome::Error(
+            r#"{"error":"knowledge scope unavailable"}"#.into(),
+        ));
+        assert_eq!(result.is_error, Some(true));
+    }
+
+    #[test]
+    fn forwarded_knowledge_success_does_not_guess_from_text() {
+        let result = forwarded_tool_result(ForwardToolOutcome::Success(
+            "Error: an indexed document contains this sentence".into(),
+        ));
+        assert_ne!(result.is_error, Some(true));
     }
 
     #[test]
@@ -362,24 +388,30 @@ pub(crate) fn build_write_body(p: &WriteParams) -> serde_json::Value {
 }
 
 impl KnowledgeStdioServer {
-    async fn forward_tool(&self, query: String, limit: Option<u32>) -> String {
+    async fn forward_tool(&self, query: String, limit: Option<u32>) -> CallToolResult {
         let body = build_search_body(&query, limit);
-        self.client
-            .forward_tool("knowledge_search", body, false)
-            .await
+        forwarded_tool_result(
+            self.client
+                .forward_tool_outcome("knowledge_search", body, false)
+                .await,
+        )
     }
 
-    async fn forward_read(&self, handle: String) -> String {
+    async fn forward_read(&self, handle: String) -> CallToolResult {
         let body = build_read_body(&handle);
-        self.client
-            .forward_tool("knowledge_read", body, false)
-            .await
+        forwarded_tool_result(
+            self.client
+                .forward_tool_outcome("knowledge_read", body, false)
+                .await,
+        )
     }
 
-    async fn forward_write(&self, params: WriteParams) -> String {
+    async fn forward_write(&self, params: WriteParams) -> CallToolResult {
         let body = build_write_body(&params);
-        self.client
-            .forward_tool("knowledge_write", body, false)
-            .await
+        forwarded_tool_result(
+            self.client
+                .forward_tool_outcome("knowledge_write", body, false)
+                .await,
+        )
     }
 }

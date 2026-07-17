@@ -262,7 +262,32 @@ body.login-page-active {
   width: 16px;
   height: 16px;
   cursor: pointer;
-  accent-color: #667eea;
+  appearance: none;
+  border: 1px solid var(--control-idle-border, #737373);
+  border-radius: 4px;
+  background-color: var(--control-idle-bg, #ffffff);
+  background-position: center;
+  background-repeat: no-repeat;
+  background-size: 9px 9px;
+  transition:
+    background-color 160ms ease-out,
+    border-color 160ms ease-out,
+    box-shadow 160ms ease-out;
+}
+
+.login-page__checkbox input[type='checkbox']:hover {
+  border-color: var(--enhanced-checkbox-selected-bg, var(--control-selected-bg, #667eea));
+}
+
+.login-page__checkbox input[type='checkbox']:checked {
+  border-color: var(--enhanced-checkbox-selected-bg, var(--control-selected-bg, #667eea));
+  background-color: var(--enhanced-checkbox-selected-bg, var(--control-selected-bg, #667eea));
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 12'%3E%3Cpath d='m2.1 6.1 2.2 2.2L9.9 2.8' fill='none' stroke='%23fff' stroke-linecap='round' stroke-linejoin='round' stroke-width='1.8'/%3E%3C/svg%3E");
+}
+
+.login-page__checkbox input[type='checkbox']:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px var(--control-focus-ring, rgba(102, 126, 234, 0.28));
 }
 
 .login-page__checkbox label {
