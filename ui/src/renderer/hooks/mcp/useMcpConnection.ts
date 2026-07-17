@@ -1,12 +1,12 @@
 import type React from 'react';
 import { useState, useCallback } from 'react';
+import { Message } from '@arco-design/web-react';
 import type { TFunction } from 'i18next';
 import { useTranslation } from 'react-i18next';
 import { isBackendHttpError } from '@/common/adapter/httpBridge';
 import { mcpService } from '@/common/adapter/ipcBridge';
 import { buildMcpConnectionTestRequest } from '@/common/adapter/mcpRequest';
 import type { IMcpServer } from '@/common/config/storage';
-import { globalMessageQueue } from './messageQueue';
 
 /**
  * 截断过长的错误消息，保持可读性
@@ -129,7 +129,6 @@ const formatThrownMcpErrorMessage = (t: TFunction, error: unknown): string => {
  */
 export const useMcpConnection = (
   setMcpServers: React.Dispatch<React.SetStateAction<IMcpServer[]>>,
-  message: Required<ReturnType<typeof import('@arco-design/web-react').Message.useMessage>[0]>,
   onAuthRequired?: (server: IMcpServer) => void,
   onAuthResolved?: (server: IMcpServer) => void
 ) => {
@@ -168,8 +167,9 @@ export const useMcpConnection = (
         if (needsAuth) {
           await updateServerStatus('disconnected');
           if (notify) {
-            await globalMessageQueue.add(() => {
-              message.warning(`${server.name}: ${t('settings.mcpAuthRequired') || 'Authentication required'}`);
+            Message.warning({
+              content: `${server.name}: ${t('settings.mcpAuthRequired') || 'Authentication required'}`,
+              duration: 3000,
             });
           }
 
@@ -196,8 +196,9 @@ export const useMcpConnection = (
             last_connected: Date.now(),
           });
           if (notify) {
-            await globalMessageQueue.add(() => {
-              message.success(`${server.name}: ${t('settings.mcpTestConnectionSuccess')}`);
+            Message.success({
+              content: `${server.name}: ${t('settings.mcpTestConnectionSuccess')}`,
+              duration: 3000,
             });
           }
 
@@ -207,15 +208,13 @@ export const useMcpConnection = (
           await updateServerStatus('error');
           const errorMsg = truncateErrorMessage(formatMcpErrorMessage(t, result));
           if (notify) {
-            await globalMessageQueue.add(() => {
-              message.error({
-                content: t('settings.mcpTestConnectionFailedWithHint', {
-                  name: server.name,
-                  error: errorMsg,
-                  defaultValue: `${server.name}: ${errorMsg}. Please review the MCP JSON configuration and test again.`,
-                }),
-                duration: 5000,
-              });
+            Message.error({
+              content: t('settings.mcpTestConnectionFailedWithHint', {
+                name: server.name,
+                error: errorMsg,
+                defaultValue: `${server.name}: ${errorMsg}. Please review the MCP JSON configuration and test again.`,
+              }),
+              duration: 5000,
             });
           }
         }
@@ -224,22 +223,20 @@ export const useMcpConnection = (
         await updateServerStatus('error');
         const errorMsg = truncateErrorMessage(formatThrownMcpErrorMessage(t, error));
         if (notify) {
-          await globalMessageQueue.add(() => {
-            message.error({
-              content: t('settings.mcpTestConnectionFailedWithHint', {
-                name: server.name,
-                error: errorMsg,
-                defaultValue: `${server.name}: ${errorMsg}. Please review the MCP JSON configuration and test again.`,
-              }),
-              duration: 5000,
-            });
+          Message.error({
+            content: t('settings.mcpTestConnectionFailedWithHint', {
+              name: server.name,
+              error: errorMsg,
+              defaultValue: `${server.name}: ${errorMsg}. Please review the MCP JSON configuration and test again.`,
+            }),
+            duration: 5000,
           });
         }
       } finally {
         setTestingServers((prev) => ({ ...prev, [server.id]: false }));
       }
     },
-    [setMcpServers, message, t, onAuthRequired, onAuthResolved]
+    [setMcpServers, t, onAuthRequired, onAuthResolved]
   );
 
   const handleTestMcpConnections = useCallback(

@@ -58,7 +58,6 @@ const ModalMcpManagementSection: React.FC<{
 
   const { testingServers, handleTestMcpConnection, handleTestMcpConnections } = useMcpConnection(
     setMcpServers,
-    message,
     handleAuthRequired,
     handleAuthResolved
   );

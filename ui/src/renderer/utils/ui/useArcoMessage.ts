@@ -13,11 +13,11 @@ import { Message } from '@arco-design/web-react';
  * Drop-in replacement for `Message.useMessage(...)`.
  *
  * It ALSO returns a **referentially stable** `message` instance. Arco recreates
- * its `message` api object on every render (no internal memoization, unlike
- * antd), so any component that lists `message` in a `useEffect`/`useCallback`
- * dependency array would re-run forever — an infinite render/fetch loop. We
- * therefore return a stable façade whose method calls always delegate to the
- * latest underlying api (tracked via a ref), making `[message]` deps safe.
+ * its API object on every render, but each object closes over its own message
+ * registry. Rebinding callers to the latest object can create multiple toast
+ * containers at the same position after state updates. Keep the initial API
+ * for the component lifetime so all of its messages share one stacked
+ * container, while `[message]` dependencies remain safe.
  */
 type UseMessageReturn = ReturnType<typeof Message.useMessage>;
 
@@ -27,9 +27,8 @@ export function useArcoMessage(
   config?: Parameters<typeof Message.useMessage>[0]
 ): [ArcoMessageInstance, UseMessageReturn[1]] {
   const [message, holder] = Message.useMessage(config);
-  // Always point at the freshest api; the façade below reads through this ref.
+  // Keep the original API because it owns this hook instance's message registry.
   const latest = useRef(message);
-  latest.current = message;
   // Build the stable façade exactly once and keep returning the same reference.
   const stable = useRef<ArcoMessageInstance | null>(null);
   if (stable.current === null) {
