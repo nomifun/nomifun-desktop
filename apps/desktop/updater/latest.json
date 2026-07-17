@@ -1,11 +1,11 @@
 {
-  "version": "0.2.27",
-  "notes": "Windows 首发：优化需求看板卡片元数据布局，并补充需求看板视觉回归覆盖。",
-  "pub_date": "2026-07-17T17:31:05.251Z",
+  "version": "0.2.28",
+  "notes": "Windows 首发：提升 OpenAI 兼容流式响应韧性，改善兼容模型流中断与错误传递处理。",
+  "pub_date": "2026-07-17T18:21:39.842Z",
   "platforms": {
     "windows-x86_64": {
-      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSU2VhcGdMaWVxOHdLN092M2tJQlVmbU9reW1yQXZnZmxIOFZvQ2NMTVVtZHpiSUViVFlRb2pwbmttRmhnZDhvQ0dTc0ZvaGxFU3AxYlR6UkxuUG1GRGdraFdIL1E4NlFFPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzg0MzA5NDYzCWZpbGU6Tm9taUZ1bl8wLjIuMjdfeDY0LXNldHVwLmV4ZQpJYXd6dm4veFZUQVZwMVNWalBvVi9mViszWTBLSTNHT0FiL1RmMElqRlIxelYyM082WmJFbU1GaVE5SENwOUxkVytrWkRWQldHWTdvWEFVVUJvTGNEdz09Cg==",
-      "url": "https://github.com/nomifun/nomifun-tauri/releases/download/v0.2.27/NomiFun_0.2.27_x64-setup.exe"
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSU2VhcGdMaWVxODNIUUIxdEt4TjZiSGt0ZDJ1dmMybkR4S3lzK1JMMzMvTnNTaUwzMGIzK05oQWFJMTZiaVc0RHozTjlDd24rU2FKd0IxV05nb2luMXp0dlJqRndnb0EwPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzg0MzEyNDk4CWZpbGU6Tm9taUZ1bl8wLjIuMjhfeDY0LXNldHVwLmV4ZQpyL2ZqNFZBdDNWd1VUeFdsbFQzMHQwVDAvekNwcFVDdjU2Ky8wcVZESURjSEpqdWlLalIwaUdvRmtLOXZ2cXBpcnZCWDF6dUFqMFpzT2M0VFdjYVhBZz09Cg==",
+      "url": "https://github.com/nomifun/nomifun-tauri/releases/download/v0.2.28/NomiFun_0.2.28_x64-setup.exe"
     }
   }
 }
