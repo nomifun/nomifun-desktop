@@ -24,6 +24,8 @@ pub struct McpCallOutput {
     pub text: String,
     /// Image content `(base64 data, mime_type)` in order of appearance.
     pub images: Vec<McpImageOut>,
+    /// Protocol-level MCP `CallToolResult.isError` marker.
+    pub is_error: bool,
 }
 
 /// A single image returned by an MCP tool call.
@@ -51,6 +53,14 @@ pub struct McpManager {
     /// Monotonically increasing request ID counter for all JSON-RPC calls
     next_id: AtomicU64,
 }
+
+#[cfg(any(test, feature = "test-utils"))]
+pub type TestMcpServerWithTools<'a> = (
+    &'a str,
+    bool,
+    Vec<McpToolDef>,
+    Box<dyn super::transport::McpTransport>,
+);
 
 /// Timeout for connecting + initializing a single MCP server (transport spawn,
 /// `initialize` handshake, `tools/list`). Without it, a server that starts but
@@ -86,28 +96,6 @@ impl McpManager {
             servers,
             next_id: AtomicU64::new(10),
         })
-    }
-
-    /// Connect a single additional MCP server after initial setup.
-    /// Returns the list of tool names exposed by the server.
-    pub async fn connect_one(
-        &mut self,
-        name: String,
-        config: &McpServerConfig,
-    ) -> Result<Vec<String>, McpError> {
-        let server = match tokio::time::timeout(MCP_CONNECT_TIMEOUT, Self::connect_server(&name, config)).await {
-            Ok(result) => result?,
-            Err(_) => {
-                return Err(McpError::InitFailed(format!(
-                    "MCP server '{name}' connection timed out after {}s",
-                    MCP_CONNECT_TIMEOUT.as_secs()
-                )));
-            }
-        };
-        let tool_names: Vec<String> = server.tools.iter().map(|t| t.name.clone()).collect();
-        tracing::info!(target: "nomi_mcp", server = %name, tools = server.tools.len(), resources = server.supports_resources, "mcp server connected");
-        self.servers.insert(name, server);
-        Ok(tool_names)
     }
 
     /// Connect to a single MCP server: create transport, initialize, discover tools
@@ -210,21 +198,6 @@ impl McpManager {
         result
     }
 
-    /// Check if a tool name exists across any server
-    pub fn has_tool_name(&self, name: &str) -> bool {
-        self.servers
-            .values()
-            .any(|s| s.tools.iter().any(|t| t.name == name))
-    }
-
-    /// Count how many servers have a tool with the given name
-    pub fn tool_name_count(&self, name: &str) -> usize {
-        self.servers
-            .values()
-            .filter(|s| s.tools.iter().any(|t| t.name == name))
-            .count()
-    }
-
     /// Execute a tool on a specific server.
     ///
     /// Returns a structured [`McpCallOutput`] keeping text and image content
@@ -262,6 +235,7 @@ impl McpManager {
             .map_err(|e| McpError::Transport(format!("Failed to parse tool result: {}", e)))?;
 
         let mut out = McpCallOutput::default();
+        out.is_error = tool_result.is_error;
         let mut text_parts: Vec<String> = Vec::new();
         for content in &tool_result.content {
             match content {
@@ -366,6 +340,29 @@ impl McpManager {
                     name: name.to_string(),
                     transport,
                     tools: vec![],
+                    supports_resources,
+                },
+            );
+        }
+        Self {
+            servers,
+            next_id: AtomicU64::new(10),
+        }
+    }
+
+    /// Test-only constructor with an already-discovered tool catalog.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn new_for_test_with_tools(
+        entries: Vec<TestMcpServerWithTools<'_>>,
+    ) -> Self {
+        let mut servers = HashMap::new();
+        for (name, supports_resources, tools, transport) in entries {
+            servers.insert(
+                name.to_string(),
+                McpServer {
+                    name: name.to_string(),
+                    transport,
+                    tools,
                     supports_resources,
                 },
             );
@@ -739,6 +736,39 @@ mod tests {
         let out = mgr.call_tool("srv", "echo", json!({})).await.unwrap();
         assert_eq!(out.text, "hello");
         assert!(out.images.is_empty());
+    }
+
+    #[tokio::test]
+    async fn call_tool_preserves_mcp_is_error_flag() {
+        let resp = json!({
+            "content": [{"type":"text","text":"invalid arguments: missing kb_id"}],
+            "isError": true
+        });
+        let mgr = make_manager_with_servers(vec![(
+            "srv",
+            false,
+            Box::new(MockTransport::new(vec![resp])),
+        )]);
+
+        let out = mgr.call_tool("srv", "update_base", json!({})).await.unwrap();
+        assert!(out.is_error);
+        assert!(out.text.contains("missing kb_id"));
+    }
+
+    #[tokio::test]
+    async fn call_tool_defaults_missing_is_error_to_success() {
+        let resp = json!({
+            "content": [{"type":"text","text":"Error: ordinary text"}]
+        });
+        let mgr = make_manager_with_servers(vec![(
+            "srv",
+            false,
+            Box::new(MockTransport::new(vec![resp])),
+        )]);
+
+        let out = mgr.call_tool("srv", "echo", json!({})).await.unwrap();
+        assert!(!out.is_error);
+        assert_eq!(out.text, "Error: ordinary text");
     }
 
     #[tokio::test]

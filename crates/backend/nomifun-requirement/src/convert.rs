@@ -5,6 +5,7 @@ use nomifun_db::models::RequirementRow;
 pub fn row_to_dto(row: &RequirementRow) -> Requirement {
     Requirement {
         id: row.id.clone(),
+        display_no: row.display_no,
         title: row.title.clone(),
         content: row.content.clone(),
         tag: row.tag.clone(),

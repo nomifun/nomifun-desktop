@@ -15,6 +15,7 @@ import { iconColors } from '@/renderer/styles/colors';
 import { useModelProviderList } from '@/renderer/hooks/agent/useModelProviderList';
 import { useProvidersQuery } from '@/renderer/hooks/agent/useModelProviderList';
 import type { ProviderId } from '@/common/types/ids';
+import { useModelSelectorProviderLabel } from '@/renderer/hooks/agent/useModelSelectorProviderLabel';
 
 /**
  * A picked provider+model pair for the knowledge AI generators, or `null` to
@@ -87,6 +88,7 @@ const KnowledgeModelSelector: React.FC<KnowledgeModelSelectorProps> = ({
   const navigate = useNavigate();
   const { providers, getAvailableModels } = useModelProviderList();
   const { data: modelConfig } = useProvidersQuery();
+  const providerLabel = useModelSelectorProviderLabel();
 
   const defaultLabel = t('common.defaultModel');
   const buttonLabel = choice ? choice.model : defaultLabel;
@@ -111,7 +113,7 @@ const KnowledgeModelSelector: React.FC<KnowledgeModelSelectorProps> = ({
             const models = getAvailableModels(provider);
             if (models.length === 0) return null;
             return (
-              <Menu.ItemGroup title={provider.name} key={provider.id}>
+              <Menu.ItemGroup title={providerLabel(provider)} key={provider.id}>
                 {models.map((modelName) => {
                   const matched = modelConfig?.find((p) => p.id === provider.id);
                   const healthStatus = matched?.model_health?.[modelName]?.status || 'unknown';

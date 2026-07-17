@@ -52,6 +52,7 @@ import type { NomiMessageRuntime } from './useNomiMessage';
 import NomiModelSelector from './NomiModelSelector';
 import { ContextUsageRing } from './ContextUsageRing';
 import type { NomiModelSelection } from './useNomiModelSelection';
+import { useModelSelectorProviderLabel } from '@/renderer/hooks/agent/useModelSelectorProviderLabel';
 
 const useNomiSendBoxDraft = getSendBoxDraftHook('nomi', {
   _type: 'nomi',
@@ -143,6 +144,7 @@ const NomiSendBox: React.FC<{
       status: 'loaded',
     }));
   const { t } = useTranslation();
+  const providerLabel = useModelSelectorProviderLabel();
   const { checkAndUpdateTitle } = useAutoTitle();
   const { current_model } = modelSelection;
 
@@ -588,7 +590,7 @@ const NomiSendBox: React.FC<{
       modelSelection.getAvailableModels(provider).map((modelName) => ({
         key: `${provider.id}::${modelName}`,
         label: modelName,
-        description: provider.name,
+        description: providerLabel(provider),
         active:
           modelSelection.current_model?.id === provider.id && modelSelection.current_model?.use_model === modelName,
       }))
@@ -689,6 +691,7 @@ const NomiSendBox: React.FC<{
     loadedMcpStatuses,
     loadedSkills,
     modelSelection,
+    providerLabel,
     setContent,
     t,
   ]);

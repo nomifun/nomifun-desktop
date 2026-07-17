@@ -72,6 +72,8 @@ pub struct NewAttachmentRef {
 pub struct Requirement {
     #[serde(deserialize_with = "crate::serde_util::deserialize_requirement_id")]
     pub id: String,
+    /// Compact, immutable identifier shown to people as `#N`.
+    pub display_no: i64,
     pub title: String,
     pub content: String,
     pub tag: String,
@@ -176,8 +178,8 @@ pub struct ListRequirementsQuery {
     pub conversation_id: Option<String>,
     #[serde(default)]
     pub q: Option<String>,
-    /// Sort column. Whitelisted server-side to `id | created_at | updated_at |
-    /// status`; any other value falls back to the default queue order.
+    /// Sort column. Whitelisted server-side to `display_no | id | created_at |
+    /// updated_at | status`; any other value falls back to the default queue order.
     #[serde(default)]
     pub order_by: Option<String>,
     /// Sort direction: `asc | desc` (default `desc` for an explicit `order_by`).

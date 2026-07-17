@@ -28,6 +28,8 @@ type UseCustomAgentsLoaderResult = {
    * Settings list render.
    */
   presets: Preset[];
+  /** True after the preset catalog request has completed, including an empty catalog. */
+  presetsLoaded: boolean;
   /**
    * User-defined ACP custom agent rows fetched from
    * `ipcBridge.acpConversation.getAvailableAgents` (filtered by
@@ -75,6 +77,7 @@ export const useCustomAgentsLoader = ({
     }
   });
   const presets = presetList ?? [];
+  const presetsLoaded = presetList !== undefined;
 
   // Execution-engine rows come from the shared agents cache — every subscriber
   // (guid / conversation / settings / channels / MCP flows) reads through the
@@ -111,6 +114,7 @@ export const useCustomAgentsLoader = ({
 
   return {
     presets,
+    presetsLoaded,
     customAgents,
     customAgentAvatarMap,
     refreshCustomAgents,

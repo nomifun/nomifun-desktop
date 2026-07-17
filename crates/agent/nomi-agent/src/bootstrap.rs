@@ -515,8 +515,6 @@ impl AgentBootstrap {
 
         // Numeric-session schemas share the same supervisor as Bash. The
         // ProcessStore is only a numeric-id adapter; it owns no OS process.
-        // Register these before the builtin-name snapshot so an MCP tool with
-        // the same name is namespaced instead of shadowing the native tool.
         let process_store = Arc::new(nomi_tools::process_store::ProcessStore::new());
         registry.register(Box::new(nomi_tools::exec_command::ExecCommandTool::new(
             Arc::clone(&process_supervisor),
@@ -529,19 +527,11 @@ impl AgentBootstrap {
             Arc::clone(&process_store),
         )));
 
-        let builtin_names: Vec<String> = registry.tool_names();
-
         let mut mcp_managers: Vec<Arc<McpManager>> = Vec::new();
         let mcp_manager = if !self.config.mcp.servers.is_empty() {
             match McpManager::connect_all(&self.config.mcp.servers).await {
                 Ok(mgr) => {
                     let mgr = Arc::new(mgr);
-                    nomi_mcp::tool_proxy::register_mcp_tools(
-                        &mut registry,
-                        &mgr,
-                        &builtin_names,
-                        &self.config.mcp.servers,
-                    );
                     mcp_managers.push(mgr.clone());
                     Some(mgr)
                 }
@@ -800,15 +790,31 @@ impl AgentBootstrap {
         // deferred), surfaced to the frontend via the Plan event bridge.
         registry.register(Box::new(nomi_tools::update_plan::UpdatePlanTool::new()));
 
-        // Per-node 工具白名单（受限角色的编排 worker）：非空时只保留白名单内的
-        // 工具（含 MCP 代理）。放在全部注册之后、ToolSearch 快照与引擎构造之前
-        // —— registry 没有 unregister，这是唯一收口点。空 = 不限制（默认）。
-        registry.retain_named(&self.config.tools.builtin_allowlist);
-
-        let tool_defs_snapshot = registry.to_tool_defs();
+        // The MCP connection is established earlier for skill discovery, but
+        // proxy registration remains after native bootstrap tools. Every MCP
+        // proxy now owns an origin-stable reserved provider name, so neither
+        // registration order nor a native ToolSearch can change its routing.
+        let deferred_state = registry.deferred_state();
         registry.register(Box::new(nomi_tools::tool_search::ToolSearchTool::new(
-            tool_defs_snapshot,
+            deferred_state,
         )));
+        if let Some(manager) = &mcp_manager {
+            nomi_mcp::tool_proxy::register_mcp_tools(
+                &mut registry,
+                manager,
+                &self.config.mcp.servers,
+            );
+        }
+
+        // Per-node 工具白名单（受限角色的编排 worker）：非空时只保留白名单内的
+        // 工具（含 MCP 代理）。放在全部注册之后、引擎构造之前；registry 会同步
+        // 实时 deferred catalog，后续动态注册也能被搜索。ToolSearch 与旧顺序一致，
+        // 始终保留；空 = 不限制（默认）。
+        let mut allowed_tools = self.config.tools.builtin_allowlist.clone();
+        if !allowed_tools.is_empty() && !allowed_tools.iter().any(|name| name == "ToolSearch") {
+            allowed_tools.push("ToolSearch".to_owned());
+        }
+        registry.retain_named(&allowed_tools);
 
         let mut engine = if let Some(session) = self.resume_session {
             AgentEngine::resume_with_provider(

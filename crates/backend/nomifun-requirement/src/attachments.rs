@@ -374,13 +374,14 @@ mod tests {
         let db = init_database_memory().await.unwrap();
         // attachments.requirement_id FKs requirements(id) (CASCADE) under
         // foreign_keys=ON, so seed the parent requirements these tests bind to.
-        for id in [REQ_1, REQ_2] {
+        for (index, id) in [REQ_1, REQ_2].into_iter().enumerate() {
             sqlx::query(
                 "INSERT INTO requirements \
-                 (id, title, content, tag, order_key, sort_seq, status, priority, attempt_count, created_by, extra, created_at, updated_at) \
-                 VALUES (?, 'T', '', 't', '', '', 'pending', 0, 0, 'user', '{}', 0, 0)",
+                 (id, display_no, title, content, tag, order_key, sort_seq, status, priority, attempt_count, created_by, extra, created_at, updated_at) \
+                 VALUES (?, ?, 'T', '', 't', '', '', 'pending', 0, 0, 'user', '{}', 0, 0)",
             )
             .bind(id)
+            .bind((index + 1) as i64)
             .execute(db.pool())
             .await
             .unwrap();

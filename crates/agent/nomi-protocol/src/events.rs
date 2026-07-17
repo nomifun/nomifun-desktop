@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use serde::Serialize;
 use serde_json::Value;
 
@@ -67,7 +69,10 @@ pub enum ProtocolEvent {
     },
     McpReady {
         name: String,
+        /// Original names advertised by the server and accepted by registry policy.
         tools: Vec<String>,
+        /// Exact original-name -> provider-visible canonical-name routing map.
+        provider_tools: BTreeMap<String, String>,
     },
     Pong,
 }
@@ -320,6 +325,16 @@ mod tests {
         let event = ProtocolEvent::McpReady {
             name: "team-tools".to_string(),
             tools: vec!["team_send_message".into(), "team_task_create".into()],
+            provider_tools: BTreeMap::from([
+                (
+                    "team_send_message".into(),
+                    "mcp__team-tools__team_send_message__abc234def567ghij".into(),
+                ),
+                (
+                    "team_task_create".into(),
+                    "mcp__team-tools__team_task_create__jkl234mno567pqrs".into(),
+                ),
+            ]),
         };
         let json = serde_json::to_value(&event).unwrap();
         assert_eq!(json["type"], "mcp_ready");
@@ -327,6 +342,10 @@ mod tests {
         assert_eq!(json["tools"][0], "team_send_message");
         assert_eq!(json["tools"][1], "team_task_create");
         assert_eq!(json["tools"].as_array().unwrap().len(), 2);
+        assert_eq!(
+            json["provider_tools"]["team_send_message"],
+            "mcp__team-tools__team_send_message__abc234def567ghij"
+        );
     }
 
     #[test]

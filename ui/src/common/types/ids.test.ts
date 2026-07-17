@@ -12,6 +12,7 @@ import {
   parseCompanionEvolutionFeedbackId,
   parseConversationId,
   parseFigureId,
+  parseOptionalEntityId,
   parsePresetTagId,
   parsePublicAgentAuditEntryId,
   parseTerminalId,
@@ -57,6 +58,20 @@ describe('entity ids', () => {
       }
       expect(error instanceof InvalidEntityIdError).toBe(true);
     }
+  });
+
+  test('accepts an absent optional ID but still rejects non-UUIDv7 values when present', () => {
+    const conversationId = 'conv_0190f5fe-7c00-7a00-8000-000000000001';
+    expect(parseOptionalEntityId('conversation', undefined)).toBeUndefined();
+    expect(parseOptionalEntityId('conversation', null)).toBeUndefined();
+    expect(parseOptionalEntityId('conversation', conversationId)).toBe(conversationId);
+    let error: unknown;
+    try {
+      parseOptionalEntityId('conversation', 'conv_550e8400-e29b-41d4-a716-446655440000');
+    } catch (caught) {
+      error = caught;
+    }
+    expect(error instanceof InvalidEntityIdError).toBe(true);
   });
 
   test('session target comparison includes the entity namespace', () => {

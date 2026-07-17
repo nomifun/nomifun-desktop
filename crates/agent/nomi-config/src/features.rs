@@ -23,9 +23,6 @@ pub enum Stage {
 /// Stable identifier for a feature flag. New flags are added here.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Feature {
-    /// Engine winds down cooperatively via a `CancellationToken` instead of the
-    /// manager dropping the turn future mid-flight (Phase 0 F0.4).
-    CooperativeCancel,
     /// Manager-level terminal-event guarantee guard rollout (Phase 0 F0.2).
     TerminationGuard,
 }
@@ -40,20 +37,12 @@ pub struct FeatureSpec {
 }
 
 /// The registry of every known feature. Single source of truth.
-pub const FEATURES: &[FeatureSpec] = &[
-    FeatureSpec {
-        id: Feature::CooperativeCancel,
-        key: "nomi_cooperative_cancel",
-        stage: Stage::UnderDevelopment,
-        default_enabled: false,
-    },
-    FeatureSpec {
+pub const FEATURES: &[FeatureSpec] = &[FeatureSpec {
         id: Feature::TerminationGuard,
         key: "nomi_termination_guard",
         stage: Stage::UnderDevelopment,
         default_enabled: false,
-    },
-];
+    }];
 
 /// Resolve a config key string to its `Feature` id, if known.
 pub fn feature_for_key(key: &str) -> Option<Feature> {
@@ -135,19 +124,19 @@ mod tests {
     #[test]
     fn enable_disable_round_trip() {
         let mut f = Features::from_defaults();
-        f.enable(Feature::CooperativeCancel);
-        assert!(f.is_enabled(Feature::CooperativeCancel));
-        f.disable(Feature::CooperativeCancel);
-        assert!(!f.is_enabled(Feature::CooperativeCancel));
+        f.enable(Feature::TerminationGuard);
+        assert!(f.is_enabled(Feature::TerminationGuard));
+        f.disable(Feature::TerminationGuard);
+        assert!(!f.is_enabled(Feature::TerminationGuard));
     }
 
     #[test]
     fn from_sources_applies_known_overrides() {
         let f = Features::from_sources(
             Features::from_defaults(),
-            [("nomi_cooperative_cancel".to_string(), true)],
+            [("nomi_termination_guard".to_string(), true)],
         );
-        assert!(f.is_enabled(Feature::CooperativeCancel));
+        assert!(f.is_enabled(Feature::TerminationGuard));
     }
 
     #[test]

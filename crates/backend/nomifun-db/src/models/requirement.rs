@@ -5,6 +5,8 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct RequirementRow {
     pub id: String,
+    /// Compact, immutable identifier shown to people as `#N`.
+    pub display_no: i64,
     pub title: String,
     pub content: String,
     pub tag: String,
@@ -26,6 +28,35 @@ pub struct RequirementRow {
     pub attempt_count: i64,
     pub created_by: String,
     /// JSON object, forward-compat.
+    pub extra: String,
+    pub created_at: TimestampMs,
+    pub updated_at: TimestampMs,
+}
+
+/// A requirement before its human-facing display number is allocated.
+///
+/// The SQLite repository allocates `display_no` from a durable singleton
+/// sequence in the same transaction that inserts this row, then returns the
+/// fully persisted [`RequirementRow`].
+#[derive(Debug, Clone)]
+pub struct NewRequirementRow {
+    pub id: String,
+    pub title: String,
+    pub content: String,
+    pub tag: String,
+    pub order_key: String,
+    pub sort_seq: String,
+    pub status: String,
+    pub priority: i64,
+    pub completion_note: Option<String>,
+    pub owner_conversation_id: Option<String>,
+    pub owner_terminal_id: Option<String>,
+    pub active_turn_started_at: Option<TimestampMs>,
+    pub lease_expires_at: Option<TimestampMs>,
+    pub started_at: Option<TimestampMs>,
+    pub completed_at: Option<TimestampMs>,
+    pub attempt_count: i64,
+    pub created_by: String,
     pub extra: String,
     pub created_at: TimestampMs,
     pub updated_at: TimestampMs,

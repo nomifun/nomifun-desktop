@@ -35,6 +35,113 @@ describe('buildToolReceiptSummaryParts', () => {
     ]);
   });
 
+  test('keeps domain update and search tools generic', () => {
+    const parts = buildToolReceiptSummaryParts(
+      [
+        tool({ key: 'kb-update', name: 'nomi_knowledge_update_base', status: 'error' }),
+        tool({ key: 'kb-search', name: 'knowledge_search', status: 'completed' }),
+      ],
+      'failed'
+    );
+
+    expect(parts).toEqual([
+      {
+        action: 'generic',
+        count: 2,
+        state: 'failed',
+        target: 'nomi_knowledge_update_base, knowledge_search',
+      },
+    ]);
+  });
+
+  test('classifies anchored file actions through direct and MCP names', () => {
+    const rows = buildToolReceiptDetailRows([
+      tool({ key: 'read-file', name: 'read_file' }),
+      tool({ key: 'write-file', name: 'write_file' }),
+      tool({ key: 'list-directory', name: 'list_directory' }),
+        tool({ key: 'mcp-read-file', name: 'mcp__server__read_file' }),
+        tool({ key: 'mcp-write-file', name: 'mcp__server__write_file' }),
+        tool({ key: 'mcp-list-directory', name: 'mcp__server__list_directory' }),
+        tool({
+          key: 'canonical-mcp-read-file',
+          name: 'mcp__server__read_file__abcdefghijklmnop',
+        }),
+    ]);
+
+    expect(rows.map(({ title, action }) => ({ title, action }))).toEqual([
+      { title: 'read_file', action: 'read_files' },
+      { title: 'write_file', action: 'edit_files' },
+      { title: 'list_directory', action: 'list_files' },
+      { title: 'mcp__server__read_file', action: 'read_files' },
+      { title: 'mcp__server__write_file', action: 'edit_files' },
+      { title: 'mcp__server__list_directory', action: 'list_files' },
+      {
+        title: 'mcp__server__read_file__abcdefghijklmnop',
+        action: 'read_files',
+      },
+    ]);
+  });
+
+  test('keeps canonical knowledge aliases generic after stripping routing hash', () => {
+    const rows = buildToolReceiptDetailRows([
+      tool({
+        key: 'canonical-kb-update',
+        name: 'mcp__gateway__nomi_knowledge_update_base__abcdefghijklmnop',
+      }),
+    ]);
+
+    expect(rows.map(({ title, action }) => ({ title, action }))).toEqual([
+      {
+        title: 'mcp__gateway__nomi_knowledge_update_base__abcdefghijklmnop',
+        action: 'generic',
+      },
+    ]);
+  });
+
+  test('keeps ambiguous one-word canonical MCP actions generic without an explicit kind', () => {
+    const rows = buildToolReceiptDetailRows([
+      tool({ key: 'web-search', name: 'mcp__web__search__abcdefghijklmnop' }),
+      tool({ key: 'knowledge-read', name: 'mcp__knowledge__read__bcdefghijklmnopq' }),
+      tool({ key: 'workflow-run', name: 'mcp__workflow__run__cdefghijklmnopqr' }),
+      tool({ key: 'domain-list', name: 'mcp__domain__list__defghijklmnopqrs' }),
+    ]);
+
+    expect(rows.map(({ title, action }) => ({ title, action }))).toEqual([
+      { title: 'mcp__web__search__abcdefghijklmnop', action: 'generic' },
+      { title: 'mcp__knowledge__read__bcdefghijklmnopq', action: 'generic' },
+      { title: 'mcp__workflow__run__cdefghijklmnopqr', action: 'generic' },
+      { title: 'mcp__domain__list__defghijklmnopqrs', action: 'generic' },
+    ]);
+  });
+
+  test('classifies ToolSearch as tool loading', () => {
+    const parts = buildToolReceiptSummaryParts(
+      [tool({ key: 'tool-search', name: 'ToolSearch', status: 'completed' })],
+      'completed'
+    );
+
+    expect(parts).toEqual([{ action: 'load_tools', count: 1, state: 'completed' }]);
+  });
+
+  test('uses explicit ACP semantics before a conflicting tool-name action', () => {
+    const parts = buildToolReceiptSummaryParts(
+      [
+        tool({
+          key: 'acp-read',
+          name: 'write_file',
+          kind: 'read',
+          description: 'config.yaml',
+          input: '{"path":"config.yaml"}',
+        }),
+      ],
+      'completed'
+    );
+
+    expect(parts).toEqual([
+      { action: 'read_files', count: 1, state: 'completed', target: 'config.yaml' },
+    ]);
+  });
+
   test('summarizes mixed file reads and commands as separate receipt parts', () => {
     const parts = buildToolReceiptSummaryParts(
       [

@@ -24,6 +24,7 @@ import {
 import { useArcoMessage } from '@/renderer/utils/ui/useArcoMessage';
 import { useLocalAsrModels } from './useLocalAsrModels';
 import type { ProviderId } from '@/common/types/ids';
+import { useModelSelectorProviderLabel } from '@/renderer/hooks/agent/useModelSelectorProviderLabel';
 
 type SpeechSourceOption = {
   value: string;
@@ -48,6 +49,7 @@ const SpeechToTextContent: React.FC = () => {
   const { data: providers } = useProvidersQuery();
   const { profiles } = useModelProfiles();
   const localAsr = useLocalAsrModels();
+  const providerLabel = useModelSelectorProviderLabel();
 
   useEffect(() => {
     const syncConfig = () => setConfig(getSpeechToTextConfig());
@@ -94,13 +96,13 @@ const SpeechToTextContent: React.FC = () => {
           })
           .map((model) => ({
             value: `cloud\u0000${provider.id}\u0000${model}`,
-            label: `${provider.name} · ${model}`,
+            label: `${providerLabel(provider)} · ${model}`,
             provider: inferCloudSpeechService(provider, model),
             providerId: provider.id,
             model,
           }))
       );
-  }, [profiles, providers]);
+  }, [profiles, providers, providerLabel]);
 
   const sourceOptions = useMemo(
     () => (localOption ? [localOption, ...cloudOptions] : cloudOptions),

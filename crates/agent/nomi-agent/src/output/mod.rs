@@ -12,10 +12,8 @@ pub trait OutputSink: Send + Sync {
     fn emit_text_delta(&self, text: &str, msg_id: &str);
     /// Stream thinking content from LLM
     fn emit_thinking(&self, text: &str, msg_id: &str);
-    /// Announce a tool call.
+    /// Publish a committed, validated tool call as Running.
     fn emit_tool_call(&self, tool_use_id: &str, name: &str, input: &str);
-    /// Announce that a tool call is being generated before full arguments are available.
-    fn emit_tool_call_delta(&self, _tool_use_id: &str, _name: &str, _input: Option<&str>) {}
     /// Surface non-terminal model activity when the provider stream is still
     /// alive but has not produced a new visible event for a short period.
     fn emit_model_activity(&self, _msg_id: &str, _status: &str) {}

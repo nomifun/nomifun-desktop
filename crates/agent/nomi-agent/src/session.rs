@@ -24,6 +24,13 @@ pub struct Session {
     /// session written before this field existed (accepted, then migrated).
     #[serde(default)]
     pub owner_token: Option<String>,
+    /// Deferred tools activated by ToolSearch for this session. Stored as
+    /// canonical registry names so a resumed engine keeps sending their full
+    /// schemas. Values are stable activation identities rather than mutable
+    /// provider display aliases. A restored identity may remain pending until
+    /// its dynamic MCP tool is registered before the first message.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub activated_deferred_tools: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -85,6 +92,7 @@ impl SessionManager {
             total_usage: TokenUsage::default(),
             messages: Vec::new(),
             owner_token: None,
+            activated_deferred_tools: Vec::new(),
         };
         self.save(&session)?;
         self.update_index(&session)?;
@@ -326,15 +334,37 @@ mod tests {
         let dir = tempdir().unwrap();
         let manager = SessionManager::new(dir.path().to_path_buf(), 10);
 
-        let session = manager
+        let mut session = manager
             .create("anthropic", "claude-3", "/home", None)
             .unwrap();
+        session.activated_deferred_tools = vec![
+            "nomi_knowledge_create_base".into(),
+            "nomi_knowledge_update_base".into(),
+        ];
+        manager.save(&session).unwrap();
         let loaded = manager.load(&session.id).unwrap();
 
         assert_eq!(loaded.id, session.id);
         assert_eq!(loaded.provider, "anthropic");
         assert_eq!(loaded.model, "claude-3");
         assert_eq!(loaded.cwd, "/home");
+        assert_eq!(loaded.activated_deferred_tools, session.activated_deferred_tools);
+    }
+
+    #[test]
+    fn legacy_session_without_deferred_activations_defaults_to_empty() {
+        let dir = tempdir().unwrap();
+        let manager = SessionManager::new(dir.path().to_path_buf(), 10);
+        let session = manager.create("openai", "gpt-4", "/tmp", None).unwrap();
+        let mut value = serde_json::to_value(&session).unwrap();
+        value
+            .as_object_mut()
+            .unwrap()
+            .remove("activated_deferred_tools");
+
+        let loaded: Session = serde_json::from_value(value).unwrap();
+
+        assert!(loaded.activated_deferred_tools.is_empty());
     }
 
     #[test]

@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -20,7 +21,7 @@ use crate::compact::state::CompactState;
 use crate::compact::{auto, emergency, estimate, micro};
 use crate::confirm::ToolConfirmer;
 use crate::tool_execution::{
-    ExecutionControl, SKIPPED_AFTER_PRIOR_ERROR, execute_tool_calls,
+    ExecutionControl, ProviderToolAuthority, SKIPPED_AFTER_PRIOR_ERROR, execute_tool_calls,
     execute_tool_calls_with_approval,
 };
 use crate::output::OutputSink;
@@ -61,6 +62,12 @@ const TRANSCRIPT_TOOL_RESULT_MAX: usize = 600;
 /// lightweight progress event so the UI does not look frozen while the model is
 /// generating a large tool-call argument.
 const STREAM_IDLE_ACTIVITY_AFTER: Duration = Duration::from_millis(1_200);
+
+/// Hard limit for complete structured tool calls emitted by one provider
+/// turn. The engine consumes the entire provider turn before dispatching any
+/// call, so rejecting the first call beyond this bound keeps the oversized
+/// turn out of both approval and execution paths.
+const MAX_PROVIDER_TURN_TOOL_CALLS: usize = 128;
 
 /// Durable transcript marker used after the current turn has finished seeing
 /// an attached image. Keeping the text marker preserves conversational meaning
@@ -155,7 +162,6 @@ struct ToolEfficiencyStats {
     batch_read_files_requested: usize,
     error_results: usize,
     skipped_after_prior_error: usize,
-    cooperative_cancelled: bool,
 }
 
 impl ToolEfficiencyStats {
@@ -163,19 +169,11 @@ impl ToolEfficiencyStats {
         self.model_turn_attempts = self.model_turn_attempts.saturating_add(1);
     }
 
-    fn observe_calls(&mut self, registry: &ToolRegistry, blocks: &[ContentBlock]) {
+    fn observe_calls(&mut self, _registry: &ToolRegistry, blocks: &[ContentBlock]) {
         let calls = blocks
             .iter()
             .filter_map(|block| match block {
-                ContentBlock::ToolUse { name, input, .. } => {
-                    let input = registry
-                        .get(name)
-                        .map(|tool| {
-                            nomi_tools::coerce_input_to_schema(&tool.input_schema(), input.clone())
-                        })
-                        .unwrap_or_else(|| input.clone());
-                    Some((name.as_str(), input))
-                }
+                ContentBlock::ToolUse { name, input, .. } => Some((name.as_str(), input)),
                 _ => None,
             })
             .collect::<Vec<_>>();
@@ -201,22 +199,10 @@ impl ToolEfficiencyStats {
         }
     }
 
-    fn observe_cooperative_cancellation(&mut self) {
-        self.cooperative_cancelled = true;
-    }
-
     fn terminal_dimensions(
         &self,
         result: &Result<AgentResult, AgentError>,
     ) -> (&'static str, &'static str, &'static str, usize) {
-        if self.cooperative_cancelled {
-            let turns = result
-                .as_ref()
-                .map(|result| result.turns)
-                .unwrap_or(self.model_turn_attempts);
-            return ("cancelled", "cancelled", "none", turns);
-        }
-
         match result {
             Ok(result) => (
                 "ok",
@@ -237,6 +223,7 @@ impl ToolEfficiencyStats {
                     AgentError::Provider(_) => "provider_error",
                     AgentError::UserAborted => "user_aborted",
                     AgentError::ContextTooLong { .. } => "context_too_long",
+                    AgentError::Stagnation(_) => "tool_stagnation",
                 },
                 self.model_turn_attempts,
             ),
@@ -338,11 +325,6 @@ pub struct AgentEngine {
     /// Opt-in goal-driven continuation. `None` (the default) means the engine
     /// behaves exactly as before — no continuation, no `update_goal` tool.
     goal: Option<crate::goal::runtime::GoalRuntime>,
-    /// Optional cooperative-cancellation token. When set (by the host manager),
-    /// the engine checks it at the top of each turn and while awaiting the model
-    /// stream, returning cleanly instead of being abruptly dropped mid-flight.
-    /// `None` (the default) is byte-for-byte the previous behaviour. (F0.4)
-    cancel_token: Option<tokio_util::sync::CancellationToken>,
     /// Detects degenerate loops (the identical tool call repeated turn after
     /// turn) and triggers a one-time corrective nudge. Always on — a safety net
     /// alongside the hard `max_turns` cap. (Loop-agent robustness)
@@ -355,9 +337,8 @@ pub struct AgentEngine {
     /// Optional steering inbox: a shared queue the host manager pushes
     /// mid-turn user interjections into. Drained at two loop boundaries
     /// (after a tool-result message, and when a turn would otherwise end)
-    /// so the model sees the interjection on its next step WITHOUT a turn
-    /// restart. `None` (the default) = byte-for-byte previous behaviour.
-    /// Mirrors `cancel_token`'s shared-handle pattern.
+    /// so the model sees the interjection on its next step without a turn
+    /// restart.
     steering_inbox: Option<Arc<Mutex<std::collections::VecDeque<String>>>>,
     /// Owns every supervised command launched by this engine's command tools.
     /// Bootstrap installs it; direct/test constructors leave it empty.
@@ -435,7 +416,6 @@ impl AgentEngine {
             max_recent_images: config.tools.max_recent_images,
             commands: crate::commands::default_registry(),
             goal: None,
-            cancel_token: None,
             stagnation_guard: crate::loop_guard::StagnationGuard::new(crate::engine::STAGNATION_THRESHOLD),
             context_contributors: Vec::new(),
             steering_inbox: None,
@@ -481,6 +461,10 @@ impl AgentEngine {
         let allow_list = config.tools.allow_list.clone();
         let compact_config = config.compact.clone();
 
+        for identity in &session.activated_deferred_tools {
+            tools.restore_deferred_tool_activation(identity);
+        }
+
         Self {
             provider,
             tools,
@@ -512,7 +496,6 @@ impl AgentEngine {
             max_recent_images: config.tools.max_recent_images,
             commands: crate::commands::default_registry(),
             goal: None,
-            cancel_token: None,
             stagnation_guard: crate::loop_guard::StagnationGuard::new(crate::engine::STAGNATION_THRESHOLD),
             context_contributors: Vec::new(),
             steering_inbox: None,
@@ -606,16 +589,7 @@ impl AgentEngine {
         self.compact_config.context_window as u64
     }
 
-    /// Install (or clear) the cooperative-cancellation token for subsequent
-    /// runs. When set, [`Self::run`] observes cancellation at the top of each
-    /// turn and while awaiting the model stream, winding down cleanly with
-    /// `self.messages` left consistent. Inert when `None`. (Phase 0 F0.4)
-    pub fn set_cancel_token(&mut self, token: Option<tokio_util::sync::CancellationToken>) {
-        self.cancel_token = token;
-    }
-
-    /// Install (or clear) the steering inbox. Called by the host manager
-    /// before/after a turn, mirroring `set_cancel_token`.
+    /// Install (or clear) the steering inbox used for mid-turn interjections.
     pub fn set_steering_inbox(
         &mut self,
         inbox: Option<Arc<Mutex<std::collections::VecDeque<String>>>>,
@@ -948,6 +922,9 @@ impl AgentEngine {
             };
         }
 
+        // Stagnation is scoped to one user-request execution. A later user
+        // instruction starts with a clean progress window.
+        self.stagnation_guard.reset();
         self.current_msg_id = msg_id.to_string();
         self.output.emit_stream_start(msg_id);
         // 记录本 turn 的起始锚点（用户消息 push 之前），供 rewind_last_turn 回退。
@@ -970,22 +947,6 @@ impl AgentEngine {
                     turns: turn,
                 });
             }
-            // Cooperative cancellation between turns: self.messages is consistent
-            // here (the prior turn appended its tool results), so return cleanly.
-            // Inert unless a token was installed via set_cancel_token. (F0.4)
-            if let Some(token) = &self.cancel_token
-                && token.is_cancelled()
-            {
-                efficiency.observe_cooperative_cancellation();
-                self.save_session();
-                return Ok(AgentResult {
-                    text: String::new(),
-                    stop_reason: StopReason::EndTurn,
-                    usage: self.total_usage.clone(),
-                    turns: turn,
-                });
-            }
-
             // Enforce the per-request provider ceiling on preloaded/resumed
             // history as well as newly appended tool results. This must happen
             // before compaction because autocompaction can itself call the
@@ -1018,6 +979,11 @@ impl AgentEngine {
                 self.tools
                     .to_tool_defs_filtered(|t| t.name() != "ExitPlanMode")
             };
+            // This exact request is the authority for what the provider may
+            // call. Registry membership is broader (for example, plan mode
+            // deliberately hides mutating tools), so dispatch must never use
+            // the live registry as an implicit allow-list.
+            let tool_authority = ProviderToolAuthority::from_request_tools(&tools);
 
             // Build system prompt: append plan mode instructions when active
             let system = if self.plan_state.is_active {
@@ -1064,26 +1030,15 @@ impl AgentEngine {
             let mut thinking_text = String::new();
             let mut thinking_signature: Option<String> = None;
             let mut tool_calls: Vec<ContentBlock> = Vec::new();
+            let mut previewed_tool_calls: BTreeMap<String, String> = BTreeMap::new();
             let mut stop_reason = StopReason::EndTurn;
             let mut turn_usage = TokenUsage::default();
+            let mut done_count = 0_u8;
 
-            let mut cancelled_midstream = false;
             let mut idle_activity_active = false;
             let mut first_token_logged = false;
             loop {
-                let event = match &self.cancel_token {
-                    Some(token) => {
-                        tokio::select! {
-                            biased;
-                            _ = token.cancelled() => {
-                                cancelled_midstream = true;
-                                break;
-                            }
-                            ev = tokio::time::timeout(STREAM_IDLE_ACTIVITY_AFTER, rx.recv()) => ev,
-                        }
-                    }
-                    None => tokio::time::timeout(STREAM_IDLE_ACTIVITY_AFTER, rx.recv()).await,
-                };
+                let event = tokio::time::timeout(STREAM_IDLE_ACTIVITY_AFTER, rx.recv()).await;
                 let event = match event {
                     Ok(event) => event,
                     Err(_) => {
@@ -1101,6 +1056,18 @@ impl AgentEngine {
                     idle_activity_active = false;
                 }
                 let Some(event) = event else { break };
+                if done_count != 0 {
+                    // Done is the provider-turn commit point. Accepting any
+                    // later event would make terminal reason validation depend
+                    // on event ordering (and historically let a second Done
+                    // overwrite MaxTokens), so fail before message insertion or
+                    // tool dispatch.
+                    efficiency.observe_calls(&self.tools, &tool_calls);
+                    return Err(AgentError::ApiError(
+                        "provider stream protocol violation: event emitted after terminal Done"
+                            .to_string(),
+                    ));
+                }
                 // Time-to-first-token: elapsed from issuing the request to the
                 // first content-bearing event of the turn. Always logged at debug;
                 // surfaced as INFO only when the user opted into cache diagnostics
@@ -1138,22 +1105,92 @@ impl AgentEngine {
                         input,
                         extra,
                     } => {
-                        if id.trim().is_empty() {
-                            tracing::error!(
-                                target: "nomi_agent",
-                                tool = %name,
-                                "provider emitted tool call with empty tool_use_id"
-                            );
-                        } else {
-                            tracing::debug!(
-                                target: "nomi_agent",
-                                tool_use_id = %id,
-                                tool = %name,
-                                "provider tool call received"
-                            );
+                        if tool_calls.len() >= MAX_PROVIDER_TURN_TOOL_CALLS {
+                            efficiency.observe_calls(&self.tools, &tool_calls);
+                            return Err(AgentError::ApiError(format!(
+                                "provider stream protocol violation: provider turn exceeded the maximum of {MAX_PROVIDER_TURN_TOOL_CALLS} complete tool calls"
+                            )));
                         }
-                        let input_str = serde_json::to_string(&input).unwrap_or_default();
-                        self.output.emit_tool_call(&id, &name, &input_str);
+                        if id.trim().is_empty() {
+                            efficiency.observe_calls(&self.tools, &tool_calls);
+                            return Err(AgentError::ApiError(format!(
+                                "provider stream protocol violation: tool '{name}' has an empty tool_use_id"
+                            )));
+                        }
+                        if id.trim() != id.as_str() {
+                            efficiency.observe_calls(&self.tools, &tool_calls);
+                            return Err(AgentError::ApiError(
+                                "provider stream protocol violation: tool_use_id has leading or trailing whitespace"
+                                    .to_string(),
+                            ));
+                        }
+                        if name.trim().is_empty() {
+                            efficiency.observe_calls(&self.tools, &tool_calls);
+                            return Err(AgentError::ApiError(format!(
+                                "provider stream protocol violation: tool call '{id}' has an empty name"
+                            )));
+                        }
+                        if name.trim() != name.as_str() {
+                            efficiency.observe_calls(&self.tools, &tool_calls);
+                            return Err(AgentError::ApiError(format!(
+                                "provider stream protocol violation: tool name for call '{id}' has leading or trailing whitespace"
+                            )));
+                        }
+                        if !tool_authority.advertises(&name) {
+                            efficiency.observe_calls(&self.tools, &tool_calls);
+                            return Err(AgentError::ApiError(format!(
+                                "provider stream protocol violation: tool '{name}' ({id}) was not advertised in this request"
+                            )));
+                        }
+                        if let Some(preview_name) = previewed_tool_calls.get(&id)
+                            && preview_name != &name
+                        {
+                            efficiency.observe_calls(&self.tools, &tool_calls);
+                            return Err(AgentError::ApiError(format!(
+                                "provider stream protocol violation: completed tool call '{id}' changed its previewed name from '{preview_name}' to '{name}'"
+                            )));
+                        }
+                        if tool_calls.iter().any(|call| {
+                            matches!(call, ContentBlock::ToolUse { id: existing, .. } if existing == &id)
+                        }) {
+                            efficiency.observe_calls(&self.tools, &tool_calls);
+                            return Err(AgentError::ApiError(format!(
+                                "provider stream protocol violation: duplicate tool_use_id '{id}' in one turn"
+                            )));
+                        }
+                        if !input.is_object() {
+                            efficiency.observe_calls(&self.tools, &tool_calls);
+                            return Err(AgentError::ApiError(format!(
+                                "provider stream protocol violation: tool '{name}' ({id}) arguments are not a JSON object"
+                            )));
+                        }
+                        // Preserve the provider's object exactly. JSON Schema
+                        // is the only input contract; no compatibility coercion
+                        // may silently change the call before approval/dispatch.
+                        debug_assert!(input.is_object());
+                        tracing::debug!(
+                            target: "nomi_agent",
+                            tool_use_id = %id,
+                            tool = %name,
+                            "provider tool call received"
+                        );
+                        // Validate the completed payload now, but do not publish
+                        // a Running lifecycle until Done commits the whole
+                        // provider turn and terminal reconciliation succeeds.
+                        // The execution boundary repeats this cached-validator
+                        // check before approval, hooks, or dispatch and returns a
+                        // paired local ToolResult when invalid.
+                        if !tool_authority.is_deferred(&name) {
+                            if let Err(error) = self.tools.validate_input(&name, &input) {
+                                tracing::warn!(
+                                    target: "nomi_agent",
+                                    tool_use_id = %id,
+                                    tool = %name,
+                                    error = %error,
+                                    "provider tool call failed local schema validation and will remain unpublished"
+                                );
+                            }
+                        }
                         tool_calls.push(ContentBlock::ToolUse {
                             id,
                             name,
@@ -1161,13 +1198,58 @@ impl AgentEngine {
                             extra,
                         });
                     }
-                    LlmEvent::ToolUseDelta { id, name, input } => {
-                        let input_str = input
-                            .as_ref()
-                            .map(serde_json::to_string)
-                            .and_then(Result::ok);
-                        self.output
-                            .emit_tool_call_delta(&id, &name, input_str.as_deref());
+                    LlmEvent::ToolUseDelta { id, name, input: _ } => {
+                        // Tool progress is uncommitted provider data. Validate
+                        // and reconcile its identity, but never publish a
+                        // Running lifecycle until a complete ToolUse passes its
+                        // full schema at the commit boundary.
+                        if id.trim().is_empty() {
+                            efficiency.observe_calls(&self.tools, &tool_calls);
+                            return Err(AgentError::ApiError(format!(
+                                "provider stream protocol violation: tool progress for '{name}' has an empty tool_use_id"
+                            )));
+                        }
+                        if id.trim() != id.as_str() {
+                            efficiency.observe_calls(&self.tools, &tool_calls);
+                            return Err(AgentError::ApiError(
+                                "provider stream protocol violation: tool progress tool_use_id has leading or trailing whitespace"
+                                    .to_string(),
+                            ));
+                        }
+                        if name.trim().is_empty() {
+                            efficiency.observe_calls(&self.tools, &tool_calls);
+                            return Err(AgentError::ApiError(format!(
+                                "provider stream protocol violation: tool progress '{id}' has an empty name"
+                            )));
+                        }
+                        if name.trim() != name.as_str() {
+                            efficiency.observe_calls(&self.tools, &tool_calls);
+                            return Err(AgentError::ApiError(format!(
+                                "provider stream protocol violation: tool progress name for call '{id}' has leading or trailing whitespace"
+                            )));
+                        }
+                        if !tool_authority.advertises(&name) {
+                            efficiency.observe_calls(&self.tools, &tool_calls);
+                            return Err(AgentError::ApiError(format!(
+                                "provider stream protocol violation: tool progress '{name}' ({id}) was not advertised in this request"
+                            )));
+                        }
+                        if let Some(preview_name) = previewed_tool_calls.get(&id) {
+                            if preview_name != &name {
+                                efficiency.observe_calls(&self.tools, &tool_calls);
+                                return Err(AgentError::ApiError(format!(
+                                    "provider stream protocol violation: tool progress '{id}' changed name from '{preview_name}' to '{name}'"
+                                )));
+                            }
+                        } else {
+                            if previewed_tool_calls.len() >= MAX_PROVIDER_TURN_TOOL_CALLS {
+                                efficiency.observe_calls(&self.tools, &tool_calls);
+                                return Err(AgentError::ApiError(format!(
+                                    "provider stream protocol violation: provider turn exceeded the maximum of {MAX_PROVIDER_TURN_TOOL_CALLS} distinct tool previews"
+                                )));
+                            }
+                            previewed_tool_calls.insert(id.clone(), name.clone());
+                        }
                     }
                     LlmEvent::ThinkingDelta(text) => {
                         self.output.emit_thinking(&text, &self.current_msg_id);
@@ -1180,6 +1262,24 @@ impl AgentEngine {
                         stop_reason: sr,
                         usage,
                     } => {
+                        if matches!(sr, StopReason::ToolUse | StopReason::EndTurn)
+                            && let Some((preview_id, preview_name)) =
+                                previewed_tool_calls.iter().find(|(preview_id, preview_name)| {
+                                    !tool_calls.iter().any(|call| {
+                                        matches!(
+                                            call,
+                                            ContentBlock::ToolUse { id, name, .. }
+                                                if id == *preview_id && name == *preview_name
+                                        )
+                                    })
+                                })
+                        {
+                            efficiency.observe_calls(&self.tools, &tool_calls);
+                            return Err(AgentError::ApiError(format!(
+                                "provider stream protocol violation: tool preview '{preview_id}' for '{preview_name}' had no matching completed ToolUse before Done"
+                            )));
+                        }
+                        done_count += 1;
                         stop_reason = sr;
                         turn_usage = usage;
                     }
@@ -1191,19 +1291,45 @@ impl AgentEngine {
             }
 
             efficiency.observe_calls(&self.tools, &tool_calls);
-            if cancelled_midstream {
-                // Cooperative cancel while awaiting the model stream: stop before
-                // pushing this turn's assistant message so self.messages stays
-                // consistent (no dangling tool_use). The host maps this to a
-                // Finish(Cancelled) terminal event via the token. (Phase 0 F0.4)
-                efficiency.observe_cooperative_cancellation();
-                self.save_session();
-                return Ok(AgentResult {
-                    text: assistant_text,
-                    stop_reason: StopReason::EndTurn,
-                    usage: self.total_usage.clone(),
-                    turns: turn + 1,
-                });
+            if done_count != 1 {
+                return Err(AgentError::ApiError(format!(
+                    "provider stream protocol violation: expected exactly one Done event, received {done_count}"
+                )));
+            }
+            let terminal_shape_error = match stop_reason {
+                StopReason::ToolUse if tool_calls.is_empty() => Some(
+                    "provider stream protocol violation: ToolUse Done contained no complete tool calls",
+                ),
+                StopReason::EndTurn | StopReason::MaxTokens if !tool_calls.is_empty() => Some(
+                    "provider stream protocol violation: EndTurn/MaxTokens Done contained tool calls",
+                ),
+                StopReason::MaxTurns => Some(
+                    "provider stream protocol violation: provider emitted engine-only MaxTurns Done",
+                ),
+                _ => None,
+            };
+            if let Some(error) = terminal_shape_error {
+                return Err(AgentError::ApiError(error.to_string()));
+            }
+
+            // Done is the provider-turn commit point. Only now may complete,
+            // authorized, non-deferred, schema-valid calls enter the frontend
+            // Running lifecycle. Provider Error/EOF, terminal-shape failures,
+            // and preview reconciliation failures therefore publish nothing.
+            for call in &tool_calls {
+                let ContentBlock::ToolUse {
+                    id, name, input, ..
+                } = call
+                else {
+                    continue;
+                };
+                if tool_authority.is_deferred(name)
+                    || self.tools.validate_input(name, input).is_err()
+                {
+                    continue;
+                }
+                let input_str = serde_json::to_string(input).unwrap_or_default();
+                self.output.emit_tool_call(id, name, &input_str);
             }
 
             self.total_usage.input_tokens += turn_usage.input_tokens;
@@ -1263,6 +1389,7 @@ impl AgentEngine {
                 .push(Message::now(Role::Assistant, assistant_content));
 
             if tool_calls.is_empty() {
+                self.stagnation_guard.reset();
                 // The provider completed this assistant response. It is a safe
                 // rollback point; any steering/goal continuation appended below
                 // belongs to the *next* provider pass and must be dropped if that
@@ -1302,15 +1429,6 @@ impl AgentEngine {
                 });
             }
 
-            // Loop-stagnation guard: observe this turn's tool-call signature
-            // before executing. If the model has issued the identical call(s)
-            // STAGNATION_THRESHOLD turns running, the nudge is appended to this
-            // turn's tool-result message below so the model course-corrects next
-            // turn. (Computed here while `tool_calls` is in scope.)
-            let stagnation_nudge = self
-                .stagnation_guard
-                .observe(crate::loop_guard::tool_calls_signature(&tool_calls));
-
             let outcome = if let Some(ref approval_mgr) = self.approval_manager {
                 // JSON stream mode: use protocol-based approval
                 let writer = self
@@ -1321,6 +1439,7 @@ impl AgentEngine {
                 match execute_tool_calls_with_approval(
                     &self.tools,
                     &tool_calls,
+                    &tool_authority,
                     approval_mgr,
                     writer,
                     &self.current_msg_id,
@@ -1343,6 +1462,7 @@ impl AgentEngine {
                 match execute_tool_calls(
                     &self.tools,
                     &tool_calls,
+                    &tool_authority,
                     &self.confirmer,
                     self.hooks.as_mut(),
                     self.compaction_level,
@@ -1358,6 +1478,46 @@ impl AgentEngine {
                 }
             };
             efficiency.observe_results(&outcome.results);
+            let failed_call_ids: std::collections::HashSet<String> = outcome
+                .results
+                .iter()
+                .filter_map(|result| match result {
+                    ContentBlock::ToolResult {
+                        tool_use_id,
+                        is_error: true,
+                        ..
+                    } => Some(tool_use_id.clone()),
+                    _ => None,
+                })
+                .collect();
+            // A successful invocation is exempt only when the tool explicitly
+            // classifies this exact input as polling. Read-only is not polling:
+            // repeating a deterministic observation or ToolSearch with the
+            // same complete outcome is still a no-progress loop and must stop
+            // after the corrective nudge. Failed polling remains tracked.
+            let outcome_signature = crate::loop_guard::tool_outcome_signature_filtered(
+                &tool_calls,
+                &outcome.results,
+                |id, name, input| match self.tools.get(name) {
+                    Some(tool)
+                        if tool.is_polling_invocation(input) && !failed_call_ids.contains(id) =>
+                    {
+                        false
+                    }
+                    Some(_) => true,
+                    None => true,
+                },
+            );
+            // Exact-signature tracking alone can be evaded by alternating two
+            // different failing calls. Count all-failed tool turns separately;
+            // assistant filler must not turn a failed tool turn into progress.
+            // Any successful result resets this counter, and a user steer below
+            // performs a full guard reset.
+            let all_tool_results_failed =
+                crate::loop_guard::all_tool_results_failed(&outcome.results);
+            let mut stagnation_action = self
+                .stagnation_guard
+                .observe(outcome_signature, all_tool_results_failed);
 
             // Apply any context modifiers from skill executions before the next turn
             self.apply_context_modifiers(&outcome.modifiers);
@@ -1404,24 +1564,42 @@ impl AgentEngine {
                 }
             }
 
-            // Append the stagnation nudge (if any) as a trailing text block on
-            // this turn's user/tool-result message, so the model sees it next
-            // turn without creating a second consecutive user message.
+            // A newly arrived user steer is material progress. Resolve it before
+            // applying the action computed from the just-finished tool result,
+            // otherwise a stale Abort decision would discard the steer.
+            let steered = self.drain_steering();
+            if !steered.is_empty() {
+                self.stagnation_guard.reset();
+                stagnation_action = crate::loop_guard::StagnationAction::Continue;
+            }
+
             let mut tool_result_blocks = outcome.results;
-            if stagnation_nudge {
-                tracing::warn!(
-                    target: "nomi_agent",
-                    "loop-stagnation guard fired: identical tool call(s) repeated {STAGNATION_THRESHOLD}x — injecting corrective nudge"
-                );
-                tool_result_blocks.push(ContentBlock::Text {
-                    text: crate::loop_guard::STAGNATION_NUDGE.to_string(),
-                });
+            match stagnation_action {
+                crate::loop_guard::StagnationAction::Continue => {}
+                crate::loop_guard::StagnationAction::Nudge => {
+                    tracing::warn!(
+                        target: "nomi_agent",
+                        "loop-stagnation guard fired after {STAGNATION_THRESHOLD} no-progress tool turns — injecting corrective nudge"
+                    );
+                    tool_result_blocks.push(ContentBlock::Text {
+                        text: crate::loop_guard::STAGNATION_NUDGE.to_string(),
+                    });
+                }
+                crate::loop_guard::StagnationAction::Abort => {
+                    tracing::error!(
+                        target: "nomi_agent",
+                        "loop-stagnation guard aborted a no-progress tool cycle after the corrective nudge"
+                    );
+                    tool_result_blocks.push(ContentBlock::Text {
+                        text: crate::loop_guard::STAGNATION_ABORT.to_string(),
+                    });
+                }
             }
             // Steering interjection (point A): append any queued steer messages
             // as trailing Text blocks on THIS turn's tool-result message, so the
             // model sees them next turn without a second consecutive user
             // message. Mirrors the stagnation nudge above.
-            for text in self.drain_steering() {
+            for text in steered {
                 tool_result_blocks.push(ContentBlock::Text { text });
             }
             self.messages
@@ -1431,6 +1609,11 @@ impl AgentEngine {
             // Save session after each turn
             *safe_messages = self.messages.clone();
             self.save_session();
+            if stagnation_action == crate::loop_guard::StagnationAction::Abort {
+                return Err(AgentError::Stagnation(
+                    crate::loop_guard::STAGNATION_ABORT.to_string(),
+                ));
+            }
             turn += 1;
         }
     }
@@ -1688,6 +1871,7 @@ impl AgentEngine {
         if let (Some(mgr), Some(session)) = (&self.session_manager, &mut self.current_session) {
             session.messages = self.messages.clone();
             session.total_usage = self.total_usage.clone();
+            session.activated_deferred_tools = self.tools.session_deferred_tool_identities();
             session.updated_at = chrono::Utc::now();
             if let Err(e) = mgr.save(session) {
                 self.output
@@ -1846,11 +2030,14 @@ impl Drop for AgentEngine {
 mod set_config_tests {
     use std::sync::{Arc, Mutex};
 
-    use super::USER_IMAGE_HISTORY_PLACEHOLDER;
+    use super::{AgentError, MAX_PROVIDER_TURN_TOOL_CALLS, USER_IMAGE_HISTORY_PLACEHOLDER};
+    use nomi_protocol::events::ToolCategory;
     use nomi_providers::{LlmProvider, ProviderError};
-    use nomi_tools::registry::ToolRegistry;
+    use nomi_tools::{Tool, registry::ToolRegistry};
     use nomi_types::llm::{LlmEvent, LlmRequest};
     use nomi_types::message::{ContentBlock, Role};
+    use nomi_types::tool::ToolResult;
+    use serde_json::Value;
 
     use crate::confirm::ToolConfirmer;
     use crate::output::OutputSink;
@@ -1867,6 +2054,29 @@ mod set_config_tests {
         fn emit_info(&self, _: &str) {}
     }
 
+    #[derive(Default)]
+    struct ToolLifecycleRecordingOutput {
+        tool_calls: std::sync::atomic::AtomicUsize,
+        tool_results: std::sync::atomic::AtomicUsize,
+    }
+
+    impl OutputSink for ToolLifecycleRecordingOutput {
+        fn emit_text_delta(&self, _: &str, _: &str) {}
+        fn emit_thinking(&self, _: &str, _: &str) {}
+        fn emit_tool_call(&self, _: &str, _: &str, _: &str) {
+            self.tool_calls
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+        fn emit_tool_result(&self, _: &str, _: &str, _: bool, _: &str) {
+            self.tool_results
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+        fn emit_stream_start(&self, _: &str) {}
+        fn emit_stream_end(&self, _: &str, _: usize, _: u64, _: u64, _: u64, _: u64) {}
+        fn emit_error(&self, _: &str) {}
+        fn emit_info(&self, _: &str) {}
+    }
+
     struct NullProvider;
     #[async_trait::async_trait]
     impl LlmProvider for NullProvider {
@@ -1874,7 +2084,13 @@ mod set_config_tests {
             &self,
             _: &LlmRequest,
         ) -> Result<tokio::sync::mpsc::Receiver<LlmEvent>, ProviderError> {
-            let (_tx, rx) = tokio::sync::mpsc::channel(1);
+            let (tx, rx) = tokio::sync::mpsc::channel(1);
+            tx.send(LlmEvent::Done {
+                stop_reason: nomi_types::message::StopReason::EndTurn,
+                usage: Default::default(),
+            })
+            .await
+            .unwrap();
             Ok(rx)
         }
     }
@@ -1984,26 +2200,479 @@ mod set_config_tests {
         }
     }
 
-    /// Never delivers an event within a test window — the engine must abandon
-    /// the in-flight stream when its cancellation token fires.
-    struct SlowProvider;
+    struct FiniteLoopProvider {
+        calls: std::sync::atomic::AtomicUsize,
+        tool_turns: usize,
+        tool_name: &'static str,
+    }
+
     #[async_trait::async_trait]
-    impl LlmProvider for SlowProvider {
+    impl LlmProvider for FiniteLoopProvider {
         async fn stream(
             &self,
             _: &LlmRequest,
         ) -> Result<tokio::sync::mpsc::Receiver<LlmEvent>, ProviderError> {
+            let turn = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             let (tx, rx) = tokio::sync::mpsc::channel(2);
-            tokio::spawn(async move {
-                tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+            if turn < self.tool_turns {
+                let _ = tx
+                    .send(LlmEvent::ToolUse {
+                        id: format!("loop-{turn}"),
+                        name: self.tool_name.to_string(),
+                        input: serde_json::json!({}),
+                        extra: None,
+                    })
+                    .await;
+                let _ = tx
+                    .send(LlmEvent::Done {
+                        stop_reason: nomi_types::message::StopReason::ToolUse,
+                        usage: Default::default(),
+                    })
+                    .await;
+            } else {
                 let _ = tx
                     .send(LlmEvent::Done {
                         stop_reason: nomi_types::message::StopReason::EndTurn,
                         usage: Default::default(),
                     })
                     .await;
-            });
+            }
             Ok(rx)
+        }
+    }
+
+    /// Alternates two failing tools while emitting assistant filler before each
+    /// call. Neither the changing signature nor the filler may evade the
+    /// consecutive-all-failed guard.
+    struct AlternatingFailureProvider {
+        turns: std::sync::atomic::AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl LlmProvider for AlternatingFailureProvider {
+        async fn stream(
+            &self,
+            _: &LlmRequest,
+        ) -> Result<tokio::sync::mpsc::Receiver<LlmEvent>, ProviderError> {
+            let turn = self.turns.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let (tx, rx) = tokio::sync::mpsc::channel(3);
+            tx.send(LlmEvent::TextDelta("Trying another tool. ".to_string()))
+                .await
+                .unwrap();
+            tx.send(LlmEvent::ToolUse {
+                id: format!("alternating-failure-{turn}"),
+                name: if turn % 2 == 0 { "create" } else { "update" }.to_string(),
+                input: serde_json::json!({}),
+                extra: None,
+            })
+            .await
+            .unwrap();
+            tx.send(LlmEvent::Done {
+                stop_reason: nomi_types::message::StopReason::ToolUse,
+                usage: Default::default(),
+            })
+            .await
+            .unwrap();
+            Ok(rx)
+        }
+    }
+
+    /// Emits a configurable burst of complete tool calls in its first provider
+    /// turn, then a plain EndTurn response so an accepted burst can finish.
+    struct ToolBurstProvider {
+        turns: std::sync::atomic::AtomicUsize,
+        tool_calls: usize,
+        tool_name: &'static str,
+    }
+
+    #[async_trait::async_trait]
+    impl LlmProvider for ToolBurstProvider {
+        async fn stream(
+            &self,
+            _: &LlmRequest,
+        ) -> Result<tokio::sync::mpsc::Receiver<LlmEvent>, ProviderError> {
+            let turn = self.turns.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if turn != 0 {
+                let (tx, rx) = tokio::sync::mpsc::channel(1);
+                tx.send(LlmEvent::Done {
+                    stop_reason: nomi_types::message::StopReason::EndTurn,
+                    usage: Default::default(),
+                })
+                .await
+                .unwrap();
+                return Ok(rx);
+            }
+
+            let (tx, rx) = tokio::sync::mpsc::channel(self.tool_calls + 1);
+            for index in 0..self.tool_calls {
+                tx.send(LlmEvent::ToolUse {
+                    id: format!("burst-{index}"),
+                    name: self.tool_name.to_string(),
+                    input: serde_json::json!({"index": index}),
+                    extra: None,
+                })
+                .await
+                .unwrap();
+            }
+            tx.send(LlmEvent::Done {
+                stop_reason: nomi_types::message::StopReason::ToolUse,
+                usage: Default::default(),
+            })
+            .await
+            .unwrap();
+            Ok(rx)
+        }
+    }
+
+    struct FixedToolCallsProvider {
+        calls: Vec<(&'static str, &'static str)>,
+        as_deltas: bool,
+    }
+
+    #[async_trait::async_trait]
+    impl LlmProvider for FixedToolCallsProvider {
+        async fn stream(
+            &self,
+            _: &LlmRequest,
+        ) -> Result<tokio::sync::mpsc::Receiver<LlmEvent>, ProviderError> {
+            let (tx, rx) = tokio::sync::mpsc::channel(self.calls.len() + 1);
+            for (id, name) in &self.calls {
+                let event = if self.as_deltas {
+                    LlmEvent::ToolUseDelta {
+                        id: (*id).to_string(),
+                        name: (*name).to_string(),
+                        input: Some(serde_json::json!({})),
+                    }
+                } else {
+                    LlmEvent::ToolUse {
+                        id: (*id).to_string(),
+                        name: (*name).to_string(),
+                        input: serde_json::json!({}),
+                        extra: None,
+                    }
+                };
+                tx.send(event).await.unwrap();
+            }
+            tx.send(LlmEvent::Done {
+                stop_reason: if self.as_deltas {
+                    nomi_types::message::StopReason::EndTurn
+                } else {
+                    nomi_types::message::StopReason::ToolUse
+                },
+                usage: Default::default(),
+            })
+            .await
+            .unwrap();
+            Ok(rx)
+        }
+    }
+
+    struct PreviewThenCompleteProvider {
+        turns: std::sync::atomic::AtomicUsize,
+        preview: (&'static str, &'static str),
+        complete: (&'static str, &'static str),
+    }
+
+    #[async_trait::async_trait]
+    impl LlmProvider for PreviewThenCompleteProvider {
+        async fn stream(
+            &self,
+            _: &LlmRequest,
+        ) -> Result<tokio::sync::mpsc::Receiver<LlmEvent>, ProviderError> {
+            if self.turns.fetch_add(1, std::sync::atomic::Ordering::SeqCst) != 0 {
+                let (tx, rx) = tokio::sync::mpsc::channel(1);
+                tx.send(LlmEvent::Done {
+                    stop_reason: nomi_types::message::StopReason::EndTurn,
+                    usage: Default::default(),
+                })
+                .await
+                .unwrap();
+                return Ok(rx);
+            }
+            let (tx, rx) = tokio::sync::mpsc::channel(3);
+            tx.send(LlmEvent::ToolUseDelta {
+                id: self.preview.0.to_string(),
+                name: self.preview.1.to_string(),
+                input: Some(serde_json::json!({})),
+            })
+            .await
+            .unwrap();
+            tx.send(LlmEvent::ToolUse {
+                id: self.complete.0.to_string(),
+                name: self.complete.1.to_string(),
+                input: serde_json::json!({}),
+                extra: None,
+            })
+            .await
+            .unwrap();
+            tx.send(LlmEvent::Done {
+                stop_reason: nomi_types::message::StopReason::ToolUse,
+                usage: Default::default(),
+            })
+            .await
+            .unwrap();
+            Ok(rx)
+        }
+    }
+
+    struct ConstantResultTool {
+        name: &'static str,
+        polling: bool,
+        category: ToolCategory,
+        calls: Arc<std::sync::atomic::AtomicUsize>,
+        steer_on_call: Option<(
+            usize,
+            Arc<Mutex<std::collections::VecDeque<String>>>,
+        )>,
+    }
+
+    #[async_trait::async_trait]
+    impl Tool for ConstantResultTool {
+        fn name(&self) -> &str {
+            self.name
+        }
+
+        fn description(&self) -> &str {
+            "test tool returning a constant result"
+        }
+
+        fn input_schema(&self) -> Value {
+            serde_json::json!({"type": "object"})
+        }
+
+        fn is_concurrency_safe(&self, _input: &Value) -> bool {
+            false
+        }
+
+        fn is_polling_invocation(&self, _input: &Value) -> bool {
+            self.polling
+        }
+
+        fn category(&self) -> ToolCategory {
+            self.category
+        }
+
+        async fn execute(&self, _input: Value) -> ToolResult {
+            let call = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+            if let Some((steer_at, inbox)) = &self.steer_on_call
+                && call == *steer_at
+            {
+                inbox.lock().unwrap().push_back("new direction".to_string());
+            }
+            ToolResult::text("unchanged")
+        }
+    }
+
+    struct ConstantErrorTool {
+        name: &'static str,
+        calls: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    struct RequiredKbIdTool {
+        calls: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    #[async_trait::async_trait]
+    impl Tool for RequiredKbIdTool {
+        fn name(&self) -> &str {
+            "knowledge_search"
+        }
+
+        fn description(&self) -> &str {
+            "schema preview lifecycle fixture"
+        }
+
+        fn input_schema(&self) -> Value {
+            serde_json::json!({
+                "type": "object",
+                "properties": { "kb_id": { "type": "string", "minLength": 1 } },
+                "required": ["kb_id"],
+                "additionalProperties": false
+            })
+        }
+
+        fn is_concurrency_safe(&self, _input: &Value) -> bool {
+            false
+        }
+
+        fn category(&self) -> ToolCategory {
+            ToolCategory::Info
+        }
+
+        async fn execute(&self, _input: Value) -> ToolResult {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            ToolResult::text("should not execute")
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl Tool for ConstantErrorTool {
+        fn name(&self) -> &str {
+            self.name
+        }
+
+        fn description(&self) -> &str {
+            "test tool returning an error"
+        }
+
+        fn input_schema(&self) -> Value {
+            serde_json::json!({"type": "object"})
+        }
+
+        fn is_concurrency_safe(&self, _input: &Value) -> bool {
+            false
+        }
+
+        fn category(&self) -> ToolCategory {
+            ToolCategory::Exec
+        }
+
+        async fn execute(&self, _input: Value) -> ToolResult {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            ToolResult::error("missing required field")
+        }
+    }
+
+    /// A real deferred catalog entry used to exercise ToolSearch through the
+    /// complete AgentEngine dispatch path.
+    struct DeferredProbeTool;
+
+    #[async_trait::async_trait]
+    impl Tool for DeferredProbeTool {
+        fn name(&self) -> &str {
+            "deferred_probe"
+        }
+
+        fn description(&self) -> &str {
+            "deferred loop-guard probe"
+        }
+
+        fn input_schema(&self) -> Value {
+            serde_json::json!({"type": "object"})
+        }
+
+        fn is_concurrency_safe(&self, _input: &Value) -> bool {
+            true
+        }
+
+        fn is_deferred(&self) -> bool {
+            true
+        }
+
+        fn category(&self) -> ToolCategory {
+            ToolCategory::Info
+        }
+
+        async fn execute(&self, _input: Value) -> ToolResult {
+            ToolResult::text("probe")
+        }
+    }
+
+    struct InputLoopProvider {
+        calls: std::sync::atomic::AtomicUsize,
+        tool_turns: usize,
+        tool_name: &'static str,
+        input: Value,
+    }
+
+    #[async_trait::async_trait]
+    impl LlmProvider for InputLoopProvider {
+        async fn stream(
+            &self,
+            _: &LlmRequest,
+        ) -> Result<tokio::sync::mpsc::Receiver<LlmEvent>, ProviderError> {
+            let turn = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let (tx, rx) = tokio::sync::mpsc::channel(2);
+            if turn < self.tool_turns {
+                let _ = tx
+                    .send(LlmEvent::ToolUse {
+                        id: format!("input-loop-{turn}"),
+                        name: self.tool_name.to_string(),
+                        input: self.input.clone(),
+                        extra: None,
+                    })
+                    .await;
+                let _ = tx
+                    .send(LlmEvent::Done {
+                        stop_reason: nomi_types::message::StopReason::ToolUse,
+                        usage: Default::default(),
+                    })
+                    .await;
+            } else {
+                let _ = tx
+                    .send(LlmEvent::Done {
+                        stop_reason: nomi_types::message::StopReason::EndTurn,
+                        usage: Default::default(),
+                    })
+                    .await;
+            }
+            Ok(rx)
+        }
+    }
+
+    enum InputLoopSemantics {
+        WriteStdin,
+        ReadOnlyAction(&'static str),
+    }
+
+    struct InputClassifiedLoopTool {
+        name: &'static str,
+        semantics: InputLoopSemantics,
+        calls: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    #[async_trait::async_trait]
+    impl Tool for InputClassifiedLoopTool {
+        fn name(&self) -> &str {
+            self.name
+        }
+
+        fn description(&self) -> &str {
+            "input-sensitive loop-guard test tool"
+        }
+
+        fn input_schema(&self) -> Value {
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "session_id": { "type": "number" },
+                    "chars": { "type": "string" },
+                    "action": { "type": "string" }
+                }
+            })
+        }
+
+        fn is_concurrency_safe(&self, _input: &Value) -> bool {
+            false
+        }
+
+        fn is_polling_invocation(&self, input: &Value) -> bool {
+            matches!(self.semantics, InputLoopSemantics::WriteStdin)
+                && match input.get("chars") {
+                    None => true,
+                    Some(Value::String(chars)) => chars.is_empty(),
+                    Some(_) => false,
+                }
+        }
+
+        fn category(&self) -> ToolCategory {
+            ToolCategory::Exec
+        }
+
+        fn category_for(&self, input: &Value) -> ToolCategory {
+            match self.semantics {
+                InputLoopSemantics::ReadOnlyAction(action)
+                    if input.get("action").and_then(Value::as_str) == Some(action) =>
+                {
+                    ToolCategory::Info
+                }
+                _ => ToolCategory::Exec,
+            }
+        }
+
+        async fn execute(&self, _input: Value) -> ToolResult {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            ToolResult::text("unchanged")
         }
     }
 
@@ -2025,7 +2694,7 @@ mod set_config_tests {
                 let _ = tx
                     .send(LlmEvent::ToolUse {
                         id: "t1".to_string(),
-                        name: "noop".to_string(), // unknown tool → error tool-result; loop continues
+                        name: "noop".to_string(),
                         input: serde_json::json!({}),
                         extra: None,
                     })
@@ -2080,7 +2749,6 @@ mod set_config_tests {
             max_recent_images: 3,
             commands: crate::commands::default_registry(),
             goal: None,
-            cancel_token: None,
             stagnation_guard: crate::loop_guard::StagnationGuard::new(crate::engine::STAGNATION_THRESHOLD),
             context_contributors: Vec::new(),
             steering_inbox: None,
@@ -2338,54 +3006,630 @@ mod set_config_tests {
     }
 
     #[tokio::test]
-    async fn safety_net_caps_unbounded_loop() {
-        // A model stuck in a tool-call loop with no configured max_turns must
-        // still terminate at the hard safety net (200), not run forever.
+    async fn stagnation_guard_caps_unchanged_loop() {
+        // A model stuck in an unchanged tool-call/result loop should terminate
+        // at the stagnation guard well before the generic 200-turn safety net.
         let mut engine = make_engine("safety-net-model");
         engine.max_turns = None;
         engine.provider = Arc::new(LoopProvider);
+        let tool_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        engine.tools.register(Box::new(ConstantResultTool {
+            name: "noop",
+            polling: false,
+            category: ToolCategory::Exec,
+            calls: Arc::clone(&tool_calls),
+            steer_on_call: None,
+        }));
 
         let res = tokio::time::timeout(
             std::time::Duration::from_secs(8),
             engine.execute_turn("go", "msg-safety"),
         )
         .await
-        .expect("engine.execute_turn must terminate via the safety net, not hang forever");
+        .expect("engine.execute_turn must terminate via the stagnation guard, not hang forever");
 
-        let result = res.expect("engine.execute_turn returned Ok");
-        assert_eq!(result.stop_reason, nomi_types::message::StopReason::MaxTurns);
-        assert_eq!(result.turns, 200);
+        assert!(
+            matches!(res, Err(AgentError::Stagnation(_))),
+            "an unchanged non-polling cycle must fail closed: {res:?}"
+        );
+        assert_eq!(tool_calls.load(std::sync::atomic::Ordering::SeqCst), 6);
     }
 
     #[tokio::test]
-    async fn cooperative_cancel_abandons_inflight_stream() {
-        // With a cancellation token set, the engine must abandon a stream that is
-        // blocked waiting for the first event and return cleanly — without
-        // pushing this turn's assistant message, so self.messages stays
-        // consistent (no dangling tool_use). (Phase 0 F0.4)
-        let mut engine = make_engine("coop-model");
-        engine.provider = Arc::new(SlowProvider);
-        let token = tokio_util::sync::CancellationToken::new();
-        engine.set_cancel_token(Some(token.clone()));
-
-        let t2 = token.clone();
-        tokio::spawn(async move {
-            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-            t2.cancel();
+    async fn alternating_all_failed_tools_with_assistant_filler_are_bounded() {
+        let mut engine = make_engine("alternating-failure-model");
+        engine.max_turns = None;
+        engine.provider = Arc::new(AlternatingFailureProvider {
+            turns: std::sync::atomic::AtomicUsize::new(0),
         });
+        let tool_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        for name in ["create", "update"] {
+            engine.tools.register(Box::new(ConstantErrorTool {
+                name,
+                calls: Arc::clone(&tool_calls),
+            }));
+        }
 
-        let res = tokio::time::timeout(
-            std::time::Duration::from_secs(5),
-            engine.execute_turn("go", "m-coop"),
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(8),
+            engine.execute_turn("keep trying", "msg-alternating-failures"),
         )
         .await
-        .expect("cooperative cancel must abandon the in-flight stream, not block on it");
+        .expect("alternating failures must terminate via the stagnation guard");
 
-        let result = res.expect("engine.execute_turn returned Ok");
-        assert_eq!(result.turns, 1, "cancelled during the first turn");
-        assert!(token.is_cancelled());
-        // Only the original user message is present — no half-built assistant turn.
-        assert_eq!(engine.messages.len(), 1);
+        assert!(
+            matches!(result, Err(AgentError::Stagnation(_))),
+            "assistant filler and alternating tool names must not evade all-failed detection: {result:?}"
+        );
+        assert_eq!(
+            tool_calls.load(std::sync::atomic::Ordering::SeqCst),
+            6,
+            "the guard must nudge at 3 all-failed turns and abort at 6"
+        );
+    }
+
+    #[tokio::test]
+    async fn repeated_tool_search_is_bounded_by_stagnation_guard() {
+        let mut engine = make_engine("tool-search-loop-model");
+        engine.max_turns = None;
+        let provider = Arc::new(InputLoopProvider {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+            tool_turns: usize::MAX,
+            tool_name: "ToolSearch",
+            input: serde_json::json!({"query": "deferred_probe"}),
+        });
+        engine.provider = provider.clone();
+
+        let deferred_state = engine.tools.deferred_state();
+        engine
+            .tools
+            .register(Box::new(nomi_tools::tool_search::ToolSearchTool::new(
+                deferred_state,
+            )));
+        engine.tools.register(Box::new(DeferredProbeTool));
+
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(8),
+            engine.execute_turn("find the probe", "msg-tool-search-loop"),
+        )
+        .await
+        .expect("ToolSearch loop must terminate before the generic turn cap");
+
+        assert!(
+            matches!(result, Err(AgentError::Stagnation(_))),
+            "an unchanged ToolSearch result must fail closed: {result:?}"
+        );
+        assert_eq!(
+            provider.calls.load(std::sync::atomic::Ordering::SeqCst),
+            6,
+            "the real ToolSearch dispatch path must nudge at 3 and abort at 6"
+        );
+    }
+
+    #[tokio::test]
+    async fn polling_invocations_can_repeat_unchanged_until_external_progress() {
+        let tool_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let mut engine = make_engine("polling-model");
+        engine.max_turns = None;
+        engine.provider = Arc::new(FiniteLoopProvider {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+            tool_turns: 7,
+            tool_name: "poll",
+        });
+        engine.tools.register(Box::new(ConstantResultTool {
+            name: "poll",
+            polling: true,
+            category: ToolCategory::Exec,
+            calls: Arc::clone(&tool_calls),
+            steer_on_call: None,
+        }));
+
+        let result = engine
+            .execute_turn("wait until ready", "msg-poll")
+            .await
+            .expect("unchanged polling is not stagnation");
+
+        assert_eq!(result.turns, 8);
+        assert_eq!(tool_calls.load(std::sync::atomic::Ordering::SeqCst), 7);
+        assert!(!engine.messages.iter().any(|message| {
+            message.content.iter().any(|block| {
+                matches!(block, ContentBlock::Text { text } if text == crate::loop_guard::STAGNATION_NUDGE)
+            })
+        }));
+    }
+
+    #[tokio::test]
+    async fn provider_turn_accepts_exactly_128_tool_calls() {
+        let executed = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let mut engine = make_engine("max-tool-burst-model");
+        engine.provider = Arc::new(ToolBurstProvider {
+            turns: std::sync::atomic::AtomicUsize::new(0),
+            tool_calls: MAX_PROVIDER_TURN_TOOL_CALLS,
+            tool_name: "burst",
+        });
+        engine.tools.register(Box::new(ConstantResultTool {
+            name: "burst",
+            polling: true,
+            category: ToolCategory::Info,
+            calls: Arc::clone(&executed),
+            steer_on_call: None,
+        }));
+
+        let result = engine
+            .execute_turn("run the burst", "msg-max-tool-burst")
+            .await
+            .expect("the exact per-turn tool-call limit must be accepted");
+
+        assert_eq!(result.stop_reason, nomi_types::message::StopReason::EndTurn);
+        assert_eq!(result.turns, 2);
+        assert_eq!(
+            executed.load(std::sync::atomic::Ordering::SeqCst),
+            MAX_PROVIDER_TURN_TOOL_CALLS
+        );
+    }
+
+    #[tokio::test]
+    async fn provider_turn_rejects_129_tool_calls_before_any_execution() {
+        let executed = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let mut engine = make_engine("oversized-tool-burst-model");
+        engine.provider = Arc::new(ToolBurstProvider {
+            turns: std::sync::atomic::AtomicUsize::new(0),
+            tool_calls: MAX_PROVIDER_TURN_TOOL_CALLS + 1,
+            tool_name: "burst",
+        });
+        engine.tools.register(Box::new(ConstantResultTool {
+            name: "burst",
+            polling: true,
+            category: ToolCategory::Info,
+            calls: Arc::clone(&executed),
+            steer_on_call: None,
+        }));
+
+        let result = engine
+            .execute_turn("run the oversized burst", "msg-oversized-tool-burst")
+            .await;
+
+        assert!(
+            matches!(
+                &result,
+                Err(AgentError::ApiError(message))
+                    if message.contains("exceeded the maximum of 128 complete tool calls")
+            ),
+            "the 129th complete tool call must fail the provider turn: {result:?}"
+        );
+        assert_eq!(
+            executed.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "an oversized provider turn must fail before any tool dispatch"
+        );
+    }
+
+    #[tokio::test]
+    async fn whitespace_variant_tool_ids_are_rejected_before_any_dispatch() {
+        let executed = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let output = Arc::new(ToolLifecycleRecordingOutput::default());
+        let mut engine = make_engine("whitespace-tool-id-model");
+        engine.output = output.clone();
+        engine.provider = Arc::new(FixedToolCallsProvider {
+            calls: vec![("x", "noop"), (" x ", "noop")],
+            as_deltas: false,
+        });
+        engine.tools.register(Box::new(ConstantResultTool {
+            name: "noop",
+            polling: false,
+            category: ToolCategory::Exec,
+            calls: Arc::clone(&executed),
+            steer_on_call: None,
+        }));
+
+        let result = engine
+            .execute_turn("run both calls", "msg-whitespace-tool-id")
+            .await;
+
+        assert!(
+            matches!(
+                &result,
+                Err(AgentError::ApiError(message))
+                    if message.contains("tool_use_id has leading or trailing whitespace")
+            ),
+            "whitespace-equivalent IDs must fail the entire provider turn: {result:?}"
+        );
+        assert_eq!(
+            executed.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "neither the canonical nor whitespace-variant call may dispatch"
+        );
+        assert_eq!(output.tool_calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn tool_names_with_surrounding_whitespace_are_rejected_before_dispatch() {
+        let executed = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let output = Arc::new(ToolLifecycleRecordingOutput::default());
+        let mut engine = make_engine("whitespace-tool-name-model");
+        engine.output = output.clone();
+        engine.provider = Arc::new(FixedToolCallsProvider {
+            calls: vec![("x", " noop ")],
+            as_deltas: false,
+        });
+        engine.tools.register(Box::new(ConstantResultTool {
+            name: "noop",
+            polling: false,
+            category: ToolCategory::Exec,
+            calls: Arc::clone(&executed),
+            steer_on_call: None,
+        }));
+
+        let result = engine
+            .execute_turn("run the call", "msg-whitespace-tool-name")
+            .await;
+
+        assert!(
+            matches!(
+                &result,
+                Err(AgentError::ApiError(message))
+                    if message.contains("tool name for call 'x' has leading or trailing whitespace")
+            ),
+            "a tool name with surrounding whitespace must fail closed: {result:?}"
+        );
+        assert_eq!(executed.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert_eq!(output.tool_calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn invalid_tool_delta_identifiers_fail_before_their_preview_or_dispatch() {
+        let cases = [
+            (
+                "whitespace-id",
+                vec![("x", "noop"), (" x ", "noop")],
+                "tool progress tool_use_id has leading or trailing whitespace",
+            ),
+            (
+                "empty-id",
+                vec![("", "noop")],
+                "has an empty tool_use_id",
+            ),
+            (
+                "whitespace-name",
+                vec![("x", " noop ")],
+                "tool progress name for call 'x' has leading or trailing whitespace",
+            ),
+            (
+                "empty-name",
+                vec![("x", "")],
+                "tool progress 'x' has an empty name",
+            ),
+        ];
+
+        for (case, calls, expected_error) in cases {
+            let executed = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let mut engine = make_engine("invalid-tool-delta-model");
+            engine.provider = Arc::new(FixedToolCallsProvider {
+                calls,
+                as_deltas: true,
+            });
+            engine.tools.register(Box::new(ConstantResultTool {
+                name: "noop",
+                polling: false,
+                category: ToolCategory::Exec,
+                calls: Arc::clone(&executed),
+                steer_on_call: None,
+            }));
+
+            let result = engine
+                .execute_turn("stream the call", "msg-invalid-tool-delta")
+                .await;
+
+            assert!(
+                matches!(&result, Err(AgentError::ApiError(message)) if message.contains(expected_error)),
+                "{case} must fail closed before emitting its invalid preview: {result:?}"
+            );
+            assert_eq!(
+                executed.load(std::sync::atomic::Ordering::SeqCst),
+                0,
+                "{case} must never dispatch a tool"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn tool_delta_identity_must_match_the_completed_call() {
+        let cases = [
+            (
+                "changed-name",
+                ("x", "first"),
+                ("x", "second"),
+                "changed its previewed name",
+            ),
+            (
+                "changed-id",
+                ("x", "first"),
+                ("y", "first"),
+                "had no matching completed ToolUse before Done",
+            ),
+        ];
+
+        for (case, preview, complete, expected_error) in cases {
+            let executed = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let output = Arc::new(ToolLifecycleRecordingOutput::default());
+            let mut engine = make_engine("mismatched-tool-preview-model");
+            engine.output = output.clone();
+            engine.provider = Arc::new(PreviewThenCompleteProvider {
+                turns: std::sync::atomic::AtomicUsize::new(0),
+                preview,
+                complete,
+            });
+            for name in ["first", "second"] {
+                engine.tools.register(Box::new(ConstantResultTool {
+                    name,
+                    polling: false,
+                    category: ToolCategory::Exec,
+                    calls: Arc::clone(&executed),
+                    steer_on_call: None,
+                }));
+            }
+
+            let result = engine
+                .execute_turn("stream the call", "msg-mismatched-tool-preview")
+                .await;
+
+            assert!(
+                matches!(&result, Err(AgentError::ApiError(message)) if message.contains(expected_error)),
+                "{case} must fail at the provider commit boundary: {result:?}"
+            );
+            assert_eq!(
+                executed.load(std::sync::atomic::Ordering::SeqCst),
+                0,
+                "{case} must fail before dispatch"
+            );
+            assert_eq!(
+                output.tool_calls.load(std::sync::atomic::Ordering::SeqCst),
+                0,
+                "{case} must fail before Running publication"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn unadvertised_tool_delta_fails_before_running_preview() {
+        let output = Arc::new(ToolLifecycleRecordingOutput::default());
+        let mut engine = make_engine("unadvertised-tool-delta-model");
+        engine.output = output.clone();
+        engine.provider = Arc::new(FixedToolCallsProvider {
+            calls: vec![("x", "not_advertised")],
+            as_deltas: true,
+        });
+
+        let result = engine
+            .execute_turn("stream the call", "msg-unadvertised-tool-delta")
+            .await;
+
+        assert!(
+            matches!(&result, Err(AgentError::ApiError(message)) if message.contains("was not advertised in this request")),
+            "an unadvertised delta must fail at the provider boundary: {result:?}"
+        );
+        assert_eq!(
+            output.tool_calls.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "an unauthorized call must never enter the Running preview lifecycle"
+        );
+    }
+
+    #[tokio::test]
+    async fn deferred_tool_delta_does_not_create_running_preview() {
+        let output = Arc::new(ToolLifecycleRecordingOutput::default());
+        let mut engine = make_engine("deferred-tool-delta-model");
+        engine.output = output.clone();
+        assert!(engine.tools.register(Box::new(DeferredProbeTool)));
+        engine.provider = Arc::new(FixedToolCallsProvider {
+            calls: vec![("x", "deferred_probe")],
+            as_deltas: true,
+        });
+
+        let result = engine
+            .execute_turn("stream the call", "msg-deferred-tool-delta")
+            .await;
+
+        assert!(
+            matches!(&result, Err(AgentError::ApiError(message)) if message.contains("had no matching completed ToolUse before Done")),
+            "an unfinished deferred preview must fail terminal reconciliation: {result:?}"
+        );
+        assert_eq!(
+            output.tool_calls.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "a deferred discovery stub must not enter the Running preview lifecycle"
+        );
+    }
+
+    #[tokio::test]
+    async fn schema_invalid_tool_call_emits_error_without_running_preview_or_dispatch() {
+        let output = Arc::new(ToolLifecycleRecordingOutput::default());
+        let executed = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let mut engine = make_engine("schema-invalid-preview-model");
+        engine.output = output.clone();
+        engine.provider = Arc::new(InputLoopProvider {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+            tool_turns: 1,
+            tool_name: "knowledge_search",
+            input: serde_json::json!({}),
+        });
+        assert!(engine.tools.register(Box::new(RequiredKbIdTool {
+            calls: executed.clone(),
+        })));
+
+        engine
+            .execute_turn("search knowledge", "msg-schema-invalid-preview")
+            .await
+            .expect("the local schema error must be returned to the model for correction");
+
+        assert_eq!(
+            output.tool_calls.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "invalid arguments must never create a Running preview"
+        );
+        assert_eq!(
+            output.tool_results.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "invalid arguments must still produce one paired local error result"
+        );
+        assert_eq!(executed.load(std::sync::atomic::Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn missing_required_field_delta_never_emits_running_preview() {
+        let output = Arc::new(ToolLifecycleRecordingOutput::default());
+        let executed = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let mut engine = make_engine("schema-invalid-delta-model");
+        engine.output = output.clone();
+        engine.provider = Arc::new(PreviewThenCompleteProvider {
+            turns: std::sync::atomic::AtomicUsize::new(0),
+            preview: ("x", "knowledge_search"),
+            complete: ("x", "knowledge_search"),
+        });
+        assert!(engine.tools.register(Box::new(RequiredKbIdTool {
+            calls: executed.clone(),
+        })));
+
+        engine
+            .execute_turn("search knowledge", "msg-schema-invalid-delta")
+            .await
+            .expect("the paired local schema error must let the model turn recover");
+
+        assert_eq!(
+            output.tool_calls.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "an uncommitted delta with missing required fields must never be Running"
+        );
+        assert_eq!(output.tool_calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert_eq!(output.tool_results.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(executed.load(std::sync::atomic::Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn whole_string_tool_arguments_are_rejected_before_dispatch() {
+        let tool_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let mut engine = make_engine("stringified-write-stdin-model");
+        engine.max_turns = None;
+        engine.provider = Arc::new(InputLoopProvider {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+            tool_turns: 7,
+            tool_name: "write_stdin",
+            input: Value::String(r#"{"session_id":7,"chars":"status"}"#.to_string()),
+        });
+        engine.tools.register(Box::new(InputClassifiedLoopTool {
+            name: "write_stdin",
+            semantics: InputLoopSemantics::WriteStdin,
+            calls: Arc::clone(&tool_calls),
+        }));
+
+        let result = engine
+            .execute_turn("send status", "msg-stringified-write-stdin")
+            .await;
+
+        assert!(
+            matches!(&result, Err(AgentError::ApiError(message)) if message.contains("arguments are not a JSON object")),
+            "a provider must not bypass the structured argument contract with a JSON string: {result:?}"
+        );
+        assert_eq!(tool_calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn whole_string_read_arguments_are_rejected_without_execution() {
+        for (tool_name, action) in [("Browser", "observe"), ("Computer", "screenshot")] {
+            let tool_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let mut engine = make_engine("stringified-read-only-model");
+            engine.max_turns = None;
+            engine.provider = Arc::new(InputLoopProvider {
+                calls: std::sync::atomic::AtomicUsize::new(0),
+                tool_turns: 7,
+                tool_name,
+                input: Value::String(format!(r#"{{"action":"{action}"}}"#)),
+            });
+            engine.tools.register(Box::new(InputClassifiedLoopTool {
+                name: tool_name,
+                semantics: InputLoopSemantics::ReadOnlyAction(action),
+                calls: Arc::clone(&tool_calls),
+            }));
+
+            let result = engine
+                .execute_turn("observe", &format!("msg-stringified-{tool_name}"))
+                .await;
+
+            assert!(
+                matches!(&result, Err(AgentError::ApiError(message)) if message.contains("arguments are not a JSON object")),
+                "{tool_name} must reject a provider's whole-object JSON string: {result:?}"
+            );
+            assert_eq!(tool_calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+        }
+    }
+
+    #[tokio::test]
+    async fn unchanged_read_only_calls_nudge_then_abort() {
+        let tool_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let mut engine = make_engine("read-only-monitor-model");
+        engine.max_turns = None;
+        engine.provider = Arc::new(FiniteLoopProvider {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+            tool_turns: 7,
+            tool_name: "external_status",
+        });
+        engine.tools.register(Box::new(ConstantResultTool {
+            name: "external_status",
+            polling: false,
+            category: ToolCategory::Info,
+            calls: Arc::clone(&tool_calls),
+            steer_on_call: None,
+        }));
+
+        let result = engine
+            .execute_turn("monitor until ready", "msg-read-only-monitor")
+            .await;
+
+        assert!(
+            matches!(result, Err(AgentError::Stagnation(_))),
+            "read-only without explicit polling semantics must be bounded: {result:?}"
+        );
+        assert_eq!(tool_calls.load(std::sync::atomic::Ordering::SeqCst), 6);
+        assert!(engine.messages.iter().any(|message| {
+            message.content.iter().any(|block| {
+                matches!(block, ContentBlock::Text { text } if text == crate::loop_guard::STAGNATION_NUDGE)
+            })
+        }));
+    }
+
+    #[tokio::test]
+    async fn steering_cancels_a_stale_stagnation_abort() {
+        let inbox = Arc::new(Mutex::new(std::collections::VecDeque::new()));
+        let tool_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let mut engine = make_engine("steered-loop-model");
+        engine.max_turns = None;
+        engine.provider = Arc::new(FiniteLoopProvider {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+            tool_turns: 6,
+            tool_name: "constant",
+        });
+        engine.tools.register(Box::new(ConstantResultTool {
+            name: "constant",
+            polling: false,
+            category: ToolCategory::Exec,
+            calls: Arc::clone(&tool_calls),
+            steer_on_call: Some((6, Arc::clone(&inbox))),
+        }));
+        engine.set_steering_inbox(Some(inbox));
+
+        let result = engine
+            .execute_turn("start", "msg-steered-loop")
+            .await
+            .expect("a steer arriving on the aborting outcome must reset the guard");
+
+        assert_eq!(result.turns, 7);
+        assert_eq!(tool_calls.load(std::sync::atomic::Ordering::SeqCst), 6);
+        assert!(engine.messages.iter().any(|message| {
+            message
+                .content
+                .iter()
+                .any(|block| matches!(block, ContentBlock::Text { text } if text == "new direction"))
+        }));
     }
 
     #[tokio::test]
@@ -2428,6 +3672,13 @@ mod set_config_tests {
         engine.provider = std::sync::Arc::new(ToolThenStopProvider {
             calls: std::sync::atomic::AtomicUsize::new(0),
         });
+        engine.tools.register(Box::new(ConstantResultTool {
+            name: "noop",
+            polling: false,
+            category: ToolCategory::Info,
+            calls: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            steer_on_call: None,
+        }));
         let inbox = std::sync::Arc::new(std::sync::Mutex::new(
             std::collections::VecDeque::from(["wait, focus on Y".to_string()]),
         ));
@@ -2774,7 +4025,6 @@ mod phase6_tests {
             max_recent_images: 3,
             commands: crate::commands::default_registry(),
             goal: None,
-            cancel_token: None,
             stagnation_guard: crate::loop_guard::StagnationGuard::new(crate::engine::STAGNATION_THRESHOLD),
             context_contributors: Vec::new(),
             steering_inbox: None,
@@ -3049,7 +4299,6 @@ mod compact_tests {
             max_recent_images: 3,
             commands: crate::commands::default_registry(),
             goal: None,
-            cancel_token: None,
             stagnation_guard: crate::loop_guard::StagnationGuard::new(crate::engine::STAGNATION_THRESHOLD),
             context_contributors: Vec::new(),
             steering_inbox: None,
@@ -3592,7 +4841,6 @@ mod plan_mode_tests {
             max_recent_images: 3,
             commands: crate::commands::default_registry(),
             goal: None,
-            cancel_token: None,
             stagnation_guard: crate::loop_guard::StagnationGuard::new(crate::engine::STAGNATION_THRESHOLD),
             context_contributors: Vec::new(),
             steering_inbox: None,
@@ -3812,7 +5060,6 @@ mod handle_command_tests {
             max_recent_images: 3,
             commands: crate::commands::default_registry(),
             goal: None,
-            cancel_token: None,
             stagnation_guard: crate::loop_guard::StagnationGuard::new(crate::engine::STAGNATION_THRESHOLD),
             context_contributors: Vec::new(),
             steering_inbox: None,
@@ -3931,6 +5178,8 @@ pub enum AgentError {
     UserAborted,
     #[error("Context window nearly full ({input_tokens} tokens used, limit {limit})")]
     ContextTooLong { input_tokens: u64, limit: usize },
+    #[error("Tool loop stopped: {0}")]
+    Stagnation(String),
 }
 
 #[cfg(test)]
@@ -4062,7 +5311,7 @@ mod transcript_tests {
 
 #[cfg(test)]
 mod tool_efficiency_tests {
-    use super::{AgentResult, ToolEfficiencyStats};
+    use super::ToolEfficiencyStats;
     use crate::tool_execution::SKIPPED_AFTER_PRIOR_ERROR;
     use nomi_process_runtime::{CapabilityPolicy, ProcessSupervisor, SupervisorConfig};
     use nomi_tools::{
@@ -4070,7 +5319,6 @@ mod tool_efficiency_tests {
         registry::ToolRegistry,
     };
     use nomi_types::message::ContentBlock;
-    use nomi_types::message::{StopReason, TokenUsage};
     use serde_json::json;
     use std::sync::Arc;
 
@@ -4126,14 +5374,12 @@ mod tool_efficiency_tests {
     }
 
     #[test]
-    fn accounting_uses_the_same_schema_coercion_as_execution() {
+    fn accounting_does_not_interpret_schema_invalid_string_as_a_batch() {
         let calls = vec![
             ContentBlock::ToolUse {
                 id: "exec".into(),
                 name: "exec_command".into(),
-                input: serde_json::Value::String(
-                    r#"{"script":"print(1)","language":"python","timeout":1000}"#.into(),
-                ),
+                input: json!({"script":"print(1)","language":"python","timeout":1000}),
                 extra: None,
             },
             ContentBlock::ToolUse {
@@ -4148,24 +5394,7 @@ mod tool_efficiency_tests {
         stats.observe_calls(&efficiency_registry(), &calls);
 
         assert_eq!(stats.exec_command_script_calls, 1);
-        assert_eq!(stats.batch_read_files_requested, 2);
-    }
-
-    #[test]
-    fn cooperative_cancel_has_a_distinct_terminal_classification() {
-        let mut stats = ToolEfficiencyStats::default();
-        stats.observe_cooperative_cancellation();
-        let result = Ok(AgentResult {
-            text: String::new(),
-            stop_reason: StopReason::EndTurn,
-            usage: TokenUsage::default(),
-            turns: 2,
-        });
-
-        assert_eq!(
-            stats.terminal_dimensions(&result),
-            ("cancelled", "cancelled", "none", 2)
-        );
+        assert_eq!(stats.batch_read_files_requested, 0);
     }
 
     #[test]

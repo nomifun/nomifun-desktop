@@ -78,8 +78,8 @@ describe('Guid preset picker visual system', () => {
     const chips = classBlock(css, 'drawerFilterChips');
     const chip = classBlock(css, 'drawerFilterChip');
 
-    expect(bar.includes('border-radius: 12px')).toBe(true);
-    expect(bar.includes('padding: 9px 10px')).toBe(true);
+    expect(bar.includes('border-radius: 10px')).toBe(true);
+    expect(bar.includes('padding: 8px 9px')).toBe(true);
     expect(rows.includes('gap: 7px')).toBe(true);
     expect(row.includes('grid-template-columns: minmax(68px, max-content) minmax(0, 1fr)')).toBe(true);
     expect(row.includes('gap: 8px')).toBe(true);
@@ -102,7 +102,7 @@ describe('Guid preset picker visual system', () => {
     const css = readSource(new URL('../index.module.css', import.meta.url));
 
     expect(css.includes('.drawerSearchInput:global(.arco-input-inner-wrapper)')).toBe(true);
-    expect(css.includes('height: 42px')).toBe(true);
+    expect(css.includes('height: 40px')).toBe(true);
     expect(css.includes('min-height: 44px')).toBe(false);
     expect(css.includes('0 10px 24px rgba(26, 20, 51, 0.04)')).toBe(false);
     expect(css.includes('.drawerSearchInput :global(.arco-input-prefix)')).toBe(true);
@@ -116,7 +116,8 @@ describe('Guid preset picker visual system', () => {
     expect(drawerSection.includes('--drawer-panel-bg')).toBe(true);
     expect(drawerSection.includes('--drawer-panel-hover-bg')).toBe(true);
     expect(drawerSection.includes('--drawer-hairline')).toBe(true);
-    expect(drawerSection.includes('--drawer-inner-highlight')).toBe(true);
+    expect(drawerSection.includes('--drawer-selection-bg')).toBe(true);
+    expect(drawerSection.includes('--drawer-selection-border')).toBe(true);
     expect(/#(?:242426|1f1f22|262626|3a3a3a)\b/i.test(drawerSection)).toBe(false);
     expect(drawerSection.includes('rgba(255, 255, 255')).toBe(false);
     expect(drawerSection.includes(":global([data-theme='dark']) .drawer")).toBe(false);

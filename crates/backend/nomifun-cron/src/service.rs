@@ -124,6 +124,32 @@ impl CronService {
             .emit_job_updated(&job.user_id, &cron_job_to_response(job));
     }
 
+    /// Execution updates are persisted in several repository writes (status,
+    /// lazy conversation binding, and next run). Reload before broadcasting so
+    /// clients never receive a stale pre-execution aggregate.
+    async fn emit_persisted_job_updated_for(&self, job: &CronJob) {
+        let row = match self.repo.get_by_id(&job.user_id, &job.id).await {
+            Ok(Some(row)) => row,
+            Ok(None) => return,
+            Err(error) => {
+                warn!(
+                    job_id = %job.id,
+                    error = %error,
+                    "Failed to reload cron job for update event"
+                );
+                return;
+            }
+        };
+        match cron_job_from_row(row) {
+            Ok(persisted) => self.emit_job_updated_for(&persisted).await,
+            Err(error) => warn!(
+                job_id = %job.id,
+                error = %error,
+                "Refusing to emit an invalid persisted cron job"
+            ),
+        }
+    }
+
     async fn emit_job_removed_for(&self, job: &CronJob) {
         self.emitter.emit_job_removed(&job.user_id, &job.id);
     }
@@ -758,6 +784,7 @@ impl CronService {
                 self.record_missed_execution(&job).await;
                 self.insert_missed_job_tips(&job).await;
                 self.reschedule_after_missed(&job).await;
+                self.emit_persisted_job_updated_for(&job).await;
                 self.emit_job_executed_for(&job, "missed", None).await;
                 continue;
             }
@@ -962,17 +989,21 @@ impl CronService {
                     .await;
                 self.record_execution_run(&job, "ok").await;
                 self.reschedule_after_execution(&job).await;
+                self.emit_persisted_job_updated_for(&job).await;
                 self.emit_job_executed_for(&job, "ok", None).await;
             }
             ExecutionResult::Retrying { attempt } => {
+                let retry_at = now_ms() + RETRY_INTERVAL_MS as i64;
                 let params = UpdateCronJobParams {
                     retry_count: Some(attempt),
+                    next_run_at: Some(Some(retry_at)),
                     ..Default::default()
                 };
                 if let Err(e) = self.repo.update(&job.user_id, job_id, &params).await {
                     error!(job_id, error = %e, "Failed to update retry count");
                 }
-                self.schedule_retry(&job, attempt);
+                self.schedule_retry(&job, retry_at);
+                self.emit_persisted_job_updated_for(&job).await;
             }
             ExecutionResult::Skipped => {
                 let params = UpdateCronJobParams {
@@ -985,12 +1016,14 @@ impl CronService {
                 }
                 self.record_execution_run(&job, "skipped").await;
                 self.reschedule_after_execution(&job).await;
+                self.emit_persisted_job_updated_for(&job).await;
                 self.emit_job_executed_for(&job, "skipped", None).await;
             }
             ExecutionResult::Error { message } => {
                 self.update_job_after_error(&job, &message).await;
                 self.record_execution_run(&job, "error").await;
                 self.reschedule_after_execution(&job).await;
+                self.emit_persisted_job_updated_for(&job).await;
                 self.emit_job_executed_for(&job, "error", Some(&message))
                     .await;
             }
@@ -1004,11 +1037,13 @@ impl CronService {
                 self.update_job_after_success(job, &conversation_id)
                     .await;
                 self.record_execution_run(job, "ok").await;
+                self.emit_persisted_job_updated_for(job).await;
                 self.emit_job_executed_for(job, "ok", None).await;
             }
             ExecutionResult::Error { message } => {
                 self.update_job_after_error(job, &message).await;
                 self.record_execution_run(job, "error").await;
+                self.emit_persisted_job_updated_for(job).await;
                 self.emit_job_executed_for(job, "error", Some(&message))
                     .await;
             }
@@ -1024,6 +1059,7 @@ impl CronService {
                         "Failed to update run-now retry count"
                     );
                 }
+                self.emit_persisted_job_updated_for(job).await;
             }
             ExecutionResult::Skipped => {
                 let params = UpdateCronJobParams {
@@ -1039,6 +1075,7 @@ impl CronService {
                     );
                 }
                 self.record_execution_run(job, "skipped").await;
+                self.emit_persisted_job_updated_for(job).await;
                 self.emit_job_executed_for(job, "skipped", None).await;
             }
         }
@@ -1148,13 +1185,6 @@ impl CronService {
                 error!(job_id = %job.id, error = %e, "Failed to disable at-type job");
             }
             self.scheduler.cancel_job(&job.id);
-
-            let disabled = CronJob {
-                enabled: false,
-                next_run_at: None,
-                ..job.clone()
-            };
-            self.emit_job_updated_for(&disabled).await;
 
             info!(job_id = %job.id, "At-type job executed, auto-disabled");
             return;
@@ -1270,8 +1300,7 @@ impl CronService {
         self.scheduler.reschedule_job(&updated);
     }
 
-    fn schedule_retry(&self, job: &CronJob, _attempt: i64) {
-        let next_run = now_ms() + RETRY_INTERVAL_MS as i64;
+    fn schedule_retry(&self, job: &CronJob, next_run: i64) {
         let retry_job = CronJob {
             schedule: CronSchedule::At {
                 at_ms: next_run,

@@ -17,11 +17,85 @@ use nomifun_common::{
     LoopbackCapabilityClaims, LoopbackCapabilityError,
     LoopbackCapabilityRenewalRequest, unix_time_secs,
 };
+use rmcp::model::{CallToolResult, Content};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use tokio::sync::Mutex;
 
 type ScopedAccess<S> = LoopbackCapabilityAccess<LoopbackCapabilityClaims<S>>;
+
+/// Structured outcome of forwarding a tool call over the loopback bridge.
+///
+/// The distinction is derived from the HTTP status and the gateway's JSON
+/// response envelope (a top-level `error` member), never from words appearing
+/// in the rendered tool text.  MCP bridges use this to set protocol-level
+/// `CallToolResult.isError` through [`into_mcp_tool_result`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ForwardToolOutcome {
+    Success(String),
+    Error(String),
+}
+
+impl ForwardToolOutcome {
+    pub(crate) fn into_parts(self) -> (String, bool) {
+        match self {
+            Self::Success(text) => (text, false),
+            Self::Error(text) => (text, true),
+        }
+    }
+}
+
+/// Convert a structured loopback outcome into the MCP wire result while
+/// preserving its error bit. A capability may optionally attach
+/// `_mcp_images: [{"mime_type","data"}]`; those entries become MCP image
+/// content and are removed from the text payload.
+pub(crate) fn into_mcp_tool_result(outcome: ForwardToolOutcome) -> CallToolResult {
+    let (text, is_error) = outcome.into_parts();
+    if !text.contains("_mcp_images") {
+        return call_tool_result(vec![Content::text(text)], is_error);
+    }
+
+    let parsed: Option<serde_json::Value> = serde_json::from_str(&text).ok();
+    let images: Vec<Content> = parsed
+        .as_ref()
+        .and_then(|value| value.get("_mcp_images"))
+        .and_then(serde_json::Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|image| {
+                    let data = image.get("data").and_then(serde_json::Value::as_str)?;
+                    let mime = image
+                        .get("mime_type")
+                        .and_then(serde_json::Value::as_str)?;
+                    Some(Content::image(data.to_owned(), mime.to_owned()))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    if images.is_empty() {
+        return call_tool_result(vec![Content::text(text)], is_error);
+    }
+
+    let text_out = match parsed {
+        Some(serde_json::Value::Object(mut map)) => {
+            map.remove("_mcp_images");
+            serde_json::to_string(&serde_json::Value::Object(map)).unwrap_or(text)
+        }
+        _ => text,
+    };
+    let mut content = vec![Content::text(text_out)];
+    content.extend(images);
+    call_tool_result(content, is_error)
+}
+
+fn call_tool_result(content: Vec<Content>, is_error: bool) -> CallToolResult {
+    if is_error {
+        CallToolResult::error(content)
+    } else {
+        CallToolResult::success(content)
+    }
+}
 
 /// Build the HTTP client used only for process-local callback traffic.
 pub fn build_bridge_http_client() -> reqwest::Client {
@@ -252,17 +326,18 @@ where
         Err(last_error)
     }
 
-    /// Forward one tool call. Session claims are always injected from the
-    /// current canonical access, never from caller-provided request JSON.
-    pub async fn forward_tool(
+    /// Forward one tool call while preserving whether the remote endpoint
+    /// returned a tool-level error.  This is the MCP-facing variant: callers
+    /// must map [`ForwardToolOutcome::Error`] to `CallToolResult.isError=true`.
+    pub(crate) async fn forward_tool_outcome(
         &self,
         operation: &str,
         mut body: serde_json::Value,
         stringify_non_string_result: bool,
-    ) -> String {
+    ) -> ForwardToolOutcome {
         let first = match self.access_for(operation).await {
             Ok(access) => access,
-            Err(error) => return format!("Error: {error}"),
+            Err(error) => return ForwardToolOutcome::Error(format!("Error: {error}")),
         };
         inject_session(&mut body, &first.claims);
         let first_response = self.post_tool_with_retry(&first.token, &body).await;
@@ -271,23 +346,29 @@ where
             Ok(response) if response.0 == reqwest::StatusCode::UNAUTHORIZED => {
                 let renewed = match self.renew_after_unauthorized(&first.token).await {
                     Ok(access) => access,
-                    Err(error) => return format!("Error: capability renewal failed: {error}"),
+                    Err(error) => {
+                        return ForwardToolOutcome::Error(format!(
+                            "Error: capability renewal failed: {error}"
+                        ));
+                    }
                 };
                 inject_session(&mut body, &renewed.claims);
                 match self.post_tool_with_retry(&renewed.token, &body).await {
                     Ok(response) => response,
-                    Err(error) => return format!("Error: {error}"),
+                    Err(error) => {
+                        return ForwardToolOutcome::Error(format!("Error: {error}"));
+                    }
                 }
             }
             Ok(response) => response,
-            Err(error) => return format!("Error: {error}"),
+            Err(error) => return ForwardToolOutcome::Error(format!("Error: {error}")),
         };
 
         eprintln!(
             "[{}] POST /tool -> status={status}",
             self.inner.log_prefix
         );
-        render_tool_response(&text, stringify_non_string_result)
+        render_tool_response(status, &text, stringify_non_string_result)
     }
 
     async fn post_tool_with_retry(
@@ -354,21 +435,64 @@ fn inject_session<S: Serialize>(body: &mut serde_json::Value, claims: &LoopbackC
     );
 }
 
-fn render_tool_response(text: &str, stringify_non_string_result: bool) -> String {
-    if let Ok(value) = serde_json::from_str::<serde_json::Value>(text) {
-        match value.get("result") {
-            Some(serde_json::Value::String(result)) => return result.clone(),
-            Some(result) if stringify_non_string_result => {
-                return serde_json::to_string_pretty(result)
-                    .unwrap_or_else(|_| result.to_string());
-            }
-            _ => {}
-        }
-        if let Some(error) = value.get("error") {
-            return format!("Error: {error}");
-        }
+fn render_tool_response(
+    status: reqwest::StatusCode,
+    text: &str,
+    stringify_non_string_result: bool,
+) -> ForwardToolOutcome {
+    if !status.is_success() {
+        return ForwardToolOutcome::Error(text.to_owned());
     }
-    text.to_owned()
+
+    let value = match serde_json::from_str::<serde_json::Value>(text) {
+        Ok(value) => value,
+        Err(error) => {
+            return ForwardToolOutcome::Error(format!(
+                "Error: invalid loopback tool response (expected JSON envelope): {error}"
+            ));
+        }
+    };
+
+    // Loopback handlers use an explicit top-level result/error envelope.  Keep
+    // this fail-closed: a malformed 2xx response must never turn into a
+    // successful MCP result.  `needs_confirmation` is the one explicit control
+    // outcome emitted by the gateway permission gate.
+    let has_result = value.get("result").is_some();
+    let has_error = value.get("error").is_some();
+    let is_confirmation = value
+        .get("needs_confirmation")
+        .and_then(serde_json::Value::as_bool)
+        == Some(true);
+    if has_result && has_error {
+        return ForwardToolOutcome::Error(
+            "Error: invalid loopback tool response (both `result` and `error` are present)".into(),
+        );
+    }
+    if is_confirmation && (has_result || has_error) {
+        return ForwardToolOutcome::Error(
+            "Error: invalid loopback tool response (confirmation mixed with result envelope)"
+                .into(),
+        );
+    }
+    if let Some(error) = value.get("error") {
+        return ForwardToolOutcome::Error(format!("Error: {error}"));
+    }
+    if let Some(result) = value.get("result") {
+        return match result {
+            serde_json::Value::String(result) => ForwardToolOutcome::Success(result.clone()),
+            _ if stringify_non_string_result => ForwardToolOutcome::Success(
+                serde_json::to_string_pretty(result).unwrap_or_else(|_| result.to_string()),
+            ),
+            _ => ForwardToolOutcome::Success(text.to_owned()),
+        };
+    }
+    if is_confirmation {
+        return ForwardToolOutcome::Success(text.to_owned());
+    }
+
+    ForwardToolOutcome::Error(
+        "Error: invalid loopback tool response (missing `result` or `error`)".into(),
+    )
 }
 
 #[cfg(test)]
@@ -388,6 +512,83 @@ mod tests {
     use super::*;
 
     const DOMAIN: &str = "stdio-common-test-v2";
+
+    #[test]
+    fn response_renderer_preserves_structured_gateway_error() {
+        let outcome = render_tool_response(
+            reqwest::StatusCode::OK,
+            r#"{"error":"invalid arguments for this tool: missing field `kb_id`"}"#,
+            true,
+        );
+        assert!(matches!(outcome, ForwardToolOutcome::Error(text) if text.contains("kb_id")));
+    }
+
+    #[test]
+    fn response_renderer_does_not_guess_errors_from_text() {
+        let outcome = render_tool_response(
+            reqwest::StatusCode::OK,
+            r#"{"result":"Error: this is ordinary successful tool output"}"#,
+            true,
+        );
+        assert_eq!(
+            outcome,
+            ForwardToolOutcome::Success("Error: this is ordinary successful tool output".into())
+        );
+
+        let nested = render_tool_response(
+            reqwest::StatusCode::OK,
+            r#"{"result":{"error":"a payload field, not the gateway envelope"}}"#,
+            true,
+        );
+        assert!(matches!(nested, ForwardToolOutcome::Success(_)));
+    }
+
+    #[test]
+    fn response_renderer_marks_non_success_http_status_as_error() {
+        let outcome = render_tool_response(
+            reqwest::StatusCode::INTERNAL_SERVER_ERROR,
+            "upstream unavailable",
+            true,
+        );
+        assert_eq!(
+            outcome,
+            ForwardToolOutcome::Error("upstream unavailable".into())
+        );
+    }
+
+    #[test]
+    fn response_renderer_rejects_malformed_success_envelopes() {
+        for text in ["not json", r#"{"unexpected":true}"#, "null"] {
+            let outcome = render_tool_response(reqwest::StatusCode::OK, text, true);
+            assert!(
+                matches!(outcome, ForwardToolOutcome::Error(ref message) if message.contains("invalid loopback tool response")),
+                "unexpected outcome for {text:?}: {outcome:?}"
+            );
+        }
+
+        let ambiguous = render_tool_response(
+            reqwest::StatusCode::OK,
+            r#"{"result":"ok","error":"failed"}"#,
+            true,
+        );
+        assert!(matches!(ambiguous, ForwardToolOutcome::Error(message) if message.contains("both `result` and `error`")));
+
+        let mixed_confirmation = render_tool_response(
+            reqwest::StatusCode::OK,
+            r#"{"result":"ok","needs_confirmation":true}"#,
+            true,
+        );
+        assert!(matches!(mixed_confirmation, ForwardToolOutcome::Error(message) if message.contains("confirmation mixed")));
+    }
+
+    #[test]
+    fn response_renderer_accepts_explicit_confirmation_outcome() {
+        let text = r#"{"needs_confirmation":true,"tool":"nomi_delete"}"#;
+        assert_eq!(
+            render_tool_response(reqwest::StatusCode::OK, text, true),
+            ForwardToolOutcome::Success(text.into())
+        );
+    }
 
     #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
     struct TestScope {
@@ -600,13 +801,15 @@ mod tests {
         .unwrap();
 
         let result = client
-            .forward_tool(
+            .forward_tool_outcome(
                 "tools/call",
                 serde_json::json!({"tool": "demo", "args": {}}),
                 false,
             )
             .await;
-        assert!(result.contains("unauthorized"));
+        assert!(
+            matches!(result, ForwardToolOutcome::Error(text) if text.contains("unauthorized"))
+        );
         assert_eq!(state.renew_count.load(Ordering::SeqCst), 2);
         assert_eq!(state.tool_count.load(Ordering::SeqCst), 2);
         server.abort();

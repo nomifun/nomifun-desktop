@@ -50,9 +50,19 @@ const PresetApplyControl: React.FC<Props> = ({ target, appliedPreset, onApply, d
     () => presets.filter((preset) => preset.enabled && preset.targets.includes(target)),
     [presets, target]
   );
+  const selectedPresetExists = useMemo(
+    () => Boolean(selectedId && availablePresets.some((preset) => preset.id === selectedId)),
+    [availablePresets, selectedId]
+  );
+
+  useEffect(() => {
+    if (!loading && selectedId && !selectedPresetExists) {
+      setSelectedId(undefined);
+    }
+  }, [loading, selectedId, selectedPresetExists]);
 
   const apply = async () => {
-    if (!selectedId) return;
+    if (!selectedId || !selectedPresetExists) return;
     setApplying(true);
     try {
       await onApply(selectedId, i18n.language);
@@ -84,7 +94,12 @@ const PresetApplyControl: React.FC<Props> = ({ target, appliedPreset, onApply, d
             </NomiSelect.Option>
           ))}
         </NomiSelect>
-        <Button type='primary' loading={applying} disabled={disabled || !selectedId || loading} onClick={() => void apply()}>
+        <Button
+          type='primary'
+          loading={applying}
+          disabled={disabled || !selectedPresetExists || loading}
+          onClick={() => void apply()}
+        >
           {t('settings.presetApplyAction', { defaultValue: 'Apply preset' })}
         </Button>
       </div>

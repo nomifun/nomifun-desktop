@@ -20,6 +20,7 @@ import { useProvidersQuery, useModelProviderList } from '@renderer/hooks/agent/u
 import { useModelProfiles } from '@renderer/hooks/agent/useModelProfiles';
 import { getCreationModels } from '@renderer/pages/modelHub/creationModels';
 import type { GenMode, ModelGroup, ModelOption } from './genTypes';
+import { useModelSelectorProviderLabel } from '@renderer/hooks/agent/useModelSelectorProviderLabel';
 
 export interface GeneratorModels {
   groups: ModelGroup[];
@@ -45,6 +46,7 @@ export function useGeneratorModels(mode: GenMode): GeneratorModels {
   const { data: rawProviders } = useProvidersQuery();
   const { providers: convProviders, getAvailableModels } = useModelProviderList();
   const { profiles } = useModelProfiles();
+  const providerLabel = useModelSelectorProviderLabel();
 
   return useMemo<GeneratorModels>(() => {
     const hasProviders =
@@ -54,7 +56,7 @@ export function useGeneratorModels(mode: GenMode): GeneratorModels {
       const flat: ModelOption[] = [];
       for (const p of convProviders) {
         for (const model of getAvailableModels(p)) {
-          flat.push({ providerId: p.id, providerName: p.name, platform: p.platform, model });
+          flat.push({ providerId: p.id, providerName: providerLabel(p), platform: p.platform, model });
         }
       }
       return { groups: group(flat), flat, hasProviders };
@@ -63,10 +65,10 @@ export function useGeneratorModels(mode: GenMode): GeneratorModels {
     const cap = mode === 'video' ? 'video_generation' : 'image_generation';
     const flat: ModelOption[] = getCreationModels(rawProviders, cap, profiles).map((e) => ({
       providerId: e.providerId,
-      providerName: e.providerName,
+      providerName: providerLabel({ name: e.providerName, platform: e.platform }),
       platform: e.platform,
       model: e.model,
     }));
     return { groups: group(flat), flat, hasProviders };
-  }, [mode, rawProviders, convProviders, getAvailableModels, profiles]);
+  }, [mode, rawProviders, convProviders, getAvailableModels, profiles, providerLabel]);
 }
