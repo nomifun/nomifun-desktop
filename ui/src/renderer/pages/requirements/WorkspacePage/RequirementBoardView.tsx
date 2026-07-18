@@ -112,8 +112,7 @@ const RequirementBoardView: React.FC<RequirementBoardViewProps> = ({ items, onOp
             }}
             onDrop={(e) => handleDrop(e, status)}
             className={[
-              'requirements-board-column flex min-w-260px flex-1 flex-col gap-8px rounded-12px p-8px box-border transition-colors duration-180',
-              hasItems ? 'self-stretch' : '',
+              'requirements-board-column flex min-w-260px max-h-full flex-1 flex-col gap-8px rounded-12px p-8px box-border transition-colors duration-180',
               isDropTarget
                 ? 'bg-[var(--color-fill-2)] border border-dashed border-[var(--color-primary-light-4)]'
                 : 'bg-[var(--color-fill-1)] border border-solid border-transparent',
@@ -135,11 +134,14 @@ const RequirementBoardView: React.FC<RequirementBoardViewProps> = ({ items, onOp
               </Tag>
             </div>
 
-            {/* Card column — scrolls independently when tall. */}
+            {/*
+             * Let each column surface follow its own cards. The column's maximum
+             * remains the existing board area's available height; only this list
+             * scrolls after that maximum is reached.
+             */}
             <div
               className={[
                 'requirements-board-card-list flex flex-col gap-4px overflow-y-auto min-h-60px',
-                hasItems ? 'flex-1 min-h-0' : '',
               ].join(' ')}
             >
               {!hasItems ? (
