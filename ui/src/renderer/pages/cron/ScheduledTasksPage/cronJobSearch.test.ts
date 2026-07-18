@@ -7,7 +7,7 @@
 import { describe, expect, test } from 'bun:test';
 import { parseConversationId, parseCronJobId } from '@/common/types/ids';
 import type { ICronJob } from '@/common/adapter/ipcBridge';
-import { filterCronJobsByQuery } from './cronJobSearch';
+import { filterCronJobsByQuery, filterCronJobsByStatus } from './cronJobSearch';
 
 function job(overrides: Partial<ICronJob>): ICronJob {
   return {
@@ -73,5 +73,18 @@ describe('filterCronJobsByQuery', () => {
     unbound.metadata = { ...unbound.metadata, conversation_id: undefined };
 
     expect(filterCronJobsByQuery([unbound], '#undefined')).toEqual([]);
+  });
+});
+
+describe('filterCronJobsByStatus', () => {
+  const jobs = [
+    job({ id: parseCronJobId('cron_019b0000-0000-7000-8000-000000000011'), enabled: true }),
+    job({ id: parseCronJobId('cron_019b0000-0000-7000-8000-000000000012'), enabled: false }),
+  ];
+
+  test('filters enabled and paused jobs while preserving all jobs for the default filter', () => {
+    expect(filterCronJobsByStatus(jobs, 'all')).toEqual(jobs);
+    expect(filterCronJobsByStatus(jobs, 'active')).toEqual([jobs[0]]);
+    expect(filterCronJobsByStatus(jobs, 'paused')).toEqual([jobs[1]]);
   });
 });

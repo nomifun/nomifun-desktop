@@ -6,6 +6,8 @@
 
 import type { ICronJob } from '@/common/adapter/ipcBridge';
 
+export type CronJobStatusFilter = 'all' | 'active' | 'paused';
+
 function normalizeSearchText(value: unknown): string {
   return String(value ?? '')
     .trim()
@@ -45,4 +47,13 @@ export function filterCronJobsByQuery(jobs: ICronJob[], query: string): ICronJob
   if (!normalizedQuery) return jobs;
 
   return jobs.filter((job) => buildCronJobSearchText(job).includes(normalizedQuery));
+}
+
+export function filterCronJobsByStatus(
+  jobs: ICronJob[],
+  statusFilter: CronJobStatusFilter
+): ICronJob[] {
+  if (statusFilter === 'all') return jobs;
+
+  return jobs.filter((job) => job.enabled === (statusFilter === 'active'));
 }

@@ -64,6 +64,12 @@
     "description": "Run tasks on a schedule, or start from a conversation with that target already selected.",
     "searchPlaceholder": "Search by task, conversation, instruction, or schedule",
     "noSearchResults": "No matching scheduled tasks",
+    "statusFilter": {
+      "label": "Task status filter",
+      "all": "All",
+      "active": "Enabled",
+      "paused": "Paused"
+    },
     "list": {
       "task": "Task",
       "status": "Status",
