@@ -8,7 +8,7 @@ import classNames from 'classnames';
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useNavigate, useSearchParams } from 'react-router-dom';
-import { Button, Switch, Message, Empty, Spin, Tooltip, Input } from '@arco-design/web-react';
+import { Button, Switch, Message, Empty, Pagination, Spin, Tooltip, Input } from '@arco-design/web-react';
 import { useLayoutContext } from '@renderer/hooks/context/LayoutContext';
 import { useAllCronJobs } from '@renderer/pages/cron/useCronJobs';
 import { formatSchedule, formatNextRun } from '@renderer/pages/cron/cronUtils';
@@ -20,10 +20,12 @@ import CronStatusTag from './CronStatusTag';
 import CreateTaskDialog from './CreateTaskDialog';
 import { getJobAgentMeta } from './jobAgentMeta';
 import { shortSessionId } from '@renderer/utils/ui/shortId';
-import { filterCronJobsByQuery } from './cronJobSearch';
+import { filterCronJobsByQuery, filterCronJobsByStatus, type CronJobStatusFilter } from './cronJobSearch';
 import { parseScheduledConversationId } from './scheduledConversationId';
 import { DESKTOP_SCHEDULED_TASK_COLUMNS } from './scheduledTaskLayout';
 import ScheduledTaskActions from './ScheduledTaskActions';
+
+const DEFAULT_PAGE_SIZE = 20;
 
 const ScheduledTasksPage: React.FC = () => {
   const layout = useLayoutContext();
@@ -36,6 +38,9 @@ const ScheduledTasksPage: React.FC = () => {
   const [createDialogVisible, setCreateDialogVisible] = useState(false);
   const [lockedCreateConversationId, setLockedCreateConversationId] = useState<ConversationId | undefined>(undefined);
   const [searchQuery, setSearchQuery] = useState('');
+  const [statusFilter, setStatusFilter] = useState<CronJobStatusFilter>('all');
+  const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(DEFAULT_PAGE_SIZE);
   const { keepAwake, setKeepAwake } = useKeepAwake();
 
   useEffect(() => {
@@ -52,7 +57,36 @@ const ScheduledTasksPage: React.FC = () => {
     setSearchParams(next, { replace: true });
   }, [searchParams, setSearchParams]);
 
-  const filteredJobs = useMemo(() => filterCronJobsByQuery(jobs, searchQuery), [jobs, searchQuery]);
+  const filteredJobs = useMemo(
+    () => filterCronJobsByStatus(filterCronJobsByQuery(jobs, searchQuery), statusFilter),
+    [jobs, searchQuery, statusFilter]
+  );
+  const pageCount = Math.max(1, Math.ceil(filteredJobs.length / pageSize));
+  const pagedJobs = useMemo(
+    () => filteredJobs.slice((page - 1) * pageSize, page * pageSize),
+    [filteredJobs, page, pageSize]
+  );
+
+  // Deletions and live updates can reduce the matching result set while the
+  // user is on a later page. Keep the current page valid in that case.
+  useEffect(() => {
+    if (page > pageCount) setPage(pageCount);
+  }, [page, pageCount]);
+
+  const handleSearchChange = useCallback((query: string) => {
+    setSearchQuery(query);
+    setPage(1);
+  }, []);
+
+  const handleStatusFilterChange = useCallback((status: CronJobStatusFilter) => {
+    setStatusFilter(status);
+    setPage(1);
+  }, []);
+
+  const handlePageChange = useCallback((nextPage: number, nextPageSize: number) => {
+    setPage(nextPage);
+    setPageSize(nextPageSize);
+  }, []);
 
   const handleOpenCreateDialog = useCallback(() => {
     setLockedCreateConversationId(undefined);
@@ -165,13 +199,36 @@ const ScheduledTasksPage: React.FC = () => {
         </div>
 
         {jobs.length > 0 && (
-          <Input.Search
-            allowClear
-            value={searchQuery}
-            onChange={setSearchQuery}
-            placeholder={t('cron.page.searchPlaceholder', { defaultValue: '搜索任务名称、会话、指令或调度规则' })}
-            className='w-full [&_.arco-input-inner-wrapper]:!rounded-full [&_.arco-input-inner-wrapper]:!border [&_.arco-input-inner-wrapper]:!border-solid [&_.arco-input-inner-wrapper]:!border-[var(--color-border-2)] [&_.arco-input-inner-wrapper:hover]:!border-[var(--color-border-3)] [&_.arco-input-inner-wrapper-focus]:!border-[rgb(var(--primary-6))]'
-          />
+          <>
+            <Input.Search
+              allowClear
+              value={searchQuery}
+              onChange={handleSearchChange}
+              placeholder={t('cron.page.searchPlaceholder', { defaultValue: '搜索任务名称、会话、指令或调度规则' })}
+              className='w-full [&_.arco-input-inner-wrapper]:!rounded-full [&_.arco-input-inner-wrapper]:!border [&_.arco-input-inner-wrapper]:!border-solid [&_.arco-input-inner-wrapper]:!border-[var(--color-border-2)] [&_.arco-input-inner-wrapper:hover]:!border-[var(--color-border-3)] [&_.arco-input-inner-wrapper-focus]:!border-[rgb(var(--primary-6))]'
+            />
+            <div className='flex items-center gap-4px' aria-label={t('cron.page.statusFilter.label')}>
+              {(['all', 'active', 'paused'] as const).map((status) => {
+                const selected = statusFilter === status;
+                return (
+                  <button
+                    key={status}
+                    type='button'
+                    aria-pressed={selected}
+                    className={classNames(
+                      'appearance-none !border-0 !outline-none !shadow-none rounded-8px px-9px py-4px text-13px leading-18px transition-colors',
+                      selected
+                        ? 'bg-fill-2 font-medium text-t-primary'
+                        : 'bg-transparent text-t-secondary hover:bg-fill-1 hover:text-t-primary'
+                    )}
+                    onClick={() => handleStatusFilterChange(status)}
+                  >
+                    {t(`cron.page.statusFilter.${status}`)}
+                  </button>
+                );
+              })}
+            </div>
+          </>
         )}
 
         {loading ? (
@@ -202,8 +259,8 @@ const ScheduledTasksPage: React.FC = () => {
               <span>{t('cron.page.form.executionMode')}</span>
             </div>
 
-            <div className='grid w-full grid-cols-1 items-start gap-12px md:block md:divide-y md:divide-solid md:divide-[var(--color-border-2)]'>
-              {filteredJobs.map((job) => {
+            <div className='grid w-full grid-cols-1 items-start gap-8px md:block md:divide-y md:divide-solid md:divide-[var(--color-border-2)]'>
+              {pagedJobs.map((job) => {
                 const agentMeta = getJobAgentMeta(job, cliAgents);
                 const isManualOnly = job.schedule.kind === 'cron' && !job.schedule.expr;
                 const executionModeLabel =
@@ -214,11 +271,11 @@ const ScheduledTasksPage: React.FC = () => {
                 return (
                   <div
                     key={job.id}
-                    className='group flex cursor-pointer flex-col rounded-12px border border-solid border-[var(--color-border-2)] bg-fill-1 px-16px py-16px transition-colors duration-200 hover:border-[var(--color-border-3)] hover:shadow-sm md:grid md:min-h-48px md:items-center md:gap-16px md:rounded-0 md:border-0 md:bg-transparent md:px-18px md:py-8px md:hover:bg-fill-2 md:hover:shadow-none'
+                    className='group flex cursor-pointer flex-col rounded-12px border border-solid border-[var(--color-border-2)] bg-fill-1 px-16px py-12px transition-colors duration-200 hover:border-[var(--color-border-3)] hover:shadow-sm md:grid md:min-h-40px md:items-center md:gap-16px md:rounded-0 md:border-0 md:bg-transparent md:px-18px md:py-4px md:hover:bg-fill-2 md:hover:shadow-none'
                     style={{ gridTemplateColumns: DESKTOP_SCHEDULED_TASK_COLUMNS }}
                     onClick={() => handleGoToDetail(job)}
                   >
-                    <div className='mb-12px flex items-center justify-between gap-8px md:mb-0 md:contents'>
+                    <div className='mb-8px flex items-center justify-between gap-8px md:mb-0 md:contents'>
                       {/* Name truncates on its own; #N sits outside the truncating span so it never gets clipped. */}
                       <span className='mr-8px flex min-w-0 flex-1 items-center gap-6px md:mr-0' title={job.name}>
                         <span className='min-w-0 truncate text-14px font-medium leading-20px text-t-primary'>
@@ -241,7 +298,7 @@ const ScheduledTasksPage: React.FC = () => {
                     </div>
 
                     <div
-                      className='mt-16px min-w-0 break-words text-13px leading-20px text-t-secondary md:mt-0 md:truncate md:[grid-column:2] md:[grid-row:1]'
+                      className='mt-12px min-w-0 break-words text-13px leading-20px text-t-secondary md:mt-0 md:truncate md:[grid-column:2] md:[grid-row:1]'
                       title={
                         job.state.next_run_at_ms
                           ? `${t('cron.nextRun')} ${formatNextRun(job.state.next_run_at_ms)}`
@@ -258,7 +315,7 @@ const ScheduledTasksPage: React.FC = () => {
                       )}
                     </div>
 
-                    <div className='mt-14px flex items-center justify-between gap-10px md:mt-0 md:contents'>
+                    <div className='mt-10px flex items-center justify-between gap-10px md:mt-0 md:contents'>
                       <div className='flex min-w-0 items-center gap-6px text-12px leading-18px text-t-secondary md:[grid-column:4] md:[grid-row:1] md:text-13px md:leading-20px'>
                         {agentMeta.name ? (
                           <Tooltip content={agentMeta.name}>
@@ -298,6 +355,19 @@ const ScheduledTasksPage: React.FC = () => {
                   </div>
                 );
               })}
+            </div>
+
+            <div className='mt-12px flex justify-end'>
+              <Pagination
+                className='scheduled-tasks-pagination'
+                current={page}
+                pageSize={pageSize}
+                total={filteredJobs.length}
+                showTotal
+                sizeCanChange
+                showJumper={filteredJobs.length > pageSize}
+                onChange={(nextPage, nextPageSize) => handlePageChange(nextPage, nextPageSize)}
+              />
             </div>
           </div>
         )}
