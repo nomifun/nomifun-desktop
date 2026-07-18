@@ -116,8 +116,9 @@ fn sample_native(window: &tauri::WebviewWindow) -> Result<CompanionLocalPointer,
 #[cfg(windows)]
 fn sample_native(window: &tauri::WebviewWindow) -> Result<CompanionLocalPointer, String> {
     use windows::Win32::Foundation::{POINT, RECT};
+    use windows::Win32::Graphics::Gdi::ScreenToClient;
     use windows::Win32::UI::WindowsAndMessaging::{
-        GetClientRect, GetCursorPos, ScreenToClient,
+        GetClientRect, GetCursorPos,
     };
 
     let hwnd = window.hwnd().map_err(|error| error.to_string())?;
@@ -125,7 +126,9 @@ fn sample_native(window: &tauri::WebviewWindow) -> Result<CompanionLocalPointer,
     let mut rect = RECT::default();
     unsafe {
         GetCursorPos(&mut point).map_err(|error| error.to_string())?;
-        ScreenToClient(hwnd, &mut point).map_err(|error| error.to_string())?;
+        if !ScreenToClient(hwnd, &mut point).as_bool() {
+            return Err("failed to convert cursor position into companion client coordinates".to_string());
+        }
         GetClientRect(hwnd, &mut rect).map_err(|error| error.to_string())?;
     }
 
