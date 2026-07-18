@@ -6,9 +6,8 @@
 
 /**
  * RequirementFilters — compact icon-and-text filter controls for tag, status,
- * sort, and search. When one or more rows are selected, a stable batch-action
- * bar is rendered below the filters (its own surface — never squeezed into the
- * filter row) carrying a Popconfirm-guarded batch delete.
+ * sort, and search. Selected-row controls stay together in the filter row,
+ * including the Popconfirm-guarded batch delete action.
  *
  * Presentational: all state lives in the parent; this only emits callbacks.
  */
@@ -99,7 +98,7 @@ interface RequirementFiltersProps {
   onOrderChange: (dir: 'asc' | 'desc') => void;
   tagOptions: ITagSummary[];
   selectedCount: number;
-  onBatchDelete: () => void; // shown only when selectedCount>0, as a stable bar
+  onBatchDelete: () => void;
   listSelection?: {
     total: number;
     pageIds: RequirementId[];
@@ -108,13 +107,6 @@ interface RequirementFiltersProps {
     onClearSelection: () => void;
   };
 }
-
-// Same selected-surface principle as list rows: subtle feedback, readable text.
-const SOFT_BATCH_BAR_STYLE: React.CSSProperties = {
-  background:
-    'linear-gradient(rgba(var(--primary-6), 0.06), rgba(var(--primary-6), 0.06)), var(--color-bg-2)',
-  borderColor: 'rgba(var(--primary-6), 0.22)',
-};
 
 const RequirementFilters: React.FC<RequirementFiltersProps> = ({
   tag,
@@ -323,6 +315,14 @@ const RequirementFilters: React.FC<RequirementFiltersProps> = ({
                 <Button type='text' size='mini' onClick={listSelection.onClearSelection}>
                   {t('requirements.selection.clear')}
                 </Button>
+                <Popconfirm
+                  title={t('requirements.actions.batchDeleteConfirm', { count: selectedCount })}
+                  onOk={onBatchDelete}
+                >
+                  <Button type='text' status='danger' size='mini'>
+                    {t('requirements.actions.delete')}
+                  </Button>
+                </Popconfirm>
               </>
             )}
           </div>
@@ -330,27 +330,6 @@ const RequirementFilters: React.FC<RequirementFiltersProps> = ({
       </div>
 
       <div role='separator' className='mt-6px h-px bg-[var(--color-border-2)]' />
-
-      {/* Stable batch-action bar — its own surface, only mounted when there is
-          a selection. Kept out of the filter row so the filters never reflow. */}
-      {selectedCount > 0 && (
-        <div
-          className='mt-10px flex items-center justify-between gap-12px rounded-10px border border-solid border-[var(--color-border-2)] bg-[var(--color-bg-2)] px-12px py-8px'
-          style={SOFT_BATCH_BAR_STYLE}
-        >
-          <span className='text-13px text-[var(--color-text-2)]'>
-            {t('requirements.actions.batchDelete', { count: selectedCount })}
-          </span>
-          <Popconfirm
-            title={t('requirements.actions.batchDeleteConfirm', { count: selectedCount })}
-            onOk={onBatchDelete}
-          >
-            <Button status='danger' size='small' shape='round'>
-              {t('requirements.actions.delete')}
-            </Button>
-          </Popconfirm>
-        </div>
-      )}
     </div>
   );
 };
