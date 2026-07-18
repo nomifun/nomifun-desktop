@@ -5,8 +5,8 @@
  */
 
 /**
- * RequirementListView — the workspace list surface. Renders a stack of
- * `RequirementListRow`s with an Arco `Pagination` (showTotal) footer. Handles
+ * RequirementListView — the workspace list surface. Renders a headerless,
+ * table-like stack of `RequirementListRow`s with an Arco `Pagination` footer. Handles
  * the three non-list states presentationally:
  *   - error            → Arco `Result` with a Retry action (`onRetry`)
  *   - empty (settled)  → `WorkspaceEmptyState` with the create CTA
@@ -87,12 +87,18 @@ const RequirementListView: React.FC<RequirementListViewProps> = ({
   // First load with no rows yet → light skeleton so the surface doesn't pop.
   if (loading && items.length === 0) {
     return (
-      <div className='flex flex-col gap-8px'>
+      <div>
         {Array.from({ length: SKELETON_ROWS }).map((_, i) => (
           <div
             key={i}
-            className='h-58px rounded-12px border border-solid border-[var(--color-border-2)] bg-[var(--color-bg-2)] opacity-60 animate-pulse'
-            style={{ animationDelay: `${i * 0.08}s` }}
+            className='h-72px opacity-60 animate-pulse'
+            style={{
+              borderTopWidth: 0,
+              borderRightWidth: 0,
+              borderBottom: '1px solid var(--color-border-2)',
+              borderLeftWidth: 0,
+              animationDelay: `${i * 0.08}s`,
+            }}
           />
         ))}
       </div>
@@ -102,7 +108,7 @@ const RequirementListView: React.FC<RequirementListViewProps> = ({
   return (
     <div className='flex flex-col gap-12px'>
       <div
-        className='flex flex-col gap-8px transition-opacity duration-150'
+        className='transition-opacity duration-150'
         style={{ opacity: loading ? 0.6 : 1 }}
       >
         {items.map((item) => (
