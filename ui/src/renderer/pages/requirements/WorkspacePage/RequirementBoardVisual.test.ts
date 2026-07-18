@@ -17,10 +17,11 @@ describe('requirements board visual hierarchy', () => {
   test('uses dedicated surfaces for columns and cards in both light and dark themes', () => {
     expect(boardSource.includes('requirements-board-column')).toBe(true);
     expect(boardSource.includes('flex w-full flex-1 min-h-0 items-start gap-12px overflow-x-auto pb-4px')).toBe(true);
-    expect(boardSource.includes('h-[calc(100vh-312px)]')).toBe(false);
+    expect(boardSource.includes('max-h-full flex-1 flex-col')).toBe(true);
+    expect(boardSource.includes('max-h-[calc(100vh-260px)]')).toBe(false);
+    expect(boardSource.includes('requirements-board-card-list flex flex-col gap-4px overflow-y-auto min-h-60px')).toBe(true);
     expect(boardSource.includes("const hasItems = colItems.length > 0;")).toBe(true);
-    expect(boardSource.includes("hasItems ? 'self-stretch' : ''")).toBe(true);
-    expect(boardSource.includes("hasItems ? 'flex-1 min-h-0' : ''")).toBe(true);
+    expect(boardSource.includes("The column's maximum")).toBe(true);
     expect(cardSource.includes('requirements-board-card')).toBe(true);
     expect(cardSource.includes('rounded-10px')).toBe(true);
     expect(cardSource.includes('text-14px font-400 leading-20px')).toBe(true);
