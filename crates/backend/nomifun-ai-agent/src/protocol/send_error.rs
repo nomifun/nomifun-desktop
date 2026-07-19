@@ -39,6 +39,24 @@ impl ClassifiedError {
 }
 
 impl AgentSendError {
+    /// An unrecoverable loss of the manager's permanent event relay. This is
+    /// deliberately distinct from provider/API errors: Conversation evicts
+    /// the cached runtime on this code before admitting another turn.
+    pub fn stream_broken(detail: impl Into<String>) -> Self {
+        Self::new(
+            "The Agent event stream disconnected",
+            AgentErrorCode::NomifunStreamBroken,
+            AgentErrorOwnership::Nomifun,
+            Some(detail.into()),
+            true,
+            true,
+            resolution(
+                AgentErrorResolutionKind::Retry,
+                Some(AgentErrorResolutionTarget::AgentSettings),
+            ),
+        )
+    }
+
     pub fn new(
         message: impl Into<String>,
         code: AgentErrorCode,
@@ -663,6 +681,23 @@ fn classify_provider_api(lower: &str) -> Option<ClassifiedError> {
             Some(AgentErrorResolutionTarget::Feedback),
         ));
     }
+    if contains_any(
+        lower,
+        &[
+            "openai-compatible provider",
+            "anthropic-compatible provider",
+            "bedrock provider returned",
+            "provider stream protocol violation",
+        ],
+    ) {
+        return Some(provider_error(
+            "The model provider returned an incompatible response",
+            AgentErrorCode::UserLlmProviderGatewayError,
+            true,
+            AgentErrorResolutionKind::Retry,
+            None,
+        ));
+    }
     if contains_any(lower, &["500", "502", "503", "bad gateway", "service unavailable"]) {
         return Some(provider_error(
             "The model provider returned a server error",
@@ -948,6 +983,21 @@ mod tests {
         assert_eq!(err.code(), Some(AgentErrorCode::UserLlmProviderGatewayError));
         assert_eq!(err.ownership(), Some(AgentErrorOwnership::UserLlmProvider));
         assert_eq!(err.stream_error().feedback_recommended, Some(false));
+    }
+
+    #[test]
+    fn classifies_provider_protocol_failures_as_retryable_gateway_errors() {
+        for detail in [
+            "Nomi agent error: API error: OpenAI-compatible provider emitted non-usage data after finish_reason",
+            "Nomi agent error: API error: OpenAI-compatible provider returned a tool call with a missing function name (call `call_123`)",
+            "Nomi agent error: API error: provider stream protocol violation: tool progress 'Write' (call-123) was not advertised in this request",
+        ] {
+            let err = AgentSendError::from_app_error(AppError::BadGateway(detail.into()));
+            assert_eq!(err.code(), Some(AgentErrorCode::UserLlmProviderGatewayError));
+            assert_eq!(err.ownership(), Some(AgentErrorOwnership::UserLlmProvider));
+            assert_eq!(err.stream_error().retryable, Some(true));
+            assert_eq!(err.stream_error().feedback_recommended, Some(false));
+        }
     }
 
     #[test]
