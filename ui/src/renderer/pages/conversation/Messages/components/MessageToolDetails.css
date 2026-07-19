@@ -42,3 +42,41 @@
   max-height: 200px;
   overflow-y: auto;
 }
+
+.tool-artifacts {
+  display: grid;
+  gap: 8px;
+}
+
+.tool-artifact {
+  min-width: 0;
+  max-width: 520px;
+  border: 1px solid var(--color-border-2, #e5e6eb);
+  border-radius: 8px;
+  background: var(--color-fill-1, #f7f8fa);
+  overflow: hidden;
+}
+
+.tool-artifact-image {
+  display: block;
+  width: 100%;
+  max-height: 420px;
+  object-fit: contain;
+  background: var(--color-bg-2, #fff);
+}
+
+.tool-artifact-path,
+.tool-artifact-file {
+  display: block;
+  padding: 6px 8px;
+  color: var(--color-text-3, #86909c);
+  font-size: 11px;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+
+.tool-artifact-file {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}

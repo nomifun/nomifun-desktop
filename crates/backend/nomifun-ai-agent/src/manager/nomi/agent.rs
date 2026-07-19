@@ -254,7 +254,9 @@ impl NomiAgentManager {
         };
 
         let backend_output_sink = Arc::new(
-            BackendOutputSink::new(runtime.event_sender()).with_distill_dir(distill_dir.clone()),
+            BackendOutputSink::new(runtime.event_sender())
+                .with_distill_dir(distill_dir.clone())
+                .with_artifact_workspace(&workspace),
         );
         let sink: Arc<dyn OutputSink> = backend_output_sink.clone();
 
@@ -743,7 +745,6 @@ impl crate::runtime_handle::AgentRuntimeControl for NomiAgentManager {
                     );
                     self.runtime
                         .emit_error_data(send_error.stream_error().clone());
-                    self.runtime.emit_finish(None);
                     term_guard.disarm();
                     return Err(send_error);
                 }
@@ -762,6 +763,7 @@ impl crate::runtime_handle::AgentRuntimeControl for NomiAgentManager {
                 None => content,
             };
 
+            self.backend_output_sink.begin_artifact_delivery_turn();
             engine.set_steering_inbox(Some(self.steering_inbox.clone()));
 
             // Each iteration runs one engine pass inside the same accepted
@@ -900,6 +902,25 @@ impl crate::runtime_handle::AgentRuntimeControl for NomiAgentManager {
                     "The model turn ended with {stop_reason:?} before this tool call reached a terminal state."
                 ));
 
+                if let Err(delivery_error) = self
+                    .backend_output_sink
+                    .finish_artifact_delivery_turn()
+                {
+                    error!(
+                        conversation_id = %self.runtime.conversation_id(),
+                        elapsed_ms,
+                        error = %delivery_error,
+                        "Nomi turn ended without satisfying every artifact-delivery obligation"
+                    );
+                    let send_error = AgentSendError::from_app_error(AppError::Internal(format!(
+                        "Artifact delivery failed: {delivery_error}"
+                    )));
+                    self.runtime
+                        .emit_error_data(send_error.stream_error().clone());
+                    term_guard.disarm();
+                    return Err(send_error);
+                }
+
                 // Phase 3 observability: a per-turn metrics event the UI shows as
                 // duration / token cost and telemetry records. Purely additive and
                 // non-terminal — emitted via `emit()` so it does NOT flip the
@@ -954,19 +975,18 @@ impl crate::runtime_handle::AgentRuntimeControl for NomiAgentManager {
                     conversation_id = %self.runtime.conversation_id(),
                     elapsed_ms,
                     error = %ErrorChain(&e),
-                    "Nomi engine.execute_turn() failed, emitting Error+Finish"
+                    "Nomi engine.execute_turn() failed, emitting terminal Error"
                 );
                 let send_error = nomi_engine_error_to_send_error(error_msg);
                 self.backend_output_sink.fail_active_tool_calls(&format!(
                     "The model/provider turn failed before this tool call completed: {e}"
                 ));
                 self.runtime.emit_error_data(send_error.stream_error().clone());
-                self.runtime.emit_finish(None);
                 Err(send_error)
             }
         };
 
-        // Normal completion: a real terminal event was emitted above, so the
+        // Normal completion: a real terminal event (Finish or Error) was emitted above, so the
         // backstop is no longer needed. (Phase 0 F0.2)
         term_guard.disarm();
         outcome
@@ -1412,6 +1432,35 @@ mod tests {
         }
     }
 
+    struct MissingImageArtifactTool;
+
+    #[async_trait::async_trait]
+    impl Tool for MissingImageArtifactTool {
+        fn name(&self) -> &str {
+            "image_gen"
+        }
+
+        fn description(&self) -> &str {
+            "Test-only image generator that falsely reports text success"
+        }
+
+        fn input_schema(&self) -> serde_json::Value {
+            serde_json::json!({"type": "object", "properties": {}})
+        }
+
+        fn is_concurrency_safe(&self, _input: &serde_json::Value) -> bool {
+            true
+        }
+
+        async fn execute(&self, _input: serde_json::Value) -> ToolResult {
+            ToolResult::text("generated successfully")
+        }
+
+        fn category(&self) -> ToolCategory {
+            ToolCategory::Info
+        }
+    }
+
     struct HangingKnowledgeSink {
         started: Arc<tokio::sync::Semaphore>,
     }
@@ -1705,6 +1754,69 @@ mod tests {
 
         assert_eq!(completed_reasons, vec![Some(TurnStopReason::EndTurn)]);
         assert_eq!(finish_reason, Some(TurnStopReason::EndTurn));
+    }
+
+    #[tokio::test]
+    async fn missing_generated_artifact_emits_error_and_never_normal_finish() {
+        let provider = Arc::new(ScriptedProvider::new(vec![
+            vec![
+                LlmEvent::ToolUse {
+                    id: "missing-image".into(),
+                    name: "image_gen".into(),
+                    input: serde_json::json!({}),
+                    extra: None,
+                },
+                LlmEvent::Done {
+                    stop_reason: StopReason::ToolUse,
+                    usage: Default::default(),
+                },
+            ],
+            vec![LlmEvent::Done {
+                stop_reason: StopReason::EndTurn,
+                usage: Default::default(),
+            }],
+        ]));
+        let mut agent = make_agent_with_provider(provider);
+        assert!(
+            agent
+                .engine
+                .get_mut()
+                .registry_mut()
+                .register(Box::new(MissingImageArtifactTool))
+        );
+        let mut rx = agent.subscribe();
+
+        let result = agent
+            .send_message(SendMessageData {
+                content: "generate an image".into(),
+                msg_id: "msg-missing-image".into(),
+                files: Vec::new(),
+                inject_skills: Vec::new(),
+                origin: None,
+            })
+            .await;
+
+        assert!(result.is_err());
+        let events = std::iter::from_fn(|| rx.try_recv().ok()).collect::<Vec<_>>();
+        assert!(events.iter().any(|event| matches!(
+            event,
+            AgentStreamEvent::ToolCall(data)
+                if data.call_id == "nomi-missing-image"
+                    && data.status == ToolCallStatus::Error
+                    && data.artifacts.is_empty()
+        )));
+        assert!(events.iter().any(|event| matches!(event, AgentStreamEvent::Error(_))));
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, AgentStreamEvent::Finish(_))),
+            "artifact-delivery failure must not be followed by a normal Finish"
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, AgentStreamEvent::TurnCompleted(_)))
+        );
     }
 
     #[tokio::test]

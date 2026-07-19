@@ -50,6 +50,7 @@ use serde_json::json;
 use sha2::{Digest, Sha256};
 
 use crate::attempt_runner::AttemptRunner;
+use crate::artifact_contract::validate_required_artifacts;
 use crate::conversation_effect::AttemptConversationEffects;
 use crate::domain_mapper;
 use crate::event_publisher::{
@@ -2049,6 +2050,17 @@ impl AgentExecutionEngine {
             .await
             .filter(|value| !value.trim().is_empty())
             .ok_or_else(|| AppError::BadRequest("Agent conversation has no final output".to_owned()))?;
+        let output_files = self
+            .scheduler
+            .read_attempt_output_files(owner_id, &conversation_id)
+            .await;
+        validate_required_artifacts(&step.spec, &output_files).map_err(|error| {
+            AppError::BadRequest(format!(
+                "Agent conversation output cannot be adopted: {error}"
+            ))
+        })?;
+        let output_files = serde_json::to_string(&output_files)
+            .map_err(|error| AppError::Internal(format!("encode verified adopted output files: {error}")))?;
         self.repository
             .adopt_step_output(
                 owner_id,
@@ -2058,7 +2070,7 @@ impl AgentExecutionEngine {
                 request.expected_step_version,
                 &AdoptAgentExecutionStepOutputParams {
                     output_summary: output,
-                    output_files: "[]".to_owned(),
+                    output_files,
                     tokens: None,
                     runtime_state: None,
                 },

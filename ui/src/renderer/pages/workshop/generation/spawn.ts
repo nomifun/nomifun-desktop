@@ -15,18 +15,20 @@
 import type { ReactFlowInstance } from '@xyflow/react';
 import { parseWorkshopNodeId, type AssetId, type ProviderId } from '@/common/types/ids';
 import {
+  KIND_META,
   makeGeneratorNode,
   makeImageNode,
   makeTextNode,
+  makeVideoNode,
   newEdgeId,
   type WorkshopFlowEdge,
   type WorkshopFlowNode,
 } from '../canvas/model';
-import { mentionRefForNode } from './pipeline';
+import type { GenMode } from './genTypes';
+import { loadWorkshopText, mentionRefForNode } from './pipeline';
 
 type RF = ReactFlowInstance<WorkshopFlowNode, WorkshopFlowEdge>;
 
-const GRID_CELL = 176;
 const GRID_GAP = 22;
 const RIGHT_GAP = 64;
 
@@ -50,24 +52,62 @@ function rightOf(rf: RF, card: WorkshopFlowNode): { x: number; y: number; width:
   return { x: origin.x + width + RIGHT_GAP, y: origin.y, width };
 }
 
+export interface SpawnResultNodesOptions {
+  /** Test seam; production always uses the authenticated Workshop text loader. */
+  loadText?: (assetId: AssetId) => Promise<string | null>;
+  /** Abort the canvas mutation when the owning run was canceled/replaced/unmounted. */
+  shouldCommit?: () => boolean;
+}
+
 /**
- * Fan out a batch of result images into a grid of image nodes to the card's
- * right, each wired from the card. Used when a run yields more than one image.
+ * Fan out additional persisted results into mode-correct nodes to the card's
+ * right, each wired from the card. Text assets must be materialised before a
+ * text node can be created; an unreadable text artifact remains reachable from
+ * the generator card's result list and is deliberately not represented by a
+ * fake/empty text node.
  */
-export function spawnResultNodes(rf: RF, card: WorkshopFlowNode, assetIds: AssetId[]): void {
+export async function spawnResultNodes(
+  rf: RF,
+  card: WorkshopFlowNode,
+  mode: GenMode,
+  assetIds: AssetId[],
+  options: SpawnResultNodesOptions = {}
+): Promise<void> {
   if (assetIds.length === 0) return;
+  if (options.shouldCommit && !options.shouldCommit()) return;
   const origin = rightOf(rf, card);
+  const cell = KIND_META[mode];
   const cols = Math.min(3, Math.ceil(Math.sqrt(assetIds.length)));
   const created: WorkshopFlowNode[] = [];
   const edges: WorkshopFlowEdge[] = [];
+  const textBodies =
+    mode === 'text'
+      ? await Promise.all(assetIds.map((assetId) => (options.loadText ?? loadWorkshopText)(assetId)))
+      : [];
+  // Text loading crosses an async boundary. Re-check ownership before creating
+  // any nodes so a canceled run cannot materialise late results on the canvas.
+  if (options.shouldCommit && !options.shouldCommit()) return;
+
   assetIds.forEach((assetId, i) => {
     const col = i % cols;
     const row = Math.floor(i / cols);
-    const pos = { x: origin.x + col * (GRID_CELL + GRID_GAP), y: origin.y + row * (GRID_CELL + GRID_GAP) };
-    const node = makeImageNode(pos, { assetId });
+    const pos = {
+      x: origin.x + col * (cell.defaultWidth + GRID_GAP),
+      y: origin.y + row * (cell.defaultHeight + GRID_GAP),
+    };
+    const node =
+      mode === 'video'
+        ? makeVideoNode(pos, { assetId })
+        : mode === 'text'
+          ? textBodies[i] == null
+            ? null
+            : makeTextNode(pos, { content: textBodies[i], sourceAssetId: assetId })
+          : makeImageNode(pos, { assetId });
+    if (!node) return;
     created.push(node);
     edges.push({ id: newEdgeId(), source: card.id, target: node.id });
   });
+  if (created.length === 0) return;
   rf.addNodes(created);
   rf.addEdges(edges);
 }

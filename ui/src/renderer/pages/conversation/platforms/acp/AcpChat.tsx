@@ -19,7 +19,8 @@ import {
 import { usePendingConfirmationsRecovery } from '@renderer/pages/conversation/Messages/usePendingConfirmationsRecovery';
 import { useAutoTitle } from '@/renderer/hooks/chat/useAutoTitle';
 import HOC from '@renderer/utils/ui/HOC';
-import React from 'react';
+import LocalImageView from '@renderer/components/media/LocalImageView';
+import React, { useEffect } from 'react';
 import AcpE2EStreamInjector from './AcpE2EStreamInjector';
 import AcpSendBox from './AcpSendBox';
 import { useAcpInitialMessage } from './useAcpInitialMessage';
@@ -59,6 +60,10 @@ const AcpChat: React.FC<{
   const { checkAndUpdateTitle } = useAutoTitle();
   const addOrUpdateMessage = useAddOrUpdateMessage();
   const messageState = useAcpMessage(conversation_id, { skipWarmup: readOnly === true });
+  const updateLocalImage = LocalImageView.useUpdateLocalImage();
+  useEffect(() => {
+    updateLocalImage({ root: workspace ?? '' });
+  }, [updateLocalImage, workspace]);
   useAcpInitialMessage({
     conversation_id,
     backend,
@@ -108,4 +113,4 @@ const AcpChat: React.FC<{
   );
 };
 
-export default HOC.Wrapper(MessageListProvider, MessageListLoadingProvider)(AcpChat);
+export default HOC.Wrapper(MessageListProvider, MessageListLoadingProvider, LocalImageView.Provider)(AcpChat);

@@ -30,6 +30,7 @@ import MessageAgentStatus from './components/MessageAgentStatus';
 import MessageTips from './components/MessageTips';
 import MessageToolCall from './components/MessageToolCall';
 import MessageToolGroup from './components/MessageToolGroup';
+import { isSuccessfulWriteFileResult } from './components/toolGroupArtifactVisibility';
 import MessageCronTrigger from './components/MessageCronTrigger';
 import MessageSkillSuggest from './components/MessageSkillSuggest';
 import MessageText from './components/MessageText';
@@ -769,13 +770,7 @@ const MessageList: React.FC<{
       if (message.type === 'tool_group') {
         if (message.content.length === 1) {
           const writeFileResults = message.content
-            .filter(
-              (item) =>
-                item.name === 'WriteFile' &&
-                item.result_display &&
-                typeof item.result_display === 'object' &&
-                'file_diff' in item.result_display
-            )
+            .filter(isSuccessfulWriteFileResult)
             .map((item) => item.result_display as WriteFileResult);
           if (writeFileResults.length && writeFileResults[0].file_diff) {
             pushFileDffChanges(

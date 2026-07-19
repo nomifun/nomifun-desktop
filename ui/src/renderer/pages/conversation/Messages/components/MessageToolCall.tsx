@@ -10,6 +10,7 @@ import { normalizeToolCall } from '@/common/chat/normalizeToolCall';
 import type { NormalizedToolStatus } from '@/common/chat/normalizeToolCall';
 import KnowledgeSearchChip from './KnowledgeSearchChip';
 import FileChangesPanel from '@/renderer/components/base/FileChangesPanel';
+import LocalImageView from '@/renderer/components/media/LocalImageView';
 import { useDiffPreviewHandlers } from '@/renderer/hooks/file/useDiffPreviewHandlers';
 import { parseDiff } from '@/renderer/utils/file/diffUtils';
 import { Badge } from '@arco-design/web-react';
@@ -57,14 +58,14 @@ const ReplacePreview: React.FC<{ message: IMessageToolCall }> = ({ message }) =>
 };
 
 const MessageToolCall: React.FC<{ message: IMessageToolCall }> = ({ message }) => {
-  const { name } = message.content;
+  const { name, artifacts = [] } = message.content;
   const [expanded, setExpanded] = useState(false);
 
   if (name === 'knowledge_search') {
     return <KnowledgeSearchChip message={message} />;
   }
 
-  if (name === 'replace' || name === 'Edit') {
+  if ((name === 'replace' || name === 'Edit') && message.content.status === 'completed') {
     return <ReplacePreview message={message} />;
   }
 
@@ -73,7 +74,8 @@ const MessageToolCall: React.FC<{ message: IMessageToolCall }> = ({ message }) =
     return <div className='text-t-primary'>{toDisplayText(name)}</div>;
   }
 
-  const hasDetail = normalized.input || normalized.output;
+  const visibleArtifacts = normalized.status === 'completed' ? artifacts : [];
+  const hasDetail = normalized.input || normalized.output || visibleArtifacts.length > 0;
 
   return (
     <div className='flex flex-col'>
@@ -102,6 +104,29 @@ const MessageToolCall: React.FC<{ message: IMessageToolCall }> = ({ message }) =
           </span>
         )}
       </div>
+      {visibleArtifacts.length > 0 && (
+        <div className='tool-artifacts m-l-20px m-t-6px'>
+          {visibleArtifacts.map((artifact) => (
+            <div className='tool-artifact' key={artifact.id} data-artifact-kind={artifact.kind}>
+              {artifact.kind === 'image' ? (
+                <LocalImageView
+                  src={artifact.path}
+                  alt={artifact.relative_path || 'Generated image'}
+                  className='tool-artifact-image'
+                />
+              ) : (
+                <div className='tool-artifact-file'>
+                  <span>{artifact.kind}</span>
+                  <code title={artifact.path}>{artifact.path}</code>
+                </div>
+              )}
+              <code className='tool-artifact-path' title={artifact.path}>
+                {artifact.path}
+              </code>
+            </div>
+          ))}
+        </div>
+      )}
       {expanded && hasDetail && (
         <div className='tool-detail-panel m-l-20px m-t-4px'>
           {normalized.input && (

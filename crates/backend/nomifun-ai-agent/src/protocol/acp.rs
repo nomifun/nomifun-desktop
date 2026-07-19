@@ -22,8 +22,9 @@
 //! both requests are just `send_request` / `send_notification` calls on the
 //! shared connection, each awaited in its own caller task.
 
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 
 use agent_client_protocol::schema::{
     AGENT_METHOD_NAMES, AuthenticateResponse, ClientNotification, ClientRequest, CloseSessionResponse, ExtResponse,
@@ -42,7 +43,8 @@ use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 use tracing::{debug, info, warn};
 
 use crate::protocol::error::AcpError;
-use crate::protocol::events::{self as stream_event, AgentStreamEvent};
+use crate::artifact_store::ArtifactStore;
+use crate::protocol::events::{self as stream_event, AcpArtifactDeliveryState, AgentStreamEvent};
 
 use agent_client_protocol::schema::{
     AgentCapabilities, AuthMethod, AuthenticateRequest, CancelNotification, CloseSessionRequest, ExtNotification,
@@ -98,6 +100,13 @@ pub struct AcpProtocol {
     /// Owned by the outer struct; an `Arc` clone is captured by the SDK
     /// background task's `on_receive_notification` closure.
     replay_suppression: Arc<AtomicBool>,
+    /// Shared with the notification handler so prompt completion can reject a
+    /// nominal EndTurn when any artifact delivery in that turn failed.
+    artifact_delivery_state: Arc<Mutex<AcpArtifactDeliveryState>>,
+    /// Retained by the protocol handle so prompt sealing can re-verify every
+    /// published immutable receipt after later tool calls had a chance to
+    /// delete or tamper with it.
+    artifact_store: Option<Arc<ArtifactStore>>,
 }
 
 #[allow(dead_code)] // Full ACP method set; some methods await wiring (fork, close, list, auth, ext).
@@ -113,9 +122,12 @@ impl AcpProtocol {
         event_tx: broadcast::Sender<AgentStreamEvent>,
         permission_tx: mpsc::Sender<PermissionRequest>,
         notification_tx: mpsc::Sender<SessionNotification>,
+        artifact_workspace: Option<PathBuf>,
     ) -> Result<Self, AcpError> {
         let alive = Arc::new(AtomicBool::new(true));
         let replay_suppression = Arc::new(AtomicBool::new(false));
+        let artifact_delivery_state = Arc::new(Mutex::new(AcpArtifactDeliveryState::default()));
+        let artifact_store = artifact_workspace.map(ArtifactStore::new).map(Arc::new);
 
         // Signals from the background task:
         // - `init_tx`: initialize handshake result (with possible SDK error)
@@ -139,6 +151,8 @@ impl AcpProtocol {
             shutdown_rx,
             Arc::clone(&alive),
             Arc::clone(&replay_suppression),
+            artifact_store.clone(),
+            Arc::clone(&artifact_delivery_state),
         ));
 
         // Wait for init to complete with timeout.
@@ -162,7 +176,27 @@ impl AcpProtocol {
             alive,
             initialize_response: Arc::new(RwLock::new(Some(init_response))),
             replay_suppression,
+            artifact_delivery_state,
+            artifact_store,
         })
+    }
+
+    /// Reset artifact receipts at the exact start of a prompt turn.
+    pub(crate) fn begin_artifact_delivery_turn(&self, session_id: &str) {
+        self.artifact_delivery_state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .begin_turn(session_id);
+    }
+
+    /// Seal the active prompt turn and return any missing/invalid artifact
+    /// receipt. This catches calls left pending when the agent nevertheless
+    /// responds with EndTurn.
+    pub(crate) fn finish_artifact_delivery_turn(&self, session_id: &str) -> Option<String> {
+        self.artifact_delivery_state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .finish_turn_with_store(session_id, self.artifact_store.as_deref())
     }
 
     pub fn initialize_response(&self) -> Option<InitializeResponse> {
@@ -370,6 +404,8 @@ async fn run_sdk_background(
     shutdown_rx: oneshot::Receiver<()>,
     alive: Arc<AtomicBool>,
     replay_suppression: Arc<AtomicBool>,
+    artifact_store: Option<Arc<ArtifactStore>>,
+    artifact_delivery_state: Arc<Mutex<AcpArtifactDeliveryState>>,
 ) {
     let transport = ByteStreams::new(stdin.compat_write(), stdout.compat());
 
@@ -386,6 +422,8 @@ async fn run_sdk_background(
                 let event_tx = event_tx.clone();
                 let notification_tx = notification_tx.clone();
                 let replay_suppression = Arc::clone(&replay_suppression);
+                let artifact_store = artifact_store.clone();
+                let artifact_delivery_state = Arc::clone(&artifact_delivery_state);
                 async move |notification: SessionNotification, _cx: ConnectionTo<Agent>| {
                     // Fan out the raw SDK notification to the manager's apply-loop
                     // FIRST, so session state is consistent by the time the UI
@@ -401,7 +439,13 @@ async fn run_sdk_background(
                     // notification_tx (event_tracker still needs metadata like
                     // available_commands_update), but skip the UI broadcast.
                     if !replay_suppression.load(Ordering::Acquire) {
-                        handle_session_notification(notification, &event_tx).await;
+                        handle_session_notification(
+                            notification,
+                            &event_tx,
+                            artifact_store.as_deref(),
+                            &artifact_delivery_state,
+                        )
+                        .await;
                     }
                     Ok(())
                 }
@@ -472,10 +516,21 @@ async fn run_sdk_background(
 async fn handle_session_notification(
     notification: SessionNotification,
     event_tx: &broadcast::Sender<AgentStreamEvent>,
+    artifact_store: Option<&ArtifactStore>,
+    artifact_delivery_state: &Mutex<AcpArtifactDeliveryState>,
 ) {
     log_agent_notify("session/update", &json_str(&notification));
 
-    let events = stream_event::session_notification_to_events(&notification);
+    let events = {
+        let mut delivery_state = artifact_delivery_state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        stream_event::session_notification_to_events_with_delivery_state(
+            &notification,
+            artifact_store,
+            &mut delivery_state,
+        )
+    };
     for event in events {
         if let Err(e) = event_tx.send(event) {
             // broadcast::SendError means no active receivers — expected when

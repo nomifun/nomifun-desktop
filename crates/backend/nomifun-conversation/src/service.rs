@@ -5,6 +5,7 @@ use std::sync::{
 };
 use std::time::Duration;
 
+use nomifun_ai_agent::artifact_store::ArtifactStore;
 use nomifun_ai_agent::types::{AgentRuntimeBuildOptions, SendMessageData};
 use nomifun_ai_agent::{AgentRuntimeHandle, AgentRuntimeRegistry, TurnStopReason};
 use futures_util::FutureExt;
@@ -45,8 +46,10 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 
 use crate::convert::{
-    TOOL_CONTENT_COMPACT_THRESHOLD_BYTES, parse_provider_with_model, row_to_artifact_response, row_to_message_response,
-    row_to_message_response_compact, row_to_response, row_to_response_with_extra, search_row_to_item, string_to_enum,
+    TOOL_CONTENT_COMPACT_THRESHOLD_BYTES, message_needs_artifact_history_audit,
+    parse_provider_with_model, project_historical_artifact_integrity,
+    row_to_artifact_response, row_to_message_response, row_to_message_response_compact,
+    row_to_response, row_to_response_with_extra, search_row_to_item, string_to_enum,
 };
 use crate::skill_resolver::SkillResolver;
 use crate::skill_snapshot::{backfill_skills_if_missing, compute_initial_skills};
@@ -2263,11 +2266,70 @@ impl ConversationService {
                 "deleted",
                 source.as_ref(),
             );
-            // Report authoritative core success before optional cascade work.
+
+            // A backend-managed workspace is part of the conversation's
+            // durable lifecycle, not an optional after-effect. Do not
+            // acknowledge deletion while its files are still locatable: that
+            // race could make stale artifacts appear to survive a successful
+            // delete. Optional repository/hooks remain detached below.
+            let mut managed_workspace_cleanup_error = None;
+            if let Some(path) = managed_temp_workspace {
+                let display_path = path.display().to_string();
+                match tokio::time::timeout(
+                    DELETE_CLEANUP_ITEM_GRACE,
+                    tokio::task::spawn_blocking(move || {
+                        if path.exists() {
+                            std::fs::remove_dir_all(path)
+                        } else {
+                            Ok(())
+                        }
+                    }),
+                )
+                .await
+                {
+                    Ok(Ok(Ok(()))) => {}
+                    Ok(Ok(Err(err))) => {
+                        warn!(
+                            conversation_id,
+                            workspace = %display_path,
+                            error = %ErrorChain(&err),
+                            "Failed to remove managed temp workspace on conversation delete"
+                        );
+                        managed_workspace_cleanup_error = Some(format!(
+                            "conversation was deleted, but managed workspace '{display_path}' could not be removed: {err}"
+                        ));
+                    }
+                    Ok(Err(err)) => {
+                        warn!(
+                            conversation_id,
+                            workspace = %display_path,
+                            error = %ErrorChain(&err),
+                            "Managed temp workspace cleanup task failed"
+                        );
+                        managed_workspace_cleanup_error = Some(format!(
+                            "conversation was deleted, but managed workspace '{display_path}' cleanup failed: {err}"
+                        ));
+                    }
+                    Err(_) => {
+                        warn!(
+                            conversation_id,
+                            workspace = %display_path,
+                            "Managed temp workspace cleanup exceeded its hard bound"
+                        );
+                        managed_workspace_cleanup_error = Some(format!(
+                            "conversation was deleted, but managed workspace '{display_path}' cleanup timed out"
+                        ));
+                    }
+                }
+            }
+
             // If the HTTP waiter timed out/disconnected, this send simply
-            // fails while the committed tombstone and cleanup remain owned by
-            // this detached task.
-            let _ = result_tx.send(Ok(()));
+            // fails while the committed tombstone and optional cleanup remain
+            // owned by this detached task.
+            let _ = result_tx.send(match managed_workspace_cleanup_error {
+                Some(error) => Err(AppError::Internal(error)),
+                None => Ok(()),
+            });
 
             match tokio::time::timeout(
                 DELETE_CLEANUP_ITEM_GRACE,
@@ -2299,40 +2361,6 @@ impl ConversationService {
                 }
             }
 
-            if let Some(path) = managed_temp_workspace {
-                let display_path = path.display().to_string();
-                match tokio::time::timeout(
-                    DELETE_CLEANUP_ITEM_GRACE,
-                    tokio::task::spawn_blocking(move || {
-                        if path.exists() {
-                            std::fs::remove_dir_all(path)
-                        } else {
-                            Ok(())
-                        }
-                    }),
-                )
-                .await
-                {
-                    Ok(Ok(Ok(()))) => {}
-                    Ok(Ok(Err(err))) => warn!(
-                        conversation_id,
-                        workspace = %display_path,
-                        error = %ErrorChain(&err),
-                        "Failed to remove managed temp workspace on conversation delete"
-                    ),
-                    Ok(Err(err)) => warn!(
-                        conversation_id,
-                        workspace = %display_path,
-                        error = %ErrorChain(&err),
-                        "Managed temp workspace cleanup task failed"
-                    ),
-                    Err(_) => warn!(
-                        conversation_id,
-                        workspace = %display_path,
-                        "Managed temp workspace cleanup exceeded its hard bound"
-                    ),
-                }
-            }
         });
         result_rx
     }
@@ -2496,6 +2524,64 @@ impl ConversationService {
 // ── Messages & Artifacts ────────────────────────────────────────────
 
 impl ConversationService {
+    /// Recheck local artifact receipts immediately before returning persisted
+    /// messages to a history consumer. Filesystem/container validation is
+    /// blocking and can read large artifacts, so the whole page is processed on
+    /// Tokio's blocking pool rather than occupying an async request worker.
+    async fn project_history_artifact_integrity(
+        &self,
+        conversation: &ConversationRow,
+        mut items: Vec<MessageResponse>,
+    ) -> Result<Vec<MessageResponse>, AppError> {
+        if !items.iter().any(message_needs_artifact_history_audit) {
+            return Ok(items);
+        }
+
+        let workspace = match history_artifact_workspace(&self.workspace_root, conversation) {
+            Ok(workspace) => Some(workspace),
+            Err(reason) => {
+                // Missing/stale workspace context is not a reason to fail the
+                // entire transcript request, but it can never authorize a
+                // green local-artifact projection. Passing `None` below
+                // deterministically downgrades every affected tool message.
+                warn!(
+                    conversation_id = %conversation.id,
+                    %reason,
+                    "Conversation history has local artifact receipts without a usable workspace"
+                );
+                None
+            }
+        };
+        let conversation_id = conversation.id.clone();
+        let (projected, invalidated) = tokio::task::spawn_blocking(move || {
+            let store = workspace.map(ArtifactStore::new);
+            let mut invalidated = 0usize;
+            for message in &mut items {
+                if project_historical_artifact_integrity(message, store.as_ref()) {
+                    invalidated += 1;
+                }
+            }
+            (items, invalidated)
+        })
+        .await
+        .map_err(|error| {
+            // Returning no history is safer than returning the unverified
+            // original page after a verifier task failed unexpectedly.
+            AppError::Internal(format!(
+                "Conversation artifact history verification failed: {error}"
+            ))
+        })?;
+
+        if invalidated > 0 {
+            warn!(
+                %conversation_id,
+                invalidated,
+                "Downgraded stale or unverifiable historical artifact deliveries"
+            );
+        }
+        Ok(projected)
+    }
+
     /// List messages for a conversation with page-based pagination.
     pub async fn list_messages(
         &self,
@@ -2504,7 +2590,8 @@ impl ConversationService {
         query: ListMessagesQuery,
     ) -> Result<MessageListResponse, AppError> {
         // Verify conversation exists and belongs to user
-        self.conversation_repo
+        let conversation = self
+            .conversation_repo
             .get(parse_conv_id(conversation_id)?)
             .await?
             .filter(|r| r.user_id == user_id)
@@ -2543,6 +2630,9 @@ impl ConversationService {
                     row_to_message_response(row)?
                 });
             }
+            let items = self
+                .project_history_artifact_integrity(&conversation, items)
+                .await?;
             return Ok(PaginatedResult {
                 items,
                 total: 0,
@@ -2605,6 +2695,9 @@ impl ConversationService {
             );
         }
 
+        let items = self
+            .project_history_artifact_integrity(&conversation, items)
+            .await?;
         Ok(PaginatedResult {
             items,
             total: result.total,
@@ -2619,7 +2712,8 @@ impl ConversationService {
         conversation_id: &str,
         message_id: &str,
     ) -> Result<MessageResponse, AppError> {
-        self.conversation_repo
+        let conversation = self
+            .conversation_repo
             .get(parse_conv_id(conversation_id)?)
             .await?
             .filter(|r| r.user_id == user_id)
@@ -2635,7 +2729,15 @@ impl ConversationService {
             .ok_or_else(|| AppError::NotFound(format!("Message {message_id} not found")))?;
 
         let content_bytes = row.content.len();
-        let response = row_to_message_response(row)?;
+        let mut responses = self
+            .project_history_artifact_integrity(
+                &conversation,
+                vec![row_to_message_response(row)?],
+            )
+            .await?;
+        let response = responses
+            .pop()
+            .ok_or_else(|| AppError::Internal("Message history projection returned no item".into()))?;
         if is_tool_message_type(response.r#type) || content_bytes > TOOL_CONTENT_COMPACT_THRESHOLD_BYTES {
             info!(
                 conversation_id,
@@ -3755,7 +3857,8 @@ impl ConversationService {
                 .with_cancellation(turn_cancellation.clone())
                 .with_companion_context(companion, companion_id.clone())
                 .with_origin(origin.clone())
-                .with_channel_platform(channel_platform.clone());
+                .with_channel_platform(channel_platform.clone())
+                .with_artifact_workspace(agent.workspace());
 
                 // Execution-attempt turns: let the relay accumulate this turn's
                 // token usage into the conversation's running total, consumed by
@@ -6013,6 +6116,34 @@ fn auto_workspace_path_for_row(
         &label,
         temp_workspace_id,
     ))
+}
+
+/// Resolve the authoritative workspace used to validate host-local receipts in
+/// persisted history. Managed workspaces are recomputed from their durable
+/// token so database restores or data-root relocation cannot make an old
+/// absolute `extra.workspace` escape the current installation. Custom
+/// workspaces use the same path validation as runtime construction.
+fn history_artifact_workspace(
+    workspace_root: &Path,
+    row: &ConversationRow,
+) -> Result<PathBuf, String> {
+    let extra: serde_json::Value = serde_json::from_str(&row.extra)
+        .map_err(|error| format!("invalid conversation extra JSON: {error}"))?;
+    if temp_workspace_marker_present(&extra) {
+        let agent_type: AgentType = string_to_enum(&row.r#type)
+            .map_err(|error| format!("invalid conversation agent type: {error}"))?;
+        return auto_workspace_path_for_row(workspace_root, row, &agent_type, &extra)
+            .map_err(|error| error.to_string());
+    }
+
+    let workspace = extra
+        .get("workspace")
+        .and_then(serde_json::Value::as_str)
+        .filter(|workspace| !workspace.is_empty())
+        .ok_or_else(|| "conversation has no artifact workspace".to_owned())?;
+    validate_runtime_workspace_path(workspace)
+        .map(PathBuf::from)
+        .map_err(|error| error.to_string())
 }
 
 fn managed_temp_workspace_path_from_row(workspace_root: &Path, row: &ConversationRow) -> Option<PathBuf> {

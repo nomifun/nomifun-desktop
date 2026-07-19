@@ -118,9 +118,43 @@ pub(crate) fn param_prompt(params: &serde_json::Value) -> String {
     params.get("prompt").and_then(|v| v.as_str()).unwrap_or_default().to_string()
 }
 
-/// Batch count (`params.count`), clamped to 1..=10; defaults to 1.
-pub(crate) fn param_count(params: &serde_json::Value) -> u32 {
-    params.get("count").and_then(|v| v.as_u64()).unwrap_or(1).clamp(1, 10) as u32
+/// Maximum image batch size supported by the creation adapters.
+pub(crate) const MAX_IMAGE_OUTPUT_COUNT: u32 = 10;
+
+/// Strict image batch count contract. Both the product-facing `count` name and
+/// the OpenAI-compatible `n` alias are accepted. Omission means one image, but
+/// a present value is never defaulted or clamped: malformed, zero, excessive,
+/// or conflicting values fail the request.
+pub(crate) fn param_count(params: &serde_json::Value) -> Result<u32, crate::types::CreationError> {
+    let mut parsed = None;
+    for field in ["count", "n"] {
+        let Some(value) = params.get(field) else {
+            continue;
+        };
+        let Some(value) = value.as_u64().filter(|value| *value > 0) else {
+            return Err(crate::types::CreationError::new(
+                "invalid_params",
+                format!("params.{field} must be a positive integer"),
+            ));
+        };
+        if value > u64::from(MAX_IMAGE_OUTPUT_COUNT) {
+            return Err(crate::types::CreationError::new(
+                "invalid_params",
+                format!(
+                    "params.{field} ({value}) exceeds the supported image output limit ({MAX_IMAGE_OUTPUT_COUNT})"
+                ),
+            ));
+        }
+        let value = value as u32;
+        if parsed.is_some_and(|previous| previous != value) {
+            return Err(crate::types::CreationError::new(
+                "invalid_params",
+                "params.count and params.n must match when both are provided",
+            ));
+        }
+        parsed = Some(value);
+    }
+    Ok(parsed.unwrap_or(1))
 }
 
 /// A `WxH` size string from `params.width`/`params.height`, or an explicit
@@ -267,13 +301,25 @@ mod tests {
     fn param_helpers() {
         let p = serde_json::json!({"prompt": "a cat", "width": 512, "height": 768, "count": 3});
         assert_eq!(param_prompt(&p), "a cat");
-        assert_eq!(param_count(&p), 3);
+        assert_eq!(param_count(&p).unwrap(), 3);
         assert_eq!(param_size(&p).as_deref(), Some("512x768"));
 
-        let p2 = serde_json::json!({"size": "1024x1024", "count": 99});
+        let p2 = serde_json::json!({"size": "1024x1024", "count": MAX_IMAGE_OUTPUT_COUNT});
         assert_eq!(param_size(&p2).as_deref(), Some("1024x1024"));
-        assert_eq!(param_count(&p2), 10); // clamped
-        assert_eq!(param_count(&serde_json::json!({})), 1); // default
+        assert_eq!(param_count(&p2).unwrap(), MAX_IMAGE_OUTPUT_COUNT);
+        assert_eq!(param_count(&serde_json::json!({})).unwrap(), 1); // default
+        assert_eq!(param_count(&serde_json::json!({"n": 4})).unwrap(), 4);
+        assert_eq!(param_count(&serde_json::json!({"count": 4, "n": 4})).unwrap(), 4);
+        for invalid in [
+            serde_json::json!({"count": 0}),
+            serde_json::json!({"count": -1}),
+            serde_json::json!({"count": "2"}),
+            serde_json::json!({"count": 1.5}),
+            serde_json::json!({"n": MAX_IMAGE_OUTPUT_COUNT + 1}),
+            serde_json::json!({"count": 2, "n": 3}),
+        ] {
+            assert!(param_count(&invalid).is_err(), "must reject {invalid}");
+        }
         assert_eq!(param_prompt(&serde_json::json!({})), "");
         assert!(param_size(&serde_json::json!({})).is_none());
     }

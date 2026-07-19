@@ -16,6 +16,7 @@
 //! [`route_adapter_id`].
 
 mod adapters;
+mod artifact;
 mod dto;
 mod types;
 
@@ -25,6 +26,7 @@ pub mod service;
 pub mod state;
 
 pub use adapters::{default_adapters, route_adapter_id};
+pub use artifact::validate_artifact_payload;
 pub use dto::CreationTask;
 pub use provider::{
     InputAsset, MediaProvider, PollResult, ProducedAsset, ProducedData, ResolvedProvider, SubmitAck,
@@ -33,7 +35,8 @@ pub use provider::{
 pub use routes::creation_routes;
 pub use service::{
     AssetSink, AssetSource, CreationService, CreationServiceBuilder, LoadedAsset, NewCreationTask,
-    PersistAsset,
+    PersistAsset, TaskArtifactCleanupFailure, TaskArtifactIssue, TaskArtifactManifest,
+    TaskArtifactReconcileReport,
 };
 pub use state::CreationRouterState;
 pub use types::{CreationError, CreationInput, MediaCapability, TaskStatus};

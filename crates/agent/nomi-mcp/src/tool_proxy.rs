@@ -10,7 +10,7 @@ use super::manager::McpManager;
 use super::protocol::ToolAnnotations;
 use nomi_protocol::events::ToolCategory;
 use nomi_tools::Tool;
-use nomi_types::tool::{JsonSchema, ToolImage, ToolResult};
+use nomi_types::tool::{JsonSchema, ToolArtifact, ToolImage, ToolResult};
 
 /// Upper bound on a single MCP image's decoded byte size before it is dropped.
 ///
@@ -20,6 +20,9 @@ use nomi_types::tool::{JsonSchema, ToolImage, ToolResult};
 /// size from the base64 length (decoded ≈ len * 3 / 4) to avoid decoding the
 /// whole payload just to measure it.
 const MCP_MAX_IMAGE_BYTES: usize = 5 * 1024 * 1024;
+/// Non-image inline resources are never sent to a provider as visual context,
+/// but the backend artifact store accepts them up to this bounded size.
+const MCP_MAX_ARTIFACT_BYTES: usize = 20 * 1024 * 1024;
 const MCP_PROVIDER_NAME_PREFIX: &str = "mcp__";
 const MAX_PROVIDER_TOOL_NAME_LEN: usize = 64;
 const MCP_DISPLAY_SEPARATOR: &str = "__";
@@ -64,6 +67,10 @@ pub struct McpToolProxy {
     display_name: String,
     /// Stable deferred-activation identity, independent of display collisions.
     activation_identity: String,
+    /// Complete origin identity used for artifact contract classification. This
+    /// must never use the bounded provider display alias because a long server
+    /// name can truncate the semantic tool suffix.
+    artifact_identity: String,
     /// Original tool name on the MCP server
     tool_name: String,
     /// Server this tool belongs to
@@ -90,9 +97,11 @@ impl McpToolProxy {
     ) -> Self {
         let display_name = canonical_mcp_display_name(&server_name, &tool_name);
         let activation_identity = canonical_mcp_tool_identity(&server_name, &tool_name);
+        let artifact_identity = format!("{server_name}__{tool_name}");
         Self {
             display_name,
             activation_identity,
+            artifact_identity,
             tool_name,
             server_name,
             description,
@@ -129,6 +138,18 @@ impl McpToolProxy {
             .and_then(|a| a.read_only_hint)
             .unwrap_or(false)
     }
+
+    /// Image-generation tools have a stronger success contract than ordinary
+    /// MCP calls: a text acknowledgement without an image is a failed result.
+    fn expects_image_output(&self) -> bool {
+        let server = self.server_name.trim().to_ascii_lowercase().replace(['-', ' '], "_");
+        let tool = self.tool_name.trim().to_ascii_lowercase().replace(['-', ' '], "_");
+        server == "nomifun_image_generation"
+            || matches!(
+                tool.as_str(),
+                "image_gen" | "image_generation" | "generate_image" | "create_image"
+            )
+    }
 }
 
 #[async_trait]
@@ -139,6 +160,10 @@ impl Tool for McpToolProxy {
 
     fn activation_identity(&self) -> &str {
         &self.activation_identity
+    }
+
+    fn artifact_identity(&self) -> &str {
+        &self.artifact_identity
     }
 
     fn reserved_provider_name_prefix(&self) -> Option<&'static str> {
@@ -181,49 +206,75 @@ impl Tool for McpToolProxy {
             Ok(out) => {
                 let mut text = out.text;
                 let is_error = out.is_error;
-                let mut images: Vec<ToolImage> = Vec::with_capacity(out.images.len());
+                let mut artifacts: Vec<ToolArtifact> = Vec::with_capacity(out.artifacts.len());
+                let mut delivery_error = None;
 
-                for img in out.images {
+                for artifact in out.artifacts {
                     // Estimate decoded byte size from base64 length to gate
-                    // oversized screenshots before they reach the context.
-                    let decoded_len = decoded_base64_len(&img.data);
-                    if decoded_len > MCP_MAX_IMAGE_BYTES {
+                    // oversized payloads before they reach history/storage.
+                    let decoded_len = decoded_base64_len(&artifact.data);
+                    let limit = if artifact.mime_type.starts_with("image/") {
+                        MCP_MAX_IMAGE_BYTES
+                    } else {
+                        MCP_MAX_ARTIFACT_BYTES
+                    };
+                    if decoded_len > limit {
                         tracing::warn!(
                             target: "nomi_mcp",
                             server = %self.server_name,
                             tool = %self.tool_name,
+                            mime_type = %artifact.mime_type,
                             bytes = decoded_len,
-                            limit = MCP_MAX_IMAGE_BYTES,
-                            "dropping oversized MCP image"
+                            limit,
+                            "rejecting oversized MCP artifact"
                         );
-                        let placeholder = format!("[image too large: {} bytes, dropped]", decoded_len);
-                        if text.is_empty() {
-                            text = placeholder;
-                        } else {
-                            text.push('\n');
-                            text.push_str(&placeholder);
-                        }
-                        continue;
+                        delivery_error = Some(format!(
+                            "MCP artifact {} is {decoded_len} bytes, above the {limit} byte limit",
+                            artifact.mime_type
+                        ));
+                        break;
                     }
 
-                    images.push(ToolImage {
-                        media_type: img.mime_type, // mime_type → media_type field name
-                        data: img.data,            // raw base64, passed through
+                    artifacts.push(ToolImage {
+                        media_type: artifact.mime_type,
+                        data: artifact.data,
                     });
                 }
 
+                if let Some(error) = delivery_error {
+                    if !text.trim().is_empty() {
+                        text.push('\n');
+                    }
+                    text.push_str("Artifact delivery rejected: ");
+                    text.push_str(&error);
+                    return ToolResult::error(text);
+                }
+
+                let contains_image = artifacts
+                    .iter()
+                    .any(|artifact| artifact.media_type.starts_with("image/"));
                 let result = if is_error {
                     ToolResult::error(text)
+                } else if self.expects_image_output() && !contains_image {
+                    let detail = if text.trim().is_empty() {
+                        "the MCP server returned no content".to_owned()
+                    } else {
+                        format!("server response: {text}")
+                    };
+                    ToolResult::error(format!(
+                        "Image generation failed: no image artifact was returned ({detail})."
+                    ))
                 } else {
                     ToolResult::text(text)
                 };
-                if images.is_empty() {
+                if artifacts.is_empty() {
                     // Pure-text MCP tool: behaviour identical to before this change.
                     result
                 } else {
-                    // Multimodal: text → content, images → ToolResult.images so the
-                    // downstream provider adapters feed them back to the model.
-                    result.with_images(images)
+                    // The legacy `images` field is now a generic inline byte
+                    // carrier. The backend persists every item first; the agent
+                    // keeps only actual image MIME types for model vision.
+                    result.with_artifacts(artifacts)
                 }
             }
             Err(e) => ToolResult::error(format!("MCP tool error: {}", e)),
@@ -902,6 +953,30 @@ mod tests {
         );
     }
 
+    #[test]
+    fn artifact_identity_retains_tool_suffix_hidden_by_bounded_provider_name() {
+        let server_name = "server-with-an-extremely-long-origin-name-that-consumes-the-readable-provider-slug";
+        for tool_name in ["export_pdf", "render_video"] {
+            let manager = manager_with_tool_response(server_name, tool_name, "done");
+            let proxy = McpToolProxy::new(
+                tool_name.to_owned(),
+                server_name.to_owned(),
+                "produce a durable artifact".to_owned(),
+                json!({"type": "object"}),
+                manager,
+                false,
+                None,
+            );
+
+            assert_eq!(proxy.name().len(), MAX_PROVIDER_TOOL_NAME_LEN);
+            assert!(!proxy.name().contains(tool_name));
+            assert_eq!(
+                proxy.artifact_identity(),
+                format!("{server_name}__{tool_name}")
+            );
+        }
+    }
+
     #[tokio::test]
     async fn tool_search_finds_mcp_by_original_tool_name_and_server_alias() {
         // Pure Unicode origins sanitize to an opaque `tool` slug, so these
@@ -1215,6 +1290,27 @@ mod tests {
         )
     }
 
+    fn proxy_with_server_response(
+        server: &str,
+        tool: &str,
+        resp: serde_json::Value,
+    ) -> McpToolProxy {
+        let mgr = Arc::new(McpManager::new_for_test(vec![(
+            server,
+            false,
+            Box::new(MockTransport::new(vec![resp])),
+        )]));
+        McpToolProxy::new(
+            tool.into(),
+            server.into(),
+            "desc".into(),
+            json!({"type":"object"}),
+            mgr,
+            true,
+            None,
+        )
+    }
+
     #[tokio::test]
     async fn proxy_execute_maps_image_to_tool_result_images() {
         let resp = json!({ "content": [
@@ -1231,6 +1327,37 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn proxy_execute_rejects_unmaterialized_remote_link_without_partial_artifacts() {
+        let resp = json!({ "content": [
+            {"type":"audio","data":"SUQzYXVkaW8=","mimeType":"audio/mpeg"},
+            {"type":"resource","resource":{"uri":"file:///report.txt","mimeType":"text/plain","text":"report"}},
+            {"type":"resource_link","uri":"https://example.test/report.pdf","name":"report.pdf","mimeType":"application/pdf"}
+        ]});
+        let proxy = proxy_with_response("export", resp);
+
+        let result = proxy.execute(json!({})).await;
+
+        assert!(result.is_error);
+        assert!(result.images.is_empty());
+        assert!(result.content.contains("was not materialized"));
+        assert!(result.content.contains("https://example.test/report.pdf"));
+    }
+
+    #[tokio::test]
+    async fn image_generator_rejects_non_image_artifact_as_success() {
+        let resp = json!({ "content": [
+            {"type":"resource","resource":{"uri":"file:///claim.txt","mimeType":"text/plain","text":"generated"}}
+        ]});
+        let proxy = proxy_with_server_response("other", "image_gen", resp);
+
+        let result = proxy.execute(json!({})).await;
+
+        assert!(result.is_error);
+        assert_eq!(result.images.len(), 1, "receipt remains available for error delivery");
+        assert!(result.content.contains("no image artifact was returned"));
+    }
+
+    #[tokio::test]
     async fn proxy_execute_text_only_no_images() {
         let resp = json!({ "content": [{"type":"text","text":"plain"}] });
         let proxy = proxy_with_response("echo", resp);
@@ -1238,6 +1365,27 @@ mod tests {
         assert!(!r.is_error);
         assert_eq!(r.content, "plain");
         assert!(r.images.is_empty());
+    }
+
+    #[tokio::test]
+    async fn image_generation_text_only_response_is_an_error() {
+        let resp = json!({ "content": [{"type":"text","text":"Image generated successfully."}] });
+        let proxy = proxy_with_server_response("nomifun-image-generation", "generate", resp);
+        let result = proxy.execute(json!({})).await;
+
+        assert!(result.is_error);
+        assert!(result.images.is_empty());
+        assert!(result.content.contains("no image artifact was returned"));
+    }
+
+    #[tokio::test]
+    async fn image_generation_empty_content_is_an_error() {
+        let resp = json!({ "content": [] });
+        let proxy = proxy_with_server_response("other", "image_gen", resp);
+        let result = proxy.execute(json!({})).await;
+
+        assert!(result.is_error);
+        assert!(result.content.contains("no image artifact was returned"));
     }
 
     #[tokio::test]
@@ -1267,7 +1415,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn proxy_execute_drops_oversized_image_with_placeholder() {
+    async fn proxy_execute_rejects_oversized_image_instead_of_false_success() {
         // Build a base64 string whose decoded size exceeds MCP_MAX_IMAGE_BYTES.
         // decoded ≈ len * 3/4, so we need > 5 MiB * 4/3 base64 chars.
         let huge = "A".repeat((MCP_MAX_IMAGE_BYTES + 1024) * 4 / 3 + 8);
@@ -1277,17 +1425,15 @@ mod tests {
         ]});
         let proxy = proxy_with_response("big_shot", resp);
         let r = proxy.execute(json!({})).await;
-        assert!(!r.is_error);
-        // Oversized image dropped → no images survive.
+        assert!(r.is_error);
         assert!(r.images.is_empty());
-        // Original text preserved + placeholder appended.
         assert!(r.content.contains("shot taken"));
         assert!(
-            r.content.contains("image too large"),
-            "expected placeholder text, got: {}",
+            r.content.contains("Artifact delivery rejected"),
+            "expected explicit delivery error, got: {}",
             r.content
         );
-        assert!(r.content.contains("dropped"));
+        assert!(r.content.contains("above the"));
     }
 
     #[tokio::test]

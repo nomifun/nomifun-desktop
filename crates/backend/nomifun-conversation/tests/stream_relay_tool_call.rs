@@ -72,6 +72,7 @@ async fn run_tool_call_with_empty_call_id_is_not_persisted() {
         input: Some(json!({"pattern": "*.rs"})),
         output: None,
         description: None,
+        artifacts: Vec::new(),
     }))
     .unwrap();
     tx.send(AgentStreamEvent::Finish(FinishEventData::default())).unwrap();

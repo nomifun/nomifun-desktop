@@ -17,6 +17,23 @@ pub struct ConversationMessageProjection {
     pub message: MessageRow,
 }
 
+/// One terminal artifact-producing tool message to publish when its enclosing
+/// turn has finished successfully.
+///
+/// Conversation and turn ownership, terminal status, position, visibility and
+/// creation time are deliberately supplied by the repository boundary rather
+/// than repeated by every item. This keeps the commit surface narrow enough to
+/// reject cross-turn or non-tool projections as one atomic batch.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TurnArtifactMessageCommit {
+    /// Canonical durable message identity claimed for the provider tool call.
+    pub id: String,
+    /// Exactly `tool_call` or `acp_tool_call`.
+    pub message_type: String,
+    /// Final JSON object containing a committed, completed artifact delivery.
+    pub content: String,
+}
+
 /// Conversation + message data access abstraction.
 ///
 /// Covers conversation CRUD, extended queries (source/chat, cron-job,
@@ -212,6 +229,26 @@ pub trait IConversationRepository: Send + Sync {
 
     /// Inserts a new message row.
     async fn insert_message(&self, message: &MessageRow) -> Result<(), DbError>;
+
+    /// Atomically commits every artifact-producing tool message from one
+    /// successfully completed turn.
+    ///
+    /// Implementations must insert missing rows, promote only matching `work`
+    /// rows to `finish`, accept an exactly identical finished replay, and roll
+    /// back the entire batch on any identity, lifecycle or content conflict.
+    /// The default is intentionally unsupported: a repository without a real
+    /// transaction must never approximate this with sequential updates.
+    async fn commit_turn_artifact_messages(
+        &self,
+        _conversation_id: &str,
+        _turn_message_id: &str,
+        _messages: &[TurnArtifactMessageCommit],
+        _committed_at: TimestampMs,
+    ) -> Result<Vec<MessageRow>, DbError> {
+        Err(DbError::Init(
+            "atomic turn artifact message commits are not supported".to_owned(),
+        ))
+    }
 
     /// Atomically resolves a protocol correlation key to one durable canonical
     /// message ID. Correlation keys are scoped by Conversation, parent turn,

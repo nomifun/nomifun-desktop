@@ -27,6 +27,7 @@ use serde_json::json;
 use tokio::sync::watch;
 
 use crate::attempt_runner::{AttemptOutcome, AttemptRunner};
+use crate::artifact_contract::validate_required_artifacts;
 use crate::control_steps::{self, ControlResolution};
 use crate::conversation_effect::{AttemptConversationEffects, PendingConversationEffect};
 use crate::domain_mapper;
@@ -579,6 +580,18 @@ impl ExecutionScheduler {
             .deps
             .attempt_runner
             .read_final_output(owner_id, conversation_id)
+            .await
+    }
+
+    pub async fn read_attempt_output_files(
+        &self,
+        owner_id: &str,
+        conversation_id: &str,
+    ) -> Vec<String> {
+        self.inner
+            .deps
+            .attempt_runner
+            .read_output_files(owner_id, conversation_id)
             .await
     }
 
@@ -1501,35 +1514,60 @@ impl ExecutionScheduler {
             return Ok(());
         }
 
-        let (attempt_status, step_status, error, output, tokens, retry_after) = match outcome {
-            Ok(outcome) if outcome.ok && outcome.text.as_ref().is_some_and(|text| !text.trim().is_empty()) => (
+        let (attempt_status, step_status, error, output, output_files, tokens, retry_after) = match outcome {
+            Ok(outcome) if agent_outcome_can_complete(&outcome, &step.spec) => (
                 ExecutionAttemptStatus::Completed,
                 ExecutionStepStatus::Completed,
                 None,
                 outcome.text,
+                outcome.output_files,
                 outcome.tokens,
                 None,
             ),
             Ok(outcome) => {
-                let retryable = self
-                    .inner
-                    .deps
-                    .attempt_runner
-                    .last_error_retryable(owner_id, &outcome.conversation_id)
-                    .await;
-                let has_marker = self
-                    .inner
-                    .deps
-                    .attempt_runner
-                    .last_error_present(owner_id, &outcome.conversation_id)
-                    .await;
-                let reason = self
-                    .inner
-                    .deps
-                    .attempt_runner
-                    .last_error_summary(owner_id, &outcome.conversation_id)
-                    .await
-                    .unwrap_or_else(|| if has_marker { "Agent attempt failed" } else { "Agent attempt timed out" }.to_owned());
+                let artifact_contract_error = (outcome.ok
+                    && outcome
+                        .text
+                        .as_ref()
+                        .is_some_and(|text| !text.trim().is_empty()))
+                .then(|| validate_required_artifacts(&step.spec, &outcome.output_files).err())
+                .flatten();
+                let (retryable, has_marker, reason) =
+                    if let Some(error) = artifact_contract_error {
+                        // The turn itself finished, but its verified delivery
+                        // did not satisfy the immutable Step requirement. Make
+                        // the integrity failure visible and retryable under the
+                        // same bounded adaptive policy as other provider faults.
+                        (true, true, format!("Agent artifact delivery failed: {error}"))
+                    } else {
+                        let retryable = self
+                            .inner
+                            .deps
+                            .attempt_runner
+                            .last_error_retryable(owner_id, &outcome.conversation_id)
+                            .await;
+                        let has_marker = self
+                            .inner
+                            .deps
+                            .attempt_runner
+                            .last_error_present(owner_id, &outcome.conversation_id)
+                            .await;
+                        let reason = self
+                            .inner
+                            .deps
+                            .attempt_runner
+                            .last_error_summary(owner_id, &outcome.conversation_id)
+                            .await
+                            .unwrap_or_else(|| {
+                                if has_marker {
+                                    "Agent attempt failed"
+                                } else {
+                                    "Agent attempt timed out"
+                                }
+                                .to_owned()
+                            });
+                        (retryable, has_marker, reason)
+                    };
                 let can_retry = detail.execution.adaptation_policy == AdaptationPolicy::Adaptive
                     && ((retryable && attempt_no <= MAX_PROVIDER_RETRIES)
                         || (!has_marker && attempt_no <= MAX_TIMEOUT_RETRIES));
@@ -1538,6 +1576,7 @@ impl ExecutionScheduler {
                     if can_retry { ExecutionStepStatus::Pending } else { ExecutionStepStatus::Failed },
                     Some(reason),
                     None,
+                    Vec::new(),
                     outcome.tokens,
                     can_retry.then(|| now_ms() + retry_backoff_ms(attempt_no)),
                 )
@@ -1553,11 +1592,14 @@ impl ExecutionScheduler {
                     step_status,
                     Some(error.to_string()),
                     None,
+                    Vec::new(),
                     None,
                     can_retry.then(|| now_ms() + retry_backoff_ms(attempt_no)),
                 )
             }
         };
+        let output_files = serde_json::to_string(&output_files)
+            .map_err(|error| AppError::Internal(format!("encode verified attempt output files: {error}")))?;
         let settled = self.inner
             .deps
             .repository
@@ -1576,7 +1618,7 @@ impl ExecutionScheduler {
                     question: Some(None),
                     error: Some(error),
                     output_summary: Some(output),
-                    output_files: Some("[]".to_owned()),
+                    output_files: Some(output_files),
                     tokens: Some(tokens),
                     retry_after: Some(retry_after),
                     runtime_state: Some(None),
@@ -1973,6 +2015,15 @@ fn attempt_error_transition(
         },
         can_retry,
     )
+}
+
+fn agent_outcome_can_complete(outcome: &AttemptOutcome, step_spec: &str) -> bool {
+    outcome.ok
+        && outcome
+            .text
+            .as_ref()
+            .is_some_and(|text| !text.trim().is_empty())
+        && validate_required_artifacts(step_spec, &outcome.output_files).is_ok()
 }
 
 fn ready_steps(detail: &AgentExecutionDetail, now: i64) -> Vec<&ExecutionStep> {
@@ -2484,6 +2535,60 @@ mod tests {
         );
         assert_eq!(adaptive_step, ExecutionStepStatus::Pending);
         assert!(adaptive_retry);
+    }
+
+    #[test]
+    fn failed_or_textless_agent_outcome_can_never_complete() {
+        let outcome = |ok, text: Option<&str>| AttemptOutcome {
+            conversation_id: "conversation-1".to_owned(),
+            text: text.map(str::to_owned),
+            output_files: vec!["/untrusted/stale-output.png".to_owned()],
+            ok,
+            tokens: None,
+        };
+
+        // Even a stale/concurrent assistant result cannot override ok=false.
+        let non_artifact_spec = "Analyze the issue and answer in chat";
+        assert!(!agent_outcome_can_complete(
+            &outcome(false, Some("another turn completed")),
+            non_artifact_spec,
+        ));
+        assert!(!agent_outcome_can_complete(
+            &outcome(true, None),
+            non_artifact_spec,
+        ));
+        assert!(!agent_outcome_can_complete(
+            &outcome(true, Some("  \n")),
+            non_artifact_spec,
+        ));
+        assert!(agent_outcome_can_complete(
+            &outcome(true, Some("authoritative receipt output")),
+            non_artifact_spec,
+        ));
+    }
+
+    #[test]
+    fn artifact_step_cannot_complete_on_text_or_insufficient_files() {
+        let outcome = |output_files: Vec<String>| AttemptOutcome {
+            conversation_id: "conversation-1".to_owned(),
+            text: Some("done".to_owned()),
+            output_files,
+            ok: true,
+            tokens: None,
+        };
+
+        assert!(!agent_outcome_can_complete(
+            &outcome(Vec::new()),
+            "Generate 2 PNG images",
+        ));
+        assert!(!agent_outcome_can_complete(
+            &outcome(vec!["/workspace/one.png".to_owned(), "/workspace/two.jpg".to_owned()]),
+            "Generate 2 PNG images",
+        ));
+        assert!(agent_outcome_can_complete(
+            &outcome(vec!["/workspace/one.png".to_owned(), "/workspace/two.png".to_owned()]),
+            "Generate 2 PNG images",
+        ));
     }
 
     #[test]

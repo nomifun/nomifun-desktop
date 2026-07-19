@@ -18,6 +18,10 @@ pub trait ICreationTaskRepository: Send + Sync {
     /// capped by `limit`.
     async fn list_tasks(&self, params: ListCreationTasksParams<'_>) -> Result<Vec<CreationTaskRow>, DbError>;
 
+    /// Complete task inventory for boot-time artifact reconciliation. Unlike
+    /// the paginated API listing, this intentionally has no 500-row cap.
+    async fn list_all_tasks(&self) -> Result<Vec<CreationTaskRow>, DbError>;
+
     /// Partial state-machine update. `DbError::NotFound` when the id is unknown.
     async fn update_task(&self, id: &str, params: UpdateCreationTaskParams<'_>) -> Result<CreationTaskRow, DbError>;
 
@@ -29,6 +33,11 @@ pub trait ICreationTaskRepository: Send + Sync {
     /// a `cancel` that lands mid-finalize is not silently flipped to
     /// `succeeded`/`failed` (compare-and-set on `status`, not the token).
     async fn update_task_if_live(&self, id: &str, params: UpdateCreationTaskParams<'_>) -> Result<bool, DbError>;
+
+    /// Patch only the remote provider handle while the task is live. This is a
+    /// single-statement CAS and must never rewrite status from a stale row
+    /// snapshot when cancel races async submission.
+    async fn set_remote_task_id_if_live(&self, id: &str, remote_task_id: &str) -> Result<bool, DbError>;
 
     /// Every task currently in a live (`queued`/`running`) state — the boot
     /// reconciliation input.

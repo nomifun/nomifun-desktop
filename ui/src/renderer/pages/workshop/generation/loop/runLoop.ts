@@ -41,6 +41,7 @@ import type { CreationTask, CreationTaskStatus, WorkshopGeneratorMode, WorkshopG
 import { buildTaskParams } from '../genConstants';
 import type { ModelOption } from '../genTypes';
 import { buildRunPlan, loadWorkshopText, type RunPlan } from '../pipeline';
+import { succeededArtifactIds } from '../taskArtifacts';
 import { beginLoopRun, endLoopRun, patchLoopProgress, recordLoopRound } from './loopRegistry';
 import { injectCount, LOOP_PARALLEL_LIMIT, LOOP_POLL_INTERVAL_MS, type LoopConfig, type LoopRoundResult } from './loopTypes';
 import type { AssetId, CreationTaskId, WorkshopNodeId } from '@/common/types/ids';
@@ -196,22 +197,21 @@ async function executeRound(ctx: RunContext, round: number): Promise<LoopRoundRe
   if (!final) return 'canceled';
   if (final.status !== 'succeeded') return final.status === 'canceled' ? 'canceled' : 'failed';
 
-  const results = final.result_asset_ids ?? [];
-  if (results.length) {
-    if (mode === 'text') {
-      const texts = await Promise.all(results.map((id) => loadWorkshopText(id)));
-      const created = texts
-        .map((text, col) => (text ? placeRoundNode(rf, target, round, col, (pos) => makeTextNode(pos, { content: text })) : null))
-        .filter((n): n is WorkshopFlowNode => n !== null);
-      spawnRoundResults(rf, target, created);
-    } else {
-      const factory = (assetId: AssetId) =>
-        mode === 'video'
-          ? (pos: { x: number; y: number }) => makeVideoNode(pos, { assetId })
-          : (pos: { x: number; y: number }) => makeImageNode(pos, { assetId });
-      const created = results.map((assetId, col) => placeRoundNode(rf, target, round, col, factory(assetId)));
-      spawnRoundResults(rf, target, created);
-    }
+  const results = succeededArtifactIds(final);
+  if (!results) return 'failed';
+  if (mode === 'text') {
+    const texts = await Promise.all(results.map((id) => loadWorkshopText(id)));
+    const created = texts
+      .map((text, col) => (text ? placeRoundNode(rf, target, round, col, (pos) => makeTextNode(pos, { content: text })) : null))
+      .filter((n): n is WorkshopFlowNode => n !== null);
+    spawnRoundResults(rf, target, created);
+  } else {
+    const factory = (assetId: AssetId) =>
+      mode === 'video'
+        ? (pos: { x: number; y: number }) => makeVideoNode(pos, { assetId })
+        : (pos: { x: number; y: number }) => makeImageNode(pos, { assetId });
+    const created = results.map((assetId, col) => placeRoundNode(rf, target, round, col, factory(assetId)));
+    spawnRoundResults(rf, target, created);
   }
   return 'success';
 }

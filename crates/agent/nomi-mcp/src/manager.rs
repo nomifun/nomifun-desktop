@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
+use base64::Engine as _;
 use serde_json::json;
 
 use super::config::{McpServerConfig, TransportType};
@@ -15,26 +16,28 @@ use super::transport::stdio::StdioTransport;
 use super::transport::streamable_http::StreamableHttpTransport;
 use super::transport::{McpError, McpTransport};
 
-/// Structured result of an MCP tool call: text and images kept separate so
-/// `McpToolProxy` can feed images back into the multimodal context instead of
-/// flattening them into a `[image: mime]` literal (which discarded the base64).
+/// Structured result of an MCP tool call. Inline artifacts remain separate
+/// from model-facing text so the backend can validate and persist them before
+/// publishing a successful tool receipt.
 #[derive(Debug, Default, Clone)]
 pub struct McpCallOutput {
     /// All text content joined with `\n` (preserves the pre-existing behaviour).
     pub text: String,
-    /// Image content `(base64 data, mime_type)` in order of appearance.
-    pub images: Vec<McpImageOut>,
+    /// Image/audio/file/resource content in order of appearance.
+    pub artifacts: Vec<McpArtifactOut>,
     /// Protocol-level MCP `CallToolResult.isError` marker.
     pub is_error: bool,
 }
 
-/// A single image returned by an MCP tool call.
+/// A single inline artifact returned by an MCP tool call.
 #[derive(Debug, Clone)]
-pub struct McpImageOut {
+pub struct McpArtifactOut {
     /// Raw base64 (straight from the server — not re-encoded).
     pub data: String,
-    /// MIME type, e.g. "image/png".
+    /// MIME type, e.g. "image/png", "audio/mpeg" or "application/pdf".
     pub mime_type: String,
+    /// Original MCP locator for embedded resources/resource links.
+    pub source_uri: Option<String>,
 }
 
 /// A connected MCP server with its discovered tools and capabilities
@@ -68,6 +71,75 @@ pub type TestMcpServerWithTools<'a> = (
 /// any Conversation that injects that server — indefinitely, with no error
 /// surfaced to the user.
 const MCP_CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
+const MCP_MAX_RESOURCE_URI_LEN: usize = 4096;
+const MCP_MAX_DATA_RESOURCE_URI_LEN: usize = (20 * 1024 * 1024 * 4 / 3) + 1024;
+const MCP_MAX_RESOURCE_NAME_LEN: usize = 512;
+
+enum ValidatedResourceUri<'a> {
+    Locator(&'a str),
+    Inline { mime_type: String, data: &'a str },
+}
+
+fn is_valid_uri_scheme(scheme: &str) -> bool {
+    scheme.bytes().enumerate().all(|(index, byte)| {
+        byte.is_ascii_alphabetic()
+            || (index > 0 && (byte.is_ascii_digit() || matches!(byte, b'+' | b'-' | b'.')))
+    })
+}
+
+/// Validate an MCP resource locator before it can enter tool output/history.
+/// `data:` links are decoded later by the verified artifact store and therefore
+/// never echoed into text. Ephemeral `blob:` URLs are not durable locators and
+/// are rejected explicitly.
+fn validate_resource_uri(uri: &str) -> Result<ValidatedResourceUri<'_>, McpError> {
+    if uri.is_empty() || uri.trim() != uri || uri.chars().any(char::is_control) {
+        return Err(McpError::Transport("MCP resource URI is empty or malformed".into()));
+    }
+    let (scheme, rest) = uri
+        .split_once(':')
+        .ok_or_else(|| McpError::Transport("MCP resource URI has no scheme".into()))?;
+    if scheme.is_empty() || !is_valid_uri_scheme(scheme) {
+        return Err(McpError::Transport("MCP resource URI has an invalid scheme".into()));
+    }
+    if scheme.eq_ignore_ascii_case("blob") {
+        return Err(McpError::Transport(
+            "MCP resource link uses an ephemeral blob: URI and cannot be delivered durably".into(),
+        ));
+    }
+    if !scheme.eq_ignore_ascii_case("data") {
+        if uri.len() > MCP_MAX_RESOURCE_URI_LEN {
+            return Err(McpError::Transport(format!(
+                "MCP resource URI exceeds the {MCP_MAX_RESOURCE_URI_LEN} byte limit"
+            )));
+        }
+        if rest.is_empty() {
+            return Err(McpError::Transport("MCP resource URI has an empty locator".into()));
+        }
+        return Ok(ValidatedResourceUri::Locator(uri));
+    }
+
+    if uri.len() > MCP_MAX_DATA_RESOURCE_URI_LEN {
+        return Err(McpError::Transport(format!(
+            "MCP data: resource URI exceeds the {MCP_MAX_DATA_RESOURCE_URI_LEN} byte limit"
+        )));
+    }
+
+    let (header, data) = rest
+        .split_once(',')
+        .ok_or_else(|| McpError::Transport("MCP data: resource URI has no payload separator".into()))?;
+    let header = header
+        .strip_suffix(";base64")
+        .ok_or_else(|| McpError::Transport("MCP data: resource URI must use base64 encoding".into()))?;
+    if data.is_empty() {
+        return Err(McpError::Transport("MCP data: resource URI has an empty payload".into()));
+    }
+    let mime_type = if header.trim().is_empty() {
+        "text/plain".to_owned()
+    } else {
+        header.to_owned()
+    };
+    Ok(ValidatedResourceUri::Inline { mime_type, data })
+}
 
 impl McpManager {
     /// Connect to all configured MCP servers
@@ -200,10 +272,9 @@ impl McpManager {
 
     /// Execute a tool on a specific server.
     ///
-    /// Returns a structured [`McpCallOutput`] keeping text and image content
-    /// separate so the proxy can feed screenshots into the multimodal context.
-    /// Image base64 `data` is preserved verbatim (previously it was discarded
-    /// and replaced with a `[image: mime]` text placeholder).
+    /// Returns a structured [`McpCallOutput`] keeping text and artifact content
+    /// separate. Binary bytes are preserved until the workspace delivery
+    /// boundary; resource locators are also retained as readable text.
     pub async fn call_tool(
         &self,
         server_name: &str,
@@ -241,15 +312,121 @@ impl McpManager {
             match content {
                 super::protocol::McpContent::Text { text } => text_parts.push(text.clone()),
                 super::protocol::McpContent::Image { data, mime_type } => {
-                    // Preserve the base64 so the proxy can route it into
-                    // ToolResult.images; no longer flattened to a text literal.
-                    out.images.push(McpImageOut {
+                    out.artifacts.push(McpArtifactOut {
                         data: data.clone(),
                         mime_type: mime_type.clone(),
+                        source_uri: None,
                     });
                 }
-                super::protocol::McpContent::Resource { .. } => {
-                    text_parts.push("[resource]".to_string());
+                super::protocol::McpContent::Audio { data, mime_type } => {
+                    out.artifacts.push(McpArtifactOut {
+                        data: data.clone(),
+                        mime_type: mime_type.clone(),
+                        source_uri: None,
+                    });
+                }
+                super::protocol::McpContent::Resource { resource } => {
+                    let locator = match validate_resource_uri(&resource.uri)? {
+                        ValidatedResourceUri::Locator(locator) => locator,
+                        ValidatedResourceUri::Inline { .. } => {
+                            return Err(McpError::Transport(
+                                "embedded MCP resources must carry bytes in text/blob, not duplicate them in a data: URI"
+                                    .into(),
+                            ));
+                        }
+                    };
+                    let payload = match (&resource.text, &resource.blob) {
+                        (Some(text), None) => base64::engine::general_purpose::STANDARD
+                            .encode(text.as_bytes()),
+                        (None, Some(blob)) => blob.clone(),
+                        (Some(_), Some(_)) => {
+                            return Err(McpError::Transport(format!(
+                                "MCP resource '{}' contains both text and blob payloads",
+                                resource.uri
+                            )));
+                        }
+                        (None, None) => {
+                            return Err(McpError::Transport(format!(
+                                "MCP resource '{}' contains no text or blob payload",
+                                resource.uri
+                            )));
+                        }
+                    };
+                    let mime_type = resource.mime_type.clone().unwrap_or_else(|| {
+                        if resource.text.is_some() {
+                            "text/plain".to_owned()
+                        } else {
+                            "application/octet-stream".to_owned()
+                        }
+                    });
+                    text_parts.push(format!("Embedded resource: {locator}"));
+                    out.artifacts.push(McpArtifactOut {
+                        data: payload,
+                        mime_type,
+                        source_uri: Some(locator.to_owned()),
+                    });
+                }
+                super::protocol::McpContent::ResourceLink {
+                    uri,
+                    name,
+                    title: _,
+                    description: _,
+                    mime_type,
+                    size: _,
+                } => {
+                    if name.trim().is_empty()
+                        || name.len() > MCP_MAX_RESOURCE_NAME_LEN
+                        || name.chars().any(char::is_control)
+                    {
+                        return Err(McpError::Transport(format!(
+                            "MCP resource link name is empty or exceeds the {MCP_MAX_RESOURCE_NAME_LEN} byte limit"
+                        )));
+                    }
+                    match validate_resource_uri(uri)? {
+                        ValidatedResourceUri::Inline {
+                            mime_type: inline_mime,
+                            data,
+                        } => {
+                            if let Some(declared) = mime_type.as_deref()
+                                && declared
+                                    .split(';')
+                                    .next()
+                                    .unwrap_or_default()
+                                    .trim()
+                                    .to_ascii_lowercase()
+                                    != inline_mime
+                                        .split(';')
+                                        .next()
+                                        .unwrap_or_default()
+                                        .trim()
+                                        .to_ascii_lowercase()
+                            {
+                                return Err(McpError::Transport(
+                                    "MCP data: resource link MIME does not match mimeType".into(),
+                                ));
+                            }
+                            text_parts.push(format!(
+                                "Inline resource materialized: {name} ({inline_mime})"
+                            ));
+                            out.artifacts.push(McpArtifactOut {
+                                data: data.to_owned(),
+                                mime_type: inline_mime,
+                                // Never retain/echo a data URI containing base64.
+                                source_uri: None,
+                            });
+                        }
+                        ValidatedResourceUri::Locator(locator) => {
+                            // A JSON descriptor of a URL is not the remote
+                            // artifact. Counting it as a verified receipt would
+                            // recreate false success. Do not blindly GET here,
+                            // either: MCP links can require server-local auth and
+                            // untrusted URLs would introduce SSRF. Require the
+                            // server to return embedded bytes or a data: URI.
+                            return Err(McpError::Transport(format!(
+                                "MCP resource link '{name}' was not materialized by the server: {locator}. Return embedded bytes or a data: URI before reporting success"
+                            )));
+                        }
+                    }
                 }
             }
         }
@@ -719,9 +896,9 @@ mod tests {
         )]);
         let out = mgr.call_tool("srv", "shot", json!({})).await.unwrap();
         assert_eq!(out.text, "done");
-        assert_eq!(out.images.len(), 1);
-        assert_eq!(out.images[0].data, "AAAAbase64==");
-        assert_eq!(out.images[0].mime_type, "image/png");
+        assert_eq!(out.artifacts.len(), 1);
+        assert_eq!(out.artifacts[0].data, "AAAAbase64==");
+        assert_eq!(out.artifacts[0].mime_type, "image/png");
     }
 
     #[tokio::test]
@@ -735,7 +912,7 @@ mod tests {
         )]);
         let out = mgr.call_tool("srv", "echo", json!({})).await.unwrap();
         assert_eq!(out.text, "hello");
-        assert!(out.images.is_empty());
+        assert!(out.artifacts.is_empty());
     }
 
     #[tokio::test]
@@ -772,13 +949,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn call_tool_multi_image_and_resource() {
-        // Multiple images interleaved with text + a resource placeholder.
+    async fn call_tool_preserves_images_and_embedded_resource_without_placeholder() {
+        // Multiple images interleaved with text + a real embedded resource.
         let resp = json!({ "content": [
             {"type":"image","data":"img1","mimeType":"image/png"},
             {"type":"text","text":"between"},
             {"type":"image","data":"img2","mimeType":"image/jpeg"},
-            {"type":"resource","resource":{"uri":"x://y"}}
+            {"type":"resource","resource":{"uri":"x://y","mimeType":"text/plain","text":"report body"}}
         ]});
         let mgr = make_manager_with_servers(vec![(
             "srv",
@@ -786,12 +963,89 @@ mod tests {
             Box::new(MockTransport::new(vec![resp])),
         )]);
         let out = mgr.call_tool("srv", "t", json!({})).await.unwrap();
-        assert_eq!(out.images.len(), 2);
-        assert_eq!(out.images[0].mime_type, "image/png");
-        assert_eq!(out.images[1].mime_type, "image/jpeg");
-        // text holds the text block and the [resource] placeholder, no [image:..]
+        assert_eq!(out.artifacts.len(), 3);
+        assert_eq!(out.artifacts[0].mime_type, "image/png");
+        assert_eq!(out.artifacts[1].mime_type, "image/jpeg");
+        assert_eq!(out.artifacts[2].mime_type, "text/plain");
+        assert_eq!(out.artifacts[2].source_uri.as_deref(), Some("x://y"));
         assert!(out.text.contains("between"));
-        assert!(out.text.contains("[resource]"));
+        assert!(out.text.contains("Embedded resource: x://y"));
+        assert!(!out.text.contains("[resource]"));
         assert!(!out.text.contains("[image"));
+    }
+
+    #[tokio::test]
+    async fn call_tool_rejects_unmaterialized_remote_resource_link() {
+        let resp = json!({ "content": [
+            {"type":"audio","data":"SUQzYXVkaW8=","mimeType":"audio/mpeg"},
+            {"type":"resource_link","uri":"https://example.test/report.pdf","name":"report.pdf","mimeType":"application/pdf","size":42}
+        ]});
+        let mgr = make_manager_with_servers(vec![(
+            "srv",
+            false,
+            Box::new(MockTransport::new(vec![resp])),
+        )]);
+
+        let error = mgr.call_tool("srv", "export", json!({})).await.unwrap_err();
+        let message = error.to_string();
+        assert!(message.contains("was not materialized"));
+        assert!(message.contains("https://example.test/report.pdf"));
+    }
+
+    #[tokio::test]
+    async fn malformed_embedded_resource_is_an_explicit_error() {
+        let resp = json!({ "content": [
+            {"type":"resource","resource":{"uri":"x://missing"}}
+        ]});
+        let mgr = make_manager_with_servers(vec![(
+            "srv",
+            false,
+            Box::new(MockTransport::new(vec![resp])),
+        )]);
+
+        let error = mgr.call_tool("srv", "export", json!({})).await.unwrap_err();
+        assert!(error.to_string().contains("contains no text or blob payload"));
+    }
+
+    #[tokio::test]
+    async fn data_resource_link_is_materialized_without_echoing_base64_uri() {
+        let resp = json!({ "content": [
+            {"type":"resource_link","uri":"data:text/plain;base64,aGVsbG8=","name":"hello.txt","mimeType":"text/plain"}
+        ]});
+        let mgr = make_manager_with_servers(vec![(
+            "srv",
+            false,
+            Box::new(MockTransport::new(vec![resp])),
+        )]);
+
+        let out = mgr.call_tool("srv", "export", json!({})).await.unwrap();
+
+        assert_eq!(out.artifacts.len(), 1);
+        assert_eq!(out.artifacts[0].mime_type, "text/plain");
+        assert_eq!(out.artifacts[0].data, "aGVsbG8=");
+        assert!(out.artifacts[0].source_uri.is_none());
+        assert!(out.text.contains("Inline resource materialized"));
+        assert!(!out.text.contains("data:"));
+        assert!(!out.text.contains("aGVsbG8="));
+    }
+
+    #[tokio::test]
+    async fn empty_ephemeral_and_oversized_resource_links_are_rejected() {
+        for uri in [
+            String::new(),
+            "blob:https://example.test/temporary".to_owned(),
+            format!("custom:{}", "x".repeat(MCP_MAX_RESOURCE_URI_LEN)),
+        ] {
+            let resp = json!({ "content": [
+                {"type":"resource_link","uri":uri,"name":"report"}
+            ]});
+            let mgr = make_manager_with_servers(vec![(
+                "srv",
+                false,
+                Box::new(MockTransport::new(vec![resp])),
+            )]);
+
+            assert!(mgr.call_tool("srv", "export", json!({})).await.is_err());
+        }
     }
 }

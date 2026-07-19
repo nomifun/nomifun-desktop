@@ -231,7 +231,11 @@ export class OpenAI2GeminiConverter implements ProtocolConverter<
           index: 0,
           message: {
             role: 'assistant',
-            content: content || 'Image generated successfully.',
+            // Never synthesize a success acknowledgement. An empty text and
+            // empty `images` array is a failed generation at the persistence
+            // boundary; inventing success here caused the original false-
+            // positive even though no path product existed.
+            content,
             ...(images.length > 0 ? { images } : {}),
           },
           finish_reason: this.mapFinishReason(candidate.finishReason),

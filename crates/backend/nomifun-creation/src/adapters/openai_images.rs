@@ -39,10 +39,11 @@ impl OpenAiImagesAdapter {
             &req.params,
         )
         .url;
+        let count = param_count(&req.params)?;
         let mut body = json!({
             "model": req.model,
             "prompt": param_prompt(&req.params),
-            "n": param_count(&req.params),
+            "n": count,
             "response_format": "b64_json",
         });
         if let Some(size) = param_size(&req.params) {
@@ -88,10 +89,11 @@ impl OpenAiImagesAdapter {
         // Single image → `image`; multiple → `image[]` (gpt-image-1 multi-ref).
         let image_field = if images.len() == 1 { "image" } else { "image[]" };
 
+        let count = param_count(&req.params)?;
         let mut form = Form::new()
             .text("model", req.model.clone())
             .text("prompt", param_prompt(&req.params))
-            .text("n", param_count(&req.params).to_string());
+            .text("n", count.to_string());
         if let Some(size) = param_size(&req.params) {
             form = form.text("size", size);
         }

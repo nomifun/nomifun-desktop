@@ -1,6 +1,8 @@
+use std::collections::HashSet;
+
 use sqlx::SqlitePool;
 
-use nomifun_common::{MessageId, PaginatedResult, ProviderWithModel};
+use nomifun_common::{ConversationId, MessageId, PaginatedResult, ProviderWithModel, TimestampMs};
 
 use crate::error::DbError;
 use crate::models::{
@@ -10,6 +12,7 @@ use crate::repository::bind::{BindValue, bind_value, bind_value_as};
 use crate::repository::conversation::{
     ConversationFilters, ConversationMessageProjection, ConversationRowUpdate,
     IConversationRepository, MessageRowUpdate, MessageSearchRow, SortOrder,
+    TurnArtifactMessageCommit,
 };
 
 /// SQLite-backed implementation of [`IConversationRepository`].
@@ -22,6 +25,174 @@ impl SqliteConversationRepository {
     pub fn new(pool: SqlitePool) -> Self {
         Self { pool }
     }
+}
+
+fn artifact_commit_conflict(message: impl Into<String>) -> DbError {
+    DbError::Conflict(format!("turn artifact message commit rejected: {}", message.into()))
+}
+
+fn artifact_tool_call_identity(message_type: &str, content: &serde_json::Value) -> Option<String> {
+    match message_type {
+        "tool_call" => content
+            .get("call_id")
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned),
+        "acp_tool_call" => content
+            .get("update")
+            .and_then(|update| update.get("tool_call_id"))
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned),
+        _ => None,
+    }
+}
+
+fn validate_turn_artifact_message_commit(
+    turn_message_id: &str,
+    message: &TurnArtifactMessageCommit,
+) -> Result<String, DbError> {
+    MessageId::parse(&message.id)
+        .map_err(|error| artifact_commit_conflict(format!("invalid message id '{}': {error}", message.id)))?;
+    if !matches!(message.message_type.as_str(), "tool_call" | "acp_tool_call") {
+        return Err(artifact_commit_conflict(format!(
+            "message '{}' has unsupported type '{}'",
+            message.id, message.message_type
+        )));
+    }
+
+    let content: serde_json::Value = serde_json::from_str(&message.content).map_err(|error| {
+        artifact_commit_conflict(format!("message '{}' has invalid JSON content: {error}", message.id))
+    })?;
+    let object = content
+        .as_object()
+        .ok_or_else(|| artifact_commit_conflict(format!("message '{}' content is not an object", message.id)))?;
+    if object.get("turn_id").and_then(serde_json::Value::as_str) != Some(turn_message_id) {
+        return Err(artifact_commit_conflict(format!(
+            "message '{}' content belongs to another turn",
+            message.id
+        )));
+    }
+    if object
+        .get("artifact_delivery_committed")
+        .and_then(serde_json::Value::as_bool)
+        != Some(true)
+    {
+        return Err(artifact_commit_conflict(format!(
+            "message '{}' is not marked as a committed artifact delivery",
+            message.id
+        )));
+    }
+
+    let call_id = artifact_tool_call_identity(&message.message_type, &content).ok_or_else(|| {
+        artifact_commit_conflict(format!("message '{}' has no stable tool call identity", message.id))
+    })?;
+    let has_delivery = match message.message_type.as_str() {
+        "tool_call" => {
+            object.get("status").and_then(serde_json::Value::as_str) == Some("completed")
+                && object
+                    .get("artifacts")
+                    .and_then(serde_json::Value::as_array)
+                    .is_some_and(|artifacts| !artifacts.is_empty() && artifacts.iter().all(serde_json::Value::is_object))
+        }
+        "acp_tool_call" => object
+            .get("update")
+            .and_then(serde_json::Value::as_object)
+            .is_some_and(|update| {
+                update.get("status").and_then(serde_json::Value::as_str) == Some("completed")
+                    && update
+                        .get("content")
+                        .and_then(serde_json::Value::as_array)
+                        .is_some_and(|items| {
+                            items.iter().any(|item| {
+                                matches!(
+                                    item.get("type").and_then(serde_json::Value::as_str),
+                                    Some("artifact" | "resource_link")
+                                )
+                            })
+                        })
+            }),
+        _ => false,
+    };
+    if !has_delivery {
+        return Err(artifact_commit_conflict(format!(
+            "message '{}' is not a completed artifact-producing tool call",
+            message.id
+        )));
+    }
+
+    Ok(call_id)
+}
+
+fn validate_provisional_artifact_row(
+    row: &MessageRow,
+    conversation_id: &str,
+    turn_message_id: &str,
+    candidate: &TurnArtifactMessageCommit,
+    candidate_call_id: &str,
+) -> Result<(), DbError> {
+    if row.conversation_id != conversation_id {
+        return Err(artifact_commit_conflict(format!(
+            "message '{}' belongs to another conversation",
+            candidate.id
+        )));
+    }
+    if row.msg_id.as_deref() != Some(turn_message_id) {
+        return Err(artifact_commit_conflict(format!(
+            "message '{}' belongs to another turn",
+            candidate.id
+        )));
+    }
+    if row.r#type != candidate.message_type {
+        return Err(artifact_commit_conflict(format!(
+            "message '{}' has a conflicting persisted type",
+            candidate.id
+        )));
+    }
+    if row.position.as_deref() != Some("left") || row.hidden {
+        return Err(artifact_commit_conflict(format!(
+            "message '{}' has a conflicting persisted projection",
+            candidate.id
+        )));
+    }
+    let existing_content: serde_json::Value = serde_json::from_str(&row.content).map_err(|error| {
+        artifact_commit_conflict(format!(
+            "message '{}' has invalid persisted JSON content: {error}",
+            candidate.id
+        ))
+    })?;
+    if existing_content.get("turn_id").and_then(serde_json::Value::as_str)
+        != Some(turn_message_id)
+        || artifact_tool_call_identity(&row.r#type, &existing_content).as_deref()
+            != Some(candidate_call_id)
+        || existing_content
+            .get("artifact_delivery_committed")
+            .and_then(serde_json::Value::as_bool)
+            == Some(true)
+    {
+        return Err(artifact_commit_conflict(format!(
+            "message '{}' has a conflicting persisted tool identity",
+            candidate.id
+        )));
+    }
+    Ok(())
+}
+
+fn finished_artifact_row_matches(
+    row: &MessageRow,
+    conversation_id: &str,
+    turn_message_id: &str,
+    candidate: &TurnArtifactMessageCommit,
+) -> bool {
+    row.conversation_id == conversation_id
+        && row.msg_id.as_deref() == Some(turn_message_id)
+        && row.r#type == candidate.message_type
+        && row.content == candidate.content
+        && row.position.as_deref() == Some("left")
+        && row.status.as_deref() == Some("finish")
+        && !row.hidden
 }
 
 async fn validate_execution_template_selection(
@@ -932,6 +1103,151 @@ impl IConversationRepository for SqliteConversationRepository {
         .await?;
 
         Ok(())
+    }
+
+    async fn commit_turn_artifact_messages(
+        &self,
+        conversation_id: &str,
+        turn_message_id: &str,
+        messages: &[TurnArtifactMessageCommit],
+        committed_at: TimestampMs,
+    ) -> Result<Vec<MessageRow>, DbError> {
+        ConversationId::parse(conversation_id).map_err(|error| {
+            artifact_commit_conflict(format!("invalid conversation id '{conversation_id}': {error}"))
+        })?;
+        MessageId::parse(turn_message_id).map_err(|error| {
+            artifact_commit_conflict(format!("invalid turn message id '{turn_message_id}': {error}"))
+        })?;
+        if messages.is_empty() {
+            return Err(artifact_commit_conflict("artifact commit batch must not be empty"));
+        }
+        if committed_at < 0 {
+            return Err(artifact_commit_conflict("artifact commit time must not be negative"));
+        }
+
+        let mut message_ids = HashSet::with_capacity(messages.len());
+        let mut tool_calls = HashSet::with_capacity(messages.len());
+        let mut call_ids = Vec::with_capacity(messages.len());
+        for message in messages {
+            if !message_ids.insert(message.id.clone()) {
+                return Err(artifact_commit_conflict(format!(
+                    "message '{}' appears more than once in the batch",
+                    message.id
+                )));
+            }
+            let call_id = validate_turn_artifact_message_commit(turn_message_id, message)?;
+            if !tool_calls.insert((message.message_type.clone(), call_id.clone())) {
+                return Err(artifact_commit_conflict(format!(
+                    "tool call '{call_id}' appears more than once in the batch"
+                )));
+            }
+            call_ids.push(call_id);
+        }
+
+        let mut tx = self.pool.begin().await?;
+        let conversation_exists: i64 = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM conversations WHERE id = ?)",
+        )
+        .bind(conversation_id)
+        .fetch_one(&mut *tx)
+        .await?;
+        if conversation_exists == 0 {
+            return Err(DbError::NotFound(format!("Conversation '{conversation_id}'")));
+        }
+
+        let mut committed = Vec::with_capacity(messages.len());
+        for (message, call_id) in messages.iter().zip(call_ids.iter()) {
+            let existing = sqlx::query_as::<_, MessageRow>("SELECT * FROM messages WHERE id = ?")
+                .bind(&message.id)
+                .fetch_optional(&mut *tx)
+                .await?;
+
+            match existing {
+                None => {
+                    sqlx::query(
+                        "INSERT INTO messages \
+                            (id, conversation_id, msg_id, type, content, position, \
+                             status, hidden, created_at) \
+                         VALUES (?, ?, ?, ?, ?, 'left', 'finish', 0, ?)",
+                    )
+                    .bind(&message.id)
+                    .bind(conversation_id)
+                    .bind(turn_message_id)
+                    .bind(&message.message_type)
+                    .bind(&message.content)
+                    .bind(committed_at)
+                    .execute(&mut *tx)
+                    .await?;
+                }
+                Some(row) if row.status.as_deref() == Some("work") => {
+                    validate_provisional_artifact_row(
+                        &row,
+                        conversation_id,
+                        turn_message_id,
+                        message,
+                        call_id,
+                    )?;
+                    let result = sqlx::query(
+                        "UPDATE messages SET content = ?, status = 'finish' \
+                         WHERE id = ? AND conversation_id = ? AND msg_id = ? \
+                           AND type = ? AND status = 'work' \
+                           AND position = 'left' AND hidden = 0",
+                    )
+                    .bind(&message.content)
+                    .bind(&message.id)
+                    .bind(conversation_id)
+                    .bind(turn_message_id)
+                    .bind(&message.message_type)
+                    .execute(&mut *tx)
+                    .await?;
+                    if result.rows_affected() != 1 {
+                        return Err(artifact_commit_conflict(format!(
+                            "message '{}' changed while its artifact delivery was being committed",
+                            message.id
+                        )));
+                    }
+                }
+                Some(row) if row.status.as_deref() == Some("finish") => {
+                    if !finished_artifact_row_matches(
+                        &row,
+                        conversation_id,
+                        turn_message_id,
+                        message,
+                    ) {
+                        return Err(artifact_commit_conflict(format!(
+                            "message '{}' conflicts with an existing finished projection",
+                            message.id
+                        )));
+                    }
+                }
+                Some(row) => {
+                    return Err(artifact_commit_conflict(format!(
+                        "message '{}' cannot transition from persisted status {:?} to an artifact success",
+                        message.id, row.status
+                    )));
+                }
+            }
+
+            let row = sqlx::query_as::<_, MessageRow>("SELECT * FROM messages WHERE id = ?")
+                .bind(&message.id)
+                .fetch_one(&mut *tx)
+                .await?;
+            if !finished_artifact_row_matches(
+                &row,
+                conversation_id,
+                turn_message_id,
+                message,
+            ) {
+                return Err(artifact_commit_conflict(format!(
+                    "message '{}' did not reach the exact committed projection",
+                    message.id
+                )));
+            }
+            committed.push(row);
+        }
+
+        tx.commit().await?;
+        Ok(committed)
     }
 
     async fn claim_message_correlation(

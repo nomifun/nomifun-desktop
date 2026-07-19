@@ -249,6 +249,7 @@ fn map_tool_event(data: &Value) -> Vec<AgentStreamEvent> {
         input: None,
         output: None,
         description: None,
+        artifacts: Vec::new(),
     })]
 }
 

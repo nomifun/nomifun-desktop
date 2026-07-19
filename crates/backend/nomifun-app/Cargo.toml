@@ -127,7 +127,11 @@ nomi-types = { workspace = true, optional = true }
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_Storage_FileSystem"] }
 
+[target.'cfg(windows)'.dev-dependencies]
+junction = "1"
+
 [dev-dependencies]
+image = { workspace = true, features = ["jpeg", "gif", "webp"] }
 nomifun-api-types.workspace = true
 nomifun-realtime.workspace = true
 clap.workspace = true

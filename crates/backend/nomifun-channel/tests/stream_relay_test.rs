@@ -109,6 +109,11 @@ async fn relay_handles_error_event() {
     let rx = event_tx.subscribe();
 
     event_tx
+        .send(AgentStreamEvent::Text(TextEventData {
+            content: "<think>private</think>partial answer".into(),
+        }))
+        .unwrap();
+    event_tx
         .send(AgentStreamEvent::Error(ErrorEventData::legacy("timeout", None)))
         .unwrap();
 
@@ -116,17 +121,17 @@ async fn relay_handles_error_event() {
 
     let edits = recorder.take_edits();
     let last = edits.last().unwrap();
-    assert!(last.text.as_deref().unwrap().contains("timeout"));
+    let text = last.text.as_deref().unwrap();
+    assert!(text.contains("partial answer"));
+    assert!(text.contains("timeout"));
+    assert!(!text.contains("private") && !text.contains("<think"));
 }
 
 #[tokio::test]
-async fn weixin_flushes_pending_text_before_tool_call() {
-    // Port of Nomi TS fix `406a62665` to the backend relay layer. On
-    // WeChat, in-place editing is not supported, so a tool-status update
-    // would otherwise overwrite any assistant text the user hasn't yet
-    // seen. The relay should flush buffered text as an independent
-    // send_message before rendering the tool-call indicator, matching the
-    // TS WeixinPlugin.sendTextNow draft-flush behaviour.
+async fn weixin_buffers_pending_text_through_tool_call_until_finish() {
+    // Send-once channels cannot retract a success-looking partial if a later
+    // required tool fails. Keep it buffered across tool status and publish it
+    // exactly once only after the authoritative Finish event.
     let (event_tx, _) = broadcast::channel::<AgentStreamEvent>(64);
     let recorder = Arc::new(MessageRecorder::new());
 
@@ -154,6 +159,7 @@ async fn weixin_flushes_pending_text_before_tool_call() {
             description: None,
             input: None,
             output: None,
+            artifacts: Vec::new(),
         }))
         .unwrap();
     event_tx
@@ -163,15 +169,16 @@ async fn weixin_flushes_pending_text_before_tool_call() {
     relay.run(rx).await;
 
     let sends = recorder.take_sends();
-    // WeChat relay does NOT send a "Thinking..." placeholder. The first
-    // send_message should be the flushed assistant text triggered by the
-    // ToolCall event.
-    assert!(!sends.is_empty(), "expected flush send_message, got {:?}", sends);
-    let flushed = &sends[0];
+    assert_eq!(sends.len(), 1, "expected one committed final send: {sends:?}");
+    let final_message = &sends[0];
     assert!(
-        flushed.text.as_deref().unwrap().contains("Here is the plan"),
-        "expected flushed text, got {:?}",
-        flushed.text
+        final_message
+            .text
+            .as_deref()
+            .unwrap()
+            .contains("Here is the plan"),
+        "expected committed text, got {:?}",
+        final_message.text
     );
 }
 
@@ -207,6 +214,7 @@ async fn telegram_does_not_flush_text_before_tool_call() {
             description: None,
             input: None,
             output: None,
+            artifacts: Vec::new(),
         }))
         .unwrap();
     event_tx
@@ -245,6 +253,7 @@ async fn weixin_skips_flush_when_buffer_is_empty() {
             description: None,
             input: None,
             output: None,
+            artifacts: Vec::new(),
         }))
         .unwrap();
     event_tx
@@ -276,7 +285,7 @@ async fn relay_handles_channel_closed() {
 
     event_tx
         .send(AgentStreamEvent::Text(TextEventData {
-            content: "partial".into(),
+            content: "<think>private</think>partial".into(),
         }))
         .unwrap();
     drop(event_tx);
@@ -285,7 +294,10 @@ async fn relay_handles_channel_closed() {
 
     let edits = recorder.take_edits();
     assert!(!edits.is_empty());
-    assert!(edits.last().unwrap().text.as_deref().unwrap().contains("partial"));
+    let text = edits.last().unwrap().text.as_deref().unwrap();
+    assert!(text.contains("partial"));
+    assert!(text.contains("ended before completion"));
+    assert!(!text.contains("private") && !text.contains("<think"));
 }
 
 // ── Telegram parse mode (HTML formatter output must be declared) ─────
@@ -368,6 +380,7 @@ async fn telegram_tool_call_edit_stays_plain_text() {
             description: None,
             input: None,
             output: None,
+            artifacts: Vec::new(),
         }))
         .unwrap();
     event_tx
@@ -718,10 +731,10 @@ async fn telegram_decision_with_thinking_only_leaves_card_intact() {
     }
 }
 
-/// Send-once platforms (WeChat): the tool-call flush must be reasoning-stripped
-/// too, and both the flush and the final send must carry only visible text.
+/// Send-once platforms (WeChat): buffering across tool calls must preserve all
+/// visible text, strip reasoning, and publish exactly one committed final.
 #[tokio::test]
-async fn weixin_inline_think_flush_and_final_are_stripped() {
+async fn weixin_inline_think_merged_final_is_stripped() {
     let (event_tx, _) = broadcast::channel::<AgentStreamEvent>(64);
     let recorder = Arc::new(MessageRecorder::new());
 
@@ -749,6 +762,7 @@ async fn weixin_inline_think_flush_and_final_are_stripped() {
             description: None,
             input: None,
             output: None,
+            artifacts: Vec::new(),
         }))
         .unwrap();
     event_tx
@@ -763,14 +777,12 @@ async fn weixin_inline_think_flush_and_final_are_stripped() {
     relay.run(rx).await;
 
     let sends = recorder.take_sends();
-    assert_eq!(sends.len(), 2, "expected a flush send + a final send: {sends:?}");
-    for m in &sends {
-        let text = m.text.as_deref().unwrap_or("");
-        assert!(!text.contains("<think"), "raw think tag leaked: {text}");
-        assert!(!text.contains("t1") && !text.contains("t2"), "reasoning leaked: {text}");
-    }
-    assert!(sends[0].text.as_deref().unwrap().contains("Visible before tool."));
-    assert!(sends[1].text.as_deref().unwrap().contains("After tool."));
+    assert_eq!(sends.len(), 1, "expected one committed final send: {sends:?}");
+    let text = sends[0].text.as_deref().unwrap_or("");
+    assert!(!text.contains("<think"), "raw think tag leaked: {text}");
+    assert!(!text.contains("t1") && !text.contains("t2"), "reasoning leaked: {text}");
+    assert!(text.contains("Visible before tool."));
+    assert!(text.contains("After tool."));
 }
 
 /// Send-once: an all-reasoning buffer at a tool call skips the flush and keeps
@@ -802,6 +814,7 @@ async fn weixin_all_think_buffer_skips_flush_then_recovers() {
             description: None,
             input: None,
             output: None,
+            artifacts: Vec::new(),
         }))
         .unwrap();
     event_tx

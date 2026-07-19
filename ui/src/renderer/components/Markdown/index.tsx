@@ -4,8 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import ReactMarkdown from 'react-markdown';
-import type { Components, ExtraProps } from 'react-markdown';
+import ReactMarkdown, { defaultUrlTransform } from 'react-markdown';
+import type { Components, ExtraProps, UrlTransform } from 'react-markdown';
 
 import rehypeKatex from 'rehype-katex';
 import rehypeRaw from 'rehype-raw';
@@ -22,15 +22,22 @@ import React, { useCallback, useMemo } from 'react';
 import { useTranslation } from 'react-i18next';
 import { convertLatexDelimiters } from '@renderer/utils/chat/latexDelimiters';
 import LocalImageView from '@renderer/components/media/LocalImageView';
+import { isLocalImageSource } from '@/common/utils/localPath';
 import CodeBlock from './CodeBlock';
 import ShadowView from './ShadowView';
 
 const REMARK_PLUGINS = [remarkGfm, remarkMath, remarkBreaks];
 
-const isLocalFilePath = (src: string): boolean => {
-  if (src.startsWith('http://') || src.startsWith('https://')) return false;
-  if (src.startsWith('data:')) return false;
-  return true;
+const markdownUrlTransform: UrlTransform = (url, key, node) => {
+  if (key === 'src' && node.tagName === 'img') {
+    // react-markdown rejects unknown schemes by default. Permit filesystem
+    // references for LocalImageView and inline/blob images for the browser,
+    // while leaving every other protocol on the library's safe allowlist.
+    if (isLocalImageSource(url) || /^data:image\//i.test(url) || /^blob:/i.test(url)) {
+      return url;
+    }
+  }
+  return defaultUrlTransform(url);
 };
 
 type MarkdownViewProps = {
@@ -43,17 +50,27 @@ type MarkdownViewProps = {
   lineHeight?: string;
   /** Enable raw HTML rendering in markdown content. Use with caution — only for trusted sources. */
   allowHtml?: boolean;
+  /** Model/tool Markdown is not a verified artifact-delivery receipt. */
+  allowUnverifiedImages?: boolean;
 };
 
 const MarkdownView: React.FC<MarkdownViewProps> = React.memo(
-  ({ hiddenCodeCopyButton, codeStyle, className, onRef, fontSize, lineHeight, allowHtml, children: childrenProp }) => {
+  ({
+    hiddenCodeCopyButton,
+    codeStyle,
+    className,
+    onRef,
+    fontSize,
+    lineHeight,
+    allowHtml,
+    allowUnverifiedImages = true,
+    children: childrenProp,
+  }) => {
     const { t } = useTranslation();
 
     const normalizedChildren = useMemo(() => {
       if (typeof childrenProp === 'string') {
-        let text = childrenProp.replace(/file:\/\//g, '');
-        text = convertLatexDelimiters(text);
-        return text;
+        return convertLatexDelimiters(childrenProp);
       }
       return childrenProp;
     }, [childrenProp]);
@@ -117,14 +134,21 @@ const MarkdownView: React.FC<MarkdownViewProps> = React.memo(
         ),
         img: ({ node: _node, ...rest }: React.JSX.IntrinsicElements['img'] & ExtraProps) => {
           const imgProps = rest;
-          if (isLocalFilePath(imgProps.src || '')) {
-            const src = decodeURIComponent(imgProps.src || '');
+          const src = imgProps.src || '';
+          if (!allowUnverifiedImages) {
+            return (
+              <span className={imgProps.className}>
+                Unverified image reference: {imgProps.alt || src || 'unknown source'}
+              </span>
+            );
+          }
+          if (isLocalImageSource(src)) {
             return <LocalImageView src={src} alt={imgProps.alt || ''} className={imgProps.className} />;
           }
           return <img {...imgProps} />;
         },
       }),
-      [codeStyle, hiddenCodeCopyButton, handleLinkClick]
+      [allowUnverifiedImages, codeStyle, hiddenCodeCopyButton, handleLinkClick]
     );
 
     const rehypePlugins = useMemo(() => (allowHtml ? [rehypeRaw, rehypeKatex] : [rehypeKatex]), [allowHtml]);
@@ -133,7 +157,12 @@ const MarkdownView: React.FC<MarkdownViewProps> = React.memo(
       <div className={classNames('relative w-full', className)}>
         <ShadowView fontSize={fontSize} lineHeight={lineHeight}>
           <div ref={onRef} className='markdown-shadow-body'>
-            <ReactMarkdown remarkPlugins={REMARK_PLUGINS} rehypePlugins={rehypePlugins} components={components}>
+            <ReactMarkdown
+              remarkPlugins={REMARK_PLUGINS}
+              rehypePlugins={rehypePlugins}
+              components={components}
+              urlTransform={markdownUrlTransform}
+            >
               {normalizedChildren}
             </ReactMarkdown>
           </div>

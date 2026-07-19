@@ -117,6 +117,15 @@ pub trait Tool: Send + Sync {
         self.name()
     }
 
+    /// Untruncated semantic identity used to derive output-delivery contracts.
+    /// Native tools default to their provider-visible name. Tool families whose
+    /// provider route is a bounded/hash alias (notably MCP) must override this
+    /// with the complete origin identity so a suffix such as `export_pdf`
+    /// cannot disappear at the provider name-length boundary.
+    fn artifact_identity(&self) -> &str {
+        self.name()
+    }
+
     /// Reserved provider-name prefix owned by this tool family. Registries use
     /// this to keep origin-stable namespaces from being claimed by unrelated
     /// native tools before a dynamic tool registers.
