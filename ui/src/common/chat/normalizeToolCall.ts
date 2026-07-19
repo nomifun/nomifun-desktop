@@ -1,8 +1,10 @@
 import type { IMessageAcpToolCall, IMessageToolCall, IMessageToolGroup } from './chatLib';
 import type { ConversationId } from '../types/ids';
 import { toDisplayText } from './displayText';
+import { normalizeToolGroupStatus } from './toolGroupStatus';
 
 export type NormalizedToolStatus = 'pending' | 'running' | 'completed' | 'error' | 'canceled';
+export type NormalizedToolNotExecutedReason = 'invalid_arguments';
 
 export interface NormalizedToolCall {
   key: string;
@@ -14,6 +16,8 @@ export interface NormalizedToolCall {
   nonFatalFailure?: boolean;
   /** Tool was not executed because an earlier call in the same assistant turn failed. */
   skipped?: boolean;
+  /** The runtime rejected the call before dispatching it to the tool. */
+  notExecutedReason?: NormalizedToolNotExecutedReason;
   description?: string;
   input?: string;
   output?: string;
@@ -24,10 +28,32 @@ export interface NormalizedToolCall {
 
 const formatValue = (value: unknown): string => toDisplayText(value);
 
+const canonicalMcpOriginHash = /^[a-z2-7]{16}$/;
+
+/**
+ * Turn provider-facing MCP routing aliases back into a stable receipt label.
+ * The origin hash remains available in the raw diagnostic output, but it is
+ * implementation metadata and must not become the user-facing tool title.
+ */
+export const formatToolDisplayName = (value: unknown): string => {
+  const fullName = toDisplayText(value).trim();
+  if (!fullName.startsWith('mcp__')) return fullName;
+
+  const segments = fullName.split('__');
+  if (segments.length < 3) return fullName;
+  if (segments.length >= 4 && canonicalMcpOriginHash.test(segments.at(-1) ?? '')) {
+    segments.pop();
+  }
+
+  const serverName = segments[1]?.trim();
+  const toolName = segments.slice(2).join('__').trim();
+  return serverName && toolName ? `${serverName}/${toolName}` : fullName;
+};
+
 // ===== tool_group → NormalizedToolCall[] =====
 
-function normalizeToolGroupStatus(status: unknown): NormalizedToolStatus {
-  switch (status) {
+function toNormalizedToolGroupStatus(status: unknown): NormalizedToolStatus {
+  switch (normalizeToolGroupStatus(status)) {
     case 'Success':
       return 'completed';
     case 'Error':
@@ -56,6 +82,7 @@ const getResultDisplayText = (
 export function normalizeToolGroup(message: IMessageToolGroup): NormalizedToolCall[] {
   if (!Array.isArray(message.content)) return [];
   return message.content.map(({ name, call_id, description, confirmationDetails, status, result_display }) => {
+    const displayStatus = normalizeToolGroupStatus(status);
     let desc = typeof description === 'string' ? description.slice(0, 100) : '';
     // Guard on `confirmationDetails` so the discriminant `type` narrows the
     // union directly off the object; previously `type` was aliased through
@@ -86,13 +113,13 @@ export function normalizeToolGroup(message: IMessageToolGroup): NormalizedToolCa
     return {
       key: toDisplayText(call_id),
       name: toDisplayText(name, 'Tool'),
-      status: normalizeToolGroupStatus(status),
+      status: toNormalizedToolGroupStatus(displayStatus),
       ...(confirmationDetails?.type === 'exec'
         ? { kind: 'execute' }
         : confirmationDetails?.type === 'edit'
           ? { kind: 'edit' }
           : {}),
-      ...(status === 'Error' && confirmationDetails?.type === 'exec' ? { nonFatalFailure: true } : {}),
+      ...(displayStatus === 'Error' && confirmationDetails?.type === 'exec' ? { nonFatalFailure: true } : {}),
       description: desc,
       input,
       output: getResultDisplayText(result_display),
@@ -306,6 +333,25 @@ const skippedAfterPriorErrorPrefix = 'Skipped because a previous tool call in th
 const isSkippedAfterPriorError = (status: unknown, output: unknown): boolean =>
   status === 'error' && toDisplayText(output).trimStart().startsWith(skippedAfterPriorErrorPrefix);
 
+const invalidArgumentsNotExecutedSuffix =
+  'Correct the arguments and retry; the tool was not executed.';
+
+/**
+ * Match only the local runtime's standardized pre-dispatch rejection. A null
+ * `args` value alone is not sufficient: remote tools can fail without echoing
+ * their input, and those failures must remain fatal.
+ */
+const isInvalidArgumentsNotExecuted = (name: unknown, status: unknown, output: unknown): boolean => {
+  if (status !== 'error') return false;
+
+  const toolName = toDisplayText(name).trim();
+  const text = toDisplayText(output).trim();
+  if (!toolName || !text.startsWith(`Invalid arguments for tool '${toolName}':`)) return false;
+  if (!text.endsWith(invalidArgumentsNotExecutedSuffix)) return false;
+
+  return text.includes('JSON Schema validation failed:') || text.includes('expected a JSON object.');
+};
+
 export function normalizeToolCall(message: IMessageToolCall): NormalizedToolCall | undefined {
   const { call_id, name, status, input, output, args, description } = message.content;
   if (!call_id) return undefined;
@@ -316,12 +362,14 @@ export function normalizeToolCall(message: IMessageToolCall): NormalizedToolCall
       ? formatValue(args)
       : undefined;
   const skipped = isSkippedAfterPriorError(status, output);
+  const invalidArgumentsNotExecuted = isInvalidArgumentsNotExecuted(name, status, output);
 
   return {
     key: toDisplayText(call_id),
     name: toDisplayText(name, 'Tool'),
-    status: skipped ? 'canceled' : normalizeToolCallStatus(status),
+    status: skipped || invalidArgumentsNotExecuted ? 'canceled' : normalizeToolCallStatus(status),
     ...(skipped ? { skipped: true } : {}),
+    ...(invalidArgumentsNotExecuted ? { notExecutedReason: 'invalid_arguments' as const } : {}),
     ...(isOrdinaryShellExit(name, status, output) || isOrdinaryDirectProbeFailure(name, status, output)
       ? { nonFatalFailure: true }
       : {}),
@@ -349,7 +397,7 @@ export function normalizeToolMessages(messages: ToolMessage[]): NormalizedToolCa
 export function hasRunningToolMessages(messages: ToolMessage[]): boolean {
   return messages.some((m) => {
     if (m.type === 'tool_group') {
-      return Array.isArray(m.content) && m.content.some((t) => normalizeToolGroupStatus(t.status) === 'running');
+      return Array.isArray(m.content) && m.content.some((t) => toNormalizedToolGroupStatus(t.status) === 'running');
     }
     if (m.type === 'acp_tool_call') {
       return m.content?.update && normalizeAcpStatus(m.content.update.status) === 'running';

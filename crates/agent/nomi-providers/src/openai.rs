@@ -373,6 +373,7 @@ impl OpenAIProvider {
         &self,
         request: &LlmRequest,
         sanitize_tool_schemas: bool,
+        include_stream_usage: bool,
     ) -> Value {
         let max_tokens_field = self
             .compat
@@ -388,9 +389,11 @@ impl OpenAIProvider {
                 &self.compat,
                 self.compat.require_reasoning_content(),
             ),
-            "stream": true,
-            "stream_options": { "include_usage": true }
+            "stream": true
         });
+        if include_stream_usage {
+            body["stream_options"] = json!({ "include_usage": true });
+        }
         body[max_tokens_field] = json!(request.max_tokens);
 
         if !request.tools.is_empty() {
@@ -673,13 +676,15 @@ struct StreamState {
     /// Deferred Done event: populated when finish_reason arrives, emitted on
     /// [DONE] so the final usage-only chunk has a chance to update token counts.
     pending_done: Option<LlmEvent>,
-    /// Final structured calls are staged alongside Done and atomically released
-    /// only after the legal usage-only tail and explicit `[DONE]`. A clean EOF
-    /// may complete a non-tool terminal but never commits side-effecting calls.
-    pending_tool_calls: Vec<LlmEvent>,
-    /// Once finish_reason appears, only usage-only metadata may follow before
-    /// `[DONE]`; content, tool deltas, or a second finish poison the turn.
+    /// The first terminal reason is retained so harmless duplicate terminal
+    /// frames can be accepted while contradictory reasons are still rejected.
+    finish_reason: Option<String>,
+    /// Once finish_reason appears, only terminal echoes, usage/accounting
+    /// metadata, or continuation fragments for the same tool calls may follow.
     finish_seen: bool,
+    /// Provider compatibility setting captured from `parse_sse_chunk` and used
+    /// only when final calls are atomically committed at `[DONE]` or clean EOF.
+    auto_tool_id: bool,
     /// A malformed SSE payload makes the rest of the provider turn
     /// untrustworthy. Once poisoned, no later chunk or `[DONE]` sentinel may
     /// resurrect accumulated calls or commit a terminal Done.
@@ -694,15 +699,15 @@ impl StreamState {
             output_tokens: 0,
             cache_read_tokens: 0,
             pending_done: None,
-            pending_tool_calls: Vec::new(),
+            finish_reason: None,
             finish_seen: false,
+            auto_tool_id: false,
             fatal_error: false,
         }
     }
 
     fn poison(&mut self, message: impl Into<String>) -> Vec<LlmEvent> {
         self.tool_calls.clear();
-        self.pending_tool_calls.clear();
         self.pending_done = None;
         self.fatal_error = true;
         vec![LlmEvent::Error(message.into())]
@@ -712,37 +717,76 @@ impl StreamState {
         self.fatal_error
     }
 
-    /// Atomically emit staged structured calls and the deferred Done event with
-    /// up-to-date token counts.
+    /// Atomically validate and emit structured calls plus the deferred Done
+    /// event with up-to-date token counts.
     ///
     /// OpenAI sends usage in a separate trailing chunk (choices:[]) *after* the
     /// chunk that carries `finish_reason`. We defer the Done event until [DONE]
     /// so that token counts are always accurate.
     fn drain_terminal_events(&mut self) -> Vec<LlmEvent> {
         if self.fatal_error {
-            self.pending_tool_calls.clear();
+            self.tool_calls.clear();
             self.pending_done = None;
             return Vec::new();
         }
         let Some(pending) = self.pending_done.take() else {
-            self.pending_tool_calls.clear();
+            self.tool_calls.clear();
             return Vec::new();
         };
-        let done = match pending {
-            LlmEvent::Done { stop_reason, .. } => LlmEvent::Done {
-                stop_reason,
-                usage: TokenUsage {
-                    input_tokens: self.input_tokens,
-                    output_tokens: self.output_tokens,
-                    cache_creation_tokens: 0,
-                    cache_read_tokens: self.cache_read_tokens,
-                },
-            },
-            other => other,
+        let LlmEvent::Done {
+            mut stop_reason, ..
+        } = pending
+        else {
+            return vec![pending];
         };
-        let mut events = std::mem::take(&mut self.pending_tool_calls);
-        events.push(done);
+
+        let mut events = Vec::new();
+        if matches!(stop_reason, StopReason::MaxTokens) {
+            self.tool_calls.clear();
+        } else if !self.tool_calls.is_empty() || matches!(stop_reason, StopReason::ToolUse) {
+            if self.tool_calls.is_empty() {
+                return self.poison(
+                    "OpenAI-compatible provider finished with tool_calls but supplied no structured tool call",
+                );
+            }
+            match finalize_structured_tool_calls(self, self.auto_tool_id) {
+                Ok(tool_events) => {
+                    events = tool_events;
+                    // Gemini and several compatible gateways use `stop` even
+                    // when their delta contains structured tool calls.
+                    stop_reason = StopReason::ToolUse;
+                }
+                Err(error) => return self.poison(error),
+            }
+        }
+
+        events.push(LlmEvent::Done {
+            stop_reason,
+            usage: TokenUsage {
+                input_tokens: self.input_tokens,
+                output_tokens: self.output_tokens,
+                cache_creation_tokens: 0,
+                cache_read_tokens: self.cache_read_tokens,
+            },
+        });
         events
+    }
+
+    fn infer_terminal_from_done(&mut self) {
+        if self.finish_seen {
+            return;
+        }
+        let has_tools = !self.tool_calls.is_empty();
+        self.finish_seen = true;
+        self.finish_reason = Some(if has_tools { "tool_calls" } else { "stop" }.to_owned());
+        self.pending_done = Some(LlmEvent::Done {
+            stop_reason: if has_tools {
+                StopReason::ToolUse
+            } else {
+                StopReason::EndTurn
+            },
+            usage: TokenUsage::default(),
+        });
     }
 
     #[cfg(test)]
@@ -776,39 +820,62 @@ impl LlmProvider for OpenAIProvider {
         let url = format!("{}{}", self.base_url, self.compat.api_path());
         let client = crate::http_client();
 
-        let sanitize_tool_schemas = self.should_sanitize_tool_schemas();
-        let mut body = self.build_request_body(request, sanitize_tool_schemas);
+        let mut sanitize_tool_schemas = self.should_sanitize_tool_schemas();
+        let mut include_stream_usage = true;
+        let mut learned_schema_fallback = false;
 
-        tracing::debug!(target: "nomi_providers", body = %serde_json::to_string_pretty(&body).unwrap_or_default(), "outgoing request");
+        // Negotiate the two optional OpenAI extensions independently. A
+        // gateway can reject both stream usage metadata and rich tool schemas;
+        // a bounded loop lets us remove each incompatible extension once
+        // without retrying unrelated 4xx responses.
+        let (response, headers, body) = loop {
+            let body = self.build_request_body(
+                request,
+                sanitize_tool_schemas,
+                include_stream_usage,
+            );
+            tracing::debug!(target: "nomi_providers", body = %serde_json::to_string_pretty(&body).unwrap_or_default(), "outgoing request");
 
-        let (response, headers) = match self
-            .send_initial_with_key_rotation(&client, &url, &body)
-            .await
-        {
-            Ok(result) => result,
-            Err(error)
-                if !request.tools.is_empty()
-                    && !sanitize_tool_schemas
-                    && error.is_tool_schema_incompatible() =>
+            match self
+                .send_initial_with_key_rotation(&client, &url, &body)
+                .await
             {
-                let ProviderError::Api { status, .. } = &error else {
-                    unreachable!("schema classifier only accepts API errors");
-                };
-                tracing::warn!(
-                    target: "nomi_providers",
-                    provider = "openai",
-                    status,
-                    "provider rejected tool schemas; retrying with Bedrock-compatible schema roots"
-                );
-                body = self.build_request_body(request, true);
-                let (response, headers) = self
-                    .send_initial_with_key_rotation(&client, &url, &body)
-                    .await?;
-                self.sanitize_tool_schemas.store(true, Ordering::Release);
-                (response, headers)
+                Ok((response, headers)) => break (response, headers, body),
+                Err(error)
+                    if include_stream_usage
+                        && error.is_stream_usage_options_incompatible() =>
+                {
+                    tracing::warn!(
+                        target: "nomi_providers",
+                        provider = "openai",
+                        error = %error,
+                        "provider rejected stream usage metadata; retrying without stream_options"
+                    );
+                    include_stream_usage = false;
+                }
+                Err(error)
+                    if !request.tools.is_empty()
+                        && !sanitize_tool_schemas
+                        && error.is_tool_schema_incompatible() =>
+                {
+                    let ProviderError::Api { status, .. } = &error else {
+                        unreachable!("schema classifier only accepts API errors");
+                    };
+                    tracing::warn!(
+                        target: "nomi_providers",
+                        provider = "openai",
+                        status,
+                        "provider rejected tool schemas; retrying with Bedrock-compatible schema roots"
+                    );
+                    sanitize_tool_schemas = true;
+                    learned_schema_fallback = true;
+                }
+                Err(error) => return Err(error),
             }
-            Err(error) => return Err(error),
         };
+        if learned_schema_fallback {
+            self.sanitize_tool_schemas.store(true, Ordering::Release);
+        }
 
         let (tx, rx) = mpsc::channel(64);
         let auto_tool_id = self.compat.auto_tool_id();
@@ -873,7 +940,10 @@ async fn process_sse_stream(
     use futures::StreamExt;
 
     let mut state = StreamState::new();
-    let mut buffer = String::new();
+    // Keep raw bytes until a complete SSE line is available. HTTP chunks may
+    // split a multi-byte UTF-8 scalar; decoding each chunk independently would
+    // inject U+FFFD into Chinese/tool arguments or corrupt otherwise valid JSON.
+    let mut buffer = Vec::new();
     let mut stream = response.bytes_stream();
     let mut emitted_content = false;
 
@@ -889,29 +959,34 @@ async fn process_sse_stream(
                 };
             }
         };
-        let text = String::from_utf8_lossy(&chunk);
-        buffer.push_str(&text);
+        buffer.extend_from_slice(&chunk);
 
         // Process complete lines
-        while let Some(line_end) = buffer.find('\n') {
-            let line = buffer[..line_end].trim().to_string();
-            buffer = buffer[line_end + 1..].to_string();
+        while let Some(line_end) = buffer.iter().position(|byte| *byte == b'\n') {
+            let raw_line = buffer.drain(..=line_end).collect::<Vec<_>>();
+            let line_bytes = raw_line.strip_suffix(b"\n").unwrap_or(&raw_line);
+            let Ok(line) = std::str::from_utf8(line_bytes) else {
+                for event in state.poison(
+                    "OpenAI-compatible provider returned invalid UTF-8 in an SSE line",
+                ) {
+                    let _ = tx.send(event).await;
+                }
+                return StreamOutcome::Ok;
+            };
+            let line = line.trim();
 
             if line.is_empty() || line.starts_with(':') {
                 continue;
             }
 
-            if let Some(data) = line.strip_prefix("data: ") {
+            if let Some(data) = line.strip_prefix("data:").map(str::trim_start) {
                 tracing::debug!(target: "nomi_providers", chunk = %data, "sse chunk received");
                 if data == "[DONE]" {
-                    if !state.finish_seen {
-                        for event in state.poison(
-                            "OpenAI-compatible provider sent [DONE] before finish_reason",
-                        ) {
-                            let _ = tx.send(event).await;
-                        }
-                        return StreamOutcome::Ok;
-                    }
+                    // A few compatible gateways use [DONE] as their only
+                    // terminal marker. Infer stop/tool_calls from the already
+                    // validated stream shape; malformed/incomplete tool JSON is
+                    // still rejected during the atomic drain below.
+                    state.infer_terminal_from_done();
                     // Atomically release staged calls and Done now that the
                     // legal usage-only tail has updated token counts.
                     for event in state.drain_terminal_events() {
@@ -951,9 +1026,19 @@ async fn process_sse_stream(
     // before deciding whether the stream is clean; otherwise an invalid or
     // truncated tail after finish_reason could be silently ignored while its
     // already-staged tool calls were committed.
-    let trailing = buffer.trim();
+    let trailing = match std::str::from_utf8(&buffer) {
+        Ok(trailing) => trailing.trim(),
+        Err(_) => {
+            for event in state.poison(
+                "OpenAI-compatible stream ended with incomplete UTF-8 in its trailing SSE line",
+            ) {
+                let _ = tx.send(event).await;
+            }
+            return StreamOutcome::Ok;
+        }
+    };
     if !trailing.is_empty() && !trailing.starts_with(':') {
-        let Some(data) = trailing.strip_prefix("data: ") else {
+        let Some(data) = trailing.strip_prefix("data:").map(str::trim_start) else {
             for event in state.poison(
                 "OpenAI-compatible stream ended with an invalid trailing SSE line",
             ) {
@@ -962,14 +1047,7 @@ async fn process_sse_stream(
             return StreamOutcome::Ok;
         };
         if data == "[DONE]" {
-            if !state.finish_seen {
-                for event in
-                    state.poison("OpenAI-compatible provider sent [DONE] before finish_reason")
-                {
-                    let _ = tx.send(event).await;
-                }
-                return StreamOutcome::Ok;
-            }
+            state.infer_terminal_from_done();
             for event in state.drain_terminal_events() {
                 if tx.send(event).await.is_err() {
                     return StreamOutcome::Ok;
@@ -997,19 +1075,11 @@ async fn process_sse_stream(
         }
     }
 
-    // Some OpenAI-compatible servers close after finish_reason without an
-    // explicit `[DONE]`. A clean EOF may complete a side-effect-free terminal,
-    // but structured tool calls require the protocol's explicit commit marker:
-    // a connection truncated immediately after finish_reason must not execute.
+    // Some OpenAI-compatible servers close cleanly after finish_reason without
+    // an explicit `[DONE]`. reqwest reports transport truncation as an error;
+    // reaching this branch means the framed body ended normally, so complete
+    // tool calls can be validated and committed just like a `[DONE]` stream.
     if state.finish_seen {
-        if !state.pending_tool_calls.is_empty() {
-            for event in state.poison(
-                "OpenAI-compatible stream ended before [DONE] with structured tool calls pending",
-            ) {
-                let _ = tx.send(event).await;
-            }
-            return StreamOutcome::Ok;
-        }
         for event in state.drain_terminal_events() {
             if tx.send(event).await.is_err() {
                 return StreamOutcome::Ok;
@@ -1256,15 +1326,37 @@ fn optional_usage_u64(
 ) -> Result<Option<u64>, String> {
     match usage.get(field) {
         None | Some(Value::Null) => Ok(None),
-        Some(value) => value.as_u64().map(Some).ok_or_else(|| {
-            format!(
-                "OpenAI-compatible provider returned non-integer usage field '{field}'"
-            )
-        }),
+        Some(value) => value
+            .as_u64()
+            .or_else(|| value.as_str().and_then(|raw| raw.trim().parse().ok()))
+            .map(Some)
+            .ok_or_else(|| {
+                format!(
+                    "OpenAI-compatible provider returned non-integer usage field '{field}'"
+                )
+            }),
     }
 }
 
 fn update_stream_usage(json: &Value, state: &mut StreamState) -> Result<(), String> {
+    // OpenCode/OpenRouter-style gateways can report their final accounting in a
+    // private `normalizedUsage` frame instead of OpenAI's `usage` object.
+    if json.get("usage").is_none_or(Value::is_null)
+        && let Some(Value::Object(usage)) = json.get("normalizedUsage")
+    {
+        let input =
+            optional_usage_u64(usage, "inputTokens")?.unwrap_or(state.input_tokens);
+        state.output_tokens = optional_usage_u64(usage, "outputTokens")?
+            .unwrap_or(state.output_tokens);
+        let cache_read = optional_usage_u64(usage, "cacheReadTokens")?
+            .unwrap_or(state.cache_read_tokens);
+        state.input_tokens = input.checked_add(cache_read).ok_or_else(|| {
+            "OpenAI-compatible provider returned overflowing normalized input usage".to_string()
+        })?;
+        state.cache_read_tokens = cache_read;
+        return Ok(());
+    }
+
     let usage = match json.get("usage") {
         None | Some(Value::Null) => return Ok(()),
         Some(Value::Object(usage)) => usage,
@@ -1307,11 +1399,48 @@ fn update_stream_usage(json: &Value, state: &mut StreamState) -> Result<(), Stri
     Ok(())
 }
 
+fn is_accounting_metadata(json: &Value) -> bool {
+    json.get("usage").is_some_and(Value::is_object)
+        || json.get("normalizedUsage").is_some_and(Value::is_object)
+        || json.get("cost").is_some()
+        || json.get("x-opencode-type").and_then(Value::as_str) == Some("inference-cost")
+}
+
+fn provider_error_detail(error: &Value) -> String {
+    error
+        .as_str()
+        .or_else(|| error.get("message").and_then(Value::as_str))
+        .map(str::to_owned)
+        .unwrap_or_else(|| error.to_string())
+}
+
+fn normalize_finish_reason(reason: &str) -> Result<&'static str, String> {
+    if reason.eq_ignore_ascii_case("stop")
+        || reason.eq_ignore_ascii_case("end_turn")
+        || reason.eq_ignore_ascii_case("content_filter")
+    {
+        Ok("stop")
+    } else if reason.eq_ignore_ascii_case("tool_calls")
+        || reason.eq_ignore_ascii_case("function_call")
+    {
+        Ok("tool_calls")
+    } else if reason.eq_ignore_ascii_case("length")
+        || reason.eq_ignore_ascii_case("max_tokens")
+    {
+        Ok("length")
+    } else {
+        Err(format!(
+            "OpenAI-compatible provider returned unsupported finish_reason '{reason}'"
+        ))
+    }
+}
+
 fn parse_sse_chunk(data: &str, state: &mut StreamState, auto_tool_id: bool) -> Vec<LlmEvent> {
     if state.fatal_error {
         return Vec::new();
     }
 
+    state.auto_tool_id = auto_tool_id;
     let mut events = Vec::new();
 
     let json: Value = match serde_json::from_str(data) {
@@ -1329,22 +1458,11 @@ fn parse_sse_chunk(data: &str, state: &mut StreamState, auto_tool_id: bool) -> V
         );
     }
 
-    let post_finish_usage_only = state.finish_seen;
-    if post_finish_usage_only {
-        let is_usage_only = json.get("usage").is_some_and(Value::is_object)
-            && json
-                .get("choices")
-                .and_then(Value::as_array)
-                .is_some_and(Vec::is_empty);
-        if !is_usage_only {
-            return state.poison(
-                "OpenAI-compatible provider emitted non-usage data after finish_reason",
-            );
-        }
-        if let Err(error) = update_stream_usage(&json, state) {
-            return state.poison(error);
-        }
-        return events;
+    if let Some(error) = json.get("error").filter(|error| !error.is_null()) {
+        return state.poison(format!(
+            "OpenAI-compatible provider returned an error: {}",
+            provider_error_detail(error)
+        ));
     }
 
     if let Err(error) = update_stream_usage(&json, state) {
@@ -1352,10 +1470,24 @@ fn parse_sse_chunk(data: &str, state: &mut StreamState, auto_tool_id: bool) -> V
     }
 
     let Some(choices) = json.get("choices").and_then(Value::as_array) else {
+        if is_accounting_metadata(&json) {
+            return events;
+        }
         return state.poison(
             "OpenAI-compatible provider returned an SSE payload without a choices array",
         );
     };
+    // Usage/accounting frames have no completion choice. Some gateways send
+    // them before the terminal choice, some after it, and some omit usage while
+    // retaining `choices: []`; all are semantically inert.
+    if choices.is_empty() {
+        if state.finish_seen || is_accounting_metadata(&json) {
+            return events;
+        }
+        return state.poison(
+            "OpenAI-compatible provider returned an empty choices array before completion",
+        );
+    }
     if choices.len() != 1 {
         return state.poison(format!(
             "OpenAI-compatible provider returned {} choices in a streamed response; expected exactly one",
@@ -1367,7 +1499,7 @@ fn parse_sse_chunk(data: &str, state: &mut StreamState, auto_tool_id: bool) -> V
             "OpenAI-compatible provider returned a non-object streamed choice",
         );
     };
-    let Some(delta_value) = choice.get("delta") else {
+    let Some(delta_value) = choice.get("delta").or_else(|| choice.get("message")) else {
         return state.poison(
             "OpenAI-compatible provider returned a streamed choice without an object delta",
         );
@@ -1379,13 +1511,26 @@ fn parse_sse_chunk(data: &str, state: &mut StreamState, auto_tool_id: bool) -> V
     };
     let finish_reason = match choice.get("finish_reason") {
         None | Some(Value::Null) => None,
-        Some(Value::String(reason)) => Some(reason.as_str()),
+        Some(Value::String(reason)) => match normalize_finish_reason(reason) {
+            Ok(reason) => Some(reason),
+            Err(error) => return state.poison(error),
+        },
         Some(_) => {
             return state.poison(
                 "OpenAI-compatible provider returned a non-string finish_reason",
             );
         }
     };
+    let post_finish = state.finish_seen;
+    if post_finish
+        && let Some(reason) = finish_reason
+        && state.finish_reason.as_deref() != Some(reason)
+    {
+        return state.poison(format!(
+            "OpenAI-compatible provider changed finish_reason from '{}' to '{reason}'",
+            state.finish_reason.as_deref().unwrap_or("<missing>")
+        ));
+    }
 
     for field in ["role", "content", "reasoning_content", "reasoning"] {
         if let Some(value) = delta.get(field)
@@ -1424,6 +1569,45 @@ fn parse_sse_chunk(data: &str, state: &mut StreamState, auto_tool_id: bool) -> V
         }
     }
 
+    if post_finish {
+        let has_late_text = ["content", "reasoning_content", "reasoning"]
+            .iter()
+            .any(|field| {
+                delta
+                    .get(*field)
+                    .and_then(Value::as_str)
+                    .is_some_and(|value| !value.is_empty())
+            })
+            || delta
+                .get("reasoning_details")
+                .and_then(Value::as_array)
+                .is_some_and(|details| {
+                    details.iter().any(|detail| {
+                        ["text", "content"].iter().any(|field| {
+                            detail
+                                .get(*field)
+                                .and_then(Value::as_str)
+                                .is_some_and(|value| !value.is_empty())
+                        })
+                    })
+                });
+        if has_late_text {
+            return state.poison(
+                "OpenAI-compatible provider emitted content after finish_reason",
+            );
+        }
+        if state.finish_reason.as_deref() == Some("length")
+            && delta
+                .get("tool_calls")
+                .and_then(Value::as_array)
+                .is_some_and(|calls| !calls.is_empty())
+        {
+            return state.poison(
+                "OpenAI-compatible provider emitted tool data after a length finish_reason",
+            );
+        }
+    }
+
     // Reasoning content (OpenAI reasoning models)
     if let Some(reasoning) = extract_reasoning_delta(delta_value) {
         events.push(LlmEvent::ThinkingDelta(reasoning));
@@ -1437,9 +1621,17 @@ fn parse_sse_chunk(data: &str, state: &mut StreamState, auto_tool_id: bool) -> V
     }
 
     // Tool calls
-    let tool_calls = match delta.get("tool_calls") {
-        None | Some(Value::Null) => None,
-        Some(Value::Array(tool_calls)) => Some(tool_calls),
+    let tool_calls: Option<Vec<&Value>> = match delta.get("tool_calls") {
+        None | Some(Value::Null) => match delta.get("function_call") {
+            None | Some(Value::Null) => None,
+            Some(Value::Object(_)) => Some(vec![&delta["function_call"]]),
+            Some(_) => {
+                return state.poison(
+                    "OpenAI-compatible provider returned non-object delta.function_call",
+                );
+            }
+        },
+        Some(Value::Array(tool_calls)) => Some(tool_calls.iter().collect()),
         Some(_) => {
             return state.poison(
                 "OpenAI-compatible provider returned non-array delta.tool_calls",
@@ -1447,16 +1639,22 @@ fn parse_sse_chunk(data: &str, state: &mut StreamState, auto_tool_id: bool) -> V
         }
     };
     if let Some(tool_calls) = tool_calls {
-        for tc in tool_calls {
+        for (position, tc) in tool_calls.into_iter().enumerate() {
             let Some(tc) = tc.as_object() else {
                 return state.poison(
                     "OpenAI-compatible provider returned a non-object tool_calls item",
                 );
             };
-            let Some(raw_index) = tc.get("index").and_then(Value::as_u64) else {
-                return state.poison(
-                    "OpenAI-compatible provider returned a tool_calls item without a non-negative integer index",
-                );
+            let raw_index = match tc.get("index") {
+                None | Some(Value::Null) => position as u64,
+                Some(index) => match index.as_u64() {
+                    Some(index) => index,
+                    None => {
+                        return state.poison(
+                            "OpenAI-compatible provider returned a tool_calls item with an invalid index",
+                        );
+                    }
+                },
             };
             if raw_index >= MAX_STRUCTURED_TOOL_CALLS_PER_TURN as u64 {
                 return state.poison(format!(
@@ -1465,48 +1663,61 @@ fn parse_sse_chunk(data: &str, state: &mut StreamState, auto_tool_id: bool) -> V
                 ));
             }
             let index = raw_index as usize;
-            if let Some(kind) = tc.get("type")
-                && kind.as_str() != Some("function")
-            {
-                return state.poison(
-                    "OpenAI-compatible provider returned a tool_calls item with a non-function type",
-                );
+            if let Some(kind) = tc.get("type") {
+                let compatible = kind.is_null()
+                    || kind.as_str() == Some("")
+                    || kind.as_str() == Some("function");
+                if !compatible {
+                    return state.poison(
+                        "OpenAI-compatible provider returned a tool_calls item with a non-function type",
+                    );
+                }
             }
             let id = match tc.get("id") {
-                None => None,
-                Some(Value::String(id)) if !id.trim().is_empty() => Some(id.as_str()),
+                None | Some(Value::Null) => None,
+                Some(Value::String(id)) if id.trim().is_empty() => None,
+                Some(Value::String(id)) => Some(id.clone()),
+                Some(Value::Number(id)) => Some(id.to_string()),
                 Some(_) => {
                     return state.poison(
-                        "OpenAI-compatible provider returned an empty or non-string tool call id",
+                        "OpenAI-compatible provider returned an unsupported tool call id type",
                     );
                 }
             };
-            let Some(function) = tc.get("function").and_then(Value::as_object) else {
-                return state.poison(
-                    "OpenAI-compatible provider returned a tool_calls item without an object function",
-                );
+            let function = match tc.get("function") {
+                None | Some(Value::Null) => {
+                    // Legacy `delta.function_call` and a few compatible
+                    // gateways put name/arguments directly on the call item.
+                    (tc.contains_key("name") || tc.contains_key("arguments")).then_some(tc)
+                }
+                Some(Value::Object(function)) => Some(function),
+                Some(_) => {
+                    return state.poison(
+                        "OpenAI-compatible provider returned a tool_calls item with a non-object function",
+                    );
+                }
             };
-            let name = match function.get("name") {
-                None => None,
-                Some(Value::String(name)) if !name.trim().is_empty() => Some(name.as_str()),
+            let name = match function.and_then(|function| function.get("name")) {
+                None | Some(Value::Null) => None,
+                Some(Value::String(name)) if name.trim().is_empty() => None,
+                Some(Value::String(name)) => Some(name.trim().to_owned()),
                 Some(_) => {
                     return state.poison(
                         "OpenAI-compatible provider returned an empty or non-string function name",
                     );
                 }
             };
-            let arguments = match function.get("arguments") {
-                None => None,
-                Some(Value::String(arguments)) => Some(arguments.as_str()),
-                Some(_) => {
-                    return state.poison(
-                        "OpenAI-compatible provider returned non-string function arguments",
-                    );
-                }
+            let arguments = match function.and_then(|function| function.get("arguments")) {
+                None | Some(Value::Null) => None,
+                Some(Value::String(arguments)) => Some(arguments.clone()),
+                // Several gateways deserialize the arguments string before
+                // forwarding it. Re-serialize it and let the same final object
+                // validator enforce the executable contract.
+                Some(arguments) => Some(arguments.to_string()),
             };
 
             if let Some(existing) = state.tool_calls.get(index) {
-                if let Some(id) = id
+                if let Some(id) = id.as_deref()
                     && !existing.id.is_empty()
                     && existing.id != id
                 {
@@ -1514,7 +1725,7 @@ fn parse_sse_chunk(data: &str, state: &mut StreamState, auto_tool_id: bool) -> V
                         "OpenAI-compatible provider changed the id for tool-call index {index}"
                     ));
                 }
-                if let Some(name) = name
+                if let Some(name) = name.as_deref()
                     && !existing.name.is_empty()
                     && existing.name != name
                 {
@@ -1527,13 +1738,19 @@ fn parse_sse_chunk(data: &str, state: &mut StreamState, auto_tool_id: bool) -> V
             let acc = state.get_or_create_tool(index);
 
             if let Some(id) = id {
-                acc.id = id.to_string();
+                acc.id = id;
             }
             if let Some(name) = name {
-                acc.name = name.to_string();
+                acc.name = name;
             }
             if let Some(arguments) = arguments {
-                acc.arguments.push_str(arguments);
+                let duplicate_terminal_echo = post_finish
+                    && finish_reason.is_some()
+                    && acc.arguments == arguments
+                    && serde_json::from_str::<Value>(&acc.arguments).is_ok();
+                if !duplicate_terminal_echo {
+                    acc.arguments.push_str(&arguments);
+                }
             }
             if let Some(extra) = tc.get("extra_content").filter(|v| !v.is_null()) {
                 acc.extra = Some(extra.clone());
@@ -1544,34 +1761,23 @@ fn parse_sse_chunk(data: &str, state: &mut StreamState, auto_tool_id: bool) -> V
         }
     }
 
-    // Defer final structured calls and Done until [DONE] so the trailing
-    // usage-only chunk can update token counts first.
-    if let Some(finish_reason) = finish_reason {
+    // Defer final validation and structured calls until [DONE] (or a clean
+    // framed EOF). This leaves room for compatible gateways that attach usage
+    // to a duplicate terminal frame or deliver the final tool fragment after
+    // their first finish_reason, while keeping execution atomic.
+    if let Some(finish_reason) = finish_reason
+        && !post_finish
+    {
         state.finish_seen = true;
+        state.finish_reason = Some(finish_reason.to_owned());
         match finish_reason {
             "tool_calls" => {
-                if state.tool_calls.is_empty() {
-                    return state.poison(
-                        "OpenAI-compatible provider finished with tool_calls but supplied no complete structured tool call",
-                    );
-                }
-                match finalize_structured_tool_calls(state, auto_tool_id) {
-                    Ok(tool_events) => {
-                        state.pending_tool_calls = tool_events;
-                        state.pending_done = Some(LlmEvent::Done {
-                            stop_reason: StopReason::ToolUse,
-                            usage: TokenUsage::default(),
-                        });
-                    }
-                    Err(error) => return state.poison(error),
-                }
+                state.pending_done = Some(LlmEvent::Done {
+                    stop_reason: StopReason::ToolUse,
+                    usage: TokenUsage::default(),
+                });
             }
             "stop" => {
-                if !state.tool_calls.is_empty() {
-                    return state.poison(
-                        "OpenAI-compatible provider finished with stop after supplying structured tool-call data",
-                    );
-                }
                 state.pending_done = Some(LlmEvent::Done {
                     stop_reason: StopReason::EndTurn,
                     usage: TokenUsage::default(),
@@ -1583,17 +1789,12 @@ fn parse_sse_chunk(data: &str, state: &mut StreamState, auto_tool_id: bool) -> V
                 // actual terminal condition and discard all incomplete call
                 // accumulators; the caller can retry with a larger token budget.
                 state.tool_calls.clear();
-                state.pending_tool_calls.clear();
                 state.pending_done = Some(LlmEvent::Done {
                     stop_reason: StopReason::MaxTokens,
                     usage: TokenUsage::default(),
                 });
             }
-            other => {
-                return state.poison(format!(
-                    "OpenAI-compatible provider returned unsupported finish_reason '{other}'"
-                ));
-            }
+            _ => unreachable!("finish reasons are normalized above"),
         }
     }
 
@@ -1786,10 +1987,13 @@ mod tests {
         .to_string();
 
         let events = parse_sse_chunk(&chunk, &mut state, true);
-        assert!(events.iter().any(
-            |event| matches!(event, LlmEvent::Error(message) if message.contains("no complete structured tool call"))
+        assert!(events
+            .iter()
+            .all(|event| !matches!(event, LlmEvent::ToolUse { .. } | LlmEvent::Error(_))));
+        let terminal = state.drain_terminal_events();
+        assert!(terminal.iter().any(
+            |event| matches!(event, LlmEvent::Error(message) if message.contains("no structured tool call"))
         ));
-        assert!(state.drain_terminal_events().is_empty());
     }
 
     #[test]
@@ -1822,12 +2026,8 @@ mod tests {
     }
 
     #[test]
-    fn missing_or_invalid_tool_call_index_is_rejected() {
+    fn invalid_tool_call_index_is_rejected() {
         for item in [
-            json!({
-                "id": "call_missing_index",
-                "function": {"name": "Read", "arguments": "{}"}
-            }),
             json!({
                 "index": "0",
                 "id": "call_string_index",
@@ -1853,11 +2053,35 @@ mod tests {
 
             assert!(matches!(
                 events.as_slice(),
-                [LlmEvent::Error(message)] if message.contains("integer index")
+                [LlmEvent::Error(message)] if message.contains("invalid index")
             ));
             assert!(state.fatal_error());
             assert!(state.drain_terminal_events().is_empty());
         }
+    }
+
+    #[test]
+    fn missing_tool_call_index_defaults_to_array_position() {
+        let mut state = StreamState::new();
+        let chunk = r#"{"choices":[{"delta":{"tool_calls":[{"id":"call_missing_index","function":{"name":"Read","arguments":"{}"}}]},"finish_reason":"tool_calls","index":0}]}"#;
+
+        assert!(parse_sse_chunk(chunk, &mut state, false)
+            .iter()
+            .all(|event| !matches!(event, LlmEvent::Error(_))));
+        assert!(state.drain_terminal_events().iter().any(
+            |event| matches!(event, LlmEvent::ToolUse { id, name, .. } if id == "call_missing_index" && name == "Read")
+        ));
+    }
+
+    #[test]
+    fn legacy_function_call_delta_is_normalized() {
+        let mut state = StreamState::new();
+        let chunk = r#"{"choices":[{"delta":{"function_call":{"name":"Read","arguments":"{\"path\":\"README.md\"}"}},"finish_reason":"function_call","index":0}]}"#;
+
+        parse_sse_chunk(chunk, &mut state, true);
+        assert!(state.drain_terminal_events().iter().any(
+            |event| matches!(event, LlmEvent::ToolUse { name, input, .. } if name == "Read" && input["path"] == "README.md")
+        ));
     }
 
     #[test]
@@ -1988,7 +2212,7 @@ mod tests {
         assert!(finish_events
             .iter()
             .all(|event| !matches!(event, LlmEvent::ToolUse { .. })));
-        assert_eq!(state.pending_tool_calls.len(), 1);
+        assert_eq!(state.tool_calls.len(), 1);
 
         let tail = r#"{"choices":[{"delta":{"content":"illegal tail"},"finish_reason":null,"index":0}]}"#;
         let tail_events = parse_sse_chunk(tail, &mut state, true);
@@ -2004,7 +2228,7 @@ mod tests {
         let mut state = StreamState::new();
         let finish = r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_staged","type":"function","function":{"name":"Read","arguments":"{\"path\":\"/tmp/file\"}"}}]},"finish_reason":"tool_calls","index":0}]}"#;
         parse_sse_chunk(finish, &mut state, true);
-        assert_eq!(state.pending_tool_calls.len(), 1);
+        assert_eq!(state.tool_calls.len(), 1);
 
         let second_finish =
             r#"{"choices":[{"delta":{},"finish_reason":"stop","index":0}]}"#;
@@ -2031,6 +2255,88 @@ mod tests {
                 stop_reason: StopReason::ToolUse,
                 usage
             }) if usage.input_tokens == 11 && usage.output_tokens == 7
+        ));
+    }
+
+    #[test]
+    fn late_tool_name_after_finish_completes_the_same_call() {
+        let mut state = StreamState::new();
+        let early_finish = r#"{"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_late_name","type":"function","function":{"arguments":"{\"path\":\"README.md\"}"}}]},"finish_reason":"tool_calls"}]}"#;
+        assert!(parse_sse_chunk(early_finish, &mut state, true)
+            .iter()
+            .all(|event| !matches!(event, LlmEvent::Error(_))));
+
+        let late_name = r#"{"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"name":"Read"}}]},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":12,"completion_tokens":5}}"#;
+        assert!(parse_sse_chunk(late_name, &mut state, true)
+            .iter()
+            .all(|event| !matches!(event, LlmEvent::Error(_))));
+
+        let terminal = state.drain_terminal_events();
+        assert!(terminal.iter().any(
+            |event| matches!(event, LlmEvent::ToolUse { id, name, input, .. } if id == "call_late_name" && name == "Read" && input["path"] == "README.md")
+        ));
+        assert!(matches!(
+            terminal.last(),
+            Some(LlmEvent::Done { usage, .. })
+                if usage.input_tokens == 12 && usage.output_tokens == 5
+        ));
+    }
+
+    #[test]
+    fn duplicate_terminal_tool_echo_is_deduplicated() {
+        let mut state = StreamState::new();
+        let finish = r#"{"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_echo","function":{"name":"Read","arguments":"{\"path\":\"README.md\"}"}}]},"finish_reason":"tool_calls"}]}"#;
+        assert!(parse_sse_chunk(finish, &mut state, true)
+            .iter()
+            .all(|event| !matches!(event, LlmEvent::Error(_))));
+
+        let echoed = r#"{"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_echo","function":{"name":"Read","arguments":"{\"path\":\"README.md\"}"}}]},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":"9","completion_tokens":"3"}}"#;
+        assert!(parse_sse_chunk(echoed, &mut state, true)
+            .iter()
+            .all(|event| !matches!(event, LlmEvent::Error(_))));
+
+        let terminal = state.drain_terminal_events();
+        assert_eq!(
+            terminal
+                .iter()
+                .filter(|event| matches!(event, LlmEvent::ToolUse { .. }))
+                .count(),
+            1
+        );
+        assert!(terminal.iter().all(|event| !matches!(event, LlmEvent::Error(_))));
+    }
+
+    #[test]
+    fn private_cost_metadata_after_finish_is_accepted() {
+        let mut state = StreamState::new();
+        let finish = r#"{"choices":[{"index":0,"delta":{"content":"ok"},"finish_reason":"stop"}]}"#;
+        parse_sse_chunk(finish, &mut state, false);
+
+        let accounting = r#"{"choices":[],"x-opencode-type":"inference-cost","cost":"0","normalizedUsage":{"inputTokens":8,"outputTokens":2,"cacheReadTokens":4}}"#;
+        assert!(parse_sse_chunk(accounting, &mut state, false).is_empty());
+
+        assert!(matches!(
+            state.drain_terminal_events().last(),
+            Some(LlmEvent::Done { usage, .. })
+                if usage.input_tokens == 12 && usage.output_tokens == 2 && usage.cache_read_tokens == 4
+        ));
+    }
+
+    #[test]
+    fn duplicate_stop_frame_with_usage_is_a_benign_terminal_echo() {
+        let mut state = StreamState::new();
+        let finish = r#"{"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}"#;
+        parse_sse_chunk(finish, &mut state, false);
+
+        let echoed = r#"{"choices":[{"index":0,"delta":{"role":"assistant","content":""},"finish_reason":"stop"}],"usage":{"prompt_tokens":4,"completion_tokens":1}}"#;
+        assert!(parse_sse_chunk(echoed, &mut state, false).is_empty());
+
+        assert!(matches!(
+            state.drain_terminal_events().as_slice(),
+            [LlmEvent::Done {
+                stop_reason: StopReason::EndTurn,
+                usage
+            }] if usage.input_tokens == 4 && usage.output_tokens == 1
         ));
     }
 
@@ -2065,7 +2371,87 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn structured_tool_call_requires_explicit_done_sentinel() {
+    async fn utf8_scalar_split_across_http_chunks_round_trips_exactly() {
+        use super::{StreamOutcome, process_sse_stream};
+        use futures::stream;
+
+        let body = concat!(
+            "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"你好\"},\"finish_reason\":\"stop\"}]}\n\n",
+            "data: [DONE]\n\n",
+        );
+        // Split one byte into the three-byte UTF-8 encoding of `你`. This is
+        // legal at the HTTP body layer and used to become U+FFFD twice because
+        // every reqwest chunk was decoded independently with from_utf8_lossy.
+        let split = body.find('你').expect("fixture contains multi-byte text") + 1;
+        let chunks = vec![
+            Ok::<Vec<u8>, std::io::Error>(body.as_bytes()[..split].to_vec()),
+            Ok(body.as_bytes()[split..].to_vec()),
+        ];
+        let response = reqwest::Response::from(
+            http::Response::builder()
+                .status(200)
+                .body(reqwest::Body::wrap_stream(stream::iter(chunks)))
+                .unwrap(),
+        );
+        let (tx, mut rx) = tokio::sync::mpsc::channel(16);
+
+        let outcome = process_sse_stream(response, &tx, false).await;
+        drop(tx);
+        let mut text = String::new();
+        let mut saw_done = false;
+        while let Some(event) = rx.recv().await {
+            match event {
+                LlmEvent::TextDelta(delta) => text.push_str(&delta),
+                LlmEvent::Done { .. } => saw_done = true,
+                LlmEvent::Error(error) => panic!("valid split UTF-8 was rejected: {error}"),
+                _ => {}
+            }
+        }
+
+        assert!(matches!(outcome, StreamOutcome::Ok));
+        assert_eq!(text, "你好");
+        assert!(saw_done);
+    }
+
+    #[tokio::test]
+    async fn done_without_finish_reason_commits_complete_tool_and_accepts_compact_data_prefix() {
+        use super::{StreamOutcome, process_sse_stream};
+
+        let body = concat!(
+            "data:{\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"id\":\"call_done_only\",\"function\":{\"name\":\"Read\",\"arguments\":{\"path\":\"README.md\"}}}]},\"finish_reason\":null}]}\n\n",
+            "data:[DONE]\n\n",
+        );
+        let response = reqwest::Response::from(
+            http::Response::builder()
+                .status(200)
+                .body(body.to_owned())
+                .unwrap(),
+        );
+        let (tx, mut rx) = tokio::sync::mpsc::channel(16);
+
+        let outcome = process_sse_stream(response, &tx, true).await;
+        drop(tx);
+        let mut events = Vec::new();
+        while let Some(event) = rx.recv().await {
+            events.push(event);
+        }
+
+        assert!(matches!(outcome, StreamOutcome::Ok));
+        assert!(events.iter().all(|event| !matches!(event, LlmEvent::Error(_))));
+        assert!(events.iter().any(
+            |event| matches!(event, LlmEvent::ToolUse { id, name, input, .. } if id == "call_done_only" && name == "Read" && input["path"] == "README.md")
+        ));
+        assert!(matches!(
+            events.last(),
+            Some(LlmEvent::Done {
+                stop_reason: StopReason::ToolUse,
+                ..
+            })
+        ));
+    }
+
+    #[tokio::test]
+    async fn clean_eof_commits_complete_structured_tool_call() {
         use super::{StreamOutcome, process_sse_stream};
 
         let body = concat!(
@@ -2087,13 +2473,17 @@ mod tests {
         }
 
         assert!(matches!(outcome, StreamOutcome::Ok));
+        assert!(events.iter().all(|event| !matches!(event, LlmEvent::Error(_))));
         assert!(events.iter().any(
-            |event| matches!(event, LlmEvent::Error(message) if message.contains("before [DONE]"))
+            |event| matches!(event, LlmEvent::ToolUse { id, .. } if id == "call_eof")
         ));
-        assert!(events.iter().all(|event| !matches!(
-            event,
-            LlmEvent::ToolUse { .. } | LlmEvent::Done { .. }
-        )));
+        assert!(matches!(
+            events.last(),
+            Some(LlmEvent::Done {
+                stop_reason: StopReason::ToolUse,
+                ..
+            })
+        ));
     }
 
     #[tokio::test]
@@ -2488,7 +2878,11 @@ mod tests {
             ),
         ];
 
-        let body = provider.build_request_body(&request, provider.should_sanitize_tool_schemas());
+        let body = provider.build_request_body(
+            &request,
+            provider.should_sanitize_tool_schemas(),
+            true,
+        );
         let assistant = body["messages"]
             .as_array()
             .unwrap()
@@ -2511,7 +2905,11 @@ mod tests {
             }],
         )];
 
-        let body = provider.build_request_body(&request, provider.should_sanitize_tool_schemas());
+        let body = provider.build_request_body(
+            &request,
+            provider.should_sanitize_tool_schemas(),
+            true,
+        );
         assert!(
             body["messages"][0].get("reasoning_content").is_none(),
             "unrelated models must retain normal OpenAI message semantics"
@@ -2560,6 +2958,51 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn stream_retries_without_unsupported_usage_options() {
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, Request, Respond, ResponseTemplate};
+
+        #[derive(Clone, Copy)]
+        struct UsageOptionsResponder;
+
+        impl Respond for UsageOptionsResponder {
+            fn respond(&self, request: &Request) -> ResponseTemplate {
+                let body: Value = serde_json::from_slice(&request.body).unwrap();
+                if body.get("stream_options").is_some() {
+                    ResponseTemplate::new(400).set_body_json(json!({
+                        "error": { "message": "unknown parameter: stream_options" }
+                    }))
+                } else {
+                    ResponseTemplate::new(200)
+                        .insert_header("content-type", "text/event-stream")
+                        .set_body_string(concat!(
+                            "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"ok\"},\"finish_reason\":\"stop\"}]}\n\n",
+                            "data: [DONE]\n\n",
+                        ))
+                }
+            }
+        }
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(UsageOptionsResponder)
+            .expect(2)
+            .mount(&server)
+            .await;
+        let provider = OpenAIProvider::new("key", &server.uri(), openai_compat());
+
+        let mut rx = provider.stream(&simple_request()).await.unwrap();
+        let mut events = Vec::new();
+        while let Some(event) = rx.recv().await {
+            events.push(event);
+        }
+
+        assert!(events.iter().all(|event| !matches!(event, LlmEvent::Error(_))));
+        assert!(events.iter().any(|event| matches!(event, LlmEvent::TextDelta(text) if text == "ok")));
+        assert!(matches!(events.last(), Some(LlmEvent::Done { .. })));
+    }
+
     // --- max_tokens_field ---
 
     #[test]
@@ -2574,7 +3017,7 @@ mod tests {
             thinking: None,
             reasoning_effort: None,
         };
-        let body = provider.build_request_body(&req, provider.should_sanitize_tool_schemas());
+        let body = provider.build_request_body(&req, provider.should_sanitize_tool_schemas(), true);
         assert_eq!(body["max_tokens"], 1024);
         assert!(body.get("max_completion_tokens").is_none());
     }
@@ -2595,7 +3038,7 @@ mod tests {
             thinking: None,
             reasoning_effort: None,
         };
-        let body = provider.build_request_body(&req, provider.should_sanitize_tool_schemas());
+        let body = provider.build_request_body(&req, provider.should_sanitize_tool_schemas(), true);
         assert_eq!(body["max_completion_tokens"], 2048);
         assert!(body.get("max_tokens").is_none());
     }
@@ -2867,14 +3310,14 @@ mod tests {
 
         provider.sanitize_tool_schemas.store(true, Ordering::Release);
 
-        let unsanitized = provider.build_request_body(&request, false);
+        let unsanitized = provider.build_request_body(&request, false, true);
         assert!(
             unsanitized["tools"][0]["function"]["parameters"]
                 .get("oneOf")
                 .is_some()
         );
 
-        let sanitized = provider.build_request_body(&request, true);
+        let sanitized = provider.build_request_body(&request, true, true);
         assert!(
             sanitized["tools"][0]["function"]["parameters"]
                 .get("oneOf")
@@ -2922,9 +3365,9 @@ mod tests {
     }
 
     #[test]
-    fn tool_calls_with_stop_finish_reason_are_rejected() {
-        // A non-tool terminal cannot promote earlier structured fragments into
-        // executable calls.
+    fn tool_calls_with_stop_finish_reason_are_committed_as_tool_use() {
+        // Gemini and some OpenAI-compatible gateways use `stop` even when a
+        // structured call was emitted. The call is still validated atomically.
         let mut state = StreamState::new();
 
         // chunk 1: tool call delta (name + partial args)
@@ -2946,13 +3389,20 @@ mod tests {
         let chunk2 = r#"{"choices":[{"delta":{"role":"assistant"},"finish_reason":"stop","index":0}],"usage":{"prompt_tokens":100,"completion_tokens":20,"total_tokens":120}}"#;
         let events2 = parse_sse_chunk(chunk2, &mut state, false);
 
-        assert!(events2.iter().any(
-            |event| matches!(event, LlmEvent::Error(message) if message.contains("finished with stop"))
-        ));
         assert!(events2
             .iter()
             .all(|event| !matches!(event, LlmEvent::ToolUse { .. } | LlmEvent::Done { .. })));
-        assert!(state.drain_terminal_events().is_empty());
+        let terminal = state.drain_terminal_events();
+        assert!(terminal.iter().any(
+            |event| matches!(event, LlmEvent::ToolUse { id, name, .. } if id == "call_abc123" && name == "Skill")
+        ));
+        assert!(matches!(
+            terminal.last(),
+            Some(LlmEvent::Done {
+                stop_reason: StopReason::ToolUse,
+                ..
+            })
+        ));
     }
 
     #[test]
@@ -2984,7 +3434,8 @@ mod tests {
                 .all(|event| !matches!(event, LlmEvent::ToolUse { .. })),
             "malformed arguments must never become an executable tool call: {events:?}"
         );
-        let message = events
+        let terminal = state.drain_terminal_events();
+        let message = terminal
             .iter()
             .find_map(|event| match event {
                 LlmEvent::Error(message) => Some(message),
@@ -3044,14 +3495,15 @@ mod tests {
                 .iter()
                 .all(|event| !matches!(event, LlmEvent::ToolUse { .. }))
         );
-        assert!(final_events.iter().any(
+        let terminal = state.drain_terminal_events();
+        assert!(terminal.iter().any(
             |event| matches!(event, LlmEvent::Error(message) if message.contains("call_split_bad"))
         ));
         assert!(state.pending_done.is_none());
     }
 
     #[test]
-    fn non_string_tool_arguments_are_rejected() {
+    fn object_tool_arguments_are_normalized_and_validated() {
         let mut state = StreamState::new();
         let chunk = json!({
             "choices": [{
@@ -3072,13 +3524,12 @@ mod tests {
         .to_string();
 
         let events = parse_sse_chunk(&chunk, &mut state, false);
-        assert!(events.iter().any(
-            |event| matches!(event, LlmEvent::Error(message) if message.contains("non-string function arguments"))
-        ));
         assert!(events
             .iter()
             .all(|event| !matches!(event, LlmEvent::ToolUse { .. } | LlmEvent::Done { .. })));
-        assert!(state.drain_terminal_events().is_empty());
+        assert!(state.drain_terminal_events().iter().any(
+            |event| matches!(event, LlmEvent::ToolUse { name, input, .. } if name == "update_base" && input["kb_id"] == "kb_1")
+        ));
     }
 
     #[test]
@@ -3215,7 +3666,8 @@ mod tests {
                 .iter()
                 .all(|event| !matches!(event, LlmEvent::ToolUse { .. }))
         );
-        assert!(events.iter().any(
+        let terminal = state.drain_terminal_events();
+        assert!(terminal.iter().any(
             |event| matches!(event, LlmEvent::Error(message) if message.contains("without a call id"))
         ));
     }
@@ -3232,7 +3684,8 @@ mod tests {
                 .iter()
                 .all(|event| !matches!(event, LlmEvent::ToolUse { .. }))
         );
-        assert!(events.iter().any(
+        let terminal = state.drain_terminal_events();
+        assert!(terminal.iter().any(
             |event| matches!(event, LlmEvent::Error(message) if message.contains("missing function name") && message.contains("call_missing_name"))
         ));
     }

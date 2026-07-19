@@ -67,6 +67,37 @@ impl ProviderError {
                     .iter()
                     .any(|keyword| lower.contains(keyword)))
     }
+
+    /// A number of otherwise OpenAI-compatible gateways implement streaming
+    /// but reject the optional `stream_options.include_usage` extension. This
+    /// is safe to retry without the extension because it only removes token
+    /// accounting metadata; response content and tool semantics are unchanged.
+    pub(crate) fn is_stream_usage_options_incompatible(&self) -> bool {
+        let ProviderError::Api {
+            status: 400 | 404 | 422,
+            message,
+        } = self
+        else {
+            return false;
+        };
+        let lower = message.to_ascii_lowercase();
+        let names_usage_extension =
+            lower.contains("stream_options") || lower.contains("include_usage");
+        let rejects_parameter = [
+            "unsupported",
+            "not supported",
+            "unknown",
+            "unrecognized",
+            "not permitted",
+            "not allowed",
+            "extra_forbidden",
+            "extra inputs",
+            "invalid parameter",
+        ]
+        .iter()
+        .any(|signal| lower.contains(signal));
+        names_usage_extension && rejects_parameter
+    }
 }
 
 /// Split the stored provider credential into individual API keys.
@@ -359,6 +390,35 @@ mod retryable_tests {
                 .iter()
                 .all(|error| !error.is_tool_schema_incompatible())
         );
+    }
+
+    #[test]
+    fn stream_usage_options_classifier_is_narrow() {
+        for message in [
+            "unknown parameter: stream_options",
+            r#"{\"detail\":[{\"loc\":[\"body\",\"stream_options\"],\"type\":\"extra_forbidden\"}]}"#,
+            "include_usage is not supported",
+        ] {
+            assert!(ProviderError::Api {
+                status: 400,
+                message: message.into(),
+            }
+            .is_stream_usage_options_incompatible());
+        }
+
+        for error in [
+            ProviderError::Api {
+                status: 500,
+                message: "unknown parameter: stream_options".into(),
+            },
+            ProviderError::Api {
+                status: 400,
+                message: "streaming is unsupported".into(),
+            },
+            ProviderError::Connection("stream_options reset".into()),
+        ] {
+            assert!(!error.is_stream_usage_options_incompatible());
+        }
     }
 
     #[test]

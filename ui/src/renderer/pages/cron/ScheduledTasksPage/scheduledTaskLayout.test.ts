@@ -40,8 +40,12 @@ test('provides localized desktop-only column labels', () => {
 });
 
 test('uses compact desktop task rows', () => {
-  expect(pageSource.includes('md:min-h-48px')).toBe(true);
-  expect(pageSource.includes('md:py-8px')).toBe(true);
+  expect(pageSource.includes('md:min-h-40px')).toBe(true);
+  expect(pageSource.includes('md:py-4px')).toBe(true);
+  expect(pageSource.includes('md:min-h-44px')).toBe(false);
+  expect(pageSource.includes('md:py-6px')).toBe(false);
+  expect(pageSource.includes('md:min-h-48px')).toBe(false);
+  expect(pageSource.includes('md:py-8px')).toBe(false);
   expect(pageSource.includes('md:min-h-68px')).toBe(false);
   expect(pageSource.includes('md:py-14px')).toBe(false);
 });
@@ -57,7 +61,7 @@ test('keeps desktop table surfaces transparent', () => {
   const desktopHeaderClass =
     pageSource.match(/className='hidden items-center gap-16px[^']*md:grid'/)?.[0] ?? '';
   const desktopListClass =
-    pageSource.match(/className='grid w-full grid-cols-1 items-start gap-12px[^']*md:divide-\[var\(--color-border-2\)\]'/)?.[0] ?? '';
+    pageSource.match(/className='grid w-full grid-cols-1 items-start gap-8px[^']*md:divide-\[var\(--color-border-2\)\]'/)?.[0] ?? '';
   const desktopRowClass =
     pageSource.match(/className='group flex cursor-pointer flex-col[^']*md:hover:shadow-none'/)?.[0] ?? '';
 
@@ -80,6 +84,20 @@ test('styles the scheduled task search as a bordered pill', () => {
   expect(searchClasses.includes('[&_.arco-input-inner-wrapper]:!border-[var(--color-border-2)]')).toBe(true);
   expect(searchClasses.includes('[&_.arco-input-inner-wrapper:hover]:!border-[var(--color-border-3)]')).toBe(true);
   expect(searchClasses.includes('[&_.arco-input-inner-wrapper-focus]:!border-[rgb(var(--primary-6))]')).toBe(true);
+});
+
+test('places localized status filters below the search input', () => {
+  expect((cronZh.page as Record<string, unknown>).statusFilter).toEqual({
+    label: '任务状态筛选',
+    all: '全部',
+    active: '已启动',
+    paused: '已暂停',
+  });
+  expect(pageSource.includes("(['all', 'active', 'paused'] as const)")).toBe(true);
+  expect(pageSource.includes('aria-pressed={selected}')).toBe(true);
+  expect(pageSource.includes('filterCronJobsByStatus')).toBe(true);
+  expect(pageSource.includes('appearance-none !border-0 !outline-none !shadow-none')).toBe(true);
+  expect(pageSource.includes('rounded-8px px-9px py-4px text-13px leading-18px')).toBe(true);
 });
 
 test('uses a desktop more menu without changing the mobile switch contract', () => {

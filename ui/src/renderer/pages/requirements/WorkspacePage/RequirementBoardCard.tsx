@@ -7,7 +7,7 @@
 /**
  * RequirementBoardCard — a compact, draggable card for the workspace board.
  *
- * Mirrors PresetCard's surface language (rounded-16px bordered surface on
+ * Mirrors PresetCard's surface language (compact rounded bordered surface on
  * bg-2, soft lift on hover) but stripped down for a Kanban column: a title,
  * an order-key chip, a tag chip, and — when the requirement is bound to an
  * executing session — a small session marker.
@@ -19,12 +19,11 @@
  * (no bare <button>).
  */
 import type { IRequirement } from '@/common/adapter/ipcBridge';
-import { Tag as ArcoTag } from '@arco-design/web-react';
-import { Tag, User } from '@icon-park/react';
+import { Calendar, SortTwo, Tag } from '@icon-park/react';
 import React from 'react';
 import { useTranslation } from 'react-i18next';
 import type { RequirementId } from '@/common/types/ids';
-import RequirementDisplayNumber from '../components/RequirementDisplayNumber';
+import CopyIconButton from '@/renderer/components/base/CopyIconButton';
 
 interface RequirementBoardCardProps {
   item: IRequirement;
@@ -32,6 +31,9 @@ interface RequirementBoardCardProps {
   /** Parent tracks the dragged id (mirrored onto dataTransfer for robustness). */
   onDragStart: (id: RequirementId) => void;
 }
+
+const formatCreatedDate = (timestamp: number): string =>
+  new Date(timestamp).toLocaleDateString(undefined, { year: 'numeric', month: '2-digit', day: '2-digit' });
 
 const RequirementBoardCard: React.FC<RequirementBoardCardProps> = ({ item, onOpenDetail, onDragStart }) => {
   const { t } = useTranslation();
@@ -57,17 +59,16 @@ const RequirementBoardCard: React.FC<RequirementBoardCardProps> = ({ item, onOpe
         onDragStart(item.id);
       }}
       className={[
-        'group relative flex flex-col rounded-16px border border-solid p-12px cursor-grab active:cursor-grabbing select-none outline-none',
+        'requirements-board-card group relative flex flex-col rounded-10px border border-solid p-12px cursor-grab active:cursor-grabbing select-none outline-none',
         'border-[var(--color-border-2)] bg-[var(--color-bg-2)] transition-all duration-180',
         'hover:border-[var(--color-primary-light-4)] hover:shadow-[0_4px_16px_rgba(0,0,0,0.06)]',
         'focus-visible:border-[rgb(var(--primary-5))] focus-visible:shadow-[0_0_0_3px_rgba(var(--primary-6),0.12)]',
       ].join(' ')}
     >
-      <div className='flex items-start gap-8px'>
-        <RequirementDisplayNumber displayNo={item.display_no} fullId={item.id} />
+      <div className='flex items-start gap-6px'>
         {/* Title — two-line clamp keeps cards tidy when dragging across columns. */}
         <div
-          className='min-w-0 flex-1 text-13px font-medium leading-18px text-[var(--color-text-1)] break-words'
+          className='min-w-0 flex-1 text-14px font-400 leading-20px text-[var(--color-text-1)] break-words'
           style={{
             display: '-webkit-box',
             WebkitLineClamp: 2,
@@ -77,29 +78,32 @@ const RequirementBoardCard: React.FC<RequirementBoardCardProps> = ({ item, onOpe
         >
           {item.title}
         </div>
+        <CopyIconButton text={item.id} tooltip={t('common.copyFullId')} size={13} className='mt-2px shrink-0' />
       </div>
 
-      {/* Meta row: order-key chip, tag chip, optional session marker. */}
-      <div className='mt-10px flex flex-wrap items-center gap-6px'>
-        <ArcoTag
-          size='small'
-          bordered={false}
-          className='!flex-shrink-0 !text-11px !leading-16px !px-7px !py-0 !rounded-6px !bg-fill-2 !text-t-secondary'
-        >
-          {item.order_key || '-'}
-        </ArcoTag>
-        {item.tag ? (
-          <span className='inline-flex items-center gap-3px rounded-[10px] px-7px py-1px text-11px leading-16px bg-[var(--color-fill-2)] text-[var(--color-text-2)] border border-solid border-[var(--color-border-2)] max-w-full'>
-            <Tag theme='outline' size={11} strokeWidth={3} className='flex-shrink-0' />
-            <span className='truncate'>{item.tag}</span>
+      {/* Labelled metadata keeps the card scannable without competing with the title. */}
+      <div className='mt-10px flex flex-col gap-5px text-11px leading-16px text-[var(--color-text-2)]'>
+        <div className='grid min-w-0 grid-cols-[16px_66px_minmax(0,1fr)] items-center gap-x-6px'>
+          <span className='relative top-2px inline-flex h-16px w-16px flex-shrink-0 items-center justify-center text-[var(--color-text-3)]'>
+            <Tag theme='outline' size={13} strokeWidth={3} className='block' />
           </span>
-        ) : null}
-        {item.owner_conversation_id != null || item.owner_terminal_id != null ? (
-          <span className='inline-flex items-center gap-3px rounded-[10px] px-7px py-1px text-11px leading-16px bg-primary-1 text-primary-6'>
-            <User theme='outline' size={11} strokeWidth={3} className='flex-shrink-0' />
-            <span>{t('requirements.columns.session')}</span>
+          <span className='text-[var(--color-text-3)] leading-16px'>{t('requirements.columns.tag')}:</span>
+          <span className='min-w-0 truncate font-500 leading-16px'>{item.tag || '-'}</span>
+        </div>
+        <div className='grid min-w-0 grid-cols-[16px_66px_minmax(0,1fr)] items-center gap-x-6px'>
+          <span className='relative top-2px inline-flex h-16px w-16px flex-shrink-0 items-center justify-center text-[var(--color-text-3)]'>
+            <SortTwo theme='outline' size={13} strokeWidth={3} className='block' />
           </span>
-        ) : null}
+          <span className='text-[var(--color-text-3)] leading-16px'>{t('requirements.sort.label')}:</span>
+          <span className='min-w-0 truncate font-500 leading-16px'>{item.order_key || '-'}</span>
+        </div>
+        <div className='grid min-w-0 grid-cols-[16px_66px_minmax(0,1fr)] items-center gap-x-6px'>
+          <span className='relative top-2px inline-flex h-16px w-16px flex-shrink-0 items-center justify-center text-[var(--color-text-3)]'>
+            <Calendar theme='outline' size={13} strokeWidth={3} className='block' />
+          </span>
+          <span className='text-[var(--color-text-3)] leading-16px'>{t('requirements.columns.createdAt')}:</span>
+          <span className='min-w-0 truncate font-500 leading-16px'>{formatCreatedDate(item.created_at)}</span>
+        </div>
       </div>
     </div>
   );

@@ -65,6 +65,12 @@
     "description": "按计划自动运行任务，也可以从会话顶部入口带入指定会话后创建。",
     "searchPlaceholder": "搜索任务名称、会话、指令或调度规则",
     "noSearchResults": "没有匹配的定时任务",
+    "statusFilter": {
+      "label": "任务状态筛选",
+      "all": "全部",
+      "active": "已启动",
+      "paused": "已暂停"
+    },
     "list": {
       "task": "任务标题",
       "status": "任务状态",

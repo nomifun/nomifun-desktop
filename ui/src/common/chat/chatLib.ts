@@ -22,6 +22,7 @@ import {
 } from '../types/ids';
 import { uuid } from '../utils';
 import { optionalDisplayText, toDisplayText } from './displayText';
+import { normalizeToolGroupStatus } from './toolGroupStatus';
 
 declare const confirmationCorrelationBrand: unique symbol;
 
@@ -244,10 +245,15 @@ export type IMessageToolCall = IMessage<
   {
     call_id: string;
     name: string;
-    args: Record<string, any>;
+    /**
+     * Provider arguments when they were decoded as a JSON object. Local
+     * pre-execution validation failures can legitimately persist `null` here
+     * because no valid argument object reached the tool.
+     */
+    args?: Record<string, unknown> | null;
     error?: string;
     status?: 'running' | 'completed' | 'error';
-    input?: Record<string, any>;
+    input?: Record<string, unknown>;
     output?: string;
     description?: string;
   }
@@ -718,20 +724,6 @@ const normalizeThinkingStatus = (value: unknown): IMessageThinking['content']['s
 const finiteNumber = (value: unknown): number | undefined =>
   typeof value === 'number' && Number.isFinite(value) ? value : undefined;
 
-const normalizeToolGroupStatus = (value: unknown): IMessageToolGroup['content'][number]['status'] => {
-  switch (value) {
-    case 'Success':
-    case 'Error':
-    case 'Canceled':
-    case 'Pending':
-    case 'Confirming':
-    case 'Executing':
-      return value;
-    default:
-      return 'Executing';
-  }
-};
-
 const normalizeToolGroupResultDisplay = (
   value: unknown
 ): IMessageToolGroup['content'][number]['result_display'] | undefined => {
@@ -1100,6 +1092,7 @@ export const transformMessage = (message: IResponseMessage): TMessage | undefine
         position: 'left',
         conversation_id: message.conversation_id,
         created_at,
+        status: message.status,
         content: message.data as any,
       };
     }

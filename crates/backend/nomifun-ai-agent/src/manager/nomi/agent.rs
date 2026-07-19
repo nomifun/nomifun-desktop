@@ -1372,6 +1372,46 @@ mod tests {
         }
     }
 
+    /// Advertises the production `Write` route for stream-boundary tests that
+    /// never commit or execute the call. Tool progress from an unadvertised
+    /// name is intentionally rejected by the engine, so those fixtures must
+    /// model the same request authority as a real desktop Nomi session.
+    struct PreviewOnlyWriteTool;
+
+    #[async_trait::async_trait]
+    impl Tool for PreviewOnlyWriteTool {
+        fn name(&self) -> &str {
+            "Write"
+        }
+
+        fn description(&self) -> &str {
+            "Test-only advertised write tool"
+        }
+
+        fn input_schema(&self) -> serde_json::Value {
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "file_path": { "type": "string" },
+                    "content": { "type": "string" }
+                },
+                "required": ["file_path", "content"]
+            })
+        }
+
+        fn is_concurrency_safe(&self, _input: &serde_json::Value) -> bool {
+            false
+        }
+
+        async fn execute(&self, _input: serde_json::Value) -> ToolResult {
+            ToolResult::error("PreviewOnlyWriteTool must not be executed")
+        }
+
+        fn category(&self) -> ToolCategory {
+            ToolCategory::Exec
+        }
+    }
+
     struct HangingKnowledgeSink {
         started: Arc<tokio::sync::Semaphore>,
     }
@@ -2157,7 +2197,15 @@ mod tests {
                 usage: Default::default(),
             }],
         ]));
-        let agent = make_agent_with_provider(provider.clone());
+        let mut agent = make_agent_with_provider(provider.clone());
+        assert!(
+            agent
+                .engine
+                .get_mut()
+                .registry_mut()
+                .register(Box::new(PreviewOnlyWriteTool)),
+            "Write must be advertised in the request that emits its progress"
+        );
         let mut rx = agent.subscribe();
 
         agent

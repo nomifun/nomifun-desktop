@@ -71,6 +71,7 @@ describe('theme control contract', () => {
     expect(controlCss.includes('background-color: var(--enhanced-checkbox-selected-bg, var(--control-selected-bg, var(--color-primary))) !important;')).toBe(true);
     expect(controlCss.includes('color: var(--enhanced-checkbox-selected-fg, var(--control-selected-fg, var(--color-white))) !important;')).toBe(true);
     expect(controlCss.includes('.arco-checkbox.arco-checkbox-disabled.arco-checkbox-checked .arco-checkbox-mask')).toBe(true);
+    expect(controlCss.includes('.arco-checkbox:hover .arco-checkbox-mask')).toBe(false);
     expect(loginCheckboxCss.includes('appearance: none;')).toBe(true);
     expect(loginCheckboxCss.includes('var(--enhanced-checkbox-selected-bg, var(--control-selected-bg, #667eea))')).toBe(true);
   });
