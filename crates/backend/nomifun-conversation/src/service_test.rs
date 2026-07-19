@@ -2738,6 +2738,9 @@ impl AgentRuntimeControl for MockAgent {
     fn status(&self) -> Option<ConversationStatus> {
         None
     }
+    fn is_transport_healthy(&self) -> bool {
+        true
+    }
     fn last_activity_at(&self) -> TimestampMs {
         0
     }
@@ -3110,6 +3113,10 @@ impl AgentRuntimeControl for ScriptedAgent {
         Some(ConversationStatus::Finished)
     }
 
+    fn is_transport_healthy(&self) -> bool {
+        true
+    }
+
     fn last_activity_at(&self) -> TimestampMs {
         0
     }
@@ -3208,6 +3215,9 @@ impl AgentRuntimeControl for SteerableAgent {
     }
     fn status(&self) -> Option<ConversationStatus> {
         self.status
+    }
+    fn is_transport_healthy(&self) -> bool {
+        true
     }
     fn last_activity_at(&self) -> TimestampMs {
         0

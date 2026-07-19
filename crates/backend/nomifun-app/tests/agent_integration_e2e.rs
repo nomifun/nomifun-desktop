@@ -65,6 +65,10 @@ impl AgentRuntimeControl for MockAgent {
         Some(ConversationStatus::Running)
     }
 
+    fn is_transport_healthy(&self) -> bool {
+        true
+    }
+
     fn last_activity_at(&self) -> TimestampMs {
         self.last_activity.load(Ordering::Relaxed)
     }

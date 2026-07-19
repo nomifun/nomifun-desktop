@@ -498,6 +498,38 @@ describe('transformMessage runtime field normalization', () => {
     expect(message.content.content).toBe('{\n  "message": "rate limited"\n}');
   });
 
+  test('preserves canonical message and owning turn identities for terminal errors', () => {
+    const terminalMessageId = parseMessageId('msg_019b0000-0000-7000-8000-000000000010');
+    const turnId = parseMessageId('msg_019b0000-0000-7000-8000-000000000011');
+    const message = transformMessage(
+      baseWire({
+        msg_id: terminalMessageId,
+        turn_id: turnId,
+        type: 'error',
+        data: { message: 'rate limited', code: 'USER_LLM_PROVIDER_RATE_LIMITED' },
+      })
+    );
+
+    expect(message?.type).toBe('tips');
+    expect(message?.id).toBe(terminalMessageId);
+    expect(message?.msg_id).toBe(terminalMessageId);
+    expect(message?.turn_id).toBe(turnId);
+  });
+
+  test('preserves owning turn identity on non-terminal stream rows', () => {
+    const turnId = parseMessageId('msg_019b0000-0000-7000-8000-000000000012');
+    const message = transformMessage(
+      baseWire({
+        turn_id: turnId,
+        type: 'tool_call',
+        data: { call_id: 'tool-1', name: 'Generate', status: 'running' },
+      })
+    );
+
+    expect(message?.type).toBe('tool_call');
+    expect(message?.turn_id).toBe(turnId);
+  });
+
   test('normalizes thinking content, subject, status, and duration defensively', () => {
     const message = transformMessage(
       baseWire({

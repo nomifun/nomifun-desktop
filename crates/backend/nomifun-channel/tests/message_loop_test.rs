@@ -217,6 +217,10 @@ impl AgentRuntimeControl for ScriptedAgent {
         Some(ConversationStatus::Finished)
     }
 
+    fn is_transport_healthy(&self) -> bool {
+        true
+    }
+
     fn last_activity_at(&self) -> TimestampMs {
         0
     }

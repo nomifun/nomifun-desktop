@@ -69,6 +69,10 @@ interface IMessage<T extends TMessageType, Content extends Record<string, any>> 
    */
   msg_id?: MessageId;
 
+  /** Stable backend turn correlation. Message identity and turn identity are
+   * intentionally separate: multiple durable rows belong to one turn. */
+  turn_id?: MessageId;
+
   /** Owning canonical Conversation entity id. */
   conversation_id: ConversationId;
   /**
@@ -1185,6 +1189,7 @@ const normalizeAgentStatusContent = (value: unknown): IMessageAgentStatus['conte
  * */
 export const transformMessage = (message: IResponseMessage): TMessage | undefined => {
   const created_at = message.created_at ?? Date.now();
+  const turnIdentity = message.turn_id ? { turn_id: message.turn_id } : {};
   switch (message.type) {
     case 'error': {
       const errorData = message.data;
@@ -1192,9 +1197,10 @@ export const transformMessage = (message: IResponseMessage): TMessage | undefine
       const errorText =
         (isObject(errorData) ? optionalDisplayText(errorData.message) : undefined) ?? toDisplayText(errorData);
       return {
-        id: uuid(),
+        id: message.msg_id,
         type: 'tips',
         msg_id: message.msg_id,
+        ...turnIdentity,
         position: 'center',
         conversation_id: message.conversation_id,
         created_at,
@@ -1214,9 +1220,10 @@ export const transformMessage = (message: IResponseMessage): TMessage | undefine
           ? (normalizeAgentStreamError(data.error) ?? normalizeAgentStreamError({ ...data, message: content }))
           : undefined;
       return {
-        id: uuid(),
+        id: message.msg_id,
         type: 'tips',
         msg_id: message.msg_id,
+        ...turnIdentity,
         position: 'center',
         conversation_id: message.conversation_id,
         created_at,
@@ -1238,6 +1245,7 @@ export const transformMessage = (message: IResponseMessage): TMessage | undefine
         id: uuid(),
         type: 'text',
         msg_id: message.msg_id,
+        ...turnIdentity,
         position: message.type === 'user_content' ? 'right' : 'left',
         conversation_id: message.conversation_id,
         created_at,
@@ -1262,6 +1270,7 @@ export const transformMessage = (message: IResponseMessage): TMessage | undefine
         id: uuid(),
         type: 'tool_call',
         msg_id: message.msg_id,
+        ...turnIdentity,
         conversation_id: message.conversation_id,
         position: 'left',
         created_at,
@@ -1273,6 +1282,7 @@ export const transformMessage = (message: IResponseMessage): TMessage | undefine
         type: 'tool_group',
         id: uuid(),
         msg_id: message.msg_id,
+        ...turnIdentity,
         conversation_id: message.conversation_id,
         created_at,
         content: normalizeToolGroupContent(message.data),
@@ -1283,6 +1293,7 @@ export const transformMessage = (message: IResponseMessage): TMessage | undefine
         id: uuid(),
         type: 'agent_status',
         msg_id: message.msg_id,
+        ...turnIdentity,
         position: 'center',
         conversation_id: message.conversation_id,
         created_at,
@@ -1294,6 +1305,7 @@ export const transformMessage = (message: IResponseMessage): TMessage | undefine
         id: uuid(),
         type: 'permission',
         msg_id: message.msg_id,
+        ...turnIdentity,
         position: 'left',
         conversation_id: message.conversation_id,
         created_at,
@@ -1305,6 +1317,7 @@ export const transformMessage = (message: IResponseMessage): TMessage | undefine
         id: uuid(),
         type: 'acp_permission',
         msg_id: message.msg_id,
+        ...turnIdentity,
         position: 'left',
         conversation_id: message.conversation_id,
         created_at,
@@ -1316,6 +1329,7 @@ export const transformMessage = (message: IResponseMessage): TMessage | undefine
         id: uuid(),
         type: 'acp_tool_call',
         msg_id: message.msg_id,
+        ...turnIdentity,
         position: 'left',
         conversation_id: message.conversation_id,
         created_at,
@@ -1327,6 +1341,7 @@ export const transformMessage = (message: IResponseMessage): TMessage | undefine
         id: uuid(),
         type: 'plan',
         msg_id: message.msg_id,
+        ...turnIdentity,
         position: 'left',
         conversation_id: message.conversation_id,
         created_at,
@@ -1341,6 +1356,7 @@ export const transformMessage = (message: IResponseMessage): TMessage | undefine
         id: uuid(),
         type: 'thinking',
         msg_id: message.msg_id,
+        ...turnIdentity,
         position: 'left',
         conversation_id: message.conversation_id,
         created_at,

@@ -1,5 +1,5 @@
 use crate::manager::acp::AcpAgentManager;
-use crate::runtime_state::AgentRuntimeState;
+use crate::runtime_state::{AgentRuntimeState, AgentRuntimeTurn};
 use crate::manager::acp::mode_normalize::agent_metadata_uses_meta_resume;
 use crate::protocol::events::{
     AgentStreamEvent, AvailableCommandsEventData, ErrorEventData, SessionAssignedEventData, StartEventData,
@@ -9,11 +9,10 @@ use crate::session::SessionId as DomainSessionId;
 use crate::types::SendMessageData;
 use agent_client_protocol::schema::{ContentBlock, LoadSessionRequest, PromptRequest, SessionId, StopReason};
 use nomifun_api_types::{
-    AgentErrorCode, AgentErrorOwnership, AgentErrorResolution, AgentErrorResolutionKind, AgentErrorResolutionTarget,
+    AgentErrorCode, AgentErrorOwnership, AgentErrorResolution, AgentErrorResolutionKind,
 };
 use nomifun_common::AppError;
 use serde_json::Value;
-use tokio::sync::broadcast::error::TryRecvError;
 
 use super::agent::sdk_to_snake_value;
 use tracing::warn;
@@ -243,16 +242,11 @@ impl AcpAgentManager {
         &self,
         data: &SendMessageData,
         session_id: Option<&str>,
+        turn: AgentRuntimeTurn,
     ) -> Result<bool, AppError> {
         let sid = session_id.ok_or_else(|| AppError::Internal("Cannot prompt: no session ID available".into()))?;
 
         let content = data.content.clone();
-
-        // Subscribe BEFORE emitting Start so we can observe every event
-        // produced during this turn. Used after `prompt()` returns to detect
-        // the "empty finish" scenario (model produced no text and no tool
-        // calls); see `is_empty_turn` below.
-        let mut probe_rx = self.runtime.subscribe();
 
         // ACP notifications are partial and have no turn id. Reset the
         // session-scoped receipt immediately before Start/prompt so any
@@ -274,14 +268,22 @@ impl AcpAgentManager {
             .await
             .map_err(AppError::from)?;
 
-        // A Cancelled stop_reason can ONLY result from `cancel()` having sent
-        // the protocol CancelNotification — and `cancel()` force-emitted the
-        // terminal `Finish(Cancelled)` for this turn at that moment. Emitting
-        // another Finish here would be a duplicate; worse, the cancel-ack can
-        // arrive AFTER a new turn already reset the status to Running, in
-        // which case the duplicate would terminate the NEW turn (the
-        // historical re-pend/re-inject churn). Skip it entirely.
+        // ACP session/update notifications do not carry a turn id. Do not let
+        // `cancel()` release turn admission before this prompt future reaches
+        // its ordered PromptResponse boundary: otherwise late text/tool
+        // updates from this prompt could be consumed by the next one. The
+        // protocol response is therefore the authoritative cancel terminal.
         if matches!(prompt_response.stop_reason, StopReason::Cancelled) {
+            // Close/reset the per-turn artifact receipt even on cancellation;
+            // cancellation remains the user-visible terminal regardless of a
+            // partial artifact that was abandoned with the turn.
+            let _ = self.protocol.finish_artifact_delivery_turn(sid, false);
+            emit_prompt_terminal(
+                &self.runtime,
+                turn,
+                sid,
+                prompt_response.stop_reason,
+            );
             return Ok(true);
         }
 
@@ -289,19 +291,28 @@ impl AcpAgentManager {
         // not attest that inline media/resources survived local persistence.
         // Delivery integrity therefore has precedence over EndTurn. Emit a
         // terminal Error and never follow it with Finish.
-        if let Some(error) = self.protocol.finish_artifact_delivery_turn(sid) {
-            emit_artifact_delivery_terminal(&self.runtime, error);
-            return Ok(false);
-        }
-
-        // Diagnose the "blank reply" case: the agent finished a turn without
-        // producing any user-visible output. We surface a structured error to
-        // the renderer so the user gets actionable feedback instead of a
-        // silent success.
-        if is_empty_turn(&mut probe_rx) {
-            self.runtime
-                .emit_error_data(empty_finish_diagnostic_error(prompt_response.stop_reason));
-            return Ok(false);
+        let complete_verified_in_progress = matches!(prompt_response.stop_reason, StopReason::EndTurn);
+        let completed_artifact_calls = match self
+            .protocol
+            .finish_artifact_delivery_turn(sid, complete_verified_in_progress)
+        {
+            Ok(completed) => completed,
+            Err(error) => {
+                emit_artifact_delivery_terminal(&self.runtime, turn, error);
+                return Ok(false);
+            }
+        };
+        for completed in completed_artifact_calls {
+            if !self
+                .runtime
+                .emit_for_turn(turn, AgentStreamEvent::AcpToolCall(completed))
+            {
+                warn!(
+                    session_id = sid,
+                    "Discarding stale ACP artifact completion after its runtime turn closed"
+                );
+                return Ok(false);
+            }
         }
 
         // Emit Finish event — carry the protocol stop_reason so AutoWork can
@@ -309,8 +320,12 @@ impl AcpAgentManager {
         // (otherwise a non-empty failed turn is silently recorded as done).
         // Guarded (absorbing-state) emit that also flips status → Finished:
         // exactly one terminal Finish per turn, emitted from exactly one place.
-        self.runtime
-            .emit_finish_with_reason(Some(sid.to_owned()), Some(map_stop_reason(prompt_response.stop_reason)));
+        emit_prompt_terminal(
+            &self.runtime,
+            turn,
+            sid,
+            prompt_response.stop_reason,
+        );
 
         Ok(false)
     }
@@ -375,9 +390,9 @@ impl AcpAgentManager {
 
 fn artifact_delivery_terminal_error(detail: String) -> ErrorEventData {
     ErrorEventData::classified(
-        "The Agent could not deliver the requested artifact",
-        AgentErrorCode::UnknownUpstreamError,
-        AgentErrorOwnership::UnknownUpstream,
+        "Nomifun could not verify the requested artifact delivery",
+        AgentErrorCode::NomifunStateInconsistent,
+        AgentErrorOwnership::Nomifun,
         Some(detail),
         true,
         true,
@@ -385,91 +400,21 @@ fn artifact_delivery_terminal_error(detail: String) -> ErrorEventData {
     )
 }
 
-fn emit_artifact_delivery_terminal(runtime: &AgentRuntimeState, detail: String) {
-    runtime.emit_error_data(artifact_delivery_terminal_error(detail));
+fn emit_artifact_delivery_terminal(runtime: &AgentRuntimeState, turn: AgentRuntimeTurn, detail: String) {
+    runtime.emit_error_data_for_turn(turn, artifact_delivery_terminal_error(detail));
 }
 
-/// Drain the supplied turn-scoped receiver and return `true` when the turn
-/// produced neither agent text nor any tool-call activity.
-///
-/// Used by `prompt_existing_session` to detect the "blank reply" scenario
-/// (ELECTRON-1JG): the ACP backend returned `StopReason::EndTurn` (or
-/// similar terminal reason) without ever emitting a `Text` /
-/// `Thinking` / `ToolCall` / `AcpToolCall` chunk. We treat presence of
-/// any of those as a non-empty turn.
-///
-/// `Lagged` is treated as non-empty: the broadcast buffer overflowed,
-/// meaning many events flew by — definitely not an empty turn.
-fn is_empty_turn(rx: &mut tokio::sync::broadcast::Receiver<AgentStreamEvent>) -> bool {
-    loop {
-        match rx.try_recv() {
-            Ok(event) => {
-                if event_is_user_visible_output(&event) {
-                    return false;
-                }
-            }
-            Err(TryRecvError::Empty) => return true,
-            Err(TryRecvError::Closed) => return true,
-            // Buffer overflow: many events occurred — turn was clearly not empty.
-            Err(TryRecvError::Lagged(_)) => return false,
-        }
-    }
-}
-
-/// Whether a stream event represents user-visible output produced by the
-/// model during a turn. Anything that would render in chat counts.
-fn event_is_user_visible_output(event: &AgentStreamEvent) -> bool {
-    matches!(
-        event,
-        AgentStreamEvent::Text(_)
-            | AgentStreamEvent::Thinking(_)
-            | AgentStreamEvent::ToolCall(_)
-            | AgentStreamEvent::AcpToolCall(_)
-            | AgentStreamEvent::ToolGroup(_)
-            | AgentStreamEvent::Plan(_)
-            | AgentStreamEvent::Permission(_)
-            | AgentStreamEvent::AcpPermission(_)
+fn emit_prompt_terminal(
+    runtime: &AgentRuntimeState,
+    turn: AgentRuntimeTurn,
+    session_id: &str,
+    stop_reason: StopReason,
+) -> bool {
+    runtime.emit_finish_for_turn(
+        turn,
+        Some(session_id.to_owned()),
+        Some(map_stop_reason(stop_reason)),
     )
-}
-
-fn empty_finish_diagnostic_error(stop_reason: StopReason) -> ErrorEventData {
-    ErrorEventData::classified(
-        // TODO(i18n): wire to a frontend translation key once a
-        // pattern is established. For now this is the user-facing
-        // English string.
-        empty_finish_diagnostic_message(stop_reason),
-        AgentErrorCode::UnknownUpstreamError,
-        AgentErrorOwnership::UnknownUpstream,
-        Some("Agent completed the turn without producing visible output.".into()),
-        true,
-        true,
-        Some(AgentErrorResolution::new(
-            AgentErrorResolutionKind::SendFeedback,
-            Some(AgentErrorResolutionTarget::Feedback),
-        )),
-    )
-}
-
-/// Build the user-facing message shown when the agent finished a turn
-/// without emitting any output. Wording is deliberately concrete so the
-/// user has something to act on (retry, reword, check provider).
-fn empty_finish_diagnostic_message(stop_reason: StopReason) -> String {
-    match stop_reason {
-        StopReason::MaxTokens => "The model reached its output token limit before producing any reply. \
-             Try asking a shorter question or raising the model's max output."
-            .to_owned(),
-        StopReason::MaxTurnRequests => "The model hit the per-turn request cap before producing any reply. \
-             Try a simpler request or restart the conversation."
-            .to_owned(),
-        StopReason::Refusal => "The model refused to continue without producing a reply.".to_owned(),
-        // EndTurn (and any non-exhaustive future variants) all map to the
-        // generic empty-reply message — the model said it was done but
-        // produced nothing.
-        _ => "The model finished without producing any reply. \
-              This usually means the request returned an empty response — \
-              try resending the message or switching model/provider."
-            .to_owned(),
-    }
 }
 
 /// Map the ACP SDK `StopReason` onto the cross-backend `TurnStopReason` carried
@@ -504,6 +449,7 @@ mod tests {
     use crate::manager::acp::{AcpSession, AcpSessionEvent};
     use crate::session::SessionId as DomainSessionId;
     use agent_client_protocol::schema::AgentCapabilities;
+    use nomifun_api_types::{AgentErrorCode, AgentErrorOwnership};
 
     fn make_session() -> AcpSession {
         AcpSession::new(None, None, Default::default())
@@ -663,90 +609,8 @@ mod tests {
         assert!(!super::is_session_not_found(&bad_request));
     }
 
-    // -- empty-finish diagnostic (ELECTRON-1JG) -------------------------------
-
-    use crate::protocol::events::{
-        AgentStreamEvent, FinishEventData, StartEventData, TextEventData, ThinkingEventData, ToolCallEventData,
-        ToolCallStatus,
-    };
+    use crate::protocol::events::AgentStreamEvent;
     use agent_client_protocol::schema::StopReason;
-    use nomifun_api_types::{AgentErrorResolutionKind, AgentErrorResolutionTarget};
-    use tokio::sync::broadcast;
-
-    /// Lifecycle-only events (`Start`/`Finish`) must NOT count as
-    /// user-visible output. This is the core empty-finish detection
-    /// contract: the helper has to look past Start before declaring
-    /// the turn empty.
-    #[tokio::test]
-    async fn is_empty_turn_returns_true_when_only_lifecycle_events() {
-        let (tx, _) = broadcast::channel::<AgentStreamEvent>(8);
-        let mut rx = tx.subscribe();
-        tx.send(AgentStreamEvent::Start(StartEventData {
-            session_id: Some("s1".into()),
-        }))
-        .unwrap();
-        tx.send(AgentStreamEvent::Finish(FinishEventData {
-            session_id: Some("s1".into()),
-            stop_reason: None,
-        }))
-        .unwrap();
-
-        assert!(super::is_empty_turn(&mut rx));
-    }
-
-    /// A single Text chunk is enough to mark the turn non-empty,
-    /// even when sandwiched between lifecycle events.
-    #[tokio::test]
-    async fn is_empty_turn_returns_false_when_text_emitted() {
-        let (tx, _) = broadcast::channel::<AgentStreamEvent>(8);
-        let mut rx = tx.subscribe();
-        tx.send(AgentStreamEvent::Start(StartEventData::default())).unwrap();
-        tx.send(AgentStreamEvent::Text(TextEventData { content: "hi".into() }))
-            .unwrap();
-        tx.send(AgentStreamEvent::Finish(FinishEventData::default())).unwrap();
-
-        assert!(!super::is_empty_turn(&mut rx));
-    }
-
-    /// Tool calls also count as visible output — even if the model
-    /// produced no Text, executing a tool means the turn was not blank.
-    #[tokio::test]
-    async fn is_empty_turn_returns_false_when_tool_call_emitted() {
-        let (tx, _) = broadcast::channel::<AgentStreamEvent>(8);
-        let mut rx = tx.subscribe();
-        tx.send(AgentStreamEvent::Start(StartEventData::default())).unwrap();
-        tx.send(AgentStreamEvent::ToolCall(ToolCallEventData {
-            call_id: "c1".into(),
-            name: "read_file".into(),
-            args: serde_json::json!({}),
-            status: ToolCallStatus::Running,
-            input: None,
-            output: None,
-            description: None,
-            artifacts: Vec::new(),
-        }))
-        .unwrap();
-
-        assert!(!super::is_empty_turn(&mut rx));
-    }
-
-    /// Thinking-only output (no final reply) still counts: the user
-    /// saw something happen, even though the model didn't commit
-    /// to a response. We don't want to double-up the diagnostic.
-    #[tokio::test]
-    async fn is_empty_turn_returns_false_when_only_thinking_emitted() {
-        let (tx, _) = broadcast::channel::<AgentStreamEvent>(8);
-        let mut rx = tx.subscribe();
-        tx.send(AgentStreamEvent::Thinking(ThinkingEventData {
-            content: "hmm".into(),
-            subject: None,
-            duration: None,
-            status: None,
-        }))
-        .unwrap();
-
-        assert!(!super::is_empty_turn(&mut rx));
-    }
 
     /// `map_stop_reason` must carry each SDK stop reason through to the
     /// normalized `TurnStopReason` so AutoWork can classify the turn.
@@ -763,47 +627,49 @@ mod tests {
         assert_eq!(super::map_stop_reason(StopReason::Cancelled), TurnStopReason::Cancelled);
     }
 
-    /// Each `StopReason` variant maps to a distinct, user-actionable
-    /// message. Pin the wording so future copy changes are deliberate.
-    #[test]
-    fn empty_finish_diagnostic_message_per_stop_reason() {
-        let endturn = super::empty_finish_diagnostic_message(StopReason::EndTurn);
-        assert!(endturn.to_lowercase().contains("finished"));
+    #[tokio::test]
+    async fn end_turn_without_observed_output_is_finish_not_synthetic_error() {
+        let runtime = crate::runtime_state::AgentRuntimeState::new("conv-empty", "/tmp/workspace", 8);
+        let turn = runtime.reset_for_new_turn(nomifun_common::ConversationStatus::Running);
+        let mut rx = runtime.subscribe();
 
-        let max_tokens = super::empty_finish_diagnostic_message(StopReason::MaxTokens);
-        assert!(max_tokens.to_lowercase().contains("token"));
+        assert!(super::emit_prompt_terminal(
+            &runtime,
+            turn,
+            "session-empty",
+            StopReason::EndTurn,
+        ));
 
-        let max_turn = super::empty_finish_diagnostic_message(StopReason::MaxTurnRequests);
-        assert!(max_turn.to_lowercase().contains("per-turn") || max_turn.to_lowercase().contains("cap"));
-
-        let refusal = super::empty_finish_diagnostic_message(StopReason::Refusal);
-        assert!(refusal.to_lowercase().contains("refused"));
-    }
-
-    #[test]
-    fn empty_finish_diagnostic_error_has_feedback_resolution() {
-        let error = super::empty_finish_diagnostic_error(StopReason::EndTurn);
-
-        let resolution = error
-            .resolution
-            .expect("empty-finish classified errors must include a resolution");
-        assert_eq!(resolution.kind, AgentErrorResolutionKind::SendFeedback);
-        assert_eq!(resolution.target, Some(AgentErrorResolutionTarget::Feedback));
+        let event = rx.recv().await.expect("prompt terminal event");
+        let AgentStreamEvent::Finish(data) = event else {
+            panic!("a nominal ACP EndTurn must never synthesize UNKNOWN_UPSTREAM_ERROR");
+        };
+        assert_eq!(data.session_id.as_deref(), Some("session-empty"));
+        assert_eq!(data.stop_reason, Some(crate::protocol::events::TurnStopReason::EndTurn));
+        assert!(matches!(
+            rx.try_recv(),
+            Err(tokio::sync::broadcast::error::TryRecvError::Empty)
+        ));
     }
 
     #[tokio::test]
     async fn artifact_delivery_failure_is_terminal_error_never_finish() {
         let runtime = crate::runtime_state::AgentRuntimeState::new("conv-1", "/tmp/workspace", 8);
-        runtime.reset_for_new_turn(nomifun_common::ConversationStatus::Running);
+        let turn = runtime.reset_for_new_turn(nomifun_common::ConversationStatus::Running);
         let mut rx = runtime.subscribe();
 
-        super::emit_artifact_delivery_terminal(&runtime, "invalid image bytes".into());
+        super::emit_artifact_delivery_terminal(&runtime, turn, "invalid image bytes".into());
 
         let event = rx.recv().await.unwrap();
         let AgentStreamEvent::Error(error) = event else {
             panic!("artifact delivery failure must terminate with Error, not Finish");
         };
-        assert_eq!(error.message, "The Agent could not deliver the requested artifact");
+        assert_eq!(
+            error.message,
+            "Nomifun could not verify the requested artifact delivery"
+        );
+        assert_eq!(error.code, Some(AgentErrorCode::NomifunStateInconsistent));
+        assert_eq!(error.ownership, Some(AgentErrorOwnership::Nomifun));
         assert_eq!(error.detail.as_deref(), Some("invalid image bytes"));
         assert!(matches!(
             rx.try_recv(),

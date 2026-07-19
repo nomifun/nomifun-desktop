@@ -65,6 +65,9 @@ impl AgentRuntimeControl for TypedMockAgent {
     fn status(&self) -> Option<ConversationStatus> {
         self.status
     }
+    fn is_transport_healthy(&self) -> bool {
+        true
+    }
     fn last_activity_at(&self) -> TimestampMs {
         self.last_activity.load(Ordering::Relaxed)
     }

@@ -258,17 +258,21 @@ export function normalizeAcpToolCall(message: IMessageAcpToolCall): NormalizedTo
       .join('\n');
   }
 
-  const kind = toDisplayText(update.kind, 'execute');
+  // `kind` is optional on ACP tool_call_update frames. Keep an absent kind
+  // absent instead of inventing an `execute` operation: partial/provider
+  // updates without semantic metadata are not proof that a shell command ran.
+  const kind = toDisplayText(update.kind);
   const keyParam = buildParamSummary(kind, rawInput);
   const commandText = pickShellCommandInput(rawInput);
+  const description = keyParam || commandText || kind;
 
   return {
     key: toDisplayText(update.tool_call_id),
     name: toDisplayText(update.title, 'Tool'),
     status: normalizeAcpStatus(update.status),
-    kind,
+    ...(kind ? { kind } : {}),
     ...(isNonFatalAcpToolFailure(update, rawInput, output) ? { nonFatalFailure: true } : {}),
-    description: keyParam || commandText || kind,
+    ...(description ? { description } : {}),
     input,
     output,
     truncated: content?._compact?.truncated === true,

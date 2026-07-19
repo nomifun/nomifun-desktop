@@ -3401,7 +3401,7 @@ impl ConversationService {
                     error = %ErrorChain(&err),
                     "Failed to build runtime options for message send"
                 );
-                let _ = self.persist_send_failure_tip(conversation_id, &err).await;
+                let _ = self.persist_send_failure_tip(conversation_id, None, &err).await;
                 let receipt_error = format!("{}", ErrorChain(&err));
                 if let Some(delivery) = durable_delivery.as_ref() {
                     delivery.handoff_receipt();
@@ -3652,7 +3652,12 @@ impl ConversationService {
                             "Agent runtime build failed"
                         );
                         service
-                            .persist_and_broadcast_send_failure_tip(&user_id_owned, &conv_id, &err)
+                            .persist_and_broadcast_send_failure_tip(
+                                &user_id_owned,
+                                &conv_id,
+                                Some(&stable_turn_id),
+                                &err,
+                            )
                             .await;
                     }
                     let receipt_error = format!("{}", ErrorChain(&err));
@@ -3728,7 +3733,12 @@ impl ConversationService {
                     "Failed to persist resolved workspace"
                 );
                 service
-                    .persist_and_broadcast_send_failure_tip(&user_id_owned, &conv_id, &err)
+                    .persist_and_broadcast_send_failure_tip(
+                        &user_id_owned,
+                        &conv_id,
+                        Some(&stable_turn_id),
+                        &err,
+                    )
                     .await;
                 let receipt_error = format!("{}", ErrorChain(&err));
                 Self::complete_delivery_receipt_before_release(
@@ -3854,6 +3864,7 @@ impl ConversationService {
                     cron_service.clone(),
                 )
                 .with_turn_completion(false)
+                .with_root_turn_id(stable_turn_id.clone())
                 .with_cancellation(turn_cancellation.clone())
                 .with_companion_context(companion, companion_id.clone())
                 .with_origin(origin.clone())
@@ -4158,6 +4169,7 @@ impl ConversationService {
                         Arc::clone(&user_events),
                         cron_service.clone(),
                     )
+                    .with_root_turn_id(stable_turn_id.clone())
                     .with_companion_context(companion, companion_id.clone())
                     .with_origin(origin.clone())
                     .with_channel_platform(channel_platform.clone());
@@ -4383,6 +4395,7 @@ impl ConversationService {
                     Arc::clone(&service.user_events),
                     None,
                 )
+                .with_root_turn_id(panic_stable_turn_id.clone())
                 .with_companion_context(
                     panic_wire_context.companion,
                     panic_wire_context.companion_id.clone(),
@@ -4736,9 +4749,10 @@ impl ConversationService {
         &self,
         user_id: &str,
         conversation_id: &str,
+        turn_id: Option<&str>,
         err: &AppError,
     ) {
-        let Some(row) = self.persist_send_failure_tip(conversation_id, err).await else {
+        let Some(row) = self.persist_send_failure_tip(conversation_id, turn_id, err).await else {
             return;
         };
 
@@ -4751,6 +4765,7 @@ impl ConversationService {
                 "message.stream",
                 serde_json::json!({
                 "conversation_id": row.conversation_id,
+                "turn_id": turn_id,
                 "msg_id": msg_id,
                 "type": row.r#type,
                 "data": content_value,
@@ -5042,6 +5057,12 @@ impl ConversationService {
                             Arc::clone(&service.conversation_repo),
                             Arc::clone(&service.user_events),
                             None,
+                        )
+                        .with_root_turn_id(
+                            turn_cancellation
+                                .wire_turn_id()
+                                .unwrap_or(terminal_msg_id)
+                                .to_owned(),
                         )
                         .with_companion_context(
                             wire_context.companion,

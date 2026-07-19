@@ -44,7 +44,9 @@ use tracing::{debug, info, warn};
 
 use crate::protocol::error::AcpError;
 use crate::artifact_store::ArtifactStore;
-use crate::protocol::events::{self as stream_event, AcpArtifactDeliveryState, AgentStreamEvent};
+use crate::protocol::events::{
+    self as stream_event, AcpArtifactDeliveryState, AcpToolCallEventData, AgentStreamEvent,
+};
 
 use agent_client_protocol::schema::{
     AgentCapabilities, AuthMethod, AuthenticateRequest, CancelNotification, CloseSessionRequest, ExtNotification,
@@ -189,14 +191,23 @@ impl AcpProtocol {
             .begin_turn(session_id);
     }
 
-    /// Seal the active prompt turn and return any missing/invalid artifact
-    /// receipt. This catches calls left pending when the agent nevertheless
-    /// responds with EndTurn.
-    pub(crate) fn finish_artifact_delivery_turn(&self, session_id: &str) -> Option<String> {
+    /// Seal the active prompt turn. A normal EndTurn may normalize a provider
+    /// call left InProgress only when its full artifact contract is already
+    /// backed by final, re-verified receipts. The caller must publish returned
+    /// Completed updates before publishing Finish.
+    pub(crate) fn finish_artifact_delivery_turn(
+        &self,
+        session_id: &str,
+        complete_verified_in_progress: bool,
+    ) -> Result<Vec<AcpToolCallEventData>, String> {
         self.artifact_delivery_state
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .finish_turn_with_store(session_id, self.artifact_store.as_deref())
+            .seal_turn_with_store(
+                session_id,
+                self.artifact_store.as_deref(),
+                complete_verified_in_progress,
+            )
     }
 
     pub fn initialize_response(&self) -> Option<InitializeResponse> {

@@ -253,6 +253,27 @@ describe('normalizeToolGroup', () => {
 });
 
 describe('normalizeAcpToolCall', () => {
+  it('does not invent an execute kind for partial ACP failure updates', () => {
+    const result = normalizeAcpToolCall({
+      type: 'acp_tool_call',
+      id: 'msg-partial-failure',
+      conversation_id: CONVERSATION_ID,
+      content: {
+        session_id: 'session-1',
+        update: {
+          sessionUpdate: 'tool_call_update',
+          tool_call_id: 'tool-partial',
+          status: 'failed',
+        },
+      },
+    } as any);
+
+    expect(result?.status).toBe('error');
+    expect(result?.kind).toBeUndefined();
+    expect(result?.description).toBeUndefined();
+    expect(result?.nonFatalFailure).toBeUndefined();
+  });
+
   it('marks failed ACP shell commands as non-fatal process outcomes', () => {
     const result = normalizeAcpToolCall({
       type: 'acp_tool_call',

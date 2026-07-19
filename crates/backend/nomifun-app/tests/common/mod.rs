@@ -148,6 +148,9 @@ impl AgentRuntimeControl for NoopMockAgent {
     fn status(&self) -> Option<nomifun_common::ConversationStatus> {
         None
     }
+    fn is_transport_healthy(&self) -> bool {
+        true
+    }
     fn last_activity_at(&self) -> nomifun_common::TimestampMs {
         nomifun_common::now_ms()
     }

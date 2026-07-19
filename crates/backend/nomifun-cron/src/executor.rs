@@ -3110,6 +3110,10 @@ mod tests {
             Some(ConversationStatus::Pending)
         }
 
+        fn is_transport_healthy(&self) -> bool {
+            true
+        }
+
         fn last_activity_at(&self) -> TimestampMs {
             0
         }

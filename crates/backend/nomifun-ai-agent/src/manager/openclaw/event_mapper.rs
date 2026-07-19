@@ -55,6 +55,33 @@ pub fn map_openclaw_event(
     }
 }
 
+/// Return the gateway run identity carried by a turn-scoped event frame.
+/// Routing code uses this before mutating `TextFallbackState`, so a delayed
+/// frame from an older run cannot latch itself as the new current run.
+pub fn openclaw_event_run_id(event: &EventFrame) -> Option<&str> {
+    event
+        .payload
+        .as_ref()
+        .and_then(|payload| payload.get("runId").or_else(|| payload.get("run_id")))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|run_id| !run_id.is_empty())
+}
+
+pub fn is_openclaw_turn_event(event: &EventFrame) -> bool {
+    matches!(event.event.as_str(), "chat" | "chat.event" | "agent" | "agent.event")
+}
+
+/// Drain frames buffered before `chat.send` returned, retaining only frames
+/// for the run identity in that acknowledgement. Frames from an earlier run
+/// are deliberately discarded rather than being remapped onto the new turn.
+pub(crate) fn drain_events_for_run(pending: &mut Vec<EventFrame>, run_id: &str) -> Vec<EventFrame> {
+    std::mem::take(pending)
+        .into_iter()
+        .filter(|event| openclaw_event_run_id(event) == Some(run_id))
+        .collect()
+}
+
 fn map_chat_event(
     event: &EventFrame,
     text_state: &mut TextFallbackState,
@@ -847,5 +874,24 @@ mod tests {
         assert!(matches!(&events[0], AgentStreamEvent::Start(_)));
         assert!(matches!(&events[1], AgentStreamEvent::Text(_)));
         assert!(state.turn_active);
+    }
+
+    #[test]
+    fn pre_ack_terminal_is_drained_only_for_acknowledged_run() {
+        let mut pending = vec![
+            make_event("chat", json!({ "runId": "run-old", "state": "aborted" })),
+            make_event("chat", json!({ "runId": "run-current", "state": "final" })),
+        ];
+
+        let drained = drain_events_for_run(&mut pending, "run-current");
+        assert!(pending.is_empty(), "all pre-ack frames must leave the pending queue");
+        assert_eq!(drained.len(), 1);
+        assert_eq!(openclaw_event_run_id(&drained[0]), Some("run-current"));
+
+        let mut text_state = TextFallbackState::new();
+        text_state.reset_for_new_turn();
+        text_state.current_run_id = Some("run-current".into());
+        let events = map_openclaw_event(&drained[0], &mut text_state, None);
+        assert!(matches!(events.as_slice(), [AgentStreamEvent::Finish(_)]));
     }
 }
