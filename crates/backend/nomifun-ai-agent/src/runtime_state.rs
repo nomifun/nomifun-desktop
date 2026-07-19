@@ -17,11 +17,27 @@ use nomifun_common::{ConversationStatus, TimestampMs, now_ms};
 
 use crate::protocol::events::{AgentStreamEvent, ErrorEventData, FinishEventData, TurnStopReason};
 
+/// Opaque identity of one accepted turn on a reusable Agent runtime.
+///
+/// A runtime outlives individual prompts.  Terminal work may also finish on a
+/// detached task (provider response, cancellation acknowledgement, panic
+/// guard), so `ConversationStatus::Running` alone cannot tell whether that
+/// work still belongs to the current prompt.  Callers that can outlive their
+/// prompt retain this token and use the scoped terminal APIs below.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AgentRuntimeTurn(u64);
+
+#[derive(Clone, Copy, Debug)]
+struct RuntimeLifecycle {
+    status: Option<ConversationStatus>,
+    turn: u64,
+}
+
 #[derive(Clone)]
 pub struct AgentRuntimeState {
     conversation_id: Arc<str>,
     workspace: Arc<str>,
-    status: Arc<RwLock<Option<ConversationStatus>>>,
+    lifecycle: Arc<RwLock<RuntimeLifecycle>>,
     last_activity: Arc<AtomicI64>,
     event_tx: broadcast::Sender<AgentStreamEvent>,
     finished_notify: Arc<Notify>,
@@ -40,7 +56,10 @@ impl AgentRuntimeState {
         Self {
             conversation_id: Arc::from(conversation_id.into()),
             workspace: Arc::from(workspace.into()),
-            status: Arc::new(RwLock::new(None)),
+            lifecycle: Arc::new(RwLock::new(RuntimeLifecycle {
+                status: None,
+                turn: 0,
+            })),
             last_activity: Arc::new(AtomicI64::new(now_ms())),
             event_tx,
             finished_notify: Arc::new(Notify::new()),
@@ -59,7 +78,7 @@ impl AgentRuntimeState {
     }
 
     pub fn status(&self) -> Option<ConversationStatus> {
-        *self.status.read().unwrap_or_else(|e| e.into_inner())
+        self.lifecycle.read().unwrap_or_else(|e| e.into_inner()).status
     }
 
     pub fn last_activity_at(&self) -> TimestampMs {
@@ -116,24 +135,48 @@ impl AgentRuntimeState {
     /// transitions from Finished to anything else are no-ops (including
     /// Finished → Finished, which is idempotent).
     pub fn transition_to(&self, status: ConversationStatus) {
-        let mut guard = self.status.write().unwrap_or_else(|e| e.into_inner());
-        if matches!(*guard, Some(ConversationStatus::Finished)) {
+        let mut guard = self.lifecycle.write().unwrap_or_else(|e| e.into_inner());
+        if matches!(guard.status, Some(ConversationStatus::Finished)) {
             // Finished is the absorbing state; ignore further writes.
             return;
         }
-        *guard = Some(status);
+        guard.status = Some(status);
     }
 
     /// Force-reset the status so a new turn can emit Finish again.
     /// Only intended for multi-turn agents (e.g. nomi) where the same
     /// runtime instance handles successive user messages.
-    pub fn reset_for_new_turn(&self, status: ConversationStatus) {
-        let mut guard = self.status.write().unwrap_or_else(|e| e.into_inner());
-        *guard = Some(status);
+    ///
+    /// Returns the new turn's opaque identity. Detached work must retain this
+    /// value and use `emit_*_for_turn`; an event from an older token is then
+    /// rejected even after this method changes the status back to `Running`.
+    pub fn reset_for_new_turn(&self, status: ConversationStatus) -> AgentRuntimeTurn {
+        let mut guard = self.lifecycle.write().unwrap_or_else(|e| e.into_inner());
+        guard.turn = guard.turn.wrapping_add(1);
+        // Reserve zero as the pre-turn identity. A wrapping process has run for
+        // 2^64 turns; skipping zero keeps it distinct without platform-specific
+        // atomics or time-based IDs.
+        if guard.turn == 0 {
+            guard.turn = 1;
+        }
+        guard.status = Some(status);
+        AgentRuntimeTurn(guard.turn)
     }
 
     pub fn emit(&self, event: AgentStreamEvent) {
         let _ = self.event_tx.send(event);
+    }
+
+    /// Broadcast a non-terminal event only while `turn` is still the active
+    /// running turn. A delayed provider frame must not append text or tool
+    /// output to a later prompt merely because the runtime is reusable.
+    pub fn emit_for_turn(&self, turn: AgentRuntimeTurn, event: AgentStreamEvent) -> bool {
+        let guard = self.lifecycle.read().unwrap_or_else(|e| e.into_inner());
+        if guard.turn != turn.0 || guard.status != Some(ConversationStatus::Running) {
+            return false;
+        }
+        let _ = self.event_tx.send(event);
+        true
     }
 
     /// Atomic: set status ← Finished AND broadcast `Finish(session_id)`.
@@ -150,24 +193,26 @@ impl AgentRuntimeState {
     /// after `cancel()` already finished the turn) is absorbed instead of
     /// leaking into the next turn's subscription.
     pub fn emit_finish_with_reason(&self, session_id: Option<String>, stop_reason: Option<TurnStopReason>) {
-        let already_finished = {
-            let mut guard = self.status.write().unwrap_or_else(|e| e.into_inner());
-            let was_finished = matches!(*guard, Some(ConversationStatus::Finished));
-            if !was_finished {
-                *guard = Some(ConversationStatus::Finished);
-            }
-            was_finished
-        };
-        if already_finished {
-            return;
-        }
-        let _ = self
-            .event_tx
-            .send(AgentStreamEvent::Finish(FinishEventData {
+        self.emit_terminal(None, AgentStreamEvent::Finish(FinishEventData {
+            session_id,
+            stop_reason,
+        }));
+    }
+
+    /// Emit Finish only if `turn` is still the active turn.
+    pub fn emit_finish_for_turn(
+        &self,
+        turn: AgentRuntimeTurn,
+        session_id: Option<String>,
+        stop_reason: Option<TurnStopReason>,
+    ) -> bool {
+        self.emit_terminal(
+            Some(turn),
+            AgentStreamEvent::Finish(FinishEventData {
                 session_id,
                 stop_reason,
-            }));
-        self.finished_notify.notify_waiters();
+            }),
+        )
     }
 
     /// Atomic: set status ← Finished AND broadcast `Error { message }`.
@@ -192,19 +237,30 @@ impl AgentRuntimeState {
     /// Atomic: set status ← Finished AND broadcast the structured error payload.
     /// Idempotent in the Finished absorbing state (no-op).
     pub fn emit_error_data(&self, data: AgentStreamErrorData) {
-        let already_finished = {
-            let mut guard = self.status.write().unwrap_or_else(|e| e.into_inner());
-            let was_finished = matches!(*guard, Some(ConversationStatus::Finished));
-            if !was_finished {
-                *guard = Some(ConversationStatus::Finished);
-            }
-            was_finished
-        };
-        if already_finished {
-            return;
+        self.emit_terminal(None, AgentStreamEvent::Error(data));
+    }
+
+    /// Emit Error only if `turn` is still the active turn.
+    pub fn emit_error_data_for_turn(&self, turn: AgentRuntimeTurn, data: AgentStreamErrorData) -> bool {
+        self.emit_terminal(Some(turn), AgentStreamEvent::Error(data))
+    }
+
+    fn emit_terminal(&self, expected_turn: Option<AgentRuntimeTurn>, event: AgentStreamEvent) -> bool {
+        let mut guard = self.lifecycle.write().unwrap_or_else(|e| e.into_inner());
+        if expected_turn.is_some_and(|turn| turn.0 != guard.turn)
+            || matches!(guard.status, Some(ConversationStatus::Finished))
+        {
+            return false;
         }
-        let _ = self.event_tx.send(AgentStreamEvent::Error(data));
+
+        guard.status = Some(ConversationStatus::Finished);
+        // `broadcast::send` is synchronous and does not invoke receiver code.
+        // Keep it in the same lifecycle critical section as the Finished
+        // transition so `reset_for_new_turn` cannot start a new turn between
+        // those two halves of one terminal operation.
+        let _ = self.event_tx.send(event);
         self.finished_notify.notify_waiters();
+        true
     }
 }
 
@@ -363,6 +419,33 @@ mod tests {
             }
             other => panic!("expected Finish, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn stale_terminal_cannot_finish_the_next_turn() {
+        let rt = runtime();
+        let first = rt.reset_for_new_turn(ConversationStatus::Running);
+        let mut rx = rt.subscribe();
+        assert!(rt.emit_finish_for_turn(first, Some("sess-1".into()), None));
+        let _ = rx.recv().await.unwrap();
+
+        let second = rt.reset_for_new_turn(ConversationStatus::Running);
+        assert_ne!(first, second);
+
+        assert!(
+            !rt.emit_error_data_for_turn(first, ErrorEventData::legacy("late first-turn error", None)),
+            "an async producer from the previous turn must be rejected by identity"
+        );
+        assert_eq!(rt.status(), Some(ConversationStatus::Running));
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(50), rx.recv())
+                .await
+                .is_err(),
+            "the stale error must not enter the next turn's subscriber"
+        );
+
+        assert!(rt.emit_finish_for_turn(second, Some("sess-2".into()), None));
+        assert!(matches!(rx.recv().await.unwrap(), AgentStreamEvent::Finish(_)));
     }
 
     #[tokio::test]

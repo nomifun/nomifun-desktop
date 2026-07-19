@@ -69,6 +69,7 @@ pub struct NomiAgentManager {
     /// Durable per-turn cancellation token. Unlike `Notify`, cancellation is
     /// retained when kill arrives before `send_message` reaches its select.
     turn_cancel: std::sync::Mutex<tokio_util::sync::CancellationToken>,
+    active_turn: Arc<std::sync::Mutex<Option<crate::runtime_state::AgentRuntimeTurn>>>,
     /// Serializes turn admission with permanent task shutdown.
     lifecycle_gate: std::sync::Mutex<()>,
     /// Holds for the complete send lifecycle. A second send waits here and
@@ -571,6 +572,7 @@ impl NomiAgentManager {
             approval_manager,
             confirmations,
             turn_cancel: std::sync::Mutex::new(tokio_util::sync::CancellationToken::new()),
+            active_turn: Arc::new(std::sync::Mutex::new(None)),
             lifecycle_gate: std::sync::Mutex::new(()),
             turn_gate: Mutex::new(()),
             closing: AtomicBool::new(false),
@@ -597,6 +599,7 @@ impl NomiAgentManager {
             self.closing.store(true, Ordering::Release);
         }
         let was_running = self.runtime.status() == Some(ConversationStatus::Running);
+        let runtime_turn = *self.active_turn.lock().unwrap_or_else(|e| e.into_inner());
 
         self.turn_cancel
             .lock()
@@ -622,8 +625,20 @@ impl NomiAgentManager {
             self.backend_output_sink.cancel_active_tool_calls(
                 "The tool call was cancelled before the turn could finish.",
             );
-            self.runtime
-                .emit_finish_with_reason(None, Some(TurnStopReason::Cancelled));
+            if let Some(runtime_turn) = runtime_turn {
+                self.runtime.emit_finish_for_turn(
+                    runtime_turn,
+                    None,
+                    Some(TurnStopReason::Cancelled),
+                );
+            } else {
+                // Initial Pending/idle managers have no accepted turn token,
+                // but their stop contract still requires a terminal boundary.
+                // Between real turns the absorbing Finished state makes this
+                // a no-op, so it cannot terminate a later reset turn.
+                self.runtime
+                    .emit_finish_with_reason(None, Some(TurnStopReason::Cancelled));
+            }
         }
 
         info!(
@@ -654,6 +669,10 @@ impl crate::runtime_handle::AgentRuntimeControl for NomiAgentManager {
         self.runtime.status()
     }
 
+    fn is_transport_healthy(&self) -> bool {
+        self.runtime.is_transport_healthy()
+    }
+
     fn last_activity_at(&self) -> TimestampMs {
         self.runtime.last_activity_at()
     }
@@ -670,7 +689,7 @@ impl crate::runtime_handle::AgentRuntimeControl for NomiAgentManager {
             "Nomi send_message started"
         );
         let _turn = self.turn_gate.lock().await;
-        let turn_cancel = {
+        let (turn_cancel, runtime_turn) = {
             let _lifecycle = self
                 .lifecycle_gate
                 .lock()
@@ -686,8 +705,9 @@ impl crate::runtime_handle::AgentRuntimeControl for NomiAgentManager {
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner()) = token.clone();
             self.runtime.bump_activity();
-            self.runtime.reset_for_new_turn(ConversationStatus::Running);
-            token
+            let runtime_turn = self.runtime.reset_for_new_turn(ConversationStatus::Running);
+            *self.active_turn.lock().unwrap_or_else(|e| e.into_inner()) = Some(runtime_turn);
+            (token, runtime_turn)
         };
 
         // Backstop: guarantee a terminal event even if this turn unwinds
@@ -695,6 +715,8 @@ impl crate::runtime_handle::AgentRuntimeControl for NomiAgentManager {
         // after the real terminal event is emitted below. (Phase 0 F0.2)
         let mut term_guard = TurnTerminationGuard {
             runtime: self.runtime.clone(),
+            turn: runtime_turn,
+            active_turn: Arc::clone(&self.active_turn),
             backend_output_sink: self.backend_output_sink.clone(),
             armed: true,
         };
@@ -744,7 +766,7 @@ impl crate::runtime_handle::AgentRuntimeControl for NomiAgentManager {
                         "The turn failed while loading its attachments.",
                     );
                     self.runtime
-                        .emit_error_data(send_error.stream_error().clone());
+                        .emit_error_data_for_turn(runtime_turn, send_error.stream_error().clone());
                     term_guard.disarm();
                     return Err(send_error);
                 }
@@ -876,8 +898,11 @@ impl crate::runtime_handle::AgentRuntimeControl for NomiAgentManager {
             self.backend_output_sink.cancel_active_tool_calls(
                 "The tool call was cancelled because the user stopped the turn.",
             );
-            self.runtime
-                .emit_finish_with_reason(None, Some(TurnStopReason::Cancelled));
+            self.runtime.emit_finish_for_turn(
+                runtime_turn,
+                None,
+                Some(TurnStopReason::Cancelled),
+            );
             term_guard.disarm();
             return Ok(());
         };
@@ -916,7 +941,7 @@ impl crate::runtime_handle::AgentRuntimeControl for NomiAgentManager {
                         "Artifact delivery failed: {delivery_error}"
                     )));
                     self.runtime
-                        .emit_error_data(send_error.stream_error().clone());
+                        .emit_error_data_for_turn(runtime_turn, send_error.stream_error().clone());
                     term_guard.disarm();
                     return Err(send_error);
                 }
@@ -966,7 +991,8 @@ impl crate::runtime_handle::AgentRuntimeControl for NomiAgentManager {
                     });
                 }
 
-                self.runtime.emit_finish_with_reason(None, Some(stop_reason));
+                self.runtime
+                    .emit_finish_for_turn(runtime_turn, None, Some(stop_reason));
                 Ok(())
             }
             Err(e) => {
@@ -981,7 +1007,8 @@ impl crate::runtime_handle::AgentRuntimeControl for NomiAgentManager {
                 self.backend_output_sink.fail_active_tool_calls(&format!(
                     "The model/provider turn failed before this tool call completed: {e}"
                 ));
-                self.runtime.emit_error_data(send_error.stream_error().clone());
+                self.runtime
+                    .emit_error_data_for_turn(runtime_turn, send_error.stream_error().clone());
                 Err(send_error)
             }
         };
@@ -1012,6 +1039,8 @@ impl crate::runtime_handle::AgentRuntimeControl for NomiAgentManager {
 /// never leak a spurious terminal event past a real one. (Phase 0 F0.2)
 struct TurnTerminationGuard {
     runtime: AgentRuntimeState,
+    turn: crate::runtime_state::AgentRuntimeTurn,
+    active_turn: Arc<std::sync::Mutex<Option<crate::runtime_state::AgentRuntimeTurn>>>,
     backend_output_sink: Arc<BackendOutputSink>,
     armed: bool,
 }
@@ -1024,12 +1053,17 @@ impl TurnTerminationGuard {
 
 impl Drop for TurnTerminationGuard {
     fn drop(&mut self) {
+        let mut active_turn = self.active_turn.lock().unwrap_or_else(|e| e.into_inner());
+        if active_turn.as_ref() == Some(&self.turn) {
+            *active_turn = None;
+        }
+        drop(active_turn);
         if self.armed {
             self.backend_output_sink.cancel_active_tool_calls(
                 "The turn ended unexpectedly before this tool call reached a terminal state.",
             );
             self.runtime
-                .emit_finish_with_reason(None, Some(TurnStopReason::Cancelled));
+                .emit_finish_for_turn(self.turn, None, Some(TurnStopReason::Cancelled));
         }
     }
 }
@@ -1557,6 +1591,7 @@ mod tests {
             approval_manager,
             confirmations,
             turn_cancel: std::sync::Mutex::new(tokio_util::sync::CancellationToken::new()),
+            active_turn: Arc::new(std::sync::Mutex::new(None)),
             lifecycle_gate: std::sync::Mutex::new(()),
             turn_gate: Mutex::new(()),
             closing: AtomicBool::new(false),
@@ -1667,6 +1702,7 @@ mod tests {
             approval_manager,
             confirmations: Arc::new(std::sync::RwLock::new(Vec::new())),
             turn_cancel: std::sync::Mutex::new(tokio_util::sync::CancellationToken::new()),
+            active_turn: Arc::new(std::sync::Mutex::new(None)),
             lifecycle_gate: std::sync::Mutex::new(()),
             turn_gate: Mutex::new(()),
             closing: AtomicBool::new(false),
@@ -2722,11 +2758,15 @@ mod tests {
         let rt = AgentRuntimeState::new("c-guard", "/w", 16);
         let mut rx = rt.subscribe();
         let backend_output_sink = Arc::new(BackendOutputSink::new(rt.event_sender()));
+        let turn = rt.reset_for_new_turn(ConversationStatus::Running);
+        let active_turn = Arc::new(std::sync::Mutex::new(Some(turn)));
         backend_output_sink.emit_tool_call("guarded-call", "Write", "{}");
         assert!(matches!(rx.try_recv(), Ok(AgentStreamEvent::ToolCall(_))));
         {
             let _g = TurnTerminationGuard {
                 runtime: rt.clone(),
+                turn,
+                active_turn,
                 backend_output_sink,
                 armed: true,
             };
@@ -2753,9 +2793,13 @@ mod tests {
         let rt = AgentRuntimeState::new("c-guard2", "/w", 16);
         let mut rx = rt.subscribe();
         let backend_output_sink = Arc::new(BackendOutputSink::new(rt.event_sender()));
+        let turn = rt.reset_for_new_turn(ConversationStatus::Running);
+        let active_turn = Arc::new(std::sync::Mutex::new(Some(turn)));
         {
             let mut g = TurnTerminationGuard {
                 runtime: rt.clone(),
+                turn,
+                active_turn,
                 backend_output_sink,
                 armed: true,
             };

@@ -371,6 +371,7 @@ const fromApiConversationArtifact = (
 const fromApiResponseMessage = (message: IResponseMessage): IResponseMessage => ({
   ...message,
   msg_id: parseMessageId(message.msg_id),
+  turn_id: message.turn_id == null ? undefined : parseMessageId(message.turn_id),
   conversation_id: parseConversationId(message.conversation_id),
   companion_id:
     message.companion_id == null ? message.companion_id : parseCompanionId(message.companion_id),
@@ -2388,6 +2389,9 @@ export interface IResponseMessage {
   status?: 'finish' | 'pending' | 'error' | 'work';
   /** messages.id stays TEXT (`msg_…`). */
   msg_id: MessageId;
+  /** Stable owning turn identity. It is distinct from msg_id for first-class
+   * terminal/error rows and continuation message segments. */
+  turn_id?: MessageId;
   /** Canonical owning conversation entity ID. */
   conversation_id: ConversationId;
   created_at?: number;

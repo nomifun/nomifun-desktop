@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { ConversationId } from '@/common/types/ids';
+import { parseMessageId, type ConversationId, type MessageId } from '@/common/types/ids';
 import { ipcBridge } from '@/common';
 import type { AgentStreamErrorInfo, IMessageThinking, IMessageTips, TMessage } from '@/common/chat/chatLib';
 import { toDisplayText } from '@/common/chat/displayText';
@@ -44,7 +44,7 @@ const getToolLifecycleKey = (message: TMessage, callId: string): string => {
     message.content && typeof message.content === 'object' && 'turn_id' in message.content
       ? toDisplayText((message.content as { turn_id?: unknown }).turn_id)
       : '';
-  const turnId = contentTurnId || message.msg_id || message.id;
+  const turnId = message.turn_id || contentTurnId || message.msg_id || message.id;
   return `${turnId}:${callId}`;
 };
 
@@ -55,7 +55,11 @@ function getMessageIndexKey(message: TMessage): string | undefined {
     const backend = typeof message.content?.backend === 'string' ? message.content.backend : 'agent';
     return `agent_status:${message.msg_id}:${backend}`;
   }
-  return message.msg_id;
+  // A msg_id identifies the owning stream segment, not a renderer row. Text,
+  // tips, plans and tool/status events can legitimately share it. Keeping a
+  // type namespace prevents a terminal error from replacing the successful
+  // assistant text that preceded it (and vice versa).
+  return `${message.type}:${message.msg_id}`;
 }
 
 const compactThinkingStreamText = (value: unknown): string => toDisplayText(value).replace(/\s+/g, ' ').trim();
@@ -141,7 +145,7 @@ function composeMessageWithIndex(message: TMessage | undefined, list: TMessage[]
   }
 
   if (message.type === 'text' && message.content.knowledge_writeback && message.msg_id) {
-    const existingIdx = index.msgIdIndex.get(message.msg_id);
+    const existingIdx = index.msgIdIndex.get(getMessageIndexKey(message)!);
     if (existingIdx !== undefined && existingIdx < list.length) {
       const existingMsg = list[existingIdx];
       if (existingMsg.type === 'text') {
@@ -158,7 +162,7 @@ function composeMessageWithIndex(message: TMessage | undefined, list: TMessage[]
     }
 
     const newIdx = list.length;
-    index.msgIdIndex.set(message.msg_id, newIdx);
+    index.msgIdIndex.set(getMessageIndexKey(message)!, newIdx);
     return list.concat(message);
   }
 
@@ -254,7 +258,8 @@ function composeMessageWithIndex(message: TMessage | undefined, list: TMessage[]
   // text message: merge only with the latest contiguous streaming chunk.
   // text 消息: 只与最后一条连续的流式片段合并，保留被工具/思考打断后的消息边界。
   if (message.type === 'text' && message.msg_id) {
-    const existingIdx = index.msgIdIndex.get(message.msg_id);
+    const textKey = getMessageIndexKey(message)!;
+    const existingIdx = index.msgIdIndex.get(textKey);
     if (existingIdx !== undefined && existingIdx < list.length) {
       const existingMsg = list[existingIdx];
       if (existingMsg.type === 'text') {
@@ -293,7 +298,7 @@ function composeMessageWithIndex(message: TMessage | undefined, list: TMessage[]
     }
 
     const newIdx = list.length;
-    index.msgIdIndex.set(message.msg_id, newIdx);
+    index.msgIdIndex.set(textKey, newIdx);
     return list.concat(message);
   }
 
@@ -344,7 +349,7 @@ function composeMessageWithIndex(message: TMessage | undefined, list: TMessage[]
   // then fall back to the plan session id so a later turn can refresh the same
   // visible checklist even when the backend minted a new message id.
   if (message.type === 'plan') {
-    let existingIdx = message.msg_id ? index.msgIdIndex.get(message.msg_id) : undefined;
+    let existingIdx = message.msg_id ? index.msgIdIndex.get(getMessageIndexKey(message)!) : undefined;
     if (existingIdx !== undefined && list[existingIdx]?.type !== 'plan') {
       existingIdx = undefined;
     }
@@ -563,6 +568,21 @@ const parseJsonArray = (value: unknown): unknown[] | undefined => {
 const normalizeTipType = (value: unknown, fallback: IMessageTips['content']['type']) =>
   value === 'success' || value === 'warning' || value === 'error' ? value : fallback;
 
+const normalizePersistedTurnId = (value: unknown): MessageId | undefined => {
+  if (typeof value !== 'string') return undefined;
+  try {
+    return parseMessageId(value);
+  } catch {
+    return undefined;
+  }
+};
+
+const resolvePersistedTurnId = (
+  msg: TMessage,
+  parsed: Record<string, unknown>
+): MessageId | undefined =>
+  normalizePersistedTurnId(msg.turn_id) ?? normalizePersistedTurnId(parsed.turn_id);
+
 const normalizePersistedWorkspaceRuntimeError = (
   parsed: Record<string, unknown>,
   message: string
@@ -674,6 +694,7 @@ const normalizeDbTipsMessage = (msg: TMessage): TMessage => {
       ? existingContent.type
       : 'error';
   const tipType = normalizeTipType(parsed.type, fallbackType);
+  const turnId = resolvePersistedTurnId(msg, parsed);
   const structuredError =
     tipType === 'error'
       ? (normalizePersistedWorkspaceRuntimeError(parsed, parsed.content) ??
@@ -684,6 +705,7 @@ const normalizeDbTipsMessage = (msg: TMessage): TMessage => {
 
   return {
     ...msg,
+    turn_id: turnId,
     content: {
       content: parsed.content,
       type: tipType,
@@ -703,6 +725,7 @@ export function normalizeDbMessage(msg: TMessage): TMessage {
     const content = normalizeToolCallContent(parsed, msg.status ?? null);
     return {
       ...msg,
+      turn_id: resolvePersistedTurnId(msg, parsed),
       content,
       status: content.status === 'error' ? 'error' : msg.status,
     };
@@ -712,6 +735,7 @@ export function normalizeDbMessage(msg: TMessage): TMessage {
     const content = normalizeAcpToolCallContent(parsed, msg.status ?? null);
     return {
       ...msg,
+      turn_id: resolvePersistedTurnId(msg, parsed),
       content,
       status: content.update?.status === 'failed' ? 'error' : msg.status,
     };
@@ -733,6 +757,7 @@ export function normalizeDbMessage(msg: TMessage): TMessage {
     const knowledgeWriteback = normalizeKnowledgeWritebackState(parsed.knowledge_writeback);
     return {
       ...msg,
+      turn_id: resolvePersistedTurnId(msg, parsed),
       content: {
         content: parsed.content as string,
         ...(knowledgeWriteback ? { knowledge_writeback: knowledgeWriteback } : {}),
@@ -760,6 +785,15 @@ const getFetchedMergeKey = (message: TMessage): string | undefined => {
     return `acp_tool_call:${getToolLifecycleKey(message, message.content.update.tool_call_id)}`;
   }
   return `${message.type}:${message.msg_id}`;
+};
+
+const compareTranscriptOrder = (left: TMessage, right: TMessage): number => {
+  const leftCreatedAt = left.created_at ?? Number.MAX_SAFE_INTEGER;
+  const rightCreatedAt = right.created_at ?? Number.MAX_SAFE_INTEGER;
+  if (leftCreatedAt !== rightCreatedAt) return leftCreatedAt - rightCreatedAt;
+  // IDs are canonical ASCII. Avoid localeCompare so ordering is identical
+  // across Windows/macOS/Linux regardless of the host ICU locale.
+  return left.id === right.id ? 0 : left.id < right.id ? -1 : 1;
 };
 
 const getThinkingTextLength = (message: IMessageThinking): number => {
@@ -836,11 +870,16 @@ export const mergeFetchedMessagesForConversation = (
   const streamingOnly = sameConversation.filter((message) => {
     if (dbIds.has(message.id)) return false;
     const key = getFetchedMergeKey(message);
-    return !key || !dbKeys.has(key);
+    if (key && dbKeys.has(key)) return false;
+
+    // This is a chronological union, not an append-only streaming tail. Rows
+    // from older keyset pages and genuinely in-flight rows both remain visible;
+    // canonical IDs/keys above remove their persisted live counterparts.
+    return true;
   });
 
   if (!streamingOnly.length && !streamingByKey.size) return messages;
-  return [...mergedMessages, ...streamingOnly];
+  return [...mergedMessages, ...streamingOnly].sort(compareTranscriptOrder);
 };
 
 /**
@@ -867,11 +906,21 @@ export const useMessageLstCache = (key: ConversationId, opts?: { windowed?: bool
   const oldestCursorRef = useRef<string | null>(null);
   const hasMoreRef = useRef(false);
   const loadingOlderRef = useRef(false);
+  const newestLoadSequenceRef = useRef(0);
+  const activeConversationRef = useRef<ConversationId>(key);
+
+  // Providers are shared by the mounted chat surface. Invalidate outstanding
+  // fetches synchronously when routing to another conversation so a slower old
+  // request can never replace the new conversation's transcript.
+  if (activeConversationRef.current !== key) {
+    newestLoadSequenceRef.current += 1;
+    activeConversationRef.current = key;
+  }
 
   // Merge a freshly fetched DB page (newest window or full list) with any
   // in-flight streaming messages for this conversation. During streaming the DB
   // may hold an older snapshot (2000ms save debounce), so we keep whichever
-  // version has more content and append streaming-only rows at the tail.
+  // version has more content and build a stable chronological union.
   const mergeIntoList = useCallback(
     (messages: TMessage[]) => {
       update((currentList) => {
@@ -882,12 +931,20 @@ export const useMessageLstCache = (key: ConversationId, opts?: { windowed?: bool
   );
 
   const loadMessages = useCallback(async (): Promise<TMessage[]> => {
+    const loadSequence = newestLoadSequenceRef.current + 1;
+    newestLoadSequenceRef.current = loadSequence;
     const result = await ipcBridge.database.getConversationMessages.invoke(
       windowed
         ? { conversation_id: key, cursor: '', page_size: HISTORY_WINDOW_SIZE, content_mode: 'compact' }
         : { conversation_id: key, page: 0, page_size: 10000, content_mode: 'compact' }
     );
     const messages = result?.items?.map(normalizeDbMessage);
+    if (
+      activeConversationRef.current !== key ||
+      newestLoadSequenceRef.current !== loadSequence
+    ) {
+      return [];
+    }
     if (windowed) {
       hasMoreRef.current = Boolean(result?.has_more);
       setHasMore(hasMoreRef.current);
@@ -917,6 +974,7 @@ export const useMessageLstCache = (key: ConversationId, opts?: { windowed?: bool
         content_mode: 'compact',
       });
       const older = result?.items?.map(normalizeDbMessage) ?? [];
+      if (activeConversationRef.current !== key) return;
       hasMoreRef.current = Boolean(result?.has_more);
       setHasMore(hasMoreRef.current);
       if (older.length) {
@@ -954,6 +1012,7 @@ export const useMessageLstCache = (key: ConversationId, opts?: { windowed?: bool
       });
     return () => {
       cancelled = true;
+      newestLoadSequenceRef.current += 1;
     };
   }, [key, loadMessages, setLoading]);
 

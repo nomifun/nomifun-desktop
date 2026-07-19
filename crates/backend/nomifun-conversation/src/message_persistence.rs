@@ -16,13 +16,19 @@ pub(crate) fn images_stripped_tip_content() -> String {
 }
 
 impl ConversationService {
-    pub(crate) async fn persist_send_failure_tip(&self, conversation_id: &str, err: &AppError) -> Option<MessageRow> {
+    pub(crate) async fn persist_send_failure_tip(
+        &self,
+        conversation_id: &str,
+        turn_id: Option<&str>,
+        err: &AppError,
+    ) -> Option<MessageRow> {
         let conv_id = conversation_id.to_owned();
         let stream_error = AgentSendError::from_app_error_ref(err).into_stream_error();
+        let id = Self::mint_msg_id();
         let row = MessageRow {
-            id: Self::mint_msg_id(),
+            id: id.clone(),
             conversation_id: conv_id,
-            msg_id: None,
+            msg_id: Some(id),
             r#type: "tips".into(),
             content: serde_json::json!({
                 "content": &stream_error.message,
@@ -31,6 +37,7 @@ impl ConversationService {
                 "code": err.error_code(),
                 "details": err.error_details(),
                 "error": stream_error,
+                "turn_id": turn_id,
             })
             .to_string(),
             position: Some("center".into()),

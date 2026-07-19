@@ -62,6 +62,9 @@ impl AgentRuntimeControl for CompletingNomiAgent {
     fn status(&self) -> Option<ConversationStatus> {
         Some(ConversationStatus::Running)
     }
+    fn is_transport_healthy(&self) -> bool {
+        true
+    }
     fn last_activity_at(&self) -> TimestampMs {
         now_ms()
     }

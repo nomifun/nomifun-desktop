@@ -3,7 +3,7 @@ import { ipcBridge } from '@/common';
 import type { IConversationMcpStatus } from '@/common/config/storage';
 import { isBackendHttpError } from '@/common/adapter/httpBridge';
 import { isSideQuestionSupported } from '@/common/chat/sideQuestion';
-import { parseError, prefixedId } from '@/common/utils';
+import { parseError } from '@/common/utils';
 import AgentModeSelector from '@/renderer/components/agent/AgentModeSelector';
 import AcpModelSelector from '@/renderer/components/agent/AcpModelSelector';
 import CommandQueuePanel from '@/renderer/components/chat/CommandQueuePanel';
@@ -50,7 +50,6 @@ import { Message, Tag } from '@arco-design/web-react';
 import { Brain, MagicHat, Shield } from '@icon-park/react';
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { buildSendFailureError } from './buildSendFailureError';
 import type { UseAcpMessageReturn } from './useAcpMessage';
 
 const useAcpSendBoxDraft = getSendBoxDraftHook('acp', {
@@ -310,37 +309,9 @@ const AcpSendBox: React.FC<{
 
 Please check your local CLI tool authentication status`,
           });
-          addOrUpdateMessageRef.current(
-            {
-              id: prefixedId('msg'),
-              type: 'tips',
-              position: 'center',
-              conversation_id,
-              created_at: Date.now(),
-              content: {
-                content,
-                type: 'error',
-                error: buildSendFailureError(error, content),
-              },
-            },
-            true
-          );
+          Message.error({ content, duration: 8000 });
         } else {
-          addOrUpdateMessageRef.current(
-            {
-              id: prefixedId('msg'),
-              type: 'tips',
-              position: 'center',
-              conversation_id,
-              created_at: Date.now(),
-              content: {
-                content: errorMsg,
-                type: 'error',
-                error: buildSendFailureError(error, errorMsg),
-              },
-            },
-            true
-          );
+          Message.error({ content: errorMsg, duration: 6000 });
         }
 
         setAiProcessing(false);

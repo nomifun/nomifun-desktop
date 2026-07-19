@@ -7,7 +7,7 @@ use serde_json::{Value, json};
 use tokio::sync::{Mutex, RwLock, broadcast};
 use tracing::{debug, error, info, warn};
 
-use crate::runtime_state::AgentRuntimeState;
+use crate::runtime_state::{AgentRuntimeState, AgentRuntimeTurn};
 use crate::capability::cli_process::CliAgentProcess;
 use crate::manager::process_registry::register_session_process;
 use crate::protocol::events::AgentStreamEvent;
@@ -18,10 +18,12 @@ use nomifun_api_types::OpenClawBuildExtra;
 use super::config::load_openclaw_config;
 use super::connection::{AuthConfig, OpenClawConnection};
 use super::device_identity::load_or_create_identity;
-use super::event_mapper::{TextFallbackState, map_openclaw_event};
+use super::event_mapper::{
+    TextFallbackState, drain_events_for_run, is_openclaw_turn_event, map_openclaw_event, openclaw_event_run_id,
+};
 use super::protocol::{
-    ChatAbortParams, ChatSendParams, SessionsResetParams, SessionsResetResponse, SessionsResolveParams,
-    SessionsResolveResponse, normalize_ws_url,
+    ChatAbortParams, ChatSendParams, EventFrame, SessionsResetParams, SessionsResetResponse,
+    SessionsResolveParams, SessionsResolveResponse, normalize_ws_url,
 };
 
 mod confirmations;
@@ -42,7 +44,59 @@ pub(super) struct OpenClawState {
     pub(super) has_messages: bool,
     pub(super) active_run_id: Option<String>,
     pub(super) turn_generation: u64,
+    pub(super) runtime_turn: Option<AgentRuntimeTurn>,
+    pending_run_events: Vec<EventFrame>,
     pub(super) approval_memory: HashMap<String, bool>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct GatewayRunTurn {
+    run_id: String,
+    runtime_turn: AgentRuntimeTurn,
+}
+
+fn gateway_turn_is_current(state: &OpenClawState, gateway_turn: &GatewayRunTurn) -> bool {
+    state.active_run_id.as_deref() == Some(gateway_turn.run_id.as_str())
+        && state.runtime_turn == Some(gateway_turn.runtime_turn)
+}
+
+fn admit_gateway_turn(state: &mut OpenClawState, runtime_turn: AgentRuntimeTurn) -> bool {
+    let is_first = !state.has_messages;
+    state.active_run_id = None;
+    state.turn_generation = state.turn_generation.wrapping_add(1);
+    state.runtime_turn = Some(runtime_turn);
+    state.pending_run_events.clear();
+    is_first
+}
+
+fn abandon_gateway_turn(state: &mut OpenClawState, runtime_turn: AgentRuntimeTurn) {
+    if state.runtime_turn == Some(runtime_turn) {
+        state.active_run_id = None;
+        state.runtime_turn = None;
+        state.pending_run_events.clear();
+    }
+}
+
+async fn map_event_for_gateway_turn(
+    state: &RwLock<OpenClawState>,
+    text_state: &Mutex<TextFallbackState>,
+    event_frame: &EventFrame,
+    gateway_turn: &GatewayRunTurn,
+) -> Option<Vec<AgentStreamEvent>> {
+    // The read guard is intentionally held across mapper mutation. New-turn
+    // admission requires the write guard before it resets `text_state`, which
+    // makes check+map and reset one linearized order.
+    let state = state.read().await;
+    if !gateway_turn_is_current(&state, gateway_turn) {
+        return None;
+    }
+    let session_key = state.session_key.clone();
+    let mut text_state = text_state.lock().await;
+    Some(map_openclaw_event(
+        event_frame,
+        &mut text_state,
+        session_key.as_deref(),
+    ))
 }
 
 pub struct OpenClawAgentManager {
@@ -188,6 +242,8 @@ impl OpenClawAgentManager {
                 has_messages: has_resume_key,
                 active_run_id: None,
                 turn_generation: 0,
+                runtime_turn: None,
+                pending_run_events: Vec::new(),
                 approval_memory: HashMap::new(),
             })),
             text_state: Mutex::new(TextFallbackState::new()),
@@ -212,20 +268,7 @@ impl OpenClawAgentManager {
                 event = event_rx.recv() => match event {
                     Ok(event_frame) => {
                         self.runtime.bump_activity();
-
-                        let session_key = self.state.read().await.session_key.clone();
-
-                        let stream_events = {
-                            let mut text_state = self.text_state.lock().await;
-                            map_openclaw_event(&event_frame, &mut text_state, session_key.as_deref())
-                        };
-
-                        for stream_event in stream_events {
-                            self.update_state_from_event(&stream_event).await;
-                            if !matches!(stream_event, AgentStreamEvent::Finish(_) | AgentStreamEvent::Error(_)) {
-                                self.runtime.emit(stream_event);
-                            }
-                        }
+                        self.route_event_frame(event_frame).await;
                     }
                     Err(broadcast::error::RecvError::Lagged(n)) => {
                         warn!(
@@ -251,28 +294,159 @@ impl OpenClawAgentManager {
         }
     }
 
-    async fn update_state_from_event(&self, event: &AgentStreamEvent) {
+    async fn route_event_frame(&self, event_frame: EventFrame) {
+        let gateway_turn = if is_openclaw_turn_event(&event_frame) {
+            let Some(event_run_id) = openclaw_event_run_id(&event_frame).map(str::to_owned) else {
+                warn!(
+                    conversation_id = %self.runtime.conversation_id(),
+                    event = %event_frame.event,
+                    "Dropping turn-scoped OpenClaw event without runId"
+                );
+                return;
+            };
+            let mut state = self.state.write().await;
+            match (state.active_run_id.as_deref(), state.runtime_turn) {
+                (Some(active_run_id), Some(runtime_turn)) if active_run_id == event_run_id => {
+                    Some(GatewayRunTurn {
+                        run_id: event_run_id,
+                        runtime_turn,
+                    })
+                }
+                (Some(active_run_id), _) => {
+                    debug!(
+                        conversation_id = %self.runtime.conversation_id(),
+                        %event_run_id,
+                        %active_run_id,
+                        "Dropping delayed OpenClaw event from another run"
+                    );
+                    return;
+                }
+                (None, Some(_)) if self.runtime.status() == Some(ConversationStatus::Running) =>
+                {
+                    const MAX_PENDING_RUN_EVENTS: usize = 256;
+                    if state.pending_run_events.len() < MAX_PENDING_RUN_EVENTS {
+                        state.pending_run_events.push(event_frame);
+                    } else {
+                        drop(state);
+                        self.runtime.emit_stream_broken(
+                            "OpenClaw produced too many events before acknowledging chat.send",
+                        );
+                    }
+                    return;
+                }
+                (None, _) => return,
+            }
+        } else {
+            None
+        };
+        self.process_event_frame(event_frame, gateway_turn).await;
+    }
+
+    async fn process_event_frame(&self, event_frame: EventFrame, gateway_turn: Option<GatewayRunTurn>) {
+        let stream_events = if let Some(gateway_turn) = gateway_turn.as_ref() {
+            // Keep the run/token validation guard across mutation of the
+            // shared mapper state. A new turn needs this state write lock
+            // before resetting TextFallbackState, so an old frame can finish
+            // mapping before that reset or be rejected after it—never write
+            // into the new turn between check and map.
+            let Some(events) = map_event_for_gateway_turn(
+                &self.state,
+                &self.text_state,
+                &event_frame,
+                gateway_turn,
+            )
+            .await
+            else {
+                return;
+            };
+            events
+        } else {
+            let session_key = self.state.read().await.session_key.clone();
+            let mut text_state = self.text_state.lock().await;
+            map_openclaw_event(&event_frame, &mut text_state, session_key.as_deref())
+        };
+
+        for stream_event in stream_events {
+            self.update_state_from_event(&stream_event, gateway_turn.as_ref()).await;
+            if !matches!(stream_event, AgentStreamEvent::Finish(_) | AgentStreamEvent::Error(_)) {
+                if let Some(gateway_turn) = gateway_turn.as_ref() {
+                    self.runtime.emit_for_turn(gateway_turn.runtime_turn, stream_event);
+                } else {
+                    self.runtime.emit(stream_event);
+                }
+            }
+        }
+    }
+
+    async fn bind_run_to_active_turn(&self, runtime_turn: AgentRuntimeTurn, run_id: String) -> bool {
+        let pending = {
+            let mut state = self.state.write().await;
+            if state.runtime_turn != Some(runtime_turn) {
+                return false;
+            }
+            // Lock order is always manager state -> text mapper state. Anchor
+            // the mapper before making active_run_id visible to the relay.
+            self.text_state.lock().await.current_run_id = Some(run_id.clone());
+            state.active_run_id = Some(run_id.clone());
+            state.has_messages = true;
+            drain_events_for_run(&mut state.pending_run_events, &run_id)
+        };
+        for event in pending {
+            self.process_event_frame(
+                event,
+                Some(GatewayRunTurn {
+                    run_id: run_id.clone(),
+                    runtime_turn,
+                }),
+            )
+            .await;
+        }
+        true
+    }
+
+    async fn update_state_from_event(&self, event: &AgentStreamEvent, gateway_turn: Option<&GatewayRunTurn>) {
         match event {
             AgentStreamEvent::Start(data) => {
-                self.runtime.transition_to(ConversationStatus::Running);
-                if let Some(ref sid) = data.session_id {
+                if let (Some(gateway_turn), Some(sid)) = (gateway_turn, data.session_id.as_ref()) {
                     let mut state = self.state.write().await;
-                    state.session_key = Some(sid.clone());
+                    if state.active_run_id.as_deref() == Some(gateway_turn.run_id.as_str())
+                        && state.runtime_turn == Some(gateway_turn.runtime_turn)
+                    {
+                        state.session_key = Some(sid.clone());
+                    }
                 }
             }
             AgentStreamEvent::Finish(data) => {
+                let Some(gateway_turn) = gateway_turn else { return };
                 let mut state = self.state.write().await;
-                state.active_run_id = None;
-                if let Some(ref sid) = data.session_id {
-                    state.session_key = Some(sid.clone());
+                let is_same_run = state.active_run_id.as_deref() == Some(gateway_turn.run_id.as_str())
+                    && state.runtime_turn == Some(gateway_turn.runtime_turn);
+                if is_same_run {
+                    state.active_run_id = None;
+                    state.runtime_turn = None;
+                    if let Some(ref sid) = data.session_id {
+                        state.session_key = Some(sid.clone());
+                    }
+                }
+                drop(state);
+                self.runtime.emit_finish_for_turn(
+                    gateway_turn.runtime_turn,
+                    data.session_id.clone(),
+                    data.stop_reason,
+                );
+            }
+            AgentStreamEvent::Error(data) => {
+                let Some(gateway_turn) = gateway_turn else { return };
+                let mut state = self.state.write().await;
+                if state.active_run_id.as_deref() == Some(gateway_turn.run_id.as_str())
+                    && state.runtime_turn == Some(gateway_turn.runtime_turn)
+                {
+                    state.active_run_id = None;
+                    state.runtime_turn = None;
                 }
                 drop(state);
                 self.runtime
-                    .emit_finish_with_reason(data.session_id.clone(), data.stop_reason);
-            }
-            AgentStreamEvent::Error(data) => {
-                self.state.write().await.active_run_id = None;
-                self.runtime.emit_error_data(data.clone());
+                    .emit_error_data_for_turn(gateway_turn.runtime_turn, data.clone());
             }
             AgentStreamEvent::AcpPermission(data) => {
                 if let Some(conf) = data.as_confirmation() {
@@ -288,7 +462,12 @@ impl OpenClawAgentManager {
         }
     }
 
-    async fn do_send_message(&self, is_first: bool, data: SendMessageData) -> Result<(), AppError> {
+    async fn do_send_message(
+        &self,
+        is_first: bool,
+        runtime_turn: AgentRuntimeTurn,
+        data: SendMessageData,
+    ) -> Result<(), AppError> {
         if is_first {
             self.resolve_session().await?;
         }
@@ -323,7 +502,7 @@ impl OpenClawAgentManager {
             .filter(|run_id| !run_id.trim().is_empty())
             .map(ToOwned::to_owned)
             .ok_or_else(|| AppError::BadGateway("OpenClaw chat.send returned no runId".into()))?;
-        self.state.write().await.active_run_id = Some(active_run_id);
+        self.bind_run_to_active_turn(runtime_turn, active_run_id).await;
 
         Ok(())
     }
@@ -416,6 +595,8 @@ impl OpenClawAgentManager {
         state.session_key = None;
         state.has_messages = false;
         state.active_run_id = None;
+        state.runtime_turn = None;
+        state.pending_run_events.clear();
         state.turn_generation = state.turn_generation.wrapping_add(1);
         state.confirmations.clear();
         Ok(())
@@ -438,6 +619,101 @@ impl OpenClawAgentManager {
             "hasActiveSession": state.session_key.is_some(),
             "sessionKey": state.session_key,
         })
+    }
+}
+
+#[cfg(test)]
+mod turn_lifecycle_tests {
+    use super::*;
+
+    fn state_for_turn(turn: AgentRuntimeTurn, run_id: Option<&str>) -> OpenClawState {
+        OpenClawState {
+            session_key: Some("session-1".into()),
+            confirmations: Vec::new(),
+            has_messages: run_id.is_some(),
+            active_run_id: run_id.map(str::to_owned),
+            turn_generation: 1,
+            runtime_turn: Some(turn),
+            pending_run_events: Vec::new(),
+            approval_memory: HashMap::new(),
+        }
+    }
+
+    #[test]
+    fn first_send_failure_does_not_poison_next_send_admission() {
+        let runtime = AgentRuntimeState::new("openclaw-first-send", "/workspace", 8);
+        let first_turn = runtime.reset_for_new_turn(ConversationStatus::Running);
+        let mut state = state_for_turn(first_turn, None);
+        state.has_messages = false;
+
+        assert!(admit_gateway_turn(&mut state, first_turn));
+        assert!(!state.has_messages, "admission alone must not claim a successful message");
+        abandon_gateway_turn(&mut state, first_turn);
+
+        let second_turn = runtime.reset_for_new_turn(ConversationStatus::Running);
+        assert!(
+            admit_gateway_turn(&mut state, second_turn),
+            "a failed first chat.send must retry session resolution on the next turn"
+        );
+    }
+
+    #[tokio::test]
+    async fn old_frame_mapping_is_linearized_before_new_turn_text_reset() {
+        let runtime = AgentRuntimeState::new("openclaw-map-order", "/workspace", 8);
+        let old_turn = runtime.reset_for_new_turn(ConversationStatus::Running);
+        let state = Arc::new(RwLock::new(state_for_turn(old_turn, Some("run-old"))));
+        let text_state = Arc::new(Mutex::new(TextFallbackState::new()));
+        let held_text = text_state.lock().await;
+        let old_binding = GatewayRunTurn {
+            run_id: "run-old".into(),
+            runtime_turn: old_turn,
+        };
+        let old_frame = EventFrame {
+            event: "chat".into(),
+            payload: Some(json!({
+                "runId": "run-old",
+                "state": "delta",
+                "deltaText": "stale"
+            })),
+            seq: None,
+        };
+
+        let state_for_old = Arc::clone(&state);
+        let text_for_old = Arc::clone(&text_state);
+        let old_mapper = tokio::spawn(async move {
+            map_event_for_gateway_turn(&state_for_old, &text_for_old, &old_frame, &old_binding).await
+        });
+
+        // Wait until the mapper has acquired the state read guard and is
+        // blocked on the text mutex we hold.
+        let mut mapper_holds_state = false;
+        for _ in 0..100 {
+            if state.try_write().is_err() {
+                mapper_holds_state = true;
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert!(mapper_holds_state, "old mapper never reached its linearization guard");
+
+        let new_turn = runtime.reset_for_new_turn(ConversationStatus::Running);
+        let state_for_new = Arc::clone(&state);
+        let text_for_new = Arc::clone(&text_state);
+        let new_admission = tokio::spawn(async move {
+            let mut state = state_for_new.write().await;
+            admit_gateway_turn(&mut state, new_turn);
+            let mut text = text_for_new.lock().await;
+            text.reset_for_new_turn();
+            text.current_run_id = Some("run-new".into());
+        });
+
+        drop(held_text);
+        assert!(old_mapper.await.unwrap().is_some());
+        new_admission.await.unwrap();
+
+        let text = text_state.lock().await;
+        assert_eq!(text.current_run_id.as_deref(), Some("run-new"));
+        assert!(text.accumulated_text.is_empty(), "old run text leaked past the new-turn reset");
     }
 }
 
@@ -479,20 +755,20 @@ impl crate::runtime_handle::AgentRuntimeControl for OpenClawAgentManager {
             ));
         }
 
+        let runtime_turn = self.runtime.reset_for_new_turn(ConversationStatus::Running);
         let is_first = {
             let mut state = self.state.write().await;
-            let first = !state.has_messages;
-            state.has_messages = true;
-            state.active_run_id = None;
-            state.turn_generation = state.turn_generation.wrapping_add(1);
-            first
+            admit_gateway_turn(&mut state, runtime_turn)
         };
-        self.runtime.reset_for_new_turn(ConversationStatus::Running);
         if !self.runtime.is_transport_healthy() {
             let error = AgentSendError::stream_broken(
                 "OpenClaw's connection relay stopped during turn admission",
             );
-            self.runtime.emit_error_data(error.stream_error().clone());
+            let mut state = self.state.write().await;
+            abandon_gateway_turn(&mut state, runtime_turn);
+            drop(state);
+            self.runtime
+                .emit_error_data_for_turn(runtime_turn, error.stream_error().clone());
             return Err(error);
         }
 
@@ -501,30 +777,33 @@ impl crate::runtime_handle::AgentRuntimeControl for OpenClawAgentManager {
             text_state.reset_for_new_turn();
         }
 
-        match self.do_send_message(is_first, data).await {
+        match self.do_send_message(is_first, runtime_turn, data).await {
             Ok(()) => Ok(()),
             Err(err) => {
-                self.state.write().await.active_run_id = None;
+                let mut state = self.state.write().await;
+                abandon_gateway_turn(&mut state, runtime_turn);
+                drop(state);
                 error!(
                     conversation_id = %self.runtime.conversation_id(),
                     error = %ErrorChain(&err),
-                    "OpenClaw send_message failed, emitting Error+Finish"
+                    "OpenClaw send_message failed, emitting terminal Error"
                 );
                 let send_error = AgentSendError::from_app_error(err);
-                self.runtime.emit_error_data(send_error.stream_error().clone());
-                self.runtime.emit_finish(None);
+                self.runtime
+                    .emit_error_data_for_turn(runtime_turn, send_error.stream_error().clone());
                 Err(send_error)
             }
         }
     }
 
     async fn cancel(&self) -> Result<(), AppError> {
-        let (session_key, run_id, turn_generation) = {
+        let (session_key, run_id, turn_generation, runtime_turn) = {
             let state = self.state.read().await;
             (
                 state.session_key.clone(),
                 state.active_run_id.clone(),
                 state.turn_generation,
+                state.runtime_turn,
             )
         };
         if let Some(ref key) = session_key {
@@ -541,7 +820,6 @@ impl crate::runtime_handle::AgentRuntimeControl for OpenClawAgentManager {
         {
             let mut state = self.state.write().await;
             state.confirmations.clear();
-            state.active_run_id = None;
         }
 
         let runtime = self.runtime.clone();
@@ -549,17 +827,29 @@ impl crate::runtime_handle::AgentRuntimeControl for OpenClawAgentManager {
         let conversation_id = self.runtime.conversation_id().to_owned();
         tokio::spawn(async move {
             tokio::time::sleep(STOP_FINISH_FALLBACK_TIMEOUT).await;
-            let is_same_turn = state.read().await.turn_generation == turn_generation;
+            let is_same_turn = {
+                let mut state = state.write().await;
+                let matches = state.turn_generation == turn_generation && state.runtime_turn == runtime_turn;
+                if matches {
+                    state.active_run_id = None;
+                    state.runtime_turn = None;
+                    state.pending_run_events.clear();
+                }
+                matches
+            };
             let needs_fallback = is_same_turn && runtime.status() == Some(ConversationStatus::Running);
             if needs_fallback {
                 warn!(
                     conversation_id = %conversation_id,
                     "Gateway did not send abort event within timeout, emitting fallback Finish"
                 );
-                runtime.emit_finish_with_reason(
-                    None,
-                    Some(crate::protocol::events::TurnStopReason::Cancelled),
-                );
+                if let Some(runtime_turn) = runtime_turn {
+                    runtime.emit_finish_for_turn(
+                        runtime_turn,
+                        None,
+                        Some(crate::protocol::events::TurnStopReason::Cancelled),
+                    );
+                }
             }
         });
 
@@ -589,10 +879,15 @@ impl crate::runtime_handle::AgentRuntimeControl for OpenClawAgentManager {
         }
 
         if reason == Some(AgentKillReason::UserCancelled) {
-            self.runtime.emit_finish_with_reason(
-                None,
-                Some(crate::protocol::events::TurnStopReason::Cancelled),
-            );
+            if let Ok(state) = self.state.try_read()
+                && let Some(runtime_turn) = state.runtime_turn
+            {
+                self.runtime.emit_finish_for_turn(
+                    runtime_turn,
+                    None,
+                    Some(crate::protocol::events::TurnStopReason::Cancelled),
+                );
+            }
         } else if self.runtime.status() == Some(ConversationStatus::Running) {
             self.runtime.emit_error(format!("OpenClaw agent was terminated ({reason:?})"));
         }

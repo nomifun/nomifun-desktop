@@ -59,6 +59,14 @@ export function assignTurnIdsFromUserRequests(items: TurnDisclosureInputItem[]):
       return { ...entry, turnId: currentTurnId };
     }
 
+    // New stream/history rows carry the authoritative owning turn. Preserve it
+    // even when a delayed event is interleaved after a newer user request. The
+    // positional fallback below exists only for legacy rows without turn_id;
+    // an explicit old turn must not move that fallback boundary backwards.
+    if (entry.turnId) {
+      return entry;
+    }
+
     if (!currentTurnId) {
       return { ...entry, turnId: undefined };
     }

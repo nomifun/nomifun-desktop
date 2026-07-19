@@ -1,4 +1,4 @@
-use crate::runtime_state::AgentRuntimeState;
+use crate::runtime_state::{AgentRuntimeState, AgentRuntimeTurn};
 use crate::capability::PromptCtx;
 use crate::capability::cli_process::CliAgentProcess;
 use crate::capability::prompt_pipeline::PromptPipeline;
@@ -150,6 +150,11 @@ pub struct AcpAgentManager {
     /// absorbing state — multiple calls are safe.
     pub(super) runtime: AgentRuntimeState,
 
+    /// Identity of the prompt currently owned by this reusable runtime.
+    /// Cancellation/kill can race the next prompt after awaiting protocol or
+    /// session locks, so they capture this token and use scoped terminal APIs.
+    active_turn: std::sync::RwLock<Option<AgentRuntimeTurn>>,
+
     /// ACP protocol handle (SDK connection).
     pub(super) protocol: AcpProtocol,
 
@@ -175,6 +180,20 @@ pub struct AcpAgentManager {
 
     /// Mutex for serializing session operations (new/load/send).
     session_lock: Mutex<()>,
+}
+
+fn clear_active_turn_if_matches(
+    active_turn: &std::sync::RwLock<Option<AgentRuntimeTurn>>,
+    completed_turn: AgentRuntimeTurn,
+) {
+    let mut active = active_turn.write().unwrap_or_else(|e| e.into_inner());
+    if active.as_ref() == Some(&completed_turn) {
+        *active = None;
+    }
+}
+
+fn acp_transport_is_healthy(runtime: &AgentRuntimeState) -> bool {
+    runtime.is_transport_healthy()
 }
 
 impl Drop for AcpAgentManager {
@@ -328,6 +347,7 @@ impl AcpAgentManager {
             params,
             session: RwLock::new(session),
             runtime,
+            active_turn: std::sync::RwLock::new(None),
             process,
             protocol,
             session_lock: Mutex::new(()),
@@ -585,9 +605,12 @@ impl AcpAgentManager {
     /// Returns `true` when the turn was cancelled (see
     /// [`prompt_existing_session`]'s contract — the terminal Finish for the
     /// turn was already emitted; callers must not emit another).
-    async fn ensure_session_and_send(&self, data: &SendMessageData) -> Result<bool, AppError> {
+    async fn ensure_session_and_send(
+        &self,
+        data: &SendMessageData,
+        turn: AgentRuntimeTurn,
+    ) -> Result<bool, AppError> {
         let sid = self.ensure_session_opened().await?;
-        self.runtime.reset_for_new_turn(ConversationStatus::Running);
 
         let content = {
             let mut s = self.session.write().await;
@@ -606,7 +629,7 @@ impl AcpAgentManager {
             content,
             ..data.clone()
         };
-        self.prompt_existing_session(&data, Some(&sid)).await
+        self.prompt_existing_session(&data, Some(&sid), turn).await
     }
 
     /// Pre-open the ACP session without sending a prompt. Called by the
@@ -643,6 +666,10 @@ impl crate::runtime_handle::AgentRuntimeControl for AcpAgentManager {
         self.runtime.status()
     }
 
+    fn is_transport_healthy(&self) -> bool {
+        acp_transport_is_healthy(&self.runtime)
+    }
+
     fn last_activity_at(&self) -> TimestampMs {
         self.runtime.last_activity_at()
     }
@@ -654,20 +681,39 @@ impl crate::runtime_handle::AgentRuntimeControl for AcpAgentManager {
     #[tracing::instrument(skip_all, fields(conversation_id = %self.params.conversation_id, msg_id = %data.msg_id))]
     async fn send_message(&self, data: SendMessageData) -> Result<(), AgentSendError> {
         self.runtime.bump_activity();
+        if !self.runtime.is_transport_healthy() {
+            return Err(AgentSendError::stream_broken(
+                "ACP's process/protocol transport is no longer running",
+            ));
+        }
+        let turn = self.runtime.reset_for_new_turn(ConversationStatus::Running);
+        *self.active_turn.write().unwrap_or_else(|e| e.into_inner()) = Some(turn);
+        if !self.runtime.is_transport_healthy() {
+            clear_active_turn_if_matches(&self.active_turn, turn);
+            let error = AgentSendError::stream_broken(
+                "ACP's process/protocol transport stopped during turn admission",
+            );
+            self.runtime
+                .emit_error_data_for_turn(turn, error.stream_error().clone());
+            return Err(error);
+        }
 
-        match self.ensure_session_and_send(&data).await {
+        match self.ensure_session_and_send(&data, turn).await {
             Ok(_cancelled) => {
+                clear_active_turn_if_matches(&self.active_turn, turn);
                 info!("ACP send_message completed");
                 // The terminal Finish for this turn was already emitted from
-                // exactly one place: `prompt_existing_session` on a normal
-                // finish (with the real stop_reason), or `cancel()` on a user
-                // cancel. Emitting a fallback Finish here would at best be
+                // exactly one place: `prompt_existing_session` after the
+                // ordered PromptResponse (including Cancelled), or the
+                // quarantined kill fallback. Emitting a fallback Finish here
+                // would at best be
                 // absorbed and at worst — when the cancel-ack returns after a
                 // NEW turn already reset the status to Running — terminate
                 // that new turn. So: no terminal emission here.
                 Ok(())
             }
             Err(err) => {
+                clear_active_turn_if_matches(&self.active_turn, turn);
                 // Build a CloseReason that captures whatever context we still
                 // have. Two cases matter:
                 //   1. The CLI process has already exited — we can read the
@@ -711,7 +757,8 @@ impl crate::runtime_handle::AgentRuntimeControl for AcpAgentManager {
                     session.record_close_reason(Some(close_reason));
                 }
                 let send_error = AgentSendError::from_app_error(err);
-                self.runtime.emit_error_data(send_error.stream_error().clone());
+                self.runtime
+                    .emit_error_data_for_turn(turn, send_error.stream_error().clone());
                 Err(send_error)
             }
         }
@@ -727,23 +774,15 @@ impl crate::runtime_handle::AgentRuntimeControl for AcpAgentManager {
         }
         self.permission_router.cancel_all();
 
-        // Distinguish a deliberate user-cancel from a crash: the toast can
-        // say "Conversation cancelled" instead of a generic "session closed".
-        // We still emit Finish (not Error) here — cancel is a clean
-        // termination — but record the close reason so anyone consulting
-        // the aggregate state for diagnostics sees the canonical signal.
+        // Distinguish a deliberate user-cancel from a crash in diagnostics.
+        // Do not emit Finish here: ACP updates have no turn identity, so turn
+        // admission must remain held until `session/prompt` resolves with its
+        // ordered Cancelled response. The prompt future emits the scoped
+        // terminal after all prior notification callbacks have completed.
         {
             let mut session = self.session.write().await;
             session.record_close_reason(Some(CloseReason::UserCancel));
         }
-
-        // Finish carries
-        // stop_reason=Cancelled so downstream consumers (AutoWork, IDMM) see
-        // a deliberate user stop, NOT a clean completion — emitting `None`
-        // here historically made AutoWork finalize a user-aborted requirement
-        // as done and immediately claim the next one.
-        self.runtime
-            .emit_finish_with_reason(None, Some(TurnStopReason::Cancelled));
 
         Ok(())
     }
@@ -800,14 +839,23 @@ impl crate::runtime_handle::AgentRuntimeControl for AcpAgentManager {
             CloseReason::Killed { reason }
         };
         let message = close_reason.user_facing_message();
+        let turn = *self.active_turn.read().unwrap_or_else(|e| e.into_inner());
+        // A killed ACP process can never safely serve another prompt. This is
+        // also the bounded cancellation fallback when no PromptResponse
+        // arrives: quarantine it before surfacing the terminal so registry
+        // release necessarily rebuilds the manager.
+        self.runtime.mark_transport_broken();
         if let Ok(mut session) = self.session.try_write() {
             session.record_close_reason(Some(close_reason));
         }
         if reason == Some(AgentKillReason::UserCancelled) {
+            if let Some(turn) = turn {
+                self.runtime
+                    .emit_finish_for_turn(turn, None, Some(TurnStopReason::Cancelled));
+            }
+        } else if let Some(turn) = turn {
             self.runtime
-                .emit_finish_with_reason(None, Some(TurnStopReason::Cancelled));
-        } else {
-            self.runtime.emit_error(message);
+                .emit_error_data_for_turn(turn, crate::protocol::events::ErrorEventData::legacy(message, None));
         }
 
         Ok(())
@@ -894,8 +942,30 @@ impl AcpAgentManager {
 
 #[cfg(test)]
 mod tests {
-    use super::{exit_status_parts, user_facing_message};
-    use nomifun_common::AppError;
+    use super::{acp_transport_is_healthy, clear_active_turn_if_matches, exit_status_parts, user_facing_message};
+    use crate::runtime_state::AgentRuntimeState;
+    use nomifun_common::{AppError, ConversationStatus};
+
+    #[test]
+    fn old_prompt_completion_cannot_clear_new_active_turn() {
+        let runtime = AgentRuntimeState::new("acp-active-turn", "/workspace", 8);
+        let old_turn = runtime.reset_for_new_turn(ConversationStatus::Running);
+        let new_turn = runtime.reset_for_new_turn(ConversationStatus::Running);
+        let active = std::sync::RwLock::new(Some(new_turn));
+
+        clear_active_turn_if_matches(&active, old_turn);
+        assert_eq!(*active.read().unwrap(), Some(new_turn));
+        clear_active_turn_if_matches(&active, new_turn);
+        assert_eq!(*active.read().unwrap(), None);
+    }
+
+    #[test]
+    fn killed_acp_transport_is_reported_unhealthy_to_the_registry() {
+        let runtime = AgentRuntimeState::new("acp-transport-health", "/workspace", 8);
+        assert!(acp_transport_is_healthy(&runtime));
+        runtime.mark_transport_broken();
+        assert!(!acp_transport_is_healthy(&runtime));
+    }
 
     #[test]
     fn exit_status_parts_handles_missing_status() {

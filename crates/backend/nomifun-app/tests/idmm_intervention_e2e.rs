@@ -59,6 +59,9 @@ impl AgentRuntimeControl for BlockedOnConfirmationAgent {
     fn status(&self) -> Option<ConversationStatus> {
         None
     }
+    fn is_transport_healthy(&self) -> bool {
+        true
+    }
     fn last_activity_at(&self) -> TimestampMs {
         now_ms()
     }

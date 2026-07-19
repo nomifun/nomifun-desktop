@@ -507,4 +507,15 @@ describe('assignTurnIdsFromUserRequests', () => {
 
     expect(result.map((entry) => entry.turnId)).toEqual([undefined, TURN_1, TURN_1, TURN_2, TURN_2]);
   });
+
+  test('preserves an authoritative delayed turn id without poisoning the positional fallback', () => {
+    const result = assignTurnIdsFromUserRequests([
+      item('user-1', 'user', { turnId: TURN_1, createdAt: 1000 }),
+      item('user-2', 'user', { turnId: TURN_2, createdAt: 2000 }),
+      item('delayed-error-1', 'assistant', { turnId: TURN_1, createdAt: 3000 }),
+      item('legacy-tool-2', 'process', { turnId: undefined, createdAt: 4000 }),
+    ]);
+
+    expect(result.map((entry) => entry.turnId)).toEqual([TURN_1, TURN_2, TURN_1, TURN_2]);
+  });
 });

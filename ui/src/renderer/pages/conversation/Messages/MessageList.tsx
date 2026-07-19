@@ -69,6 +69,7 @@ type IMessageVO =
       type: 'file_summary';
       id: string;
       msg_id?: MessageId;
+      turn_id?: MessageId;
       diffs: FileChangeInfo[];
       sourceMessageIds: string[];
       created_at: number;
@@ -77,6 +78,7 @@ type IMessageVO =
       type: 'tool_summary';
       id: string;
       msg_id?: MessageId;
+      turn_id?: MessageId;
       messages: Array<IMessageToolGroup | IMessageAcpToolCall | IMessageToolCall>;
       sourceMessageIds: string[];
       created_at: number;
@@ -182,6 +184,11 @@ const getProcessedItemMsgId = (item: IRenderableItem): MessageId | undefined => 
     return undefined;
   }
   return item.msg_id;
+};
+
+const getProcessedItemTurnId = (item: IRenderableItem): MessageId | undefined => {
+  if ('type' in item && item.type === 'artifact') return undefined;
+  return item.turn_id;
 };
 
 const getProcessedItemRole = (item: IRenderableItem): TurnDisclosureInputItem['role'] => {
@@ -690,6 +697,7 @@ const MessageList: React.FC<{
     const result: Array<IMessageVO> = [];
     let diffsChanges: FileChangeInfo[] = [];
     let diffsSourceMessageIds: string[] = [];
+    let diffsTurnId: MessageId | undefined;
     let toolList: Array<IMessageToolGroup | IMessageAcpToolCall | IMessageToolCall> = [];
     let toolSourceMessageIds: string[] = [];
 
@@ -697,14 +705,21 @@ const MessageList: React.FC<{
       changes: FileChangeInfo,
       sourceMessageId: string,
       created_at: number,
-      msg_id?: MessageId
+      msg_id?: MessageId,
+      turn_id?: MessageId
     ) => {
+      if (diffsChanges.length && diffsTurnId && turn_id && diffsTurnId !== turn_id) {
+        diffsChanges = [];
+        diffsSourceMessageIds = [];
+      }
       if (!diffsChanges.length) {
         diffsSourceMessageIds = [];
+        diffsTurnId = turn_id;
         result.push({
           type: 'file_summary',
           id: `summary-${sourceMessageId}`,
           msg_id,
+          turn_id,
           diffs: diffsChanges,
           sourceMessageIds: diffsSourceMessageIds,
           created_at,
@@ -716,12 +731,21 @@ const MessageList: React.FC<{
       toolSourceMessageIds = [];
     };
     const pushToolList = (message: IMessageToolGroup | IMessageAcpToolCall | IMessageToolCall) => {
+      const groupedTurnId = toolList.find((tool) => tool.turn_id)?.turn_id;
+      if (groupedTurnId && message.turn_id && groupedTurnId !== message.turn_id) {
+        // A delayed event from another explicit turn must start a new receipt;
+        // otherwise the synthetic summary would inherit the first tool's turn
+        // and visually attach the delayed failure to the wrong request.
+        toolList = [];
+        toolSourceMessageIds = [];
+      }
       if (!toolList.length) {
         toolSourceMessageIds = [];
         result.push({
           type: 'tool_summary',
           id: `tool-summary-${message.id}`,
           msg_id: message.msg_id,
+          turn_id: message.turn_id,
           messages: toolList,
           sourceMessageIds: toolSourceMessageIds,
           created_at: message.created_at ?? 0,
@@ -731,6 +755,7 @@ const MessageList: React.FC<{
       toolSourceMessageIds.push(message.id);
       diffsChanges = [];
       diffsSourceMessageIds = [];
+      diffsTurnId = undefined;
     };
 
     for (let i = 0, len = list.length; i < len; i++) {
@@ -755,6 +780,7 @@ const MessageList: React.FC<{
         toolSourceMessageIds = [];
         diffsChanges = [];
         diffsSourceMessageIds = [];
+        diffsTurnId = undefined;
         continue;
       }
       // Connection-handshake status banners (connecting/connected/authenticated/
@@ -777,7 +803,8 @@ const MessageList: React.FC<{
               parseDiff(writeFileResults[0].file_diff, writeFileResults[0].file_name),
               message.id,
               message.created_at ?? 0,
-              message.msg_id
+              message.msg_id,
+              message.turn_id
             );
             continue;
           }
@@ -797,6 +824,7 @@ const MessageList: React.FC<{
       toolSourceMessageIds = [];
       diffsChanges = [];
       diffsSourceMessageIds = [];
+      diffsTurnId = undefined;
       result.push(message);
     }
     const visibleArtifacts = artifacts
@@ -831,7 +859,7 @@ const MessageList: React.FC<{
       itemById.set(id, item);
       return {
         id,
-        turnId: role === 'user' ? getProcessedItemMsgId(item) : undefined,
+        turnId: role === 'user' ? getProcessedItemMsgId(item) : getProcessedItemTurnId(item),
         role,
         createdAt: getProcessedItemCreatedAt(item),
         processState: getProcessItemState(item),
