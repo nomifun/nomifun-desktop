@@ -925,18 +925,11 @@ pub fn build_workshop_state(services: &AppServices) -> WorkshopRouterState {
 }
 
 /// Build the 生成引擎 (creation) router state, reusing the singleton
-/// `creation_service`, and settle any task left live by a previous process
-/// (boot reconciliation — "running ⟺ live generation task" invariant). The reconcile is
-/// detached + best-effort, mirroring the other boot-resume tasks.
+/// `creation_service`. Creation task/asset reconciliation is completed during
+/// `AppServices::from_config`, before this router can accept new generation
+/// tasks, so a live write cannot race the boot inventory snapshot.
 pub fn build_creation_state(services: &AppServices) -> CreationRouterState {
-    let service = services.creation_service.clone();
-    {
-        let service = service.clone();
-        tokio::spawn(async move {
-            service.reconcile_on_boot().await;
-        });
-    }
-    CreationRouterState::new(service)
+    CreationRouterState::new(services.creation_service.clone())
 }
 
 /// Build the single Agent Execution facade shared by REST, model tools and boot

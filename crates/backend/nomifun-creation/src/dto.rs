@@ -44,7 +44,7 @@ impl TryFrom<CreationTaskRow> for CreationTask {
 
         let params = serde_json::from_str::<Value>(&row.params)
             .map_err(|error| AppError::Internal(format!("invalid creation_tasks.params JSON: {error}")))?;
-        let error = row
+        let mut error = row
             .error
             .as_deref()
             .map(serde_json::from_str::<Value>)
@@ -57,6 +57,18 @@ impl TryFrom<CreationTaskRow> for CreationTask {
                 .map_err(|error| corrupt_id("creation_tasks.result_asset_ids[]", error))?;
         }
 
+        // Last-resort wire-boundary guard for historical corruption. The
+        // async service path also audits/persists this repair, but direct DTO
+        // conversion must never serialize `succeeded` with no artifacts.
+        let mut status = row.status;
+        if status == "succeeded" && result_asset_ids.is_empty() {
+            status = "failed".to_string();
+            error = Some(serde_json::json!({
+                "kind": "invalid_artifact",
+                "message": "historical succeeded task has no result artifacts"
+            }));
+        }
+
         Ok(Self {
             id: row.id,
             canvas_id: row.canvas_id,
@@ -65,7 +77,7 @@ impl TryFrom<CreationTaskRow> for CreationTask {
             model: row.model,
             capability: row.capability,
             params,
-            status: row.status,
+            status,
             error,
             result_asset_ids,
             attempt: row.attempt,
@@ -112,5 +124,30 @@ mod tests {
         assert_eq!(dto.error.unwrap()["kind"], "adapter_unavailable");
         assert_eq!(dto.result_asset_ids, vec![asset_id]);
         assert_eq!(dto.finished_at, Some(2));
+    }
+
+    #[test]
+    fn succeeded_without_artifacts_is_never_exposed_as_success() {
+        let row = CreationTaskRow {
+            id: CreationTaskId::new().into_string(),
+            canvas_id: None,
+            node_id: None,
+            provider_id: ProviderId::new().into_string(),
+            model: "m".into(),
+            capability: "t2i".into(),
+            params: "{}".into(),
+            status: "succeeded".into(),
+            error: None,
+            result_asset_ids: "[]".into(),
+            remote_task_id: None,
+            attempt: 0,
+            submitted_at: 1,
+            started_at: Some(1),
+            finished_at: Some(2),
+        };
+        let dto = CreationTask::try_from(row).unwrap();
+        assert_eq!(dto.status, "failed");
+        assert!(dto.result_asset_ids.is_empty());
+        assert_eq!(dto.error.unwrap()["kind"], "invalid_artifact");
     }
 }

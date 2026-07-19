@@ -699,6 +699,11 @@ impl AppServices {
         .with_asset_sink(creation_asset_bridge)
         .with_providers(creation_adapters)
         .build();
+        // Complete task/asset reconciliation before AppServices is published.
+        // Running this synchronously closes the race where a newly-created task
+        // could persist an asset between the task snapshot and Workshop scan
+        // and be mistaken for an orphan by detached boot cleanup.
+        creation_service.reconcile_on_boot().await;
 
         // Headless seed: bind a Remote access token to the default companion so an
         // operator can configure the front door via env on a headless server.

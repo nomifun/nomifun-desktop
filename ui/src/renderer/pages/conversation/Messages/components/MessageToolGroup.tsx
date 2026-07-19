@@ -8,10 +8,9 @@ import { ipcBridge } from '@/common';
 import { parseConfirmationCorrelationId, type IMessageToolGroup } from '@/common/chat/chatLib';
 import { optionalDisplayText, toDisplayText } from '@/common/chat/displayText';
 import { iconColors } from '@/renderer/styles/colors';
-import { Alert, Button, Image, Message, Radio, Tag, Tooltip } from '@arco-design/web-react';
-import { useArcoMessage } from '@/renderer/utils/ui/useArcoMessage';
-import { Copy, Download, LoadingOne } from '@icon-park/react';
-import React, { useCallback, useContext, useMemo, useState } from 'react';
+import { Alert, Button, Radio, Tag } from '@arco-design/web-react';
+import { LoadingOne } from '@icon-park/react';
+import React, { useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import FeedbackButton from '@/renderer/components/base/FeedbackButton';
 import FileChangesPanel from '@/renderer/components/base/FileChangesPanel';
@@ -23,10 +22,14 @@ import CollapsibleContent from '@renderer/components/chat/CollapsibleContent';
 import LocalImageView from '@renderer/components/media/LocalImageView';
 import MarkdownView from '@renderer/components/Markdown';
 import { ToolConfirmationOutcome } from '@renderer/utils/common';
-import { ImagePreviewContext } from '../MessageList';
 import { COLLAPSE_CONFIG, TEXT_CONFIG } from '../constants';
 import { MESSAGE_BODY_FONT_SIZE, MESSAGE_BODY_LINE_HEIGHT } from '../typography';
-import type { ImageGenerationResult, WriteFileResult } from '../types';
+import type { WriteFileResult } from '../types';
+import {
+  enforceToolGroupArtifactTrust,
+  getSuccessfulLegacyImage,
+  isSuccessfulWriteFileResult,
+} from './toolGroupArtifactVisibility';
 
 const CODE_STYLE = { marginTop: 4, marginBottom: 4 };
 
@@ -238,197 +241,20 @@ const ConfirmationDetails: React.FC<{
   );
 };
 
-// ImageDisplay: 图片生成结果展示组件 Image generation result display component
+// Legacy tool-group image display. LocalImageView owns source-generation
+// cancellation and stale/error clearing for local, remote, data and blob URLs.
 const ImageDisplay: React.FC<{
   imgUrl: string;
   relativePath?: string;
-}> = ({ imgUrl, relativePath }) => {
-  const { t } = useTranslation();
-  const [messageApi, messageContext] = useArcoMessage();
-  const [imageUrl, setImageUrl] = useState<string>(imgUrl);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState(false);
-  const { inPreviewGroup } = useContext(ImagePreviewContext);
-
-  // 如果是本地路径，需要加载为 base64 Load local paths as base64
-  React.useEffect(() => {
-    if (imgUrl.startsWith('data:') || imgUrl.startsWith('http')) {
-      setImageUrl(imgUrl);
-      setLoading(false);
-    } else {
-      setLoading(true);
-      setError(false);
-      ipcBridge.fs.getImageBase64
-        .invoke({ path: imgUrl })
-        .then((base64) => {
-          if (!base64) {
-            throw new Error('Image file not found');
-          }
-          setImageUrl(base64);
-          setLoading(false);
-        })
-        .catch((error) => {
-          console.error('Failed to load image:', error);
-          setError(true);
-          setLoading(false);
-        });
-    }
-  }, [imgUrl]);
-
-  // 获取图片 blob（复用逻辑）Get image blob (reusable logic)
-  const getImageBlob = useCallback(async (): Promise<Blob> => {
-    const response = await fetch(imageUrl);
-    return await response.blob();
-  }, [imageUrl]);
-
-  const handleCopy = useCallback(async () => {
-    try {
-      const blob = await getImageBlob();
-
-      // Try using Clipboard API with blob (requires secure context in WebUI)
-      if (navigator.clipboard && window.isSecureContext && typeof navigator.clipboard.write === 'function') {
-        try {
-          await navigator.clipboard.write([
-            new ClipboardItem({
-              [blob.type]: blob,
-            }),
-          ]);
-          messageApi.success(t('messages.copySuccess', { defaultValue: 'Copied' }));
-          return;
-        } catch (clipboardError) {
-          console.warn('[ImageDisplay] Clipboard API failed, trying fallback:', clipboardError);
-        }
-      }
-
-      // Fallback: Use canvas to copy image for browsers/Electron that don't support ClipboardItem with images
-      const img = document.createElement('img');
-      img.src = imageUrl;
-      await new Promise((resolve, reject) => {
-        img.onload = resolve;
-        img.onerror = reject;
-      });
-
-      const canvas = document.createElement('canvas');
-      canvas.width = img.naturalWidth;
-      canvas.height = img.naturalHeight;
-      const ctx = canvas.getContext('2d');
-      if (!ctx) throw new Error('Failed to get canvas context');
-
-      ctx.drawImage(img, 0, 0);
-      canvas.toBlob(async (canvasBlob) => {
-        if (!canvasBlob) {
-          messageApi.error(t('messages.copyFailed', { defaultValue: 'Failed to copy' }));
-          return;
-        }
-        if (!navigator.clipboard || !window.isSecureContext || typeof navigator.clipboard.write !== 'function') {
-          messageApi.error(t('messages.copyFailed', { defaultValue: 'Failed to copy' }));
-          return;
-        }
-        try {
-          await navigator.clipboard.write([
-            new ClipboardItem({
-              'image/png': canvasBlob,
-            }),
-          ]);
-          messageApi.success(t('messages.copySuccess', { defaultValue: 'Copied' }));
-        } catch (canvasError) {
-          console.error('[ImageDisplay] Canvas fallback also failed:', canvasError);
-          messageApi.error(t('messages.copyFailed', { defaultValue: 'Failed to copy' }));
-        }
-      }, 'image/png');
-    } catch (error) {
-      console.error('Failed to copy image:', error);
-      messageApi.error(t('messages.copyFailed', { defaultValue: 'Failed to copy' }));
-    }
-  }, [getImageBlob, imageUrl, t, messageApi]);
-
-  const handleDownload = useCallback(async () => {
-    try {
-      const blob = await getImageBlob();
-      const file_name = relativePath?.split(/[\\/]/).pop() || 'image.png';
-
-      // 创建下载链接 Create download link
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = file_name;
-      document.body.appendChild(a);
-      a.click();
-      document.body.removeChild(a);
-      URL.revokeObjectURL(url);
-
-      messageApi.success(t('messages.downloadSuccess', { defaultValue: 'Download successful' }));
-    } catch (error) {
-      console.error('Failed to download image:', error);
-      messageApi.error(t('messages.downloadFailed', { defaultValue: 'Failed to download' }));
-    }
-  }, [getImageBlob, relativePath, t, messageApi]);
-
-  // 加载状态 Loading state
-  if (loading) {
-    return (
-      <div className='flex items-center gap-8px my-8px'>
-        <LoadingOne className='loading' theme='outline' size='14' fill={iconColors.primary} />
-        <span className='text-t-secondary text-sm'>{t('common.loading', { defaultValue: 'Loading...' })}</span>
-      </div>
-    );
-  }
-
-  // 错误状态 Error state
-  if (error || !imageUrl) {
-    return (
-      <div className='flex items-center gap-8px my-8px text-t-secondary text-sm'>
-        <span>{t('messages.imageLoadFailed', { defaultValue: 'Failed to load image' })}</span>
-      </div>
-    );
-  }
-
-  // 图片元素 Image element
-  const imageElement = (
-    <Image
-      src={imageUrl}
+}> = ({ imgUrl, relativePath }) => (
+  <div className='my-8px' style={{ maxWidth: '197px' }}>
+    <LocalImageView
+      src={imgUrl}
       alt={relativePath || 'Generated image'}
-      width={197}
-      style={{
-        maxHeight: '320px',
-        objectFit: 'contain',
-        borderRadius: '8px',
-        cursor: 'pointer',
-      }}
+      className='block max-w-full max-h-320px object-contain rd-8px'
     />
-  );
-
-  return (
-    <>
-      {messageContext}
-      <div className='flex flex-col gap-8px my-8px' style={{ maxWidth: '197px' }}>
-        {/* 图片预览 Image preview - 如果已在 PreviewGroup 中则直接渲染，否则包裹 PreviewGroup */}
-        {inPreviewGroup ? imageElement : <Image.PreviewGroup>{imageElement}</Image.PreviewGroup>}
-        {/* 操作按钮 Action buttons */}
-        <div className='flex gap-8px'>
-          <Tooltip content={t('common.copy', { defaultValue: 'Copy' })}>
-            <Button
-              type='secondary'
-              size='small'
-              shape='circle'
-              icon={<Copy theme='outline' size='14' fill={iconColors.primary} />}
-              onClick={handleCopy}
-            />
-          </Tooltip>
-          <Tooltip content={t('common.download', { defaultValue: 'Download' })}>
-            <Button
-              type='secondary'
-              size='small'
-              shape='circle'
-              icon={<Download theme='outline' size='14' fill={iconColors.primary} />}
-              onClick={handleDownload}
-            />
-          </Tooltip>
-        </div>
-      </div>
-    </>
-  );
-};
+  </div>
+);
 
 const ToolResultDisplay: React.FC<{
   content: IMessageToolGroupProps['message']['content'][number];
@@ -437,20 +263,15 @@ const ToolResultDisplay: React.FC<{
   const toolName = toDisplayText(name);
 
   // 图片生成特殊处理 Special handling for image generation
-  if (toolName === 'ImageGeneration' && typeof result_display === 'object' && result_display !== null) {
-    const result = result_display as ImageGenerationResult;
-    // 如果有 img_url 才显示图片，否则显示错误信息
-    const imgUrl = optionalDisplayText(result.img_url);
-    if (imgUrl) {
-      return (
-        <LocalImageView
-          src={imgUrl}
-          alt={optionalDisplayText(result.relative_path) || imgUrl}
-          className='max-w-100% max-h-100%'
-        />
-      );
-    }
-    // 如果是错误，继续走下面的 JSON 显示逻辑
+  const successfulImage = getSuccessfulLegacyImage(content);
+  if (toolName === 'ImageGeneration' && successfulImage) {
+    return (
+      <LocalImageView
+        src={successfulImage.imgUrl}
+        alt={successfulImage.relativePath || successfulImage.imgUrl}
+        className='max-w-100% max-h-100%'
+      />
+    );
   }
 
   // 将结果转换为字符串 Convert result to string
@@ -473,17 +294,19 @@ const ToolResultDisplay: React.FC<{
 const MessageToolGroup: React.FC<IMessageToolGroupProps> = ({ message }) => {
   const { t } = useTranslation();
   const readOnly = useConversationContextSafe()?.readOnly === true;
-  const toolContent = Array.isArray(message.content) ? message.content : [];
+  const toolContent = useMemo(
+    () =>
+      Array.isArray(message.content)
+        ? message.content.map(enforceToolGroupArtifactTrust)
+        : [],
+    [message.content]
+  );
 
   // 收集所有 WriteFile 结果用于汇总显示 / Collect all WriteFile results for summary display
   const writeFileResults = useMemo(() => {
     return toolContent
       .filter(
-        (item) =>
-          toDisplayText(item.name) === 'WriteFile' &&
-          item.result_display &&
-          typeof item.result_display === 'object' &&
-          'file_diff' in item.result_display
+        (item) => isSuccessfulWriteFileResult(item)
       )
       .map((item) => {
         const result = item.result_display as WriteFileResult;
@@ -497,11 +320,7 @@ const MessageToolGroup: React.FC<IMessageToolGroupProps> = ({ message }) => {
   // 找到第一个 WriteFile 的索引 / Find the index of first WriteFile
   const firstWriteFileIndex = useMemo(() => {
     return toolContent.findIndex(
-      (item) =>
-        toDisplayText(item.name) === 'WriteFile' &&
-        item.result_display &&
-        typeof item.result_display === 'object' &&
-        'file_diff' in item.result_display
+      (item) => isSuccessfulWriteFileResult(item)
     );
   }, [toolContent]);
 
@@ -542,7 +361,7 @@ const MessageToolGroup: React.FC<IMessageToolGroupProps> = ({ message }) => {
         }
 
         // WriteFile 特殊处理：使用 MessageFileChanges 汇总显示 / WriteFile special handling: use MessageFileChanges for summary display
-        if (nameText === 'WriteFile' && typeof result_display !== 'string') {
+        if (statusText === 'Success' && nameText === 'WriteFile' && typeof result_display !== 'string') {
           if (result_display && typeof result_display === 'object' && 'file_diff' in result_display) {
             // 只在第一个 WriteFile 位置显示汇总组件 / Only show summary component at first WriteFile position
             if (index === firstWriteFileIndex && writeFileResults.length > 0) {
@@ -558,18 +377,15 @@ const MessageToolGroup: React.FC<IMessageToolGroupProps> = ({ message }) => {
         }
 
         // ImageGeneration 特殊处理：单独展示图片，不用 Alert 包裹 Special handling for ImageGeneration: display image separately without Alert wrapper
-        if (nameText === 'ImageGeneration' && typeof result_display === 'object' && result_display !== null) {
-          const result = result_display as ImageGenerationResult;
-          const imgUrl = optionalDisplayText(result.img_url);
-          if (imgUrl) {
-            return (
-              <ImageDisplay
-                key={callIdText}
-                imgUrl={imgUrl}
-                relativePath={optionalDisplayText(result.relative_path)}
-              />
-            );
-          }
+        const successfulImage = getSuccessfulLegacyImage(content);
+        if (successfulImage) {
+          return (
+            <ImageDisplay
+              key={callIdText}
+              imgUrl={successfulImage.imgUrl}
+              relativePath={successfulImage.relativePath}
+            />
+          );
         }
 
         // 通用工具调用展示 Generic tool call display

@@ -644,10 +644,46 @@ impl ChannelMessageService {
     pub fn process_stream_event(event: &AgentStreamEvent) -> Option<StreamAction> {
         match event {
             AgentStreamEvent::Text(data) => Some(StreamAction::AppendText(data.content.clone())),
-            AgentStreamEvent::Finish(_) => Some(StreamAction::Finish),
+            AgentStreamEvent::Finish(data)
+                if matches!(
+                    data.stop_reason,
+                    None
+                        | Some(
+                            nomifun_ai_agent::protocol::events::TurnStopReason::EndTurn
+                        )
+                ) =>
+            {
+                Some(StreamAction::Finish)
+            }
+            AgentStreamEvent::Finish(data) => Some(StreamAction::Error(format!(
+                "The turn ended before its requested output was completed: {}",
+                match data.stop_reason {
+                    Some(nomifun_ai_agent::protocol::events::TurnStopReason::MaxTokens) =>
+                        "maximum output tokens reached",
+                    Some(
+                        nomifun_ai_agent::protocol::events::TurnStopReason::MaxTurnRequests
+                    ) => "maximum tool requests reached",
+                    Some(nomifun_ai_agent::protocol::events::TurnStopReason::Refusal) =>
+                        "the model refused the request",
+                    Some(nomifun_ai_agent::protocol::events::TurnStopReason::Cancelled) =>
+                        "the turn was cancelled",
+                    Some(nomifun_ai_agent::protocol::events::TurnStopReason::EndTurn) | None =>
+                        unreachable!("normal finish was handled above"),
+                }
+            ))),
             AgentStreamEvent::Error(data) => Some(StreamAction::Error(data.message.clone())),
             AgentStreamEvent::Thinking(data) => Some(StreamAction::Thinking(data.content.clone())),
             AgentStreamEvent::ToolCall(data) => {
+                // Verified Nomi/ACP artifacts are already durable workspace
+                // files. Preserve their receipts so the relay can upload the
+                // bytes (or explicitly report the path if upload/read fails).
+                if matches!(
+                    data.status,
+                    nomifun_ai_agent::protocol::events::ToolCallStatus::Completed
+                ) && !data.artifacts.is_empty()
+                {
+                    return Some(StreamAction::ArtifactsProduced(data.artifacts.clone()));
+                }
                 // A completed tool call may carry produced workshop asset ids in
                 // its output JSON (nomi_workshop_get_task/generate `result_asset_ids`).
                 // Surface those as MediaProduced so the relay can send the picture;
@@ -666,6 +702,28 @@ impl ChannelMessageService {
                     name: data.name.clone(),
                     status: format!("{:?}", data.status),
                 })
+            }
+            AgentStreamEvent::AcpToolCall(data) => {
+                if data.update.status
+                    != Some(nomifun_ai_agent::protocol::events::AcpToolCallStatus::Completed)
+                {
+                    return None;
+                }
+                let artifacts = data
+                    .update
+                    .content
+                    .as_ref()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|item| match item {
+                        nomifun_ai_agent::protocol::events::AcpToolCallContentItem::Artifact {
+                            artifact,
+                            ..
+                        } => Some(artifact.clone()),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>();
+                (!artifacts.is_empty()).then_some(StreamAction::ArtifactsProduced(artifacts))
             }
             // Blocking decisions: forward as a numbered text choice. A decision
             // with no options is unanswerable, so it is dropped (None).
@@ -705,7 +763,6 @@ impl ChannelMessageService {
             | AgentStreamEvent::ToolGroup(_)
             | AgentStreamEvent::AgentStatus(_)
             | AgentStreamEvent::Plan(_)
-            | AgentStreamEvent::AcpToolCall(_)
             | AgentStreamEvent::AvailableCommands(_)
             | AgentStreamEvent::SkillSuggest(_)
             | AgentStreamEvent::CronTrigger(_)
@@ -882,6 +939,10 @@ pub enum StreamAction {
     /// (e.g. `nomi_workshop_get_task` `result_asset_ids`). The relay resolves
     /// each to bytes and sends it as media after the final text.
     MediaProduced(Vec<String>),
+    /// Verified workspace artifacts attached directly to a completed tool
+    /// result. Unlike workshop ids these need no resolver: the receipt carries
+    /// the canonical path, MIME and integrity metadata.
+    ArtifactsProduced(Vec<nomifun_ai_agent::artifact_store::PersistedArtifact>),
 }
 
 /// Decorate a channel conversation with its persisted Agent context. Gateway
@@ -1039,8 +1100,9 @@ fn channel_conversation_name(
 mod tests {
     use super::*;
     use nomifun_ai_agent::protocol::events::{
-        ErrorEventData, FinishEventData, StartEventData, TextEventData, ThinkingEventData, ToolCallEventData,
-        ToolCallStatus,
+        AcpToolCallContentItem, AcpToolCallEventData, AcpToolCallSessionUpdateKind, AcpToolCallStatus,
+        AcpToolCallUpdateData, ErrorEventData, FinishEventData, StartEventData, TextEventData,
+        ThinkingEventData, ToolCallEventData, ToolCallStatus,
     };
     use nomifun_common::ProviderWithModel;
 
@@ -1277,6 +1339,39 @@ mod tests {
     }
 
     #[test]
+    fn truncated_or_cancelled_finish_is_an_error_not_a_success_boundary() {
+        use nomifun_ai_agent::protocol::events::TurnStopReason;
+
+        for stop_reason in [
+            TurnStopReason::MaxTokens,
+            TurnStopReason::MaxTurnRequests,
+            TurnStopReason::Refusal,
+            TurnStopReason::Cancelled,
+        ] {
+            let event = AgentStreamEvent::Finish(FinishEventData {
+                session_id: None,
+                stop_reason: Some(stop_reason),
+            });
+            assert!(
+                matches!(
+                    ChannelMessageService::process_stream_event(&event),
+                    Some(StreamAction::Error(_))
+                ),
+                "{stop_reason:?} must not release queued artifacts"
+            );
+        }
+
+        let normal = AgentStreamEvent::Finish(FinishEventData {
+            session_id: None,
+            stop_reason: Some(TurnStopReason::EndTurn),
+        });
+        assert!(matches!(
+            ChannelMessageService::process_stream_event(&normal),
+            Some(StreamAction::Finish)
+        ));
+    }
+
+    #[test]
     fn error_event_produces_error() {
         let event = AgentStreamEvent::Error(ErrorEventData::legacy("timeout", None));
         let action = ChannelMessageService::process_stream_event(&event);
@@ -1311,6 +1406,7 @@ mod tests {
             description: None,
             input: None,
             output: None,
+            artifacts: Vec::new(),
         });
         let action = ChannelMessageService::process_stream_event(&event);
         match action {
@@ -1338,11 +1434,113 @@ mod tests {
             description: None,
             input: None,
             output: Some(r#"{"status":"succeeded","result_asset_ids":["wsa_1"]}"#.into()),
+            artifacts: Vec::new(),
         });
         match ChannelMessageService::process_stream_event(&event) {
             Some(StreamAction::MediaProduced(ids)) => assert_eq!(ids, vec!["wsa_1"]),
             other => panic!("expected MediaProduced, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn completed_tool_call_preserves_verified_artifact_receipts() {
+        let artifact = nomifun_ai_agent::artifact_store::PersistedArtifact {
+            id: "artifact-1".into(),
+            kind: nomifun_ai_agent::artifact_store::ArtifactKind::File,
+            mime_type: "application/pdf".into(),
+            path: "/workspace/nomifun-artifacts/artifact-1.pdf".into(),
+            relative_path: "nomifun-artifacts/artifact-1.pdf".into(),
+            size_bytes: 10,
+            sha256: "abc".into(),
+        };
+        let event = AgentStreamEvent::ToolCall(ToolCallEventData {
+            call_id: "c1".into(),
+            name: "mcp__reports__export".into(),
+            args: serde_json::Value::Null,
+            status: ToolCallStatus::Completed,
+            description: None,
+            input: None,
+            output: Some("done".into()),
+            artifacts: vec![artifact.clone()],
+        });
+
+        match ChannelMessageService::process_stream_event(&event) {
+            Some(StreamAction::ArtifactsProduced(artifacts)) => {
+                assert_eq!(artifacts, vec![artifact]);
+            }
+            other => panic!("expected ArtifactsProduced, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn completed_acp_tool_call_preserves_verified_artifact_receipts() {
+        let artifact = nomifun_ai_agent::artifact_store::PersistedArtifact {
+            id: "artifact-acp-1".into(),
+            kind: nomifun_ai_agent::artifact_store::ArtifactKind::Image,
+            mime_type: "image/png".into(),
+            path: "/workspace/nomifun-artifacts/artifact-acp-1.png".into(),
+            relative_path: "nomifun-artifacts/artifact-acp-1.png".into(),
+            size_bytes: 10,
+            sha256: "abc".into(),
+        };
+        let event = AgentStreamEvent::AcpToolCall(AcpToolCallEventData {
+            session_id: "sess-1".into(),
+            update: AcpToolCallUpdateData {
+                session_update: AcpToolCallSessionUpdateKind::ToolCallUpdate,
+                tool_call_id: "tool-1".into(),
+                status: Some(AcpToolCallStatus::Completed),
+                title: None,
+                kind: None,
+                raw_input: None,
+                raw_output: None,
+                content: Some(vec![AcpToolCallContentItem::Artifact {
+                    artifact: artifact.clone(),
+                    source_uri: None,
+                }]),
+                locations: None,
+            },
+            meta: None,
+        });
+
+        match ChannelMessageService::process_stream_event(&event) {
+            Some(StreamAction::ArtifactsProduced(artifacts)) => {
+                assert_eq!(artifacts, vec![artifact]);
+            }
+            other => panic!("expected ACP ArtifactsProduced, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn failed_acp_tool_call_never_uploads_artifact_receipts() {
+        let artifact = nomifun_ai_agent::artifact_store::PersistedArtifact {
+            id: "artifact-acp-failed".into(),
+            kind: nomifun_ai_agent::artifact_store::ArtifactKind::Image,
+            mime_type: "image/png".into(),
+            path: "/workspace/nomifun-artifacts/artifact-acp-failed.png".into(),
+            relative_path: "nomifun-artifacts/artifact-acp-failed.png".into(),
+            size_bytes: 10,
+            sha256: "abc".into(),
+        };
+        let event = AgentStreamEvent::AcpToolCall(AcpToolCallEventData {
+            session_id: "sess-1".into(),
+            update: AcpToolCallUpdateData {
+                session_update: AcpToolCallSessionUpdateKind::ToolCallUpdate,
+                tool_call_id: "tool-1".into(),
+                status: Some(AcpToolCallStatus::Failed),
+                title: None,
+                kind: None,
+                raw_input: None,
+                raw_output: None,
+                content: Some(vec![AcpToolCallContentItem::Artifact {
+                    artifact,
+                    source_uri: None,
+                }]),
+                locations: None,
+            },
+            meta: None,
+        });
+
+        assert!(ChannelMessageService::process_stream_event(&event).is_none());
     }
 
     #[test]
@@ -1355,6 +1553,7 @@ mod tests {
             description: None,
             input: None,
             output: None,
+            artifacts: Vec::new(),
         });
         assert!(matches!(
             ChannelMessageService::process_stream_event(&event),
@@ -1372,6 +1571,7 @@ mod tests {
             description: None,
             input: None,
             output: Some("just some text output".into()),
+            artifacts: Vec::new(),
         });
         assert!(matches!(
             ChannelMessageService::process_stream_event(&event),

@@ -98,6 +98,7 @@ impl ProtocolEmitter for BackendProtocolSink {
                     input: None,
                     output: None,
                     description: None,
+                    artifacts: Vec::new(),
                 }));
             }
 

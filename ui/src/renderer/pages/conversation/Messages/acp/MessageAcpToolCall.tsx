@@ -13,6 +13,7 @@ import { Card, Tag } from '@arco-design/web-react';
 import { createTwoFilesPatch } from 'diff';
 import React, { useMemo } from 'react';
 import MarkdownView from '@renderer/components/Markdown';
+import LocalImageView from '@/renderer/components/media/LocalImageView';
 import { MESSAGE_BODY_FONT_SIZE, MESSAGE_BODY_LINE_HEIGHT } from '../typography';
 
 const StatusTag: React.FC<{ status: string }> = ({ status }) => {
@@ -23,6 +24,10 @@ const StatusTag: React.FC<{ status: string }> = ({ status }) => {
         return { color: 'blue', text: 'Pending' };
       case 'in_progress':
         return { color: 'orange', text: 'In Progress' };
+      case 'completed':
+        return { color: 'green', text: 'Completed' };
+      case 'failed':
+        return { color: 'red', text: 'Failed' };
       default:
         return { color: 'gray', text: statusText };
     }
@@ -61,8 +66,12 @@ const DiffContentView: React.FC<{ old_text: string; new_text: string; path: stri
   );
 };
 
-const ContentView: React.FC<{ content: NonNullable<IMessageAcpToolCall['content']['update']['content']>[number] }> = ({ content }) => {
+const ContentView: React.FC<{
+  content: NonNullable<IMessageAcpToolCall['content']['update']['content']>[number];
+  terminalSuccess: boolean;
+}> = ({ content, terminalSuccess }) => {
   if (content.type === 'diff') {
+    if (!terminalSuccess) return null;
     return (
       <DiffContentView
         old_text={toDisplayText(content.old_text)}
@@ -72,13 +81,55 @@ const ContentView: React.FC<{ content: NonNullable<IMessageAcpToolCall['content'
     );
   }
 
+  if (content.type === 'artifact') {
+    if (!terminalSuccess) return null;
+    const { artifact } = content;
+    return (
+      <div className='mt-3 rounded border overflow-hidden'>
+        {artifact.kind === 'image' && (
+          <LocalImageView
+            src={artifact.path}
+            alt={artifact.relative_path || 'Generated image'}
+            className='block max-w-full max-h-420px object-contain'
+          />
+        )}
+        <code className='block bg-1 p-2 text-xs break-all' title={artifact.path}>
+          {artifact.path}
+        </code>
+      </div>
+    );
+  }
+
+  if (content.type === 'resource_link') {
+    if (!terminalSuccess) return null;
+    return (
+      <div className='mt-3 bg-1 p-3 rounded border break-all'>
+        <a href={content.uri} title={content.description || content.uri}>
+          {content.title || content.name || content.uri}
+        </a>
+      </div>
+    );
+  }
+
+  if (content.type === 'artifact_error') {
+    return <div className='mt-3 bg-red-1 color-red-6 p-3 rounded border'>{content.message}</div>;
+  }
+
+  if (content.type === 'terminal') {
+    return <code className='block mt-3 bg-1 p-2 rounded'>Terminal: {content.terminal_id}</code>;
+  }
+
   // 处理 content 类型，包含 text 内容
   if (content.type === 'content' && content.content && content.content.type === 'text' && content.content.text) {
     return (
       <div className='mt-3'>
         <div className='bg-1 p-3 rounded border overflow-hidden'>
           <div className='overflow-x-auto break-words'>
-            <MarkdownView fontSize={MESSAGE_BODY_FONT_SIZE} lineHeight={MESSAGE_BODY_LINE_HEIGHT}>
+            <MarkdownView
+              fontSize={MESSAGE_BODY_FONT_SIZE}
+              lineHeight={MESSAGE_BODY_LINE_HEIGHT}
+              allowUnverifiedImages={false}
+            >
               {toDisplayText(content.content.text)}
             </MarkdownView>
           </div>
@@ -133,7 +184,7 @@ const MessageAcpToolCall: React.FC<{ message: IMessageAcpToolCall }> = ({ messag
           {diffContent && diffContent.length > 0 && (
             <div>
               {diffContent.map((content, index) => (
-                <ContentView key={index} content={content} />
+                <ContentView key={index} content={content} terminalSuccess={status === 'completed'} />
               ))}
             </div>
           )}

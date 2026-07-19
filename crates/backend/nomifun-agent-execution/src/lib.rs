@@ -7,6 +7,7 @@
 //! integration concepts.
 
 mod attempt_runner;
+mod artifact_contract;
 mod control_steps;
 mod conversation_effect;
 mod domain_mapper;

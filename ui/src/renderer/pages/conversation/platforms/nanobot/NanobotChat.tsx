@@ -33,7 +33,7 @@ const NanobotChat: React.FC<{
   const updateLocalImage = LocalImageView.useUpdateLocalImage();
   useEffect(() => {
     updateLocalImage({ root: workspace });
-  }, [workspace, updateLocalImage]);
+  }, [updateLocalImage, workspace]);
   return (
     <ConversationProvider
       value={{ conversation_id: conversation_id, workspace, type: 'nanobot', cron_job_id, hideSendBox, readOnly, loadedSkills }}
@@ -48,4 +48,4 @@ const NanobotChat: React.FC<{
   );
 };
 
-export default HOC.Wrapper(MessageListProvider, MessageListLoadingProvider)(NanobotChat);
+export default HOC.Wrapper(MessageListProvider, MessageListLoadingProvider, LocalImageView.Provider)(NanobotChat);

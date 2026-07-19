@@ -587,7 +587,7 @@ async fn text_only_tool_calls_finish_is_rejected_without_dispatch() {
         .await;
 
     assert!(
-        matches!(&result, Err(AgentError::ApiError(message)) if message.contains("no complete structured tool call")),
+        matches!(&result, Err(AgentError::ApiError(message)) if message.contains("no structured tool call")),
         "expected structured-only provider error, got {result:?}"
     );
     assert_eq!(calls.load(Ordering::SeqCst), 0);

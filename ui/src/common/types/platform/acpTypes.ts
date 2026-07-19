@@ -104,17 +104,55 @@ export interface BaseSessionUpdate {
   session_id: string;
 }
 
-/** Tool call 内容项类型 / Tool call content item type */
-export interface ToolCallContentItem {
-  type: 'content' | 'diff';
-  content?: {
-    type: 'text';
-    text: string;
-  };
-  path?: string;
-  old_text?: string | null;
-  new_text?: string;
+export interface PersistedToolArtifact {
+  id: string;
+  kind: 'image' | 'audio' | 'video' | 'text' | 'file';
+  mime_type: string;
+  /** Canonical native path on the current host. */
+  path: string;
+  /** Portable path relative to the conversation workspace. */
+  relative_path: string;
+  size_bytes: number;
+  sha256: string;
 }
+
+/** Tool call 内容项类型 / Tool call content item type */
+export type ToolCallContentItem =
+  | {
+      type: 'content';
+      content: {
+        type: 'text';
+        text: string;
+      };
+    }
+  | {
+      type: 'diff';
+      path: string;
+      old_text?: string | null;
+      new_text: string;
+    }
+  | {
+      type: 'artifact';
+      artifact: PersistedToolArtifact;
+      source_uri?: string;
+    }
+  | {
+      type: 'resource_link';
+      name: string;
+      uri: string;
+      title?: string;
+      description?: string;
+      mime_type?: string;
+      size_bytes?: number;
+    }
+  | {
+      type: 'terminal';
+      terminal_id: string;
+    }
+  | {
+      type: 'artifact_error';
+      message: string;
+    };
 
 /** Tool call 位置项类型 / Tool call location item type */
 export interface ToolCallLocationItem {
@@ -123,13 +161,17 @@ export interface ToolCallLocationItem {
 
 /** Tool call session update */
 export interface ToolCallUpdate extends BaseSessionUpdate {
+  /** Persistence-only two-phase delivery marker; absent on live ACP frames. */
+  artifact_delivery_committed?: boolean;
   update: {
-    sessionUpdate: 'tool_call';
+    sessionUpdate: 'tool_call' | 'tool_call_update';
     tool_call_id: string;
-    status: 'pending' | 'in_progress' | 'completed' | 'failed';
-    title: string;
-    kind: 'read' | 'edit' | 'execute';
+    /** ACP tool_call_update fields are partial and must not synthesize defaults. */
+    status?: 'pending' | 'in_progress' | 'completed' | 'failed';
+    title?: string;
+    kind?: 'read' | 'edit' | 'execute';
     rawInput?: Record<string, unknown>;
+    rawOutput?: unknown;
     content?: ToolCallContentItem[];
     locations?: ToolCallLocationItem[];
   };

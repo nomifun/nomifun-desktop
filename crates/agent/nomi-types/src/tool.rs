@@ -41,22 +41,35 @@ pub struct ToolDef {
     pub deferred: bool,
 }
 
-/// An image attached to a tool result (e.g. a screenshot), base64-encoded.
+/// An inline binary artifact attached to a tool result, base64-encoded.
+///
+/// The historical name is retained because provider adapters already use this
+/// shape for screenshots.  Nomi's delivery boundary now also accepts audio,
+/// video and file MIME types through the same byte carrier; non-image artifacts
+/// are persisted by the backend and removed before the next provider request.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ToolImage {
-    /// MIME type, e.g. "image/png"
+    /// MIME type, e.g. "image/png", "audio/mpeg" or "application/pdf".
     pub media_type: String,
-    /// Base64-encoded image bytes
+    /// Base64-encoded artifact bytes.
     pub data: String,
 }
+
+/// Generic name for the backwards-compatible inline artifact carrier.
+///
+/// Keeping this as an alias avoids invalidating persisted transcripts and the
+/// many existing image-producing tools while giving MCP/resource code an
+/// accurate type name.
+pub type ToolArtifact = ToolImage;
 
 /// Result from executing a tool
 #[derive(Debug, Clone, Default)]
 pub struct ToolResult {
     pub content: String,
     pub is_error: bool,
-    /// Images to send back to the LLM alongside the text content.
-    /// Only multimodal-capable tools (screenshots) populate this.
+    /// Inline artifacts returned by the tool. The field name is wire-compatible
+    /// with older sessions; only image MIME types are sent to multimodal model
+    /// adapters, while the backend persists all supported kinds first.
     pub images: Vec<ToolImage>,
 }
 
@@ -82,6 +95,12 @@ impl ToolResult {
     /// Attach images to the result
     pub fn with_images(mut self, images: Vec<ToolImage>) -> Self {
         self.images = images;
+        self
+    }
+
+    /// Attach generic inline artifacts using the legacy wire-compatible field.
+    pub fn with_artifacts(mut self, artifacts: Vec<ToolArtifact>) -> Self {
+        self.images = artifacts;
         self
     }
 }

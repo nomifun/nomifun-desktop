@@ -8,25 +8,147 @@
  * The generation card's run engine: build the request, submit it, poll to a
  * terminal state, and reflect every transition back into node `data` (through
  * the canvas `updateNodeData`, so history + autosave stay consistent). Polling
- * survives remounts — a card whose `data.taskId` is still non-terminal on mount
- * resumes polling — and is torn down on unmount / canvas close.
+ * survives remounts, while terminal snapshots and task-less legacy successes
+ * are revalidated before retaining success. Polling is torn down on unmount /
+ * canvas close.
  */
 
 import { useCallback, useEffect, useRef } from 'react';
 import { useReactFlow } from '@xyflow/react';
-import { cancelTask, createTask, getTask } from '../api';
+import { buildBackendAuthHeaders } from '@/common/adapter/httpBridge';
+import { cancelTask, createTask, getTask, workshopFileUrl } from '../api';
 import type { WorkshopFlowEdge, WorkshopFlowNode } from '../canvas/model';
-import type { CreationTask, CreationTaskStatus, WorkshopGeneratorNodeData, WorkshopGeneratorStatus } from '../types';
+import type {
+  CreationTask,
+  CreationTaskStatus,
+  WorkshopGeneratorMode,
+  WorkshopGeneratorNodeData,
+  WorkshopGeneratorStatus,
+} from '../types';
 import { buildTaskParams } from './genConstants';
 import type { ModelOption } from './genTypes';
 import { buildRunPlan } from './pipeline';
 import { spawnResultNodes } from './spawn';
+import { EMPTY_GENERATION_ARTIFACTS_ERROR, succeededArtifactIds } from './taskArtifacts';
 import type { CreationTaskId, WorkshopNodeId } from '@/common/types/ids';
 
 const POLL_INTERVAL_MS = 2000;
 
 const TERMINAL: CreationTaskStatus[] = ['succeeded', 'failed', 'canceled'];
 const isTerminal = (s: CreationTaskStatus): boolean => TERMINAL.includes(s);
+
+export const LEGACY_GENERATION_ARTIFACTS_ERROR =
+  'Saved generation results could not be verified. Run the generation again.';
+export const GENERATION_TASK_VERIFICATION_ERROR =
+  'The saved generation task could not be verified. Retrying in the background.';
+export const GENERATION_TASK_SCOPE_ERROR = 'The saved generation task does not belong to this generator card.';
+export const UNSUPPORTED_GENERATION_RESULT_ERROR = 'The generation task returned an unsupported artifact type.';
+
+/** The persisted task capability, not a mutable tab snapshot, owns the result kind. */
+export function generationModeForTask(task: Pick<CreationTask, 'capability'>): WorkshopGeneratorMode | null {
+  switch (task.capability) {
+    case 'text':
+      return 'text';
+    case 't2v':
+    case 'i2v':
+    case 'v2v':
+      return 'video';
+    case 't2i':
+    case 'i2i':
+    case 'inpaint':
+      return 'image';
+    case 'tts':
+    default:
+      return null;
+  }
+}
+
+function mimeMatchesMode(mime: string, mode: WorkshopGeneratorMode): boolean {
+  const normalized = mime.split(';', 1)[0]?.trim().toLowerCase() ?? '';
+  if (mode === 'image') return normalized.startsWith('image/');
+  if (mode === 'video') return normalized.startsWith('video/');
+  return normalized.startsWith('text/') || normalized === 'application/json';
+}
+
+/**
+ * Probe one legacy asset without buffering a potentially large video. Axum's
+ * byte response exposes a content length; the stream fallback reads only its
+ * first chunk. Text is small and is read completely so empty/whitespace-only
+ * legacy output cannot keep a green badge. MIME must also agree with the mode.
+ */
+async function probeLegacyResultAsset(mode: WorkshopGeneratorMode, assetId: import('@/common/types/ids').AssetId): Promise<boolean> {
+  try {
+    const response = await fetch(workshopFileUrl(assetId), {
+      method: 'GET',
+      headers: buildBackendAuthHeaders('GET'),
+    });
+    if (!response.ok || !mimeMatchesMode(response.headers.get('content-type') ?? '', mode)) return false;
+
+    if (mode === 'text') return (await response.text()).trim().length > 0;
+
+    const contentLength = Number(response.headers.get('content-length'));
+    if (Number.isFinite(contentLength) && contentLength > 0) {
+      await response.body?.cancel().catch(() => {});
+      return true;
+    }
+    if (!response.body) return false;
+    const reader = response.body.getReader();
+    const first = await reader.read();
+    await reader.cancel().catch(() => {});
+    return !first.done && (first.value?.byteLength ?? 0) > 0;
+  } catch {
+    return false;
+  }
+}
+
+export async function validateLegacyResultAssets(
+  mode: WorkshopGeneratorMode,
+  assetIds: import('@/common/types/ids').AssetId[],
+  probe: (mode: WorkshopGeneratorMode, assetId: import('@/common/types/ids').AssetId) => Promise<boolean> =
+    probeLegacyResultAsset
+): Promise<boolean> {
+  if (assetIds.length === 0) return false;
+  const verdicts = await Promise.all(assetIds.map((assetId) => probe(mode, assetId)));
+  return verdicts.every(Boolean);
+}
+
+export type MountedGenerationAuditResult =
+  | { kind: 'none' }
+  | { kind: 'task'; task: CreationTask }
+  | { kind: 'task-unavailable' }
+  | { kind: 'legacy-valid' }
+  | { kind: 'legacy-invalid' };
+
+/**
+ * Reconcile every saved task id, including terminal snapshots. Task-less
+ * legacy successes are allowed to remain green only after every persisted
+ * asset serve path has been read successfully.
+ */
+export async function auditMountedGenerationSnapshot(
+  snapshot: Pick<WorkshopGeneratorNodeData, 'mode' | 'status' | 'taskId' | 'resultAssetIds'>,
+  dependencies: {
+    fetchTask?: (taskId: CreationTaskId) => Promise<CreationTask>;
+    validateLegacy?: (mode: WorkshopGeneratorMode, assetIds: import('@/common/types/ids').AssetId[]) => Promise<boolean>;
+  } = {}
+): Promise<MountedGenerationAuditResult> {
+  if (snapshot.taskId) {
+    try {
+      return { kind: 'task', task: await (dependencies.fetchTask ?? getTask)(snapshot.taskId) };
+    } catch {
+      return { kind: 'task-unavailable' };
+    }
+  }
+  if (snapshot.status !== 'success') return { kind: 'none' };
+  try {
+    const valid = await (dependencies.validateLegacy ?? validateLegacyResultAssets)(
+      snapshot.mode,
+      snapshot.resultAssetIds
+    );
+    return { kind: valid ? 'legacy-valid' : 'legacy-invalid' };
+  } catch {
+    return { kind: 'legacy-invalid' };
+  }
+}
 
 function mapStatus(s: CreationTaskStatus): WorkshopGeneratorStatus {
   switch (s) {
@@ -42,6 +164,84 @@ function mapStatus(s: CreationTaskStatus): WorkshopGeneratorStatus {
     default:
       return 'idle';
   }
+}
+
+/**
+ * A task already saved as terminal may already have fanned out its batch. Only
+ * snapshots that were genuinely in flight may fan out after mount-time polling.
+ */
+export function allowSpawnAfterMountedSnapshot(status: WorkshopGeneratorStatus): boolean {
+  return status === 'queued' || status === 'running';
+}
+
+export interface TerminalGenerationResolution {
+  patch: Partial<WorkshopGeneratorNodeData>;
+  resultMode: WorkshopGeneratorMode | null;
+  resultAssetIds: import('@/common/types/ids').AssetId[];
+}
+
+/** Pure terminal-state reducer shared by live completion and reopen audits. */
+export function resolveTerminalGenerationTask(task: CreationTask): TerminalGenerationResolution {
+  if (task.status === 'succeeded') {
+    const results = succeededArtifactIds(task);
+    if (!results) {
+      return {
+        patch: {
+          status: 'error',
+          taskId: task.id,
+          resultAssetIds: [],
+          errorMessage: EMPTY_GENERATION_ARTIFACTS_ERROR,
+          batch: undefined,
+        },
+        resultMode: null,
+        resultAssetIds: [],
+      };
+    }
+    const resultMode = generationModeForTask(task);
+    if (!resultMode) {
+      return {
+        patch: {
+          status: 'error',
+          taskId: task.id,
+          resultAssetIds: [],
+          errorMessage: UNSUPPORTED_GENERATION_RESULT_ERROR,
+          batch: undefined,
+        },
+        resultMode: null,
+        resultAssetIds: [],
+      };
+    }
+    return {
+      patch: {
+        status: 'success',
+        taskId: task.id,
+        mode: resultMode,
+        resultAssetIds: results,
+        errorMessage: undefined,
+        batch: results.length > 1 ? { expanded: true, primary: results[0] } : undefined,
+      },
+      resultMode,
+      resultAssetIds: results,
+    };
+  }
+  if (task.status === 'failed') {
+    return {
+      patch: {
+        status: 'error',
+        taskId: task.id,
+        resultAssetIds: [],
+        errorMessage: task.error?.message || 'error',
+        batch: undefined,
+      },
+      resultMode: null,
+      resultAssetIds: [],
+    };
+  }
+  return {
+    patch: { status: 'idle', taskId: null, resultAssetIds: [], errorMessage: undefined, batch: undefined },
+    resultMode: null,
+    resultAssetIds: [],
+  };
 }
 
 export interface UseGenerationRunArgs {
@@ -74,6 +274,7 @@ export function useGenerationRun(args: UseGenerationRunArgs): GenerationRun {
   const timerRef = useRef<number | null>(null);
   const activeTaskRef = useRef<CreationTaskId | null>(null);
   const spawnedTaskRef = useRef<CreationTaskId | null>(null);
+  const operationRef = useRef(0);
 
   const patch = useCallback((p: Partial<WorkshopGeneratorNodeData>) => updateRef.current(nodeId, p), [nodeId]);
 
@@ -84,63 +285,87 @@ export function useGenerationRun(args: UseGenerationRunArgs): GenerationRun {
     }
   }, []);
 
-  const finalize = useCallback(
-    (task: CreationTask) => {
+  const taskBelongsToCard = useCallback(
+    (task: CreationTask) => task.node_id === nodeId && task.canvas_id === canvasId,
+    [canvasId, nodeId]
+  );
+
+  const rejectOutOfScopeTask = useCallback(
+    (taskId: CreationTaskId) => {
       activeTaskRef.current = null;
       clearTimer();
-      if (task.status === 'succeeded') {
-        const results = task.result_asset_ids ?? [];
-        patch({
-          status: 'success',
-          taskId: task.id,
-          resultAssetIds: results,
-          errorMessage: undefined,
-          batch: results.length > 1 ? { expanded: true, primary: results[0] } : undefined,
-        });
-        // Fan the extra images out as nodes exactly once, on the live transition.
-        if (results.length > 1 && spawnedTaskRef.current !== task.id) {
+      patch({
+        status: 'error',
+        taskId,
+        resultAssetIds: [],
+        errorMessage: GENERATION_TASK_SCOPE_ERROR,
+        batch: undefined,
+      });
+    },
+    [clearTimer, patch]
+  );
+
+  const finalize = useCallback(
+    (task: CreationTask, options: { allowSpawn?: boolean } = {}) => {
+      activeTaskRef.current = null;
+      clearTimer();
+      const resolution = resolveTerminalGenerationTask(task);
+      patch(resolution.patch);
+      if (resolution.resultMode) {
+        // Only a live completion fans out nodes. A mount/reopen audit calls
+        // finalize with allowSpawn=false so persisted canvases never duplicate
+        // the same batch on every reopen; every result is still visible in-card.
+        if (
+          options.allowSpawn !== false &&
+          resolution.resultAssetIds.length > 1 &&
+          spawnedTaskRef.current !== task.id
+        ) {
           spawnedTaskRef.current = task.id;
           const card = rf.getNode(nodeId);
-          if (card) spawnResultNodes(rf, card, results.slice(1));
+          if (card) {
+            const operation = operationRef.current;
+            void spawnResultNodes(rf, card, resolution.resultMode, resolution.resultAssetIds.slice(1), {
+              shouldCommit: () => mountedRef.current && operationRef.current === operation,
+            }).catch(() => {});
+          }
         }
-      } else if (task.status === 'failed') {
-        patch({ status: 'error', taskId: task.id, errorMessage: task.error?.message || 'error' });
-      } else {
-        // canceled
-        patch({ status: 'idle', taskId: null });
       }
     },
     [clearTimer, patch, rf, nodeId]
   );
 
   const poll = useCallback(
-    async (taskId: CreationTaskId) => {
+    async (taskId: CreationTaskId, allowSpawn: boolean) => {
       let task: CreationTask;
       try {
         task = await getTask(taskId);
       } catch {
         // Transient fetch error — retry on the next tick if still the active task.
         if (mountedRef.current && activeTaskRef.current === taskId) {
-          timerRef.current = window.setTimeout(() => void poll(taskId), POLL_INTERVAL_MS);
+          timerRef.current = window.setTimeout(() => void poll(taskId, allowSpawn), POLL_INTERVAL_MS);
         }
         return;
       }
       if (!mountedRef.current || activeTaskRef.current !== taskId) return;
+      if (task.id !== taskId || !taskBelongsToCard(task)) {
+        rejectOutOfScopeTask(taskId);
+        return;
+      }
       if (isTerminal(task.status)) {
-        finalize(task);
+        finalize(task, { allowSpawn });
         return;
       }
       patch({ status: mapStatus(task.status) });
-      timerRef.current = window.setTimeout(() => void poll(taskId), POLL_INTERVAL_MS);
+      timerRef.current = window.setTimeout(() => void poll(taskId, allowSpawn), POLL_INTERVAL_MS);
     },
-    [finalize, patch]
+    [finalize, patch, rejectOutOfScopeTask, taskBelongsToCard]
   );
 
   const startPolling = useCallback(
-    (taskId: CreationTaskId) => {
+    (taskId: CreationTaskId, allowSpawn: boolean) => {
       activeTaskRef.current = taskId;
       clearTimer();
-      timerRef.current = window.setTimeout(() => void poll(taskId), POLL_INTERVAL_MS);
+      timerRef.current = window.setTimeout(() => void poll(taskId, allowSpawn), POLL_INTERVAL_MS);
     },
     [clearTimer, poll]
   );
@@ -150,6 +375,11 @@ export function useGenerationRun(args: UseGenerationRunArgs): GenerationRun {
     const model = modelRef.current;
     if (!model) return;
     if (d.status === 'queued' || d.status === 'running') return;
+
+    const operation = operationRef.current + 1;
+    operationRef.current = operation;
+    clearTimer();
+    activeTaskRef.current = null;
 
     const nodes = rf.getNodes();
     const edges = rf.getEdges();
@@ -171,6 +401,7 @@ export function useGenerationRun(args: UseGenerationRunArgs): GenerationRun {
       patch({ status: 'error', errorMessage: e instanceof Error ? e.message : String(e) });
       return;
     }
+    if (!mountedRef.current || operationRef.current !== operation) return;
 
     const params = buildTaskParams(d.mode, d.params ?? {}, plan.prompt);
     patch({
@@ -192,32 +423,84 @@ export function useGenerationRun(args: UseGenerationRunArgs): GenerationRun {
         params,
         inputs: plan.inputs,
       });
-      if (!mountedRef.current) return;
+      if (!mountedRef.current || operationRef.current !== operation) return;
+      if (!taskBelongsToCard(task)) {
+        rejectOutOfScopeTask(task.id);
+        return;
+      }
       patch({ taskId: task.id, status: mapStatus(task.status) });
       if (isTerminal(task.status)) finalize(task);
-      else startPolling(task.id);
+      else startPolling(task.id, true);
     } catch (e) {
-      if (mountedRef.current) patch({ status: 'error', errorMessage: e instanceof Error ? e.message : String(e) });
+      if (mountedRef.current && operationRef.current === operation) {
+        patch({ status: 'error', errorMessage: e instanceof Error ? e.message : String(e) });
+      }
     }
-  }, [rf, nodeId, canvasId, patch, finalize, startPolling]);
+  }, [rf, nodeId, canvasId, patch, finalize, startPolling, clearTimer, rejectOutOfScopeTask, taskBelongsToCard]);
 
   const cancel = useCallback(() => {
     const taskId = activeTaskRef.current ?? dataRef.current.taskId ?? null;
+    operationRef.current += 1;
     clearTimer();
     activeTaskRef.current = null;
     patch({ status: 'idle', taskId: null });
     if (taskId) void cancelTask(taskId).catch(() => {});
   }, [clearTimer, patch]);
 
-  // Resume a still-running task after a remount / canvas reopen (once).
+  // Reconcile every saved task (including terminal snapshots) after a remount /
+  // canvas reopen. Legacy task-less successes are probed before they may remain
+  // green. Mount audits never fan out nodes; live transitions own that side effect.
   useEffect(() => {
     mountedRef.current = true;
     const d = dataRef.current;
-    if (d.taskId && (d.status === 'queued' || d.status === 'running')) {
-      startPolling(d.taskId);
+    const needsAudit = !!d.taskId || d.status === 'success';
+    if (needsAudit) {
+      const operation = operationRef.current + 1;
+      operationRef.current = operation;
+      // A persisted green badge is provisional until the backend task or every
+      // legacy artifact has been read. There is intentionally no stale-green
+      // window while the asynchronous audit runs.
+      if (d.status === 'success') patch({ status: 'running', errorMessage: undefined });
+
+      void auditMountedGenerationSnapshot(d).then((audit) => {
+        if (!mountedRef.current || operationRef.current !== operation) return;
+        if (audit.kind === 'task') {
+          if (audit.task.id !== d.taskId || !taskBelongsToCard(audit.task)) {
+            rejectOutOfScopeTask(d.taskId ?? audit.task.id);
+          } else if (isTerminal(audit.task.status)) {
+            finalize(audit.task, { allowSpawn: false });
+          } else {
+            patch({ status: mapStatus(audit.task.status), errorMessage: undefined });
+            startPolling(audit.task.id, allowSpawnAfterMountedSnapshot(d.status));
+          }
+        } else if (audit.kind === 'task-unavailable' && d.taskId) {
+          const allowSpawn = allowSpawnAfterMountedSnapshot(d.status);
+          if (allowSpawn) {
+            // Preserve cancel/run-lock semantics for a task that was genuinely
+            // in flight; the next poll retries the transient verification.
+            patch({ status: d.status, taskId: d.taskId });
+          } else {
+            patch({ status: 'error', taskId: d.taskId, errorMessage: GENERATION_TASK_VERIFICATION_ERROR });
+          }
+          startPolling(d.taskId, allowSpawn);
+        } else if (audit.kind === 'legacy-valid') {
+          patch({ status: 'success', taskId: null, errorMessage: undefined });
+        } else if (audit.kind === 'legacy-invalid') {
+          activeTaskRef.current = null;
+          clearTimer();
+          patch({
+            status: 'error',
+            taskId: null,
+            resultAssetIds: [],
+            errorMessage: LEGACY_GENERATION_ARTIFACTS_ERROR,
+            batch: undefined,
+          });
+        }
+      });
     }
     return () => {
       mountedRef.current = false;
+      operationRef.current += 1;
       clearTimer();
       activeTaskRef.current = null;
     };

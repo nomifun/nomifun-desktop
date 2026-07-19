@@ -116,11 +116,44 @@ pub enum McpContent {
         #[serde(rename = "mimeType")]
         mime_type: String,
     },
-    #[serde(rename = "resource")]
-    Resource {
-        #[allow(dead_code)]
-        resource: Value,
+    #[serde(rename = "audio")]
+    Audio {
+        data: String,
+        #[serde(rename = "mimeType")]
+        mime_type: String,
     },
+    #[serde(rename = "resource")]
+    Resource { resource: McpEmbeddedResource },
+    #[serde(rename = "resource_link")]
+    ResourceLink {
+        uri: String,
+        name: String,
+        #[serde(default)]
+        title: Option<String>,
+        #[serde(default)]
+        description: Option<String>,
+        #[serde(rename = "mimeType", default)]
+        mime_type: Option<String>,
+        #[serde(default)]
+        size: Option<u64>,
+    },
+}
+
+/// Text or blob resource embedded in a tool result.
+///
+/// MCP models this as a union. Optional fields let deserialization preserve the
+/// complete response and the manager performs the stricter exactly-one-payload
+/// check so malformed resources fail explicitly rather than becoming a
+/// successful placeholder.
+#[derive(Debug, Deserialize)]
+pub struct McpEmbeddedResource {
+    pub uri: String,
+    #[serde(rename = "mimeType", default)]
+    pub mime_type: Option<String>,
+    #[serde(default)]
+    pub text: Option<String>,
+    #[serde(default)]
+    pub blob: Option<String>,
 }
 
 /// Initialize request params

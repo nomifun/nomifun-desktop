@@ -1,10 +1,18 @@
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::fs::File;
+use std::io::Read;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
-use nomi_agent::output::OutputSink;
+use nomi_agent::output::{
+    ArtifactContract, ArtifactExpectation, ArtifactRequirement, OutputSink, ToolMediaDelivery,
+    artifact_contract, artifact_contract_with_input, is_context_only_image_tool,
+};
+use nomi_types::tool::ToolImage;
+use sha2::{Digest, Sha256};
 use tokio::sync::broadcast;
 
+use crate::artifact_store::{ArtifactKind, ArtifactStore, PersistedArtifact};
 use crate::protocol::events::{
     AgentStatusEventData, AgentStreamEvent, ErrorEventData, FinishEventData, PlanEventData,
     StartEventData, TextEventData, ThinkingEventData, TipType, TipsEventData, ToolCallEventData,
@@ -16,6 +24,11 @@ pub struct BackendOutputSink {
     /// File-based memory directory for citation reflow. `None` = this session
     /// does not participate (companion sessions, or no base dir).
     distill_dir: Option<PathBuf>,
+    /// Workspace-scoped verified store for binary tool outputs. A desktop
+    /// session wires this unconditionally; `None` is retained for lightweight
+    /// unit/companion sinks and causes media delivery to fail closed.
+    artifact_store: Option<ArtifactStore>,
+    artifact_workspace: Option<PathBuf>,
     /// Accumulates this turn's assistant text so the `<nomi-mem-citation>`
     /// block can be parsed at stream end. Reset on each stream start.
     turn_text: Mutex<String>,
@@ -23,14 +36,430 @@ pub struct BackendOutputSink {
     /// not yet produced a result. Unexpected termination and cancellation drain
     /// this map so no Running lifecycle can leak into a later turn.
     active_tool_calls: Mutex<HashMap<String, ActiveToolCall>>,
+    /// Accepted-user-turn artifact obligations. Provider sub-streams and
+    /// automatic continuations share this state; only the manager's accepted
+    /// turn boundary begins/seals it.
+    artifact_delivery_turn: Mutex<ArtifactDeliveryTurn>,
 }
 
 #[derive(Debug, Clone)]
 struct ActiveToolCall {
     call_id: String,
     name: String,
+    artifact_identity: String,
     args: serde_json::Value,
     input: Option<serde_json::Value>,
+    contract: Option<ArtifactContract>,
+    contract_error: Option<String>,
+    artifact_path_baselines: ArtifactPathBaselines,
+}
+
+const MAX_DECLARED_ARTIFACT_PATHS: usize = 32;
+const MAX_DECLARED_PATH_LENGTH: usize = 4096;
+const MAX_ARTIFACT_OUTPUT_JSON_NODES: usize = 512;
+const MAX_BASELINE_ARTIFACT_BYTES: u64 = 512 * 1024 * 1024;
+
+#[derive(Debug, Clone, Default)]
+struct ArtifactPathBaselines {
+    entries: Vec<ArtifactPathBaseline>,
+    errors: Vec<String>,
+}
+
+impl ArtifactPathBaselines {
+    fn declares_artifact(&self) -> bool {
+        !self.entries.is_empty() || !self.errors.is_empty()
+    }
+}
+
+#[derive(Debug, Clone)]
+struct ArtifactPathBaseline {
+    path: PathBuf,
+    fingerprint: ArtifactPathFingerprint,
+}
+
+#[derive(Debug, Clone)]
+enum ArtifactPathFingerprint {
+    Absent,
+    Present { size_bytes: u64, sha256: String },
+}
+
+#[derive(Debug, Clone, Default)]
+struct DeclaredArtifactPaths {
+    paths: Vec<String>,
+    saw_explicit_key: bool,
+    errors: Vec<String>,
+}
+
+impl DeclaredArtifactPaths {
+    fn push_error(&mut self, error: impl Into<String>) {
+        let error = error.into();
+        if !self.errors.iter().any(|known| known == &error) {
+            self.errors.push(error);
+        }
+    }
+}
+
+#[derive(Debug, Default)]
+struct ArtifactDeliveryTurn {
+    active: bool,
+    calls: HashMap<String, ArtifactCallObligation>,
+}
+
+#[derive(Debug)]
+struct ArtifactCallObligation {
+    tool_name: String,
+    contract: ArtifactContract,
+    status: ArtifactCallDeliveryStatus,
+}
+
+#[derive(Debug)]
+enum ArtifactCallDeliveryStatus {
+    Running,
+    CompletedVerified(Vec<PersistedArtifact>),
+    Failed(String),
+}
+
+fn any_artifact_contract() -> ArtifactContract {
+    ArtifactContract {
+        expectation: ArtifactExpectation::Any,
+        requirement: ArtifactRequirement::Any,
+        requested_count: None,
+    }
+}
+
+fn normalized_path_key(key: &str) -> String {
+    key.chars()
+        .filter(|character| character.is_ascii_alphanumeric())
+        .flat_map(char::to_lowercase)
+        .collect()
+}
+
+fn is_explicit_artifact_path_key(key: &str) -> bool {
+    let normalized = normalized_path_key(key);
+    const PREFIXES: &[&str] = &[
+        "output",
+        "outputs",
+        "artifact",
+        "artifacts",
+        "result",
+        "results",
+        "save",
+        "saves",
+        "destination",
+        "destinations",
+    ];
+    const SUFFIXES: &[&str] = &[
+        "path",
+        "paths",
+        "file",
+        "files",
+        "filepath",
+        "filepaths",
+    ];
+    PREFIXES.iter().any(|prefix| {
+        normalized
+            .strip_prefix(prefix)
+            .is_some_and(|suffix| SUFFIXES.contains(&suffix))
+    })
+}
+
+fn is_plain_path_key(key: &str) -> bool {
+    matches!(normalized_path_key(key).as_str(), "path" | "paths")
+}
+
+fn is_result_scope(key: &str) -> bool {
+    matches!(
+        normalized_path_key(key).as_str(),
+        "result" | "results" | "output" | "outputs" | "artifact" | "artifacts"
+    )
+}
+
+fn is_blocked_path_scope(key: &str) -> bool {
+    matches!(
+        normalized_path_key(key).as_str(),
+        "input"
+            | "inputs"
+            | "source"
+            | "sources"
+            | "request"
+            | "requests"
+            | "argument"
+            | "arguments"
+            | "arg"
+            | "args"
+            | "parameter"
+            | "parameters"
+    )
+}
+
+fn push_declared_path(declared: &mut DeclaredArtifactPaths, value: &str) {
+    let value = value
+        .trim()
+        .trim_matches(|character| matches!(character, '`' | '"' | '\''));
+    if value.is_empty() {
+        declared.push_error("declared artifact path is empty");
+        return;
+    }
+    if value.len() > MAX_DECLARED_PATH_LENGTH {
+        declared.push_error(format!(
+            "declared artifact path exceeds {MAX_DECLARED_PATH_LENGTH} bytes"
+        ));
+        return;
+    }
+    if value.chars().any(char::is_control) {
+        declared.push_error("declared artifact path contains a control character");
+        return;
+    }
+    if declared.paths.iter().any(|known| known == value) {
+        return;
+    }
+    if declared.paths.len() >= MAX_DECLARED_ARTIFACT_PATHS {
+        declared.push_error(format!(
+            "artifact contract declares more than {MAX_DECLARED_ARTIFACT_PATHS} distinct paths"
+        ));
+        return;
+    }
+    declared.paths.push(value.to_owned());
+}
+
+fn collect_path_value(value: &serde_json::Value, declared: &mut DeclaredArtifactPaths) {
+    match value {
+        serde_json::Value::String(value) => push_declared_path(declared, value),
+        serde_json::Value::Array(values) => {
+            for value in values {
+                if let Some(value) = value.as_str() {
+                    push_declared_path(declared, value);
+                } else {
+                    declared.push_error(
+                        "declared artifact path list contains a non-string value",
+                    );
+                }
+            }
+        }
+        _ => declared.push_error("declared artifact path value is not a string or string list"),
+    }
+}
+
+fn collect_json_artifact_paths(
+    value: &serde_json::Value,
+    declared: &mut DeclaredArtifactPaths,
+    nodes: &mut usize,
+    depth: usize,
+    allow_plain_path: bool,
+    inside_result_scope: bool,
+) {
+    if depth > 12 {
+        declared.push_error("artifact contract JSON nesting exceeds 12 levels");
+        return;
+    }
+    if *nodes >= MAX_ARTIFACT_OUTPUT_JSON_NODES {
+        declared.push_error(format!(
+            "artifact contract JSON exceeds {MAX_ARTIFACT_OUTPUT_JSON_NODES} nodes"
+        ));
+        return;
+    }
+    *nodes += 1;
+    match value {
+        serde_json::Value::Object(object) => {
+            for (key, child) in object {
+                if is_blocked_path_scope(key) {
+                    continue;
+                }
+                if is_explicit_artifact_path_key(key) {
+                    declared.saw_explicit_key = true;
+                    collect_path_value(child, declared);
+                } else if allow_plain_path
+                    && is_plain_path_key(key)
+                    && (depth == 0 || inside_result_scope)
+                {
+                    collect_path_value(child, declared);
+                }
+                collect_json_artifact_paths(
+                    child,
+                    declared,
+                    nodes,
+                    depth + 1,
+                    allow_plain_path,
+                    inside_result_scope || is_result_scope(key),
+                );
+            }
+        }
+        serde_json::Value::Array(values) => {
+            for child in values {
+                collect_json_artifact_paths(
+                    child,
+                    declared,
+                    nodes,
+                    depth + 1,
+                    allow_plain_path,
+                    inside_result_scope,
+                );
+            }
+        }
+        _ => {}
+    }
+}
+
+fn input_artifact_paths(value: &serde_json::Value) -> DeclaredArtifactPaths {
+    let mut declared = DeclaredArtifactPaths::default();
+    let mut nodes = 0;
+    collect_json_artifact_paths(value, &mut declared, &mut nodes, 0, false, false);
+    declared
+}
+
+fn output_artifact_paths(content: &str, allow_plain_path: bool) -> DeclaredArtifactPaths {
+    let mut declared = DeclaredArtifactPaths::default();
+    if let Ok(value) = serde_json::from_str::<serde_json::Value>(content.trim()) {
+        let mut nodes = 0;
+        collect_json_artifact_paths(
+            &value,
+            &mut declared,
+            &mut nodes,
+            0,
+            allow_plain_path,
+            false,
+        );
+    }
+
+    // A number of native/export tools return a human-readable locator rather
+    // than JSON. Only accept explicit output labels; arbitrary prose and input
+    // paths are deliberately ignored.
+    const LABELS: &[&str] = &[
+        "saved to:",
+        "output path:",
+        "output file:",
+        "artifact path:",
+        "artifact file:",
+        "result path:",
+        "result file:",
+        "destination path:",
+        "destination file:",
+    ];
+    for line in content.lines() {
+        let trimmed = line.trim();
+        let lower = trimmed.to_ascii_lowercase();
+        for label in LABELS {
+            if lower.starts_with(label) {
+                declared.saw_explicit_key = true;
+                push_declared_path(&mut declared, &trimmed[label.len()..]);
+                break;
+            }
+        }
+    }
+    declared
+}
+
+fn artifact_candidate_path(value: &str) -> Result<PathBuf, String> {
+    if value.get(..5).is_some_and(|prefix| prefix.eq_ignore_ascii_case("file:")) {
+        let url = url::Url::parse(value).map_err(|error| format!("invalid artifact file URI: {error}"))?;
+        return url
+            .to_file_path()
+            .map_err(|_| "artifact file URI is not a local filesystem path".to_owned());
+    }
+    Ok(PathBuf::from(value))
+}
+
+fn intended_artifact_path(workspace: &Path, value: &str) -> Result<PathBuf, String> {
+    let workspace = std::fs::canonicalize(workspace)
+        .map_err(|error| format!("cannot canonicalize artifact workspace: {error}"))?;
+    let requested = artifact_candidate_path(value)?;
+    if requested
+        .components()
+        .any(|component| matches!(component, std::path::Component::ParentDir))
+    {
+        return Err("artifact path contains a parent-directory traversal".to_owned());
+    }
+    let candidate = if requested.is_absolute() {
+        requested
+    } else {
+        workspace.join(requested)
+    };
+
+    // Canonicalize the nearest existing ancestor, then re-attach the missing
+    // suffix. This validates both paths that already exist and paths the tool
+    // promises to create, including symlinked parents, without a time-of-check
+    // assumption about filesystem timestamp precision.
+    let mut ancestor = candidate.as_path();
+    let mut missing_suffix = Vec::new();
+    loop {
+        match std::fs::symlink_metadata(ancestor) {
+            Ok(_) => break,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                let file_name = ancestor
+                    .file_name()
+                    .ok_or_else(|| "artifact path has no existing ancestor".to_owned())?;
+                missing_suffix.push(file_name.to_os_string());
+                ancestor = ancestor
+                    .parent()
+                    .ok_or_else(|| "artifact path has no existing ancestor".to_owned())?;
+            }
+            Err(error) => return Err(format!("cannot inspect artifact path: {error}")),
+        }
+    }
+    let mut resolved = std::fs::canonicalize(ancestor)
+        .map_err(|error| format!("cannot canonicalize artifact path: {error}"))?;
+    if !resolved.starts_with(&workspace) {
+        return Err("artifact path escapes the workspace boundary".to_owned());
+    }
+    for component in missing_suffix.into_iter().rev() {
+        resolved.push(component);
+    }
+    if !resolved.starts_with(&workspace) {
+        return Err("artifact path escapes the workspace boundary".to_owned());
+    }
+    Ok(resolved)
+}
+
+fn hash_file_for_baseline(path: &Path, expected_size: u64) -> Result<String, String> {
+    if expected_size > MAX_BASELINE_ARTIFACT_BYTES {
+        return Err(format!(
+            "artifact baseline exceeds the {} byte limit",
+            MAX_BASELINE_ARTIFACT_BYTES
+        ));
+    }
+    let mut file = File::open(path)
+        .map_err(|error| format!("cannot open artifact baseline: {error}"))?;
+    let mut digest = Sha256::new();
+    let mut buffer = [0_u8; 64 * 1024];
+    let mut bytes_read = 0_u64;
+    loop {
+        let read = file
+            .read(&mut buffer)
+            .map_err(|error| format!("cannot read artifact baseline: {error}"))?;
+        if read == 0 {
+            break;
+        }
+        bytes_read = bytes_read.saturating_add(read as u64);
+        if bytes_read > MAX_BASELINE_ARTIFACT_BYTES {
+            return Err(format!(
+                "artifact baseline exceeds the {} byte limit",
+                MAX_BASELINE_ARTIFACT_BYTES
+            ));
+        }
+        digest.update(&buffer[..read]);
+    }
+    let metadata = std::fs::metadata(path)
+        .map_err(|error| format!("cannot re-check artifact baseline: {error}"))?;
+    if !metadata.is_file() || metadata.len() != expected_size || bytes_read != expected_size {
+        return Err("artifact baseline changed while it was being fingerprinted".to_owned());
+    }
+    Ok(hex::encode(digest.finalize()))
+}
+
+fn capture_path_fingerprint(path: &Path) -> Result<ArtifactPathFingerprint, String> {
+    let metadata = match std::fs::metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(ArtifactPathFingerprint::Absent);
+        }
+        Err(error) => return Err(format!("cannot inspect artifact baseline: {error}")),
+    };
+    if !metadata.is_file() {
+        return Err("declared artifact baseline is not a regular file".to_owned());
+    }
+    let size_bytes = metadata.len();
+    let sha256 = hash_file_for_baseline(path, size_bytes)?;
+    Ok(ArtifactPathFingerprint::Present { size_bytes, sha256 })
 }
 
 /// Parse the `update_plan` tool result content into frontend plan entries.
@@ -50,8 +479,11 @@ impl BackendOutputSink {
         Self {
             event_tx,
             distill_dir: None,
+            artifact_store: None,
+            artifact_workspace: None,
             turn_text: Mutex::new(String::new()),
             active_tool_calls: Mutex::new(HashMap::new()),
+            artifact_delivery_turn: Mutex::new(ArtifactDeliveryTurn::default()),
         }
     }
 
@@ -60,6 +492,492 @@ impl BackendOutputSink {
     pub fn with_distill_dir(mut self, dir: Option<PathBuf>) -> Self {
         self.distill_dir = dir;
         self
+    }
+
+    /// Enable durable, verified binary output delivery under the session's
+    /// trusted workspace.
+    pub fn with_artifact_workspace(mut self, workspace: impl Into<PathBuf>) -> Self {
+        let workspace = workspace.into();
+        self.artifact_store = Some(ArtifactStore::new(workspace.clone()));
+        self.artifact_workspace = Some(workspace);
+        self
+    }
+
+    /// Begin one accepted user turn's artifact-delivery ledger. Engine
+    /// sub-streams do not call this: steering and truncation continuations are
+    /// part of the same accepted turn and must retain earlier failures.
+    pub fn begin_artifact_delivery_turn(&self) {
+        let mut turn = self
+            .artifact_delivery_turn
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        turn.calls.clear();
+        turn.active = true;
+    }
+
+    /// Seal one accepted user turn. Every artifact-producing call must have a
+    /// verified receipt of its own; a later successful call cannot mask an
+    /// earlier failure or an unfinished call.
+    pub fn finish_artifact_delivery_turn(&self) -> Result<(), String> {
+        let mut turn = match self.artifact_delivery_turn.lock() {
+            Ok(turn) => turn,
+            Err(poisoned) => {
+                let mut turn = poisoned.into_inner();
+                turn.active = false;
+                turn.calls.clear();
+                return Err("artifact-delivery ledger lock was poisoned".to_owned());
+            }
+        };
+        if !turn.active {
+            return Err("artifact-delivery turn was not active".to_owned());
+        }
+        turn.active = false;
+        let mut failures = Vec::new();
+        for obligation in turn.calls.values() {
+            match &obligation.status {
+                ArtifactCallDeliveryStatus::CompletedVerified(artifacts) => {
+                    let Some(store) = self.artifact_store.as_ref() else {
+                        failures.push(format!(
+                            "{} ({}) lost its workspace artifact store before turn completion",
+                            obligation.tool_name,
+                            obligation.contract.label()
+                        ));
+                        continue;
+                    };
+                    for artifact in artifacts {
+                        if let Err(error) = store.reverify_receipt(artifact) {
+                            failures.push(format!(
+                                "{} ({}) artifact {} failed final verification: {error}",
+                                obligation.tool_name,
+                                obligation.contract.label(),
+                                artifact.path
+                            ));
+                        }
+                    }
+                    let mime_types = artifacts
+                        .iter()
+                        .map(|artifact| artifact.mime_type.as_str())
+                        .collect::<Vec<_>>();
+                    if let Err(error) = obligation.contract.validate_mimes(&mime_types) {
+                        failures.push(format!(
+                            "{} ({}) failed final contract verification: {error}",
+                            obligation.tool_name,
+                            obligation.contract.label()
+                        ));
+                    }
+                }
+                ArtifactCallDeliveryStatus::Running => failures.push(format!(
+                    "{} ({}) ended without a verified artifact receipt",
+                    obligation.tool_name,
+                    obligation.contract.label()
+                )),
+                ArtifactCallDeliveryStatus::Failed(reason) => failures.push(format!(
+                    "{} ({}) failed artifact delivery: {reason}",
+                    obligation.tool_name,
+                    obligation.contract.label()
+                )),
+            }
+        }
+        turn.calls.clear();
+        if failures.is_empty() {
+            Ok(())
+        } else {
+            Err(failures.join("; "))
+        }
+    }
+
+    fn record_artifact_obligation(
+        &self,
+        call_id: &str,
+        tool_name: &str,
+        contract: Option<ArtifactContract>,
+    ) {
+        let Some(contract) = contract else {
+            return;
+        };
+        let mut turn = self
+            .artifact_delivery_turn
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if !turn.active {
+            return;
+        }
+        turn.calls
+            .entry(call_id.to_owned())
+            .and_modify(|obligation| {
+                if matches!(obligation.status, ArtifactCallDeliveryStatus::Running) {
+                    match obligation.contract.merge(contract) {
+                        Ok(merged) => obligation.contract = merged,
+                        Err(error) => {
+                            obligation.status = ArtifactCallDeliveryStatus::Failed(format!(
+                                "conflicting artifact contract metadata: {error}"
+                            ));
+                        }
+                    }
+                }
+            })
+            .or_insert_with(|| ArtifactCallObligation {
+                tool_name: tool_name.to_owned(),
+                contract,
+                status: ArtifactCallDeliveryStatus::Running,
+            });
+    }
+
+    fn register_artifact_obligation(
+        &self,
+        call_id: &str,
+        tool_name: &str,
+        contract: Option<ArtifactContract>,
+    ) {
+        let Some(contract) = contract else {
+            return;
+        };
+        let mut turn = self
+            .artifact_delivery_turn
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if !turn.active {
+            return;
+        }
+        match turn.calls.entry(call_id.to_owned()) {
+            std::collections::hash_map::Entry::Vacant(entry) => {
+                entry.insert(ArtifactCallObligation {
+                    tool_name: tool_name.to_owned(),
+                    contract,
+                    status: ArtifactCallDeliveryStatus::Running,
+                });
+            }
+            std::collections::hash_map::Entry::Occupied(mut entry) => {
+                entry.get_mut().status = ArtifactCallDeliveryStatus::Failed(
+                    "artifact-producing tool call reused a prior call id".to_owned(),
+                );
+            }
+        }
+    }
+
+    fn settle_artifact_obligation(
+        &self,
+        call_id: &str,
+        tool_name: &str,
+        is_error: bool,
+        artifacts: &[PersistedArtifact],
+    ) {
+        let mut turn = self
+            .artifact_delivery_turn
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if !turn.calls.contains_key(call_id) && !is_error && !artifacts.is_empty() && turn.active {
+            // An unknown/brand-named tool may still return a real persisted
+            // artifact even when its name carried no pre-call requirement.
+            // Every receipt that we publish must enter the turn ledger so a
+            // later tool cannot delete it before Finish and escape final
+            // re-verification.
+            turn.calls.insert(
+                call_id.to_owned(),
+                ArtifactCallObligation {
+                    tool_name: tool_name.to_owned(),
+                    contract: any_artifact_contract(),
+                    status: ArtifactCallDeliveryStatus::Running,
+                },
+            );
+        }
+        let Some(obligation) = turn.calls.get_mut(call_id) else {
+            return;
+        };
+        obligation.status = match &obligation.status {
+            ArtifactCallDeliveryStatus::Running => {
+                if is_error {
+                    ArtifactCallDeliveryStatus::Failed("tool returned an error".to_owned())
+                } else if artifacts.is_empty() {
+                    ArtifactCallDeliveryStatus::Failed(
+                        "tool completed without a verified artifact receipt".to_owned(),
+                    )
+                } else {
+                    let mime_types = artifacts
+                        .iter()
+                        .map(|artifact| artifact.mime_type.as_str())
+                        .collect::<Vec<_>>();
+                    match obligation.contract.validate_mimes(&mime_types) {
+                        Ok(()) => ArtifactCallDeliveryStatus::CompletedVerified(artifacts.to_vec()),
+                        Err(error) => ArtifactCallDeliveryStatus::Failed(format!(
+                            "verified receipts do not satisfy the artifact contract: {error}"
+                        )),
+                    }
+                }
+            }
+            ArtifactCallDeliveryStatus::CompletedVerified(_) => {
+                ArtifactCallDeliveryStatus::Failed(
+                    "artifact-producing tool call emitted more than one terminal result".to_owned(),
+                )
+            }
+            ArtifactCallDeliveryStatus::Failed(reason) => {
+                ArtifactCallDeliveryStatus::Failed(reason.clone())
+            }
+        };
+    }
+
+    fn fail_artifact_obligation(&self, call_id: &str, reason: &str) {
+        let mut turn = self
+            .artifact_delivery_turn
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(obligation) = turn.calls.get_mut(call_id) {
+            obligation.status = ArtifactCallDeliveryStatus::Failed(reason.to_owned());
+        }
+    }
+
+    fn record_unidentified_artifact_failure(
+        &self,
+        tool_name: &str,
+        contract: Option<ArtifactContract>,
+        reason: &str,
+    ) {
+        let Some(contract) = contract else {
+            return;
+        };
+        let mut turn = self
+            .artifact_delivery_turn
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if !turn.active {
+            return;
+        }
+        let mut sequence = turn.calls.len();
+        let call_id = loop {
+            let candidate = format!("invalid-artifact-call-{sequence}");
+            if !turn.calls.contains_key(&candidate) {
+                break candidate;
+            }
+            sequence += 1;
+        };
+        turn.calls.insert(
+            call_id,
+            ArtifactCallObligation {
+                tool_name: tool_name.to_owned(),
+                contract,
+                status: ArtifactCallDeliveryStatus::Failed(reason.to_owned()),
+            },
+        );
+    }
+
+    fn capture_artifact_path_baselines(
+        &self,
+        input: &serde_json::Value,
+    ) -> ArtifactPathBaselines {
+        let declared = input_artifact_paths(input);
+        let mut baselines = ArtifactPathBaselines::default();
+        if !declared.saw_explicit_key && declared.errors.is_empty() {
+            return baselines;
+        }
+        baselines.errors.extend(declared.errors);
+        if declared.paths.is_empty() {
+            if baselines.errors.is_empty() {
+                baselines
+                    .errors
+                    .push("declared artifact output key contains no usable path".to_owned());
+            }
+            return baselines;
+        }
+        let Some(workspace) = self.artifact_workspace.as_deref() else {
+            baselines
+                .errors
+                .push("session has no workspace for artifact baselines".to_owned());
+            return baselines;
+        };
+        for raw_path in declared.paths {
+            let path = match intended_artifact_path(workspace, &raw_path) {
+                Ok(path) => path,
+                Err(error) => {
+                    baselines
+                        .errors
+                        .push(format!("invalid declared artifact path {raw_path:?}: {error}"));
+                    continue;
+                }
+            };
+            if baselines.entries.iter().any(|known| known.path == path) {
+                continue;
+            }
+            match capture_path_fingerprint(&path) {
+                Ok(fingerprint) => baselines
+                    .entries
+                    .push(ArtifactPathBaseline { path, fingerprint }),
+                Err(error) => baselines.errors.push(format!(
+                    "cannot fingerprint declared artifact path {raw_path:?}: {error}"
+                )),
+            }
+        }
+        baselines
+    }
+
+    fn inline_artifact_kind(mime_type: &str) -> ArtifactKind {
+        let mime = mime_type
+            .split(';')
+            .next()
+            .unwrap_or_default()
+            .trim()
+            .to_ascii_lowercase();
+        if mime.starts_with("image/") {
+            ArtifactKind::Image
+        } else if mime.starts_with("audio/") {
+            ArtifactKind::Audio
+        } else if mime.starts_with("video/") {
+            ArtifactKind::Video
+        } else if mime.starts_with("text/")
+            || matches!(mime.as_str(), "application/json" | "application/xml")
+        {
+            ArtifactKind::Text
+        } else {
+            ArtifactKind::File
+        }
+    }
+
+    fn append_delivery_context(content: &str, context: &str) -> String {
+        match (content.trim().is_empty(), context.trim().is_empty()) {
+            (true, _) => context.to_owned(),
+            (_, true) => content.to_owned(),
+            (false, false) => format!("{content}\n{context}"),
+        }
+    }
+
+    fn delivery_context(artifacts: &[PersistedArtifact]) -> String {
+        let mut context = String::from("Verified artifacts saved to:");
+        for artifact in artifacts {
+            context.push_str("\n- ");
+            context.push_str(&artifact.path);
+        }
+        context
+    }
+
+    fn preflight_declared_path_artifacts(
+        &self,
+        active: Option<&ActiveToolCall>,
+        contract: ArtifactContract,
+        declared_output: &DeclaredArtifactPaths,
+    ) -> Result<Vec<PathBuf>, String> {
+        if !declared_output.errors.is_empty() {
+            return Err(declared_output.errors.join("; "));
+        }
+        let has_output_declaration =
+            declared_output.saw_explicit_key || !declared_output.paths.is_empty();
+        let has_input_declaration = active
+            .is_some_and(|call| call.artifact_path_baselines.declares_artifact());
+        if !has_output_declaration && !has_input_declaration {
+            return Ok(Vec::new());
+        }
+        let active = active.ok_or_else(|| {
+            "result-only artifact path has no pre-call baseline; refusing an unproven file"
+                .to_owned()
+        })?;
+        if !active.artifact_path_baselines.errors.is_empty() {
+            return Err(active.artifact_path_baselines.errors.join("; "));
+        }
+        if declared_output.saw_explicit_key && declared_output.paths.is_empty() {
+            return Err("artifact result contains an explicit output key but no usable path".to_owned());
+        }
+        let store = self
+            .artifact_store
+            .as_ref()
+            .ok_or_else(|| "session has no workspace artifact store".to_owned())?;
+
+        let Some(workspace) = self.artifact_workspace.as_deref() else {
+            return Err("session has no workspace for artifact verification".to_owned());
+        };
+        for raw_path in &declared_output.paths {
+            let output_path = intended_artifact_path(workspace, raw_path)?;
+            if !active
+                .artifact_path_baselines
+                .entries
+                .iter()
+                .any(|baseline| baseline.path == output_path)
+            {
+                return Err(format!(
+                    "result-only artifact path {raw_path:?} has no matching pre-call baseline"
+                ));
+            }
+        }
+
+        let mut verified = Vec::with_capacity(active.artifact_path_baselines.entries.len());
+        for baseline in &active.artifact_path_baselines.entries {
+            let file_type = match std::fs::symlink_metadata(&baseline.path) {
+                Ok(metadata) => metadata.file_type(),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    return Err(
+                        "declared artifact path is still missing after the tool completed"
+                            .to_owned(),
+                    );
+                }
+                Err(error) => {
+                    return Err(format!("cannot inspect declared artifact path: {error}"));
+                }
+            };
+            if file_type.is_symlink() {
+                return Err(
+                    "declared artifact path became a symbolic link after the call began".to_owned(),
+                );
+            }
+            let artifact = store
+                .verify_existing_path(&baseline.path)
+                .map_err(|error| format!("declared artifact path failed verification: {error}"))?;
+            if !contract.accepts_mime(&artifact.mime_type) {
+                return Err(format!(
+                    "declared artifact path has MIME {}, expected {}",
+                    artifact.mime_type,
+                    contract.label()
+                ));
+            }
+            if let ArtifactPathFingerprint::Present { size_bytes, sha256 } = &baseline.fingerprint
+                && artifact.sha256 == *sha256
+            {
+                return Err(format!(
+                    "declared artifact path is unchanged from its pre-call fingerprint ({} bytes)",
+                    size_bytes
+                ));
+            }
+            if !verified.iter().any(|known| known == &baseline.path) {
+                verified.push(baseline.path.clone());
+            }
+        }
+        Ok(verified)
+    }
+
+    fn emit_terminal_tool_result(
+        &self,
+        call_id: String,
+        name: &str,
+        is_error: bool,
+        content: &str,
+        artifacts: Vec<PersistedArtifact>,
+    ) {
+        self.settle_artifact_obligation(&call_id, name, is_error, &artifacts);
+        self.forget_active_tool_call(&call_id);
+        let status = if is_error {
+            ToolCallStatus::Error
+        } else {
+            ToolCallStatus::Completed
+        };
+
+        tracing::info!(
+            call_id = %call_id,
+            tool = name,
+            status = ?status,
+            artifact_count = artifacts.len(),
+            "Emitting nomi tool_result event"
+        );
+
+        let _ = self.event_tx.send(AgentStreamEvent::ToolCall(ToolCallEventData {
+            call_id,
+            name: name.to_owned(),
+            args: serde_json::Value::Null,
+            status,
+            input: None,
+            output: if content.is_empty() {
+                None
+            } else {
+                Some(content.to_owned())
+            },
+            description: None,
+            artifacts,
+        }));
     }
 
     fn internal_call_id(tool_use_id: &str) -> Option<String> {
@@ -75,9 +993,30 @@ impl BackendOutputSink {
         &self,
         call_id: String,
         name: String,
+        artifact_identity: String,
         args: serde_json::Value,
         input: Option<serde_json::Value>,
     ) {
+        let artifact_path_baselines = if is_context_only_image_tool(&artifact_identity) {
+            ArtifactPathBaselines::default()
+        } else {
+            self.capture_artifact_path_baselines(&args)
+        };
+        let (mut contract, contract_error) =
+            match artifact_contract_with_input(&artifact_identity, &args) {
+                Ok(contract) => (contract, None),
+                Err(error) => (
+                    artifact_contract(&artifact_identity),
+                    Some(format!("invalid artifact contract input: {error}")),
+                ),
+            };
+        if contract.is_none() && artifact_path_baselines.declares_artifact() {
+            contract = Some(any_artifact_contract());
+        }
+        self.register_artifact_obligation(&call_id, &name, contract);
+        if let Some(error) = contract_error.as_deref() {
+            self.fail_artifact_obligation(&call_id, error);
+        }
         match self.active_tool_calls.lock() {
             Ok(mut active) => {
                 active.insert(
@@ -85,8 +1024,12 @@ impl BackendOutputSink {
                     ActiveToolCall {
                         call_id,
                         name,
+                        artifact_identity,
                         args,
                         input,
+                        contract,
+                        contract_error,
+                        artifact_path_baselines,
                     },
                 );
             }
@@ -114,6 +1057,19 @@ impl BackendOutputSink {
         }
     }
 
+    fn active_tool_call(&self, call_id: &str) -> Option<ActiveToolCall> {
+        match self.active_tool_calls.lock() {
+            Ok(active) => active.get(call_id).cloned(),
+            Err(poisoned) => {
+                tracing::warn!(
+                    error = %poisoned,
+                    "Active tool-call lock was poisoned while verifying an artifact path"
+                );
+                poisoned.into_inner().get(call_id).cloned()
+            }
+        }
+    }
+
     fn terminate_active_tool_calls(
         &self,
         status: ToolCallStatus,
@@ -133,6 +1089,7 @@ impl BackendOutputSink {
         };
 
         for active in interrupted {
+            self.fail_artifact_obligation(&active.call_id, &output);
             let _ = self.event_tx.send(AgentStreamEvent::ToolCall(ToolCallEventData {
                 call_id: active.call_id,
                 name: active.name,
@@ -141,6 +1098,7 @@ impl BackendOutputSink {
                 input: active.input,
                 output: Some(output.clone()),
                 description: Some(description.to_owned()),
+                artifacts: Vec::new(),
             }));
         }
     }
@@ -237,15 +1195,45 @@ impl OutputSink for BackendOutputSink {
     }
 
     fn emit_tool_call(&self, tool_use_id: &str, name: &str, input: &str) {
+        self.emit_tool_call_with_artifact_identity(tool_use_id, name, name, input);
+    }
+
+    fn emit_tool_call_with_artifact_identity(
+        &self,
+        tool_use_id: &str,
+        name: &str,
+        artifact_identity: &str,
+        input: &str,
+    ) {
+        let parsed_input = serde_json::from_str(input)
+            .unwrap_or(serde_json::Value::String(input.to_owned()));
         let Some(call_id) = Self::internal_call_id(tool_use_id) else {
+            let (mut contract, contract_error) =
+                match artifact_contract_with_input(artifact_identity, &parsed_input) {
+                    Ok(contract) => (contract, None),
+                    Err(error) => (
+                        artifact_contract(artifact_identity),
+                        Some(format!("invalid artifact contract input: {error}")),
+                    ),
+                };
+            if contract.is_none() && input_artifact_paths(&parsed_input).saw_explicit_key {
+                contract = Some(any_artifact_contract());
+            }
+            let reason = contract_error.as_deref().unwrap_or(
+                "tool call has an empty or non-canonical call id",
+            );
+            self.record_unidentified_artifact_failure(
+                name,
+                contract,
+                reason,
+            );
             tracing::error!(
                 tool = name,
+                artifact_identity,
                 "Cannot emit tool_call with empty or non-canonical tool_use_id"
             );
             return;
         };
-
-        let parsed_input = serde_json::from_str(input).unwrap_or(serde_json::Value::String(input.to_owned()));
 
         tracing::debug!(
             tool_use_id = %tool_use_id,
@@ -265,6 +1253,7 @@ impl OutputSink for BackendOutputSink {
         self.remember_active_tool_call(
             call_id.clone(),
             name.to_owned(),
+            artifact_identity.to_owned(),
             parsed_input.clone(),
             Some(parsed_input.clone()),
         );
@@ -277,24 +1266,24 @@ impl OutputSink for BackendOutputSink {
             input: Some(parsed_input),
             output: None,
             description: None,
+            artifacts: Vec::new(),
         }));
     }
 
     fn emit_tool_result(&self, tool_use_id: &str, name: &str, is_error: bool, content: &str) {
-        let Some(call_id) = Self::internal_call_id(tool_use_id) else {
-            tracing::error!(
-                tool = name,
-                "Cannot emit tool_result with empty or non-canonical tool_use_id"
-            );
-            return;
-        };
-
         // update_plan special case: emit a Plan event so the frontend renders
         // the checklist (MessagePlan) instead of a raw JSON tool card.
         if name == "update_plan"
             && !is_error
             && let Some(entries) = parse_plan_entries(content)
         {
+            let Some(call_id) = Self::internal_call_id(tool_use_id) else {
+                tracing::error!(
+                    tool = name,
+                    "Cannot emit update_plan result with empty or non-canonical tool_use_id"
+                );
+                return;
+            };
             self.forget_active_tool_call(&call_id);
             let _ = self.event_tx.send(AgentStreamEvent::Plan(PlanEventData {
                 session_id: Some("update_plan".to_string()),
@@ -305,35 +1294,236 @@ impl OutputSink for BackendOutputSink {
         }
         // Unparsable update_plan output falls through to a normal tool result.
 
-        self.forget_active_tool_call(&call_id);
+        let _ = self.emit_tool_result_with_images_and_artifact_identity(
+            tool_use_id,
+            name,
+            name,
+            is_error,
+            content,
+            &[],
+        );
+    }
 
-        let status = if is_error {
-            ToolCallStatus::Error
-        } else {
-            ToolCallStatus::Completed
+    fn emit_tool_result_with_images(
+        &self,
+        tool_use_id: &str,
+        name: &str,
+        is_error: bool,
+        content: &str,
+        images: &[ToolImage],
+    ) -> ToolMediaDelivery {
+        self.emit_tool_result_with_images_and_artifact_identity(
+            tool_use_id,
+            name,
+            name,
+            is_error,
+            content,
+            images,
+        )
+    }
+
+    fn emit_tool_result_with_images_and_artifact_identity(
+        &self,
+        tool_use_id: &str,
+        name: &str,
+        artifact_identity: &str,
+        is_error: bool,
+        content: &str,
+        images: &[ToolImage],
+    ) -> ToolMediaDelivery {
+        let Some(call_id) = Self::internal_call_id(tool_use_id) else {
+            let explicit_output = output_artifact_paths(content, false);
+            let mut contract = artifact_contract(artifact_identity);
+            if contract.is_none()
+                && (!images.is_empty()
+                    || explicit_output.saw_explicit_key
+                    || !explicit_output.paths.is_empty()
+                    || !explicit_output.errors.is_empty())
+            {
+                contract = Some(any_artifact_contract());
+            }
+            self.record_unidentified_artifact_failure(
+                name,
+                contract,
+                "tool result has an empty or non-canonical call id",
+            );
+            return ToolMediaDelivery::Failed {
+                error: "tool result has no canonical call id; artifact was not written".to_owned(),
+            };
         };
 
-        tracing::info!(
-            tool_use_id = %tool_use_id,
-            call_id = %call_id,
-            tool = name,
-            status = ?status,
-            "Emitting nomi tool_result event"
-        );
+        // Failed tools may return diagnostic images. They remain transient
+        // model context: never persist or publish them as successful artifacts.
+        if is_error {
+            self.emit_terminal_tool_result(call_id, name, true, content, Vec::new());
+            return ToolMediaDelivery::Unmanaged;
+        }
 
-        let _ = self.event_tx.send(AgentStreamEvent::ToolCall(ToolCallEventData {
-            call_id,
-            name: name.to_owned(),
-            args: serde_json::Value::Null,
-            status,
-            input: None,
-            output: if content.is_empty() {
-                None
-            } else {
-                Some(content.to_owned())
+        let active = self.active_tool_call(&call_id);
+        let effective_identity = active
+            .as_ref()
+            .map(|call| call.artifact_identity.as_str())
+            .unwrap_or(artifact_identity);
+
+        // Browser/computer screenshots are observational context, not durable
+        // user-requested output. Do not create files or artifact receipts.
+        if is_context_only_image_tool(effective_identity) {
+            self.emit_terminal_tool_result(call_id, name, false, content, Vec::new());
+            return ToolMediaDelivery::Unmanaged;
+        }
+
+        if let Some(error) = active
+            .as_ref()
+            .and_then(|call| call.contract_error.as_deref())
+        {
+            let error = error.to_owned();
+            let output = Self::append_delivery_context(
+                content,
+                &format!("Artifact delivery failed: {error}"),
+            );
+            self.emit_terminal_tool_result(call_id, name, true, &output, Vec::new());
+            return ToolMediaDelivery::Failed { error };
+        }
+
+        let explicit_output = output_artifact_paths(content, false);
+        let observed_contract = artifact_contract(artifact_identity);
+        let mut contract = match (
+            active.as_ref().and_then(|call| call.contract),
+            observed_contract,
+        ) {
+            (Some(existing), Some(observed)) => match existing.merge(observed) {
+                Ok(contract) => Some(contract),
+                Err(error) => {
+                    let error = format!("conflicting tool artifact identities: {error}");
+                    self.fail_artifact_obligation(&call_id, &error);
+                    let output = Self::append_delivery_context(
+                        content,
+                        &format!("Artifact delivery failed: {error}"),
+                    );
+                    self.emit_terminal_tool_result(call_id, name, true, &output, Vec::new());
+                    return ToolMediaDelivery::Failed { error };
+                }
             },
-            description: None,
-        }));
+            (Some(contract), None) | (None, Some(contract)) => Some(contract),
+            (None, None) => None,
+        };
+        if contract.is_none()
+            && (!images.is_empty()
+                || explicit_output.saw_explicit_key
+                || !explicit_output.paths.is_empty()
+                || !explicit_output.errors.is_empty())
+        {
+            contract = Some(any_artifact_contract());
+        }
+        self.record_artifact_obligation(&call_id, name, contract);
+
+        let declared_output = if contract.is_some() {
+            output_artifact_paths(content, true)
+        } else {
+            explicit_output
+        };
+
+        if images.is_empty()
+            && contract.is_none()
+            && !declared_output.saw_explicit_key
+            && declared_output.paths.is_empty()
+            && declared_output.errors.is_empty()
+        {
+            self.emit_terminal_tool_result(call_id, name, false, content, Vec::new());
+            return ToolMediaDelivery::Unmanaged;
+        }
+
+        let contract = contract.unwrap_or_else(any_artifact_contract);
+
+        // Some native and third-party generators write directly into the
+        // workspace and return a structured/human-readable output path instead
+        // of inline bytes. Accept only paths captured before the call and only
+        // when an absent path appeared or an existing file's content hash
+        // changed. Preflight these paths before writing inline bytes so mixed
+        // output cannot leave a partial artifact batch.
+        let path_sources = match self.preflight_declared_path_artifacts(
+            active.as_ref(),
+            contract,
+            &declared_output,
+        ) {
+            Ok(artifacts) => artifacts,
+            Err(error) => {
+                let output = Self::append_delivery_context(
+                    content,
+                    &format!("Artifact delivery failed: {error}"),
+                );
+                self.emit_terminal_tool_result(call_id, name, true, &output, Vec::new());
+                return ToolMediaDelivery::Failed { error };
+            }
+        };
+
+        if let Some((index, artifact)) = images
+            .iter()
+            .enumerate()
+            .find(|(_, artifact)| !contract.accepts_mime(&artifact.media_type))
+        {
+            let error = format!(
+                "artifact-producing tool returned no {} satisfying the contract; inline artifact {index} has MIME {}",
+                contract.label(),
+                artifact.media_type,
+            );
+            let output = Self::append_delivery_context(
+                content,
+                &format!("Artifact delivery failed: {error}"),
+            );
+            self.emit_terminal_tool_result(call_id, name, true, &output, Vec::new());
+            return ToolMediaDelivery::Failed { error };
+        }
+
+        let actual_count = path_sources.len().saturating_add(images.len());
+        if actual_count < contract.expected_count() {
+            let error = if actual_count == 0 && contract.expected_count() == 1 {
+                format!("artifact-producing tool returned no {}", contract.label())
+            } else {
+                format!(
+                    "artifact-producing tool returned {actual_count} verified candidate(s), expected at least {} {}(s)",
+                    contract.expected_count(),
+                    contract.label()
+                )
+            };
+            let output = Self::append_delivery_context(
+                content,
+                &format!("Artifact delivery failed: {error}"),
+            );
+            self.emit_terminal_tool_result(call_id, name, true, &output, Vec::new());
+            return ToolMediaDelivery::Failed { error };
+        }
+
+        let Some(store) = self.artifact_store.as_ref() else {
+            let error = "session has no workspace artifact store".to_owned();
+            let output = Self::append_delivery_context(content, &format!("Artifact delivery failed: {error}"));
+            self.emit_terminal_tool_result(call_id, name, true, &output, Vec::new());
+            return ToolMediaDelivery::Failed { error };
+        };
+
+        match store.persist_inline_and_existing_batch(
+            images.iter().map(|artifact| {
+                (
+                    Self::inline_artifact_kind(&artifact.media_type),
+                    &artifact.media_type,
+                    &artifact.data,
+                )
+            }),
+            &path_sources,
+        ) {
+            Ok(artifacts) => {
+                let context = Self::delivery_context(&artifacts);
+                let output = Self::append_delivery_context(content, &context);
+                self.emit_terminal_tool_result(call_id, name, false, &output, artifacts);
+                ToolMediaDelivery::Delivered { context }
+            }
+            Err(error) => {
+                let error = error.to_string();
+                let output = Self::append_delivery_context(content, &format!("Artifact delivery failed: {error}"));
+                self.emit_terminal_tool_result(call_id, name, true, &output, Vec::new());
+                ToolMediaDelivery::Failed { error }
+            }
+        }
     }
 
     fn emit_stream_start(&self, _msg_id: &str) {
@@ -756,6 +1946,818 @@ mod tests {
             }
             other => panic!("Expected ToolCall, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn valid_image_is_verified_persisted_and_attached_before_completed() {
+        const PNG: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
+        let workspace = tempfile::tempdir().unwrap();
+        let (tx, mut rx) = broadcast::channel(16);
+        let sink = BackendOutputSink::new(tx).with_artifact_workspace(workspace.path());
+        sink.emit_tool_call("image-1", "image_gen", "{}");
+        let _running = rx.try_recv().unwrap();
+
+        let delivery = sink.emit_tool_result_with_images(
+            "image-1",
+            "image_gen",
+            false,
+            "",
+            &[ToolImage {
+                media_type: "image/png".into(),
+                data: PNG.into(),
+            }],
+        );
+
+        assert!(matches!(delivery, ToolMediaDelivery::Delivered { .. }));
+        match rx.try_recv().unwrap() {
+            AgentStreamEvent::ToolCall(data) => {
+                assert_eq!(data.status, ToolCallStatus::Completed);
+                assert_eq!(data.artifacts.len(), 1);
+                assert!(std::path::Path::new(&data.artifacts[0].path).is_file());
+                assert_eq!(data.artifacts[0].mime_type, "image/png");
+                assert!(data.output.unwrap().contains("Verified artifacts saved to:"));
+            }
+            other => panic!("Expected ToolCall, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn generic_audio_and_resource_descriptor_are_verified_before_completed() {
+        use base64::Engine as _;
+
+        let workspace = tempfile::tempdir().unwrap();
+        let (tx, mut rx) = broadcast::channel(16);
+        let sink = BackendOutputSink::new(tx).with_artifact_workspace(workspace.path());
+        sink.emit_tool_call("export-1", "mcp__reports__export", "{}");
+        let _running = rx.try_recv().unwrap();
+        let mut wav = b"RIFF".to_vec();
+        wav.extend_from_slice(&38_u32.to_le_bytes());
+        wav.extend_from_slice(b"WAVEfmt ");
+        wav.extend_from_slice(&16_u32.to_le_bytes());
+        wav.extend_from_slice(&[1, 0, 1, 0]);
+        wav.extend_from_slice(&8_000_u32.to_le_bytes());
+        wav.extend_from_slice(&8_000_u32.to_le_bytes());
+        wav.extend_from_slice(&[1, 0, 8, 0]);
+        wav.extend_from_slice(b"data");
+        wav.extend_from_slice(&1_u32.to_le_bytes());
+        wav.extend_from_slice(&[128, 0]);
+
+        let delivery = sink.emit_tool_result_with_images(
+            "export-1",
+            "mcp__reports__export",
+            false,
+            "Resource link: report — https://example.test/report.pdf",
+            &[
+                ToolImage {
+                    media_type: "audio/wav".into(),
+                    data: base64::engine::general_purpose::STANDARD.encode(wav),
+                },
+                ToolImage {
+                    media_type: "application/json".into(),
+                    data: "eyJ1cmkiOiJodHRwczovL2UifQ==".into(),
+                },
+            ],
+        );
+
+        assert!(matches!(delivery, ToolMediaDelivery::Delivered { .. }));
+        match rx.try_recv().unwrap() {
+            AgentStreamEvent::ToolCall(data) => {
+                assert_eq!(data.status, ToolCallStatus::Completed);
+                assert_eq!(data.artifacts.len(), 2);
+                assert_eq!(data.artifacts[0].kind, ArtifactKind::Audio);
+                assert_eq!(data.artifacts[1].kind, ArtifactKind::Text);
+                assert!(data.artifacts.iter().all(|artifact| {
+                    std::path::Path::new(&artifact.path).is_file()
+                        && artifact.size_bytes > 0
+                        && !artifact.sha256.is_empty()
+                }));
+                let output = data.output.unwrap();
+                assert!(output.contains("https://example.test/report.pdf"));
+                assert!(output.contains("Verified artifacts saved to:"));
+            }
+            other => panic!("Expected ToolCall, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn image_generator_cannot_complete_with_only_a_file_artifact() {
+        let workspace = tempfile::tempdir().unwrap();
+        let (tx, mut rx) = broadcast::channel(16);
+        let sink = BackendOutputSink::new(tx).with_artifact_workspace(workspace.path());
+
+        let delivery = sink.emit_tool_result_with_images(
+            "image-1",
+            "image_gen",
+            false,
+            "generated",
+            &[ToolImage {
+                media_type: "text/plain".into(),
+                data: "bm90IGFuIGltYWdl".into(),
+            }],
+        );
+
+        assert!(matches!(delivery, ToolMediaDelivery::Failed { .. }));
+        match rx.try_recv().unwrap() {
+            AgentStreamEvent::ToolCall(data) => {
+                assert_eq!(data.status, ToolCallStatus::Error);
+                assert!(data.artifacts.is_empty());
+                assert!(data.output.unwrap().contains("no image artifact"));
+            }
+            other => panic!("Expected ToolCall, got {other:?}"),
+        }
+        assert!(!workspace.path().join("nomifun-artifacts").exists());
+    }
+
+    #[test]
+    fn image_generator_without_an_image_is_failed_not_completed() {
+        let workspace = tempfile::tempdir().unwrap();
+        let (tx, mut rx) = broadcast::channel(16);
+        let sink = BackendOutputSink::new(tx).with_artifact_workspace(workspace.path());
+
+        let delivery = sink.emit_tool_result_with_images("image-1", "image_gen", false, "done", &[]);
+
+        assert!(matches!(delivery, ToolMediaDelivery::Failed { .. }));
+        match rx.try_recv().unwrap() {
+            AgentStreamEvent::ToolCall(data) => {
+                assert_eq!(data.status, ToolCallStatus::Error);
+                assert!(data.artifacts.is_empty());
+                assert!(data.output.unwrap().contains("returned no image artifact"));
+            }
+            other => panic!("Expected ToolCall, got {other:?}"),
+        }
+        assert!(!workspace.path().join("nomifun-artifacts").exists());
+    }
+
+    #[test]
+    fn report_export_without_a_file_is_failed_not_completed() {
+        let workspace = tempfile::tempdir().unwrap();
+        let (tx, mut rx) = broadcast::channel(16);
+        let sink = BackendOutputSink::new(tx).with_artifact_workspace(workspace.path());
+
+        let delivery = sink.emit_tool_result_with_images(
+            "report-1",
+            "mcp__reports__export_report",
+            false,
+            "Report generated successfully",
+            &[],
+        );
+
+        assert!(matches!(delivery, ToolMediaDelivery::Failed { .. }));
+        match rx.try_recv().unwrap() {
+            AgentStreamEvent::ToolCall(data) => {
+                assert_eq!(data.status, ToolCallStatus::Error);
+                assert!(data.artifacts.is_empty());
+                assert!(data.output.unwrap().contains("returned no file artifact"));
+            }
+            other => panic!("Expected ToolCall, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn exact_format_tools_reject_wrong_format_receipts_before_persistence() {
+        const SAMPLE_BASE64: &str =
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
+        let cases = [
+            ("renderPng", "image/jpeg", "PNG image artifact"),
+            ("generateMp3", "audio/wav", "MP3 audio artifact"),
+            ("exportMp4", "video/webm", "MP4 video artifact"),
+            ("exportPdf", "text/plain", "PDF artifact"),
+        ];
+
+        for (index, (tool_name, wrong_mime, expected_label)) in cases.into_iter().enumerate() {
+            let workspace = tempfile::tempdir().unwrap();
+            let (tx, mut rx) = broadcast::channel(8);
+            let sink = BackendOutputSink::new(tx).with_artifact_workspace(workspace.path());
+            let call_id = format!("wrong-format-{index}");
+            sink.begin_artifact_delivery_turn();
+            sink.emit_tool_call(&call_id, tool_name, "{}");
+            let _running = rx.try_recv().unwrap();
+
+            let delivery = sink.emit_tool_result_with_images(
+                &call_id,
+                tool_name,
+                false,
+                "claimed success",
+                &[ToolImage {
+                    media_type: wrong_mime.to_owned(),
+                    data: SAMPLE_BASE64.to_owned(),
+                }],
+            );
+
+            let ToolMediaDelivery::Failed { error } = delivery else {
+                panic!("{tool_name} accepted {wrong_mime}");
+            };
+            assert!(error.contains(expected_label), "{tool_name}: {error}");
+            match rx.try_recv().unwrap() {
+                AgentStreamEvent::ToolCall(data) => {
+                    assert_eq!(data.status, ToolCallStatus::Error);
+                    assert!(data.artifacts.is_empty());
+                }
+                other => panic!("Expected ToolCall, got {other:?}"),
+            }
+            assert!(sink.finish_artifact_delivery_turn().is_err());
+            assert!(!workspace.path().join("nomifun-artifacts").exists());
+        }
+    }
+
+    #[test]
+    fn requested_image_count_is_a_minimum_verified_receipt_contract() {
+        const PNG: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
+        let workspace = tempfile::tempdir().unwrap();
+        let (tx, mut rx) = broadcast::channel(16);
+        let sink = BackendOutputSink::new(tx).with_artifact_workspace(workspace.path());
+
+        sink.emit_tool_call("count-short", "image_gen", r#"{"n":4}"#);
+        let _running = rx.try_recv().unwrap();
+        let delivery = sink.emit_tool_result_with_images(
+            "count-short",
+            "image_gen",
+            false,
+            "generated",
+            &[ToolImage {
+                media_type: "image/png".into(),
+                data: PNG.into(),
+            }],
+        );
+        let ToolMediaDelivery::Failed { error } = delivery else {
+            panic!("one receipt incorrectly satisfied n=4");
+        };
+        assert!(error.contains("expected at least 4"));
+        match rx.try_recv().unwrap() {
+            AgentStreamEvent::ToolCall(data) => {
+                assert_eq!(data.status, ToolCallStatus::Error);
+                assert!(data.artifacts.is_empty());
+            }
+            other => panic!("Expected ToolCall, got {other:?}"),
+        }
+        assert!(!workspace.path().join("nomifun-artifacts").exists());
+
+        sink.emit_tool_call("count-good", "image_gen", r#"{"num_images":4}"#);
+        let _running = rx.try_recv().unwrap();
+        let images = (0..4)
+            .map(|_| ToolImage {
+                media_type: "image/png".into(),
+                data: PNG.into(),
+            })
+            .collect::<Vec<_>>();
+        assert!(matches!(
+            sink.emit_tool_result_with_images(
+                "count-good",
+                "image_gen",
+                false,
+                "generated",
+                &images,
+            ),
+            ToolMediaDelivery::Delivered { .. }
+        ));
+        match rx.try_recv().unwrap() {
+            AgentStreamEvent::ToolCall(data) => {
+                assert_eq!(data.status, ToolCallStatus::Completed);
+                assert_eq!(data.artifacts.len(), 4);
+                assert!(data.artifacts.iter().all(|artifact| {
+                    artifact.mime_type == "image/png"
+                        && std::path::Path::new(&artifact.path).is_file()
+                }));
+            }
+            other => panic!("Expected ToolCall, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn long_mcp_identity_cannot_lose_export_pdf_obligation_to_display_hashing() {
+        let workspace = tempfile::tempdir().unwrap();
+        let (tx, mut rx) = broadcast::channel(8);
+        let sink = BackendOutputSink::new(tx).with_artifact_workspace(workspace.path());
+        let display_name = "mcp__very_long_server__7f6e5d4c";
+        let artifact_identity = format!("{}__export_pdf", "very_long_server_segment_".repeat(20));
+        assert!(artifact_contract(display_name).is_none());
+        assert_eq!(
+            artifact_contract(&artifact_identity).unwrap().requirement,
+            ArtifactRequirement::Pdf
+        );
+
+        sink.begin_artifact_delivery_turn();
+        sink.emit_tool_call_with_artifact_identity(
+            "long-pdf",
+            display_name,
+            &artifact_identity,
+            "{}",
+        );
+        let _running = rx.try_recv().unwrap();
+        let delivery = sink.emit_tool_result_with_images_and_artifact_identity(
+            "long-pdf",
+            display_name,
+            &artifact_identity,
+            false,
+            "PDF exported successfully",
+            &[],
+        );
+
+        let ToolMediaDelivery::Failed { error } = delivery else {
+            panic!("hashed display name bypassed its PDF contract");
+        };
+        assert!(error.contains("PDF artifact"));
+        match rx.try_recv().unwrap() {
+            AgentStreamEvent::ToolCall(data) => {
+                assert_eq!(data.status, ToolCallStatus::Error);
+                assert!(data.artifacts.is_empty());
+            }
+            other => panic!("Expected ToolCall, got {other:?}"),
+        }
+        assert!(sink.finish_artifact_delivery_turn().is_err());
+    }
+
+    #[test]
+    fn freshly_written_declared_output_path_is_verified_and_attached() {
+        let workspace = tempfile::tempdir().unwrap();
+        let (tx, mut rx) = broadcast::channel(16);
+        let sink = BackendOutputSink::new(tx).with_artifact_workspace(workspace.path());
+        sink.emit_tool_call(
+            "report-path",
+            "mcp__reports__export_report",
+            r#"{"output_path":"report.md"}"#,
+        );
+        let _running = rx.try_recv().unwrap();
+        std::fs::write(workspace.path().join("report.md"), "# Generated report\n").unwrap();
+
+        let delivery = sink.emit_tool_result_with_images(
+            "report-path",
+            "mcp__reports__export_report",
+            false,
+            r#"{"path":"report.md"}"#,
+            &[],
+        );
+
+        assert!(matches!(delivery, ToolMediaDelivery::Delivered { .. }));
+        let artifact = match rx.try_recv().unwrap() {
+            AgentStreamEvent::ToolCall(data) => {
+                assert_eq!(data.status, ToolCallStatus::Completed);
+                assert_eq!(data.artifacts.len(), 1);
+                assert!(
+                    data.artifacts[0]
+                        .relative_path
+                        .starts_with("nomifun-artifacts/artifact-")
+                );
+                assert_eq!(data.artifacts[0].mime_type, "text/markdown");
+                data.artifacts[0].clone()
+            }
+            other => panic!("Expected ToolCall, got {other:?}"),
+        };
+
+        // The published receipt is an immutable snapshot. A later tool in the
+        // same accepted turn may overwrite or delete the caller-owned path,
+        // but that must not invalidate a green terminal delivery.
+        std::fs::write(workspace.path().join("report.md"), "# Replaced later\n").unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&artifact.path).unwrap(),
+            "# Generated report\n"
+        );
+        assert_ne!(artifact.path, workspace.path().join("report.md").to_string_lossy());
+    }
+
+    #[test]
+    fn artifact_path_contract_over_limit_fails_instead_of_truncating() {
+        let workspace = tempfile::tempdir().unwrap();
+        let (tx, mut rx) = broadcast::channel(16);
+        let sink = BackendOutputSink::new(tx).with_artifact_workspace(workspace.path());
+        let paths = (0..=MAX_DECLARED_ARTIFACT_PATHS)
+            .map(|index| format!("result-{index}.md"))
+            .collect::<Vec<_>>();
+        let contract = serde_json::json!({ "outputPaths": paths }).to_string();
+
+        sink.emit_tool_call("too-many-paths", "exportReport", &contract);
+        let _running = rx.try_recv().unwrap();
+        let delivery = sink.emit_tool_result_with_images(
+            "too-many-paths",
+            "exportReport",
+            false,
+            &contract,
+            &[],
+        );
+
+        assert!(matches!(delivery, ToolMediaDelivery::Failed { .. }));
+        match rx.try_recv().unwrap() {
+            AgentStreamEvent::ToolCall(data) => {
+                assert_eq!(data.status, ToolCallStatus::Error);
+                assert!(data.artifacts.is_empty());
+                assert!(data.output.unwrap().contains("more than 32 distinct paths"));
+            }
+            other => panic!("Expected ToolCall, got {other:?}"),
+        }
+        assert!(!workspace.path().join("nomifun-artifacts").exists());
+    }
+
+    #[test]
+    fn result_only_declared_path_without_pre_call_baseline_fails_closed() {
+        let workspace = tempfile::tempdir().unwrap();
+        std::fs::write(workspace.path().join("old-report.md"), "# Old report\n").unwrap();
+        let (tx, mut rx) = broadcast::channel(16);
+        let sink = BackendOutputSink::new(tx).with_artifact_workspace(workspace.path());
+
+        let delivery = sink.emit_tool_result_with_images(
+            "report-path",
+            "mcp__reports__export_report",
+            false,
+            r#"{"outputPath":"old-report.md"}"#,
+            &[],
+        );
+
+        assert!(matches!(delivery, ToolMediaDelivery::Failed { .. }));
+        match rx.try_recv().unwrap() {
+            AgentStreamEvent::ToolCall(data) => {
+                assert_eq!(data.status, ToolCallStatus::Error);
+                assert!(data.artifacts.is_empty());
+                assert!(data.output.unwrap().contains("no pre-call baseline"));
+            }
+            other => panic!("Expected ToolCall, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn unchanged_preexisting_artifact_and_missing_artifact_both_fail_closed() {
+        let workspace = tempfile::tempdir().unwrap();
+        std::fs::write(workspace.path().join("old-report.md"), "# Old report\n").unwrap();
+        let (tx, mut rx) = broadcast::channel(16);
+        let sink = BackendOutputSink::new(tx).with_artifact_workspace(workspace.path());
+
+        sink.emit_tool_call(
+            "old",
+            "exportReport",
+            r#"{"outputPath":"old-report.md"}"#,
+        );
+        let _running = rx.try_recv().unwrap();
+        let old_delivery = sink.emit_tool_result_with_images(
+            "old",
+            "exportReport",
+            false,
+            r#"{"outputPath":"old-report.md"}"#,
+            &[],
+        );
+        assert!(matches!(old_delivery, ToolMediaDelivery::Failed { .. }));
+        match rx.try_recv().unwrap() {
+            AgentStreamEvent::ToolCall(data) => {
+                assert_eq!(data.status, ToolCallStatus::Error);
+                assert!(data.output.unwrap().contains("unchanged from its pre-call fingerprint"));
+            }
+            other => panic!("Expected ToolCall, got {other:?}"),
+        }
+
+        sink.emit_tool_call(
+            "missing",
+            "exportReport",
+            r#"{"output_path":"never-created.md"}"#,
+        );
+        let _running = rx.try_recv().unwrap();
+        let missing_delivery = sink.emit_tool_result_with_images(
+            "missing",
+            "exportReport",
+            false,
+            r#"{"result":{"path":"never-created.md"}}"#,
+            &[],
+        );
+        assert!(matches!(missing_delivery, ToolMediaDelivery::Failed { .. }));
+        match rx.try_recv().unwrap() {
+            AgentStreamEvent::ToolCall(data) => {
+                assert_eq!(data.status, ToolCallStatus::Error);
+                assert!(data.output.unwrap().contains("still missing"));
+            }
+            other => panic!("Expected ToolCall, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn unknown_tool_with_explicit_output_path_becomes_any_artifact_contract() {
+        let workspace = tempfile::tempdir().unwrap();
+        let (tx, mut rx) = broadcast::channel(16);
+        let sink = BackendOutputSink::new(tx).with_artifact_workspace(workspace.path());
+        sink.emit_tool_call(
+            "custom",
+            "mcp__vendor__worker",
+            r#"{"artifacts_paths":["custom.bin"]}"#,
+        );
+        let _running = rx.try_recv().unwrap();
+        std::fs::write(workspace.path().join("custom.bin"), b"generated bytes").unwrap();
+
+        let delivery = sink.emit_tool_result_with_images(
+            "custom",
+            "mcp__vendor__worker",
+            false,
+            r#"{"resultsFiles":["custom.bin"]}"#,
+            &[],
+        );
+        assert!(matches!(delivery, ToolMediaDelivery::Delivered { .. }));
+        match rx.try_recv().unwrap() {
+            AgentStreamEvent::ToolCall(data) => {
+                assert_eq!(data.status, ToolCallStatus::Completed);
+                assert_eq!(data.artifacts.len(), 1);
+                assert!(
+                    data.artifacts[0]
+                        .relative_path
+                        .starts_with("nomifun-artifacts/artifact-")
+                );
+            }
+            other => panic!("Expected ToolCall, got {other:?}"),
+        }
+
+        std::fs::write(workspace.path().join("untracked.bin"), b"old bytes").unwrap();
+        let result_only = sink.emit_tool_result_with_images(
+            "untracked",
+            "mcp__vendor__worker",
+            false,
+            r#"{"artifactPath":"untracked.bin"}"#,
+            &[],
+        );
+        assert!(matches!(result_only, ToolMediaDelivery::Failed { .. }));
+        match rx.try_recv().unwrap() {
+            AgentStreamEvent::ToolCall(data) => {
+                assert_eq!(data.status, ToolCallStatus::Error);
+                assert!(data.output.unwrap().contains("no pre-call baseline"));
+            }
+            other => panic!("Expected ToolCall, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn nested_source_paths_are_never_published_as_generated_outputs() {
+        let workspace = tempfile::tempdir().unwrap();
+        std::fs::write(workspace.path().join("source.md"), "# Source\n").unwrap();
+        let (tx, mut rx) = broadcast::channel(16);
+        let sink = BackendOutputSink::new(tx).with_artifact_workspace(workspace.path());
+        sink.emit_tool_call(
+            "source-output",
+            "exportReport",
+            r#"{"input":{"path":"source.md"},"output_path":"report.md"}"#,
+        );
+        let _running = rx.try_recv().unwrap();
+        std::fs::write(workspace.path().join("report.md"), "# Generated\n").unwrap();
+
+        let delivery = sink.emit_tool_result_with_images(
+            "source-output",
+            "exportReport",
+            false,
+            r#"{"source":{"path":"source.md"},"output":{"path":"report.md"}}"#,
+            &[],
+        );
+        assert!(matches!(delivery, ToolMediaDelivery::Delivered { .. }));
+        match rx.try_recv().unwrap() {
+            AgentStreamEvent::ToolCall(data) => {
+                assert_eq!(data.status, ToolCallStatus::Completed);
+                assert_eq!(data.artifacts.len(), 1);
+                assert!(
+                    data.artifacts[0]
+                        .relative_path
+                        .starts_with("nomifun-artifacts/artifact-")
+                );
+                assert_eq!(
+                    std::fs::read_to_string(&data.artifacts[0].path).unwrap(),
+                    "# Generated\n"
+                );
+            }
+            other => panic!("Expected ToolCall, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn failed_images_and_context_screenshots_are_never_persisted() {
+        const PNG: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
+        let workspace = tempfile::tempdir().unwrap();
+        let (tx, mut rx) = broadcast::channel(16);
+        let sink = BackendOutputSink::new(tx).with_artifact_workspace(workspace.path());
+
+        sink.emit_tool_call("failed-image", "image_gen", "{}");
+        let _running = rx.try_recv().unwrap();
+        let failed = sink.emit_tool_result_with_images(
+            "failed-image",
+            "image_gen",
+            true,
+            "provider failed",
+            &[ToolImage {
+                media_type: "image/png".into(),
+                data: PNG.into(),
+            }],
+        );
+        assert_eq!(failed, ToolMediaDelivery::Unmanaged);
+        match rx.try_recv().unwrap() {
+            AgentStreamEvent::ToolCall(data) => {
+                assert_eq!(data.status, ToolCallStatus::Error);
+                assert!(data.artifacts.is_empty());
+            }
+            other => panic!("Expected ToolCall, got {other:?}"),
+        }
+
+        sink.emit_tool_call("screenshot", "browserScreenshot", "{}");
+        let _running = rx.try_recv().unwrap();
+        let screenshot = sink.emit_tool_result_with_images(
+            "screenshot",
+            "browserScreenshot",
+            false,
+            "captured",
+            &[ToolImage {
+                media_type: "image/png".into(),
+                data: PNG.into(),
+            }],
+        );
+        assert_eq!(screenshot, ToolMediaDelivery::Unmanaged);
+        match rx.try_recv().unwrap() {
+            AgentStreamEvent::ToolCall(data) => {
+                assert_eq!(data.status, ToolCallStatus::Completed);
+                assert!(data.artifacts.is_empty());
+            }
+            other => panic!("Expected ToolCall, got {other:?}"),
+        }
+        assert!(!workspace.path().join("nomifun-artifacts").exists());
+    }
+
+    #[test]
+    fn accepted_turn_requires_each_artifact_call_to_complete_with_its_own_receipt() {
+        const PNG: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
+        let workspace = tempfile::tempdir().unwrap();
+        let (tx, mut rx) = broadcast::channel(32);
+        let sink = BackendOutputSink::new(tx).with_artifact_workspace(workspace.path());
+
+        sink.begin_artifact_delivery_turn();
+        sink.emit_tool_call("good", "image_gen", "{}");
+        let _running = rx.try_recv().unwrap();
+        assert!(matches!(
+            sink.emit_tool_result_with_images(
+                "good",
+                "image_gen",
+                false,
+                "done",
+                &[ToolImage {
+                    media_type: "image/png".into(),
+                    data: PNG.into(),
+                }],
+            ),
+            ToolMediaDelivery::Delivered { .. }
+        ));
+        let _completed = rx.try_recv().unwrap();
+        assert!(sink.finish_artifact_delivery_turn().is_ok());
+
+        sink.begin_artifact_delivery_turn();
+        sink.emit_tool_call("first-failed", "image_gen", "{}");
+        let _running = rx.try_recv().unwrap();
+        let _ = sink.emit_tool_result_with_images(
+            "first-failed",
+            "image_gen",
+            false,
+            "claimed success",
+            &[],
+        );
+        let _failed = rx.try_recv().unwrap();
+        sink.emit_tool_call("later-good", "image_gen", "{}");
+        let _running = rx.try_recv().unwrap();
+        let _ = sink.emit_tool_result_with_images(
+            "later-good",
+            "image_gen",
+            false,
+            "done",
+            &[ToolImage {
+                media_type: "image/png".into(),
+                data: PNG.into(),
+            }],
+        );
+        let _completed = rx.try_recv().unwrap();
+        let error = sink.finish_artifact_delivery_turn().unwrap_err();
+        assert!(error.contains("first-failed") || error.contains("image_gen"));
+
+        sink.begin_artifact_delivery_turn();
+        sink.emit_tool_call("still-running", "exportReport", r#"{"output_path":"x.md"}"#);
+        let _running = rx.try_recv().unwrap();
+        sink.emit_stream_start("continuation");
+        let _failed = rx.try_recv().unwrap();
+        let _start = rx.try_recv().unwrap();
+        assert!(sink.finish_artifact_delivery_turn().is_err());
+    }
+
+    #[test]
+    fn accepted_turn_reverifies_receipts_after_all_later_tools_finish() {
+        const PNG: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
+        let workspace = tempfile::tempdir().unwrap();
+        let (tx, mut rx) = broadcast::channel(16);
+        let sink = BackendOutputSink::new(tx).with_artifact_workspace(workspace.path());
+
+        sink.begin_artifact_delivery_turn();
+        // `flux` deliberately has no classifier-derived pre-call expectation;
+        // the actual published receipt must still be enrolled in the ledger.
+        sink.emit_tool_call("image-delete", "flux", "{}");
+        let _running = rx.try_recv().unwrap();
+        let delivery = sink.emit_tool_result_with_images(
+            "image-delete",
+            "flux",
+            false,
+            "done",
+            &[ToolImage {
+                media_type: "image/png".into(),
+                data: PNG.into(),
+            }],
+        );
+        assert!(matches!(delivery, ToolMediaDelivery::Delivered { .. }));
+        let receipt_path = match rx.try_recv().unwrap() {
+            AgentStreamEvent::ToolCall(data) => data.artifacts[0].path.clone(),
+            other => panic!("Expected ToolCall, got {other:?}"),
+        };
+
+        // Simulate a later shell tool deleting the locator after the image
+        // call completed but before the accepted user turn reached Finish.
+        std::fs::remove_file(receipt_path).unwrap();
+        let error = sink.finish_artifact_delivery_turn().unwrap_err();
+        assert!(error.contains("failed final verification"));
+    }
+
+    #[test]
+    fn invalid_declared_path_prevents_partial_inline_persistence() {
+        const PNG: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
+        let workspace = tempfile::tempdir().unwrap();
+        let (tx, mut rx) = broadcast::channel(16);
+        let sink = BackendOutputSink::new(tx).with_artifact_workspace(workspace.path());
+        sink.emit_tool_call("image-mixed", "mcp__openai__image_gen", "{}");
+        let _running = rx.try_recv().unwrap();
+
+        let delivery = sink.emit_tool_result_with_images(
+            "image-mixed",
+            "mcp__openai__image_gen",
+            false,
+            r#"{"artifactPath":"missing.png"}"#,
+            &[ToolImage {
+                media_type: "image/png".into(),
+                data: PNG.into(),
+            }],
+        );
+
+        assert!(matches!(delivery, ToolMediaDelivery::Failed { .. }));
+        assert!(!workspace.path().join("nomifun-artifacts").exists());
+        match rx.try_recv().unwrap() {
+            AgentStreamEvent::ToolCall(data) => {
+                assert_eq!(data.status, ToolCallStatus::Error);
+                assert!(data.artifacts.is_empty());
+            }
+            other => panic!("Expected ToolCall, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn invalid_inline_member_rolls_back_valid_path_snapshot_batch() {
+        let workspace = tempfile::tempdir().unwrap();
+        let (tx, mut rx) = broadcast::channel(16);
+        let sink = BackendOutputSink::new(tx).with_artifact_workspace(workspace.path());
+        sink.emit_tool_call(
+            "mixed-invalid-inline",
+            "exportReport",
+            r#"{"outputPath":"report.md"}"#,
+        );
+        let _running = rx.try_recv().unwrap();
+        std::fs::write(workspace.path().join("report.md"), "# Valid report\n").unwrap();
+
+        let delivery = sink.emit_tool_result_with_images(
+            "mixed-invalid-inline",
+            "exportReport",
+            false,
+            r#"{"outputPath":"report.md"}"#,
+            &[ToolImage {
+                media_type: "image/png".into(),
+                data: "bm90IGFuIGltYWdl".into(),
+            }],
+        );
+
+        assert!(matches!(delivery, ToolMediaDelivery::Failed { .. }));
+        assert!(!workspace.path().join("nomifun-artifacts").exists());
+        match rx.try_recv().unwrap() {
+            AgentStreamEvent::ToolCall(data) => {
+                assert_eq!(data.status, ToolCallStatus::Error);
+                assert!(data.artifacts.is_empty());
+            }
+            other => panic!("Expected ToolCall, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn invalid_image_bytes_fail_delivery_without_creating_a_receipt() {
+        let workspace = tempfile::tempdir().unwrap();
+        let (tx, mut rx) = broadcast::channel(16);
+        let sink = BackendOutputSink::new(tx).with_artifact_workspace(workspace.path());
+
+        let delivery = sink.emit_tool_result_with_images(
+            "image-1",
+            "image_gen",
+            false,
+            "provider said success",
+            &[ToolImage {
+                media_type: "image/png".into(),
+                data: "bm90IGFuIGltYWdl".into(),
+            }],
+        );
+
+        assert!(matches!(delivery, ToolMediaDelivery::Failed { .. }));
+        match rx.try_recv().unwrap() {
+            AgentStreamEvent::ToolCall(data) => {
+                assert_eq!(data.status, ToolCallStatus::Error);
+                assert!(data.artifacts.is_empty());
+                assert!(data.output.unwrap().contains("Artifact delivery failed"));
+            }
+            other => panic!("Expected ToolCall, got {other:?}"),
+        }
+        assert!(!workspace.path().join("nomifun-artifacts").exists());
     }
 
     #[test]

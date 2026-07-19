@@ -16,8 +16,9 @@ use nomifun_ai_agent::{AgentSendError, AgentRuntimeRegistry};
 use crate::response_middleware::{CronCommandResult, CronCreateParams, CronUpdateParams, ICronService};
 use nomifun_api_types::AgentErrorCode;
 use nomifun_api_types::{
-    CloneConversationRequest, CreateConversationRequest, ListConversationsQuery, SearchMessagesQuery,
-    SendMessageRequest, UpdateConversationRequest, WebSocketMessage,
+    CloneConversationRequest, CreateConversationRequest, ListConversationsQuery,
+    ListMessagesQuery, SearchMessagesQuery, SendMessageRequest, UpdateConversationRequest,
+    WebSocketMessage,
 };
 use nomifun_common::{
     AdaptationPolicy, AgentExecutionEventKind, AgentExecutionStatus, AgentKillReason,
@@ -334,6 +335,35 @@ impl IConversationRepository for MockRepo {
             items,
             total: matched.len() as u64,
             has_more: end < matched.len(),
+        })
+    }
+
+    async fn get_messages_keyset(
+        &self,
+        conv_id: &str,
+        before: Option<(i64, String)>,
+        limit: u32,
+    ) -> Result<PaginatedResult<MessageRow>, nomifun_db::DbError> {
+        let messages = self.messages.lock().unwrap();
+        let mut matched: Vec<_> = messages
+            .iter()
+            .filter(|message| message.conversation_id == conv_id)
+            .filter(|message| {
+                before.as_ref().is_none_or(|(created_at, id)| {
+                    (message.created_at, message.id.as_str()) < (*created_at, id.as_str())
+                })
+            })
+            .cloned()
+            .collect();
+        matched.sort_by(|left, right| {
+            (right.created_at, right.id.as_str()).cmp(&(left.created_at, left.id.as_str()))
+        });
+        let has_more = matched.len() > limit as usize;
+        matched.truncate(limit as usize);
+        Ok(PaginatedResult {
+            items: matched,
+            total: 0,
+            has_more,
         })
     }
 
@@ -2143,6 +2173,457 @@ async fn list_artifacts_does_not_project_retired_cron_trigger_messages() {
     let artifacts = svc.list_artifacts(TEST_USER_1, &conv.id).await.unwrap();
 
     assert!(artifacts.is_empty());
+}
+
+#[tokio::test]
+async fn history_reverifies_committed_local_artifact_after_replace_and_delete() {
+    use nomifun_ai_agent::artifact_store::ArtifactStore;
+
+    const ONE_PIXEL_PNG: &str =
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
+
+    let data_root = std::env::temp_dir().join(format!(
+        "nomifun-history-artifact-test-{}",
+        MessageId::new().into_string()
+    ));
+    let workspace = data_root.join("custom-workspace");
+    std::fs::create_dir_all(&workspace).unwrap();
+    let (svc, _broadcaster, repo, _runtime_registry) =
+        make_service_with_workspace_root(data_root.clone());
+    let conv = svc
+        .create(
+            TEST_USER_1,
+            serde_json::from_value(json!({
+                "type": "acp",
+                "extra": { "workspace": workspace.to_string_lossy() }
+            }))
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    let artifact = ArtifactStore::new(&workspace)
+        .persist_images([("image/png", ONE_PIXEL_PNG)])
+        .unwrap()
+        .into_iter()
+        .next()
+        .unwrap();
+    let original_bytes = std::fs::read(&artifact.path).unwrap();
+    let message_id = MessageId::new().into_string();
+    repo.insert_message(&MessageRow {
+        id: message_id.clone(),
+        conversation_id: conv.id.clone(),
+        msg_id: None,
+        r#type: "tool_call".into(),
+        content: json!({
+            "call_id": "historical-image",
+            "name": "ImageGeneration",
+            "status": "completed",
+            "artifact_delivery_committed": true,
+            "artifacts": [artifact.clone()],
+        })
+        .to_string(),
+        position: Some("left".into()),
+        status: Some("finish".into()),
+        hidden: false,
+        created_at: 1000,
+    })
+    .await
+    .unwrap();
+
+    let valid = svc
+        .list_messages(TEST_USER_1, &conv.id, ListMessagesQuery::default())
+        .await
+        .unwrap();
+    assert_eq!(valid.items[0].status, Some(nomifun_common::MessageStatus::Finish));
+    assert_eq!(valid.items[0].content["status"], "completed");
+    assert_eq!(valid.items[0].content["artifacts"].as_array().map(Vec::len), Some(1));
+
+    std::fs::write(&artifact.path, b"replacement bytes at the same locator").unwrap();
+    let replaced = svc
+        .list_messages(
+            TEST_USER_1,
+            &conv.id,
+            ListMessagesQuery {
+                cursor: Some(String::new()),
+                content_mode: Some("compact".into()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        replaced.items[0].status,
+        Some(nomifun_common::MessageStatus::Error)
+    );
+    assert_eq!(replaced.items[0].content["status"], "error");
+    assert_eq!(replaced.items[0].content["artifact_delivery_committed"], false);
+    assert_eq!(replaced.items[0].content["artifacts"], json!([]));
+
+    // The downgrade is a read projection, not an irreversible DB rewrite: if
+    // the exact committed bytes are restored, the next load can verify them.
+    std::fs::write(&artifact.path, &original_bytes).unwrap();
+    let restored = svc
+        .get_message(TEST_USER_1, &conv.id, &message_id)
+        .await
+        .unwrap();
+    assert_eq!(restored.status, Some(nomifun_common::MessageStatus::Finish));
+    assert_eq!(restored.content["status"], "completed");
+
+    std::fs::remove_file(&artifact.path).unwrap();
+    let deleted = svc
+        .get_message(TEST_USER_1, &conv.id, &message_id)
+        .await
+        .unwrap();
+    assert_eq!(deleted.status, Some(nomifun_common::MessageStatus::Error));
+    assert_eq!(deleted.content["status"], "error");
+    assert_eq!(deleted.content["artifacts"], json!([]));
+    std::fs::remove_dir_all(&data_root).unwrap();
+}
+
+#[tokio::test]
+async fn history_without_workspace_fails_closed_for_acp_local_artifact_batch() {
+    use nomifun_ai_agent::artifact_store::ArtifactStore;
+
+    const ONE_PIXEL_PNG: &str =
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
+
+    let data_root = std::env::temp_dir().join(format!(
+        "nomifun-history-artifact-no-workspace-test-{}",
+        MessageId::new().into_string()
+    ));
+    let workspace = data_root.join("custom-workspace");
+    std::fs::create_dir_all(&workspace).unwrap();
+    let (svc, _broadcaster, repo, _runtime_registry) =
+        make_service_with_workspace_root(data_root.clone());
+    let conv = svc
+        .create(
+            TEST_USER_1,
+            serde_json::from_value(json!({
+                "type": "acp",
+                "extra": { "workspace": workspace.to_string_lossy() }
+            }))
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    let artifact = ArtifactStore::new(&workspace)
+        .persist_images([("image/png", ONE_PIXEL_PNG)])
+        .unwrap()
+        .into_iter()
+        .next()
+        .unwrap();
+
+    repo.update(
+        &conv.id,
+        &ConversationRowUpdate {
+            extra: Some("{}".into()),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    repo.insert_message(&MessageRow {
+        id: MessageId::new().into_string(),
+        conversation_id: conv.id.clone(),
+        msg_id: None,
+        r#type: "acp_tool_call".into(),
+        content: json!({
+            "session_id": "session-history",
+            "artifact_delivery_committed": true,
+            "update": {
+                "session_update": "tool_call_update",
+                "tool_call_id": "historical-acp-image",
+                "status": "completed",
+                "content": [
+                    { "type": "artifact", "artifact": artifact },
+                    { "type": "resource_link", "name": "remote copy", "uri": "https://example.com/copy.png" }
+                ]
+            }
+        })
+        .to_string(),
+        position: Some("left".into()),
+        status: Some("finish".into()),
+        hidden: false,
+        created_at: 1000,
+    })
+    .await
+    .unwrap();
+
+    let history = svc
+        .list_messages(TEST_USER_1, &conv.id, ListMessagesQuery::default())
+        .await
+        .unwrap();
+    let message = &history.items[0];
+    assert_eq!(message.status, Some(nomifun_common::MessageStatus::Error));
+    assert_eq!(message.content["update"]["status"], "failed");
+    assert_eq!(message.content["artifact_delivery_committed"], false);
+    let items = message.content["update"]["content"].as_array().unwrap();
+    assert!(items.iter().all(|item| {
+        !matches!(
+            item["type"].as_str(),
+            Some("artifact" | "resource_link")
+        )
+    }));
+    assert!(items.iter().any(|item| item["type"] == "artifact_error"));
+    std::fs::remove_dir_all(&data_root).unwrap();
+}
+
+#[tokio::test]
+async fn legacy_completed_artifact_tool_without_required_receipts_is_not_green() {
+    let (svc, _broadcaster, repo, _runtime_registry) = make_service();
+    let conv = svc.create(TEST_USER_1, make_create_req()).await.unwrap();
+    let fake_receipt = json!({
+        "id": "artifact-history-contract",
+        "kind": "image",
+        "mime_type": "image/png",
+        "path": "/project/nomifun-artifacts/history.png",
+        "relative_path": "nomifun-artifacts/history.png",
+        "size_bytes": 10,
+        "sha256": "a".repeat(64),
+    });
+    let mut wrong_mime_receipt = fake_receipt.clone();
+    wrong_mime_receipt["mime_type"] = json!("application/pdf");
+    let rows = [
+        (
+            "image_gen",
+            json!({
+                "call_id": "legacy-empty-image",
+                "name": "image_gen",
+                "args": { "prompt": "cat" },
+                "status": "completed",
+                "artifacts": [],
+            }),
+        ),
+        (
+            "image_count_short",
+            json!({
+                "call_id": "legacy-count-short",
+                "name": "image_gen",
+                "args": { "prompt": "cats", "n": 2 },
+                "status": "completed",
+                "artifacts": [fake_receipt.clone()],
+            }),
+        ),
+        (
+            "image_wrong_mime",
+            json!({
+                "call_id": "legacy-wrong-mime",
+                "name": "image_gen",
+                "args": { "prompt": "cat" },
+                "status": "completed",
+                "artifacts": [wrong_mime_receipt],
+            }),
+        ),
+        (
+            "ordinary_read",
+            json!({
+                "call_id": "ordinary-read",
+                "name": "read_file",
+                "args": { "path": "README.md" },
+                "status": "completed",
+                "artifacts": [],
+            }),
+        ),
+    ];
+    for (index, (_, content)) in rows.iter().enumerate() {
+        repo.insert_message(&MessageRow {
+            id: MessageId::new().into_string(),
+            conversation_id: conv.id.clone(),
+            msg_id: None,
+            r#type: "tool_call".into(),
+            content: content.to_string(),
+            position: Some("left".into()),
+            status: Some("finish".into()),
+            hidden: false,
+            created_at: index as i64,
+        })
+        .await
+        .unwrap();
+    }
+
+    let history = svc
+        .list_messages(TEST_USER_1, &conv.id, ListMessagesQuery::default())
+        .await
+        .unwrap();
+    assert_eq!(history.items.len(), 4);
+    for message in &history.items[..3] {
+        assert_eq!(message.status, Some(nomifun_common::MessageStatus::Error));
+        assert_eq!(message.content["status"], "error");
+        assert_eq!(message.content["artifacts"], json!([]));
+        assert_eq!(message.content["artifact_delivery_committed"], false);
+    }
+    let ordinary_read = &history.items[3];
+    assert_eq!(
+        ordinary_read.status,
+        Some(nomifun_common::MessageStatus::Finish)
+    );
+    assert_eq!(ordinary_read.content["status"], "completed");
+    assert!(ordinary_read
+        .content
+        .get("artifact_delivery_committed")
+        .is_none());
+}
+
+#[tokio::test]
+async fn legacy_completed_high_signal_tool_group_without_receipts_is_not_green() {
+    let (svc, _broadcaster, repo, _runtime_registry) = make_service();
+    let conv = svc.create(TEST_USER_1, make_create_req()).await.unwrap();
+    repo.insert_message(&MessageRow {
+        id: MessageId::new().into_string(),
+        conversation_id: conv.id.clone(),
+        msg_id: None,
+        r#type: "tool_group".into(),
+        content: json!([
+            {
+                "call_id": "legacy-group-image",
+                "name": "image_gen",
+                "status": "completed",
+                "description": "generated"
+            },
+            {
+                "call_id": "legacy-group-export",
+                "name": "export_pdf",
+                "status": "completed",
+                "description": "exported",
+                "result_display": { "path": "/project/report.pdf" }
+            },
+            {
+                "call_id": "legacy-group-read",
+                "name": "read_file",
+                "status": "completed",
+                "description": "read"
+            }
+        ])
+        .to_string(),
+        position: Some("left".into()),
+        status: Some("finish".into()),
+        hidden: false,
+        created_at: 1000,
+    })
+    .await
+    .unwrap();
+
+    let history = svc
+        .list_messages(TEST_USER_1, &conv.id, ListMessagesQuery::default())
+        .await
+        .unwrap();
+    assert_eq!(history.items.len(), 1);
+    let message = &history.items[0];
+    assert_eq!(message.status, Some(nomifun_common::MessageStatus::Error));
+    let entries = message.content.as_array().expect("tool group content");
+    assert_eq!(entries[0]["status"], "error");
+    assert_eq!(entries[1]["status"], "error");
+    assert!(entries[1].get("result_display").is_none());
+    assert_eq!(entries[2]["status"], "completed");
+}
+
+#[tokio::test]
+async fn legacy_completed_acp_artifact_tool_without_required_receipts_is_not_green() {
+    let (svc, _broadcaster, repo, _runtime_registry) = make_service();
+    let conv = svc.create(TEST_USER_1, make_create_req()).await.unwrap();
+    let fake_receipt = json!({
+        "id": "acp-artifact-history-contract",
+        "kind": "image",
+        "mime_type": "image/png",
+        "path": "/project/nomifun-artifacts/history.png",
+        "relative_path": "nomifun-artifacts/history.png",
+        "size_bytes": 10,
+        "sha256": "a".repeat(64),
+    });
+    let mut wrong_mime_receipt = fake_receipt.clone();
+    wrong_mime_receipt["mime_type"] = json!("application/pdf");
+    let identity_free_first = fake_receipt.clone();
+    let mut identity_free_duplicate_id = fake_receipt.clone();
+    identity_free_duplicate_id["path"] =
+        json!("/project/nomifun-artifacts/history-second.png");
+    identity_free_duplicate_id["relative_path"] =
+        json!("nomifun-artifacts/history-second.png");
+    let updates = [
+        json!({
+            "session_update": "tool_call_update",
+            "tool_call_id": "acp-empty-image",
+            "title": "ImageGeneration",
+            "status": "completed",
+            "raw_input": { "prompt": "cat" },
+            "content": [],
+        }),
+        json!({
+            "session_update": "tool_call_update",
+            "tool_call_id": "acp-count-short",
+            "title": "image_gen",
+            "status": "completed",
+            "raw_input": { "prompt": "cats", "n": 2 },
+            "content": [{ "type": "artifact", "artifact": fake_receipt }],
+        }),
+        json!({
+            "session_update": "tool_call_update",
+            "tool_call_id": "acp-wrong-mime",
+            "title": "image_gen",
+            "status": "completed",
+            "raw_input": { "prompt": "cat" },
+            "content": [{ "type": "artifact", "artifact": wrong_mime_receipt }],
+        }),
+        json!({
+            "session_update": "tool_call_update",
+            "tool_call_id": "acp-identity-free-duplicate-id",
+            "status": "completed",
+            "content": [
+                { "type": "artifact", "artifact": identity_free_first },
+                { "type": "artifact", "artifact": identity_free_duplicate_id }
+            ],
+        }),
+        json!({
+            "session_update": "tool_call_update",
+            "tool_call_id": "acp-ordinary-read",
+            "title": "Read",
+            "status": "completed",
+            "raw_input": { "path": "README.md" },
+            "content": [],
+        }),
+    ];
+    for (index, update) in updates.iter().enumerate() {
+        repo.insert_message(&MessageRow {
+            id: MessageId::new().into_string(),
+            conversation_id: conv.id.clone(),
+            msg_id: None,
+            r#type: "acp_tool_call".into(),
+            content: json!({
+                "session_id": "legacy-acp-history",
+                "update": update,
+            })
+            .to_string(),
+            position: Some("left".into()),
+            status: Some("finish".into()),
+            hidden: false,
+            created_at: index as i64,
+        })
+        .await
+        .unwrap();
+    }
+
+    let history = svc
+        .list_messages(TEST_USER_1, &conv.id, ListMessagesQuery::default())
+        .await
+        .unwrap();
+    assert_eq!(history.items.len(), 5);
+    for message in &history.items[..4] {
+        assert_eq!(message.status, Some(nomifun_common::MessageStatus::Error));
+        assert_eq!(message.content["update"]["status"], "failed");
+        assert_eq!(message.content["artifact_delivery_committed"], false);
+        let items = message.content["update"]["content"].as_array().unwrap();
+        assert!(items.iter().any(|item| item["type"] == "artifact_error"));
+        assert!(items.iter().all(|item| item["type"] != "artifact"));
+    }
+    let ordinary_read = &history.items[4];
+    assert_eq!(
+        ordinary_read.status,
+        Some(nomifun_common::MessageStatus::Finish)
+    );
+    assert_eq!(ordinary_read.content["update"]["status"], "completed");
+    assert!(ordinary_read
+        .content
+        .get("artifact_delivery_committed")
+        .is_none());
 }
 
 #[tokio::test]
@@ -5463,6 +5944,7 @@ async fn failover_post_toolcall_fault_does_not_switch_and_surfaces_error() {
                     description: None,
                     input: None,
                     output: Some("ok".into()),
+                    artifacts: Vec::new(),
                 }),
                 AgentStreamEvent::Error(ErrorEventData::legacy(
                     "rate limited",

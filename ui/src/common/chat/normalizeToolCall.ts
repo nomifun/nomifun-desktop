@@ -177,10 +177,11 @@ const isNonFatalAcpToolFailure = (
   output: string | undefined
 ): boolean => {
   if (update.status !== 'failed') return false;
-  if (['read', 'glob', 'grep', 'search', 'find'].includes(update.kind)) {
-    return isExplicitProbeMiss(update.kind, output);
+  const kind = toDisplayText(update.kind);
+  if (['read', 'glob', 'grep', 'search', 'find'].includes(kind)) {
+    return isExplicitProbeMiss(kind, output);
   }
-  if (update.kind !== 'execute') return false;
+  if (kind !== 'execute') return false;
   if (hasShellCommandInput(rawInput)) return true;
   return shellCommandTitles.has(toDisplayText(update.title).trim().toLowerCase());
 };
@@ -245,6 +246,12 @@ export function normalizeAcpToolCall(message: IMessageAcpToolCall): NormalizedTo
       .map((item) => {
         if (item.type === 'content' && item.content?.text) return item.content.text;
         if (item.type === 'diff' && 'path' in item) return `[diff] ${item.path}`;
+        if (item.type === 'artifact' && update.status === 'completed') {
+          return `[${item.artifact.kind}] ${item.artifact.path}`;
+        }
+        if (item.type === 'resource_link' && update.status === 'completed') return `[resource] ${item.uri}`;
+        if (item.type === 'terminal') return `[terminal] ${item.terminal_id}`;
+        if (item.type === 'artifact_error') return `[artifact error] ${item.message}`;
         return '';
       })
       .filter(Boolean)
@@ -353,7 +360,7 @@ const isInvalidArgumentsNotExecuted = (name: unknown, status: unknown, output: u
 };
 
 export function normalizeToolCall(message: IMessageToolCall): NormalizedToolCall | undefined {
-  const { call_id, name, status, input, output, args, description } = message.content;
+  const { call_id, name, status, input, output, args, description, artifacts } = message.content;
   if (!call_id) return undefined;
 
   const displayInput = input
@@ -375,7 +382,15 @@ export function normalizeToolCall(message: IMessageToolCall): NormalizedToolCall
       : {}),
     description: description ? formatValue(description) : undefined,
     input: displayInput,
-    output: output ? toDisplayText(output) : undefined,
+    output:
+      output || (status === 'completed' && artifacts?.length)
+        ? [
+            output,
+            ...(status === 'completed' ? (artifacts ?? []).map((artifact) => `[${artifact.kind}] ${artifact.path}`) : []),
+          ]
+            .filter(Boolean)
+            .join('\n')
+        : undefined,
   };
 }
 

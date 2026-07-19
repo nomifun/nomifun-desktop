@@ -1343,7 +1343,17 @@ impl AgentEngine {
                     continue;
                 }
                 let input_str = serde_json::to_string(input).unwrap_or_default();
-                self.output.emit_tool_call(id, name, &input_str);
+                let artifact_identity = self
+                    .tools
+                    .get(name)
+                    .map(nomi_tools::Tool::artifact_identity)
+                    .unwrap_or(name);
+                self.output.emit_tool_call_with_artifact_identity(
+                    id,
+                    name,
+                    artifact_identity,
+                    &input_str,
+                );
             }
 
             self.total_usage.input_tokens += turn_usage.input_tokens;
@@ -1443,7 +1453,7 @@ impl AgentEngine {
                 });
             }
 
-            let outcome = if let Some(ref approval_mgr) = self.approval_manager {
+            let mut outcome = if let Some(ref approval_mgr) = self.approval_manager {
                 // JSON stream mode: use protocol-based approval
                 let writer = self
                     .protocol_writer
@@ -1491,6 +1501,108 @@ impl AgentEngine {
                     }
                 }
             };
+            // Deliver binary outputs before success accounting or the next
+            // model turn. A provider/tool RPC succeeding is not enough: when
+            // the user-facing sink cannot persist the media, convert the tool
+            // result into an error and remove the undeliverable in-memory image
+            // so the model is forced to retry instead of claiming completion.
+            for result in &mut outcome.results {
+                if let ContentBlock::ToolResult {
+                    tool_use_id,
+                    content,
+                    is_error,
+                    images,
+                } = result
+                {
+                    let tool_name = tool_calls
+                        .iter()
+                        .find_map(|call| {
+                            if let ContentBlock::ToolUse { id, name, .. } = call
+                                && id == tool_use_id
+                            {
+                                return Some(name.as_str());
+                            }
+                            None
+                        })
+                        .unwrap_or("unknown");
+                    let artifact_identity = self
+                        .tools
+                        .get(tool_name)
+                        .map(nomi_tools::Tool::artifact_identity)
+                        .unwrap_or(tool_name);
+                    let status = if *is_error { "error" } else { "completed" };
+                    if tool_use_id.trim().is_empty() {
+                        tracing::error!(
+                            target: "nomi_agent",
+                            tool = %tool_name,
+                            status,
+                            "tool result has empty tool_use_id"
+                        );
+                    } else {
+                        tracing::debug!(
+                            target: "nomi_agent",
+                            tool_use_id = %tool_use_id,
+                            tool = %tool_name,
+                            status,
+                            image_count = images.len(),
+                            "tool result emitted"
+                        );
+                    }
+
+                    match self
+                        .output
+                        .emit_tool_result_with_images_and_artifact_identity(
+                        tool_use_id,
+                        tool_name,
+                        artifact_identity,
+                        *is_error,
+                        content,
+                        images,
+                    ) {
+                        crate::output::ToolMediaDelivery::Unmanaged => {
+                            // Diagnostic screenshots or other binary payloads
+                            // returned by a failed tool are never valid model
+                            // context for a completed artifact.  Sinks mark
+                            // these as unmanaged because they intentionally do
+                            // not persist them; discard the bytes here as well
+                            // so an error cannot be replayed as if it were a
+                            // generated image on the next provider turn.
+                            if *is_error {
+                                images.clear();
+                            }
+                        }
+                        crate::output::ToolMediaDelivery::Delivered { context } => {
+                            if !context.trim().is_empty() {
+                                if !content.is_empty() {
+                                    content.push('\n');
+                                }
+                                content.push_str(&context);
+                            }
+                            // Non-image artifacts are represented to the model by
+                            // their verified filesystem locators. Provider image
+                            // adapters must never receive audio/PDF/resource bytes
+                            // mislabeled as visual input.
+                            images.retain(|artifact| {
+                                artifact
+                                    .media_type
+                                    .trim()
+                                    .to_ascii_lowercase()
+                                    .starts_with("image/")
+                            });
+                        }
+                        crate::output::ToolMediaDelivery::Failed { error } => {
+                            *is_error = true;
+                            images.clear();
+                            if !content.is_empty() {
+                                content.push('\n');
+                            }
+                            content.push_str("Artifact delivery failed: ");
+                            content.push_str(&error);
+                        }
+                    }
+                }
+            }
+
             efficiency.observe_results(&outcome.results);
             let failed_call_ids: std::collections::HashSet<String> = outcome
                 .results
@@ -1535,48 +1647,6 @@ impl AgentEngine {
 
             // Apply any context modifiers from skill executions before the next turn
             self.apply_context_modifiers(&outcome.modifiers);
-
-            // Display tool results
-            for result in &outcome.results {
-                if let ContentBlock::ToolResult {
-                    tool_use_id,
-                    content,
-                    is_error,
-                    ..
-                } = result
-                {
-                    let tool_name = tool_calls
-                        .iter()
-                        .find_map(|c| {
-                            if let ContentBlock::ToolUse { id, name, .. } = c
-                                && id == tool_use_id
-                            {
-                                return Some(name.as_str());
-                            }
-                            None
-                        })
-                        .unwrap_or("unknown");
-                    let status = if *is_error { "error" } else { "completed" };
-                    if tool_use_id.trim().is_empty() {
-                        tracing::error!(
-                            target: "nomi_agent",
-                            tool = %tool_name,
-                            status,
-                            "tool result has empty tool_use_id"
-                        );
-                    } else {
-                        tracing::debug!(
-                            target: "nomi_agent",
-                            tool_use_id = %tool_use_id,
-                            tool = %tool_name,
-                            status,
-                            "tool result emitted"
-                        );
-                    }
-                    self.output
-                        .emit_tool_result(tool_use_id, tool_name, *is_error, content);
-                }
-            }
 
             // A newly arrived user steer is material progress. Resolve it before
             // applying the action computed from the just-finished tool result,
@@ -2054,7 +2124,7 @@ mod set_config_tests {
     use serde_json::Value;
 
     use crate::confirm::ToolConfirmer;
-    use crate::output::OutputSink;
+    use crate::output::{OutputSink, ToolMediaDelivery, artifact_contract};
 
     struct NullOutput;
     impl OutputSink for NullOutput {
@@ -2062,6 +2132,58 @@ mod set_config_tests {
         fn emit_thinking(&self, _: &str, _: &str) {}
         fn emit_tool_call(&self, _: &str, _: &str, _: &str) {}
         fn emit_tool_result(&self, _: &str, _: &str, _: bool, _: &str) {}
+        fn emit_stream_start(&self, _: &str) {}
+        fn emit_stream_end(&self, _: &str, _: usize, _: u64, _: u64, _: u64, _: u64) {}
+        fn emit_error(&self, _: &str) {}
+        fn emit_info(&self, _: &str) {}
+    }
+
+    #[derive(Default)]
+    struct ArtifactIdentityOutput {
+        running_identities: Mutex<Vec<String>>,
+        result_identities: Mutex<Vec<String>>,
+    }
+
+    impl OutputSink for ArtifactIdentityOutput {
+        fn emit_text_delta(&self, _: &str, _: &str) {}
+        fn emit_thinking(&self, _: &str, _: &str) {}
+        fn emit_tool_call(&self, _: &str, _: &str, _: &str) {}
+        fn emit_tool_call_with_artifact_identity(
+            &self,
+            _: &str,
+            _: &str,
+            artifact_identity: &str,
+            _: &str,
+        ) {
+            self.running_identities
+                .lock()
+                .unwrap()
+                .push(artifact_identity.to_owned());
+        }
+        fn emit_tool_result(&self, _: &str, _: &str, _: bool, _: &str) {}
+        fn emit_tool_result_with_images_and_artifact_identity(
+            &self,
+            _: &str,
+            _: &str,
+            artifact_identity: &str,
+            is_error: bool,
+            _: &str,
+            images: &[nomi_types::tool::ToolImage],
+        ) -> ToolMediaDelivery {
+            self.result_identities
+                .lock()
+                .unwrap()
+                .push(artifact_identity.to_owned());
+            let contract = artifact_contract(artifact_identity)
+                .expect("the untruncated exporter identity must create a contract");
+            if !is_error && images.is_empty() {
+                ToolMediaDelivery::Failed {
+                    error: format!("tool returned no {}", contract.label()),
+                }
+            } else {
+                ToolMediaDelivery::Unmanaged
+            }
+        }
         fn emit_stream_start(&self, _: &str) {}
         fn emit_stream_end(&self, _: &str, _: usize, _: u64, _: u64, _: u64, _: u64) {}
         fn emit_error(&self, _: &str) {}
@@ -2444,6 +2566,46 @@ mod set_config_tests {
         )>,
     }
 
+    struct ArtifactIdentityTool {
+        provider_name: String,
+        artifact_identity: String,
+    }
+
+    #[async_trait::async_trait]
+    impl Tool for ArtifactIdentityTool {
+        fn name(&self) -> &str {
+            &self.provider_name
+        }
+
+        fn artifact_identity(&self) -> &str {
+            &self.artifact_identity
+        }
+
+        fn reserved_provider_name_prefix(&self) -> Option<&'static str> {
+            Some("mcp__")
+        }
+
+        fn description(&self) -> &str {
+            "test MCP exporter whose provider alias omits its semantic suffix"
+        }
+
+        fn input_schema(&self) -> Value {
+            serde_json::json!({"type": "object"})
+        }
+
+        fn is_concurrency_safe(&self, _input: &Value) -> bool {
+            false
+        }
+
+        fn category(&self) -> ToolCategory {
+            ToolCategory::Info
+        }
+
+        async fn execute(&self, _input: Value) -> ToolResult {
+            ToolResult::text("artifact generated successfully")
+        }
+    }
+
     #[async_trait::async_trait]
     impl Tool for ConstantResultTool {
         fn name(&self) -> &str {
@@ -2485,6 +2647,8 @@ mod set_config_tests {
         name: &'static str,
         calls: Arc<std::sync::atomic::AtomicUsize>,
     }
+
+    struct DiagnosticImageErrorTool;
 
     struct RequiredKbIdTool {
         calls: Arc<std::sync::atomic::AtomicUsize>,
@@ -2620,6 +2784,38 @@ mod set_config_tests {
         async fn execute(&self, _input: Value) -> ToolResult {
             self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             ToolResult::error("missing required field")
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl Tool for DiagnosticImageErrorTool {
+        fn name(&self) -> &str {
+            "noop"
+        }
+
+        fn description(&self) -> &str {
+            "test tool returning an error with diagnostic image bytes"
+        }
+
+        fn input_schema(&self) -> Value {
+            serde_json::json!({"type": "object"})
+        }
+
+        fn is_concurrency_safe(&self, _input: &Value) -> bool {
+            false
+        }
+
+        fn category(&self) -> ToolCategory {
+            ToolCategory::Exec
+        }
+
+        async fn execute(&self, _input: Value) -> ToolResult {
+            ToolResult::error("diagnostic failure").with_images(vec![
+                nomi_types::tool::ToolImage {
+                    media_type: "image/png".to_owned(),
+                    data: "ZGlhZ25vc3RpYw==".to_owned(),
+                },
+            ])
         }
     }
 
@@ -2771,13 +2967,68 @@ mod set_config_tests {
     /// rides along the tool-result message.
     struct ToolThenStopProvider {
         calls: std::sync::atomic::AtomicUsize,
+        request_image_counts: Option<Arc<Mutex<Vec<usize>>>>,
+    }
+
+    struct NamedToolThenStopProvider {
+        calls: std::sync::atomic::AtomicUsize,
+        provider_name: String,
+    }
+
+    #[async_trait::async_trait]
+    impl LlmProvider for NamedToolThenStopProvider {
+        async fn stream(
+            &self,
+            _request: &LlmRequest,
+        ) -> Result<tokio::sync::mpsc::Receiver<LlmEvent>, ProviderError> {
+            let turn = self
+                .calls
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let (tx, rx) = tokio::sync::mpsc::channel(2);
+            if turn == 0 {
+                tx.send(LlmEvent::ToolUse {
+                    id: "artifact-call".to_owned(),
+                    name: self.provider_name.clone(),
+                    input: serde_json::json!({}),
+                    extra: None,
+                })
+                .await
+                .unwrap();
+                tx.send(LlmEvent::Done {
+                    stop_reason: nomi_types::message::StopReason::ToolUse,
+                    usage: Default::default(),
+                })
+                .await
+                .unwrap();
+            } else {
+                tx.send(LlmEvent::Done {
+                    stop_reason: nomi_types::message::StopReason::EndTurn,
+                    usage: Default::default(),
+                })
+                .await
+                .unwrap();
+            }
+            Ok(rx)
+        }
     }
     #[async_trait::async_trait]
     impl LlmProvider for ToolThenStopProvider {
         async fn stream(
             &self,
-            _: &LlmRequest,
+            request: &LlmRequest,
         ) -> Result<tokio::sync::mpsc::Receiver<LlmEvent>, ProviderError> {
+            if let Some(counts) = &self.request_image_counts {
+                let image_count = request
+                    .messages
+                    .iter()
+                    .flat_map(|message| &message.content)
+                    .map(|block| match block {
+                        ContentBlock::ToolResult { images, .. } => images.len(),
+                        _ => 0,
+                    })
+                    .sum();
+                counts.lock().unwrap().push(image_count);
+            }
             let n = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             let (tx, rx) = tokio::sync::mpsc::channel(4);
             if n == 0 {
@@ -3807,6 +4058,7 @@ mod set_config_tests {
         let mut engine = make_engine("steer-a");
         engine.provider = std::sync::Arc::new(ToolThenStopProvider {
             calls: std::sync::atomic::AtomicUsize::new(0),
+            request_image_counts: None,
         });
         engine.tools.register(Box::new(ConstantResultTool {
             name: "noop",
@@ -3843,6 +4095,88 @@ mod set_config_tests {
             );
         }
         assert!(inbox.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn failed_tool_diagnostic_images_are_not_replayed_to_the_provider() {
+        let mut engine = make_engine("diagnostic-image-error");
+        let request_image_counts = Arc::new(Mutex::new(Vec::new()));
+        engine.provider = Arc::new(ToolThenStopProvider {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+            request_image_counts: Some(request_image_counts.clone()),
+        });
+        engine.tools.register(Box::new(DiagnosticImageErrorTool));
+
+        engine
+            .execute_turn("run the diagnostic tool", "m-diagnostic-image")
+            .await
+            .expect("a handled tool error should reach the second provider turn");
+
+        assert_eq!(
+            *request_image_counts.lock().unwrap(),
+            vec![0, 0],
+            "diagnostic bytes from a failed tool must not enter the next request"
+        );
+        let ContentBlock::ToolResult {
+            is_error, images, ..
+        } = &engine.messages[2].content[0]
+        else {
+            panic!("the third message should contain the failed tool result");
+        };
+        assert!(*is_error);
+        assert!(images.is_empty());
+    }
+
+    #[tokio::test]
+    async fn bounded_mcp_alias_uses_untruncated_export_identity_and_rejects_text_only_success() {
+        for semantic_tool in ["export_pdf", "render_video"] {
+            // This is the shape of a 64-byte MCP provider alias after a long
+            // server slug consumed the readable budget: neither output product
+            // survives in the provider-facing name.
+            let provider_name =
+                "mcp__enterprise_content_gateway_with_a_very_l__abcdefghijklmnop".to_owned();
+            assert!(!provider_name.contains(semantic_tool));
+            let artifact_identity = format!(
+                "enterprise_content_gateway_with_a_very_long_origin_name__{semantic_tool}"
+            );
+            let output = Arc::new(ArtifactIdentityOutput::default());
+            let mut engine = make_engine("mcp-artifact-identity");
+            engine.provider = Arc::new(NamedToolThenStopProvider {
+                calls: std::sync::atomic::AtomicUsize::new(0),
+                provider_name: provider_name.clone(),
+            });
+            engine.output = output.clone();
+            engine.tools.register(Box::new(ArtifactIdentityTool {
+                provider_name,
+                artifact_identity: artifact_identity.clone(),
+            }));
+
+            engine
+                .execute_turn("create the requested artifact", "m-mcp-artifact")
+                .await
+                .expect("a contract failure is a handled tool result");
+
+            assert_eq!(
+                *output.running_identities.lock().unwrap(),
+                vec![artifact_identity.clone()]
+            );
+            assert_eq!(
+                *output.result_identities.lock().unwrap(),
+                vec![artifact_identity]
+            );
+            let ContentBlock::ToolResult {
+                is_error,
+                images,
+                content,
+                ..
+            } = &engine.messages[2].content[0]
+            else {
+                panic!("the third message should contain the exporter result");
+            };
+            assert!(*is_error, "text-only {semantic_tool} must not remain successful");
+            assert!(images.is_empty());
+            assert!(content.contains("Artifact delivery failed"));
+        }
     }
 
     #[test]

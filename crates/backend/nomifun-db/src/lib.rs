@@ -37,7 +37,7 @@ pub use models::{ModelProfileRow, UpsertModelProfileParams};
 pub use repository::channel::UpdatePluginStatusParams;
 pub use repository::conversation::{
     ConversationFilters, ConversationMessageProjection, ConversationRowUpdate, MessageRowUpdate,
-    MessageSearchRow, SortOrder,
+    MessageSearchRow, SortOrder, TurnArtifactMessageCommit,
 };
 pub use repository::cron::{CRON_RUN_HISTORY_LIMIT, UpdateCronJobParams};
 pub use repository::mcp_server::{CreateMcpServerParams, UpdateMcpServerParams};

@@ -24,6 +24,7 @@ use nomifun_common::{
     AgentKillReason, AgentType, AppError, ConversationStatus, ErrorChain, TimestampMs, normalize_keys_to_snake_case,
 };
 use serde_json::Value;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{Mutex, RwLock, broadcast, mpsc};
@@ -263,7 +264,14 @@ impl AcpAgentManager {
         // 70ms in — ELECTRON-1BT), so we explicitly watch the child. If
         // it dies before init completes, surface a `StartupCrash` carrying
         // the buffered stderr instead of waiting out the timeout.
-        let connect_fut = AcpProtocol::connect(stdin, stdout, runtime.event_sender(), permission_tx, notification_tx);
+        let connect_fut = AcpProtocol::connect(
+            stdin,
+            stdout,
+            runtime.event_sender(),
+            permission_tx,
+            notification_tx,
+            Some(PathBuf::from(&params.workspace.path)),
+        );
         tokio::pin!(connect_fut);
         let protocol = tokio::select! {
             biased;

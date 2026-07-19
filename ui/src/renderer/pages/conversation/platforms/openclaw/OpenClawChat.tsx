@@ -33,7 +33,7 @@ const OpenClawChat: React.FC<{
   const updateLocalImage = LocalImageView.useUpdateLocalImage();
   useEffect(() => {
     updateLocalImage({ root: workspace });
-  }, [workspace]);
+  }, [updateLocalImage, workspace]);
   return (
     <ConversationProvider
       value={{
@@ -56,4 +56,4 @@ const OpenClawChat: React.FC<{
   );
 };
 
-export default HOC.Wrapper(MessageListProvider, MessageListLoadingProvider)(OpenClawChat);
+export default HOC.Wrapper(MessageListProvider, MessageListLoadingProvider, LocalImageView.Provider)(OpenClawChat);

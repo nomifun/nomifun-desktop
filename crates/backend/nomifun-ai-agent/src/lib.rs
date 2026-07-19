@@ -1,5 +1,6 @@
 //! Agent runtime lifecycle, per-conversation runtime registration, and skill management.
 pub(crate) mod runtime_state;
+pub mod artifact_store;
 pub mod runtime_handle;
 // P3-K2: rendering page-fetch backend for knowledge URL sources. Gated behind
 // `browser-use` — the ONE bridge from the (agent-layer) browser engine into the

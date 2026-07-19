@@ -40,6 +40,7 @@ tracing.workspace = true
 getrandom.workspace = true
 dashmap.workspace = true
 regex.workspace = true
+sha2.workspace = true
 reqwest = { workspace = true, optional = true }
 tokio-tungstenite = { workspace = true, optional = true }
 futures-util = { workspace = true, optional = true }

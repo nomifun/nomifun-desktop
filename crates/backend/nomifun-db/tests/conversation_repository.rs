@@ -1,6 +1,7 @@
 use nomifun_db::{
     ConversationFilters, ConversationRowUpdate, IConversationRepository, MessageRowUpdate, SortOrder,
-    SqliteConversationRepository, models::ConversationRow, models::MessageRow,
+    SqliteConversationRepository, TurnArtifactMessageCommit, models::ConversationRow,
+    models::MessageRow,
 };
 use nomifun_common::{ConversationArtifactId, ConversationId, CronJobId, MessageId};
 
@@ -71,6 +72,105 @@ fn make_message(conv_id: &str, content: &str) -> MessageRow {
         status: Some("finish".to_string()),
         hidden: false,
         created_at: now,
+    }
+}
+
+fn make_generic_artifact_commit(
+    id: String,
+    turn_message_id: &str,
+    call_id: &str,
+    artifact_id: &str,
+) -> TurnArtifactMessageCommit {
+    TurnArtifactMessageCommit {
+        id,
+        message_type: "tool_call".to_owned(),
+        content: serde_json::json!({
+            "call_id": call_id,
+            "name": "ImageGeneration",
+            "args": {"prompt": "cat"},
+            "status": "completed",
+            "output": "generated",
+            "artifacts": [{
+                "id": artifact_id,
+                "kind": "image",
+                "mime_type": "image/png",
+                "path": format!("/workspace/{artifact_id}.png"),
+                "relative_path": format!("nomifun-artifacts/{artifact_id}.png"),
+                "size_bytes": 10,
+                "sha256": "a".repeat(64),
+            }],
+            "turn_id": turn_message_id,
+            "artifact_delivery_committed": true,
+        })
+        .to_string(),
+    }
+}
+
+fn make_acp_artifact_commit(
+    id: String,
+    turn_message_id: &str,
+    call_id: &str,
+    artifact_id: &str,
+) -> TurnArtifactMessageCommit {
+    TurnArtifactMessageCommit {
+        id,
+        message_type: "acp_tool_call".to_owned(),
+        content: serde_json::json!({
+            "session_id": "session-1",
+            "update": {
+                "session_update": "tool_call_update",
+                "tool_call_id": call_id,
+                "status": "completed",
+                "title": "Generate image",
+                "content": [{
+                    "type": "artifact",
+                    "artifact": {
+                        "id": artifact_id,
+                        "kind": "image",
+                        "mime_type": "image/png",
+                        "path": format!("/workspace/{artifact_id}.png"),
+                        "relative_path": format!("nomifun-artifacts/{artifact_id}.png"),
+                        "size_bytes": 10,
+                        "sha256": "b".repeat(64),
+                    }
+                }]
+            },
+            "turn_id": turn_message_id,
+            "artifact_delivery_committed": true,
+        })
+        .to_string(),
+    }
+}
+
+fn make_provisional_artifact_message(
+    conversation_id: &str,
+    turn_message_id: &str,
+    commit: &TurnArtifactMessageCommit,
+    created_at: i64,
+) -> MessageRow {
+    let mut content: serde_json::Value = serde_json::from_str(&commit.content).unwrap();
+    content["artifact_delivery_committed"] = serde_json::json!(false);
+    match commit.message_type.as_str() {
+        "tool_call" => {
+            content["status"] = serde_json::json!("running");
+            content["artifacts"] = serde_json::json!([]);
+        }
+        "acp_tool_call" => {
+            content["update"]["status"] = serde_json::json!("in_progress");
+            content["update"]["content"] = serde_json::json!([]);
+        }
+        _ => unreachable!("test fixture only supports artifact tool messages"),
+    }
+    MessageRow {
+        id: commit.id.clone(),
+        conversation_id: conversation_id.to_owned(),
+        msg_id: Some(turn_message_id.to_owned()),
+        r#type: commit.message_type.clone(),
+        content: content.to_string(),
+        position: Some("left".to_owned()),
+        status: Some("work".to_owned()),
+        hidden: false,
+        created_at,
     }
 }
 
@@ -746,6 +846,252 @@ async fn message_correlation_claim_is_canonical_stable_and_turn_scoped() {
     MessageId::parse(&first).expect("claimed correlation ID must be canonical");
     assert_eq!(replay, first);
     assert_ne!(other_turn, first);
+}
+
+#[tokio::test]
+async fn artifact_message_commit_promotes_inserts_and_replays_atomically() {
+    let (repo, _db) = setup().await;
+    let mut conv = make_conversation("artifact-commit");
+    conv.id = repo.create(&conv).await.unwrap();
+    let turn_id = MessageId::new().into_string();
+    let generic = make_generic_artifact_commit(
+        MessageId::new().into_string(),
+        &turn_id,
+        "generic-call",
+        "generic-image",
+    );
+    let acp = make_acp_artifact_commit(
+        MessageId::new().into_string(),
+        &turn_id,
+        "acp-call",
+        "acp-image",
+    );
+    let provisional = make_provisional_artifact_message(&conv.id, &turn_id, &generic, 100);
+    repo.insert_message(&provisional).await.unwrap();
+
+    let empty_error = repo
+        .commit_turn_artifact_messages(&conv.id, &turn_id, &[], 200)
+        .await
+        .unwrap_err();
+    assert!(matches!(empty_error, nomifun_db::DbError::Conflict(_)));
+
+    let committed = repo
+        .commit_turn_artifact_messages(&conv.id, &turn_id, &[generic.clone(), acp.clone()], 200)
+        .await
+        .unwrap();
+    assert_eq!(committed.len(), 2);
+    assert_eq!(committed[0].id, generic.id);
+    assert_eq!(committed[0].status.as_deref(), Some("finish"));
+    assert_eq!(committed[0].content, generic.content);
+    assert_eq!(committed[0].created_at, 100, "promotion preserves provisional creation time");
+    assert_eq!(committed[1].id, acp.id);
+    assert_eq!(committed[1].status.as_deref(), Some("finish"));
+    assert_eq!(committed[1].content, acp.content);
+    assert_eq!(committed[1].created_at, 200, "missing row is inserted at commit time");
+
+    let replay = repo
+        .commit_turn_artifact_messages(&conv.id, &turn_id, &[generic.clone(), acp.clone()], 999)
+        .await
+        .unwrap();
+    assert_eq!(replay.len(), 2);
+    assert_eq!(replay[0].created_at, 100);
+    assert_eq!(replay[1].created_at, 200);
+    assert_eq!(replay[0].content, generic.content);
+    assert_eq!(replay[1].content, acp.content);
+}
+
+#[tokio::test]
+async fn artifact_message_commit_rolls_back_the_batch_on_error_state() {
+    let (repo, _db) = setup().await;
+    let mut conv = make_conversation("artifact-error-rollback");
+    conv.id = repo.create(&conv).await.unwrap();
+    let turn_id = MessageId::new().into_string();
+    let would_insert = make_generic_artifact_commit(
+        MessageId::new().into_string(),
+        &turn_id,
+        "insert-before-conflict",
+        "new-image",
+    );
+    let blocked = make_acp_artifact_commit(
+        MessageId::new().into_string(),
+        &turn_id,
+        "already-failed",
+        "failed-image",
+    );
+    let mut error_row = make_provisional_artifact_message(&conv.id, &turn_id, &blocked, 100);
+    error_row.status = Some("error".to_owned());
+    let original_error_content = error_row.content.clone();
+    repo.insert_message(&error_row).await.unwrap();
+
+    let error = repo
+        .commit_turn_artifact_messages(
+            &conv.id,
+            &turn_id,
+            &[would_insert.clone(), blocked.clone()],
+            200,
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(error, nomifun_db::DbError::Conflict(_)));
+    assert!(
+        repo.get_message(&conv.id, &would_insert.id)
+            .await
+            .unwrap()
+            .is_none(),
+        "the earlier insert must roll back when a later row conflicts"
+    );
+    let still_error = repo.get_message(&conv.id, &blocked.id).await.unwrap().unwrap();
+    assert_eq!(still_error.status.as_deref(), Some("error"));
+    assert_eq!(still_error.content, original_error_content);
+}
+
+#[tokio::test]
+async fn artifact_message_commit_rejects_cross_turn_and_wrong_type_rows() {
+    let (repo, _db) = setup().await;
+    let mut conv = make_conversation("artifact-identity-conflicts");
+    conv.id = repo.create(&conv).await.unwrap();
+    let mut other_conv = make_conversation("artifact-other-owner");
+    other_conv.id = repo.create(&other_conv).await.unwrap();
+    let turn_id = MessageId::new().into_string();
+    let other_turn_id = MessageId::new().into_string();
+
+    let cross_conversation = make_acp_artifact_commit(
+        MessageId::new().into_string(),
+        &turn_id,
+        "cross-conversation-call",
+        "cross-conversation-image",
+    );
+    let cross_conversation_row =
+        make_provisional_artifact_message(&other_conv.id, &turn_id, &cross_conversation, 100);
+    repo.insert_message(&cross_conversation_row).await.unwrap();
+    let error = repo
+        .commit_turn_artifact_messages(
+            &conv.id,
+            &turn_id,
+            std::slice::from_ref(&cross_conversation),
+            200,
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(error, nomifun_db::DbError::Conflict(_)));
+
+    let cross_turn = make_generic_artifact_commit(
+        MessageId::new().into_string(),
+        &turn_id,
+        "cross-turn-call",
+        "cross-turn-image",
+    );
+    let cross_turn_row = make_provisional_artifact_message(
+        &conv.id,
+        &other_turn_id,
+        &make_generic_artifact_commit(
+            cross_turn.id.clone(),
+            &other_turn_id,
+            "cross-turn-call",
+            "cross-turn-image",
+        ),
+        100,
+    );
+    repo.insert_message(&cross_turn_row).await.unwrap();
+    let error = repo
+        .commit_turn_artifact_messages(&conv.id, &turn_id, std::slice::from_ref(&cross_turn), 200)
+        .await
+        .unwrap_err();
+    assert!(matches!(error, nomifun_db::DbError::Conflict(_)));
+
+    let wrong_type = make_generic_artifact_commit(
+        MessageId::new().into_string(),
+        &turn_id,
+        "wrong-type-call",
+        "wrong-type-image",
+    );
+    let row = MessageRow {
+        id: wrong_type.id.clone(),
+        conversation_id: conv.id.clone(),
+        msg_id: Some(turn_id.clone()),
+        r#type: "text".to_owned(),
+        content: serde_json::json!({"content": "not a tool", "turn_id": turn_id}).to_string(),
+        position: Some("left".to_owned()),
+        status: Some("work".to_owned()),
+        hidden: false,
+        created_at: 100,
+    };
+    repo.insert_message(&row).await.unwrap();
+    let error = repo
+        .commit_turn_artifact_messages(&conv.id, &turn_id, std::slice::from_ref(&wrong_type), 200)
+        .await
+        .unwrap_err();
+    assert!(matches!(error, nomifun_db::DbError::Conflict(_)));
+
+    let mut unsupported = make_generic_artifact_commit(
+        MessageId::new().into_string(),
+        &turn_id,
+        "unsupported-type-call",
+        "unsupported-type-image",
+    );
+    unsupported.message_type = "text".to_owned();
+    let error = repo
+        .commit_turn_artifact_messages(&conv.id, &turn_id, &[unsupported], 200)
+        .await
+        .unwrap_err();
+    assert!(matches!(error, nomifun_db::DbError::Conflict(_)));
+}
+
+#[tokio::test]
+async fn artifact_message_commit_rolls_back_on_different_finished_projection() {
+    let (repo, _db) = setup().await;
+    let mut conv = make_conversation("artifact-finish-conflict");
+    conv.id = repo.create(&conv).await.unwrap();
+    let turn_id = MessageId::new().into_string();
+    let would_insert = make_acp_artifact_commit(
+        MessageId::new().into_string(),
+        &turn_id,
+        "insert-before-finish-conflict",
+        "new-acp-image",
+    );
+    let existing = make_generic_artifact_commit(
+        MessageId::new().into_string(),
+        &turn_id,
+        "same-call",
+        "original-image",
+    );
+    let different = make_generic_artifact_commit(
+        existing.id.clone(),
+        &turn_id,
+        "same-call",
+        "different-image",
+    );
+    let existing_row = MessageRow {
+        id: existing.id.clone(),
+        conversation_id: conv.id.clone(),
+        msg_id: Some(turn_id.clone()),
+        r#type: existing.message_type.clone(),
+        content: existing.content.clone(),
+        position: Some("left".to_owned()),
+        status: Some("finish".to_owned()),
+        hidden: false,
+        created_at: 100,
+    };
+    repo.insert_message(&existing_row).await.unwrap();
+
+    let error = repo
+        .commit_turn_artifact_messages(
+            &conv.id,
+            &turn_id,
+            &[would_insert.clone(), different],
+            200,
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(error, nomifun_db::DbError::Conflict(_)));
+    assert!(repo
+        .get_message(&conv.id, &would_insert.id)
+        .await
+        .unwrap()
+        .is_none());
+    let preserved = repo.get_message(&conv.id, &existing.id).await.unwrap().unwrap();
+    assert_eq!(preserved.content, existing.content);
+    assert_eq!(preserved.status.as_deref(), Some("finish"));
 }
 
 #[tokio::test]

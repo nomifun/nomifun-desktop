@@ -11,8 +11,12 @@ import { toDisplayText } from '@/common/chat/displayText';
 import {
   composeMessage,
   mergeAcpToolCallContent,
+  mergeToolCallContent,
   mergeTextMessageContent,
+  normalizeAcpToolCallContent,
   normalizeKnowledgeWritebackState,
+  normalizeToolCallContent,
+  normalizeToolGroupContent,
   normalizeWireAgentMessageMetadata,
   normalizeAgentStreamError,
   preferTextMessageVersion,
@@ -195,7 +199,7 @@ function composeMessageWithIndex(message: TMessage | undefined, list: TMessage[]
       const existingMsg = list[existingIdx];
       if (existingMsg.type === 'tool_call') {
         const newList = list.slice();
-        const merged = { ...existingMsg.content, ...message.content };
+        const merged = mergeToolCallContent(existingMsg.content, message.content);
         newList[existingIdx] = { ...existingMsg, ...message, content: merged };
         return newList;
       }
@@ -545,6 +549,17 @@ const parseJsonRecord = (value: unknown): Record<string, unknown> | undefined =>
   }
 };
 
+const parseJsonArray = (value: unknown): unknown[] | undefined => {
+  if (Array.isArray(value)) return value;
+  if (typeof value !== 'string') return undefined;
+  try {
+    const parsed = JSON.parse(value) as unknown;
+    return Array.isArray(parsed) ? parsed : undefined;
+  } catch {
+    return undefined;
+  }
+};
+
 const normalizeTipType = (value: unknown, fallback: IMessageTips['content']['type']) =>
   value === 'success' || value === 'warning' || value === 'error' ? value : fallback;
 
@@ -683,6 +698,32 @@ const normalizeDbTipsMessage = (msg: TMessage): TMessage => {
  */
 export function normalizeDbMessage(msg: TMessage): TMessage {
   if (msg.type === 'tips') return normalizeDbTipsMessage(msg);
+  if (msg.type === 'tool_call') {
+    const parsed = parseJsonRecord(msg.content) ?? {};
+    const content = normalizeToolCallContent(parsed, msg.status ?? null);
+    return {
+      ...msg,
+      content,
+      status: content.status === 'error' ? 'error' : msg.status,
+    };
+  }
+  if (msg.type === 'acp_tool_call') {
+    const parsed = parseJsonRecord(msg.content) ?? {};
+    const content = normalizeAcpToolCallContent(parsed, msg.status ?? null);
+    return {
+      ...msg,
+      content,
+      status: content.update?.status === 'failed' ? 'error' : msg.status,
+    };
+  }
+  if (msg.type === 'tool_group') {
+    const content = normalizeToolGroupContent(parseJsonArray(msg.content) ?? []);
+    return {
+      ...msg,
+      content,
+      status: content.some((item) => item.status === 'Error') ? 'error' : msg.status,
+    };
+  }
   if (msg.type !== 'text') return msg;
   const raw = msg.content as unknown;
   if (typeof raw !== 'string') return msg;
@@ -712,6 +753,12 @@ const messageCursorOf = (m: TMessage): string => `${m.created_at ?? 0}:${m.id}`;
 
 const getFetchedMergeKey = (message: TMessage): string | undefined => {
   if (!message.msg_id) return undefined;
+  if (message.type === 'tool_call' && message.content?.call_id) {
+    return `tool_call:${getToolLifecycleKey(message, message.content.call_id)}`;
+  }
+  if (message.type === 'acp_tool_call' && message.content?.update?.tool_call_id) {
+    return `acp_tool_call:${getToolLifecycleKey(message, message.content.update.tool_call_id)}`;
+  }
   return `${message.type}:${message.msg_id}`;
 };
 
@@ -762,6 +809,26 @@ export const mergeFetchedMessagesForConversation = (
     }
     if (dbMessage.type === 'thinking' && streamMessage.type === 'thinking') {
       return preferThinkingMessageVersion(dbMessage, streamMessage);
+    }
+    if (dbMessage.type === 'tool_call' && streamMessage.type === 'tool_call') {
+      const content = mergeToolCallContent(dbMessage.content, streamMessage.content);
+      return {
+        ...dbMessage,
+        ...streamMessage,
+        id: dbMessage.id,
+        content,
+        status: content.status === 'error' ? 'error' : dbMessage.status,
+      };
+    }
+    if (dbMessage.type === 'acp_tool_call' && streamMessage.type === 'acp_tool_call') {
+      const content = mergeAcpToolCallContent(dbMessage.content, streamMessage.content);
+      return {
+        ...dbMessage,
+        ...streamMessage,
+        id: dbMessage.id,
+        content,
+        status: content.update.status === 'failed' ? 'error' : dbMessage.status,
+      };
     }
     return dbMessage;
   });

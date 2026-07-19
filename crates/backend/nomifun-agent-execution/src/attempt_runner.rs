@@ -7,24 +7,35 @@
 //! observed output. The scheduler is therefore able to cancel an attempt as
 //! soon as the conversation exists, without a correlation-id race.
 
+use std::collections::BTreeSet;
 use std::future::Future;
+use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
-use nomifun_ai_agent::AgentRuntimeRegistry;
+use nomifun_ai_agent::{
+    AgentRuntimeRegistry,
+    artifact_store::{ArtifactStore, PersistedArtifact},
+};
 use nomifun_api_types::{
     CreateConversationRequest, ExecutionModelPool, ExecutionModelRef, ExecutionParticipant,
-    ListMessagesQuery, SendMessageRequest,
+    ListMessagesQuery, MessageResponse, SendMessageRequest,
 };
 use nomifun_common::{
-    AgentToolPolicy, AgentType, AppError, DecisionPolicy, DelegationPolicy, ProviderId,
+    AgentToolPolicy, AgentType, AppError, DecisionPolicy, DelegationPolicy,
+    MAX_AGENT_DELEGATION_DEPTH, MessagePosition, MessageStatus, MessageType, ProviderId,
     ProviderWithModel,
-    MAX_AGENT_DELEGATION_DEPTH,
 };
 use nomifun_conversation::{AgentExecutionConversationPort, ConversationService};
 use serde_json::{Value, json};
+
+const ARTIFACT_RECEIPT_PAGE_SIZE: u32 = 100;
+// Keep receipt consumption aligned with ArtifactStore::verify_existing_path.
+// The store repeats this limit against real metadata before reading bytes, so
+// a forged small receipt cannot make us hash an arbitrarily large file.
+const MAX_VERIFIED_ARTIFACT_BYTES: u64 = 512 * 1024 * 1024;
 
 /// Async callback invoked immediately after the Agent conversation is created
 /// and before its first message is sent. The scheduler uses it to persist the
@@ -37,6 +48,8 @@ pub(crate) type AttemptStarted = Box<
 pub(crate) struct AttemptOutcome {
     pub conversation_id: String,
     pub text: Option<String>,
+    /// Verified artifact paths observed in this attempt's current turn.
+    pub output_files: Vec<String>,
     pub ok: bool,
     pub tokens: Option<i64>,
 }
@@ -91,6 +104,10 @@ pub(crate) trait AttemptRunner: Send + Sync {
 
     async fn read_final_output(&self, _owner_id: &str, _conversation_id: &str) -> Option<String> {
         None
+    }
+
+    async fn read_output_files(&self, _owner_id: &str, _conversation_id: &str) -> Vec<String> {
+        Vec::new()
     }
 
     async fn last_error_retryable(&self, _owner_id: &str, _conversation_id: &str) -> bool {
@@ -180,11 +197,16 @@ impl ConversationAttemptRunner {
                 },
             )
             .await?;
+        let boundary_message_id = delivery.message_id.clone();
         if delivery.completed {
+            let projection = self
+                .output_files_for_turn(owner_id, conversation_id, &boundary_message_id)
+                .await;
             return Ok(AttemptOutcome {
                 conversation_id: conversation_id.to_owned(),
                 text: delivery.result_text,
-                ok: delivery.result_ok.unwrap_or(false),
+                output_files: projection.files,
+                ok: delivery.result_ok.unwrap_or(false) && projection.integrity_ok,
                 tokens: self.conv.take_turn_tokens(conversation_id),
             });
         }
@@ -195,6 +217,7 @@ impl ConversationAttemptRunner {
             return Ok(AttemptOutcome {
                 conversation_id: conversation_id.to_owned(),
                 text: None,
+                output_files: Vec::new(),
                 ok: false,
                 tokens: self.conv.take_turn_tokens(conversation_id),
             });
@@ -212,24 +235,131 @@ impl ConversationAttemptRunner {
             .await?
             .filter(|receipt| receipt.completed)
         {
+            let projection = self
+                .output_files_for_turn(owner_id, conversation_id, &receipt.message_id)
+                .await;
             return Ok(AttemptOutcome {
                 conversation_id: conversation_id.to_owned(),
                 text: receipt.result_text,
-                ok: receipt.result_ok.unwrap_or(false),
+                output_files: projection.files,
+                ok: receipt.result_ok.unwrap_or(false) && projection.integrity_ok,
                 tokens: self.conv.take_turn_tokens(conversation_id),
             });
         }
-        let text = self
-            .recent_messages(owner_id, conversation_id)
-            .await
-            .as_ref()
-            .and_then(latest_assistant_text);
-        Ok(AttemptOutcome {
-            conversation_id: conversation_id.to_owned(),
-            ok: text.is_some(),
-            text,
-            tokens: self.conv.take_turn_tokens(conversation_id),
-        })
+        // Runtime idleness is not a delivery receipt. Reading the newest
+        // assistant row here could select a previous or concurrently delivered
+        // turn and falsely complete this attempt. Without the exact operation
+        // receipt above, fail closed and let the scheduler retry/report the
+        // missing terminal delivery.
+        tracing::warn!(
+            conversation_id,
+            operation_id,
+            boundary_message_id,
+            "agent turn became idle without a completed delivery receipt"
+        );
+        Ok(missing_delivery_receipt_outcome(
+            conversation_id,
+            self.conv.take_turn_tokens(conversation_id),
+        ))
+    }
+
+    /// Project only artifact receipts belonging to the exact delivered turn.
+    ///
+    /// The durable delivery receipt identifies the exact right-side user row.
+    /// Tool rows use a separate wire-turn id, stamped identically into their
+    /// `msg_id` and `content.turn_id`. We page newest-first to that user-row
+    /// boundary, reset at any intervening user turn, require the tool ids to be
+    /// self-consistent, and fail closed unless the boundary is found.
+    async fn output_files_for_turn(
+        &self,
+        owner_id: &str,
+        conversation_id: &str,
+        boundary_message_id: &str,
+    ) -> ArtifactProjectionResult {
+        self.output_files_from_projection(
+            owner_id,
+            conversation_id,
+            TurnArtifactProjection::for_boundary(boundary_message_id),
+        )
+        .await
+    }
+
+    async fn latest_output_files(&self, owner_id: &str, conversation_id: &str) -> Vec<String> {
+        self.output_files_from_projection(
+            owner_id,
+            conversation_id,
+            TurnArtifactProjection::for_latest_turn(),
+        )
+        .await
+        .files
+    }
+
+    async fn output_files_from_projection(
+        &self,
+        owner_id: &str,
+        conversation_id: &str,
+        mut projection: TurnArtifactProjection<'_>,
+    ) -> ArtifactProjectionResult {
+        let mut page = 1_u32;
+        loop {
+            let messages = match self
+                .conv
+                .list_messages(
+                    owner_id,
+                    conversation_id,
+                    ListMessagesQuery {
+                        page: Some(page),
+                        page_size: Some(ARTIFACT_RECEIPT_PAGE_SIZE),
+                        order: Some("desc".to_owned()),
+                        content_mode: None,
+                        cursor: None,
+                    },
+                )
+                .await
+            {
+                Ok(messages) => messages,
+                Err(error) => {
+                    tracing::warn!(
+                        %error,
+                        conversation_id,
+                        requested_boundary = projection.boundary_label(),
+                        "failed to page current-turn artifact receipts"
+                    );
+                    return ArtifactProjectionResult::failed();
+                }
+            };
+            projection.ingest_page(&messages.items);
+            if projection.boundary_seen() || !messages.has_more {
+                break;
+            }
+            let Some(next_page) = page.checked_add(1) else {
+                return ArtifactProjectionResult::failed();
+            };
+            page = next_page;
+        }
+
+        let workspace = self
+            .conversation_workspace(owner_id, conversation_id)
+            .await;
+        projection.finish(workspace.as_deref())
+    }
+
+    async fn conversation_workspace(
+        &self,
+        owner_id: &str,
+        conversation_id: &str,
+    ) -> Option<PathBuf> {
+        let conversation = self.conv.get(owner_id, conversation_id).await.ok()?;
+        let workspace = conversation
+            .extra
+            .get("workspace")
+            .and_then(Value::as_str)?
+            .trim();
+        if workspace.is_empty() {
+            return None;
+        }
+        let canonical = std::fs::canonicalize(workspace).ok()?;
+        canonical.is_dir().then_some(canonical)
     }
 }
 
@@ -408,6 +538,13 @@ impl AttemptRunner for ConversationAttemptRunner {
             .and_then(latest_assistant_text)
     }
 
+    async fn read_output_files(&self, owner_id: &str, conversation_id: &str) -> Vec<String> {
+        // Adoption has no stored delivery id, but the latest canonical
+        // right-side boundary is reliable: only its immediately preceding
+        // newest-first segment is considered, never the whole conversation.
+        self.latest_output_files(owner_id, conversation_id).await
+    }
+
     async fn last_error_retryable(&self, owner_id: &str, conversation_id: &str) -> bool {
         self.recent_messages(owner_id, conversation_id)
             .await
@@ -494,6 +631,262 @@ fn latest_assistant_text(value: &Value) -> Option<String> {
     }
 }
 
+/// Runtime idleness and transcript contents are observational only. The
+/// operation-scoped durable receipt is the sole authority which may mark an
+/// Agent turn successful, so its absence always produces a failed outcome.
+fn missing_delivery_receipt_outcome(
+    conversation_id: &str,
+    tokens: Option<i64>,
+) -> AttemptOutcome {
+    AttemptOutcome {
+        conversation_id: conversation_id.to_owned(),
+        text: None,
+        output_files: Vec::new(),
+        ok: false,
+        tokens,
+    }
+}
+
+#[derive(Debug, Default, PartialEq, Eq)]
+struct ArtifactProjectionResult {
+    files: Vec<String>,
+    integrity_ok: bool,
+}
+
+impl ArtifactProjectionResult {
+    fn failed() -> Self {
+        Self {
+            files: Vec::new(),
+            integrity_ok: false,
+        }
+    }
+}
+
+#[derive(Debug)]
+struct TurnArtifactProjection<'a> {
+    boundary_message_id: Option<&'a str>,
+    boundary_seen: bool,
+    receipts: Vec<PersistedArtifact>,
+    invalid_artifact_claim: bool,
+}
+
+impl<'a> TurnArtifactProjection<'a> {
+    fn for_boundary(boundary_message_id: &'a str) -> Self {
+        Self {
+            boundary_message_id: Some(boundary_message_id),
+            boundary_seen: false,
+            receipts: Vec::new(),
+            invalid_artifact_claim: false,
+        }
+    }
+
+    fn for_latest_turn() -> Self {
+        Self {
+            boundary_message_id: None,
+            boundary_seen: false,
+            receipts: Vec::new(),
+            invalid_artifact_claim: false,
+        }
+    }
+
+    fn ingest_page(&mut self, messages: &[MessageResponse]) {
+        if self.boundary_seen {
+            return;
+        }
+        for message in messages {
+            if is_right_turn_boundary(message) {
+                if self
+                    .boundary_message_id
+                    .map_or(true, |boundary| message.id == boundary)
+                {
+                    self.boundary_seen = true;
+                    return;
+                }
+                // We crossed a more recent turn. Receipts collected above that
+                // boundary belong to it, not to the requested delivery.
+                self.receipts.clear();
+                self.invalid_artifact_claim = false;
+                continue;
+            }
+            let has_claim = message_has_artifact_claim(message);
+            match completed_artifact_receipts(message) {
+                Some(receipts) => self.receipts.extend(receipts),
+                None if has_claim => self.invalid_artifact_claim = true,
+                None => {}
+            }
+        }
+    }
+
+    fn boundary_seen(&self) -> bool {
+        self.boundary_seen
+    }
+
+    fn boundary_label(&self) -> &str {
+        self.boundary_message_id.unwrap_or("<latest>")
+    }
+
+    fn finish(self, workspace: Option<&Path>) -> ArtifactProjectionResult {
+        if !self.boundary_seen {
+            return ArtifactProjectionResult::failed();
+        }
+        if self.receipts.is_empty() {
+            return ArtifactProjectionResult {
+                files: Vec::new(),
+                integrity_ok: !self.invalid_artifact_claim,
+            };
+        }
+        let Some(workspace) = workspace else {
+            return ArtifactProjectionResult::failed();
+        };
+        let mut files = BTreeSet::new();
+        let mut integrity_ok = !self.invalid_artifact_claim;
+        for receipt in &self.receipts {
+            match verify_artifact_receipt(workspace, receipt) {
+                Some(path) => {
+                    files.insert(path);
+                }
+                None => integrity_ok = false,
+            }
+        }
+        ArtifactProjectionResult {
+            files: files.into_iter().collect(),
+            integrity_ok,
+        }
+    }
+}
+
+fn is_right_turn_boundary(message: &MessageResponse) -> bool {
+    message.msg_id.as_deref() == Some(message.id.as_str())
+        && message.r#type == MessageType::Text
+        && message.position == Some(MessagePosition::Right)
+        && message.status == Some(MessageStatus::Finish)
+}
+
+fn message_has_artifact_claim(message: &MessageResponse) -> bool {
+    match message.r#type {
+        MessageType::ToolCall => message
+            .content
+            .get("artifacts")
+            .is_some_and(|artifacts| !artifacts.as_array().is_some_and(Vec::is_empty)),
+        MessageType::AcpToolCall => message
+            .content
+            .get("update")
+            .and_then(|update| update.get("content"))
+            .and_then(Value::as_array)
+            .is_some_and(|items| {
+                items.iter().any(|item| {
+                    matches!(
+                        item.get("type").and_then(Value::as_str),
+                        Some("artifact" | "artifact_error")
+                    )
+                })
+            }),
+        _ => false,
+    }
+}
+
+fn completed_artifact_receipts(message: &MessageResponse) -> Option<Vec<PersistedArtifact>> {
+    let wire_turn_id = message.msg_id.as_deref()?;
+    if wire_turn_id.trim().is_empty()
+        || message.status != Some(MessageStatus::Finish)
+        || message.content.get("turn_id").and_then(Value::as_str) != Some(wire_turn_id)
+        || message
+            .content
+            .get("artifact_delivery_committed")
+            .and_then(Value::as_bool)
+            != Some(true)
+    {
+        return None;
+    }
+
+    match message.r#type {
+        MessageType::ToolCall => {
+            if message.content.get("status").and_then(Value::as_str) != Some("completed") {
+                return None;
+            }
+            let artifacts = message.content.get("artifacts")?.as_array()?;
+            artifacts
+                .iter()
+                .cloned()
+                .map(serde_json::from_value::<PersistedArtifact>)
+                .collect::<Result<Vec<_>, _>>()
+                .ok()
+        }
+        MessageType::AcpToolCall => {
+            let update = message.content.get("update")?.as_object()?;
+            if update.get("status").and_then(Value::as_str) != Some("completed") {
+                return None;
+            }
+            let items = update.get("content")?.as_array()?;
+            let mut artifacts = Vec::new();
+            for item in items {
+                match item.get("type").and_then(Value::as_str) {
+                    Some("artifact") => {
+                        let artifact = item.get("artifact")?.clone();
+                        artifacts.push(serde_json::from_value::<PersistedArtifact>(artifact).ok()?);
+                    }
+                    // A completed update carrying an artifact failure is not a
+                    // trustworthy terminal receipt, even if another item looks valid.
+                    Some("artifact_error") => return None,
+                    _ => {}
+                }
+            }
+            Some(artifacts)
+        }
+        _ => None,
+    }
+}
+
+fn verify_artifact_receipt(workspace: &Path, artifact: &PersistedArtifact) -> Option<String> {
+    if artifact.id.trim().is_empty()
+        || artifact.mime_type.trim().is_empty()
+        || artifact.path.trim().is_empty()
+        || artifact.relative_path.trim().is_empty()
+        || artifact.size_bytes == 0
+        || artifact.size_bytes > MAX_VERIFIED_ARTIFACT_BYTES
+        || artifact.sha256.len() != 64
+        || !artifact.sha256.bytes().all(|byte| byte.is_ascii_hexdigit())
+    {
+        return None;
+    }
+
+    if !Path::new(&artifact.path).is_absolute() {
+        return None;
+    }
+    portable_relative_path(&artifact.relative_path)?;
+
+    // Reuse the authoritative delivery verifier: canonical workspace
+    // containment, regular/non-empty file checks, the 512 MiB metadata cap,
+    // complete format validation, and SHA-256 are all repeated here.
+    let verified = ArtifactStore::new(workspace)
+        .verify_existing_path(&artifact.path)
+        .ok()?;
+    if verified.kind != artifact.kind
+        || verified.mime_type != artifact.mime_type
+        || verified.relative_path != artifact.relative_path
+        || verified.size_bytes != artifact.size_bytes
+        || !verified.sha256.eq_ignore_ascii_case(&artifact.sha256)
+    {
+        return None;
+    }
+
+    Some(verified.path)
+}
+
+fn portable_relative_path(value: &str) -> Option<PathBuf> {
+    let mut path = PathBuf::new();
+    for segment in value.split('/') {
+        if segment.is_empty()
+            || matches!(segment, "." | "..")
+            || segment.contains(['\\', ':', '\0'])
+        {
+            return None;
+        }
+        path.push(segment);
+    }
+    (!path.as_os_str().is_empty() && !path.is_absolute()).then_some(path)
+}
+
 fn latest_error_retryable(value: &Value) -> bool {
     match value {
         Value::Array(values) => values.iter().find_map(error_retryable_flag).unwrap_or(false),
@@ -558,6 +951,107 @@ fn error_summary(value: &Value) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use nomifun_common::TimestampMs;
+    use sha2::{Digest, Sha256};
+
+    fn sha256_hex(bytes: &[u8]) -> String {
+        format!("{:x}", Sha256::digest(bytes))
+    }
+
+    fn message(
+        id: &str,
+        msg_id: &str,
+        message_type: MessageType,
+        position: MessagePosition,
+        status: MessageStatus,
+        content: Value,
+    ) -> MessageResponse {
+        MessageResponse {
+            id: id.to_owned(),
+            conversation_id: "conversation-1".to_owned(),
+            msg_id: Some(msg_id.to_owned()),
+            r#type: message_type,
+            content,
+            position: Some(position),
+            status: Some(status),
+            hidden: false,
+            created_at: TimestampMs::from(1),
+        }
+    }
+
+    fn boundary(id: &str) -> MessageResponse {
+        message(
+            id,
+            id,
+            MessageType::Text,
+            MessagePosition::Right,
+            MessageStatus::Finish,
+            json!({"content":"generate the requested artifact"}),
+        )
+    }
+
+    fn artifact_receipt(workspace: &Path, file_name: &str, bytes: &[u8]) -> Value {
+        let path = workspace.join(file_name);
+        std::fs::write(&path, bytes).unwrap();
+        let canonical = std::fs::canonicalize(path).unwrap();
+        json!({
+            "id": format!("artifact-{file_name}"),
+            "kind": "file",
+            "mime_type": "application/octet-stream",
+            "path": canonical.to_string_lossy(),
+            "relative_path": file_name,
+            "size_bytes": bytes.len(),
+            "sha256": sha256_hex(bytes),
+        })
+    }
+
+    fn completed_tool_message(id: &str, turn_id: &str, artifact: Value) -> MessageResponse {
+        message(
+            id,
+            turn_id,
+            MessageType::ToolCall,
+            MessagePosition::Left,
+            MessageStatus::Finish,
+            json!({
+                "call_id": id,
+                "name": "generate_file",
+                "status": "completed",
+                "turn_id": turn_id,
+                "artifact_delivery_committed": true,
+                "artifacts": [artifact],
+            }),
+        )
+    }
+
+    fn projected_result(
+        workspace: &Path,
+        boundary_id: &str,
+        pages: &[Vec<MessageResponse>],
+    ) -> ArtifactProjectionResult {
+        let workspace = std::fs::canonicalize(workspace).unwrap();
+        let mut projection = TurnArtifactProjection::for_boundary(boundary_id);
+        for page in pages {
+            projection.ingest_page(page);
+        }
+        projection.finish(Some(&workspace))
+    }
+
+    fn projected_paths(
+        workspace: &Path,
+        boundary_id: &str,
+        pages: &[Vec<MessageResponse>],
+    ) -> Vec<String> {
+        projected_result(workspace, boundary_id, pages).files
+    }
+
+    fn projected_latest_paths(workspace: &Path, pages: &[Vec<MessageResponse>]) -> Vec<String> {
+        let workspace = std::fs::canonicalize(workspace).unwrap();
+        let mut projection = TurnArtifactProjection::for_latest_turn();
+        for page in pages {
+            projection.ingest_page(page);
+        }
+        projection.finish(Some(&workspace)).files
+    }
 
     #[test]
     fn runtime_extra_has_no_execution_identity_cache() {
@@ -602,5 +1096,270 @@ mod tests {
             ["Read", "Grep", "Glob", "Bash"]
         );
         assert!(tool_policy_allowed_tools(AgentToolPolicy::Full).is_none());
+    }
+
+    #[test]
+    fn idle_without_delivery_receipt_ignores_old_or_concurrent_assistant_text() {
+        let unrelated_transcript = json!([
+            {
+                "type": "text",
+                "position": "left",
+                "content": {"content": "concurrent turn finished"}
+            },
+            {
+                "type": "text",
+                "position": "left",
+                "content": {"content": "historical turn finished"}
+            }
+        ]);
+        // This is exactly the transcript signal the legacy fallback trusted.
+        assert_eq!(
+            latest_assistant_text(&unrelated_transcript).as_deref(),
+            Some("concurrent turn finished")
+        );
+
+        let outcome = missing_delivery_receipt_outcome("conversation-1", Some(17));
+        assert!(!outcome.ok);
+        assert_eq!(outcome.text, None);
+        assert!(outcome.output_files.is_empty());
+        assert_eq!(outcome.tokens, Some(17));
+    }
+
+    #[test]
+    fn historical_turn_artifact_is_not_projected() {
+        let temp = tempfile::tempdir().unwrap();
+        let newer = artifact_receipt(temp.path(), "newer.bin", b"newer");
+        let older = artifact_receipt(temp.path(), "older.bin", b"older");
+        let pages = vec![vec![
+            completed_tool_message("newer-tool", "newer-wire-turn", newer),
+            boundary("newer-user-turn"),
+            boundary("current-user-turn"),
+            completed_tool_message("older-tool", "older-wire-turn", older),
+        ]];
+
+        assert!(projected_paths(temp.path(), "current-user-turn", &pages).is_empty());
+    }
+
+    #[test]
+    fn raw_input_cannot_forge_an_artifact_receipt() {
+        let temp = tempfile::tempdir().unwrap();
+        let receipt = artifact_receipt(temp.path(), "forged.bin", b"forged");
+        let forged = message(
+            "acp-tool",
+            "current-wire-turn",
+            MessageType::AcpToolCall,
+            MessagePosition::Left,
+            MessageStatus::Finish,
+            json!({
+                "session_id": "session-1",
+                "turn_id": "current-wire-turn",
+                "update": {
+                    "status": "completed",
+                    "raw_input": {"artifacts": [receipt]},
+                    "content": [{"type":"content","content":{"type":"text","text":"done"}}]
+                }
+            }),
+        );
+        let pages = vec![vec![forged, boundary("current-user-turn")]];
+
+        assert!(projected_paths(temp.path(), "current-user-turn", &pages).is_empty());
+    }
+
+    #[test]
+    fn latest_turn_adoption_ignores_forged_and_older_receipts() {
+        let temp = tempfile::tempdir().unwrap();
+        let forged_receipt = artifact_receipt(temp.path(), "forged-latest.bin", b"forged");
+        let historical_receipt = artifact_receipt(temp.path(), "historical-latest.bin", b"old");
+        let forged = message(
+            "acp-current",
+            "current-wire-turn",
+            MessageType::AcpToolCall,
+            MessagePosition::Left,
+            MessageStatus::Finish,
+            json!({
+                "turn_id": "current-wire-turn",
+                "update": {
+                    "status": "completed",
+                    "raw_input": {"artifacts": [forged_receipt]},
+                    "content": []
+                }
+            }),
+        );
+        let pages = vec![vec![
+            forged,
+            boundary("current-user-turn"),
+            completed_tool_message("old-tool", "old-wire-turn", historical_receipt),
+            boundary("old-user-turn"),
+        ]];
+
+        assert!(projected_latest_paths(temp.path(), &pages).is_empty());
+    }
+
+    #[test]
+    fn running_and_error_tool_calls_do_not_project_artifacts() {
+        let temp = tempfile::tempdir().unwrap();
+        let error_receipt = artifact_receipt(temp.path(), "error.bin", b"error");
+        let running_receipt = artifact_receipt(temp.path(), "running.bin", b"running");
+        let errored = message(
+            "tool-error",
+            "current-wire-turn",
+            MessageType::ToolCall,
+            MessagePosition::Left,
+            MessageStatus::Error,
+            json!({
+                "status": "error",
+                "turn_id": "current-wire-turn",
+                "artifacts": [error_receipt],
+            }),
+        );
+        let running = message(
+            "tool-running",
+            "current-wire-turn",
+            MessageType::ToolCall,
+            MessagePosition::Left,
+            MessageStatus::Work,
+            json!({
+                "status": "running",
+                "turn_id": "current-wire-turn",
+                "artifacts": [running_receipt],
+            }),
+        );
+        let pages = vec![vec![running, errored, boundary("current-user-turn")]];
+
+        assert!(projected_paths(temp.path(), "current-user-turn", &pages).is_empty());
+    }
+
+    #[test]
+    fn legacy_or_provisional_receipts_without_atomic_commit_marker_fail_closed() {
+        let temp = tempfile::tempdir().unwrap();
+        let generic_receipt = artifact_receipt(temp.path(), "legacy-generic.bin", b"legacy generic");
+        let mut generic = completed_tool_message("legacy-tool", "current-wire-turn", generic_receipt);
+        generic
+            .content
+            .as_object_mut()
+            .unwrap()
+            .remove("artifact_delivery_committed");
+        let acp_receipt = artifact_receipt(temp.path(), "legacy-acp.bin", b"legacy acp");
+        let acp = message(
+            "legacy-acp-tool",
+            "current-wire-turn",
+            MessageType::AcpToolCall,
+            MessagePosition::Left,
+            MessageStatus::Finish,
+            json!({
+                "turn_id": "current-wire-turn",
+                "update": {
+                    "status": "completed",
+                    "content": [{"type":"artifact","artifact":acp_receipt}]
+                }
+            }),
+        );
+        let pages = vec![vec![generic, acp, boundary("current-user-turn")]];
+
+        let result = projected_result(temp.path(), "current-user-turn", &pages);
+        assert!(result.files.is_empty());
+        assert!(!result.integrity_ok);
+    }
+
+    #[test]
+    fn mismatched_size_and_hash_are_rejected() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut wrong_size = artifact_receipt(temp.path(), "size.bin", b"size");
+        wrong_size["size_bytes"] = json!(99);
+        let mut wrong_hash = artifact_receipt(temp.path(), "hash.bin", b"hash");
+        wrong_hash["sha256"] = json!("0".repeat(64));
+        let mut oversized = artifact_receipt(temp.path(), "oversized.bin", b"small");
+        oversized["size_bytes"] = json!(MAX_VERIFIED_ARTIFACT_BYTES + 1);
+        let pages = vec![vec![
+            completed_tool_message("size-tool", "current-wire-turn", wrong_size),
+            completed_tool_message("hash-tool", "current-wire-turn", wrong_hash),
+            completed_tool_message("oversized-tool", "current-wire-turn", oversized),
+            boundary("current-user-turn"),
+        ]];
+
+        let result = projected_result(temp.path(), "current-user-turn", &pages);
+        assert!(result.files.is_empty());
+        assert!(!result.integrity_ok);
+    }
+
+    #[test]
+    fn artifact_path_outside_workspace_is_rejected() {
+        let workspace = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let receipt = artifact_receipt(outside.path(), "outside.bin", b"outside");
+        let pages = vec![vec![
+            completed_tool_message("tool", "current-wire-turn", receipt),
+            boundary("current-user-turn"),
+        ]];
+
+        assert!(projected_paths(workspace.path(), "current-user-turn", &pages).is_empty());
+    }
+
+    #[test]
+    fn current_completed_tool_and_acp_receipts_are_verified_and_deduplicated() {
+        let temp = tempfile::tempdir().unwrap();
+        let receipt = artifact_receipt(temp.path(), "current.bin", b"current artifact");
+        let expected = receipt["path"].as_str().unwrap().to_owned();
+        let acp = message(
+            "acp-tool",
+            "current-wire-turn",
+            MessageType::AcpToolCall,
+            MessagePosition::Left,
+            MessageStatus::Finish,
+            json!({
+                "session_id": "session-1",
+                "turn_id": "current-wire-turn",
+                "artifact_delivery_committed": true,
+                "update": {
+                    "status": "completed",
+                    "content": [{"type":"artifact","artifact":receipt.clone()}]
+                }
+            }),
+        );
+        let pages = vec![vec![
+            acp,
+            completed_tool_message("tool", "current-wire-turn", receipt),
+            boundary("current-user-turn"),
+        ]];
+
+        assert_eq!(
+            projected_paths(temp.path(), "current-user-turn", &pages),
+            vec![expected.clone()]
+        );
+        assert_eq!(projected_latest_paths(temp.path(), &pages), vec![expected]);
+    }
+
+    #[test]
+    fn projection_crosses_page_size_and_requires_canonical_boundary() {
+        let temp = tempfile::tempdir().unwrap();
+        let receipt = artifact_receipt(temp.path(), "paged.bin", b"paged artifact");
+        let expected = receipt["path"].as_str().unwrap().to_owned();
+        let mut first_page = vec![completed_tool_message(
+            "tool",
+            "current-wire-turn",
+            receipt,
+        )];
+        for index in 1..ARTIFACT_RECEIPT_PAGE_SIZE {
+            first_page.push(message(
+                &format!("assistant-{index}"),
+                "current-wire-turn",
+                MessageType::Text,
+                MessagePosition::Left,
+                MessageStatus::Finish,
+                json!({"content":"progress"}),
+            ));
+        }
+        assert_eq!(first_page.len(), ARTIFACT_RECEIPT_PAGE_SIZE as usize);
+        let second_page = vec![boundary("current-user-turn")];
+
+        assert_eq!(
+            projected_paths(
+                temp.path(),
+                "current-user-turn",
+                &[first_page.clone(), second_page]
+            ),
+            vec![expected]
+        );
+        assert!(projected_paths(temp.path(), "current-user-turn", &[first_page]).is_empty());
     }
 }

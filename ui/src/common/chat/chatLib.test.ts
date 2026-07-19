@@ -11,7 +11,13 @@ import {
   parseKnowledgeBaseId,
   parseMessageId,
 } from '@/common/types/ids';
-import { composeMessage, transformKnowledgeWritebackEvent, transformMessage, transformUserCreatedEvent } from './chatLib';
+import {
+  composeMessage,
+  joinPath,
+  transformKnowledgeWritebackEvent,
+  transformMessage,
+  transformUserCreatedEvent,
+} from './chatLib';
 
 const MESSAGE_ID = parseMessageId('msg_019b0000-0000-7000-8000-000000000001');
 const COMPANION_ID = parseCompanionId('companion_019b0000-0000-7000-8000-000000000001');
@@ -23,7 +29,309 @@ const baseWire = (overrides: Record<string, unknown>) =>
     ...overrides,
   }) as any;
 
+describe('joinPath compatibility export', () => {
+  test('preserves UNC and URI prefixes', () => {
+    expect(joinPath('//server/share/project', '../cat.png')).toBe('//server/share/cat.png');
+    expect(joinPath('https://example.com/assets', 'cat.png')).toBe('https://example.com/assets/cat.png');
+  });
+});
+
 describe('transformMessage runtime field normalization', () => {
+  test('ACP partial updates preserve prior title, kind, and status instead of injecting defaults', () => {
+    const initial = transformMessage(
+      baseWire({
+        type: 'acp_tool_call',
+        data: {
+          session_id: 'session-1',
+          update: {
+            sessionUpdate: 'tool_call',
+            tool_call_id: 'tool-1',
+            status: 'in_progress',
+            title: 'Generate image',
+            kind: 'execute',
+          },
+        },
+      })
+    )!;
+    const partial = transformMessage(
+      baseWire({
+        type: 'acp_tool_call',
+        data: {
+          session_id: 'session-1',
+          update: {
+            sessionUpdate: 'tool_call_update',
+            tool_call_id: 'tool-1',
+            rawOutput: { progress: 50 },
+          },
+        },
+      })
+    )!;
+
+    expect(partial.type).toBe('acp_tool_call');
+    if (partial.type !== 'acp_tool_call' || initial.type !== 'acp_tool_call') {
+      throw new Error('expected ACP tool messages');
+    }
+    expect(partial.content.update.status).toBeUndefined();
+    expect(partial.content.update.title).toBeUndefined();
+    expect(partial.content.update.kind).toBeUndefined();
+
+    const merged = composeMessage(partial, [initial]);
+    expect(merged).toHaveLength(1);
+    const update = (merged[0] as typeof initial).content.update;
+    expect(update.status).toBe('in_progress');
+    expect(update.title).toBe('Generate image');
+    expect(update.kind).toBe('execute');
+    expect(update.rawOutput).toEqual({ progress: 50 });
+  });
+
+  test('ACP failed status is absorbing across late completed updates', () => {
+    const failed = transformMessage(
+      baseWire({
+        type: 'acp_tool_call',
+        data: {
+          session_id: 'session-1',
+          update: {
+            sessionUpdate: 'tool_call_update',
+            tool_call_id: 'tool-1',
+            status: 'failed',
+            title: 'Generate image',
+            kind: 'execute',
+            content: [{ type: 'artifact_error', message: 'invalid image' }],
+          },
+        },
+      })
+    )!;
+    const lateCompleted = transformMessage(
+      baseWire({
+        type: 'acp_tool_call',
+        data: {
+          session_id: 'session-1',
+          update: {
+            sessionUpdate: 'tool_call_update',
+            tool_call_id: 'tool-1',
+            status: 'completed',
+          },
+        },
+      })
+    )!;
+
+    const merged = composeMessage(lateCompleted, [failed]);
+    expect(merged).toHaveLength(1);
+    const mergedMessage = merged[0];
+    if (mergedMessage.type !== 'acp_tool_call') throw new Error('expected ACP tool message');
+    expect(mergedMessage.content.update.status).toBe('failed');
+  });
+
+  test('ACP failed correction removes artifact content inherited from completed state', () => {
+    const completed = transformMessage(
+      baseWire({
+        type: 'acp_tool_call',
+        data: {
+          session_id: 'session-1',
+          update: {
+            sessionUpdate: 'tool_call_update',
+            tool_call_id: 'tool-artifact',
+            status: 'completed',
+            content: [
+              {
+                type: 'artifact',
+                artifact: {
+                  id: 'artifact-acp-old',
+                  kind: 'image',
+                  mime_type: 'image/png',
+                  path: '/workspace/old.png',
+                  relative_path: 'nomifun-artifacts/old.png',
+                  size_bytes: 10,
+                  sha256: 'd'.repeat(64),
+                },
+              },
+            ],
+          },
+        },
+      })
+    )!;
+    const failed = transformMessage(
+      baseWire({
+        type: 'acp_tool_call',
+        data: {
+          session_id: 'session-1',
+          update: {
+            sessionUpdate: 'tool_call_update',
+            tool_call_id: 'tool-artifact',
+            status: 'failed',
+          },
+        },
+      })
+    )!;
+
+    const merged = composeMessage(failed, [completed]);
+    const message = merged[0];
+    if (message.type !== 'acp_tool_call') throw new Error('expected ACP tool call');
+    expect(message.content.update.status).toBe('failed');
+    expect(message.content.update.content).toEqual([]);
+  });
+
+  test('generic tool failure is absorbing across a late completed artifact frame', () => {
+    const failed = transformMessage(
+      baseWire({
+        type: 'tool_call',
+        data: { call_id: 'tool-1', name: 'Generate', status: 'error', output: 'failed' },
+      })
+    )!;
+    const lateCompleted = transformMessage(
+      baseWire({
+        type: 'tool_call',
+        data: {
+          call_id: 'tool-1',
+          name: 'Generate',
+          status: 'completed',
+          artifacts: [
+            {
+              id: 'artifact-1',
+              kind: 'image',
+              mime_type: 'image/png',
+              path: '/workspace/old.png',
+              relative_path: 'nomifun-artifacts/old.png',
+              size_bytes: 10,
+              sha256: 'a'.repeat(64),
+            },
+          ],
+        },
+      })
+    )!;
+
+    const merged = composeMessage(lateCompleted, [failed]);
+    const message = merged[0];
+    if (message.type !== 'tool_call') throw new Error('expected tool call');
+    expect(message.content.status).toBe('error');
+    expect(message.content.artifacts).toEqual([]);
+  });
+
+  test('generic tool error correction retracts an earlier completed artifact frame', () => {
+    const completed = transformMessage(
+      baseWire({
+        type: 'tool_call',
+        data: {
+          call_id: 'tool-corrected',
+          name: 'Generate',
+          status: 'completed',
+          artifacts: [
+            {
+              id: 'artifact-old',
+              kind: 'image',
+              mime_type: 'image/png',
+              path: '/workspace/old.png',
+              relative_path: 'nomifun-artifacts/old.png',
+              size_bytes: 10,
+              sha256: 'a'.repeat(64),
+            },
+          ],
+        },
+      })
+    )!;
+    const correction = transformMessage(
+      baseWire({
+        type: 'tool_call',
+        data: {
+          call_id: 'tool-corrected',
+          name: 'Generate',
+          status: 'error',
+          output: 'enclosing turn failed',
+          artifacts: [],
+        },
+      })
+    )!;
+
+    const merged = composeMessage(correction, [completed]);
+    const message = merged[0];
+    if (message.type !== 'tool_call') throw new Error('expected tool call');
+    expect(message.content.status).toBe('error');
+    expect(message.content.artifacts).toEqual([]);
+  });
+
+  test('only completed tool calls retain structurally valid durable artifact receipts', () => {
+    const artifact = {
+      id: 'artifact-1',
+      kind: 'image',
+      mime_type: 'image/png',
+      path: '/workspace/nomifun-artifacts/image.png',
+      relative_path: 'nomifun-artifacts/image.png',
+      size_bytes: 10,
+      sha256: 'a'.repeat(64),
+    };
+    const transform = (status: 'running' | 'completed' | 'error', value: Record<string, unknown>) =>
+      transformMessage(
+        baseWire({
+          type: 'tool_call',
+          data: { call_id: `tool-${status}`, name: 'Generate', status, artifacts: [value] },
+        })
+      );
+
+    const completed = transform('completed', artifact);
+    if (completed?.type !== 'tool_call') throw new Error('expected completed tool call');
+    expect(completed.content.artifacts).toEqual([artifact]);
+
+    for (const status of ['running', 'error'] as const) {
+      const message = transform(status, artifact);
+      if (message?.type !== 'tool_call') throw new Error('expected tool call');
+      expect(message.content.artifacts).toEqual([]);
+    }
+
+    for (const malformed of [
+      { ...artifact, sha256: 'not-a-sha' },
+      { ...artifact, size_bytes: 0 },
+      { ...artifact, path: 'relative/image.png' },
+      { ...artifact, relative_path: '../old.png' },
+    ]) {
+      const message = transform('completed', malformed);
+      if (message?.type !== 'tool_call') throw new Error('expected tool call');
+      expect(message.content.artifacts).toEqual([]);
+    }
+  });
+
+  test('ACP artifact content requires completed status and a valid receipt', () => {
+    const artifact = {
+      id: 'artifact-acp',
+      kind: 'image',
+      mime_type: 'image/png',
+      path: String.raw`C:\workspace\nomifun-artifacts\image.png`,
+      relative_path: 'nomifun-artifacts/image.png',
+      size_bytes: 10,
+      sha256: 'b'.repeat(64),
+    };
+    const transform = (status: 'in_progress' | 'completed' | 'failed', value: Record<string, unknown>) =>
+      transformMessage(
+        baseWire({
+          type: 'acp_tool_call',
+          data: {
+            session_id: 'session-1',
+            update: {
+              sessionUpdate: 'tool_call_update',
+              tool_call_id: `acp-${status}`,
+              status,
+              content: [{ type: 'artifact', artifact: value }],
+            },
+          },
+        })
+      );
+
+    const completed = transform('completed', artifact);
+    if (completed?.type !== 'acp_tool_call') throw new Error('expected ACP tool call');
+    expect(completed.content.update.content?.[0]).toMatchObject({ type: 'artifact', artifact });
+
+    for (const status of ['in_progress', 'failed'] as const) {
+      const message = transform(status, artifact);
+      if (message?.type !== 'acp_tool_call') throw new Error('expected ACP tool call');
+      expect(message.content.update.content).toEqual([]);
+    }
+
+    const malformed = transform('completed', { ...artifact, relative_path: '../old.png' });
+    if (malformed?.type !== 'acp_tool_call') throw new Error('expected ACP tool call');
+    expect(malformed.content.update.content).toEqual([
+      { type: 'artifact_error', message: 'Invalid or incomplete artifact receipt' },
+    ]);
+  });
+
   test('composeMessage keeps reused tool call ids isolated by turn', () => {
     const first = transformMessage(baseWire({
       msg_id: 'turn-1',
@@ -37,6 +345,81 @@ describe('transformMessage runtime field normalization', () => {
     }))!;
 
     expect(composeMessage(second, [first])).toHaveLength(2);
+  });
+
+  test('legacy tool-group Error is absorbing across a late image Success frame', () => {
+    const wire = (status: 'Error' | 'Success', result_display?: Record<string, string>) =>
+      transformMessage(
+        baseWire({
+          type: 'tool_group',
+          data: [
+            {
+              call_id: 'legacy-image',
+              name: 'ImageGeneration',
+              description: 'generate',
+              status,
+              result_display,
+            },
+          ],
+        })
+      )!;
+    const failed = wire('Error');
+    const lateSuccess = wire('Success', { img_url: '/workspace/old.png', relative_path: 'old.png' });
+    const merged = composeMessage(lateSuccess, [failed]);
+    const message = merged[0];
+    if (message.type !== 'tool_group') throw new Error('expected tool group');
+    expect(message.content[0].status).toBe('Error');
+    expect(message.content[0].result_display).toBeUndefined();
+  });
+
+  test('legacy tool-group image Success is downgraded at message admission without receipt authority', () => {
+    const message = transformMessage(
+      baseWire({
+        type: 'tool_group',
+        data: [
+          {
+            call_id: 'legacy-unverified-image',
+            name: 'ImageGeneration',
+            description: 'generated',
+            status: 'Success',
+            result_display: {
+              img_url: '/workspace/old.png',
+              relative_path: 'old.png',
+            },
+          },
+        ],
+      })
+    );
+
+    if (message?.type !== 'tool_group') throw new Error('expected tool group');
+    expect(message.content[0].status).toBe('Error');
+    expect(message.content[0].result_display).toBeUndefined();
+    expect(message.content[0].description.includes('committed artifact receipt')).toBe(true);
+  });
+
+  test('legacy tool-group terminal Success cannot inherit a provisional image path', () => {
+    const wire = (status: 'Executing' | 'Success', result_display?: Record<string, string>) =>
+      transformMessage(
+        baseWire({
+          type: 'tool_group',
+          data: [
+            {
+              call_id: 'legacy-image',
+              name: 'ImageGeneration',
+              description: 'generate',
+              status,
+              ...(result_display ? { result_display } : {}),
+            },
+          ],
+        })
+      )!;
+    const progress = wire('Executing', { img_url: '/workspace/old.png', relative_path: 'old.png' });
+    const terminalWithoutReceipt = wire('Success');
+    const merged = composeMessage(terminalWithoutReceipt, [progress]);
+    const message = merged[0];
+    if (message.type !== 'tool_group') throw new Error('expected tool group');
+    expect(message.content[0].status).toBe('Success');
+    expect(message.content[0].result_display).toBeUndefined();
   });
 
   test('serializes structured text payloads instead of leaking objects into message content', () => {

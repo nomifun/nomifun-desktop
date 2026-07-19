@@ -37,4 +37,10 @@ describe('MessageText process action chrome', () => {
     expect(source.includes('h-14px w-14px shrink-0 items-center justify-center self-center leading-none')).toBe(true);
     expect(source.includes("className='block shrink-0'")).toBe(true);
   });
+
+  test('routes file marker parsing through the message-side trust boundary', () => {
+    expect(source.includes("import { parseMessageFileMarker } from './messageFileMarker';")).toBe(true);
+    expect(source.includes('parseMessageFileMarker(contentToRender, message.position)')).toBe(true);
+    expect(source.includes('const parseFileMarker')).toBe(false);
+  });
 });

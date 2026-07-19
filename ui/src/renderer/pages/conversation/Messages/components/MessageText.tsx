@@ -6,7 +6,6 @@
 
 import type { IMessageText, KnowledgeWritebackState, KnowledgeWritebackStatus } from '@/common/chat/chatLib';
 import { toDisplayText } from '@/common/chat/displayText';
-import { NOMIFUN_FILES_MARKER } from '@/common/config/constants';
 import { useConversationContextSafe } from '@/renderer/hooks/context/ConversationContext';
 import { useLayoutContext } from '@/renderer/hooks/context/LayoutContext';
 import { iconColors } from '@/renderer/styles/colors';
@@ -25,6 +24,7 @@ import MarkdownView from '@renderer/components/Markdown';
 import { stripThinkTags, hasThinkTags } from '@renderer/utils/chat/thinkTagFilter';
 import { stripSkillSuggest, hasSkillSuggest } from '@renderer/utils/chat/skillSuggestParser';
 import { MESSAGE_BODY_CLASS_NAME, MESSAGE_BODY_FONT_SIZE, MESSAGE_BODY_LINE_HEIGHT } from '../typography';
+import { parseMessageFileMarker } from './messageFileMarker';
 
 /**
  * Format a timestamp for message display.
@@ -138,22 +138,6 @@ const MessageKnowledgeWriteback: React.FC<{ state: KnowledgeWritebackState }> = 
   );
 };
 
-const parseFileMarker = (content: string) => {
-  const markerIndex = content.indexOf(NOMIFUN_FILES_MARKER);
-  if (markerIndex === -1) {
-    return { text: content, files: [] as string[] };
-  }
-  const text = content.slice(0, markerIndex).trimEnd();
-  const afterMarker = content.slice(markerIndex + NOMIFUN_FILES_MARKER.length).trim();
-  const files = afterMarker
-    ? afterMarker
-        .split('\n')
-        .map((line) => line.trim())
-        .filter(Boolean)
-    : [];
-  return { text, files };
-};
-
 const isAbsoluteMessageFilePath = (file_path: string): boolean =>
   file_path.startsWith('/') || /^[A-Za-z]:/.test(file_path);
 
@@ -197,7 +181,7 @@ const MessageText: React.FC<{ message: IMessageText; hideActions?: boolean }> = 
     return content;
   }, [message.content.content]);
 
-  const { text, files } = parseFileMarker(contentToRender);
+  const { text, files } = parseMessageFileMarker(contentToRender, message.position);
   const { data, json } = useFormatContent(text);
   const { t } = useTranslation();
   const [showCopyAlert, setShowCopyAlert] = useState(false);
@@ -261,7 +245,7 @@ const MessageText: React.FC<{ message: IMessageText; hideActions?: boolean }> = 
   const handleEdit = () => {
     if (!message.msg_id || !message.created_at) return;
     const rawContent = typeof message.content?.content === 'string' ? message.content.content : '';
-    const { text: editText } = parseFileMarker(rawContent);
+    const { text: editText } = parseMessageFileMarker(rawContent, 'right');
     emitter.emit('sendbox.edit', { msgId: message.msg_id, createdAt: message.created_at, content: editText });
   };
 
@@ -339,12 +323,18 @@ const MessageText: React.FC<{ message: IMessageText; hideActions?: boolean }> = 
                     codeStyle={CODE_STYLE}
                     fontSize={MESSAGE_BODY_FONT_SIZE}
                     lineHeight={MESSAGE_BODY_LINE_HEIGHT}
+                    allowUnverifiedImages={isUserMessage}
                   >{`\`\`\`json\n${JSON.stringify(data, null, 2)}\n\`\`\``}</MarkdownView>
                 </div>
               </CollapsibleContent>
             ) : (
               <div data-testid='message-text-content'>
-                <MarkdownView codeStyle={CODE_STYLE} fontSize={MESSAGE_BODY_FONT_SIZE} lineHeight={MESSAGE_BODY_LINE_HEIGHT}>
+                <MarkdownView
+                  codeStyle={CODE_STYLE}
+                  fontSize={MESSAGE_BODY_FONT_SIZE}
+                  lineHeight={MESSAGE_BODY_LINE_HEIGHT}
+                  allowUnverifiedImages={isUserMessage}
+                >
                   {data}
                 </MarkdownView>
               </div>

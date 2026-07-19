@@ -1,4 +1,5 @@
 use crate::manager::acp::AcpAgentManager;
+use crate::runtime_state::AgentRuntimeState;
 use crate::manager::acp::mode_normalize::agent_metadata_uses_meta_resume;
 use crate::protocol::events::{
     AgentStreamEvent, AvailableCommandsEventData, ErrorEventData, SessionAssignedEventData, StartEventData,
@@ -233,10 +234,11 @@ impl AcpAgentManager {
     ///
     /// Returns `true` when the turn ended because it was CANCELLED (the
     /// `cancel()` path force-emitted the terminal `Finish(Cancelled)` for this
-    /// turn already), `false` for a normal completion (this method emitted the
-    /// terminal `Finish` itself). Callers must NOT emit a further terminal
-    /// event in either case — a late duplicate can land inside the NEXT turn's
-    /// subscription (cancel-ack latency) and mis-terminate it.
+    /// turn already), `false` when this method emitted the terminal event
+    /// (`Finish` for verified success, `Error` for empty/failed artifact
+    /// delivery). Callers must NOT emit a further terminal event in either
+    /// case — a late duplicate can land inside the NEXT turn's subscription
+    /// (cancel-ack latency) and mis-terminate it.
     pub(super) async fn prompt_existing_session(
         &self,
         data: &SendMessageData,
@@ -251,6 +253,12 @@ impl AcpAgentManager {
         // the "empty finish" scenario (model produced no text and no tool
         // calls); see `is_empty_turn` below.
         let mut probe_rx = self.runtime.subscribe();
+
+        // ACP notifications are partial and have no turn id. Reset the
+        // session-scoped receipt immediately before Start/prompt so any
+        // delivery failure observed by the notification handler belongs to
+        // this turn and can veto a nominal EndTurn response.
+        self.protocol.begin_artifact_delivery_turn(sid);
 
         // Emit Start event
         self.runtime.emit(AgentStreamEvent::Start(StartEventData {
@@ -277,14 +285,23 @@ impl AcpAgentManager {
             return Ok(true);
         }
 
+        // A provider's PromptResponse only reports model control flow; it does
+        // not attest that inline media/resources survived local persistence.
+        // Delivery integrity therefore has precedence over EndTurn. Emit a
+        // terminal Error and never follow it with Finish.
+        if let Some(error) = self.protocol.finish_artifact_delivery_turn(sid) {
+            emit_artifact_delivery_terminal(&self.runtime, error);
+            return Ok(false);
+        }
+
         // Diagnose the "blank reply" case: the agent finished a turn without
         // producing any user-visible output. We surface a structured error to
         // the renderer so the user gets actionable feedback instead of a
         // silent success.
         if is_empty_turn(&mut probe_rx) {
-            self.runtime.emit(AgentStreamEvent::Error(empty_finish_diagnostic_error(
-                prompt_response.stop_reason,
-            )));
+            self.runtime
+                .emit_error_data(empty_finish_diagnostic_error(prompt_response.stop_reason));
+            return Ok(false);
         }
 
         // Emit Finish event — carry the protocol stop_reason so AutoWork can
@@ -354,6 +371,22 @@ impl AcpAgentManager {
                 }));
         }
     }
+}
+
+fn artifact_delivery_terminal_error(detail: String) -> ErrorEventData {
+    ErrorEventData::classified(
+        "The Agent could not deliver the requested artifact",
+        AgentErrorCode::UnknownUpstreamError,
+        AgentErrorOwnership::UnknownUpstream,
+        Some(detail),
+        true,
+        true,
+        Some(AgentErrorResolution::new(AgentErrorResolutionKind::Retry, None)),
+    )
+}
+
+fn emit_artifact_delivery_terminal(runtime: &AgentRuntimeState, detail: String) {
+    runtime.emit_error_data(artifact_delivery_terminal_error(detail));
 }
 
 /// Drain the supplied turn-scoped receiver and return `true` when the turn
@@ -690,6 +723,7 @@ mod tests {
             input: None,
             output: None,
             description: None,
+            artifacts: Vec::new(),
         }))
         .unwrap();
 
@@ -755,5 +789,26 @@ mod tests {
             .expect("empty-finish classified errors must include a resolution");
         assert_eq!(resolution.kind, AgentErrorResolutionKind::SendFeedback);
         assert_eq!(resolution.target, Some(AgentErrorResolutionTarget::Feedback));
+    }
+
+    #[tokio::test]
+    async fn artifact_delivery_failure_is_terminal_error_never_finish() {
+        let runtime = crate::runtime_state::AgentRuntimeState::new("conv-1", "/tmp/workspace", 8);
+        runtime.reset_for_new_turn(nomifun_common::ConversationStatus::Running);
+        let mut rx = runtime.subscribe();
+
+        super::emit_artifact_delivery_terminal(&runtime, "invalid image bytes".into());
+
+        let event = rx.recv().await.unwrap();
+        let AgentStreamEvent::Error(error) = event else {
+            panic!("artifact delivery failure must terminate with Error, not Finish");
+        };
+        assert_eq!(error.message, "The Agent could not deliver the requested artifact");
+        assert_eq!(error.detail.as_deref(), Some("invalid image bytes"));
+        assert!(matches!(
+            rx.try_recv(),
+            Err(tokio::sync::broadcast::error::TryRecvError::Empty)
+        ));
+        assert_eq!(runtime.status(), Some(nomifun_common::ConversationStatus::Finished));
     }
 }

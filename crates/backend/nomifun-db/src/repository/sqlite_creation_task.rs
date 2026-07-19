@@ -119,6 +119,14 @@ impl ICreationTaskRepository for SqliteCreationTaskRepository {
         Ok(rows)
     }
 
+    async fn list_all_tasks(&self) -> Result<Vec<CreationTaskRow>, DbError> {
+        Ok(sqlx::query_as::<_, CreationTaskRow>(
+            "SELECT * FROM creation_tasks ORDER BY submitted_at ASC, id ASC",
+        )
+        .fetch_all(&self.pool)
+        .await?)
+    }
+
     async fn update_task(&self, id: &str, params: UpdateCreationTaskParams<'_>) -> Result<CreationTaskRow, DbError> {
         let existing = self
             .get_task(id)
@@ -182,6 +190,18 @@ impl ICreationTaskRepository for SqliteCreationTaskRepository {
         Ok(res.rows_affected() > 0)
     }
 
+    async fn set_remote_task_id_if_live(&self, id: &str, remote_task_id: &str) -> Result<bool, DbError> {
+        let result = sqlx::query(
+            "UPDATE creation_tasks SET remote_task_id = ? \
+             WHERE id = ? AND status IN ('queued', 'running')",
+        )
+        .bind(remote_task_id)
+        .bind(id)
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected() > 0)
+    }
+
     async fn list_live_tasks(&self) -> Result<Vec<CreationTaskRow>, DbError> {
         let rows = sqlx::query_as::<_, CreationTaskRow>(
             "SELECT * FROM creation_tasks WHERE status IN ('queued', 'running') ORDER BY submitted_at ASC",
@@ -197,6 +217,7 @@ mod tests {
     use super::*;
     use crate::init_database_memory;
     use nomifun_common::{CreationTaskId, ProviderId, WorkshopCanvasId};
+    use std::sync::Arc;
 
     async fn repo() -> (SqliteCreationTaskRepository, crate::Database, String) {
         let db = init_database_memory().await.unwrap();
@@ -310,6 +331,7 @@ mod tests {
         // both queued+running are "live"
         let live = repo.list_live_tasks().await.unwrap();
         assert_eq!(live.len(), 2);
+        assert_eq!(repo.list_all_tasks().await.unwrap().len(), 2);
     }
 
     #[tokio::test]
@@ -355,5 +377,58 @@ mod tests {
             .await
             .unwrap();
         assert!(!applied3);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn remote_id_patch_racing_cancel_never_resurrects_task() {
+        let (repo, _db, provider_id) = repo().await;
+        let repo = Arc::new(repo);
+        for _ in 0..64 {
+            let task_id = CreationTaskId::new().into_string();
+            repo.create_task(create_params(&task_id, None, &provider_id)).await.unwrap();
+            repo.update_task(
+                &task_id,
+                UpdateCreationTaskParams {
+                    status: Some("running"),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+
+            let cancel_repo = repo.clone();
+            let cancel_id = task_id.clone();
+            let cancel = tokio::spawn(async move {
+                cancel_repo
+                    .update_task(
+                        &cancel_id,
+                        UpdateCreationTaskParams {
+                            status: Some("canceled"),
+                            finished_at: Some(Some(1)),
+                            ..Default::default()
+                        },
+                    )
+                    .await
+                    .unwrap();
+            });
+            let remote_repo = repo.clone();
+            let remote_id = task_id.clone();
+            let remote = tokio::spawn(async move {
+                remote_repo
+                    .set_remote_task_id_if_live(&remote_id, "remote-race")
+                    .await
+                    .unwrap()
+            });
+            let (_, remote_applied) = tokio::join!(cancel, remote);
+            let _ = remote_applied.unwrap();
+
+            let row = repo.get_task(&task_id).await.unwrap().unwrap();
+            assert_eq!(row.status, "canceled");
+            assert!(
+                !repo.set_remote_task_id_if_live(&task_id, "remote-after-cancel").await.unwrap(),
+                "terminal cancel must make subsequent remote patches no-op"
+            );
+            assert_eq!(repo.get_task(&task_id).await.unwrap().unwrap().status, "canceled");
+        }
     }
 }
