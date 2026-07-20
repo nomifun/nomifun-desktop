@@ -3,7 +3,7 @@
  * Copyright 2025-2026 NomiFun (nomifun.com)
  * SPDX-License-Identifier: Apache-2.0
  */
-import { conversationTarget, type ConversationId } from '@/common/types/ids';
+import { conversationTarget, type ConversationId, type MessageId } from '@/common/types/ids';
 import { sessionStorageKey } from '@/common/utils/browserStorageKey';
 
 import { ipcBridge } from '@/common';
@@ -22,7 +22,7 @@ type UseAcpInitialMessageParams = {
   workspacePath?: string;
   enabled?: boolean;
   setAiProcessing: (value: boolean) => void;
-  markTurnAccepted: () => void;
+  markTurnAccepted: (requestMessageId?: MessageId) => void;
   checkAndUpdateTitle: (conversation_id: ConversationId, input: string) => void;
   addOrUpdateMessage: (message: TMessage, prepend?: boolean) => void;
 };
@@ -75,7 +75,7 @@ export const useAcpInitialMessage = ({
           conversation_id: conversation_id,
           files,
         });
-        markTurnAccepted();
+        markTurnAccepted(msg_id);
 
         // Use add=false (compose mode) so composeMessageWithIndex can de-dup
         // by msg_id — this prevents a duplicate bubble if useMessageLstCache

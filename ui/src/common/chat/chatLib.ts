@@ -363,6 +363,10 @@ export const mergeAcpToolCallContent = (
         (item) => item.type !== 'artifact' && item.type !== 'resource_link'
       );
     }
+  } else if (existing.update.status === 'completed' && incoming.update.status !== 'completed') {
+    // Terminal success is monotonic. A replayed/late partial frame must not
+    // downgrade a committed artifact delivery or discard its receipts.
+    Object.assign(update, existing.update, { status: 'completed' as const });
   }
 
   return {

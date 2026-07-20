@@ -3,7 +3,7 @@
  * Copyright 2025-2026 NomiFun (nomifun.com)
  * SPDX-License-Identifier: Apache-2.0
  */
-import type { ConversationId, CronJobId } from '@/common/types/ids';
+import type { ConversationId, CronJobId, MessageId } from '@/common/types/ids';
 
 import type { IConversationMcpStatus } from '@/common/config/storage';
 import React, { createContext, useContext } from 'react';
@@ -54,6 +54,12 @@ export interface ConversationContextValue {
    * until the request actually settles.
    */
   isProcessing?: boolean;
+
+  /** Authoritative root id of the active turn when the platform exposes it. */
+  activeTurnId?: MessageId;
+
+  /** User message that initiated `activeTurnId`, when this was a visible request. */
+  activeRequestMessageId?: MessageId;
 
   /**
    * Loaded skill names for this conversation (snapshot from conversation.extra.skills).

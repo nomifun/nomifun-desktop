@@ -56,6 +56,51 @@ export const normalizeAcpSlashCommands = (commands: unknown): SlashCommandItem[]
     });
 };
 
+const ACP_THINKING_NON_BOUNDARY_TYPES = new Set([
+  'thought',
+  'thinking',
+  'start',
+  'request_trace',
+  'acp_context_usage',
+  'acp_model_info',
+  'codex_model_info',
+  'available_commands',
+  'slash_commands_updated',
+  'agent_status',
+  'user_content',
+  ACP_AGENT_MESSAGE_EVENT,
+]);
+
+/**
+ * A delayed event from another explicit turn must not finish the thinking
+ * segment that belongs to the active turn. Missing ids retain the legacy
+ * stream-order behavior for older ACP servers that cannot correlate events.
+ */
+export const isAcpThinkingBoundaryForTurn = (
+  messageType: string,
+  activeThinkingTurnId?: MessageId,
+  boundaryTurnId?: MessageId
+): boolean => {
+  if (ACP_THINKING_NON_BOUNDARY_TYPES.has(messageType)) return false;
+  return !activeThinkingTurnId || !boundaryTurnId || activeThinkingTurnId === boundaryTurnId;
+};
+
+export const isAcpEventForActiveTurn = (eventTurnId?: MessageId, activeTurnId?: MessageId): boolean =>
+  !eventTurnId || !activeTurnId || eventTurnId === activeTurnId;
+
+export const shouldClearActiveRequestForStartedTurn = (
+  previousTurnId: MessageId | null,
+  startedTurnId?: MessageId
+): boolean => Boolean(previousTurnId && startedTurnId && previousTurnId !== startedTurnId);
+
+export const shouldProjectForeignAcpStreamEvent = (messageType: string, data: unknown): boolean => {
+  if (messageType !== 'thinking' || !data || typeof data !== 'object' || Array.isArray(data)) return true;
+  // A terminal thinking frame is an empty lifecycle update, not a standalone
+  // transcript row. If its start row is not present in this render generation,
+  // appending it would manufacture a second zero-duration process disclosure.
+  return (data as { status?: unknown }).status !== 'done';
+};
+
 export type UseAcpMessageReturn = {
   thought: ThoughtData;
   setThought: React.Dispatch<React.SetStateAction<ThoughtData>>;
@@ -63,8 +108,10 @@ export type UseAcpMessageReturn = {
   hasHydratedRunningState: boolean;
   acpStatus: 'connecting' | 'connected' | 'authenticated' | 'session_active' | 'disconnected' | 'error' | null;
   aiProcessing: boolean;
+  activeTurnId?: MessageId;
+  activeRequestMessageId?: MessageId;
   setAiProcessing: (value: boolean) => void;
-  markTurnAccepted: () => void;
+  markTurnAccepted: (requestMessageId?: MessageId) => void;
   processingStartedAt?: number;
   resetState: () => void;
   confirmStopped: () => void;
@@ -128,7 +175,8 @@ export const useAcpMessage = (conversation_id: ConversationId, options?: { skipW
   // Track whether current turn has a thinking message in the conversation
   const hasThinkingMessageRef = useRef(false);
   const [hasThinkingMessage, setHasThinkingMessage] = useState(false);
-  const activeThinkingRef = useRef<{ msgId: MessageId; startedAt: number } | null>(null);
+  const activeThinkingRef = useRef<{ msgId: MessageId; startedAt: number; turnId?: MessageId } | null>(null);
+  const [activeRequestMessageId, setActiveRequestMessageId] = useState<MessageId>();
 
   // Track request trace state for displaying complete request lifecycle
   const requestTraceRef = useRef<{
@@ -194,6 +242,7 @@ export const useAcpMessage = (conversation_id: ConversationId, options?: { skipW
       rootTurnIdRef.current = null;
       rejectUnannouncedStartRef.current = false;
       turnFinishedRef.current = false;
+      setActiveRequestMessageId(undefined);
       dispatchTurn({ type: 'submit' });
       return;
     }
@@ -202,6 +251,7 @@ export const useAcpMessage = (conversation_id: ConversationId, options?: { skipW
     rootTurnIdRef.current = null;
     rejectUnannouncedStartRef.current = false;
     turnFinishedRef.current = true;
+    setActiveRequestMessageId(undefined);
     dispatchTurn({ type: 'reset' });
   }, []);
 
@@ -218,6 +268,7 @@ export const useAcpMessage = (conversation_id: ConversationId, options?: { skipW
     hasContentInTurnRef.current = false;
     hasThinkingMessageRef.current = false;
     activeThinkingRef.current = null;
+    setActiveRequestMessageId(undefined);
     setHasThinkingMessage(false);
   }, []);
 
@@ -236,7 +287,13 @@ export const useAcpMessage = (conversation_id: ConversationId, options?: { skipW
   }, [conversation_id, settleCompletedTurn]);
 
   const markTurnAccepted = useCallback(
-    () => {
+    (requestMessageId?: MessageId) => {
+      if (
+        requestMessageId &&
+        (awaitingBackendTurnRef.current || !turnFinishedRef.current || rootTurnIdRef.current)
+      ) {
+        setActiveRequestMessageId(requestMessageId);
+      }
       if (!awaitingBackendTurnRef.current || rejectUnannouncedStartRef.current) return;
       if (!verifyUnannouncedStartRuntimeRef.current) turnLifecycleGenerationRef.current += 1;
       rootTurnIdRef.current = null;
@@ -258,7 +315,7 @@ export const useAcpMessage = (conversation_id: ConversationId, options?: { skipW
 
   const completeActiveThinking = useCallback(
     (
-      boundaryMessage: Pick<IResponseMessage, 'conversation_id' | 'created_at'>,
+      boundaryMessage: Pick<IResponseMessage, 'conversation_id' | 'created_at' | 'turn_id'>,
       completeOptions?: {
         duration?: number;
       }
@@ -268,11 +325,13 @@ export const useAcpMessage = (conversation_id: ConversationId, options?: { skipW
 
       const endTime = boundaryMessage.created_at ?? Date.now();
       const duration = completeOptions?.duration ?? Math.max(0, endTime - activeThinking.startedAt);
+      const thinkingTurnId = activeThinking.turnId ?? rootTurnIdRef.current ?? boundaryMessage.turn_id;
 
       addOrUpdateMessage({
         id: `${activeThinking.msgId}-thinking-done`,
         type: 'thinking',
         msg_id: activeThinking.msgId,
+        ...(thinkingTurnId ? { turn_id: thinkingTurnId } : {}),
         conversation_id: boundaryMessage.conversation_id,
         position: 'left',
         created_at: endTime,
@@ -298,28 +357,40 @@ export const useAcpMessage = (conversation_id: ConversationId, options?: { skipW
         return;
       }
 
+      const belongsToActiveTurn = isAcpEventForActiveTurn(
+        message.turn_id,
+        rootTurnIdRef.current ?? undefined
+      );
+      const transformedMessage = transformMessage(message);
+
+      // Explicitly correlated history from another turn may arrive late on
+      // the same conversation stream. Keep any renderable row, but never let
+      // it mutate the active turn's reducer, completion, thinking, trace, or
+      // usage state. Agent/user content cases are presentation-only and have
+      // their own normalization below, so they are safe to pass through.
+      if (
+        !belongsToActiveTurn &&
+        message.type !== ACP_AGENT_MESSAGE_EVENT &&
+        message.type !== 'user_content'
+      ) {
+        if (shouldProjectForeignAcpStreamEvent(message.type, message.data)) {
+          addOrUpdateMessage(transformedMessage);
+        }
+        return;
+      }
+
       const shouldCompleteThinking =
         activeThinkingRef.current &&
-        ![
-          'thought',
-          'thinking',
-          'start',
-          'request_trace',
-          'acp_context_usage',
-          'acp_model_info',
-          'codex_model_info',
-          'available_commands',
-          'slash_commands_updated',
-          'agent_status',
-          'user_content',
-          ACP_AGENT_MESSAGE_EVENT,
-        ].includes(message.type);
+        isAcpThinkingBoundaryForTurn(
+          message.type,
+          activeThinkingRef.current.turnId ?? rootTurnIdRef.current ?? undefined,
+          message.turn_id
+        );
 
       if (shouldCompleteThinking) {
         completeActiveThinking(message);
       }
 
-      const transformedMessage = transformMessage(message);
       switch (message.type) {
         case 'thought':
           // Thought events are now handled by AcpAgentManager (converted to thinking messages)
@@ -347,11 +418,18 @@ export const useAcpMessage = (conversation_id: ConversationId, options?: { skipW
             activeThinkingRef.current = {
               msgId: message.msg_id,
               startedAt: message.created_at ?? Date.now(),
+              turnId: message.turn_id ?? rootTurnIdRef.current ?? undefined,
             };
           } else if (activeThinkingRef.current.msgId !== message.msg_id) {
             activeThinkingRef.current = {
               msgId: message.msg_id,
               startedAt: message.created_at ?? Date.now(),
+              turnId: message.turn_id ?? rootTurnIdRef.current ?? undefined,
+            };
+          } else if (!activeThinkingRef.current.turnId) {
+            activeThinkingRef.current = {
+              ...activeThinkingRef.current,
+              turnId: message.turn_id ?? rootTurnIdRef.current ?? undefined,
             };
           }
           hasThinkingMessageRef.current = true;
@@ -571,6 +649,7 @@ export const useAcpMessage = (conversation_id: ConversationId, options?: { skipW
       if (startAction === 'ignore') return;
 
       const acceptStart = () => {
+        const previousRootTurnId = rootTurnIdRef.current;
         turnStartGenerationRef.current += 1;
         turnLifecycleGenerationRef.current += 1;
         awaitingBackendTurnRef.current = false;
@@ -579,6 +658,16 @@ export const useAcpMessage = (conversation_id: ConversationId, options?: { skipW
         verifyUnannouncedStartRuntimeRef.current = false;
         turnFinishedRef.current = false;
         hasContentInTurnRef.current = false;
+        if (shouldClearActiveRequestForStartedTurn(previousRootTurnId, event.turn_id)) {
+          setActiveRequestMessageId(undefined);
+        }
+        if (
+          event.turn_id &&
+          activeThinkingRef.current?.turnId &&
+          activeThinkingRef.current.turnId !== event.turn_id
+        ) {
+          activeThinkingRef.current = null;
+        }
         dispatchTurn({
           type: 'turnStarted',
           turnId: event.turn_id,
@@ -684,6 +773,7 @@ export const useAcpMessage = (conversation_id: ConversationId, options?: { skipW
     verifyUnannouncedStartRuntimeRef.current = false;
     hasThinkingMessageRef.current = false;
     activeThinkingRef.current = null;
+    setActiveRequestMessageId(undefined);
     setHasThinkingMessage(false);
     setHasHydratedRunningState(false);
 
@@ -801,7 +891,11 @@ export const useAcpMessage = (conversation_id: ConversationId, options?: { skipW
     rejectUnannouncedStartRef.current = false;
     verifyUnannouncedStartRuntimeRef.current = false;
     turnFinishedRef.current = false;
-    dispatchTurn({ type: 'hydrate', isRunning: true });
+    dispatchTurn(
+      rootTurnId
+        ? { type: 'turnStarted', turnId: rootTurnId }
+        : { type: 'hydrate', isRunning: true }
+    );
     const generation = turnLifecycleGenerationRef.current;
     const sequence = turnReconcileSequenceRef.current + 1;
     turnReconcileSequenceRef.current = sequence;
@@ -822,6 +916,7 @@ export const useAcpMessage = (conversation_id: ConversationId, options?: { skipW
     rejectUnannouncedStartRef.current = false;
     turnFinishedRef.current = true;
     dispatchTurn({ type: 'reset' });
+    setActiveRequestMessageId(undefined);
   }, []);
 
   const getTurnStartGeneration = useCallback(() => turnStartGenerationRef.current, []);
@@ -844,6 +939,10 @@ export const useAcpMessage = (conversation_id: ConversationId, options?: { skipW
     hasHydratedRunningState,
     acpStatus,
     aiProcessing,
+    // `turnStarted` is parsed at the IPC boundary, so any populated reducer id
+    // is a canonical MessageId. Locally submitted pre-start state has no id.
+    activeTurnId: turnState.turnId as MessageId | undefined,
+    activeRequestMessageId,
     setAiProcessing,
     markTurnAccepted,
     processingStartedAt: turnState.processingStartedAt,

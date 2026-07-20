@@ -5,7 +5,7 @@
  */
 
 import { describe, expect, test } from 'bun:test';
-import { parseConversationId, parseMessageId, type MessageId } from '@/common/types/ids';
+import { parseConversationId, parseCronJobId, parseMessageId, type MessageId } from '@/common/types/ids';
 import type { TMessage } from '@/common/chat/chatLib';
 import {
   composeMessageForTest,
@@ -13,7 +13,7 @@ import {
   mergeThinkingStreamContent,
   normalizeDbMessage,
 } from './hooks';
-import { assignTurnIdsFromUserRequests } from './turnDisclosureModel';
+import { assignTurnIdsFromUserRequests, buildTurnDisclosureItems } from './turnDisclosureModel';
 
 const messageId = (label: string): MessageId => {
   const suffix = Array.from(label)
@@ -42,6 +42,112 @@ const baseMessage = (overrides: MessageOverrides): TMessage =>
   }) as TMessage;
 
 describe('mergeFetchedMessagesForConversation', () => {
+  test('keeps a late ACP image completion before the final answer and produces one disclosure', () => {
+    const conversationId = parseConversationId('conv_0190f5fe-7c00-7a00-8000-000000000004');
+    const userId = messageId('image-user');
+    const rootTurnId = messageId('image-root');
+    const finalId = messageId('image-final');
+    const user = normalizeDbMessage(baseMessage({
+      id: userId,
+      msg_id: 'image-user',
+      position: 'right',
+      created_at: 1000,
+      content: { content: 'Generate an office image' },
+    }));
+    const intro = normalizeDbMessage(baseMessage({
+      id: rootTurnId,
+      msg_id: 'image-root',
+      created_at: 1500,
+      content: { content: 'I will generate it.', turn_id: rootTurnId } as any,
+    }));
+    const persistedTool = normalizeDbMessage(baseMessage({
+      id: 'persisted-image-tool',
+      msg_id: 'image-root',
+      type: 'acp_tool_call',
+      created_at: 2900,
+      content: {
+        session_id: 'session-image',
+        turn_id: rootTurnId,
+        artifact_delivery_committed: true,
+        update: {
+          session_update: 'tool_call_update',
+          tool_call_id: 'image-call',
+          status: 'completed',
+          content: [],
+        },
+      } as any,
+    }));
+    const final = normalizeDbMessage(baseMessage({
+      id: finalId,
+      msg_id: 'image-final',
+      created_at: 3000,
+      content: { content: 'Image generated.', turn_id: rootTurnId } as any,
+    }));
+    const lateLiveTool = baseMessage({
+      id: 'late-live-image-tool',
+      msg_id: 'image-root',
+      turn_id: rootTurnId,
+      type: 'acp_tool_call',
+      created_at: 5000,
+      content: {
+        session_id: 'session-image',
+        update: {
+          session_update: 'tool_call_update',
+          tool_call_id: 'image-call',
+          status: 'completed',
+          content: [],
+        },
+      },
+    } as any);
+    const liveIntro = { ...intro, id: 'live-intro', turn_id: rootTurnId } as TMessage;
+    const liveFinal = { ...final, id: 'live-final', turn_id: rootTurnId } as TMessage;
+
+    const merged = mergeFetchedMessagesForConversation(
+      [user, liveIntro, liveFinal, lateLiveTool],
+      [user, intro, persistedTool, final],
+      conversationId
+    );
+
+    expect(merged.map((message) => message.id)).toEqual([
+      userId,
+      rootTurnId,
+      'persisted-image-tool',
+      finalId,
+    ]);
+    expect(merged.map((message) => message.created_at)).toEqual([1000, 1500, 2900, 3000]);
+    expect(merged.slice(1).map((message) => message.turn_id)).toEqual([
+      rootTurnId,
+      rootTurnId,
+      rootTurnId,
+    ]);
+
+    const grouped = assignTurnIdsFromUserRequests(
+      merged.map((message) => ({
+        id: message.id,
+        role:
+          message.type === 'text'
+            ? message.position === 'right'
+              ? 'user' as const
+              : 'assistant' as const
+            : 'process' as const,
+        turnId: message.position === 'right' ? message.msg_id : message.turn_id,
+        createdAt: message.created_at ?? 0,
+      }))
+    );
+    const display = buildTurnDisclosureItems(grouped, { tailClosed: true });
+    const disclosures = display.filter((entry) => entry.type === 'turn_disclosure');
+    expect(disclosures).toHaveLength(1);
+    expect(disclosures[0]?.turnId).toBe(rootTurnId);
+    expect(disclosures[0]?.processItemIds).toEqual([rootTurnId, 'persisted-image-tool']);
+    expect(disclosures[0]?.startAt).toBe(1500);
+    expect(disclosures[0]?.endAt).toBe(3000);
+    expect(display.map((entry) => entry.id)).toEqual([
+      userId,
+      `turn-disclosure-${rootTurnId}`,
+      finalId,
+    ]);
+  });
+
   test('keeps one canonical old error in place instead of moving a live duplicate behind a later success', () => {
     const oldUser = baseMessage({
       id: 'db-old-user',
@@ -260,7 +366,9 @@ describe('mergeFetchedMessagesForConversation', () => {
     const merged = mergeFetchedMessagesForConversation([streamingThinking], [stalePersistedThinking], parseConversationId('conv_0190f5fe-7c00-7a00-8000-000000000004'));
 
     expect(merged).toHaveLength(1);
-    expect(merged[0]).toEqual(streamingThinking);
+    expect(merged[0].id).toBe(stalePersistedThinking.id);
+    expect(merged[0].created_at).toBe(stalePersistedThinking.created_at);
+    expect(merged[0].content).toEqual(streamingThinking.content);
   });
 
   test('does not restore a stale DB completed artifact over a live generic tool error', () => {
@@ -401,6 +509,75 @@ describe('mergeFetchedMessagesForConversation', () => {
 });
 
 describe('composeMessageForTest', () => {
+  test('keeps the first ACP tool envelope stable when a terminal frame arrives late', () => {
+    const turnId = messageId('stable-turn');
+    const running = baseMessage({
+      id: 'first-live-tool-id',
+      msg_id: 'stable-turn',
+      turn_id: turnId,
+      type: 'acp_tool_call',
+      created_at: 2000,
+      content: {
+        session_id: 'session-stable',
+        update: {
+          session_update: 'tool_call_update',
+          tool_call_id: 'stable-call',
+          status: 'in_progress',
+        },
+      },
+    } as any);
+    const completed = baseMessage({
+      id: 'late-terminal-tool-id',
+      msg_id: 'stable-turn',
+      turn_id: turnId,
+      type: 'acp_tool_call',
+      created_at: 5000,
+      content: {
+        session_id: 'session-stable',
+        update: {
+          session_update: 'tool_call_update',
+          tool_call_id: 'stable-call',
+          status: 'completed',
+        },
+      },
+    } as any);
+
+    const merged = composeMessageForTest(completed, [running]);
+
+    expect(merged).toHaveLength(1);
+    expect(merged[0].id).toBe('first-live-tool-id');
+    expect(merged[0].created_at).toBe(2000);
+    expect(merged[0].turn_id).toBe(turnId);
+    expect((merged[0] as any).content.update.status).toBe('completed');
+  });
+
+  test('backfills the root turn id when a thinking completion merges into an early unowned row', () => {
+    const rootTurnId = messageId('thinking-root');
+    const running = baseMessage({
+      id: 'first-thinking-id',
+      msg_id: 'thinking-segment',
+      type: 'thinking',
+      created_at: 1000,
+      content: { content: '正在分析请求', status: 'thinking' },
+    });
+    const completed = baseMessage({
+      id: 'late-thinking-done-id',
+      msg_id: 'thinking-segment',
+      turn_id: rootTurnId,
+      type: 'thinking',
+      created_at: 5000,
+      content: { content: '', status: 'done', duration: 4000 },
+    });
+
+    const merged = composeMessageForTest(completed, [running]);
+
+    expect(merged).toHaveLength(1);
+    expect(merged[0].id).toBe('first-thinking-id');
+    expect(merged[0].created_at).toBe(1000);
+    expect(merged[0].turn_id).toBe(rootTurnId);
+    expect(merged[0].content).toMatchObject({ status: 'done', duration: 4000 });
+  });
+
   test('keeps terminal tips separate from successful text sharing the same stream msg_id', () => {
     const text = baseMessage({
       id: 'successful-text',
@@ -844,6 +1021,67 @@ describe('normalizeDbMessage', () => {
     expect(generic.turn_id).toBe(genericTurnId);
     expect(acp.turn_id).toBe(acpTurnId);
     expect(text.turn_id).toBe(textTurnId);
+  });
+
+  test('restores text turn identity when REST already decoded the persisted content object', () => {
+    const turnId = messageId('object-text-turn');
+    const normalized = normalizeDbMessage(
+      baseMessage({
+        id: 'decoded-text-row',
+        msg_id: 'decoded-text-row',
+        type: 'text',
+        content: { content: 'Already decoded.', turn_id: turnId } as any,
+      })
+    );
+
+    expect(normalized.type).toBe('text');
+    expect(normalized.turn_id).toBe(turnId);
+    expect(normalized.content).toEqual({ content: 'Already decoded.' });
+  });
+
+  test('keeps validated decoded cron and Agent metadata while lifting turn identity', () => {
+    const turnId = messageId('metadata-turn');
+    const senderConversationId = parseConversationId('conv_0190f5fe-7c00-7a00-8000-000000000007');
+    const cronJobId = parseCronJobId('cron_019b0000-0000-7000-8000-000000000001');
+    const normalized = normalizeDbMessage(
+      baseMessage({
+        id: 'decoded-metadata-row',
+        msg_id: 'decoded-metadata-row',
+        type: 'text',
+        content: {
+          content: 'Automated Agent result.',
+          turn_id: turnId,
+          replace: true,
+          cronMeta: {
+            source: 'cron',
+            cron_job_id: cronJobId,
+            cron_job_name: 'Daily report',
+            triggered_at: 1234,
+          },
+          agentMessage: true,
+          senderName: 'Researcher',
+          senderAgentType: 'codex',
+          senderConversationId,
+        } as any,
+      })
+    );
+
+    expect(normalized.type).toBe('text');
+    expect(normalized.turn_id).toBe(turnId);
+    expect(normalized.content).toEqual({
+      content: 'Automated Agent result.',
+      replace: true,
+      cronMeta: {
+        source: 'cron',
+        cron_job_id: cronJobId,
+        cron_job_name: 'Daily report',
+        triggered_at: 1234,
+      },
+      agentMessage: true,
+      senderName: 'Researcher',
+      senderAgentType: 'codex',
+      senderConversationId,
+    });
   });
 
   test('prefers a valid row turn id and falls back from an invalid row id to persisted content', () => {

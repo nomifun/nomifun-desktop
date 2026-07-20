@@ -14,6 +14,7 @@ import { parseMessageId } from '@/common/types/ids';
 
 const TURN_1 = parseMessageId('msg_0190f5fe-7c00-7a00-8000-000000000001');
 const TURN_2 = parseMessageId('msg_0190f5fe-7c00-7a00-8000-000000000002');
+const ACP_ROOT_1 = parseMessageId('msg_0190f5fe-7c00-7a00-8000-000000000011');
 const DISCLOSURE_1 = `turn-disclosure-${TURN_1}`;
 const DISCLOSURE_2 = `turn-disclosure-${TURN_2}`;
 
@@ -468,6 +469,219 @@ describe('buildTurnDisclosureItems', () => {
     expect(result.filter((entry) => entry.type === 'turn_disclosure')).toHaveLength(2);
   });
 
+  test('folds a delayed process fragment into the first disclosure without reordering visible messages', () => {
+    const result = buildTurnDisclosureItems(
+      [
+        item('user-1', 'user', { turnId: TURN_1, createdAt: 1000 }),
+        item('tool-1', 'process', { turnId: TURN_1, createdAt: 2000 }),
+        item('final-1', 'assistant', { turnId: TURN_1, createdAt: 3000 }),
+        item('user-2', 'user', { turnId: TURN_2, createdAt: 4000 }),
+        item('tool-2', 'process', { turnId: TURN_2, createdAt: 5000 }),
+        item('final-2', 'assistant', { turnId: TURN_2, createdAt: 6000 }),
+        item('late-tool-1', 'process', { turnId: TURN_1, createdAt: 7000 }),
+      ],
+      { tailClosed: true }
+    );
+
+    expect(result.map((entry) => entry.id)).toEqual([
+      'user-1',
+      DISCLOSURE_1,
+      'final-1',
+      'user-2',
+      DISCLOSURE_2,
+      'final-2',
+    ]);
+    expect(new Set(result.map((entry) => entry.id)).size).toBe(result.length);
+    const firstDisclosure = result.find(
+      (entry) => entry.type === 'turn_disclosure' && entry.turnId === TURN_1
+    );
+    expect(firstDisclosure?.type).toBe('turn_disclosure');
+    if (firstDisclosure?.type !== 'turn_disclosure') return;
+    expect(firstDisclosure.processItemIds).toEqual(['tool-1', 'late-tool-1']);
+    expect(firstDisclosure.endAt).toBe(7000);
+  });
+
+  test('selects final assistant content across non-contiguous fragments of the same turn', () => {
+    const result = buildTurnDisclosureItems(
+      [
+        item('user-1', 'user', { turnId: TURN_1, createdAt: 1000 }),
+        item('intro-1', 'assistant', { turnId: TURN_1, createdAt: 1500 }),
+        item('tool-1', 'process', { turnId: TURN_1, createdAt: 2000 }),
+        item('delayed-turn-2', 'process', { turnId: TURN_2, createdAt: 2500 }),
+        item('final-1', 'assistant', { turnId: TURN_1, createdAt: 3000 }),
+      ],
+      { tailClosed: true }
+    );
+
+    expect(result.map((entry) => entry.id)).toEqual([
+      'user-1',
+      DISCLOSURE_1,
+      DISCLOSURE_2,
+      'final-1',
+    ]);
+    const disclosure = result.find(
+      (entry) => entry.type === 'turn_disclosure' && entry.turnId === TURN_1
+    );
+    expect(disclosure?.type).toBe('turn_disclosure');
+    if (disclosure?.type !== 'turn_disclosure') return;
+    expect(disclosure.processItemIds).toEqual(['intro-1', 'tool-1']);
+    expect(disclosure.endAt).toBe(3000);
+  });
+
+  test('uses the latest fragment state when a canceled turn later completes', () => {
+    const result = buildTurnDisclosureItems(
+      [
+        item('user-1', 'user', { turnId: TURN_1, createdAt: 1000 }),
+        item('canceled-1', 'process', {
+          turnId: TURN_1,
+          createdAt: 2000,
+          processState: 'canceled',
+        }),
+        item('delayed-turn-2', 'process', { turnId: TURN_2, createdAt: 2500 }),
+        item('completed-1', 'process', {
+          turnId: TURN_1,
+          createdAt: 3000,
+          processState: 'completed',
+        }),
+        item('final-1', 'assistant', { turnId: TURN_1, createdAt: 3500 }),
+      ],
+      { tailClosed: true }
+    );
+
+    const disclosure = result.find(
+      (entry) => entry.type === 'turn_disclosure' && entry.turnId === TURN_1
+    );
+    expect(disclosure?.type).toBe('turn_disclosure');
+    if (disclosure?.type !== 'turn_disclosure') return;
+    expect(disclosure.state).toBe('completed');
+    expect(disclosure.processItemStates).toEqual({
+      'canceled-1': 'canceled',
+      'completed-1': 'completed',
+    });
+  });
+
+  test('uses the latest fragment state when a waiting turn resumes running', () => {
+    const result = buildTurnDisclosureItems(
+      [
+        item('user-1', 'user', { turnId: TURN_1, createdAt: 1000 }),
+        item('permission-1', 'process', {
+          turnId: TURN_1,
+          createdAt: 2000,
+          processState: 'waiting',
+        }),
+        item('delayed-turn-2', 'process', { turnId: TURN_2, createdAt: 2500 }),
+        item('running-1', 'process', {
+          turnId: TURN_1,
+          createdAt: 3000,
+          processState: 'running',
+        }),
+      ],
+      { activeTurnId: TURN_1 }
+    );
+
+    const disclosure = result.find(
+      (entry) => entry.type === 'turn_disclosure' && entry.turnId === TURN_1
+    );
+    expect(disclosure?.type).toBe('turn_disclosure');
+    if (disclosure?.type !== 'turn_disclosure') return;
+    expect(disclosure.state).toBe('running');
+    expect(disclosure.running).toBe(true);
+  });
+
+  test('does not let an older process state win merely because every fragment includes the global final time', () => {
+    const result = buildTurnDisclosureItems(
+      [
+        item('user-1', 'user', { turnId: TURN_1, createdAt: 1000 }),
+        item('completed-1', 'process', {
+          turnId: TURN_1,
+          createdAt: 5000,
+          processState: 'completed',
+        }),
+        item('final-1', 'assistant', { turnId: TURN_1, createdAt: 6000 }),
+        item('delayed-turn-2', 'process', { turnId: TURN_2, createdAt: 6500 }),
+        item('stale-canceled-1', 'process', {
+          turnId: TURN_1,
+          createdAt: 2000,
+          processState: 'canceled',
+        }),
+      ],
+      { tailClosed: true }
+    );
+
+    const disclosure = result.find(
+      (entry) => entry.type === 'turn_disclosure' && entry.turnId === TURN_1
+    );
+    expect(disclosure?.type).toBe('turn_disclosure');
+    if (disclosure?.type !== 'turn_disclosure') return;
+    expect(disclosure.endAt).toBe(6000);
+    expect(disclosure.state).toBe('completed');
+    expect(disclosure.processItemStates['stale-canceled-1']).toBe('canceled');
+  });
+
+  test('does not mistake a delayed older assistant row for the final answer merely because it was appended last', () => {
+    const result = buildTurnDisclosureItems(
+      [
+        item('user-1', 'user', { turnId: TURN_1, createdAt: 1000 }),
+        item('tool-1', 'process', { turnId: TURN_1, createdAt: 2000 }),
+        item('true-final-1', 'assistant', { turnId: TURN_1, createdAt: 6000 }),
+        item('delayed-turn-2', 'process', { turnId: TURN_2, createdAt: 6500 }),
+        item('late-old-intro-1', 'assistant', { turnId: TURN_1, createdAt: 3000 }),
+      ],
+      { tailClosed: true }
+    );
+
+    expect(result.map((entry) => entry.id)).toEqual([
+      'user-1',
+      DISCLOSURE_1,
+      'true-final-1',
+      DISCLOSURE_2,
+    ]);
+    const disclosure = result.find(
+      (entry) => entry.type === 'turn_disclosure' && entry.turnId === TURN_1
+    );
+    expect(disclosure?.type).toBe('turn_disclosure');
+    if (disclosure?.type !== 'turn_disclosure') return;
+    expect(disclosure.processItemIds).toEqual(['tool-1', 'late-old-intro-1']);
+    expect(disclosure.endAt).toBe(6000);
+  });
+
+  test('keeps the latest user turn running when an older turn fragment arrives last', () => {
+    const result = buildTurnDisclosureItems(
+      [
+        item('user-1', 'user', { turnId: TURN_1, createdAt: 1000 }),
+        item('tool-1', 'process', { turnId: TURN_1, createdAt: 2000 }),
+        item('final-1', 'assistant', { turnId: TURN_1, createdAt: 3000 }),
+        item('user-2', 'user', { turnId: TURN_2, createdAt: 4000 }),
+        item('tool-2', 'process', { turnId: TURN_2, createdAt: 5000, processState: 'running' }),
+        item('late-tool-1', 'process', { turnId: TURN_1, createdAt: 6000 }),
+      ],
+      { activeTurnId: TURN_2 }
+    );
+
+    const disclosures = result.filter((entry) => entry.type === 'turn_disclosure');
+    expect(disclosures).toHaveLength(2);
+    expect(disclosures.find((entry) => entry.turnId === TURN_1)?.state).toBe('completed');
+    expect(disclosures.find((entry) => entry.turnId === TURN_2)?.state).toBe('running');
+  });
+
+  test('uses an explicit active turn for background work without a visible user row', () => {
+    const result = buildTurnDisclosureItems(
+      [
+        item('current-background-tool', 'process', {
+          turnId: TURN_2,
+          createdAt: 1000,
+          processState: 'running',
+        }),
+        item('delayed-old-tool', 'process', { turnId: TURN_1, createdAt: 2000 }),
+      ],
+      { activeTurnId: TURN_2 }
+    );
+
+    const disclosures = result.filter((entry) => entry.type === 'turn_disclosure');
+    expect(disclosures.find((entry) => entry.turnId === TURN_2)?.state).toBe('running');
+    expect(disclosures.find((entry) => entry.turnId === TURN_1)?.state).toBe('completed');
+  });
+
   test('renders process steps without a visible user request as inline receipts', () => {
     const result = buildTurnDisclosureItems([
       item('scan', 'process', { turnId: undefined, createdAt: 1000, processState: 'completed' }),
@@ -484,6 +698,38 @@ describe('buildTurnDisclosureItems', () => {
 });
 
 describe('assignTurnIdsFromUserRequests', () => {
+  test('promotes the ACP root turn id over the distinct user request id for unowned tail rows', () => {
+    const assigned = assignTurnIdsFromUserRequests([
+      item('user', 'user', { turnId: TURN_1, createdAt: 1000 }),
+      item('tool', 'process', { turnId: ACP_ROOT_1, createdAt: 2000, processState: 'completed' }),
+      item('final', 'assistant', { turnId: ACP_ROOT_1, createdAt: 3000 }),
+      item('terminal-orphan', 'process', {
+        turnId: undefined,
+        createdAt: 3001,
+        processState: 'completed',
+      }),
+    ]);
+
+    expect(assigned.map((entry) => entry.turnId)).toEqual([
+      ACP_ROOT_1,
+      ACP_ROOT_1,
+      ACP_ROOT_1,
+      ACP_ROOT_1,
+    ]);
+
+    const display = buildTurnDisclosureItems(assigned, { tailClosed: true });
+    const disclosures = display.filter((entry) => entry.type === 'turn_disclosure');
+    expect(disclosures).toHaveLength(1);
+    expect(disclosures[0]?.turnId).toBe(ACP_ROOT_1);
+    expect(disclosures[0]?.processItemIds).toEqual(['tool', 'terminal-orphan']);
+    expect(display.map((entry) => entry.id)).toEqual([
+      'user',
+      `turn-disclosure-${ACP_ROOT_1}`,
+      'final',
+    ]);
+    expect(new Set(display.map((entry) => entry.id)).size).toBe(display.length);
+  });
+
   test('groups all assistant and process messages after one user request into the same turn', () => {
     const result = assignTurnIdsFromUserRequests([
       item('user', 'user', { turnId: TURN_1, createdAt: 1000 }),
@@ -517,5 +763,66 @@ describe('assignTurnIdsFromUserRequests', () => {
     ]);
 
     expect(result.map((entry) => entry.turnId)).toEqual([TURN_1, TURN_2, TURN_1, TURN_2]);
+  });
+
+  test('does not promote a retired provisional request id before the current root arrives', () => {
+    const userTurn2 = parseMessageId('msg_0190f5fe-7c00-7a00-8000-000000000022');
+    const result = assignTurnIdsFromUserRequests([
+      item('user-1', 'user', { turnId: TURN_1, createdAt: 1000 }),
+      item('root-1', 'process', { turnId: ACP_ROOT_1, createdAt: 1500 }),
+      item('user-2', 'user', { turnId: userTurn2, createdAt: 2000 }),
+      item('delayed-provisional-1', 'assistant', { turnId: TURN_1, createdAt: 2500 }),
+      item('legacy-tool-2', 'process', { turnId: undefined, createdAt: 3000 }),
+    ]);
+
+    expect(result.map((entry) => entry.turnId)).toEqual([
+      ACP_ROOT_1,
+      ACP_ROOT_1,
+      userTurn2,
+      TURN_1,
+      userTurn2,
+    ]);
+  });
+
+  test('uses the active request correlation before the first root-owned stream row arrives', () => {
+    const assigned = assignTurnIdsFromUserRequests(
+      [
+        item('user', 'user', { turnId: TURN_1, createdAt: 1000 }),
+        item('early-thinking', 'process_content', {
+          turnId: undefined,
+          createdAt: 1200,
+          processState: 'running',
+        }),
+      ],
+      { activeRequestMessageId: TURN_1, activeTurnId: ACP_ROOT_1 }
+    );
+
+    expect(assigned.map((entry) => entry.turnId)).toEqual([ACP_ROOT_1, ACP_ROOT_1]);
+    const display = buildTurnDisclosureItems(assigned, { activeTurnId: ACP_ROOT_1 });
+    expect(display.map((entry) => entry.id)).toEqual([
+      'user',
+      `turn-disclosure-${ACP_ROOT_1}`,
+    ]);
+    expect(display[1]?.type).toBe('turn_disclosure');
+    if (display[1]?.type !== 'turn_disclosure') return;
+    expect(display[1].state).toBe('running');
+    expect(display[1].processItemIds).toEqual(['early-thinking']);
+  });
+
+  test('does not let an unseen delayed old turn override an authoritative active request pair', () => {
+    const assigned = assignTurnIdsFromUserRequests(
+      [
+        item('user', 'user', { turnId: TURN_1, createdAt: 1000 }),
+        item('delayed-old-event', 'process', { turnId: TURN_2, createdAt: 1100 }),
+        item('current-unowned-thinking', 'process_content', {
+          turnId: undefined,
+          createdAt: 1200,
+          processState: 'running',
+        }),
+      ],
+      { activeRequestMessageId: TURN_1, activeTurnId: ACP_ROOT_1 }
+    );
+
+    expect(assigned.map((entry) => entry.turnId)).toEqual([ACP_ROOT_1, TURN_2, ACP_ROOT_1]);
   });
 });
