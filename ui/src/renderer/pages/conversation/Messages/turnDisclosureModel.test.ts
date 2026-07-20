@@ -146,6 +146,16 @@ describe('buildTurnDisclosureItems', () => {
     expect(disclosure.endAt).toBe(1000);
   });
 
+  test('keeps a text-only streaming turn terminated by its live disclosure', () => {
+    const result = buildTurnDisclosureItems([
+      item('user', 'user', { createdAt: 1000 }),
+      item('streaming-text', 'assistant', { createdAt: 2000 }),
+    ]);
+
+    expect(result.map((entry) => entry.id)).toEqual(['user', 'streaming-text', DISCLOSURE_1]);
+    expect(result.at(-1)?.type).toBe('turn_disclosure');
+  });
+
   test('keeps the current turn disclosure visible between active process phases', () => {
     const result = buildTurnDisclosureItems([
       item('user', 'user', { createdAt: 1000 }),
@@ -233,7 +243,7 @@ describe('buildTurnDisclosureItems', () => {
     expect(disclosure.processItemStates).toEqual({ thinking: 'completed' });
   });
 
-  test('keeps running assistant text visible after the live disclosure', () => {
+  test('keeps the live disclosure after running assistant text', () => {
     const result = buildTurnDisclosureItems([
       item('user', 'user', { createdAt: 1000 }),
       item('progress-note', 'assistant', { createdAt: 1500 }),
@@ -243,10 +253,10 @@ describe('buildTurnDisclosureItems', () => {
 
     expect(result.map((entry) => (entry.type === 'item' ? entry.id : entry.id))).toEqual([
       'user',
-      DISCLOSURE_1,
       'partial-answer',
+      DISCLOSURE_1,
     ]);
-    const disclosure = result[1];
+    const disclosure = result[2];
     expect(disclosure.type).toBe('turn_disclosure');
     if (disclosure.type !== 'turn_disclosure') return;
     expect(disclosure.state).toBe('running');
@@ -262,10 +272,10 @@ describe('buildTurnDisclosureItems', () => {
 
     expect(result.map((entry) => (entry.type === 'item' ? entry.id : entry.id))).toEqual([
       'user',
-      DISCLOSURE_1,
       'partial-answer',
+      DISCLOSURE_1,
     ]);
-    const disclosure = result[1];
+    const disclosure = result[2];
     expect(disclosure.type).toBe('turn_disclosure');
     if (disclosure.type !== 'turn_disclosure') return;
     expect(disclosure.state).toBe('waiting');
@@ -403,7 +413,7 @@ describe('buildTurnDisclosureItems', () => {
     expect(disclosure.processItemIds).toEqual(['tool']);
   });
 
-  test('keeps a completed tail in the live disclosure while assistant text remains readable', () => {
+  test('keeps a completed live disclosure after assistant text so processing remains the tail', () => {
     const result = buildTurnDisclosureItems([
       item('user', 'user', { createdAt: 1000 }),
       item('tool', 'process', { createdAt: 2000, processState: 'completed' }),
@@ -412,10 +422,10 @@ describe('buildTurnDisclosureItems', () => {
 
     expect(result.map((entry) => (entry.type === 'item' ? entry.id : entry.id))).toEqual([
       'user',
-      DISCLOSURE_1,
       'assistant-text',
+      DISCLOSURE_1,
     ]);
-    const disclosure = result[1];
+    const disclosure = result[2];
     expect(disclosure.type).toBe('turn_disclosure');
     if (disclosure.type !== 'turn_disclosure') return;
     expect(disclosure.state).toBe('running');
@@ -662,6 +672,23 @@ describe('buildTurnDisclosureItems', () => {
     expect(disclosures).toHaveLength(2);
     expect(disclosures.find((entry) => entry.turnId === TURN_1)?.state).toBe('completed');
     expect(disclosures.find((entry) => entry.turnId === TURN_2)?.state).toBe('running');
+  });
+
+  test('keeps a coalesced active-turn disclosure at the transcript tail', () => {
+    const result = buildTurnDisclosureItems(
+      [
+        item('user-1', 'user', { turnId: TURN_1, createdAt: 1000 }),
+        item('tool-1', 'process', { turnId: TURN_1, createdAt: 2000, processState: 'completed' }),
+        item('partial-1', 'assistant', { turnId: TURN_1, createdAt: 3000 }),
+        item('delayed-tool-2', 'process', { turnId: TURN_2, createdAt: 4000, processState: 'completed' }),
+        item('running-1', 'process', { turnId: TURN_1, createdAt: 5000, processState: 'running' }),
+      ],
+      { activeTurnId: TURN_1 }
+    );
+
+    expect(result.at(-1)?.type).toBe('turn_disclosure');
+    expect(result.at(-1)?.id).toBe(DISCLOSURE_1);
+    expect(result.filter((entry) => entry.id === DISCLOSURE_1)).toHaveLength(1);
   });
 
   test('uses an explicit active turn for background work without a visible user row', () => {

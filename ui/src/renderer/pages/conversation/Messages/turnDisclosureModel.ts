@@ -402,5 +402,19 @@ export function buildTurnDisclosureItems(
   // segments. Keep ordinary transcript items in arrival order, but fold their
   // synthetic process metadata into the first disclosure so IDs/DOM controls
   // remain unique and one turn can never render two "processed" headers.
-  return coalesceTurnDisclosures(output, processObservedAtByItemId);
+  const coalesced = coalesceTurnDisclosures(output, processObservedAtByItemId);
+  const liveDisclosureIndex = coalesced.findLastIndex(
+    (item) => item.type === 'turn_disclosure' && item.running
+  );
+  if (liveDisclosureIndex < 0 || liveDisclosureIndex === coalesced.length - 1) return coalesced;
+
+  // A live turn's process state is the transcript terminator. Keeping this
+  // invariant after coalescing also covers text-only streaming and delayed
+  // fragments from another turn without changing completed transcript order.
+  const liveDisclosure = coalesced[liveDisclosureIndex];
+  return [
+    ...coalesced.slice(0, liveDisclosureIndex),
+    ...coalesced.slice(liveDisclosureIndex + 1),
+    liveDisclosure,
+  ];
 }
