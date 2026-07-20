@@ -4,9 +4,21 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { parseMessageId, type ConversationId, type MessageId } from '@/common/types/ids';
+import {
+  parseConversationId,
+  parseCronJobId,
+  parseMessageId,
+  type ConversationId,
+  type MessageId,
+} from '@/common/types/ids';
 import { ipcBridge } from '@/common';
-import type { AgentStreamErrorInfo, IMessageThinking, IMessageTips, TMessage } from '@/common/chat/chatLib';
+import type {
+  AgentStreamErrorInfo,
+  IMessageText,
+  IMessageThinking,
+  IMessageTips,
+  TMessage,
+} from '@/common/chat/chatLib';
 import { toDisplayText } from '@/common/chat/displayText';
 import {
   composeMessage,
@@ -204,7 +216,18 @@ function composeMessageWithIndex(message: TMessage | undefined, list: TMessage[]
       if (existingMsg.type === 'tool_call') {
         const newList = list.slice();
         const merged = mergeToolCallContent(existingMsg.content, message.content);
-        newList[existingIdx] = { ...existingMsg, ...message, content: merged };
+        newList[existingIdx] = {
+          ...existingMsg,
+          ...message,
+          // Lifecycle updates must not move a process step in transcript
+          // order or churn its React identity. Later frames only update its
+          // state/content; the first frame owns its stable envelope.
+          id: existingMsg.id,
+          msg_id: existingMsg.msg_id ?? message.msg_id,
+          turn_id: message.turn_id ?? existingMsg.turn_id,
+          created_at: existingMsg.created_at ?? message.created_at,
+          content: merged,
+        };
         return newList;
       }
     }
@@ -225,7 +248,15 @@ function composeMessageWithIndex(message: TMessage | undefined, list: TMessage[]
       if (existingMsg.type === 'acp_tool_call') {
         const newList = list.slice();
         const merged = mergeAcpToolCallContent(existingMsg.content, message.content);
-        newList[existingIdx] = { ...existingMsg, ...message, content: merged };
+        newList[existingIdx] = {
+          ...existingMsg,
+          ...message,
+          id: existingMsg.id,
+          msg_id: existingMsg.msg_id ?? message.msg_id,
+          turn_id: message.turn_id ?? existingMsg.turn_id,
+          created_at: existingMsg.created_at ?? message.created_at,
+          content: merged,
+        };
         return newList;
       }
     }
@@ -314,6 +345,7 @@ function composeMessageWithIndex(message: TMessage | undefined, list: TMessage[]
           const newList = list.slice();
           newList[existingIdx] = {
             ...existingMsg,
+            turn_id: message.turn_id ?? existingMsg.turn_id,
             content: {
               ...existingMsg.content,
               status: 'done' as const,
@@ -714,9 +746,49 @@ const normalizeDbTipsMessage = (msg: TMessage): TMessage => {
   } as IMessageTips;
 };
 
+const normalizeDecodedTextMetadata = (parsed: Record<string, unknown>): Partial<IMessageText['content']> => {
+  const metadata: Partial<IMessageText['content']> = {
+    ...(parsed.replace === true ? { replace: true } : {}),
+    ...(parsed.agentMessage === true ? { agentMessage: true } : {}),
+    ...(typeof parsed.senderName === 'string' ? { senderName: parsed.senderName } : {}),
+    ...(typeof parsed.senderAgentType === 'string' ? { senderAgentType: parsed.senderAgentType } : {}),
+  };
+
+  if (typeof parsed.senderConversationId === 'string') {
+    try {
+      metadata.senderConversationId = parseConversationId(parsed.senderConversationId);
+    } catch {
+      // Ignore malformed persisted collaboration metadata without dropping the
+      // otherwise valid message body.
+    }
+  }
+
+  const cronMeta = isRecord(parsed.cronMeta) ? parsed.cronMeta : undefined;
+  if (
+    cronMeta?.source === 'cron' &&
+    typeof cronMeta.cron_job_id === 'string' &&
+    typeof cronMeta.cron_job_name === 'string' &&
+    typeof cronMeta.triggered_at === 'number'
+  ) {
+    try {
+      metadata.cronMeta = {
+        source: 'cron',
+        cron_job_id: parseCronJobId(cronMeta.cron_job_id),
+        cron_job_name: cronMeta.cron_job_name,
+        triggered_at: cronMeta.triggered_at,
+      };
+    } catch {
+      // Same trust boundary as senderConversationId above.
+    }
+  }
+
+  return metadata;
+};
+
 /**
- * Normalize a message loaded from backend DB: if `content` is a JSON string,
- * parse it and map stored fields to renderer message content.
+ * Normalize a message loaded from backend DB. `content` may be a JSON string
+ * or an object decoded by the transport mapper; both shapes are projected into
+ * renderer content and their persisted ownership metadata is restored.
  */
 export function normalizeDbMessage(msg: TMessage): TMessage {
   if (msg.type === 'tips') return normalizeDbTipsMessage(msg);
@@ -749,24 +821,23 @@ export function normalizeDbMessage(msg: TMessage): TMessage {
     };
   }
   if (msg.type !== 'text') return msg;
-  const raw = msg.content as unknown;
-  if (typeof raw !== 'string') return msg;
-  try {
-    const parsed = JSON.parse(raw) as Record<string, unknown>;
-    if (typeof parsed.content !== 'string') return msg;
-    const knowledgeWriteback = normalizeKnowledgeWritebackState(parsed.knowledge_writeback);
-    return {
-      ...msg,
-      turn_id: resolvePersistedTurnId(msg, parsed),
-      content: {
-        content: parsed.content as string,
-        ...(knowledgeWriteback ? { knowledge_writeback: knowledgeWriteback } : {}),
-        ...normalizeWireAgentMessageMetadata(parsed),
-      },
-    };
-  } catch {
-    return msg;
-  }
+  // Depending on the IPC/REST mapper, JSON DB content can arrive either as its
+  // original string or as an already-decoded object. Both shapes must restore
+  // the top-level owning turn; leaving it nested makes history/live hydration
+  // split one ACP request between the user message id and the root turn id.
+  const parsed = parseJsonRecord(msg.content);
+  if (!parsed || typeof parsed.content !== 'string') return msg;
+  const knowledgeWriteback = normalizeKnowledgeWritebackState(parsed.knowledge_writeback);
+  return {
+    ...msg,
+    turn_id: resolvePersistedTurnId(msg, parsed),
+    content: {
+      content: parsed.content,
+      ...normalizeDecodedTextMetadata(parsed),
+      ...(knowledgeWriteback ? { knowledge_writeback: knowledgeWriteback } : {}),
+      ...normalizeWireAgentMessageMetadata(parsed),
+    },
+  };
 }
 
 /** Initial / per-page window size for keyset (windowed) history loading. */
@@ -813,6 +884,19 @@ const preferThinkingMessageVersion = (
   return dbMessage;
 };
 
+const withFetchedCanonicalIdentity = <T extends TMessage>(dbMessage: T, preferred: T): T =>
+  ({
+    ...preferred,
+    // The fetched row owns durable identity and chronological placement even
+    // when a longer/live payload wins for display content.
+    id: dbMessage.id,
+    msg_id: dbMessage.msg_id ?? preferred.msg_id,
+    conversation_id: dbMessage.conversation_id,
+    created_at: dbMessage.created_at ?? preferred.created_at,
+    turn_id: dbMessage.turn_id ?? preferred.turn_id,
+    status: dbMessage.status ?? preferred.status,
+  }) as T;
+
 export const mergeFetchedMessagesForConversation = (
   currentList: TMessage[],
   messages: TMessage[],
@@ -839,10 +923,10 @@ export const mergeFetchedMessagesForConversation = (
     if (!streamMessage) return dbMessage;
 
     if (dbMessage.type === 'text' && streamMessage.type === 'text') {
-      return preferTextMessageVersion(dbMessage, streamMessage);
+      return withFetchedCanonicalIdentity(dbMessage, preferTextMessageVersion(dbMessage, streamMessage));
     }
     if (dbMessage.type === 'thinking' && streamMessage.type === 'thinking') {
-      return preferThinkingMessageVersion(dbMessage, streamMessage);
+      return withFetchedCanonicalIdentity(dbMessage, preferThinkingMessageVersion(dbMessage, streamMessage));
     }
     if (dbMessage.type === 'tool_call' && streamMessage.type === 'tool_call') {
       const content = mergeToolCallContent(dbMessage.content, streamMessage.content);
@@ -850,6 +934,10 @@ export const mergeFetchedMessagesForConversation = (
         ...dbMessage,
         ...streamMessage,
         id: dbMessage.id,
+        msg_id: dbMessage.msg_id ?? streamMessage.msg_id,
+        conversation_id: dbMessage.conversation_id,
+        created_at: dbMessage.created_at ?? streamMessage.created_at,
+        turn_id: dbMessage.turn_id ?? streamMessage.turn_id,
         content,
         status: content.status === 'error' ? 'error' : dbMessage.status,
       };
@@ -860,6 +948,10 @@ export const mergeFetchedMessagesForConversation = (
         ...dbMessage,
         ...streamMessage,
         id: dbMessage.id,
+        msg_id: dbMessage.msg_id ?? streamMessage.msg_id,
+        conversation_id: dbMessage.conversation_id,
+        created_at: dbMessage.created_at ?? streamMessage.created_at,
+        turn_id: dbMessage.turn_id ?? streamMessage.turn_id,
         content,
         status: content.update.status === 'failed' ? 'error' : dbMessage.status,
       };

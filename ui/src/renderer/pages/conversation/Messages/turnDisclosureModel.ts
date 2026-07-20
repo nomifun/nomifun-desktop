@@ -40,6 +40,12 @@ export type TurnDisclosureOutputItem =
 
 export interface BuildTurnDisclosureOptions {
   tailClosed?: boolean;
+  activeTurnId?: MessageId;
+}
+
+export interface AssignTurnIdOptions {
+  activeTurnId?: MessageId;
+  activeRequestMessageId?: MessageId;
 }
 
 const unique = (values: string[]): string[] => Array.from(new Set(values.filter(Boolean)));
@@ -50,29 +56,72 @@ const toProcessReceipt = (entry: TurnDisclosureInputItem): TurnDisclosureOutputI
   itemId: entry.id,
 });
 
-export function assignTurnIdsFromUserRequests(items: TurnDisclosureInputItem[]): TurnDisclosureInputItem[] {
+export function assignTurnIdsFromUserRequests(
+  items: TurnDisclosureInputItem[],
+  options: AssignTurnIdOptions = {}
+): TurnDisclosureInputItem[] {
+  const output: TurnDisclosureInputItem[] = [];
   let currentTurnId: MessageId | undefined;
+  let authoritativeTurnId: MessageId | undefined;
+  let requestBoundaryTurnId: MessageId | undefined;
+  let currentRequestFallbackIndices: number[] = [];
+  const retiredTurnIds = new Set<MessageId>();
 
-  return items.map((entry) => {
+  for (const entry of items) {
     if (entry.role === 'user') {
-      currentTurnId = entry.turnId;
-      return { ...entry, turnId: currentTurnId };
+      if (requestBoundaryTurnId) retiredTurnIds.add(requestBoundaryTurnId);
+      if (currentTurnId) retiredTurnIds.add(currentTurnId);
+      if (authoritativeTurnId) retiredTurnIds.add(authoritativeTurnId);
+      requestBoundaryTurnId = entry.turnId;
+      const activeRootTurnId =
+        options.activeTurnId &&
+        options.activeRequestMessageId &&
+        entry.turnId === options.activeRequestMessageId
+          ? options.activeTurnId
+          : undefined;
+      // Once turn.started has correlated the visible request with the backend
+      // root, that pair is stronger evidence than positional stream order.
+      // In particular, an unseen delayed event from an older turn must not
+      // claim the new request merely because it is the first explicit id.
+      currentTurnId = activeRootTurnId ?? entry.turnId;
+      authoritativeTurnId = activeRootTurnId;
+      currentRequestFallbackIndices = [output.length];
+      output.push({ ...entry, turnId: currentTurnId });
+      continue;
     }
 
     // New stream/history rows carry the authoritative owning turn. Preserve it
-    // even when a delayed event is interleaved after a newer user request. The
-    // positional fallback below exists only for legacy rows without turn_id;
-    // an explicit old turn must not move that fallback boundary backwards.
+    // even when a delayed event is interleaved after a newer user request. A
+    // user's message id is only a provisional request boundary: ACP backends
+    // mint a distinct root turn id for the response. The first non-retired
+    // explicit id therefore becomes the fallback for later legacy/transient
+    // rows that omit turn_id. Known older ids must not move that boundary back.
     if (entry.turnId) {
-      return entry;
+      if (!authoritativeTurnId && !retiredTurnIds.has(entry.turnId)) {
+        authoritativeTurnId = entry.turnId;
+        currentTurnId = entry.turnId;
+        // Correlate the provisional user/request boundary (and any early
+        // legacy rows) with the backend-owned response root. This keeps the
+        // logical turn contiguous even though the durable user row and root
+        // response deliberately have different message IDs.
+        for (const index of currentRequestFallbackIndices) {
+          output[index] = { ...output[index], turnId: entry.turnId };
+        }
+      }
+      output.push(entry);
+      continue;
     }
 
     if (!currentTurnId) {
-      return { ...entry, turnId: undefined };
+      output.push({ ...entry, turnId: undefined });
+      continue;
     }
 
-    return { ...entry, turnId: currentTurnId };
-  });
+    currentRequestFallbackIndices.push(output.length);
+    output.push({ ...entry, turnId: currentTurnId });
+  }
+
+  return output;
 }
 
 const getProcessState = (entry: TurnDisclosureInputItem): TurnDisclosureProcessState => {
@@ -153,11 +202,20 @@ const buildEmptyRunningSegmentOutput = (
   return output;
 };
 
-function buildSegmentOutput(segment: TurnDisclosureInputItem[], isClosed: boolean): TurnDisclosureOutputItem[] {
+function buildSegmentOutput(
+  segment: TurnDisclosureInputItem[],
+  isClosed: boolean,
+  finalAssistantForTurn?: TurnDisclosureInputItem
+): TurnDisclosureOutputItem[] {
   const turnId = segment[0]?.turnId;
   if (!turnId) return segment.map((entry) => ({ type: 'item', id: entry.id }));
 
-  const finalAssistantIndex = segment.findLastIndex((entry) => entry.role === 'assistant');
+  // A delayed event from another turn can split one logical turn into several
+  // segments. Only the last assistant row across the whole turn is final
+  // answer content; earlier assistant rows remain part of the process trace.
+  const finalAssistantIndex = finalAssistantForTurn
+    ? segment.findIndex((entry) => entry === finalAssistantForTurn)
+    : -1;
   const stateOptions = { isClosed };
 
   const processItems = segment.filter((entry, index) => {
@@ -187,8 +245,9 @@ function buildSegmentOutput(segment: TurnDisclosureInputItem[], isClosed: boolea
       ? 'waiting'
       : 'running';
 
-  const finalOrProcessItems =
-    finalAssistantIndex === -1 ? processItems : [...processItems, segment[finalAssistantIndex]].filter(Boolean);
+  const finalOrProcessItems = finalAssistantForTurn
+    ? [...processItems, finalAssistantForTurn]
+    : processItems;
   const disclosure: TurnDisclosureOutputItem = {
     type: 'turn_disclosure',
     id: `turn-disclosure-${turnId}`,
@@ -228,16 +287,98 @@ function buildSegmentOutput(segment: TurnDisclosureInputItem[], isClosed: boolea
   return output;
 }
 
+const getDisclosureStateObservedAt = (
+  disclosure: Extract<TurnDisclosureOutputItem, { type: 'turn_disclosure' }>,
+  processObservedAtByItemId: ReadonlyMap<string, number>
+): number => {
+  if (!disclosure.processItemIds.length) return disclosure.endAt;
+  const observedTimes = disclosure.processItemIds
+    .map((itemId) => processObservedAtByItemId.get(itemId))
+    .filter((value): value is number => value !== undefined);
+  return observedTimes.length ? Math.max(...observedTimes) : disclosure.endAt;
+};
+
+const coalesceTurnDisclosures = (
+  items: TurnDisclosureOutputItem[],
+  processObservedAtByItemId: ReadonlyMap<string, number>
+): TurnDisclosureOutputItem[] => {
+  const output: TurnDisclosureOutputItem[] = [];
+  const disclosureIndexByTurn = new Map<MessageId, number>();
+
+  for (const item of items) {
+    if (item.type !== 'turn_disclosure') {
+      output.push(item);
+      continue;
+    }
+
+    const existingIndex = disclosureIndexByTurn.get(item.turnId);
+    if (existingIndex === undefined) {
+      disclosureIndexByTurn.set(item.turnId, output.length);
+      output.push(item);
+      continue;
+    }
+
+    const existing = output[existingIndex];
+    if (existing.type !== 'turn_disclosure') continue;
+    // Header state describes the latest process observation, not the most
+    // severe state ever seen. Duration endAt also includes the global final
+    // answer, so it cannot safely decide freshness between split fragments.
+    // On equal process timestamps, the later transcript fragment wins.
+    const existingStateObservedAt = getDisclosureStateObservedAt(existing, processObservedAtByItemId);
+    const itemStateObservedAt = getDisclosureStateObservedAt(item, processObservedAtByItemId);
+    const state = itemStateObservedAt >= existingStateObservedAt ? item.state : existing.state;
+    output[existingIndex] = {
+      ...existing,
+      processItemIds: unique([...existing.processItemIds, ...item.processItemIds]),
+      sourceMessageIds: unique([...existing.sourceMessageIds, ...item.sourceMessageIds]),
+      startAt: Math.min(existing.startAt, item.startAt),
+      endAt: Math.max(existing.endAt, item.endAt),
+      state,
+      processItemStates: { ...existing.processItemStates, ...item.processItemStates },
+      running: state === 'running' || state === 'waiting',
+      defaultCollapsed: state !== 'running' && state !== 'waiting',
+    };
+  }
+
+  return output;
+};
+
 export function buildTurnDisclosureItems(
   items: TurnDisclosureInputItem[],
   options: BuildTurnDisclosureOptions = {}
 ): TurnDisclosureOutputItem[] {
   const output: TurnDisclosureOutputItem[] = [];
   let segment: TurnDisclosureInputItem[] = [];
+  const activeTurnId = options.tailClosed === true ? undefined : options.activeTurnId;
+  const finalAssistantByTurn = new Map<MessageId, TurnDisclosureInputItem>();
+  const processObservedAtByItemId = new Map<string, number>();
 
-  const flush = (isClosed: boolean) => {
+  for (const item of items) {
+    if (item.turnId && item.role === 'assistant') {
+      const currentFinal = finalAssistantByTurn.get(item.turnId);
+      // Live rows are arrival-ordered and a delayed older text can be appended
+      // after the real final answer. Choose by authoritative message time;
+      // `>=` intentionally lets the later observation break timestamp ties.
+      if (!currentFinal || item.createdAt >= currentFinal.createdAt) {
+        finalAssistantByTurn.set(item.turnId, item);
+      }
+    }
+    if (item.role !== 'user' && item.role !== 'other') {
+      processObservedAtByItemId.set(item.id, getProcessEndAt(item));
+    }
+  }
+
+  const flush = (fallbackClosed: boolean) => {
     if (!segment.length) return;
-    output.push(...buildSegmentOutput(segment, isClosed));
+    const segmentTurnId = segment[0]?.turnId;
+    const isClosed = options.tailClosed === true || (activeTurnId ? segmentTurnId !== activeTurnId : fallbackClosed);
+    output.push(
+      ...buildSegmentOutput(
+        segment,
+        isClosed,
+        segmentTurnId ? finalAssistantByTurn.get(segmentTurnId) : undefined
+      )
+    );
     segment = [];
   };
 
@@ -257,5 +398,9 @@ export function buildTurnDisclosureItems(
   }
 
   flush(options.tailClosed === true);
-  return output;
+  // Delayed events can make one logical turn appear in multiple non-contiguous
+  // segments. Keep ordinary transcript items in arrival order, but fold their
+  // synthetic process metadata into the first disclosure so IDs/DOM controls
+  // remain unique and one turn can never render two "processed" headers.
+  return coalesceTurnDisclosures(output, processObservedAtByItemId);
 }

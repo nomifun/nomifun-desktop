@@ -18,6 +18,7 @@ describe('MessageList turn completion disclosure structure', () => {
     expect(source.includes('buildTurnDisclosureItems')).toBe(true);
     expect(source.includes('assignTurnIdsFromUserRequests')).toBe(true);
     expect(source.includes('tailClosed: conversationContext?.isProcessing !== true')).toBe(true);
+    expect(source.includes('activeTurnId: conversationContext?.activeTurnId')).toBe(true);
     expect(source.includes("type: 'turn_process_disclosure'")).toBe(true);
     expect(source.includes('renderTurnDisclosure')).toBe(true);
     expect(source.includes('components/TurnProcessDisclosure')).toBe(true);
@@ -28,6 +29,11 @@ describe('MessageList turn completion disclosure structure', () => {
     expect(source.includes('renderProcessTraceItem')).toBe(true);
     expect(source.includes('getProcessItemState')).toBe(true);
     expect(source.includes('highlighted={highlighted}')).toBe(true);
+  });
+
+  test('uses the stable view-model id as the React reconciliation key', () => {
+    expect(source.includes('<React.Fragment key={item.id}>')).toBe(true);
+    expect(source.includes('<React.Fragment key={getProcessedItemAnchorId(item) || index}>')).toBe(false);
   });
 
   test('does not reuse legacy process cards inside receipt expansion', () => {

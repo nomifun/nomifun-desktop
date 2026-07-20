@@ -122,6 +122,43 @@ describe('transformMessage runtime field normalization', () => {
     expect(mergedMessage.content.update.status).toBe('failed');
   });
 
+  test('ACP completed status is not downgraded by a replayed in-progress frame', () => {
+    const completed = transformMessage(
+      baseWire({
+        type: 'acp_tool_call',
+        data: {
+          session_id: 'session-1',
+          update: {
+            sessionUpdate: 'tool_call_update',
+            tool_call_id: 'tool-completed',
+            status: 'completed',
+            title: 'Generate image',
+          },
+        },
+      })
+    )!;
+    const replayedProgress = transformMessage(
+      baseWire({
+        type: 'acp_tool_call',
+        data: {
+          session_id: 'session-1',
+          update: {
+            sessionUpdate: 'tool_call_update',
+            tool_call_id: 'tool-completed',
+            status: 'in_progress',
+          },
+        },
+      })
+    )!;
+
+    const merged = composeMessage(replayedProgress, [completed]);
+    expect(merged).toHaveLength(1);
+    const mergedMessage = merged[0];
+    if (mergedMessage.type !== 'acp_tool_call') throw new Error('expected ACP tool message');
+    expect(mergedMessage.content.update.status).toBe('completed');
+    expect(mergedMessage.content.update.title).toBe('Generate image');
+  });
+
   test('ACP failed correction removes artifact content inherited from completed state', () => {
     const completed = transformMessage(
       baseWire({

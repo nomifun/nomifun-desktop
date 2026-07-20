@@ -868,9 +868,15 @@ const MessageList: React.FC<{
         sourceMessageIds: getProcessedItemSourceMessageIds(item),
       };
     });
-    const modelInput = assignTurnIdsFromUserRequests(rawModelInput);
+    const modelInput = assignTurnIdsFromUserRequests(rawModelInput, {
+      activeTurnId: conversationContext?.activeTurnId,
+      activeRequestMessageId: conversationContext?.activeRequestMessageId,
+    });
 
-    const disclosureItems = buildTurnDisclosureItems(modelInput, { tailClosed: conversationContext?.isProcessing !== true })
+    const disclosureItems = buildTurnDisclosureItems(modelInput, {
+      tailClosed: conversationContext?.isProcessing !== true,
+      activeTurnId: conversationContext?.activeTurnId,
+    })
       .map<IProcessedItem | undefined>((entry: TurnDisclosureOutputItem) => {
         if (entry.type === 'item') {
           return itemById.get(entry.id);
@@ -918,7 +924,14 @@ const MessageList: React.FC<{
       .filter((item): item is IProcessedItem => Boolean(item));
 
     return disclosureItems;
-  }, [conversationContext?.isProcessing, processedList, t, workspaceRoots]);
+  }, [
+    conversationContext?.activeRequestMessageId,
+    conversationContext?.activeTurnId,
+    conversationContext?.isProcessing,
+    processedList,
+    t,
+    workspaceRoots,
+  ]);
 
   const lastUserTextIndex = useMemo(
     () =>
@@ -1218,7 +1231,7 @@ const MessageList: React.FC<{
             <div ref={handleContentRef} data-testid='message-list-content' style={{ overflowAnchor: 'none' }}>
               <div className='h-10px' />
               {displayList.map((item, index) => (
-                <React.Fragment key={getProcessedItemAnchorId(item) || index}>{renderItem(index, item)}</React.Fragment>
+                <React.Fragment key={item.id}>{renderItem(index, item)}</React.Fragment>
               ))}
               <div className='h-20px' />
             </div>

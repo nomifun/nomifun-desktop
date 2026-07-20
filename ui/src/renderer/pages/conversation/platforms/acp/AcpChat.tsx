@@ -85,6 +85,8 @@ const AcpChat: React.FC<{
         hideSendBox,
         readOnly,
         isProcessing: messageState.running,
+        activeTurnId: messageState.activeTurnId,
+        activeRequestMessageId: messageState.activeRequestMessageId,
         loadedSkills,
         loadedMcpServers,
         loadedMcpStatuses,

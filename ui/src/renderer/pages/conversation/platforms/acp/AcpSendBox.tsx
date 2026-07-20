@@ -264,7 +264,7 @@ const AcpSendBox: React.FC<{
           files,
         });
         if (execution && !execution.isCurrent()) return;
-        markTurnAccepted();
+        markTurnAccepted(msg_id);
         // Use add=false (compose mode) so composeMessageWithIndex can de-dup
         // by msg_id — this prevents a duplicate bubble if useMessageLstCache
         // already inserted the DB row for this same msg_id.
