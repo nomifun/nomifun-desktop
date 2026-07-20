@@ -5,6 +5,7 @@
  */
 
 import type { TurnDisclosureProcessState } from '../turnDisclosureModel';
+import { Spin } from '@arco-design/web-react';
 import { Down } from '@icon-park/react';
 import classNames from 'classnames';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
@@ -143,6 +144,15 @@ function TurnProcessDisclosure<T>({
     return latestItem ? getProcessItemKey(latestItem) : undefined;
   }, [getProcessItemKey, getProcessItemState, item.processItems]);
 
+  const hasActiveProcessItem = useMemo(
+    () =>
+      item.processItems.some((processItem) => {
+        const state = getProcessItemState(processItem);
+        return state === 'running' || state === 'waiting';
+      }),
+    [getProcessItemState, item.processItems]
+  );
+
   const expandableProcessItemKeys = useMemo(() => {
     if (!getProcessItemCanExpandAll) return [];
     return item.processItems.filter(getProcessItemCanExpandAll).map(getProcessItemKey);
@@ -204,6 +214,7 @@ function TurnProcessDisclosure<T>({
   const bodyId = `turn-process-disclosure-body-${sanitizeDomId(item.id)}`;
   const disclosureExpanded = hasProcessItems && expanded;
   const hasHeaderActions = disclosureExpanded && hasExpandableProcessItems;
+  const showThinkingTail = displayState === 'running' && !hasActiveProcessItem;
 
   return (
     <div className={classNames('turn-process-disclosure', `turn-process-disclosure--${displayState}`)}>
@@ -265,9 +276,9 @@ function TurnProcessDisclosure<T>({
           </div>
         )}
       </div>
-      {disclosureExpanded && (
+      {(disclosureExpanded || showThinkingTail) && (
         <div id={bodyId} className='turn-process-disclosure__body'>
-          {item.processItems.map((processItem) => {
+          {disclosureExpanded && item.processItems.map((processItem) => {
             const itemKey = getProcessItemKey(processItem);
             const state = getProcessItemState(processItem);
             const layoutKind = getProcessItemLayoutKind?.(processItem) ?? 'other';
@@ -288,6 +299,20 @@ function TurnProcessDisclosure<T>({
               </div>
             );
           })}
+          {showThinkingTail && (
+            <div
+              className='turn-process-disclosure__live-tail turn-process-trace__row turn-process-trace__row--running'
+              role='status'
+              aria-live='polite'
+            >
+              <span className='turn-process-trace__row-icon' aria-hidden='true'>
+                <Spin size={12} />
+              </span>
+              <span className='turn-process-trace__text'>
+                {t('messages.processReceipt.thinkingRunning', { defaultValue: 'Thinking' })}
+              </span>
+            </div>
+          )}
         </div>
       )}
     </div>
