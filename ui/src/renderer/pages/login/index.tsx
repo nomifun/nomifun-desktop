@@ -142,7 +142,7 @@ const LoginPage: React.FC = () => {
       // this is a normal sign-in.
       const result = needsSetup
         ? await setup({ username: trimmedUsername, password })
-        : await login({ username: trimmedUsername, password, remember: rememberMe });
+        : await login({ username: trimmedUsername, password });
 
       if (result.success) {
         if (!needsSetup && rememberMe) {

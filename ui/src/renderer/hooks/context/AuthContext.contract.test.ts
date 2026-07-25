@@ -5,7 +5,7 @@
  */
 
 import { describe, expect, test } from 'bun:test';
-import { parseAuthUser } from './AuthContext';
+import { buildLoginRequestBody, parseAuthUser } from './AuthContext';
 
 const USER_ID = '0190f5fe-7c00-7a00-8000-000000000001';
 
@@ -23,5 +23,20 @@ describe('auth user wire contract', () => {
 
   test('rejects a payload containing both user_id and generic id', () => {
     expect(parseAuthUser({ user_id: USER_ID, id: USER_ID, username: 'admin' })).toBe(null);
+  });
+});
+
+describe('login request wire contract', () => {
+  test('sends only the fields accepted by POST /login', () => {
+    const request = buildLoginRequestBody({
+      username: 'admin',
+      password: 'StrongP@ss1',
+    });
+
+    expect(request).toEqual({
+      username: 'admin',
+      password: 'StrongP@ss1',
+    });
+    expect(Object.keys(request).sort()).toEqual(['password', 'username']);
   });
 });

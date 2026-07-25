@@ -144,7 +144,7 @@ async fn login(app: &mut Router, username: &str, password: &str) -> (String, Str
     assert_eq!(resp.status(), StatusCode::OK);
     let json = body_json(resp).await;
     let token = json["token"].as_str().unwrap().to_owned();
-    let user_id = json["user"]["id"].as_str().unwrap().to_owned();
+    let user_id = json["user"]["user_id"].as_str().unwrap().to_owned();
     (token, user_id)
 }
 
@@ -176,11 +176,37 @@ async fn t4_1_login_success() {
     assert_eq!(json["message"], "Login successful");
     assert!(json["token"].is_string());
     assert_eq!(json["user"]["username"], "admin");
-    assert!(json["user"]["id"].is_string());
+    assert!(json["user"]["user_id"].is_string());
 
     // Verify the returned token is valid
     let token = json["token"].as_str().unwrap();
     assert!(ctx.jwt_service.verify(token).is_ok());
+}
+
+#[tokio::test]
+async fn t4_1_login_rejects_client_only_remember_field_before_authentication() {
+    let (app, ctx) = test_app().await;
+    create_test_user(&ctx, "admin", "StrongP@ss1").await;
+
+    // Regression witness for the browser login failure: the UI used to leak
+    // its local "remember me" preference into this strict wire request. Axum
+    // rejects unknown fields before the handler can verify the password.
+    let req = json_post(
+        "/login",
+        r#"{"username":"admin","password":"StrongP@ss1","remember":false}"#,
+    );
+    let resp = app.oneshot(req).await.unwrap();
+
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let json = body_json(resp).await;
+    assert_eq!(json["code"], "BAD_REQUEST");
+    assert!(
+        json["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("unknown field `remember`"),
+        "the rejected client-only field should remain diagnosable: {json}"
+    );
 }
 
 #[tokio::test]
@@ -392,7 +418,7 @@ async fn t7_1_get_user_success() {
     let json = body_json(resp).await;
     assert_eq!(json["success"], true);
     assert_eq!(json["user"]["username"], "admin");
-    assert!(json["user"]["id"].is_string());
+    assert!(json["user"]["user_id"].is_string());
 }
 
 #[tokio::test]
@@ -804,7 +830,7 @@ async fn t12_2_internal_user_routes_work_in_local_mode() {
         .unwrap();
     assert_eq!(system_resp.status(), StatusCode::OK);
     let system_json = body_json(system_resp).await;
-    assert_eq!(system_json["data"]["id"], ctx.installation_owner);
+    assert_eq!(system_json["data"]["user_id"], ctx.installation_owner);
 
     let user_resp = app
         .clone()
@@ -813,7 +839,7 @@ async fn t12_2_internal_user_routes_work_in_local_mode() {
         .unwrap();
     assert_eq!(user_resp.status(), StatusCode::OK);
     let user_json = body_json(user_resp).await;
-    let user_id = user_json["data"]["id"].as_str().unwrap().to_owned();
+    let user_id = user_json["data"]["user_id"].as_str().unwrap().to_owned();
 
     let update_resp = app
         .clone()
@@ -831,6 +857,6 @@ async fn t12_2_internal_user_routes_work_in_local_mode() {
         .unwrap();
     assert_eq!(renamed_resp.status(), StatusCode::OK);
     let renamed_json = body_json(renamed_resp).await;
-    assert_eq!(renamed_json["data"]["id"], user_id);
+    assert_eq!(renamed_json["data"]["user_id"], user_id);
     assert_eq!(renamed_json["data"]["username"], "renamed-admin");
 }
