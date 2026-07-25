@@ -19,7 +19,9 @@ pub mod commands;
 pub mod desktop;
 
 pub use config::{AppConfig, derive_encryption_key, load_or_create_data_encryption_key};
-pub use desktop::{DesktopKeepAlive, DesktopServer, WebUiStatus};
+pub use desktop::{
+    DesktopKeepAlive, DesktopServer, WebUiAsset, WebUiAssetSource, WebUiStatus,
+};
 pub use nomifun_auth::AuthPolicy;
 pub use router::{
     ChannelMessageLoopComponents, ModuleStates, build_preset_state, build_conversation_state,

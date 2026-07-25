@@ -14,11 +14,23 @@ const MANIFEST_FIELDS: [&str; 4] = [
     "schema",
 ];
 
+#[allow(dead_code)] // Shared by multiple build scripts; desktop uses the explicit-mode variant.
 pub fn embed_frontend_build_id(host_name: &str) {
-    println!("cargo:rerun-if-env-changed={STATIC_WEBUI_FEATURE_ENV}");
     let profile = env::var("PROFILE").unwrap_or_default();
     let static_build_requested =
         profile == "release" || env::var_os(STATIC_WEBUI_FEATURE_ENV).is_some();
+    embed_frontend_build_id_if(host_name, static_build_requested);
+}
+
+/// Embed the exact paired frontend identity when the host will serve static
+/// assets, regardless of Cargo's optimization profile.
+///
+/// A Tauri `build --debug` still enables its production custom protocol and
+/// embeds `frontendDist`; `PROFILE=debug` therefore does *not* imply a Vite/dev
+/// host. The desktop build script passes `!tauri_build::is_dev()` here so fast
+/// no-bundle builds receive the same identity guarantees as release bundles.
+pub fn embed_frontend_build_id_if(host_name: &str, static_build_requested: bool) {
+    println!("cargo:rerun-if-env-changed={STATIC_WEBUI_FEATURE_ENV}");
     if !static_build_requested {
         println!(
             "cargo:warning={host_name} is being built without static WebUI support; ignored ui/dist cannot affect API-only/Vite development"

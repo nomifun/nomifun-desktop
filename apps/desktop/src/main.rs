@@ -16,13 +16,13 @@
 //! │  WebView2/WKWebView/WebKitGTK ── HTTP ──▶ 127.0.0.1:<p>/api │
 //! └────────────────────────────────────────────────────────────┘
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use anyhow::Context;
 use clap::Parser;
-use nomifun_app::{DesktopServer, WebUiStatus};
+use nomifun_app::{DesktopServer, WebUiAsset, WebUiAssetSource, WebUiStatus};
 use tauri::menu::{Menu, MenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{Emitter, Manager};
@@ -100,8 +100,21 @@ pub(crate) fn webui_init_script(port: u16, trust_secret: &str) -> String {
     )
 }
 
+/// Resolve an optional, non-empty `NOMIFUN_WEBUI_DIST` override once. Empty
+/// environment values are treated as unset so they cannot accidentally disable
+/// the canonical embedded frontend.
+fn configured_webui_dist_override() -> Option<PathBuf> {
+    normalize_webui_dist_override(std::env::var_os("NOMIFUN_WEBUI_DIST"))
+}
+
+fn normalize_webui_dist_override(value: Option<std::ffi::OsString>) -> Option<PathBuf> {
+    value
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+}
+
 /// Resolve the bundled SPA directory (`ui/dist`) served to remote browsers by
-/// the LAN listener. Probes a `NOMIFUN_WEBUI_DIST` override, several
+/// the LAN listener. Checks an already-normalized explicit override, then
 /// resource-dir layouts (production bundle), then dev-tree relatives. A
 /// candidate must contain `index.html` to be accepted; `None` means remote
 /// browsers get the API only (logged as a warning).
@@ -134,13 +147,19 @@ fn validate_webui_spa_candidate_with_build_id(
     Ok(true)
 }
 
-fn resolve_webui_spa_dir(app: &tauri::App) -> anyhow::Result<Option<PathBuf>> {
+fn resolve_webui_spa_dir(
+    app: &tauri::App,
+    explicit_override: Option<&Path>,
+) -> anyhow::Result<Option<PathBuf>> {
     let production = !tauri::is_dev();
-    if let Some(p) = std::env::var_os("NOMIFUN_WEBUI_DIST") {
-        let p = PathBuf::from(p);
-        if validate_webui_spa_candidate(&p, production)? {
-            return Ok(Some(p));
+    if let Some(path) = explicit_override {
+        if validate_webui_spa_candidate(path, production)? {
+            return Ok(Some(path.to_path_buf()));
         }
+        anyhow::bail!(
+            "NOMIFUN_WEBUI_DIST={} does not contain a valid WebUI app shell",
+            path.display()
+        );
     }
     let mut candidates: Vec<PathBuf> = Vec::new();
     if let Ok(res) = app.path().resource_dir() {
@@ -159,6 +178,98 @@ fn resolve_webui_spa_dir(app: &tauri::App) -> anyhow::Result<Option<PathBuf>> {
         }
     }
     Ok(None)
+}
+
+/// Snapshot Tauri's production asset resolver into the backend's host-agnostic
+/// WebUI source. A custom-protocol build already embeds `frontendDist` in the
+/// executable, so this is available to release bundles *and* `tauri build
+/// --debug --no-bundle` without relying on a platform-specific resource path.
+///
+/// Every asset is resolved exactly once here. The immutable snapshot uses
+/// ref-counted bytes, bounds decompression work to startup, and lets the Tauri
+/// resolver (which owns an AppManager reference) drop before the backend is put
+/// back into Tauri managed state.
+///
+/// Development deliberately returns `None`: the LAN listener proxies to the
+/// same live Vite server as the desktop webview instead.
+fn resolve_embedded_webui_assets<R: tauri::Runtime>(
+    app: &tauri::App<R>,
+) -> anyhow::Result<Option<WebUiAssetSource>> {
+    if tauri::is_dev() {
+        return Ok(None);
+    }
+
+    let resolver = app.asset_resolver();
+    let asset_keys = resolver
+        .iter()
+        .map(|(key, _)| key.into_owned())
+        .collect::<Vec<_>>();
+    if !asset_keys
+        .iter()
+        .any(|key| key.trim_start_matches('/') == "index.html")
+    {
+        return Ok(None);
+    }
+
+    // Use the LAN listener's HTTP scheme explicitly. During setup no webview
+    // exists yet, so AssetResolver::get() would infer HTTPS from all(empty).
+    let mut assets = Vec::with_capacity(asset_keys.len());
+    let mut manifest_bytes = None;
+    let mut uncompressed_bytes = 0usize;
+    for key in asset_keys {
+        let key = key.trim_start_matches('/').to_owned();
+        let asset = resolver
+            .get_for_scheme(format!("/{key}"), false)
+            .with_context(|| format!("failed to resolve embedded WebUI asset {key}"))?;
+        let asset =
+            WebUiAsset::new(asset.bytes, asset.mime_type).with_csp_header(asset.csp_header);
+        validate_webui_snapshot_asset(&key, &asset)?;
+        uncompressed_bytes = uncompressed_bytes.saturating_add(asset.bytes.len());
+        if key == nomifun_app::bootstrap::UI_BUILD_MANIFEST_FILE {
+            manifest_bytes = Some(asset.bytes.clone());
+        }
+        assets.push((key, asset));
+    }
+
+    // Keep the exact host/frontend pairing invariant for embedded assets too.
+    // The manifest is selected from the exact embedded key set, so a missing
+    // manifest cannot be hidden by Tauri's normal index.html SPA fallback.
+    let expected_build_id = option_env!("NOMIFUN_FRONTEND_BUILD_ID").context(
+        "this production desktop host has no exact frontend build identity; run `bun run build:ui` and rebuild the desktop application",
+    )?;
+    let manifest_bytes = manifest_bytes.context("embedded WebUI build manifest is missing")?;
+    nomifun_app::bootstrap::validate_webui_manifest_bytes(
+        &manifest_bytes,
+        "embedded frontendDist/nomifun-build.json",
+        env!("CARGO_PKG_VERSION"),
+        Some(expected_build_id),
+    )?;
+
+    tracing::info!(
+        asset_count = assets.len(),
+        uncompressed_bytes,
+        "snapshotted embedded WebUI assets"
+    );
+    Ok(Some(WebUiAssetSource::new(assets)))
+}
+
+fn validate_webui_snapshot_asset(key: &str, asset: &WebUiAsset) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        !asset
+            .csp_header
+            .as_deref()
+            .is_some_and(|value| value.contains("'nonce-")),
+        "embedded WebUI asset {key} uses a per-response CSP nonce, which cannot be safely reused from an immutable snapshot; configure a hash-only CSP or disable CSP nonce injection"
+    );
+    Ok(())
+}
+
+fn should_resolve_filesystem_webui(
+    explicit_dist_override: bool,
+    has_dev_frontend: bool,
+    has_embedded_frontend: bool,
+) -> bool {
+    !has_dev_frontend && (explicit_dist_override || !has_embedded_frontend)
 }
 
 /// Data root resolution, in priority order:
@@ -562,6 +673,13 @@ fn reconcile_companion_windows(
     Ok(())
 }
 
+/// Keep Tauri's generated context macro at one expansion site. Production Wry
+/// and the mock-runtime artifact test then consume the exact same generated
+/// assets without defining platform metadata symbols twice in one test binary.
+fn generated_tauri_context<R: tauri::Runtime>() -> tauri::Context<R> {
+    tauri::generate_context!()
+}
+
 fn main() -> std::process::ExitCode {
     // If an ACP agent CLI spawned this shell as an MCP stdio bridge
     // (`current_exe() mcp-requirement-stdio` etc.), run that helper and exit
@@ -625,14 +743,10 @@ fn main() -> std::process::ExitCode {
         ))
         .plugin(tauri_plugin_deep_link::init())
         .setup(move |app| {
-            // Resolve the bundled SPA dir for serving the app shell to remote
-            // browsers over the LAN listener (loopback webview loads via the
-            // Tauri asset protocol and does not need this).
-            let spa_dir = resolve_webui_spa_dir(app)?;
             // In dev, the desktop webview loads the live vite dev server; serving
             // the (stale) bundled `ui/dist` to remote browsers would desync them
             // from the desktop. So in dev the LAN listener proxies the SPA to vite
-            // instead. In production this is None and the bundled dist is served.
+            // instead. In production this is None and embedded assets are served.
             let dev_frontend_url: Option<String> = if tauri::is_dev() {
                 app.config()
                     .build
@@ -643,9 +757,35 @@ fn main() -> std::process::ExitCode {
             } else {
                 None
             };
-            if spa_dir.is_none() && dev_frontend_url.is_none() {
+            let explicit_dist_override = configured_webui_dist_override();
+            // Production custom-protocol builds already contain frontendDist in
+            // the executable. This is the canonical, cross-platform source for
+            // remote WebUI requests and also covers --no-bundle fast builds.
+            // An explicit directory override keeps its historical precedence.
+            let webui_asset_source =
+                if dev_frontend_url.is_none() && explicit_dist_override.is_none() {
+                    resolve_embedded_webui_assets(app)?
+                } else {
+                    None
+                };
+            // Only probe platform resource/cwd layouts when explicitly requested
+            // or when an older/custom host has no embedded frontend. A stale
+            // sidecar must never block a valid canonical embedded distribution.
+            let spa_dir = if should_resolve_filesystem_webui(
+                explicit_dist_override.is_some(),
+                dev_frontend_url.is_some(),
+                webui_asset_source.is_some(),
+            ) {
+                resolve_webui_spa_dir(app, explicit_dist_override.as_deref())?
+            } else {
+                None
+            };
+            if spa_dir.is_none()
+                && dev_frontend_url.is_none()
+                && webui_asset_source.is_none()
+            {
                 tracing::warn!(
-                    "WebUI SPA directory not found — remote browsers would receive the API but no app shell"
+                    "WebUI app shell not found — remote browsers would receive the API but no app shell"
                 );
             }
 
@@ -664,7 +804,14 @@ fn main() -> std::process::ExitCode {
                             .map_err(|e| anyhow::anyhow!("failed to build backend runtime: {e}"))?;
                         rt.block_on(async move {
                             let (server, _keep_alive) =
-                                DesktopServer::start(&cli, &merged_path, spa_dir, dev_frontend_url).await?;
+                                DesktopServer::start(
+                                    &cli,
+                                    &merged_path,
+                                    spa_dir,
+                                    dev_frontend_url,
+                                    webui_asset_source,
+                                )
+                                .await?;
                             // Unblock the main thread's window build.
                             let _ = boot_tx.send(server.clone());
                             // Forward LAN status changes to the renderer. Holding
@@ -878,7 +1025,7 @@ fn main() -> std::process::ExitCode {
                 _ => {}
             }
         })
-        .build(tauri::generate_context!())
+        .build(generated_tauri_context())
         .expect("error while building tauri application");
 
     // `Builder::run(context)` installs an empty app-level event callback. Build
@@ -926,6 +1073,71 @@ mod tests {
         let error = validate_webui_spa_candidate_with_build_id(dist.path(), true, None)
             .expect_err("an unpaired desktop host must never serve production assets");
         assert!(format!("{error:#}").contains("exact frontend build identity"));
+    }
+
+    #[test]
+    fn embedded_webui_skips_stale_filesystem_candidates() {
+        assert!(!should_resolve_filesystem_webui(false, false, true));
+    }
+
+    #[test]
+    fn empty_webui_dist_override_does_not_disable_embedded_assets() {
+        assert!(normalize_webui_dist_override(Some("".into())).is_none());
+        assert_eq!(
+            normalize_webui_dist_override(Some("custom-dist".into())),
+            Some(PathBuf::from("custom-dist"))
+        );
+    }
+
+    #[test]
+    fn embedded_webui_snapshot_rejects_reusable_csp_nonces() {
+        let asset = WebUiAsset::new(b"<html></html>".to_vec(), "text/html")
+            .with_csp_header(Some("script-src 'nonce-1234'".to_string()));
+        let error = validate_webui_snapshot_asset("index.html", &asset)
+            .expect_err("per-response nonces cannot be cached for process lifetime");
+        assert!(format!("{error:#}").contains("per-response CSP nonce"));
+    }
+
+    #[test]
+    fn generated_custom_protocol_context_contains_a_valid_embedded_webui_snapshot() {
+        if tauri::is_dev() {
+            // Normal desktop tests intentionally use Vite/no embedded assets.
+            // The three-platform generated-context gate sets the requirement
+            // variable and runs this test with:
+            //   cargo test -p nomifun-desktop --features tauri/custom-protocol \
+            //     generated_custom_protocol_context_contains_a_valid_embedded_webui_snapshot
+            assert!(
+                std::env::var_os("NOMIFUN_REQUIRE_EMBEDDED_WEBUI_TEST").is_none(),
+                "embedded WebUI gate requires tauri/custom-protocol, but Tauri is still in dev mode"
+            );
+            return;
+        }
+
+        let app = tauri::test::mock_builder()
+            .build(generated_tauri_context())
+            .expect("build Tauri mock app with generated production context");
+        let source = resolve_embedded_webui_assets(&app)
+            .expect("validate and snapshot generated frontendDist");
+        assert!(
+            source.is_some(),
+            "custom-protocol context must embed an index.html app shell"
+        );
+    }
+
+    #[test]
+    fn explicit_webui_dist_keeps_precedence_in_production() {
+        assert!(should_resolve_filesystem_webui(true, false, true));
+    }
+
+    #[test]
+    fn filesystem_webui_remains_a_fallback_when_embedded_assets_are_missing() {
+        assert!(should_resolve_filesystem_webui(false, false, false));
+    }
+
+    #[test]
+    fn vite_development_never_probes_stale_webui_filesystem_assets() {
+        assert!(!should_resolve_filesystem_webui(false, true, false));
+        assert!(!should_resolve_filesystem_webui(true, true, false));
     }
 
     #[tokio::test]
