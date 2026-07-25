@@ -457,3 +457,61 @@ async fn webui_enable_preserves_user_set_username_and_reports_persisted_state() 
     assert_eq!(after.admin_username, "custom_admin");
     assert!(after.password_set, "password must remain set after stopping the LAN listener");
 }
+
+/// Browser login contract regression: the desktop-generated credentials must
+/// authenticate through the REAL LAN listener when the request body matches
+/// the strict `/login` schema used by the bundled WebUI.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn webui_browser_login_contract_accepts_generated_credentials() {
+    use clap::Parser as _;
+
+    let tmp = tempfile::TempDir::new().unwrap();
+    let data_dir = tmp.path().to_string_lossy().into_owned();
+    let spa_dir = tmp.path().join("spa");
+    std::fs::create_dir_all(&spa_dir).unwrap();
+    std::fs::write(spa_dir.join("index.html"), "<!doctype html><title>Nomi</title>").unwrap();
+
+    let cli = nomifun_app::cli::Cli::parse_from(["nomifun-desktop-test", "--data-dir", &data_dir]);
+    let merged_path = std::env::var("PATH").unwrap_or_default();
+    let (server, _keep) =
+        nomifun_app::DesktopServer::start(&cli, &merged_path, Some(spa_dir), None, None)
+            .await
+            .expect("DesktopServer::start failed");
+
+    let status = server.start_lan().await;
+    assert!(status.running, "start_lan failed: {:?}", status.error);
+    let password = status
+        .initial_password
+        .as_deref()
+        .expect("first LAN enable should expose the generated password once");
+    let login_url = format!("http://127.0.0.1:{}/login", status.port);
+
+    let response = local_http_client()
+        .post(login_url)
+        .json(&serde_json::json!({
+            "username": status.admin_username,
+            "password": password,
+        }))
+        .send()
+        .await
+        .expect("browser login request failed");
+    let response_status = response.status();
+    let response_body: serde_json::Value = response
+        .json()
+        .await
+        .expect("login response should be JSON");
+
+    server.stop_lan().await;
+
+    assert_eq!(
+        response_status,
+        reqwest::StatusCode::OK,
+        "generated credentials should authenticate through LAN: {response_body}"
+    );
+    assert_eq!(response_body["success"], true);
+    assert_eq!(response_body["user"]["username"], status.admin_username);
+    assert!(
+        response_body["token"].as_str().is_some_and(|token| !token.is_empty()),
+        "successful login should return a session token"
+    );
+}
