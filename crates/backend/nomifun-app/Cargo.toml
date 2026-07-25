@@ -259,6 +259,8 @@ anyhow.workspace = true
 async-trait.workspace = true
 # Network-interface enumeration for desktop LAN-IP detection (WebUI remote access).
 if-addrs = "0.13"
+# Decode request paths before matching the immutable embedded WebUI asset map.
+percent-encoding = "2"
 
 # Computer-use discrete-tool MCP bridge (`mcp-computer-stdio`) — facade over
 # ComputerTool. Optional; only the `computer-use` feature pulls the native

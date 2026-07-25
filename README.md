@@ -415,6 +415,7 @@ fails on the webkit2gtk link — build on the target architecture's machine/cont
 | `bun run dev:ui` | 仅启动前端开发服务器（纯 vite，无后端） |
 | **构建（出制品）** | |
 | `bun run build` | 为当前操作系统打桌面安装包 |
+| `bun run build:fast` | 快速构建可直接运行的 debug 桌面二进制（不打安装包） |
 | `bun run build:win` | 打 Windows 安装包（NSIS），汇总到 dist/desktop/ |
 | `bun run build:mac` | 打 macOS 安装包（.dmg），汇总到 dist/desktop/ |
 | `bun run build:linux` | 打 Linux 安装包（.deb/.AppImage/.rpm），汇总到 dist/desktop/ |
@@ -430,6 +431,9 @@ fails on the webkit2gtk link — build on the target architecture's machine/cont
 | **测试** | |
 | `bun run test` | 运行全部 Rust 测试（含 doctest） |
 | `bun run test:fast` | 用 nextest 快速跑 Rust 测试（日常） |
+| `bun run test:crate` | 运行单个 Rust crate：bun run test:crate <crate> [cargo 参数] |
+| `bun run test:core` | 运行不含 desktop-only feature 的 Rust workspace |
+| `bun run test:desktop` | 运行桌面壳测试，不监听或打包 ui/dist 资源 |
 | **静态检查 / 门禁** | |
 | `bun run check:process-runtime-boundary` | Enforce the supervised process runtime boundary and exact hand-off allowlist. |
 | `bun run check:agent-vocabulary` | Enforce AgentExecution as the only active collaboration aggregate and permit only exact migration fences. |
