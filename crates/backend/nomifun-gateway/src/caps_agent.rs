@@ -847,7 +847,7 @@ mod tests {
     fn set_enabled_accepts_only_canonical_agent_ids() {
         let canonical_id = AgentId::new().into_string();
         let parsed: AgentSetEnabledParams =
-            serde_json::from_value(json!({ "agent_id": canonical_id })).unwrap();
+            serde_json::from_value(json!({ "agent_id": canonical_id, "enabled": true })).unwrap();
         assert_eq!(parsed.agent_id.as_str(), canonical_id);
 
         for invalid_id in [

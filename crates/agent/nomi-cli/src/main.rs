@@ -277,7 +277,6 @@ async fn main() -> anyhow::Result<()> {
 
     // Bootstrap engine with full feature initialization
     let mut bootstrap = AgentBootstrap::new(config, &cwd, output.clone());
-
     if let Some(resume_id) = &cli.resume {
         let cfg = bootstrap.config();
         let session_mgr = session::SessionManager::new(
@@ -485,7 +484,6 @@ async fn run_json_stream_mode(
     // of the construction-time auto_approve snapshot.
     let mut bootstrap =
         AgentBootstrap::new(config, cwd, output.clone()).approval_manager(approval_manager.clone());
-
     if let Some(resume_id) = &resume {
         let cfg = bootstrap.config();
         let session_mgr = session::SessionManager::new(

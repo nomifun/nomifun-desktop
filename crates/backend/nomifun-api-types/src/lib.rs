@@ -221,7 +221,9 @@ pub use system::{
     UpdateSettingsRequest,
 };
 pub use mcp_bridge::{
-    BrowserMcpConfig, ComputerMcpConfig, GATEWAY_CALL_TOOL_OPERATION,
+    BROWSER_CAPABILITY_DOMAIN, BROWSER_MCP_TOOL_NAMES, BrowserCapabilityClaims,
+    BrowserCapabilityOperation, BrowserCapabilityScope, BrowserCapabilitySurface,
+    BrowserMcpChildConfig, BrowserMcpConfig, ComputerMcpConfig, GATEWAY_CALL_TOOL_OPERATION,
     GATEWAY_CAPABILITY_DOMAIN, GATEWAY_CREATE_CONVERSATION_TOOL,
     GATEWAY_LIST_TOOLS_OPERATION,
     GatewayCapabilityClaims, GatewayCapabilityScope, GatewayMcpChildConfig,
@@ -232,7 +234,7 @@ pub use mcp_bridge::{
     REQUIREMENT_CAPABILITY_DOMAIN, REQUIREMENT_COMPLETE_TOOL,
     REQUIREMENT_UPDATE_STATUS_TOOL, RequirementCapabilityClaims,
     RequirementCapabilityScope, RequirementMcpChildConfig, RequirementMcpConfig,
-    ScopedMcpChildBootstrap, ScopedMcpChildConfig,
+    ScopedMcpChildBootstrap, ScopedMcpChildConfig, browser_tool_operation,
 };
 pub use terminal::{
     CreateTerminalRequest, TerminalExitEvent, TerminalInputRequest, TerminalOutputEvent,

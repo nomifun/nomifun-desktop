@@ -2796,17 +2796,26 @@ mod set_config_tests {
 
     /// Emits one tool call every turn forever — used to verify the runaway-loop
     /// safety net. With `max_turns: None` the engine must still terminate.
-    struct LoopProvider;
+    ///
+    /// Provider tool-use ids are scoped to the root user turn and must be
+    /// unique across rounds. Keep this fixture focused on the stagnation guard
+    /// rather than accidentally exercising the protocol-violation path.
+    struct LoopProvider {
+        calls: std::sync::atomic::AtomicUsize,
+    }
     #[async_trait::async_trait]
     impl LlmProvider for LoopProvider {
         async fn stream(
             &self,
             _: &LlmRequest,
         ) -> Result<tokio::sync::mpsc::Receiver<LlmEvent>, ProviderError> {
+            let call = self
+                .calls
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             let (tx, rx) = tokio::sync::mpsc::channel(2);
             let _ = tx
                 .send(LlmEvent::ToolUse {
-                    id: "loop".to_string(),
+                    id: format!("loop-{call}"),
                     name: "noop".to_string(),
                     input: serde_json::json!({}),
                     extra: None,
@@ -3885,7 +3894,9 @@ mod set_config_tests {
         // at the stagnation guard well before the generic 200-turn safety net.
         let mut engine = make_engine("safety-net-model");
         engine.max_turns = None;
-        engine.provider = Arc::new(LoopProvider);
+        engine.provider = Arc::new(LoopProvider {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+        });
         let tool_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         engine.tools.register(Box::new(ConstantResultTool {
             name: "noop",

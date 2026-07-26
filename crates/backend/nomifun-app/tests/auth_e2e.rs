@@ -559,6 +559,18 @@ async fn installation_control_plane_uses_canonical_owner_identity() {
     // Secondary users retain useful model-only scheduling. The service keeps
     // provider/model selection but strips every process/path/preset field, and
     // the skill subresource remains installation-owner only.
+    sqlx::query(
+        "INSERT INTO providers (\
+            provider_id, platform, name, base_url, api_key_encrypted, models, enabled, \
+            capabilities, created_at, updated_at\
+         ) VALUES (?, 'openai', 'model-only-safe', \
+                   'https://example.invalid', 'encrypted', \
+                   '[\"model-safe\"]', 1, '[]', 1, 1)",
+    )
+    .bind("0190f5fe-7c00-7a00-8000-000000000015")
+    .execute(services.database.pool())
+    .await
+    .unwrap();
     let cron = app
         .clone()
         .oneshot(post_json_with_csrf(
@@ -572,9 +584,9 @@ async fn installation_control_plane_uses_canonical_owner_identity() {
                 "created_by":"user",
                 "execution_mode":"new_conversation",
                 "agent_config":{
-                    "backend":"0190f5fe-7c00-7a00-8000-000000000015",
+                    "provider_id":"0190f5fe-7c00-7a00-8000-000000000015",
                     "name":"Nomi",
-                    "model_id":"model-safe",
+                    "model":"model-safe",
                     "cli_path":"/bin/sh",
                     "workspace":"/",
                     "mode":"yolo",
@@ -591,10 +603,10 @@ async fn installation_control_plane_uses_canonical_owner_identity() {
     let cron_id = cron["data"]["cron_job_id"].as_str().unwrap();
     let cron_config = &cron["data"]["metadata"]["agent_config"];
     assert_eq!(
-        cron_config["backend"],
+        cron_config["provider_id"],
         "0190f5fe-7c00-7a00-8000-000000000015"
     );
-    assert_eq!(cron_config["model_id"], "model-safe");
+    assert_eq!(cron_config["model"], "model-safe");
     for key in ["cli_path", "workspace", "mode", "config_options", "preset_id"] {
         assert!(
             cron_config.get(key).is_none() || cron_config[key].is_null(),

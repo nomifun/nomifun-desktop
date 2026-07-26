@@ -234,7 +234,10 @@ async fn status_renews_the_visible_session_activity_timestamp() {
 
 #[tokio::test]
 async fn process_output_renews_a_session_even_when_nobody_polls_it() {
-    let lease = Duration::from_millis(120);
+    // Keep this as a real-process wiring smoke, but leave enough scheduler
+    // margin for the Windows blocking pipe reader under a parallel test load.
+    // Deterministic callback/lease semantics are covered by unit tests.
+    let lease = Duration::from_millis(600);
     let supervisor = ProcessSupervisor::new(SupervisorConfig {
         max_sessions: 1,
         reaper_interval: Duration::from_millis(10),
@@ -242,13 +245,13 @@ async fn process_output_renews_a_session_even_when_nobody_polls_it() {
     let handle = supervisor
         .start(helper_request(
             owner(Uuid::now_v7(), Uuid::now_v7()),
-            string_args(&["emit-delayed", "8", "40"]),
+            string_args(&["emit-delayed", "12", "100"]),
             lease,
         ))
         .await
         .expect("periodic-output helper should start");
 
-    tokio::time::sleep(Duration::from_millis(260)).await;
+    tokio::time::sleep(Duration::from_millis(900)).await;
     let still_owned = supervisor
         .status(&handle.owner, &handle.session_id)
         .await

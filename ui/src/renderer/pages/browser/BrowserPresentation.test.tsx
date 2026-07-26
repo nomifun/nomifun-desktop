@@ -10,8 +10,9 @@ import { createInstance } from 'i18next';
 import React from 'react';
 import { I18nextProvider, initReactI18next } from 'react-i18next';
 import { renderToStaticMarkup } from 'react-dom/server';
-import type { IBrowserLane } from '@/common/browser/browserTypes';
+import type { IBrowserLane, IBrowserOverview } from '@/common/browser/browserTypes';
 import enBrowser from '../../services/i18n/locales/en-US/browser.json';
+import BrowserHostDiagnostics from './BrowserHostDiagnostics';
 import BrowserInventoryTree from './BrowserInventoryTree';
 import BrowserLaneDetails from './BrowserLaneDetails';
 import BrowserPageHeader from './BrowserPageHeader';
@@ -178,6 +179,58 @@ describe('Browser management presentation', () => {
     expect(laneBHtml.includes('Lane A active tab')).toBe(false);
   });
 
+  test('treats active_tab_id as authoritative over stale tab flags and lane URL', () => {
+    const html = renderBrowser(
+      <BrowserInventoryTree
+        groups={[
+          group('conversation-tabs', 'Tabs conversation', [
+            lane({
+              lane_id: 'lane-authoritative-tab',
+              lane_name: 'Authoritative tab lane',
+              url: 'https://stale-lane.example/old',
+              active_tab_id: 'fresh-tab',
+              tabs: [
+                {
+                  tab_id: 'stale-tab',
+                  title: 'Stale active flag',
+                  url: 'https://stale-tab.example/old',
+                  active: true,
+                },
+                {
+                  tab_id: 'fresh-tab',
+                  title: 'Fresh authoritative tab',
+                  url: 'https://fresh-tab.example/current',
+                  active: false,
+                },
+              ],
+            }),
+          ]),
+        ]}
+        selectedLaneId='lane-authoritative-tab'
+        onSelectLane={() => undefined}
+        onCloseLane={() => undefined}
+        onCloseConversation={() => undefined}
+      />
+    );
+
+    const tabListStart = html.indexOf('data-browser-lane-tabs="lane-authoritative-tab"');
+    const laneHeader = html.slice(0, tabListStart);
+    expect(tabListStart).toBeGreaterThan(-1);
+    expect(laneHeader.includes('fresh-tab.example')).toBe(true);
+    expect(laneHeader.includes('stale-lane.example')).toBe(false);
+    expect(
+      html.includes(
+        'data-browser-tab-id="stale-tab" data-browser-tab-active="false" data-browser-tab-crashed="false"'
+      )
+    ).toBe(true);
+    expect(
+      html.includes(
+        'data-browser-tab-id="fresh-tab" data-browser-tab-active="true" data-browser-tab-crashed="false"'
+      )
+    ).toBe(true);
+    expect(html.match(/>Current</g)).toHaveLength(1);
+  });
+
   test('keeps tab rows presentational so lane selection remains scoped to the parent lane', () => {
     const tabMapStart = inventoryTreeSource.indexOf('{lane.tabs.map((tab) => {');
     const tabMapEnd = inventoryTreeSource.indexOf(
@@ -229,6 +282,8 @@ describe('Browser management presentation', () => {
         refreshing={false}
         closingAll={false}
         hasLanes
+        canCloseAll
+        closeAllLabel='Close all globally'
         onRefresh={() => undefined}
         onCloseAll={() => undefined}
       />
@@ -237,8 +292,36 @@ describe('Browser management presentation', () => {
     expect(html.includes('Critical pressure')).toBe(true);
     expect(html.includes('3 running')).toBe(true);
     expect(html.includes('5 queued')).toBe(true);
-    expect(html.includes('>Close all<')).toBe(true);
+    expect(html.includes('>Close all globally<')).toBe(true);
     expect(html.includes('disabled')).toBe(false);
+  });
+
+  test('hides installation-wide close-all unless overview grants it explicitly', () => {
+    const renderHeader = (canCloseAll: boolean) =>
+      renderBrowser(
+        <BrowserPageHeader
+          runningCount={1}
+          queuedCount={0}
+          refreshing={false}
+          closingAll={false}
+          hasLanes
+          canCloseAll={canCloseAll}
+          closeAllLabel='Owner-only close all'
+          onRefresh={() => undefined}
+          onCloseAll={() => undefined}
+        />
+      );
+
+    expect(renderHeader(true).includes('Owner-only close all')).toBe(true);
+    const deniedHtml = renderHeader(false);
+    expect(deniedHtml.includes('Owner-only close all')).toBe(false);
+    expect(deniedHtml.includes('Refresh')).toBe(true);
+    expect(deniedHtml.includes('1 running')).toBe(true);
+  });
+
+  test('wires Browser page close-all visibility to normalized overview capability', () => {
+    expect(browserPageSource.includes('resolveBrowserOverviewCapabilities(overview)')).toBe(true);
+    expect(browserPageSource.includes('canCloseAll={canCloseAll}')).toBe(true);
   });
 
   test('keeps lane management visible when the embedded stream has failed', () => {
@@ -259,5 +342,48 @@ describe('Browser management presentation', () => {
 
     expect(html.includes('viewer_stream_failed: The embedded viewer disconnected.')).toBe(true);
     expect(html.includes('>Close lane<')).toBe(true);
+  });
+
+  test('renders Host diagnostics collapsed with safe resource metadata', () => {
+    const overview: IBrowserOverview = {
+      supported: true,
+      enabled: true,
+      running_lanes: 2,
+      queued_lanes: 1,
+      total_lanes: 3,
+      pressure_state: 'pressured',
+      capacity: {
+        active: 2,
+        queued: 1,
+        max_active: 8,
+        max_open_lanes: 32,
+        recommended_concurrency: 4,
+        reason_code: 'browser_memory_pressure',
+      },
+      hosts: [
+        {
+          host_id: 'host-primary',
+          state: 'running',
+          epoch: 7,
+          identity_mode: 'primary',
+          lane_count: 2,
+          rss_bytes: 64 * 1024 * 1024,
+        },
+      ],
+      updated_at: 1_700_000_000_000,
+    };
+
+    const html = renderBrowser(<BrowserHostDiagnostics overview={overview} />);
+
+    expect(html.includes('<details')).toBe(true);
+    expect(html.includes(' open')).toBe(false);
+    expect(html.includes('Host diagnostics')).toBe(true);
+    expect(html.includes('host-primary')).toBe(true);
+    expect(html.includes('64 MiB')).toBe(true);
+    expect(html.includes('Primary')).toBe(true);
+    expect(html.includes('browser_memory_pressure')).toBe(true);
+    expect(html.includes('cdp')).toBe(false);
+    expect(html.includes('profile')).toBe(false);
+    expect(html.includes('debugging')).toBe(false);
   });
 });

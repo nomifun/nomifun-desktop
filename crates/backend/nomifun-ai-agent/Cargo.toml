@@ -47,14 +47,10 @@ nomi-mcp.workspace = true
 nomi-providers.workspace = true
 nomi-memory.workspace = true
 nomi-redact.workspace = true
-# P3-K2: rendering page-fetch backend (BrowserFetcher) for knowledge URL sources.
-# Optional + gated behind the `browser-use` feature — this is the ONE place the
-# (agent-layer) browser engine is bridged into the (backend-layer) knowledge
-# `PageFetcher` trait. The knowledge crate itself NEVER depends on the engine
-# (P3 anti-cycle decision ②); the bridge lives here because this crate already
-# depends on `nomifun-knowledge` (the trait) and is the natural late-wire home
-# (same layering as `LiveKnowledgeCompleter`).
-nomi-browser-engine = { workspace = true, optional = true }
+# Rendering page-fetch backend for knowledge URL sources. This adapter consumes
+# the application-owned Browser Session Hub while the knowledge crate remains
+# independent of the browser platform.
+nomifun-browser-platform = { workspace = true, optional = true }
 # Phase D: the facade `BrowserApprovalGate` trait — the desktop `DesktopApprovalGate`
 # impl (Confirmation + ToolApprovalManager) lives in this crate and is threaded into
 # the native BrowserTool via `AgentBootstrap::approval_gate`. Optional (browser-use only).
@@ -86,7 +82,7 @@ test-support = []
 # Desktop control tools for the nomi engine (desktop host only).
 computer-use = ["nomi-agent/computer-use"]
 # Browser-automation tools for the nomi engine (desktop host only).
-browser-use = ["nomi-agent/browser-use", "dep:nomi-browser-engine", "dep:nomi-browser"]
+browser-use = ["nomi-agent/browser-use", "dep:nomi-browser", "dep:nomifun-browser-platform"]
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["full"] }

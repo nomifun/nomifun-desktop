@@ -28,8 +28,19 @@ const DESCRIPTION: &str = concat!(
 );
 
 fn local_delegate_json_schema() -> JsonSchema {
-    serde_json::to_value(schemars::schema_for!(ParallelDelegationRequest))
-        .expect("embedded delegation schema is serializable")
+    let schema = serde_json::to_value(schemars::schema_for!(ParallelDelegationRequest))
+        .expect("embedded delegation schema is serializable");
+    let mut schema = match schema {
+        Value::Object(object) => object,
+        _ => serde_json::Map::new(),
+    };
+    schema.remove("$schema");
+    schema.remove("title");
+    schema.entry("type".to_owned())
+        .or_insert_with(|| json!("object"));
+    schema.entry("properties".to_owned())
+        .or_insert_with(|| json!({}));
+    JsonSchema::Object(schema)
 }
 
 /// Embedded deployment of the shared `nomi_delegate` Agent Execution request.

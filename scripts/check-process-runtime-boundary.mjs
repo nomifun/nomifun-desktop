@@ -39,6 +39,7 @@ const REVIEWED_EXTERNAL_OWNERSHIP = new Map([
   ],
 ]);
 const HAND_OFF_ALLOWLIST = new Set([
+  'crates/agent/nomi-browser-engine/src/backend/cdp.rs',
   'crates/agent/nomi-computer/src/launch.rs',
   'crates/backend/nomifun-shell/src/opener.rs',
   'crates/shared/nomi-process-runtime/src/command_builder.rs',
@@ -836,6 +837,14 @@ function selfTest() {
         'fn launch() { open::that_detached("target"); command.hand_off(); }\n',
     }),
     'exact hand-off allowlist rejected an approved path',
+  );
+  assertNoViolation(
+    base.concat({
+      path: 'crates/agent/nomi-browser-engine/src/backend/cdp.rs',
+      source:
+        'fn retain_cleanup_authority(cleanup: &Cleanup) { cleanup.hand_off(); }\n',
+    }),
+    'browser construction cleanup hand-off was not exact-allowlisted',
   );
   assertNoViolation(
     base.concat({

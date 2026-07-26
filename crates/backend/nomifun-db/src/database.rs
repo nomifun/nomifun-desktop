@@ -21,6 +21,17 @@ const BUSY_TIMEOUT_MS: u64 = 5000;
 static DB_MIGRATOR: Migrator = sqlx::migrate!();
 const V3_BASELINE_MIGRATION_VERSION: i64 = 1;
 
+/// Compatibility result for a persisted sqlx migration lineage.
+///
+/// A strict prefix is safe to hand to the embedded migrator for an incremental
+/// upgrade. Anything else (a gap, unknown version, failed row, or checksum
+/// mismatch) is unsupported and must fail closed before writable startup.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MigrationLineageStatus {
+    Current,
+    UpgradeRequired,
+}
+
 /// Wraps a SQLite connection pool with lifecycle management.
 #[derive(Clone, Debug)]
 pub struct Database {
@@ -129,7 +140,7 @@ pub async fn open_database_for_backup(path: &Path) -> Result<Database, DbError> 
 }
 
 async fn validate_restorable_database_contract(pool: &SqlitePool) -> Result<(), DbError> {
-    validate_exact_v3_migration_lineage(pool).await?;
+    validate_current_migration_lineage(pool).await?;
     crate::id_schema_contract::validate_id_schema_contract(pool).await?;
     crate::id_schema_contract::validate_id_data_contract(pool).await?;
 
@@ -173,7 +184,28 @@ async fn validate_restorable_database_contract(pool: &SqlitePool) -> Result<(), 
     Ok(())
 }
 
-async fn validate_exact_v3_migration_lineage(pool: &SqlitePool) -> Result<(), DbError> {
+/// Require the complete migration lineage shipped with this build.
+///
+/// Backup and restore artifacts must already be Current; they are preservation
+/// boundaries and must not be mutated as part of validation.
+pub async fn validate_current_migration_lineage(pool: &SqlitePool) -> Result<(), DbError> {
+    match inspect_supported_migration_lineage(pool).await? {
+        MigrationLineageStatus::Current => Ok(()),
+        MigrationLineageStatus::UpgradeRequired => Err(DbError::Init(
+            "database migration lineage is a supported prefix but is not fully upgraded".into(),
+        )),
+    }
+}
+
+/// Validate that the applied migration rows are an exact, non-empty prefix of
+/// the migrations embedded in this binary.
+///
+/// Startup may admit an older supported prefix so [`init_database`] can apply
+/// the missing suffix. This still rejects unknown versions, gaps, failed rows,
+/// and checksum mismatches before the database is opened for migration.
+pub async fn inspect_supported_migration_lineage(
+    pool: &SqlitePool,
+) -> Result<MigrationLineageStatus, DbError> {
     let expected = DB_MIGRATOR.iter().collect::<Vec<_>>();
     if expected
         .first()
@@ -188,15 +220,21 @@ async fn validate_exact_v3_migration_lineage(pool: &SqlitePool) -> Result<(), Db
         .fetch_all(pool)
         .await
         .map_err(DbError::Query)?;
-    if rows.len() != expected.len() {
+    if rows.is_empty() {
         return Err(DbError::Init(format!(
-            "database migration lineage must contain exactly {} embedded rows, found {}",
-            expected.len(),
+            "database migration lineage must begin with embedded migration {}",
+            V3_BASELINE_MIGRATION_VERSION,
+        )));
+    }
+    if rows.len() > expected.len() {
+        return Err(DbError::Init(format!(
+            "database migration lineage contains {} rows but this binary embeds only {}",
             rows.len(),
+            expected.len(),
         )));
     }
 
-    for (row, expected) in rows.iter().zip(expected) {
+    for (row, expected) in rows.iter().zip(expected.iter()) {
         let version: i64 = row.try_get("version").map_err(DbError::Query)?;
         let success: bool = row.try_get("success").map_err(DbError::Query)?;
         let checksum: Vec<u8> = row.try_get("checksum").map_err(DbError::Query)?;
@@ -210,7 +248,11 @@ async fn validate_exact_v3_migration_lineage(pool: &SqlitePool) -> Result<(), Db
             )));
         }
     }
-    Ok(())
+    Ok(if rows.len() == expected.len() {
+        MigrationLineageStatus::Current
+    } else {
+        MigrationLineageStatus::UpgradeRequired
+    })
 }
 
 /// Initialize a file-backed SQLite database.

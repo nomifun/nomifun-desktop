@@ -1275,6 +1275,18 @@ impl AgentExecutionEngine {
     ) -> Result<AgentExecution, AppError> {
         let current = self.detail(owner_id, execution_id).await?;
         require_status(current.execution.status, &[AgentExecutionStatus::Paused])?;
+        if current.attempts.iter().any(|attempt| {
+            attempt.status == ExecutionAttemptStatus::WaitingInput
+                && attempt
+                    .runtime_state
+                    .as_ref()
+                    .is_some_and(|state| state.get("review_blocked").is_some())
+        }) {
+            return Err(AppError::Conflict(
+                "this Agent Execution contains an interrupted turn blocked for manual review and cannot be resumed"
+                    .to_owned(),
+            ));
+        }
         let resumed_status = if current
             .attempts
             .iter()
