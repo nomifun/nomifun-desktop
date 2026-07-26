@@ -1,0 +1,170 @@
+{
+  "sider": {
+    "label": "Browser",
+    "counts": "{{running}} running, {{queued}} queued",
+    "tooltip": "{{label}} · {{counts}}"
+  },
+  "page": {
+    "title": "Browser management",
+    "description": "Inspect, take over, and close browser lanes owned by Agent runtimes.",
+    "runningCount": "{{count}} running",
+    "queuedCount": "{{count}} queued",
+    "pressure": "{{state}} pressure",
+    "refresh": "Refresh",
+    "closeAll": "Close all",
+    "inventoryUnavailable": "Browser inventory is temporarily unavailable: {{error}}",
+    "retry": "Retry",
+    "capabilityUnavailable": "Browser management is not available in this runtime.",
+    "loading": "Loading browser lanes…",
+    "empty": "Browser lanes appear here when an Agent first uses Browser Use.",
+    "inventoryAria": "Browser lane inventory",
+    "selectLane": "Select a browser lane to inspect it."
+  },
+  "close": {
+    "laneSuccess": "Browser lane closed. The conversation and execution remain available.",
+    "laneActiveTitle": "Close a browser lane with active work?",
+    "laneActiveContent": "This cancels the lane's queued and active browser work. The conversation and Agent execution remain alive.",
+    "laneAction": "Close lane",
+    "keepOpen": "Keep open",
+    "conversationTitle": "Close all browser lanes for this conversation?",
+    "conversationContent": "{{count}} browser lanes will be closed and active browser operations will be cancelled. The conversation and executions remain alive.",
+    "conversationContent_one": "{{count}} browser lane will be closed and its active browser operations will be cancelled. The conversation and execution remain alive.",
+    "conversationContent_other": "{{count}} browser lanes will be closed and active browser operations will be cancelled. The conversation and executions remain alive.",
+    "conversationAction": "Close lanes",
+    "conversationSuccess": "Conversation browser lanes closed.",
+    "allTitle": "Close all managed browsers?",
+    "allContent": "Every queued and running browser lane will be closed. Conversations and Agent executions remain alive.",
+    "allAction": "Close all browsers",
+    "cancel": "Cancel",
+    "allSuccess": "All managed browser lanes closed."
+  },
+  "tree": {
+    "noActivePage": "No active page",
+    "current": "Current",
+    "summary": "{{running}} running · {{queued}} queued",
+    "closeConversationAria": "Close all browser lanes for {{name}}",
+    "laneFallback": "Browser lane",
+    "queuePosition": "queue #{{position}}",
+    "closeLaneAria": "Close {{name}}"
+  },
+  "fallback": {
+    "clusterNode": "Cluster node {{id}}",
+    "attempt": "Attempt {{id}}",
+    "runtime": "Runtime {{id}}",
+    "execution": "Execution {{id}}",
+    "owner": "Owner",
+    "laneOwner": "Lane owner",
+    "conversation": "Conversation {{id}}",
+    "unassigned": "Unassigned"
+  },
+  "details": {
+    "laneFallback": "Browser lane",
+    "controlState": "{{state}} control",
+    "closeLane": "Close lane",
+    "waitingCapacity": "Waiting for browser capacity",
+    "queuePositionInline": "queue position {{position}}",
+    "recommendedConcurrency": "recommended concurrency {{count}}",
+    "title": "Lane details",
+    "sharedLiveIdentity": "shared live identity",
+    "fields": {
+      "identity": "Identity",
+      "lifecycle": "Lifecycle",
+      "control": "Control",
+      "queuePosition": "Queue position",
+      "capacityReason": "Capacity reason",
+      "resourceEstimate": "Resource estimate",
+      "activePageTitle": "Active page title",
+      "activeUrl": "Active URL",
+      "lastActivity": "Last activity",
+      "created": "Created",
+      "owner": "Owner",
+      "runtime": "Runtime",
+      "execution": "Execution",
+      "attempt": "Attempt",
+      "clusterNode": "Cluster node",
+      "tabs": "Tabs"
+    }
+  },
+  "viewer": {
+    "errors": {
+      "streamFailed": "Viewer stream failed.",
+      "connectionFailed": "The embedded viewer connection failed. Lane management remains available.",
+      "disconnected": "The embedded viewer disconnected. You can retry without affecting the browser lane.",
+      "startFailed": "Unable to start the embedded viewer: {{error}}"
+    },
+    "queuedUnavailable": "The viewer will become available when this lane receives capacity.",
+    "stateUnavailable": "No live viewer is available for this lane state.",
+    "back": "Back",
+    "forward": "Forward",
+    "reload": "Reload",
+    "address": "Browser address",
+    "tab": "Browser tab",
+    "crashed": "crashed",
+    "readOnly": "read-only",
+    "unknownReadOnlyIdentity": "Unknown identity",
+    "userControl": "You control this lane",
+    "agentControl": "Agent control",
+    "returnToAgent": "Return to Agent",
+    "takeControl": "Take control",
+    "retry": "Retry viewer",
+    "surfaceAria": "Embedded Agent browser viewer",
+    "frameAlt": "Live Agent browser frame",
+    "connecting": "Connecting viewer…",
+    "waitingFrame": "Waiting for frame…",
+    "idle": "Viewer idle",
+    "jpegLiveView": "JPEG live view",
+    "latestFrameOnly": "latest frame only",
+    "frameStatus": "{{frame}} · {{mode}}"
+  },
+  "diagnostics": {
+    "title": "Host diagnostics",
+    "host": "Browser Host",
+    "hostCount": "{{count}} Hosts",
+    "hostCount_one": "{{count}} Host",
+    "hostCount_other": "{{count}} Hosts",
+    "noHosts": "No active Browser Hosts are currently reporting diagnostics.",
+    "hostState": {
+      "stopped": "Stopped",
+      "restarting": "Restarting"
+    },
+    "fields": {
+      "identity": "Identity",
+      "epoch": "Epoch",
+      "lanes": "Lanes",
+      "rss": "Chromium RSS",
+      "hostId": "Host ID",
+      "activeOperations": "Active operations",
+      "queuedRequests": "Queued requests",
+      "openLanes": "Open lanes",
+      "recommendedConcurrency": "Recommended concurrency",
+      "capacityReason": "Capacity reason",
+      "updated": "Updated"
+    }
+  },
+  "state": {
+    "lifecycle": {
+      "queued": "Queued",
+      "starting": "Starting",
+      "running": "Running",
+      "frozen": "Frozen",
+      "stopping": "Stopping",
+      "failed": "Failed"
+    },
+    "control": {
+      "agent": "Agent",
+      "user": "User",
+      "idle": "Idle"
+    },
+    "identity": {
+      "primary": "Primary",
+      "anonymous": "Anonymous",
+      "authenticatedReplica": "Authenticated replica",
+      "isolated": "Isolated"
+    },
+    "pressure": {
+      "normal": "Normal",
+      "pressured": "Pressured",
+      "critical": "Critical"
+    }
+  }
+}
