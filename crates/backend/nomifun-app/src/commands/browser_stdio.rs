@@ -1,13 +1,10 @@
 //! `nomicore mcp-browser-stdio`: discrete browser tools for ACP agents.
 //!
-//! The child is deliberately only an authenticated stdio-to-loopback proxy. It
-//! cannot create a browser engine, profile, or Chromium process. Every call is
-//! forwarded under a main-process-signed user/conversation/runtime capability
-//! to the singleton `BrowserSessionHub`.
-//!
-//! The bootstrap contains no CDP endpoint, Chromium debugging port, profile
-//! path, cookie, or storage value. Tool and browser-operation allowlists fail
-//! closed, and arbitrary page-script evaluation is not granted by default.
+//! The child is deliberately only an authenticated stdio-to-loopback proxy.
+//! Every call is forwarded under a main-process-signed
+//! user/conversation/runtime capability to the singleton `BrowserSessionHub`.
+//! Tool and browser-operation allowlists fail closed, and arbitrary page-script
+//! evaluation is not granted by default.
 
 use std::process::ExitCode;
 
@@ -27,17 +24,6 @@ use serde_json::{Value, json};
 
 use super::stdio_common::{ForwardToolOutcome, into_mcp_tool_result};
 
-/// Resolve the bundled Chrome-for-Testing resource directory.
-///
-/// Convention: the desktop build places Chrome-for-Testing at
-/// `<app_resource_dir>/chrome-for-testing/chrome-<platform>/...`.
-/// This function computes `<app_resource_dir>/chrome-for-testing` from
-/// `current_exe().canonicalize().parent()` (mirrors `services.rs` resource-dir
-/// resolution) and returns `Some(dir)` ONLY if the directory exists on disk —
-/// so non-packaged / dev runs get `None` (unchanged behavior: env > data_dir > download).
-///
-/// The application composition root uses this to configure the sole managed
-/// Host factory before any ACP proxy can open a Lane.
 pub async fn run_browser_stdio() -> ExitCode {
     let client = match super::stdio_common::ScopedBridgeClient::from_env(
         BrowserMcpConfig::ENV_CAPABILITY,

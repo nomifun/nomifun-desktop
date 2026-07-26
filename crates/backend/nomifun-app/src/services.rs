@@ -1557,7 +1557,7 @@ impl AppServices {
             }
         });
 
-        let mut events_rx = hub.subscribe();
+        let events_rx = hub.subscribe();
         let event_bus = self.event_bus.clone();
         let ws_manager = self.ws_manager.clone();
         let installation_owner = self.authoritative_user_id.clone();
@@ -3217,7 +3217,10 @@ mod tests {
         ));
 
         for receiver in [&mut owner_rx, &mut other_rx] {
-            let outbound = receiver.recv().await.expect("resync must be delivered");
+            let outbound = tokio::time::timeout(Duration::from_secs(1), receiver.recv())
+                .await
+                .expect("resync delivery must not stall")
+                .expect("resync must be delivered");
             let nomifun_realtime::WsOutbound::Text(text) = outbound else {
                 panic!("expected resync text event")
             };
@@ -3230,7 +3233,10 @@ mod tests {
             assert!(event.data.get("sequence").is_none());
         }
 
-        let newest = user_events.recv().await.unwrap();
+        let newest = tokio::time::timeout(Duration::from_secs(1), user_events.recv())
+            .await
+            .expect("newest inventory event delivery must not stall")
+            .expect("newest inventory event must be delivered");
         assert_eq!(newest.user_id, "owner-a");
         assert_eq!(newest.event.name, BROWSER_INVENTORY_EVENT_NAME);
         assert_eq!(newest.event.data["sequence"], 2);
