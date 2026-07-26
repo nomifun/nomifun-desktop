@@ -1,10 +1,11 @@
 //! Offline backup and restore commands for `nomicore`.
 //!
 //! These commands intentionally do not boot the HTTP server. Backup acquires
-//! the normal per-data-dir server lock before opening SQLite, which makes it
-//! safe to run only when no backend instance is using the directory. Restore
-//! never opens the destination database and refuses to overwrite existing
-//! files.
+//! the normal per-data-dir server lock and then the resolved work-root lock
+//! before opening SQLite, matching server startup order. This excludes both a
+//! live backend on the same dataset and another dataset sharing an external
+//! work root. Restore never opens the destination database and refuses to
+//! overwrite existing files.
 
 use std::fs;
 #[cfg(windows)]
@@ -30,8 +31,29 @@ use crate::config::{
 
 /// Create a complete offline bundle from the resolved data/work directories.
 pub async fn run_backup(cli: &Cli, output: PathBuf) -> Result<ExitCode> {
-    let work_dir = crate::bootstrap::resolve_work_dir(cli.work_dir.clone(), &cli.data_dir);
-    let manifest = create_offline_backup(&cli.data_dir, &work_dir, &output).await?;
+    // Resolution may perform the one-time, receipt-bound legacy work-dir
+    // repair, so acquire the same data-dir authority as server boot first.
+    let data_server_lock =
+        crate::bootstrap::acquire_offline_server_lock(&cli.data_dir)?;
+    let data_dir = data_server_lock.protected_data_dir().to_path_buf();
+    let data_root_work_lock =
+        crate::bootstrap::acquire_work_root_lock(&data_dir)?;
+    nomifun_common::factory_reset::require_data_root_not_owned_as_external_work(
+        &data_dir,
+    )?;
+    let requested_work_dir =
+        crate::bootstrap::resolve_work_dir(cli.work_dir.clone(), &data_dir)?;
+    let _external_work_root_lock =
+        crate::bootstrap::acquire_distinct_work_root_lock(
+            &data_root_work_lock,
+            &requested_work_dir,
+        )?;
+    let work_dir = _external_work_root_lock
+        .as_ref()
+        .map(|lock| lock.protected_root().to_path_buf())
+        .unwrap_or_else(|| data_root_work_lock.protected_root().to_path_buf());
+    let manifest =
+        create_offline_backup_locked(&data_dir, &work_dir, &output).await?;
     println!(
         "backup created: {} ({} bytes)",
         output.display(),
@@ -57,7 +79,36 @@ pub async fn run_restore(bundle: PathBuf, destination_data_dir: PathBuf) -> Resu
     Ok(ExitCode::SUCCESS)
 }
 
+#[cfg(test)]
 async fn create_offline_backup(
+    data_dir: &Path,
+    work_dir: &Path,
+    output: &Path,
+) -> Result<nomifun_db::backup_bundle::BackupManifest> {
+    // Match server boot's lock order. The data lock protects the receipt and
+    // database; the work-root lock prevents another dataset that shares this
+    // external root from mutating conversations during the snapshot.
+    let data_server_lock =
+        crate::bootstrap::acquire_offline_server_lock(data_dir)?;
+    let data_dir = data_server_lock.protected_data_dir().to_path_buf();
+    let data_root_work_lock =
+        crate::bootstrap::acquire_work_root_lock(&data_dir)?;
+    nomifun_common::factory_reset::require_data_root_not_owned_as_external_work(
+        &data_dir,
+    )?;
+    let _external_work_root_lock =
+        crate::bootstrap::acquire_distinct_work_root_lock(
+            &data_root_work_lock,
+            work_dir,
+        )?;
+    let work_dir = _external_work_root_lock
+        .as_ref()
+        .map(|lock| lock.protected_root().to_path_buf())
+        .unwrap_or_else(|| data_root_work_lock.protected_root().to_path_buf());
+    create_offline_backup_locked(&data_dir, &work_dir, output).await
+}
+
+async fn create_offline_backup_locked(
     data_dir: &Path,
     work_dir: &Path,
     output: &Path,
@@ -68,11 +119,14 @@ async fn create_offline_backup(
     let database_path = data_dir.join("nomifun-backend.db");
     ensure_regular_source_file(&database_path, "database")?;
 
-    // Keep the lock alive until the snapshot and manifest have been fully
-    // verified. This is the same lock the server holds for its lifetime.
-    let _lock = crate::bootstrap::acquire_offline_server_lock(data_dir)?;
-    nomifun_common::factory_reset::require_current_v3_dataset(data_dir)
-        .map_err(|error| anyhow::anyhow!("backup requires a finalized v3 dataset: {error}"))?;
+    nomifun_common::factory_reset::ensure_current_v3_work_root_owner(
+        data_dir, work_dir,
+    )
+    .map_err(|error| {
+        anyhow::anyhow!(
+            "backup requires a finalized v3 dataset bound to the resolved work directory: {error}"
+        )
+    })?;
     let generation_path = data_dir.join("storage-generation");
     ensure_regular_source_file(&generation_path, "storage generation")?;
     let generation = load_or_create_storage_generation(data_dir)
@@ -565,9 +619,18 @@ mod tests {
     use std::cell::Cell;
     use std::fs;
 
+    fn canonical_tempdir() -> tempfile::TempDir {
+        let canonical_temp_root =
+            fs::canonicalize(std::env::temp_dir()).unwrap();
+        tempfile::Builder::new()
+            .prefix("nomifun-backup-test-")
+            .tempdir_in(canonical_temp_root)
+            .unwrap()
+    }
+
     #[test]
     fn restore_destination_allows_absent_and_empty_directories() {
-        let root = tempfile::tempdir().unwrap();
+        let root = canonical_tempdir();
         let absent = root.path().join("absent");
         prepare_restore_destination(&absent).unwrap();
         let empty = root.path().join("empty");
@@ -578,7 +641,7 @@ mod tests {
 
     #[test]
     fn restore_destination_rejects_non_empty_directory() {
-        let root = tempfile::tempdir().unwrap();
+        let root = canonical_tempdir();
         let dir = root.path().join("non-empty");
         fs::create_dir(&dir).unwrap();
         fs::write(dir.join("existing"), b"x").unwrap();
@@ -641,7 +704,7 @@ mod tests {
 
     #[tokio::test]
     async fn command_roundtrip_preserves_ids_and_rotates_generation() {
-        let root = tempfile::tempdir().unwrap();
+        let root = canonical_tempdir();
         let source = root.path().join("source");
         let bundle = root.path().join("bundle");
         let destination = root.path().join("restored");
@@ -694,6 +757,17 @@ mod tests {
             source_generation,
             "restore must rotate the dataset namespace"
         );
+        nomifun_common::factory_reset::require_current_v3_dataset_for_work_dir(
+            &destination,
+            &destination,
+        )
+        .unwrap();
+        nomifun_common::factory_reset::require_v3_work_root_owner(
+            &destination,
+            &destination,
+            &outcome.destination_storage_generation,
+        )
+        .unwrap();
         let restored = nomifun_db::init_database(&destination.join("nomifun-backend.db"))
             .await
             .unwrap();
@@ -725,7 +799,7 @@ mod tests {
 
     #[tokio::test]
     async fn backup_refuses_a_contended_server_lock() {
-        let root = tempfile::tempdir().unwrap();
+        let root = canonical_tempdir();
         let source = root.path().join("source");
         fs::create_dir(&source).unwrap();
         let database = nomifun_db::init_database(&source.join("nomifun-backend.db"))
@@ -748,8 +822,26 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn backup_refuses_a_contended_external_work_root() {
+        let root = canonical_tempdir();
+        let source = root.path().join("source");
+        let work = root.path().join("external-work");
+        fs::create_dir(&source).unwrap();
+        fs::create_dir(&work).unwrap();
+        let _held = crate::bootstrap::acquire_work_root_lock(&work).unwrap();
+
+        let error =
+            create_offline_backup(&source, &work, &root.path().join("bundle"))
+                .await
+                .unwrap_err();
+
+        assert!(format!("{error:#}").contains("already in use"));
+        assert!(!root.path().join("bundle").exists());
+    }
+
+    #[tokio::test]
     async fn backup_refuses_encrypted_rows_without_their_persistent_key() {
-        let root = tempfile::tempdir().unwrap();
+        let root = canonical_tempdir();
         let source = root.path().join("source");
         fs::create_dir(&source).unwrap();
         let database = nomifun_db::init_database(&source.join("nomifun-backend.db"))

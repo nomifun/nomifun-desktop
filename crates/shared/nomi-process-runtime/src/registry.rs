@@ -37,6 +37,7 @@ struct SessionEntry {
     owner: ProcessOwner,
     session: Arc<Session>,
     lease: Duration,
+    expire_on_idle: bool,
     lease_expires_at: Instant,
     last_used: Instant,
     in_flight_actions: usize,
@@ -138,6 +139,7 @@ impl Registry {
         owner: ProcessOwner,
         session: Arc<Session>,
         lease: Duration,
+        expire_on_idle: bool,
         now: Instant,
     ) -> CommitResult {
         let result = {
@@ -158,6 +160,7 @@ impl Registry {
                         owner,
                         session,
                         lease,
+                        expire_on_idle,
                         lease_expires_at: lease_deadline(now, lease),
                         last_used: now,
                         in_flight_actions: 0,
@@ -283,7 +286,9 @@ impl Registry {
                 .active
                 .iter()
                 .filter_map(|(id, entry)| {
-                    (entry.in_flight_actions == 0 && entry.lease_expires_at <= now)
+                    (entry.expire_on_idle
+                        && entry.in_flight_actions == 0
+                        && entry.lease_expires_at <= now)
                         .then_some(*id)
                 })
                 .collect::<Vec<_>>();
@@ -496,6 +501,7 @@ impl Registry {
         owner: ProcessOwner,
         session: Arc<Session>,
         lease: Duration,
+        expire_on_idle: bool,
         now: Instant,
     ) -> CommitResult {
         self.commit(
@@ -504,6 +510,7 @@ impl Registry {
             owner,
             session,
             lease,
+            expire_on_idle,
             now,
         )
     }

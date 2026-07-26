@@ -23,7 +23,7 @@ use tracing::{info, warn};
 use crate::driver::{TerminalDescription, TerminalDriver};
 use crate::error::TerminalError;
 use crate::events::TerminalEventEmitter;
-use crate::pty::{PtyHandle, SpawnParams};
+use crate::pty::{PtyExit, PtyHandle, SpawnParams};
 use crate::types::{
     TerminalOwnerScope, persisted_terminal_env, process_env_from_persisted, resolve_command,
     row_to_response, strip_internal_terminal_env, terminal_owner_scope,
@@ -57,9 +57,9 @@ const UTF8_CTYPE: &str = "C.UTF-8";
 /// Set default environment that describes the emulator and byte encoding the
 /// PTY is actually wired to: xterm.js consuming UTF-8.
 ///
-/// `portable-pty` seeds the child from the app process's own environment. A
-/// macOS app launched from Finder/Dock/launchd inherits a *minimal* environment
-/// with neither `TERM` nor a character locale (the same reason
+/// The PTY child inherits the app process's environment. A macOS app launched
+/// from Finder/Dock/launchd inherits a *minimal* environment with neither
+/// `TERM` nor a character locale (the same reason
 /// `nomifun-runtime::shell_env` repairs `PATH`). Missing `TERM` breaks terminal
 /// capabilities. Missing/`C` locale makes TTY-aware tools such as macOS `ls`
 /// replace each non-ASCII filename byte with `?` before output reaches NomiFun.
@@ -723,7 +723,9 @@ impl TerminalService {
             req.rows,
             kb_ids,
             req.backend.as_deref(),
-        ) {
+        )
+        .await
+        {
             // The row is intentionally retained so the failed launch remains
             // diagnosable/relaunchable, but it must never masquerade as running.
             *lifecycle = TerminalLifecycleState::Failed(terminal_failure_message(&error));
@@ -742,7 +744,7 @@ impl TerminalService {
 
     /// Spawn (or respawn) the PTY for a session id and register it as live.
     #[allow(clippy::too_many_arguments)]
-    fn spawn_pty(
+    async fn spawn_pty(
         &self,
         owner_id: &str,
         id: &str,
@@ -820,21 +822,24 @@ impl TerminalService {
         let emitter_exit = self.emitter.clone();
         let exit_owner_id = owner_id.to_owned();
         let repo_exit = self.repo.clone();
+        let work_dir_exit = self.work_dir.clone();
         let live_exit = self.live.clone();
         let lifecycle_slots_exit = self.lifecycle_slots.clone();
         let capability_leases_exit = self.live_capability_leases.clone();
-        // Capture the runtime handle now (we're on the async create path); the
-        // exit callback runs on the PTY reader's OS thread, which has no
-        // ambient Tokio runtime, so `tokio::spawn` there would panic.
+        // Capture the runtime handle now (we're on the async create path). The
+        // PTY adapter invokes this callback from its detached outcome-monitor
+        // task, and the callback must hand durable async cleanup back to the
+        // application runtime without depending on the caller's request task.
         let rt = tokio::runtime::Handle::current();
-        let on_exit = move |code: Option<i32>, scrollback: Vec<u8>| {
+        let on_exit = move |exit: PtyExit, scrollback: Vec<u8>| {
             capability_leases_exit.remove_if(exit_terminal_id.as_str(), |_, (lease_epoch, _)| {
                 *lease_epoch == epoch
             });
-            // Serialize exit with resize/delete/relaunch. An epoch check on this
-            // OS thread alone is insufficient: an old process may exit during
-            // relaunch's async preflight and queue `status=exited` before the
-            // replacement is inserted, only for that DB write to land later.
+            // Serialize exit with resize/delete/relaunch. An epoch check before
+            // entering the async critical section is insufficient: an old
+            // process may exit during relaunch's preflight and queue
+            // `status=exited` before the replacement is inserted, only for that
+            // DB write to land later.
             let Some(lifecycle_slot) = lifecycle_slots_exit
                 .get(exit_terminal_id.as_str())
                 .map(|entry| Arc::clone(entry.value()))
@@ -843,7 +848,7 @@ impl TerminalService {
             };
             let repo = repo_exit;
             rt.spawn(async move {
-                let lifecycle = lifecycle_slot.lock_owned().await;
+                let mut lifecycle = lifecycle_slot.lock_owned().await;
                 if matches!(*lifecycle, TerminalLifecycleState::Cancelled) {
                     return;
                 }
@@ -868,13 +873,35 @@ impl TerminalService {
                     )
                     .await
                 {
-                    // The process is already gone, so it cannot be kept alive.
-                    // Remove only this exact handle, but leave the durable
-                    // session status untouched: an in-progress Requirement
-                    // remains absorbing and boot/lease recovery will park it.
-                    live_exit.remove_if(exit_terminal_id.as_str(), |_, handle| {
-                        handle.epoch() == epoch
-                    });
+                    // For a proven exit, remove only this exact handle but leave
+                    // durable status untouched so the absorbing admission can
+                    // be recovered. An unreaped Lost outcome retains the
+                    // in-memory runtime authority as quarantine.
+                    if !matches!(
+                        exit,
+                        PtyExit::Lost {
+                            cleanup_reaped: false,
+                            ..
+                        }
+                    ) {
+                        live_exit.remove_if(exit_terminal_id.as_str(), |_, handle| {
+                            handle.epoch() == epoch
+                        });
+                    }
+                    if let PtyExit::Lost { ref message, .. } = exit {
+                        *lifecycle =
+                            TerminalLifecycleState::Failed(Arc::<str>::from(message.as_str()));
+                        if let Err(status_error) = repo
+                            .update_status(exit_terminal_id.as_str(), "error", None)
+                            .await
+                        {
+                            warn!(
+                                terminal_id = %exit_terminal_id,
+                                error = %status_error,
+                                "failed to persist quarantined PTY status"
+                            );
+                        }
+                    }
                     warn!(
                         terminal_id = %exit_terminal_id,
                         pty_epoch = epoch,
@@ -883,31 +910,82 @@ impl TerminalService {
                     );
                     return;
                 }
-                if live_exit
-                    .remove_if(exit_terminal_id.as_str(), |_, handle| {
-                        handle.epoch() == epoch
-                    })
-                    .is_none()
-                {
-                    return;
+                match exit {
+                    PtyExit::Exited(code) => {
+                        if live_exit
+                            .remove_if(exit_terminal_id.as_str(), |_, handle| {
+                                handle.epoch() == epoch
+                            })
+                            .is_none()
+                        {
+                            return;
+                        }
+                        if let Err(e) = repo
+                            .update_status(
+                                exit_terminal_id.as_str(),
+                                "exited",
+                                code.map(i64::from),
+                            )
+                            .await
+                        {
+                            warn!(terminal_id = %exit_terminal_id, error = %e, "failed to persist terminal exit status");
+                        }
+                        if let Err(e) = repo
+                            .save_scrollback(exit_terminal_id.as_str(), &scrollback)
+                            .await
+                        {
+                            warn!(terminal_id = %exit_terminal_id, error = %e, "failed to persist final terminal scrollback");
+                        }
+                        emitter_exit.emit_exit(&exit_owner_id, &exit_terminal_id, code);
+                    }
+                    PtyExit::Lost {
+                        message,
+                        cleanup_reaped,
+                    } => {
+                        // Exact cleanup permits releasing the in-memory handle,
+                        // but Lost is never published as a successful exit.
+                        // Unreaped cleanup keeps the handle/runtime watchdog
+                        // reachable and blocks delete/relaunch.
+                        if cleanup_reaped {
+                            live_exit.remove_if(exit_terminal_id.as_str(), |_, handle| {
+                                handle.epoch() == epoch
+                            });
+                        }
+                        *lifecycle =
+                            TerminalLifecycleState::Failed(Arc::<str>::from(message.as_str()));
+                        if let Err(e) = repo
+                            .update_status(exit_terminal_id.as_str(), "error", None)
+                            .await
+                        {
+                            warn!(terminal_id = %exit_terminal_id, error = %e, "failed to persist indeterminate terminal status");
+                        }
+                        if let Err(e) = repo
+                            .save_scrollback(exit_terminal_id.as_str(), &scrollback)
+                            .await
+                        {
+                            warn!(terminal_id = %exit_terminal_id, error = %e, "failed to persist quarantined terminal scrollback");
+                        }
+                        match repo.get_by_id(exit_terminal_id.as_str()).await {
+                            Ok(Some(row)) => {
+                                let response = row_to_response(&row, None, &work_dir_exit);
+                                emitter_exit.emit_updated(row.user_id.as_str(), &response);
+                            }
+                            Ok(None) => {
+                                warn!(terminal_id = %exit_terminal_id, "lost PTY row disappeared before error broadcast");
+                            }
+                            Err(error) => {
+                                warn!(terminal_id = %exit_terminal_id, error = %error, "failed to reload lost PTY row");
+                            }
+                        }
+                        warn!(
+                            terminal_id = %exit_terminal_id,
+                            pty_epoch = epoch,
+                            cleanup_reaped,
+                            reason = %message,
+                            "PTY runtime reported Lost; durable row retained"
+                        );
+                    }
                 }
-                if let Err(e) = repo
-                    .update_status(exit_terminal_id.as_str(), "exited", code.map(i64::from))
-                    .await
-                {
-                    warn!(terminal_id = %exit_terminal_id, error = %e, "failed to persist terminal exit status");
-                }
-                // Persist the FINAL scrollback so the output survives a restart
-                // even if the process exited between debounced flushes —this is
-                // what captures the tail the periodic flusher may not have reached.
-                if let Err(e) = repo.save_scrollback(exit_terminal_id.as_str(), &scrollback).await {
-                    warn!(terminal_id = %exit_terminal_id, error = %e, "failed to persist final terminal scrollback");
-                }
-                // Publish only after the durable state and final scrollback have
-                // been attempted. Consumers commonly reconcile an exit event
-                // with an immediate GET; emitting first let that GET observe a
-                // stale `running` row and overwrite the newer UI state.
-                emitter_exit.emit_exit(&exit_owner_id, &exit_terminal_id, code);
                 // Retain the slot through final scrollback persistence. A
                 // relaunch clears predecessor output; this prevents a late exit
                 // write from restoring stale scrollback afterwards.
@@ -927,13 +1005,18 @@ impl TerminalService {
             epoch,
             on_output,
             on_exit,
-        );
+        )
+        .await;
         if handle.is_err() {
             self.live_capability_leases
                 .remove_if(terminal_id.as_str(), |_, (lease_epoch, _)| *lease_epoch == epoch);
         }
         let handle = handle?;
-        self.live.insert(id.to_string(), handle);
+        self.live.insert(id.to_string(), Arc::clone(&handle));
+        // Insert before arming the exit monitor. A child may already have
+        // exited, but its outcome/output is retained by the runtime until this
+        // exact epoch is visible to the callback.
+        handle.activate();
 
         // Plan-2 lifecycle consumer: subscribe to this terminal's lifecycle
         // events. On the FIRST `TurnEnd` of an agent session, auto-title from the
@@ -1335,16 +1418,34 @@ impl TerminalService {
         }
     }
 
+    /// Serialize a raw input write with kill/relaunch/delete for this terminal.
+    ///
+    /// Cloning the live handle alone is insufficient: after the DashMap guard
+    /// is released, a relaunch could replace the authoritative epoch while an
+    /// async runtime write is still pending. The per-terminal lifecycle lock
+    /// makes the write belong wholly to one live generation.
+    async fn write_live_input(&self, id: &str, bytes: &[u8]) -> Result<(), TerminalError> {
+        let lifecycle_slot = self
+            .existing_lifecycle_slot(id)
+            .ok_or_else(|| TerminalError::NotFound(id.to_owned()))?;
+        let lifecycle = lifecycle_slot.lock().await;
+        if matches!(*lifecycle, TerminalLifecycleState::Cancelled) {
+            return Err(TerminalError::NotFound(id.to_owned()));
+        }
+        let handle = self
+            .live
+            .get(id)
+            .map(|entry| Arc::clone(entry.value()))
+            .ok_or_else(|| TerminalError::NotFound(id.to_owned()))?;
+        handle.write(bytes).await
+    }
+
     /// Write base64-encoded bytes to the PTY.
     pub async fn input(&self, id: &str, data_b64: &str) -> Result<(), TerminalError> {
         let bytes = BASE64
             .decode(data_b64)
             .map_err(|e| TerminalError::InvalidInput(format!("base64: {e}")))?;
-        let handle = self
-            .live
-            .get(id)
-            .ok_or_else(|| TerminalError::NotFound(id.to_string()))?;
-        handle.write(&bytes)?;
+        self.write_live_input(id, &bytes).await?;
         // Re-arm IDMM supervision on user activity (no-op if disabled / already
         // supervising) —covers re-arm after a prior supervisor stood down.
         self.arm_supervision(id);
@@ -1643,13 +1744,12 @@ impl TerminalService {
     }
 
     async fn resize_live(&self, id: &str, cols: u16, rows: u16) -> Result<(), TerminalError> {
-        {
-            let handle = self
-                .live
-                .get(id)
-                .ok_or_else(|| TerminalError::NotFound(id.to_string()))?;
-            handle.resize(cols, rows)?;
-        }
+        let handle = self
+            .live
+            .get(id)
+            .map(|entry| Arc::clone(entry.value()))
+            .ok_or_else(|| TerminalError::NotFound(id.to_string()))?;
+        handle.resize(cols, rows).await?;
         self.repo.update_size(id, cols as i64, rows as i64).await?;
         Ok(())
     }
@@ -1684,24 +1784,43 @@ impl TerminalService {
     /// per-id mutex for their whole lifetime: the first caller performs the spawn
     /// while every concurrent resize/delete/relaunch waits for the same outcome.
     pub async fn resize(&self, id: &str, cols: u16, rows: u16) -> Result<(), TerminalError> {
+        let service = self.clone();
+        let id = id.to_owned();
+        tokio::spawn(async move { service.resize_coordinated(id, cols, rows).await })
+            .await
+            .map_err(|error| {
+                TerminalError::Spawn(format!("terminal resize coordinator failed: {error}"))
+            })?
+    }
+
+    /// Detached activation coordinator. If the HTTP/WebSocket caller is
+    /// cancelled while the runtime ownership transaction is awaiting, this
+    /// task still drives the lifecycle slot to Ready or Failed and cannot leave
+    /// an unregistered PTY behind.
+    async fn resize_coordinated(
+        &self,
+        id: String,
+        cols: u16,
+        rows: u16,
+    ) -> Result<(), TerminalError> {
         let _shutdown_guard = self.enter_operation().await?;
         validate_pty_size(cols, rows)?;
 
         let slot = self
-            .existing_lifecycle_slot(id)
-            .ok_or_else(|| TerminalError::NotFound(id.to_owned()))?;
+            .existing_lifecycle_slot(&id)
+            .ok_or_else(|| TerminalError::NotFound(id.clone()))?;
         let mut state = slot.lock().await;
         match state.clone() {
             TerminalLifecycleState::Pending => {
                 // A cancelled request can drop its future immediately after
                 // `spawn_pty` inserted the handle but before it updated the state.
                 // Recover that completed activation instead of spawning twice.
-                if self.live.contains_key(id) {
+                if self.live.contains_key(&id) {
                     *state = TerminalLifecycleState::Ready;
-                    return self.resize_live(id, cols, rows).await;
+                    return self.resize_live(&id, cols, rows).await;
                 }
 
-                match self.spawn_deferred(id, cols, rows).await {
+                match self.spawn_deferred(&id, cols, rows).await {
                     Ok(()) => {
                         *state = TerminalLifecycleState::Ready;
                         Ok(())
@@ -1709,16 +1828,16 @@ impl TerminalService {
                     Err(DeferredSpawnFailure::Preflight(error)) => Err(error),
                     Err(DeferredSpawnFailure::Spawn(error)) => {
                         *state = TerminalLifecycleState::Failed(terminal_failure_message(&error));
-                        self.persist_terminal_failure(id, true).await;
+                        self.persist_terminal_failure(&id, true).await;
                         Err(error)
                     }
                 }
             }
-            TerminalLifecycleState::Ready => self.resize_live(id, cols, rows).await,
+            TerminalLifecycleState::Ready => self.resize_live(&id, cols, rows).await,
             TerminalLifecycleState::Failed(message) => {
                 Err(TerminalError::Spawn(message.to_string()))
             }
-            TerminalLifecycleState::Cancelled => Err(TerminalError::NotFound(id.to_string())),
+            TerminalLifecycleState::Cancelled => Err(TerminalError::NotFound(id)),
         }
     }
 
@@ -1772,6 +1891,7 @@ impl TerminalService {
             kb_ids,
             row.backend.as_deref(),
         )
+        .await
         .map_err(DeferredSpawnFailure::Spawn)?;
         self.arm_supervision(id);
         info!(
@@ -1783,33 +1903,44 @@ impl TerminalService {
 
     /// Kill the child process (session row remains, status flips to exited via on_exit).
     pub async fn kill(&self, id: &str) -> Result<(), TerminalError> {
+        let service = self.clone();
+        let id = id.to_owned();
+        tokio::spawn(async move { service.kill_coordinated(id).await })
+            .await
+            .map_err(|error| {
+                TerminalError::Spawn(format!("terminal kill coordinator failed: {error}"))
+            })?
+    }
+
+    async fn kill_coordinated(&self, id: String) -> Result<(), TerminalError> {
         let _shutdown_guard = self.enter_operation().await?;
         let lifecycle_slot = self
-            .existing_lifecycle_slot(id)
-            .ok_or_else(|| TerminalError::NotFound(id.to_owned()))?;
+            .existing_lifecycle_slot(&id)
+            .ok_or_else(|| TerminalError::NotFound(id.clone()))?;
         let lifecycle = lifecycle_slot.lock().await;
         if matches!(*lifecycle, TerminalLifecycleState::Cancelled) {
-            return Err(TerminalError::NotFound(id.to_string()));
+            return Err(TerminalError::NotFound(id));
         }
         let pty_epoch = self
             .live
-            .get(id)
+            .get(&id)
             .map(|handle| handle.epoch())
-            .ok_or_else(|| TerminalError::NotFound(id.to_string()))?;
+            .ok_or_else(|| TerminalError::NotFound(id.clone()))?;
         self.repo
             .park_open_turn_admissions(
-                id,
+                &id,
                 Some(pty_epoch),
                 TURN_PARK_KILL,
                 nomifun_common::now_ms(),
             )
             .await?;
-        self.live_capability_leases.remove(id);
+        self.live_capability_leases.remove(&id);
         let handle = self
             .live
-            .get(id)
-            .ok_or_else(|| TerminalError::NotFound(id.to_string()))?;
-        handle.kill()
+            .get(&id)
+            .map(|entry| Arc::clone(entry.value()))
+            .ok_or_else(|| TerminalError::NotFound(id))?;
+        handle.kill().await
     }
 
     /// Kill (if live) and delete the session row.
@@ -1824,8 +1955,8 @@ impl TerminalService {
     }
 
     /// Runs independently of the HTTP caller so a dropped request cannot leave
-    /// an unknown DB-commit result without performing the synchronous PTY half
-    /// of the delete. The session lock is owned by this coordinator task.
+    /// an unknown DB-commit result without completing the PTY cleanup half of
+    /// the delete. The session lock is owned by this coordinator task.
     async fn delete_coordinated(&self, id: String) -> Result<(), TerminalError> {
         let shutdown_guard = self.enter_operation().await?;
         let terminal_id = TerminalId::parse(&id)
@@ -1858,8 +1989,12 @@ impl TerminalService {
             .get(&id)
             .map(|entry| Arc::clone(entry.value()))
         {
+            // A quarantined handle represents indeterminate ownership. Keep
+            // both the durable row and runtime authority intact; only an
+            // explicit cleanup retry may operate on it.
+            handle.ensure_not_quarantined()?;
             self.live_capability_leases.remove(&id);
-            handle.kill()?;
+            handle.kill().await?;
         }
 
         // Once tree cleanup is proven, commit deletion. If SQLite fails, the
@@ -1948,18 +2083,37 @@ impl TerminalService {
                 )
                 .await?;
         }
-        // All fallible async preflight happens while the previous PTY and state
-        // remain untouched. This is deliberately the LAST await before the
-        // synchronous kill+spawn+state commit below.
+        if let Some(handle) = self
+            .live
+            .get(&id)
+            .map(|entry| Arc::clone(entry.value()))
+        {
+            // Do not turn a known ownership quarantine into a process swap.
+            // Re-check immediately before the first durable relaunch mutation;
+            // the monitor marks this flag without waiting for this lifecycle
+            // lock.
+            handle.ensure_not_quarantined()?;
+        }
+        // All fallible durable preflight happens while the previous PTY and
+        // state remain untouched. This is deliberately the last DB mutation
+        // before the owned cleanup + replacement transaction below.
         self.repo.update_status(&id, "running", None).await?;
 
         let previous_state = lifecycle.clone();
         *lifecycle = TerminalLifecycleState::Pending;
-        if let Some(handle) = self.live.get(&id)
-            && let Err(error) = handle.kill()
-        {
-            *lifecycle = previous_state;
-            return Err(error);
+        let old_handle = self
+            .live
+            .get(&id)
+            .map(|entry| Arc::clone(entry.value()));
+        if let Some(handle) = old_handle {
+            if let Err(error) = handle.ensure_not_quarantined() {
+                *lifecycle = previous_state;
+                return Err(error);
+            }
+            if let Err(error) = handle.kill().await {
+                *lifecycle = previous_state;
+                return Err(error);
+            }
         }
         self.live_capability_leases.remove(&id);
         self.live.remove(&id);
@@ -1975,7 +2129,9 @@ impl TerminalService {
             rows,
             kb_ids,
             row.backend.as_deref(),
-        ) {
+        )
+        .await
+        {
             // The old PTY is already removed + killed; if the fresh spawn fails
             // the session has no process. Record a stable error because the
             // predecessor's epoch-guarded exit callback will not do it for us.
@@ -2071,10 +2227,17 @@ impl TerminalService {
                 )
                 .await?;
         }
-        // One atomic durable preflight is the LAST await before process swap: an
-        // observer can never see shell identity and agent status as two separate
-        // commits. The detached coordinator completes the swap even if the HTTP
-        // caller is cancelled after SQLite commits.
+        if let Some(handle) = self
+            .live
+            .get(&id)
+            .map(|entry| Arc::clone(entry.value()))
+        {
+            handle.ensure_not_quarantined()?;
+        }
+        // One atomic durable preflight precedes the process swap: an observer
+        // can never see shell identity and agent status as two separate commits.
+        // The detached coordinator completes the swap even if the HTTP caller
+        // is cancelled after SQLite commits.
         self.repo
             .update_launch_state(
                 &id,
@@ -2088,23 +2251,31 @@ impl TerminalService {
 
         let previous_state = lifecycle.clone();
         *lifecycle = TerminalLifecycleState::Pending;
-        if let Some(handle) = self.live.get(&id)
-            && let Err(kill_error) = handle.kill()
-        {
-            *lifecycle = previous_state;
-            // The old PTY is still live. Restore its durable launch identity
-            // before returning so a failed fallback remains internally honest.
-            self.repo
-                .update_launch_state(
-                    &id,
-                    &row.command,
-                    &row.args,
-                    row.backend.as_deref(),
-                    &row.last_status,
-                    row.exit_code,
-                )
-                .await?;
-            return Err(kill_error);
+        let old_handle = self
+            .live
+            .get(&id)
+            .map(|entry| Arc::clone(entry.value()));
+        if let Some(handle) = old_handle {
+            let cleanup = match handle.ensure_not_quarantined() {
+                Ok(()) => handle.kill().await,
+                Err(error) => Err(error),
+            };
+            if let Err(kill_error) = cleanup {
+                *lifecycle = previous_state;
+                // The old PTY is still live. Restore its durable launch identity
+                // before returning so a failed fallback remains internally honest.
+                self.repo
+                    .update_launch_state(
+                        &id,
+                        &row.command,
+                        &row.args,
+                        row.backend.as_deref(),
+                        &row.last_status,
+                        row.exit_code,
+                    )
+                    .await?;
+                return Err(kill_error);
+            }
         }
         self.live_capability_leases.remove(&id);
         self.live.remove(&id);
@@ -2120,7 +2291,9 @@ impl TerminalService {
             rows,
             kb_ids,
             None,
-        ) {
+        )
+        .await
+        {
             *lifecycle = TerminalLifecycleState::Failed(terminal_failure_message(&e));
             self.persist_terminal_failure(&id, true).await;
             return Err(e);
@@ -2212,7 +2385,7 @@ impl TerminalService {
             .collect();
         for (id, handle) in live_handles {
             self.live_capability_leases.remove(&id);
-            if let Err(error) = handle.kill() {
+            if let Err(error) = handle.kill().await {
                 self.shutting_down
                     .store(false, std::sync::atomic::Ordering::Release);
                 warn!(
@@ -2276,11 +2449,7 @@ impl TerminalService {
 #[async_trait::async_trait]
 impl TerminalDriver for TerminalService {
     async fn write_input(&self, id: &str, bytes: &[u8]) -> Result<(), TerminalError> {
-        let handle = self
-            .live
-            .get(id)
-            .ok_or_else(|| TerminalError::NotFound(id.to_string()))?;
-        handle.write(bytes)
+        self.write_live_input(id, bytes).await
     }
 
     fn current_epoch(&self, id: &str) -> Option<u64> {
@@ -2303,6 +2472,7 @@ impl TerminalDriver for TerminalService {
         let handle = self
             .live
             .get(id)
+            .map(|entry| Arc::clone(entry.value()))
             .ok_or_else(|| TerminalError::NotFound(id.to_owned()))?;
         let current_epoch = handle.epoch();
         if current_epoch != pty_epoch {
@@ -2310,10 +2480,10 @@ impl TerminalDriver for TerminalService {
                 "terminal {id} expected PTY epoch {pty_epoch}, current epoch is {current_epoch}"
             )));
         }
-        // Keep the lifecycle lock through the synchronous write. Kill,
+        // Keep the lifecycle lock through the asynchronous runtime write. Kill,
         // relaunch, delete and shutdown acquire the same lock, so the verified
         // generation cannot be replaced between comparison and effects.
-        handle.write(bytes)
+        handle.write(bytes).await
     }
 
     fn subscribe_output(&self, id: &str) -> Option<tokio::sync::broadcast::Receiver<Vec<u8>>> {
@@ -2455,6 +2625,7 @@ impl TerminalDriver for TerminalService {
         let handle = self
             .live
             .get(&key.terminal_id)
+            .map(|entry| Arc::clone(entry.value()))
             .ok_or_else(|| TerminalError::NotFound(key.terminal_id.clone()))?;
         if handle.epoch() != key.pty_epoch {
             return Err(TerminalError::StaleGeneration(format!(
@@ -2462,7 +2633,7 @@ impl TerminalDriver for TerminalService {
                 key.terminal_id
             )));
         }
-        handle.write(bytes)?;
+        handle.write(bytes).await?;
         Ok(transition)
     }
 
@@ -2499,6 +2670,7 @@ impl TerminalDriver for TerminalService {
         let handle = self
             .live
             .get(&key.terminal_id)
+            .map(|entry| Arc::clone(entry.value()))
             .ok_or_else(|| TerminalError::NotFound(key.terminal_id.clone()))?;
         if handle.epoch() != key.pty_epoch {
             return Err(TerminalError::StaleGeneration(format!(
@@ -2506,7 +2678,7 @@ impl TerminalDriver for TerminalService {
                 key.terminal_id
             )));
         }
-        handle.write(bytes)?;
+        handle.write(bytes).await?;
         Ok(transition)
     }
 
@@ -2543,6 +2715,7 @@ impl TerminalDriver for TerminalService {
         let handle = self
             .live
             .get(&key.terminal_id)
+            .map(|entry| Arc::clone(entry.value()))
             .ok_or_else(|| TerminalError::NotFound(key.terminal_id.clone()))?;
         if handle.epoch() != key.pty_epoch {
             return Err(TerminalError::StaleGeneration(format!(
@@ -2550,7 +2723,7 @@ impl TerminalDriver for TerminalService {
                 key.terminal_id
             )));
         }
-        handle.write(bytes)?;
+        handle.write(bytes).await?;
         Ok(transition)
     }
 
@@ -2851,11 +3024,11 @@ mod tests {
 
     // End-to-end: prove the injected TERM/COLORTERM actually reach the spawned
     // child through the REAL PtyHandle path (not just the env map). This mirrors
-    // the Finder-launch case: `cmd.env()` overrides portable-pty's inherited
-    // base, so the child sees xterm-256color regardless of the parent's env.
+    // the Finder-launch case: process-runtime applies the explicit overrides,
+    // so the child sees xterm-256color regardless of the parent's env.
     #[cfg(unix)]
-    #[test]
-    fn pty_child_actually_receives_injected_term() {
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn pty_child_actually_receives_injected_term() {
         use crate::pty::{PtyHandle, SpawnParams};
         use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -2866,7 +3039,7 @@ mod tests {
         let cap = captured.clone();
         let done = Arc::new(AtomicBool::new(false));
         let done_cb = done.clone();
-        let _handle = PtyHandle::spawn(
+        let handle = PtyHandle::spawn(
             SpawnParams {
                 program: "sh".to_owned(),
                 args: vec![
@@ -2882,7 +3055,9 @@ mod tests {
             move |chunk| cap.lock().unwrap().extend_from_slice(&chunk),
             move |_code, _sb| done_cb.store(true, Ordering::SeqCst),
         )
+        .await
         .expect("spawn sh");
+        handle.activate();
 
         for _ in 0..250 {
             if done.load(Ordering::SeqCst) {
@@ -2903,8 +3078,8 @@ mod tests {
     }
 
     #[cfg(any(target_os = "macos", target_os = "linux"))]
-    #[test]
-    fn pty_child_preserves_valid_inherited_utf8_lc_all() {
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn pty_child_preserves_valid_inherited_utf8_lc_all() {
         use crate::pty::{PtyHandle, SpawnParams};
         use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -2917,7 +3092,7 @@ mod tests {
         let cap = captured.clone();
         let done = Arc::new(AtomicBool::new(false));
         let done_cb = done.clone();
-        let _handle = PtyHandle::spawn(
+        let handle = PtyHandle::spawn(
             SpawnParams {
                 program: "sh".to_owned(),
                 args: vec![
@@ -2934,7 +3109,9 @@ mod tests {
             move |chunk| cap.lock().unwrap().extend_from_slice(&chunk),
             move |_code, _sb| done_cb.store(true, Ordering::SeqCst),
         )
+        .await
         .expect("spawn sh");
+        handle.activate();
 
         for _ in 0..250 {
             if done.load(Ordering::SeqCst) {
@@ -2956,8 +3133,8 @@ mod tests {
     /// Prove the environment repair reaches a real PTY child before bytes are
     /// captured, persisted, Base64-encoded, or decoded by the frontend.
     #[cfg(target_os = "macos")]
-    #[test]
-    fn pty_child_lists_unicode_filename_under_repaired_locale() {
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn pty_child_lists_unicode_filename_under_repaired_locale() {
         use crate::pty::{PtyHandle, SpawnParams};
         use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -2974,7 +3151,7 @@ mod tests {
         let cap = captured.clone();
         let done = Arc::new(AtomicBool::new(false));
         let done_cb = done.clone();
-        let _handle = PtyHandle::spawn(
+        let handle = PtyHandle::spawn(
             SpawnParams {
                 program: "/bin/ls".to_owned(),
                 args: vec!["-1".to_owned()],
@@ -2987,7 +3164,9 @@ mod tests {
             move |chunk| cap.lock().unwrap().extend_from_slice(&chunk),
             move |_code, _sb| done_cb.store(true, Ordering::SeqCst),
         )
+        .await
         .expect("spawn ls");
+        handle.activate();
 
         for _ in 0..250 {
             if done.load(Ordering::SeqCst) {
@@ -4470,6 +4649,31 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn raw_driver_write_waits_for_terminal_lifecycle_lock() {
+        use crate::driver::TerminalDriver;
+
+        let (svc, _bc) = service();
+        let resp = svc.create(TEST_USER_ID, req("cat", &[])).await.unwrap();
+        let lifecycle_slot = svc.lifecycle_slot(&resp.terminal_id);
+        let lifecycle = lifecycle_slot.lock().await;
+
+        let writer_service = svc.clone();
+        let writer_id = resp.terminal_id.clone();
+        let writer = tokio::spawn(async move {
+            TerminalDriver::write_input(&writer_service, &writer_id, b"serialized-input\n").await
+        });
+        tokio::task::yield_now().await;
+        assert!(
+            !writer.is_finished(),
+            "raw async input must not cross a kill/relaunch lifecycle critical section"
+        );
+
+        drop(lifecycle);
+        writer.await.unwrap().unwrap();
+        svc.kill(&resp.terminal_id).await.unwrap();
+    }
+
+    #[tokio::test]
     async fn get_returns_scrollback_and_resize_persists() {
         let (svc, _bc) = service();
         let resp = svc.create(TEST_USER_ID, req("cat", &[])).await.unwrap();
@@ -5004,6 +5208,60 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn quarantined_handle_blocks_input_relaunch_and_delete() {
+        let (svc, _bc, repo) = service_with_repo();
+        let id = svc
+            .create(TEST_USER_ID, req("cat", &[]))
+            .await
+            .unwrap()
+            .terminal_id;
+        let handle = svc
+            .live
+            .get(id.as_str())
+            .map(|entry| Arc::clone(entry.value()))
+            .expect("live PTY");
+        let epoch = handle.epoch();
+        handle.quarantine_for_test();
+
+        assert!(matches!(
+            svc.input(&id, &BASE64.encode("must-not-write\n"))
+                .await
+                .unwrap_err(),
+            TerminalError::Spawn(message) if message.contains("quarantined")
+        ));
+        assert!(matches!(
+            svc.relaunch(&id).await.unwrap_err(),
+            TerminalError::Spawn(message) if message.contains("quarantined")
+        ));
+        assert_eq!(
+            svc.live.get(id.as_str()).expect("same live handle").epoch(),
+            epoch,
+            "relaunch must not replace quarantined ownership"
+        );
+        assert!(matches!(
+            svc.relaunch_as_shell(&id).await.unwrap_err(),
+            TerminalError::Spawn(message) if message.contains("quarantined")
+        ));
+        assert!(matches!(
+            svc.delete(&id).await.unwrap_err(),
+            TerminalError::Spawn(message) if message.contains("quarantined")
+        ));
+        assert!(
+            repo.get_by_id(id.as_str()).await.unwrap().is_some(),
+            "delete must retain the durable management row"
+        );
+        assert!(
+            svc.live.contains_key(id.as_str()),
+            "delete must retain the quarantined runtime authority"
+        );
+
+        // The explicit cleanup primitive is intentionally still available.
+        // It is the only path capable of turning uncertain ownership into
+        // proven reap evidence.
+        handle.kill().await.expect("clean up real test process");
+    }
+
+    #[tokio::test]
     async fn aborted_delete_caller_still_finishes_post_commit_cleanup() {
         let (svc, _bc, repo) = service_with_repo();
         let id = svc
@@ -5066,6 +5324,50 @@ mod tests {
         })
         .await
         .expect("detached create coordinator should finish activation");
+        let slot = svc.lifecycle_slot(id.as_str());
+        assert!(matches!(
+            *slot.lock().await,
+            TerminalLifecycleState::Ready
+        ));
+        svc.kill(id.as_str()).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn aborted_deferred_resize_caller_still_finishes_activation() {
+        let (svc, _bc, repo) = service_with_repo();
+        let mut request = req("cat", &[]);
+        request.defer_spawn = true;
+        let id = svc
+            .create(TEST_USER_ID, request)
+            .await
+            .unwrap()
+            .terminal_id;
+        let gate = Arc::new(GetByIdGate::default());
+        *repo.get_by_id_gate.lock().unwrap() = Some(gate.clone());
+
+        let caller_svc = svc.clone();
+        let caller_id = id.clone();
+        let caller =
+            tokio::spawn(async move { caller_svc.resize(&caller_id, 120, 40).await });
+        tokio::time::timeout(Duration::from_secs(2), gate.reached.notified())
+            .await
+            .expect("deferred activation should enter repository preflight");
+
+        caller.abort();
+        assert!(caller.await.unwrap_err().is_cancelled());
+        gate.release.notify_one();
+
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while !svc.live.contains_key(id.as_str()) {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("detached resize coordinator should finish activation");
+        assert_eq!(
+            (svc.get(&id).await.unwrap().cols, svc.get(&id).await.unwrap().rows),
+            (120, 40)
+        );
         let slot = svc.lifecycle_slot(id.as_str());
         assert!(matches!(
             *slot.lock().await,
@@ -5733,7 +6035,7 @@ mod tests {
             let handle = svc.live.get(id.as_str()).expect("old PTY remains live");
             Arc::clone(handle.value())
         };
-        old_handle.kill().unwrap();
+        old_handle.kill().await.unwrap();
         tokio::time::sleep(Duration::from_millis(300)).await;
         assert_eq!(
             svc.live.get(id.as_str()).unwrap().epoch(),

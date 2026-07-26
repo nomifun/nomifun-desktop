@@ -9,7 +9,10 @@ use tracing::{debug, error, info, warn};
 
 use crate::runtime_state::{AgentRuntimeState, AgentRuntimeTurn};
 use crate::capability::cli_process::CliAgentProcess;
-use crate::manager::process_registry::register_session_process;
+use crate::factory::construction_guard::ConstructionGuard;
+use crate::manager::process_registry::{
+    register_session_process, unregister_agent_process,
+};
 use crate::protocol::events::AgentStreamEvent;
 use crate::protocol::send_error::AgentSendError;
 use crate::types::{SendMessageData, inject_runtime_preset_context};
@@ -38,7 +41,10 @@ use spawn_helpers::{build_spawn_config, is_port_listening, wait_for_gateway_read
 pub const DEFAULT_GATEWAY_PORT: u16 = 18789;
 
 const OPENCLAW_KILL_GRACE_MS: u64 = 1000;
+#[cfg(not(test))]
 pub(super) const GATEWAY_READY_TIMEOUT: Duration = Duration::from_secs(10);
+#[cfg(test)]
+pub(super) const GATEWAY_READY_TIMEOUT: Duration = Duration::from_millis(200);
 pub(super) const GATEWAY_READY_POLL_INTERVAL: Duration = Duration::from_millis(200);
 #[cfg(not(test))]
 const OPENCLAW_TEARDOWN_RPC_TIMEOUT: Duration = Duration::from_secs(5);
@@ -95,6 +101,31 @@ async fn kill_owned_gateway_process(
     connection.close().await;
     process
         .kill(Duration::from_millis(OPENCLAW_KILL_GRACE_MS))
+        .await
+}
+
+async fn teardown_owned_gateway_before_error(
+    process_guard: &mut Option<ConstructionGuard<CliAgentProcess>>,
+    data_dir: &std::path::Path,
+    error: AppError,
+) -> AppError {
+    let Some(process_guard) = process_guard.as_mut() else {
+        return error;
+    };
+    let data_dir = data_dir.to_path_buf();
+    process_guard
+        .teardown_before_error(error, move |process| {
+            let data_dir = data_dir.clone();
+            async move {
+                let result = process
+                    .kill(Duration::from_millis(OPENCLAW_KILL_GRACE_MS))
+                    .await;
+                if result.is_ok() {
+                    let _ = unregister_agent_process(&data_dir, process.pid());
+                }
+                result
+            }
+        })
         .await
 }
 
@@ -279,7 +310,7 @@ impl OpenClawAgentManager {
             })
             .unwrap_or(DEFAULT_GATEWAY_PORT);
 
-        let gateway_process = if !config.gateway.use_external_gateway {
+        let (gateway_process, mut process_guard) = if !config.gateway.use_external_gateway {
             let cli_path = config
                 .gateway
                 .cli_path
@@ -290,16 +321,39 @@ impl OpenClawAgentManager {
                 let spawn_config = build_spawn_config(cli_path, &workspace, &config.gateway);
                 let command_preview = spawn_config.command.display().to_string();
                 let process = Arc::new(CliAgentProcess::spawn(spawn_config).await?);
-                register_session_process(
+                let mut process_guard = Some(ConstructionGuard::new(
+                    Arc::clone(&process),
+                    "OpenClaw gateway CLI process",
+                    CliAgentProcess::request_exact_tree_cleanup,
+                ));
+                if let Err(error) = register_session_process(
                     &data_dir,
                     Arc::clone(&process),
                     conversation_id.clone(),
                     AgentType::OpenclawGateway,
                     None,
                     Some(command_preview),
-                )?;
+                ) {
+                    return Err(
+                        teardown_owned_gateway_before_error(
+                            &mut process_guard,
+                            &data_dir,
+                            error,
+                        )
+                        .await,
+                    );
+                }
 
-                wait_for_gateway_ready(host, port).await?;
+                if let Err(error) = wait_for_gateway_ready(host, port).await {
+                    return Err(
+                        teardown_owned_gateway_before_error(
+                            &mut process_guard,
+                            &data_dir,
+                            error,
+                        )
+                        .await,
+                    );
+                }
 
                 info!(
                     conversation_id = %conversation_id,
@@ -307,18 +361,30 @@ impl OpenClawAgentManager {
                     "OpenClaw gateway subprocess ready"
                 );
 
-                Some(process)
+                (Some(process), process_guard)
             } else {
                 debug!(port = port, "OpenClaw gateway already listening, skipping spawn");
-                None
+                (None, None)
             }
         } else {
-            None
+            (None, None)
         };
 
         let ws_url = normalize_ws_url(host, port);
 
-        let identity = load_or_create_identity(None)?;
+        let identity = match load_or_create_identity(None) {
+            Ok(identity) => identity,
+            Err(error) => {
+                return Err(
+                    teardown_owned_gateway_before_error(
+                        &mut process_guard,
+                        &data_dir,
+                        error,
+                    )
+                    .await,
+                );
+            }
+        };
 
         let shared_token = config
             .gateway
@@ -343,16 +409,26 @@ impl OpenClawAgentManager {
             None
         };
 
-        let (connection, hello) = OpenClawConnection::connect(&ws_url, auth, &identity)
-            .await
-            .inspect_err(|e| {
-                error!(
-                    conversation_id = %conversation_id,
-                    url = %ws_url,
-                    error = %ErrorChain(e),
-                    "Failed to connect to OpenClaw gateway"
-                );
-            })?;
+        let (connection, hello) =
+            match OpenClawConnection::connect(&ws_url, auth, &identity).await {
+                Ok(connected) => connected,
+                Err(error) => {
+                    error!(
+                        conversation_id = %conversation_id,
+                        url = %ws_url,
+                        error = %ErrorChain(&error),
+                        "Failed to connect to OpenClaw gateway"
+                    );
+                    return Err(
+                        teardown_owned_gateway_before_error(
+                            &mut process_guard,
+                            &data_dir,
+                            error,
+                        )
+                        .await,
+                    );
+                }
+            };
 
         if let Some(ref device_token) = hello.auth.device_token
         {
@@ -405,6 +481,9 @@ impl OpenClawAgentManager {
             teardown: Arc::new(TeardownCoordinator::default()),
         };
 
+        if let Some(process_guard) = process_guard.as_mut() {
+            process_guard.disarm();
+        }
         Ok(manager)
     }
 
@@ -902,6 +981,177 @@ mod turn_lifecycle_tests {
         let text = text_state.lock().await;
         assert_eq!(text.current_run_id.as_deref(), Some("run-new"));
         assert!(text.accumulated_text.is_empty(), "old run text leaked past the new-turn reset");
+    }
+}
+
+#[cfg(all(test, unix))]
+mod construction_tests {
+    use std::path::PathBuf;
+
+    use nomifun_api_types::OpenClawGatewayConfig;
+
+    use super::*;
+    use crate::manager::process_registry::agent_process_registry_path;
+
+    fn endless_test_cli() -> PathBuf {
+        ["/usr/bin/yes", "/bin/yes"]
+            .into_iter()
+            .map(PathBuf::from)
+            .find(|path| path.is_file())
+            .expect("the Unix test host should provide yes(1)")
+    }
+
+    async fn unused_loopback_port() -> u16 {
+        for candidate in 65_500..65_510 {
+            if !is_port_listening("127.0.0.1", candidate).await {
+                return candidate;
+            }
+        }
+        panic!("test host should have an unused high loopback port");
+    }
+
+    fn test_config(port: u16) -> OpenClawBuildExtra {
+        OpenClawBuildExtra {
+            backend: None,
+            agent_name: None,
+            preset_context: None,
+            gateway: OpenClawGatewayConfig {
+                host: Some("127.0.0.1".into()),
+                port: Some(port),
+                token: None,
+                password: None,
+                use_external_gateway: false,
+                cli_path: Some(endless_test_cli().to_string_lossy().into_owned()),
+            },
+            skills: Vec::new(),
+            preset_id: None,
+            cron_job_id: None,
+            session_key: None,
+        }
+    }
+
+    fn process_exists(pid: libc::pid_t) -> bool {
+        if unsafe { libc::kill(pid, 0) } == 0 {
+            return true;
+        }
+        std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH)
+    }
+
+    fn process_group_exists(process_group_id: libc::pid_t) -> bool {
+        if unsafe { libc::kill(-process_group_id, 0) } == 0 {
+            return true;
+        }
+        std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH)
+    }
+
+    fn pid_from_registry_error(error: &AppError) -> libc::pid_t {
+        error
+            .to_string()
+            .split_once("agent process ")
+            .and_then(|(_, remainder)| remainder.split_once(" in runtime registry"))
+            .and_then(|(pid, _)| pid.parse().ok())
+            .expect("registration error should retain the exact spawned pid")
+    }
+
+    async fn wait_for_process_tree_exit(pid: libc::pid_t) {
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while process_exists(pid) || process_group_exists(pid) {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("construction failure returned before the spawned gateway tree exited");
+    }
+
+    async fn read_registered_pid(registry_path: &std::path::Path) -> libc::pid_t {
+        tokio::time::timeout(Duration::from_millis(500), async {
+            loop {
+                if let Ok(contents) = std::fs::read_to_string(registry_path)
+                    && let Ok(value) =
+                        serde_json::from_str::<serde_json::Value>(&contents)
+                    && let Some(pid) = value["processes"][0]["pid"].as_u64()
+                {
+                    return libc::pid_t::try_from(pid).unwrap();
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("OpenClaw process should be durably registered before readiness")
+    }
+
+    #[tokio::test]
+    async fn registry_failure_keeps_openclaw_construction_pending_until_tree_exit() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(agent_process_registry_path(data_dir.path()))
+            .unwrap();
+
+        let build = tokio::spawn(OpenClawAgentManager::new(
+            "openclaw-construction-registry-failure".into(),
+            workspace.path().to_string_lossy().into_owned(),
+            test_config(unused_loopback_port().await),
+            None,
+            data_dir.path().to_path_buf(),
+        ));
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(
+            !build.is_finished(),
+            "OpenClaw exposed a construction error while its old gateway tree was alive"
+        );
+
+        let result = tokio::time::timeout(Duration::from_secs(10), build)
+            .await
+            .expect("OpenClaw exact construction cleanup timed out")
+            .expect("OpenClaw construction task panicked");
+        let error = match result {
+            Err(error) => error,
+            Ok(_) => panic!("registry destination directory must reject registration"),
+        };
+        assert!(error.to_string().contains("runtime registry"));
+        let pid = pid_from_registry_error(&error);
+        wait_for_process_tree_exit(pid).await;
+    }
+
+    #[tokio::test]
+    async fn readiness_failure_waits_for_tree_exit_and_unregisters_before_error() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        let registry_path = agent_process_registry_path(data_dir.path());
+        let build = tokio::spawn(OpenClawAgentManager::new(
+            "openclaw-construction-readiness-failure".into(),
+            workspace.path().to_string_lossy().into_owned(),
+            test_config(unused_loopback_port().await),
+            None,
+            data_dir.path().to_path_buf(),
+        ));
+        let pid = read_registered_pid(&registry_path).await;
+
+        assert!(process_exists(pid));
+        assert!(
+            !build.is_finished(),
+            "OpenClaw exposed readiness failure before its gateway tree was cleaned"
+        );
+
+        let result = tokio::time::timeout(Duration::from_secs(5), build)
+            .await
+            .expect("OpenClaw readiness cleanup timed out")
+            .expect("OpenClaw readiness task panicked");
+        let error = match result {
+            Err(error) => error,
+            Ok(_) => panic!("yes(1) cannot open the configured gateway port"),
+        };
+        assert!(error.to_string().contains("did not become ready"));
+        wait_for_process_tree_exit(pid).await;
+
+        let registry: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&registry_path).unwrap())
+                .unwrap();
+        assert_eq!(
+            registry["processes"].as_array().map(Vec::len),
+            Some(0),
+            "readiness cleanup returned before unregistering the exited process"
+        );
     }
 }
 

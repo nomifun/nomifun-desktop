@@ -573,6 +573,8 @@ pub fn build_system_state(services: &AppServices) -> SystemRouterState {
         protocol_detection_service: ProtocolDetectionService::new_dynamic(),
         version_check_service: VersionCheckService::new_dynamic(env!("CARGO_PKG_VERSION").to_owned()),
         data_dir: services.data_dir.clone(),
+        work_dir: services.work_dir.clone(),
+        work_dir_is_cli_override: services.work_dir_is_cli_override,
     }
 }
 
