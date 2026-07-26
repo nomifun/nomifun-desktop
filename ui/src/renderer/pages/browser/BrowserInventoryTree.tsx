@@ -31,8 +31,15 @@ const stateColor = (state: string): string => {
   return 'gray';
 };
 
+const activeTabForLane = (lane: IBrowserLane): IBrowserTab | undefined => {
+  const authoritative = lane.active_tab_id
+    ? lane.tabs.find((tab) => tab.tab_id === lane.active_tab_id)
+    : undefined;
+  return authoritative || (!lane.active_tab_id ? lane.tabs.find((tab) => tab.active) : undefined);
+};
+
 const shortUrl = (lane: IBrowserLane, noActivePage: string): string => {
-  const value = lane.url || lane.tabs.find((tab) => tab.active)?.url || lane.tabs[0]?.url;
+  const value = activeTabForLane(lane)?.url || lane.url || lane.tabs[0]?.url;
   if (!value) return noActivePage;
   try {
     return new URL(value).hostname || value;
@@ -42,7 +49,7 @@ const shortUrl = (lane: IBrowserLane, noActivePage: string): string => {
 };
 
 const tabIsActive = (lane: IBrowserLane, tab: IBrowserTab): boolean =>
-  tab.tab_id === lane.active_tab_id || tab.active === true;
+  lane.active_tab_id ? tab.tab_id === lane.active_tab_id : tab.active === true;
 
 const tabTitle = (tab: IBrowserTab): string => tab.title?.trim() || tab.url?.trim() || tab.tab_id;
 
@@ -127,8 +134,7 @@ const BrowserInventoryTree: React.FC<BrowserInventoryTreeProps> = ({
                   const active = selectedLaneId === lane.lane_id;
                   const title =
                     lane.title ||
-                    lane.tabs.find((tab) => tab.tab_id === lane.active_tab_id)?.title ||
-                    lane.tabs.find((tab) => tab.active)?.title ||
+                    activeTabForLane(lane)?.title ||
                     lane.lane_name ||
                     t('browser.tree.laneFallback');
                   return (

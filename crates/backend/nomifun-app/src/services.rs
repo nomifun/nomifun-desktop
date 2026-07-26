@@ -1,7 +1,9 @@
 //! Shared application services for dependency injection.
 
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 
 use nomifun_ai_agent::{
     AcpSessionSyncService, AcpSkillManager, AgentFactoryDeps, AgentRegistry, AgentRuntimeRegistry,
@@ -24,6 +26,8 @@ use nomifun_db::{
     SqliteModelProfileRepository, SqliteProviderRepository, SqliteRemoteAgentRepository,
     SqliteTerminalRepository, SqliteUserRepository,
 };
+#[cfg(feature = "browser-use")]
+use nomifun_db::{IClientPreferenceRepository, SqliteClientPreferenceRepository};
 use nomifun_realtime::{BroadcastEventBus, WebSocketManager};
 use nomifun_terminal::{TerminalEventEmitter, TerminalLifecycleServer, TerminalService};
 
@@ -35,6 +39,898 @@ fn require_utf8_executable_path(path: &std::path::Path) -> anyhow::Result<String
             "backend executable path is not valid Unicode; refusing to configure child-process bridges or lifecycle hooks: {path:?}"
         )
     })
+}
+
+#[cfg(feature = "browser-use")]
+struct BrowserPlatformTasks {
+    sweep: tokio::task::JoinHandle<()>,
+    events: tokio::task::JoinHandle<()>,
+    telemetry: tokio::task::JoinHandle<()>,
+}
+
+#[cfg(feature = "browser-use")]
+impl Drop for BrowserPlatformTasks {
+    fn drop(&mut self) {
+        self.sweep.abort();
+        self.events.abort();
+        self.telemetry.abort();
+    }
+}
+
+#[cfg(feature = "browser-use")]
+fn browser_resource_telemetry_from_measurements(
+    total_memory_bytes: u64,
+    available_memory_bytes: u64,
+    logical_cpus: Option<usize>,
+    chromium_rss_bytes: Option<u64>,
+    host_rss_by_process_id: std::collections::HashMap<u32, u64>,
+    cpu_usage_percent: Option<f32>,
+) -> nomifun_browser_platform::ResourceTelemetry {
+    nomifun_browser_platform::ResourceTelemetry {
+        total_memory_bytes,
+        available_memory_bytes,
+        logical_cpus: logical_cpus.unwrap_or(0),
+        chromium_rss_bytes: chromium_rss_bytes.unwrap_or(0),
+        cpu_pressure: cpu_usage_percent
+            .map(browser_cpu_pressure_from_percent)
+            .unwrap_or(0.0),
+        // No cross-platform GPU collector is wired yet. Keep this explicitly
+        // unknown instead of deriving a misleading approximation.
+        gpu_pressure: None,
+        host_rss_by_process_id,
+    }
+}
+
+#[cfg(feature = "browser-use")]
+fn browser_cpu_pressure_from_percent(cpu_usage_percent: f32) -> f64 {
+    let pressure = f64::from(cpu_usage_percent) / 100.0;
+    if pressure.is_finite() {
+        pressure.clamp(0.0, 1.0)
+    } else {
+        0.0
+    }
+}
+
+#[cfg(feature = "browser-use")]
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct BrowserStartupPreferences {
+    display_mode: &'static str,
+    source: String,
+    full_power: bool,
+    persistent_login: bool,
+}
+
+#[cfg(feature = "browser-use")]
+impl Default for BrowserStartupPreferences {
+    fn default() -> Self {
+        Self {
+            display_mode: "embedded",
+            source: "system".to_owned(),
+            full_power: false,
+            persistent_login: true,
+        }
+    }
+}
+
+#[cfg(feature = "browser-use")]
+fn resolve_browser_display_mode(
+    display_mode: Option<&str>,
+    legacy_silent: Option<&str>,
+) -> (&'static str, bool) {
+    // A valid new value is authoritative. A malformed-but-present new value
+    // fails safe to embedded for this boot, but is deliberately not persisted:
+    // otherwise startup could overwrite a still-meaningful legacy `silent`
+    // value with the default. Legacy migration is used only when the new key
+    // is absent.
+    if let Some(value) = display_mode {
+        return match value.trim().trim_matches('"') {
+            "embedded" => ("embedded", false),
+            "external" => ("external", false),
+            "headless" => ("headless", false),
+            _ => ("embedded", false),
+        };
+    }
+
+    match legacy_silent
+        .map(|value| value.trim().trim_matches('"'))
+        .and_then(|value| match value {
+            "false" => Some("external"),
+            "true" => Some("headless"),
+            _ => None,
+        }) {
+        Some(mode) => (mode, true),
+        None => ("embedded", true),
+    }
+}
+
+#[cfg(feature = "browser-use")]
+const BROWSER_STARTUP_PREFERENCE_KEYS: [&str; 5] = [
+    "agent.browserUse.displayMode",
+    "agent.browserUse.silent",
+    "agent.browserUse.source",
+    "agent.browserUse.fullPower",
+    "agent.browserUse.persistentLogin",
+];
+
+#[cfg(feature = "browser-use")]
+async fn load_browser_startup_preferences<R>(
+    preference_repo: &R,
+) -> BrowserStartupPreferences
+where
+    R: IClientPreferenceRepository + ?Sized,
+{
+    let preferences = match preference_repo
+        .get_by_keys(&BROWSER_STARTUP_PREFERENCE_KEYS)
+        .await
+    {
+        Ok(preferences) => preferences,
+        Err(error) => {
+            // A read failure is not the same as a fresh install. Keep the
+            // fail-safe runtime defaults, but do not persist them: writing
+            // `embedded` here could permanently replace a legacy external or
+            // headless choice when the database is temporarily unavailable.
+            tracing::warn!(
+                %error,
+                "could not read persisted browser startup preferences; using fail-safe defaults without migration"
+            );
+            return BrowserStartupPreferences::default();
+        }
+    };
+
+    let preference = |key: &str| {
+        preferences
+            .iter()
+            .find(|row| row.key == key)
+            .map(|row| row.value.as_str())
+    };
+    let (display_mode, persist_display_mode) = resolve_browser_display_mode(
+        preference("agent.browserUse.displayMode"),
+        preference("agent.browserUse.silent"),
+    );
+
+    if persist_display_mode {
+        // Persist only after a successful read. This covers fresh-install
+        // defaults and legacy migration, while never rewriting the legacy
+        // `silent` key itself. A malformed present displayMode does not request
+        // persistence, so this path cannot overwrite it with a default.
+        let serialized =
+            serde_json::to_string(display_mode).expect("browser display mode is static JSON");
+        if let Err(error) = preference_repo
+            .upsert_batch(&[("agent.browserUse.displayMode", serialized.as_str())])
+            .await
+        {
+            tracing::warn!(
+                %error,
+                "could not persist migrated browser display mode"
+            );
+        }
+    }
+
+    BrowserStartupPreferences {
+        display_mode,
+        source: preference("agent.browserUse.source")
+            .map(|value| value.trim().trim_matches('"').to_owned())
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| "system".to_owned()),
+        full_power: preference("agent.browserUse.fullPower")
+            .map(|value| value.trim().trim_matches('"') == "true")
+            .unwrap_or(false),
+        persistent_login: preference("agent.browserUse.persistentLogin")
+            .map(|value| value.trim().trim_matches('"') != "false")
+            .unwrap_or(true),
+    }
+}
+
+#[cfg(feature = "browser-use")]
+fn primary_host_is_headful(display_mode: &str) -> bool {
+    display_mode == "external"
+}
+
+#[cfg(feature = "browser-use")]
+fn browser_process_tree_rss<I>(
+    root_pids: &[u32],
+    processes: I,
+) -> (
+    Option<u64>,
+    std::collections::HashMap<u32, u64>,
+)
+where
+    I: IntoIterator<Item = (u32, Option<u32>, u64)>,
+{
+    use std::collections::{HashMap, HashSet};
+
+    if root_pids.is_empty() {
+        return (None, HashMap::new());
+    }
+
+    let mut rss_by_pid = HashMap::new();
+    let mut children_by_parent: HashMap<u32, Vec<u32>> = HashMap::new();
+    for (pid, parent_pid, rss_bytes) in processes {
+        rss_by_pid.insert(pid, rss_bytes);
+        if let Some(parent_pid) = parent_pid {
+            children_by_parent.entry(parent_pid).or_default().push(pid);
+        }
+    }
+
+    let mut total_visited = HashSet::new();
+    let mut host_rss_by_process_id = HashMap::new();
+    let mut total_rss_bytes = 0_u64;
+    for root_pid in root_pids.iter().copied().collect::<HashSet<_>>() {
+        let mut pending = vec![root_pid];
+        let mut host_visited = HashSet::new();
+        let mut host_measured = false;
+        let mut host_rss_bytes = 0_u64;
+        while let Some(pid) = pending.pop() {
+            if !host_visited.insert(pid) {
+                continue;
+            }
+            if let Some(rss_bytes) = rss_by_pid.get(&pid) {
+                host_measured = true;
+                host_rss_bytes = host_rss_bytes.saturating_add(*rss_bytes);
+                if total_visited.insert(pid) {
+                    total_rss_bytes = total_rss_bytes.saturating_add(*rss_bytes);
+                }
+            }
+            if let Some(children) = children_by_parent.get(&pid) {
+                pending.extend(children.iter().copied());
+            }
+        }
+        if host_measured {
+            host_rss_by_process_id.insert(root_pid, host_rss_bytes);
+        }
+    }
+
+    (
+        (!total_visited.is_empty()).then_some(total_rss_bytes),
+        host_rss_by_process_id,
+    )
+}
+
+#[cfg(feature = "browser-use")]
+const BROWSER_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(10);
+
+type BrowserShutdownResult = Result<(), Arc<str>>;
+
+struct BrowserShutdownFlight {
+    result: tokio::sync::watch::Receiver<Option<BrowserShutdownResult>>,
+}
+
+impl BrowserShutdownFlight {
+    fn new(result: tokio::sync::watch::Receiver<Option<BrowserShutdownResult>>) -> Self {
+        Self { result }
+    }
+
+    async fn wait(&self) -> BrowserShutdownResult {
+        let mut result = self.result.clone();
+        loop {
+            if let Some(result) = result.borrow().clone() {
+                return result;
+            }
+            if result.changed().await.is_err() {
+                return Err(Arc::from(
+                    "managed browser platform shutdown worker ended without publishing a result",
+                ));
+            }
+        }
+    }
+}
+
+#[cfg(feature = "browser-use")]
+#[derive(Default)]
+struct BrowserShutdownCoordinatorState {
+    flight: Option<Arc<BrowserShutdownFlight>>,
+    succeeded: bool,
+}
+
+/// Process-wide Browser Hub shutdown authority.
+///
+/// The first caller starts a detached Hub-owned shutdown worker. Every
+/// concurrent caller waits on that same flight, and timing out one waiter never
+/// drops or cancels the real `hub.shutdown()` future. Success is cached;
+/// failures clear the flight so a later caller can retry the Hub's retained
+/// cleanup queues.
+#[cfg(feature = "browser-use")]
+#[derive(Clone)]
+pub(crate) struct BrowserShutdownCoordinator {
+    hub: Arc<nomifun_browser_platform::BrowserSessionHub>,
+    state: Arc<tokio::sync::Mutex<BrowserShutdownCoordinatorState>>,
+}
+
+#[cfg(feature = "browser-use")]
+impl BrowserShutdownCoordinator {
+    fn new(hub: Arc<nomifun_browser_platform::BrowserSessionHub>) -> Self {
+        Self {
+            hub,
+            state: Arc::new(tokio::sync::Mutex::new(
+                BrowserShutdownCoordinatorState::default(),
+            )),
+        }
+    }
+
+    pub(crate) async fn shutdown(&self) -> anyhow::Result<()> {
+        self.shutdown_with_timeout(BROWSER_SHUTDOWN_TIMEOUT).await
+    }
+
+    async fn shutdown_with_timeout(&self, timeout: Duration) -> anyhow::Result<()> {
+        let flight = self.current_or_start_flight().await;
+        match tokio::time::timeout(timeout, flight.wait()).await {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(error)) => {
+                self.clear_failed_flight(&flight).await;
+                Err(anyhow::anyhow!("{error}"))
+            }
+            Err(_) => Err(anyhow::anyhow!(
+                "managed browser platform shutdown timed out after {}",
+                format_duration(timeout)
+            )),
+        }
+    }
+
+    async fn current_or_start_flight(&self) -> Arc<BrowserShutdownFlight> {
+        let mut state = self.state.lock().await;
+        if state.succeeded {
+            let (_tx, rx) = tokio::sync::watch::channel(Some(Ok(())));
+            return Arc::new(BrowserShutdownFlight::new(rx));
+        }
+        if let Some(flight) = state.flight.clone() {
+            return flight;
+        }
+
+        let (result_tx, result_rx) = tokio::sync::watch::channel(None);
+        let flight = Arc::new(BrowserShutdownFlight::new(result_rx));
+        state.flight = Some(Arc::clone(&flight));
+
+        let hub = Arc::clone(&self.hub);
+        let coordinator_state = Arc::clone(&self.state);
+        let active_flight = Arc::clone(&flight);
+        tokio::spawn(async move {
+            let result = match tokio::spawn(async move { hub.shutdown().await }).await {
+                Ok(Ok(())) => Ok(()),
+                Ok(Err(error)) => Err(Arc::from(
+                    format!(
+                        "managed browser platform shutdown failed ({:?}): {}",
+                        error.code, error.message
+                    )
+                    .into_boxed_str(),
+                )),
+                Err(error) => Err(Arc::from(
+                    format!(
+                        "managed browser platform shutdown worker failed (cancelled={}, panic={}): {error}",
+                        error.is_cancelled(),
+                        error.is_panic()
+                    )
+                    .into_boxed_str(),
+                )),
+            };
+
+            // Publish the terminal result before mutating coordinator state.
+            // Followers that already hold this flight must observe its exact
+            // result even if a failed flight is cleared and a retry starts
+            // immediately on another task.
+            result_tx.send_replace(Some(result.clone()));
+            {
+                let mut state = coordinator_state.lock().await;
+                if state
+                    .flight
+                    .as_ref()
+                    .is_some_and(|flight| Arc::ptr_eq(flight, &active_flight))
+                {
+                    if result.is_ok() {
+                        state.succeeded = true;
+                    } else {
+                        state.flight = None;
+                    }
+                }
+            }
+        });
+
+        flight
+    }
+
+    async fn clear_failed_flight(&self, failed: &Arc<BrowserShutdownFlight>) {
+        let mut state = self.state.lock().await;
+        if state
+            .flight
+            .as_ref()
+            .is_some_and(|flight| Arc::ptr_eq(flight, failed))
+        {
+            state.flight = None;
+        }
+    }
+}
+
+#[derive(Default)]
+struct BrowserPlatformShutdownState {
+    hub: Option<BrowserShutdownStep>,
+    flight: Option<Arc<BrowserShutdownFlight>>,
+    succeeded: bool,
+}
+
+type BrowserShutdownStepFuture = std::pin::Pin<
+    Box<dyn std::future::Future<Output = Result<(), String>> + Send + 'static>,
+>;
+
+#[derive(Clone)]
+struct BrowserShutdownStep {
+    label: &'static str,
+    run: Arc<dyn Fn() -> BrowserShutdownStepFuture + Send + Sync>,
+}
+
+impl BrowserShutdownStep {
+    fn new<F, Fut>(label: &'static str, run: F) -> Self
+    where
+        F: Fn() -> Fut + Send + Sync + 'static,
+        Fut: std::future::Future<Output = Result<(), String>> + Send + 'static,
+    {
+        Self {
+            label,
+            run: Arc::new(move || Box::pin(run())),
+        }
+    }
+
+    async fn execute(&self) -> Result<(), String> {
+        (self.run)().await
+    }
+}
+
+struct BrowserPlatformShutdownInner {
+    gateway: Option<BrowserShutdownStep>,
+    browser_mcp: tokio::sync::Mutex<Option<BrowserShutdownStep>>,
+    state: tokio::sync::Mutex<BrowserPlatformShutdownState>,
+}
+
+/// Cloneable, process-wide authority for ordered Gateway/Browser shutdown.
+///
+/// Gateway is always present when startup succeeds, including builds without
+/// `browser-use`. Browser-enabled builds add ACP Browser MCP and the Hub. One
+/// shared flight first closes every configured ingress in parallel and waits
+/// for authoritative quiescence/owner cleanup. Only a fully successful ingress
+/// barrier may advance to Hub shutdown. This prevents Hub or DB teardown from
+/// racing accepted requests, while a failed flight remains retryable.
+#[derive(Clone)]
+pub(crate) struct BrowserPlatformShutdown {
+    inner: Arc<BrowserPlatformShutdownInner>,
+}
+
+impl Default for BrowserPlatformShutdown {
+    fn default() -> Self {
+        Self::from_steps(None, None)
+    }
+}
+
+impl BrowserPlatformShutdown {
+    #[cfg(not(feature = "browser-use"))]
+    fn gateway_only(
+        gateway: Option<Arc<nomifun_gateway::GatewayMcpServer>>,
+    ) -> Self {
+        Self::gateway_only_early(gateway)
+    }
+
+    fn gateway_only_early(
+        gateway: Option<Arc<nomifun_gateway::GatewayMcpServer>>,
+    ) -> Self {
+        let gateway = gateway.map(|server| {
+            BrowserShutdownStep::new("Gateway MCP ingress", move || {
+                let server = Arc::clone(&server);
+                async move { server.wait_for_shutdown().await }
+            })
+        });
+        Self::from_steps(gateway, None)
+    }
+
+    #[cfg(feature = "browser-use")]
+    async fn set_browser_mcp(
+        &self,
+        browser_mcp: Option<Arc<crate::browser_mcp_server::BrowserMcpServer>>,
+    ) {
+        let browser_mcp = browser_mcp.map(|server| {
+            BrowserShutdownStep::new("ACP Browser MCP ingress", move || {
+                let server = Arc::clone(&server);
+                async move { server.stop_and_wait().await }
+            })
+        });
+        self.set_browser_mcp_step(browser_mcp).await;
+    }
+
+    fn from_steps(
+        gateway: Option<BrowserShutdownStep>,
+        browser_mcp: Option<BrowserShutdownStep>,
+    ) -> Self {
+        Self {
+            inner: Arc::new(BrowserPlatformShutdownInner {
+                gateway,
+                browser_mcp: tokio::sync::Mutex::new(browser_mcp),
+                state: tokio::sync::Mutex::new(BrowserPlatformShutdownState::default()),
+            }),
+        }
+    }
+
+    /// Install the Hub shutdown authority before publishing the composed
+    /// services. If an ingress-only shutdown raced composition, join that
+    /// flight first and reopen the sequence so the newly installed Hub cannot
+    /// be skipped by a cached success.
+    #[cfg(feature = "browser-use")]
+    async fn set_hub_coordinator(&self, coordinator: BrowserShutdownCoordinator) {
+        let hub = BrowserShutdownStep::new("Browser Hub", move || {
+            let coordinator = coordinator.clone();
+            async move {
+                coordinator
+                    .shutdown()
+                    .await
+                    .map_err(|error| format!("{error:#}"))
+            }
+        });
+        self.set_hub_step(hub).await;
+    }
+
+    #[cfg(feature = "browser-use")]
+    async fn set_hub_step(&self, hub: BrowserShutdownStep) {
+        loop {
+            let active_flight = {
+                let mut state = self.inner.state.lock().await;
+                if state.succeeded {
+                    state.succeeded = false;
+                    state.flight = None;
+                    state.hub = Some(hub.clone());
+                    return;
+                }
+                match state.flight.clone() {
+                    Some(flight) => Some(flight),
+                    None => {
+                        state.hub = Some(hub.clone());
+                        return;
+                    }
+                }
+            };
+
+            let Some(active_flight) = active_flight else {
+                unreachable!("Browser platform shutdown flight was checked above");
+            };
+            if active_flight.wait().await.is_err() {
+                self.clear_failed_flight(&active_flight).await;
+            }
+            // The worker publishes before updating shared state. Yield once so
+            // it can cache success or clear failure before this loop rechecks.
+            tokio::task::yield_now().await;
+        }
+    }
+
+    /// Register a newly started Browser MCP ingress without allowing an
+    /// already-running or cached shutdown flight to omit it. Startup and
+    /// shutdown normally run on one task, but fatal supervisors may initiate
+    /// cleanup concurrently; use the same reopen/join protocol as Hub
+    /// installation so cleanup success always covers every published ingress.
+    async fn set_browser_mcp_step(&self, browser_mcp: Option<BrowserShutdownStep>) {
+        loop {
+            let active_flight = {
+                let mut state = self.inner.state.lock().await;
+                if state.succeeded {
+                    state.succeeded = false;
+                    state.flight = None;
+                    *self.inner.browser_mcp.lock().await = browser_mcp.clone();
+                    return;
+                }
+                if state.flight.is_none() {
+                    *self.inner.browser_mcp.lock().await = browser_mcp.clone();
+                    return;
+                }
+                state.flight.clone()
+            };
+
+            let Some(active_flight) = active_flight else {
+                unreachable!("Browser platform shutdown flight was checked above");
+            };
+            if active_flight.wait().await.is_err() {
+                self.clear_failed_flight(&active_flight).await;
+            }
+            tokio::task::yield_now().await;
+        }
+    }
+
+    pub(crate) async fn shutdown(&self) -> anyhow::Result<()> {
+        let flight = self.current_or_start_flight().await;
+        match flight.wait().await {
+            Ok(()) => Ok(()),
+            Err(error) => {
+                self.clear_failed_flight(&flight).await;
+                Err(anyhow::anyhow!("{error}"))
+            }
+        }
+    }
+
+    async fn current_or_start_flight(&self) -> Arc<BrowserShutdownFlight> {
+        let mut state = self.inner.state.lock().await;
+        if state.succeeded {
+            let (_tx, rx) = tokio::sync::watch::channel(Some(Ok(())));
+            return Arc::new(BrowserShutdownFlight::new(rx));
+        }
+        if let Some(flight) = state.flight.clone() {
+            return flight;
+        }
+
+        let (result_tx, result_rx) = tokio::sync::watch::channel(None);
+        let flight = Arc::new(BrowserShutdownFlight::new(result_rx));
+        state.flight = Some(Arc::clone(&flight));
+
+        let gateway = self.inner.gateway.clone();
+        let browser_mcp = self.inner.browser_mcp.lock().await.clone();
+        let hub = state.hub.clone();
+        let inner = Arc::clone(&self.inner);
+        let active_flight = Arc::clone(&flight);
+        tokio::spawn(async move {
+            let result = match tokio::spawn(run_browser_platform_shutdown(
+                gateway,
+                browser_mcp,
+                hub,
+            ))
+            .await
+            {
+                Ok(result) => result,
+                Err(error) => Err(Arc::from(
+                    format!(
+                        "managed browser platform shutdown worker failed (cancelled={}, panic={}): {error}",
+                        error.is_cancelled(),
+                        error.is_panic()
+                    )
+                    .into_boxed_str(),
+                )),
+            };
+
+            // Publish first so every caller already attached to this exact
+            // flight observes the same terminal result.
+            result_tx.send_replace(Some(result.clone()));
+            let mut state = inner.state.lock().await;
+            if state
+                .flight
+                .as_ref()
+                .is_some_and(|flight| Arc::ptr_eq(flight, &active_flight))
+            {
+                if result.is_ok() {
+                    state.succeeded = true;
+                } else {
+                    state.flight = None;
+                }
+            }
+        });
+
+        flight
+    }
+
+    async fn clear_failed_flight(&self, failed: &Arc<BrowserShutdownFlight>) {
+        let mut state = self.inner.state.lock().await;
+        if state
+            .flight
+            .as_ref()
+            .is_some_and(|flight| Arc::ptr_eq(flight, failed))
+        {
+            state.flight = None;
+        }
+    }
+}
+
+async fn run_browser_platform_shutdown(
+    gateway: Option<BrowserShutdownStep>,
+    browser_mcp: Option<BrowserShutdownStep>,
+    hub: Option<BrowserShutdownStep>,
+) -> BrowserShutdownResult {
+    let (gateway_result, browser_mcp_result) = tokio::join!(
+        await_browser_shutdown_step(gateway),
+        await_browser_shutdown_step(browser_mcp)
+    );
+
+    let mut ingress_errors = Vec::new();
+    if let Err(error) = gateway_result {
+        ingress_errors.push(error);
+    }
+    if let Err(error) = browser_mcp_result {
+        ingress_errors.push(error);
+    }
+
+    if !ingress_errors.is_empty() {
+        // A failed or unconfirmed ingress barrier means an accepted request may
+        // still own Hub work. Do not destroy that authority underneath it. The
+        // composed flight is cleared by the caller so a later shutdown attempt
+        // can rejoin/retry the ingress authorities and only then advance.
+        return Err(Arc::from(ingress_errors.join("; ").into_boxed_str()));
+    }
+
+    await_browser_shutdown_step(hub)
+        .await
+        .map_err(|error| Arc::from(error.into_boxed_str()))
+}
+
+async fn await_browser_shutdown_step(step: Option<BrowserShutdownStep>) -> Result<(), String> {
+    let Some(step) = step else {
+        return Ok(());
+    };
+    let label = step.label;
+    match tokio::spawn(async move { step.execute().await }).await {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(error)) => Err(format!("{label} shutdown failed: {error}")),
+        Err(error) => Err(format!(
+            "{label} shutdown task failed (cancelled={}, panic={}): {error}",
+            error.is_cancelled(),
+            error.is_panic()
+        )),
+    }
+}
+
+#[cfg(feature = "browser-use")]
+fn format_duration(duration: Duration) -> String {
+    if duration.subsec_nanos() == 0 {
+        if duration.as_secs() > 0 {
+            return format!("{} seconds", duration.as_secs());
+        }
+        return format!("{} milliseconds", duration.as_millis());
+    }
+    format!("{duration:?}")
+}
+
+#[cfg(feature = "browser-use")]
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum BrowserOrphanRecoveryOutcome {
+    Safe { summary: String },
+    Degraded { reason: String },
+}
+
+#[cfg(feature = "browser-use")]
+impl BrowserOrphanRecoveryOutcome {
+    fn from_report(report: &nomi_browser_engine::profile::ProfileRecoveryReport) -> Self {
+        let summary = report.safety_summary();
+        if report.failures == 0 && report.profiles_preserved == 0 {
+            Self::Safe { summary }
+        } else {
+            Self::Degraded {
+                reason: format!(
+                    "startup orphan recovery was not proven safe ({summary}); Browser functionality is disabled for this process"
+                ),
+            }
+        }
+    }
+
+    fn from_join_error(error: &tokio::task::JoinError) -> Self {
+        Self::Degraded {
+            reason: format!(
+                "startup orphan recovery worker failed (cancelled={}, panic={}): {error}; Browser functionality is disabled for this process",
+                error.is_cancelled(),
+                error.is_panic()
+            ),
+        }
+    }
+
+    fn permits_host_composition(&self) -> bool {
+        matches!(self, Self::Safe { .. })
+    }
+
+    fn is_safe(&self) -> bool {
+        self.permits_host_composition()
+    }
+}
+
+#[cfg(feature = "browser-use")]
+fn persisted_identity_seed_coverage() -> nomifun_browser_platform::SnapshotCoverage {
+    nomifun_browser_platform::SnapshotCoverage::cookies_only()
+}
+
+#[cfg(feature = "browser-use")]
+fn sample_browser_resources(
+    system: &mut sysinfo::System,
+    root_pids: &[u32],
+    cpu_usage_percent: Option<f32>,
+) -> nomifun_browser_platform::ResourceTelemetry {
+    system.refresh_memory();
+    system.refresh_processes_specifics(
+        sysinfo::ProcessesToUpdate::All,
+        true,
+        sysinfo::ProcessRefreshKind::nothing().with_memory(),
+    );
+    let (chromium_rss_bytes, host_rss_by_process_id) = browser_process_tree_rss(
+        root_pids,
+        system.processes().values().map(|process| {
+            (
+                process.pid().as_u32(),
+                process.parent().map(|pid| pid.as_u32()),
+                process.memory(),
+            )
+        }),
+    );
+    browser_resource_telemetry_from_measurements(
+        system.total_memory(),
+        system.available_memory(),
+        std::thread::available_parallelism()
+            .ok()
+            .map(std::num::NonZeroUsize::get),
+        chromium_rss_bytes,
+        host_rss_by_process_id,
+        cpu_usage_percent,
+    )
+
+}
+
+#[cfg(feature = "browser-use")]
+const BROWSER_INVENTORY_EVENT_NAME: &str = "browser.inventory.changed";
+#[cfg(feature = "browser-use")]
+const BROWSER_INVENTORY_RESYNC_CHANGE_KIND: &str = "resync_required";
+
+/// Build a protocol-compatible invalidation event for a lossy inventory hop.
+///
+/// This intentionally carries no synthetic `sequence`: only the Hub owns that
+/// counter, and inventing one here could hide a real gap. Existing clients
+/// already refresh on every inventory event; newer clients can use the
+/// additive marker to explicitly classify the refresh as a full resync.
+#[cfg(feature = "browser-use")]
+fn browser_inventory_resync_event(
+    skipped: u64,
+) -> nomifun_api_types::WebSocketMessage<serde_json::Value> {
+    nomifun_api_types::WebSocketMessage::new(
+        BROWSER_INVENTORY_EVENT_NAME,
+        serde_json::json!({
+            "change_kind": BROWSER_INVENTORY_RESYNC_CHANGE_KIND,
+            "resync_required": true,
+            "skipped": skipped,
+        }),
+    )
+}
+
+#[cfg(feature = "browser-use")]
+async fn forward_browser_inventory_events(
+    mut receiver: tokio::sync::broadcast::Receiver<
+        nomifun_browser_platform::BrowserInventoryEvent,
+    >,
+    event_bus: Arc<BroadcastEventBus>,
+    ws_manager: Arc<WebSocketManager>,
+    installation_owner: Arc<str>,
+) {
+    use nomifun_api_types::WebSocketMessage;
+    use nomifun_realtime::UserEventSink;
+    use tokio::sync::broadcast::error::RecvError;
+
+    loop {
+        let event = match receiver.recv().await {
+            Ok(event) => event,
+            Err(RecvError::Lagged(skipped)) => {
+                tracing::warn!(skipped, "browser inventory realtime forwarder lagged");
+                // Hub events are user-scoped, but Tokio only reports a count
+                // for discarded entries, not their audiences. The invalidation
+                // contains no inventory data, so safely send it to every
+                // connection; each client refreshes its own authenticated
+                // snapshot. Deliver directly to the socket manager so the
+                // signal cannot be dropped by the same intermediate bus.
+                ws_manager.broadcast_all(browser_inventory_resync_event(skipped));
+                continue;
+            }
+            Err(RecvError::Closed) => break,
+        };
+        let audience = event
+            .user_id
+            .as_deref()
+            .unwrap_or(installation_owner.as_ref());
+        let payload = serde_json::json!({
+            "sequence": event.sequence,
+            "change_kind": event.change_kind,
+            "lane_id": event.lane_id,
+            "conversation_id": event.conversation_id,
+            "at_ms": event.at_ms,
+        });
+        event_bus.send_to_user(
+            audience,
+            WebSocketMessage::new(BROWSER_INVENTORY_EVENT_NAME, payload.clone()),
+        );
+        if matches!(
+            event.change_kind.as_str(),
+            "lane_created"
+                | "lane_running"
+                | "lane_failed"
+                | "lane_stopping"
+                | "lane_closed"
+                | "platform_stopped"
+        ) {
+            event_bus.send_to_user(
+                audience,
+                WebSocketMessage::new("browser.lifecycle.changed", payload),
+            );
+        }
+    }
 }
 
 pub struct AppServices {
@@ -124,7 +1020,7 @@ pub struct AppServices {
     /// Platform Gateway MCP server instance kept alive for the app lifetime.
     /// Its deps are late-wired from `create_router` via
     /// [`AppServices::inject_gateway_deps`] once the module services exist.
-    pub(crate) _gateway_mcp_server: Option<nomifun_gateway::GatewayMcpServer>,
+    pub(crate) _gateway_mcp_server: Option<Arc<nomifun_gateway::GatewayMcpServer>>,
     /// Knowledge MCP server instance kept alive for the app lifetime. Its
     /// presence (surfaced to the agent factory as `knowledge_mcp_config`) gates
     /// scoped knowledge tool injection into ACP sessions that have bound bases.
@@ -150,6 +1046,320 @@ pub struct AppServices {
     /// the `/api/knowledge/*` routes and the `ConversationService`, which
     /// mounts bound bases into session workspaces at task start.
     pub knowledge_service: Arc<nomifun_knowledge::KnowledgeService>,
+    /// The process-wide browser authority. Browser-capable hosts inject one
+    /// Hub at the composition root; routes and every agent transport reuse it.
+    /// `None` is an explicit unsupported/degraded state and never triggers a
+    /// handler-local Chromium launch.
+    #[cfg(feature = "browser-use")]
+    pub browser_session_hub: Option<Arc<nomifun_browser_platform::BrowserSessionHub>>,
+    /// Ordered, cloneable Gateway/Browser shutdown authority used by every
+    /// process entry point. It exists in builds without `browser-use` because
+    /// the Platform Gateway is unconditional and must quiesce before the DB.
+    pub(crate) browser_platform_shutdown: BrowserPlatformShutdown,
+    /// One-shot bridge shared with the already-built Agent factory. Installing
+    /// the Hub-backed provider here makes Native Nomi use the exact same
+    /// process-wide Hub as HTTP, viewer, Gateway, ACP, and knowledge fetching.
+    #[cfg(feature = "browser-use")]
+    _browser_lane_provider_slot:
+        nomifun_ai_agent::BrowserLaneClientProviderSlot,
+    /// Keeps the authenticated ACP browser loopback proxy alive. Its issuer is
+    /// process-private; child runtimes receive only scoped capabilities.
+    #[cfg(feature = "browser-use")]
+    pub(crate) _browser_mcp_server: Option<Arc<crate::browser_mcp_server::BrowserMcpServer>>,
+    /// Owns the Hub lifecycle sweep and user-scoped realtime forwarding loops.
+    /// Dropping AppServices aborts both loops instead of detaching them.
+    #[cfg(feature = "browser-use")]
+    _browser_platform_tasks: Option<BrowserPlatformTasks>,
+}
+
+pub(crate) struct RetainedAppServicesStartupError {
+    services: AppServices,
+    error: anyhow::Error,
+}
+
+impl RetainedAppServicesStartupError {
+    fn new(services: AppServices, error: anyhow::Error) -> Self {
+        Self { services, error }
+    }
+
+    pub(crate) fn into_parts(self) -> (AppServices, anyhow::Error) {
+        (self.services, self.error)
+    }
+}
+
+pub(crate) struct RetainedAppServicesConstructionError {
+    error: anyhow::Error,
+    cleanup_error: Option<anyhow::Error>,
+    authority: Option<Arc<StartupCleanupAuthority>>,
+}
+
+impl RetainedAppServicesConstructionError {
+    fn verified(error: anyhow::Error) -> Self {
+        Self {
+            error,
+            cleanup_error: None,
+            authority: None,
+        }
+    }
+
+    fn new(
+        error: anyhow::Error,
+        cleanup_error: anyhow::Error,
+        authority: Arc<StartupCleanupAuthority>,
+    ) -> Self {
+        Self {
+            error,
+            cleanup_error: Some(cleanup_error),
+            authority: Some(authority),
+        }
+    }
+
+    pub(crate) async fn retry_cleanup(&self) -> anyhow::Result<()> {
+        match &self.authority {
+            Some(authority) => authority.cleanup().await,
+            None => Ok(()),
+        }
+    }
+
+    pub(crate) fn into_parts(
+        self,
+    ) -> (
+        anyhow::Error,
+        Option<anyhow::Error>,
+        Option<Arc<StartupCleanupAuthority>>,
+    ) {
+        (self.error, self.cleanup_error, self.authority)
+    }
+}
+
+impl std::fmt::Debug for RetainedAppServicesConstructionError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("RetainedAppServicesConstructionError")
+            .field("error", &self.error)
+            .field("cleanup_error", &self.cleanup_error)
+            .field(
+                "authority",
+                &self.authority.as_ref().map(|_| "<retained>"),
+            )
+            .finish()
+    }
+}
+
+impl std::fmt::Display for RetainedAppServicesConstructionError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "{:#}{}",
+            self.error,
+            self.cleanup_error
+                .as_ref()
+                .map(|error| format!("; managed browser platform cleanup remains unverified: {error:#}"))
+                .unwrap_or_default()
+        )
+    }
+}
+
+impl std::error::Error for RetainedAppServicesConstructionError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        self.error.source()
+    }
+}
+
+/// Startup-only cleanup authority used while `AppServices` is still being
+/// composed.
+///
+/// `from_config_inner` starts loopback ingress servers before all of the
+/// remaining fallible composition work has completed.  The ordinary Rust
+/// drop path is not a proof that those ingresses have stopped, so the
+/// database must stay open until the shared Browser/Gateway barrier confirms
+/// quiescence.  This small authority is deliberately independent of
+/// `AppServices`: it can outlive a failed composition and retain the exact
+/// ingress/Hub handles needed for a later retry.
+pub(crate) struct StartupCleanupAuthority {
+    database: Database,
+    browser_platform_shutdown: tokio::sync::Mutex<Option<BrowserPlatformShutdown>>,
+    retry_worker_started: AtomicBool,
+}
+
+impl StartupCleanupAuthority {
+    fn new(database: Database) -> Self {
+        Self {
+            database,
+            browser_platform_shutdown: tokio::sync::Mutex::new(None),
+            retry_worker_started: AtomicBool::new(false),
+        }
+    }
+
+    async fn install_browser_platform(&self, shutdown: BrowserPlatformShutdown) {
+        *self.browser_platform_shutdown.lock().await = Some(shutdown);
+    }
+
+    async fn browser_platform_shutdown(&self) -> Option<BrowserPlatformShutdown> {
+        self.browser_platform_shutdown.lock().await.clone()
+    }
+
+    /// Close the managed ingress first and the database second.
+    ///
+    /// A failed ingress shutdown intentionally leaves the database open.  The
+    /// caller retains this authority and can invoke the same method again;
+    /// `BrowserPlatformShutdown` provides the single-flight/idempotent retry
+    /// semantics for the actual Gateway, Browser MCP, and Hub owners.
+    pub(crate) async fn cleanup(&self) -> anyhow::Result<()> {
+        let browser_cleanup = match self.browser_platform_shutdown().await {
+            Some(shutdown) => shutdown.shutdown().await,
+            None => Ok(()),
+        };
+        close_database_after_browser_platform_cleanup(browser_cleanup, || self.database.close())
+            .await
+    }
+
+    fn retain_retry_worker(self: &Arc<Self>) {
+        if self
+            .retry_worker_started
+            .swap(true, Ordering::AcqRel)
+        {
+            return;
+        }
+
+        let authority = Arc::clone(self);
+        tokio::spawn(async move {
+            let mut delay = Duration::from_millis(250);
+            loop {
+                tokio::time::sleep(delay).await;
+                match authority.cleanup().await {
+                    Ok(()) => {
+                        tracing::info!(
+                            "retained startup cleanup authority completed after retry"
+                        );
+                        break;
+                    }
+                    Err(error) => {
+                        tracing::warn!(
+                            %error,
+                            "retained startup cleanup authority is still pending; retrying"
+                        );
+                        delay = (delay * 2).min(Duration::from_secs(5));
+                    }
+                }
+            }
+        });
+    }
+}
+
+async fn finish_startup_cleanup_typed(
+    authority: Arc<StartupCleanupAuthority>,
+    error: anyhow::Error,
+) -> Result<anyhow::Error, RetainedAppServicesConstructionError> {
+    match authority.cleanup().await {
+        Ok(()) => Ok(error),
+        Err(cleanup_error) => Err(RetainedAppServicesConstructionError::new(
+            error,
+            cleanup_error,
+            authority,
+        )),
+    }
+}
+
+async fn finish_startup_cleanup(
+    authority: Arc<StartupCleanupAuthority>,
+    error: anyhow::Error,
+) -> anyhow::Error {
+    match finish_startup_cleanup_typed(authority, error).await {
+        Ok(error) => error,
+        Err(retained) => {
+            let (error, cleanup_error, authority) = retained.into_parts();
+            // Compatibility callers may immediately drop the returned anyhow
+            // error. Retain the exact ingress/Hub handles and open database in
+            // a detached retry worker as well as in the downcastable error.
+            match (cleanup_error, authority) {
+                (Some(cleanup_error), Some(authority)) => {
+                    authority.retain_retry_worker();
+                    anyhow::Error::new(RetainedStartupCleanupError::new(
+                        error,
+                        cleanup_error,
+                        authority,
+                    ))
+                }
+                _ => anyhow::anyhow!(
+                    "{error:#}; startup cleanup state was internally inconsistent"
+                ),
+            }
+        }
+    }
+}
+
+/// Error returned by `from_config` when startup cleanup could not yet be
+/// verified.
+///
+/// The authority is retained both in this error (for a host that wants to
+/// supervise retries) and by a bounded background retry worker.  This keeps
+/// old callers safe even if they immediately propagate and drop the error:
+/// neither the managed ingress handles nor the database are abandoned before
+/// cleanup succeeds.
+pub(crate) struct RetainedStartupCleanupError {
+    error: anyhow::Error,
+    cleanup_error: anyhow::Error,
+    authority: Arc<StartupCleanupAuthority>,
+}
+
+impl RetainedStartupCleanupError {
+    fn new(
+        error: anyhow::Error,
+        cleanup_error: anyhow::Error,
+        authority: Arc<StartupCleanupAuthority>,
+    ) -> Self {
+        Self {
+            error,
+            cleanup_error,
+            authority,
+        }
+    }
+
+    pub(crate) fn authority(&self) -> Arc<StartupCleanupAuthority> {
+        Arc::clone(&self.authority)
+    }
+
+    pub(crate) async fn retry_cleanup(&self) -> anyhow::Result<()> {
+        self.authority.cleanup().await
+    }
+
+    pub(crate) fn into_parts(
+        self,
+    ) -> (
+        anyhow::Error,
+        anyhow::Error,
+        Arc<StartupCleanupAuthority>,
+    ) {
+        (self.error, self.cleanup_error, self.authority)
+    }
+}
+
+impl std::fmt::Debug for RetainedStartupCleanupError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("RetainedStartupCleanupError")
+            .field("error", &self.error)
+            .field("cleanup_error", &self.cleanup_error)
+            .field("authority", &"<retained>")
+            .finish()
+    }
+}
+
+impl std::fmt::Display for RetainedStartupCleanupError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "{:#}; managed browser platform cleanup remains unverified: {:#}",
+            self.error, self.cleanup_error
+        )
+    }
+}
+
+impl std::error::Error for RetainedStartupCleanupError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        self.error.source()
+    }
 }
 
 impl AppServices {
@@ -161,38 +1371,82 @@ impl AppServices {
     /// sweep in a database opened from directory B, without rejecting valid
     /// path aliases. The authority is not process-tree termination proof.
     pub async fn with_boot_reconciliation_authority(
-        mut self,
+        self,
         authority: crate::bootstrap::BootServerLockAuthority,
         config: &AppConfig,
     ) -> anyhow::Result<Self> {
-        if !authority.protects_data_dir(&config.data_dir)?
-            || !authority.protects_data_dir(&self.data_dir)?
+        match self
+            .try_with_boot_reconciliation_authority(authority, config)
+            .await
         {
-            anyhow::bail!(
-                "boot reconciliation authority does not protect AppServices data directory {}",
-                self.data_dir.display()
-            );
+            Ok(services) => Ok(services),
+            Err(failure) => {
+                let (services, error) = failure.into_parts();
+                Err(services.cleanup_after_startup_failure(error).await)
+            }
+        }
+    }
+
+    /// Desktop startup needs to retain the exact services that still own
+    /// browser/Gateway cleanup when this late boot stage fails. Other entry
+    /// points use [`Self::with_boot_reconciliation_authority`], which preserves
+    /// the historical "cleanup before returning" behavior.
+    pub(crate) async fn try_with_boot_reconciliation_authority(
+        mut self,
+        authority: crate::bootstrap::BootServerLockAuthority,
+        config: &AppConfig,
+    ) -> Result<Self, RetainedAppServicesStartupError> {
+        let config_dir_protected = match authority.protects_data_dir(&config.data_dir) {
+            Ok(value) => value,
+            Err(error) => {
+                return Err(RetainedAppServicesStartupError::new(self, error));
+            }
+        };
+        let services_dir_protected = match authority.protects_data_dir(&self.data_dir) {
+            Ok(value) => value,
+            Err(error) => {
+                return Err(RetainedAppServicesStartupError::new(self, error));
+            }
+        };
+        if !config_dir_protected || !services_dir_protected {
+            let data_dir = self.data_dir.display().to_string();
+            return Err(RetainedAppServicesStartupError::new(
+                self,
+                anyhow::anyhow!(
+                    "boot reconciliation authority does not protect AppServices data directory {}",
+                    data_dir
+                ),
+            ));
         }
 
-        if !authority
+        let database_protected = match authority
             .protects_database(&self.database, &config.database_path())
-            .await?
+            .await
         {
-            anyhow::bail!(
-                "boot reconciliation authority/database mismatch for data directory {}",
-                config.data_dir.display()
-            );
+            Ok(value) => value,
+            Err(error) => {
+                return Err(RetainedAppServicesStartupError::new(self, error));
+            }
+        };
+        if !database_protected {
+            return Err(RetainedAppServicesStartupError::new(
+                self,
+                anyhow::anyhow!(
+                    "boot reconciliation authority/database mismatch for data directory {}",
+                    config.data_dir.display()
+                ),
+            ));
         }
 
         self._boot_reconciliation_authority = Some(authority);
-        self.requirement_service
-            .recover_pending_attachment_deletes()
-            .await
-            .map_err(|error| {
+        if let Err(error) = self.requirement_service.recover_pending_attachment_deletes().await {
+            return Err(RetainedAppServicesStartupError::new(
+                self,
                 anyhow::anyhow!(
                     "attachment delete-journal boot reconciliation failed: {error}"
-                )
-            })?;
+                ),
+            ));
+        }
         Ok(self)
     }
 
@@ -219,6 +1473,142 @@ impl AppServices {
         self
     }
 
+    /// Explicitly stop Gateway plus the optional managed Browser platform.
+    /// Teardown is asynchronous and must be confirmed before an entry point
+    /// closes the database or reports startup/shutdown success; relying on
+    /// `Drop` is insufficient even when `browser-use` is disabled.
+    pub async fn shutdown_browser_platform(&self) -> anyhow::Result<()> {
+        self.browser_platform_shutdown.shutdown().await
+    }
+
+    /// Close browser resources and the database after a startup-stage failure,
+    /// preserving the original failure as the primary error.
+    pub async fn cleanup_after_startup_failure(&self, error: anyhow::Error) -> anyhow::Error {
+        let authority = Arc::new(StartupCleanupAuthority::new(self.database.clone()));
+        authority
+            .install_browser_platform(self.browser_platform_shutdown.clone())
+            .await;
+        finish_startup_cleanup(authority, error).await
+    }
+
+    /// Inject the one main-process browser authority.
+    ///
+    /// Kept as a builder so the native host can compose the Chromium adapter
+    /// after resolving its bundled executable and encrypted identity vault.
+    #[cfg(feature = "browser-use")]
+    pub(crate) async fn with_browser_session_hub(
+        mut self,
+        hub: Arc<nomifun_browser_platform::BrowserSessionHub>,
+    ) -> anyhow::Result<Self> {
+        use tokio::time::Duration;
+
+        let shutdown_coordinator = BrowserShutdownCoordinator::new(Arc::clone(&hub));
+        self.browser_platform_shutdown
+            .set_hub_coordinator(shutdown_coordinator)
+            .await;
+        if let Err(error) = self._browser_lane_provider_slot.install(Arc::new(
+            crate::browser_lane_provider::HubBrowserLaneClientProvider::new(
+                Arc::clone(&hub),
+                Arc::clone(&self.execution_conversation_boundary),
+                Duration::from_secs(60),
+                Arc::clone(&self.authoritative_user_id),
+            ),
+        )) {
+            let cleanup_error = self.browser_platform_shutdown.shutdown().await.err();
+            if cleanup_error.is_none() {
+                self.database.close().await;
+            }
+            let error = anyhow::Error::new(error);
+            return Err(match cleanup_error {
+                Some(cleanup_error) => anyhow::anyhow!(
+                    "{error:#}; managed browser platform cleanup after composition failure also failed: {cleanup_error:#}"
+                ),
+                None => error,
+            });
+        }
+
+        if let Some(server) = &self._browser_mcp_server {
+            server.set_hub(Arc::downgrade(&hub));
+        }
+
+        let sweep_hub = Arc::clone(&hub);
+        let sweep = tokio::spawn(async move {
+            loop {
+                // Read the live policy for every cycle. Resource-policy
+                // updates may change the lifecycle cadence, and a fixed
+                // application-level interval would silently ignore that
+                // setting until restart.
+                let sweep_period_ms = sweep_hub
+                    .resource_policy()
+                    .await
+                    .lifecycle_sweep_period_ms
+                    .max(1);
+                // The first sleep intentionally avoids an eager startup sweep
+                // before runtimes have finished attaching their owner leases.
+                tokio::time::sleep(Duration::from_millis(sweep_period_ms)).await;
+                if let Err(error) = sweep_hub.sweep().await {
+                    tracing::warn!(
+                        code = ?error.code,
+                        retryable = error.retryable,
+                        "browser lifecycle sweep failed"
+                    );
+                }
+            }
+        });
+
+        let mut events_rx = hub.subscribe();
+        let event_bus = self.event_bus.clone();
+        let ws_manager = self.ws_manager.clone();
+        let installation_owner = self.authoritative_user_id.clone();
+        let events = tokio::spawn(forward_browser_inventory_events(
+            events_rx,
+            event_bus,
+            ws_manager,
+            installation_owner,
+        ));
+
+        let telemetry_hub = Arc::clone(&hub);
+        let telemetry = tokio::spawn(async move {
+            let mut system = sysinfo::System::new();
+            // CPU usage is delta-based. This first refresh establishes the
+            // baseline; the immediate startup sample deliberately leaves CPU
+            // pressure unknown while still publishing memory and process RSS.
+            system.refresh_cpu_usage();
+            let root_pids = telemetry_hub.managed_host_process_ids().await;
+            let initial_sample = sample_browser_resources(&mut system, &root_pids, None);
+            telemetry_hub
+                .update_resource_telemetry(initial_sample)
+                .await;
+            loop {
+                let sample_period_ms = telemetry_hub.resource_policy().await.sample_period_ms;
+                // Honor the policy period while preserving sysinfo's minimum
+                // delta window for an accurate CPU sample.
+                tokio::time::sleep(
+                    Duration::from_millis(sample_period_ms.max(1))
+                        .max(sysinfo::MINIMUM_CPU_UPDATE_INTERVAL),
+                )
+                .await;
+                system.refresh_cpu_usage();
+                let root_pids = telemetry_hub.managed_host_process_ids().await;
+                let cpu_usage_percent = system.global_cpu_usage();
+                let sample = sample_browser_resources(
+                    &mut system,
+                    &root_pids,
+                    Some(cpu_usage_percent),
+                );
+                telemetry_hub.update_resource_telemetry(sample).await;
+            }
+        });
+
+        self._browser_platform_tasks = Some(BrowserPlatformTasks {
+            sweep,
+            events,
+            telemetry,
+        });
+        self.browser_session_hub = Some(hub);
+        Ok(self)
+    }
+
     /// Wire the dependency bundle into the Platform Gateway MCP server.
     /// Called from `create_router` after `build_module_states` (the
     /// `ConversationService` / `CronService` instances live there).
@@ -229,6 +1619,54 @@ impl AppServices {
     }
 
     pub async fn from_config(database: Database, config: &AppConfig) -> anyhow::Result<Self> {
+        match Self::try_from_config(database, config).await {
+            Ok(services) => Ok(services),
+            Err(failure) => {
+                let (error, cleanup_error, authority) = failure.into_parts();
+                match (cleanup_error, authority) {
+                    (None, None) => Err(error),
+                    (Some(cleanup_error), Some(authority)) => {
+                        authority.retain_retry_worker();
+                        Err(anyhow::Error::new(RetainedStartupCleanupError::new(
+                            error,
+                            cleanup_error,
+                            authority,
+                        )))
+                    }
+                    _ => Err(anyhow::anyhow!(
+                        "{error:#}; startup cleanup state was internally inconsistent"
+                    )),
+                }
+            }
+        }
+    }
+
+    pub(crate) async fn try_from_config(
+        database: Database,
+        config: &AppConfig,
+    ) -> Result<Self, RetainedAppServicesConstructionError> {
+        let startup_cleanup_authority =
+            Arc::new(StartupCleanupAuthority::new(database.clone()));
+        match Self::from_config_inner(
+            database,
+            config,
+            Arc::clone(&startup_cleanup_authority),
+        )
+        .await
+        {
+            Ok(services) => Ok(services),
+            Err(error) => match finish_startup_cleanup_typed(startup_cleanup_authority, error).await {
+                Ok(error) => Err(RetainedAppServicesConstructionError::verified(error)),
+                Err(retained) => Err(retained),
+            },
+        }
+    }
+
+    async fn from_config_inner(
+        database: Database,
+        config: &AppConfig,
+        startup_cleanup_authority: Arc<StartupCleanupAuthority>,
+    ) -> anyhow::Result<Self> {
         // Brand computer-use permission-error guidance with the host app's name so
         // failures say "grant NomiFun … then quit and reopen NomiFun" instead of a
         // generic "this app" — which a model otherwise misreads as the terminal /
@@ -499,6 +1937,7 @@ impl AppServices {
         let (gateway_mcp_server, gateway_mcp_config) =
             match nomifun_gateway::GatewayMcpServer::start().await {
                 Ok(srv) => {
+                    let srv = Arc::new(srv);
                     let config = srv.issuer_config(
                         backend_binary_path_utf8.clone(),
                         authoritative_user_id.to_string(),
@@ -511,6 +1950,15 @@ impl AppServices {
                     (None, None)
                 }
             };
+        // Register the first long-lived ingress immediately. Any later
+        // composition failure must quiesce Gateway before the database closes;
+        // waiting until the final AppServices struct exists leaves a large
+        // unsafe window in which Drop is the only shutdown signal.
+        let browser_platform_shutdown =
+            BrowserPlatformShutdown::gateway_only_early(gateway_mcp_server.clone());
+        startup_cleanup_authority
+            .install_browser_platform(browser_platform_shutdown.clone())
+            .await;
 
         // Reliable-launch (`open`) MCP config — Windows only. macOS/Linux already
         // launch URLs/apps reliably (`open`/`xdg-open`), so the agent needs no
@@ -540,19 +1988,6 @@ impl AppServices {
                 binary_path: backend_binary_path_utf8.clone(),
             });
 
-        // Browser-use discrete-tool MCP config — symmetric with computer-use
-        // (P4-2, 裁决①). Every desktop OS, gated ONLY on the `browser-use`
-        // feature (else `mcp-browser-stdio` is a stub, so we'd inject a bridge the
-        // binary can't serve). Lets codex/ACP sessions drive a managed Chromium
-        // (navigate / observe / click / type) via `nomicore mcp-browser-stdio`,
-        // mirroring the in-process `BrowserTool` the nomi engine gets. The bridge
-        // is stateless fail-safe (R2: no per-pet context over the env boundary;
-        // `secret:NAME` fails closed and downloads land in the data-dir sandbox).
-        let browser_mcp_config =
-            cfg!(feature = "browser-use").then(|| nomifun_api_types::BrowserMcpConfig {
-                binary_path: backend_binary_path_utf8.clone(),
-            });
-
         // Singleton knowledge service: knowledge base registry + workspace
         // mounting. Shared by the `/api/knowledge/*` routes and the
         // conversation service (mount-at-task-start).
@@ -576,29 +2011,111 @@ impl AppServices {
             encryption_key,
             workspace: data_dir.clone(),
         }));
-        // P3-K2: late-wire the rendering page-fetch backend (the engine-backed
-        // `BrowserFetcher`) so the knowledge layer CAN fetch JS-rendered pages.
-        // Feature-gated: only when `browser-use` is compiled in (desktop host).
-        // When OFF, no render backend is registered and every source keeps using
-        // the HTTP fetcher (K1 default — zero regression). This only PROVIDES the
-        // backend; per-source routing on the `rendered` flag is K3. The crate
-        // boundary (`nomifun-knowledge` never depends on the browser engine) holds:
-        // `BrowserFetcher` lives in `nomifun-ai-agent` and is injected here as a
-        // `dyn PageFetcher` trait object (anti-cycle decision ②, same late-wire as
-        // `LiveKnowledgeCompleter` above).
+        // Recover profiles left by an interrupted earlier browser runtime
+        // before constructing any Host authority. If ownership/termination
+        // cannot be proven, Browser functionality remains degraded for this
+        // process: no Hub/provider/MCP/fetcher wiring is published.
         #[cfg(feature = "browser-use")]
-        {
-            // 并发隔离：启动 GC 回收上次运行崩溃/硬杀遗留、未经引擎 Drop 清理的 per-instance profile
-            // 孤儿（`<data_dir>/browser-data/profiles/<token>`）。此刻本进程尚未启动任何引擎，故这些目录
-            // 都是旧运行的孤儿；保守 TTL（1h）以免误删并发 MCP stdio 桥进程刚建的活目录。best-effort。
-            nomi_browser_engine::profile::gc_stale_profiles(
-                &data_dir.join("browser-data").join("profiles"),
-                std::time::Duration::from_secs(3600),
-            );
-            let browser_fetcher =
-                nomifun_ai_agent::BrowserFetcher::new(data_dir.join("knowledge-browser"));
-            knowledge_service.set_render_fetcher(Arc::new(browser_fetcher));
-        }
+        let browser_orphan_recovery = {
+            // Recover marker-owned browser processes before any managed Host
+            // can launch. The engine validates app/browser PID + executable +
+            // full platform creation identity and confirms the process tree is
+            // gone before touching disk. Primary and legacy stable profiles
+            // retain all data; only their completed ownership marker is
+            // cleared. Explicit ephemeral roots may be deleted after proof.
+            let browser_data = data_dir.join("browser-data");
+            let platform_profiles = browser_data.join("platform-profiles");
+            let recovery = tokio::task::spawn_blocking(move || {
+                use nomi_browser_engine::profile::{
+                    ProfileRecoveryMode, ProfileRecoveryReport, recover_owned_profiles,
+                };
+
+                let mut report = ProfileRecoveryReport::default();
+                for profiles_root in [
+                    browser_data.join("profiles"),
+                    platform_profiles.join("anonymous"),
+                    platform_profiles.join("replica"),
+                    platform_profiles.join("isolated"),
+                ] {
+                    report.merge(recover_owned_profiles(
+                        &profiles_root,
+                        ProfileRecoveryMode::DeleteEphemeralProfile,
+                    ));
+                }
+                for stable_root in [
+                    browser_data.join("profile"),
+                    platform_profiles.join("primary"),
+                ] {
+                    report.merge(recover_owned_profiles(
+                        &stable_root,
+                        ProfileRecoveryMode::PreserveStableProfile,
+                    ));
+                }
+                report
+            })
+            .await;
+            let outcome = match recovery {
+                Ok(report) => BrowserOrphanRecoveryOutcome::from_report(&report),
+                Err(error) => BrowserOrphanRecoveryOutcome::from_join_error(&error),
+            };
+            match &outcome {
+                BrowserOrphanRecoveryOutcome::Safe { summary } => {
+                    tracing::info!(
+                        %summary,
+                        "browser orphan recovery completed safely"
+                    );
+                }
+                BrowserOrphanRecoveryOutcome::Degraded { reason } => {
+                    tracing::error!(
+                        %reason,
+                        "browser startup degraded closed after unsafe orphan recovery"
+                    );
+                }
+            }
+            outcome
+        };
+
+        // Preference migration is independent from Chromium orphan recovery.
+        // Even when Host composition must remain disabled for this process, a
+        // successfully read legacy `silent` value is still migrated. A read
+        // failure remains fail-safe and never writes a replacement value.
+        #[cfg(feature = "browser-use")]
+        let browser_startup_preferences = {
+            let preference_repo =
+                SqliteClientPreferenceRepository::new(database.pool().clone());
+            load_browser_startup_preferences(&preference_repo).await
+        };
+
+        // Browser-use MCP is a scoped proxy into the process-wide Hub. Start
+        // its issuer only after orphan recovery proved safe. Failure or a
+        // degraded recovery disables ACP browser tools without falling back to
+        // child-owned Chromium.
+        #[cfg(feature = "browser-use")]
+        let (browser_mcp_server, browser_mcp_config) = if browser_orphan_recovery.is_safe() {
+            match crate::browser_mcp_server::BrowserMcpServer::start().await {
+                Ok(server) => {
+                    let server = Arc::new(server);
+                    let config = server.issuer_config(backend_binary_path_utf8.clone());
+                    tracing::info!("Browser MCP scoped proxy started");
+                    (Some(server), Some(config))
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        %error,
+                        "Browser MCP scoped proxy failed to start; ACP browser tools disabled"
+                    );
+                    (None, None)
+                }
+            }
+        } else {
+            (None, None)
+        };
+        #[cfg(feature = "browser-use")]
+        browser_platform_shutdown
+            .set_browser_mcp(browser_mcp_server.clone())
+            .await;
+        #[cfg(not(feature = "browser-use"))]
+        let browser_mcp_config = None;
         // P3 connectors: register the built-in source connectors and late-wire
         // the encrypted credential store (same machine-bound AES key the
         // provider api-key column uses). Until this runs, the credential and
@@ -615,7 +2132,6 @@ impl AppServices {
         // fetch never completed (the app exited mid-run — the source is
         // persisted unstamped before fetching). Spawned after the completer
         // wiring so the chained autogen works; never blocks startup.
-        tokio::spawn(Arc::clone(&knowledge_service).resume_pending_source_fetches());
 
         // Knowledge MCP server: gives ACP sessions with bound knowledge bases
         // search/read and policy-gated write tools over a stdio bridge. It owns
@@ -712,7 +2228,10 @@ impl AppServices {
         }
         // Debounced scrollback persistence loop so terminal output history
         // survives a restart (dirty live sessions only; never per chunk).
-        terminal_service.spawn_scrollback_flusher();
+        // Start it only after all remaining fallible composition steps succeed.
+        // The task owns a clone of TerminalService, which in turn owns the
+        // TerminalLifecycleServer Arc; starting it here would keep the
+        // lifecycle listener alive if a later startup step returned an error.
 
         // Companion service (nomi companion): built BEFORE the agent factory so the
         // factory gets the companion memory sink (recall/save memory tools for
@@ -846,6 +2365,10 @@ impl AppServices {
         // lack one (multimodal model hub). Best-effort: never blocks boot on error.
         reconcile_model_profiles(&provider_repo_for_services, &model_profile_repo).await;
 
+        #[cfg(feature = "browser-use")]
+        let browser_lane_provider_slot =
+            nomifun_ai_agent::BrowserLaneClientProviderSlot::new();
+
         let factory = build_agent_factory(AgentFactoryDeps {
             authoritative_user_id: authoritative_user_id.clone(),
             skill_manager: AcpSkillManager::new(skill_paths.clone()),
@@ -867,6 +2390,8 @@ impl AppServices {
             open_mcp_config: open_mcp_config.clone(),
             computer_mcp_config: computer_mcp_config.clone(),
             browser_mcp_config: browser_mcp_config.clone(),
+            #[cfg(feature = "browser-use")]
+            browser_lane_provider: Some(browser_lane_provider_slot.clone()),
             client_prefs: Some(Arc::new(nomifun_db::SqliteClientPreferenceRepository::new(
                 database.pool().clone(),
             ))
@@ -926,7 +2451,7 @@ impl AppServices {
         let runtime_registry_delete_hook: Arc<dyn OnConversationDelete> = runtime_registry_concrete;
         let conversation_runtime_state = Arc::new(ConversationRuntimeStateService::default());
 
-        Ok(Self {
+        let services = Self {
             database,
             _boot_reconciliation_authority: None,
             provider_lifecycle,
@@ -971,8 +2496,143 @@ impl AppServices {
             workshop_service,
             creation_service,
             knowledge_service,
-        })
+            #[cfg(feature = "browser-use")]
+            browser_session_hub: None,
+            browser_platform_shutdown,
+            #[cfg(feature = "browser-use")]
+            _browser_lane_provider_slot: browser_lane_provider_slot,
+            #[cfg(feature = "browser-use")]
+            _browser_mcp_server: browser_mcp_server,
+            #[cfg(feature = "browser-use")]
+            _browser_platform_tasks: None,
+        };
+
+        #[cfg(feature = "browser-use")]
+        {
+            if !browser_orphan_recovery.permits_host_composition() {
+                let BrowserOrphanRecoveryOutcome::Degraded { reason } =
+                    &browser_orphan_recovery
+                else {
+                    unreachable!("unsafe Browser recovery outcome must be degraded");
+                };
+                tracing::error!(
+                    %reason,
+                    "Browser Hub composition skipped; all Browser entry points remain fail-closed"
+                );
+                services.terminal_service.spawn_scrollback_flusher();
+                tokio::spawn(
+                    Arc::clone(&services.knowledge_service).resume_pending_source_fetches(),
+                );
+                return Ok(services);
+            }
+
+            let BrowserStartupPreferences {
+                display_mode,
+                source,
+                full_power,
+                persistent_login,
+            } = browser_startup_preferences;
+            let storage_state = nomi_browser_engine::load_storage_state(
+                &nomi_browser_engine::shared_storage_state_path(&services.data_dir),
+                &services.encryption_key,
+            )
+            .and_then(|state| state.to_json().ok());
+            let startup_identity_snapshot = storage_state.clone();
+            let engine_config = nomi_browser_engine::EngineConfig {
+                data_dir: services.data_dir.join("browser-data"),
+                bundled_dir: crate::browser_resource::bundled_chrome_dir(),
+                // Host visibility is assigned by the Hub's identity-aware
+                // HostLaunchRequest. Keep the template headless so a future
+                // non-Primary launch cannot inherit external-window state.
+                headful: false,
+                chrome_source: nomi_browser_engine::ChromeSource::from_source_str(&source),
+                workspace_dir: Some(services.work_dir.clone()),
+                evaluate_full_power: full_power,
+                evaluate_persistent_login: persistent_login,
+                storage_state,
+                ..Default::default()
+            };
+            let secret_source = nomi_browser::BrowserSecretSource {
+                vault_path: nomifun_secret::shared_vault_path(&services.data_dir),
+                key: services.encryption_key,
+            };
+            let factory = nomi_browser::ManagedEngineHostFactory::new(engine_config)
+                .with_identity_vault(
+                    nomi_browser_engine::shared_storage_state_path(&services.data_dir),
+                    services.encryption_key,
+                )
+                .with_lane_policy(Arc::new(move |tool| {
+                    tool.secret_source(secret_source.clone())
+                }));
+            let mut hub_config = nomifun_browser_platform::HubConfig {
+                // Hub applies this preference only to Primary identity when
+                // constructing HostLaunchRequest; Anonymous/Replica/Isolated
+                // Hosts remain headless even in external display mode.
+                headful: primary_host_is_headful(display_mode),
+                ..Default::default()
+            };
+            // Restore policy before Hub construction so admission and operation
+            // limits are correct before any runtime can open its first Lane.
+            let browser_preferences =
+                nomifun_db::SqliteClientPreferenceRepository::new(services.database.pool().clone());
+            hub_config.resource_policy =
+                crate::router::browser_management::restore_persisted_resource_policy(
+                    &browser_preferences,
+                    hub_config.resource_policy,
+                )
+                .await;
+            let hub = Arc::new(nomifun_browser_platform::BrowserSessionHub::new(
+                Arc::new(factory),
+                hub_config,
+            ));
+            if let Some(payload) = startup_identity_snapshot {
+                if let Err(error) = hub.publish_identity_snapshot(
+                    nomifun_browser_platform::IdentitySnapshotPayload::from_json(payload),
+                    persisted_identity_seed_coverage(),
+                ) {
+                    tracing::warn!(
+                        code = ?error.code,
+                        "persisted canonical browser identity could not be seeded into the Hub"
+                    );
+                }
+            }
+            let browser_fetcher = Arc::new(nomifun_ai_agent::BrowserFetcher::new(
+                Arc::clone(&hub),
+                services.authoritative_user_id.to_string(),
+            ));
+            services
+                .knowledge_service
+                .set_render_fetcher(browser_fetcher);
+            let services = services.with_browser_session_hub(hub).await?;
+            services.terminal_service.spawn_scrollback_flusher();
+            tokio::spawn(
+                Arc::clone(&services.knowledge_service).resume_pending_source_fetches(),
+            );
+            return Ok(services);
+        }
+
+        #[cfg(not(feature = "browser-use"))]
+        {
+            services.terminal_service.spawn_scrollback_flusher();
+            tokio::spawn(
+                Arc::clone(&services.knowledge_service).resume_pending_source_fetches(),
+            );
+            Ok(services)
+        }
     }
+}
+
+async fn close_database_after_browser_platform_cleanup<F, Fut>(
+    browser_cleanup: anyhow::Result<()>,
+    close_database: F,
+) -> anyhow::Result<()>
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = ()>,
+{
+    browser_cleanup?;
+    close_database().await;
+    Ok(())
 }
 
 /// Ensure every provider model has an authoritative [`nomifun_db::ModelProfileRow`].
@@ -1019,6 +2679,1129 @@ async fn reconcile_model_profiles(
 mod tests {
     use super::*;
     use std::path::Path;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    #[cfg(feature = "browser-use")]
+    use std::sync::atomic::AtomicBool;
+    #[cfg(feature = "browser-use")]
+    use std::time::Duration;
+
+    #[cfg(feature = "browser-use")]
+    use async_trait::async_trait;
+    #[cfg(feature = "browser-use")]
+    use nomifun_db::{DbError, models::ClientPreference};
+    #[cfg(feature = "browser-use")]
+    use nomifun_browser_platform::{
+        BrowserErrorCode, BrowserHostDriver, BrowserHostFactory, BrowserHostId,
+        BrowserIdentityMode, BrowserLaneDriver, BrowserOperation,
+        BrowserOperationResult, BrowserPlatformError, DriverOperationContext, HostLaunchRequest,
+        HostLifecycleState, HubConfig, LaneFreezeOutcome, LaneLaunchRequest,
+        SnapshotComponentCoverage,
+    };
+    #[cfg(feature = "browser-use")]
+    use tokio::sync::{Notify, Semaphore};
+
+    #[cfg(feature = "browser-use")]
+    #[derive(Default)]
+    struct BrowserPreferenceTestRepository {
+        rows: std::sync::Mutex<Vec<ClientPreference>>,
+        writes: std::sync::Mutex<Vec<(String, String)>>,
+        fail_reads: AtomicBool,
+    }
+
+    #[cfg(feature = "browser-use")]
+    impl BrowserPreferenceTestRepository {
+        fn with_rows(rows: &[(&str, &str)]) -> Self {
+            Self {
+                rows: std::sync::Mutex::new(
+                    rows.iter()
+                        .enumerate()
+                        .map(|(index, (key, value))| ClientPreference {
+                            id: index as i64 + 1,
+                            key: (*key).to_owned(),
+                            value: (*value).to_owned(),
+                            updated_at: 0,
+                        })
+                        .collect(),
+                ),
+                ..Default::default()
+            }
+        }
+
+        fn failing_reads() -> Self {
+            Self {
+                fail_reads: AtomicBool::new(true),
+                ..Default::default()
+            }
+        }
+
+        fn writes(&self) -> Vec<(String, String)> {
+            self.writes
+                .lock()
+                .expect("browser preference write probe poisoned")
+                .clone()
+        }
+    }
+
+    #[cfg(feature = "browser-use")]
+    #[async_trait]
+    impl IClientPreferenceRepository for BrowserPreferenceTestRepository {
+        async fn get_all(&self) -> Result<Vec<ClientPreference>, DbError> {
+            self.get_by_keys(&[]).await
+        }
+
+        async fn get_by_keys(&self, keys: &[&str]) -> Result<Vec<ClientPreference>, DbError> {
+            if self.fail_reads.load(Ordering::Acquire) {
+                return Err(DbError::Init("synthetic preference read failure".to_owned()));
+            }
+            let rows = self
+                .rows
+                .lock()
+                .expect("browser preference row probe poisoned");
+            if keys.is_empty() {
+                return Ok(rows.clone());
+            }
+            Ok(rows
+                .iter()
+                .filter(|row| keys.contains(&row.key.as_str()))
+                .cloned()
+                .collect())
+        }
+
+        async fn upsert_batch(&self, entries: &[(&str, &str)]) -> Result<(), DbError> {
+            self.writes
+                .lock()
+                .expect("browser preference write probe poisoned")
+                .extend(
+                    entries
+                        .iter()
+                        .map(|(key, value)| ((*key).to_owned(), (*value).to_owned())),
+                );
+            Ok(())
+        }
+
+        async fn delete_keys(&self, _keys: &[&str]) -> Result<(), DbError> {
+            Ok(())
+        }
+    }
+
+    #[cfg(feature = "browser-use")]
+    struct ShutdownProbe {
+        launches: AtomicUsize,
+        shutdown_calls: AtomicUsize,
+        fail_shutdowns_remaining: AtomicUsize,
+        block_shutdown: AtomicBool,
+        shutdown_release: Semaphore,
+        shutdown_changed: Notify,
+    }
+
+    #[cfg(feature = "browser-use")]
+    impl ShutdownProbe {
+        fn new() -> Arc<Self> {
+            Arc::new(Self {
+                launches: AtomicUsize::new(0),
+                shutdown_calls: AtomicUsize::new(0),
+                fail_shutdowns_remaining: AtomicUsize::new(0),
+                block_shutdown: AtomicBool::new(false),
+                shutdown_release: Semaphore::new(0),
+                shutdown_changed: Notify::new(),
+            })
+        }
+
+        async fn wait_for_shutdown_calls(&self, expected: usize) {
+            loop {
+                if self.shutdown_calls.load(Ordering::Acquire) >= expected {
+                    return;
+                }
+                self.shutdown_changed.notified().await;
+            }
+        }
+    }
+
+    #[cfg(feature = "browser-use")]
+    struct PlatformShutdownStepProbe {
+        label: &'static str,
+        failure_message: &'static str,
+        calls: AtomicUsize,
+        completions: AtomicUsize,
+        fail_calls_remaining: AtomicUsize,
+        block: AtomicBool,
+        release: Semaphore,
+        changed: Notify,
+        events: Arc<std::sync::Mutex<Vec<String>>>,
+    }
+
+    #[cfg(feature = "browser-use")]
+    impl PlatformShutdownStepProbe {
+        fn new(
+            label: &'static str,
+            failure_message: &'static str,
+            events: Arc<std::sync::Mutex<Vec<String>>>,
+        ) -> Arc<Self> {
+            Arc::new(Self {
+                label,
+                failure_message,
+                calls: AtomicUsize::new(0),
+                completions: AtomicUsize::new(0),
+                fail_calls_remaining: AtomicUsize::new(0),
+                block: AtomicBool::new(false),
+                release: Semaphore::new(0),
+                changed: Notify::new(),
+                events,
+            })
+        }
+
+        fn step(self: &Arc<Self>) -> BrowserShutdownStep {
+            let probe = Arc::clone(self);
+            BrowserShutdownStep::new(self.label, move || {
+                let probe = Arc::clone(&probe);
+                async move { probe.run().await }
+            })
+        }
+
+        async fn run(&self) -> Result<(), String> {
+            self.calls.fetch_add(1, Ordering::AcqRel);
+            self.record("start");
+            self.changed.notify_waiters();
+            if self.block.load(Ordering::Acquire) {
+                let permit = self
+                    .release
+                    .acquire()
+                    .await
+                    .map_err(|_| format!("{} test release closed", self.label))?;
+                permit.forget();
+            }
+            self.record("finish");
+            self.completions.fetch_add(1, Ordering::AcqRel);
+            self.changed.notify_waiters();
+
+            if self
+                .fail_calls_remaining
+                .fetch_update(Ordering::AcqRel, Ordering::Acquire, |remaining| {
+                    remaining.checked_sub(1)
+                })
+                .is_ok()
+            {
+                return Err(self.failure_message.to_owned());
+            }
+            Ok(())
+        }
+
+        fn record(&self, phase: &str) {
+            self.events
+                .lock()
+                .expect("platform shutdown event log poisoned")
+                .push(format!("{}:{phase}", self.label));
+        }
+
+        async fn wait_for_calls(&self, expected: usize) {
+            self.wait_for_counter(&self.calls, expected).await;
+        }
+
+        async fn wait_for_completions(&self, expected: usize) {
+            self.wait_for_counter(&self.completions, expected).await;
+        }
+
+        async fn wait_for_counter(&self, counter: &AtomicUsize, expected: usize) {
+            tokio::time::timeout(Duration::from_secs(2), async {
+                loop {
+                    let changed = self.changed.notified();
+                    if counter.load(Ordering::Acquire) >= expected {
+                        return;
+                    }
+                    changed.await;
+                }
+            })
+            .await
+            .unwrap_or_else(|_| {
+                panic!(
+                    "{} did not reach expected count {expected}; calls={}, completions={}",
+                    self.label,
+                    self.calls.load(Ordering::Acquire),
+                    self.completions.load(Ordering::Acquire)
+                )
+            });
+        }
+
+        fn release_one(&self) {
+            self.release.add_permits(1);
+        }
+    }
+
+    #[cfg(feature = "browser-use")]
+    struct ShutdownTestLane;
+
+    #[cfg(feature = "browser-use")]
+    #[async_trait]
+    impl BrowserLaneDriver for ShutdownTestLane {
+        async fn execute(
+            &self,
+            _operation: BrowserOperation,
+            _context: DriverOperationContext,
+        ) -> Result<BrowserOperationResult, BrowserPlatformError> {
+            Ok(BrowserOperationResult::default())
+        }
+
+        async fn close(&self) -> Result<(), BrowserPlatformError> {
+            Ok(())
+        }
+
+        async fn freeze(&self) -> Result<LaneFreezeOutcome, BrowserPlatformError> {
+            Ok(LaneFreezeOutcome::Unsupported)
+        }
+    }
+
+    #[cfg(feature = "browser-use")]
+    struct ShutdownTestHost {
+        host_id: BrowserHostId,
+        epoch: u64,
+        probe: Arc<ShutdownProbe>,
+    }
+
+    #[cfg(feature = "browser-use")]
+    #[async_trait]
+    impl BrowserHostDriver for ShutdownTestHost {
+        fn host_id(&self) -> BrowserHostId {
+            self.host_id.clone()
+        }
+
+        fn epoch(&self) -> u64 {
+            self.epoch
+        }
+
+        fn state(&self) -> HostLifecycleState {
+            HostLifecycleState::Running
+        }
+
+        async fn open_lane(
+            &self,
+            _request: LaneLaunchRequest,
+        ) -> Result<Arc<dyn BrowserLaneDriver>, BrowserPlatformError> {
+            Ok(Arc::new(ShutdownTestLane))
+        }
+
+        async fn shutdown(&self) -> Result<(), BrowserPlatformError> {
+            self.probe.shutdown_calls.fetch_add(1, Ordering::AcqRel);
+            self.probe.shutdown_changed.notify_waiters();
+            if self.probe.block_shutdown.load(Ordering::Acquire) {
+                let permit = self
+                    .probe
+                    .shutdown_release
+                    .acquire()
+                    .await
+                    .map_err(|_| BrowserPlatformError::shutting_down())?;
+                permit.forget();
+            }
+            if self
+                .probe
+                .fail_shutdowns_remaining
+                .fetch_update(Ordering::AcqRel, Ordering::Acquire, |remaining| {
+                    remaining.checked_sub(1)
+                })
+                .is_ok()
+            {
+                return Err(BrowserPlatformError::new(
+                    BrowserErrorCode::BrowserUnavailable,
+                    "synthetic shutdown failure",
+                    true,
+                    "retry",
+                ));
+            }
+            Ok(())
+        }
+    }
+
+    #[cfg(feature = "browser-use")]
+    struct ShutdownTestFactory {
+        probe: Arc<ShutdownProbe>,
+    }
+
+    #[cfg(feature = "browser-use")]
+    #[async_trait]
+    impl BrowserHostFactory for ShutdownTestFactory {
+        async fn launch(
+            &self,
+            request: HostLaunchRequest,
+        ) -> Result<Arc<dyn BrowserHostDriver>, BrowserPlatformError> {
+            self.probe.launches.fetch_add(1, Ordering::AcqRel);
+            Ok(Arc::new(ShutdownTestHost {
+                host_id: request.host_id,
+                epoch: request.browser_epoch,
+                probe: Arc::clone(&self.probe),
+            }))
+        }
+    }
+
+    #[cfg(feature = "browser-use")]
+    async fn shutdown_coordinator_fixture(
+    ) -> (
+        BrowserShutdownCoordinator,
+        Arc<ShutdownProbe>,
+        Arc<nomifun_browser_platform::BrowserSessionHub>,
+    ) {
+        use std::collections::BTreeSet;
+
+        let probe = ShutdownProbe::new();
+        let hub = Arc::new(nomifun_browser_platform::BrowserSessionHub::new(
+            Arc::new(ShutdownTestFactory {
+                probe: Arc::clone(&probe),
+            }),
+            HubConfig::default(),
+        ));
+        let owner = hub
+            .issue_owner_lease("user", Some("conversation".to_owned()), "runtime")
+            .unwrap();
+        let client = hub
+            .bind(nomifun_browser_platform::CallerIdentity {
+                user_id: "user".to_owned(),
+                conversation_id: Some("conversation".to_owned()),
+                runtime_instance_id: "runtime".to_owned(),
+                agent_id: Some("fixture".to_owned()),
+                companion_id: None,
+                execution_id: None,
+                step_id: None,
+                attempt_id: None,
+                remote_connection_id: None,
+                surface: nomifun_browser_platform::BrowserSurface::Native,
+                owner_lease_id: owner.lease_id,
+                capability_expires_at_ms: u64::MAX,
+                allowed_operations: BTreeSet::from([
+                    nomifun_browser_platform::BrowserOperationKind::Manage,
+                ]),
+            })
+            .unwrap();
+        client
+            .open(
+                Some("shutdown-fixture"),
+                BrowserIdentityMode::Primary,
+                None,
+            )
+            .await
+            .unwrap();
+
+        (
+            BrowserShutdownCoordinator::new(Arc::clone(&hub)),
+            probe,
+            hub,
+        )
+    }
+
+    #[cfg(feature = "browser-use")]
+    #[test]
+    fn browser_display_mode_migration_is_authoritative_and_persistable() {
+        assert_eq!(
+            resolve_browser_display_mode(Some("external"), Some("true")),
+            ("external", false)
+        );
+        assert_eq!(
+            resolve_browser_display_mode(None, Some("false")),
+            ("external", true)
+        );
+        assert_eq!(
+            resolve_browser_display_mode(None, Some("true")),
+            ("headless", true)
+        );
+        assert_eq!(
+            resolve_browser_display_mode(None, None),
+            ("embedded", true)
+        );
+        assert_eq!(
+            resolve_browser_display_mode(Some("invalid"), None),
+            ("embedded", false)
+        );
+        assert_eq!(
+            resolve_browser_display_mode(Some("invalid"), Some("false")),
+            ("embedded", false),
+            "an invalid-but-present new value fails safe without overwriting or reviving legacy state"
+        );
+        assert_eq!(
+            resolve_browser_display_mode(Some("  \"headless\"  "), Some("false")),
+            ("headless", false)
+        );
+        assert!(primary_host_is_headful("external"));
+        assert!(!primary_host_is_headful("embedded"));
+        assert!(!primary_host_is_headful("headless"));
+    }
+
+    #[cfg(feature = "browser-use")]
+    #[tokio::test]
+    async fn browser_display_mode_read_failure_never_persists_a_default() {
+        let repo = BrowserPreferenceTestRepository::failing_reads();
+
+        assert_eq!(
+            load_browser_startup_preferences(&repo).await,
+            BrowserStartupPreferences::default()
+        );
+        assert!(
+            repo.writes().is_empty(),
+            "a repository read failure must not be treated as missing preferences"
+        );
+    }
+
+    #[cfg(feature = "browser-use")]
+    #[tokio::test]
+    async fn browser_display_mode_migration_preserves_legacy_and_does_not_depend_on_hosts() {
+        let repo = BrowserPreferenceTestRepository::with_rows(&[
+            ("agent.browserUse.silent", "false"),
+            ("agent.browserUse.source", "\"system\""),
+        ]);
+
+        let preferences = load_browser_startup_preferences(&repo).await;
+        assert_eq!(preferences.display_mode, "external");
+        assert_eq!(
+            repo.writes(),
+            vec![(
+                "agent.browserUse.displayMode".to_owned(),
+                "\"external\"".to_owned()
+            )]
+        );
+    }
+
+    #[cfg(feature = "browser-use")]
+    #[tokio::test]
+    async fn invalid_display_mode_fails_safe_without_overwriting_legacy_choice() {
+        let repo = BrowserPreferenceTestRepository::with_rows(&[
+            ("agent.browserUse.displayMode", "\"visible\""),
+            ("agent.browserUse.silent", "false"),
+        ]);
+
+        let preferences = load_browser_startup_preferences(&repo).await;
+        assert_eq!(preferences.display_mode, "embedded");
+        assert!(
+            repo.writes().is_empty(),
+            "malformed new configuration must not overwrite or revive legacy state"
+        );
+    }
+
+    #[cfg(feature = "browser-use")]
+    #[tokio::test]
+    async fn browser_inventory_lag_emits_resync_then_forwards_newest_event() {
+        let (source_tx, source_rx) = tokio::sync::broadcast::channel(1);
+        source_tx
+            .send(nomifun_browser_platform::BrowserInventoryEvent {
+                sequence: 1,
+                change_kind: "lane_created".to_owned(),
+                lane_id: None,
+                user_id: Some("owner-a".to_owned()),
+                conversation_id: None,
+                at_ms: 10,
+            })
+            .unwrap();
+        source_tx
+            .send(nomifun_browser_platform::BrowserInventoryEvent {
+                sequence: 2,
+                change_kind: "lane_running".to_owned(),
+                lane_id: None,
+                user_id: Some("owner-a".to_owned()),
+                conversation_id: None,
+                at_ms: 20,
+            })
+            .unwrap();
+        drop(source_tx);
+
+        let event_bus = Arc::new(BroadcastEventBus::new(4));
+        let mut user_events = event_bus.subscribe_user();
+        let manager = Arc::new(WebSocketManager::new());
+        let (owner_tx, mut owner_rx) = tokio::sync::mpsc::channel(4);
+        let (other_tx, mut other_rx) = tokio::sync::mpsc::channel(4);
+        manager.add_client("owner-a".into(), "owner-token".into(), owner_tx);
+        manager.add_client("owner-b".into(), "other-token".into(), other_tx);
+
+        let task = tokio::spawn(forward_browser_inventory_events(
+            source_rx,
+            event_bus,
+            manager,
+            Arc::from("installation-owner"),
+        ));
+
+        for receiver in [&mut owner_rx, &mut other_rx] {
+            let outbound = receiver.recv().await.expect("resync must be delivered");
+            let nomifun_realtime::WsOutbound::Text(text) = outbound else {
+                panic!("expected resync text event")
+            };
+            let event: nomifun_api_types::WebSocketMessage<serde_json::Value> =
+                serde_json::from_str(&text).unwrap();
+            assert_eq!(event.name, BROWSER_INVENTORY_EVENT_NAME);
+            assert_eq!(event.data["change_kind"], BROWSER_INVENTORY_RESYNC_CHANGE_KIND);
+            assert_eq!(event.data["resync_required"], true);
+            assert_eq!(event.data["skipped"], 1);
+            assert!(event.data.get("sequence").is_none());
+        }
+
+        let newest = user_events.recv().await.unwrap();
+        assert_eq!(newest.user_id, "owner-a");
+        assert_eq!(newest.event.name, BROWSER_INVENTORY_EVENT_NAME);
+        assert_eq!(newest.event.data["sequence"], 2);
+        assert_eq!(newest.event.data["change_kind"], "lane_running");
+        tokio::time::timeout(Duration::from_secs(1), task)
+            .await
+            .expect("closed source must stop the forwarder")
+            .unwrap();
+    }
+
+    #[cfg(not(feature = "browser-use"))]
+    #[tokio::test]
+    async fn default_platform_shutdown_waits_for_gateway_only() {
+        let server = Arc::new(
+            nomifun_gateway::GatewayMcpServer::start()
+                .await
+                .expect("Gateway MCP server must start for the default shutdown test"),
+        );
+        let address = std::net::SocketAddr::from(([127, 0, 0, 1], server.http_port()));
+        let shutdown = BrowserPlatformShutdown::gateway_only(Some(Arc::clone(&server)));
+
+        shutdown
+            .shutdown()
+            .await
+            .expect("default shutdown must await Gateway quiescence");
+        assert!(
+            tokio::net::TcpListener::bind(address).await.is_ok(),
+            "Gateway listener must be closed before the shutdown barrier resolves"
+        );
+
+        // The composed authority is idempotent after a successful flight.
+        shutdown
+            .shutdown()
+            .await
+            .expect("repeating default Gateway shutdown must be a no-op");
+    }
+
+    #[cfg(feature = "browser-use")]
+    #[tokio::test]
+    async fn browser_shutdown_coordinator_joins_concurrent_callers_and_caches_success() {
+        let (coordinator, probe, _hub) = shutdown_coordinator_fixture().await;
+        probe.block_shutdown.store(true, Ordering::Release);
+
+        let first = {
+            let coordinator = coordinator.clone();
+            tokio::spawn(async move { coordinator.shutdown().await })
+        };
+        probe.wait_for_shutdown_calls(1).await;
+        let second = {
+            let coordinator = coordinator.clone();
+            tokio::spawn(async move { coordinator.shutdown().await })
+        };
+        tokio::task::yield_now().await;
+        assert_eq!(probe.shutdown_calls.load(Ordering::Acquire), 1);
+
+        probe.shutdown_release.add_permits(1);
+        assert!(first.await.unwrap().is_ok());
+        assert!(second.await.unwrap().is_ok());
+        assert!(coordinator.shutdown().await.is_ok());
+        assert_eq!(
+            probe.shutdown_calls.load(Ordering::Acquire),
+            1,
+            "successful shutdown must be cached"
+        );
+    }
+
+    #[cfg(feature = "browser-use")]
+    #[tokio::test]
+    async fn browser_shutdown_waiter_timeout_does_not_cancel_real_shutdown() {
+        let (coordinator, probe, _hub) = shutdown_coordinator_fixture().await;
+        probe.block_shutdown.store(true, Ordering::Release);
+
+        let timed_out = coordinator
+            .shutdown_with_timeout(Duration::from_millis(20))
+            .await;
+        assert!(timed_out.is_err());
+        probe.wait_for_shutdown_calls(1).await;
+
+        let waiter = {
+            let coordinator = coordinator.clone();
+            tokio::spawn(async move { coordinator.shutdown().await })
+        };
+        tokio::task::yield_now().await;
+        assert_eq!(
+            probe.shutdown_calls.load(Ordering::Acquire),
+            1,
+            "a timed-out waiter must leave the original Hub shutdown flight running"
+        );
+
+        probe.shutdown_release.add_permits(1);
+        assert!(waiter.await.unwrap().is_ok());
+        assert!(coordinator.shutdown().await.is_ok());
+        assert_eq!(probe.shutdown_calls.load(Ordering::Acquire), 1);
+    }
+
+    #[cfg(feature = "browser-use")]
+    #[tokio::test]
+    async fn browser_shutdown_failure_clears_flight_for_retry() {
+        let (coordinator, probe, _hub) = shutdown_coordinator_fixture().await;
+        probe
+            .fail_shutdowns_remaining
+            .store(1, Ordering::Release);
+
+        let first = coordinator.shutdown().await;
+        assert!(first.is_err());
+        assert_eq!(probe.shutdown_calls.load(Ordering::Acquire), 1);
+
+        assert!(coordinator.shutdown().await.is_ok());
+        assert_eq!(
+            probe.shutdown_calls.load(Ordering::Acquire),
+            2,
+            "failed flight must be cleared so retained Hub cleanup can retry"
+        );
+        assert!(coordinator.shutdown().await.is_ok());
+        assert_eq!(probe.shutdown_calls.load(Ordering::Acquire), 2);
+    }
+
+    #[cfg(feature = "browser-use")]
+    #[tokio::test]
+    async fn browser_shutdown_failure_is_shared_before_a_retry_starts() {
+        let (coordinator, probe, _hub) = shutdown_coordinator_fixture().await;
+        probe
+            .fail_shutdowns_remaining
+            .store(1, Ordering::Release);
+        probe.block_shutdown.store(true, Ordering::Release);
+
+        let first = coordinator.current_or_start_flight().await;
+        probe.wait_for_shutdown_calls(1).await;
+        let follower = coordinator.current_or_start_flight().await;
+        assert!(Arc::ptr_eq(&first, &follower));
+        probe.shutdown_release.add_permits(1);
+
+        assert!(first.wait().await.is_err());
+        assert!(follower.wait().await.is_err());
+        assert_eq!(
+            probe.shutdown_calls.load(Ordering::Acquire),
+            1,
+            "followers of the failed flight must receive that failure rather than silently starting a retry"
+        );
+
+        probe.block_shutdown.store(false, Ordering::Release);
+        assert!(coordinator.shutdown().await.is_ok());
+        assert_eq!(probe.shutdown_calls.load(Ordering::Acquire), 2);
+    }
+
+    #[cfg(feature = "browser-use")]
+    #[tokio::test]
+    async fn browser_platform_shutdown_concurrent_callers_share_one_ordered_flight() {
+        let events = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let gateway =
+            PlatformShutdownStepProbe::new("gateway", "gateway failure", Arc::clone(&events));
+        let browser_mcp =
+            PlatformShutdownStepProbe::new("browser-mcp", "browser MCP failure", Arc::clone(&events));
+        let hub = PlatformShutdownStepProbe::new("hub", "hub failure", Arc::clone(&events));
+        gateway.block.store(true, Ordering::Release);
+        browser_mcp.block.store(true, Ordering::Release);
+        hub.block.store(true, Ordering::Release);
+
+        let shutdown =
+            BrowserPlatformShutdown::from_steps(Some(gateway.step()), Some(browser_mcp.step()));
+        shutdown.set_hub_step(hub.step()).await;
+
+        let first_flight = shutdown.current_or_start_flight().await;
+        gateway.wait_for_calls(1).await;
+        browser_mcp.wait_for_calls(1).await;
+        assert_eq!(
+            hub.calls.load(Ordering::Acquire),
+            0,
+            "Hub shutdown must not begin while either ingress is still draining"
+        );
+
+        let follower_flight = shutdown.current_or_start_flight().await;
+        assert!(
+            Arc::ptr_eq(&first_flight, &follower_flight),
+            "concurrent callers must join the exact same ordered shutdown flight"
+        );
+        assert_eq!(gateway.calls.load(Ordering::Acquire), 1);
+        assert_eq!(browser_mcp.calls.load(Ordering::Acquire), 1);
+
+        gateway.release_one();
+        gateway.wait_for_completions(1).await;
+        tokio::task::yield_now().await;
+        assert_eq!(
+            hub.calls.load(Ordering::Acquire),
+            0,
+            "one completed ingress is insufficient to start Hub shutdown"
+        );
+
+        browser_mcp.release_one();
+        hub.wait_for_calls(1).await;
+        let events = events
+            .lock()
+            .expect("platform shutdown event log poisoned")
+            .clone();
+        let hub_start = events
+            .iter()
+            .position(|event| event == "hub:start")
+            .expect("Hub start event");
+        for ingress_finish in ["gateway:finish", "browser-mcp:finish"] {
+            assert!(
+                events
+                    .iter()
+                    .position(|event| event == ingress_finish)
+                    .is_some_and(|position| position < hub_start),
+                "{ingress_finish} must precede Hub shutdown: {events:?}"
+            );
+        }
+
+        hub.release_one();
+        let (first_result, follower_result) =
+            tokio::join!(first_flight.wait(), follower_flight.wait());
+        assert!(first_result.is_ok());
+        assert!(follower_result.is_ok());
+
+        assert!(shutdown.shutdown().await.is_ok());
+        assert_eq!(gateway.calls.load(Ordering::Acquire), 1);
+        assert_eq!(browser_mcp.calls.load(Ordering::Acquire), 1);
+        assert_eq!(
+            hub.calls.load(Ordering::Acquire),
+            1,
+            "successful ordered shutdown must be cached"
+        );
+    }
+
+    #[cfg(feature = "browser-use")]
+    #[tokio::test]
+    async fn browser_platform_shutdown_without_hub_still_stops_both_ingresses() {
+        let events = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let gateway =
+            PlatformShutdownStepProbe::new("gateway", "gateway failure", Arc::clone(&events));
+        let browser_mcp =
+            PlatformShutdownStepProbe::new("browser-mcp", "browser MCP failure", events);
+        gateway.block.store(true, Ordering::Release);
+        browser_mcp.block.store(true, Ordering::Release);
+
+        let shutdown =
+            BrowserPlatformShutdown::from_steps(Some(gateway.step()), Some(browser_mcp.step()));
+        let waiter = {
+            let shutdown = shutdown.clone();
+            tokio::spawn(async move { shutdown.shutdown().await })
+        };
+
+        gateway.wait_for_calls(1).await;
+        browser_mcp.wait_for_calls(1).await;
+        assert!(
+            !waiter.is_finished(),
+            "ingress-only shutdown must wait for both ingress cleanup flights"
+        );
+
+        gateway.release_one();
+        browser_mcp.release_one();
+        assert!(waiter.await.unwrap().is_ok());
+        assert_eq!(gateway.completions.load(Ordering::Acquire), 1);
+        assert_eq!(browser_mcp.completions.load(Ordering::Acquire), 1);
+    }
+
+    #[cfg(feature = "browser-use")]
+    #[tokio::test]
+    async fn browser_platform_shutdown_ingress_failures_block_hub_and_retry_in_order() {
+        let events = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let gateway = PlatformShutdownStepProbe::new(
+            "Gateway MCP ingress",
+            "synthetic ingress error",
+            Arc::clone(&events),
+        );
+        let browser_mcp = PlatformShutdownStepProbe::new(
+            "ACP Browser MCP ingress",
+            "synthetic cleanup timed out",
+            Arc::clone(&events),
+        );
+        let hub =
+            PlatformShutdownStepProbe::new("Browser Hub", "synthetic Hub error", Arc::clone(&events));
+        gateway
+            .fail_calls_remaining
+            .store(1, Ordering::Release);
+        browser_mcp
+            .fail_calls_remaining
+            .store(1, Ordering::Release);
+
+        let shutdown =
+            BrowserPlatformShutdown::from_steps(Some(gateway.step()), Some(browser_mcp.step()));
+        shutdown.set_hub_step(hub.step()).await;
+
+        let error = shutdown.shutdown().await.unwrap_err().to_string();
+        assert!(error.contains(
+            "Gateway MCP ingress shutdown failed: synthetic ingress error"
+        ));
+        assert!(error.contains(
+            "ACP Browser MCP ingress shutdown failed: synthetic cleanup timed out"
+        ));
+        assert_eq!(gateway.calls.load(Ordering::Acquire), 1);
+        assert_eq!(browser_mcp.calls.load(Ordering::Acquire), 1);
+        assert_eq!(
+            hub.calls.load(Ordering::Acquire),
+            0,
+            "unconfirmed ingress quiescence must block Hub shutdown"
+        );
+
+        assert!(
+            shutdown.shutdown().await.is_ok(),
+            "a failed ordered flight must remain retryable"
+        );
+        assert_eq!(gateway.calls.load(Ordering::Acquire), 2);
+        assert_eq!(browser_mcp.calls.load(Ordering::Acquire), 2);
+        assert_eq!(
+            hub.calls.load(Ordering::Acquire),
+            1,
+            "Hub shutdown may begin only after the retry confirms both ingress barriers"
+        );
+
+        assert!(shutdown.shutdown().await.is_ok());
+        assert_eq!(gateway.calls.load(Ordering::Acquire), 2);
+        assert_eq!(browser_mcp.calls.load(Ordering::Acquire), 2);
+        assert_eq!(
+            hub.calls.load(Ordering::Acquire),
+            1,
+            "the first successful retry must be cached"
+        );
+    }
+
+    #[cfg(feature = "browser-use")]
+    #[tokio::test]
+    async fn browser_platform_shutdown_waiter_timeout_does_not_cancel_ordered_authority() {
+        let events = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let gateway =
+            PlatformShutdownStepProbe::new("gateway", "gateway failure", Arc::clone(&events));
+        let browser_mcp =
+            PlatformShutdownStepProbe::new("browser-mcp", "browser MCP failure", Arc::clone(&events));
+        let hub = PlatformShutdownStepProbe::new("hub", "hub failure", events);
+        gateway.block.store(true, Ordering::Release);
+        hub.block.store(true, Ordering::Release);
+
+        let shutdown =
+            BrowserPlatformShutdown::from_steps(Some(gateway.step()), Some(browser_mcp.step()));
+        shutdown.set_hub_step(hub.step()).await;
+
+        let timed_out_waiter = {
+            let shutdown = shutdown.clone();
+            tokio::spawn(async move {
+                tokio::time::timeout(Duration::from_millis(20), shutdown.shutdown()).await
+            })
+        };
+        gateway.wait_for_calls(1).await;
+        browser_mcp.wait_for_calls(1).await;
+        assert!(
+            timed_out_waiter.await.unwrap().is_err(),
+            "the caller-local timeout should expire while ingress remains blocked"
+        );
+        assert_eq!(
+            hub.calls.load(Ordering::Acquire),
+            0,
+            "timing out a waiter must not skip the ingress barrier"
+        );
+
+        gateway.release_one();
+        hub.wait_for_calls(1).await;
+        let follower = {
+            let shutdown = shutdown.clone();
+            tokio::spawn(async move { shutdown.shutdown().await })
+        };
+        tokio::task::yield_now().await;
+        assert_eq!(gateway.calls.load(Ordering::Acquire), 1);
+        assert_eq!(browser_mcp.calls.load(Ordering::Acquire), 1);
+        assert_eq!(
+            hub.calls.load(Ordering::Acquire),
+            1,
+            "a later waiter must join the original ordered authority"
+        );
+
+        hub.release_one();
+        assert!(follower.await.unwrap().is_ok());
+        assert!(shutdown.shutdown().await.is_ok());
+        assert_eq!(gateway.calls.load(Ordering::Acquire), 1);
+        assert_eq!(browser_mcp.calls.load(Ordering::Acquire), 1);
+        assert_eq!(hub.calls.load(Ordering::Acquire), 1);
+    }
+
+    #[tokio::test]
+    async fn failed_browser_cleanup_keeps_database_close_barrier_closed() {
+        let close_calls = AtomicUsize::new(0);
+
+        let error = close_database_after_browser_platform_cleanup(
+            Err(anyhow::anyhow!("ingress quiescence not confirmed")),
+            || async {
+                close_calls.fetch_add(1, Ordering::AcqRel);
+            },
+        )
+        .await
+        .unwrap_err();
+
+        assert!(error.to_string().contains("ingress quiescence not confirmed"));
+        assert_eq!(
+            close_calls.load(Ordering::Acquire),
+            0,
+            "the database must remain available for a retry while browser ingress is unconfirmed"
+        );
+    }
+
+    #[tokio::test]
+    async fn successful_browser_cleanup_allows_database_close_once() {
+        let close_calls = AtomicUsize::new(0);
+
+        close_database_after_browser_platform_cleanup(Ok(()), || async {
+            close_calls.fetch_add(1, Ordering::AcqRel);
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(close_calls.load(Ordering::Acquire), 1);
+    }
+
+    #[tokio::test]
+    async fn failed_browser_cleanup_can_be_retried_before_database_close() {
+        let close_calls = AtomicUsize::new(0);
+
+        assert!(
+            close_database_after_browser_platform_cleanup(
+                Err(anyhow::anyhow!("transient ingress failure")),
+                || async {
+                    close_calls.fetch_add(1, Ordering::AcqRel);
+                },
+            )
+            .await
+            .is_err()
+        );
+        assert_eq!(close_calls.load(Ordering::Acquire), 0);
+
+        close_database_after_browser_platform_cleanup(Ok(()), || async {
+            close_calls.fetch_add(1, Ordering::AcqRel);
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            close_calls.load(Ordering::Acquire),
+            1,
+            "a successful retry must close the database exactly once"
+        );
+    }
+
+    #[cfg(feature = "browser-use")]
+    #[tokio::test]
+    async fn browser_platform_shutdown_installing_hub_reopens_ingress_only_success() {
+        let events = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let gateway =
+            PlatformShutdownStepProbe::new("gateway", "gateway failure", Arc::clone(&events));
+        let browser_mcp =
+            PlatformShutdownStepProbe::new("browser-mcp", "browser MCP failure", events);
+        let shutdown =
+            BrowserPlatformShutdown::from_steps(Some(gateway.step()), Some(browser_mcp.step()));
+
+        assert!(shutdown.shutdown().await.is_ok());
+        assert_eq!(gateway.calls.load(Ordering::Acquire), 1);
+        assert_eq!(browser_mcp.calls.load(Ordering::Acquire), 1);
+
+        let (coordinator, hub_probe, _hub) = shutdown_coordinator_fixture().await;
+        shutdown.set_hub_coordinator(coordinator).await;
+        assert!(
+            shutdown.shutdown().await.is_ok(),
+            "installing a Hub after ingress-only success must reopen the ordered sequence"
+        );
+        assert_eq!(
+            hub_probe.shutdown_calls.load(Ordering::Acquire),
+            1,
+            "the earlier ingress-only cached success must not permanently skip Hub shutdown"
+        );
+        assert_eq!(gateway.calls.load(Ordering::Acquire), 2);
+        assert_eq!(browser_mcp.calls.load(Ordering::Acquire), 2);
+
+        assert!(shutdown.shutdown().await.is_ok());
+        assert_eq!(hub_probe.shutdown_calls.load(Ordering::Acquire), 1);
+        assert_eq!(gateway.calls.load(Ordering::Acquire), 2);
+        assert_eq!(browser_mcp.calls.load(Ordering::Acquire), 2);
+    }
+
+    #[cfg(feature = "browser-use")]
+    #[tokio::test]
+    async fn browser_platform_shutdown_installing_browser_mcp_reopens_cached_success() {
+        let events = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let gateway =
+            PlatformShutdownStepProbe::new("gateway", "gateway failure", Arc::clone(&events));
+        let browser_mcp =
+            PlatformShutdownStepProbe::new("browser-mcp", "browser MCP failure", events);
+        let shutdown = BrowserPlatformShutdown::from_steps(Some(gateway.step()), None);
+
+        assert!(shutdown.shutdown().await.is_ok());
+        assert_eq!(gateway.calls.load(Ordering::Acquire), 1);
+
+        shutdown
+            .set_browser_mcp_step(Some(browser_mcp.step()))
+            .await;
+        assert!(
+            shutdown.shutdown().await.is_ok(),
+            "registering Browser MCP after cached success must reopen shutdown"
+        );
+        assert_eq!(gateway.calls.load(Ordering::Acquire), 2);
+        assert_eq!(
+            browser_mcp.calls.load(Ordering::Acquire),
+            1,
+            "the newly registered ingress must be included in verified cleanup"
+        );
+
+        assert!(shutdown.shutdown().await.is_ok());
+        assert_eq!(gateway.calls.load(Ordering::Acquire), 2);
+        assert_eq!(browser_mcp.calls.load(Ordering::Acquire), 1);
+    }
+
+    #[cfg(feature = "browser-use")]
+    #[test]
+    fn unsafe_orphan_recovery_degrades_browser_functionality() {
+        let safe = nomi_browser_engine::profile::ProfileRecoveryReport::default();
+        assert!(BrowserOrphanRecoveryOutcome::from_report(&safe).is_safe());
+
+        let with_failure = nomi_browser_engine::profile::ProfileRecoveryReport {
+            failures: 1,
+            ..Default::default()
+        };
+        assert!(matches!(
+            BrowserOrphanRecoveryOutcome::from_report(&with_failure),
+            BrowserOrphanRecoveryOutcome::Degraded { .. }
+        ));
+        assert!(
+            !BrowserOrphanRecoveryOutcome::from_report(&with_failure)
+                .permits_host_composition()
+        );
+
+        let with_preserved_profile = nomi_browser_engine::profile::ProfileRecoveryReport {
+            profiles_preserved: 1,
+            ..Default::default()
+        };
+        assert!(matches!(
+            BrowserOrphanRecoveryOutcome::from_report(&with_preserved_profile),
+            BrowserOrphanRecoveryOutcome::Degraded { .. }
+        ));
+        assert!(
+            !BrowserOrphanRecoveryOutcome::from_report(&with_preserved_profile)
+                .permits_host_composition()
+        );
+    }
+
+    #[cfg(feature = "browser-use")]
+    #[tokio::test]
+    async fn orphan_recovery_worker_join_failure_degrades_browser_functionality() {
+        let join_error = tokio::spawn(async {
+            panic!("synthetic orphan recovery panic");
+        })
+        .await
+        .unwrap_err();
+
+        let outcome = BrowserOrphanRecoveryOutcome::from_join_error(&join_error);
+        assert!(!outcome.permits_host_composition());
+        assert!(matches!(
+            outcome,
+            BrowserOrphanRecoveryOutcome::Degraded { .. }
+        ));
+    }
+
+    #[cfg(feature = "browser-use")]
+    #[test]
+    fn persisted_identity_startup_seed_declares_cookie_only_coverage() {
+        let coverage = persisted_identity_seed_coverage();
+        assert_eq!(coverage.current_origin, None);
+        assert_eq!(
+            coverage.cookies,
+            SnapshotComponentCoverage::AllOrigins
+        );
+        assert_eq!(
+            coverage.local_storage,
+            SnapshotComponentCoverage::NotIncluded
+        );
+        assert_eq!(
+            coverage.indexed_db,
+            SnapshotComponentCoverage::NotIncluded
+        );
+    }
 
     fn test_config(data_dir: &Path) -> AppConfig {
         AppConfig {
@@ -1027,6 +3810,7 @@ mod tests {
             ..Default::default()
         }
     }
+
 
     #[test]
     fn executable_path_preserves_valid_unicode_exactly() {
@@ -1066,6 +3850,74 @@ mod tests {
         assert!(require_utf8_executable_path(&path).is_err());
     }
 
+
+    #[cfg(feature = "browser-use")]
+    #[test]
+    fn browser_telemetry_maps_only_real_measurements() {
+        let telemetry = browser_resource_telemetry_from_measurements(
+            16_000,
+            7_500,
+            Some(12),
+            Some(2_048),
+            std::collections::HashMap::from([(4_242, 2_048)]),
+            Some(37.5),
+        );
+
+        assert_eq!(telemetry.total_memory_bytes, 16_000);
+        assert_eq!(telemetry.available_memory_bytes, 7_500);
+        assert_eq!(telemetry.logical_cpus, 12);
+        assert_eq!(telemetry.chromium_rss_bytes, 2_048);
+        assert_eq!(telemetry.host_rss_by_process_id.get(&4_242), Some(&2_048));
+        assert!((telemetry.cpu_pressure - 0.375).abs() < f64::EPSILON);
+        assert_eq!(telemetry.gpu_pressure, None);
+
+        let unknown = browser_resource_telemetry_from_measurements(
+            16_000,
+            7_500,
+            None,
+            None,
+            std::collections::HashMap::new(),
+            None,
+        );
+        assert_eq!(unknown.logical_cpus, 0);
+        assert_eq!(unknown.chromium_rss_bytes, 0);
+        assert_eq!(unknown.cpu_pressure, 0.0);
+        assert_eq!(unknown.gpu_pressure, None);
+        assert_eq!(browser_cpu_pressure_from_percent(250.0), 1.0);
+        assert_eq!(browser_cpu_pressure_from_percent(f32::NAN), 0.0);
+    }
+
+    #[cfg(feature = "browser-use")]
+    #[test]
+    fn browser_process_tree_rss_counts_roots_and_descendants_once() {
+        let (rss, hosts) = browser_process_tree_rss(
+            &[10, 20, 10],
+            [
+                (10, Some(1), 100),
+                (11, Some(10), 50),
+                (12, Some(11), 25),
+                (20, Some(1), 200),
+                (99, Some(1), 9_999),
+            ],
+        );
+        assert_eq!(rss, Some(375));
+        assert_eq!(hosts.get(&10), Some(&175));
+        assert_eq!(hosts.get(&20), Some(&200));
+        assert_eq!(
+            browser_process_tree_rss(&[10], [(11, Some(10), 50)]),
+            (Some(50), std::collections::HashMap::from([(10, 50)]))
+        );
+        assert_eq!(
+            browser_process_tree_rss(&[10], [(99, Some(1), 9_999)]),
+            (None, std::collections::HashMap::new())
+        );
+        assert_eq!(
+            browser_process_tree_rss(&[], [(10, Some(1), 100)]),
+            (None, std::collections::HashMap::new())
+        );
+    }
+
+
     #[tokio::test]
     async fn test_app_services_from_memory_db() {
         let db = nomifun_db::init_database_memory().await.unwrap();
@@ -1101,6 +3953,31 @@ mod tests {
         assert!(!has_users); // empty owner password → not counted
 
         services.database.close().await;
+    }
+
+    #[tokio::test]
+    async fn from_config_error_closes_supplied_database() {
+        let db = nomifun_db::init_database_memory().await.unwrap();
+        let database_observer = db.clone();
+        sqlx::query("DELETE FROM users")
+            .execute(db.pool())
+            .await
+            .unwrap();
+        let tmp = tempfile::TempDir::new().unwrap();
+
+        let error = match AppServices::from_config(db, &test_config(tmp.path())).await {
+            Ok(_) => panic!("missing installation owner must fail startup"),
+            Err(error) => error,
+        };
+
+        assert!(
+            error.to_string().contains("installation owner is missing"),
+            "unexpected startup error: {error:#}"
+        );
+        assert!(
+            database_observer.pool().is_closed(),
+            "from_config must close the supplied database after dropping partial startup resources"
+        );
     }
 
     #[tokio::test]

@@ -642,6 +642,12 @@ pub fn build_conversation_state(
     if let Some(hook) = services.runtime_registry_delete_hook.clone() {
         conversation_service.with_delete_hook(hook);
     }
+    #[cfg(feature = "browser-use")]
+    if let Some(hub) = services.browser_session_hub.clone() {
+        conversation_service.with_delete_hook(Arc::new(
+            BrowserLaneConversationCascade { hub },
+        ));
+    }
     if let Some(cron_service) = cron_service {
         conversation_service.with_delete_hook(cron_service.clone());
         conversation_service.with_cron_service(Some(cron_service));
@@ -975,6 +981,12 @@ pub async fn build_channel_state(
     );
     if let Some(hook) = services.runtime_registry_delete_hook.clone() {
         conversation_svc.with_delete_hook(hook);
+    }
+    #[cfg(feature = "browser-use")]
+    if let Some(hub) = services.browser_session_hub.clone() {
+        conversation_svc.with_delete_hook(Arc::new(
+            BrowserLaneConversationCascade { hub },
+        ));
     }
 
     // Channel Agent profile: per-platform companion binding + model resolution
@@ -1397,6 +1409,12 @@ pub fn build_companion_state(
     if let Some(hook) = services.runtime_registry_delete_hook.clone() {
         conv_service.with_delete_hook(hook);
     }
+    #[cfg(feature = "browser-use")]
+    if let Some(hub) = services.browser_session_hub.clone() {
+        conv_service.with_delete_hook(Arc::new(
+            BrowserLaneConversationCascade { hub },
+        ));
+    }
 
     // Deleting a companion must also drop its ('companion', id) knowledge-binding row so
     // bindings don't orphan (T3.3). Switching a companion's chat model (single source
@@ -1438,6 +1456,30 @@ impl nomifun_companion::service::CompanionCleanupHook for CompanionKnowledgeClea
 /// close these explicitly; this hook is the durable owner-lifecycle fallback.
 struct ConversationTerminalCascade {
     terminals: Arc<nomifun_terminal::TerminalService>,
+}
+
+/// Conversation deletion is an authority boundary of its own. Runtime
+/// termination normally drops the native owner lease, but Gateway/ACP/remote
+/// lanes may outlive that particular runtime object. Close every Hub lane
+/// attributed to the deleted conversation as a separate idempotent cascade.
+#[cfg(feature = "browser-use")]
+struct BrowserLaneConversationCascade {
+    hub: Arc<nomifun_browser_platform::BrowserSessionHub>,
+}
+
+#[cfg(feature = "browser-use")]
+#[async_trait::async_trait]
+impl OnConversationDelete for BrowserLaneConversationCascade {
+    async fn on_conversation_deleted(&self, _user_id: &str, conversation_id: &str) {
+        if let Err(error) = self.hub.close_conversation(conversation_id).await {
+            tracing::warn!(
+                conversation_id,
+                code = ?error.code,
+                retryable = error.retryable,
+                "failed to close browser lanes during conversation deletion"
+            );
+        }
+    }
 }
 
 #[async_trait::async_trait]

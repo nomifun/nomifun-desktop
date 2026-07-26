@@ -16,18 +16,28 @@ const MISSING_CONVERSATION_ID: &str = "0190f5fe-7c00-7a00-8abc-012345679998";
 // ── Helpers ─────────────────────────────────────────────────────
 
 fn create_conv_body(name: &str, agent_type: &str) -> serde_json::Value {
+    let extra = if agent_type == "acp" {
+        common::acp_extra_with_workspace("/project")
+    } else {
+        json!({ "workspace": "/project" })
+    };
     json!({
         "type": agent_type,
         "name": name,
-        "extra": { "workspace": "/project" }
+        "extra": extra
     })
 }
 
 fn create_conv_body_with_workspace(name: &str, agent_type: &str, workspace: &str) -> serde_json::Value {
+    let extra = if agent_type == "acp" {
+        common::acp_extra_with_workspace(workspace)
+    } else {
+        json!({ "workspace": workspace })
+    };
     json!({
         "type": agent_type,
         "name": name,
-        "extra": { "workspace": workspace }
+        "extra": extra
     })
 }
 
@@ -48,7 +58,10 @@ async fn create_conversation_with_workspace(
     );
     let resp = app.clone().oneshot(req).await.unwrap();
     let json = common::body_json(resp).await;
-    json["data"]["conversation_id"].as_str().unwrap().to_owned()
+    json["data"]["conversation_id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("conversation creation failed: {json}"))
+        .to_owned()
 }
 
 async fn create_conversation(app: &mut axum::Router, token: &str, csrf: &str, name: &str, agent_type: &str) -> String {
@@ -61,7 +74,10 @@ async fn create_conversation(app: &mut axum::Router, token: &str, csrf: &str, na
     );
     let resp = app.clone().oneshot(req).await.unwrap();
     let json = common::body_json(resp).await;
-    json["data"]["conversation_id"].as_str().unwrap().to_owned()
+    json["data"]["conversation_id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("conversation creation failed: {json}"))
+        .to_owned()
 }
 
 async fn build_app() -> (axum::Router, nomifun_app::AppServices) {
@@ -400,7 +416,11 @@ async fn confirm_call_no_task() {
     let req = json_with_token(
         "POST",
         &format!("/api/conversations/{conv_id}/confirmations/call-1/confirm"),
-        json!({ "msg_id": "msg-1", "data": { "value": "allow" }, "always_allow": false }),
+        json!({
+            "msg_id": "0190f5fe-7c00-7a00-8abc-012345678901",
+            "data": { "value": "allow" },
+            "always_allow": false
+        }),
         &token,
         &csrf,
     );

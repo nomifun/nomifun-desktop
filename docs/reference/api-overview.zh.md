@@ -92,6 +92,7 @@ NomiFun 启动时进入三种鉴权策略之一：
 | 伙伴 | `/api/companion/*` | 已鉴权 | [`nomifun-companion/src/routes.rs`](../../crates/backend/nomifun-companion/src/routes.rs) |
 | WebUI/public 能力 companion token | `/api/webui/companions/{id}/access-token` | 已鉴权 / 本地 WebUI admin 流 | [`router/companion_token_routes.rs`](../../crates/backend/nomifun-app/src/router/companion_token_routes.rs) |
 | Browser-use secrets | `/api/browser-secrets/*` | 已鉴权 | [`nomifun-secret/src/routes.rs`](../../crates/backend/nomifun-secret/src/routes.rs) |
+| 浏览器平台管理 + 嵌入式 Viewer | `/api/browser/*` | 已鉴权；改变状态的 HTTP 请求受 CSRF 保护；Viewer WebSocket 还要求一次性 token | [`router/browser_management.rs`](../../crates/backend/nomifun-app/src/router/browser_management.rs)、[`router/browser_viewer.rs`](../../crates/backend/nomifun-app/src/router/browser_viewer.rs) |
 | 文件系统 | `/api/fs/*` | 已鉴权 | [`nomifun-file/src/routes.rs`](../../crates/backend/nomifun-file/src/routes.rs) |
 | Office 预览 | `/api/word-preview/*`、`/api/excel-preview/*`、`/api/ppt-preview/*`、`/api/document/convert`、`/api/preview-history/*`、`/api/star-office/detect` | 已鉴权 | [`nomifun-office/src/routes.rs`](../../crates/backend/nomifun-office/src/routes.rs) |
 | Office iframe 代理 | `/api/ppt-proxy/*`、`/api/office-watch-proxy/*` | 公共（提供 iframe 内容；不鉴权） | 同上 |
@@ -125,10 +126,41 @@ NomiFun 启动时进入三种鉴权策略之一：
 | `POST /api/auth/qr-login` | 消费一次性的二维码登录 token（由 WebUI 远程访问流程下发）。 |
 | `GET  /qr-login` | 静态 HTML 页面，用于完成来自手机扫码的二维码登录跳转。 |
 
+### 浏览器平台端点
+
+Browser 管理接口只公开已鉴权用户可访问的受管 Browser Lane，不会暴露
+原始 CDP endpoint、调试端口或 profile 路径：
+
+| 方法 + 路径 | 用途 |
+|---|---|
+| `GET /api/browser/overview` | 返回浏览器容量、压力、队列、Lane 与安全的 Host 诊断信息。 |
+| `GET /api/browser/lanes` | 列出当前已鉴权用户可见的 Browser Lane。 |
+| `POST /api/browser/lanes/{lane_id}/close` | 幂等关闭一个 Lane，不关闭其 conversation 或 Agent execution。 |
+| `POST /api/browser/conversations/{conversation_id}/close` | 关闭当前用户在指定 conversation 下的全部 Lane。 |
+| `POST /api/browser/close-all` | 关闭当前已鉴权用户拥有的全部 Browser Lane。 |
+| `POST /api/browser/lanes/{lane_id}/return-control` | 释放当前 Viewer control lease，把控制权交还 Agent。 |
+| `GET /api/browser/resource-policy` | 读取当前 Browser 资源策略档位与高级上限。 |
+| `PUT /api/browser/resource-policy` | 校验、持久化并应用 Browser 资源策略。 |
+| `POST /api/browser/lanes/{lane_id}/viewer-token` | 签发绑定当前用户与 Lane 的短时、单次使用 token。 |
+| `GET /api/browser/lanes/{lane_id}/view` | 使用应用鉴权和 viewer token 升级到嵌入式 Viewer WebSocket。 |
+
+除显式不安全的无鉴权本地模式外，所有端点都要求正常的应用鉴权，并继续
+执行当前用户与宿主授权策略。使用 cookie 鉴权的 `POST`、`PUT` 请求必须
+携带常规的 `x-csrf-token` 请求头；安全的 `GET` 请求跳过 CSRF。Viewer
+WebSocket 升级同样不走 cookie CSRF，但只有应用鉴权、Origin 校验、Lane
+路径以及短时一次性 viewer token 全部匹配时才会放行。该连接同时传输
+二进制 JPEG 帧与 Lane 范围内的 JSON 元数据/输入消息。
+
+Browser inventory 与生命周期变化通过共享 `/ws` 实时通道发送已鉴权 JSON
+事件；图像帧和 Viewer 输入只走专用的
+`/api/browser/lanes/{lane_id}/view` 连接。
+
 ## WebSocket 事件模型
 
-`/ws` 是用于流式更新的单一双向通道：智能体 token 流、终端输出，
-以及需求、计划任务和协作任务的状态变化。
+`/ws` 是应用更新共用的 JSON 实时通道：智能体 token 流、终端输出、
+Browser inventory/生命周期事件，以及需求、计划任务和协作任务的状态
+变化。二进制 Browser Viewer 帧和 Viewer 输入使用上文所述的专用 Lane
+连接。
 
 - 鉴权：通过 `GET /api/ws-token` 获得的 JWT，放在 WebSocket 的
   `Sec-WebSocket-Protocol` 请求头中（或 `Authorization`）。token 无效或
@@ -176,6 +208,7 @@ NomiFun 启动时进入三种鉴权策略之一：
 ## 另见
 
 - [配置参考](./configuration.zh.md) —— 参数、环境变量、鉴权密钥解析顺序。
+- [浏览器平台架构](../architecture/browser-platform.zh.md) —— BrowserSessionHub、Browser Host/Lane、身份域、Viewer 与生命周期保证。
 - [疑难排查](./troubleshooting.zh.md) —— 常见的 API 与 WebSocket 故障
   形态。
 - [Web 服务部署](../guides/web-server-deployment.md) —— 在 TLS 之后把

@@ -71,6 +71,7 @@ gtk = { version = "0.18", features = ["v3_24"] }
 
 [dev-dependencies]
 tempfile.workspace = true
+tauri = { version = "2", features = ["test"] }
 
 # Tests build a real NTFS junction inside the fake legacy tree (the same
 # primitive nomifun-extension's skill_service materializes workspace skill

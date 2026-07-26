@@ -201,6 +201,21 @@ pub fn should_arm_as_oopif(
     target_type == "iframe" && !is_own_page_session && !already_armed
 }
 
+/// Host/Lane-safe OOPIF routing additionally requires the attach event's
+/// envelope session to be the page (or iframe) session that owns this OOPIF.
+/// Without this check every lane-local OOPIF loop would see and adopt iframe
+/// targets belonging to sibling lanes on the shared connection.
+pub fn should_arm_as_oopif_for_parent(
+    target_type: &str,
+    event_parent_session: &str,
+    owning_page_session: &str,
+    is_own_page_session: bool,
+    already_armed: bool,
+) -> bool {
+    event_parent_session == owning_page_session
+        && should_arm_as_oopif(target_type, is_own_page_session, already_armed)
+}
+
 /// **一个标签页的对 LLM 摘要项**（[tabs 列表动作] 返回；`is_active` 标记当前 active tab）。
 /// `last4` 是 targetId 末 4 位（对 LLM 友好的 tab_id）；url/title 取自 `Target.getTargets`。
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -383,6 +398,24 @@ mod tests {
         assert!(!should_arm_as_oopif("iframe", true, false));
         // 已 armed（同 target 多次 attach）→ 不重复 arm。
         assert!(!should_arm_as_oopif("iframe", false, true));
+    }
+
+    #[test]
+    fn oopif_requires_owning_parent_session() {
+        assert!(should_arm_as_oopif_for_parent(
+            "iframe",
+            "lane-a-page",
+            "lane-a-page",
+            false,
+            false
+        ));
+        assert!(!should_arm_as_oopif_for_parent(
+            "iframe",
+            "lane-b-page",
+            "lane-a-page",
+            false,
+            false
+        ));
     }
 
     #[test]

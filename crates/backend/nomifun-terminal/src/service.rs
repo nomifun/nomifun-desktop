@@ -1296,15 +1296,20 @@ impl TerminalService {
     /// Spawn the background scrollback persistence loop. Every
     /// [`SCROLLBACK_FLUSH_INTERVAL`] it persists each *dirty* live session's
     /// scrollback so a restart can replay history. Idle sessions are skipped.
-    /// Spawn exactly once at boot (the service is cheaply cloneable —Arc fields).
-    pub fn spawn_scrollback_flusher(&self) {
-        let svc = self.clone();
+    /// Spawn exactly once at boot. The task holds only a weak reference so a
+    /// failed startup or an explicit service teardown cannot be kept alive by
+    /// the detached periodic worker itself.
+    pub fn spawn_scrollback_flusher(self: &Arc<Self>) {
+        let svc = Arc::downgrade(self);
         tokio::spawn(async move {
             let mut ticker = tokio::time::interval(SCROLLBACK_FLUSH_INTERVAL);
             // The first tick fires immediately; skip it (nothing to flush yet).
             ticker.tick().await;
             loop {
                 ticker.tick().await;
+                let Some(svc) = svc.upgrade() else {
+                    break;
+                };
                 svc.flush_dirty_scrollback().await;
             }
         });
@@ -2248,6 +2253,18 @@ impl TerminalService {
                     .await;
             }
         }
+        // The lifecycle listener is an ingress owned by this service. Release
+        // it only after terminal/process cleanup and durable row deletion have
+        // succeeded, so a failed shutdown remains retryable with its original
+        // authority intact.
+        self.terminal_lifecycle
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+        *self
+            .lifecycle_binary_path
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
         info!(
             deleted = n,
             "terminal shutdown cleanup: all sessions killed and removed"

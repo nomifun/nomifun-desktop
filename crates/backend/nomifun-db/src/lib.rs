@@ -7,8 +7,9 @@ pub mod models;
 mod repository;
 
 pub use database::{
-    Database, init_database, init_database_memory, init_database_memory_with_owner,
-    open_database_for_backup,
+    Database, MigrationLineageStatus, init_database, init_database_memory,
+    init_database_memory_with_owner, inspect_supported_migration_lineage,
+    open_database_for_backup, validate_current_migration_lineage,
 };
 pub use error::DbError;
 pub use id_schema_contract::{validate_id_data_contract, validate_id_schema_contract};

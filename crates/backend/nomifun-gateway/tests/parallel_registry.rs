@@ -1,74 +1,447 @@
-//! 网关并行执行面：`BrowserRegistry::execute_parallel` 异 key 并发、同 key 串行,结果保输入序。
+//! Gateway concurrency regression tests over the shared BrowserSessionHub.
 //!
-//! **Hermetic（不启动 Chrome）**：用**未知动作**——facade 在 dispatch 即返 `Unknown action {name}`
-//! 错误,**不调 `engine()`**（不解析/下载 Chrome）,但仍走完 `execute` 的 per-key 锁 + 派发路径。
-//! 错误消息含动作名,故可据此断言结果**按输入序**返回。
-//!
-//! 跑：`cargo nextest run -p nomifun-gateway --features browser-use -E 'test(execute_parallel)'`
+//! These tests are hermetic: the fake host never launches Chromium. They prove
+//! that the Gateway no longer owns per-companion engines or a global operation
+//! mutex, while retaining input-order results for batched calls.
 
 #![cfg(feature = "browser-use")]
 
-use nomifun_gateway::browser_registry::{tool_result_to_value, BrowserRegistry};
-use serde_json::json;
+use std::collections::BTreeSet;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::Duration;
 
-#[tokio::test]
-async fn execute_parallel_distinct_keys_results_in_input_order() {
-    let reg = BrowserRegistry::default_for_browser_use();
-    // 两个不同 key（异 key 并发）。未知动作 → 各自快速返错,不启动 Chrome。
-    let batch = vec![
-        ("companion-a".to_string(), json!({"action": "zzz_marker_alpha"})),
-        ("companion-b".to_string(), json!({"action": "zzz_marker_beta"})),
-    ];
-    let started = std::time::Instant::now();
-    let results = reg.execute_parallel(batch).await;
-    assert_eq!(results.len(), 2, "一输入一结果");
-    // 保序：结果[0] 对应 alpha、结果[1] 对应 beta（错误消息回带动作名）。
-    let strs: Vec<String> = results
-        .into_iter()
-        .map(|r| tool_result_to_value(r).to_string())
-        .collect();
-    assert!(strs[0].contains("zzz_marker_alpha"), "结果须按输入序(idx0=alpha): {}", strs[0]);
-    assert!(strs[1].contains("zzz_marker_beta"), "结果须按输入序(idx1=beta): {}", strs[1]);
-    // 不得死锁/卡住（未知动作不启动 Chrome,应近乎瞬时）。
-    assert!(started.elapsed().as_secs() < 20, "execute_parallel 不得死锁/卡住");
+use async_trait::async_trait;
+use nomifun_browser_platform::{
+    BrowserErrorCode,
+    BrowserHostDriver, BrowserHostFactory, BrowserHostId, BrowserLaneDriver,
+    BrowserOperation, BrowserOperationKind, BrowserOperationResult,
+    BrowserPlatformError, BrowserSessionHub, BrowserSurface, CallerIdentity,
+    DriverOperationContext, HostLaunchRequest, HostLifecycleState, HubConfig,
+    LaneLaunchRequest,
+};
+use nomifun_gateway::CallerCtx;
+use nomifun_gateway::browser_registry::{
+    BrowserRegistry, GatewayBrowserCall,
+};
+use serde_json::{Value, json};
+use tokio::sync::Semaphore;
+
+struct Probe {
+    active: AtomicUsize,
+    maximum: AtomicUsize,
+    entered: Semaphore,
+    releases: Semaphore,
 }
 
-#[tokio::test]
-async fn execute_parallel_same_key_serializes_and_returns_all() {
-    let reg = BrowserRegistry::default_for_browser_use();
-    // 同一 key 两次：必须经该 key 的 CompanionBrowser 锁**串行**（不并发撞同一引擎）,但两结果都返回。
-    let batch = vec![
-        ("companion-a".to_string(), json!({"action": "zzz_one"})),
-        ("companion-a".to_string(), json!({"action": "zzz_two"})),
-    ];
-    let results = reg.execute_parallel(batch).await;
-    assert_eq!(results.len(), 2, "同 key 两调用都须返回(串行,无丢失)");
-}
-
-// ── real-chrome：并发隔离真机证明（#[ignore]，需本机/打包 chrome）───────────────────────
-// 上面两个测试是 hermetic 的（未知动作 → 不启动 Chrome），只证保序/串行/不死锁，**不**证明隔离。
-// 本测试用真动作让两个**不同 key** 并发各 navigate：每 key 的 BrowserTool 自分配进程内唯一
-// user-data-dir（`<data_dir>/profiles/<token>`），故两个 Chrome 真并发冷启都成功——旧的共享
-// `<data_dir>/profile` 下第二个会撞 Chromium 进程单例（转发命令行后退出）而失败。这正是修复的核心证明。
-//   set NOMIFUN_CHROME_BINARY=C:\Program Files\Google\Chrome\Application\chrome.exe 后：
-//   cargo nextest run -p nomifun-gateway --features browser-use --run-ignored all -E 'test(distinct_keys_both_launch)'
-#[tokio::test]
-#[ignore = "需本机/打包 chrome：并发隔离真机证明（set NOMIFUN_CHROME_BINARY）"]
-async fn execute_parallel_distinct_keys_both_launch_real_chrome() {
-    let reg = BrowserRegistry::default_for_browser_use();
-    let page = "data:text/html,<title>iso</title><h1>hello</h1>";
-    let batch = vec![
-        ("companion-iso-a".to_string(), json!({"action": "navigate", "url": page})),
-        ("companion-iso-b".to_string(), json!({"action": "navigate", "url": page})),
-    ];
-    let results = reg.execute_parallel(batch).await;
-    assert_eq!(results.len(), 2, "一输入一结果");
-    for (i, r) in results.into_iter().enumerate() {
-        let v = tool_result_to_value(r);
-        assert!(
-            v.get("error").is_none(),
-            "key {i} navigate must succeed — distinct per-instance user-data-dirs mean no Chromium \
-             singleton collision between the two concurrent launches: {v}"
-        );
+impl Probe {
+    fn record_enter(&self) {
+        let active = self.active.fetch_add(1, Ordering::AcqRel) + 1;
+        self.maximum.fetch_max(active, Ordering::AcqRel);
     }
+
+    fn record_exit(&self) {
+        self.active.fetch_sub(1, Ordering::AcqRel);
+    }
+
+    async fn wait_for_entries(&self, expected: u32) {
+        self.entered
+            .acquire_many(expected)
+            .await
+            .expect("entry semaphore closed")
+            .forget();
+    }
+
+    fn release(&self, count: usize) {
+        self.releases.add_permits(count);
+    }
+}
+
+struct FakeLane {
+    probe: Arc<Probe>,
+}
+
+#[async_trait]
+impl BrowserLaneDriver for FakeLane {
+    async fn execute(
+        &self,
+        operation: BrowserOperation,
+        _context: DriverOperationContext,
+    ) -> Result<BrowserOperationResult, BrowserPlatformError> {
+        self.probe.record_enter();
+        if operation
+            .input
+            .get("block")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+        {
+            self.probe.entered.add_permits(1);
+            self.probe
+                .releases
+                .acquire()
+                .await
+                .expect("release semaphore closed")
+                .forget();
+        } else {
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        self.probe.record_exit();
+        Ok(BrowserOperationResult {
+            output: json!({
+                "marker": operation
+                    .input
+                    .get("marker")
+                    .and_then(Value::as_str),
+            }),
+            ..Default::default()
+        })
+    }
+
+    async fn close(&self) -> Result<(), BrowserPlatformError> {
+        Ok(())
+    }
+}
+
+struct FakeHost {
+    host_id: BrowserHostId,
+    probe: Arc<Probe>,
+}
+
+#[async_trait]
+impl BrowserHostDriver for FakeHost {
+    fn host_id(&self) -> BrowserHostId {
+        self.host_id.clone()
+    }
+
+    fn epoch(&self) -> u64 {
+        1
+    }
+
+    fn state(&self) -> HostLifecycleState {
+        HostLifecycleState::Running
+    }
+
+    async fn open_lane(
+        &self,
+        _request: LaneLaunchRequest,
+    ) -> Result<Arc<dyn BrowserLaneDriver>, BrowserPlatformError> {
+        Ok(Arc::new(FakeLane {
+            probe: Arc::clone(&self.probe),
+        }))
+    }
+
+    async fn shutdown(&self) -> Result<(), BrowserPlatformError> {
+        Ok(())
+    }
+}
+
+struct FakeFactory {
+    probe: Arc<Probe>,
+}
+
+#[async_trait]
+impl BrowserHostFactory for FakeFactory {
+    async fn launch(
+        &self,
+        request: HostLaunchRequest,
+    ) -> Result<Arc<dyn BrowserHostDriver>, BrowserPlatformError> {
+        Ok(Arc::new(FakeHost {
+            host_id: request.host_id,
+            probe: Arc::clone(&self.probe),
+        }))
+    }
+}
+
+fn fixture() -> (BrowserRegistry, CallerCtx, Arc<Probe>) {
+    let probe = Arc::new(Probe {
+        active: AtomicUsize::new(0),
+        maximum: AtomicUsize::new(0),
+        entered: Semaphore::new(0),
+        releases: Semaphore::new(0),
+    });
+    let hub = BrowserSessionHub::new(
+        Arc::new(FakeFactory {
+            probe: Arc::clone(&probe),
+        }),
+        HubConfig::default(),
+    );
+    let user_id = nomifun_common::UserId::parse(
+        "0190f5fe-7c00-7a00-8000-000000000001",
+    )
+    .unwrap();
+    let conversation_id = nomifun_common::ConversationId::parse(
+        "0190f5fe-7c00-7a00-8abc-012345678901",
+    )
+    .unwrap();
+    let runtime_id = "gateway-runtime-parallel";
+    let owner = hub
+        .issue_owner_lease(
+            user_id.as_str(),
+            Some(conversation_id.as_str().to_owned()),
+            runtime_id,
+        )
+        .unwrap();
+    let caller = CallerCtx {
+        conversation_id: Some(conversation_id.clone()),
+        user_id: user_id.clone(),
+        browser_identity: Some(CallerIdentity {
+            user_id: user_id.as_str().to_owned(),
+            conversation_id: Some(conversation_id.as_str().to_owned()),
+            runtime_instance_id: runtime_id.to_owned(),
+            agent_id: Some("gateway-agent".to_owned()),
+            companion_id: None,
+            execution_id: None,
+            step_id: None,
+            attempt_id: Some("attempt-1".to_owned()),
+            remote_connection_id: None,
+            surface: BrowserSurface::Gateway,
+            owner_lease_id: owner.lease_id,
+            capability_expires_at_ms: u64::MAX,
+            allowed_operations: BTreeSet::from([
+                BrowserOperationKind::Manage,
+                BrowserOperationKind::Navigate,
+            ]),
+        }),
+        ..Default::default()
+    };
+    (BrowserRegistry::from_hub(hub), caller, probe)
+}
+
+fn gateway_caller_without_browser_identity(
+    conversation_id: &nomifun_common::ConversationId,
+    user_id: &nomifun_common::UserId,
+    companion_id: &nomifun_common::CompanionId,
+) -> CallerCtx {
+    CallerCtx {
+        conversation_id: Some(conversation_id.clone()),
+        user_id: user_id.clone(),
+        companion_id: Some(companion_id.clone()),
+        remote: true,
+        ..Default::default()
+    }
+}
+
+fn call(caller: &CallerCtx, lane_name: &str, marker: &str) -> GatewayBrowserCall {
+    GatewayBrowserCall {
+        caller: caller.clone(),
+        lane_name: lane_name.to_owned(),
+        input: json!({
+            "action": "navigate",
+            "url": format!("https://example.test/{marker}"),
+            "marker": marker,
+        }),
+    }
+}
+
+fn blocking_call(
+    caller: &CallerCtx,
+    lane_name: &str,
+    marker: &str,
+) -> GatewayBrowserCall {
+    let mut call = call(caller, lane_name, marker);
+    call.input["block"] = Value::Bool(true);
+    call
+}
+
+#[tokio::test]
+async fn execute_parallel_distinct_lanes_overlap_and_keep_input_order() {
+    let (registry, caller, probe) = fixture();
+    let results = registry
+        .execute_parallel(vec![
+            call(&caller, "alpha", "first"),
+            call(&caller, "beta", "second"),
+        ])
+        .await;
+    assert_eq!(results.len(), 2);
+    assert_eq!(
+        results[0]
+            .as_ref()
+            .unwrap()
+            .output
+            .get("marker")
+            .and_then(Value::as_str),
+        Some("first")
+    );
+    assert_eq!(
+        results[1]
+            .as_ref()
+            .unwrap()
+            .output
+            .get("marker")
+            .and_then(Value::as_str),
+        Some("second")
+    );
+    assert_eq!(
+        probe.maximum.load(Ordering::Acquire),
+        2,
+        "different lanes must not be globally serialized"
+    );
+}
+
+#[tokio::test]
+async fn execute_parallel_same_lane_remains_serialized() {
+    let (registry, caller, probe) = fixture();
+    let results = registry
+        .execute_parallel(vec![
+            call(&caller, "default", "first"),
+            call(&caller, "default", "second"),
+        ])
+        .await;
+    assert!(results.iter().all(Result::is_ok));
+    assert_eq!(
+        probe.maximum.load(Ordering::Acquire),
+        1,
+        "the Hub must serialize operations in one lane"
+    );
+}
+
+#[tokio::test]
+async fn same_companion_attempts_get_distinct_default_lanes_and_revoke_exact_owner() {
+    let probe = Arc::new(Probe {
+        active: AtomicUsize::new(0),
+        maximum: AtomicUsize::new(0),
+        entered: Semaphore::new(0),
+        releases: Semaphore::new(0),
+    });
+    let hub = BrowserSessionHub::new(
+        Arc::new(FakeFactory {
+            probe: Arc::clone(&probe),
+        }),
+        HubConfig::default(),
+    );
+    let registry = BrowserRegistry::from_hub(hub.clone());
+    let user_id = nomifun_common::UserId::parse(
+        "0190f5fe-7c00-7a00-8000-000000000001",
+    )
+    .unwrap();
+    let conversation_id = nomifun_common::ConversationId::parse(
+        "0190f5fe-7c00-7a00-8abc-012345678901",
+    )
+    .unwrap();
+    let companion_id = nomifun_common::CompanionId::parse(
+        "0190f5fe-7c00-7a00-8abc-012345678902",
+    )
+    .unwrap();
+    let mut first = gateway_caller_without_browser_identity(
+        &conversation_id,
+        &user_id,
+        &companion_id,
+    );
+    let mut second = gateway_caller_without_browser_identity(
+        &conversation_id,
+        &user_id,
+        &companion_id,
+    );
+    registry
+        .attach_trusted_identity(
+            &mut first,
+            "signed-child-attempt-a",
+            Some("attempt-a"),
+            u64::MAX,
+        )
+        .await
+        .unwrap();
+    registry
+        .attach_trusted_identity(
+            &mut second,
+            "signed-child-attempt-b",
+            Some("attempt-b"),
+            u64::MAX,
+        )
+        .await
+        .unwrap();
+
+    let first_lane = registry.open(&first, None).await.unwrap();
+    let second_lane = registry.open(&second, None).await.unwrap();
+    assert_ne!(first_lane.lane_id, second_lane.lane_id);
+    assert_ne!(first_lane.lane_key, second_lane.lane_key);
+    assert_eq!(first_lane.lane_key.lane_name, "default");
+    assert_eq!(second_lane.lane_key.lane_name, "default");
+    assert_eq!(
+        first_lane.caller.companion_id,
+        second_lane.caller.companion_id,
+        "companion attribution must not merge attempt-owned lanes"
+    );
+    assert_eq!(
+        first_lane.caller.conversation_id,
+        second_lane.caller.conversation_id,
+        "conversation attribution must not merge attempt-owned lanes"
+    );
+
+    let parallel_registry = registry.clone();
+    let parallel_first = first.clone();
+    let parallel_second = second.clone();
+    let parallel = tokio::spawn(async move {
+        parallel_registry
+            .execute_parallel(vec![
+                blocking_call(
+                    &parallel_first,
+                    "default",
+                    "attempt-a",
+                ),
+                blocking_call(
+                    &parallel_second,
+                    "default",
+                    "attempt-b",
+                ),
+            ])
+            .await
+    });
+    tokio::time::timeout(
+        Duration::from_secs(1),
+        probe.wait_for_entries(2),
+    )
+    .await
+    .expect(
+        "attempt-owned default lanes were serialized before both drivers entered",
+    );
+    assert_eq!(
+        probe.maximum.load(Ordering::Acquire),
+        2,
+        "attempt-owned default lanes must overlap despite identical companion/conversation"
+    );
+    probe.release(2);
+    let results = parallel.await.unwrap();
+    assert!(results.iter().all(Result::is_ok));
+
+    let stale_first = first.clone();
+    let revoked = registry
+        .revoke_signed_child_lease("signed-child-attempt-a")
+        .await
+        .unwrap();
+    assert_eq!(revoked.closed, 1);
+    assert!(!revoked.already_closed);
+
+    let lanes = hub.list_lanes().await;
+    assert_eq!(lanes.len(), 1);
+    assert_eq!(lanes[0].lane_id, second_lane.lane_id);
+    assert_eq!(
+        lanes[0].caller.runtime_instance_id,
+        "signed-child-attempt-b"
+    );
+    assert_eq!(
+        registry.open(&stale_first, None).await.unwrap_err().code,
+        BrowserErrorCode::OwnerLeaseExpired,
+        "a detached caller must not reopen the revoked owner's lane"
+    );
+    assert_eq!(
+        registry
+            .execute(
+                &stale_first,
+                None,
+                json!({
+                    "action": "navigate",
+                    "url": "https://example.test/revoked",
+                }),
+            )
+            .await
+            .unwrap_err()
+            .code,
+        BrowserErrorCode::OwnerLeaseExpired
+    );
+    assert_eq!(
+        registry.open(&second, None).await.unwrap().lane_id,
+        second_lane.lane_id,
+        "revoking one remote attempt must not disturb its sibling owner"
+    );
 }

@@ -324,4 +324,3 @@ async fn observe_redacts_secrets() {
         obs.yaml
     );
 }
-

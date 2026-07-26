@@ -78,6 +78,61 @@ mod unix {
     }
 
     #[tokio::test]
+    async fn managed_shutdown_is_one_authoritative_idempotent_operation() {
+        let directory = tempfile::tempdir().expect("temporary directory should be created");
+        let marker = directory.path().join("managed-child-grandchild.pid");
+        let mut builder = ChildProcessBuilder::new(env!("CARGO_BIN_EXE_process_test_helper"));
+        builder
+            .args([
+                OsString::from("spawn-grandchild"),
+                marker.as_os_str().to_owned(),
+            ])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        let mut process = builder
+            .spawn_managed()
+            .expect("managed child-process helper should start");
+        let leader = process.id().expect("managed child should have a PID");
+        let grandchild = wait_for_pid_marker(&marker).await;
+
+        process
+            .shutdown()
+            .await
+            .expect("managed shutdown should terminate and prove the whole tree");
+        process
+            .shutdown()
+            .await
+            .expect("managed shutdown should be idempotent after proof");
+
+        assert_process_gone(leader);
+        assert_process_gone(grandchild);
+    }
+
+    #[tokio::test]
+    async fn managed_shutdown_accepts_a_naturally_exited_helper() {
+        let mut builder = ChildProcessBuilder::new(env!("CARGO_BIN_EXE_process_test_helper"));
+        builder
+            .args([OsString::from("exit"), OsString::from("0")])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        let mut process = builder
+            .spawn_managed()
+            .expect("naturally exiting helper should start");
+
+        let status = process
+            .wait()
+            .await
+            .expect("naturally exiting helper should be waitable");
+        assert!(status.success());
+        process
+            .shutdown()
+            .await
+            .expect("shutdown should accept a helper that already exited naturally");
+    }
+
+    #[tokio::test]
     async fn natural_leader_exit_reaps_the_remaining_group_descendant() {
         let directory = tempfile::tempdir().expect("temporary directory should be created");
         let marker = directory.path().join("child-process-leader-first-grandchild.pid");
@@ -279,6 +334,68 @@ mod windows {
         grandchild
             .wait_terminated(Duration::from_secs(2), "child-process descendant")
             .await;
+    }
+
+    #[tokio::test]
+    async fn managed_shutdown_is_one_authoritative_idempotent_operation() {
+        let directory = tempfile::tempdir().expect("temporary directory should be created");
+        let marker = directory.path().join("managed-child-grandchild.pid");
+        let mut builder = ChildProcessBuilder::new(env!("CARGO_BIN_EXE_process_test_helper"));
+        builder
+            .args([
+                OsString::from("spawn-grandchild"),
+                marker.as_os_str().to_owned(),
+            ])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        let mut process = builder
+            .spawn_managed()
+            .expect("managed child-process helper should start");
+        let leader_pid = process.id().expect("managed child should have a PID");
+        let leader = ExactProcess::open(leader_pid).expect("managed leader process should open");
+        let grandchild_pid = wait_for_pid_marker(&marker).await;
+        let grandchild =
+            ExactProcess::open(grandchild_pid).expect("managed grandchild process should open");
+
+        process
+            .shutdown()
+            .await
+            .expect("managed shutdown should terminate and prove the whole tree");
+        process
+            .shutdown()
+            .await
+            .expect("managed shutdown should be idempotent after proof");
+
+        leader
+            .wait_terminated(Duration::ZERO, "managed child-process leader")
+            .await;
+        grandchild
+            .wait_terminated(Duration::ZERO, "managed child-process descendant")
+            .await;
+    }
+
+    #[tokio::test]
+    async fn managed_shutdown_accepts_a_naturally_exited_helper() {
+        let mut builder = ChildProcessBuilder::new(env!("CARGO_BIN_EXE_process_test_helper"));
+        builder
+            .args([OsString::from("exit"), OsString::from("0")])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        let mut process = builder
+            .spawn_managed()
+            .expect("naturally exiting helper should start");
+
+        let status = process
+            .wait()
+            .await
+            .expect("naturally exiting helper should be waitable");
+        assert!(status.success());
+        process
+            .shutdown()
+            .await
+            .expect("shutdown should accept a helper that already exited naturally");
     }
 
     #[tokio::test]

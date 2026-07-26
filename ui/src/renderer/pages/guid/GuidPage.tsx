@@ -37,6 +37,7 @@ import GuidResourceCards from './components/GuidResourceCards';
 import MentionDropdown, { MentionSelectorBadge } from './components/MentionDropdown';
 import QuickActionButtons from './components/QuickActionButtons';
 import PresetPickerDrawer from './components/PresetPickerDrawer';
+import type { LocalizableSkill } from '@/renderer/pages/settings/skill/skillDisplay';
 import SpeechInputButton from '@/renderer/components/chat/SpeechInputButton';
 import FeedbackReportModal from '@/renderer/components/settings/SettingsModal/contents/FeedbackReportModal';
 import AutoWorkControl from '@/renderer/pages/conversation/components/AutoWorkControl';
@@ -62,6 +63,7 @@ import { useTranslation } from 'react-i18next';
 import { useLocation, useNavigate } from 'react-router-dom';
 import { mutate as swrMutate } from 'swr';
 import type { Preset } from '@/common/types/agent/presetTypes';
+import { PRESET_CATALOG_SWR_KEY } from '@/renderer/hooks/preset/presetCatalog';
 import styles from './index.module.css';
 
 const GuidPage: React.FC = () => {
@@ -99,7 +101,7 @@ const GuidPage: React.FC = () => {
   // into one catalog for the action-row menu. Auto-injected skills default to
   // checked; the rest are opt-in per conversation (or pre-checked when the
   // active preset declares them in `included_skills`).
-  const [allSkills, setAllSkills] = useState<Array<{ name: string; description: string; isAuto: boolean }>>([]);
+  const [allSkills, setAllSkills] = useState<Array<LocalizableSkill & { isAuto: boolean }>>([]);
   const [guidDisabledBuiltinSkills, setGuidDisabledBuiltinSkills] = useState<string[] | undefined>(undefined);
   const [guidEnabledSkills, setGuidEnabledSkills] = useState<string[] | undefined>(undefined);
   const [availableMcpServers, setAvailableMcpServers] = useState<IMcpServer[]>([]);
@@ -109,14 +111,12 @@ const GuidPage: React.FC = () => {
     Promise.all([ipcBridge.fs.listBuiltinAutoSkills.invoke(), ipcBridge.fs.listAvailableSkills.invoke()])
       .then(([autoSkills, availableSkills]) => {
         const autoNames = new Set(autoSkills.map((s) => s.name));
-        const merged: Array<{
-          name: string;
-          description: string;
-          isAuto: boolean;
-        }> = [
+        const merged: Array<LocalizableSkill & { isAuto: boolean }> = [
           ...autoSkills.map((s) => ({
             name: s.name,
             description: s.description,
+            name_i18n: s.name_i18n,
+            description_i18n: s.description_i18n,
             isAuto: true,
           })),
           ...availableSkills
@@ -124,6 +124,8 @@ const GuidPage: React.FC = () => {
             .map((s) => ({
               name: s.name,
               description: s.description,
+              name_i18n: s.name_i18n,
+              description_i18n: s.description_i18n,
               isAuto: false,
             })),
         ];
@@ -263,7 +265,6 @@ const GuidPage: React.FC = () => {
     selectedAgent: agentSelection.selectedAgent,
     selectedAgentKey: agentSelection.selectedAgentKey,
     selectedAgentInfo: agentSelection.selectedAgentInfo,
-    is_presetAgent: agentSelection.is_presetAgent,
     selectedMode: agentSelection.selectedMode,
     selectedAcpModel: agentSelection.selectedAcpModel,
     currentAcpCachedModelInfo: agentSelection.currentAcpCachedModelInfo,
@@ -567,7 +568,7 @@ const GuidPage: React.FC = () => {
       if (!presetId || nextAgentId === currentPresetAgentId) return;
       try {
         await swrMutate(
-          'presets.list',
+          PRESET_CATALOG_SWR_KEY,
           (prev: Preset[] | undefined) =>
             prev?.map((item) =>
               item.preset_id === presetId ? { ...item, preferred_agent_id: nextAgentId } : item,
@@ -578,7 +579,10 @@ const GuidPage: React.FC = () => {
           preset_id: presetId,
           preferred_agent_id: nextAgentId,
         });
-        await Promise.all([swrMutate('presets.list'), agentSelection.refreshCustomAgents()]);
+        await Promise.all([
+          swrMutate(PRESET_CATALOG_SWR_KEY),
+          agentSelection.refreshCustomAgents(),
+        ]);
         const agent_name = agentSelection.availableAgents?.find((a) => a.id === nextAgentId)?.name || nextAgentId;
         Message.success(t('guid.switchedToAgent', { agent: agent_name }));
       } catch (error) {
@@ -827,6 +831,7 @@ const GuidPage: React.FC = () => {
                   onFree={() => {
                     agentSelection.setSelectedAgentKey(agentSelection.defaultAgentKey);
                   }}
+                  localeKey={localeKey}
                   activeSkillCount={activeSkillCount}
                   activeSkills={activeSkills}
                   collaborationPolicyNode={collaborationPolicyNode}

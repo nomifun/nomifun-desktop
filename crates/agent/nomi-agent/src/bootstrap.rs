@@ -317,6 +317,14 @@ pub struct AgentBootstrap {
     /// (default) → fail-closed (current behavior). Feature-gated: the trait is in `nomi_browser`.
     #[cfg(feature = "browser-use")]
     approval_gate: Option<Arc<dyn nomi_browser::BrowserApprovalGate>>,
+    /// Trusted main-process Browser Platform capability for this runtime.
+    /// The embedded host resolves/signs caller identity before constructing
+    /// this client; neither the model nor tool input can populate those fields.
+    ///
+    /// When present, the Browser tool uses this client as its only execution
+    /// path and cannot lazily launch a private Chromium process.
+    #[cfg(feature = "browser-use")]
+    browser_lane_client: Option<nomi_browser::BrowserLaneClient>,
 }
 
 impl AgentBootstrap {
@@ -334,6 +342,8 @@ impl AgentBootstrap {
             browser_secret_source: None,
             #[cfg(feature = "browser-use")]
             approval_gate: None,
+            #[cfg(feature = "browser-use")]
+            browser_lane_client: None,
         }
     }
 
@@ -387,6 +397,16 @@ impl AgentBootstrap {
     #[cfg(feature = "browser-use")]
     pub fn approval_gate(mut self, gate: Arc<dyn nomi_browser::BrowserApprovalGate>) -> Self {
         self.approval_gate = Some(gate);
+        self
+    }
+
+    /// Bind the native Agent Browser tool to the process-wide Browser Session
+    /// Hub. The supplied client already carries trusted caller identity,
+    /// capability expiry, owner lease, and allowed operations; no corresponding
+    /// fields are exposed to model input.
+    #[cfg(feature = "browser-use")]
+    pub fn browser_lane_client(mut self, client: nomi_browser::BrowserLaneClient) -> Self {
+        self.browser_lane_client = Some(client);
         self
     }
 
@@ -678,18 +698,26 @@ impl AgentBootstrap {
             );
         }
 
-        // Native browser-use (in-process self-hosted CDP engine). The native
-        // BrowserTool registers under the name "Browser" (actions: navigate /
-        // observe / screenshot / capabilities) and is the sole browser path. The
-        // engine launches lazily on the first action — registering it never starts
-        // a browser.
+        // Browser use. Production hosts inject a trusted BrowserLaneClient,
+        // making the process-wide Browser Session Hub the sole owner/execution
+        // path. AgentBootstrap never enables BrowserTool's standalone lazy
+        // engine; tests and explicit low-level embeddings may still construct
+        // BrowserTool directly outside this production bootstrap.
         #[cfg(feature = "browser-use")]
         if self.config.tools.browser.enabled {
-            tracing::info!(
-                target: "nomi_agent",
-                "browser-use ENABLED: registering the native Browser tool (navigate / observe / \
-                 screenshot / capabilities). The managed Chromium launches lazily on first use."
-            );
+            if self.browser_lane_client.is_some() {
+                tracing::info!(
+                    target: "nomi_agent",
+                    "browser-use ENABLED: registering a Browser tool bound to the shared Browser \
+                     Session Hub. Private Chromium fallback is disabled."
+                );
+            } else {
+                tracing::error!(
+                    target: "nomi_agent",
+                    "browser-use ENABLED, but no BrowserLaneClient was issued. \
+                     The Browser tool will fail closed; private Chromium fallback is disabled."
+                );
+            }
             // F1-sec: thread the session-bypass policy + evaluate full-power into the
             // facade so its independent fail-closed redline gate (裁决⑧) actually fires
             // and the evaluate gate (裁决⑨) reflects the user's opt-in. `auto_approve`
@@ -716,7 +744,7 @@ impl AgentBootstrap {
             // yolo arms it immediately, instead of being pinned to the auto_approve snapshot
             // above. `None` (e.g. the interactive REPL, which has no protocol approval
             // manager) → the facade falls back to the construction-time snapshot (unchanged).
-            let mut browser_tool = nomi_browser::BrowserTool::with_policy(
+            let mut browser_tool = nomi_browser::BrowserTool::new_managed(
                 &self.config.tools.browser,
                 self.config.tools.auto_approve,
                 self.config.tools.browser.full_power,
@@ -730,6 +758,11 @@ impl AgentBootstrap {
                     .clone()
                     .map(|(vault_path, key)| nomi_browser::BrowserSecretSource { vault_path, key }),
             );
+            if let Some(client) = self.browser_lane_client.clone() {
+                // Authoritative mode switch: once injected, BrowserTool::engine()
+                // rejects facade-owned engine access before its cache/build path.
+                browser_tool = browser_tool.with_lane_client(client);
+            }
             // P7A: site-memory opt-in (LIVE pref `agent.browserUse.siteMemory`, default OFF). When
             // ON, inject a file-backed sink so the agent remembers site structure across sessions
             // (entries injected into observe as untrusted hints; secret-sourced entries dropped by
