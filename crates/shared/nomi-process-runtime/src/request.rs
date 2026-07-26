@@ -71,6 +71,12 @@ impl ProcessOwner {
 pub struct ProcessPolicy {
     pub output_limit_bytes: usize,
     pub lease: Duration,
+    /// Whether the supervisor may retire this session after `lease` elapses
+    /// without an API action or output activity.
+    ///
+    /// Interactive desktop terminals set this to `false` so a long machine
+    /// sleep cannot race the idle-session reaper on resume.
+    pub expire_on_idle: bool,
     pub deadline: Option<Instant>,
     pub interrupt_grace: Duration,
     pub terminate_grace: Duration,
@@ -82,6 +88,7 @@ impl Default for ProcessPolicy {
         Self {
             output_limit_bytes: 4 * 1024 * 1024,
             lease: Duration::from_secs(15 * 60),
+            expire_on_idle: true,
             deadline: None,
             interrupt_grace: Duration::from_secs(1),
             terminate_grace: Duration::from_secs(1),

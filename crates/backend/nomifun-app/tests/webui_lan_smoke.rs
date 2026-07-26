@@ -32,7 +32,8 @@ async fn webui_lan_start_smoke() {
     let cli = nomifun_app::cli::Cli::parse_from(["nomifun-desktop-test", "--data-dir", &data_dir]);
     let merged_path = std::env::var("PATH").unwrap_or_default();
 
-    let started = nomifun_app::DesktopServer::start(&cli, &merged_path, Some(spa_dir), None).await;
+    let started =
+        nomifun_app::DesktopServer::start(&cli, &merged_path, Some(spa_dir), None, None).await;
     let (server, _keep) = match started {
         Ok(pair) => pair,
         Err(e) => panic!("DesktopServer::start failed: {e:#}"),
@@ -70,7 +71,7 @@ async fn webui_lan_spa_deep_link_serves_app_shell() {
     let merged_path = std::env::var("PATH").unwrap_or_default();
 
     let (server, _keep) =
-        nomifun_app::DesktopServer::start(&cli, &merged_path, Some(spa_dir), None)
+        nomifun_app::DesktopServer::start(&cli, &merged_path, Some(spa_dir), None, None)
             .await
             .expect("DesktopServer::start failed");
 
@@ -97,6 +98,138 @@ async fn webui_lan_spa_deep_link_serves_app_shell() {
     );
 }
 
+/// HTTP-layer regression coverage for custom-protocol builds, which can have an
+/// embedded frontend source but no external webui-dist directory. A separate
+/// desktop test exercises Tauri's generated custom-protocol context and exact
+/// frontend build-ID pairing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn webui_lan_embedded_asset_source_needs_no_filesystem_shell() {
+    use clap::Parser as _;
+
+    const INDEX: &str = "<!doctype html><title>EMBEDDED_WEBUI_MARKER</title>";
+    const SCRIPT: &str = "window.__embeddedWebUi = true;";
+
+    let tmp = tempfile::TempDir::new().unwrap();
+    let data_dir = tmp.path().to_string_lossy().into_owned();
+    let cli = nomifun_app::cli::Cli::parse_from([
+        "nomifun-desktop-test",
+        "--data-dir",
+        &data_dir,
+    ]);
+    let merged_path = std::env::var("PATH").unwrap_or_default();
+    let assets = nomifun_app::WebUiAssetSource::new([
+        (
+            "index.html",
+            nomifun_app::WebUiAsset::new(INDEX.as_bytes().to_vec(), "text/html")
+                .with_csp_header(Some("default-src 'self'".to_string())),
+        ),
+        (
+            "assets/app.js",
+            nomifun_app::WebUiAsset::new(
+                SCRIPT.as_bytes().to_vec(),
+                "text/javascript",
+            ),
+        ),
+    ]);
+
+    let (server, _keep) =
+        nomifun_app::DesktopServer::start(&cli, &merged_path, None, None, Some(assets))
+            .await
+            .expect("DesktopServer::start failed");
+    let status = server.start_lan().await;
+    assert!(status.running, "start_lan failed: {:?}", status.error);
+
+    let client = local_http_client();
+    let base = format!("http://127.0.0.1:{}", status.port);
+    let route = client
+        .get(format!("{base}/open-capabilities"))
+        .send()
+        .await
+        .expect("request embedded SPA route");
+    assert_eq!(route.status(), reqwest::StatusCode::OK);
+    assert_eq!(
+        route
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok()),
+        Some("text/html")
+    );
+    assert_eq!(
+        route
+            .headers()
+            .get(reqwest::header::CACHE_CONTROL)
+            .and_then(|value| value.to_str().ok()),
+        Some("no-cache")
+    );
+    assert_eq!(
+        route
+            .headers()
+            .get(reqwest::header::CONTENT_SECURITY_POLICY)
+            .and_then(|value| value.to_str().ok()),
+        Some("default-src 'self'")
+    );
+    assert_eq!(
+        route
+            .headers()
+            .get(reqwest::header::X_CONTENT_TYPE_OPTIONS)
+            .and_then(|value| value.to_str().ok()),
+        Some("nosniff")
+    );
+    assert!(route.text().await.unwrap_or_default().contains("EMBEDDED_WEBUI_MARKER"));
+
+    let script = client
+        .get(format!("{base}/assets/app.js"))
+        .send()
+        .await
+        .expect("request embedded JS");
+    assert_eq!(script.status(), reqwest::StatusCode::OK);
+    assert_eq!(
+        script
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok()),
+        Some("text/javascript")
+    );
+    assert_eq!(
+        script
+            .headers()
+            .get(reqwest::header::CACHE_CONTROL)
+            .and_then(|value| value.to_str().ok()),
+        Some("public, max-age=31536000, immutable")
+    );
+    assert_eq!(script.text().await.unwrap_or_default(), SCRIPT);
+
+    let head = client
+        .head(format!("{base}/open-capabilities"))
+        .send()
+        .await
+        .expect("HEAD embedded SPA route");
+    assert_eq!(head.status(), reqwest::StatusCode::OK);
+    let head_length = head
+        .headers()
+        .get(reqwest::header::CONTENT_LENGTH)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<usize>().ok());
+    assert_eq!(head_length, Some(INDEX.len()));
+    assert!(head.bytes().await.unwrap_or_default().is_empty());
+
+    let method = client
+        .post(format!("{base}/open-capabilities"))
+        .send()
+        .await
+        .expect("POST embedded SPA route");
+    assert_eq!(method.status(), reqwest::StatusCode::METHOD_NOT_ALLOWED);
+    assert_eq!(
+        method
+            .headers()
+            .get(reqwest::header::ALLOW)
+            .and_then(|value| value.to_str().ok()),
+        Some("GET, HEAD")
+    );
+
+    server.stop_lan().await;
+}
+
 /// A LAN listener with only `/qr-login` + `/api/auth/qr-login` but no SPA shell
 /// reproduces the phone symptom: the QR page can say "Login successful", then
 /// the browser navigates to `/` and receives an HTTP failure. Refuse that
@@ -111,9 +244,10 @@ async fn webui_lan_without_app_shell_fails_instead_of_serving_partial_qr_flow() 
     let cli = nomifun_app::cli::Cli::parse_from(["nomifun-desktop-test", "--data-dir", &data_dir]);
     let merged_path = std::env::var("PATH").unwrap_or_default();
 
-    let (server, _keep) = nomifun_app::DesktopServer::start(&cli, &merged_path, None, None)
-        .await
-        .expect("DesktopServer::start failed");
+    let (server, _keep) =
+        nomifun_app::DesktopServer::start(&cli, &merged_path, None, None, None)
+            .await
+            .expect("DesktopServer::start failed");
 
     let status = server.start_lan().await;
 
@@ -151,9 +285,10 @@ async fn figure_image_get_is_public_but_listing_stays_authenticated() {
 
     let cli = nomifun_app::cli::Cli::parse_from(["nomifun-desktop-test", "--data-dir", &data_dir]);
     let merged_path = std::env::var("PATH").unwrap_or_default();
-    let (server, _keep) = nomifun_app::DesktopServer::start(&cli, &merged_path, None, None)
-        .await
-        .expect("DesktopServer::start failed");
+    let (server, _keep) =
+        nomifun_app::DesktopServer::start(&cli, &merged_path, None, None, None)
+            .await
+            .expect("DesktopServer::start failed");
 
     let base = format!("http://127.0.0.1:{}", server.loopback_port());
     let client = local_http_client();
@@ -220,11 +355,23 @@ async fn webui_lan_dev_proxy_serves_live_frontend() {
     let cli = nomifun_app::cli::Cli::parse_from(["nomifun-desktop-test", "--data-dir", &data_dir]);
     let merged_path = std::env::var("PATH").unwrap_or_default();
     let dev_url = format!("http://127.0.0.1:{mock_port}");
+    let stale_embedded = nomifun_app::WebUiAssetSource::new([(
+        "index.html",
+        nomifun_app::WebUiAsset::new(
+            b"STALE_EMBEDDED_MARKER".to_vec(),
+            "text/html",
+        ),
+    )]);
 
-    let (server, _keep) =
-        nomifun_app::DesktopServer::start(&cli, &merged_path, None, Some(dev_url))
-            .await
-            .expect("DesktopServer::start failed");
+    let (server, _keep) = nomifun_app::DesktopServer::start(
+        &cli,
+        &merged_path,
+        None,
+        Some(dev_url),
+        Some(stale_embedded),
+    )
+    .await
+    .expect("DesktopServer::start failed");
 
     let status = server.start_lan().await;
     assert!(status.running, "start_lan failed: {:?}", status.error);
@@ -264,9 +411,10 @@ async fn webui_enable_preserves_user_set_username_and_reports_persisted_state() 
     let cli = nomifun_app::cli::Cli::parse_from(["nomifun-desktop-test", "--data-dir", &data_dir]);
     let merged_path = std::env::var("PATH").unwrap_or_default();
 
-    let (server, _keep) = nomifun_app::DesktopServer::start(&cli, &merged_path, Some(spa_dir), None)
-        .await
-        .expect("DesktopServer::start failed");
+    let (server, _keep) =
+        nomifun_app::DesktopServer::start(&cli, &merged_path, Some(spa_dir), None, None)
+            .await
+            .expect("DesktopServer::start failed");
 
     // Simulate the user renaming the admin from the panel while WebUI is OFF:
     // this leaves `password_hash` empty. Open the SAME db file the server uses
@@ -277,7 +425,8 @@ async fn webui_enable_preserves_user_set_username_and_reports_persisted_state() 
         .expect("open backend db");
     let affected = sqlx::query(
         "UPDATE users SET username = 'custom_admin' \
-         WHERE id = (SELECT owner_user_id FROM installation_identity WHERE key = 'installation')",
+         WHERE user_id = (SELECT owner_user_id FROM installation_identity \
+                          WHERE singleton_key = 'installation')",
     )
         .execute(&pool)
         .await
@@ -307,4 +456,62 @@ async fn webui_enable_preserves_user_set_username_and_reports_persisted_state() 
     let after = server.status_snapshot().await;
     assert_eq!(after.admin_username, "custom_admin");
     assert!(after.password_set, "password must remain set after stopping the LAN listener");
+}
+
+/// Browser login contract regression: the desktop-generated credentials must
+/// authenticate through the REAL LAN listener when the request body matches
+/// the strict `/login` schema used by the bundled WebUI.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn webui_browser_login_contract_accepts_generated_credentials() {
+    use clap::Parser as _;
+
+    let tmp = tempfile::TempDir::new().unwrap();
+    let data_dir = tmp.path().to_string_lossy().into_owned();
+    let spa_dir = tmp.path().join("spa");
+    std::fs::create_dir_all(&spa_dir).unwrap();
+    std::fs::write(spa_dir.join("index.html"), "<!doctype html><title>Nomi</title>").unwrap();
+
+    let cli = nomifun_app::cli::Cli::parse_from(["nomifun-desktop-test", "--data-dir", &data_dir]);
+    let merged_path = std::env::var("PATH").unwrap_or_default();
+    let (server, _keep) =
+        nomifun_app::DesktopServer::start(&cli, &merged_path, Some(spa_dir), None, None)
+            .await
+            .expect("DesktopServer::start failed");
+
+    let status = server.start_lan().await;
+    assert!(status.running, "start_lan failed: {:?}", status.error);
+    let password = status
+        .initial_password
+        .as_deref()
+        .expect("first LAN enable should expose the generated password once");
+    let login_url = format!("http://127.0.0.1:{}/login", status.port);
+
+    let response = local_http_client()
+        .post(login_url)
+        .json(&serde_json::json!({
+            "username": status.admin_username,
+            "password": password,
+        }))
+        .send()
+        .await
+        .expect("browser login request failed");
+    let response_status = response.status();
+    let response_body: serde_json::Value = response
+        .json()
+        .await
+        .expect("login response should be JSON");
+
+    server.stop_lan().await;
+
+    assert_eq!(
+        response_status,
+        reqwest::StatusCode::OK,
+        "generated credentials should authenticate through LAN: {response_body}"
+    );
+    assert_eq!(response_body["success"], true);
+    assert_eq!(response_body["user"]["username"], status.admin_username);
+    assert!(
+        response_body["token"].as_str().is_some_and(|token| !token.is_empty()),
+        "successful login should return a session token"
+    );
 }

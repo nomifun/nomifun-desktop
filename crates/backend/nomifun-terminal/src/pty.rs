@@ -1,16 +1,27 @@
-//! Low-level PTY wrapper: spawns a child in a pseudo-terminal, streams its
-//! output through a callback, and keeps a bounded scrollback buffer for
-//! reconnect. Built on `portable-pty` (cross-platform: macOS/Linux + Windows
-//! ConPTY).
+//! Low-level PTY adapter backed by `nomi-process-runtime`.
+//!
+//! The runtime owns the platform-specific process-tree authority (Unix
+//! watchdog/process group and Windows Job/ConPTY), so a backend crash cannot
+//! leave an ordinary PTY session running against the managed workspace.
 
-use std::collections::HashMap;
-use std::io::{Read, Write};
+use std::collections::{BTreeMap, HashMap};
+use std::ffi::OsString;
+#[cfg(windows)]
+use std::path::Path;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
-use portable_pty::{ChildKiller, CommandBuilder, MasterPty, PtySize, native_pty_system};
+use nomi_process_runtime::{
+    CapabilityPolicy, CleanupReport, CommandSpec, OutputCursor, OutputObserver, OutputStream,
+    ProcessHandle, ProcessOutcome, ProcessOwner, ProcessPolicy, ProcessRequest,
+    ProcessSupervisor, SupervisorConfig, Transport, normalize_request,
+};
+#[cfg(windows)]
+use nomi_process_runtime::ShellKind;
 use tokio::sync::broadcast;
+use uuid::Uuid;
 
 use crate::error::TerminalError;
 
@@ -18,42 +29,38 @@ use crate::error::TerminalError;
 const SCROLLBACK_CAP: usize = 256 * 1024;
 
 /// Bounded fan-out buffer for the live output stream (in chunks). A lagging
-/// subscriber (e.g. a slow AutoWork watcher) drops oldest chunks rather than
-/// stalling the reader; AutoWork tolerates this (it scans for a marker/quiescence
-/// on whatever it receives). The WebSocket path is unaffected — it is driven by
-/// the `on_output` callback, not this channel.
+/// subscriber drops oldest chunks rather than stalling the PTY reader.
 const OUTPUT_BROADCAST_CAP: usize = 512;
 
-/// Grace period after a child exits before the exit is reported, so the reader
-/// thread can drain output still buffered in the PTY (notably on Windows, where
-/// the ConPTY master does not reach EOF on child exit).
-const EXIT_DRAIN_GRACE: Duration = Duration::from_millis(120);
+/// The terminal-facing interpretation of the runtime's terminal outcome.
+///
+/// `Lost` is deliberately separate from a normal exit. Callers must preserve
+/// the durable management row and must not report a successful delete/relaunch
+/// when exact process ownership or cleanup was lost.
+#[derive(Debug, Clone)]
+pub enum PtyExit {
+    Exited(Option<i32>),
+    Lost {
+        message: String,
+        cleanup_reaped: bool,
+    },
+}
 
-/// A live PTY: master handle + writer + child + scrollback.
+type ExitCallback = Box<dyn FnOnce(PtyExit, Vec<u8>) + Send + 'static>;
+
+/// A live PTY session owned by one process-runtime supervisor.
 pub struct PtyHandle {
-    master: Mutex<Box<dyn MasterPty + Send>>,
-    writer: Mutex<Box<dyn Write + Send>>,
-    /// A killer split from the child (via `clone_killer`) so `kill()` can signal
-    /// the process while the waiter thread is parked in the blocking `wait()`.
-    killer: Mutex<Box<dyn ChildKiller + Send + Sync>>,
+    supervisor: Arc<ProcessSupervisor>,
+    process: ProcessHandle,
     scrollback: Arc<Mutex<Vec<u8>>>,
-    /// Set whenever new bytes land in `scrollback`, cleared by
-    /// [`take_dirty_scrollback`]. Lets the debounced persistence flusher skip
-    /// idle sessions instead of rewriting an unchanged 256 KB buffer every tick.
     dirty: Arc<AtomicBool>,
-    /// Live output fan-out. Each PTY chunk is published here in addition to the
-    /// scrollback + `on_output` callback, so in-process consumers (AutoWork) can
-    /// observe the stream without touching the WebSocket path.
     out_tx: broadcast::Sender<Vec<u8>>,
-    /// Direct child pid. The child is its own session/process-group leader
-    /// (portable-pty calls `setsid()` on the slave), so this is also the
-    /// process-group id used to kill the whole tree.
     pid: Option<u32>,
-    /// Monotonic spawn generation, assigned by the service. The exit callback
-    /// only tears the session down if this epoch is still the live one for the
-    /// id — a relaunch kills the old child then immediately spawns a
-    /// higher-epoch replacement, so the killed predecessor's (drain-grace-
-    /// delayed) exit callback becomes a no-op instead of closing the fresh PTY.
+    exit_callback: Mutex<Option<ExitCallback>>,
+    exit_monitor_started: AtomicBool,
+    quarantined: AtomicBool,
+    #[cfg(test)]
+    fail_next_kill: AtomicBool,
     epoch: u64,
 }
 
@@ -67,39 +74,15 @@ pub struct SpawnParams {
     pub rows: u16,
 }
 
-/// Remove inherited locale variables that have higher POSIX precedence than a
-/// locale override supplied for this PTY session. `CommandBuilder` snapshots
-/// the parent environment at construction, so merely adding `LC_CTYPE` or
-/// `LANG` does not make it effective when the parent has `LC_ALL`/`LC_CTYPE`.
-#[cfg(unix)]
-fn remove_inherited_locale_vars_shadowing_overrides(
-    cmd: &mut CommandBuilder,
-    env: &HashMap<String, String>,
-) {
-    if env.contains_key("LC_ALL") {
-        // The session supplies the highest-precedence category itself.
-        return;
-    }
-    if env.contains_key("LC_CTYPE") {
-        cmd.env_remove("LC_ALL");
-    } else if env.contains_key("LANG") {
-        cmd.env_remove("LC_ALL");
-        cmd.env_remove("LC_CTYPE");
-    }
-}
-
 impl PtyHandle {
-    /// Spawn a child in a new PTY.
+    /// Spawn a child under the runtime's platform ownership transaction.
     ///
-    /// `on_output` is invoked (on a blocking reader thread) for every chunk of
-    /// bytes read from the PTY. `on_exit` is invoked once when the child exits,
-    /// with the child's exit code (if available) and a final snapshot of the
-    /// scrollback (taken after the drain grace, so it includes the tail) — the
-    /// caller persists this so the output survives the process even between
-    /// debounced flushes. `epoch` is the service-assigned spawn generation
-    /// stored on the handle (see the field docs); the caller uses it to ignore
-    /// a stale exit callback after a relaunch.
-    pub fn spawn<FOut, FExit>(
+    /// Output observation is installed before user code can run, so live
+    /// callbacks do not depend on the runtime's bounded replay ring. The exit
+    /// monitor is intentionally armed separately via [`Self::activate`]:
+    /// `TerminalService` first inserts the returned handle into its epoch map,
+    /// closing the quick-exit-before-registration race.
+    pub async fn spawn<FOut, FExit>(
         params: SpawnParams,
         epoch: u64,
         on_output: FOut,
@@ -107,169 +90,231 @@ impl PtyHandle {
     ) -> Result<Arc<Self>, TerminalError>
     where
         FOut: Fn(Vec<u8>) + Send + 'static,
-        FExit: FnOnce(Option<i32>, Vec<u8>) + Send + 'static,
+        FExit: FnOnce(PtyExit, Vec<u8>) + Send + 'static,
     {
-        let pty_system = native_pty_system();
-        let pair = pty_system
-            .openpty(PtySize {
-                rows: params.rows,
-                cols: params.cols,
-                pixel_width: 0,
-                pixel_height: 0,
-            })
-            .map_err(|e| TerminalError::Spawn(format!("openpty: {e}")))?;
-
-        let mut cmd = CommandBuilder::new(&params.program);
-        for arg in &params.args {
-            cmd.arg(arg);
-        }
-        if !params.cwd.is_empty() {
-            cmd.cwd(&params.cwd);
-        }
-        #[cfg(unix)]
-        remove_inherited_locale_vars_shadowing_overrides(&mut cmd, &params.env);
-        for (k, v) in &params.env {
-            cmd.env(k, v);
-        }
-
-        let child = pair
-            .slave
-            .spawn_command(cmd)
-            .map_err(|e| TerminalError::Spawn(format!("spawn '{}': {e}", params.program)))?;
-        // Drop the slave so the master sees EOF when the child exits.
-        drop(pair.slave);
-
-        let writer = pair
-            .master
-            .take_writer()
-            .map_err(|e| TerminalError::Spawn(format!("take_writer: {e}")))?;
-        let mut reader = pair
-            .master
-            .try_clone_reader()
-            .map_err(|e| TerminalError::Spawn(format!("clone_reader: {e}")))?;
+        let session_cwd = std::env::current_dir()
+            .map_err(|error| TerminalError::Spawn(format!("resolve current directory: {error}")))?;
+        let requested_cwd = if params.cwd.is_empty() {
+            PathBuf::from(".")
+        } else {
+            PathBuf::from(&params.cwd)
+        };
+        let capability_root = if requested_cwd.is_absolute() {
+            requested_cwd.clone()
+        } else {
+            session_cwd.join(&requested_cwd)
+        };
 
         let scrollback = Arc::new(Mutex::new(Vec::<u8>::new()));
         let dirty = Arc::new(AtomicBool::new(false));
-        let pid = child.process_id();
         let (out_tx, _) = broadcast::channel::<Vec<u8>>(OUTPUT_BROADCAST_CAP);
-        // Split a killer off the child so `kill()` can signal the process while
-        // the waiter thread below is parked in the blocking `child.wait()`.
-        let killer = child.clone_killer();
+        let output_callback =
+            Arc::new(Mutex::new(Box::new(on_output) as Box<dyn Fn(Vec<u8>) + Send>));
 
-        let handle = Arc::new(PtyHandle {
-            master: Mutex::new(pair.master),
-            writer: Mutex::new(writer),
-            killer: Mutex::new(killer),
-            scrollback: scrollback.clone(),
-            dirty: dirty.clone(),
-            out_tx: out_tx.clone(),
-            pid,
-            epoch,
-        });
-
-        // Reader thread: stream PTY output (reads are synchronous). On Windows
-        // the ConPTY master does NOT reach EOF when the child exits, so this
-        // loop can outlive the child; it ends when the master is dropped (the
-        // PtyHandle is released) or the read errors. Exit is reported by the
-        // separate waiter thread below, NOT by this loop's EOF.
-        let scrollback_reader = scrollback.clone();
-        let dirty_reader = dirty.clone();
-        std::thread::spawn(move || {
-            let mut buf = [0u8; 8192];
-            loop {
-                match reader.read(&mut buf) {
-                    Ok(0) => break, // EOF (Unix, or master dropped)
-                    Ok(n) => {
-                        let chunk = buf[..n].to_vec();
-                        append_scrollback(&scrollback_reader, &chunk);
-                        dirty_reader.store(true, Ordering::Relaxed);
-                        // Fan out to in-process subscribers (AutoWork). Err just
-                        // means no live receivers — harmless.
-                        let _ = out_tx.send(chunk.clone());
-                        on_output(chunk);
-                    }
-                    Err(_) => break,
-                }
+        let observer_scrollback = Arc::clone(&scrollback);
+        let observer_dirty = Arc::clone(&dirty);
+        let observer_tx = out_tx.clone();
+        let observer_callback = Arc::clone(&output_callback);
+        let observer: OutputObserver = Arc::new(move |stream, bytes| {
+            if stream != OutputStream::Pty || bytes.is_empty() {
+                return;
             }
+            let chunk = bytes.to_vec();
+            append_scrollback(&observer_scrollback, &chunk);
+            observer_dirty.store(true, Ordering::Relaxed);
+            let _ = observer_tx.send(chunk.clone());
+            let callback = observer_callback
+                .lock()
+                .expect("PTY output callback lock is poisoned");
+            callback(chunk);
         });
 
-        // Waiter thread: block directly on the child and report its exit exactly
-        // once. This is the source of truth for exit — relying on the reader's
-        // EOF would never fire on Windows ConPTY (the master stays open after
-        // the child dies).
-        let scrollback_waiter = scrollback.clone();
-        std::thread::spawn(move || {
-            let mut child = child;
-            let code = child.wait().ok().map(|status| status.exit_code() as i32);
-            // Brief grace so the reader can drain output still buffered in the
-            // PTY before the caller tears the session down on this signal.
-            std::thread::sleep(EXIT_DRAIN_GRACE);
-            // Snapshot AFTER the grace so the persisted final scrollback includes
-            // the tail the reader just drained.
-            let final_scrollback = scrollback_waiter.lock().expect("scrollback lock").clone();
-            on_exit(code, final_scrollback);
-        });
+        let mut policy = ProcessPolicy::default();
+        policy.output_limit_bytes = SCROLLBACK_CAP;
+        // Desktop terminals live until the user closes/relaunches them or the
+        // backend shuts down. A lease would race the reaper after long sleep.
+        policy.expire_on_idle = false;
 
-        Ok(handle)
+        let command = command_with_locale_precedence(params.program, params.args, &params.env);
+        let request = ProcessRequest {
+            owner: ProcessOwner::new(Uuid::now_v7(), Uuid::now_v7()),
+            command,
+            cwd: requested_cwd,
+            env: params
+                .env
+                .into_iter()
+                .map(|(key, value)| (OsString::from(key), OsString::from(value)))
+                .collect::<BTreeMap<_, _>>(),
+            transport: Transport::Pty {
+                cols: params.cols,
+                rows: params.rows,
+            },
+            policy,
+            capability: CapabilityPolicy::local_owner(capability_root),
+        };
+        let request = normalize_request(request, &session_cwd)
+            .map_err(|error| TerminalError::Spawn(error.to_string()))?;
+        let supervisor = ProcessSupervisor::new(SupervisorConfig {
+            max_sessions: 1,
+            ..SupervisorConfig::default()
+        });
+        let process = supervisor
+            .start_with_output_observer(request, observer)
+            .await
+            .map_err(|error| TerminalError::Spawn(error.to_string()))?;
+        // There is deliberately no await between the committed runtime start
+        // and assembling the adapter handle, so cancellation cannot strand an
+        // owned process after `start` returns.
+        let pid = Some(process.pid);
+
+        Ok(Arc::new(Self {
+            supervisor,
+            process,
+            scrollback,
+            dirty,
+            out_tx,
+            pid,
+            exit_callback: Mutex::new(Some(Box::new(on_exit))),
+            exit_monitor_started: AtomicBool::new(false),
+            quarantined: AtomicBool::new(false),
+            #[cfg(test)]
+            fail_next_kill: AtomicBool::new(false),
+            epoch,
+        }))
     }
 
-    /// Write bytes to the PTY (the child's stdin).
-    pub fn write(&self, bytes: &[u8]) -> Result<(), TerminalError> {
-        let mut writer = self.writer.lock().expect("pty writer lock");
-        writer.write_all(bytes)?;
-        writer.flush()?;
-        Ok(())
+    /// Arm exactly one terminal-outcome monitor after the service has published
+    /// this handle as the authoritative live epoch.
+    pub fn activate(self: &Arc<Self>) {
+        if self.exit_monitor_started.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        let handle = Arc::clone(self);
+        tokio::spawn(async move {
+            handle.monitor_exit().await;
+        });
+    }
+
+    async fn monitor_exit(self: Arc<Self>) {
+        let outcome = loop {
+            match self
+                .supervisor
+                .poll(
+                    &self.process.owner,
+                    &self.process.session_id,
+                    OutputCursor::START,
+                    Instant::now() + Duration::from_secs(24 * 60 * 60),
+                )
+                .await
+            {
+                Ok(nomi_process_runtime::PollResult::Running { .. }) => continue,
+                Ok(nomi_process_runtime::PollResult::Finished(outcome)) => break outcome,
+                Err(error) => {
+                    let exit = PtyExit::Lost {
+                        message: format!("PTY outcome monitor lost runtime ownership: {error}"),
+                        cleanup_reaped: false,
+                    };
+                    self.mark_quarantined();
+                    self.fire_exit(exit);
+                    return;
+                }
+            }
+        };
+
+        let exit = exit_from_outcome(&outcome);
+        if matches!(exit, PtyExit::Lost { .. }) {
+            self.mark_quarantined();
+        }
+        self.fire_exit(exit);
+    }
+
+    fn fire_exit(&self, exit: PtyExit) {
+        let callback = self
+            .exit_callback
+            .lock()
+            .expect("PTY exit callback lock is poisoned")
+            .take();
+        if let Some(callback) = callback {
+            callback(exit, self.scrollback());
+        }
+    }
+
+    /// Write bytes to the PTY.
+    pub async fn write(&self, bytes: &[u8]) -> Result<(), TerminalError> {
+        self.ensure_not_quarantined()?;
+        self.supervisor
+            .write(&self.process.owner, &self.process.session_id, bytes)
+            .await
+            .map_err(|error| TerminalError::Spawn(format!("write PTY: {error}")))
     }
 
     /// Resize the PTY window.
-    pub fn resize(&self, cols: u16, rows: u16) -> Result<(), TerminalError> {
-        self.master
-            .lock()
-            .expect("pty master lock")
-            .resize(PtySize {
-                rows,
-                cols,
-                pixel_width: 0,
-                pixel_height: 0,
-            })
-            .map_err(|e| TerminalError::Spawn(format!("resize: {e}")))
+    pub async fn resize(&self, cols: u16, rows: u16) -> Result<(), TerminalError> {
+        self.ensure_not_quarantined()?;
+        self.supervisor
+            .resize(&self.process.owner, &self.process.session_id, cols, rows)
+            .await
+            .map_err(|error| TerminalError::Spawn(format!("resize PTY: {error}")))
     }
 
-    /// Terminate the child process **and its descendants**.
+    /// Immediately force-kill and reap the owned PTY session/process group.
     ///
-    /// `portable-pty`'s `Child::kill()` only signals the direct child pid, which
-    /// can leave grandchildren (e.g. a `claude`/`vim` launched by the shell)
-    /// alive. The child is its own process-group leader (the slave is spawned
-    /// with `setsid()`), so on Unix we additionally SIGKILL the whole process
-    /// group via the negative pid to reap the entire tree.
-    pub fn kill(&self) -> Result<(), TerminalError> {
-        #[cfg(unix)]
-        if let Some(pid) = self.pid {
-            // Negative pid → signal the process group led by `pid`.
-            unsafe {
-                libc::kill(-(pid as i32), libc::SIGKILL);
-            }
+    /// `Ok` is returned only for a non-`Lost` outcome whose cleanup evidence
+    /// proves the platform authority empty.
+    pub async fn kill(&self) -> Result<(), TerminalError> {
+        #[cfg(test)]
+        if self.fail_next_kill.swap(false, Ordering::SeqCst) {
+            return Err(TerminalError::Spawn(
+                "injected PTY process-tree kill failure".to_owned(),
+            ));
         }
-        // Best-effort direct kill too (covers the non-group / Windows path).
-        // Uses the split killer, which works even while the waiter thread is
-        // blocked in `child.wait()`.
-        let _ = self.killer.lock().expect("pty killer lock").kill();
-        Ok(())
+
+        let outcome = self
+            .supervisor
+            .force_kill(&self.process.owner, &self.process.session_id)
+            .await
+            .map_err(|error| {
+                // An error at this boundary leaves exact cleanup unproven.
+                // Quarantine synchronously, before the caller can issue another
+                // write or process-replacement operation.
+                self.mark_quarantined();
+                TerminalError::Spawn(format!("kill PTY process tree: {error}"))
+            })?;
+        self.record_cleanup_outcome(&outcome)
     }
 
-    /// Snapshot of the current scrollback bytes (for reconnect).
+    fn record_cleanup_outcome(&self, outcome: &ProcessOutcome) -> Result<(), TerminalError> {
+        let result = validate_cleanup_outcome(outcome);
+        if result.is_err() {
+            // Do not wait for the detached exit monitor to observe the same
+            // terminal outcome. The kill caller must publish the fail-closed
+            // state before returning its error.
+            self.mark_quarantined();
+        }
+        result
+    }
+
+    fn mark_quarantined(&self) {
+        self.quarantined.store(true, Ordering::Release);
+    }
+
+    pub(crate) fn ensure_not_quarantined(&self) -> Result<(), TerminalError> {
+        if self.quarantined.load(Ordering::Acquire) {
+            Err(TerminalError::Spawn(
+                "PTY process ownership is quarantined after an indeterminate cleanup".to_owned(),
+            ))
+        } else {
+            Ok(())
+        }
+    }
+
     pub fn scrollback(&self) -> Vec<u8> {
-        self.scrollback.lock().expect("scrollback lock").clone()
+        self.scrollback
+            .lock()
+            .expect("PTY scrollback lock is poisoned")
+            .clone()
     }
 
-    /// If new output has landed since the last call (or spawn), clear the dirty
-    /// flag and return a snapshot to persist; otherwise return `None`. Used by
-    /// the debounced flusher so an idle session is never rewritten.
-    ///
-    /// Note the flag is cleared *before* the snapshot is read. A chunk arriving
-    /// in that window re-sets the flag, so it is caught next tick — at worst the
-    /// snapshot already includes it (a harmless redundant write next tick),
-    /// never a lost update.
     pub fn take_dirty_scrollback(&self) -> Option<Vec<u8>> {
         if self.dirty.swap(false, Ordering::Relaxed) {
             Some(self.scrollback())
@@ -278,30 +323,177 @@ impl PtyHandle {
         }
     }
 
-    /// Subscribe to the live output byte-stream (in-process fan-out). Each PTY
-    /// chunk is delivered as a `Vec<u8>`; a lagging receiver drops oldest chunks.
     pub fn subscribe_output(&self) -> broadcast::Receiver<Vec<u8>> {
         self.out_tx.subscribe()
     }
 
-    /// The direct child pid (also the process-group id).
     pub fn pid(&self) -> Option<u32> {
         self.pid
     }
 
-    /// The service-assigned spawn generation (see the field docs). Used by the
-    /// service to ignore a stale exit callback from a relaunched-over PTY.
     pub fn epoch(&self) -> u64 {
         self.epoch
+    }
+
+    #[cfg(test)]
+    pub(crate) fn fail_next_kill_for_test(&self) {
+        self.fail_next_kill.store(true, Ordering::SeqCst);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn quarantine_for_test(&self) {
+        self.mark_quarantined();
+    }
+}
+
+fn command_with_locale_precedence(
+    program: String,
+    args: Vec<String>,
+    env: &HashMap<String, String>,
+) -> CommandSpec {
+    #[cfg(unix)]
+    {
+        // Process requests inherit the backend environment. Preserve the old
+        // terminal contract where a session-level LC_CTYPE/LANG override is not
+        // silently shadowed by a stronger inherited locale category. `env`
+        // execs the requested program in place, so PID/session ownership stays
+        // with the runtime watchdog.
+        let removals: &[&str] = if env.contains_key("LC_ALL") {
+            &[]
+        } else if env.contains_key("LC_CTYPE") {
+            &["LC_ALL"]
+        } else if env.contains_key("LANG") {
+            &["LC_ALL", "LC_CTYPE"]
+        } else {
+            &[]
+        };
+        if !removals.is_empty() {
+            let mut wrapped = Vec::with_capacity(removals.len() * 2 + 1 + args.len());
+            for key in removals {
+                wrapped.push(OsString::from("-u"));
+                wrapped.push(OsString::from(key));
+            }
+            wrapped.push(OsString::from(program));
+            wrapped.extend(args.into_iter().map(OsString::from));
+            return CommandSpec::Program {
+                program: OsString::from("/usr/bin/env"),
+                args: wrapped,
+            };
+        }
+    }
+
+    #[cfg(windows)]
+    if Path::new(&program)
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| {
+            ["cmd", "bat", "ps1"]
+                .iter()
+                .any(|candidate| extension.eq_ignore_ascii_case(candidate))
+        })
+    {
+        // CreateProcessW cannot execute package-manager script shims directly.
+        // Invoke them through the runtime's trusted, encoded PowerShell path.
+        // Every token is a single-quoted PowerShell literal, so caller-supplied
+        // arguments cannot become script syntax.
+        return CommandSpec::Shell {
+            shell: ShellKind::PowerShell,
+            script: powershell_script_invocation(&program, &args),
+        };
+    }
+
+    CommandSpec::Program {
+        program: OsString::from(program),
+        args: args.into_iter().map(OsString::from).collect(),
+    }
+}
+
+#[cfg(any(windows, test))]
+fn powershell_script_invocation(program: &str, args: &[String]) -> String {
+    let mut script = String::from("& ");
+    push_powershell_single_quoted(&mut script, program);
+    for arg in args {
+        script.push(' ');
+        push_powershell_single_quoted(&mut script, arg);
+    }
+    script
+}
+
+#[cfg(any(windows, test))]
+fn push_powershell_single_quoted(output: &mut String, value: &str) {
+    output.push('\'');
+    output.push_str(&value.replace('\'', "''"));
+    output.push('\'');
+}
+
+fn cleanup_report(outcome: &ProcessOutcome) -> Option<&CleanupReport> {
+    match outcome {
+        ProcessOutcome::Exited { cleanup, .. }
+        | ProcessOutcome::Cancelled { cleanup, .. }
+        | ProcessOutcome::TimedOut { cleanup, .. }
+        | ProcessOutcome::Lost { cleanup, .. } => Some(cleanup),
+        ProcessOutcome::SpawnFailed(_) => None,
+    }
+}
+
+fn validate_cleanup_outcome(outcome: &ProcessOutcome) -> Result<(), TerminalError> {
+    match outcome {
+        ProcessOutcome::Lost { cleanup, .. } => Err(TerminalError::Spawn(format!(
+            "PTY process-tree cleanup was lost (reaped={}, errors={:?})",
+            cleanup.reaped, cleanup.errors
+        ))),
+        ProcessOutcome::SpawnFailed(failure) => Err(TerminalError::Spawn(format!(
+            "PTY process failed after activation: {} ({})",
+            failure.message, failure.code
+        ))),
+        _ if cleanup_report(outcome).is_some_and(|cleanup| cleanup.reaped) => Ok(()),
+        _ => {
+            let cleanup = cleanup_report(outcome)
+                .expect("every non-spawn terminal outcome carries cleanup evidence");
+            Err(TerminalError::Spawn(format!(
+                "PTY process-tree cleanup was not proven (errors={:?})",
+                cleanup.errors
+            )))
+        }
+    }
+}
+
+fn exit_from_outcome(outcome: &ProcessOutcome) -> PtyExit {
+    match outcome {
+        ProcessOutcome::Exited { code, .. } => PtyExit::Exited(*code),
+        ProcessOutcome::Cancelled { .. } => PtyExit::Exited(None),
+        ProcessOutcome::TimedOut { cleanup, .. } => PtyExit::Lost {
+            message: format!(
+                "PTY process hit an unexpected runtime deadline (errors={:?})",
+                cleanup.errors
+            ),
+            cleanup_reaped: cleanup.reaped,
+        },
+        ProcessOutcome::Lost { cleanup, .. } => PtyExit::Lost {
+            message: format!(
+                "PTY process ownership was lost (reaped={}, errors={:?})",
+                cleanup.reaped, cleanup.errors
+            ),
+            cleanup_reaped: cleanup.reaped,
+        },
+        ProcessOutcome::SpawnFailed(failure) => PtyExit::Lost {
+            message: format!(
+                "PTY process failed after activation: {} ({})",
+                failure.message, failure.code
+            ),
+            cleanup_reaped: false,
+        },
     }
 }
 
 fn append_scrollback(scrollback: &Arc<Mutex<Vec<u8>>>, chunk: &[u8]) {
-    let mut sb = scrollback.lock().expect("scrollback lock");
-    sb.extend_from_slice(chunk);
-    if sb.len() > SCROLLBACK_CAP {
-        let overflow = sb.len() - SCROLLBACK_CAP;
-        sb.drain(0..overflow);
+    let mut scrollback = scrollback
+        .lock()
+        .expect("PTY scrollback lock is poisoned");
+    scrollback.extend_from_slice(chunk);
+    if scrollback.len() > SCROLLBACK_CAP {
+        let overflow = scrollback.len() - SCROLLBACK_CAP;
+        scrollback.drain(0..overflow);
     }
 }
 
@@ -309,202 +501,265 @@ fn append_scrollback(scrollback: &Arc<Mutex<Vec<u8>>>, chunk: &[u8]) {
 mod tests {
     use super::*;
 
-    #[cfg(unix)]
-    #[test]
-    fn explicit_lc_ctype_removes_inherited_lc_all() {
-        let mut cmd = CommandBuilder::new("sh");
-        cmd.env("LC_ALL", "C");
-        let env = HashMap::from([("LC_CTYPE".to_owned(), "UTF-8".to_owned())]);
-
-        remove_inherited_locale_vars_shadowing_overrides(&mut cmd, &env);
-
-        assert!(cmd.get_env("LC_ALL").is_none());
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn explicit_lang_removes_inherited_character_locale_overrides() {
-        let mut cmd = CommandBuilder::new("sh");
-        cmd.env("LC_ALL", "C");
-        cmd.env("LC_CTYPE", "zh_CN.GB18030");
-        let env = HashMap::from([("LANG".to_owned(), "en_US.UTF-8".to_owned())]);
-
-        remove_inherited_locale_vars_shadowing_overrides(&mut cmd, &env);
-
-        assert!(cmd.get_env("LC_ALL").is_none());
-        assert!(cmd.get_env("LC_CTYPE").is_none());
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn explicit_lc_all_keeps_highest_precedence_override() {
-        let mut cmd = CommandBuilder::new("sh");
-        cmd.env("LC_ALL", "C");
-        let env = HashMap::from([("LC_ALL".to_owned(), "en_US.UTF-8".to_owned())]);
-
-        remove_inherited_locale_vars_shadowing_overrides(&mut cmd, &env);
-        for (key, value) in &env {
-            cmd.env(key, value);
+    fn shell_command(script: &str) -> (String, Vec<String>) {
+        #[cfg(windows)]
+        {
+            (
+                std::env::var("ComSpec")
+                    .unwrap_or_else(|_| "C:\\Windows\\System32\\cmd.exe".to_owned()),
+                vec!["/d".to_owned(), "/c".to_owned(), script.to_owned()],
+            )
         }
-
-        assert_eq!(
-            cmd.get_env("LC_ALL"),
-            Some(std::ffi::OsStr::new("en_US.UTF-8"))
-        );
+        #[cfg(not(windows))]
+        {
+            (
+                "/bin/sh".to_owned(),
+                vec!["-c".to_owned(), script.to_owned()],
+            )
+        }
     }
 
     #[test]
-    fn scrollback_is_bounded() {
-        let sb = Arc::new(Mutex::new(Vec::<u8>::new()));
-        let big = vec![b'x'; SCROLLBACK_CAP + 5000];
-        append_scrollback(&sb, &big);
-        assert_eq!(sb.lock().unwrap().len(), SCROLLBACK_CAP);
-    }
-
-    #[test]
-    fn scrollback_keeps_most_recent_bytes() {
-        let sb = Arc::new(Mutex::new(Vec::<u8>::new()));
-        append_scrollback(&sb, &vec![b'a'; SCROLLBACK_CAP]);
-        append_scrollback(&sb, b"TAIL");
-        let data = sb.lock().unwrap();
+    fn scrollback_is_bounded_and_keeps_recent_bytes() {
+        let scrollback = Arc::new(Mutex::new(Vec::<u8>::new()));
+        append_scrollback(&scrollback, &vec![b'a'; SCROLLBACK_CAP]);
+        append_scrollback(&scrollback, b"TAIL");
+        let data = scrollback.lock().unwrap();
         assert_eq!(data.len(), SCROLLBACK_CAP);
         assert_eq!(&data[data.len() - 4..], b"TAIL");
     }
 
+    #[cfg(unix)]
     #[test]
-    fn dirty_flag_set_by_output_then_cleared_by_take() {
-        use std::sync::atomic::{AtomicBool, Ordering};
-
-        // A child that emits known output then exits on its own.
-        #[cfg(windows)]
-        let (program, args) = (
-            std::env::var("ComSpec").unwrap_or_else(|_| "C:\\Windows\\System32\\cmd.exe".into()),
-            vec!["/c".to_owned(), "echo".to_owned(), "hello".to_owned()],
+    fn explicit_character_locale_removes_stronger_inherited_categories() {
+        let command = command_with_locale_precedence(
+            "sh".to_owned(),
+            vec!["-l".to_owned()],
+            &HashMap::from([("LANG".to_owned(), "en_US.UTF-8".to_owned())]),
         );
-        #[cfg(not(windows))]
-        let (program, args) = ("sh".to_owned(), vec!["-c".to_owned(), "printf hello".to_owned()]);
+        let CommandSpec::Program { program, args } = command else {
+            panic!("locale wrapper must remain a direct program request");
+        };
+        assert_eq!(program, OsString::from("/usr/bin/env"));
+        assert_eq!(
+            args,
+            [
+                "-u",
+                "LC_ALL",
+                "-u",
+                "LC_CTYPE",
+                "sh",
+                "-l",
+            ]
+            .into_iter()
+            .map(OsString::from)
+            .collect::<Vec<_>>()
+        );
+    }
 
-        let exited = Arc::new(AtomicBool::new(false));
-        let exited_cb = exited.clone();
+    #[test]
+    fn powershell_script_shim_invocation_quotes_every_token_as_data() {
+        assert_eq!(
+            powershell_script_invocation(
+                r"C:\Agent's Tools\runner.cmd",
+                &["a'b".to_owned(), String::new(), "$(Get-Item env:PATH)".to_owned()]
+            ),
+            r"& 'C:\Agent''s Tools\runner.cmd' 'a''b' '' '$(Get-Item env:PATH)'"
+        );
+    }
+
+    #[test]
+    fn lost_outcome_is_never_accepted_as_success_even_when_reaped() {
+        let now = Instant::now();
+        let outcome = ProcessOutcome::Lost {
+            last_known: nomi_process_runtime::ProcessSnapshot {
+                pid: 42,
+                state: nomi_process_runtime::ProcessState::Lost,
+                started_at: now,
+                last_activity_at: now,
+            },
+            output: Default::default(),
+            cleanup: CleanupReport {
+                reaped: true,
+                ..CleanupReport::default()
+            },
+        };
+
+        assert!(
+            validate_cleanup_outcome(&outcome).is_err(),
+            "Lost ownership must remain an error even after exact cleanup"
+        );
+        assert!(matches!(
+            exit_from_outcome(&outcome),
+            PtyExit::Lost {
+                cleanup_reaped: true,
+                ..
+            }
+        ));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn invalid_cleanup_outcome_quarantines_before_return() {
+        #[cfg(windows)]
+        let script = "ping -n 60 127.0.0.1 >NUL";
+        #[cfg(not(windows))]
+        let script = "sleep 60";
+        let (program, args) = shell_command(script);
         let handle = PtyHandle::spawn(
             SpawnParams {
                 program,
                 args,
                 cwd: String::new(),
-                env: std::collections::HashMap::new(),
+                env: HashMap::new(),
                 cols: 80,
                 rows: 24,
             },
             0,
             |_chunk| {},
-            move |_code, _sb| exited_cb.store(true, Ordering::SeqCst),
+            |_exit, _scrollback| {},
         )
+        .await
         .expect("spawn");
 
-        // Wait for exit (on_exit fires after the reader has drained final bytes).
-        for _ in 0..250 {
-            if exited.load(Ordering::SeqCst) {
-                break;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(20));
-        }
-        // Small settle so the reader thread has appended the last chunk.
-        std::thread::sleep(std::time::Duration::from_millis(50));
+        let now = Instant::now();
+        let lost_but_reaped = ProcessOutcome::Lost {
+            last_known: nomi_process_runtime::ProcessSnapshot {
+                pid: handle.pid().expect("runtime leader pid"),
+                state: nomi_process_runtime::ProcessState::Lost,
+                started_at: now,
+                last_activity_at: now,
+            },
+            output: Default::default(),
+            cleanup: CleanupReport {
+                reaped: true,
+                ..CleanupReport::default()
+            },
+        };
+        assert!(handle.record_cleanup_outcome(&lost_but_reaped).is_err());
+        assert!(
+            handle.ensure_not_quarantined().is_err(),
+            "Lost must publish quarantine before the kill caller receives its error"
+        );
 
-        // Output landed → dirty → first take returns the snapshot.
-        let snap = handle.take_dirty_scrollback().expect("dirty after output");
+        // Exercise the independent `cleanup.reaped=false` condition on the
+        // same live runtime authority.
+        handle.quarantined.store(false, Ordering::Release);
+        let unreaped = ProcessOutcome::Cancelled {
+            output: Default::default(),
+            cleanup: CleanupReport::default(),
+        };
+        assert!(handle.record_cleanup_outcome(&unreaped).is_err());
         assert!(
-            String::from_utf8_lossy(&snap).contains("hello"),
-            "snapshot should contain the emitted output, got {:?}",
-            String::from_utf8_lossy(&snap)
+            handle.ensure_not_quarantined().is_err(),
+            "unproven reap must publish quarantine synchronously"
         );
-        // No new output since the take → second take is None (idle, skip write).
-        assert!(
-            handle.take_dirty_scrollback().is_none(),
-            "a session with no new output must not be re-flushed"
-        );
+
+        // Explicit cleanup remains possible; quarantine blocks writes and
+        // replacement/deletion, not the only operation that can prove safety.
+        handle.kill().await.expect("clean up real test process");
     }
 
-    #[test]
-    fn exit_fires_when_child_exits_on_its_own() {
-        use std::sync::atomic::{AtomicBool, Ordering};
-
-        // A child that exits immediately on its own (no kill). On Windows the
-        // ConPTY master never EOFs on exit, so a reader-EOF-gated design never
-        // fires on_exit here; the dedicated waiter thread must.
-        #[cfg(windows)]
-        let (program, args) = (
-            std::env::var("ComSpec").unwrap_or_else(|_| "C:\\Windows\\System32\\cmd.exe".into()),
-            vec!["/c".to_owned(), "exit".to_owned(), "0".to_owned()],
-        );
-        #[cfg(not(windows))]
-        let (program, args) = ("sh".to_owned(), vec!["-c".to_owned(), "exit 0".to_owned()]);
-
-        let exited = Arc::new(AtomicBool::new(false));
-        let exited_cb = exited.clone();
-        let _handle = PtyHandle::spawn(
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn quick_exit_is_observed_after_delayed_activation() {
+        let (program, args) = shell_command("printf quick");
+        let exited = Arc::new(tokio::sync::Notify::new());
+        let exited_callback = Arc::clone(&exited);
+        let handle = PtyHandle::spawn(
             SpawnParams {
                 program,
                 args,
                 cwd: String::new(),
-                env: std::collections::HashMap::new(),
+                env: HashMap::new(),
+                cols: 80,
+                rows: 24,
+            },
+            7,
+            |_chunk| {},
+            move |exit, _scrollback| {
+                assert!(matches!(exit, PtyExit::Exited(Some(0))));
+                exited_callback.notify_one();
+            },
+        )
+        .await
+        .expect("spawn quick process");
+
+        // Let the child finish before the service-equivalent registration gate.
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        handle.activate();
+        tokio::time::timeout(Duration::from_secs(3), exited.notified())
+            .await
+            .expect("delayed activation must still observe the terminal outcome");
+        assert!(
+            String::from_utf8_lossy(&handle.scrollback()).contains("quick"),
+            "output emitted before activation must remain available"
+        );
+        assert_eq!(handle.epoch(), 7);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn dirty_scrollback_and_live_output_preserve_raw_bytes() {
+        let (program, args) = shell_command("printf hello");
+        let captured = Arc::new(Mutex::new(Vec::<u8>::new()));
+        let captured_callback = Arc::clone(&captured);
+        let exited = Arc::new(tokio::sync::Notify::new());
+        let exited_callback = Arc::clone(&exited);
+        let handle = PtyHandle::spawn(
+            SpawnParams {
+                program,
+                args,
+                cwd: String::new(),
+                env: HashMap::new(),
                 cols: 80,
                 rows: 24,
             },
             0,
-            |_chunk| {},
-            move |_code, _sb| exited_cb.store(true, Ordering::SeqCst),
+            move |chunk| captured_callback.lock().unwrap().extend_from_slice(&chunk),
+            move |_exit, _scrollback| exited_callback.notify_one(),
         )
+        .await
         .expect("spawn");
+        handle.activate();
 
-        let mut fired = false;
-        for _ in 0..250 {
-            if exited.load(Ordering::SeqCst) {
-                fired = true;
-                break;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(20));
-        }
-        assert!(fired, "on_exit must fire when the child exits on its own");
+        tokio::time::timeout(Duration::from_secs(3), exited.notified())
+            .await
+            .expect("process should exit");
+        let snapshot = handle
+            .take_dirty_scrollback()
+            .expect("output must set dirty");
+        assert!(String::from_utf8_lossy(&snapshot).contains("hello"));
+        assert!(String::from_utf8_lossy(&captured.lock().unwrap()).contains("hello"));
+        assert!(handle.take_dirty_scrollback().is_none());
     }
 
     #[cfg(unix)]
-    #[test]
-    fn kill_terminates_the_process() {
-        use std::sync::atomic::{AtomicBool, Ordering};
-        let exited = Arc::new(AtomicBool::new(false));
-        let exited_cb = exited.clone();
-        // A long-lived child: sleep 60s. kill() must terminate it promptly.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn force_kill_reaps_the_owned_process_group() {
         let handle = PtyHandle::spawn(
             SpawnParams {
-                program: "sleep".into(),
-                args: vec!["60".into()],
+                program: "/bin/sh".to_owned(),
+                args: vec!["-c".to_owned(), "sleep 60 & wait".to_owned()],
                 cwd: String::new(),
-                env: std::collections::HashMap::new(),
+                env: HashMap::new(),
                 cols: 80,
                 rows: 24,
             },
             0,
             |_chunk| {},
-            move |_code, _sb| exited_cb.store(true, Ordering::SeqCst),
+            |_exit, _scrollback| {},
         )
-        .expect("spawn sleep");
+        .await
+        .expect("spawn");
+        handle.activate();
+        let pid = handle.pid().expect("runtime must expose leader pid") as i32;
+        assert_eq!(unsafe { libc::kill(pid, 0) }, 0);
 
-        let pid = handle.pid().expect("pid") as i32;
-        // Process exists right after spawn (signal 0 = existence probe).
-        assert_eq!(unsafe { libc::kill(pid, 0) }, 0, "child should be alive");
-
-        handle.kill().expect("kill");
-
-        // Within a short window the reader hits EOF and on_exit fires.
-        let mut gone = false;
-        for _ in 0..200 {
-            if exited.load(Ordering::SeqCst) {
-                gone = true;
-                break;
+        handle.kill().await.expect("exact process-group cleanup");
+        for _ in 0..100 {
+            if unsafe { libc::kill(pid, 0) } != 0 {
+                return;
             }
-            std::thread::sleep(std::time::Duration::from_millis(20));
+            tokio::time::sleep(Duration::from_millis(20)).await;
         }
-        assert!(gone, "kill() should terminate the child and trigger on_exit");
+        panic!("PTY leader remained alive after exact force-kill");
     }
 }

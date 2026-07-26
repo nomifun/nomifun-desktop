@@ -18,17 +18,20 @@
 //! in. Trust is the secret, NOT "arrived on loopback", so other local OS
 //! accounts and same-host reverse proxies are not trusted.
 
+use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use axum::Router;
+use axum::body::Bytes;
 use axum::extract::Request;
-use axum::http::{StatusCode, header};
+use axum::http::{Method, StatusCode, header};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use nomifun_auth::generate_random_hex_secret;
+use percent_encoding::percent_decode_str;
 use tokio::net::TcpListener;
 use tokio::runtime::Handle;
 use tokio::sync::{Mutex, watch};
@@ -42,6 +45,86 @@ use nomifun_db::IUserRepository;
 /// Stable, bookmarkable port for the LAN listener (matches the UI's
 /// `WEBUI_DEFAULT_PORT`). Falls back to an ephemeral port if occupied.
 pub const WEBUI_LAN_PORT: u16 = 25808;
+
+/// One frontend asset resolved by the desktop host.
+///
+/// The desktop crate adapts Tauri's compile-time `frontendDist` asset store to
+/// this host-agnostic shape. Keeping the resolver abstraction in `nomifun-app`
+/// avoids a Tauri dependency in the backend while letting the LAN listener
+/// serve the exact bytes already embedded in the desktop executable.
+#[derive(Clone, Debug)]
+pub struct WebUiAsset {
+    pub bytes: Bytes,
+    pub content_type: String,
+    pub csp_header: Option<String>,
+}
+
+impl WebUiAsset {
+    pub fn new(bytes: impl Into<Bytes>, content_type: impl Into<String>) -> Self {
+        Self {
+            bytes: bytes.into(),
+            content_type: content_type.into(),
+            csp_header: None,
+        }
+    }
+
+    pub fn with_csp_header(mut self, csp_header: Option<String>) -> Self {
+        self.csp_header = csp_header;
+        self
+    }
+}
+
+/// Immutable, thread-safe snapshot of the desktop's embedded WebUI assets.
+///
+/// The desktop host resolves and decompresses Tauri's `frontendDist` exactly
+/// once during startup, then drops Tauri's resolver before placing this source
+/// in managed backend state. Requests therefore share ref-counted bytes without
+/// repeated decompression, unbounded blocking work, or an AppManager reference
+/// cycle. Unknown client routes use the same HTML fallback order as Tauri.
+#[derive(Clone)]
+pub struct WebUiAssetSource {
+    assets: Arc<HashMap<String, WebUiAsset>>,
+}
+
+impl WebUiAssetSource {
+    pub fn new<I, K>(assets: I) -> Self
+    where
+        I: IntoIterator<Item = (K, WebUiAsset)>,
+        K: Into<String>,
+    {
+        let assets = assets
+            .into_iter()
+            .map(|(key, asset)| {
+                let key = key.into();
+                (key.trim_start_matches('/').to_owned(), asset)
+            })
+            .collect();
+        Self {
+            assets: Arc::new(assets),
+        }
+    }
+
+    fn resolve(&self, path: &str) -> Option<WebUiAsset> {
+        let decoded = percent_decode_str(path).decode_utf8_lossy();
+        // Tauri's Windows AssetKey converts native separators to URL-style
+        // slashes. Normalize them on every host so encoded `\` has identical
+        // lookup semantics across macOS, Linux, and Windows.
+        let normalized = decoded.replace('\\', "/");
+        let mut path = normalized.as_str();
+        if path.ends_with('/') {
+            path = &path[..path.len() - 1];
+        }
+        let path = path.strip_prefix('/').unwrap_or(path);
+        let path = if path.is_empty() { "index.html" } else { path };
+
+        self.assets
+            .get(path)
+            .or_else(|| self.assets.get(&format!("{path}.html")))
+            .or_else(|| self.assets.get(&format!("{path}/index.html")))
+            .or_else(|| self.assets.get("index.html"))
+            .cloned()
+    }
+}
 
 /// Snapshot of the WebUI serving state, surfaced to the desktop UI and emitted
 /// on every change. Field names match the frontend `IWebUIStatus` /
@@ -100,8 +183,13 @@ pub struct DesktopServer {
     /// Built once; cloned per listener.
     router: Router,
     /// Bundled SPA directory (`ui/dist`) served to remote browsers by the LAN
-    /// listener in PRODUCTION. `None` disables remote serving of the app shell.
+    /// listener in PRODUCTION. This is a compatibility fallback for hosts that
+    /// cannot expose their compile-time asset store.
     spa_dir: Option<PathBuf>,
+    /// Canonical production source: the exact `frontendDist` bytes already
+    /// embedded in the Tauri executable. Unlike `spa_dir`, this is independent
+    /// of bundle layout, current working directory, and platform path rules.
+    webui_asset_source: Option<WebUiAssetSource>,
     /// In DEV, the vite dev-server URL (e.g. `http://localhost:5173`) the desktop
     /// webview itself loads. When set, the LAN listener PROXIES the SPA to it
     /// instead of serving the (stale) bundled `ui/dist`, so remote browsers get
@@ -136,14 +224,17 @@ impl DesktopServer {
     /// lifetime; the loopback listener runs until the process exits.
     ///
     /// `spa_dir` is the bundled `ui/dist` directory used to serve the app shell
-    /// to remote browsers in production. `dev_frontend_url` (e.g.
+    /// to remote browsers as a compatibility fallback. `dev_frontend_url` (e.g.
     /// `http://localhost:5173`) is set ONLY in dev: the LAN listener then proxies
     /// the SPA to the vite dev server so remote browsers match the live desktop.
+    /// `webui_asset_source` is the preferred production source and should adapt
+    /// the desktop host's compile-time embedded frontend assets.
     pub async fn start(
         cli: &Cli,
         merged_path: &str,
         spa_dir: Option<PathBuf>,
         dev_frontend_url: Option<String>,
+        webui_asset_source: Option<WebUiAssetSource>,
     ) -> Result<(Arc<DesktopServer>, DesktopKeepAlive)> {
         let env = bootstrap::init_environment(cli, merged_path)?;
 
@@ -161,7 +252,14 @@ impl DesktopServer {
         config.local_trust_secret = Some(secret.clone());
 
         let database = bootstrap::init_data_layer(&config).await?;
-        let services = AppServices::from_config(database, &config).await?;
+        let services = AppServices::from_config(database, &config)
+            .await?
+            .with_boot_reconciliation_authority(
+                env.boot_reconciliation_authority(),
+                &config,
+            )
+            .await?;
+        bootstrap::finalize_data_layer(&config)?;
         let user_repo = services.user_repo.clone();
         let terminal_service = services.terminal_service.clone();
         let router = create_router(&services).await;
@@ -204,6 +302,7 @@ impl DesktopServer {
             local_trust_secret: secret,
             router,
             spa_dir,
+            webui_asset_source,
             dev_frontend_url: dev_frontend_url.map(|u| Arc::from(u.trim_end_matches('/'))),
             runtime: Handle::current(),
             terminal_service,
@@ -265,7 +364,10 @@ impl DesktopServer {
             return self.status();
         }
 
-        if self.spa_dir.is_none() && self.dev_frontend_url.is_none() {
+        if self.spa_dir.is_none()
+            && self.dev_frontend_url.is_none()
+            && self.webui_asset_source.is_none()
+        {
             return self.fail_start(
                 "WebUI app shell not found; remote browsers would receive QR/API endpoints but no app shell"
                     .to_string(),
@@ -311,13 +413,20 @@ impl DesktopServer {
 
         // Build the LAN app: shared router (/api, /ws) + the app shell.
         // In dev → proxy the SPA to the vite dev server (live, matches desktop).
-        // In prod → serve the bundled `ui/dist` statically.
+        // In prod → serve Tauri's compile-time embedded frontend assets. A
+        // filesystem `ui/dist` remains as a compatibility fallback.
         let mut app = self.router.clone();
         if let Some(dev_url) = &self.dev_frontend_url {
             let dev_url = dev_url.clone();
             app = app.fallback(move |req: Request| {
                 let dev_url = dev_url.clone();
                 async move { dev_spa_proxy(&dev_url, req).await }
+            });
+        } else if let Some(asset_source) = &self.webui_asset_source {
+            let asset_source = asset_source.clone();
+            app = app.fallback(move |req: Request| {
+                let asset_source = asset_source.clone();
+                async move { embedded_spa_response(asset_source, req).await }
             });
         } else if let Some(dir) = &self.spa_dir {
             app = app.fallback_service(
@@ -450,6 +559,56 @@ impl DesktopServer {
             Err(e) => tracing::warn!(error = %e, "terminal exit cleanup did not report back — proceeding with quit"),
         }
     }
+}
+
+/// Serve a frontend response from the immutable embedded-asset snapshot. The
+/// source mirrors Tauri's percent-decoding and SPA fallback; this adapter adds
+/// the HTTP semantics needed by normal remote browsers.
+async fn embedded_spa_response(asset_source: WebUiAssetSource, req: Request) -> Response {
+    if req.method() != Method::GET && req.method() != Method::HEAD {
+        return Response::builder()
+            .status(StatusCode::METHOD_NOT_ALLOWED)
+            .header(header::ALLOW, "GET, HEAD")
+            .body(axum::body::Body::empty())
+            .unwrap_or_else(|_| StatusCode::METHOD_NOT_ALLOWED.into_response());
+    }
+
+    let method = req.method().clone();
+    let request_path = req.uri().path().to_owned();
+    // Resolution is an in-memory hash lookup over ref-counted bytes. Tauri's
+    // synchronous decompression already happened once during desktop startup.
+    let asset = asset_source.resolve(&request_path);
+    let Some(asset) = asset else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+
+    let content_length = asset.bytes.len();
+    let is_head = method == Method::HEAD;
+    let cache_control =
+        if asset.content_type.starts_with("text/html") || !request_path.starts_with("/assets/") {
+            "no-cache"
+        } else {
+            // Vite filenames under /assets include a content hash, so they can
+            // be cached permanently without serving stale code after upgrades.
+            "public, max-age=31536000, immutable"
+        };
+    let mut builder = Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, asset.content_type)
+        .header(header::CONTENT_LENGTH, content_length)
+        .header(header::CACHE_CONTROL, cache_control)
+        .header(header::X_CONTENT_TYPE_OPTIONS, "nosniff");
+    if let Some(csp_header) = asset.csp_header {
+        builder = builder.header(header::CONTENT_SECURITY_POLICY, csp_header);
+    }
+    let body = if is_head {
+        axum::body::Body::empty()
+    } else {
+        axum::body::Body::from(asset.bytes)
+    };
+    builder
+        .body(body)
+        .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
 }
 
 /// Bind `0.0.0.0:preferred` for the LAN listener, falling back through a bounded
@@ -667,5 +826,52 @@ mod tests {
         assert!(is_webui_lan_ip_candidate(Ipv4Addr::new(10, 8, 0, 2)));
         assert!(is_webui_lan_ip_candidate(Ipv4Addr::new(172, 16, 1, 20)));
         assert!(is_webui_lan_ip_candidate(Ipv4Addr::new(192, 168, 31, 5)));
+    }
+
+    #[test]
+    fn embedded_webui_source_matches_tauri_fallbacks_without_copying_bytes() {
+        let source = WebUiAssetSource::new([
+            (
+                "index.html",
+                WebUiAsset::new(b"index".to_vec(), "text/html"),
+            ),
+            (
+                "assets/app.js",
+                WebUiAsset::new(b"script".to_vec(), "text/javascript"),
+            ),
+            (
+                "settings.html",
+                WebUiAsset::new(b"settings".to_vec(), "text/html"),
+            ),
+            (
+                "docs/index.html",
+                WebUiAsset::new(b"docs".to_vec(), "text/html"),
+            ),
+        ]);
+
+        let exact = source.resolve("/assets/app%2Ejs").expect("encoded exact asset");
+        let exact_again = source.resolve("/assets/app.js").expect("exact asset");
+        let windows_style = source
+            .resolve("/assets%5Capp.js")
+            .expect("encoded Windows separator");
+        assert_eq!(exact.bytes, Bytes::from_static(b"script"));
+        assert_eq!(windows_style.bytes, Bytes::from_static(b"script"));
+        assert_eq!(
+            exact.bytes.as_ptr(),
+            exact_again.bytes.as_ptr(),
+            "asset clones must share storage"
+        );
+        assert_eq!(
+            source.resolve("/settings").unwrap().bytes,
+            Bytes::from_static(b"settings")
+        );
+        assert_eq!(
+            source.resolve("/docs").unwrap().bytes,
+            Bytes::from_static(b"docs")
+        );
+        assert_eq!(
+            source.resolve("/unknown/client-route").unwrap().bytes,
+            Bytes::from_static(b"index")
+        );
     }
 }

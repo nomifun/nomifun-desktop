@@ -8,8 +8,8 @@ use std::{
 
 use crate::{
     CleanupReport, ProcessError, ProcessOutcome, ProcessOwner, ProcessPolicy,
-    NormalizedProcessRequest, OutputBuffer, OutputCursor, ProcessSnapshot, ProcessState,
-    SessionId,
+    NormalizedProcessRequest, OutputBuffer, OutputCursor, OutputObserver, ProcessSnapshot,
+    ProcessState, SessionId,
     io::FrozenOutput,
     platform::{ExitFact, PlatformProcess},
     registry::{
@@ -28,6 +28,7 @@ const MAX_REAP_GRACE: Duration = Duration::from_secs(3);
 pub struct ProcessHandle {
     pub owner: ProcessOwner,
     pub session_id: SessionId,
+    pub pid: u32,
     pub started_at: Instant,
 }
 
@@ -56,6 +57,10 @@ pub enum PollResult {
 
 pub struct ProcessSupervisor {
     registry: Arc<Registry>,
+    /// A read lease spans a complete spawn/ownership transaction. A terminal
+    /// fence takes the write lease, waits for admitted starts, and prevents a
+    /// later start until the exact cleanup snapshot has drained.
+    admission_gate: tokio::sync::RwLock<()>,
     reaper_started: AtomicBool,
     reaper_stop: tokio_util::sync::CancellationToken,
     shutdown: Arc<ShutdownState>,
@@ -94,6 +99,33 @@ pub struct ShutdownReport {
 #[derive(Clone, Debug, PartialEq, Eq)]
 /// The exact owner, session id, and terminal cleanup outcome produced by shutdown.
 pub struct ShutdownSessionReport {
+    pub session_id: SessionId,
+    pub owner: ProcessOwner,
+    pub outcome: ProcessOutcome,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+/// Exact reusable process-tree fence result.
+///
+/// Callers must not publish a business terminal state when [`Self::is_exact`]
+/// is false.
+pub struct QuiesceReport {
+    pub sessions: Vec<QuiesceSessionReport>,
+    pub errors: Vec<String>,
+}
+
+impl QuiesceReport {
+    pub fn is_exact(&self) -> bool {
+        self.errors.is_empty()
+            && self
+                .sessions
+                .iter()
+                .all(|session| outcome_reaped(&session.outcome))
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct QuiesceSessionReport {
     pub session_id: SessionId,
     pub owner: ProcessOwner,
     pub outcome: ProcessOutcome,
@@ -188,6 +220,7 @@ impl ProcessSupervisor {
     pub fn new(config: SupervisorConfig) -> Arc<Self> {
         Arc::new(Self {
             registry: Arc::new(Registry::new(config.max_sessions)),
+            admission_gate: tokio::sync::RwLock::new(()),
             reaper_started: AtomicBool::new(false),
             reaper_stop: tokio_util::sync::CancellationToken::new(),
             shutdown: Arc::new(ShutdownState {
@@ -202,18 +235,44 @@ impl ProcessSupervisor {
         self: &Arc<Self>,
         request: NormalizedProcessRequest,
     ) -> Result<ProcessHandle, ProcessError> {
+        self.start_inner(request, None).await
+    }
+
+    /// Start a process and observe every raw transport read before bounded
+    /// replay retention can evict older bytes.
+    pub async fn start_with_output_observer(
+        self: &Arc<Self>,
+        request: NormalizedProcessRequest,
+        observer: OutputObserver,
+    ) -> Result<ProcessHandle, ProcessError> {
+        self.start_inner(request, Some(observer)).await
+    }
+
+    async fn start_inner(
+        self: &Arc<Self>,
+        request: NormalizedProcessRequest,
+        observer: Option<OutputObserver>,
+    ) -> Result<ProcessHandle, ProcessError> {
+        // Hold through platform spawn and registry commit. An exact turn fence
+        // can therefore neither miss this start nor race a post-snapshot start.
+        let _admission = self.admission_gate.read().await;
         self.ensure_reaper_started();
         let mut reservation = self.reserve_start_capacity().await?;
         let activity_registry = Arc::downgrade(&self.registry);
         let session_id = SessionId::new();
-        let output = Arc::new(OutputBuffer::with_activity(
-            request.policy.output_limit_bytes,
-            Arc::new(move || {
-                if let Some(registry) = activity_registry.upgrade() {
-                    registry.touch_session(session_id, Instant::now());
-                }
-            }),
-        ));
+        let activity: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
+            if let Some(registry) = activity_registry.upgrade() {
+                registry.touch_session(session_id, Instant::now());
+            }
+        });
+        let output = Arc::new(match observer {
+            Some(observer) => OutputBuffer::with_activity_and_observer(
+                request.policy.output_limit_bytes,
+                activity,
+                observer,
+            ),
+            None => OutputBuffer::with_activity(request.policy.output_limit_bytes, activity),
+        });
         let spawned = crate::platform::spawn(request.clone(), output.clone()).await?;
         self.register_reserved(
             request,
@@ -253,9 +312,11 @@ impl ProcessSupervisor {
         session_id: SessionId,
     ) -> Result<ProcessHandle, ProcessError> {
         let started_at = Instant::now();
+        let pid = process.pid();
         let owner = request.owner;
         let policy = request.policy;
         let lease = policy.lease;
+        let expire_on_idle = policy.expire_on_idle;
         let (exit, _exit_receiver) = tokio::sync::watch::channel(None);
         let (lifecycle, _lifecycle_receiver) = tokio::sync::watch::channel(0);
         let session = Arc::new(Session {
@@ -280,6 +341,7 @@ impl ProcessSupervisor {
             owner.clone(),
             session.clone(),
             lease,
+            expire_on_idle,
             started_at,
         );
         start_waiter(Arc::clone(&session));
@@ -289,6 +351,7 @@ impl ProcessSupervisor {
                 Ok(ProcessHandle {
                     owner,
                     session_id,
+                    pid,
                     started_at,
                 })
             }
@@ -541,6 +604,25 @@ impl ProcessSupervisor {
         .await)
     }
 
+    /// Immediately force-kill and reap the platform-owned process authority
+    /// (the Unix PTY session/process group or Windows Job).
+    pub async fn force_kill(
+        &self,
+        owner: &ProcessOwner,
+        session_id: &SessionId,
+    ) -> Result<ProcessOutcome, ProcessError> {
+        let request_started_at = tokio::time::Instant::now();
+        let action = self.session(owner, session_id)?;
+        let session = action.session_arc();
+        Ok(stop_session(
+            session,
+            &[SignalStage::ForceKill],
+            request_started_at,
+            StopCause::Cancelled,
+        )
+        .await)
+    }
+
     /// Stop a session because its hard process deadline elapsed. Unlike
     /// `poll`, this records a durable `TimedOut` terminal outcome.
     pub async fn timeout(
@@ -567,6 +649,56 @@ impl ProcessSupervisor {
     pub fn heartbeat(&self, invocation_id: uuid::Uuid) -> usize {
         self.registry
             .heartbeat_invocation(invocation_id, Instant::now())
+    }
+
+    /// Stop new starts, wait for every admitted ownership transaction, then
+    /// terminate and reap every process tree owned by this supervisor.
+    ///
+    /// Unlike [`Self::shutdown`], this is a reusable turn boundary: admission
+    /// reopens after the report is assembled. A later turn may reuse the
+    /// supervisor only when [`QuiesceReport::is_exact`] is true.
+    pub async fn quiesce(self: &Arc<Self>) -> QuiesceReport {
+        let _exclusive_admission = self.admission_gate.write().await;
+        let (sessions, retirements) = self.registry.quiesce_snapshot();
+        let mut workers = tokio::task::JoinSet::new();
+
+        for session in sessions {
+            workers.spawn(async move {
+                let outcome = retire_session(session.session).await;
+                QuiesceSessionReport {
+                    session_id: session.id,
+                    owner: session.owner,
+                    outcome,
+                }
+            });
+        }
+
+        for retirement in retirements {
+            self.start_retirement(retirement.clone());
+            workers.spawn(async move {
+                let outcome = retirement.wait_outcome().await;
+                QuiesceSessionReport {
+                    session_id: retirement.id(),
+                    owner: retirement.owner().clone(),
+                    outcome,
+                }
+            });
+        }
+
+        let mut report = QuiesceReport {
+            sessions: Vec::new(),
+            errors: Vec::new(),
+        };
+        while let Some(result) = workers.join_next().await {
+            match result {
+                Ok(session) => report.sessions.push(session),
+                Err(error) => report
+                    .errors
+                    .push(format!("process quiesce worker stopped unexpectedly: {error}")),
+            }
+        }
+        report.sessions.sort_by_key(|session| session.session_id);
+        report
     }
 
     pub async fn shutdown(&self) -> ShutdownReport {
@@ -2228,6 +2360,33 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
+    async fn persistent_session_is_not_claimed_after_its_idle_lease() {
+        let policy = ProcessPolicy {
+            lease: Duration::from_millis(10),
+            expire_on_idle: false,
+            ..ProcessPolicy::default()
+        };
+        let (supervisor, handle, fake, _output) = register_fake_with_config(
+            FakeOwner::pending(),
+            policy,
+            SupervisorConfig {
+                max_sessions: 1,
+                reaper_interval: Duration::from_millis(1),
+            },
+        )
+        .await;
+
+        tokio::time::advance(Duration::from_secs(1)).await;
+        tokio::task::yield_now().await;
+
+        assert!(
+            supervisor.registry.get(&handle.session_id).is_some(),
+            "persistent session must remain active past arbitrarily many idle leases"
+        );
+        assert!(fake.signal_calls().is_empty());
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn concurrent_shutdown_is_single_flight_and_reports_one_exact_retirement() {
         let policy = ProcessPolicy {
             interrupt_grace: Duration::from_millis(10),
@@ -2311,6 +2470,7 @@ mod tests {
                 owner,
                 session.clone(),
                 policy.lease,
+                policy.expire_on_idle,
                 started_at,
             ),
             CommitResult::Active
@@ -2389,6 +2549,7 @@ mod tests {
             owner.clone(),
             session.clone(),
             policy.lease,
+            policy.expire_on_idle,
             started_at,
         );
         start_waiter(session);
@@ -3107,6 +3268,27 @@ mod tests {
         assert_eq!(times[1], ("terminate", observed_start + Duration::from_secs(1)));
         assert_eq!(times[2], ("force_kill", observed_start + Duration::from_secs(2)));
         assert!(tokio::time::Instant::now() <= observed_start + Duration::from_secs(5));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn force_kill_skips_graceful_stages_and_waits_for_exact_reap() {
+        let (supervisor, handle, fake, _output) =
+            register_fake(FakeOwner::reaps_on(FakeSignal::ForceKill, 137)).await;
+
+        let outcome = supervisor
+            .force_kill(&handle.owner, &handle.session_id)
+            .await
+            .expect("force kill should return its terminal outcome");
+
+        let ProcessOutcome::Cancelled { cleanup, .. } = outcome else {
+            panic!("a proven force-kill reap should be Cancelled");
+        };
+        assert!(!cleanup.interrupt_attempted);
+        assert!(!cleanup.terminate_attempted);
+        assert!(cleanup.force_kill_attempted);
+        assert!(cleanup.reaped);
+        assert_eq!(fake.signal_calls(), vec!["force_kill"]);
+        assert_eq!(fake.wait_call_count(), 1);
     }
 
     #[tokio::test(start_paused = true)]

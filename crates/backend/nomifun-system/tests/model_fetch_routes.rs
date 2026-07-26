@@ -48,6 +48,8 @@ fn build_state(db: &nomifun_db::Database) -> SystemRouterState {
         protocol_detection_service: ProtocolDetectionService::new(http_client.clone()),
         version_check_service: VersionCheckService::new(http_client, "0.1.0".to_owned()),
         data_dir: std::env::temp_dir(),
+        work_dir: std::env::temp_dir(),
+        work_dir_is_cli_override: false,
     }
 }
 
@@ -67,7 +69,7 @@ async fn create_provider(
     let encrypted = encrypt_string(api_key, &TEST_KEY).unwrap();
     let row = repo
         .create(CreateProviderParams {
-            id: None,
+            provider_id: None,
             platform,
             name: "Test Provider",
             base_url,
@@ -75,7 +77,6 @@ async fn create_provider(
             models: "[]",
             enabled: true,
             capabilities: "[]",
-            context_limit: None,
             model_context_limits: None,
             model_protocols: None,
             model_descriptions: None,
@@ -87,7 +88,7 @@ async fn create_provider(
         })
         .await
         .unwrap();
-    row.id
+    row.provider_id
 }
 
 async fn body_json(resp: axum::response::Response) -> serde_json::Value {
@@ -135,8 +136,8 @@ async fn fetch_models_vertex_ai_hardcoded() {
     assert_eq!(json["success"], true);
     let models = json["data"]["models"].as_array().unwrap();
     assert_eq!(models.len(), 2);
-    assert_eq!(models[0], "gemini-2.5-pro");
-    assert_eq!(models[1], "gemini-2.5-flash");
+    assert_eq!(models[0]["id"], "gemini-2.5-pro");
+    assert_eq!(models[1]["id"], "gemini-2.5-flash");
     assert!(json["data"].get("fixed_base_url").is_none());
 }
 
@@ -150,9 +151,13 @@ async fn fetch_models_minimax_hardcoded() {
 
     let json = body_json(resp).await;
     let models = json["data"]["models"].as_array().unwrap();
-    assert!(models.iter().any(|model| model == "MiniMax-M3"));
-    assert!(models.iter().any(|model| model == "MiniMax-M2.7"));
-    assert!(models.iter().any(|model| model == "MiniMax-Text-01"));
+    assert!(models.iter().any(|model| model["id"] == "MiniMax-M3"));
+    assert!(models.iter().any(|model| model["id"] == "MiniMax-M2.7"));
+    assert!(
+        models
+            .iter()
+            .any(|model| model["id"] == "MiniMax-Text-01")
+    );
 }
 
 #[tokio::test]
@@ -165,8 +170,12 @@ async fn fetch_models_mimo_falls_back_to_supported_chat_models() {
 
     let json = body_json(resp).await;
     let models = json["data"]["models"].as_array().unwrap();
-    assert!(models.iter().any(|model| model == "mimo-v2.5-pro"));
-    assert!(models.iter().any(|model| model == "mimo-v2.5"));
+    assert!(
+        models
+            .iter()
+            .any(|model| model["id"] == "mimo-v2.5-pro")
+    );
+    assert!(models.iter().any(|model| model["id"] == "mimo-v2.5"));
 }
 
 #[tokio::test]
@@ -179,8 +188,12 @@ async fn fetch_models_mimo_token_plan_falls_back_to_supported_chat_models() {
 
     let json = body_json(resp).await;
     let models = json["data"]["models"].as_array().unwrap();
-    assert!(models.iter().any(|model| model == "mimo-v2.5-pro"));
-    assert!(models.iter().any(|model| model == "mimo-v2.5"));
+    assert!(
+        models
+            .iter()
+            .any(|model| model["id"] == "mimo-v2.5-pro")
+    );
+    assert!(models.iter().any(|model| model["id"] == "mimo-v2.5"));
 }
 
 #[tokio::test]
@@ -193,8 +206,12 @@ async fn fetch_models_minimax_code_falls_back_to_supported_coding_models() {
 
     let json = body_json(resp).await;
     let models = json["data"]["models"].as_array().unwrap();
-    assert!(models.iter().any(|model| model == "MiniMax-M3"));
-    assert!(models.iter().any(|model| model == "MiniMax-M2.7-highspeed"));
+    assert!(models.iter().any(|model| model["id"] == "MiniMax-M3"));
+    assert!(
+        models
+            .iter()
+            .any(|model| model["id"] == "MiniMax-M2.7-highspeed")
+    );
 }
 
 #[tokio::test]
@@ -207,8 +224,12 @@ async fn fetch_models_minimax_coding_plan_falls_back_to_supported_coding_models(
 
     let json = body_json(resp).await;
     let models = json["data"]["models"].as_array().unwrap();
-    assert!(models.iter().any(|model| model == "MiniMax-M3"));
-    assert!(models.iter().any(|model| model == "MiniMax-M2.1"));
+    assert!(models.iter().any(|model| model["id"] == "MiniMax-M3"));
+    assert!(
+        models
+            .iter()
+            .any(|model| model["id"] == "MiniMax-M2.1")
+    );
 }
 
 #[tokio::test]
@@ -221,8 +242,16 @@ async fn fetch_models_stepfun_plan_falls_back_to_supported_coding_models() {
 
     let json = body_json(resp).await;
     let models = json["data"]["models"].as_array().unwrap();
-    assert!(models.iter().any(|model| model == "step-3.7-flash"));
-    assert!(models.iter().any(|model| model == "step-router-v1"));
+    assert!(
+        models
+            .iter()
+            .any(|model| model["id"] == "step-3.7-flash")
+    );
+    assert!(
+        models
+            .iter()
+            .any(|model| model["id"] == "step-router-v1")
+    );
 }
 
 #[tokio::test]
@@ -235,9 +264,9 @@ async fn fetch_models_glm_coding_plan_falls_back_to_supported_coding_models() {
 
     let json = body_json(resp).await;
     let models = json["data"]["models"].as_array().unwrap();
-    assert!(models.iter().any(|model| model == "glm-5.2"));
-    assert!(models.iter().any(|model| model == "glm-5"));
-    assert!(models.iter().any(|model| model == "glm-4.7"));
+    assert!(models.iter().any(|model| model["id"] == "glm-5.2"));
+    assert!(models.iter().any(|model| model["id"] == "glm-5"));
+    assert!(models.iter().any(|model| model["id"] == "glm-4.7"));
 }
 
 #[tokio::test]
@@ -250,9 +279,13 @@ async fn fetch_models_qianfan_coding_plan_falls_back_to_supported_coding_models(
 
     let json = body_json(resp).await;
     let models = json["data"]["models"].as_array().unwrap();
-    assert!(models.iter().any(|model| model == "qianfan-code-latest"));
-    assert!(models.iter().any(|model| model == "kimi-k2.5"));
-    assert!(models.iter().any(|model| model == "glm-5"));
+    assert!(
+        models
+            .iter()
+            .any(|model| model["id"] == "qianfan-code-latest")
+    );
+    assert!(models.iter().any(|model| model["id"] == "kimi-k2.5"));
+    assert!(models.iter().any(|model| model["id"] == "glm-5"));
 }
 
 #[tokio::test]
@@ -265,7 +298,11 @@ async fn fetch_models_ark_coding_plan_falls_back_to_supported_coding_models() {
 
     let json = body_json(resp).await;
     let models = json["data"]["models"].as_array().unwrap();
-    assert!(models.iter().any(|model| model == "ark-code-latest"));
+    assert!(
+        models
+            .iter()
+            .any(|model| model["id"] == "ark-code-latest")
+    );
 }
 
 #[tokio::test]
@@ -291,8 +328,8 @@ async fn fetch_models_ark_agent_plan_uses_remote_catalog_when_available() {
     let json = body_json(resp).await;
     let models = json["data"]["models"].as_array().unwrap();
     assert_eq!(models.len(), 2);
-    assert_eq!(models[0], "doubao-seed-2.0-code");
-    assert_eq!(models[1], "kimi-k2.6");
+    assert_eq!(models[0]["id"], "doubao-seed-2.0-code");
+    assert_eq!(models[1]["id"], "kimi-k2.6");
 }
 
 #[tokio::test]
@@ -315,7 +352,11 @@ async fn fetch_models_ark_agent_plan_falls_back_when_catalog_unavailable() {
 
     let json = body_json(resp).await;
     let models = json["data"]["models"].as_array().unwrap();
-    assert!(models.iter().any(|model| model == "ark-code-latest"));
+    assert!(
+        models
+            .iter()
+            .any(|model| model["id"] == "ark-code-latest")
+    );
     // No fixed_base_url — the known-correct base is never auto-rewritten.
     assert!(json["data"].get("fixed_base_url").is_none());
 }
@@ -352,8 +393,35 @@ async fn fetch_models_openai_compatible_success() {
     let json = body_json(resp).await;
     let models = json["data"]["models"].as_array().unwrap();
     assert_eq!(models.len(), 2);
-    assert_eq!(models[0], "gpt-4o");
-    assert_eq!(models[1], "gpt-4o-mini");
+    assert_eq!(models[0]["id"], "gpt-4o");
+    assert_eq!(models[1]["id"], "gpt-4o-mini");
+}
+
+#[tokio::test]
+async fn fetch_models_stepfun_prefers_live_catalog() {
+    let mock_server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/models"))
+        .and(header("Authorization", "Bearer step-key"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "data": [
+                {"id": "step-live-model"},
+                {"id": "step-live-vision"}
+            ]
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let (router, db) = setup().await;
+    let id = create_provider(&db, "stepfun", &mock_server.uri(), "step-key").await;
+    let req = post_request(&format!("/api/providers/{id}/models"), json!({}));
+    let resp = router.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let json = body_json(resp).await;
+    let models = json["data"]["models"].as_array().unwrap();
+    assert_eq!(models[0]["id"], "step-live-model");
+    assert_eq!(models[1]["id"], "step-live-vision");
 }
 
 #[tokio::test]
@@ -380,7 +448,7 @@ async fn fetch_models_openai_compatible_uses_first_comma_separated_key() {
 
     let json = body_json(resp).await;
     let models = json["data"]["models"].as_array().unwrap();
-    assert_eq!(models[0], "gpt-4o");
+    assert_eq!(models[0]["id"], "gpt-4o");
 }
 
 #[tokio::test]
@@ -401,6 +469,34 @@ async fn fetch_models_openai_remote_error() {
     );
     let resp = router.oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::BAD_GATEWAY);
+}
+
+#[tokio::test]
+async fn fetch_models_does_not_mask_invalid_api_key_as_bad_gateway() {
+    let mock_server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/models"))
+        .respond_with(ResponseTemplate::new(401))
+        .mount(&mock_server)
+        .await;
+
+    let (router, db) = setup().await;
+    let id = create_provider(&db, "stepfun", &mock_server.uri(), "bad-key").await;
+    let req = post_request(
+        &format!("/api/providers/{id}/models"),
+        json!({"try_fix": true}),
+    );
+    let resp = router.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+
+    let json = body_json(resp).await;
+    assert_eq!(json["code"], "UNAUTHORIZED");
+    assert!(
+        json["error"]
+            .as_str()
+            .unwrap()
+            .contains("Remote API rejected")
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -434,11 +530,11 @@ async fn fetch_models_anthropic_success() {
     let json = body_json(resp).await;
     let models = json["data"]["models"].as_array().unwrap();
     assert_eq!(models.len(), 2);
-    assert_eq!(models[0], "claude-sonnet-4-20250514");
+    assert_eq!(models[0]["id"], "claude-sonnet-4-20250514");
 }
 
 #[tokio::test]
-async fn fetch_models_anthropic_fallback_on_error() {
+async fn fetch_models_anthropic_does_not_mask_invalid_api_key() {
     let mock_server = MockServer::start().await;
     Mock::given(method("GET"))
         .and(path("/v1/models"))
@@ -451,12 +547,10 @@ async fn fetch_models_anthropic_fallback_on_error() {
 
     let req = post_request(&format!("/api/providers/{id}/models"), json!({}));
     let resp = router.oneshot(req).await.unwrap();
-    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
 
     let json = body_json(resp).await;
-    let models = json["data"]["models"].as_array().unwrap();
-    // Should return fallback models
-    assert!(!models.is_empty());
+    assert_eq!(json["code"], "UNAUTHORIZED");
 }
 
 // ---------------------------------------------------------------------------
@@ -488,12 +582,12 @@ async fn fetch_models_gemini_success() {
     let models = json["data"]["models"].as_array().unwrap();
     assert_eq!(models.len(), 2);
     // models/ prefix should be stripped
-    assert_eq!(models[0], "gemini-2.5-pro");
-    assert_eq!(models[1], "gemini-2.5-flash");
+    assert_eq!(models[0]["id"], "gemini-2.5-pro");
+    assert_eq!(models[1]["id"], "gemini-2.5-flash");
 }
 
 #[tokio::test]
-async fn fetch_models_gemini_fallback_on_error() {
+async fn fetch_models_gemini_does_not_mask_forbidden_api_key() {
     let mock_server = MockServer::start().await;
     Mock::given(method("GET"))
         .and(path("/v1beta/models"))
@@ -506,11 +600,10 @@ async fn fetch_models_gemini_fallback_on_error() {
 
     let req = post_request(&format!("/api/providers/{id}/models"), json!({}));
     let resp = router.oneshot(req).await.unwrap();
-    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
 
     let json = body_json(resp).await;
-    let models = json["data"]["models"].as_array().unwrap();
-    assert!(!models.is_empty());
+    assert_eq!(json["code"], "FORBIDDEN");
 }
 
 // ---------------------------------------------------------------------------
@@ -540,7 +633,7 @@ async fn fetch_models_new_api_adds_v1() {
     let json = body_json(resp).await;
     let models = json["data"]["models"].as_array().unwrap();
     assert_eq!(models.len(), 1);
-    assert_eq!(models[0], "model-a");
+    assert_eq!(models[0]["id"], "model-a");
 }
 
 // ---------------------------------------------------------------------------
@@ -578,7 +671,7 @@ async fn fetch_models_url_auto_fix_success() {
     let json = body_json(resp).await;
     let models = json["data"]["models"].as_array().unwrap();
     assert_eq!(models.len(), 1);
-    assert_eq!(models[0], "fixed-model");
+    assert_eq!(models[0]["id"], "fixed-model");
     // fixedBaseUrl should be present
     assert!(
         json["data"]["fixed_base_url"]
@@ -611,7 +704,7 @@ async fn fetch_models_url_auto_fix_not_triggered_when_success() {
 
     let json = body_json(resp).await;
     let models = json["data"]["models"].as_array().unwrap();
-    assert_eq!(models[0], "original-model");
+    assert_eq!(models[0]["id"], "original-model");
     // fixedBaseUrl should NOT be present since original URL worked
     assert!(json["data"].get("fixed_base_url").is_none());
 }
@@ -629,16 +722,17 @@ async fn fetch_models_url_auto_fix_not_for_anthropic() {
     let (router, db) = setup().await;
     let id = create_provider(&db, "anthropic", &mock_server.uri(), "bad-key").await;
 
-    // Even with tryFix=true, Anthropic should use fallback, not URL fix
+    // Even with tryFix=true, an authentication failure must be returned
+    // directly instead of triggering URL guessing or a fallback catalog.
     let req = post_request(
         &format!("/api/providers/{id}/models"),
         json!({"try_fix": true}),
     );
     let resp = router.oneshot(req).await.unwrap();
-    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
 
     let json = body_json(resp).await;
-    // Should be fallback models, no fixedBaseUrl
+    assert_eq!(json["code"], "UNAUTHORIZED");
     assert!(json["data"].get("fixed_base_url").is_none());
 }
 
@@ -672,7 +766,7 @@ async fn fetch_models_anonymous_returns_models_for_valid_input() {
     let json = body_json(resp).await;
     let models = json["data"]["models"].as_array().unwrap();
     assert_eq!(models.len(), 2);
-    assert_eq!(models[0], "gpt-4o");
+    assert_eq!(models[0]["id"], "gpt-4o");
 }
 
 #[tokio::test]
@@ -700,7 +794,7 @@ async fn fetch_models_anonymous_uses_first_comma_separated_key() {
     assert_eq!(resp.status(), StatusCode::OK);
     let json = body_json(resp).await;
     let models = json["data"]["models"].as_array().unwrap();
-    assert_eq!(models[0], "gpt-4o");
+    assert_eq!(models[0]["id"], "gpt-4o");
 }
 
 #[tokio::test]
@@ -734,8 +828,12 @@ async fn fetch_models_anonymous_minimax_hardcoded() {
     assert_eq!(resp.status(), StatusCode::OK);
     let json = body_json(resp).await;
     let models = json["data"]["models"].as_array().unwrap();
-    assert!(models.iter().any(|model| model == "MiniMax-M3"));
-    assert!(models.iter().any(|model| model == "MiniMax-Text-01"));
+    assert!(models.iter().any(|model| model["id"] == "MiniMax-M3"));
+    assert!(
+        models
+            .iter()
+            .any(|model| model["id"] == "MiniMax-Text-01")
+    );
 }
 
 #[tokio::test]
