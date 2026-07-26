@@ -1,11 +1,19 @@
 {
   "version": "0.3.1",
   "notes": "## Important upgrade notice\n\nv0.3.1 stays on the v3 data contract introduced in v0.3.0. When upgrading from an earlier NomiFun data contract, the app retires/quarantines the previous managed dataset and initializes a clean v3 dataset. Historical local product data is not migrated into v3, and dataset-owned credentials and integrations must be configured again. Arbitrary external user workspaces are not deleted.\n\n## Highlights\n\n- Safely recovers from and retires legacy v3 datasets during startup/bootstrap.\n- Aligns the WebUI browser-login request contract and improves embedded shell serving for fast custom-protocol builds.\n- Rebuilds the Windows package from the latest main branch after the v0.3.0 cross-platform updater manifest merge.\n- Refreshes the Windows x64 updater manifest entry for the v0.3.1 release line.\n\n## Packaging\n\n- This Windows-first release includes the Windows x64 installer and signed Tauri updater assets. macOS and Linux packages can be appended later from their native build machines.\n- The Windows installer is not Authenticode-signed. Manual downloads may show a SmartScreen or unknown-publisher warning; Tauri automatic-update signature verification remains enabled.",
-  "pub_date": "2026-07-26T14:29:50.352Z",
+  "pub_date": "2026-07-26T15:37:40.023Z",
   "platforms": {
     "windows-x86_64": {
       "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSU2VhcGdMaWVxODJwUEVxM2ZzeTN2TDZaa2poVHkvYzVucnNtZEJVSnBiVnI3dkk5dGJoU0YrNjliNHZTRm9tWUVJQ1k0Z1Uxem1aeUFrVmt5OTl5dTFxRWRtSzg0NVE4PQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzg1MDc2MTg5CWZpbGU6Tm9taUZ1bl8wLjMuMV94NjQtc2V0dXAuZXhlClo4dUNDQi9EbW1UYlNicE83ZmUrSFBEanpvOGJvOVo2N2NFWDBPUGd0WWYyVW0zOXErcENMdmJyQWxpWGVUb1JucXExakM0TFFKckJRbkRCSTVJaERRPT0K",
       "url": "https://github.com/nomifun/nomifun-tauri/releases/download/v0.3.1/NomiFun_0.3.1_x64-setup.exe"
+    },
+    "darwin-x86_64": {
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSU2VhcGdMaWVxOCtZcHpjZUVOdGRGMXZtUDhkUVN3YWVPU2w0c0dzM1ZpdUJqSlRmZG5YdUthY1Y2QXlCZ1A3dTZmYVkwN2tRWjl4bFZsbkRGa2hDd1NwNVg5c3l1Z1FzPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzg1MDgwMDQ0CWZpbGU6Tm9taUZ1bi5hcHAudGFyLmd6CmZmK3VnSWV0R0g5YVJqS2ZaQVlualZMSWFuOVB2Yk4yd2k0dGxETmxDdk5aTm9UL1FlL1VFd1JoM2IxK2YyWGtWaGc5d2hpaU9NV0NpVlJQV1gvd0J3PT0K",
+      "url": "https://github.com/nomifun/nomifun-tauri/releases/download/v0.3.1/NomiFun.app.tar.gz"
+    },
+    "darwin-aarch64": {
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSU2VhcGdMaWVxOCtZcHpjZUVOdGRGMXZtUDhkUVN3YWVPU2w0c0dzM1ZpdUJqSlRmZG5YdUthY1Y2QXlCZ1A3dTZmYVkwN2tRWjl4bFZsbkRGa2hDd1NwNVg5c3l1Z1FzPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzg1MDgwMDQ0CWZpbGU6Tm9taUZ1bi5hcHAudGFyLmd6CmZmK3VnSWV0R0g5YVJqS2ZaQVlualZMSWFuOVB2Yk4yd2k0dGxETmxDdk5aTm9UL1FlL1VFd1JoM2IxK2YyWGtWaGc5d2hpaU9NV0NpVlJQV1gvd0J3PT0K",
+      "url": "https://github.com/nomifun/nomifun-tauri/releases/download/v0.3.1/NomiFun.app.tar.gz"
     }
   }
 }
