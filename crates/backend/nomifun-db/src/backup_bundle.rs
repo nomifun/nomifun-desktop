@@ -14,7 +14,9 @@ use std::path::{Component, Path, PathBuf};
 use nomifun_common::{
     TimestampMs,
     dataset_roots::{
-        BackupPolicy, DatasetRootKind, ManagedDatasetRoot, managed_dataset_roots,
+        AGENT_PROCESS_REGISTRY_FILE, BackupPolicy, DatasetRootKind,
+        ManagedDatasetRoot, WORK_ROOT_BINDING_FILE, WORK_ROOT_OWNER_FILE,
+        managed_dataset_roots,
     },
     now_ms, validate_uuidv7,
 };
@@ -216,7 +218,9 @@ impl BackupCoverage {
 
     fn validate(&self) -> Result<(), BackupError> {
         let expected = Self::complete_v3();
-        if self != &expected {
+        if self != &expected
+            && !self.is_legacy_v2_host_control_coverage(&expected)
+        {
             return Err(BackupError::InvalidManifest(
                 "backup coverage does not exactly match the current v3 managed-dataset registry"
                     .into(),
@@ -224,6 +228,40 @@ impl BackupCoverage {
         }
         self.validate_non_overlapping_restore_roots()?;
         Ok(())
+    }
+
+    /// Released format-v2 predates the two host-local work-root controls and
+    /// the explicit process-registry exclusion. An owner-only intermediate
+    /// shape is also accepted, but a binding without its owner is not a valid
+    /// historical publication order. Every other included/excluded entry and
+    /// ordering remains exact.
+    fn is_legacy_v2_host_control_coverage(
+        &self,
+        expected: &Self,
+    ) -> bool {
+        if self.included != expected.included {
+            return false;
+        }
+        let without_binding = expected
+            .excluded
+            .iter()
+            .filter(|entry| entry.path != WORK_ROOT_BINDING_FILE)
+            .cloned()
+            .collect::<Vec<_>>();
+        if self.excluded == without_binding {
+            return true;
+        }
+        let without_owner_or_binding = expected
+            .excluded
+            .iter()
+            .filter(|entry| {
+                    entry.path != WORK_ROOT_OWNER_FILE
+                    && entry.path != WORK_ROOT_BINDING_FILE
+                    && entry.path != AGENT_PROCESS_REGISTRY_FILE
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        self.excluded == without_owner_or_binding
     }
 
     fn validate_non_overlapping_restore_roots(&self) -> Result<(), BackupError> {
@@ -782,8 +820,9 @@ pub async fn restore_backup_data_dir(
             &staging.join(STORAGE_GENERATION_FILE),
             destination_storage_generation.as_bytes(),
         )?;
-        nomifun_common::factory_reset::write_v3_dataset_receipt(
+        nomifun_common::factory_reset::write_v3_single_root_lifecycle_for_atomic_install(
             &staging,
+            destination_data_dir,
             &destination_storage_generation,
         )
         .map_err(|error| BackupError::DatasetLifecycle(error.to_string()))?;
@@ -1340,24 +1379,26 @@ fn install_staging_directory(staging: &Path, destination: &Path) -> Result<(), B
         use std::ffi::CString;
         use std::os::unix::ffi::OsStrExt;
 
-        let staging = CString::new(staging.as_os_str().as_bytes()).map_err(|_| {
+        let staging_c = CString::new(staging.as_os_str().as_bytes()).map_err(|_| {
             BackupError::InvalidManifest("staging path contains a NUL byte".into())
         })?;
-        let destination = CString::new(destination.as_os_str().as_bytes()).map_err(|_| {
-            BackupError::InvalidManifest("destination path contains a NUL byte".into())
-        })?;
+        let destination_c =
+            CString::new(destination.as_os_str().as_bytes()).map_err(|_| {
+                BackupError::InvalidManifest("destination path contains a NUL byte".into())
+            })?;
         // RENAME_NOREPLACE is the atomic directory install primitive needed
         // here: a concurrent creator must never be overwritten.
         let result = unsafe {
             libc::renameat2(
                 libc::AT_FDCWD,
-                staging.as_ptr(),
+                staging_c.as_ptr(),
                 libc::AT_FDCWD,
-                destination.as_ptr(),
+                destination_c.as_ptr(),
                 libc::RENAME_NOREPLACE,
             )
         };
         if result == 0 {
+            sync_directory_best_effort(destination.parent().unwrap_or_else(|| Path::new(".")));
             return Ok(());
         }
         return Err(std::io::Error::last_os_error().into());
@@ -1368,20 +1409,22 @@ fn install_staging_directory(staging: &Path, destination: &Path) -> Result<(), B
         use std::ffi::CString;
         use std::os::unix::ffi::OsStrExt;
 
-        let staging = CString::new(staging.as_os_str().as_bytes()).map_err(|_| {
+        let staging_c = CString::new(staging.as_os_str().as_bytes()).map_err(|_| {
             BackupError::InvalidManifest("staging path contains a NUL byte".into())
         })?;
-        let destination = CString::new(destination.as_os_str().as_bytes()).map_err(|_| {
-            BackupError::InvalidManifest("destination path contains a NUL byte".into())
-        })?;
+        let destination_c =
+            CString::new(destination.as_os_str().as_bytes()).map_err(|_| {
+                BackupError::InvalidManifest("destination path contains a NUL byte".into())
+            })?;
         let result = unsafe {
             libc::renamex_np(
-                staging.as_ptr(),
-                destination.as_ptr(),
+                staging_c.as_ptr(),
+                destination_c.as_ptr(),
                 libc::RENAME_EXCL,
             )
         };
         if result == 0 {
+            sync_directory_best_effort(destination.parent().unwrap_or_else(|| Path::new(".")));
             return Ok(());
         }
         return Err(std::io::Error::last_os_error().into());
@@ -1389,9 +1432,62 @@ fn install_staging_directory(staging: &Path, destination: &Path) -> Result<(), B
 
     #[cfg(windows)]
     {
-        // MoveFile semantics used by std::fs::rename are no-replace.
-        fs::rename(staging, destination)?;
-        Ok(())
+        use std::os::windows::ffi::OsStrExt;
+
+        const MOVEFILE_WRITE_THROUGH: u32 = 0x0000_0008;
+        const ERROR_FILE_EXISTS: i32 = 80;
+        const ERROR_ALREADY_EXISTS: i32 = 183;
+
+        #[link(name = "kernel32")]
+        unsafe extern "system" {
+            fn MoveFileExW(
+                existing_file_name: *const u16,
+                new_file_name: *const u16,
+                flags: u32,
+            ) -> i32;
+        }
+
+        fn nul_terminated_wide_path(path: &Path) -> Result<Vec<u16>, BackupError> {
+            let mut wide = path.as_os_str().encode_wide().collect::<Vec<_>>();
+            if wide.contains(&0) {
+                return Err(BackupError::Io(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    format!("path contains an embedded NUL: {}", path.display()),
+                )));
+            }
+            wide.push(0);
+            Ok(wide)
+        }
+
+        let staging_wide = nul_terminated_wide_path(staging)?;
+        let destination_wide = nul_terminated_wide_path(destination)?;
+        // Omitting MOVEFILE_REPLACE_EXISTING is the no-clobber guarantee.
+        // WRITE_THROUGH asks Windows not to report success until the move has
+        // reached durable storage.
+        let result = unsafe {
+            MoveFileExW(
+                staging_wide.as_ptr(),
+                destination_wide.as_ptr(),
+                MOVEFILE_WRITE_THROUGH,
+            )
+        };
+        if result != 0 {
+            return Ok(());
+        }
+
+        let error = std::io::Error::last_os_error();
+        match error.raw_os_error() {
+            Some(ERROR_FILE_EXISTS | ERROR_ALREADY_EXISTS) => {
+                Err(BackupError::Io(std::io::Error::new(
+                    std::io::ErrorKind::AlreadyExists,
+                    format!(
+                        "backup destination already exists: {}",
+                        destination.display()
+                    ),
+                )))
+            }
+            _ => Err(error.into()),
+        }
     }
 
     #[cfg(not(any(
@@ -1828,6 +1924,39 @@ fn create_directory_tree_safe(path: &Path, label: &str) -> Result<(), BackupErro
     walk_directory_components(path, label, true)
 }
 
+#[cfg(target_os = "macos")]
+fn normalize_platform_root_alias(path: PathBuf) -> PathBuf {
+    // macOS ships these root-owned compatibility aliases as symlinks. They
+    // are not user-selected path indirection, and rejecting them makes every
+    // standard tempfile under /var/folders unusable. Accept only the exact
+    // platform mappings; any other symlink is still rejected component by
+    // component below.
+    for (alias, canonical) in [
+        (Path::new("/var"), Path::new("/private/var")),
+        (Path::new("/tmp"), Path::new("/private/tmp")),
+        (Path::new("/etc"), Path::new("/private/etc")),
+    ] {
+        let Ok(suffix) = path.strip_prefix(alias) else {
+            continue;
+        };
+        let Ok(metadata) = fs::symlink_metadata(alias) else {
+            continue;
+        };
+        if metadata.file_type().is_symlink()
+            && fs::canonicalize(alias)
+                .is_ok_and(|resolved| resolved == canonical)
+        {
+            return canonical.join(suffix);
+        }
+    }
+    path
+}
+
+#[cfg(not(target_os = "macos"))]
+fn normalize_platform_root_alias(path: PathBuf) -> PathBuf {
+    path
+}
+
 fn walk_directory_components(
     path: &Path,
     label: &str,
@@ -1840,6 +1969,7 @@ fn walk_directory_components(
     } else {
         std::env::current_dir()?.join(path)
     };
+    let absolute = normalize_platform_root_alias(absolute);
     let mut current = PathBuf::new();
     for component in absolute.components() {
         match component {
@@ -2098,4 +2228,124 @@ fn set_private_file_permissions(path: &Path) -> Result<(), BackupError> {
 #[cfg(not(unix))]
 fn set_private_file_permissions(_path: &Path) -> Result<(), BackupError> {
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn staging_install_never_replaces_existing_directory() {
+        let temp = tempfile::tempdir().unwrap();
+        let staging = temp.path().join("staging");
+        let destination = temp.path().join("destination");
+        fs::create_dir(&staging).unwrap();
+        fs::write(staging.join("staged-marker"), b"staged").unwrap();
+        fs::create_dir(&destination).unwrap();
+        fs::write(destination.join("existing-marker"), b"existing").unwrap();
+
+        let error = install_staging_directory(&staging, &destination)
+            .expect_err("an existing destination directory must win the race");
+        assert!(
+            matches!(
+                error,
+                BackupError::Io(ref error)
+                    if error.kind() == std::io::ErrorKind::AlreadyExists
+            ),
+            "unexpected collision error: {error}"
+        );
+        assert_eq!(
+            fs::read(destination.join("existing-marker")).unwrap(),
+            b"existing"
+        );
+        assert!(!destination.join("staged-marker").exists());
+        assert_eq!(fs::read(staging.join("staged-marker")).unwrap(), b"staged");
+    }
+
+    #[test]
+    fn staging_install_never_replaces_existing_file() {
+        let temp = tempfile::tempdir().unwrap();
+        let staging = temp.path().join("staging");
+        let destination = temp.path().join("destination");
+        fs::create_dir(&staging).unwrap();
+        fs::write(staging.join("staged-marker"), b"staged").unwrap();
+        fs::write(&destination, b"existing-file").unwrap();
+
+        let error = install_staging_directory(&staging, &destination)
+            .expect_err("an existing destination file must win the race");
+        assert!(
+            matches!(
+                error,
+                BackupError::Io(ref error)
+                    if error.kind() == std::io::ErrorKind::AlreadyExists
+            ),
+            "unexpected collision error: {error}"
+        );
+        assert_eq!(fs::read(&destination).unwrap(), b"existing-file");
+        assert_eq!(fs::read(staging.join("staged-marker")).unwrap(), b"staged");
+    }
+
+    #[test]
+    fn concurrent_staging_installs_publish_exactly_one_directory() {
+        use std::sync::{Arc, Barrier};
+
+        let temp = tempfile::tempdir().unwrap();
+        let first = temp.path().join("first-staging");
+        let second = temp.path().join("second-staging");
+        let destination = temp.path().join("destination");
+        for (staging, marker) in [(&first, b"first".as_slice()), (&second, b"second".as_slice())] {
+            fs::create_dir(staging).unwrap();
+            fs::write(staging.join("marker"), marker).unwrap();
+        }
+
+        let barrier = Arc::new(Barrier::new(2));
+        let outcomes = std::thread::scope(|scope| {
+            let first_barrier = Arc::clone(&barrier);
+            let first_staging = first.as_path();
+            let first_destination = &destination;
+            let first_handle = scope.spawn(move || {
+                first_barrier.wait();
+                install_staging_directory(first_staging, first_destination)
+            });
+            let second_barrier = Arc::clone(&barrier);
+            let second_staging = second.as_path();
+            let second_destination = &destination;
+            let second_handle = scope.spawn(move || {
+                second_barrier.wait();
+                install_staging_directory(second_staging, second_destination)
+            });
+            [first_handle.join().unwrap(), second_handle.join().unwrap()]
+        });
+
+        assert_eq!(
+            outcomes.iter().filter(|outcome| outcome.is_ok()).count(),
+            1,
+            "exactly one atomic no-replace install must win"
+        );
+        let collision = outcomes
+            .iter()
+            .find_map(|outcome| outcome.as_ref().err())
+            .expect("one install must lose the destination collision");
+        assert!(
+            matches!(
+                collision,
+                BackupError::Io(error)
+                    if error.kind() == std::io::ErrorKind::AlreadyExists
+            ),
+            "unexpected collision error: {collision}"
+        );
+
+        let installed = fs::read(destination.join("marker")).unwrap();
+        match installed.as_slice() {
+            b"first" => {
+                assert!(!first.exists());
+                assert_eq!(fs::read(second.join("marker")).unwrap(), b"second");
+            }
+            b"second" => {
+                assert!(!second.exists());
+                assert_eq!(fs::read(first.join("marker")).unwrap(), b"first");
+            }
+            marker => panic!("unexpected installed marker: {marker:?}"),
+        }
+    }
 }

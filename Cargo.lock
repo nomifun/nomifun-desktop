@@ -5688,6 +5688,7 @@ dependencies = [
  "base64 0.22.1",
  "getrandom 0.2.17",
  "hmac 0.12.1",
+ "libc",
  "nomi-types",
  "semver",
  "serde",
@@ -5699,6 +5700,7 @@ dependencies = [
  "tracing",
  "ts-rs",
  "uuid",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -6313,7 +6315,6 @@ dependencies = [
  "nomifun-knowledge",
  "nomifun-realtime",
  "nomifun-runtime",
- "portable-pty",
  "reqwest 0.12.28",
  "serde",
  "serde_json",
@@ -6321,6 +6322,7 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tracing",
+ "uuid",
 ]
 
 [[package]]
