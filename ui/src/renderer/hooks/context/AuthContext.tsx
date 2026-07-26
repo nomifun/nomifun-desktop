@@ -17,18 +17,35 @@ export interface AuthUser {
   username: string;
 }
 
-const parseAuthUser = (value: unknown): AuthUser | null => {
+/**
+ * Map the auth response's explicit `user_id` wire field to the UI's shorter
+ * internal `id` field. Generic `id` is intentionally not a compatibility
+ * alias: accepting it would hide a backend contract regression.
+ */
+export const parseAuthUser = (value: unknown): AuthUser | null => {
   if (!value || typeof value !== 'object') return null;
-  const raw = value as { id?: unknown; username?: unknown };
-  if (typeof raw.username !== 'string') return null;
-  return { id: parseUserId(raw.id), username: raw.username };
+  const raw = value as { user_id?: unknown; id?: unknown; username?: unknown };
+  if (Object.prototype.hasOwnProperty.call(raw, 'id')) return null;
+  if (typeof raw.user_id !== 'string' || typeof raw.username !== 'string') return null;
+  return { id: parseUserId(raw.user_id), username: raw.username };
 };
 
 interface LoginParams {
   username: string;
   password: string;
-  remember?: boolean;
 }
+
+/**
+ * Keep browser-only login preferences out of the strict backend wire contract.
+ *
+ * "Remember me" controls LoginPage storage only. `POST /login` accepts exactly
+ * `{ username, password }`; adding UI state to this object makes Axum reject
+ * the request before credential verification.
+ */
+export const buildLoginRequestBody = ({ username, password }: LoginParams) => ({
+  username,
+  password,
+});
 
 interface SetupParams {
   username: string;
@@ -228,7 +245,7 @@ export const AuthProvider: React.FC<React.PropsWithChildren> = ({ children }) =>
     return () => window.removeEventListener(AUTH_EXPIRED_EVENT, handleAuthExpired);
   }, []);
 
-  const login = useCallback(async ({ username, password, remember }: LoginParams): Promise<LoginResult> => {
+  const login = useCallback(async (credentials: LoginParams): Promise<LoginResult> => {
     try {
       if (isDesktopRuntime) {
         setReady(true);
@@ -252,19 +269,20 @@ export const AuthProvider: React.FC<React.PropsWithChildren> = ({ children }) =>
           'Content-Type': 'application/json',
         },
         credentials: 'include',
-        body: JSON.stringify(withCsrfToken({ username, password, remember })),
+        body: JSON.stringify(withCsrfToken(buildLoginRequestBody(credentials))),
       });
 
       const data = (await response.json()) as {
         success: boolean;
         message?: string;
+        error?: string;
         user?: unknown;
       };
       const authenticatedUser = parseAuthUser(data.user);
 
       if (!response.ok || !data.success || !authenticatedUser) {
         let code: LoginErrorCode = 'unknown';
-        let message = data?.message ?? 'Login failed';
+        let message = data?.message ?? data?.error ?? 'Login failed';
         let shouldClearCache = false;
 
         if (response.status === 401) {

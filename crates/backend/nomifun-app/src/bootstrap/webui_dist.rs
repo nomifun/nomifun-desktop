@@ -33,30 +33,50 @@ pub fn validate_webui_dist(
     );
 
     let manifest_path = dist_dir.join(UI_BUILD_MANIFEST_FILE);
-    let manifest_json = fs::read_to_string(&manifest_path).with_context(|| {
+    let manifest_json = fs::read(&manifest_path).with_context(|| {
         format!(
             "WebUI build manifest is missing or unreadable at {}. Run `bun run build:ui` and restart the backend.",
             manifest_path.display()
         )
     })?;
-    let manifest: UiBuildManifest = serde_json::from_str(&manifest_json).with_context(|| {
+    validate_webui_manifest_bytes(
+        &manifest_json,
+        &manifest_path.display().to_string(),
+        expected_app_version,
+        expected_build_id,
+    )
+}
+
+/// Validate a WebUI build manifest supplied by a non-filesystem host.
+///
+/// Tauri custom-protocol builds keep `frontendDist` inside the executable, so
+/// the desktop cannot validate it through [`validate_webui_dist`]. Sharing this
+/// byte-level validator keeps the same schema/version/contract/build-ID guard
+/// for both embedded assets and directory-based hosts.
+pub fn validate_webui_manifest_bytes(
+    manifest_json: &[u8],
+    manifest_location: &str,
+    expected_app_version: &str,
+    expected_build_id: Option<&str>,
+) -> anyhow::Result<UiBuildManifest> {
+    let manifest: UiBuildManifest = serde_json::from_slice(manifest_json).with_context(|| {
         format!(
             "WebUI build manifest at {} is invalid or uses an unsupported legacy shape. Run `bun run build:ui` and restart the backend.",
-            manifest_path.display()
+            manifest_location
         )
     })?;
 
     ensure!(
         manifest.schema == UI_BUILD_MANIFEST_SCHEMA,
         "WebUI manifest schema mismatch at {}: expected {}, found {}. Run `bun run build:ui` and restart the backend.",
-        manifest_path.display(),
+        manifest_location,
         UI_BUILD_MANIFEST_SCHEMA,
         manifest.schema
     );
     ensure!(
         manifest.app_version == expected_app_version,
         "WebUI app_version mismatch at {}: backend expects {:?}, manifest contains {:?}. Run `bun run build:ui` and restart the backend.",
-        manifest_path.display(),
+        manifest_location,
         expected_app_version,
         manifest.app_version
     );
@@ -65,21 +85,21 @@ pub fn validate_webui_dist(
     ensure!(
         manifest.api_contract_version == expected_contract_version,
         "WebUI api_contract_version mismatch at {}: backend expects {}, manifest contains {}. Run `bun run build:ui` and restart the backend.",
-        manifest_path.display(),
+        manifest_location,
         expected_contract_version,
         manifest.api_contract_version
     );
     ensure!(
         !manifest.frontend_build_id.trim().is_empty(),
         "WebUI frontend_build_id is blank at {}. Run `bun run build:ui` and restart the backend.",
-        manifest_path.display()
+        manifest_location
     );
 
     if let Some(expected_build_id) = expected_build_id {
         ensure!(
             manifest.frontend_build_id == expected_build_id,
             "WebUI frontend_build_id mismatch at {}: backend expects {:?}, manifest contains {:?}. Run `bun run build:ui` and restart the backend.",
-            manifest_path.display(),
+            manifest_location,
             expected_build_id,
             manifest.frontend_build_id
         );

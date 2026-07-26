@@ -49,6 +49,8 @@ fn build_state(db: &nomifun_db::Database, version_check_service: VersionCheckSer
         protocol_detection_service: ProtocolDetectionService::new(http_client),
         version_check_service,
         data_dir: std::env::temp_dir(),
+        work_dir: std::env::temp_dir(),
+        work_dir_is_cli_override: false,
     }
 }
 

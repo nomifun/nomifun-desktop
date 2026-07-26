@@ -38,9 +38,14 @@ pub struct SystemRouterState {
     pub managed_model_service: Option<std::sync::Arc<ManagedModelService>>,
     pub protocol_detection_service: ProtocolDetectionService,
     pub version_check_service: VersionCheckService,
-    /// Data directory root — used to arm a factory reset (write the marker that
-    /// the next boot consumes). See `nomifun_common::factory_reset`.
+    /// Data directory root — used to arm the v3 reset request consumed by the
+    /// next boot. See `nomifun_common::factory_reset`.
     pub data_dir: PathBuf,
+    /// Canonical work root used by the live dataset. Explicit reset requests
+    /// are bound to this value so config/env changes cannot redirect them.
+    pub work_dir: PathBuf,
+    /// True when `--work-dir` has authoritative priority on every restart.
+    pub work_dir_is_cli_override: bool,
 }
 
 /// Build the system router (settings + client prefs + providers + system).
@@ -54,15 +59,15 @@ pub struct SystemRouterState {
 /// - `PUT  /api/settings/client`             — batch update client preferences
 /// - `GET  /api/providers`                   — list all providers
 /// - `POST /api/providers`                   — create a provider
-/// - `PUT  /api/providers/:id`               — update a provider
-/// - `DELETE /api/providers/:id`             — delete a provider
-/// - `POST /api/providers/:id/models`        — fetch models from remote API
+/// - `PUT  /api/providers/:provider_id`      — update a provider
+/// - `DELETE /api/providers/:provider_id`    — delete a provider
+/// - `POST /api/providers/:provider_id/models` — fetch models from remote API
 /// - `POST /api/providers/fetch-models`      — fetch models anonymously (pre-create preview)
 /// - `POST /api/providers/detect-protocol`   — detect API protocol
 /// - `GET  /api/system/info`                 — system directory & platform info
 /// - `POST /api/system/check-update`         — check GitHub for new versions
 /// - `POST /api/system/factory-reset`        — arm a factory reset (wipes on next boot)
-/// - `POST /api/system/work-dir`             — persist the work dir (applies on next restart)
+/// - `POST /api/system/work-dir`             — request a restart-time work-root change
 pub fn system_routes(state: SystemRouterState) -> Router {
     Router::new()
         .route("/api/settings", get(get_settings).patch(update_settings))
@@ -71,7 +76,7 @@ pub fn system_routes(state: SystemRouterState) -> Router {
             get(get_client_preferences).put(update_client_preferences),
         )
         .route("/api/providers", get(list_providers).post(create_provider))
-        // Literal-segment routes must register BEFORE the `/{id}` routes so
+        // Literal-segment routes must register BEFORE the provider routes so
         // axum matches the literals instead of treating "detect-protocol" /
         // "fetch-models" as a provider id.
         .route("/api/providers/detect-protocol", post(detect_protocol))
@@ -85,15 +90,21 @@ pub fn system_routes(state: SystemRouterState) -> Router {
         )
         .route("/api/model-services/free/activate", post(activate_free_models))
         .route(
-            "/api/model-services/free/models/{id}/health",
+            "/api/model-services/free/models/{model_id}/health",
             post(check_free_model_health),
         )
         .route(
-            "/api/model-services/free/models/{id}",
+            "/api/model-services/free/models/{model_id}",
             patch(set_free_model_enabled),
         )
-        .route("/api/providers/{id}", delete(delete_provider).put(update_provider))
-        .route("/api/providers/{id}/models", post(fetch_models))
+        .route(
+            "/api/providers/{provider_id}",
+            delete(delete_provider).put(update_provider),
+        )
+        .route(
+            "/api/providers/{provider_id}/models",
+            post(fetch_models),
+        )
         // Multimodal model hub: authoritative per-model capability profiles.
         .route("/api/model-profiles", get(list_model_profiles).post(upsert_model_profile))
         .route("/api/model-profiles/delete", post(delete_model_profile))
@@ -187,29 +198,32 @@ async fn create_provider(
 
 async fn update_provider(
     State(state): State<SystemRouterState>,
-    Path(id): Path<String>,
+    Path(provider_id): Path<String>,
     body: Result<Json<UpdateProviderRequest>, JsonRejection>,
 ) -> Result<Json<ApiResponse<ProviderResponse>>, AppError> {
     let Json(req) = body.map_err(|e| AppError::BadRequest(e.to_string()))?;
-    let provider = state.provider_service.update(&id, req).await?;
+    let provider = state.provider_service.update(&provider_id, req).await?;
     Ok(Json(ApiResponse::ok(provider)))
 }
 
 async fn delete_provider(
     State(state): State<SystemRouterState>,
-    Path(id): Path<String>,
+    Path(provider_id): Path<String>,
 ) -> Result<Json<ApiResponse<()>>, AppError> {
-    state.provider_service.delete(&id).await?;
+    state.provider_service.delete(&provider_id).await?;
     Ok(Json(ApiResponse::success()))
 }
 
 async fn fetch_models(
     State(state): State<SystemRouterState>,
-    Path(id): Path<String>,
+    Path(provider_id): Path<String>,
     body: Result<Json<FetchModelsRequest>, JsonRejection>,
 ) -> Result<Json<ApiResponse<FetchModelsResponse>>, AppError> {
     let Json(req) = body.map_err(|e| AppError::BadRequest(e.to_string()))?;
-    let result = state.model_fetch_service.fetch_models(&id, &req).await?;
+    let result = state
+        .model_fetch_service
+        .fetch_models(&provider_id, &req)
+        .await?;
     Ok(Json(ApiResponse::ok(result)))
 }
 
@@ -305,10 +319,10 @@ async fn get_free_model_health(
 
 async fn check_free_model_health(
     State(state): State<SystemRouterState>,
-    Path(id): Path<String>,
+    Path(model_id): Path<String>,
 ) -> Result<Json<ApiResponse<ManagedModelHealthResult>>, AppError> {
     let service = managed_service(&state)?;
-    let result = service.check_free_model_health(&id).await?;
+    let result = service.check_free_model_health(&model_id).await?;
     Ok(Json(ApiResponse::ok(result)))
 }
 
@@ -334,12 +348,12 @@ async fn activate_free_models(
 
 async fn set_free_model_enabled(
     State(state): State<SystemRouterState>,
-    Path(id): Path<String>,
+    Path(model_id): Path<String>,
     body: Result<Json<SetManagedModelEnabledRequest>, JsonRejection>,
 ) -> Result<Json<ApiResponse<ManagedModelServiceStatus>>, AppError> {
     let Json(req) = body.map_err(|e| AppError::BadRequest(e.to_string()))?;
     let status = managed_service(&state)?
-        .set_free_model_enabled(&id, req.enabled)
+        .set_free_model_enabled(&model_id, req.enabled)
         .await?;
     Ok(Json(ApiResponse::ok(status)))
 }
@@ -418,8 +432,21 @@ async fn check_update(
 /// after this returns. Nothing is deleted synchronously here — that would race
 /// with the live connection pool and the background write loops.
 async fn factory_reset(State(state): State<SystemRouterState>) -> Result<Json<ApiResponse<()>>, AppError> {
-    let marker = nomifun_common::factory_reset::ResetMarker::new(nomifun_common::factory_reset::ResetScope::Full);
-    nomifun_common::factory_reset::write_marker(&state.data_dir, &marker)?;
+    nomifun_common::factory_reset::require_safe_data_work_root_layout(
+        &state.data_dir,
+        &state.work_dir,
+    )
+    .map_err(|_| {
+        AppError::Conflict(
+            "factory reset is unsafe because the active work directory overlaps \
+             a product-managed data root; first change to a separate working directory"
+                .into(),
+        )
+    })?;
+    nomifun_common::factory_reset::request_v3_dataset_reset(
+        &state.data_dir,
+        &state.work_dir,
+    )?;
     tracing::warn!(target: "factory_reset", "factory reset armed — will wipe database and derived data on next restart");
     Ok(Json(ApiResponse::success()))
 }
@@ -428,12 +455,13 @@ async fn factory_reset(State(state): State<SystemRouterState>) -> Result<Json<Ap
 // Work directory handler
 // ===========================================================================
 
-/// Persist the user-chosen working directory. Like factory reset, this only
-/// takes effect on the *next* boot: the backend resolves `work_dir` (and injects
-/// it into every service) before the HTTP server even exists, so the value
-/// cannot change in the running process. The stored path is read early next boot
-/// by `bootstrap::work_dir::resolve_work_dir` (see `nomifun_common::dir_config`).
-/// The client should restart the app right after this returns.
+/// Request a user-chosen working directory. This only takes effect on the next
+/// boot: the backend resolves `work_dir` before the HTTP server exists.
+///
+/// Changing the root of a finalized v3 dataset also arms one durable reset so
+/// database/side-store IDs cannot be attached to an unrelated workspace. The
+/// old workspace is not migrated or deleted. The request is consumed by the
+/// immutable reset plan, so later boots do not reset the new generation again.
 ///
 /// The new path is validated to be a non-empty, absolute, creatable directory so
 /// the next boot does not fail on an unusable value.
@@ -442,6 +470,12 @@ async fn set_work_dir(
     body: Result<Json<UpdateWorkDirRequest>, JsonRejection>,
 ) -> Result<Json<ApiResponse<()>>, AppError> {
     let Json(req) = body.map_err(|e| AppError::BadRequest(e.to_string()))?;
+    if state.work_dir_is_cli_override {
+        return Err(AppError::Conflict(
+            "the working directory is controlled by the --work-dir startup option; remove that option before changing it in Settings"
+                .into(),
+        ));
+    }
 
     let trimmed = req.work_dir.trim();
     if trimmed.is_empty() {
@@ -458,6 +492,16 @@ async fn set_work_dir(
     if nomifun_common::workspace_path_has_edge_whitespace_segment(&path) {
         return Err(AppError::WorkspacePathEdgeWhitespace(path.display().to_string()));
     }
+    let current_work_dir =
+        nomifun_common::factory_reset::finalized_v3_work_dir(
+            &state.data_dir,
+        )?
+        .ok_or_else(|| {
+            AppError::Conflict(
+                "the current dataset has no finalized v3 work-root binding; preserving it without changing directories"
+                    .into(),
+            )
+        })?;
     // Create it now so we (a) confirm the location is writable and (b) reject a
     // path that collides with an existing file — both would otherwise surface as
     // a confusing failure on the next boot.
@@ -470,11 +514,48 @@ async fn set_work_dir(
         )));
     }
 
-    nomifun_common::dir_config::set_work_dir(&state.data_dir, &path)?;
-    tracing::info!(
-        target: "system",
-        work_dir = %path.display(),
-        "work dir override persisted — applies on next restart"
-    );
+    let canonical = std::fs::canonicalize(&path).map_err(|error| {
+        AppError::BadRequest(format!(
+            "cannot canonicalize work_dir {}: {error}",
+            path.display()
+        ))
+    })?;
+    if let Some(pending_work_dir) =
+        nomifun_common::factory_reset::requested_v3_reset_work_dir(
+            &state.data_dir,
+        )?
+        && pending_work_dir != canonical
+    {
+        return Err(AppError::Conflict(format!(
+            "a restart-time dataset operation is already bound to {}; restart NomiFun before requesting another work directory",
+            pending_work_dir.display()
+        )));
+    }
+    match current_work_dir {
+        current if current == canonical => {
+            // Repair or refresh only the host-local control pointer; the
+            // dataset binding is already correct, so no reset is needed.
+            nomifun_common::dir_config::set_work_dir(
+                &state.data_dir,
+                &canonical,
+            )?;
+            tracing::info!(
+                target: "system",
+                work_dir = %canonical.display(),
+                "work dir override refreshed without changing dataset generation"
+            );
+        }
+        _ => {
+            nomifun_common::factory_reset::request_v3_dataset_reset_for_work_dir(
+                &state.data_dir,
+                &canonical,
+            )?;
+            tracing::warn!(
+                target: "system",
+                work_dir = %canonical.display(),
+                "work dir change armed a one-shot fresh v3 dataset; historical data will not be migrated"
+            );
+        }
+    }
     Ok(Json(ApiResponse::success()))
 }

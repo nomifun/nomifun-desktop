@@ -9,7 +9,6 @@ mod bind;
 mod boot_log;
 mod builtin_skills;
 mod environment;
-mod relocation;
 mod server_lock;
 mod tracing_init;
 mod webui_dist;
@@ -18,12 +17,16 @@ mod work_dir;
 pub use admin::{AdminBootstrap, ensure_admin_credentials};
 pub use bind::{PORT_FILE, PortAnnouncement, SCAN_SPAN, announce_bound_port, bind_with_fallback, write_port_file};
 pub use boot_log::{BootNoteLevel, record_boot_note};
-pub use environment::{ServerEnvironment, init_data_layer, init_environment};
-pub use relocation::{RELOCATED_DONE_MARKER, RELOCATED_FROM_MARKER, RelocationMarker, rewrite_relocated_paths};
-pub use server_lock::{SERVER_LOCK_FILE, ServerLock};
+pub use environment::{
+    ServerEnvironment, finalize_data_layer, init_data_layer, init_environment,
+};
+pub(crate) use environment::{
+    acquire_distinct_work_root_lock, acquire_work_root_lock,
+};
+pub use server_lock::{BootServerLockAuthority, SERVER_LOCK_FILE, ServerLock};
 pub use webui_dist::{
     UI_BUILD_MANIFEST_FILE, UI_BUILD_MANIFEST_SCHEMA, UiBuildManifest, ui_api_contract_version,
-    validate_webui_dist,
+    validate_webui_dist, validate_webui_manifest_bytes,
 };
 pub(crate) use work_dir::resolve_work_dir;
 

@@ -50,6 +50,8 @@ async fn setup() -> (
         protocol_detection_service: ProtocolDetectionService::new(http.clone()),
         version_check_service: VersionCheckService::new(http, "0.1.0".into()),
         data_dir: std::env::temp_dir(),
+        work_dir: std::env::temp_dir(),
+        work_dir_is_cli_override: false,
     };
     (system_routes(state), db, server)
 }

@@ -37,6 +37,7 @@ struct SessionEntry {
     owner: ProcessOwner,
     session: Arc<Session>,
     lease: Duration,
+    expire_on_idle: bool,
     lease_expires_at: Instant,
     last_used: Instant,
     in_flight_actions: usize,
@@ -80,6 +81,12 @@ pub(crate) enum LookupError {
 pub(crate) struct ShutdownSnapshot {
     pub(crate) reservations: usize,
     pub(crate) retirements: Vec<Arc<Retirement>>,
+}
+
+pub(crate) struct QuiesceSession {
+    pub(crate) id: SessionId,
+    pub(crate) owner: ProcessOwner,
+    pub(crate) session: Arc<Session>,
 }
 
 impl Registry {
@@ -132,6 +139,7 @@ impl Registry {
         owner: ProcessOwner,
         session: Arc<Session>,
         lease: Duration,
+        expire_on_idle: bool,
         now: Instant,
     ) -> CommitResult {
         let result = {
@@ -152,6 +160,7 @@ impl Registry {
                         owner,
                         session,
                         lease,
+                        expire_on_idle,
                         lease_expires_at: lease_deadline(now, lease),
                         last_used: now,
                         in_flight_actions: 0,
@@ -277,7 +286,9 @@ impl Registry {
                 .active
                 .iter()
                 .filter_map(|(id, entry)| {
-                    (entry.in_flight_actions == 0 && entry.lease_expires_at <= now)
+                    (entry.expire_on_idle
+                        && entry.in_flight_actions == 0
+                        && entry.lease_expires_at <= now)
                         .then_some(*id)
                 })
                 .collect::<Vec<_>>();
@@ -300,6 +311,30 @@ impl Registry {
             .filter(|retirement| retirement.outcome().is_none())
             .cloned()
             .collect()
+    }
+
+    /// Snapshot every process authority currently owned by the supervisor.
+    ///
+    /// The caller holds the supervisor's exclusive start-admission lease, so
+    /// no newly admitted process can appear until this snapshot is drained.
+    pub(crate) fn quiesce_snapshot(
+        &self,
+    ) -> (Vec<QuiesceSession>, Vec<Arc<Retirement>>) {
+        let state = self
+            .state
+            .lock()
+            .expect("process registry lock is poisoned");
+        let sessions = state
+            .active
+            .iter()
+            .map(|(id, entry)| QuiesceSession {
+                id: *id,
+                owner: entry.owner.clone(),
+                session: Arc::clone(&entry.session),
+            })
+            .collect();
+        let retirements = state.retiring.values().cloned().collect();
+        (sessions, retirements)
     }
 
     pub(crate) fn finish_retirement(
@@ -466,6 +501,7 @@ impl Registry {
         owner: ProcessOwner,
         session: Arc<Session>,
         lease: Duration,
+        expire_on_idle: bool,
         now: Instant,
     ) -> CommitResult {
         self.commit(
@@ -474,6 +510,7 @@ impl Registry {
             owner,
             session,
             lease,
+            expire_on_idle,
             now,
         )
     }
