@@ -18,7 +18,7 @@ pub use command_builder::{
     ChildProcessBuilder, ChildProcessCleanup, kill_process_tree, merge_process_path,
     resolve_command_in, resolve_command_path,
 };
-pub use io::OutputBuffer;
+pub use io::{OutputBuffer, OutputObserver};
 pub use outcome::{
     CleanupReport, EncodingMetadata, ProcessEvent, ProcessOutcome, OutputChunk, OutputCursor,
     OutputSnapshot, OutputStream, ProcessSnapshot, ProcessState, SessionId, SpawnFailure,

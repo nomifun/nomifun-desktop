@@ -99,6 +99,7 @@ pub struct AppServices {
     pub encryption_key: [u8; 32],
     pub data_dir: PathBuf,
     pub work_dir: PathBuf,
+    pub work_dir_is_cli_override: bool,
     /// Authentication policy (single source of truth, replaces `local: bool`).
     pub auth_policy: AuthPolicy,
     /// Per-boot secret the desktop's own webview presents to be trusted as the
@@ -239,6 +240,7 @@ impl AppServices {
 
         let data_dir = config.data_dir.clone();
         let work_dir = config.work_dir.clone();
+        let work_dir_is_cli_override = config.work_dir_is_cli_override;
         // The on-device model feature has been retired. Remove its managed
         // models, runtimes, partial downloads, ASR jobs, and persisted state so
         // upgrades do not leave multi-gigabyte orphaned data behind.
@@ -758,10 +760,10 @@ impl AppServices {
             provider_lifecycle.clone(),
         );
         if let Err(error) = workshop_service.audit_managed_data_on_boot().await {
-            nomifun_common::factory_reset::request_v3_dataset_reset(&data_dir)?;
             anyhow::bail!(
                 "managed Workshop data failed its startup integrity audit; \
-                 a full dataset reset has been scheduled: {error}"
+                 the existing dataset has been preserved; request an explicit factory reset \
+                 to replace it: {error}"
             );
         }
         // The generation engine resolves provider rows (endpoint + decrypted key,
@@ -793,10 +795,10 @@ impl AppServices {
         // could persist an asset between the task snapshot and Workshop scan
         // and be mistaken for an orphan by detached boot cleanup.
         if let Err(error) = creation_service.audit_managed_data_on_boot().await {
-            nomifun_common::factory_reset::request_v3_dataset_reset(&data_dir)?;
             anyhow::bail!(
                 "managed creation data failed its startup integrity audit; \
-                 a full dataset reset has been scheduled: {error}"
+                 the existing dataset has been preserved; request an explicit factory reset \
+                 to replace it: {error}"
             );
         }
         creation_service
@@ -957,6 +959,7 @@ impl AppServices {
             encryption_key,
             data_dir,
             work_dir,
+            work_dir_is_cli_override,
             auth_policy,
             local_trust_secret,
             app_version,

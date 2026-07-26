@@ -12,6 +12,13 @@ use crate::outcome::{
     EncodingMetadata, ProcessEvent, OutputChunk, OutputCursor, OutputSnapshot, OutputStream,
 };
 
+/// Lossless observer invoked directly on each raw transport read before the
+/// bounded replay buffer can evict older bytes.
+///
+/// The observer runs inline on the transport reader and must remain
+/// non-blocking; hand expensive or asynchronous work to another task.
+pub type OutputObserver = Arc<dyn Fn(OutputStream, &[u8]) + Send + Sync + 'static>;
+
 const UTF8_LABEL: &str = "utf-8";
 const DECODE_SCRATCH_BYTES: usize = 4 * 1024;
 // Retained text may use UTF-8's fixed maximum of four bytes per decoded scalar. The raw
@@ -28,6 +35,7 @@ pub struct OutputBuffer {
     limit: usize,
     inner: Mutex<OutputBufferState>,
     activity: Option<Arc<dyn Fn() + Send + Sync>>,
+    observer: Option<OutputObserver>,
     changed: tokio::sync::watch::Sender<u64>,
 }
 
@@ -73,6 +81,7 @@ impl OutputBuffer {
                 finalized: false,
             }))),
             activity: None,
+            observer: None,
             changed,
         }
     }
@@ -83,6 +92,16 @@ impl OutputBuffer {
     ) -> Self {
         let mut output = Self::new(limit_bytes);
         output.activity = Some(activity);
+        output
+    }
+
+    pub(crate) fn with_activity_and_observer(
+        limit_bytes: usize,
+        activity: Arc<dyn Fn() + Send + Sync>,
+        observer: OutputObserver,
+    ) -> Self {
+        let mut output = Self::with_activity(limit_bytes, activity);
+        output.observer = Some(observer);
         output
     }
 
@@ -133,6 +152,15 @@ impl OutputBuffer {
             && let Some(activity) = &self.activity
         {
             activity();
+        }
+        if !bytes.is_empty()
+            && let Some(observer) = &self.observer
+            && std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                observer(stream, bytes);
+            }))
+            .is_err()
+        {
+            tracing::warn!("process output observer panicked; transport reader remains active");
         }
         if !bytes.is_empty() {
             self.changed.send_modify(|generation| {
@@ -803,10 +831,46 @@ mod tests {
         thread,
     };
 
-    use super::{FrozenOutput, OutputBuffer, OutputBufferState};
+    use super::{FrozenOutput, OutputBuffer, OutputBufferState, OutputObserver};
     use crate::{ProcessEvent, OutputCursor, OutputStream};
 
     const MAX_DECODED_TEXT_BYTES_PER_SOURCE_BYTE: usize = 4;
+
+    #[test]
+    fn raw_observer_sees_bytes_evicted_from_the_replay_ring() {
+        let observed = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let observed_callback = Arc::clone(&observed);
+        let observer: OutputObserver = Arc::new(move |_stream, bytes| {
+            observed_callback.lock().unwrap().extend_from_slice(bytes);
+        });
+        let output = OutputBuffer::with_activity_and_observer(
+            4,
+            Arc::new(|| {}),
+            observer,
+        );
+
+        output.push(OutputStream::Pty, b"0123456789");
+
+        assert_eq!(&*observed.lock().unwrap(), b"0123456789");
+        assert_eq!(
+            output.snapshot_from(OutputCursor::START).raw_bytes(),
+            b"6789"
+        );
+    }
+
+    #[test]
+    fn observer_panic_is_contained_and_later_output_is_still_retained() {
+        let observer: OutputObserver = Arc::new(|_stream, _bytes| panic!("observer fault"));
+        let output =
+            OutputBuffer::with_activity_and_observer(16, Arc::new(|| {}), observer);
+
+        output.push(OutputStream::Pty, b"still-readable");
+
+        assert_eq!(
+            output.snapshot_from(OutputCursor::START).raw_bytes(),
+            b"still-readable"
+        );
+    }
 
     fn retained_allocation(output: &OutputBuffer) -> Option<(*const u8, usize)> {
         let storage = output.inner.lock().expect("fresh mutex must lock");
