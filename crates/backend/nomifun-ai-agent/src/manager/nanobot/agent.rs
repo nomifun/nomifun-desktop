@@ -11,7 +11,10 @@ use nomifun_common::CommandSpec;
 
 use crate::runtime_state::{AgentRuntimeState, AgentRuntimeTurn};
 use crate::capability::cli_process::CliAgentProcess;
-use crate::manager::process_registry::register_session_process;
+use crate::factory::construction_guard::ConstructionGuard;
+use crate::manager::process_registry::{
+    register_session_process, unregister_agent_process,
+};
 use crate::protocol::events::{AgentStreamEvent, ErrorEventData, TurnStopReason};
 use crate::protocol::send_error::AgentSendError;
 use crate::types::{SendMessageData, inject_runtime_preset_context};
@@ -144,21 +147,64 @@ impl NanobotAgentManager {
         let spawn_config = Self::build_spawn_config(cli_path, &workspace);
         let command_preview = spawn_config.command.display().to_string();
         let process = Arc::new(CliAgentProcess::spawn(spawn_config).await?);
-        register_session_process(
+        let mut process_guard = ConstructionGuard::new(
+            Arc::clone(&process),
+            "Nanobot CLI process",
+            CliAgentProcess::request_exact_tree_cleanup,
+        );
+        if let Err(error) = register_session_process(
             &data_dir,
             Arc::clone(&process),
             conversation_id.clone(),
             AgentType::Nanobot,
             None,
             Some(command_preview),
-        )?;
+        ) {
+            return Err(
+                process_guard
+                    .teardown_before_error(error, |process| async move {
+                        process
+                            .kill(Duration::from_millis(NANOBOT_KILL_GRACE_MS))
+                            .await
+                    })
+                    .await,
+            );
+        }
 
-        let raw_rx = process
-            .take_initial_receiver()
-            .expect("Initial receiver should be available immediately after spawn");
+        let raw_rx = match process.take_initial_receiver() {
+            Some(receiver) => receiver,
+            None => {
+                let data_dir = data_dir.clone();
+                return Err(
+                    process_guard
+                        .teardown_before_error(
+                            AppError::Internal(
+                                "Nanobot initial event receiver was unavailable after spawn"
+                                    .into(),
+                            ),
+                            move |process| {
+                                let data_dir = data_dir.clone();
+                                async move {
+                                    let result = process
+                                        .kill(Duration::from_millis(NANOBOT_KILL_GRACE_MS))
+                                        .await;
+                                    if result.is_ok() {
+                                        let _ = unregister_agent_process(
+                                            &data_dir,
+                                            process.pid(),
+                                        );
+                                    }
+                                    result
+                                }
+                            },
+                        )
+                        .await,
+                );
+            }
+        };
         let runtime = AgentRuntimeState::new(conversation_id, workspace, 256);
 
-        Ok(Self {
+        let manager = Self {
             runtime,
             process,
             state: RwLock::new(NanobotState {
@@ -168,7 +214,9 @@ impl NanobotAgentManager {
             raw_rx: Mutex::new(Some(raw_rx)),
             preset_context,
             turn_boundary_recycle_required: AtomicBool::new(false),
-        })
+        };
+        process_guard.disarm();
+        Ok(manager)
     }
 
     fn build_spawn_config(cli_path: PathBuf, workspace: &str) -> CommandSpec {
@@ -524,10 +572,97 @@ impl NanobotAgentManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
+    use crate::manager::process_registry::agent_process_registry_path;
     use crate::protocol::events::{
         FinishEventData, StartEventData, TextEventData, ToolCallEventData,
         ToolCallStatus,
     };
+
+    #[cfg(unix)]
+    fn endless_test_cli() -> PathBuf {
+        ["/usr/bin/yes", "/bin/yes"]
+            .into_iter()
+            .map(PathBuf::from)
+            .find(|path| path.is_file())
+            .expect("the Unix test host should provide yes(1)")
+    }
+
+    #[cfg(unix)]
+    fn process_exists(pid: libc::pid_t) -> bool {
+        if unsafe { libc::kill(pid, 0) } == 0 {
+            return true;
+        }
+        std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH)
+    }
+
+    #[cfg(unix)]
+    fn process_group_exists(process_group_id: libc::pid_t) -> bool {
+        if unsafe { libc::kill(-process_group_id, 0) } == 0 {
+            return true;
+        }
+        std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH)
+    }
+
+    #[cfg(unix)]
+    fn pid_from_registry_error(error: &AppError) -> libc::pid_t {
+        error
+            .to_string()
+            .split_once("agent process ")
+            .and_then(|(_, remainder)| remainder.split_once(" in runtime registry"))
+            .and_then(|(pid, _)| pid.parse().ok())
+            .expect("registration error should retain the exact spawned pid")
+    }
+
+    #[cfg(unix)]
+    async fn wait_for_process_tree_exit(pid: libc::pid_t) {
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while process_exists(pid) || process_group_exists(pid) {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("construction failure returned before the spawned process tree exited");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn registry_failure_keeps_nanobot_construction_pending_until_tree_exit() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+
+        // A directory at the file destination makes durable registration fail
+        // after spawn. This is the regression boundary: the factory future
+        // must retain its construction slot while the old process group is
+        // still alive, rather than exposing Err and admitting another spawn.
+        std::fs::create_dir_all(agent_process_registry_path(data_dir.path()))
+            .unwrap();
+
+        let build = tokio::spawn(NanobotAgentManager::new(
+            "nanobot-construction-registry-failure".into(),
+            workspace.path().to_string_lossy().into_owned(),
+            endless_test_cli(),
+            data_dir.path().to_path_buf(),
+            None,
+        ));
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(
+            !build.is_finished(),
+            "Nanobot exposed a construction error while its old process tree was alive"
+        );
+
+        let result = tokio::time::timeout(Duration::from_secs(5), build)
+            .await
+            .expect("Nanobot exact construction cleanup timed out")
+            .expect("Nanobot construction task panicked");
+        let error = match result {
+            Err(error) => error,
+            Ok(_) => panic!("registry destination directory must reject registration"),
+        };
+        assert!(error.to_string().contains("runtime registry"));
+        let pid = pid_from_registry_error(&error);
+        wait_for_process_tree_exit(pid).await;
+    }
 
     #[test]
     fn build_spawn_config_basic() {

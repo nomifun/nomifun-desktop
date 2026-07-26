@@ -440,5 +440,5 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
 //
 // 11. `nomi_system_factory_reset` (Destructive, deny_on Channel+Remote)
 //     Needs: `deps.data_dir: PathBuf`
-//     Method: `nomifun_common::factory_reset::request_v3_dataset_reset(&data_dir)`
+//     Method: `nomifun_common::factory_reset::request_v3_dataset_reset(&data_dir, &work_dir)`
 //     Not wired because data_dir is not in the assumed GatewayDeps.

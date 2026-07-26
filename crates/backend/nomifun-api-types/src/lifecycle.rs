@@ -26,9 +26,10 @@ pub struct UpdateCheckRequest {
     pub repo: Option<String>,
 }
 
-/// Request body for `POST /api/system/work-dir`: persist the user-chosen
-/// conversation workspace root. Applied on the next boot (the backend resolves
-/// `work_dir` before any service starts), so the client restarts after this.
+/// Request body for `POST /api/system/work-dir`: request a user-chosen
+/// conversation workspace root for the next boot. Changing a finalized
+/// dataset's root creates one fresh v3 generation; historical data is not
+/// migrated.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct UpdateWorkDirRequest {

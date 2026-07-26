@@ -40,6 +40,8 @@ fn build_state(db: &nomifun_db::Database) -> SystemRouterState {
         protocol_detection_service: ProtocolDetectionService::new(http_client.clone()),
         version_check_service: VersionCheckService::new(http_client, "0.1.0".to_owned()),
         data_dir: std::env::temp_dir(),
+        work_dir: std::env::temp_dir(),
+        work_dir_is_cli_override: false,
     }
 }
 

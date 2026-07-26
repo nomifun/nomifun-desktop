@@ -1,6 +1,7 @@
 //! Terminal sessions: PTY-backed interactive sessions managed alongside
-//! conversations. Owns a `portable-pty` per session, streams output over the
-//! realtime WebSocket broadcaster, and persists session metadata in SQLite.
+//! conversations. PTY process lifetimes are owned by `nomi-process-runtime`,
+//! output is streamed over the realtime WebSocket broadcaster, and session
+//! metadata is persisted in SQLite.
 
 pub mod ansi;
 pub mod driver;

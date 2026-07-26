@@ -267,6 +267,21 @@ pub(super) fn acquire_server_lock(data_dir: &Path) -> Result<ServerLock> {
 fn acquire_server_lock_with_timeout(data_dir: &Path, timeout: Duration) -> Result<ServerLock> {
     std::fs::create_dir_all(data_dir)
         .with_context(|| format!("failed to create data dir {}", data_dir.display()))?;
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0000_0400;
+        let metadata = std::fs::symlink_metadata(data_dir)
+            .with_context(|| format!("failed to inspect data dir {}", data_dir.display()))?;
+        if !metadata.is_dir()
+            || metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+        {
+            bail!(
+                "data directory must be a real directory, not a junction/reparse point: {}",
+                data_dir.display()
+            );
+        }
+    }
     let data_dir_identity = std::fs::canonicalize(data_dir)
         .with_context(|| format!("failed to resolve data dir {}", data_dir.display()))?;
     let data_dir_file_identity = file_system_identity(&data_dir_identity)
@@ -338,6 +353,11 @@ fn acquire_server_lock_with_timeout(data_dir: &Path, timeout: Duration) -> Resul
 }
 
 impl ServerLock {
+    /// Canonical directory whose lock handle is retained by this value.
+    pub(crate) fn protected_data_dir(&self) -> &Path {
+        &self.data_dir_path
+    }
+
     pub(super) fn boot_authority(self: &Arc<Self>) -> BootServerLockAuthority {
         BootServerLockAuthority {
             _server_lock: Arc::clone(self),

@@ -18,6 +18,9 @@ pub struct AppConfig {
     pub port: u16,
     pub data_dir: PathBuf,
     pub work_dir: PathBuf,
+    /// The effective work root came from an explicit `--work-dir` flag.
+    /// Runtime settings must not pretend they can override that next boot.
+    pub work_dir_is_cli_override: bool,
     pub app_version: String,
     /// Authentication policy (single source of truth, replaces the old
     /// `local: bool`). Desktop = `TrustLocalToken`; standalone web = `Required`;
@@ -75,6 +78,7 @@ impl Default for AppConfig {
             port: nomifun_common::constants::DEFAULT_PORT,
             data_dir: PathBuf::from("data"),
             work_dir: PathBuf::from("data"),
+            work_dir_is_cli_override: false,
             app_version: env!("CARGO_PKG_VERSION").to_string(),
             auth_policy: AuthPolicy::Required,
             local_trust_secret: None,

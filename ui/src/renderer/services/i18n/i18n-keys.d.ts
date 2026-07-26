@@ -4393,6 +4393,8 @@ export type I18nKey =
   | 'settings.weixin.step2'
   | 'settings.weixin.step3'
   | 'settings.workDir'
+  | 'settings.workDirChangeConfirmContent'
+  | 'settings.workDirChangeConfirmTitle'
   | 'settings.yoloMode'
   | 'starOffice.monitor.assistPromptInstalled'
   | 'starOffice.monitor.checking'

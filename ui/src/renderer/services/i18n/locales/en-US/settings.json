@@ -487,6 +487,8 @@
   "baseUrlAutoFix": "base_url auto fix to: {{base_url}}",
   "updateConfirm": "Confirm Changes",
   "restartConfirm": "Changes will restart the application. Continue?",
+  "workDirChangeConfirmTitle": "Change the working directory and create a new dataset?",
+  "workDirChangeConfirmContent": "NomiFun will restart and create a brand-new v3 dataset. Historical data will not be migrated. Files in the previous working directory will be kept, but NomiFun will no longer load them. The new folder must not already contain a “conversations” folder. Continue?",
   "theme": "Theme",
   "fontSize": "Scale",
   "fontSizeDescription": "Adjust the UI zoom level so the entire interface matches your preferred size.",

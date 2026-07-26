@@ -97,13 +97,13 @@ pub fn resolve_command(command: &str, args: &[String]) -> (String, Vec<String>) 
 }
 
 /// Resolve a bare command name to its absolute executable path so the PTY
-/// backend (portable-pty) launches the intended file.
+/// process runtime launches the intended file.
 ///
-/// portable-pty's own Windows `PATH` search picks the extension-less npm
-/// shell shim (e.g. `…\npm\claude`), which `CreateProcessW` rejects with
-/// "not a valid Win32 application" (os error 193). `resolve_command_path`
-/// honours `PATHEXT` plus the `.cmd / .ps1 / .bat` fallback, so `claude`
-/// resolves to `…\claude.cmd` — which ConPTY runs correctly.
+/// A naïve Windows `PATH` search can pick the extension-less npm shell shim
+/// (e.g. `…\npm\claude`), which `CreateProcessW` rejects with "not a valid
+/// Win32 application" (os error 193). `resolve_command_path` honours `PATHEXT`
+/// plus the `.cmd / .ps1 / .bat` fallback, so `claude` resolves to
+/// `…\claude.cmd` — which ConPTY runs correctly.
 ///
 /// Inputs that already contain a path separator (an absolute path, or the
 /// expanded login shell) or that don't resolve are returned unchanged.
@@ -249,7 +249,7 @@ mod tests {
     #[test]
     fn resolve_command_resolves_bare_name_to_absolute_path() {
         // A bare command present on PATH must resolve to an absolute executable
-        // path so the PTY backend (portable-pty) launches the real file. On
+        // path so the PTY process runtime launches the real file. On
         // Windows this is what turns an npm `claude` shim into `claude.cmd`
         // instead of the extension-less shell script CreateProcessW rejects
         // (os error 193).

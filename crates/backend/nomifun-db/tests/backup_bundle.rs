@@ -1,6 +1,9 @@
 use nomifun_common::{
     ConversationId,
-    dataset_roots::{BackupPolicy, DatasetRootKind, managed_dataset_roots},
+    dataset_roots::{
+        BackupPolicy, DatasetRootKind, WORK_ROOT_BINDING_FILE,
+        WORK_ROOT_OWNER_FILE, managed_dataset_roots,
+    },
     factory_reset::{DatasetPreparation, prepare_v3_dataset},
     generate_id,
 };
@@ -714,6 +717,21 @@ async fn verification_rejects_legacy_format_and_coverage_drift() {
     ));
 
     let mut manifest: serde_json::Value = serde_json::from_slice(&original).unwrap();
+    manifest["coverage"]["excluded"]
+        .as_array_mut()
+        .unwrap()
+        .swap(0, 1);
+    std::fs::write(
+        &manifest_path,
+        serde_json::to_vec_pretty(&manifest).unwrap(),
+    )
+    .unwrap();
+    assert!(matches!(
+        verify_backup_bundle(&bundle),
+        Err(BackupError::InvalidManifest(_))
+    ));
+
+    let mut manifest: serde_json::Value = serde_json::from_slice(&original).unwrap();
     manifest["legacy_compatibility"] = json!(true);
     std::fs::write(
         &manifest_path,
@@ -723,6 +741,85 @@ async fn verification_rejects_legacy_format_and_coverage_drift() {
     let error = verify_backup_bundle(&bundle)
         .expect_err("strict v3 manifests must reject unknown compatibility fields");
     assert!(matches!(error, BackupError::InvalidManifest(_)));
+}
+
+#[tokio::test]
+async fn pre_work_root_owner_v2_coverage_remains_verifiable_and_restorable() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = dir.path().join("source.db");
+    let bundle = dir.path().join("backup.nomifun");
+    let destination = dir.path().join("restored");
+    let database = init_database(&source).await.unwrap();
+    create_backup_bundle(
+        &database,
+        &bundle,
+        &generate_id(),
+        BackupObjectGraph::full_database(),
+    )
+    .await
+    .unwrap();
+
+    let manifest_path = bundle.join(MANIFEST_FILE);
+    let mut manifest: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&manifest_path).unwrap()).unwrap();
+    let excluded = manifest["coverage"]["excluded"].as_array_mut().unwrap();
+    excluded.retain(|entry| {
+        entry["path"] != WORK_ROOT_OWNER_FILE
+            && entry["path"] != WORK_ROOT_BINDING_FILE
+            && entry["path"] != "agent-process-registry.json"
+    });
+    std::fs::write(
+        &manifest_path,
+        serde_json::to_vec_pretty(&manifest).unwrap(),
+    )
+    .unwrap();
+
+    let verified = verify_backup_bundle(&bundle).unwrap();
+    assert_eq!(verified.format_version, BACKUP_FORMAT_VERSION);
+    assert!(
+        verified
+            .coverage
+            .excluded
+            .iter()
+            .all(|entry| {
+                entry.path != WORK_ROOT_OWNER_FILE
+                    && entry.path != WORK_ROOT_BINDING_FILE
+                    && entry.path != "agent-process-registry.json"
+            })
+    );
+
+    let outcome = restore_backup_bundle(
+        &bundle,
+        &destination.join("nomifun-backend.db"),
+        &destination.join(STORAGE_GENERATION_FILE),
+    )
+    .await
+    .unwrap();
+    assert!(
+        outcome
+            .manifest
+            .coverage
+            .excluded
+            .iter()
+            .all(|entry| {
+                entry.path != WORK_ROOT_OWNER_FILE
+                    && entry.path != WORK_ROOT_BINDING_FILE
+                    && entry.path != "agent-process-registry.json"
+            })
+    );
+    assert!(destination.join("nomifun-backend.db").is_file());
+    assert!(destination.join(DATASET_RECEIPT_FILE).is_file());
+
+    manifest["coverage"]["excluded"][0]["exclusion_reason"] = json!("tampered");
+    std::fs::write(
+        &manifest_path,
+        serde_json::to_vec_pretty(&manifest).unwrap(),
+    )
+    .unwrap();
+    assert!(matches!(
+        verify_backup_bundle(&bundle),
+        Err(BackupError::InvalidManifest(_))
+    ));
 }
 
 #[tokio::test]

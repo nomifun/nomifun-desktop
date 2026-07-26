@@ -1,10 +1,10 @@
 //! Regression test for the Windows terminal spawn bug (os error 193).
 //!
 //! npm-installed CLIs expose an extension-less shell shim (e.g. `claude`)
-//! alongside `claude.cmd`. portable-pty's own PATH search picked the
-//! extension-less shim — a non-PE file `CreateProcessW` rejects with
-//! "not a valid Win32 application" (os error 193). The terminal path must
-//! resolve the bare name to its `.cmd` shim and run it under ConPTY.
+//! alongside `claude.cmd`. A naïve PATH search can pick the extension-less
+//! shim — a non-PE file `CreateProcessW` rejects with "not a valid Win32
+//! application" (os error 193). The terminal path must resolve the bare name
+//! to its `.cmd` shim and run it under ConPTY.
 #![cfg(windows)]
 
 use std::collections::HashMap;
@@ -15,8 +15,8 @@ use std::time::{Duration, Instant};
 use nomifun_terminal::pty::{PtyHandle, SpawnParams};
 use nomifun_terminal::types::resolve_command;
 
-#[test]
-fn resolves_and_runs_npm_style_cmd_shim() {
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn resolves_and_runs_npm_style_cmd_shim() {
     let dir = tempfile::tempdir().unwrap();
     // Decoy: the extension-less shell shim npm also installs. Picking this
     // non-PE file is exactly what produced os error 193.
@@ -60,7 +60,9 @@ fn resolves_and_runs_npm_style_cmd_shim() {
         move |chunk| out_cb.lock().unwrap().extend_from_slice(&chunk),
         move |_code, _sb| exit_cb.store(true, Ordering::SeqCst),
     )
+    .await
     .expect("spawn must succeed (regression: os error 193)");
+    handle.activate();
 
     let deadline = Instant::now() + Duration::from_secs(8);
     let mut ran = false;
