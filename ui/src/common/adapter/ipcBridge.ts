@@ -4380,6 +4380,11 @@ export type IFigureUpdatePatch = {
 };
 
 /** One companion's profile — `companions/{companion_id}/config.json`. */
+export interface ICompanionSkillConfig {
+  enabled: string[];
+  disabled_auto: string[];
+}
+
 export interface ICompanionProfile {
   companion_id: CompanionId;
   /** Positive dataset-local display ordinal. */
@@ -4389,6 +4394,7 @@ export interface ICompanionProfile {
   character: string;
   persona: ICompanionPersona;
   model: ICompanionModelRef | null;
+  skills: ICompanionSkillConfig;
   appearance: ICompanionWindowConfig;
   /** Frozen execution configuration last applied to this companion. */
   applied_preset?: ResolvedPresetSnapshot;
@@ -4442,6 +4448,7 @@ export type ICompanionProfilePatch = {
   character?: string;
   persona?: Partial<ICompanionPersona>;
   model?: ICompanionModelRef | null;
+  skills?: Partial<ICompanionSkillConfig>;
   appearance?: Partial<ICompanionWindowConfig>;
 };
 

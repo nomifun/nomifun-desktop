@@ -4758,6 +4758,65 @@ impl ConversationService {
         Ok(())
     }
 
+    /// Replace the immutable skill snapshot for a backend-owned conversation.
+    /// Public conversation PATCH deliberately rejects `extra.skills`; trusted
+    /// owners such as desktop companions use this narrow seam when their
+    /// profile assignment changes. The cached runtime is terminated so the
+    /// next turn observes the new snapshot.
+    pub async fn replace_skill_snapshot(
+        &self,
+        conversation_id: &str,
+        skills: &[String],
+    ) -> Result<bool, AppError> {
+        let existing = self
+            .conversation_repo
+            .get(parse_conv_id(conversation_id)?)
+            .await?
+            .ok_or_else(|| AppError::NotFound(format!("Conversation {conversation_id} not found")))?;
+        let mut extra: serde_json::Value = serde_json::from_str(&existing.extra).map_err(|error| {
+            AppError::Internal(format!("Conversation {conversation_id} has invalid extra JSON: {error}"))
+        })?;
+        if !extra.is_object() {
+            extra = serde_json::json!({});
+        }
+        let mut desired = skills.to_vec();
+        desired.sort();
+        desired.dedup();
+        let mut current = extra
+            .get("skills")
+            .and_then(|value| serde_json::from_value::<Vec<String>>(value.clone()).ok())
+            .unwrap_or_default();
+        current.sort();
+        current.dedup();
+        if current == desired {
+            return Ok(false);
+        }
+        extra["skills"] = serde_json::Value::Array(
+            desired.into_iter().map(serde_json::Value::String).collect(),
+        );
+        self.conversation_repo
+            .update(
+                parse_conv_id(conversation_id)?,
+                &ConversationRowUpdate {
+                    extra: Some(
+                        serde_json::to_string(&extra)
+                            .map_err(|error| AppError::Internal(format!("Failed to serialize skill snapshot: {error}")))?,
+                    ),
+                    updated_at: Some(now_ms()),
+                    ..Default::default()
+                },
+            )
+            .await?;
+        Self::terminate_runtime_with_proof(
+            &self.runtime_registry,
+            conversation_id,
+            AgentKillReason::AgentErrorRecovery,
+            "companion skill snapshot update",
+        )
+        .await
+        .map(|_| true)
+    }
+
     pub async fn save_acp_runtime_mode(&self, conversation_id: &str, mode: &str) -> Result<(), AppError> {
         let params = SaveRuntimeStateParams {
             current_mode_id: Some(Some(mode)),
