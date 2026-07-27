@@ -585,7 +585,7 @@ export const conversation = {
     httpGet<unknown[], { cron_job_id: CronJobId }>((p) => `/api/cron/jobs/${p.cron_job_id}/conversations`),
     (list) => list.map(fromApiConversation)
   ),
-  remove: httpDelete<boolean, { conversation_id: ConversationId }>(
+  remove: httpDelete<void, { conversation_id: ConversationId }>(
     (p) => `/api/conversations/${p.conversation_id}`
   ),
   // updates 额外允许顶层 `pinned`：对应 conversations 表真列（UpdateConversationRequest.pinned，
