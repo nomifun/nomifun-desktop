@@ -19,10 +19,11 @@ use nomifun_auth::CompanionTokenValidator;
 use nomifun_common::CompanionId;
 use nomifun_gateway::GatewayDeps;
 use rmcp::transport::streamable_http_server::{
-    StreamableHttpServerConfig, StreamableHttpService, session::local::LocalSessionManager,
+    StreamableHttpServerConfig, StreamableHttpService,
 };
 
 use crate::handler::RemoteMcpHandler;
+use crate::session::RemoteSessionManager;
 
 /// The companion a validated Remote token is bound to, stashed in the request
 /// extensions by [`companion_token_middleware`] and read by both adapters
@@ -64,6 +65,53 @@ pub(crate) async fn companion_token_middleware(
     }
 }
 
+#[derive(Clone)]
+struct McpAuthState {
+    public: PublicMcpState,
+    sessions: Arc<RemoteSessionManager>,
+}
+
+async fn mcp_companion_token_middleware(
+    State(state): State<McpAuthState>,
+    request: Request,
+    next: Next,
+) -> Response {
+    let presented = request
+        .headers()
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .unwrap_or("");
+    let Some(companion_id) = state.public.validator.resolve(presented) else {
+        return (StatusCode::UNAUTHORIZED, "unauthorized").into_response();
+    };
+
+    if let Some(session_id) = request
+        .headers()
+        .get("mcp-session-id")
+        .and_then(|value| value.to_str().ok())
+        .map(Into::into)
+    {
+        if !state
+            .sessions
+            .companion_matches(&session_id, &companion_id)
+            .await
+        {
+            return (
+                StatusCode::UNAUTHORIZED,
+                "session is bound to a different companion",
+            )
+                .into_response();
+        }
+    } else if request.method() == axum::http::Method::DELETE {
+            return (StatusCode::BAD_REQUEST, "session id required").into_response();
+    }
+
+    let mut request = request;
+    request.extensions_mut().insert(RemoteCompanion(companion_id));
+    next.run(request).await
+}
+
 /// Build the Remote front-door sub-router (MCP Streamable-HTTP) gated by the
 /// companion token. The caller MUST mount it with `.nest("/mcp", ..)` (NOT
 /// `.merge`): `nest` scopes both the token-auth layer and this router's
@@ -87,7 +135,8 @@ pub fn public_mcp_router(
     // — the headless web host relies on the token + your TLS/reverse proxy.
     let config = StreamableHttpServerConfig::default().disable_allowed_hosts();
 
-    let service: StreamableHttpService<RemoteMcpHandler, LocalSessionManager> = StreamableHttpService::new(
+    let session_manager = Arc::new(RemoteSessionManager::new(deps.clone(), domains));
+    let service: StreamableHttpService<RemoteMcpHandler, RemoteSessionManager> = StreamableHttpService::new(
         {
             let deps = deps.clone();
             move || {
@@ -97,7 +146,7 @@ pub fn public_mcp_router(
                 })
             }
         },
-        Arc::new(LocalSessionManager::default()),
+        session_manager.clone(),
         config,
     );
 
@@ -105,7 +154,13 @@ pub fn public_mcp_router(
     // layer wraps it. Scoped by `nest`, so the global fallback is untouched.
     Router::new()
         .fallback_service(service)
-        .layer(from_fn_with_state(PublicMcpState { validator }, companion_token_middleware))
+        .layer(from_fn_with_state(
+            McpAuthState {
+                public: PublicMcpState { validator },
+                sessions: session_manager,
+            },
+            mcp_companion_token_middleware,
+        ))
 }
 
 #[cfg(test)]

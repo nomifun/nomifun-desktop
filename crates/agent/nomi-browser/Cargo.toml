@@ -8,6 +8,7 @@ repository.workspace = true
 
 [dependencies]
 nomi-browser-engine.workspace = true
+nomifun-browser-platform.workspace = true
 nomi-types.workspace    = true
 nomi-config.workspace   = true
 nomi-protocol.workspace = true
@@ -21,9 +22,10 @@ tracing.workspace     = true
 tokio.workspace       = true
 serde_json.workspace  = true
 async-trait.workspace = true
-image.workspace       = true
+image = { workspace = true, features = ["jpeg"] }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }
+tokio-util.workspace = true
 # P3-X2: per-pet secret vault round-trip tests use a temp dir.
 tempfile.workspace = true

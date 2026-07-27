@@ -3,6 +3,8 @@ use std::{
     io,
     path::{Path, PathBuf},
     process::Stdio,
+    sync::{Arc, Mutex, OnceLock},
+    time::{Duration, Instant},
 };
 
 #[cfg(unix)]
@@ -41,7 +43,13 @@ pub struct ChildProcessCleanup {
 }
 
 impl ChildProcessCleanup {
+    /// Consume this completion proof and wait until the platform authority has
+    /// proved the whole process tree empty.
     pub async fn wait(self) -> io::Result<()> {
+        self.wait_ref().await
+    }
+
+    async fn wait_ref(&self) -> io::Result<()> {
         #[cfg(unix)]
         {
             return self.inner.wait().await;
@@ -53,6 +61,295 @@ impl ChildProcessCleanup {
         #[cfg(not(any(unix, windows)))]
         {
             Ok(())
+        }
+    }
+
+    async fn shutdown(&self, child: &mut Child) -> io::Result<()> {
+        #[cfg(unix)]
+        {
+            return self.inner.shutdown(child).await;
+        }
+        #[cfg(windows)]
+        {
+            return self.inner.shutdown(child).await;
+        }
+        #[cfg(not(any(unix, windows)))]
+        {
+            child.kill().await?;
+            child.wait().await.map(|_| ())
+        }
+    }
+}
+
+/// Exact, single-owner lifecycle authority for one managed child process tree.
+///
+/// This value deliberately owns both the Tokio direct-child handle and the
+/// platform cleanup proof. Callers must use [`Self::shutdown`] rather than
+/// waiting/terminating those proofs independently: one operation requests
+/// whole-tree termination, reaps the direct child, and proves platform tree
+/// cleanup. Failed or cancelled attempts leave the same authority available
+/// for a later retry.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ManagedChildDropMode {
+    /// The caller still owns the hand-off decision.
+    Handoff,
+    /// The cleanup relay owns the value. A drop must retain it directly
+    /// instead of re-entering the hand-off path.
+    Retain,
+}
+
+pub struct ManagedChildProcess {
+    child: Option<Child>,
+    cleanup: Option<ChildProcessCleanup>,
+    shutdown_complete: bool,
+    drop_mode: ManagedChildDropMode,
+}
+
+const MANAGED_CLEANUP_SYNC_GRACE: Duration = Duration::from_millis(500);
+
+/// A last-resort, process-local cleanup relay.
+///
+/// This is intentionally a static hand-off rather than an implicit leak:
+/// ownership remains visible to the runtime and can be retried by a later
+/// cleanup hand-off when an execution path becomes available again. Statics
+/// are not destructed during Rust process teardown, so retaining an item here
+/// does not invoke [`ManagedChildProcess::drop`].
+static PENDING_MANAGED_CLEANUPS: OnceLock<Mutex<Vec<ManagedChildProcess>>> = OnceLock::new();
+
+fn pending_managed_cleanups() -> &'static Mutex<Vec<ManagedChildProcess>> {
+    PENDING_MANAGED_CLEANUPS.get_or_init(|| Mutex::new(Vec::new()))
+}
+
+impl ManagedChildProcess {
+    fn from_parts(child: Child, cleanup: ChildProcessCleanup) -> Self {
+        Self {
+            child: Some(child),
+            cleanup: Some(cleanup),
+            shutdown_complete: false,
+            drop_mode: ManagedChildDropMode::Handoff,
+        }
+    }
+
+    fn into_cleanup_relay(mut self) -> Self {
+        self.drop_mode = ManagedChildDropMode::Retain;
+        self
+    }
+
+    pub fn child(&self) -> &Child {
+        self.child
+            .as_ref()
+            .expect("managed child direct-child handle is unavailable")
+    }
+
+    pub fn child_mut(&mut self) -> &mut Child {
+        self.child
+            .as_mut()
+            .expect("managed child direct-child handle is unavailable")
+    }
+
+    pub fn id(&self) -> Option<u32> {
+        self.child().id()
+    }
+
+    pub async fn shutdown(&mut self) -> io::Result<()> {
+        if self.shutdown_complete {
+            return Ok(());
+        }
+
+        let result = match (self.cleanup.as_ref(), self.child.as_mut()) {
+            (Some(cleanup), Some(child)) => cleanup.shutdown(child).await,
+            (None, _) => Err(io::Error::other(
+                "managed child process cleanup authority is unavailable",
+            )),
+            (_, None) => Err(io::Error::other(
+                "managed child process direct-child authority is unavailable",
+            )),
+        };
+        match result {
+            Ok(()) => {
+                // The proof is linear for the managed path. Once it has
+                // completed, discard it exactly once; later shutdown calls
+                // return from `shutdown_complete` without another kill/wait.
+                self.cleanup.take();
+                self.shutdown_complete = true;
+                Ok(())
+            }
+            Err(error) => Err(error),
+        }
+    }
+}
+
+impl std::ops::Deref for ManagedChildProcess {
+    type Target = Child;
+
+    fn deref(&self) -> &Self::Target {
+        self.child()
+    }
+}
+
+impl std::ops::DerefMut for ManagedChildProcess {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.child_mut()
+    }
+}
+
+impl Drop for ManagedChildProcess {
+    fn drop(&mut self) {
+        if self.shutdown_complete {
+            return;
+        }
+        let (Some(child), Some(cleanup)) = (self.child.take(), self.cleanup.take()) else {
+            return;
+        };
+        let process = Self {
+            child: Some(child),
+            cleanup: Some(cleanup),
+            shutdown_complete: false,
+            drop_mode: self.drop_mode,
+        };
+        match self.drop_mode {
+            ManagedChildDropMode::Handoff => hand_off_managed_child_cleanup(process),
+            ManagedChildDropMode::Retain => retain_pending_managed_cleanup(process),
+        }
+    }
+}
+
+fn hand_off_managed_child_cleanup(process: ManagedChildProcess) {
+    let mut processes = take_pending_managed_cleanups();
+    processes.push(process.into_cleanup_relay());
+
+    let retained = Arc::new(Mutex::new(Some(processes)));
+    let worker_retained = Arc::clone(&retained);
+    let worker = move || {
+        let processes = worker_retained
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take();
+        let Some(processes) = processes else {
+            return;
+        };
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build();
+        let Ok(runtime) = runtime else {
+            retain_after_runtime_failure(processes);
+            return;
+        };
+        runtime.block_on(shutdown_managed_children(processes));
+    };
+
+    if std::thread::Builder::new()
+        .name("nomi-managed-child-cleanup".into())
+        .spawn(worker)
+        .is_ok()
+    {
+        return;
+    }
+
+    let process = retained
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .take();
+    let Some(processes) = process else {
+        return;
+    };
+    if let Ok(handle) = tokio::runtime::Handle::try_current() {
+        handle.spawn(shutdown_managed_children(processes));
+    } else {
+        retain_after_runtime_failure(processes);
+    }
+}
+
+fn take_pending_managed_cleanups() -> Vec<ManagedChildProcess> {
+    pending_managed_cleanups()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .drain(..)
+        .collect()
+}
+
+async fn shutdown_managed_children(processes: Vec<ManagedChildProcess>) {
+    for mut process in processes {
+        loop {
+            match process.shutdown().await {
+                Ok(()) => break,
+                Err(error) => {
+                    tracing::warn!(
+                        pid = process.child.as_ref().and_then(Child::id),
+                        %error,
+                        "managed child cleanup retry is still pending"
+                    );
+                    tokio::time::sleep(Duration::from_millis(250)).await;
+                }
+            }
+        }
+    }
+}
+
+fn retain_after_runtime_failure(processes: Vec<ManagedChildProcess>) {
+    for mut process in processes {
+        let reaped = best_effort_synchronous_kill_and_reap(&mut process);
+        retain_pending_managed_cleanup_with_status(process, reaped);
+    }
+}
+
+fn retain_pending_managed_cleanup(process: ManagedChildProcess) {
+    retain_pending_managed_cleanup_with_status(process, false);
+}
+
+fn retain_pending_managed_cleanup_with_status(
+    mut process: ManagedChildProcess,
+    direct_child_reaped: bool,
+) {
+    process.drop_mode = ManagedChildDropMode::Retain;
+    let pid = process.child.as_ref().and_then(Child::id);
+    let mut pending = pending_managed_cleanups()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    pending.push(process);
+    tracing::error!(
+        pid,
+        direct_child_reaped,
+        pending = pending.len(),
+        "managed child cleanup retained for a later retry"
+    );
+}
+
+/// Try to make progress without Tokio while preserving the exact cleanup
+/// authority for a later retry. `Child::start_kill` and `Child::try_wait` are
+/// synchronous and do not require a runtime; the platform cleanup worker
+/// retained by [`ChildProcessCleanup`] remains authoritative for descendants.
+fn best_effort_synchronous_kill_and_reap(process: &mut ManagedChildProcess) -> bool {
+    let pid = process.child.as_ref().and_then(Child::id);
+    let Some(child) = process.child.as_mut() else {
+        tracing::error!(pid, "managed child lost its direct-child cleanup authority");
+        return false;
+    };
+
+    if let Err(error) = child.start_kill()
+        && error.kind() != io::ErrorKind::NotFound
+    {
+        tracing::warn!(pid, %error, "synchronous managed-child kill request failed");
+    }
+
+    let deadline = Instant::now() + MANAGED_CLEANUP_SYNC_GRACE;
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => {
+                tracing::warn!(pid, "managed child was synchronously killed and reaped; tree proof retained for retry");
+                return true;
+            }
+            Ok(None) if Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            Ok(None) => {
+                tracing::warn!(pid, "managed child synchronous reap grace expired; exact cleanup retained for retry");
+                return false;
+            }
+            Err(error) => {
+                tracing::warn!(pid, %error, "synchronous managed-child reap probe failed; exact cleanup retained for retry");
+                return false;
+            }
         }
     }
 }
@@ -168,6 +465,12 @@ impl ChildProcessBuilder {
         self.spawn_with_cleanup().map(|(child, _cleanup)| child)
     }
 
+    /// Spawn a child and return the single authoritative lifecycle owner.
+    pub fn spawn_managed(self) -> io::Result<ManagedChildProcess> {
+        self.spawn_with_cleanup()
+            .map(|(child, cleanup)| ManagedChildProcess::from_parts(child, cleanup))
+    }
+
     /// Spawn a child and retain the exact platform tree-cleanup proof.
     ///
     /// Lifecycle-owning adapters should prefer this over [`Self::spawn`], then
@@ -205,7 +508,7 @@ impl ChildProcessBuilder {
             // On cancellation the losing wait_with_output future was dropped
             // first, so Child::kill_on_drop has already initiated platform
             // teardown. The Job/watchdog completion remains the exact proof.
-            let cleanup_result = cleanup.wait().await;
+            let cleanup_result = cleanup.wait_ref().await;
             let result = match (output, cleanup_result) {
                 (Ok(output), Ok(())) => Ok(output),
                 (Err(output_error), Ok(())) => Err(output_error),

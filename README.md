@@ -175,9 +175,11 @@ Pull the knowledge scattered across your system into one managed, trackable plac
 Self-built, **in-process Rust** — no Playwright, no Node, no third-party automation daemon. More capable, faster, and far cheaper on tokens, with fine-grained control and fully open source for you to extend.
 
 - **Computer use** — accessibility tree + Set-of-Marks overlay + OCR, steering the model to act on real UI elements instead of guessing pixels. macOS (AXUIElement + Vision OCR) and Windows (UI Automation) are complete; Linux (AT-SPI2) is partial.
-- **Browser use** — an in-process Chromium CDP engine with ARIA observation, an egress **firewall** with out-of-band approval, and an origin-bound secret vault so credentials never reach the LLM.
-- **Modes that match the job** — desktop builds default to visible browser runs in your system Chrome / Edge (using an isolated profile), with managed Chromium and silent runs still available.
-- **One-click login reuse** — open a visible "Log into my browser" window once, then later agent runs reuse that authenticated state from a shared profile with encrypted backup.
+- **Browser use** — a main-process `BrowserSessionHub` owns managed Chromium Hosts and addressable Browser Lanes. Built-in agents, ACP/Codex, Gateway, remote agents, and parallel AgentExecution attempts all enter the same platform instead of launching private browsers.
+- **The real page, embedded by default** — after an agent first uses Browser, the **Browser** page shows the exact target it is operating. You can instead choose an `external` managed window or `headless` mode.
+- **Shared live login identity** — ordinary interactive Lanes use an application-managed Primary profile and see live shared login state. Public crawls use an anonymous identity with no Primary cookies or site storage, while explicitly isolated work gets a separate identity. NomiFun never opens the user's real Chrome or Edge profile.
+- **Bounded, observable concurrency** — different Lanes can run concurrently while each Lane remains strictly serialized. When safe capacity is exhausted, callers and the UI receive queue position, pressure reason, and recommended concurrency rather than an apparently ready handle blocked by a hidden global lock.
+- **View, take over, and clean up authoritatively** — users can take control of only the selected Lane, return control to the agent, or close one Lane, a conversation's Lanes, or all managed browsers. Runtime, attempt, remote-transport, and app shutdown revoke ownership and explicitly clean up managed Chromium process trees.
 - **Approval with visual context** — silent-mode high-risk browser approvals can include a current-page screenshot, so you do not have to approve blindly from text alone.
 - **Guarded by design** — every action carries a danger × surface approval matrix; irreversible actions wait for explicit confirmation.
 

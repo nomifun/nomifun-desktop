@@ -14,7 +14,13 @@ import { blurActiveElement } from '@renderer/utils/ui/focus';
 import { isDesktopShell } from '@renderer/utils/platform';
 import { useKnowledgeInboxPending } from '@renderer/pages/knowledge/useKnowledge';
 import {
+  isBrowserCapabilityUnavailable,
+  useBrowserOverview,
+} from '@renderer/pages/browser/useBrowserInventory';
+import { parseSessionRoute } from '@renderer/utils/routes/sessionRoute';
+import {
   SiderAssetLibraryEntry,
+  SiderBrowserEntry,
   SiderPresetEntry,
   SiderSkillsEntry,
   SiderConversationEntry,
@@ -58,6 +64,16 @@ const Sider: React.FC<SiderProps> = ({ onSessionClick, collapsed = false }) => {
   const location = useLocation();
   const { pathname, search, hash } = location;
   const { count: pendingInboxCount } = useKnowledgeInboxPending();
+  const {
+    overview: browserOverview,
+    unavailable: browserUnavailable,
+    transient: browserOverviewTransient,
+    retry: retryBrowserOverview,
+  } = useBrowserOverview();
+  const browserCapabilityUnavailable = isBrowserCapabilityUnavailable(
+    browserOverview,
+    browserUnavailable
+  );
 
   const navigate = useNavigate();
   const { logout, status } = useAuth();
@@ -88,6 +104,17 @@ const Sider: React.FC<SiderProps> = ({ onSessionClick, collapsed = false }) => {
   );
 
   const handleConversationClick = () => navTo('/guid');
+  const handleBrowserClick = () => {
+    if (browserOverviewTransient) {
+      void retryBrowserOverview();
+    }
+    const currentSession = parseSessionRoute(pathname);
+    if (currentSession?.kind === 'conversation') {
+      navTo(`/browser?conversation_id=${encodeURIComponent(currentSession.id)}`);
+      return;
+    }
+    navTo(pathname === '/browser' && search ? `/browser${search}` : '/browser');
+  };
   const handleScheduledClick = () => navTo('/scheduled');
   const handleRequirementsClick = () => navTo('/requirements');
   const handleKnowledgeClick = () => navTo('/knowledge');
@@ -179,6 +206,19 @@ const Sider: React.FC<SiderProps> = ({ onSessionClick, collapsed = false }) => {
               siderTooltipProps={siderTooltipProps}
               onClick={handleConversationClick}
             />
+            {!browserCapabilityUnavailable &&
+              browserOverview?.supported !== false &&
+              browserOverview?.enabled !== false && (
+              <SiderBrowserEntry
+                isMobile={isMobile}
+                isActive={pathname === '/browser'}
+                collapsed={collapsed}
+                runningCount={browserOverview?.running_lanes ?? 0}
+                queuedCount={browserOverview?.queued_lanes ?? 0}
+                siderTooltipProps={siderTooltipProps}
+                onClick={handleBrowserClick}
+              />
+            )}
             {/* Work partner (桌面伙伴) */}
             <SiderNomiEntry
               isMobile={isMobile}

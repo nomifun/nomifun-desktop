@@ -15,8 +15,8 @@ mod supervisor;
 
 pub use capability::{CapabilityPolicy, SandboxPolicy};
 pub use command_builder::{
-    ChildProcessBuilder, ChildProcessCleanup, kill_process_tree, merge_process_path,
-    resolve_command_in, resolve_command_path,
+    ChildProcessBuilder, ChildProcessCleanup, ManagedChildProcess, kill_process_tree,
+    merge_process_path, resolve_command_in, resolve_command_path,
 };
 pub use io::{OutputBuffer, OutputObserver};
 pub use outcome::{
@@ -32,4 +32,9 @@ pub use supervisor::{
     ShutdownReport, ShutdownSessionReport, SupervisorConfig,
 };
 #[cfg(windows)]
-pub use platform::windows::WindowsProcessJob;
+pub use platform::windows::{
+    WindowsExactProcess, WindowsProcessIdentity, WindowsProcessJob, WindowsRecoveryJob,
+    windows_child_process_identity, windows_process_identity,
+};
+#[cfg(target_os = "linux")]
+pub use platform::linux_recovery::LinuxProcessGroupAnchor;

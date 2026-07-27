@@ -4,6 +4,8 @@
 
 pub mod approval;
 pub mod extract;
+pub mod managed;
+pub mod platform_adapter;
 pub mod recording;
 pub mod redline;
 pub mod replay;
@@ -14,6 +16,12 @@ pub mod visual_fallback;
 
 pub use approval::{ApprovalAsk, ApprovalDecision, ApprovalKind, BrowserApprovalGate, GateEgressApprover};
 pub use extract::{ExtractModel, ExtractSchema};
+pub use managed::{ManagedBrowserFacade, managed_result_envelope, public_lane_json};
+pub use platform_adapter::{
+    EngineConfigResolver, ManagedEngineHostFactory, ManagedEngineLaneDriver,
+    ManagedLanePolicyDecorator,
+};
+pub use nomifun_browser_platform::BrowserLaneClient;
 pub use recording::{RecordedStep, Recording};
 pub use redline::{accname_is_irreversible, classify_action, enforce_redline, ActionContext, ApprovalTier};
 pub use tool::{BrowserSecretSource, BrowserTool, OUT_OF_BAND_CONFIRMED_KEY};

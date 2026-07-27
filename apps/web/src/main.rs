@@ -193,20 +193,26 @@ async fn serve(cli: nomifun_app::cli::Cli, merged_path: String, args: Args) -> R
             &env.config,
         )
         .await?;
-    nomifun_app::bootstrap::finalize_data_layer(&env.config)?;
+    if let Err(error) = nomifun_app::bootstrap::finalize_data_layer(&env.config) {
+        return Err(services.cleanup_after_startup_failure(error).await);
+    }
 
     // First-run admin provisioning. No-op in local mode and once an admin
     // exists; otherwise a fresh authenticated install would have no way to set
     // the first password (the in-band setup routes are local-only). Returns
     // whether the install still awaits interactive first-run setup.
-    let needs_first_run_setup = nomifun_app::bootstrap::ensure_admin_credentials(
+    let needs_first_run_setup = match nomifun_app::bootstrap::ensure_admin_credentials(
         &services,
         nomifun_app::bootstrap::AdminBootstrap {
             username: Some(args.admin_user.clone()),
             password: args.admin_password.clone(),
         },
     )
-    .await?;
+    .await
+    {
+        Ok(value) => value,
+        Err(error) => return Err(services.cleanup_after_startup_failure(error).await),
+    };
     if needs_first_run_setup && !ip.is_loopback() {
         tracing::warn!(
             %ip,
@@ -238,7 +244,11 @@ async fn serve(cli: nomifun_app::cli::Cli, merged_path: String, args: Args) -> R
     // an ephemeral port) instead of hard-failing, then announce the actually
     // bound port via `{data_dir}/port.json` + stdout so the operator/launcher
     // can re-point clients — a browser cannot self-discover a moved port.
-    let (actual_port, listener) = nomifun_app::bootstrap::bind_with_fallback(ip, args.port).await?;
+    let (actual_port, listener) =
+        match nomifun_app::bootstrap::bind_with_fallback(ip, args.port).await {
+            Ok(value) => value,
+            Err(error) => return Err(services.cleanup_after_startup_failure(error).await),
+        };
     if actual_port != args.port {
         tracing::warn!(
             requested = args.port,
@@ -247,10 +257,14 @@ async fn serve(cli: nomifun_app::cli::Cli, merged_path: String, args: Args) -> R
         );
     }
     nomifun_app::bootstrap::announce_bound_port(&cli.data_dir, &args.host, actual_port);
-    axum::serve(listener, app).await?;
+    if let Err(error) = axum::serve(listener, app).await {
+        return Err(services.cleanup_after_startup_failure(error.into()).await);
+    }
 
+    let browser_shutdown = services.shutdown_browser_platform().await;
     services.database.close().await;
     drop(env);
+    browser_shutdown?;
     Ok(ExitCode::SUCCESS)
 }
 

@@ -21,6 +21,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use chromiumoxide::cdp::js_protocol::runtime::RunIfWaitingForDebuggerParams;
+use chromiumoxide::cdp::browser_protocol::fetch::EnableParams as FetchEnableParams;
 use chromiumoxide::cdp::browser_protocol::target::{
     EventAttachedToTarget, SetAutoAttachParams,
 };
@@ -71,6 +72,21 @@ struct ConnectionInner {
     command_timeout: Duration,
 }
 
+/// Removes a registered callback when a `send` future is cancelled or dropped
+/// while it is queued on the shared sink or waiting for a response.
+struct PendingCommand {
+    registry: Arc<SessionRegistry>,
+    session_id: String,
+    call_id: CallId,
+}
+
+impl Drop for PendingCommand {
+    fn drop(&mut self) {
+        self.registry
+            .cancel_command(&self.session_id, self.call_id);
+    }
+}
+
 impl Connection {
     /// 连接到给定的 CDP browser WebSocket URL（如
     /// `ws://127.0.0.1:9222/devtools/browser/<id>`），启动后台 read loop，并返回
@@ -87,9 +103,13 @@ impl Connection {
             .max_message_size(None)
             .max_frame_size(None);
 
-        let (ws, _resp) = connect_async_with_config(ws_url, Some(config), false)
-            .await
-            .map_err(|e| TransportError::Protocol(format!("WS connect failed: {e}")))?;
+        let (ws, _resp) = tokio::time::timeout(
+            DEFAULT_COMMAND_TIMEOUT,
+            connect_async_with_config(ws_url, Some(config), false),
+        )
+        .await
+        .map_err(|_| TransportError::Timeout)?
+        .map_err(|e| TransportError::Protocol(format!("WS connect failed: {e}")))?;
 
         let (sink, mut stream) = ws.split();
         let registry = Arc::new(SessionRegistry::new());
@@ -223,6 +243,16 @@ impl Connection {
         self.inner.registry.subscribe(method, session_id)
     }
 
+    /// Lossless control-event subscription used for events whose omission can
+    /// leave a target or network request paused indefinitely.
+    pub fn subscribe_reliable(
+        &self,
+        method: impl Into<String>,
+        session_id: Option<&str>,
+    ) -> tokio::sync::mpsc::UnboundedReceiver<CdpEvent> {
+        self.inner.registry.subscribe_reliable(method, session_id)
+    }
+
     /// 在指定 session 上发一条 CDP 命令并等回包（带每命令超时）。
     ///
     /// 流程：分配单调 CallId → 在注册表登记 oneshot（已死 session / 已关连接在此短路）→
@@ -240,15 +270,26 @@ impl Connection {
 
         // 注册回调（已死 session / 已关连接在此短路，绝不悬挂未投递回调）。
         let rx = self.inner.registry.register_command(session_id, call_id)?;
+        let _pending = PendingCommand {
+            registry: Arc::clone(&self.inner.registry),
+            session_id: session_id.to_owned(),
+            call_id,
+        };
+        let deadline = tokio::time::Instant::now() + self.inner.command_timeout;
 
         // 写 WS（失败则清理回调）。
-        if let Err(e) = self.write_call::<C>(call_id, session_id, params).await {
+        if let Err(e) =
+            tokio::time::timeout_at(deadline, self.write_call::<C>(call_id, session_id, params))
+                .await
+                .map_err(|_| TransportError::Timeout)
+                .and_then(|result| result)
+        {
             self.inner.registry.cancel_command(session_id, call_id);
             return Err(e);
         }
 
         // 等回包 vs deadline 竞速。
-        match tokio::time::timeout(self.inner.command_timeout, rx).await {
+        match tokio::time::timeout_at(deadline, rx).await {
             Ok(Ok(result)) => result,
             // oneshot 发送端被 drop（理论上只在连接解除时，已是 Err 结果）→ 视为 Closed。
             Ok(Err(_recv)) => Err(TransportError::Closed),
@@ -316,7 +357,12 @@ impl Connection {
         // 1) 先登记子 session（先装好路由，再放行）。
         self.inner.registry.register_session(&sid, &ttype);
 
-        // 2) **级联 setAutoAttach 到 page/iframe 子 session**：OOPIF（跨进程 iframe）只在其**所属帧的
+        // 2) 在放行 target 前安装出口防火墙。若 Fetch.enable 失败，保持
+        // waiting-for-debugger 状态即为 fail-closed，绝不能让首批请求绕过策略。
+        let fetch = FetchEnableParams::default();
+        self.send::<FetchEnableParams>(&sid, &fetch).await?;
+
+        // 3) **级联 setAutoAttach 到 page/iframe 子 session**：OOPIF（跨进程 iframe）只在其**所属帧的
         //    session**上设了 setAutoAttach 才会自动 attach——browser-root 级 setAutoAttach 只覆盖顶层
         //    page,不覆盖其跨进程子帧（实测：headful + site-isolation 下 Chrome 确建了 type=="iframe"
         //    target,但缺本级联时引擎收不到它的 attachedToTarget → `spawn_oopif_arm_loop` 永不 arm →
@@ -337,7 +383,7 @@ impl Connection {
             }
         }
 
-        // 3) 仅当该 target 在等调试器时才放行（waitForDebuggerOnStart=true 的产物）。
+        // 4) 仅当该 target 在等调试器时才放行（waitForDebuggerOnStart=true 的产物）。
         //    放行命令用 send_may_fail：target 可能在我们处理前就 detach 了，吞掉即可。
         if event.waiting_for_debugger {
             let run = RunIfWaitingForDebuggerParams::default();
@@ -354,28 +400,40 @@ impl Connection {
     /// 典型用法是先 `let h = conn.run_attach_loop();` 再 `conn.enable_auto_attach().await?;`。
     pub fn run_attach_loop(&self) -> tokio::task::JoinHandle<()> {
         let conn = self.clone();
-        let mut rx = self.subscribe(EventAttachedToTarget::IDENTIFIER, None);
+        let mut rx = self.subscribe_reliable(EventAttachedToTarget::IDENTIFIER, None);
         tokio::spawn(async move {
-            loop {
-                match rx.recv().await {
-                    Ok(ev) => {
-                        match serde_json::from_value::<EventAttachedToTarget>(ev.params.clone()) {
-                            Ok(attached) => {
-                                if let Err(e) = conn.handle_attached(&attached).await {
-                                    tracing::warn!(target: "nomi_browser_engine::transport", error = %e, "handle_attached failed");
-                                }
-                            }
-                            Err(e) => {
-                                tracing::warn!(target: "nomi_browser_engine::transport", error = %e, "failed to parse attachedToTarget");
-                            }
+            while let Some(ev) = rx.recv().await {
+                match serde_json::from_value::<EventAttachedToTarget>(ev.params.clone()) {
+                    Ok(attached) => {
+                        if let Err(e) = conn.handle_attached(&attached).await {
+                            tracing::warn!(target: "nomi_browser_engine::transport", error = %e, "handle_attached failed");
                         }
                     }
-                    // 订阅落后（lagged）→ 继续；连接关闭（closed）→ 退出循环。
-                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
-                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                    Err(e) => {
+                        tracing::warn!(target: "nomi_browser_engine::transport", error = %e, "failed to parse attachedToTarget");
+                    }
                 }
             }
         })
+    }
+
+    /// Close the transport explicitly and release every pending command/event
+    /// subscriber. This is idempotent and intentionally best-effort: process
+    /// teardown remains authoritative even if a WebSocket close handshake or
+    /// pipe shutdown cannot complete.
+    pub async fn shutdown(&self) {
+        self.inner.registry.fail_connection();
+        let mut sink = self.inner.sink.lock().await;
+        match &mut *sink {
+            TransportSink::Ws(ws) => {
+                let _ = tokio::time::timeout(Duration::from_secs(1), ws.close()).await;
+            }
+            #[cfg(unix)]
+            TransportSink::Pipe(pipe) => {
+                use tokio::io::AsyncWriteExt;
+                let _ = tokio::time::timeout(Duration::from_secs(1), pipe.shutdown()).await;
+            }
+        }
     }
 
     /// 分配下一个单调 CallId。

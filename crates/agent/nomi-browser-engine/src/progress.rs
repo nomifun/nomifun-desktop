@@ -24,6 +24,9 @@ use tokio_util::sync::CancellationToken;
 pub enum AbortReason {
     /// page 被关闭：该 page 下所有进行中的操作立即取消。
     PageClosed,
+    /// page renderer crashed. Kept distinct from an intentional close so the
+    /// platform can recover only the affected target.
+    TargetCrashed,
     /// frame 被 detach：该 frame 下所有进行中的操作立即取消。
     FrameDetached,
     /// 主动/用户取消。

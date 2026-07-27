@@ -302,8 +302,11 @@ pub struct AttemptConversationEffectResult {
 
 #[derive(Debug, Clone)]
 pub struct PendingConversationCleanup {
+    pub link_id: i64,
     pub execution_id: String,
     pub user_id: String,
+    pub step_id: String,
+    pub attempt_id: String,
     pub conversation_id: String,
 }
 
@@ -421,6 +424,19 @@ pub trait IAgentExecutionRepository: Send + Sync {
         user_id: &str,
         execution_id: &str,
         expected_version: i64,
+        event: &NewAgentExecutionEvent,
+    ) -> Result<AgentExecutionDetailRows, DbError>;
+    /// Scheduler-only fatal aggregate transition. Under the same lease-fenced
+    /// transaction it fails the aggregate, terminates every unfinished
+    /// Attempt/Step, deactivates attempt links as durable cleanup work, and
+    /// appends the terminal outbox event.
+    async fn fail_active_execution(
+        &self,
+        user_id: &str,
+        execution_id: &str,
+        expected_version: i64,
+        lease: &AgentExecutionLeaseToken,
+        reason: &str,
         event: &NewAgentExecutionEvent,
     ) -> Result<AgentExecutionDetailRows, DbError>;
     async fn delete_execution(
@@ -758,15 +774,35 @@ pub trait IAgentExecutionRepository: Send + Sync {
     ) -> Result<bool, DbError>;
 
     /// Durable external cleanup outbox derived from inactive attempt links.
+    /// Each item names the exact retired link generation that produced the
+    /// work; callers must revalidate it immediately before external cancel.
     async fn list_pending_conversation_cleanups(
         &self,
         execution_id: Option<&str>,
         limit: i64,
     ) -> Result<Vec<PendingConversationCleanup>, DbError>;
+    /// Atomically prove that the exact retired link generation is still
+    /// pending and that no active Attempt link has replaced it for the same
+    /// Conversation. This is the final fence immediately before cancel.
+    async fn validate_conversation_cleanup(
+        &self,
+        cleanup: &PendingConversationCleanup,
+    ) -> Result<bool, DbError>;
+    /// Acknowledge every still-pending inactive row for this Conversation
+    /// only when the exact validated generation remains pending and no active
+    /// replacement link exists. Duplicate inactive rows are one cancel unit.
     async fn mark_conversation_cleanup_completed(
         &self,
         execution_id: &str,
         conversation_id: &str,
+        completed_at: i64,
+    ) -> Result<bool, DbError>;
+    /// Exact-generation variant used by the scheduler. The legacy
+    /// execution/conversation form above remains source-compatible for other
+    /// repository consumers.
+    async fn mark_conversation_cleanup_completed_exact(
+        &self,
+        cleanup: &PendingConversationCleanup,
         completed_at: i64,
     ) -> Result<bool, DbError>;
 

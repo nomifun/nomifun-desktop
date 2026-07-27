@@ -21,7 +21,9 @@
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex as StdMutex};
+use std::{future::Future, time::Duration};
 
 use anyhow::{Context, Result};
 use axum::Router;
@@ -34,7 +36,7 @@ use nomifun_auth::generate_random_hex_secret;
 use percent_encoding::percent_decode_str;
 use tokio::net::TcpListener;
 use tokio::runtime::Handle;
-use tokio::sync::{Mutex, watch};
+use tokio::sync::{Mutex, OnceCell, watch};
 use tower_http::services::{ServeDir, ServeFile};
 
 use crate::cli::Cli;
@@ -45,6 +47,125 @@ use nomifun_db::IUserRepository;
 /// Stable, bookmarkable port for the LAN listener (matches the UI's
 /// `WEBUI_DEFAULT_PORT`). Falls back to an ephemeral port if occupied.
 pub const WEBUI_LAN_PORT: u16 = 25808;
+
+/// Whether a failed desktop startup positively verified teardown of every
+/// resource acquired before the failure was returned.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StartupCleanupDisposition {
+    /// Startup either failed before acquiring long-lived resources or
+    /// explicitly completed every required teardown step.
+    Verified,
+    /// Startup acquired resources whose cleanup did not complete. The caller
+    /// must retain the Tokio runtime and fail closed instead of treating the
+    /// returned error as proof that teardown succeeded.
+    Unverified,
+}
+
+/// Typed failure returned by [`DesktopServer::start_with_outcome`].
+///
+/// The cleanup disposition is intentionally independent of the error text:
+/// callers must never infer cleanup authority by parsing or classifying an
+/// `anyhow::Error`.
+pub struct DesktopStartError {
+    error: anyhow::Error,
+    cleanup_disposition: StartupCleanupDisposition,
+    /// Retained startup authority when cleanup could not be verified.
+    ///
+    /// The native shell must keep this alive and retry before releasing its
+    /// backend runtime. It is consumed exactly once by the startup supervisor.
+    retained_keep_alive: Option<DesktopKeepAlive>,
+}
+
+impl DesktopStartError {
+    fn verified(error: anyhow::Error) -> Self {
+        Self {
+            error,
+            cleanup_disposition: StartupCleanupDisposition::Verified,
+            retained_keep_alive: None,
+        }
+    }
+
+    fn unverified(error: anyhow::Error, keep_alive: DesktopKeepAlive) -> Self {
+        Self {
+            error,
+            cleanup_disposition: StartupCleanupDisposition::Unverified,
+            retained_keep_alive: Some(keep_alive),
+        }
+    }
+
+    /// Fail closed when an internal invariant prevents us from proving cleanup
+    /// and no retry authority can be recovered. The native supervisor must
+    /// retain its runtime and refuse process handoff rather than treating an
+    /// inconsistent state as verified teardown.
+    fn unverified_without_authority(error: anyhow::Error) -> Self {
+        Self {
+            error,
+            cleanup_disposition: StartupCleanupDisposition::Unverified,
+            retained_keep_alive: None,
+        }
+    }
+
+    pub fn cleanup_disposition(&self) -> StartupCleanupDisposition {
+        self.cleanup_disposition
+    }
+
+    pub fn cleanup_verified(&self) -> bool {
+        self.cleanup_disposition == StartupCleanupDisposition::Verified
+    }
+
+    /// Transfer the retained startup authority to the caller.
+    pub fn take_retained_keep_alive(&mut self) -> Option<DesktopKeepAlive> {
+        self.retained_keep_alive.take()
+    }
+
+    pub fn into_inner(self) -> anyhow::Error {
+        self.error
+    }
+}
+
+impl std::fmt::Debug for DesktopStartError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("DesktopStartError")
+            .field("error", &self.error)
+            .field("cleanup_disposition", &self.cleanup_disposition)
+            .field(
+                "retained_keep_alive",
+                &self.retained_keep_alive.as_ref().map(|_| "<retained>"),
+            )
+            .finish()
+    }
+}
+
+impl std::fmt::Display for DesktopStartError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(&self.error, formatter)
+    }
+}
+
+impl std::error::Error for DesktopStartError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        self.error.source()
+    }
+}
+
+#[cfg(test)]
+mod desktop_start_error_tests {
+    use super::{DesktopStartError, StartupCleanupDisposition};
+
+    #[test]
+    fn invariant_failure_without_authority_is_unverified() {
+        let error = DesktopStartError::unverified_without_authority(anyhow::anyhow!(
+            "synthetic inconsistent cleanup state"
+        ));
+
+        assert_eq!(
+            error.cleanup_disposition(),
+            StartupCleanupDisposition::Unverified
+        );
+        assert!(!error.cleanup_verified());
+    }
+}
 
 /// One frontend asset resolved by the desktop host.
 ///
@@ -166,7 +287,110 @@ pub struct WebUiStatus {
 
 struct LanListener {
     shutdown: watch::Sender<bool>,
+    termination: ListenerTermination,
     port: u16,
+}
+
+/// The listener's lifecycle is represented by a state transition, rather than
+/// by two independently observed flags.  In particular, once a listener has
+/// reached either terminal state, a later stop request cannot rewrite that
+/// result.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum ListenerCompletion {
+    Running,
+    StopRequested,
+    RequestedStop,
+    UnexpectedExit(String),
+}
+
+impl ListenerCompletion {
+    fn is_terminal(&self) -> bool {
+        matches!(
+            self,
+            Self::RequestedStop | Self::UnexpectedExit(_)
+        )
+    }
+}
+
+/// Synchronous state transition authority shared by the listener task and its
+/// management commands.  The lock is held only while publishing a lifecycle
+/// transition; it is never held across an await or browser/router operation.
+#[derive(Clone)]
+struct ListenerTermination {
+    state: Arc<StdMutex<ListenerCompletion>>,
+    completion_tx: watch::Sender<ListenerCompletion>,
+}
+
+impl ListenerTermination {
+    fn new() -> Self {
+        let (completion_tx, _) = watch::channel(ListenerCompletion::Running);
+        Self {
+            state: Arc::new(StdMutex::new(ListenerCompletion::Running)),
+            completion_tx,
+        }
+    }
+
+    fn subscribe(&self) -> watch::Receiver<ListenerCompletion> {
+        self.completion_tx.subscribe()
+    }
+
+    fn same_listener(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.state, &other.state)
+    }
+
+    fn snapshot(&self) -> ListenerCompletion {
+        self.state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+    }
+
+    fn request_stop(&self) {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if matches!(*state, ListenerCompletion::Running) {
+            *state = ListenerCompletion::StopRequested;
+            self.completion_tx.send_replace(state.clone());
+        }
+    }
+
+    /// Publish the one immutable terminal result for this listener.
+    ///
+    /// A clean server result is considered user-requested only when the stop
+    /// transition was already published.  Errors always win over an in-flight
+    /// stop request, so a request that arrives after an abnormal exit cannot
+    /// suppress the failure.
+    fn complete(&self, result: Result<(), String>) -> ListenerCompletion {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if state.is_terminal() {
+            return state.clone();
+        }
+
+        let completion = match result {
+            Ok(()) if matches!(*state, ListenerCompletion::StopRequested) => {
+                ListenerCompletion::RequestedStop
+            }
+            Ok(()) => ListenerCompletion::UnexpectedExit(
+                "listener exited before shutdown was requested".to_owned(),
+            ),
+            Err(error) => ListenerCompletion::UnexpectedExit(error),
+        };
+        *state = completion.clone();
+        self.completion_tx.send_replace(completion.clone());
+        completion
+    }
+}
+
+/// Completion signals for the two listener tasks. `watch` is used instead of
+/// a one-shot notification so a waiter that subscribes after a task exits
+/// still observes the terminal state.
+struct ListenerLifecycle {
+    loopback_termination: ListenerTermination,
 }
 
 /// Owns the desktop's in-process backend serving. Construct with
@@ -197,10 +421,41 @@ pub struct DesktopServer {
     dev_frontend_url: Option<Arc<str>>,
     /// Backend runtime handle, so Tauri command threads can drive async work.
     runtime: Handle,
-    /// The singleton terminal service (live PTY map + session repo). Held here so
-    /// the Tauri main thread can trigger a synchronous cleanup of all terminal
-    /// sessions on real app exit (see [`shutdown_terminals_blocking`]).
+    /// The singleton terminal service (live PTY map + session repo). Held here
+    /// so the unified shutdown path can clean up all terminal sessions before
+    /// the database is closed.
     terminal_service: Arc<nomifun_terminal::TerminalService>,
+    /// Clone of the database pool used by the embedded router. Closing this
+    /// clone closes the shared pool, so fatal listener failures cannot leave
+    /// the backend's persistent resources alive while the host is exiting.
+    database: nomifun_db::Database,
+    /// Complete startup authority. Keeping this alongside the published
+    /// server prevents a listener failure from dropping the environment lock
+    /// or long-lived services before cleanup has been verified.
+    _keep_alive: DesktopKeepAlive,
+    /// Shared process-wide Gateway/Browser shutdown authority. Desktop
+    /// exit/restart always stops the Gateway; browser-enabled builds also stop
+    /// ACP browser ingress and then join the same Hub shutdown flight used by
+    /// services/server cleanup.
+    browser_platform_shutdown: crate::services::BrowserPlatformShutdown,
+    /// The first unexpected listener failure is delivered to the desktop
+    /// backend thread, which then drops [`DesktopKeepAlive`] and exits the
+    /// host. `watch` keeps this signal observable without exposing internals.
+    failure_tx: watch::Sender<Option<String>>,
+    /// Gracefully stop the permanent loopback listener during fatal cleanup.
+    loopback_shutdown: watch::Sender<bool>,
+    listener_lifecycle: ListenerLifecycle,
+    fatal_reported: Arc<AtomicBool>,
+    /// Process-wide cleanup single-flight. Fatal listener cleanup and the
+    /// Tauri exit hook must share one terminal result rather than racing
+    /// independent terminal/browser/database teardown paths.
+    shutdown_success: Arc<OnceCell<()>>,
+    /// Published only by an explicit desktop-shell shutdown entry point, after
+    /// every ordered shutdown stage succeeds and its completion callback has
+    /// run. Fatal listener cleanup calls [`Self::shutdown_all`] directly and
+    /// must publish `failure_tx` instead of looking like a normal shell exit.
+    shutdown_complete_tx: watch::Sender<bool>,
+    shutdown_complete_rx: watch::Receiver<bool>,
     /// For the pre-LAN safety gate (refuse to expose before an admin exists).
     user_repo: Arc<dyn IUserRepository>,
     lan: Mutex<Option<LanListener>>,
@@ -212,9 +467,103 @@ pub struct DesktopServer {
 /// (inside `ServerEnvironment`) and all long-lived service handles (MCP servers,
 /// background tasks) the router depends on. The backend thread holds this for
 /// the process lifetime; dropping it tears the backend down.
+#[derive(Clone)]
 pub struct DesktopKeepAlive {
+    inner: Arc<DesktopKeepAliveInner>,
+}
+
+struct DesktopKeepAliveInner {
     _env: bootstrap::ServerEnvironment,
-    _services: AppServices,
+    cleanup: DesktopStartupCleanupAuthority,
+}
+
+enum DesktopStartupCleanupAuthority {
+    Services(AppServices),
+    Startup(Arc<crate::services::StartupCleanupAuthority>),
+}
+
+impl DesktopKeepAlive {
+    /// Retry the authoritative cleanup required when startup fails after
+    /// service construction has acquired long-lived resources.
+    ///
+    /// A fully constructed service graph uses its shared browser-platform
+    /// shutdown authority. A construction failure instead retains the
+    /// startup-only authority supplied by `AppServices::try_from_config`.
+    /// Either path leaves the database open when cleanup fails so a later retry
+    /// can use the exact retained authority.
+    pub async fn shutdown_after_startup_failure(&self) -> anyhow::Result<()> {
+        match &self.inner.cleanup {
+            DesktopStartupCleanupAuthority::Services(services) => {
+                services.shutdown_browser_platform().await?;
+                services.database.close().await;
+                Ok(())
+            }
+            DesktopStartupCleanupAuthority::Startup(authority) => authority.cleanup().await,
+        }
+    }
+
+    /// Bridge retained startup cleanup onto the still-live backend runtime.
+    pub fn shutdown_after_startup_failure_blocking(
+        &self,
+        runtime: &tokio::runtime::Runtime,
+    ) -> anyhow::Result<()> {
+        let keep_alive = self.clone();
+        let (tx, rx) = std::sync::mpsc::channel();
+        runtime.spawn(async move {
+            let _ = tx.send(keep_alive.shutdown_after_startup_failure().await);
+        });
+        rx.recv_timeout(Duration::from_secs(31)).map_err(|error| {
+            anyhow::anyhow!(
+                "retained desktop startup cleanup did not report back: {error}"
+            )
+        })?
+    }
+
+    fn from_parts(env: bootstrap::ServerEnvironment, services: AppServices) -> Self {
+        Self {
+            inner: Arc::new(DesktopKeepAliveInner {
+                _env: env,
+                cleanup: DesktopStartupCleanupAuthority::Services(services),
+            }),
+        }
+    }
+
+    fn from_startup_cleanup_authority(
+        env: bootstrap::ServerEnvironment,
+        authority: Arc<crate::services::StartupCleanupAuthority>,
+    ) -> Self {
+        Self {
+            inner: Arc::new(DesktopKeepAliveInner {
+                _env: env,
+                cleanup: DesktopStartupCleanupAuthority::Startup(authority),
+            }),
+        }
+    }
+
+    fn services(&self) -> Option<&AppServices> {
+        match &self.inner.cleanup {
+            DesktopStartupCleanupAuthority::Services(services) => Some(services),
+            DesktopStartupCleanupAuthority::Startup(_) => None,
+        }
+    }
+}
+
+async fn cleanup_start_failure(
+    keep_alive: DesktopKeepAlive,
+    error: anyhow::Error,
+) -> DesktopStartError {
+    match keep_alive.shutdown_after_startup_failure().await {
+        Ok(()) => {
+            drop(keep_alive);
+            DesktopStartError::verified(error)
+        }
+        Err(cleanup_error) => DesktopStartError::unverified(
+            anyhow::anyhow!(
+                "{error:#}; managed browser platform cleanup after startup failure also failed: {cleanup_error:#}"
+            ),
+            keep_alive,
+        ),
+    }
 }
 
 impl DesktopServer {
@@ -236,7 +585,34 @@ impl DesktopServer {
         dev_frontend_url: Option<String>,
         webui_asset_source: Option<WebUiAssetSource>,
     ) -> Result<(Arc<DesktopServer>, DesktopKeepAlive)> {
-        let env = bootstrap::init_environment(cli, merged_path)?;
+        Self::start_with_outcome(
+            cli,
+            merged_path,
+            spa_dir,
+            dev_frontend_url,
+            webui_asset_source,
+        )
+        .await
+        .map_err(DesktopStartError::into_inner)
+    }
+
+    /// Typed desktop startup entry point used by the native shell.
+    ///
+    /// Unlike [`Self::start`], failures retain a positive cleanup disposition
+    /// so the shell can distinguish a safe-to-release runtime from a failed
+    /// teardown that must retain runtime authority and fail closed.
+    pub async fn start_with_outcome(
+        cli: &Cli,
+        merged_path: &str,
+        spa_dir: Option<PathBuf>,
+        dev_frontend_url: Option<String>,
+        webui_asset_source: Option<WebUiAssetSource>,
+    ) -> std::result::Result<
+        (Arc<DesktopServer>, DesktopKeepAlive),
+        DesktopStartError,
+    > {
+        let env = bootstrap::init_environment(cli, merged_path)
+            .map_err(DesktopStartError::verified)?;
 
         // Override the CLI-derived policy: the desktop trusts its own webview via
         // a per-boot secret, and requires login for everyone else.
@@ -251,33 +627,76 @@ impl DesktopServer {
         config.auth_policy = AuthPolicy::TrustLocalToken;
         config.local_trust_secret = Some(secret.clone());
 
-        let database = bootstrap::init_data_layer(&config).await?;
-        let services = AppServices::from_config(database, &config)
-            .await?
-            .with_boot_reconciliation_authority(
+        let database = bootstrap::init_data_layer(&config)
+            .await
+            .map_err(DesktopStartError::verified)?;
+        let services = match AppServices::try_from_config(database, &config).await {
+            Ok(services) => services,
+            Err(failure) => {
+                let (error, cleanup_error, authority) = failure.into_parts();
+                return Err(match (cleanup_error, authority) {
+                    (None, None) => DesktopStartError::verified(error),
+                    (Some(cleanup_error), Some(authority)) => {
+                        let keep_alive =
+                            DesktopKeepAlive::from_startup_cleanup_authority(env, authority);
+                        DesktopStartError::unverified(
+                            anyhow::anyhow!(
+                                "{error:#}; managed browser platform cleanup during AppServices startup also failed: {cleanup_error:#}"
+                            ),
+                            keep_alive,
+                        )
+                    }
+                    _ => DesktopStartError::unverified_without_authority(anyhow::anyhow!(
+                        "{error:#}; AppServices startup cleanup state was internally inconsistent"
+                    )),
+                });
+            }
+        };
+        let services = match services
+            .try_with_boot_reconciliation_authority(
                 env.boot_reconciliation_authority(),
                 &config,
             )
-            .await?;
-        bootstrap::finalize_data_layer(&config)?;
+            .await
+        {
+            Ok(services) => services,
+            Err(failure) => {
+                let (services, error) = failure.into_parts();
+                let keep_alive = DesktopKeepAlive::from_parts(env, services);
+                return Err(cleanup_start_failure(keep_alive, error).await);
+            }
+        };
+        if let Err(error) = bootstrap::finalize_data_layer(&config) {
+            let keep_alive = DesktopKeepAlive::from_parts(env, services);
+            return Err(cleanup_start_failure(keep_alive, error).await);
+        }
         let user_repo = services.user_repo.clone();
         let terminal_service = services.terminal_service.clone();
-        let router = create_router(&services).await;
 
-        // Permanent loopback listener on an ephemeral port (today's behavior).
-        let loopback = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+        // Reserve the permanent loopback socket before router assembly. Router
+        // construction starts background forwarders, so every fallible socket
+        // setup step must complete first; otherwise a bind/local-address
+        // failure could return from startup after detached work was published.
+        let loopback = match TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
             .await
-            .context("failed to bind loopback listener")?;
-        let loopback_port = loopback.local_addr()?.port();
-
+            .context("failed to bind loopback listener")
         {
-            let router = router.clone();
-            tokio::spawn(async move {
-                if let Err(e) = axum::serve(loopback, router).await {
-                    tracing::error!(error = %e, "desktop loopback server exited");
-                }
-            });
-        }
+            Ok(loopback) => loopback,
+            Err(error) => {
+                let keep_alive = DesktopKeepAlive::from_parts(env, services);
+                return Err(cleanup_start_failure(keep_alive, error).await);
+            }
+        };
+        let loopback_port = match loopback.local_addr() {
+            Ok(address) => address.port(),
+            Err(error) => {
+                let keep_alive = DesktopKeepAlive::from_parts(env, services);
+                return Err(
+                    cleanup_start_failure(keep_alive, anyhow::Error::new(error)).await
+                );
+            }
+        };
+        let router = create_router(&services).await;
 
         // Seed the initial status with the PERSISTED admin identity so the
         // desktop UI shows the real username / "password set" state immediately
@@ -291,6 +710,14 @@ impl DesktopServer {
             ..Default::default()
         };
         let (status_tx, status_rx) = watch::channel(initial);
+        let (failure_tx, _) = watch::channel(None);
+        let (loopback_shutdown, _) = watch::channel(false);
+        let loopback_termination = ListenerTermination::new();
+        let (shutdown_complete_tx, shutdown_complete_rx) = watch::channel(false);
+        let keep_alive = DesktopKeepAlive::from_parts(env, services);
+        let services = keep_alive
+            .services()
+            .expect("DesktopKeepAlive built from AppServices");
 
         tracing::info!(
             loopback_port,
@@ -306,15 +733,24 @@ impl DesktopServer {
             dev_frontend_url: dev_frontend_url.map(|u| Arc::from(u.trim_end_matches('/'))),
             runtime: Handle::current(),
             terminal_service,
+            database: services.database.clone(),
+            _keep_alive: keep_alive.clone(),
+            browser_platform_shutdown: services.browser_platform_shutdown.clone(),
+            failure_tx,
+            loopback_shutdown,
+            listener_lifecycle: ListenerLifecycle {
+                loopback_termination,
+            },
+            fatal_reported: Arc::new(AtomicBool::new(false)),
+            shutdown_success: Arc::new(OnceCell::new()),
+            shutdown_complete_tx,
+            shutdown_complete_rx,
             user_repo,
             lan: Mutex::new(None),
             status_tx,
             status_rx,
         });
-        let keep_alive = DesktopKeepAlive {
-            _env: env,
-            _services: services,
-        };
+        server.spawn_loopback(loopback);
         Ok((server, keep_alive))
     }
 
@@ -353,6 +789,218 @@ impl DesktopServer {
     /// Subscribe to status changes (for emitting a Tauri event on each change).
     pub fn subscribe_status(&self) -> watch::Receiver<WebUiStatus> {
         self.status_rx.clone()
+    }
+
+    /// Subscribe to fatal embedded-listener failures. A value is published
+    /// only after the server has stopped sibling listeners and attempted
+    /// managed browser/database cleanup.
+    pub fn subscribe_failure(&self) -> watch::Receiver<Option<String>> {
+        self.failure_tx.subscribe()
+    }
+
+    /// Return the currently retained fatal listener failure, if any.
+    pub fn current_failure(&self) -> Option<String> {
+        self.failure_tx.borrow().clone()
+    }
+
+    /// Subscribe to completion of the ordered application shutdown.
+    pub fn subscribe_shutdown(&self) -> watch::Receiver<bool> {
+        self.shutdown_complete_rx.clone()
+    }
+
+    fn spawn_loopback(self: &Arc<Self>, listener: TcpListener) {
+        let server = Arc::clone(self);
+        let router = self.router.clone();
+        let mut shutdown_rx = self.loopback_shutdown.subscribe();
+        let termination = self.listener_lifecycle.loopback_termination.clone();
+        self.runtime.spawn(async move {
+            let shutdown = async move {
+                while shutdown_rx.changed().await.is_ok() {
+                    if *shutdown_rx.borrow() {
+                        break;
+                    }
+                }
+            };
+            let result = axum::serve(listener, router)
+                .with_graceful_shutdown(shutdown)
+                .await
+                .map_err(|error| error.to_string());
+            // Publish the immutable terminal result before fatal cleanup. The
+            // cleanup path waits for every listener and must never wait for
+            // this supervisor itself.
+            if let ListenerCompletion::UnexpectedExit(error) = termination.complete(result) {
+                server.handle_listener_failure("loopback", error).await;
+            }
+        });
+    }
+
+    async fn wait_for_listener_completion(
+        mut completion: watch::Receiver<ListenerCompletion>,
+        component: &'static str,
+    ) -> anyhow::Result<ListenerCompletion> {
+        loop {
+            let state = completion.borrow().clone();
+            match state {
+                ListenerCompletion::Running | ListenerCompletion::StopRequested => {}
+                ListenerCompletion::RequestedStop => {
+                    return Ok(ListenerCompletion::RequestedStop);
+                }
+                ListenerCompletion::UnexpectedExit(error) => {
+                    return Err(anyhow::anyhow!(
+                        "{component} listener exited unexpectedly: {error}"
+                    ));
+                }
+            }
+
+            completion.changed().await.map_err(|_| {
+                anyhow::anyhow!("{component} listener completion channel closed unexpectedly")
+            })?;
+        }
+    }
+
+    async fn stop_listeners_and_wait(&self) -> anyhow::Result<()> {
+        self.listener_lifecycle
+            .loopback_termination
+            .request_stop();
+        self.loopback_shutdown.send_replace(true);
+        let lan_completion = {
+            let lan = self.lan.lock().await;
+            if let Some(listener) = lan.as_ref() {
+                listener.termination.request_stop();
+                listener.shutdown.send_replace(true);
+                // Keep the owner in `self.lan` until completion is confirmed.
+                // If this attempt is cancelled or times out, the next explicit
+                // shutdown must still have the sender and completion receiver
+                // needed to retry/wait rather than closing the DB underneath a
+                // still-running listener.
+                Some(listener.termination.subscribe())
+            } else {
+                None
+            }
+        };
+        let loopback_completion = self
+            .listener_lifecycle
+            .loopback_termination
+            .subscribe();
+        let wait = async {
+            let loopback_wait = Self::wait_for_listener_completion(loopback_completion, "loopback");
+            let lan_wait = async {
+                if let Some(completion) = lan_completion {
+                    Self::wait_for_listener_completion(completion, "LAN")
+                        .await
+                        .map(|_| ())
+                } else {
+                    Ok(())
+                }
+            };
+            tokio::try_join!(loopback_wait, lan_wait).map(|_| ())
+        };
+        match tokio::time::timeout(std::time::Duration::from_secs(5), wait).await {
+            Ok(Ok(())) => {
+                // Remove the LAN inventory only after the listener completion
+                // future itself returned `Ok(())`; an outer timeout success
+                // carrying an inner error is not sufficient.
+                let mut lan = self.lan.lock().await;
+                if lan
+                    .as_ref()
+                    .is_some_and(|listener| {
+                        matches!(
+                            listener.termination.snapshot(),
+                            ListenerCompletion::RequestedStop
+                        )
+                    })
+                {
+                    lan.take();
+                }
+                Ok(())
+            }
+            Ok(Err(error)) => Err(error),
+            Err(_) => Err(anyhow::anyhow!(
+                "desktop listener shutdown timed out after 5 seconds"
+            )),
+        }
+    }
+
+    async fn perform_shutdown(&self) -> anyhow::Result<()> {
+        // Stop ingress first so no new request can race terminal/browser or
+        // database teardown. Each stage runs even when an earlier stage fails;
+        // the final error retains every cleanup diagnostic.
+        let mut errors = Vec::new();
+
+        if let Err(error) = self.stop_listeners_and_wait().await {
+            errors.push(format!("listener cleanup failed: {error:#}"));
+        }
+
+        let terminal_result = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            self.terminal_service.shutdown_cleanup(),
+        )
+        .await;
+        match terminal_result {
+            Ok(Ok(deleted)) => {
+                tracing::info!(deleted, "terminal sessions cleaned up during desktop shutdown");
+            }
+            Ok(Err(error)) => errors.push(format!("terminal cleanup failed: {error}")),
+            Err(_) => errors.push(
+                "terminal cleanup timed out after 5 seconds".to_owned(),
+            ),
+        }
+
+        let browser_result: anyhow::Result<()> =
+            self.browser_platform_shutdown.shutdown().await;
+        if let Err(error) = browser_result {
+            errors.push(format!("browser cleanup failed: {error:#}"));
+        }
+
+        // Do not close the shared database after an earlier cleanup failure.
+        // Terminal cleanup intentionally preserves durable rows on failure and
+        // BrowserSessionHub retains Host authority for an explicit retry; closing
+        // the shared pool here would make both retries fail for the wrong reason.
+        // The database is therefore closed only after listeners, terminals, and
+        // every explicit Host shutdown have all completed successfully.
+        close_database_after_cleanup(errors, || self.database.close()).await
+    }
+
+    pub async fn shutdown_all(&self) -> anyhow::Result<()> {
+        run_shutdown_once(&self.shutdown_success, || async {
+            self.perform_shutdown().await
+        })
+        .await
+    }
+
+    fn publish_shutdown_complete(&self) {
+        self.shutdown_complete_tx.send_replace(true);
+    }
+
+    async fn handle_listener_failure(&self, component: &str, error: String) {
+        let raw_failure = format!("desktop {component} server exited unexpectedly: {error}");
+        tracing::error!(component, error = %error, "embedded desktop listener exited");
+
+        // Cleanup must finish (or hit the outer bound) before claiming the
+        // single fatal report. This preserves the failure signal if cleanup is
+        // cancelled and lets a later exit request retry a failed cleanup.
+        let cleanup_result = match tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            self.shutdown_all(),
+        )
+        .await
+        {
+            Ok(result) => result,
+            Err(_) => Err(anyhow::anyhow!(
+                "desktop backend cleanup timed out after 30 seconds"
+            )),
+        };
+        if !claim_first_fatal_report(&self.fatal_reported) {
+            return;
+        }
+        let failure = merge_listener_failure_with_cleanup(raw_failure, cleanup_result);
+        let mut status = self.status();
+        status.running = false;
+        status.error = Some(failure.clone());
+        self.status_tx.send_replace(status);
+        // The loopback task can fail before `start` returns and before a caller
+        // subscribes. Retain that early fatal value instead of dropping it.
+        self.failure_tx.send_replace(Some(failure));
     }
 
     /// Start LAN serving (bind `0.0.0.0:WEBUI_LAN_PORT`). Awaitable directly
@@ -440,6 +1088,7 @@ impl DesktopServer {
 
         let lan_ips = detect_all_lan_ipv4s();
         let lan_ip = lan_ips.first().copied();
+        let (admin_username, password_set) = resolve_admin(&*self.user_repo).await;
 
         let (port, listener) = match bind_lan(WEBUI_LAN_PORT).await {
             Ok(pair) => pair,
@@ -447,7 +1096,18 @@ impl DesktopServer {
         };
 
         let (sd_tx, mut sd_rx) = watch::channel(false);
+        let termination = ListenerTermination::new();
         let make = app.into_make_service_with_connect_info::<SocketAddr>();
+        let server = Arc::clone(self);
+        let task_termination = termination.clone();
+        // Publish the listener handle before spawning either task. A freshly
+        // spawned task may fail immediately; cleanup must then see and revoke
+        // this listener rather than racing a later inventory insertion.
+        *lan = Some(LanListener {
+            shutdown: sd_tx.clone(),
+            termination,
+            port,
+        });
         self.runtime.spawn(async move {
             let shutdown = async move {
                 while sd_rx.changed().await.is_ok() {
@@ -456,20 +1116,19 @@ impl DesktopServer {
                     }
                 }
             };
-            if let Err(e) = axum::serve(listener, make)
+            let result = axum::serve(listener, make)
                 .with_graceful_shutdown(shutdown)
                 .await
+                .map_err(|error| error.to_string());
+            // Publish the immutable terminal result before invoking fatal
+            // cleanup so cleanup never waits for the supervisor performing it.
+            if let ListenerCompletion::UnexpectedExit(error) =
+                task_termination.complete(result)
             {
-                tracing::error!(error = %e, "desktop LAN server exited");
+                server.handle_listener_failure("lan", error).await;
             }
         });
 
-        *lan = Some(LanListener {
-            shutdown: sd_tx,
-            port,
-        });
-
-        let (admin_username, password_set) = resolve_admin(&*self.user_repo).await;
         let network_url = lan_ip.as_ref().map(|ip| format!("http://{ip}:{port}"));
         let network_urls: Vec<String> = lan_ips
             .iter()
@@ -516,48 +1175,270 @@ impl DesktopServer {
     /// Stop LAN serving and return the resulting status. The loopback listener
     /// (the desktop's own webview) is unaffected.
     pub async fn stop_lan(self: &Arc<Self>) -> WebUiStatus {
-        let mut lan = self.lan.lock().await;
-        if let Some(listener) = lan.take() {
-            let _ = listener.shutdown.send(true);
-            tracing::info!(port = listener.port, "desktop LAN serving stopped");
-        }
+        let previous_status = self.status();
+        let stopped_listener = {
+            let lan = self.lan.lock().await;
+            if let Some(listener) = lan.as_ref() {
+                let termination = listener.termination.clone();
+                let completion = termination.subscribe();
+                termination.request_stop();
+                listener.shutdown.send_replace(true);
+                tracing::info!(port = listener.port, "desktop LAN serving stopped");
+                Some((listener.port, termination, completion))
+            } else {
+                None
+            }
+        };
+        let stop_result = if let Some((port, termination, completion)) = stopped_listener {
+            let wait = Self::wait_for_listener_completion(completion, "LAN");
+            match tokio::time::timeout(std::time::Duration::from_secs(5), wait).await {
+                Ok(Ok(ListenerCompletion::RequestedStop)) => {
+                    let mut lan = self.lan.lock().await;
+                    if lan
+                        .as_ref()
+                        .is_some_and(|listener| {
+                            listener.termination.same_listener(&termination)
+                                && matches!(
+                                    listener.termination.snapshot(),
+                                    ListenerCompletion::RequestedStop
+                                )
+                        })
+                    {
+                        lan.take();
+                    }
+                    Ok(())
+                }
+                Ok(Ok(completion)) => Err(anyhow::anyhow!(
+                    "LAN listener completed with unexpected terminal state: {completion:?}"
+                )),
+                Ok(Err(error)) => {
+                    tracing::warn!(port, %error, "desktop LAN listener shutdown was not confirmed");
+                    Err(error)
+                }
+                Err(_) => {
+                    let error =
+                        anyhow::anyhow!("desktop LAN listener shutdown timed out after 5 seconds");
+                    tracing::warn!(port, %error);
+                    Err(error)
+                }
+            }
+        } else {
+            Ok(())
+        };
         // Carry the persisted admin identity into the stopped status so the UI
         // keeps showing the real username / password-set state after stopping.
         let (admin_username, password_set) = resolve_admin(&*self.user_repo).await;
-        let status = WebUiStatus {
-            running: false,
-            local_url: format!("http://localhost:{}", self.loopback_port),
+        let status = stop_lan_status(
+            previous_status,
             admin_username,
             password_set,
-            ..Default::default()
-        };
+            stop_result,
+        );
         let _ = self.status_tx.send(status.clone());
         status
     }
 
-    /// Synchronously kill all live PTYs and delete all terminal session rows on
-    /// real app exit. Called from the Tauri main thread (which is NOT a Tokio
-    /// runtime thread) right before the process tears down, so the work must run
-    /// on the backend runtime and this thread must block until it finishes.
-    ///
-    /// Uses a one-shot `std::sync::mpsc` channel rather than `Handle::block_on`
-    /// (which panics inside some contexts): we spawn the async cleanup on the
-    /// backend runtime and wait on the channel with a hard cap so a hung kill or
-    /// DB write can never wedge the quit. Failures only warn — a best-effort wipe
-    /// is acceptable (the OS reaps the process tree on exit either way).
-    pub fn shutdown_terminals_blocking(&self) {
-        let ts = self.terminal_service.clone();
-        let (tx, rx) = std::sync::mpsc::channel();
-        self.runtime.spawn(async move {
-            let r = tokio::time::timeout(std::time::Duration::from_secs(3), ts.shutdown_cleanup()).await;
-            let _ = tx.send(r);
-        });
-        match rx.recv_timeout(std::time::Duration::from_secs(4)) {
-            Ok(Ok(Ok(n))) => tracing::info!(deleted = n, "terminal sessions cleaned up on exit"),
-            Ok(Ok(Err(e))) => tracing::warn!(error = %e, "terminal exit cleanup failed"),
-            Ok(Err(_)) => tracing::warn!("terminal exit cleanup timed out (3s) — proceeding with quit"),
-            Err(e) => tracing::warn!(error = %e, "terminal exit cleanup did not report back — proceeding with quit"),
+    /// Synchronously perform the complete application shutdown on the backend
+    /// runtime. This is called from the Tauri main thread, so it schedules the
+    /// async single-flight cleanup and waits without calling `Handle::block_on`.
+    /// Cleanup is ordered: listeners, terminal sessions, BrowserSessionHub,
+    /// then the database.
+    pub fn shutdown_all_blocking(self: &Arc<Self>) -> anyhow::Result<()> {
+        if self.shutdown_success.get().is_some() {
+            tracing::info!(
+                "desktop listeners, terminals, browser platform, and database already cleaned up"
+            );
+            self.publish_shutdown_complete();
+            return Ok(());
         }
+
+        // A failed attempt is not cached by `shutdown_all`, so one bounded
+        // immediate retry can recover transient terminal/Host cleanup failures.
+        // The caller receives the terminal failure and must not report cleanup
+        // success merely because the bounded wait returned.
+        let mut last_error = None;
+        for attempt in 1..=2 {
+            let server = Arc::clone(self);
+            let (tx, rx) = std::sync::mpsc::channel();
+            self.runtime.spawn(async move {
+                let result = match tokio::time::timeout(
+                    Duration::from_secs(30),
+                    server.shutdown_all(),
+                )
+                .await
+                {
+                    Ok(result) => result,
+                    Err(_) => Err(anyhow::anyhow!(
+                        "desktop shutdown timed out after 30 seconds"
+                    )),
+                };
+                let _ = tx.send(result);
+            });
+            match rx.recv_timeout(Duration::from_secs(31)) {
+                Ok(Ok(())) => {
+                    tracing::info!(
+                        attempt,
+                        "desktop listeners, terminals, browser platform, and database cleaned up on exit"
+                    );
+                    self.publish_shutdown_complete();
+                    return Ok(());
+                }
+                Ok(Err(error)) => {
+                    tracing::warn!(
+                        attempt,
+                        %error,
+                        "desktop backend exit cleanup failed"
+                    );
+                    last_error = Some(error);
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        attempt,
+                        %error,
+                        "desktop backend exit cleanup did not report back; proceeding with retry"
+                    );
+                    last_error = Some(anyhow::anyhow!(
+                        "desktop backend exit cleanup did not report back: {error}"
+                    ));
+                }
+            }
+        }
+        let error = last_error.unwrap_or_else(|| {
+            anyhow::anyhow!(
+                "desktop backend exit cleanup did not complete successfully after bounded retries"
+            )
+        });
+        tracing::error!(
+            %error,
+            "desktop backend exit cleanup did not complete successfully after bounded retries"
+        );
+        Err(error)
+    }
+
+    /// Start the complete ordered shutdown without blocking the Tauri event
+    /// loop. The callback runs on the backend runtime thread after cleanup
+    /// succeeds or fails and is invoked exactly once for this request. This
+    /// lower-level form deliberately does not publish a normal shell-exit
+    /// notification, so setup/fatal cleanup cannot race its error dialog.
+    pub fn cleanup_all_async<F>(self: &Arc<Self>, callback: F)
+    where
+        F: FnOnce(anyhow::Result<()>) + Send + 'static,
+    {
+        let server = Arc::clone(self);
+        self.runtime.spawn(async move {
+            let result = match tokio::time::timeout(
+                Duration::from_secs(30),
+                server.shutdown_all(),
+            )
+            .await
+            {
+                Ok(result) => result,
+                Err(_) => Err(anyhow::anyhow!(
+                    "desktop shutdown timed out after 30 seconds"
+                )),
+            };
+            callback(result);
+        });
+    }
+
+    /// Start an explicit desktop-shell shutdown. The callback is allowed to
+    /// update the shell exit state and request the final Tauri exit before the
+    /// backend supervisor is notified and drops its keep-alives.
+    pub fn shutdown_all_async<F>(self: &Arc<Self>, callback: F)
+    where
+        F: FnOnce(anyhow::Result<()>) + Send + 'static,
+    {
+        let server = Arc::clone(self);
+        self.cleanup_all_async(move |result| {
+            let completed = result.is_ok();
+            callback(result);
+            if completed {
+                server.publish_shutdown_complete();
+            }
+        });
+    }
+}
+
+/// Run one shutdown attempt through the process-wide single-flight cell.
+///
+/// `tokio::sync::OnceCell::get_or_try_init` caches only the `Ok` value. An
+/// error (or cancellation) leaves the cell uninitialized, which is exactly the
+/// retry contract required by explicit shutdown: success is idempotent, while
+/// failed cleanup retains authority for a later attempt.
+async fn run_shutdown_once<F, Fut>(success: &OnceCell<()>, init: F) -> anyhow::Result<()>
+where
+    F: FnOnce() -> Fut,
+    Fut: Future<Output = anyhow::Result<()>>,
+{
+    success.get_or_try_init(init).await.map(|_| ())
+}
+
+async fn close_database_after_cleanup<F, Fut>(
+    errors: Vec<String>,
+    close: F,
+) -> anyhow::Result<()>
+where
+    F: FnOnce() -> Fut,
+    Fut: Future<Output = ()>,
+{
+    if !errors.is_empty() {
+        let error = anyhow::anyhow!("{}", errors.join("; "));
+        tracing::warn!(
+            error = %error,
+            "desktop shutdown cleanup failed; database left open for retry"
+        );
+        return Err(error);
+    }
+
+    // Database::close closes the shared pool and is safe to call more than
+    // once. It must be last so terminal cleanup can still read its durable
+    // rows. Bound the await so a stuck connection cannot suppress the fatal
+    // signal indefinitely.
+    match tokio::time::timeout(Duration::from_secs(5), close()).await {
+        Ok(()) => Ok(()),
+        Err(_) => Err(anyhow::anyhow!(
+            "database close timed out after 5 seconds"
+        )),
+    }
+}
+
+fn claim_first_fatal_report(fatal_reported: &AtomicBool) -> bool {
+    !fatal_reported.swap(true, Ordering::AcqRel)
+}
+
+fn merge_listener_failure_with_cleanup(
+    listener_failure: String,
+    cleanup_result: anyhow::Result<()>,
+) -> String {
+    match cleanup_result {
+        Ok(()) => listener_failure,
+        Err(cleanup_error) => {
+            format!("{listener_failure}; backend cleanup also failed: {cleanup_error:#}")
+        }
+    }
+}
+
+fn stop_lan_status(
+    previous_status: WebUiStatus,
+    admin_username: String,
+    password_set: bool,
+    stop_result: anyhow::Result<()>,
+) -> WebUiStatus {
+    match stop_result {
+        Ok(()) => WebUiStatus {
+            running: false,
+            local_url: previous_status.local_url,
+            admin_username,
+            password_set,
+            ..Default::default()
+        },
+        Err(error) => WebUiStatus {
+            admin_username,
+            password_set,
+            initial_password: None,
+            error: Some(format!("failed to stop LAN listener: {error:#}")),
+            ..previous_status
+        },
     }
 }
 
@@ -874,4 +1755,188 @@ mod tests {
             Bytes::from_static(b"index")
         );
     }
+
+    #[test]
+    fn requested_listener_stop_has_an_immutable_terminal_outcome() {
+        let termination = ListenerTermination::new();
+        termination.request_stop();
+
+        assert_eq!(
+            termination.complete(Ok(())),
+            ListenerCompletion::RequestedStop
+        );
+        assert_eq!(
+            termination.complete(Err("late fixture failure".to_owned())),
+            ListenerCompletion::RequestedStop
+        );
+    }
+
+    #[test]
+    fn late_stop_request_does_not_mask_listener_failure() {
+        let termination = ListenerTermination::new();
+
+        assert_eq!(
+            termination.complete(Err("fixture listener failure".to_owned())),
+            ListenerCompletion::UnexpectedExit("fixture listener failure".to_owned())
+        );
+        termination.request_stop();
+        assert_eq!(
+            termination.snapshot(),
+            ListenerCompletion::UnexpectedExit("fixture listener failure".to_owned())
+        );
+    }
+
+    #[test]
+    fn listener_error_wins_over_an_in_flight_stop_request() {
+        let termination = ListenerTermination::new();
+        termination.request_stop();
+
+        assert_eq!(
+            termination.complete(Err("fixture listener failure".to_owned())),
+            ListenerCompletion::UnexpectedExit("fixture listener failure".to_owned())
+        );
+    }
+
+    #[tokio::test]
+    async fn listener_wait_preserves_unexpected_exit() {
+        let termination = ListenerTermination::new();
+        let completion = termination.subscribe();
+        termination.complete(Err("fixture listener failure".to_owned()));
+
+        let error = DesktopServer::wait_for_listener_completion(completion, "LAN")
+            .await
+            .expect_err("unexpected exit must fail the waiter");
+        assert!(error.to_string().contains("fixture listener failure"));
+    }
+
+    #[test]
+    fn only_the_first_fatal_listener_failure_is_reported() {
+        let fatal_reported = AtomicBool::new(false);
+        assert!(claim_first_fatal_report(&fatal_reported));
+        assert!(!claim_first_fatal_report(&fatal_reported));
+    }
+
+    #[test]
+    fn listener_failure_preserves_cleanup_failure_context() {
+        let message = merge_listener_failure_with_cleanup(
+            "desktop loopback server exited unexpectedly: fixture listener error".to_string(),
+            Err(anyhow::anyhow!("fixture cleanup error")),
+        );
+
+        assert!(message.contains("fixture listener error"));
+        assert!(message.contains("fixture cleanup error"));
+    }
+
+    #[test]
+    fn failed_lan_stop_keeps_running_status_and_reports_the_error() {
+        let previous = WebUiStatus {
+            running: true,
+            port: 25808,
+            allow_remote: true,
+            local_url: "http://localhost:12345".to_owned(),
+            network_url: Some("http://192.168.1.10:25808".to_owned()),
+            network_urls: vec!["http://192.168.1.10:25808".to_owned()],
+            lan_ip: Some("192.168.1.10".to_owned()),
+            admin_username: "old-admin".to_owned(),
+            password_set: false,
+            initial_password: Some("one-time".to_owned()),
+            error: None,
+        };
+
+        let status = stop_lan_status(
+            previous,
+            "admin".to_owned(),
+            true,
+            Err(anyhow::anyhow!("fixture listener timeout")),
+        );
+
+        assert!(status.running);
+        assert_eq!(status.port, 25808);
+        assert!(status.allow_remote);
+        assert_eq!(
+            status.network_url.as_deref(),
+            Some("http://192.168.1.10:25808")
+        );
+        assert_eq!(status.admin_username, "admin");
+        assert!(status.password_set);
+        assert!(status.initial_password.is_none());
+        assert!(
+            status
+                .error
+                .as_deref()
+                .is_some_and(|error| error.contains("fixture listener timeout"))
+        );
+    }
+
+    #[test]
+    fn confirmed_lan_stop_reports_stopped_status() {
+        let previous = WebUiStatus {
+            running: true,
+            port: 25808,
+            allow_remote: true,
+            local_url: "http://localhost:12345".to_owned(),
+            ..Default::default()
+        };
+
+        let status = stop_lan_status(previous, "admin".to_owned(), true, Ok(()));
+
+        assert!(!status.running);
+        assert_eq!(status.port, 0);
+        assert!(!status.allow_remote);
+        assert_eq!(status.local_url, "http://localhost:12345");
+        assert_eq!(status.admin_username, "admin");
+        assert!(status.password_set);
+        assert!(status.error.is_none());
+    }
+
+    #[tokio::test]
+    async fn shutdown_failure_is_not_cached_and_success_is_idempotent() {
+        let success = OnceCell::new();
+        let attempts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+
+        let first_attempts = Arc::clone(&attempts);
+        let first = run_shutdown_once(&success, || async move {
+            first_attempts.fetch_add(1, Ordering::AcqRel);
+            Err(anyhow::anyhow!("transient cleanup failure"))
+        })
+        .await;
+        assert!(first.is_err());
+        assert!(success.get().is_none());
+
+        let second_attempts = Arc::clone(&attempts);
+        let second = run_shutdown_once(&success, || async move {
+            second_attempts.fetch_add(1, Ordering::AcqRel);
+            Ok(())
+        })
+        .await;
+        assert!(second.is_ok());
+        assert!(success.get().is_some());
+
+        // A successful shutdown is idempotent: the initializer is not run again.
+        let third_attempts = Arc::clone(&attempts);
+        let third = run_shutdown_once(&success, || async move {
+            third_attempts.fetch_add(1, Ordering::AcqRel);
+            Ok(())
+        })
+        .await;
+        assert!(third.is_ok());
+        assert_eq!(attempts.load(Ordering::Acquire), 2);
+    }
+
+    #[tokio::test]
+    async fn cleanup_failure_leaves_database_open_for_retry() {
+        let close_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let close_calls_for_fn = Arc::clone(&close_calls);
+        let result = close_database_after_cleanup(
+            vec!["terminal cleanup failed: fixture".to_owned()],
+            move || async move {
+                close_calls_for_fn.fetch_add(1, Ordering::AcqRel);
+            },
+        )
+        .await;
+
+        assert!(result.is_err());
+        assert_eq!(close_calls.load(Ordering::Acquire), 0);
+    }
+
 }

@@ -359,6 +359,36 @@ impl LoopbackCapabilityIssuer {
     where
         S: Clone + Serialize + for<'de> Deserialize<'de>,
     {
+        self.activate_inner(domain, claims, true)
+    }
+
+    /// Activate one immutable authorization without replacing sibling leases
+    /// for the same user/session.
+    ///
+    /// This is reserved for domains whose trusted scope contains an additional
+    /// runtime/attempt identity and which explicitly support multiple concurrent
+    /// owners inside one conversation. Callers that require the traditional
+    /// single-child-per-session behavior should use [`Self::activate`].
+    pub fn activate_concurrent<S>(
+        &self,
+        domain: &str,
+        claims: &LoopbackCapabilityClaims<S>,
+    ) -> Result<(String, String), LoopbackCapabilityError>
+    where
+        S: Clone + Serialize + for<'de> Deserialize<'de>,
+    {
+        self.activate_inner(domain, claims, false)
+    }
+
+    fn activate_inner<S>(
+        &self,
+        domain: &str,
+        claims: &LoopbackCapabilityClaims<S>,
+        replace_same_session: bool,
+    ) -> Result<(String, String), LoopbackCapabilityError>
+    where
+        S: Clone + Serialize + for<'de> Deserialize<'de>,
+    {
         claims.validate_at(unix_time_secs())?;
         let authorization_json = Self::authorization_json(claims)?;
         let renewal_proof = derive_scoped_auth_token(
@@ -372,11 +402,13 @@ impl LoopbackCapabilityIssuer {
             .active_leases
             .write()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        leases.retain(|_, lease| {
-            lease.domain != domain
-                || lease.user_id != claims.user_id
-                || lease.session != claims.session
-        });
+        if replace_same_session {
+            leases.retain(|_, lease| {
+                lease.domain != domain
+                    || lease.user_id != claims.user_id
+                    || lease.session != claims.session
+            });
+        }
         leases.insert(
             claims.lease_id.clone(),
             ActiveLoopbackLease {
@@ -490,6 +522,19 @@ impl LoopbackCapabilityIssuer {
         }
         leases.remove(&request.lease_id);
         Ok(())
+    }
+
+    /// Returns whether an immutable lease is still active for `domain`.
+    ///
+    /// Loopback service adapters use this read-only seam to reconcile
+    /// domain-owned resources after a parent runtime drops its in-process lease
+    /// guard. It exposes neither authorization claims nor renewal material.
+    pub fn is_lease_active(&self, domain: &str, lease_id: &str) -> bool {
+        self.active_leases
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .get(lease_id)
+            .is_some_and(|lease| lease.domain == domain)
     }
 
     fn revoke_lease(&self, domain: &str, lease_id: &str) {
@@ -1002,6 +1047,8 @@ mod tests {
             original.lease_id.clone(),
         );
         let runtime_lease = lease.clone();
+        assert!(issuer.is_lease_active("gateway-v2", &original.lease_id));
+        assert!(!issuer.is_lease_active("other-domain", &original.lease_id));
 
         // Dropping a partially consumed child config is safe once the runtime
         // has accepted a clone of its guard.
@@ -1011,6 +1058,7 @@ mod tests {
         // Runtime construction failure (or normal teardown) drops the last
         // guard and deterministically removes renewable authority.
         drop(runtime_lease);
+        assert!(!issuer.is_lease_active("gateway-v2", &original.lease_id));
         assert_eq!(
             issuer.renew::<Scope>("gateway-v2", &request),
             Err(LoopbackCapabilityError::InvalidToken)

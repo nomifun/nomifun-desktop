@@ -33,9 +33,17 @@ use nomi_protocol::ToolApprovalManager;
 use nomi_protocol::events::ToolCategory;
 use nomi_tools::Tool;
 use nomi_types::tool::{JsonSchema, ToolResult};
+use nomifun_browser_platform::{
+    BrowserIdentityMode, BrowserLaneClient, BrowserLaneId, BrowserLaneSnapshot, BrowserOperation,
+    BrowserOperationKind, BrowserOperationResult, BrowserPlatformError, LaneLifecycleState,
+    OpenLaneOutcome,
+};
+#[cfg(test)]
+use nomifun_browser_platform::CloseResult;
 use nomifun_secret::SecretStore;
 
 use crate::extract::{self, ExtractModel, ExtractModelRef, ExtractSchema};
+use crate::managed::{BrowserLaneClientPort, execute_crawl_many_input};
 use crate::redline::{self, ActionContext, ApprovalTier};
 
 /// **P7B SoM cap**: max clickable elements to label on a Set-of-Marks overlay. Beyond this,
@@ -166,6 +174,45 @@ pub const OUT_OF_BAND_CONFIRMED_KEY: &str = "__out_of_band_confirmed";
 /// abort（page.close/frame.detach）由引擎内部订阅，优先于本 deadline（progress.rs biased race）。
 const ACT_TIMEOUT: Duration = Duration::from_secs(45);
 
+/// Fields whose authority belongs to the main-process runtime registry. They
+/// are never forwarded from model input to the Browser Platform.
+const TRUSTED_OWNER_INPUT_FIELDS: &[&str] = &[
+    "caller",
+    "caller_identity",
+    "user_id",
+    "conversation_id",
+    "runtime_instance_id",
+    "agent_id",
+    "companion_id",
+    "execution_id",
+    "step_id",
+    "attempt_id",
+    "remote_connection_id",
+    "owner_lease_id",
+    "capability_expires_at_ms",
+    "allowed_operations",
+    "identity_generation",
+    "browser_epoch",
+    "target_id",
+    "frame_id",
+    "ref_generation",
+    "cancellation_id",
+    "workspace_hint",
+];
+
+/// Identity selection belongs to the trusted host/crawl planner.  These
+/// fields are deliberately rejected (rather than silently stripped) at the
+/// model-facing managed boundary so a newly-added browser action cannot
+/// accidentally turn a model hint into an identity policy.
+const MODEL_IDENTITY_INPUT_FIELDS: &[&str] = &[
+    "identity",
+    "identity_mode",
+    "authenticated",
+    "auth_identity",
+    "profile",
+    "account",
+];
+
 const DESCRIPTION: &str = "Drive a managed Chromium browser via the Chrome DevTools Protocol \
 (in-process, self-hosted — no external browser, no Playwright/Node). Use this to open web pages, \
 read their structure, and interact with them.\n\n\
@@ -276,6 +323,29 @@ pub struct BrowserTool {
     /// retry per call — the same failure-cache discipline as `ComputerTool`'s
     /// accessibility engine.
     pub(crate) engine: Mutex<Option<Result<Arc<dyn BrowserEngine>, String>>>,
+    /// Main-process Browser Platform capability, already bound to a trusted
+    /// [`nomifun_browser_platform::CallerIdentity`]. When present this is the
+    /// authoritative execution path for the Agent-facing tool: existing
+    /// actions resolve a Lane and call this client, and management actions
+    /// operate on the same owner scope. Model input never constructs or
+    /// overrides the bound caller.
+    ///
+    /// This field is mutually exclusive with the facade-owned `engine` cache.
+    /// [`Self::engine`] rejects managed-client mode before consulting or
+    /// constructing that cache, which makes private Chromium fallback
+    /// structurally impossible after injection.
+    lane_client: Option<Arc<dyn BrowserLaneClientPort>>,
+    /// Production fail-closed switch. When set, a missing Lane capability is
+    /// an unavailable shared platform, never permission to launch Chromium
+    /// privately from this facade.
+    managed_only: bool,
+    /// Distinguishes a managed policy facade with an injected engine from an
+    /// Agent facade that is merely required to wait for a Lane client. This
+    /// lets `engine()` preserve the latter's fail-closed error while still
+    /// returning (or reporting failure from) the former's managed cache.
+    managed_engine_injected: bool,
+    /// Generates short model-visible names for unnamed fork/crawl lanes.
+    managed_lane_counter: AtomicU64,
     /// **Per-facade engine-construction gate (并发隔离)**. Held across the async
     /// `create_engine().await` so concurrent *first* calls on one `BrowserTool`
     /// (e.g. the MCP stdio bridge shares one `Arc<BrowserTool>` and calls `execute`
@@ -484,6 +554,14 @@ impl BrowserTool {
     /// session) for callers that only have a `BrowserConfig` (the redline gate then
     /// never hard-denies — equivalent to leaving approval to approval pipeline).
     pub fn new(config: &BrowserConfig) -> Self {
+        Self::new_standalone(config)
+    }
+
+    /// Explicit legacy/standalone constructor. Production Agent sessions
+    /// should bind a [`BrowserLaneClient`] with [`Self::with_lane_client`];
+    /// this constructor remains for tests, the standalone CLI, and embeddings
+    /// that intentionally own their browser process.
+    pub fn new_standalone(config: &BrowserConfig) -> Self {
         let persistent_data_dir = nomi_config::config::app_data_dir();
         let data_dir = persistent_data_dir.join("browser-data");
         let mut t = Self::with_data_dir(data_dir, !config.headless);
@@ -530,7 +608,7 @@ impl BrowserTool {
         runtime_mode: Option<Arc<ToolApprovalManager>>,
         secret_source: Option<BrowserSecretSource>,
     ) -> Self {
-        let mut t = Self::new(config);
+        let mut t = Self::new_standalone(config);
         t.session_bypasses_approval = session_bypasses_approval;
         t.evaluate_full_power = evaluate_full_power;
         t.evaluate_persistent_login = evaluate_persistent_login;
@@ -538,6 +616,54 @@ impl BrowserTool {
         t.runtime_mode = runtime_mode;
         t.secret_source = secret_source;
         t
+    }
+
+    /// Bind this Agent-facing facade to a trusted main-process Browser
+    /// Platform capability.
+    ///
+    /// The capability already contains the authoritative owner identity and
+    /// allowed operation set. No identity field is exposed in the tool schema.
+    /// Once bound, [`Self::engine`] refuses to launch or reuse a facade-owned
+    /// engine, including after fatal platform/engine failures.
+    pub fn with_lane_client(mut self, client: BrowserLaneClient) -> Self {
+        self.lane_client = Some(Arc::new(client));
+        self.managed_only = true;
+        self.managed_engine_injected = false;
+        self.engine = Mutex::new(None);
+        self.description.push_str(
+            "\n\nBROWSER PLATFORM: This tool is bound to the application's shared Browser \
+             Session Hub. `queued`/`pressured` means wait, reuse a Lane, or lower concurrency; \
+             never start another browser to bypass capacity. Existing actions accept optional \
+             `lane_id`; use browser_open/browser_fork/browser_list/browser_status/browser_close/\
+             browser_close_all/browser_crawl_many to manage Lanes.",
+        );
+        self
+    }
+
+    /// Require the shared Browser Platform without yet supplying its capability.
+    ///
+    /// Production hosts set this independently from client issuance so a
+    /// missing/late provider fails closed instead of reviving the standalone
+    /// lazy-Chromium path. Tests and explicit standalone embeddings simply do
+    /// not call this builder.
+    pub fn require_lane_client(mut self) -> Self {
+        self.lane_client = None;
+        self.managed_only = true;
+        self.managed_engine_injected = false;
+        self.engine = Mutex::new(None);
+        self
+    }
+
+    #[cfg(test)]
+    fn with_lane_client_port_for_test(
+        mut self,
+        client: Arc<dyn BrowserLaneClientPort>,
+    ) -> Self {
+        self.lane_client = Some(client);
+        self.managed_only = true;
+        self.managed_engine_injected = false;
+        self.engine = Mutex::new(None);
+        self
     }
 
     /// Construct with an explicit data directory (used by tests and any caller
@@ -570,6 +696,11 @@ impl BrowserTool {
             chrome_source: ChromeSource::Managed,
             persist_login_coordinator,
             engine: Mutex::new(None),
+            // Standalone compatibility constructor: no Hub capability is bound.
+            lane_client: None,
+            managed_only: false,
+            managed_engine_injected: false,
+            managed_lane_counter: AtomicU64::new(0),
             // 并发隔离：per-facade 引擎构造锁（详见字段文档）。
             engine_build_gate: tokio::sync::Mutex::new(()),
             last_snapshot: Mutex::new(None),
@@ -620,6 +751,140 @@ impl BrowserTool {
             // it via `.with_approval_gate(...)` to enable takeover + egress approval.
             approval_gate: None,
         }
+    }
+
+    /// Construct a Browser facade for a managed host without taking ownership
+    /// of any browser profile or data directory.
+    ///
+    /// The managed host owns Chromium, its lanes, and all profile/data-dir
+    /// lifecycle. This facade starts with no standalone engine cache; callers
+    /// must inject a trusted Lane client before actions can execute.
+    pub fn new_managed(
+        config: &BrowserConfig,
+        session_bypasses_approval: bool,
+        evaluate_full_power: bool,
+        evaluate_persistent_login: bool,
+        workspace_dir: Option<PathBuf>,
+        runtime_mode: Option<Arc<ToolApprovalManager>>,
+        secret_source: Option<BrowserSecretSource>,
+    ) -> Self {
+        Self {
+            description: format!("{DESCRIPTION}{}", capabilities_note(&default_capabilities())),
+            // Managed hosts own these resources. Empty paths deliberately make
+            // facade-owned profile/data-dir allocation impossible.
+            persistent_data_dir: PathBuf::new(),
+            data_dir: PathBuf::new(),
+            profile_dir: PathBuf::new(),
+            workspace_dir,
+            bundled_dir: None,
+            headful: !config.headless,
+            chrome_source: ChromeSource::Managed,
+            persist_login_coordinator: Arc::new(PersistLoginCoordinator::new()),
+            engine: Mutex::new(None),
+            lane_client: None,
+            managed_only: true,
+            managed_engine_injected: false,
+            managed_lane_counter: AtomicU64::new(0),
+            engine_build_gate: tokio::sync::Mutex::new(()),
+            last_snapshot: Mutex::new(None),
+            secret_store: Mutex::new(None),
+            secret_source,
+            firewall_override: Mutex::new(None),
+            session_bypasses_approval,
+            runtime_mode,
+            unrestricted_approval: config.unrestricted_approval,
+            evaluate_full_power,
+            evaluate_persistent_login,
+            extract_model: None,
+            known_secret_values: Arc::new(std::sync::Mutex::new(HashSet::new())),
+            must_re_observe: AtomicBool::new(false),
+            takeover_controller: crate::takeover::TakeoverController::new(Duration::from_secs(120)),
+            recording: Mutex::new(None),
+            site_memory: None,
+            visual_fallback_enabled: false,
+            visual_locator: None,
+            approval_gate: None,
+        }
+    }
+
+    /// Build the policy facade used by the shared Browser Platform adapter.
+    ///
+    /// The engine is supplied by `ManagedBrowserHost`, so this constructor must
+    /// never lazily launch a second Chromium process.  Platform calls do not run
+    /// through the generic tool-execution approval pipeline; consequently this
+    /// facade deliberately behaves like an approval-bypassing session.  The
+    /// independent redline gate then fail-closes irreversible actions unless a
+    /// future trusted platform approval seam confirms them out-of-band.
+    pub(crate) fn with_managed_engine(
+        engine: Arc<dyn BrowserEngine>,
+        _data_dir: PathBuf,
+        workspace_dir: Option<PathBuf>,
+        headful: bool,
+        evaluate_full_power: bool,
+        evaluate_persistent_login: bool,
+        known_secret_values: nomi_browser_engine::KnownSecretValues,
+    ) -> Self {
+        let mut tool = Self::new_managed(
+            &BrowserConfig {
+                headless: !headful,
+                ..BrowserConfig::default()
+            },
+            true,
+            evaluate_full_power,
+            evaluate_persistent_login,
+            workspace_dir,
+            None,
+            None,
+        );
+        tool.managed_engine_injected = true;
+        tool.known_secret_values = known_secret_values;
+        tool.engine = Mutex::new(Some(Ok(engine)));
+        tool
+    }
+
+    /// Cache an observation produced by the platform adapter so BrowserTool's
+    /// origin-bound secret gate and irreversible-action classifier see exactly
+    /// the same snapshot as the engine operation result.
+    pub(crate) fn cache_managed_observation(&self, observation: Observation) {
+        *self
+            .last_snapshot
+            .lock()
+            .expect("last_snapshot poisoned") = Some(observation);
+        self.clear_must_re_observe();
+    }
+
+    /// Validate and classify an adapter action through the existing BrowserTool
+    /// security policy, then return the engine-level action specification.
+    ///
+    /// The confirmation sentinel is always removed from operation input because
+    /// it can originate with a model. It is reintroduced only from the separate
+    /// trusted driver context flag supplied by the main process.
+    pub(crate) async fn prepare_managed_act(
+        &self,
+        action: &str,
+        input: &Value,
+        trusted_out_of_band_confirmation: bool,
+    ) -> Result<ActSpec, String> {
+        // In managed mode the engine is already installed, so `engine()` does
+        // not run its normal pre-launch vault bootstrap. Load the same trusted
+        // secret source here before resolving a possible `secret:NAME`.
+        self.ensure_secret_store_and_firewall();
+        let mut sanitized = input.clone();
+        if let Some(object) = sanitized.as_object_mut() {
+            object.remove(OUT_OF_BAND_CONFIRMED_KEY);
+            if trusted_out_of_band_confirmation {
+                object.insert(OUT_OF_BAND_CONFIRMED_KEY.to_string(), Value::Bool(true));
+            }
+            object.insert("action".to_string(), Value::String(action.to_string()));
+        }
+        if let Some(blocked) = self
+            .redline_gate_with_takeover(action, &sanitized)
+            .await
+        {
+            return Err(blocked.content);
+        }
+        self.build_act_spec(action, &sanitized)
+            .map_err(|result| result.content)
     }
 
     /// This facade's dedicated Chromium `--user-data-dir` (`<data_dir>/profiles/<token>`),
@@ -927,6 +1192,35 @@ impl BrowserTool {
     /// fail. The gate is held across the async build; a waiter re-checks the cache and
     /// reuses the engine the first caller built.
     async fn engine(&self) -> Result<Arc<dyn BrowserEngine>, String> {
+        if self.managed_only {
+            if self.lane_client.is_some() {
+                return Err(
+                "This Browser tool is bound to the shared Browser Session Hub; a private browser \
+                 engine cannot be launched or used from this facade."
+                    .to_string(),
+                );
+            }
+            if !self.managed_engine_injected {
+                return Err(
+                    "This Browser tool requires the shared Browser Session Hub, but its Lane client \
+                     is unavailable. Private browser engine fallback is disabled."
+                        .to_string(),
+                );
+            }
+            return self
+                .engine
+                .lock()
+                .expect("engine poisoned")
+                .as_ref()
+                .cloned()
+                .unwrap_or_else(|| {
+                    Err(
+                        "The managed Browser engine is unavailable. Private browser engine fallback \
+                         is disabled."
+                            .to_string(),
+                    )
+                });
+        }
         // Fast path: already constructed (success or cached failure).
         if let Some(cached) = self.engine.lock().expect("engine poisoned").as_ref() {
             return cached.clone();
@@ -1133,6 +1427,12 @@ impl BrowserTool {
     /// then. Eviction only resets the cache slot (sync, no await); the live `Arc` held
     /// by the in-flight action drops normally → `kill_on_drop` reaps the dead chrome.
     fn engine_failure(&self, what: &str, err: BrowserError) -> ToolResult {
+        if self.managed_only {
+            return ToolResult::error(format!(
+                "{what}: {err}. The shared browser Lane remains authoritative; inspect its status \
+                 or open a replacement Lane. No private browser fallback was attempted."
+            ));
+        }
         if matches!(err, BrowserError::SessionLost { recoverable: false }) {
             *self.engine.lock().expect("engine poisoned") = None;
             ToolResult::error(format!(
@@ -1149,6 +1449,264 @@ impl BrowserTool {
     /// Always mentions "browser" so the model knows what surface this is.
     pub fn capabilities_note(caps: &Capabilities) -> String {
         capabilities_note(caps)
+    }
+
+    async fn execute_managed(&self, action: &str, input: &Value) -> ToolResult {
+        let Some(client) = self.lane_client.as_ref().cloned() else {
+            return ToolResult::error("The Browser Platform client is not configured.");
+        };
+        if let Some(field) = first_trusted_owner_field(input) {
+            return ToolResult::error(format!(
+                "Browser input field `{field}` is trusted host metadata and is not accepted from \
+                 the model. Use only a short `lane_name` or a Lane handle returned by this tool."
+            ));
+        }
+        if let Some(field) = first_model_identity_field(input) {
+            return ToolResult::error(pretty_json(&json!({
+                "ok": false,
+                "error": {
+                    "code": "invalid_browser_request",
+                    "message": format!(
+                        "Browser input field `{field}` is controlled by the trusted host and is \
+                         not accepted from the model."
+                    ),
+                    "retryable": false,
+                    "next_action": "Remove identity, authentication, profile, and account fields; \
+                                    use only a short lane_name.",
+                }
+            })));
+        }
+
+        let canonical = match action {
+            "open" => "browser_open",
+            "fork" => "browser_fork",
+            "list" => "browser_list",
+            "status" => "browser_status",
+            "close" => "browser_close",
+            "close_all" => "browser_close_all",
+            "crawl_many" => "browser_crawl_many",
+            other => other,
+        };
+
+        match canonical {
+            "browser_open" => self.managed_open(client, input, false).await,
+            "browser_fork" => self.managed_open(client, input, true).await,
+            "browser_list" => match client.list().await {
+                Ok(lanes) => ToolResult::text(pretty_json(&json!({
+                    "ok": true,
+                    "action": "browser_list",
+                    "lanes": lanes.iter().map(public_lane_json).collect::<Vec<_>>(),
+                }))),
+                Err(error) => platform_error_result("Listing browser Lanes failed", error),
+            },
+            "browser_status" => self.managed_status(client, input).await,
+            "browser_close" => self.managed_close(client, input).await,
+            "browser_close_all" => match client.close_all().await {
+                Ok(result) => ToolResult::text(pretty_json(&json!({
+                    "ok": true,
+                    "action": "browser_close_all",
+                    "closed": result.closed,
+                    "already_closed": result.already_closed,
+                }))),
+                Err(error) => platform_error_result("Closing browser Lanes failed", error),
+            },
+            "browser_crawl_many" => self.managed_crawl_many(client, input).await,
+            other if is_existing_browser_action(other) => {
+                self.managed_execute_existing(client, other, input).await
+            }
+            other => ToolResult::error(format!(
+                "Unsupported Browser action `{other}`. Use an existing browser action or one of \
+                 browser_open, browser_fork, browser_list, browser_status, browser_close, \
+                 browser_close_all, browser_crawl_many."
+            )),
+        }
+    }
+
+    async fn managed_open(
+        &self,
+        client: Arc<dyn BrowserLaneClientPort>,
+        input: &Value,
+        fork: bool,
+    ) -> ToolResult {
+        let generated_name;
+        let lane_name = match input.get("lane_name").and_then(Value::as_str) {
+            Some(name) => Some(name),
+            None if fork => {
+                let sequence = self.managed_lane_counter.fetch_add(1, Ordering::AcqRel) + 1;
+                generated_name = format!("fork-{sequence}");
+                Some(generated_name.as_str())
+            }
+            None => None,
+        };
+        let workspace_hint = self
+            .workspace_dir
+            .as_ref()
+            .map(|path| path.to_string_lossy().into_owned());
+        match client
+            // Native Agent interactive lanes always use the trusted live
+            // Primary identity.  The model may choose only the logical lane
+            // name; identity policy is resolved by the host/Hub.
+            .open(lane_name, BrowserIdentityMode::Primary, workspace_hint)
+            .await
+        {
+            Ok(outcome) => {
+                let lane = outcome.lane();
+                ToolResult::text(pretty_json(&json!({
+                    "ok": true,
+                    "action": if fork { "browser_fork" } else { "browser_open" },
+                    "lane": public_lane_json(lane),
+                    "queued": matches!(outcome, OpenLaneOutcome::Queued { .. }),
+                    "next_action": lane_next_action(lane),
+                })))
+            }
+            Err(error) => platform_error_result(
+                if fork {
+                    "Forking a browser Lane failed"
+                } else {
+                    "Opening a browser Lane failed"
+                },
+                error,
+            ),
+        }
+    }
+
+    async fn managed_status(
+        &self,
+        client: Arc<dyn BrowserLaneClientPort>,
+        input: &Value,
+    ) -> ToolResult {
+        let lane_id = match managed_lane_id(input) {
+            Ok(Some(lane_id)) => lane_id,
+            Ok(None) => match find_default_lane(client.as_ref()).await {
+                Ok(Some(lane)) => lane.lane_id,
+                Ok(None) => {
+                    return ToolResult::error(
+                        "No default browser Lane exists. Run `browser_open` first.",
+                    );
+                }
+                Err(error) => return platform_error_result("Resolving the default Lane failed", error),
+            },
+            Err(error) => return platform_error_result("Invalid browser Lane handle", error),
+        };
+        match client.status(&lane_id).await {
+            Ok(lane) => ToolResult::text(pretty_json(&json!({
+                "ok": true,
+                "action": "browser_status",
+                "lane": public_lane_json(&lane),
+                "next_action": lane_next_action(&lane),
+            }))),
+            Err(error) => platform_error_result("Reading browser Lane status failed", error),
+        }
+    }
+
+    async fn managed_close(
+        &self,
+        client: Arc<dyn BrowserLaneClientPort>,
+        input: &Value,
+    ) -> ToolResult {
+        let lane_id = match managed_lane_id(input) {
+            Ok(Some(lane_id)) => Some(lane_id),
+            Ok(None) => match find_default_lane(client.as_ref()).await {
+                Ok(lane) => lane.map(|snapshot| snapshot.lane_id),
+                Err(error) => return platform_error_result("Resolving the default Lane failed", error),
+            },
+            Err(error) => return platform_error_result("Invalid browser Lane handle", error),
+        };
+        let Some(lane_id) = lane_id else {
+            return ToolResult::text(pretty_json(&json!({
+                "ok": true,
+                "action": "browser_close",
+                "closed": 0,
+                "already_closed": true,
+            })));
+        };
+        match client.close(&lane_id).await {
+            Ok(result) => ToolResult::text(pretty_json(&json!({
+                "ok": true,
+                "action": "browser_close",
+                "lane_id": lane_id.as_str(),
+                "closed": result.closed,
+                "already_closed": result.already_closed,
+            }))),
+            Err(error) => platform_error_result("Closing the browser Lane failed", error),
+        }
+    }
+
+    async fn managed_execute_existing(
+        &self,
+        client: Arc<dyn BrowserLaneClientPort>,
+        action: &str,
+        input: &Value,
+    ) -> ToolResult {
+        let lane = match self.resolve_managed_lane(client.as_ref(), input).await {
+            Ok(lane) => lane,
+            Err(error) => return platform_error_result("Resolving the browser Lane failed", error),
+        };
+        if lane.lifecycle_state != LaneLifecycleState::Running {
+            return ToolResult::text(pretty_json(&json!({
+                "ok": true,
+                "action": action,
+                "dispatched": false,
+                "lane": public_lane_json(&lane),
+                "next_action": lane_next_action(&lane),
+            })));
+        }
+
+        let operation = BrowserOperation {
+            kind: operation_kind(action),
+            action: action.to_string(),
+            input: sanitize_managed_operation_input(input),
+            expected_browser_epoch: input
+                .get("expected_browser_epoch")
+                .or_else(|| input.get("browser_epoch"))
+                .and_then(Value::as_u64),
+            // Target/frame ownership is selected by the Lane driver. Model
+            // input is never allowed to override these routing fields.
+            target_id: None,
+            frame_id: None,
+            // `f<seq>e<n>` embeds a frame sequence, not the observation
+            // generation. Bind ref-bearing operations to the authoritative
+            // Lane snapshot instead of parsing the model-visible ref text.
+            ref_generation: input
+                .get("ref")
+                .and_then(Value::as_str)
+                .is_some()
+                .then_some(lane.ref_generation),
+            may_modify_identity: action_may_modify_identity(action, input),
+        };
+        match client.execute(&lane.lane_id, operation).await {
+            Ok(result) => {
+                let latest = client.status(&lane.lane_id).await.ok();
+                managed_operation_result(action, &lane.lane_id, result, latest.as_ref())
+            }
+            Err(error) => platform_error_result("Browser Lane operation failed", error),
+        }
+    }
+
+    async fn resolve_managed_lane(
+        &self,
+        client: &dyn BrowserLaneClientPort,
+        input: &Value,
+    ) -> Result<BrowserLaneSnapshot, BrowserPlatformError> {
+        if let Some(lane_id) = managed_lane_id(input)? {
+            return client.status(&lane_id).await;
+        }
+        let workspace_hint = self
+            .workspace_dir
+            .as_ref()
+            .map(|path| path.to_string_lossy().into_owned());
+        client
+            .open(None, BrowserIdentityMode::Primary, workspace_hint)
+            .await
+            .map(|outcome| outcome.lane().clone())
+    }
+
+    async fn managed_crawl_many(
+        &self,
+        client: Arc<dyn BrowserLaneClientPort>,
+        input: &Value,
+    ) -> ToolResult {
+        execute_crawl_many_input(client, input, self.workspace_dir.as_deref()).await
     }
 
     async fn do_navigate(&self, input: &Value) -> ToolResult {
@@ -2276,22 +2834,285 @@ impl BrowserTool {
     }
 }
 
-/// **F1-sec: [纯逻辑] press_key 的裸 Enter 是否应保守视作「落 form 隐式提交」**（喂
-/// [`redline::ActionContext::enter_submits_form`]）。
-///
-/// facade 的 classify 时点拿不到 focus 树（「Enter 是不是落在 `<form>` 里」要运行时查），故对
-/// **裸 Enter / Return**（无修饰键、或仅 keypad Enter）**保守升级**为可能提交——分类器据此把
-/// `press_key` 判 Irreversible（普通会话弹审批 / yolo 下 hard-deny）。带修饰键的组合（如
-/// `Ctrl+Enter` 提交、`Shift+Enter` 换行）语义各异，且更可能是有意快捷键 → **不**据此升级（保守
-/// 只对最常见的「输入框里按回车 = 提交表单」这一形态升级，避免把所有 Enter 都拦死）。
-///
-/// 判定（大小写不敏感，去空白）：
-/// - `"Enter"` / `"Return"`（裸键，无 `+` 组合）→ `true`；
-/// - 含 `+`（组合键）/ 其它键 / `None` → `false`。
-///
-/// 这是「宁可过判一道确认（普通会话只是弹审批，yolo 下被拦但 P3 带外确认放行），也不漏判一个隐式
-/// 表单提交」的保守方向；真实的「Enter 落 form」精确判定（注入查 focus-in-form）在引擎层 C2 的
-/// `press_key` dispatch 路径有，本 facade 信号是其前置的保守闸。
+fn first_trusted_owner_field(input: &Value) -> Option<&'static str> {
+    let object = input.as_object()?;
+    TRUSTED_OWNER_INPUT_FIELDS
+        .iter()
+        .copied()
+        .find(|field| object.contains_key(*field))
+}
+
+fn first_model_identity_field(input: &Value) -> Option<&'static str> {
+    let object = input.as_object()?;
+    MODEL_IDENTITY_INPUT_FIELDS
+        .iter()
+        .copied()
+        .find(|field| object.contains_key(*field))
+}
+
+fn managed_lane_id(input: &Value) -> Result<Option<BrowserLaneId>, BrowserPlatformError> {
+    input
+        .get("lane_id")
+        .and_then(Value::as_str)
+        .map(|value| BrowserLaneId::parse(value.to_string()))
+        .transpose()
+}
+
+async fn find_default_lane(
+    client: &dyn BrowserLaneClientPort,
+) -> Result<Option<BrowserLaneSnapshot>, BrowserPlatformError> {
+    Ok(client
+        .list()
+        .await?
+        .into_iter()
+        .find(|lane| lane.lane_key.lane_name == "default"))
+}
+
+fn is_existing_browser_action(action: &str) -> bool {
+    matches!(
+        action,
+        "navigate"
+            | "observe"
+            | "screenshot"
+            | "capabilities"
+            | "get_page_text"
+            | "search_page"
+            | "find_elements"
+            | "get_dropdown_options"
+            | "cursor"
+            | "tabs"
+            | "wait"
+            | "wait_for"
+            | "get_console_logs"
+            | "get_page_errors"
+            | "get_network_log"
+            | "click"
+            | "hover"
+            | "type"
+            | "set_value"
+            | "select_option"
+            | "press_key"
+            | "scroll"
+            | "scroll_to_text"
+            | "upload_file"
+            | "download"
+            | "save_as_pdf"
+            | "extract"
+            | "switch_frame"
+            | "switch_tab"
+            | "close_tab"
+            | "open_link_new_tab"
+            | "back"
+            | "forward"
+            | "reload"
+            | "evaluate"
+    )
+}
+
+fn operation_kind(action: &str) -> BrowserOperationKind {
+    match action {
+        "navigate" | "back" | "forward" | "reload" => BrowserOperationKind::Navigate,
+        "observe" | "get_page_text" | "search_page" | "find_elements"
+        | "get_dropdown_options" | "cursor" => BrowserOperationKind::Observe,
+        "screenshot" => BrowserOperationKind::Screenshot,
+        "tabs" | "switch_tab" | "close_tab" | "open_link_new_tab" => {
+            BrowserOperationKind::Tabs
+        }
+        "download" | "save_as_pdf" => BrowserOperationKind::Download,
+        "get_console_logs" | "get_page_errors" | "get_network_log" | "evaluate" => {
+            BrowserOperationKind::Debug
+        }
+        "capabilities" => BrowserOperationKind::Manage,
+        _ => BrowserOperationKind::Act,
+    }
+}
+
+fn action_may_modify_identity(action: &str, input: &Value) -> bool {
+    match action {
+        "navigate" | "back" | "forward" | "reload" | "open_link_new_tab" => {
+            input_declares_stateful_request(input)
+        }
+        "click"
+        | "type"
+        | "set_value"
+        | "select_option"
+        | "press_key"
+        | "upload_file"
+        | "evaluate" => true,
+        "observe"
+        | "screenshot"
+        | "capabilities"
+        | "get_page_text"
+        | "search_page"
+        | "find_elements"
+        | "get_dropdown_options"
+        | "cursor"
+        | "tabs"
+        | "wait"
+        | "wait_for"
+        | "get_console_logs"
+        | "get_page_errors"
+        | "get_network_log"
+        | "hover"
+        | "scroll"
+        | "scroll_to_text"
+        | "download"
+        | "save_as_pdf"
+        | "extract"
+        | "switch_frame"
+        | "switch_tab"
+        | "close_tab" => false,
+        _ => true,
+    }
+}
+
+fn input_declares_stateful_request(input: &Value) -> bool {
+    input
+        .get("method")
+        .and_then(Value::as_str)
+        .is_some_and(|method| {
+            !method.eq_ignore_ascii_case("get") && !method.eq_ignore_ascii_case("head")
+        })
+        || input
+            .get("submits_form")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+}
+
+fn sanitize_managed_operation_input(input: &Value) -> Value {
+    let mut sanitized = input.as_object().cloned().unwrap_or_default();
+    sanitized.remove("lane_id");
+    sanitized.remove("lane_name");
+    sanitized.remove("expected_browser_epoch");
+    sanitized.remove(OUT_OF_BAND_CONFIRMED_KEY);
+    for field in TRUSTED_OWNER_INPUT_FIELDS {
+        sanitized.remove(*field);
+    }
+    Value::Object(sanitized)
+}
+
+fn public_lane_json(lane: &BrowserLaneSnapshot) -> Value {
+    let tabs = lane
+        .tabs
+        .iter()
+        .map(|tab| {
+            json!({
+                "tab_id": tab.tab_id,
+                "title": tab.title,
+                "url": tab.url,
+                "active": tab.active,
+                "crashed": tab.crashed,
+            })
+        })
+        .collect::<Vec<_>>();
+    let queue = lane.queue.as_ref().map(|queue| {
+        json!({
+            "position": queue.position,
+            "recommended_concurrency": queue.recommended_concurrency,
+            "owner_active": queue.owner_active,
+            "owner_queued": queue.owner_queued,
+            "global_active": queue.global_active,
+            "global_queued": queue.global_queued,
+            "retry_delay_ms": queue.retry_delay_ms,
+            "reason_code": queue.reason_code,
+        })
+    });
+    json!({
+        "lane_id": lane.lane_id.as_str(),
+        "lane_name": lane.lane_key.lane_name,
+        "identity_mode": lane.identity_mode,
+        "identity_generation": lane.identity_generation,
+        "lifecycle_state": lane.lifecycle_state,
+        "control_state": lane.control_state,
+        "browser_epoch": lane.browser_epoch,
+        "tabs": tabs,
+        "active_tab_id": lane.active_tab_id,
+        "ref_generation": lane.ref_generation,
+        "queue": queue,
+        "recommended_concurrency": lane
+            .queue
+            .as_ref()
+            .map(|queue| queue.recommended_concurrency),
+        "recoverable": lane.recoverable,
+        "error_code": lane.error_code,
+        "error_message": lane.error_message,
+    })
+}
+
+fn lane_next_action(lane: &BrowserLaneSnapshot) -> &'static str {
+    match lane.lifecycle_state {
+        LaneLifecycleState::Queued => {
+            "Wait for the Lane to become running, reuse an existing Lane, or lower concurrency."
+        }
+        LaneLifecycleState::Starting => "Wait for the Lane to finish starting, then retry.",
+        LaneLifecycleState::Running => "Use the returned lane_id for browser operations.",
+        LaneLifecycleState::Frozen => "Reuse an active Lane or wait for capacity to recover.",
+        LaneLifecycleState::Stopping => "Open a replacement Lane only if more work is required.",
+        LaneLifecycleState::Failed => {
+            "Inspect error_code and recoverable; open a replacement Lane when advised."
+        }
+    }
+}
+
+fn public_platform_error_json(error: &BrowserPlatformError) -> Value {
+    json!({
+        "code": error.code,
+        "message": error.message,
+        "retryable": error.retryable,
+        "next_action": error.next_action,
+        "lane_id": error.lane_id.as_ref().map(BrowserLaneId::as_str),
+        "metadata": error.metadata,
+    })
+}
+
+fn platform_error_result(context: &str, error: BrowserPlatformError) -> ToolResult {
+    ToolResult::error(pretty_json(&json!({
+        "ok": false,
+        "context": context,
+        "error": public_platform_error_json(&error),
+    })))
+}
+
+fn pretty_json(value: &Value) -> String {
+    serde_json::to_string_pretty(value).unwrap_or_else(|_| value.to_string())
+}
+
+fn managed_operation_result(
+    action: &str,
+    lane_id: &BrowserLaneId,
+    result: BrowserOperationResult,
+    lane: Option<&BrowserLaneSnapshot>,
+) -> ToolResult {
+    let mut output = result.output;
+    let mut images = Vec::new();
+    if action == "screenshot"
+        && let Some(object) = output.as_object_mut()
+        && let (Some(media_type), Some(data)) = (
+            object.get("media_type").and_then(Value::as_str),
+            object.get("data").and_then(Value::as_str),
+        )
+    {
+        images.push(nomi_types::tool::ToolImage {
+            media_type: media_type.to_string(),
+            data: data.to_string(),
+        });
+        object.remove("data");
+        object.insert(
+            "image_attached".to_string(),
+            Value::Bool(true),
+        );
+    }
+    let envelope = json!({
+        "ok": true,
+        "action": action,
+        "lane_id": lane_id.as_str(),
+        "lane": lane.map(public_lane_json),
+        "output": output,
+        "ref_generation": result.ref_generation,
+    });
+    ToolResult::text(pretty_json(&envelope)).with_images(images)
+}
+
 fn enter_submits_form_signal(keys: Option<&str>) -> bool {
     let Some(keys) = keys else { return false };
     let k = keys.trim();
@@ -2548,9 +3369,22 @@ impl Tool for BrowserTool {
                         "press_key", "scroll", "scroll_to_text", "upload_file",
                         "download", "save_as_pdf", "extract",
                         "switch_frame", "switch_tab", "close_tab", "open_link_new_tab",
-                        "back", "forward", "reload", "evaluate"
+                        "back", "forward", "reload", "evaluate",
+                        // Browser Platform Lane lifecycle / bounded crawl
+                        "browser_open", "browser_fork", "browser_list", "browser_status",
+                        "browser_close", "browser_close_all", "browser_crawl_many"
                     ],
                     "description": "The browser operation to perform"
+                },
+                "lane_id": { "type": "string", "description": "Optional Lane handle returned by browser_open/browser_fork/browser_list. Existing actions use the caller's default Lane when omitted." },
+                "lane_name": { "type": "string", "minLength": 1, "maxLength": 32, "pattern": "^[A-Za-z0-9_-]+$", "description": "Short model-chosen Lane name for browser_open/browser_fork. Trusted owner identity is supplied by the host and cannot be set here." },
+                "urls": { "type": "array", "minItems": 1, "maxItems": 64, "items": { "type": "string" }, "description": "HTTP(S) URLs for browser_crawl_many. One ordered result is returned per URL." },
+                "concurrency": {
+                    "description": "Bounded browser_crawl_many concurrency: \"auto\" (default) or an integer 1-8. Hub capacity may admit fewer and report queued.",
+                    "oneOf": [
+                        { "type": "string", "enum": ["auto"] },
+                        { "type": "integer", "minimum": 1, "maximum": 8 }
+                    ]
                 },
                 // element addressing
                 "ref": { "type": "string", "description": "A `[ref=f<seq>e<n>]` element from the latest `observe` (click/hover/type/set_value/select_option/get_dropdown_options/upload_file/switch_frame; optional for scroll to target an element)" },
@@ -2598,6 +3432,12 @@ impl Tool for BrowserTool {
     }
 
     fn is_concurrency_safe(&self, _input: &Value) -> bool {
+        if self.lane_client.is_some() {
+            // The Hub owns per-Lane serialization and global resource bounds.
+            // Different Lanes may therefore progress concurrently, while
+            // same-Lane calls still serialize at the authoritative boundary.
+            return true;
+        }
         // DESIGN §22：per-target act 串行 + observe⊥act。引擎已用 op_mutex 在内部强制互斥,但 Browser
         // 工具仍永不可被 tool executor 并发批处理——同引擎两调用在 op_mutex 上也会串行,且调度器不得假设
         // 其副作用相互独立。恒 false（正确性地基=引擎 op_mutex；调度天花板=此处恒 false,两者都须成立）。
@@ -2613,6 +3453,13 @@ impl Tool for BrowserTool {
         };
 
         tracing::debug!(action = %action, "BrowserTool executing");
+
+        if self.managed_only {
+            // Managed mode is an authoritative fork in the execution graph.
+            // Never fall through to facade-owned engine construction, including
+            // after a platform error or fatal Lane failure.
+            return self.execute_managed(action, &input).await;
+        }
 
         // E2: facade 独立 fail-closed 强制门（**不经 approval pipeline**，设计裁决⑧）。在 dispatch 前拦
         // 审批旁路会话（yolo/companion）里的不可逆动作（submit/付款/删除/发送/跨域 POST/Enter 落 form/
@@ -2808,13 +3655,15 @@ impl BrowserTool {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use nomi_browser_engine::Capabilities;
+    use std::collections::BTreeSet;
 
     fn tool() -> BrowserTool {
         BrowserTool::new(&BrowserConfig::default())
     }
+
 
     fn login_state(value: &str) -> nomi_browser_engine::StorageState {
         nomi_browser_engine::StorageState {
@@ -2920,7 +3769,617 @@ mod tests {
         );
     }
 
+    #[derive(Default)]
+    pub(crate) struct FakeLaneClient {
+        opens: Mutex<Vec<(Option<String>, BrowserIdentityMode, Option<String>)>>,
+        operations: Mutex<Vec<(BrowserLaneId, BrowserOperation)>>,
+        closes: Mutex<Vec<BrowserLaneId>>,
+        lanes: Mutex<Vec<BrowserLaneSnapshot>>,
+        sequence: AtomicU64,
+        open_lifecycle: Mutex<Option<LaneLifecycleState>>,
+        panic_url: Mutex<Option<String>>,
+        block_open_after_insert: AtomicBool,
+        block_execute: AtomicBool,
+        open_started: tokio::sync::Notify,
+        open_release: tokio::sync::Notify,
+        execute_started: tokio::sync::Notify,
+        execute_release: tokio::sync::Notify,
+        close_called: tokio::sync::Notify,
+    }
+
+    impl FakeLaneClient {
+        fn snapshot(&self, lane_name: &str, identity_mode: BrowserIdentityMode) -> BrowserLaneSnapshot {
+            let sequence = self.sequence.fetch_add(1, Ordering::AcqRel) + 1;
+            BrowserLaneSnapshot {
+                lane_id: BrowserLaneId(format!("lane-{sequence}")),
+                lane_key: nomifun_browser_platform::LaneKey {
+                    runtime_instance_id: "trusted-runtime".to_string(),
+                    lane_name: lane_name.to_string(),
+                },
+                caller: nomifun_browser_platform::CallerIdentity {
+                    user_id: "trusted-user-secret".to_string(),
+                    conversation_id: Some("trusted-conversation-secret".to_string()),
+                    runtime_instance_id: "trusted-runtime".to_string(),
+                    agent_id: Some("trusted-agent".to_string()),
+                    companion_id: None,
+                    execution_id: None,
+                    step_id: None,
+                    attempt_id: None,
+                    remote_connection_id: None,
+                    surface: nomifun_browser_platform::BrowserSurface::Native,
+                    owner_lease_id: nomifun_browser_platform::OwnerLeaseId(
+                        "trusted-owner-secret".to_string(),
+                    ),
+                    capability_expires_at_ms: u64::MAX,
+                    allowed_operations: BTreeSet::from([
+                        BrowserOperationKind::Manage,
+                        BrowserOperationKind::Navigate,
+                        BrowserOperationKind::Observe,
+                        BrowserOperationKind::Act,
+                        BrowserOperationKind::Screenshot,
+                        BrowserOperationKind::Tabs,
+                        BrowserOperationKind::Download,
+                        BrowserOperationKind::Debug,
+                        BrowserOperationKind::Crawl,
+                    ]),
+                },
+                identity_mode,
+                identity_generation: 7,
+                lifecycle_state: LaneLifecycleState::Running,
+                control_state: nomifun_browser_platform::LaneControlState::Agent,
+                browser_epoch: 42,
+                tabs: Vec::new(),
+                active_tab_id: None,
+                active_frame_id: None,
+                ref_generation: 0,
+                queue: None,
+                resource_estimate_bytes: 0,
+                active_operation_count: 0,
+                last_active_at_ms: 0,
+                created_at_ms: sequence,
+                viewer_state: nomifun_browser_platform::ViewerState::Idle,
+                error_code: None,
+                error_message: None,
+                recoverable: false,
+            }
+        }
+    }
+
+    #[async_trait]
+    impl BrowserLaneClientPort for FakeLaneClient {
+        async fn open(
+            &self,
+            lane_name: Option<&str>,
+            identity_mode: BrowserIdentityMode,
+            workspace_hint: Option<String>,
+        ) -> Result<OpenLaneOutcome, BrowserPlatformError> {
+            self.opens.lock().unwrap().push((
+                lane_name.map(str::to_string),
+                identity_mode,
+                workspace_hint,
+            ));
+            let lane_name = lane_name.unwrap_or("default");
+            if let Some(existing) = self
+                .lanes
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|lane| lane.lane_key.lane_name == lane_name)
+                .cloned()
+            {
+                return Ok(OpenLaneOutcome::Running { lane: existing });
+            }
+            let mut lane = self.snapshot(lane_name, identity_mode);
+            if let Some(lifecycle) = self.open_lifecycle.lock().unwrap().clone() {
+                lane.lifecycle_state = lifecycle;
+            }
+            self.lanes.lock().unwrap().push(lane.clone());
+            if self.block_open_after_insert.load(Ordering::Acquire) {
+                self.open_started.notify_one();
+                self.open_release.notified().await;
+            }
+            if lane.lifecycle_state == LaneLifecycleState::Queued {
+                Ok(OpenLaneOutcome::Queued { lane })
+            } else {
+                Ok(OpenLaneOutcome::Running { lane })
+            }
+        }
+
+        async fn execute(
+            &self,
+            lane_id: &BrowserLaneId,
+            operation: BrowserOperation,
+        ) -> Result<BrowserOperationResult, BrowserPlatformError> {
+            if !self
+                .lanes
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|lane| &lane.lane_id == lane_id)
+            {
+                return Err(BrowserPlatformError::lane_not_found(lane_id.clone()));
+            }
+            let action = operation.action.clone();
+            self.operations
+                .lock()
+                .unwrap()
+                .push((lane_id.clone(), operation));
+            if self.block_execute.load(Ordering::Acquire) {
+                self.execute_started.notify_one();
+                self.execute_release.notified().await;
+            }
+            let should_panic = self
+                .panic_url
+                .lock()
+                .unwrap()
+                .as_ref()
+                .is_some_and(|panic_url| {
+                    action == "navigate"
+                        && self
+                            .operations
+                            .lock()
+                            .unwrap()
+                            .last()
+                            .and_then(|(_, operation)| operation.input.get("url"))
+                            .and_then(Value::as_str)
+                            == Some(panic_url.as_str())
+                });
+            assert!(
+                !should_panic,
+                "intentional crawl worker panic for lifecycle regression coverage"
+            );
+            Ok(BrowserOperationResult {
+                output: match action.as_str() {
+                    "navigate" => json!({
+                        "final_url": "https://example.test/",
+                        "http_status": 200,
+                        "redirected": false,
+                        "load_state": "complete",
+                    }),
+                    "get_page_text" => json!({ "message": "fixture page text" }),
+                    "screenshot" => json!({
+                        "media_type": "image/png",
+                        "data": "ZmFrZS1wbmc=",
+                    }),
+                    _ => json!({ "message": format!("{action} ok") }),
+                },
+                ..BrowserOperationResult::default()
+            })
+        }
+
+        async fn list(&self) -> Result<Vec<BrowserLaneSnapshot>, BrowserPlatformError> {
+            Ok(self.lanes.lock().unwrap().clone())
+        }
+
+        async fn status(
+            &self,
+            lane_id: &BrowserLaneId,
+        ) -> Result<BrowserLaneSnapshot, BrowserPlatformError> {
+            self.lanes
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|lane| &lane.lane_id == lane_id)
+                .cloned()
+                .ok_or_else(|| BrowserPlatformError::lane_not_found(lane_id.clone()))
+        }
+
+        async fn close(
+            &self,
+            lane_id: &BrowserLaneId,
+        ) -> Result<CloseResult, BrowserPlatformError> {
+            self.closes.lock().unwrap().push(lane_id.clone());
+            let mut lanes = self.lanes.lock().unwrap();
+            let before = lanes.len();
+            lanes.retain(|lane| &lane.lane_id != lane_id);
+            let closed = usize::from(lanes.len() != before);
+            self.close_called.notify_one();
+            Ok(CloseResult {
+                closed,
+                already_closed: closed == 0,
+            })
+        }
+
+        async fn close_all(&self) -> Result<CloseResult, BrowserPlatformError> {
+            let mut lanes = self.lanes.lock().unwrap();
+            let closed = lanes.len();
+            lanes.clear();
+            Ok(CloseResult {
+                closed,
+                already_closed: closed == 0,
+            })
+        }
+    }
+
+    pub(crate) fn managed_tool_for_contract(client: Arc<FakeLaneClient>) -> BrowserTool {
+        BrowserTool::with_data_dir(std::env::temp_dir().join("browser-lane-client-test"), false)
+            .with_lane_client_port_for_test(client)
+    }
+
+    fn managed_tool(client: Arc<FakeLaneClient>) -> BrowserTool {
+        managed_tool_for_contract(client)
+    }
+
     #[tokio::test]
+    async fn injected_lane_client_is_authoritative_and_never_private_launches() {
+        let client = Arc::new(FakeLaneClient::default());
+        let tool = managed_tool(client);
+
+        let error = match tool.engine().await {
+            Ok(_) => panic!("managed facade must reject private engine"),
+            Err(error) => error,
+        };
+        assert!(error.contains("shared Browser Session Hub"));
+        assert!(tool.engine.lock().unwrap().is_none());
+        assert!(tool.is_concurrency_safe(&json!({"action": "navigate"})));
+    }
+
+    #[tokio::test]
+    async fn managed_only_without_client_fails_before_private_engine_build() {
+        let tool = BrowserTool::with_data_dir(
+            std::env::temp_dir().join("browser-lane-client-required-test"),
+            false,
+        )
+        .require_lane_client();
+
+        let error = match tool.engine().await {
+            Ok(_) => panic!("managed-only facade must reject private engine construction"),
+            Err(error) => error,
+        };
+        assert!(error.contains("requires the shared Browser Session Hub"));
+        assert!(error.contains("fallback is disabled"));
+        assert!(
+            tool.engine.lock().unwrap().is_none(),
+            "fail-closed provider absence must not populate or construct the private engine cache"
+        );
+
+        let result = tool
+            .execute(json!({
+                "action": "navigate",
+                "url": "https://example.test/",
+            }))
+            .await;
+        assert!(result.is_error);
+        assert!(result.content.contains("client is not configured"));
+        assert!(tool.engine.lock().unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn managed_default_lane_dispatch_strips_untrusted_confirmation() {
+        let client = Arc::new(FakeLaneClient::default());
+        let tool = managed_tool(Arc::clone(&client));
+        let result = tool
+            .execute(json!({
+                "action": "navigate",
+                "url": "https://example.test/",
+                (OUT_OF_BAND_CONFIRMED_KEY): true,
+            }))
+            .await;
+
+        assert!(!result.is_error, "{}", result.content);
+        let opens = client.opens.lock().unwrap();
+        assert_eq!(opens.len(), 1);
+        assert_eq!(opens[0].0, None, "missing lane_id must use the default Lane");
+        drop(opens);
+        let operations = client.operations.lock().unwrap();
+        assert_eq!(operations.len(), 1);
+        assert!(
+            operations[0]
+                .1
+                .input
+                .get(OUT_OF_BAND_CONFIRMED_KEY)
+                .is_none(),
+            "model-provided confirmation sentinel must never cross the managed boundary"
+        );
+        assert!(result.content.contains("\"lane_id\": \"lane-1\""));
+    }
+
+    #[tokio::test]
+    async fn managed_tool_rejects_trusted_owner_fields_without_dispatch() {
+        let client = Arc::new(FakeLaneClient::default());
+        let tool = managed_tool(Arc::clone(&client));
+        let result = tool
+            .execute(json!({
+                "action": "navigate",
+                "url": "https://example.test/",
+                "user_id": "model-chosen-owner",
+            }))
+            .await;
+
+        assert!(result.is_error);
+        assert!(result.content.contains("trusted host metadata"));
+        assert!(client.opens.lock().unwrap().is_empty());
+        assert!(client.operations.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn managed_ref_action_uses_lane_generation_not_frame_sequence() {
+        let client = Arc::new(FakeLaneClient::default());
+        let mut lane = client.snapshot("default", BrowserIdentityMode::Primary);
+        lane.ref_generation = 42;
+        let lane_id = lane.lane_id.clone();
+        client.lanes.lock().unwrap().push(lane);
+        let tool = managed_tool(Arc::clone(&client));
+
+        let result = tool
+            .execute(json!({
+                "action": "click",
+                "lane_id": lane_id.as_str(),
+                "ref": "f7e3",
+            }))
+            .await;
+
+        assert!(!result.is_error, "{}", result.content);
+        let operations = client.operations.lock().unwrap();
+        assert_eq!(operations.len(), 1);
+        assert_eq!(operations[0].1.ref_generation, Some(42));
+        assert_ne!(
+            operations[0].1.ref_generation,
+            Some(7),
+            "the f<frame-seq> prefix must not be treated as an observation generation"
+        );
+    }
+
+    #[test]
+    fn managed_identity_modification_hint_is_closed_without_blocking_replica_navigation() {
+        for action in [
+            "evaluate",
+            "click",
+            "type",
+            "set_value",
+            "select_option",
+            "press_key",
+            "upload_file",
+        ] {
+            assert!(
+                action_may_modify_identity(action, &json!({})),
+                "{action} must carry the conservative replica write hint"
+            );
+        }
+
+        for action in [
+            "navigate",
+            "back",
+            "forward",
+            "reload",
+            "open_link_new_tab",
+            "close_tab",
+            "observe",
+            "screenshot",
+            "capabilities",
+            "get_page_text",
+            "search_page",
+            "find_elements",
+            "get_dropdown_options",
+            "cursor",
+            "tabs",
+            "switch_tab",
+            "get_console_logs",
+            "get_page_errors",
+            "get_network_log",
+            "download",
+            "save_as_pdf",
+            "hover",
+            "scroll",
+            "scroll_to_text",
+            "wait",
+            "wait_for",
+            "extract",
+            "switch_frame",
+        ] {
+            assert!(
+                !action_may_modify_identity(action, &json!({})),
+                "{action} should remain usable as a non-mutating hint"
+            );
+        }
+        assert!(action_may_modify_identity(
+            "navigate",
+            &json!({"method": "POST"})
+        ));
+        assert!(action_may_modify_identity("future_action", &json!({})));
+    }
+
+    #[tokio::test]
+    async fn managed_lane_actions_return_short_public_handles_only() {
+        let client = Arc::new(FakeLaneClient::default());
+        let tool = managed_tool(Arc::clone(&client));
+        let opened = tool
+            .execute(json!({
+                "action": "browser_open",
+                "lane_name": "research",
+            }))
+            .await;
+        assert!(!opened.is_error, "{}", opened.content);
+        assert!(opened.content.contains("\"lane_id\": \"lane-1\""));
+        assert!(!opened.content.contains("trusted-user-secret"));
+        assert!(!opened.content.contains("trusted-owner-secret"));
+        assert_eq!(
+            client.opens.lock().unwrap()[0].1,
+            BrowserIdentityMode::Primary,
+            "interactive model-facing opens must use the trusted Primary identity"
+        );
+
+        let navigated = tool
+            .execute(json!({
+                "action": "navigate",
+                "lane_id": "lane-1",
+                "url": "https://example.test/",
+            }))
+            .await;
+        assert!(!navigated.is_error, "{}", navigated.content);
+        assert_eq!(client.opens.lock().unwrap().len(), 1);
+        assert_eq!(client.operations.lock().unwrap()[0].0.as_str(), "lane-1");
+
+        let listed = tool.execute(json!({"action": "browser_list"})).await;
+        assert!(!listed.content.contains("trusted-conversation-secret"));
+        assert!(!listed.content.contains("trusted-owner-secret"));
+    }
+
+    #[tokio::test]
+    async fn crawl_many_reuses_bounded_lanes_preserves_order_and_cleans_up() {
+        let client = Arc::new(FakeLaneClient::default());
+        let tool = managed_tool(Arc::clone(&client));
+        let result = tool
+            .execute(json!({
+                "action": "browser_crawl_many",
+                "urls": [
+                    "https://example.test/0",
+                    "https://example.test/1",
+                    "https://example.test/2",
+                    "https://example.test/3",
+                    "https://example.test/4"
+                ],
+                "concurrency": 2,
+            }))
+            .await;
+
+        assert!(!result.is_error, "{}", result.content);
+        let value: Value = serde_json::from_str(&result.content).unwrap();
+        let results = value["results"].as_array().unwrap();
+        assert_eq!(results.len(), 5);
+        for (index, item) in results.iter().enumerate() {
+            assert_eq!(
+                item["url"],
+                Value::String(format!("https://example.test/{index}"))
+            );
+            assert_eq!(item["ok"], true);
+        }
+        assert_eq!(client.opens.lock().unwrap().len(), 2);
+        assert!(
+            client
+                .opens
+                .lock()
+                .unwrap()
+                .iter()
+                .all(|(_, mode, _)| *mode == BrowserIdentityMode::Anonymous),
+            "public crawl batches must use the host-selected Anonymous identity"
+        );
+        assert_eq!(
+            client.operations.lock().unwrap().len(),
+            10,
+            "each URL should navigate then read, reusing two worker Lanes"
+        );
+        assert_eq!(client.closes.lock().unwrap().len(), 2);
+        assert!(client.lanes.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn model_identity_fields_fail_closed_before_lane_dispatch() {
+        for (field, value) in [
+            ("identity_mode", json!("authenticated_replica")),
+            ("identity", json!("primary")),
+            ("authenticated", json!(true)),
+            ("auth_identity", json!("account-a")),
+            ("profile", json!("personal")),
+            ("account", json!("admin")),
+        ] {
+            let client = Arc::new(FakeLaneClient::default());
+            let tool = managed_tool(Arc::clone(&client));
+            let mut input = json!({
+                "action": "browser_crawl_many",
+                "urls": ["https://example.test/public"],
+                "concurrency": 1,
+            });
+            input[field] = value;
+
+            let result = tool.execute(input).await;
+            assert!(result.is_error, "{field}: {}", result.content);
+            assert!(result.content.contains(field), "{field}: {}", result.content);
+            assert!(
+                client.opens.lock().unwrap().is_empty(),
+                "{field} must be rejected before opening a Lane"
+            );
+            assert!(
+                client.operations.lock().unwrap().is_empty(),
+                "{field} must be rejected before dispatching an operation"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn crawl_many_queued_is_terminal_failure_not_success_with_a_closed_handle() {
+        let client = Arc::new(FakeLaneClient::default());
+        *client.open_lifecycle.lock().unwrap() = Some(LaneLifecycleState::Queued);
+        let tool = managed_tool(Arc::clone(&client));
+        let result = tool
+            .execute(json!({
+                "action": "browser_crawl_many",
+                "urls": [
+                    "https://example.test/queued-0",
+                    "https://example.test/queued-1"
+                ],
+                "concurrency": 1,
+            }))
+            .await;
+
+        assert!(!result.is_error, "structured batch failures remain a JSON result");
+        let value: Value = serde_json::from_str(&result.content).unwrap();
+        assert_eq!(value["ok"], false);
+        let results = value["results"].as_array().unwrap();
+        assert_eq!(results.len(), 2);
+        for (index, item) in results.iter().enumerate() {
+            assert_eq!(
+                item["url"],
+                Value::String(format!("https://example.test/queued-{index}"))
+            );
+            assert_eq!(item["ok"], false);
+            assert_eq!(item["dispatched"], false);
+            assert_eq!(item["error"]["code"], "browser_capacity_queued");
+            assert_eq!(item["lane"]["lifecycle_state"], "queued");
+            assert_eq!(item["cleanup"]["closed"], true);
+        }
+        assert!(client.operations.lock().unwrap().is_empty());
+        assert_eq!(client.closes.lock().unwrap().len(), 1);
+        assert!(client.lanes.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn crawl_many_parent_cancellation_aborts_worker_and_raii_closes_lane() {
+        let client = Arc::new(FakeLaneClient::default());
+        client.block_execute.store(true, Ordering::Release);
+        let tool = Arc::new(managed_tool(Arc::clone(&client)));
+        let task = tokio::spawn({
+            let tool = Arc::clone(&tool);
+            async move {
+                tool.execute(json!({
+                    "action": "browser_crawl_many",
+                    "urls": [
+                        "https://example.test/cancel-0",
+                        "https://example.test/cancel-1"
+                    ],
+                    "concurrency": 1,
+                }))
+                .await
+            }
+        });
+
+        tokio::time::timeout(
+            Duration::from_secs(2),
+            client.execute_started.notified(),
+        )
+        .await
+        .expect("crawl worker should begin its first operation");
+        task.abort();
+        let join_error = task.await.expect_err("parent crawl task should be cancelled");
+        assert!(join_error.is_cancelled());
+        tokio::time::timeout(Duration::from_secs(2), client.close_called.notified())
+            .await
+            .expect("RAII cleanup should close the worker Lane");
+        assert!(client.lanes.lock().unwrap().is_empty());
+
+        let operation_count = client.operations.lock().unwrap().len();
+        client.execute_release.notify_waiters();
+        tokio::time::sleep(Duration::from_millis(25)).await;
+        assert_eq!(
+            client.operations.lock().unwrap().len(),
+            operation_count,
+            "aborted worker must not detach and resume after its parent is cancelled"
+
+        );
+    }
+
+    #[tokio::test]
+
     async fn failed_persistent_login_save_does_not_poison_retry_throttle() {
         let directory = tempfile::tempdir().expect("tempdir");
         let tool = persistent_login_tool(directory.path());
@@ -3039,6 +4498,85 @@ mod tests {
             ),
             "conversation-local facades targeting one global vault need one ordering authority"
         );
+    }
+
+    #[tokio::test]
+    async fn crawl_many_cancellation_during_open_closes_lane_by_deterministic_name() {
+        let client = Arc::new(FakeLaneClient::default());
+        client
+            .block_open_after_insert
+            .store(true, Ordering::Release);
+        let tool = Arc::new(managed_tool(Arc::clone(&client)));
+        let task = tokio::spawn({
+            let tool = Arc::clone(&tool);
+            async move {
+                tool.execute(json!({
+                    "action": "browser_crawl_many",
+                    "urls": ["https://example.test/cancel-open"],
+                    "concurrency": 1,
+                }))
+                .await
+            }
+        });
+
+        tokio::time::timeout(Duration::from_secs(2), client.open_started.notified())
+            .await
+            .expect("fake client should register a Lane before blocking open");
+        task.abort();
+        let join_error = task.await.expect_err("parent crawl task should be cancelled");
+        assert!(join_error.is_cancelled());
+        tokio::time::timeout(Duration::from_secs(2), client.close_called.notified())
+            .await
+            .expect("RAII cleanup should resolve and close the partially-opened Lane");
+        assert!(client.lanes.lock().unwrap().is_empty());
+        assert_eq!(client.closes.lock().unwrap().len(), 1);
+        assert!(client.operations.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn crawl_many_worker_panic_returns_one_stable_ordered_result_per_assigned_url() {
+        let client = Arc::new(FakeLaneClient::default());
+        *client.panic_url.lock().unwrap() = Some("https://example.test/2".to_string());
+        let tool = managed_tool(Arc::clone(&client));
+        let result = tool
+            .execute(json!({
+                "action": "browser_crawl_many",
+                "urls": [
+                    "https://example.test/0",
+                    "https://example.test/1",
+                    "https://example.test/2",
+                    "https://example.test/3",
+                    "https://example.test/4"
+                ],
+                "concurrency": 2,
+            }))
+            .await;
+
+        assert!(!result.is_error, "worker failure must remain a structured batch result");
+        let value: Value = serde_json::from_str(&result.content).unwrap();
+        assert_eq!(value["ok"], false);
+        let results = value["results"].as_array().unwrap();
+        assert_eq!(results.len(), 5);
+        for (index, item) in results.iter().enumerate() {
+            assert_eq!(
+                item["url"],
+                Value::String(format!("https://example.test/{index}")),
+                "results must preserve input order"
+            );
+        }
+        for index in [0, 2, 4] {
+            assert_eq!(results[index]["ok"], false);
+            assert_eq!(results[index]["error"]["code"], "crawl_worker_failed");
+            assert_eq!(results[index]["error"]["cause"], "worker_panicked");
+            assert_eq!(results[index]["cleanup"]["closed"], true);
+        }
+        for index in [1, 3] {
+            assert_eq!(results[index]["ok"], true);
+            assert_eq!(results[index]["cleanup"]["closed"], true);
+        }
+        assert_eq!(client.closes.lock().unwrap().len(), 2);
+        assert!(client.lanes.lock().unwrap().is_empty());
+
     }
 
     #[test]
@@ -3744,6 +5282,37 @@ mod tests {
             a.profile_dir(),
             data.join("profile"),
             "must not reuse the legacy shared <data_dir>/profile"
+        );
+    }
+
+    #[tokio::test]
+    async fn managed_constructor_owns_no_profile_and_never_initializes_standalone_engine() {
+        let workspace = std::env::temp_dir().join("bt-managed-workspace");
+        let tool = BrowserTool::new_managed(
+            &BrowserConfig::default(),
+            false,
+            false,
+            false,
+            Some(workspace.clone()),
+            None,
+            None,
+        );
+
+        assert!(tool.managed_only);
+        assert!(tool.data_dir.as_os_str().is_empty());
+        assert!(tool.persistent_data_dir.as_os_str().is_empty());
+        assert!(tool.profile_dir().as_os_str().is_empty());
+        assert_eq!(tool.workspace_dir.as_ref(), Some(&workspace));
+        assert!(tool.engine.lock().unwrap().is_none());
+
+        let error = match tool.engine().await {
+            Ok(_) => panic!("managed facade without a Lane client must fail closed"),
+            Err(error) => error,
+        };
+        assert!(error.contains("requires the shared Browser Session Hub"));
+        assert!(
+            tool.engine.lock().unwrap().is_none(),
+            "managed lookup must not initialize or cache a standalone engine"
         );
     }
 
@@ -5192,6 +6761,60 @@ mod tests {
         async fn debug_snapshot(&self) -> Result<nomi_browser_engine::DebugSnapshot, nomi_browser_engine::BrowserError> {
             Err(nomi_browser_engine::BrowserError::Unsupported { capability: "debug".into(), hint: "fake".into() })
         }
+    }
+
+    fn managed_engine_tool(engine: Arc<dyn BrowserEngine>) -> BrowserTool {
+        BrowserTool::with_managed_engine(
+            engine,
+            std::env::temp_dir().join("managed-engine-policy-test"),
+            None,
+            false,
+            false,
+            false,
+            Arc::new(Mutex::new(HashSet::new())),
+        )
+    }
+
+    #[tokio::test]
+    async fn managed_engine_facade_returns_injected_engine() {
+        let injected: Arc<dyn BrowserEngine> = Arc::new(FakeRecordingEngine);
+        let tool = managed_engine_tool(Arc::clone(&injected));
+
+        assert!(tool.managed_only);
+        assert!(tool.profile_dir().as_os_str().is_empty());
+        let resolved = tool
+            .engine()
+            .await
+            .expect("managed facade should return its injected engine");
+        assert!(Arc::ptr_eq(&resolved, &injected));
+    }
+
+    #[tokio::test]
+    async fn managed_engine_cache_loss_or_failure_never_private_falls_back() {
+        let tool = managed_engine_tool(Arc::new(FakeRecordingEngine));
+
+        *tool.engine.lock().unwrap() = None;
+        let missing = match tool.engine().await {
+            Ok(_) => panic!("missing managed cache must fail closed"),
+            Err(error) => error,
+        };
+        assert!(missing.contains("managed Browser engine is unavailable"));
+        assert!(missing.contains("fallback is disabled"));
+        assert!(
+            tool.engine.lock().unwrap().is_none(),
+            "fail-closed lookup must not populate a standalone engine"
+        );
+
+        *tool.engine.lock().unwrap() = Some(Err("managed engine failed".into()));
+        let failed = match tool.engine().await {
+            Ok(_) => panic!("cached managed failure must be returned"),
+            Err(error) => error,
+        };
+        assert_eq!(failed, "managed engine failed");
+        assert!(matches!(
+            tool.engine.lock().unwrap().as_ref(),
+            Some(Err(error)) if error == "managed engine failed"
+        ));
     }
 
     #[tokio::test]

@@ -7,9 +7,9 @@
 //! 为何读 DevToolsActivePort 而非 HTTP `/json/version`：免一次 HTTP（无需 `trust_env(false)`
 //! 绕代理）、无需解析 JSON、且是 chrome 端口就绪的**权威信号**（文件出现即端口在监听）。
 //!
-//! 进程托管：`Builder::spawn` 已挂 `kill_on_drop(true)` + 三平台清理网（Windows Job
-//! Object / Linux PDEATHSIG / macOS kqueue），故 engine 只要持有 child handle，退出即无
-//! 残留 chrome。
+//! 进程托管：`Builder::spawn_with_cleanup` 同时返回 direct-child handle 与三平台整树
+//! cleanup proof（Windows Job / Unix watchdog）。生命周期 owner 必须同时持有二者，并且只有
+//! direct child 已回收且 cleanup proof 完成后，才能报告 Chromium 已停止。
 //!
 //! headless 决策：[`crate::display::display_available`] 为 false（无显示器：无头 server /
 //! CI / SSH 无 X）→ 强制 `--headless=new`。headful 时给 `--window-position`（非主屏角）+
@@ -19,8 +19,6 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 #[cfg(windows)]
 use std::time::Instant;
-
-use tokio::process::Child;
 
 use crate::engine::BrowserError;
 
@@ -32,7 +30,7 @@ const PORT_FILE_TIMEOUT: Duration = Duration::from_secs(30);
 const PORT_FILE_POLL_INTERVAL: Duration = Duration::from_millis(50);
 
 /// 托管启动配置。`resolve_chrome_path`（Task 6）得到的可执行 + 专属数据目录 + headful。
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct LaunchConfig {
     /// chrome 可执行绝对路径（来自 [`crate::acquire::resolve_chrome_path`]）。
     pub chrome_path: PathBuf,
@@ -42,12 +40,57 @@ pub struct LaunchConfig {
     pub headful: bool,
 }
 
+impl std::fmt::Debug for LaunchConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LaunchConfig")
+            .field("chrome_path_configured", &true)
+            .field("user_data_dir_configured", &true)
+            .field("headful", &self.headful)
+            .finish()
+    }
+}
+
 /// 一次成功启动的产物：托管的 child handle（保活=保证退出清理）+ CDP 连接运输。
 pub struct Launched {
-    /// 托管的 chrome 进程句柄。engine 持有它；drop/kill 即清理整棵进程树。
-    pub child: Child,
+    /// Chromium direct child + exact whole-tree cleanup proof.
+    pub child: nomi_process_runtime::ManagedChildProcess,
     /// CDP 连接运输（Unix=管道 / Windows=ws url）。
     pub transport: LaunchTransport,
+}
+
+impl Launched {
+    pub(crate) fn into_managed(self) -> (nomi_process_runtime::ManagedChildProcess, LaunchTransport) {
+        (self.child, self.transport)
+    }
+}
+
+/// Force-stop a launched browser through its single authoritative lifecycle
+/// operation. A failed or cancelled attempt leaves the same exact authority
+/// available for a later retry.
+pub(crate) async fn terminate_launched_process_tree(
+    process: &mut nomi_process_runtime::ManagedChildProcess,
+) -> Result<(), BrowserError> {
+    process.shutdown().await.map_err(|error| {
+        tracing::warn!(
+            target: "nomi_browser_engine::launch",
+            error_kind = ?error.kind(),
+            "managed Chromium process-tree cleanup could not be proven"
+        );
+        BrowserError::Other("managed Chromium process-tree cleanup could not be proven".into())
+    })
+}
+
+fn launch_error_after_cleanup(
+    primary: BrowserError,
+    cleanup: Result<(), BrowserError>,
+) -> BrowserError {
+    if cleanup.is_ok() {
+        primary
+    } else {
+        BrowserError::Other(
+            "browser launch failed and process-tree cleanup could not be proven".into(),
+        )
+    }
 }
 
 /// CDP 连接运输。**Unix 生产用 `--remote-debugging-pipe`**（fd3/fd4；浏览器在本进程死亡——含
@@ -150,11 +193,13 @@ pub fn parse_devtools_active_port(content: &str) -> Result<(u16, String), Browse
         .next()
         .ok_or_else(|| BrowserError::Other("DevToolsActivePort missing ws-path line".into()))?;
 
-    let port: u16 = port_line.trim().parse().map_err(|e| {
-        BrowserError::Other(format!(
-            "DevToolsActivePort port line not a u16 ({port_line:?}): {e}"
-        ))
-    })?;
+    // Never include either line in the error. The second line is a
+    // browser-scoped WebSocket path and may contain a secret token; the first
+    // line is caller-controlled file content and is not useful to a caller.
+    let port: u16 = port_line
+        .trim()
+        .parse()
+        .map_err(|_| BrowserError::Other("DevToolsActivePort contained an invalid port".into()))?;
     if port == 0 {
         return Err(BrowserError::Other(
             "DevToolsActivePort reported port 0 (not yet bound)".into(),
@@ -163,9 +208,9 @@ pub fn parse_devtools_active_port(content: &str) -> Result<(u16, String), Browse
 
     let ws_path = ws_path.trim().to_string();
     if !ws_path.starts_with('/') {
-        return Err(BrowserError::Other(format!(
-            "DevToolsActivePort ws-path not absolute ({ws_path:?})"
-        )));
+        return Err(BrowserError::Other(
+            "DevToolsActivePort contained an invalid browser path".into(),
+        ));
     }
     Ok((port, ws_path))
 }
@@ -173,6 +218,62 @@ pub fn parse_devtools_active_port(content: &str) -> Result<(u16, String), Browse
 /// 由端口 + ws 路径拼出 browser ws url（loopback v4）。
 pub fn build_ws_url(port: u16, ws_path: &str) -> String {
     format!("ws://127.0.0.1:{port}{ws_path}")
+}
+
+fn safe_profile_prepare_error() -> BrowserError {
+    BrowserError::Other("browser launch could not prepare its profile".into())
+}
+
+fn safe_profile_ownership_error() -> BrowserError {
+    BrowserError::Other("browser launch ownership preflight failed".into())
+}
+
+fn safe_chromium_spawn_error() -> BrowserError {
+    BrowserError::Other("browser launch could not start Chromium".into())
+}
+
+fn safe_devtools_timeout_error() -> BrowserError {
+    BrowserError::Other("browser launch timed out waiting for DevToolsActivePort".into())
+}
+
+/// Keep the Chromium test escape hatch on an exact allowlist.
+///
+/// Release builds do not read `NOMI_CHROME_EXTRA_ARGS` at all. In debug
+/// builds, only the switches required by the OOPIF fixture are accepted.
+/// An allowlist is intentional here: Chromium has many aliases and related
+/// switches that can change profile ownership, CDP exposure, extensions,
+/// sandboxing, or other security-sensitive behavior.
+fn filtered_extra_chrome_args(extra: &str) -> Vec<String> {
+    #[cfg(debug_assertions)]
+    {
+        const OOPIF_HOST_RESOLVER_RULES: &str =
+            "--host-resolver-rules=MAP *.nomitest 127.0.0.1";
+
+        extra
+            .lines()
+            .map(str::trim)
+            .filter(|arg| !arg.is_empty())
+            .filter_map(|arg| {
+                if arg == OOPIF_HOST_RESOLVER_RULES || arg == "--site-per-process" {
+                    Some(arg.to_owned())
+                } else {
+                    // Never echo a rejected value: it may contain a path,
+                    // endpoint, or another secret supplied by the caller.
+                    tracing::warn!(
+                        target: "nomi_browser_engine::launch",
+                        "ignored unsupported NOMI_CHROME_EXTRA_ARGS entry"
+                    );
+                    None
+                }
+            })
+            .collect()
+    }
+
+    #[cfg(not(debug_assertions))]
+    {
+        let _ = extra;
+        Vec::new()
+    }
 }
 
 /// 托管启动 chrome 并返回 child + CDP 连接运输。
@@ -186,12 +287,15 @@ pub async fn launch_chrome(
     force_headless: bool,
 ) -> Result<Launched, BrowserError> {
     // user-data-dir 必须存在（专属目录；红线已在 config 构造处保证非用户 profile）。
-    std::fs::create_dir_all(&config.user_data_dir).map_err(|e| {
-        BrowserError::Other(format!(
-            "create user-data-dir {}: {e}",
-            config.user_data_dir.display()
-        ))
-    })?;
+    std::fs::create_dir_all(&config.user_data_dir).map_err(|_| safe_profile_prepare_error())?;
+
+    // Ownership must be resolved before touching Preferences, Singleton files,
+    // or any other profile state. A live owner or in-progress recovery makes
+    // the whole launch fail closed.
+    let ownership_claim =
+        crate::profile::prepare_ownership_marker_for_launch(&config.user_data_dir).map_err(
+            |_| safe_profile_ownership_error(),
+        )?;
 
     // **脏 profile 根治（keystone）**：上次 chrome 必被硬杀（kill_on_drop / Job Object / app 同步
     // exit），profile.exit_type 停在 "Crashed" → 下次启动弹「未正确关闭 / 恢复页面?」气泡 + 跑会话
@@ -200,7 +304,7 @@ pub async fn launch_chrome(
     if let Err(e) = crate::profile::scrub_crash_markers(&config.user_data_dir) {
         tracing::warn!(
             target: "nomi_browser_engine::launch",
-            error = %e, dir = %config.user_data_dir.display(),
+            error_kind = ?e.kind(),
             "profile crash-marker scrub failed (best-effort; launch continues)"
         );
     }
@@ -210,26 +314,22 @@ pub async fn launch_chrome(
 
     let mut args = build_chrome_args(&config.user_data_dir, force_headless);
 
-    // Escape hatch（测试 / 高级排障）：`NOMI_CHROME_EXTRA_ARGS`（**每行一个参数**,故参数值可含空格,
-    // 如 `--host-resolver-rules=MAP *.test 127.0.0.1`）追加到 chrome 启动参数（OOPIF 验证强制站点隔离 /
-    // Emulation 调试旗标等）。生产默认未设 → 零影响。
+    // The environment escape hatch is compiled out of release builds.
+    // Debug builds still use the exact allowlist above; arbitrary Chromium
+    // switches must never be able to replace the managed profile or CDP
+    // transport, load extensions, or weaken sandbox/security settings.
+    #[cfg(debug_assertions)]
     if let Ok(extra) = std::env::var("NOMI_CHROME_EXTRA_ARGS") {
-        args.extend(
-            extra
-                .lines()
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-                .map(String::from),
-        );
+        args.extend(filtered_extra_chrome_args(&extra));
     }
 
     #[cfg(unix)]
     {
-        launch_chrome_pipe(config, &args).await
+        launch_chrome_pipe(config, &args, &ownership_claim).await
     }
     #[cfg(windows)]
     {
-        match launch_chrome_ws(config, &args).await {
+        match launch_chrome_ws(config, &args, &ownership_claim).await {
             Ok(v) => Ok(v),
             Err(first) if should_retry_with_startup_page(&first, &args) => {
                 tracing::warn!(
@@ -237,12 +337,23 @@ pub async fn launch_chrome(
                     error = %first,
                     "chrome exited before DevTools port was ready; retrying with an explicit startup page"
                 );
+                crate::profile::prepare_ownership_marker_for_retry(
+                    &config.user_data_dir,
+                    &ownership_claim,
+                )
+                .map_err(|_| {
+                    BrowserError::Other(
+                        "browser launch ownership preflight failed before retry".into(),
+                    )
+                })?;
                 let fallback_args = chrome_args_with_startup_page(&args);
-                launch_chrome_ws(config, &fallback_args).await.map_err(|second| {
-                    BrowserError::Other(format!(
-                        "chrome launch retry with startup page failed: {second}; first no-startup-window launch failed: {first}"
-                    ))
-                })
+                launch_chrome_ws(config, &fallback_args, &ownership_claim)
+                    .await
+                    .map_err(|_| {
+                        BrowserError::Other(
+                            "browser launch retry with startup page failed".into(),
+                        )
+                    })
             }
             Err(e) => Err(e),
         }
@@ -256,6 +367,7 @@ pub async fn launch_chrome(
 async fn launch_chrome_pipe(
     config: &LaunchConfig,
     args: &[String],
+    ownership_claim: &crate::profile::ProfileLaunchClaim,
 ) -> Result<Launched, BrowserError> {
     // pipe_in：父写命令 → chrome 读（fd3）。pipe_out：chrome 写响应（fd4）→ 父读。
     let (chrome_cmd_read, our_cmd_write) = make_pipe()?;
@@ -271,23 +383,28 @@ async fn launch_chrome_pipe(
         // chrome `--remote-debugging-pipe`：fd3 读命令、fd4 写响应。
         .inherit_fds(vec![(3, chrome_cmd_read), (4, chrome_resp_write)]);
 
-    let mut child = builder.spawn().map_err(|e| {
-        BrowserError::Other(format!(
-            "spawn chrome {}: {e}",
-            config.chrome_path.display()
-        ))
+    let mut process = builder.spawn_managed().map_err(|e| {
+        tracing::debug!(
+            target: "nomi_browser_engine::launch",
+            error_kind = ?e.kind(),
+            "managed Chromium spawn failed"
+        );
+        safe_chromium_spawn_error()
     })?;
+    commit_browser_ownership(config, ownership_claim, &mut process).await?;
 
     // 快速失败：给 chrome 一小会儿；若立即退出（坏开关 / 缺依赖）立即报错,不必等首条 CDP 命令超时。
     tokio::time::sleep(Duration::from_millis(120)).await;
-    if let Ok(Some(status)) = child.try_wait() {
-        return Err(BrowserError::Other(format!(
+    if let Ok(Some(status)) = process.child_mut().try_wait() {
+        let primary = BrowserError::Other(format!(
             "chrome exited immediately after spawn (bad flags / missing deps?) status {status}"
-        )));
+        ));
+        let cleanup = terminate_launched_process_tree(&mut process).await;
+        return Err(launch_error_after_cleanup(primary, cleanup));
     }
 
     Ok(Launched {
-        child,
+        child: process,
         transport: LaunchTransport::Pipe {
             cmd_writer: our_cmd_write,
             resp_reader: our_resp_read,
@@ -343,6 +460,7 @@ fn set_cloexec(fd: &std::os::fd::OwnedFd) -> Result<(), BrowserError> {
 async fn launch_chrome_ws(
     config: &LaunchConfig,
     args: &[String],
+    ownership_claim: &crate::profile::ProfileLaunchClaim,
 ) -> Result<Launched, BrowserError> {
     // 删旧 DevToolsActivePort：复用目录时避免轮询读到上次启动的陈旧端口/路径。
     let port_file = config.user_data_dir.join("DevToolsActivePort");
@@ -355,40 +473,78 @@ async fn launch_chrome_ws(
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
 
-    let mut child = builder.spawn().map_err(|e| {
-        BrowserError::Other(format!(
-            "spawn chrome {}: {e}",
-            config.chrome_path.display()
-        ))
+    let mut process = builder.spawn_managed().map_err(|e| {
+        tracing::debug!(
+            target: "nomi_browser_engine::launch",
+            error_kind = ?e.kind(),
+            "managed Chromium spawn failed"
+        );
+        safe_chromium_spawn_error()
     })?;
+    commit_browser_ownership(config, ownership_claim, &mut process).await?;
 
     // 轮询 DevToolsActivePort 直到出现且可解析，或 child 提前退出，或超时。
     let deadline = Instant::now() + PORT_FILE_TIMEOUT;
     loop {
-        if let Ok(Some(status)) = child.try_wait() {
-            return Err(BrowserError::Other(format!(
+        if let Ok(Some(status)) = process.child_mut().try_wait() {
+            let primary = BrowserError::Other(format!(
                 "chrome exited before DevTools port was ready (status {status})"
-            )));
+            ));
+            let cleanup = terminate_launched_process_tree(&mut process).await;
+            return Err(launch_error_after_cleanup(primary, cleanup));
         }
         if let Ok(content) = std::fs::read_to_string(&port_file) {
             if let Ok((port, ws_path)) = parse_devtools_active_port(&content) {
                 let ws_url = build_ws_url(port, &ws_path);
                 return Ok(Launched {
-                    child,
+                    child: process,
                     transport: LaunchTransport::Ws { ws_url },
                 });
             }
         }
         if Instant::now() >= deadline {
-            let _ = nomi_process_runtime::kill_process_tree(&mut child).await;
-            return Err(BrowserError::Other(format!(
-                "timed out after {}s waiting for DevToolsActivePort in {}",
-                PORT_FILE_TIMEOUT.as_secs(),
-                config.user_data_dir.display()
-            )));
+            let cleanup = terminate_launched_process_tree(&mut process).await;
+            return Err(launch_error_after_cleanup(
+                safe_devtools_timeout_error(),
+                cleanup,
+            ));
         }
         tokio::time::sleep(PORT_FILE_POLL_INTERVAL).await;
     }
+}
+
+async fn commit_browser_ownership(
+    config: &LaunchConfig,
+    ownership_claim: &crate::profile::ProfileLaunchClaim,
+    process: &mut nomi_process_runtime::ManagedChildProcess,
+) -> Result<(), BrowserError> {
+    let Some(_) = process.id() else {
+        let cleanup = terminate_launched_process_tree(process).await;
+        return Err(launch_error_after_cleanup(
+            BrowserError::Other("spawned browser exited before ownership commit".into()),
+            cleanup,
+        ));
+    };
+    if crate::profile::write_browser_ownership_marker(
+        ownership_claim,
+        &config.user_data_dir,
+        &config.chrome_path,
+        process.child(),
+    )
+    .await
+    .is_err()
+    {
+        tracing::warn!(
+            target: "nomi_browser_engine::launch",
+            "browser ownership marker commit failed; terminating the unowned process tree"
+        );
+        let cleanup = terminate_launched_process_tree(process).await;
+        return Err(launch_error_after_cleanup(
+            BrowserError::Other("browser ownership commit failed".into()),
+            cleanup,
+        ));
+    }
+    Ok(())
 }
 
 #[cfg(windows)]
@@ -447,6 +603,125 @@ mod tests {
         assert!(
             !args.iter().any(|a| a == "about:blank"),
             "命令行不应再带 about:blank 起始页（受控页由 createTarget 建）: {args:?}"
+        );
+    }
+
+    #[test]
+    fn extra_chrome_args_are_fail_closed_for_security_sensitive_switches() {
+        let extra = [
+            "--user-data-dir=C:\\attacker\\profile",
+            "--profile-directory=Default",
+            "--remote-debugging-port=9222",
+            "--remote-debugging-address=0.0.0.0",
+            "--remote-debugging-pipe",
+            "--load-extension=C:\\attacker\\extension",
+            "--disable-extensions-except=C:\\attacker\\extension",
+            "--no-sandbox",
+            "--disable-setuid-sandbox",
+            "--disable-web-security",
+            "--allow-running-insecure-content",
+            "--disable-features=IsolateOrigins",
+            "--enable-features=NetworkServiceInProcess",
+            "--proxy-server=http://attacker.invalid:8080",
+            "--host-resolver-rules=MAP * 0.0.0.0",
+            "https://attacker.invalid",
+            "--site-per-process",
+            "--host-resolver-rules=MAP *.nomitest 127.0.0.1",
+        ]
+        .join("\n");
+
+        let filtered = filtered_extra_chrome_args(&extra);
+
+        #[cfg(debug_assertions)]
+        assert_eq!(
+            filtered,
+            vec![
+                "--site-per-process".to_string(),
+                "--host-resolver-rules=MAP *.nomitest 127.0.0.1".to_string(),
+            ]
+        );
+
+        #[cfg(not(debug_assertions))]
+        assert!(
+            filtered.is_empty(),
+            "release builds must not accept ambient Chromium switches: {filtered:?}"
+        );
+
+        for rejected in [
+            "--user-data-dir=",
+            "--profile-directory=",
+            "--remote-debugging-port=",
+            "--remote-debugging-address=",
+            "--remote-debugging-pipe",
+            "--load-extension=",
+            "--disable-extensions-except=",
+            "--no-sandbox",
+            "--disable-setuid-sandbox",
+            "--disable-web-security",
+            "--allow-running-insecure-content",
+            "--disable-features=",
+            "--enable-features=",
+            "--proxy-server=",
+            "--host-resolver-rules=MAP * 0.0.0.0",
+            "https://attacker.invalid",
+        ] {
+            assert!(
+                !filtered.iter().any(|arg| arg == rejected),
+                "sensitive or unapproved switch was accepted: {rejected}; got {filtered:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn extra_chrome_args_cannot_override_managed_profile_or_transport() {
+        let managed_profile = Path::new("/managed/profile");
+        let mut args = build_chrome_args(managed_profile, true);
+        args.extend(filtered_extra_chrome_args(
+            "--user-data-dir=/attacker/profile\n\
+             --profile-directory=Attacker\n\
+             --remote-debugging-port=9222\n\
+             --remote-debugging-address=0.0.0.0\n\
+             --load-extension=/attacker/extension\n\
+             --no-sandbox\n\
+             --disable-web-security\n\
+             --site-per-process",
+        ));
+
+        assert_eq!(
+            args.iter()
+                .filter(|arg| arg.starts_with("--user-data-dir="))
+                .count(),
+            1,
+            "managed profile must remain unique: {args:?}"
+        );
+        assert!(
+            args.iter()
+                .all(|arg| !arg.starts_with("--user-data-dir=/attacker/")),
+            "untrusted profile override must be absent: {args:?}"
+        );
+        assert!(
+            args.iter()
+                .all(|arg| !arg.starts_with("--profile-directory=")),
+            "profile-directory must not be caller-controlled: {args:?}"
+        );
+        assert!(
+            args.iter()
+                .all(|arg| !arg.starts_with("--remote-debugging-port=9222")),
+            "remote debugging port must remain managed: {args:?}"
+        );
+        assert!(
+            args.iter()
+                .all(|arg| !arg.starts_with("--remote-debugging-address=")),
+            "remote debugging bind address must remain managed: {args:?}"
+        );
+        assert!(
+            args.iter()
+                .all(|arg| !arg.starts_with("--load-extension=")),
+            "extensions must not be caller-controlled: {args:?}"
+        );
+        assert!(
+            args.iter().all(|arg| arg != "--disable-web-security"),
+            "security weakening switch must be absent: {args:?}"
         );
     }
 
@@ -546,7 +821,111 @@ mod tests {
     }
 
     #[test]
+    fn active_port_parse_errors_do_not_echo_endpoint_material() {
+        let private_port_line = "12345-private-port-sentinel";
+        let error = parse_devtools_active_port(&format!(
+            "{private_port_line}\n/devtools/browser/private-token"
+        ))
+        .unwrap_err()
+        .to_string();
+        assert!(!error.contains(private_port_line));
+        assert!(!error.contains("private-token"));
+        assert!(!error.contains("12345"));
+
+        let private_ws_path = "ws://127.0.0.1:12345/devtools/browser/private-token";
+        let error = parse_devtools_active_port(&format!("9333\n{private_ws_path}"))
+            .unwrap_err()
+            .to_string();
+        assert!(!error.contains(private_ws_path));
+        assert!(!error.contains("private-token"));
+        assert!(!error.contains("12345"));
+    }
+
+    #[test]
     fn parse_active_port_rejects_non_absolute_ws_path() {
         assert!(parse_devtools_active_port("9333\ndevtools/browser/x").is_err());
+    }
+
+    #[test]
+    fn launch_boundary_errors_do_not_echo_private_paths_or_endpoints() {
+        let profile_path = r"C:\secret\profile";
+        let chrome_path = r"C:\secret\Chrome\chrome.exe";
+        let ws_endpoint = "ws://127.0.0.1:12345/devtools/browser/private-token";
+        let errors = [
+            safe_profile_prepare_error(),
+            safe_profile_ownership_error(),
+            safe_chromium_spawn_error(),
+            safe_devtools_timeout_error(),
+        ];
+
+        for error in errors {
+            let display = error.to_string();
+            assert!(!display.contains(profile_path));
+            assert!(!display.contains(chrome_path));
+            assert!(!display.contains(ws_endpoint));
+            assert!(!display.contains("private-token"));
+            assert!(!display.contains("12345"));
+        }
+    }
+
+    #[test]
+    fn launch_config_debug_does_not_echo_private_paths() {
+        let chrome_path = "LAUNCH-CHROMIUM-PATH-SENTINEL";
+        let profile_path = "LAUNCH-PROFILE-PATH-SENTINEL";
+        let config = LaunchConfig {
+            chrome_path: PathBuf::from(chrome_path),
+            user_data_dir: PathBuf::from(profile_path),
+            headful: true,
+        };
+
+        let debug = format!("{config:?}");
+        assert!(!debug.contains(chrome_path), "{debug}");
+        assert!(!debug.contains(profile_path), "{debug}");
+        assert!(debug.contains("chrome_path_configured"));
+        assert!(debug.contains("user_data_dir_configured"));
+        assert!(debug.contains("headful: true"));
+    }
+
+    #[tokio::test]
+    async fn profile_prepare_failure_does_not_echo_the_profile_or_executable_path() {
+        let temp = tempfile::tempdir().unwrap();
+        let profile = temp.path().join("private-profile-sentinel");
+        std::fs::write(&profile, b"not a directory").unwrap();
+        let chrome = temp.path().join("private-chrome-sentinel");
+        let config = LaunchConfig {
+            chrome_path: chrome.clone(),
+            user_data_dir: profile.clone(),
+            headful: false,
+        };
+
+        let error = match launch_chrome(&config, true).await {
+            Ok(_) => panic!("a regular file cannot be used as a browser profile"),
+            Err(error) => error.to_string(),
+        };
+        assert!(!error.contains(&profile.display().to_string()));
+        assert!(!error.contains(&chrome.display().to_string()));
+        assert!(!error.contains("private-profile-sentinel"));
+        assert!(!error.contains("private-chrome-sentinel"));
+    }
+
+    #[tokio::test]
+    async fn spawn_failure_does_not_echo_the_profile_or_executable_path() {
+        let temp = tempfile::tempdir().unwrap();
+        let profile = temp.path().join("private-profile-sentinel");
+        let chrome = temp.path().join("private-chrome-sentinel");
+        let config = LaunchConfig {
+            chrome_path: chrome.clone(),
+            user_data_dir: profile.clone(),
+            headful: false,
+        };
+
+        let error = match launch_chrome(&config, true).await {
+            Ok(_) => panic!("a nonexistent Chromium executable cannot launch"),
+            Err(error) => error.to_string(),
+        };
+        assert!(!error.contains(&profile.display().to_string()));
+        assert!(!error.contains(&chrome.display().to_string()));
+        assert!(!error.contains("private-profile-sentinel"));
+        assert!(!error.contains("private-chrome-sentinel"));
     }
 }
