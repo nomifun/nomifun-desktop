@@ -5,8 +5,6 @@
 
 #[cfg(feature = "browser-use")]
 mod browser_stdio;
-#[cfg(feature = "browser-use")]
-pub(crate) use browser_stdio::bundled_chrome_dir;
 #[cfg(feature = "computer-use")]
 mod computer_stdio;
 mod ctl;

@@ -1,0 +1,170 @@
+{
+  "sider": {
+    "label": "浏览器",
+    "counts": "{{running}} 个运行中，{{queued}} 个排队中",
+    "tooltip": "{{label}} · {{counts}}"
+  },
+  "page": {
+    "title": "浏览器管理",
+    "description": "查看、接管和关闭由 Agent 运行时持有的浏览器通道。",
+    "runningCount": "{{count}} 个运行中",
+    "queuedCount": "{{count}} 个排队中",
+    "pressure": "{{state}}负载",
+    "refresh": "刷新",
+    "closeAll": "全部关闭",
+    "inventoryUnavailable": "暂时无法获取浏览器清单：{{error}}",
+    "retry": "重试",
+    "capabilityUnavailable": "当前运行时不支持浏览器管理。",
+    "loading": "正在加载浏览器通道…",
+    "empty": "Agent 首次使用 Browser Use 后，浏览器通道会显示在这里。",
+    "inventoryAria": "浏览器通道清单",
+    "selectLane": "选择一个浏览器通道以查看详情。"
+  },
+  "close": {
+    "laneSuccess": "浏览器通道已关闭，对话和执行仍可继续使用。",
+    "laneActiveTitle": "关闭仍有活动任务的浏览器通道？",
+    "laneActiveContent": "这会取消该通道中排队和正在进行的浏览器任务。对话和 Agent 执行仍会保持运行。",
+    "laneAction": "关闭通道",
+    "keepOpen": "保持打开",
+    "conversationTitle": "关闭此对话的所有浏览器通道？",
+    "conversationContent": "将关闭 {{count}} 个浏览器通道，并取消其中正在进行的浏览器操作。对话和执行仍会保持运行。",
+    "conversationContent_one": "将关闭 {{count}} 个浏览器通道，并取消其中正在进行的浏览器操作。对话和执行仍会保持运行。",
+    "conversationContent_other": "将关闭 {{count}} 个浏览器通道，并取消其中正在进行的浏览器操作。对话和执行仍会保持运行。",
+    "conversationAction": "关闭通道",
+    "conversationSuccess": "此对话的浏览器通道已关闭。",
+    "allTitle": "关闭所有受管浏览器？",
+    "allContent": "所有排队和运行中的浏览器通道都会关闭。对话和 Agent 执行仍会保持运行。",
+    "allAction": "关闭所有浏览器",
+    "cancel": "取消",
+    "allSuccess": "所有受管浏览器通道已关闭。"
+  },
+  "tree": {
+    "noActivePage": "没有活动页面",
+    "current": "当前",
+    "summary": "{{running}} 个运行中 · {{queued}} 个排队中",
+    "closeConversationAria": "关闭 {{name}} 的所有浏览器通道",
+    "laneFallback": "浏览器通道",
+    "queuePosition": "队列第 {{position}} 位",
+    "closeLaneAria": "关闭 {{name}}"
+  },
+  "fallback": {
+    "clusterNode": "集群节点 {{id}}",
+    "attempt": "尝试 {{id}}",
+    "runtime": "运行时 {{id}}",
+    "execution": "执行 {{id}}",
+    "owner": "所有者",
+    "laneOwner": "通道所有者",
+    "conversation": "对话 {{id}}",
+    "unassigned": "未分配"
+  },
+  "details": {
+    "laneFallback": "浏览器通道",
+    "controlState": "{{state}}控制",
+    "closeLane": "关闭通道",
+    "waitingCapacity": "正在等待浏览器容量",
+    "queuePositionInline": "队列第 {{position}} 位",
+    "recommendedConcurrency": "建议并发数 {{count}}",
+    "title": "通道详情",
+    "sharedLiveIdentity": "共享实时身份",
+    "fields": {
+      "identity": "身份",
+      "lifecycle": "生命周期",
+      "control": "控制方",
+      "queuePosition": "队列位置",
+      "capacityReason": "容量原因",
+      "resourceEstimate": "资源估算",
+      "activePageTitle": "活动页面标题",
+      "activeUrl": "活动网址",
+      "lastActivity": "最近活动",
+      "created": "创建时间",
+      "owner": "所有者",
+      "runtime": "运行时",
+      "execution": "执行",
+      "attempt": "尝试",
+      "clusterNode": "集群节点",
+      "tabs": "标签页"
+    }
+  },
+  "viewer": {
+    "errors": {
+      "streamFailed": "Viewer 视频流失败。",
+      "connectionFailed": "嵌入式 Viewer 连接失败，通道管理仍可使用。",
+      "disconnected": "嵌入式 Viewer 已断开。你可以重试，不会影响浏览器通道。",
+      "startFailed": "无法启动嵌入式 Viewer：{{error}}"
+    },
+    "queuedUnavailable": "此通道获得容量后即可使用 Viewer。",
+    "stateUnavailable": "此通道状态下没有可用的实时 Viewer。",
+    "back": "后退",
+    "forward": "前进",
+    "reload": "重新加载",
+    "address": "浏览器地址",
+    "tab": "浏览器标签页",
+    "crashed": "已崩溃",
+    "readOnly": "只读",
+    "unknownReadOnlyIdentity": "未知身份",
+    "userControl": "你正在控制此通道",
+    "agentControl": "Agent 控制",
+    "returnToAgent": "交还给 Agent",
+    "takeControl": "接管",
+    "retry": "重试 Viewer",
+    "surfaceAria": "嵌入式 Agent 浏览器 Viewer",
+    "frameAlt": "Agent 浏览器实时画面",
+    "connecting": "正在连接 Viewer…",
+    "waitingFrame": "正在等待画面…",
+    "idle": "Viewer 空闲",
+    "jpegLiveView": "JPEG 实时视图",
+    "latestFrameOnly": "仅保留最新画面",
+    "frameStatus": "{{frame}} · {{mode}}"
+  },
+  "diagnostics": {
+    "title": "主机诊断",
+    "host": "浏览器主机",
+    "hostCount": "{{count}} 个主机",
+    "hostCount_one": "{{count}} 个主机",
+    "hostCount_other": "{{count}} 个主机",
+    "noHosts": "当前没有活动的浏览器主机上报诊断信息。",
+    "hostState": {
+      "stopped": "已停止",
+      "restarting": "正在重启"
+    },
+    "fields": {
+      "identity": "身份",
+      "epoch": "版本",
+      "lanes": "通道数",
+      "rss": "Chromium 内存",
+      "hostId": "主机 ID",
+      "activeOperations": "活动操作",
+      "queuedRequests": "排队请求",
+      "openLanes": "已打开通道",
+      "recommendedConcurrency": "建议并发数",
+      "capacityReason": "容量原因",
+      "updated": "更新时间"
+    }
+  },
+  "state": {
+    "lifecycle": {
+      "queued": "排队中",
+      "starting": "启动中",
+      "running": "运行中",
+      "frozen": "已冻结",
+      "stopping": "停止中",
+      "failed": "失败"
+    },
+    "control": {
+      "agent": "Agent",
+      "user": "用户",
+      "idle": "空闲"
+    },
+    "identity": {
+      "primary": "主身份",
+      "anonymous": "匿名",
+      "authenticatedReplica": "已认证副本",
+      "isolated": "隔离身份"
+    },
+    "pressure": {
+      "normal": "正常",
+      "pressured": "紧张",
+      "critical": "严重"
+    }
+  }
+}

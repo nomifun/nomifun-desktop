@@ -16,9 +16,10 @@
 //! 错误映射（Task B 故意把 `TransportError` 与 `BrowserError` 解耦，留在此处映射）：
 //! 见 [`map_transport_err`]。绝不 panic。
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Weak};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -49,17 +50,19 @@ use chromiumoxide::cdp::browser_protocol::target::{
 use chromiumoxide::cdp::js_protocol::runtime::{
     CallArgument, CallFunctionOnParams, EvaluateParams, ExecutionContextId, RemoteObjectId,
 };
-use tokio::process::Child;
-use tokio::sync::Mutex as AsyncMutex;
+use tokio::sync::{Mutex as AsyncMutex, watch};
+use tokio_util::sync::CancellationToken;
 
 use crate::aria_ref::{frame_prefix, RefRecord, RefTable};
 use crate::actions::{ActResult, Effect};
 use crate::engine::{
-    BrowserEngine, BrowserError, Capabilities, ElementEntry, LoadState, NavResult, Observation,
-    ObserveOpts,
+    BrowserEngine, BrowserError, BrowserKeyEventKind, BrowserMouseButton, BrowserMouseEventKind,
+    BrowserRawInput, BrowserTabInfo, BrowserViewerFrame, BrowserViewerImageFormat, Capabilities,
+    ElementEntry, LoadState, NavResult, Observation, ObserveOpts, browser_key_code_is_allowed,
+    browser_key_value_is_allowed, browser_text_input_is_allowed,
 };
 use crate::injected::{InjectError, InjectionManager};
-use crate::launch::{launch_chrome, LaunchConfig, Launched};
+use crate::launch::{LaunchConfig, Launched, launch_chrome, terminate_launched_process_tree};
 use crate::nav::{
     self, InflightCounter, LifecycleSignal, NavSettleState, NETWORK_IDLE_CAP, NETWORK_IDLE_QUIET,
     SETTLE_QUIET, SPA_SETTLE_TIMEOUT,
@@ -69,6 +72,8 @@ use crate::progress::{AbortReason, Progress};
 use crate::redact;
 use crate::tabs::{OopifEntry, TabHandles, TabRecord};
 use crate::transport::{Connection, TransportError, ROOT_SESSION};
+use crate::host::LaneOperationGate;
+use crate::{EngineConfig, LaneEngineConfig, LaneId, TargetOwnership, TargetRoute};
 
 /// 拿到新 page 的 `attachedToTarget` 事件的上限（flatten auto-attach 通常 <1s）。
 const PAGE_ATTACH_TIMEOUT: Duration = Duration::from_secs(10);
@@ -80,8 +85,9 @@ const OBSERVE_CONTEXT_READY_TIMEOUT: Duration = Duration::from_secs(5);
 /// 把传输/会话层错误映射到引擎错误。**绝不 panic**；让模型读到可路由的语义。
 ///
 /// - `Timeout` → `NavFailed`（多见于 navigate/load 等不来；语义是「这次操作没完成」）。
-/// - `Closed` / `SessionClosed` → `SessionLost{recoverable:false}`（连接/页面没了）。
-/// - `SessionCrashed` → `SessionLost{recoverable:true}`（标签崩了，可重开新 target 恢复）。
+/// - `Closed` → `SessionLost{recoverable:false}`（整个 Host/CDP 连接没了）。
+/// - `SessionClosed` → `TargetClosed`（仅该 target/page 已关闭）。
+/// - `SessionCrashed` → `TargetCrashed`（仅该 target 崩溃，可选其它 tab 或新建 target）。
 /// - `Cdp{code,message}` → `Other`（浏览器侧拒绝；带上 code/message 供诊断）。
 /// - `Protocol` → `Other`（我方序列化/路由不变量问题）。
 pub fn map_transport_err(e: TransportError) -> BrowserError {
@@ -89,10 +95,9 @@ pub fn map_transport_err(e: TransportError) -> BrowserError {
         TransportError::Timeout => BrowserError::NavFailed {
             kind: "cdp command timed out".into(),
         },
-        TransportError::Closed | TransportError::SessionClosed => {
-            BrowserError::SessionLost { recoverable: false }
-        }
-        TransportError::SessionCrashed => BrowserError::SessionLost { recoverable: true },
+        TransportError::Closed => BrowserError::SessionLost { recoverable: false },
+        TransportError::SessionClosed => BrowserError::TargetClosed,
+        TransportError::SessionCrashed => BrowserError::TargetCrashed,
         TransportError::Cdp { code, message } => {
             BrowserError::Other(format!("cdp error {code}: {message}"))
         }
@@ -120,6 +125,1137 @@ pub(crate) fn map_inject_err(e: InjectError) -> BrowserError {
     }
 }
 
+fn raw_input_blocked() -> BrowserError {
+    BrowserError::Blocked {
+        reason: "invalid raw browser input".into(),
+    }
+}
+
+fn finite_positive(value: f64) -> Option<f64> {
+    value.is_finite().then_some(value).filter(|value| *value > 0.0)
+}
+
+fn virtual_key_code_for_browser_code(code: &str) -> Option<i64> {
+    if let Some(suffix) = code.strip_prefix("Key")
+        && suffix.len() == 1
+    {
+        return suffix
+            .as_bytes()
+            .first()
+            .copied()
+            .filter(u8::is_ascii_uppercase)
+            .map(i64::from);
+    }
+    if let Some(suffix) = code.strip_prefix("Digit")
+        && suffix.len() == 1
+    {
+        return suffix
+            .as_bytes()
+            .first()
+            .copied()
+            .filter(u8::is_ascii_digit)
+            .map(i64::from);
+    }
+    if let Some(suffix) = code.strip_prefix("Numpad")
+        && suffix.len() == 1
+    {
+        return suffix
+            .as_bytes()
+            .first()
+            .copied()
+            .filter(u8::is_ascii_digit)
+            .map(|digit| i64::from(digit - b'0') + 96);
+    }
+    Some(match code {
+        "Backspace" => 8,
+        "Tab" => 9,
+        "Enter" | "NumpadEnter" => 13,
+        "ShiftLeft" | "ShiftRight" => 16,
+        "ControlLeft" | "ControlRight" => 17,
+        "AltLeft" | "AltRight" => 18,
+        "Pause" => 19,
+        "CapsLock" => 20,
+        "Escape" => 27,
+        "Space" => 32,
+        "PageUp" => 33,
+        "PageDown" => 34,
+        "End" => 35,
+        "Home" => 36,
+        "ArrowLeft" => 37,
+        "ArrowUp" => 38,
+        "ArrowRight" => 39,
+        "ArrowDown" => 40,
+        "Insert" => 45,
+        "Delete" => 46,
+        "MetaLeft" => 91,
+        "MetaRight" => 92,
+        "ContextMenu" => 93,
+        "NumpadMultiply" => 106,
+        "NumpadAdd" => 107,
+        "NumpadSubtract" => 109,
+        "NumpadDecimal" => 110,
+        "NumpadDivide" => 111,
+        "NumLock" => 144,
+        "ScrollLock" => 145,
+        "Semicolon" => 186,
+        "Equal" => 187,
+        "Comma" => 188,
+        "Minus" => 189,
+        "Period" => 190,
+        "Slash" => 191,
+        "Backquote" => 192,
+        "BracketLeft" => 219,
+        "Backslash" => 220,
+        "BracketRight" => 221,
+        "Quote" => 222,
+        _ => return None,
+    })
+}
+
+fn browser_mouse_button_bit(button: BrowserMouseButton) -> u8 {
+    match button {
+        BrowserMouseButton::None => 0,
+        BrowserMouseButton::Left => 1,
+        BrowserMouseButton::Right => 2,
+        BrowserMouseButton::Middle => 4,
+        BrowserMouseButton::Back => 8,
+        BrowserMouseButton::Forward => 16,
+    }
+}
+
+fn cdp_mouse_button(
+    button: BrowserMouseButton,
+) -> chromiumoxide::cdp::browser_protocol::input::MouseButton {
+    use chromiumoxide::cdp::browser_protocol::input::MouseButton;
+    match button {
+        BrowserMouseButton::None => MouseButton::None,
+        BrowserMouseButton::Left => MouseButton::Left,
+        BrowserMouseButton::Middle => MouseButton::Middle,
+        BrowserMouseButton::Right => MouseButton::Right,
+        BrowserMouseButton::Back => MouseButton::Back,
+        BrowserMouseButton::Forward => MouseButton::Forward,
+    }
+}
+
+async fn send_browser_mouse_event(
+    conn: &Connection,
+    session: &str,
+    kind: chromiumoxide::cdp::browser_protocol::input::DispatchMouseEventType,
+    input: &crate::engine::BrowserMouseInput,
+    buttons: u8,
+    click_count: Option<i64>,
+) -> Result<(), BrowserError> {
+    use chromiumoxide::cdp::browser_protocol::input::DispatchMouseEventParams;
+    let mut params = DispatchMouseEventParams::new(kind, input.x, input.y);
+    params.modifiers = Some(input.modifiers.cdp_bits());
+    params.button = Some(cdp_mouse_button(input.button));
+    params.buttons = Some(i64::from(buttons));
+    params.click_count = click_count;
+    conn.send::<DispatchMouseEventParams>(session, &params)
+        .await
+        .map_err(map_transport_err)?;
+    Ok(())
+}
+
+async fn send_browser_key_event(
+    conn: &Connection,
+    session: &str,
+    input: &crate::engine::BrowserKeyInput,
+) -> Result<(), BrowserError> {
+    use chromiumoxide::cdp::browser_protocol::input::{
+        DispatchKeyEventParams, DispatchKeyEventType,
+    };
+    if !browser_key_code_is_allowed(&input.code)
+        || !browser_key_value_is_allowed(&input.key)
+        || input.code.len() > 64
+    {
+        return Err(raw_input_blocked());
+    }
+    let virtual_key =
+        virtual_key_code_for_browser_code(&input.code).ok_or_else(raw_input_blocked)?;
+    let event_type = match input.kind {
+        BrowserKeyEventKind::Down => DispatchKeyEventType::KeyDown,
+        BrowserKeyEventKind::Up => DispatchKeyEventType::KeyUp,
+    };
+    let mut params = DispatchKeyEventParams::new(event_type);
+    params.modifiers = Some(input.modifiers.cdp_bits());
+    params.key = Some(input.key.clone());
+    params.code = Some(input.code.clone());
+    params.windows_virtual_key_code = Some(virtual_key);
+    params.native_virtual_key_code = Some(virtual_key);
+    params.auto_repeat = Some(input.repeat);
+    params.is_keypad = Some(input.code.starts_with("Numpad"));
+    params.location = Some(if input.code.ends_with("Right") {
+        2
+    } else if input.code.ends_with("Left") {
+        1
+    } else if input.code.starts_with("Numpad") {
+        3
+    } else {
+        0
+    });
+    if input.kind == BrowserKeyEventKind::Down
+        && !input.modifiers.has_command_modifier()
+        && input.key.chars().count() == 1
+        && input.key.chars().all(|ch| !ch.is_control())
+    {
+        params.text = Some(input.key.clone());
+        params.unmodified_text = Some(input.key.clone());
+    }
+    conn.send::<DispatchKeyEventParams>(session, &params)
+        .await
+        .map_err(map_transport_err)?;
+    Ok(())
+}
+
+#[derive(Clone)]
+struct PendingPage {
+    target_id: String,
+    session_id: String,
+    opener_target_id: Option<String>,
+}
+
+struct LaneRoute {
+    tabs: Weak<AsyncMutex<HashMap<String, TabRecord>>>,
+    active_target: Weak<AsyncMutex<String>>,
+    active_frame: Weak<AsyncMutex<Option<(String, String)>>>,
+    closing: Arc<AtomicBool>,
+    download_dir: Option<String>,
+}
+
+struct PendingDownload {
+    lane_id: LaneId,
+    download_dir: String,
+    suggested_filename: String,
+}
+
+struct HostRouteState {
+    ownership: TargetOwnership,
+    lanes: HashMap<LaneId, LaneRoute>,
+    quarantined: HashMap<String, PendingPage>,
+    session_targets: HashMap<String, String>,
+    lost_targets: HashSet<String>,
+    frame_owner: HashMap<String, LaneId>,
+    downloads: HashMap<String, PendingDownload>,
+}
+
+impl Default for HostRouteState {
+    fn default() -> Self {
+        Self {
+            ownership: TargetOwnership::default(),
+            lanes: HashMap::new(),
+            quarantined: HashMap::new(),
+            session_targets: HashMap::new(),
+            lost_targets: HashSet::new(),
+            frame_owner: HashMap::new(),
+            downloads: HashMap::new(),
+        }
+    }
+}
+
+/// Host-global target router.  It is the sole top-level page discovery loop:
+/// explicit target claims win, popups inherit their opener's lane, and targets
+/// with neither are retained in quarantine instead of being adopted.
+struct HostTargetRouter {
+    conn: Connection,
+    state: AsyncMutex<HostRouteState>,
+}
+
+impl HostTargetRouter {
+    fn new(conn: Connection) -> Arc<Self> {
+        Arc::new(Self {
+            conn,
+            state: AsyncMutex::new(HostRouteState::default()),
+        })
+    }
+
+    async fn register_lane(
+        &self,
+        lane_id: LaneId,
+        tabs: &Arc<AsyncMutex<HashMap<String, TabRecord>>>,
+        active_target: &Arc<AsyncMutex<String>>,
+        active_frame: &Arc<AsyncMutex<Option<(String, String)>>>,
+        closing: Arc<AtomicBool>,
+        download_dir: Option<String>,
+    ) {
+        self.state.lock().await.lanes.insert(
+            lane_id,
+            LaneRoute {
+                tabs: Arc::downgrade(tabs),
+                active_target: Arc::downgrade(active_target),
+                active_frame: Arc::downgrade(active_frame),
+                closing,
+                download_dir,
+            },
+        );
+    }
+
+    /// Claim a target for one Lane. Returns `false` when the target already
+    /// crashed or belongs to another Lane.
+    async fn claim_target(&self, lane_id: &str, target_id: &str) -> bool {
+        let pending_pages = {
+            let mut state = self.state.lock().await;
+            if state.lost_targets.contains(target_id) {
+                return false;
+            }
+            let Some(route) = state.lanes.get(lane_id) else {
+                return false;
+            };
+            if route.closing.load(Ordering::Acquire) {
+                return false;
+            }
+            if let Err(owner) = state.ownership.claim(lane_id, target_id) {
+                tracing::warn!(
+                    target: "nomi_browser_engine::host",
+                    target_id_suffix = %cdp_id_suffix(target_id),
+                    requested_lane = %lane_id,
+                    established_lane = %owner,
+                    "refused to transfer an owned target between lanes"
+                );
+                return false;
+            }
+            let mut pages = Vec::new();
+            let mut inherited_from = vec![target_id.to_string()];
+            if let Some(page) = state.quarantined.remove(target_id) {
+                pages.push(page);
+            }
+            while let Some(opener_id) = inherited_from.pop() {
+                let children = state
+                    .quarantined
+                    .iter()
+                    .filter_map(|(id, page)| {
+                        (page.opener_target_id.as_deref() == Some(opener_id.as_str()))
+                            .then_some(id.clone())
+                    })
+                    .collect::<Vec<_>>();
+                for child_id in children {
+                    if state.ownership.claim(lane_id, &child_id).is_ok()
+                        && let Some(page) = state.quarantined.remove(&child_id)
+                    {
+                        inherited_from.push(child_id);
+                        pages.push(page);
+                    }
+                }
+            }
+            pages
+        };
+        for pending in pending_pages {
+            self.arm_owned_page(lane_id.to_string(), pending).await;
+        }
+        true
+    }
+
+    async fn is_target_lost(&self, target_id: &str) -> bool {
+        self.state.lock().await.lost_targets.contains(target_id)
+    }
+
+    async fn unregister_lane(&self, lane_id: &str) {
+        let mut state = self.state.lock().await;
+        state.lanes.remove(lane_id);
+        let released = state.ownership.release_lane(lane_id);
+        for target_id in released {
+            state.quarantined.remove(&target_id);
+            state
+                .session_targets
+                .retain(|_, mapped_target| mapped_target != &target_id);
+        }
+        state.frame_owner.retain(|_, owner| owner != lane_id);
+        state.downloads.retain(|_, route| route.lane_id != lane_id);
+    }
+
+    async fn release_target(&self, target_id: &str) {
+        let mut state = self.state.lock().await;
+        // Keep the target owner as an epoch-local tombstone until lane close.
+        // A popup attach can race just behind its opener's close event; target
+        // ids are not reused within a Chromium epoch, so retaining ownership is
+        // both safe and necessary for deterministic opener inheritance.
+        state.frame_owner.remove(target_id);
+    }
+
+    async fn claim_frame(&self, lane_id: &str, frame_id: &str) {
+        let mut state = self.state.lock().await;
+        match state.frame_owner.get(frame_id) {
+            Some(owner) if owner != lane_id => {
+                tracing::warn!(
+                    %frame_id,
+                    requested_lane = %lane_id,
+                    established_lane = %owner,
+                    "refused to transfer a frame between browser lanes"
+                );
+            }
+            _ => {
+                state
+                    .frame_owner
+                    .insert(frame_id.to_string(), lane_id.to_string());
+            }
+        }
+    }
+
+    async fn begin_download(
+        &self,
+        frame_id: &str,
+        guid: &str,
+        suggested_filename: &str,
+    ) {
+        let mut state = self.state.lock().await;
+        let lane_id = state
+            .frame_owner
+            .get(frame_id)
+            .cloned()
+            .or_else(|| state.ownership.owner(frame_id).map(str::to_string));
+        let Some(lane_id) = lane_id else {
+            tracing::warn!(
+                %guid,
+                %frame_id,
+                "download has no owned frame; leaving it quarantined in host staging"
+            );
+            return;
+        };
+        let download_dir = state
+            .lanes
+            .get(&lane_id)
+            .and_then(|route| route.download_dir.clone());
+        let Some(download_dir) = download_dir else {
+            return;
+        };
+        state.downloads.insert(
+            guid.to_string(),
+            PendingDownload {
+                lane_id,
+                download_dir,
+                suggested_filename: suggested_filename.to_string(),
+            },
+        );
+    }
+
+    async fn finish_download(&self, guid: &str, source: &std::path::Path) -> bool {
+        let route = self.state.lock().await.downloads.remove(guid);
+        let Some(route) = route else {
+            return false;
+        };
+        let filename = std::path::Path::new(&route.suggested_filename)
+            .file_name()
+            .and_then(|name| name.to_str())
+            .filter(|name| !name.is_empty())
+            .unwrap_or(guid);
+        let mut destination = std::path::Path::new(&route.download_dir).join(filename);
+        if destination.exists() {
+            destination =
+                std::path::Path::new(&route.download_dir).join(format!("{guid}-{filename}"));
+        }
+        if source != destination && let Err(rename_error) = std::fs::rename(source, &destination) {
+            // Workspaces can live on another Windows volume. Fall back to
+            // copy+remove when an atomic cross-volume rename is unavailable.
+            if let Err(copy_error) = std::fs::copy(source, &destination) {
+                tracing::warn!(
+                    %guid,
+                    lane_id = %route.lane_id,
+                    from = %source.display(),
+                    to = %destination.display(),
+                    %rename_error,
+                    %copy_error,
+                    "failed to route completed download to its owning lane"
+                );
+                return false;
+            }
+            if let Err(error) = std::fs::remove_file(source) {
+                tracing::debug!(
+                    %guid,
+                    file = %source.display(),
+                    %error,
+                    "routed download copied successfully but staging cleanup was deferred"
+                );
+            }
+        }
+        if let Err(error) = crate::download::write_motw(&destination) {
+            tracing::debug!(
+                %error,
+                file = %destination.display(),
+                "MOTW write failed after lane download routing"
+            );
+        }
+        true
+    }
+
+    async fn handle_attached(&self, pending: PendingPage) {
+        let route = {
+            let mut state = self.state.lock().await;
+            state
+                .session_targets
+                .insert(pending.session_id.clone(), pending.target_id.clone());
+            if state.lost_targets.contains(&pending.target_id) {
+                return;
+            }
+            let route = state.ownership.route_attached(
+                &pending.target_id,
+                pending.opener_target_id.as_deref(),
+            );
+            if route == TargetRoute::Quarantined {
+                state
+                    .quarantined
+                    .insert(pending.target_id.clone(), pending.clone());
+            }
+            route
+        };
+        match route {
+            TargetRoute::Owned(lane_id) | TargetRoute::Inherited { lane_id, .. } => {
+                self.arm_owned_page(lane_id, pending).await;
+            }
+            TargetRoute::Quarantined => {
+                tracing::debug!(
+                    target: "nomi_browser_engine::host",
+                    target_id_suffix = %cdp_id_suffix(&pending.target_id),
+                    opener_target_id_suffix = ?pending
+                        .opener_target_id
+                        .as_deref()
+                        .map(cdp_id_suffix),
+                    "top-level target quarantined until an owning lane claims it"
+                );
+            }
+        }
+    }
+
+    async fn arm_owned_page(&self, lane_id: LaneId, pending: PendingPage) {
+        let route = {
+            let state = self.state.lock().await;
+            if state.lost_targets.contains(&pending.target_id) {
+                return;
+            }
+            state
+                .lanes
+                .get(&lane_id)
+                .map(|route| (route.tabs.clone(), route.closing.clone()))
+        };
+        let Some((tabs, closing)) = route else {
+            return;
+        };
+        if closing.load(Ordering::Acquire) {
+            return;
+        }
+        let Some(tabs) = tabs.upgrade() else {
+            return;
+        };
+        if tabs.lock().await.contains_key(&pending.target_id) {
+            return;
+        }
+
+        let deadline = tokio::time::Instant::now() + OOPIF_SESSION_REGISTER_TIMEOUT;
+        while !self.conn.registry().has_session(&pending.session_id) {
+            if closing.load(Ordering::Acquire) || tokio::time::Instant::now() >= deadline {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        match arm_tab(&self.conn, &pending.target_id, &pending.session_id).await {
+            Ok(record) => {
+                // Serialize the final insert with crash marking. If the target
+                // crashed while `arm_tab` awaited CDP, the crash path wins and
+                // this dead record is never published into the Lane.
+                let state = self.state.lock().await;
+                if state.lost_targets.contains(&pending.target_id) {
+                    abort_tab_record(&record);
+                    return;
+                }
+                let mut tabs = tabs.lock().await;
+                if closing.load(Ordering::Acquire) || tabs.contains_key(&pending.target_id) {
+                    abort_tab_record(&record);
+                    return;
+                }
+                let main_frame_id = record.main_frame_id.clone();
+                tabs.insert(pending.target_id.clone(), record);
+                drop(tabs);
+                drop(state);
+                self.claim_frame(&lane_id, &main_frame_id).await;
+                tracing::info!(
+                    target: "nomi_browser_engine::host",
+                    lane_id = %lane_id,
+                    target_id_suffix = %cdp_id_suffix(&pending.target_id),
+                    "top-level target assigned to browser lane"
+                );
+            }
+            Err(error) => {
+                tracing::warn!(
+                    target: "nomi_browser_engine::host",
+                    lane_id = %lane_id,
+                    target_id_suffix = %cdp_id_suffix(&pending.target_id),
+                    %error,
+                    "failed to arm lane-owned target"
+                );
+            }
+        }
+    }
+
+    /// Remove exactly one crashed top-level target from its owning Lane.
+    ///
+    /// Ownership is resolved before touching Lane state, so a renderer crash
+    /// can never fan out into another Lane. The target id remains an
+    /// epoch-local tombstone in `TargetOwnership` so a late popup attach cannot
+    /// escape its original owner.
+    async fn handle_target_crashed(&self, params: &serde_json::Value) {
+        let route = {
+            let mut state = self.state.lock().await;
+            let target_id = params
+                .get("targetId")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned)
+                .or_else(|| {
+                    params
+                        .get("sessionId")
+                        .and_then(serde_json::Value::as_str)
+                        .and_then(|session_id| state.session_targets.get(session_id).cloned())
+                });
+            let Some(target_id) = target_id else {
+                return;
+            };
+            if !state.lost_targets.insert(target_id.clone()) {
+                return;
+            }
+            state.quarantined.remove(&target_id);
+            state
+                .session_targets
+                .retain(|_, mapped_target| mapped_target != &target_id);
+            let Some(lane_id) = state.ownership.owner(&target_id).map(str::to_owned) else {
+                return;
+            };
+            let Some(lane) = state.lanes.get(&lane_id) else {
+                return;
+            };
+            (
+                target_id,
+                lane_id,
+                lane.tabs.clone(),
+                lane.active_target.clone(),
+                lane.active_frame.clone(),
+                lane.closing.clone(),
+            )
+        };
+
+        let (target_id, lane_id, tabs, active_target, active_frame, closing) = route;
+        if closing.load(Ordering::Acquire) {
+            return;
+        }
+        let (Some(tabs), Some(active_target), Some(active_frame)) = (
+            tabs.upgrade(),
+            active_target.upgrade(),
+            active_frame.upgrade(),
+        ) else {
+            return;
+        };
+
+        let removed = tabs.lock().await.remove(&target_id);
+        if let Some(record) = removed {
+            let main_frame_id = record.main_frame_id.clone();
+            abort_tab_record(&record);
+            self.state.lock().await.frame_owner.remove(&main_frame_id);
+        }
+
+        let was_active = active_target.lock().await.as_str() == target_id;
+        let survivor = if was_active {
+            deterministic_survivor(
+                tabs.lock().await.keys().map(String::as_str),
+                &target_id,
+            )
+        } else {
+            None
+        };
+        if was_active {
+            *active_target.lock().await = survivor.clone().unwrap_or_default();
+            *active_frame.lock().await = None;
+        }
+
+        tracing::warn!(
+            target: "nomi_browser_engine::host",
+            lane_id = %lane_id,
+            target_id_suffix = %cdp_id_suffix(&target_id),
+            survivor_target_id_suffix = ?survivor.as_deref().map(cdp_id_suffix),
+            "top-level target crashed; only its owning browser lane was updated"
+        );
+    }
+
+    fn spawn(self: &Arc<Self>) -> tokio::task::JoinHandle<()> {
+        let router = self.clone();
+        let mut attached_rx = router
+            .conn
+            .subscribe_reliable(EventAttachedToTarget::IDENTIFIER, None);
+        let mut crashed_rx = router
+            .conn
+            .subscribe_reliable("Target.targetCrashed", None);
+        tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    event = attached_rx.recv() => {
+                        let Some(event) = event else {
+                            break;
+                        };
+                        let Ok(attached) =
+                            serde_json::from_value::<EventAttachedToTarget>(event.params)
+                        else {
+                            continue;
+                        };
+                        if attached.target_info.r#type == "page" {
+                            router
+                                .handle_attached(PendingPage {
+                                    target_id: String::from(attached.target_info.target_id),
+                                    session_id: String::from(attached.session_id),
+                                    opener_target_id: attached
+                                        .target_info
+                                        .opener_id
+                                        .map(String::from),
+                                })
+                                .await;
+                        }
+                    }
+                    event = crashed_rx.recv() => {
+                        let Some(event) = event else {
+                            break;
+                        };
+                        router.handle_target_crashed(&event.params).await;
+                    }
+                }
+            }
+        })
+    }
+}
+
+fn abort_tab_record(record: &TabRecord) {
+    record._inject_loop.abort();
+    record._oopif_loop.abort();
+    record._debug_loop.abort();
+}
+
+/// Return a short diagnostic suffix without ever emitting a short CDP id in full.
+///
+/// Real Chromium target/session ids are long, so their final four characters
+/// preserve useful correlation while avoiding persistence of the complete id.
+/// The fallback is deliberately fixed for malformed or unusually short ids.
+fn cdp_id_suffix(id: &str) -> String {
+    let suffix = crate::tabs::last4(id);
+    if suffix.chars().count() == id.chars().count() {
+        "[redacted]".to_string()
+    } else {
+        suffix
+    }
+}
+
+#[cfg(test)]
+mod cdp_id_suffix_tests {
+    use super::cdp_id_suffix;
+
+    #[test]
+    fn keeps_only_the_last_four_characters_of_a_long_id() {
+        assert_eq!(cdp_id_suffix("0123456789abcdef"), "cdef");
+    }
+
+    #[test]
+    fn redacts_short_ids_instead_of_logging_them_in_full() {
+        assert_eq!(cdp_id_suffix("abcd"), "[redacted]");
+        assert_eq!(cdp_id_suffix("x"), "[redacted]");
+        assert_eq!(cdp_id_suffix(""), "[redacted]");
+    }
+
+    #[test]
+    fn uses_character_boundaries_for_non_ascii_ids() {
+        assert_eq!(cdp_id_suffix("target-一二三四五"), "二三四五");
+        assert_eq!(cdp_id_suffix("一二三四"), "[redacted]");
+    }
+}
+
+/// Choose the next active target without depending on `HashMap` iteration
+/// order. The crashed target is filtered defensively even though callers
+/// normally remove it before selecting a survivor.
+fn deterministic_survivor<'a>(
+    target_ids: impl IntoIterator<Item = &'a str>,
+    crashed_target_id: &str,
+) -> Option<String> {
+    target_ids
+        .into_iter()
+        .filter(|target_id| *target_id != crashed_target_id)
+        .min()
+        .map(str::to_owned)
+}
+
+fn tab_handles(record: &TabRecord) -> TabHandles {
+    TabHandles {
+        target_id: record.target_id.clone(),
+        session_id: record.session_id.clone(),
+        injection: record.injection.clone(),
+        main_frame_id: record.main_frame_id.clone(),
+        oopif_managers: record.oopif_managers.clone(),
+        ref_table: record.ref_table.clone(),
+        debug: record.debug.clone(),
+    }
+}
+
+/// Process/transport lifetime shared by all lanes on one managed host.
+pub(crate) struct CdpHostRuntime {
+    conn: Connection,
+    process: AsyncMutex<nomi_process_runtime::ManagedChildProcess>,
+    /// Read-only root Chromium pid captured before the child handle is moved.
+    /// It is process-local telemetry only and never enters browser APIs,
+    /// capability payloads, CDP routing, or profile metadata.
+    root_process_id: Option<u32>,
+    attach_loop: tokio::task::JoinHandle<()>,
+    target_router_loop: tokio::task::JoinHandle<()>,
+    download_loop: Option<tokio::task::JoinHandle<()>>,
+    firewall_loop: tokio::task::JoinHandle<()>,
+    router: Arc<HostTargetRouter>,
+    download_dir: Option<String>,
+    firewall_config: crate::firewall::FirewallConfig,
+    approved_domains: crate::firewall::ApprovedDomains,
+    storage_state: Option<serde_json::Value>,
+    headful: bool,
+    display_available: bool,
+    cleanup_user_data_dir: std::sync::Mutex<Option<PathBuf>>,
+    shutdown: AtomicBool,
+    stopped: AtomicBool,
+    shutdown_gate: AsyncMutex<()>,
+}
+
+impl CdpHostRuntime {
+    pub(crate) async fn launch(config: EngineConfig) -> Result<Arc<Self>, BrowserError> {
+        let chrome_path = crate::acquire::resolve_chrome_path_with_source(
+            &config.data_dir,
+            config.bundled_dir.as_deref(),
+            config.chrome_source,
+        )
+        .await?;
+        let user_data_dir = crate::resolve_user_data_dir(&config);
+        let launch_config = LaunchConfig {
+            chrome_path,
+            user_data_dir: user_data_dir.clone(),
+            headful: config.headful,
+        };
+        let workspace = config
+            .workspace_dir
+            .clone()
+            .unwrap_or_else(|| config.data_dir.clone());
+        let download_dir = Some(crate::download::ensure_download_dir(&workspace));
+        let _launch_permit = crate::launch_semaphore()
+            .acquire()
+            .await
+            .expect("browser launch semaphore is never closed");
+        let display_available = crate::display::display_available();
+        let headful = display_available && config.headful;
+        let launched = launch_chrome(&launch_config, !headful).await?;
+        let cleanup_user_data_dir = config.ephemeral_profile.then_some(user_data_dir);
+        Self::from_launched(
+            launched,
+            headful,
+            display_available,
+            download_dir,
+            config.firewall,
+            config.egress_approver,
+            config.storage_state,
+            cleanup_user_data_dir,
+            None,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn from_launched(
+        launched: Launched,
+        headful: bool,
+        display_available: bool,
+        download_dir: Option<String>,
+        firewall: crate::firewall::FirewallConfig,
+        egress_approver: Option<Arc<dyn crate::firewall::EgressApprover>>,
+        storage_state: Option<serde_json::Value>,
+        cleanup_user_data_dir: Option<PathBuf>,
+        dns_resolver: Option<Arc<dyn crate::firewall::HostResolver>>,
+    ) -> Result<Arc<Self>, BrowserError> {
+        let (process, transport) = launched.into_managed();
+        let cleanup = DurableProcessCleanup::new(process, cleanup_user_data_dir.clone());
+        let root_process_id = cleanup.process_id();
+        let conn = match Connection::connect_launched(transport).await {
+            Ok(conn) => conn,
+            Err(error) => {
+                let primary = map_transport_err(error);
+                return Err(cleanup_failed_host_launch(primary, cleanup).await);
+            }
+        };
+        let attach_loop = conn.run_attach_loop();
+        if let Err(error) = conn.enable_auto_attach().await {
+            attach_loop.abort();
+            conn.shutdown().await;
+            let primary = map_transport_err(error);
+            return Err(cleanup_failed_host_launch(primary, cleanup).await);
+        }
+        let router = HostTargetRouter::new(conn.clone());
+
+        let download_loop = if let Some(ref dir) = download_dir {
+            let handle = spawn_download_loop(conn.clone(), Some(router.clone()));
+            if let Err(error) = set_download_behavior_sandbox(&conn, dir).await {
+                tracing::warn!(%error, dir = %dir, "shared host download sandbox setup failed");
+            }
+            Some(handle)
+        } else {
+            None
+        };
+
+        let firewall_config = firewall.clone();
+        let approved_domains = crate::firewall::ApprovedDomains::new();
+        let dns_resolver = dns_resolver
+            .unwrap_or_else(|| Arc::new(crate::firewall::TokioResolver::default()));
+        let firewall_loop = spawn_fetch_firewall_loop(
+            conn.clone(),
+            firewall,
+            egress_approver,
+            approved_domains.clone(),
+            dns_resolver,
+            crate::firewall::DnsResolverCache::default(),
+        );
+        if let Err(error) = enable_fetch_on_session(&conn, ROOT_SESSION).await {
+            tracing::warn!(%error, "Fetch.enable on shared browser session failed");
+        }
+
+        let target_router_loop = router.spawn();
+        Ok(Arc::new(Self {
+            conn,
+            process: AsyncMutex::new(cleanup.into_process()),
+            root_process_id,
+            attach_loop,
+            target_router_loop,
+            download_loop,
+            firewall_loop,
+            router,
+            download_dir,
+            firewall_config,
+            approved_domains,
+            storage_state,
+            headful,
+            display_available,
+            cleanup_user_data_dir: std::sync::Mutex::new(cleanup_user_data_dir),
+            shutdown: AtomicBool::new(false),
+            stopped: AtomicBool::new(false),
+            shutdown_gate: AsyncMutex::new(()),
+        }))
+    }
+
+    pub(crate) fn is_stopped(&self) -> bool {
+        self.stopped.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn process_id(&self) -> Option<u32> {
+        if self.is_stopped() {
+            None
+        } else {
+            self.root_process_id
+        }
+    }
+
+    pub(crate) async fn shutdown(&self) -> Result<(), BrowserError> {
+        let _shutdown = self.shutdown_gate.lock().await;
+        if self.stopped.load(Ordering::Acquire) {
+            return Ok(());
+        }
+        self.shutdown.store(true, Ordering::Release);
+        self.target_router_loop.abort();
+        self.firewall_loop.abort();
+        self.attach_loop.abort();
+        if let Some(loop_handle) = &self.download_loop {
+            loop_handle.abort();
+        }
+        use chromiumoxide::cdp::browser_protocol::browser::CloseParams;
+        let _ = tokio::time::timeout(
+            Duration::from_secs(2),
+            self.conn.send::<CloseParams>(ROOT_SESSION, &CloseParams::default()),
+        )
+        .await;
+        self.conn.shutdown().await;
+        let shutdown_result = {
+            let mut process = self.process.lock().await;
+            terminate_launched_process_tree(&mut process).await
+        };
+        if let Err(error) = shutdown_result {
+            return Err(error);
+        }
+        self.spawn_profile_cleanup();
+        self.stopped.store(true, Ordering::Release);
+        Ok(())
+    }
+
+    fn spawn_profile_cleanup(&self) {
+        let Some(dir) = self
+            .cleanup_user_data_dir
+            .lock()
+            .ok()
+            .and_then(|mut dir| dir.take())
+        else {
+            return;
+        };
+        spawn_profile_cleanup(dir);
+    }
+}
+
+async fn cleanup_failed_host_launch(
+    primary: BrowserError,
+    cleanup: DurableProcessCleanup,
+) -> BrowserError {
+    match cleanup.finish().await {
+        Ok(()) => primary,
+        Err(_) => BrowserError::Other(
+            "browser host initialization failed and process-tree cleanup could not be proven"
+                .into(),
+        ),
+    }
+}
+
+struct DurableProcessCleanup {
+    process: Option<Arc<AsyncMutex<nomi_process_runtime::ManagedChildProcess>>>,
+    state: AtomicU64,
+    cleanup_user_data_dir: Option<PathBuf>,
+}
+
+impl DurableProcessCleanup {
+    fn new(
+        process: nomi_process_runtime::ManagedChildProcess,
+        cleanup_user_data_dir: Option<PathBuf>,
+    ) -> Self {
+        Self {
+            process: Some(Arc::new(AsyncMutex::new(process))),
+            state: AtomicU64::new(0),
+            cleanup_user_data_dir,
+        }
+    }
+
+    fn into_process(mut self) -> nomi_process_runtime::ManagedChildProcess {
+        self.state.store(2, Ordering::Release);
+        Arc::try_unwrap(
+            self.process
+                .take()
+                .expect("construction cleanup still owns process authority"),
+        )
+            .ok()
+            .expect("construction cleanup has unique process authority")
+            .into_inner()
+    }
+
+    fn process_id(&self) -> Option<u32> {
+        self.process
+            .as_ref()
+            .and_then(|process| process.try_lock().ok())
+            .and_then(|process| process.id())
+    }
+
+    fn spawn_worker(
+        process: Arc<AsyncMutex<nomi_process_runtime::ManagedChildProcess>>,
+        cleanup_user_data_dir: Option<PathBuf>,
+    ) -> bool {
+        let worker = async move {
+            loop {
+                let result = {
+                    let mut process = process.lock().await;
+                    terminate_launched_process_tree(&mut process).await
+                };
+                if result.is_ok() {
+                    if let Some(dir) = cleanup_user_data_dir {
+                        spawn_profile_cleanup(dir);
+                    }
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(250)).await;
+            }
+        };
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            handle.spawn(worker);
+            true
+        } else {
+            std::thread::Builder::new()
+                .name("nomi-browser-construction-cleanup".into())
+                .spawn(move || {
+                    let runtime = tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build();
+                    if let Ok(runtime) = runtime {
+                        runtime.block_on(worker);
+                    }
+                })
+                .is_ok()
+        }
+    }
+
+    fn hand_off(&self) {
+        if self
+            .state
+            .compare_exchange(0, 1, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return;
+        }
+        let Some(process) = self.process.as_ref() else {
+            self.state.store(2, Ordering::Release);
+            return;
+        };
+        if !Self::spawn_worker(Arc::clone(process), self.cleanup_user_data_dir.clone()) {
+            self.state.store(0, Ordering::Release);
+        }
+    }
+
+    async fn finish(self) -> Result<(), BrowserError> {
+        let result = {
+            let mut process = self
+                .process
+                .as_ref()
+                .expect("construction cleanup still owns process authority")
+                .lock()
+                .await;
+            terminate_launched_process_tree(&mut process).await
+        };
+        if result.is_ok() {
+            self.state.store(2, Ordering::Release);
+            if let Some(dir) = self.cleanup_user_data_dir.as_ref() {
+                spawn_profile_cleanup(dir.clone());
+            }
+        } else {
+            self.hand_off();
+        }
+        result
+    }
+}
+
+fn spawn_profile_cleanup(dir: PathBuf) {
+    std::thread::spawn(move || {
+        for attempt in 0..10u64 {
+            std::thread::sleep(Duration::from_millis(200 * (attempt + 1)));
+            if !dir.exists() || std::fs::remove_dir_all(&dir).is_ok() {
+                return;
+            }
+        }
+        log_ephemeral_profile_cleanup_deferred(&dir);
+    });
+}
+
+fn log_ephemeral_profile_cleanup_deferred(_profile_dir: &std::path::Path) {
+    tracing::debug!(
+        target: "nomi_browser_engine::profile",
+        reason = "cleanup_retries_exhausted",
+        "ephemeral browser profile cleanup deferred to startup GC"
+    );
+}
+
+impl Drop for DurableProcessCleanup {
+    fn drop(&mut self) {
+        if self.state.load(Ordering::Acquire) != 0 {
+            return;
+        }
+        self.hand_off();
+    }
+}
+
+impl Drop for CdpHostRuntime {
+    fn drop(&mut self) {
+        self.target_router_loop.abort();
+        self.firewall_loop.abort();
+        self.attach_loop.abort();
+        if let Some(loop_handle) = &self.download_loop {
+            loop_handle.abort();
+        }
+        // `Drop` cannot prove exact process-tree cleanup. Ephemeral profile
+        // deletion is therefore reserved for successful explicit shutdown.
+    }
+}
+
 /// P0 浏览器后端：自建 transport 发裸 CDP 命令（无 chromiumoxide 高层）。
 ///
 /// **P2 D1 结构改造（DESIGN §13 裁决⑥）**：原先「单 tab 的 per-tab 字段直挂」改为 tab 注册表 +
@@ -132,6 +1268,19 @@ pub(crate) fn map_inject_err(e: InjectError) -> BrowserError {
 /// 改造前完全一致。
 pub struct CdpBackend {
     conn: Connection,
+    /// Shared process/transport owner. A lane never owns the Chromium child.
+    host: Option<Arc<CdpHostRuntime>>,
+    lane_id: LaneId,
+    /// Lane closure is two-phase for cancellation safety: `shutdown_lane`
+    /// sets `lane_closing` immediately to fence new work, but `lane_closed`
+    /// is published only after every target/session cleanup step completes.
+    /// If the close future is cancelled midway, the next authoritative retry
+    /// can continue instead of returning a false idempotent success.
+    lane_closing: Arc<AtomicBool>,
+    lane_closed: Arc<AtomicBool>,
+    lane_shutdown_gate: AsyncMutex<()>,
+    lane_close_confirmed: AsyncMutex<HashSet<String>>,
+    lane_cancel: CancellationToken,
     /// **tab 注册表**：targetId → [`TabRecord`]（吸收原 per-tab 字段）。短暂锁、克隆句柄、立即释放
     /// （绝不跨 await 持有；见 [`crate::tabs`]）。**D3**：`Arc` 包裹——tab 发现循环（`'static` 后台任务）
     /// 持一份克隆，发现新顶层 page 时锁它插入新 [`TabRecord`]（与 observe/act 的短临界区共存，互不跨
@@ -153,12 +1302,12 @@ pub struct CdpBackend {
     act_seq: std::sync::atomic::AtomicU64,
     /// 托管的 chrome 进程句柄——保活，Drop 即清理。`AsyncMutex` 仅为内部可变（取 child 杀进程）；
     /// 正常路径靠 kill_on_drop。
-    _child: AsyncMutex<Child>,
+    _process: Option<AsyncMutex<nomi_process_runtime::ManagedChildProcess>>,
     /// attach 处理循环句柄——保活，让 flatten 自动附着的子 session 持续被登记。
-    _attach_loop: tokio::task::JoinHandle<()>,
+    _attach_loop: Option<tokio::task::JoinHandle<()>>,
     /// **tab 发现后台循环句柄**（D3）——保活。订阅新顶层 page 的 `Target.attachedToTarget`，arm 成
     /// [`TabRecord`] 入 `tabs`（不抢焦点）。backend Drop 即连带 abort（连接随之关闭，循环也会自然退出）。
-    _tab_discovery_loop: tokio::task::JoinHandle<()>,
+    _tab_discovery_loop: Option<tokio::task::JoinHandle<()>>,
     /// **下载事件后台循环句柄**（E4）——保活。仅当 `setDownloadBehavior` 沙箱已挂（`download_dir`
     /// 为 `Some`）时存在。订阅 `Browser.downloadProgress`，对完成（`state=="completed"`）的下载在其
     /// `filePath` 上打 Win MOTW（`Zone.Identifier` ADS）。mac/linux 为空实现。**绝不**自动打开文件。
@@ -182,7 +1331,7 @@ pub struct CdpBackend {
     /// [`crate::firewall::decide`] 判定后 `continueRequest` 放行 / `failRequest` 阻断（IP 封禁硬阻）/
     /// （F1）升审批（跨域 POST-body）。**SW 必须也拦**（裁决⑪/不变量⑬）——P0 保持 SW attach，本循环
     /// 对其 session 也 Fetch.enable。backend Drop 即连带 abort。
-    _firewall_loop: tokio::task::JoinHandle<()>,
+    _firewall_loop: Option<tokio::task::JoinHandle<()>>,
     /// **P3-G1：注入的出口防火墙配置快照**（裁决①）。= `EngineConfig.firewall`（经 build_backend →
     /// from_launched 透传），**与 `_firewall_loop` 持有的同一份配置**。仅供测试 accessor
     /// [`Self::firewall_config_for_test`] 读回断言「注入值真的到达引擎」（loop 在另一线程内消费，
@@ -212,57 +1361,48 @@ pub struct CdpBackend {
     /// （`is_concurrency_safe==false` → tool executor partition + 网关 `CompanionBrowser::lock`）；现在
     /// **引擎自身**保证——并发调用方也无法交错 observe/act。公平 `tokio::sync::Mutex`，只在单次已被
     /// 截止时间界定的操作内持有（每 CDP 命令超时 + `Progress` 截止 / `ACT_TIMEOUT`），绝不跨无界等待 → 不死锁。
-    /// **作用域 per-engine**（= per Chrome 进程）：DESIGN §22「per-BrowserContext 可并发」由上层实现——
-    /// 不同引擎（网关 per-companion 各自 Chrome 进程）持不同 op_mutex 并行（`BrowserRegistry::execute_parallel`），
-    /// 此锁绝不跨引擎。重入安全：`navigate`/`screenshot`/`observe`/`act` 体内均只调 `*_impl`/`*_on_session`
+    /// **作用域 per-Lane**（≠ per Chrome 进程）：共享 Host 的每个 lane adapter 都持不同 gate，因此
+    /// 不同 Lane 可在同一 Connection 上并行；此锁绝不跨 Lane。重入安全：
+    /// `navigate`/`screenshot`/`observe`/`act` 体内均只调 `*_impl`/`*_on_session`
     /// 助手、绝不回调这四个 trait 方法（已对抗式 grep 校验），故非重入锁不会自死锁。
-    op_mutex: AsyncMutex<()>,
+    op_mutex: LaneOperationGate,
+    /// Serializes lazy target replacement after the final tab crashes.
+    ///
+    /// The normal Lane operation gate already covers agent actions, but viewer
+    /// capture may resolve a target concurrently. Keeping recovery in its own
+    /// short-lived gate guarantees one replacement target per Lane without
+    /// introducing a Host-global lock.
+    target_recovery_gate: AsyncMutex<()>,
+    /// At most one `Page.startScreencast` producer is active per lane. The
+    /// producer acknowledges every CDP frame immediately and publishes into a
+    /// one-slot watch channel, so slow viewers can never accumulate frames.
+    viewer_screencast: AsyncMutex<Option<ViewerScreencastState>>,
     /// Known-secret exact-blackout registry (shared with facade via `Arc`). Debug serializers
     /// read this set and `String::replace` each value with `[KNOWN_SECRET_REDACTED]` before
     /// heuristic redaction passes. See [`crate::KnownSecretValues`] doc for invariants.
     known_secret_values: crate::KnownSecretValues,
-    /// **并发隔离：本引擎实例专属临时 user-data-dir 的清理目标**（`Some` → ephemeral）。
-    /// `create_engine` 对每实例唯一目录（`<data_dir>/profiles/<token>`）经 [`Self::mark_ephemeral`]
-    /// 设成 `Some(dir)`；引擎关闭（[`Drop`]）时 best-effort 删除它（用完即弃，避免磁盘无界增长）。
-    /// `None`（默认）→ 不删（共享兜底 `<data_dir>/profile` / 登录窗稳定目录 / 测试固定目录需保留）。
-    /// 未删掉的孤儿（app 硬退出/崩溃）由 [`crate::profile::gc_stale_profiles`] 启动时兜底回收。
-    cleanup_user_data_dir: Option<PathBuf>,
+}
+
+struct ViewerScreencastState {
+    target_id: String,
+    session_id: String,
+    latest: watch::Receiver<Option<BrowserViewerFrame>>,
+    cancel: CancellationToken,
+    task: tokio::task::JoinHandle<()>,
 }
 
 impl Drop for CdpBackend {
-    /// **并发隔离：引擎关闭时 best-effort 清理本实例专属的临时 user-data-dir**（`ephemeral`=Some）。
-    ///
-    /// 时序：Drop::drop 体先跑、字段（含 `_child` 的 `kill_on_drop`）随后 drop——即此刻 chrome 尚在被杀、
-    /// Windows 上文件句柄释放有延迟。故派一个 **detached 线程**：先小睡让 chrome 退出/句柄释放，再重试
-    /// `remove_dir_all`（指数退避几次）。删不掉不致命（[`crate::profile::gc_stale_profiles`] 启动时兜底）。
     fn drop(&mut self) {
-        let Some(dir) = self.cleanup_user_data_dir.take() else {
-            return; // 非 ephemeral（共享兜底 / 登录窗稳定目录 / 测试）→ 不清理
-        };
-        std::thread::spawn(move || {
-            for attempt in 0..10u32 {
-                std::thread::sleep(std::time::Duration::from_millis(200 * u64::from(attempt + 1)));
-                if !dir.exists() || std::fs::remove_dir_all(&dir).is_ok() {
-                    return;
-                }
-            }
-            tracing::debug!(
-                target: "nomi_browser_engine::profile",
-                dir = %dir.display(),
-                "ephemeral profile dir cleanup gave up after retries (startup GC will reclaim it)"
-            );
-        });
+        if let Ok(mut state) = self.viewer_screencast.try_lock()
+            && let Some(state) = state.take()
+        {
+            state.cancel.cancel();
+            state.task.abort();
+        }
     }
 }
 
 impl CdpBackend {
-    /// **并发隔离：把本引擎的 user-data-dir 标记为 ephemeral（Drop 时清理）**。`create_engine` 对每实例
-    /// 唯一目录（`<data_dir>/profiles/<token>`）调用它，使该目录随引擎关闭 best-effort 删除（用完即弃）。
-    /// 共享兜底目录 / 登录窗稳定目录 / 测试不调用它 → 保留（默认 `None`）。见 [`Self::cleanup_user_data_dir`]。
-    pub fn mark_ephemeral(&mut self, user_data_dir: PathBuf) {
-        self.cleanup_user_data_dir = Some(user_data_dir);
-    }
-
     /// 用一次成功的 [`launch_chrome`] 产物建后端：connect → 起 attach loop →
     /// enable_auto_attach → 取一个 page session。
     ///
@@ -290,20 +1430,36 @@ impl CdpBackend {
         // 私网域先于 approver 被 SSRF 守卫 Block」这一关键交互(seam 此前硬编码,测试无从覆盖)。
         dns_resolver: Option<Arc<dyn crate::firewall::HostResolver>>,
     ) -> Result<Self, BrowserError> {
-        let Launched { child, transport } = launched;
+        let (process, transport) = launched.into_managed();
+        let cleanup = DurableProcessCleanup::new(process, None);
 
-        let conn = Connection::connect_launched(transport)
-            .await
-            .map_err(map_transport_err)?;
+        let conn = match Connection::connect_launched(transport).await {
+            Ok(conn) => conn,
+            Err(error) => {
+                let primary = map_transport_err(error);
+                return Err(cleanup_failed_host_launch(primary, cleanup).await);
+            }
+        };
 
         // 先装 attach loop（订阅在循环内部），再放行自动附着。顺序勿换。
         let attach_loop = conn.run_attach_loop();
-        conn.enable_auto_attach().await.map_err(map_transport_err)?;
+        if let Err(error) = conn.enable_auto_attach().await {
+            attach_loop.abort();
+            conn.shutdown().await;
+            let primary = map_transport_err(error);
+            return Err(cleanup_failed_host_launch(primary, cleanup).await);
+        }
 
         // 取一个 page session（createTarget + 等其 attachedToTarget）。D1：需要 targetId（tabs 的 key
         // + active_target 指针），故 create_page_session 返 (target_id, session_id)。
-        let (page_target_id, page_session) =
-            create_page_session(&conn).await?;
+        let (page_target_id, page_session) = match create_page_session(&conn).await {
+            Ok(page) => page,
+            Err(error) => {
+                attach_loop.abort();
+                conn.shutdown().await;
+                return Err(cleanup_failed_host_launch(error, cleanup).await);
+            }
+        };
 
         // E4 下载沙箱：在**根 browser session** 挂 setDownloadBehavior（browser-level，作用全 context）
         // + 起下载事件循环（完成后打 MOTW）。仅当传入了隔离 download_dir。先订阅事件再放行行为不是
@@ -311,7 +1467,7 @@ impl CdpBackend {
         // 之前 spawn，确保不漏首个下载事件。失败 best-effort（warn 不致命）——沙箱缺失只降级到无 MOTW，
         // 不应阻断引擎创建；但若上层要求严格隔离，缺失即风险，故 warn 留痕。
         let download_loop = if let Some(ref dir) = download_dir {
-            let h = spawn_download_loop(conn.clone());
+            let h = spawn_download_loop(conn.clone(), None);
             if let Err(e) = set_download_behavior_sandbox(&conn, dir).await {
                 tracing::warn!(error = %e, dir = %dir, "setDownloadBehavior sandbox failed; downloads may fall back to chrome default");
             }
@@ -327,8 +1483,17 @@ impl CdpBackend {
 
         // D3：把「为一个 (target_id, session_id) arm injection + inject loop + oopif loop + 建 TabRecord」
         // 抽成可复用的 arm_tab helper。初始 tab 与发现循环里的新 tab 都用它（同一套 arm 逻辑，零分叉）。
-        let initial_tab =
-            arm_tab(&conn, &page_target_id, &page_session).await?;
+        let initial_tab = match arm_tab(&conn, &page_target_id, &page_session).await {
+            Ok(tab) => tab,
+            Err(error) => {
+                if let Some(loop_handle) = &download_loop {
+                    loop_handle.abort();
+                }
+                attach_loop.abort();
+                conn.shutdown().await;
+                return Err(cleanup_failed_host_launch(error, cleanup).await);
+            }
+        };
 
         // D1/D3：把初始 page 作为**唯一一个 TabRecord** 插入 tabs，active_target 指向它。
         // 单 tab 场景：tabs 永远只 1 项、active 指向它——行为与改造前完全一致。
@@ -401,20 +1566,27 @@ impl CdpBackend {
 
         let backend = Self {
             conn,
+            host: None,
+            lane_id: "standalone".to_string(),
+            lane_closing: Arc::new(AtomicBool::new(false)),
+            lane_closed: Arc::new(AtomicBool::new(false)),
+            lane_shutdown_gate: AsyncMutex::new(()),
+            lane_close_confirmed: AsyncMutex::new(HashSet::new()),
+            lane_cancel: CancellationToken::new(),
             tabs,
             active_target,
             active_frame: Arc::new(AsyncMutex::new(None)),
             act_seq: std::sync::atomic::AtomicU64::new(0),
-            _child: AsyncMutex::new(child),
-            _attach_loop: attach_loop,
-            _tab_discovery_loop: tab_discovery_loop,
+            _process: Some(AsyncMutex::new(cleanup.into_process())),
+            _attach_loop: Some(attach_loop),
+            _tab_discovery_loop: Some(tab_discovery_loop),
             _download_loop: download_loop,
             // F-actions：保留隔离下载目录绝对路径，供 download（触发落点验证）/ save_as_pdf（printToPDF
             // 写入）复用 E4 沙箱的同一目录。与 _download_loop 同生（仅当沙箱已挂）。
             download_dir,
             // SD-2：上传路径沙箱根（per-pet workspace）。act_upload_file 逐路径 canonicalize + 包含判定。
             workspace_dir,
-            _firewall_loop: firewall_loop,
+            _firewall_loop: Some(firewall_loop),
             // P3-G1：保留注入的 firewall 快照（与 loop 同值）供测试读回断言注入生效。
             firewall_config,
             // P3-D2：保留 always_allow 已批准域集合（与 loop 同 Arc）。
@@ -429,12 +1601,11 @@ impl CdpBackend {
             headful,
             display_available,
             // 引擎级 observe⊥act 串行门（见字段 doc）。每引擎一把,初始空闲。
-            op_mutex: AsyncMutex::new(()),
+            op_mutex: LaneOperationGate::default(),
+            target_recovery_gate: AsyncMutex::new(()),
+            viewer_screencast: AsyncMutex::new(None),
             // Known-secret blackout: store the shared Arc for debug serializers to read.
             known_secret_values,
-            // 并发隔离：临时 user-data-dir 清理目标。默认 None（不清理——共享兜底 / 登录窗稳定目录 /
-            // 测试）；`create_engine` 对 per-instance 唯一目录调 `mark_ephemeral` 设成 Some → Drop 时清理。
-            cleanup_user_data_dir: None,
         };
 
         // ── W4d 持久登录：启动注入 storage_state（灌登录态）──────────────────────────
@@ -483,34 +1654,539 @@ impl CdpBackend {
 }
 
 impl CdpBackend {
+    /// Build one lane-scoped engine over an already connected shared host.
+    pub(crate) async fn from_host(
+        host: Arc<CdpHostRuntime>,
+        lane_id: LaneId,
+        config: LaneEngineConfig,
+    ) -> Result<Self, BrowserError> {
+        if host.shutdown.load(Ordering::Acquire) {
+            return Err(BrowserError::SessionLost { recoverable: false });
+        }
+        let conn = host.conn.clone();
+        let (page_target_id, page_session) = create_page_session(&conn).await?;
+        let initial_tab = match arm_tab(&conn, &page_target_id, &page_session).await {
+            Ok(tab) => tab,
+            Err(error) => {
+                use chromiumoxide::cdp::browser_protocol::target::CloseTargetParams;
+                let _ = conn
+                    .send_may_fail::<CloseTargetParams>(
+                        ROOT_SESSION,
+                        &CloseTargetParams::new(page_target_id),
+                    )
+                    .await;
+                return Err(error);
+            }
+        };
+        let initial_frame_id = initial_tab.main_frame_id.clone();
+        let download_dir = config
+            .workspace_dir
+            .as_deref()
+            .map(crate::download::ensure_download_dir)
+            .or_else(|| host.download_dir.clone());
+        let mut tabs_map = HashMap::new();
+        tabs_map.insert(page_target_id.clone(), initial_tab);
+        let tabs = Arc::new(AsyncMutex::new(tabs_map));
+        let active_target = Arc::new(AsyncMutex::new(page_target_id.clone()));
+        let active_frame = Arc::new(AsyncMutex::new(None));
+        let lane_closing = Arc::new(AtomicBool::new(false));
+        let lane_closed = Arc::new(AtomicBool::new(false));
+
+        host.router
+            .register_lane(
+                lane_id.clone(),
+                &tabs,
+                &active_target,
+                &active_frame,
+                lane_closing.clone(),
+                download_dir.clone(),
+            )
+            .await;
+        host.router.claim_target(&lane_id, &page_target_id).await;
+        host.router.claim_frame(&lane_id, &initial_frame_id).await;
+        if let Err(error) = enable_fetch_on_session(&conn, &page_session).await {
+            tracing::warn!(
+                lane_id = %lane_id,
+                session_id = %page_session,
+                %error,
+                "Fetch.enable on initial lane page failed"
+            );
+        }
+
+        let known_secret_values = config.known_secret_values.unwrap_or_default();
+        let backend = Self {
+            conn,
+            host: Some(host.clone()),
+            lane_id,
+            lane_closing,
+            lane_closed,
+            lane_shutdown_gate: AsyncMutex::new(()),
+            lane_close_confirmed: AsyncMutex::new(HashSet::new()),
+            lane_cancel: CancellationToken::new(),
+            tabs,
+            active_target,
+            active_frame,
+            act_seq: std::sync::atomic::AtomicU64::new(0),
+            _process: None,
+            _attach_loop: None,
+            _tab_discovery_loop: None,
+            _download_loop: None,
+            download_dir,
+            workspace_dir: config.workspace_dir,
+            _firewall_loop: None,
+            firewall_config: host.firewall_config.clone(),
+            approved_domains: host.approved_domains.clone(),
+            evaluate_gate: AsyncMutex::new(crate::evaluate::EvaluateGate {
+                full_power: config.evaluate_full_power,
+                persistent_login: config.evaluate_persistent_login,
+            }),
+            headful: host.headful,
+            display_available: host.display_available,
+            op_mutex: LaneOperationGate::default(),
+            target_recovery_gate: AsyncMutex::new(()),
+            viewer_screencast: AsyncMutex::new(None),
+            known_secret_values,
+        };
+
+        if let Some(value) = host.storage_state.clone() {
+            match crate::storage_state::StorageState::from_json(value) {
+                Ok(state) => {
+                    if let Err(error) = backend.restore_cookies(&state).await {
+                        tracing::warn!(%error, "shared-host cookie restore failed");
+                    }
+                    if let Err(error) = backend.restore_local_storage(&state).await {
+                        tracing::warn!(%error, "shared-host localStorage restore failed");
+                    }
+                }
+                Err(error) => {
+                    tracing::warn!(%error, "shared-host storage state is invalid");
+                }
+            }
+        }
+        Ok(backend)
+    }
+
+    /// Cancel in-flight work and close only this lane's targets.  This method
+    /// deliberately bypasses `op_mutex`, so a hung lane operation cannot block
+    /// authoritative cleanup.
+    pub(crate) async fn shutdown_lane(&self) -> Result<(), BrowserError> {
+        let _shutdown = self.lane_shutdown_gate.lock().await;
+        if self.lane_closed.load(Ordering::Acquire) {
+            return Ok(());
+        }
+        self.lane_closing.store(true, Ordering::Release);
+        self.stop_viewer_screencast_impl().await;
+        self.lane_cancel.cancel();
+        let target_ids = {
+            let tabs = self.tabs.lock().await;
+            let mut ids = tabs.keys().cloned().collect::<Vec<_>>();
+            ids.sort();
+            ids
+        };
+        use chromiumoxide::cdp::browser_protocol::target::CloseTargetParams;
+        let pending_targets = {
+            let confirmed = self.lane_close_confirmed.lock().await;
+            target_ids
+                .into_iter()
+                .filter(|target_id| !confirmed.contains(target_id))
+                .collect::<Vec<_>>()
+        };
+        for target_id in pending_targets {
+            if let Err(error) = self
+                .conn
+                .send::<CloseTargetParams>(
+                    ROOT_SESSION,
+                    &CloseTargetParams::new(target_id.clone()),
+                )
+                .await
+            {
+                tracing::debug!(
+                    lane_id = %self.lane_id,
+                    target_id_suffix = %cdp_id_suffix(&target_id),
+                    %error,
+                    "closing lane target failed; preserving lane state for retry"
+                );
+                return Err(map_transport_err(error));
+            }
+            self.lane_close_confirmed
+                .lock()
+                .await
+                .insert(target_id.clone());
+            if let Some(record) = self.tabs.lock().await.get(&target_id) {
+                abort_tab_record(record);
+            }
+        }
+        let records = {
+            let mut tabs = self.tabs.lock().await;
+            std::mem::take(&mut *tabs)
+        };
+        if let Some(host) = &self.host {
+            host.router.unregister_lane(&self.lane_id).await;
+        }
+        for record in records.values() {
+            abort_tab_record(record);
+        }
+        self.lane_close_confirmed.lock().await.clear();
+        self.lane_closed.store(true, Ordering::Release);
+        Ok(())
+    }
+
     /// **active tab 句柄快照**（D1 锁模式核心；DESIGN §13 裁决⑥ + [`crate::tabs`] 锁设计）：短暂锁
     /// `active_target` + `tabs`，从 active [`TabRecord`] **克隆出**所有可独立持有的句柄
     /// （[`TabHandles`]），**立即释放两把锁**后返回。observe/act/navigate 全程用克隆出的句柄操作——
     /// **绝不**跨 await 持 `tabs` 锁（否则阻塞 D3 tab 发现循环 + observe 内嵌套锁 ref_table 死锁）。
     ///
-    /// `active_target` 指向的 tab 不在 `tabs` 里（D3 close 后的竞态 / 内部不变量破坏）→ 返
-    /// [`BrowserError::SessionLost`]`{recoverable:false}`（绝不 panic）。**单 tab 场景**：tabs 恒 1 项、
-    /// active 指向它，必命中。
+    /// `active_target` 指向的 tab 已崩溃/不在 `tabs` 时，先剔除崩溃记录并按 target id
+    /// 确定性选择仍存活的 tab；没有 survivor 时按需创建 replacement target。整条恢复链由
+    /// lane-local gate 串行化，因此 agent/viewer 并发访问只会发布一个 replacement。
     pub(crate) async fn active_tab_handles(&self) -> Result<TabHandles, BrowserError> {
-        // 先锁 active_target 取指针（短临界区，clone 出 String 即放）。
-        let target_id = self.active_target.lock().await.clone();
-        // 再锁 tabs 取 active 记录、克隆句柄、立即释放（不跨任何 await 持 tabs 锁）。
+        if self.lane_closing.load(Ordering::Acquire) {
+            return Err(BrowserError::TargetClosed);
+        }
+
+        // Agent operations are already serialized by `op_mutex`; this
+        // additional Lane-local gate covers viewer target resolution too and
+        // makes final-tab replacement single-flight.
+        let _recovery = self.target_recovery_gate.lock().await;
+        if self.lane_closing.load(Ordering::Acquire) {
+            return Err(BrowserError::TargetClosed);
+        }
+        if let Some(handles) = self.select_live_active_tab().await {
+            return Ok(handles);
+        }
+        self.create_replacement_target().await
+    }
+
+    /// Resolve the current active target, pruning sticky-crashed records and
+    /// deterministically selecting another Lane-owned tab when available.
+    async fn select_live_active_tab(&self) -> Option<TabHandles> {
+        let previous_active = self.active_target.lock().await.clone();
+        let (selected, removed) = {
+            let mut tabs = self.tabs.lock().await;
+            let crashed = tabs
+                .iter()
+                .filter_map(|(target_id, record)| {
+                    self.conn
+                        .registry()
+                        .is_session_crashed(&record.session_id)
+                        .then(|| target_id.clone())
+                })
+                .collect::<Vec<_>>();
+            let mut removed = Vec::with_capacity(crashed.len());
+            for target_id in crashed {
+                if let Some(record) = tabs.remove(&target_id) {
+                    removed.push(record);
+                }
+            }
+
+            let selected_id = tabs
+                .contains_key(&previous_active)
+                .then(|| previous_active.clone())
+                .or_else(|| deterministic_survivor(tabs.keys().map(String::as_str), ""));
+            let selected = selected_id
+                .as_ref()
+                .and_then(|target_id| tabs.get(target_id))
+                .map(tab_handles);
+            (selected, removed)
+        };
+        for record in removed {
+            abort_tab_record(&record);
+        }
+
+        if let Some(handles) = selected {
+            if handles.target_id != previous_active {
+                *self.active_target.lock().await = handles.target_id.clone();
+                *self.active_frame.lock().await = None;
+            }
+            Some(handles)
+        } else {
+            None
+        }
+    }
+
+    /// Lazily create the replacement required after a Lane loses its final
+    /// target. The recovery gate held by [`Self::active_tab_handles`] ensures
+    /// concurrent agent/viewer callers create at most one target.
+    async fn create_replacement_target(&self) -> Result<TabHandles, BrowserError> {
+        use chromiumoxide::cdp::browser_protocol::target::CloseTargetParams;
+
+        if self.conn.registry().is_connection_closed() {
+            return Err(BrowserError::SessionLost { recoverable: false });
+        }
+
+        let (target_id, session_id) = create_page_session(&self.conn).await?;
+        if let Some(host) = &self.host
+            && !host.router.claim_target(&self.lane_id, &target_id).await
+        {
+            return Err(BrowserError::TargetCrashed);
+        }
+
+        // The router or standalone discovery loop may have armed the target
+        // while `claim_target` awaited a quarantined attach.
+        if let Some(handles) = self
+            .tabs
+            .lock()
+            .await
+            .get(&target_id)
+            .map(tab_handles)
+        {
+            *self.active_target.lock().await = target_id;
+            *self.active_frame.lock().await = None;
+            return Ok(handles);
+        }
+
+        let record = arm_tab(&self.conn, &target_id, &session_id).await?;
+        let main_frame_id = record.main_frame_id.clone();
+        let handles = tab_handles(&record);
+
+        if self.conn.registry().is_session_crashed(&session_id) {
+            abort_tab_record(&record);
+            return Err(BrowserError::TargetCrashed);
+        }
+        if let Some(host) = &self.host
+            && host.router.is_target_lost(&target_id).await
+        {
+            abort_tab_record(&record);
+            return Err(BrowserError::TargetCrashed);
+        }
+
+        let mut pending_record = Some(record);
+        let survivor = {
+            let mut tabs = self.tabs.lock().await;
+            let survivor =
+                deterministic_survivor(tabs.keys().map(String::as_str), &target_id);
+            if survivor.is_none() {
+                if let Some(record) = pending_record.take() {
+                    tabs.insert(target_id.clone(), record);
+                }
+            }
+            survivor
+        };
+
+        if let Some(survivor) = survivor {
+            if let Some(record) = pending_record.as_ref() {
+                abort_tab_record(record);
+            }
+            let _ = self
+                .conn
+                .send_may_fail::<CloseTargetParams>(
+                    ROOT_SESSION,
+                    &CloseTargetParams::new(target_id),
+                )
+                .await;
+            *self.active_target.lock().await = survivor;
+            *self.active_frame.lock().await = None;
+            return self
+                .select_live_active_tab()
+                .await
+                .ok_or(BrowserError::TargetClosed);
+        }
+
+        *self.active_target.lock().await = target_id.clone();
+        *self.active_frame.lock().await = None;
+        if let Some(host) = &self.host {
+            host.router.claim_frame(&self.lane_id, &main_frame_id).await;
+        }
+        if let Err(error) = enable_fetch_on_session(&self.conn, &session_id).await {
+            tracing::warn!(
+                lane_id = %self.lane_id,
+                target_id_suffix = %cdp_id_suffix(&target_id),
+                %error,
+                "Fetch.enable on replacement Lane target failed"
+            );
+        }
+        tracing::info!(
+            target: "nomi_browser_engine::host",
+            lane_id = %self.lane_id,
+            target_id_suffix = %cdp_id_suffix(&target_id),
+            "created replacement target after the Lane lost its final tab"
+        );
+        Ok(handles)
+    }
+
+    /// Resolve an exact, full target id to this lane's immutable page handles.
+    /// This never consults `active_target`, so viewer input remains bound to
+    /// the frame it came from even if another operation switches tabs between
+    /// frame delivery and input dispatch.
+    async fn tab_handles_for_target(&self, target_id: &str) -> Result<TabHandles, BrowserError> {
+        if self.lane_closing.load(Ordering::Acquire) {
+            return Err(BrowserError::TargetClosed);
+        }
         let guard = self.tabs.lock().await;
-        let tab = guard.get(&target_id).ok_or(BrowserError::SessionLost {
-            recoverable: false,
-        })?;
-        Ok(TabHandles {
-            target_id: tab.target_id.clone(),
-            session_id: tab.session_id.clone(),
-            // InjectionManager: Clone（共享 Arc 缓存，不复制后台循环）。
-            injection: tab.injection.clone(),
-            main_frame_id: tab.main_frame_id.clone(),
-            // Arc clone：锁外独立锁这两个（observe 跨多 await 不持 tabs 锁）。
-            oopif_managers: tab.oopif_managers.clone(),
-            ref_table: tab.ref_table.clone(),
-            debug: tab.debug.clone(),
+        let tab = guard.get(target_id).ok_or(BrowserError::TargetClosed)?;
+        Ok(tab_handles(tab))
+    }
+
+    async fn start_viewer_screencast(
+        &self,
+        handles: &TabHandles,
+    ) -> Result<ViewerScreencastState, BrowserError> {
+        use chromiumoxide::cdp::browser_protocol::page::{
+            EventScreencastFrame, ScreencastFrameAckParams, StartScreencastFormat,
+            StartScreencastParams,
+        };
+
+        // Subscribe before starting so the first frame cannot race past us.
+        let mut events = self.conn.subscribe(
+            EventScreencastFrame::IDENTIFIER,
+            Some(&handles.session_id),
+        );
+        let params = StartScreencastParams::builder()
+            .format(StartScreencastFormat::Jpeg)
+            .quality(70)
+            .max_width(1_600)
+            .max_height(1_200)
+            .every_nth_frame(1)
+            .build();
+        if let Err(error) = self
+            .conn
+            .send::<StartScreencastParams>(&handles.session_id, &params)
+            .await
+        {
+            return match error {
+                TransportError::Cdp { code, message } => Err(BrowserError::Unsupported {
+                    capability: "viewer_screencast".into(),
+                    hint: format!("Page.startScreencast unavailable ({code}: {message})"),
+                }),
+                TransportError::Timeout => Err(BrowserError::Unsupported {
+                    capability: "viewer_screencast".into(),
+                    hint: "Page.startScreencast did not become available".into(),
+                }),
+                other => Err(map_transport_err(other)),
+            };
+        }
+
+        let (latest_tx, latest) = watch::channel(None);
+        let cancel = CancellationToken::new();
+        let task_cancel = cancel.clone();
+        let lane_cancel = self.lane_cancel.clone();
+        let conn = self.conn.clone();
+        let target_id = handles.target_id.clone();
+        let session_id = handles.session_id.clone();
+        let task_target_id = target_id.clone();
+        let task_session_id = session_id.clone();
+        let task = tokio::spawn(async move {
+            const MIN_PUBLISH_INTERVAL: Duration = Duration::from_millis(84);
+            let mut last_publish: Option<tokio::time::Instant> = None;
+            loop {
+                let event = tokio::select! {
+                    biased;
+                    _ = task_cancel.cancelled() => break,
+                    _ = lane_cancel.cancelled() => break,
+                    event = events.recv() => event,
+                };
+                let event = match event {
+                    Ok(event) => event,
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
+                        // CDP normally waits for each ack before producing the
+                        // next frame. Keep the bounded subscription alive if a
+                        // transport burst nevertheless overflowed it.
+                        tracing::debug!(
+                            target_id_suffix = %cdp_id_suffix(&task_target_id),
+                            skipped,
+                            "viewer screencast event subscriber lagged"
+                        );
+                        continue;
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                };
+                let Ok(frame) =
+                    serde_json::from_value::<EventScreencastFrame>(event.params.clone())
+                else {
+                    continue;
+                };
+
+                // Ack before decoding or rate limiting. This is the flow-control
+                // boundary Chromium expects and prevents a slow consumer from
+                // stalling compositor capture.
+                let ack = ScreencastFrameAckParams::new(frame.session_id);
+                let ack_result = tokio::select! {
+                    biased;
+                    _ = task_cancel.cancelled() => break,
+                    _ = lane_cancel.cancelled() => break,
+                    result = conn.send::<ScreencastFrameAckParams>(&task_session_id, &ack) => result,
+                };
+                if let Err(error) = ack_result {
+                    tracing::debug!(
+                        target_id_suffix = %cdp_id_suffix(&task_target_id),
+                        %error,
+                        "viewer screencast frame acknowledgement failed"
+                    );
+                    break;
+                }
+
+                let now = tokio::time::Instant::now();
+                if last_publish
+                    .is_some_and(|previous| now.duration_since(previous) < MIN_PUBLISH_INTERVAL)
+                {
+                    continue;
+                }
+                let Some(image) = decode_base64(frame.data.as_ref()) else {
+                    continue;
+                };
+                let css_viewport_width = finite_positive(frame.metadata.device_width);
+                let css_viewport_height = finite_positive(frame.metadata.device_height);
+                latest_tx.send_replace(Some(BrowserViewerFrame {
+                    image,
+                    format: BrowserViewerImageFormat::Jpeg,
+                    target_id: Some(task_target_id.clone()),
+                    css_viewport_width,
+                    css_viewport_height,
+                    // The authoritative CSS dimensions above are used for
+                    // coordinate mapping. Keep DPR neutral rather than making
+                    // an incorrect inference from a downscaled JPEG.
+                    device_pixel_ratio: 1.0,
+                }));
+                last_publish = Some(now);
+            }
+        });
+
+        Ok(ViewerScreencastState {
+            target_id,
+            session_id,
+            latest,
+            cancel,
+            task,
         })
-        // guard 在此 drop（释放 tabs 锁）。
+    }
+
+    async fn stop_viewer_screencast_state(&self, state: ViewerScreencastState) {
+        use chromiumoxide::cdp::browser_protocol::page::StopScreencastParams;
+        state.cancel.cancel();
+        state.task.abort();
+        let _ = self
+            .conn
+            .send_may_fail::<StopScreencastParams>(
+                &state.session_id,
+                &StopScreencastParams::default(),
+            )
+            .await;
+    }
+
+    async fn stop_viewer_screencast_impl(&self) {
+        let state = self.viewer_screencast.lock().await.take();
+        if let Some(state) = state {
+            self.stop_viewer_screencast_state(state).await;
+        }
+    }
+
+    async fn viewer_screencast_receiver(
+        &self,
+        handles: &TabHandles,
+    ) -> Result<watch::Receiver<Option<BrowserViewerFrame>>, BrowserError> {
+        let mut state = self.viewer_screencast.lock().await;
+        if let Some(current) = state.as_ref()
+            && current.target_id == handles.target_id
+        {
+            return Ok(current.latest.clone());
+        }
+        if let Some(previous) = state.take() {
+            self.stop_viewer_screencast_state(previous).await;
+        }
+        let next = self.start_viewer_screencast(handles).await?;
+        let receiver = next.latest.clone();
+        *state = Some(next);
+        Ok(receiver)
     }
 
     /// **Takeover seam: bring the headful browser window to the foreground.**
@@ -668,7 +2344,8 @@ fn spawn_tab_discovery_loop(
                     if !registry.has_session(&sid) {
                         tracing::warn!(
                             target: "nomi_browser_engine::backend::cdp",
-                            session_id = %sid, target_id = %tid,
+                            session_id = %sid,
+                            target_id_suffix = %cdp_id_suffix(&tid),
                             "new page child session never registered; skip arm"
                         );
                         continue;
@@ -686,20 +2363,20 @@ fn spawn_tab_discovery_loop(
                                 record._oopif_loop.abort();
                                 continue;
                             }
-                            let last4 = crate::tabs::last4(&tid);
+                            let target_id_suffix = cdp_id_suffix(&tid);
                             guard.insert(tid.clone(), record);
                             drop(guard);
                             // **不抢焦点、不改 active**：只记日志（LLM 经 tabs/switch_tab 显式切换）。
                             tracing::info!(
                                 target: "nomi_browser_engine::backend::cdp",
-                                target_id = %tid, last4 = %last4,
-                                "新标签已打开[{last4}]（未抢焦点；observe/act 仍在原标签，需显式 switch_tab）"
+                                target_id_suffix = %target_id_suffix,
+                                "新标签已打开[{target_id_suffix}]（未抢焦点；observe/act 仍在原标签，需显式 switch_tab）"
                             );
                         }
                         Err(e) => {
                             tracing::warn!(
                                 target: "nomi_browser_engine::backend::cdp",
-                                target_id = %tid, error = %e,
+                                target_id_suffix = %cdp_id_suffix(&tid), error = %e,
                                 "arm discovered tab failed (non-fatal)"
                             );
                         }
@@ -807,6 +2484,7 @@ fn spawn_oopif_arm_loop(
         loop {
             match rx.recv().await {
                 Ok(ev) => {
+                    let event_parent_session = ev.session_id.clone();
                     let Ok(att) =
                         serde_json::from_value::<EventAttachedToTarget>(ev.params.clone())
                     else {
@@ -820,7 +2498,13 @@ fn spawn_oopif_arm_loop(
                     // [`crate::tabs::should_arm_as_oopif`]（与 should_arm_as_page 严格互补）。
                     let is_own_page_session = sid == page_session;
                     let already_armed = oopif_managers.lock().await.contains_key(&sid);
-                    if !crate::tabs::should_arm_as_oopif(&ttype, is_own_page_session, already_armed) {
+                    if !crate::tabs::should_arm_as_oopif_for_parent(
+                        &ttype,
+                        &event_parent_session,
+                        &page_session,
+                        is_own_page_session,
+                        already_armed,
+                    ) {
                         continue;
                     }
                     // 等子 session 在注册表登记（run_attach_loop 的 handle_attached 负责登记）。
@@ -1044,29 +2728,39 @@ impl BrowserEngine for CdpBackend {
 
     async fn navigate(&self, url: &str, _new_tab: bool) -> Result<NavResult, BrowserError> {
         // observe⊥act：整段导航持引擎 op_mutex（DESIGN §22），不与在途 observe/act 在本引擎交错。
-        let _op = self.op_mutex.lock().await;
+        let _op = tokio::select! {
+            guard = self.op_mutex.lock() => guard,
+            _ = self.lane_cancel.cancelled() => return Err(BrowserError::TargetClosed),
+        };
         // D1/D2：在 active tab 的 page session 上原地导航（多 tab 路由 / new_tab 由 D3 实现）。短暂
         // 锁 tabs 克隆出 active 句柄后立即释放（不跨 await 持 tabs 锁）。
         let handles = self.active_tab_handles().await?;
         let session = handles.session_id.as_str();
         let main_frame_id = handles.main_frame_id.clone();
-        self.navigate_on_session(session, &main_frame_id, url).await
+        tokio::select! {
+            result = self.navigate_on_session(session, &main_frame_id, url) => result,
+            _ = self.lane_cancel.cancelled() => Err(BrowserError::TargetClosed),
+        }
     }
 
     async fn screenshot(&self) -> Result<Vec<u8>, BrowserError> {
         // observe⊥act：持 op_mutex（DESIGN §22），截图不与在途 act 改 DOM 交错。
-        let _op = self.op_mutex.lock().await;
+        let _op = tokio::select! {
+            guard = self.op_mutex.lock() => guard,
+            _ = self.lane_cancel.cancelled() => return Err(BrowserError::TargetClosed),
+        };
         // D1：截 active tab。
         let session = self.active_tab_handles().await?.session_id;
         let params = CaptureScreenshotParams::builder()
             .format(CaptureScreenshotFormat::Png)
             .build();
 
-        let result = self
-            .conn
-            .send::<CaptureScreenshotParams>(&session, &params)
-            .await
-            .map_err(map_transport_err)?;
+        let result = tokio::select! {
+            result = self.conn.send::<CaptureScreenshotParams>(&session, &params) => {
+                result.map_err(map_transport_err)?
+            }
+            _ = self.lane_cancel.cancelled() => return Err(BrowserError::TargetClosed),
+        };
 
         let shot: CaptureScreenshotReturns = serde_json::from_value(result.clone()).map_err(|e| {
             BrowserError::Other(format!("parse captureScreenshot response: {e}"))
@@ -1078,10 +2772,92 @@ impl BrowserEngine for CdpBackend {
         })
     }
 
+    async fn capture_viewer_frame(&self) -> Result<BrowserViewerFrame, BrowserError> {
+        // Viewer frames are observational and intentionally bypass the
+        // lane-local op_mutex so a bounded capture does not queue behind a
+        // long navigation/action. The active target/session snapshot is still
+        // lane-owned, and cancellation remains authoritative.
+        let handles = self.active_tab_handles().await?;
+        let session = handles.session_id;
+        let params = CaptureScreenshotParams::builder()
+            .format(CaptureScreenshotFormat::Png)
+            .build();
+        let result = tokio::select! {
+            result = self.conn.send::<CaptureScreenshotParams>(&session, &params) => {
+                result.map_err(map_transport_err)?
+            }
+            _ = self.lane_cancel.cancelled() => return Err(BrowserError::TargetClosed),
+        };
+        let shot: CaptureScreenshotReturns = serde_json::from_value(result).map_err(|error| {
+            BrowserError::Other(format!("parse viewer captureScreenshot response: {error}"))
+        })?;
+        let image = decode_base64(shot.data.as_ref()).ok_or_else(|| {
+            BrowserError::Other("viewer captureScreenshot returned non-base64 data".into())
+        })?;
+        let mut dpr_params = EvaluateParams::new("window.devicePixelRatio".to_owned());
+        dpr_params.return_by_value = Some(true);
+        let device_pixel_ratio = self
+            .conn
+            .send::<EvaluateParams>(&session, &dpr_params)
+            .await
+            .ok()
+            .and_then(|result| {
+                result
+                    .get("result")
+                    .and_then(|value| value.get("value"))
+                    .and_then(serde_json::Value::as_f64)
+            })
+            .filter(|dpr| dpr.is_finite() && *dpr > 0.0)
+            .unwrap_or(1.0);
+        Ok(BrowserViewerFrame {
+            image,
+            format: BrowserViewerImageFormat::Png,
+            target_id: Some(handles.target_id),
+            css_viewport_width: None,
+            css_viewport_height: None,
+            device_pixel_ratio,
+        })
+    }
+
+    async fn viewer_screencast_frame(&self) -> Result<BrowserViewerFrame, BrowserError> {
+        let handles = self.active_tab_handles().await?;
+        let mut latest = self.viewer_screencast_receiver(&handles).await?;
+        if let Some(frame) = latest.borrow().clone() {
+            return Ok(frame);
+        }
+        let changed = tokio::select! {
+            biased;
+            _ = self.lane_cancel.cancelled() => return Err(BrowserError::TargetClosed),
+            result = tokio::time::timeout(Duration::from_secs(3), latest.changed()) => result,
+        };
+        match changed {
+            Ok(Ok(())) => latest.borrow().clone().ok_or_else(|| {
+                BrowserError::Other("viewer screencast produced an empty frame".into())
+            }),
+            Ok(Err(_)) => Err(BrowserError::Other(
+                "viewer screencast producer stopped".into(),
+            )),
+            Err(_) => Err(BrowserError::Other(
+                "viewer screencast did not produce a frame in time".into(),
+            )),
+        }
+    }
+
+    async fn stop_viewer_screencast(&self) -> Result<(), BrowserError> {
+        self.stop_viewer_screencast_impl().await;
+        Ok(())
+    }
+
     async fn observe(&self, opts: &ObserveOpts) -> Result<Observation, BrowserError> {
         // observe⊥act：整段快照持 op_mutex，动作不可在序列化中途改 DOM（否则交回模型陈旧 ref）。
-        let _op = self.op_mutex.lock().await;
-        self.observe_impl(opts).await
+        let _op = tokio::select! {
+            guard = self.op_mutex.lock() => guard,
+            _ = self.lane_cancel.cancelled() => return Err(BrowserError::TargetClosed),
+        };
+        tokio::select! {
+            result = self.observe_impl(opts) => result,
+            _ = self.lane_cancel.cancelled() => Err(BrowserError::TargetClosed),
+        }
     }
 
     async fn rendered_html(&self) -> Result<String, BrowserError> {
@@ -1106,9 +2882,15 @@ impl BrowserEngine for CdpBackend {
         progress: &crate::progress::Progress,
     ) -> Result<crate::actions::ActResult, BrowserError> {
         // observe⊥act + per-target act 串行：一引擎一次一动作。受 progress 截止时间界定,op_mutex 不无界持有。
-        let _op = self.op_mutex.lock().await;
+        let _op = tokio::select! {
+            guard = self.op_mutex.lock() => guard,
+            _ = self.lane_cancel.cancelled() => return Err(BrowserError::TargetClosed),
+        };
         // C1：Click/Type/SetValue 经 act_impl 串 B2-B6 执行；其它 ActSpec 仍 Unsupported（C2/C3/D/E/F）。
-        self.act_impl(spec, progress).await
+        tokio::select! {
+            result = self.act_impl(spec, progress) => result,
+            _ = self.lane_cancel.cancelled() => Err(BrowserError::TargetClosed),
+        }
     }
 
     async fn debug_snapshot(
@@ -1126,6 +2908,141 @@ impl BrowserEngine for CdpBackend {
         &self,
     ) -> Result<crate::storage_state::StorageState, BrowserError> {
         CdpBackend::capture_storage_state(self).await
+    }
+
+    async fn tabs(&self) -> Result<Vec<BrowserTabInfo>, BrowserError> {
+        self.structured_tab_inventory().await
+    }
+
+    async fn dispatch_raw_input(
+        &self,
+        target_id: &str,
+        event: &BrowserRawInput,
+    ) -> Result<(), BrowserError> {
+        use chromiumoxide::cdp::browser_protocol::input::{
+            DispatchMouseEventParams, DispatchMouseEventType, InsertTextParams, MouseButton,
+        };
+
+        let _op = tokio::select! {
+            guard = self.op_mutex.lock() => guard,
+            _ = self.lane_cancel.cancelled() => return Err(BrowserError::TargetClosed),
+        };
+        let session = self.tab_handles_for_target(target_id).await?.session_id;
+        match event {
+            BrowserRawInput::Mouse(input) => {
+                if !input.x.is_finite()
+                    || !input.y.is_finite()
+                    || input.x < 0.0
+                    || input.y < 0.0
+                    || input.x > 1_000_000.0
+                    || input.y > 1_000_000.0
+                    || input.buttons > 31
+                    || (input.kind != BrowserMouseEventKind::Move
+                        && input.button == BrowserMouseButton::None)
+                {
+                    return Err(raw_input_blocked());
+                }
+                match input.kind {
+                    BrowserMouseEventKind::Move => {
+                        send_browser_mouse_event(
+                            &self.conn,
+                            &session,
+                            DispatchMouseEventType::MouseMoved,
+                            input,
+                            input.buttons,
+                            None,
+                        )
+                        .await
+                    }
+                    BrowserMouseEventKind::Down => {
+                        send_browser_mouse_event(
+                            &self.conn,
+                            &session,
+                            DispatchMouseEventType::MousePressed,
+                            input,
+                            input.buttons,
+                            Some(1),
+                        )
+                        .await
+                    }
+                    BrowserMouseEventKind::Up => {
+                        send_browser_mouse_event(
+                            &self.conn,
+                            &session,
+                            DispatchMouseEventType::MouseReleased,
+                            input,
+                            input.buttons,
+                            Some(1),
+                        )
+                        .await
+                    }
+                    BrowserMouseEventKind::Click => {
+                        let bit = browser_mouse_button_bit(input.button);
+                        send_browser_mouse_event(
+                            &self.conn,
+                            &session,
+                            DispatchMouseEventType::MousePressed,
+                            input,
+                            input.buttons | bit,
+                            Some(1),
+                        )
+                        .await?;
+                        send_browser_mouse_event(
+                            &self.conn,
+                            &session,
+                            DispatchMouseEventType::MouseReleased,
+                            input,
+                            input.buttons & !bit,
+                            Some(1),
+                        )
+                        .await
+                    }
+                }
+            }
+            BrowserRawInput::Wheel(input) => {
+                if !input.x.is_finite()
+                    || !input.y.is_finite()
+                    || !input.delta_x.is_finite()
+                    || !input.delta_y.is_finite()
+                    || input.x < 0.0
+                    || input.y < 0.0
+                    || input.x > 1_000_000.0
+                    || input.y > 1_000_000.0
+                    || input.delta_x.abs() > 10_000.0
+                    || input.delta_y.abs() > 10_000.0
+                {
+                    return Err(raw_input_blocked());
+                }
+                let mut params = DispatchMouseEventParams::new(
+                    DispatchMouseEventType::MouseWheel,
+                    input.x,
+                    input.y,
+                );
+                params.modifiers = Some(input.modifiers.cdp_bits());
+                params.button = Some(MouseButton::None);
+                params.buttons = Some(0);
+                params.delta_x = Some(input.delta_x);
+                params.delta_y = Some(input.delta_y);
+                self.conn
+                    .send::<DispatchMouseEventParams>(&session, &params)
+                    .await
+                    .map_err(map_transport_err)?;
+                Ok(())
+            }
+            BrowserRawInput::Key(input) => {
+                send_browser_key_event(&self.conn, &session, input).await
+            }
+            BrowserRawInput::Text(text) => {
+                if !browser_text_input_is_allowed(text) {
+                    return Err(raw_input_blocked());
+                }
+                self.conn
+                    .send::<InsertTextParams>(&session, &InsertTextParams::new(text.clone()))
+                    .await
+                    .map_err(map_transport_err)?;
+                Ok(())
+            }
+        }
     }
 
     async fn click_at_css_point(&self, x: f64, y: f64) -> Result<(), BrowserError> {
@@ -1166,26 +3083,31 @@ impl CdpBackend {
     /// 1. 据传入的 `parent`（动作的总 deadline/取消上下文）派生一个**子** [`Progress`]（共享 timeout +
     ///    token 层级：parent 取消 → 子立即取消）。动作跑在返回的子 Progress 上。
     /// 2. spawn 一个监听任务，select 三路事件订阅；命中即对子 Progress `abort`：
-    ///    - `Target.detachedFromTarget` / `Target.targetCrashed`（params.sessionId == 本 page session）
-    ///      → `abort(PageClosed)`（target 没了/崩了 → 上层经 errmap 成 `TargetClosed`）；
+    ///    - `Target.detachedFromTarget`（params.sessionId == 本 page session）
+    ///      → `abort(PageClosed)`；
+    ///    - `Target.targetCrashed`（params.targetId == 本 page target）
+    ///      → `abort(TargetCrashed)`；
     ///    - `Page.frameDetached`（params.frameId == `frame_id`，即动作所在帧）→ `abort(FrameDetached)`。
     /// 3. 返回 `(child, guard)`：动作在 `child` 上跑；`guard` 持监听任务句柄，**Drop 即取消监听**
     ///    （动作结束——成功/失败均然——guard 离开作用域，临时订阅随之收摊）。
     ///
     /// **绝不 panic**：监听任务里所有解析失败 best-effort（continue）；订阅通道关闭/落后按 broadcast
-    /// 语义处理（closed→退出、lagged→继续）。crash 与 close 的恢复语义一致（重开 target），故都映射到
-    /// `PageClosed`（`AbortReason` 不含独立 crash 变体；这是本任务约定的最小接线，dedicated crash
-    /// reason 留待需要时扩 progress.rs/errmap.rs）。
+    /// 语义处理（closed→退出、lagged→继续）。close 与 crash 保留不同的 typed error，同时都允许
+    /// 后续操作走 active-tab survivor/replacement 恢复。
     ///
-    /// **D1：async**——内部短暂锁 tabs 取 active tab 的 page session（订阅 Page.frameDetached 限定它 +
-    /// 比对 detach/crash 事件的 sessionId）后立即释放。active tab 缺失 → Err（绝不 panic）。
+    /// **D1：async**——内部短暂锁 tabs 取 active tab 的 page session/target（订阅
+    /// Page.frameDetached 限定它 + 分别比对 detach sessionId / crash targetId）后立即释放。
+    /// active tab 缺失时会先走 survivor/replacement 恢复；失败返 Err（绝不 panic）。
     pub async fn arm_act_abort(
         &self,
         parent: &Progress,
         frame_id: &str,
     ) -> Result<(Arc<Progress>, ActAbortGuard), BrowserError> {
-        // D1：取 active tab 的 page session（detach/crash 订阅 + sessionId 比对锚定它）。
-        let page_session = self.active_tab_handles().await?.session_id;
+        // D1：同时取 page session 和 target id。detachedFromTarget 按
+        // sessionId 路由；targetCrashed 的 CDP payload 只有 targetId。
+        let page = self.active_tab_handles().await?;
+        let page_session = page.session_id;
+        let page_target = page.target_id;
 
         // 子 Progress：共享 parent 的剩余 deadline（保守用 parent 当下剩余预算的近似——这里直接复用
         // parent 的 token 层级，timeout 取一个不短于 parent 的值；act 的真实 deadline 由调用方在 parent
@@ -1193,8 +3115,12 @@ impl CdpBackend {
         let child = Arc::new(Progress::child(parent.timeout(), parent.token()));
 
         // 三路临时订阅（act 期间有效，guard drop 后监听任务被 abort，订阅 Receiver 随任务 drop 收摊）。
-        let mut detached_rx = self.conn.subscribe("Target.detachedFromTarget", None);
-        let mut crashed_rx = self.conn.subscribe("Target.targetCrashed", None);
+        let mut detached_rx = self
+            .conn
+            .subscribe_reliable("Target.detachedFromTarget", None);
+        let mut crashed_rx = self
+            .conn
+            .subscribe_reliable("Target.targetCrashed", None);
         let mut frame_detached_rx = self
             .conn
             .subscribe("Page.frameDetached", Some(&page_session));
@@ -1203,30 +3129,27 @@ impl CdpBackend {
         let child_for_task = Arc::clone(&child);
 
         let handle = tokio::spawn(async move {
-            use tokio::sync::broadcast::error::RecvError;
             loop {
                 tokio::select! {
                     // page target detach（tab 关闭）：params.sessionId == 本 page session → PageClosed。
                     ev = detached_rx.recv() => match ev {
-                        Ok(ev) => {
+                        Some(ev) => {
                             if event_session_matches(&ev.params, &page_session) {
                                 child_for_task.abort(AbortReason::PageClosed);
                                 break;
                             }
                         }
-                        Err(RecvError::Lagged(_)) => continue,
-                        Err(RecvError::Closed) => break,
+                        None => break,
                     },
-                    // page target crash：同样按 sessionId 命中 → PageClosed（恢复语义同 close）。
+                    // targetCrashed 是 root event，按 targetId 命中并保留 crash taxonomy。
                     ev = crashed_rx.recv() => match ev {
-                        Ok(ev) => {
-                            if event_session_matches(&ev.params, &page_session) {
-                                child_for_task.abort(AbortReason::PageClosed);
+                        Some(ev) => {
+                            if event_target_matches(&ev.params, &page_target) {
+                                child_for_task.abort(AbortReason::TargetCrashed);
                                 break;
                             }
                         }
-                        Err(RecvError::Lagged(_)) => continue,
-                        Err(RecvError::Closed) => break,
+                        None => break,
                     },
                     // 动作所在帧 detach：params.frameId == watch_frame → FrameDetached。
                     ev = frame_detached_rx.recv() => match ev {
@@ -1236,8 +3159,8 @@ impl CdpBackend {
                                 break;
                             }
                         }
-                        Err(RecvError::Lagged(_)) => continue,
-                        Err(RecvError::Closed) => break,
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                     },
                 }
             }
@@ -2981,54 +4904,91 @@ impl CdpBackend {
         }
     }
 
-    /// **tabs 列表动作**（D3，DESIGN §13，Info 级只读）：枚举当前所有纳管标签 → (last4, url, title,
-    /// is_active) → 渲染成对 LLM 文案。url/title 经 `Target.getTargets`（一次取全量 targetInfo），按本
-    /// 注册表的 tab key 过滤（只列我们纳管的 page，不含 OOPIF/SW/其它 browser target）。
-    pub async fn act_tabs(&self) -> Result<ActResult, BrowserError> {
-        use crate::tabs::{last4, render_tab_list, TabListItem};
+    /// Structured top-level tab inventory used by non-LLM platform callers.
+    /// Registry ownership is authoritative; `Target.getTargets` contributes
+    /// only display metadata.
+    async fn structured_tab_inventory(&self) -> Result<Vec<BrowserTabInfo>, BrowserError> {
+        use crate::tabs::last4;
         use chromiumoxide::cdp::browser_protocol::target::GetTargetsParams;
 
-        // 注册表里的 tab 集合 + 当前 active（短临界区取后释放锁）。
-        let (managed, active): (Vec<String>, String) = {
+        let (managed, active): (Vec<(String, String)>, String) = {
             let tabs = self.tabs.lock().await;
-            let managed = tabs.keys().cloned().collect();
+            let managed = tabs
+                .iter()
+                .map(|(target_id, record)| {
+                    (target_id.clone(), record.session_id.clone())
+                })
+                .collect();
             let active = self.active_target.lock().await.clone();
             (managed, active)
         };
 
-        // getTargets 取 url/title（发到根 browser session）。失败 → best-effort 空 info（url/title 留空）。
-        let mut info: HashMap<String, (String, String)> = HashMap::new();
+        let mut display: HashMap<String, (String, String)> = HashMap::new();
         if let Ok(raw) = self
             .conn
             .send::<GetTargetsParams>(ROOT_SESSION, &GetTargetsParams { filter: None })
             .await
-            && let Some(arr) = raw.get("targetInfos").and_then(|v| v.as_array())
+            && let Some(targets) = raw.get("targetInfos").and_then(|value| value.as_array())
         {
-            for ti in arr {
-                let Some(tid) = ti.get("targetId").and_then(|v| v.as_str()) else {
+            for target in targets {
+                let Some(target_id) = target.get("targetId").and_then(|value| value.as_str())
+                else {
                     continue;
                 };
-                let url = ti.get("url").and_then(|v| v.as_str()).unwrap_or("").to_string();
-                let title = ti.get("title").and_then(|v| v.as_str()).unwrap_or("").to_string();
-                info.insert(tid.to_string(), (url, title));
+                let url = target
+                    .get("url")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or_default()
+                    .to_owned();
+                let title = target
+                    .get("title")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or_default()
+                    .to_owned();
+                display.insert(target_id.to_owned(), (url, title));
             }
         }
 
-        // 只列我们纳管的 tab（注册表 key），按 last4 排序保稳定输出。
-        let mut items: Vec<TabListItem> = managed
-            .iter()
-            .map(|tid| {
-                let (url, title) = info.get(tid).cloned().unwrap_or_default();
-                TabListItem {
-                    last4: last4(tid),
-                    target_id: tid.clone(),
-                    url,
-                    title,
-                    is_active: *tid == active,
+        let mut tabs = managed
+            .into_iter()
+            .map(|(target_id, session_id)| {
+                let (url, title) = display.get(&target_id).cloned().unwrap_or_default();
+                BrowserTabInfo {
+                    tab_id: last4(&target_id),
+                    active: target_id == active,
+                    crashed: self.conn.registry().is_session_crashed(&session_id),
+                    target_id,
+                    title: (!title.is_empty()).then_some(title),
+                    url: (!url.is_empty()).then_some(url),
                 }
             })
+            .collect::<Vec<_>>();
+        tabs.sort_by(|left, right| {
+            left.tab_id
+                .cmp(&right.tab_id)
+                .then_with(|| left.target_id.cmp(&right.target_id))
+        });
+        Ok(tabs)
+    }
+
+    /// **tabs 列表动作**（D3，DESIGN §13，Info 级只读）：枚举当前所有纳管标签 → (last4, url, title,
+    /// is_active) → 渲染成对 LLM 文案。url/title 经 `Target.getTargets`（一次取全量 targetInfo），按本
+    /// 注册表的 tab key 过滤（只列我们纳管的 page，不含 OOPIF/SW/其它 browser target）。
+    pub async fn act_tabs(&self) -> Result<ActResult, BrowserError> {
+        use crate::tabs::{TabListItem, render_tab_list};
+
+        let items: Vec<TabListItem> = self
+            .structured_tab_inventory()
+            .await?
+            .into_iter()
+            .map(|tab| TabListItem {
+                last4: tab.tab_id,
+                target_id: tab.target_id,
+                url: tab.url.unwrap_or_default(),
+                title: tab.title.unwrap_or_default(),
+                is_active: tab.active,
+            })
             .collect();
-        items.sort_by(|a, b| a.last4.cmp(&b.last4));
 
         Ok(ActResult {
             message: render_tab_list(&items),
@@ -3165,6 +5125,9 @@ impl CdpBackend {
                 reselected = None;
             }
         }
+        if let Some(host) = &self.host {
+            host.router.release_target(&target_id).await;
+        }
 
         if was_active {
             // 关 active：对进行中操作（绑该 tab 的 act）发 abort(PageClosed)——立即取消而非白等。
@@ -3223,6 +5186,9 @@ impl CdpBackend {
             .and_then(|v| v.as_str())
             .ok_or_else(|| BrowserError::Other("createTarget response missing targetId".into()))?
             .to_string();
+        if let Some(host) = &self.host {
+            host.router.claim_target(&self.lane_id, &new_tid).await;
+        }
         let l4 = last4(&new_tid);
 
         Ok(ActResult {
@@ -3812,15 +5778,24 @@ impl Drop for ActAbortGuard {
     }
 }
 
-/// **[纯逻辑] 事件 params 的 `sessionId` 是否匹配目标 session**（detach/crash 接线判定）。
-/// `Target.detachedFromTarget` / `Target.targetCrashed` 的 params 带 `sessionId`（标识哪个 target
-/// 没了/崩了）；与本 page session 比对，命中即「本动作所在 page 没了」。抽纯函数便于单测形状解析。
+/// **[纯逻辑] 事件 params 的 `sessionId` 是否匹配目标 session**（detach 接线判定）。
+/// `Target.detachedFromTarget` 的 params 带 `sessionId`；与本 page session 比对，命中即
+/// 「本动作所在 page 没了」。抽纯函数便于单测形状解析。
 fn event_session_matches(params: &serde_json::Value, target_session: &str) -> bool {
     params
         .get("sessionId")
         .and_then(|v| v.as_str())
         .map(|s| s == target_session)
         .unwrap_or(false)
+}
+
+/// `Target.targetCrashed` is emitted on the root session and identifies the
+/// renderer by `targetId` (not `sessionId`).
+fn event_target_matches(params: &serde_json::Value, target_id: &str) -> bool {
+    params
+        .get("targetId")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|event_target| event_target == target_id)
 }
 
 /// **[纯逻辑] 事件 params 的 `frameId` 是否匹配目标帧**（frame detach 接线判定）。
@@ -4153,7 +6128,10 @@ async fn set_download_behavior_sandbox(
 ///
 /// best-effort + 绝不 panic：解析失败 / cancel 失败 / MOTW 写失败只 `warn`/`debug`，不致命。连接关闭
 /// （`RecvError::Closed`）→ 退出循环（backend Drop 关连接即触发）。
-fn spawn_download_loop(conn: Connection) -> tokio::task::JoinHandle<()> {
+fn spawn_download_loop(
+    conn: Connection,
+    router: Option<Arc<HostTargetRouter>>,
+) -> tokio::task::JoinHandle<()> {
     let mut begin_rx = conn.subscribe(EventDownloadWillBegin::IDENTIFIER, None);
     let mut progress_rx = conn.subscribe(EventDownloadProgress::IDENTIFIER, None);
     tokio::spawn(async move {
@@ -4199,6 +6177,14 @@ fn spawn_download_loop(conn: Connection) -> tokio::task::JoinHandle<()> {
                                         "cancelDownload for a blocked download failed; the file may still land in the isolated downloads dir (block already logged)"
                                     );
                                 }
+                            } else if let Some(router) = &router {
+                                router
+                                    .begin_download(
+                                        b.frame_id.as_ref(),
+                                        &b.guid,
+                                        &b.suggested_filename,
+                                    )
+                                    .await;
                             }
                         }
                         Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
@@ -4221,6 +6207,11 @@ fn spawn_download_loop(conn: Connection) -> tokio::task::JoinHandle<()> {
                                 continue;
                             };
                             let path = std::path::Path::new(file_path);
+                            if let Some(router) = &router
+                                && router.finish_download(&p.guid, path).await
+                            {
+                                continue;
+                            }
                             match crate::download::write_motw(path) {
                                 Ok(()) => {
                                     tracing::debug!(file = %file_path, "download completed; MOTW applied (Windows)");
@@ -4278,15 +6269,15 @@ fn spawn_fetch_firewall_loop(
     dns_resolver: Arc<dyn crate::firewall::HostResolver>,
     dns_cache: crate::firewall::DnsResolverCache,
 ) -> tokio::task::JoinHandle<()> {
-    let mut attached_rx = conn.subscribe(EventAttachedToTarget::IDENTIFIER, None);
-    let mut paused_rx = conn.subscribe(EventRequestPaused::IDENTIFIER, None);
+    let mut attached_rx = conn.subscribe_reliable(EventAttachedToTarget::IDENTIFIER, None);
+    let mut paused_rx = conn.subscribe_reliable(EventRequestPaused::IDENTIFIER, None);
     tokio::spawn(async move {
         loop {
             tokio::select! {
                 // ① 新 session（含 SW）→ 挂 Fetch.enable。
                 ev = attached_rx.recv() => {
                     match ev {
-                        Ok(ev) => {
+                        Some(ev) => {
                             let Ok(att) = serde_json::from_value::<EventAttachedToTarget>(ev.params.clone())
                             else { continue };
                             let sid: String = att.session_id.clone().into();
@@ -4307,14 +6298,13 @@ fn spawn_fetch_firewall_loop(
                                 );
                             }
                         }
-                        Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
-                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                        None => break,
                     }
                 }
                 // ② 被拦请求 → 判定 → continue/fail/（D2）悬挂等审批。
                 ev = paused_rx.recv() => {
                     match ev {
-                        Ok(ev) => {
+                        Some(ev) => {
                             let session_id = ev.session_id.clone();
                             let Ok(paused) = serde_json::from_value::<EventRequestPaused>(ev.params.clone())
                             else {
@@ -4335,8 +6325,7 @@ fn spawn_fetch_firewall_loop(
                             )
                             .await;
                         }
-                        Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
-                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                        None => break,
                     }
                 }
             }
@@ -4658,11 +6647,421 @@ pub async fn build_backend(
 mod tests {
     use super::*;
 
+    #[derive(Default)]
+    struct CapturedEvents(std::sync::Mutex<Vec<String>>);
+
+    struct FieldVisitor<'a>(&'a mut String);
+
+    impl tracing::field::Visit for FieldVisitor<'_> {
+        fn record_debug(
+            &mut self,
+            field: &tracing::field::Field,
+            value: &dyn std::fmt::Debug,
+        ) {
+            use std::fmt::Write as _;
+            let _ = write!(self.0, "{}={value:?};", field.name());
+        }
+    }
+
+    impl tracing::Subscriber for CapturedEvents {
+        fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
+            true
+        }
+
+        fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+            tracing::span::Id::from_u64(1)
+        }
+
+        fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+
+        fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+
+        fn event(&self, event: &tracing::Event<'_>) {
+            let mut rendered = String::new();
+            event.record(&mut FieldVisitor(&mut rendered));
+            self.0.lock().unwrap().push(rendered);
+        }
+
+        fn enter(&self, _: &tracing::span::Id) {}
+
+        fn exit(&self, _: &tracing::span::Id) {}
+    }
+
+    #[test]
+    fn deferred_ephemeral_profile_cleanup_log_does_not_leak_profile_path() {
+        let path_sentinel = "EPHEMERAL-PROFILE-PATH-SENTINEL";
+        let profile_dir = std::env::temp_dir().join(path_sentinel);
+        let subscriber = std::sync::Arc::new(CapturedEvents::default());
+
+        tracing::subscriber::with_default(subscriber.clone(), || {
+            log_ephemeral_profile_cleanup_deferred(&profile_dir);
+        });
+
+        let captured = subscriber.0.lock().unwrap().join("\n");
+        assert!(
+            captured.contains("ephemeral browser profile cleanup deferred to startup GC"),
+            "{captured}"
+        );
+        assert!(
+            captured.contains("cleanup_retries_exhausted"),
+            "{captured}"
+        );
+        assert!(
+            !captured.contains(path_sentinel),
+            "profile cleanup log leaked its path: {captured}"
+        );
+        assert!(
+            !captured.contains(&profile_dir.display().to_string()),
+            "profile cleanup log leaked its full path: {captured}"
+        );
+    }
+
+    async fn router_test_connection() -> (Connection, tokio::task::JoinHandle<()>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind router test websocket");
+        let address = listener.local_addr().expect("read router test address");
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("accept router test client");
+            let _websocket = tokio_tungstenite::accept_async(stream)
+                .await
+                .expect("complete router test websocket handshake");
+            std::future::pending::<()>().await;
+        });
+        let connection = Connection::connect(&format!("ws://{address}"))
+            .await
+            .expect("connect router test websocket");
+        (connection, server)
+    }
+
+    async fn close_target_fake_connection(
+        outcomes: Vec<Result<(), TransportError>>,
+    ) -> (Connection, tokio::task::JoinHandle<Vec<String>>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind close-target fake websocket");
+        let address = listener.local_addr().expect("read fake websocket address");
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("accept fake client");
+            let mut websocket = tokio_tungstenite::accept_async(stream)
+                .await
+                .expect("complete fake websocket handshake");
+            let mut outcomes = outcomes.into_iter();
+            let mut closed_targets = Vec::new();
+            while let Some(message) = futures_util::StreamExt::next(&mut websocket).await {
+                let Ok(tokio_tungstenite::tungstenite::Message::Text(text)) = message else {
+                    break;
+                };
+                let request: serde_json::Value =
+                    serde_json::from_str(&text).expect("fake received valid json");
+                let id = request
+                    .get("id")
+                    .and_then(serde_json::Value::as_u64)
+                    .expect("fake request has id");
+                if request.get("method").and_then(serde_json::Value::as_str)
+                    == Some("Target.closeTarget")
+                {
+                    if let Some(target_id) = request
+                        .get("params")
+                        .and_then(|params| params.get("targetId"))
+                        .and_then(serde_json::Value::as_str)
+                    {
+                        closed_targets.push(target_id.to_string());
+                    }
+                    match outcomes.next().unwrap_or(Ok(())) {
+                        Ok(()) => {
+                            futures_util::SinkExt::send(
+                                &mut websocket,
+                                tokio_tungstenite::tungstenite::Message::Text(
+                                    serde_json::json!({
+                                        "id": id,
+                                        "result": { "success": true }
+                                    })
+                                    .to_string()
+                                    .into(),
+                                ),
+                            )
+                            .await
+                            .expect("fake sends closeTarget success");
+                        }
+                        Err(TransportError::Cdp { code, message }) => {
+                            futures_util::SinkExt::send(
+                                &mut websocket,
+                                tokio_tungstenite::tungstenite::Message::Text(
+                                    serde_json::json!({
+                                        "id": id,
+                                        "error": { "code": code, "message": message }
+                                    })
+                                    .to_string()
+                                    .into(),
+                                ),
+                            )
+                            .await
+                            .expect("fake sends closeTarget cdp error");
+                        }
+                        Err(other) => panic!("fake closeTarget supports only Cdp errors, got {other:?}"),
+                    }
+                } else {
+                    futures_util::SinkExt::send(
+                        &mut websocket,
+                        tokio_tungstenite::tungstenite::Message::Text(
+                            serde_json::json!({ "id": id, "result": {} })
+                                .to_string()
+                                .into(),
+                        ),
+                    )
+                    .await
+                    .expect("fake sends generic success");
+                }
+            }
+            closed_targets
+        });
+        let connection = Connection::connect(&format!("ws://{address}"))
+            .await
+            .expect("connect close-target fake websocket");
+        (connection, server)
+    }
+
+    fn inert_loop() -> tokio::task::JoinHandle<()> {
+        tokio::spawn(std::future::pending::<()>())
+    }
+
+    fn test_tab_record(conn: &Connection, target_id: &str, session_id: &str) -> TabRecord {
+        TabRecord {
+            target_id: target_id.to_string(),
+            session_id: session_id.to_string(),
+            injection: InjectionManager::new(conn.clone(), session_id.to_string()),
+            _inject_loop: inert_loop(),
+            main_frame_id: target_id.to_string(),
+            oopif_managers: Arc::new(AsyncMutex::new(HashMap::new())),
+            _oopif_loop: inert_loop(),
+            ref_table: Arc::new(AsyncMutex::new(None)),
+            debug: Arc::new(std::sync::Mutex::new(
+                crate::debug_capture::DebugBuffers::default(),
+            )),
+            _debug_loop: inert_loop(),
+        }
+    }
+
+    fn test_backend_with_tabs(conn: Connection, target_ids: &[&str]) -> CdpBackend {
+        let tabs = target_ids
+            .iter()
+            .map(|target_id| {
+                (
+                    (*target_id).to_string(),
+                    test_tab_record(&conn, target_id, &format!("session-{target_id}")),
+                )
+            })
+            .collect::<HashMap<_, _>>();
+        CdpBackend {
+            conn,
+            host: None,
+            lane_id: "test-lane".to_string(),
+            lane_closing: Arc::new(AtomicBool::new(false)),
+            lane_closed: Arc::new(AtomicBool::new(false)),
+            lane_shutdown_gate: AsyncMutex::new(()),
+            lane_close_confirmed: AsyncMutex::new(HashSet::new()),
+            lane_cancel: CancellationToken::new(),
+            tabs: Arc::new(AsyncMutex::new(tabs)),
+            active_target: Arc::new(AsyncMutex::new(
+                target_ids.first().copied().unwrap_or_default().to_string(),
+            )),
+            active_frame: Arc::new(AsyncMutex::new(None)),
+            act_seq: AtomicU64::new(0),
+            _process: None,
+            _attach_loop: None,
+            _tab_discovery_loop: None,
+            _download_loop: None,
+            download_dir: None,
+            workspace_dir: None,
+            _firewall_loop: None,
+            firewall_config: crate::firewall::FirewallConfig::default(),
+            approved_domains: crate::firewall::ApprovedDomains::new(),
+            evaluate_gate: AsyncMutex::new(crate::evaluate::EvaluateGate::default()),
+            headful: false,
+            display_available: false,
+            op_mutex: LaneOperationGate::default(),
+            target_recovery_gate: AsyncMutex::new(()),
+            viewer_screencast: AsyncMutex::new(None),
+            known_secret_values: crate::KnownSecretValues::default(),
+        }
+    }
+
+    #[tokio::test]
+    async fn shutdown_lane_propagates_close_target_error_and_preserves_state() {
+        let (connection, server) = close_target_fake_connection(vec![Err(TransportError::Cdp {
+            code: -32000,
+            message: "close denied".into(),
+        })])
+        .await;
+        let backend = test_backend_with_tabs(connection.clone(), &["target-a"]);
+
+        let error = backend.shutdown_lane().await.unwrap_err();
+        match error {
+            BrowserError::Other(message) => assert!(message.contains("close denied"), "{message}"),
+            other => panic!("expected propagated CDP error, got {other:?}"),
+        }
+        assert!(
+            backend.lane_closing.load(Ordering::Acquire),
+            "failed cleanup still fences new lane work"
+        );
+        assert!(
+            !backend.lane_closed.load(Ordering::Acquire),
+            "lane must not publish closed after closeTarget failure"
+        );
+        assert!(
+            backend.tabs.lock().await.contains_key("target-a"),
+            "target state must remain for retry"
+        );
+        assert!(
+            backend.lane_close_confirmed.lock().await.is_empty(),
+            "failed target must not be marked confirmed"
+        );
+
+        drop(backend);
+        connection.shutdown().await;
+        let closed_targets = server.await.expect("fake server joins");
+        assert_eq!(closed_targets, vec!["target-a"]);
+    }
+
+    #[tokio::test]
+    async fn shutdown_lane_retries_only_unconfirmed_targets_after_partial_success() {
+        let (connection, server) = close_target_fake_connection(vec![
+            Ok(()),
+            Err(TransportError::Cdp {
+                code: -32000,
+                message: "transient close failure".into(),
+            }),
+            Ok(()),
+        ])
+        .await;
+        let backend = test_backend_with_tabs(connection.clone(), &["target-a", "target-b"]);
+
+        assert!(
+            backend.shutdown_lane().await.is_err(),
+            "first cleanup should surface the failing second target"
+        );
+        assert_eq!(
+            backend
+                .lane_close_confirmed
+                .lock()
+                .await
+                .iter()
+                .cloned()
+                .collect::<Vec<_>>(),
+            vec!["target-a".to_string()],
+            "successful target is remembered so retry is idempotent"
+        );
+        assert!(
+            backend.tabs.lock().await.contains_key("target-a")
+                && backend.tabs.lock().await.contains_key("target-b"),
+            "tabs remain authoritative until the whole lane closes"
+        );
+
+        backend
+            .shutdown_lane()
+            .await
+            .expect("retry closes only the remaining target");
+        assert!(backend.lane_closed.load(Ordering::Acquire));
+        assert!(backend.tabs.lock().await.is_empty());
+        assert!(backend.lane_close_confirmed.lock().await.is_empty());
+
+        drop(backend);
+        connection.shutdown().await;
+        let closed_targets = server.await.expect("fake server joins");
+        assert_eq!(
+            closed_targets,
+            vec![
+                "target-a".to_string(),
+                "target-b".to_string(),
+                "target-b".to_string()
+            ],
+            "retry must not send closeTarget again for the already-confirmed target"
+        );
+    }
+
+    #[tokio::test]
+    async fn lane_closing_fences_popup_attach_before_lane_closed() {
+        let (connection, server) = router_test_connection().await;
+        let router = HostTargetRouter::new(connection.clone());
+        let tabs = Arc::new(AsyncMutex::new(HashMap::new()));
+        let active_target = Arc::new(AsyncMutex::new("opener".to_string()));
+        let active_frame = Arc::new(AsyncMutex::new(None));
+        let lane_closing = Arc::new(AtomicBool::new(false));
+        let lane_closed = Arc::new(AtomicBool::new(false));
+
+        router
+            .register_lane(
+                "lane-a".to_string(),
+                &tabs,
+                &active_target,
+                &active_frame,
+                lane_closing.clone(),
+                None,
+            )
+            .await;
+        assert!(router.claim_target("lane-a", "opener").await);
+
+        let attach_router = router.clone();
+        let attach = tokio::spawn(async move {
+            attach_router
+                .handle_attached(PendingPage {
+                    target_id: "popup".to_string(),
+                    session_id: "popup-session".to_string(),
+                    opener_target_id: Some("opener".to_string()),
+                })
+                .await;
+        });
+
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if router.state.lock().await.ownership.owner("popup") == Some("lane-a") {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("popup attach must enter the router before close starts");
+
+        lane_closing.store(true, Ordering::Release);
+        assert!(
+            !lane_closed.load(Ordering::Acquire),
+            "the router fence must engage before final lane_closed publication"
+        );
+        tokio::time::timeout(Duration::from_millis(250), attach)
+            .await
+            .expect("closing must promptly stop an in-flight popup attach")
+            .expect("popup attach task must not panic");
+
+        assert!(
+            tabs.lock().await.is_empty(),
+            "a popup must not enter the Lane after lane_closing is published"
+        );
+        assert!(
+            !router.claim_target("lane-a", "explicit-after-close").await,
+            "explicit target claims must also fail once Lane closing begins"
+        );
+        assert_eq!(
+            router
+                .state
+                .lock()
+                .await
+                .ownership
+                .owner("explicit-after-close"),
+            None
+        );
+
+        server.abort();
+        let _ = server.await;
+        connection.shutdown().await;
+    }
+
     // ── B6 detach/crash 事件源接线：事件 params 形状判定（[纯逻辑]，喂构造 Value，无浏览器）──
 
     #[test]
     fn event_session_matches_by_session_id() {
-        // Target.detachedFromTarget / targetCrashed 的 params.sessionId 命中本 page session → true。
+        // Target.detachedFromTarget 的 params.sessionId 命中本 page session → true。
         let p = serde_json::json!({"sessionId": "PAGE_SID", "targetId": "T1"});
         assert!(event_session_matches(&p, "PAGE_SID"));
         // 不同 session（其它 target 没了）→ false（不误 abort 本动作）。
@@ -4673,6 +7072,41 @@ mod tests {
         // sessionId 非字符串（坏形状）→ false。
         let p3 = serde_json::json!({"sessionId": 7});
         assert!(!event_session_matches(&p3, "PAGE_SID"));
+    }
+
+    #[test]
+    fn target_crash_matches_target_id_not_root_session() {
+        let crash = serde_json::json!({
+            "targetId": "TARGET_A",
+            "status": "crashed",
+            "errorCode": 1
+        });
+        assert!(event_target_matches(&crash, "TARGET_A"));
+        assert!(!event_target_matches(&crash, "TARGET_B"));
+        assert!(
+            !event_session_matches(&crash, "PAGE_SESSION"),
+            "root targetCrashed has no child sessionId"
+        );
+        assert!(!event_target_matches(
+            &serde_json::json!({"sessionId": "PAGE_SESSION"}),
+            "TARGET_A"
+        ));
+    }
+
+    #[test]
+    fn crashed_active_target_selects_a_deterministic_survivor() {
+        let first = ["target-z", "target-a", "target-m"];
+        let second = ["target-m", "target-z", "target-a"];
+        assert_eq!(
+            deterministic_survivor(first, "target-z").as_deref(),
+            Some("target-a")
+        );
+        assert_eq!(
+            deterministic_survivor(second, "target-z").as_deref(),
+            Some("target-a"),
+            "HashMap/event order must not change survivor selection"
+        );
+        assert_eq!(deterministic_survivor(["only"], "only"), None);
     }
 
     #[test]
@@ -4697,22 +7131,26 @@ mod tests {
     }
 
     #[test]
-    fn transport_closed_maps_to_session_lost_unrecoverable() {
+    fn transport_connection_closed_maps_to_host_session_lost() {
         assert!(matches!(
             map_transport_err(TransportError::Closed),
-            BrowserError::SessionLost { recoverable: false }
-        ));
-        assert!(matches!(
-            map_transport_err(TransportError::SessionClosed),
             BrowserError::SessionLost { recoverable: false }
         ));
     }
 
     #[test]
-    fn transport_crashed_maps_to_session_lost_recoverable() {
+    fn transport_session_closed_stays_target_local() {
+        assert!(matches!(
+            map_transport_err(TransportError::SessionClosed),
+            BrowserError::TargetClosed
+        ));
+    }
+
+    #[test]
+    fn transport_session_crashed_stays_target_local() {
         assert!(matches!(
             map_transport_err(TransportError::SessionCrashed),
-            BrowserError::SessionLost { recoverable: true }
+            BrowserError::TargetCrashed
         ));
     }
 
@@ -5056,4 +7494,3 @@ mod op_mutex_tests {
         );
     }
 }
-

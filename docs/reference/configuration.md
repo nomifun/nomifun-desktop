@@ -51,7 +51,7 @@ Subcommands (used internally by the agent CLI bridge and for diagnostics):
 | `mcp-gateway-stdio` | Internal stdio transport for platform Gateway tools; accepts only a host-issued scoped, expiring signed claim. |
 | `mcp-open-stdio` | MCP stdio server exposing a reliable OS `open` tool. |
 | `mcp-computer-stdio` | MCP stdio server exposing desktop computer-use tools. |
-| `mcp-browser-stdio` | MCP stdio server exposing browser-use tools. |
+| `mcp-browser-stdio` | Scoped MCP stdio proxy for browser-use; forwards to the main-process `BrowserSessionHub` and does not create a private Chromium or profile. |
 | `terminal-hook --event <kind>` | One-shot terminal lifecycle hook relay. |
 | `doctor` | Self-check: hydrate the agent registry, probe every CLI on `$PATH`, print a per-agent availability table. |
 | `tools` | List public Remote capability names and descriptions as JSON. |

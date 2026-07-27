@@ -139,6 +139,245 @@ pub struct CssRect {
     pub height: f64,
 }
 
+/// A structured snapshot of one top-level page target owned by this engine.
+///
+/// `tab_id` is the short, user-facing identifier accepted by tab actions;
+/// `target_id` is the complete CDP target identifier used for authoritative
+/// routing. Callers must never reconstruct one from the other.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BrowserTabInfo {
+    pub tab_id: String,
+    pub target_id: String,
+    pub title: Option<String>,
+    pub url: Option<String>,
+    pub active: bool,
+    pub crashed: bool,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct BrowserViewerFrame {
+    pub image: Vec<u8>,
+    pub format: BrowserViewerImageFormat,
+    /// Full target id captured from the same active-tab handle as the frame.
+    pub target_id: Option<String>,
+    /// CSS viewport dimensions represented by the encoded frame, when the
+    /// capture source provides them authoritatively (for example screencast
+    /// metadata). Callers should prefer these over inferring from DPR.
+    pub css_viewport_width: Option<f64>,
+    pub css_viewport_height: Option<f64>,
+    pub device_pixel_ratio: f64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BrowserViewerImageFormat {
+    Jpeg,
+    Png,
+}
+
+/// Modifier state for a page-scoped raw input event. CDP dispatches these
+/// events into the active page only; they are not operating-system key events.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct BrowserInputModifiers {
+    pub alt: bool,
+    pub ctrl: bool,
+    pub meta: bool,
+    pub shift: bool,
+}
+
+impl BrowserInputModifiers {
+    /// CDP's `Input` modifier bit field: Alt=1, Ctrl=2, Meta=4, Shift=8.
+    pub fn cdp_bits(self) -> i64 {
+        i64::from(self.alt)
+            | (i64::from(self.ctrl) << 1)
+            | (i64::from(self.meta) << 2)
+            | (i64::from(self.shift) << 3)
+    }
+
+    pub fn has_command_modifier(self) -> bool {
+        self.alt || self.ctrl || self.meta
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BrowserMouseButton {
+    None,
+    Left,
+    Middle,
+    Right,
+    Back,
+    Forward,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BrowserMouseEventKind {
+    Move,
+    Down,
+    Up,
+    Click,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct BrowserMouseInput {
+    pub kind: BrowserMouseEventKind,
+    pub x: f64,
+    pub y: f64,
+    pub button: BrowserMouseButton,
+    /// DOM `MouseEvent.buttons`: Left=1, Right=2, Middle=4, Back=8,
+    /// Forward=16.
+    pub buttons: u8,
+    pub modifiers: BrowserInputModifiers,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct BrowserWheelInput {
+    pub x: f64,
+    pub y: f64,
+    pub delta_x: f64,
+    pub delta_y: f64,
+    pub modifiers: BrowserInputModifiers,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BrowserKeyEventKind {
+    Down,
+    Up,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BrowserKeyInput {
+    pub kind: BrowserKeyEventKind,
+    pub key: String,
+    pub code: String,
+    pub repeat: bool,
+    pub modifiers: BrowserInputModifiers,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum BrowserRawInput {
+    Mouse(BrowserMouseInput),
+    Wheel(BrowserWheelInput),
+    Key(BrowserKeyInput),
+    /// IME/paste-style text insertion. The adapter applies a strict byte and
+    /// control-character policy before constructing this variant.
+    Text(String),
+}
+
+/// Conservative DOM `KeyboardEvent.code` allowlist shared by the platform
+/// adapter and the backend's defense-in-depth check.
+pub fn browser_key_code_is_allowed(code: &str) -> bool {
+    let bytes = code.as_bytes();
+    let patterned = (bytes.len() == 4
+        && bytes.starts_with(b"Key")
+        && bytes[3].is_ascii_uppercase())
+        || (bytes.len() == 6
+            && bytes.starts_with(b"Digit")
+            && bytes[5].is_ascii_digit())
+        || (bytes.len() == 7
+            && bytes.starts_with(b"Numpad")
+            && bytes[6].is_ascii_digit());
+    patterned
+        || matches!(
+            code,
+            "Backspace"
+                | "Tab"
+                | "Enter"
+                | "NumpadEnter"
+                | "Escape"
+                | "Space"
+                | "PageUp"
+                | "PageDown"
+                | "End"
+                | "Home"
+                | "ArrowLeft"
+                | "ArrowUp"
+                | "ArrowRight"
+                | "ArrowDown"
+                | "Insert"
+                | "Delete"
+                | "ShiftLeft"
+                | "ShiftRight"
+                | "ControlLeft"
+                | "ControlRight"
+                | "AltLeft"
+                | "AltRight"
+                | "MetaLeft"
+                | "MetaRight"
+                | "CapsLock"
+                | "NumLock"
+                | "ScrollLock"
+                | "Pause"
+                | "ContextMenu"
+                | "Backquote"
+                | "Minus"
+                | "Equal"
+                | "BracketLeft"
+                | "BracketRight"
+                | "Backslash"
+                | "Semicolon"
+                | "Quote"
+                | "Comma"
+                | "Period"
+                | "Slash"
+                | "NumpadAdd"
+                | "NumpadSubtract"
+                | "NumpadMultiply"
+                | "NumpadDivide"
+                | "NumpadDecimal"
+        )
+}
+
+/// A key value is either one printable Unicode scalar or one of the bounded
+/// non-text DOM key names used by the allowlisted physical codes.
+pub fn browser_key_value_is_allowed(key: &str) -> bool {
+    if !key.is_empty()
+        && key.len() <= 64
+        && key.chars().count() == 1
+        && key.chars().all(|ch| !ch.is_control())
+    {
+        return true;
+    }
+    matches!(
+        key,
+        "Backspace"
+            | "Tab"
+            | "Enter"
+            | "Escape"
+            | "PageUp"
+            | "PageDown"
+            | "End"
+            | "Home"
+            | "ArrowLeft"
+            | "ArrowUp"
+            | "ArrowRight"
+            | "ArrowDown"
+            | "Insert"
+            | "Delete"
+            | "Shift"
+            | "Control"
+            | "Alt"
+            | "AltGraph"
+            | "Meta"
+            | "OS"
+            | "CapsLock"
+            | "NumLock"
+            | "ScrollLock"
+            | "Pause"
+            | "ContextMenu"
+    )
+}
+
+/// Bounded text policy for direct human input. Newline and tab are permitted;
+/// NUL, DEL, and other C0 controls are rejected.
+pub fn browser_text_input_is_allowed(text: &str) -> bool {
+    !text.is_empty()
+        && text.len() <= 4_096
+        && text
+            .chars()
+            .all(|ch| !ch.is_control() || matches!(ch, '\n' | '\r' | '\t'))
+        && !text.contains('\0')
+        && !text.contains('\u{7f}')
+}
+
 /// 一次 `observe` 的产物：序列化给 LLM 的 aria YAML + 配套的 ref 表 + 出处/封顶元信息。
 #[derive(Clone, Debug)]
 pub struct Observation {
@@ -227,9 +466,10 @@ pub enum DetachKind {
 
 /// **引擎并发契约（DESIGN §22）**：每个 [`BrowserEngine`] 实现**必须**在单个引擎实例上把 `observe`
 /// 与 `act`/`navigate`/`screenshot` 串行化——快照绝不与改 DOM 的动作交错（否则交回模型陈旧 `ref`）。
-/// 后端用一把引擎内 per-engine mutex（跨每个操作体持有）实现。facade 仍报 `is_concurrency_safe == false`
-/// （调度器也串行），但正确性**不再依赖**它——并发调用方也无法交错 observe/act。并发只在**不同引擎**
-/// （各自 Chrome 进程）之间，绝不在单引擎内。本常量令该契约被代码引用并由测试钉死。
+/// 后端用一把 lane adapter 内 mutex（跨每个操作体持有）实现。facade 仍报
+/// `is_concurrency_safe == false`（调度器也串行），但正确性**不再依赖**它——并发调用方也无法交错
+/// observe/act。共享 Host 中每个 Lane 都有独立 adapter/gate，所以不同 Lane 可以在同一 Chromium/CDP
+/// Connection 上重叠执行；同一 Lane 内仍严格串行。本常量令该契约被代码引用并由测试钉死。
 pub const OBSERVE_ACT_MUTEX_IS_ENGINE_ENFORCED: bool = true;
 
 /// The contract every browser backend implements. Async because the CDP
@@ -239,7 +479,7 @@ pub const OBSERVE_ACT_MUTEX_IS_ENGINE_ENFORCED: bool = true;
 /// **并发契约（DESIGN §22）**：实现必须在单引擎实例上串行化 `observe` 与
 /// `act`/`navigate`/`screenshot`（引擎内 per-engine mutex，见
 /// [`OBSERVE_ACT_MUTEX_IS_ENGINE_ENFORCED`]）；正确性不依赖 `is_concurrency_safe`。
-/// 并发跨不同引擎实现，绝不在单引擎内。
+/// 一个实现值代表一个 Lane：并发跨不同 Lane adapter 实现，绝不在同一 Lane 内。
 #[async_trait]
 pub trait BrowserEngine: Send + Sync {
     /// Honest report of what this session can do.
@@ -251,6 +491,46 @@ pub trait BrowserEngine: Send + Sync {
 
     /// Capture a screenshot of the current page as PNG bytes.
     async fn screenshot(&self) -> Result<Vec<u8>, BrowserError>;
+
+    /// Capture a read-only viewer frame without joining the lane's
+    /// observe/action correctness gate. Implementations must keep this
+    /// operation page-scoped and cancellable; a backend without a dedicated
+    /// concurrent capture path may conservatively fall back to `screenshot`.
+    async fn capture_viewer_frame(&self) -> Result<BrowserViewerFrame, BrowserError> {
+        let image = self.screenshot().await?;
+        let target_id = self
+            .tabs()
+            .await
+            .ok()
+            .and_then(|tabs| tabs.into_iter().find(|tab| tab.active))
+            .map(|tab| tab.target_id);
+        let device_pixel_ratio = self.device_pixel_ratio().await.unwrap_or(1.0);
+        Ok(BrowserViewerFrame {
+            image,
+            format: BrowserViewerImageFormat::Png,
+            target_id,
+            css_viewport_width: None,
+            css_viewport_height: None,
+            device_pixel_ratio,
+        })
+    }
+
+    /// Return the latest JPEG frame from a persistent CDP screencast.
+    ///
+    /// Backends that do not support `Page.startScreencast` must return
+    /// `BrowserError::Unsupported`; the platform viewer then falls back to
+    /// bounded screenshot polling.
+    async fn viewer_screencast_frame(&self) -> Result<BrowserViewerFrame, BrowserError> {
+        Err(BrowserError::Unsupported {
+            capability: "viewer_screencast".into(),
+            hint: "persistent viewer screencast not supported by this backend".into(),
+        })
+    }
+
+    /// Stop a persistent viewer screencast, if one is active.
+    async fn stop_viewer_screencast(&self) -> Result<(), BrowserError> {
+        Ok(())
+    }
 
     /// Serialize the **fully-rendered** DOM of the current page to raw HTML
     /// (`document.documentElement.outerHTML`) — i.e. the post-JS markup the user
@@ -324,6 +604,32 @@ pub trait BrowserEngine: Send + Sync {
         Err(BrowserError::Unsupported {
             capability: "capture_storage_state".into(),
             hint: "storage_state capture not supported by this backend".into(),
+        })
+    }
+
+    /// Return a structured snapshot of all top-level tabs owned by this engine.
+    async fn tabs(&self) -> Result<Vec<BrowserTabInfo>, BrowserError> {
+        Err(BrowserError::Unsupported {
+            capability: "tabs".into(),
+            hint: "structured tab inventory not supported by this backend".into(),
+        })
+    }
+
+    /// Dispatch a validated page-scoped input event to an exact owned target.
+    ///
+    /// The platform adapter is the primary validation boundary; backends must
+    /// still reject malformed coordinates, button masks, key codes, and text.
+    /// The full target id is mandatory so a tab switch racing after frame
+    /// capture can never redirect input to another page.
+    async fn dispatch_raw_input(
+        &self,
+        target_id: &str,
+        event: &BrowserRawInput,
+    ) -> Result<(), BrowserError> {
+        let _ = (target_id, event);
+        Err(BrowserError::Unsupported {
+            capability: "raw_input".into(),
+            hint: "raw viewer input not supported by this backend".into(),
         })
     }
 

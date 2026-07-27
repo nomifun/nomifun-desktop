@@ -1484,6 +1484,17 @@ mod tests {
             .into_iter()
             .find(|spec| spec.name == "nomi_delegate")
             .expect("nomi_delegate must be advertised to the owner");
+        let properties = spec
+            .input_schema
+            .get("properties")
+            .and_then(Value::as_object)
+            .expect("nomi_delegate must advertise root properties");
+        for field in ["strategy", "goal", "tasks", "synthesize"] {
+            assert!(
+                properties.contains_key(field),
+                "nomi_delegate root projection is missing {field}"
+            );
+        }
         let schema = Value::Object(spec.input_schema);
         let validator = jsonschema::options()
             .build(&schema)

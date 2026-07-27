@@ -26,6 +26,7 @@ pub fn map_progress_err(e: ProgressError) -> BrowserError {
             phase: NavPhase::Action,
         },
         ProgressError::Aborted(AbortReason::PageClosed) => BrowserError::TargetClosed,
+        ProgressError::Aborted(AbortReason::TargetCrashed) => BrowserError::TargetCrashed,
         ProgressError::Aborted(AbortReason::FrameDetached) => BrowserError::Detached {
             kind: DetachKind::Frame,
         },
@@ -44,6 +45,10 @@ mod tests {
         assert!(matches!(
             map_progress_err(ProgressError::Aborted(AbortReason::PageClosed)),
             BrowserError::TargetClosed
+        ));
+        assert!(matches!(
+            map_progress_err(ProgressError::Aborted(AbortReason::TargetCrashed)),
+            BrowserError::TargetCrashed
         ));
         assert!(matches!(
             map_progress_err(ProgressError::Aborted(AbortReason::FrameDetached)),

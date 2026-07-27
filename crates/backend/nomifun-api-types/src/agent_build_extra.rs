@@ -141,10 +141,10 @@ pub struct AcpBuildExtra {
     /// assembler injects `nomicore mcp-browser-stdio` so the agent gets discrete
     /// browser tools (navigate / observe / click / type / …). Injected from
     /// `AgentFactoryDeps::browser_mcp_config` at build time — populated on every
-    /// desktop OS when the host binary has the `browser-use` feature. Symmetric
-    /// with `computer_mcp_config`; the bridge is stateless fail-safe (R2: no
-    /// per-pet context over the env boundary — see `BrowserMcpConfig`).
-    #[serde(default)]
+    /// desktop OS when the host binary has the `browser-use` feature. Unlike
+    /// computer-use, this process-private issuer is skipped by serde; the
+    /// assembler gives each ACP runtime one scoped renewable capability.
+    #[serde(skip)]
     pub browser_mcp_config: Option<BrowserMcpConfig>,
     /// The companion this session is bound to (multi-companion upgrade). Set by the
     /// channel layer on Channel Agent sessions (platform binding > default
@@ -401,14 +401,18 @@ mod tests {
 
     const MCP_SERVER_ID: &str = "0190f5fe-7c00-7a00-8000-000000000123";
 
-    /// P4-2: the `browser_mcp_config` field on `AcpBuildExtra` round-trips
-    /// symmetrically with `computer_mcp_config` (both `Some`, both preserved).
+    /// Process-private browser issuers must never survive build-extra
+    /// serialization, while the stateless computer bridge remains serializable.
     #[test]
-    fn acp_build_extra_browser_mcp_config_json_roundtrip() {
+    fn acp_build_extra_skips_browser_mcp_issuer() {
         let extra = AcpBuildExtra {
-            browser_mcp_config: Some(BrowserMcpConfig {
-                binary_path: "/usr/bin/nomicore".into(),
-            }),
+            browser_mcp_config: Some(BrowserMcpConfig::from_issuer(
+                41_000,
+                std::sync::Arc::new(
+                    nomifun_common::LoopbackCapabilityIssuer::random().unwrap(),
+                ),
+                "/usr/bin/nomicore".into(),
+            )),
             computer_mcp_config: Some(ComputerMcpConfig {
                 binary_path: "/usr/bin/nomicore".into(),
             }),
@@ -416,12 +420,10 @@ mod tests {
         };
         let json = serde_json::to_string(&extra).unwrap();
         let parsed: AcpBuildExtra = serde_json::from_str(&json).unwrap();
-        assert_eq!(
-            parsed.browser_mcp_config.as_ref().map(|c| c.binary_path.as_str()),
-            Some("/usr/bin/nomicore"),
-            "browser_mcp_config must survive the round-trip"
+        assert!(
+            parsed.browser_mcp_config.is_none(),
+            "browser issuer authority must remain process-local"
         );
-        // Symmetry: the sibling computer field still round-trips alongside it.
         assert_eq!(
             parsed.computer_mcp_config.as_ref().map(|c| c.binary_path.as_str()),
             Some("/usr/bin/nomicore"),

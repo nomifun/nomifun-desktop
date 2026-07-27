@@ -3,6 +3,10 @@
 //! actual failure cause of "enable WebUI" surfaces deterministically instead of
 //! being guessed at. Prints the resolved status (port, LAN IP, URL, error).
 
+use std::path::Path;
+
+use clap::Parser as _;
+
 fn local_http_client() -> reqwest::Client {
     reqwest::Client::builder()
         .no_proxy()
@@ -10,17 +14,27 @@ fn local_http_client() -> reqwest::Client {
         .expect("local reqwest client should build")
 }
 
+/// Keep each backend's conversation workspace independent from the process
+/// global `NOMIFUN_WORK_DIR` that another concurrently running test may set.
+fn isolated_cli(data_dir: &Path) -> nomifun_app::cli::Cli {
+    let work_dir = data_dir.join("work");
+    nomifun_app::cli::Cli::parse_from([
+        "nomifun-desktop-test".to_owned(),
+        "--data-dir".to_owned(),
+        data_dir.to_string_lossy().into_owned(),
+        "--work-dir".to_owned(),
+        work_dir.to_string_lossy().into_owned(),
+    ])
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn webui_lan_start_smoke() {
-    use clap::Parser as _;
-
     // Isolated data dir so we never touch a running instance's state / lock.
     let tmp = tempfile::TempDir::new().unwrap();
     // Isolate the data dir via --data-dir below (NOT a process-global env var):
     // these tests run in parallel, so a shared set_var("NOMIFUN_DATA_DIR") would
     // race and two backends could resolve to the SAME dir → "data directory
     // already in use by another running NomiFun backend".
-    let data_dir = tmp.path().to_string_lossy().into_owned();
     let spa_dir = tmp.path().join("spa");
     std::fs::create_dir_all(&spa_dir).unwrap();
     std::fs::write(
@@ -29,7 +43,7 @@ async fn webui_lan_start_smoke() {
     )
     .unwrap();
 
-    let cli = nomifun_app::cli::Cli::parse_from(["nomifun-desktop-test", "--data-dir", &data_dir]);
+    let cli = isolated_cli(tmp.path());
     let merged_path = std::env::var("PATH").unwrap_or_default();
 
     let started =
@@ -55,10 +69,7 @@ async fn webui_lan_start_smoke() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn webui_lan_spa_deep_link_serves_app_shell() {
-    use clap::Parser as _;
-
     let tmp = tempfile::TempDir::new().unwrap();
-    let data_dir = tmp.path().to_string_lossy().into_owned();
     let spa_dir = tmp.path().join("spa");
     std::fs::create_dir_all(&spa_dir).unwrap();
     std::fs::write(
@@ -67,7 +78,7 @@ async fn webui_lan_spa_deep_link_serves_app_shell() {
     )
     .unwrap();
 
-    let cli = nomifun_app::cli::Cli::parse_from(["nomifun-desktop-test", "--data-dir", &data_dir]);
+    let cli = isolated_cli(tmp.path());
     let merged_path = std::env::var("PATH").unwrap_or_default();
 
     let (server, _keep) =
@@ -104,18 +115,11 @@ async fn webui_lan_spa_deep_link_serves_app_shell() {
 /// frontend build-ID pairing.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn webui_lan_embedded_asset_source_needs_no_filesystem_shell() {
-    use clap::Parser as _;
-
     const INDEX: &str = "<!doctype html><title>EMBEDDED_WEBUI_MARKER</title>";
     const SCRIPT: &str = "window.__embeddedWebUi = true;";
 
     let tmp = tempfile::TempDir::new().unwrap();
-    let data_dir = tmp.path().to_string_lossy().into_owned();
-    let cli = nomifun_app::cli::Cli::parse_from([
-        "nomifun-desktop-test",
-        "--data-dir",
-        &data_dir,
-    ]);
+    let cli = isolated_cli(tmp.path());
     let merged_path = std::env::var("PATH").unwrap_or_default();
     let assets = nomifun_app::WebUiAssetSource::new([
         (
@@ -125,10 +129,7 @@ async fn webui_lan_embedded_asset_source_needs_no_filesystem_shell() {
         ),
         (
             "assets/app.js",
-            nomifun_app::WebUiAsset::new(
-                SCRIPT.as_bytes().to_vec(),
-                "text/javascript",
-            ),
+            nomifun_app::WebUiAsset::new(SCRIPT.as_bytes().to_vec(), "text/javascript"),
         ),
     ]);
 
@@ -175,7 +176,13 @@ async fn webui_lan_embedded_asset_source_needs_no_filesystem_shell() {
             .and_then(|value| value.to_str().ok()),
         Some("nosniff")
     );
-    assert!(route.text().await.unwrap_or_default().contains("EMBEDDED_WEBUI_MARKER"));
+    assert!(
+        route
+            .text()
+            .await
+            .unwrap_or_default()
+            .contains("EMBEDDED_WEBUI_MARKER")
+    );
 
     let script = client
         .get(format!("{base}/assets/app.js"))
@@ -237,11 +244,8 @@ async fn webui_lan_embedded_asset_source_needs_no_filesystem_shell() {
 /// instead of handing users a broken QR flow.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn webui_lan_without_app_shell_fails_instead_of_serving_partial_qr_flow() {
-    use clap::Parser as _;
-
     let tmp = tempfile::TempDir::new().unwrap();
-    let data_dir = tmp.path().to_string_lossy().into_owned();
-    let cli = nomifun_app::cli::Cli::parse_from(["nomifun-desktop-test", "--data-dir", &data_dir]);
+    let cli = isolated_cli(tmp.path());
     let merged_path = std::env::var("PATH").unwrap_or_default();
 
     let (server, _keep) =
@@ -274,16 +278,12 @@ async fn webui_lan_without_app_shell_fails_instead_of_serving_partial_qr_flow() 
 /// hits its loopback port with NO trust header, exactly like a native image load.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn figure_image_get_is_public_but_listing_stays_authenticated() {
-    use clap::Parser as _;
-
     let tmp = tempfile::TempDir::new().unwrap();
     // Isolate the data dir via --data-dir below (NOT a process-global env var):
     // these tests run in parallel, so a shared set_var("NOMIFUN_DATA_DIR") would
     // race and two backends could resolve to the SAME dir → "data directory
     // already in use by another running NomiFun backend".
-    let data_dir = tmp.path().to_string_lossy().into_owned();
-
-    let cli = nomifun_app::cli::Cli::parse_from(["nomifun-desktop-test", "--data-dir", &data_dir]);
+    let cli = isolated_cli(tmp.path());
     let merged_path = std::env::var("PATH").unwrap_or_default();
     let (server, _keep) =
         nomifun_app::DesktopServer::start(&cli, &merged_path, None, None, None)
@@ -333,15 +333,11 @@ async fn figure_image_get_is_public_but_listing_stays_authenticated() {
 /// and asserts a request to the LAN port is proxied through to the live content.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn webui_lan_dev_proxy_serves_live_frontend() {
-    use clap::Parser as _;
-
     let tmp = tempfile::TempDir::new().unwrap();
     // Isolate the data dir via --data-dir below (NOT a process-global env var):
     // these tests run in parallel, so a shared set_var("NOMIFUN_DATA_DIR") would
     // race and two backends could resolve to the SAME dir → "data directory
     // already in use by another running NomiFun backend".
-    let data_dir = tmp.path().to_string_lossy().into_owned();
-
     // Mock vite dev server: returns a recognizable marker for any path.
     let mock = tokio::net::TcpListener::bind(("127.0.0.1", 0))
         .await
@@ -352,15 +348,12 @@ async fn webui_lan_dev_proxy_serves_live_frontend() {
         let _ = axum::serve(mock, app).await;
     });
 
-    let cli = nomifun_app::cli::Cli::parse_from(["nomifun-desktop-test", "--data-dir", &data_dir]);
+    let cli = isolated_cli(tmp.path());
     let merged_path = std::env::var("PATH").unwrap_or_default();
     let dev_url = format!("http://127.0.0.1:{mock_port}");
     let stale_embedded = nomifun_app::WebUiAssetSource::new([(
         "index.html",
-        nomifun_app::WebUiAsset::new(
-            b"STALE_EMBEDDED_MARKER".to_vec(),
-            "text/html",
-        ),
+        nomifun_app::WebUiAsset::new(b"STALE_EMBEDDED_MARKER".to_vec(), "text/html"),
     )]);
 
     let (server, _keep) = nomifun_app::DesktopServer::start(
@@ -390,6 +383,10 @@ async fn webui_lan_dev_proxy_serves_live_frontend() {
         body.contains("LIVE_VITE_INDEX_MARKER"),
         "LAN listener did not proxy to the dev frontend; status={response_status}; got: {body}"
     );
+    assert!(
+        !body.contains("STALE_EMBEDDED_MARKER"),
+        "dev proxy must take precedence over stale embedded assets"
+    );
 
     server.stop_lan().await;
 }
@@ -400,15 +397,12 @@ async fn webui_lan_dev_proxy_serves_live_frontend() {
 /// username + `password_set` even before/without the LAN listener running.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn webui_enable_preserves_user_set_username_and_reports_persisted_state() {
-    use clap::Parser as _;
-
     let tmp = tempfile::TempDir::new().unwrap();
-    let data_dir = tmp.path().to_string_lossy().into_owned();
     let spa_dir = tmp.path().join("spa");
     std::fs::create_dir_all(&spa_dir).unwrap();
     std::fs::write(spa_dir.join("index.html"), "<!doctype html><title>Nomi</title>").unwrap();
 
-    let cli = nomifun_app::cli::Cli::parse_from(["nomifun-desktop-test", "--data-dir", &data_dir]);
+    let cli = isolated_cli(tmp.path());
     let merged_path = std::env::var("PATH").unwrap_or_default();
 
     let (server, _keep) =
@@ -459,19 +453,16 @@ async fn webui_enable_preserves_user_set_username_and_reports_persisted_state() 
 }
 
 /// Browser login contract regression: the desktop-generated credentials must
-/// authenticate through the REAL LAN listener when the request body matches
+/// authenticate through the real LAN listener when the request body matches
 /// the strict `/login` schema used by the bundled WebUI.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn webui_browser_login_contract_accepts_generated_credentials() {
-    use clap::Parser as _;
-
     let tmp = tempfile::TempDir::new().unwrap();
-    let data_dir = tmp.path().to_string_lossy().into_owned();
     let spa_dir = tmp.path().join("spa");
     std::fs::create_dir_all(&spa_dir).unwrap();
     std::fs::write(spa_dir.join("index.html"), "<!doctype html><title>Nomi</title>").unwrap();
 
-    let cli = nomifun_app::cli::Cli::parse_from(["nomifun-desktop-test", "--data-dir", &data_dir]);
+    let cli = isolated_cli(tmp.path());
     let merged_path = std::env::var("PATH").unwrap_or_default();
     let (server, _keep) =
         nomifun_app::DesktopServer::start(&cli, &merged_path, Some(spa_dir), None, None)
@@ -511,7 +502,9 @@ async fn webui_browser_login_contract_accepts_generated_credentials() {
     assert_eq!(response_body["success"], true);
     assert_eq!(response_body["user"]["username"], status.admin_username);
     assert!(
-        response_body["token"].as_str().is_some_and(|token| !token.is_empty()),
+        response_body["token"]
+            .as_str()
+            .is_some_and(|token| !token.is_empty()),
         "successful login should return a session token"
     );
 }

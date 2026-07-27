@@ -3,8 +3,8 @@ use std::time::Duration;
 
 use axum::extract::WebSocketUpgrade;
 use axum::extract::ws::{CloseFrame, Message, WebSocket};
-use axum::http::HeaderMap;
-use axum::response::IntoResponse;
+use axum::http::{HeaderMap, StatusCode, Uri, header};
+use axum::response::{IntoResponse, Response};
 use futures_util::{SinkExt, StreamExt};
 use nomifun_api_types::WebSocketMessage;
 use serde_json::{Value, json};
@@ -31,10 +31,27 @@ pub struct WsHandlerState {
     pub token_extractor: TokenExtractor,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum OriginDisposition {
+    /// Browsers send `Origin` on WebSocket handshakes. Its absence is retained
+    /// for CLI, agent, and other non-browser clients that authenticate with an
+    /// explicit credential.
+    NonBrowser,
+    SameOrigin,
+    /// The desktop renderer and local Vite renderer run on a different local
+    /// origin from the embedded loopback backend.
+    LocalWebview,
+}
+
+struct UpgradeCredentials {
+    token: Option<String>,
+    selected_protocol: Option<String>,
+}
+
 /// Axum handler for HTTP → WebSocket upgrade.
 ///
-/// Extracts a JWT token from the request headers, validates it,
-/// and upgrades the connection to WebSocket on success.
+/// Validates an origin-bearing browser handshake before extracting its JWT,
+/// then upgrades the connection to WebSocket on success.
 /// On authentication failure, sends `auth-expired` and closes with 1008.
 ///
 /// When the token is carried via `Sec-WebSocket-Protocol`, the server
@@ -43,24 +60,148 @@ pub async fn ws_upgrade_handler(
     ws: WebSocketUpgrade,
     headers: HeaderMap,
     axum::extract::State(state): axum::extract::State<WsHandlerState>,
-) -> impl IntoResponse {
-    let token = (state.token_extractor)(&headers);
+) -> Response {
+    // Validate Origin before touching cookie/Bearer credentials. In
+    // particular, a hostile page must not be able to use an ambient session
+    // cookie for a cross-site WebSocket handshake.
+    let credentials = match upgrade_credentials(&headers, &state) {
+        Ok(credentials) => credentials,
+        Err(()) => {
+            debug!("rejected websocket upgrade with an untrusted origin");
+            return StatusCode::FORBIDDEN.into_response();
+        }
+    };
 
-    // Echo Sec-WebSocket-Protocol so clients using it for auth
-    // receive a valid subprotocol negotiation response.
-    let ws = if let Some(protocol) = headers
-        .get("sec-websocket-protocol")
-        .and_then(|v| v.to_str().ok())
-        .map(|s| s.to_owned())
-    {
+    // Echo the selected Sec-WebSocket-Protocol so clients using it for auth
+    // receive a valid subprotocol negotiation response. Select one protocol,
+    // rather than echoing a possibly comma-delimited request header.
+    let ws = if let Some(protocol) = credentials.selected_protocol.clone() {
         ws.protocols([protocol])
     } else {
         ws
     };
 
     ws.on_upgrade(move |socket| async move {
-        handle_socket(socket, token, state).await;
+        handle_socket(socket, credentials.token, state).await;
     })
+    .into_response()
+}
+
+/// Resolve the authentication material permitted for this request's origin.
+///
+/// Same-origin browsers retain the existing extractor priority (Bearer,
+/// cookie, then subprotocol). A known local desktop/dev webview is necessarily
+/// cross-origin with the loopback backend, so it may connect only when the
+/// first requested subprotocol is itself a valid explicit credential. This
+/// prevents an ambient cookie from authorizing a local cross-origin page.
+fn upgrade_credentials(headers: &HeaderMap, state: &WsHandlerState) -> Result<UpgradeCredentials, ()> {
+    match validate_origin(headers)? {
+        OriginDisposition::LocalWebview => {
+            let token = if let Some(protocol) = first_requested_protocol(headers) {
+                let protocol = protocol.to_owned();
+                (state.token_authenticator)(&protocol).ok_or(())?;
+                protocol
+            } else {
+                // `--insecure-no-auth` / `dev:web` deliberately has no
+                // browser-visible credential and its application-provided
+                // extractor returns the synthetic local token. Preserve that
+                // legal local development handshake, but remove every ambient
+                // credential first so a Cookie or Bearer value can never make
+                // an authenticated deployment take this fallback.
+                let mut credentialless_headers = headers.clone();
+                credentialless_headers.remove(header::AUTHORIZATION);
+                credentialless_headers.remove(header::COOKIE);
+                credentialless_headers.remove(header::SEC_WEBSOCKET_PROTOCOL);
+                let token = (state.token_extractor)(&credentialless_headers).ok_or(())?;
+                (state.token_authenticator)(&token).ok_or(())?;
+                token
+            };
+            Ok(UpgradeCredentials {
+                token: Some(token),
+                selected_protocol: first_requested_protocol(headers).map(str::to_owned),
+            })
+        }
+        OriginDisposition::NonBrowser | OriginDisposition::SameOrigin => Ok(UpgradeCredentials {
+            token: (state.token_extractor)(headers),
+            selected_protocol: first_requested_protocol(headers).map(str::to_owned),
+        }),
+    }
+}
+
+/// Validate a browser WebSocket Origin against the request Host.
+///
+/// This follows the application's existing browser-viewer origin model:
+/// ordinary WebUI browsers must be same-authority HTTP(S), while the known
+/// Tauri and loopback development origins are classified separately and bound
+/// to explicit subprotocol authentication by [`upgrade_credentials`]. Missing
+/// Origin is allowed only as the non-browser compatibility path. Any present
+/// but malformed, opaque, duplicated, or untrusted Origin fails closed.
+fn validate_origin(headers: &HeaderMap) -> Result<OriginDisposition, ()> {
+    let mut origins = headers.get_all(header::ORIGIN).iter();
+    let Some(origin_value) = origins.next() else {
+        return Ok(OriginDisposition::NonBrowser);
+    };
+    if origins.next().is_some() {
+        return Err(());
+    }
+    let origin = origin_value
+        .to_str()
+        .ok()
+        .map(str::trim)
+        .filter(|origin| !origin.is_empty() && !origin.contains(','))
+        .ok_or(())?;
+
+    let mut hosts = headers.get_all(header::HOST).iter();
+    let host = hosts
+        .next()
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+        .filter(|host| !host.is_empty() && !host.contains(',') && !host.contains('@'))
+        .ok_or(())?;
+    if hosts.next().is_some() {
+        return Err(());
+    }
+    let host = host.parse::<axum::http::uri::Authority>().map_err(|_| ())?;
+
+    let uri = origin.parse::<Uri>().map_err(|_| ())?;
+    let scheme = uri.scheme_str().ok_or(())?;
+    let authority = uri.authority().ok_or(())?;
+    if uri
+        .path_and_query()
+        .is_some_and(|path_and_query| path_and_query.as_str() != "/")
+        || authority.as_str().contains('@')
+    {
+        return Err(());
+    }
+
+    if matches!(scheme, "http" | "https") && authority.as_str().eq_ignore_ascii_case(host.as_str()) {
+        return Ok(OriginDisposition::SameOrigin);
+    }
+
+    let origin_host = authority
+        .host()
+        .strip_prefix('[')
+        .and_then(|host| host.strip_suffix(']'))
+        .unwrap_or_else(|| authority.host());
+    let is_tauri_origin = (scheme == "tauri" && origin_host.eq_ignore_ascii_case("localhost"))
+        || (matches!(scheme, "http" | "https") && origin_host.eq_ignore_ascii_case("tauri.localhost"));
+    let is_loopback_dev_origin = matches!(scheme, "http" | "https")
+        && (origin_host.eq_ignore_ascii_case("localhost") || origin_host == "127.0.0.1" || origin_host == "::1");
+
+    if is_tauri_origin || is_loopback_dev_origin {
+        Ok(OriginDisposition::LocalWebview)
+    } else {
+        Err(())
+    }
+}
+
+fn first_requested_protocol(headers: &HeaderMap) -> Option<&str> {
+    headers
+        .get(header::SEC_WEBSOCKET_PROTOCOL)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|protocols| protocols.split(',').next())
+        .map(str::trim)
+        .filter(|protocol| !protocol.is_empty())
 }
 
 /// Post-upgrade connection handler.
@@ -302,6 +443,80 @@ mod tests {
             token_authenticator: Arc::new(|_| Some("user".to_owned())),
             token_extractor: Arc::new(|_| None),
         }
+    }
+
+    fn origin_headers(host: &str, origin: Option<&str>) -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        headers.insert(header::HOST, host.parse().unwrap());
+        if let Some(origin) = origin {
+            headers.insert(header::ORIGIN, origin.parse().unwrap());
+        }
+        headers
+    }
+
+    #[test]
+    fn origin_validation_accepts_same_authority_and_non_browser_absence() {
+        assert_eq!(
+            validate_origin(&origin_headers("nomifun.example:8443", None)),
+            Ok(OriginDisposition::NonBrowser)
+        );
+        assert_eq!(
+            validate_origin(&origin_headers(
+                "nomifun.example:8443",
+                Some("https://NOMIFUN.example:8443")
+            )),
+            Ok(OriginDisposition::SameOrigin)
+        );
+        assert!(
+            validate_origin(&origin_headers(
+                "nomifun.example:8443",
+                Some("https://nomifun.example")
+            ))
+            .is_err(),
+            "the origin port is part of the WebSocket same-origin boundary"
+        );
+    }
+
+    #[test]
+    fn origin_validation_classifies_known_local_webview_origins() {
+        for origin in [
+            "tauri://localhost",
+            "http://tauri.localhost",
+            "http://localhost:5173",
+            "http://127.0.0.1:5173",
+            "http://[::1]:5173",
+        ] {
+            assert_eq!(
+                validate_origin(&origin_headers("127.0.0.1:25808", Some(origin))),
+                Ok(OriginDisposition::LocalWebview),
+                "expected {origin} to be a known local webview origin"
+            );
+        }
+    }
+
+    #[test]
+    fn origin_validation_fails_closed_for_untrusted_or_ambiguous_values() {
+        for origin in [
+            "https://attacker.example",
+            "null",
+            "https://nomifun.example:8443/path",
+            "https://user@nomifun.example:8443",
+            "https://nomifun.example:8443, https://attacker.example",
+        ] {
+            assert!(
+                validate_origin(&origin_headers("nomifun.example:8443", Some(origin))).is_err(),
+                "expected {origin} to be rejected"
+            );
+        }
+
+        let mut duplicate = origin_headers("nomifun.example:8443", None);
+        duplicate.append(header::ORIGIN, "https://nomifun.example:8443".parse().unwrap());
+        duplicate.append(header::ORIGIN, "https://attacker.example".parse().unwrap());
+        assert!(validate_origin(&duplicate).is_err());
+
+        let mut missing_host = HeaderMap::new();
+        missing_host.insert(header::ORIGIN, "https://nomifun.example:8443".parse().unwrap());
+        assert!(validate_origin(&missing_host).is_err());
     }
 
     #[test]

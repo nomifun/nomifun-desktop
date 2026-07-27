@@ -29,6 +29,7 @@ chromiumoxide = { workspace = true }
 tokio-tungstenite.workspace = true
 # SinkExt/StreamExt for the WS split sink + read loop.
 futures-util.workspace = true
+fs2.workspace = true
 # 注入管线（Task D）的 utility-world 名 / binding 名按会话随机化（`__nomi_<hex>__`，
 # 反检测 + 防与页面全局冲突）。getrandom 是 workspace 已锁的 CSPRNG 原语，hex 化即可，
 # 无需引入 `rand` 的大依赖面。
@@ -54,6 +55,9 @@ url.workspace = true
 # Debug-context redactor regex (expanded keyword set + key=value fallback). nomi-redact already
 # transitively pulls regex; this direct dep costs zero extra build time.
 regex.workspace = true
+# Startup orphan recovery validates PID + executable + process start time and
+# terminates only a fully verified Chromium process tree.
+sysinfo.workspace = true
 # CfT chrome 下载兜底的 zip 解压（三平台包都是 .zip）。复用 workspace 锁定的
 # zip = "2"（与 nomifun-app::provision::install 的解压同款，版本对齐）。
 zip.workspace = true
@@ -68,7 +72,13 @@ dunce = "1"
 # Windows: GetSystemMetrics(SM_CMONITORS) 监视器数。0.61 与 nomi-a11y /
 # nomi-computer 已固定的版本对齐，避免冗余/版本分裂。
 [target.'cfg(target_os = "windows")'.dependencies]
-windows = { version = "0.61", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging"] }
+windows = { version = "0.61", features = [
+  "Win32_Foundation",
+  "Win32_Security",
+  "Win32_System_JobObjects",
+  "Win32_System_Threading",
+  "Win32_UI_WindowsAndMessaging",
+] }
 windows-sys = { version = "0.61", features = ["Win32_Storage_FileSystem"] }
 
 # macOS: CGDisplay::active_display_count()（CGGetActiveDisplayList 的安全封装）。

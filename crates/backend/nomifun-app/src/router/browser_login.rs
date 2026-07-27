@@ -1,179 +1,479 @@
-//! **Phase 2b: 「登录我的浏览器」** —— 让用户一键打开一个**可见**浏览器窗口,登录自己的站点一次,
-//! 之后（默认静默的）agent 会话即复用该登录态。
+//! Compatibility endpoints for opening a user-controlled Primary browser Lane.
 //!
-//! 登录态如何留存:所有会话共用**同一个磁盘 profile**(`<data_dir>/profile`,Chrome 原生把 cookie
-//! 写盘),故在这个可见窗口里登录一次 → 磁盘 profile 记住 → 后续静默会话直接是登录态。关闭窗口前
-//! 额外 best-effort 把登录态 capture 进加密 vault(Phase 2a),作为 profile 被清后的恢复备份。
-//!
-//! 生命周期:`open`(拉起可见窗口、返回)→ 用户在窗口里登录 →`close`(capture+save 备份、销毁引擎=
-//! 关窗)。至多一个登录窗口(浏览器身份全局共享)。
-//!
-//! **红线不变**:用的仍是引擎**专属** user-data-dir(非用户真实 Chrome profile);来源(内置 CfT /
-//! 系统 Chrome)由请求里的 `source` 决定,与 agent 一致。
-//!
-//! 约束:同一 profile 不能同时开两个 Chrome 实例——若此刻有 agent 会话正在跑浏览器,拉起会失败,
-//! `open` 返回可读的错误信息(请先结束浏览器任务再登录)。仅 `browser-use` 构建有此路由;无显示器的
-//! 服务器上引擎会被迫 headless(窗口不可见),故此功能面向桌面端。
+//! The legacy implementation launched a second private Chromium instance and
+//! owned its profile in this route. That violated the process-wide browser
+//! authority. These endpoints now allocate a normal Hub owner lease and a
+//! Primary Lane. In embedded mode the Lane is controlled from `/browser`; in
+//! external mode the same managed host is visible as a native window.
 
 #![cfg(feature = "browser-use")]
 
-use std::path::PathBuf;
+use std::collections::BTreeSet;
 use std::sync::Arc;
+use std::time::Duration;
 
 use axum::Json;
 use axum::extract::State;
-use nomi_browser_engine::{
-    BrowserEngine, ChromeSource, EngineConfig, create_engine, save_storage_state,
-    shared_storage_state_path,
-};
 use nomifun_api_types::ApiResponse;
+use nomifun_browser_platform::{
+    BrowserIdentityMode, BrowserLaneId, BrowserOperationKind, BrowserSessionHub,
+    BrowserSurface, CallerIdentity, OpenLaneOutcome, OwnerLeaseId,
+};
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 
-/// 登录窗口打开时落地的起始页。用户在 Chrome 地址栏输入自己的站点——我们**不**替用户导航到任何
-/// 具体站点(about:blank + 原生地址栏)。
-const LOGIN_START_URL: &str = "about:blank";
-
-/// 持有唯一在活的登录浏览器引擎(open→close 之间)。全局共享(浏览器身份全局共享),同一时刻至多一个
-/// 登录窗口。`Clone` 供 axum `State`(内部 `Arc` 共享)。
 #[derive(Clone)]
 pub(crate) struct BrowserLoginState {
     inner: Arc<BrowserLoginInner>,
 }
 
 struct BrowserLoginInner {
-    /// 在活的登录引擎(`Some` = 窗口开着)。`close` 取走并 drop(=关窗)。
-    session: Mutex<Option<Arc<dyn BrowserEngine>>>,
-    /// 应用数据目录。登录窗用其下**专用稳定**子目录 `login-profile`（与 agent 在
-    /// `browser-data/profiles/<token>` 的 per-instance 唯一目录隔离，绝不共享）；vault 落在
-    /// `<data_dir>/browser-state/…`（`shared_storage_state_path`），登录态经它传播给 agent 会话。
-    data_dir: PathBuf,
-    /// 打包 Chrome 资源目录(与 agent 一致),`None` 走 env>下载兜底。
-    bundled_dir: Option<PathBuf>,
-    /// 持久登录 vault 的机器绑定 key(与 secret vault 同一把)。
-    key: [u8; 32],
+    hub: Option<Arc<BrowserSessionHub>>,
+    user_id: Arc<str>,
+    session: Mutex<Option<LoginLane>>,
+}
+
+struct LoginLane {
+    lane_id: BrowserLaneId,
+    owner_lease_id: OwnerLeaseId,
+    hub: Arc<BrowserSessionHub>,
+    renewal_task: tokio::task::JoinHandle<()>,
+}
+
+impl Drop for LoginLane {
+    fn drop(&mut self) {
+        self.renewal_task.abort();
+        // `BrowserLoginState` is router state and is normally dropped only
+        // during application teardown.  Do not rely on the next status call
+        // to revoke the owner lease: arrange a best-effort asynchronous
+        // cleanup when the state disappears, while keeping Drop itself
+        // non-blocking.
+        let hub = Arc::clone(&self.hub);
+        let lease_id = self.owner_lease_id.clone();
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            handle.spawn(async move {
+                let _ = hub.revoke_owner_lease(&lease_id).await;
+            });
+        }
+    }
 }
 
 impl BrowserLoginState {
-    pub(crate) fn new(data_dir: PathBuf, bundled_dir: Option<PathBuf>, key: [u8; 32]) -> Self {
+    pub(crate) fn new(hub: Option<Arc<BrowserSessionHub>>, user_id: Arc<str>) -> Self {
         Self {
             inner: Arc::new(BrowserLoginInner {
+                hub,
+                user_id,
                 session: Mutex::new(None),
-                data_dir,
-                bundled_dir,
-                key,
             }),
         }
     }
 }
 
-/// `open` 请求体:`source` 镜像 `agent.browserUse.source`,使登录浏览器与 agent 用同一二进制。
 #[derive(Deserialize)]
 pub(crate) struct OpenLoginBody {
-    #[serde(default)]
-    source: String,
+    // Kept for wire compatibility. The process composition root resolves the
+    // trusted Chrome source; a request body cannot replace host policy.
+    #[serde(default, rename = "source")]
+    _source: String,
 }
 
-/// 登录窗口状态(open/close/status 共用)。
 #[derive(Serialize)]
 pub(crate) struct LoginStatus {
-    /// 当前是否有登录窗口开着。
     active: bool,
-    /// 结果说明码(`opened` / `already_open` / `closed` / `not_open` / `launch_failed:...`),
-    /// 供 UI 展示/文案映射。
     message: Option<String>,
-    /// close 时是否把登录态备份进了加密 vault(磁盘 profile 无论如何都已原生留存)。
     saved: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    lane_id: Option<BrowserLaneId>,
 }
 
-/// POST /api/browser/login/open —— 拉起一个**可见**登录浏览器(共享 profile + 指定来源),落到起始页。
 pub(crate) async fn open_browser_login(
     State(state): State<BrowserLoginState>,
-    Json(body): Json<OpenLoginBody>,
+    Json(_body): Json<OpenLoginBody>,
 ) -> Json<ApiResponse<LoginStatus>> {
-    let inner = &state.inner;
-    let mut guard = inner.session.lock().await;
-    if guard.is_some() {
-        return Json(ApiResponse::ok(LoginStatus {
-            active: true,
-            message: Some("already_open".into()),
-            saved: false,
-        }));
-    }
-    let config = EngineConfig {
-        data_dir: inner.data_dir.join("browser-data"),
-        // 并发隔离：登录窗用**专用稳定** user-data-dir（`<data_dir>/login-profile`），与 agent 的
-        // per-instance 唯一目录（`<data_dir>/profiles/<token>`）+ 知识抓取（`knowledge-browser/profile`）
-        // 完全隔离——绝不再与 agent 会话共享一个 profile（此前共享 `<data_dir>/profile` 会与活着的 agent
-        // 会话撞 Chromium 单例，即注释里的 "launch_failed"）。稳定（非 ephemeral）→ 重开登录窗见上次登录态；
-        // 登录态传播给 agent 经 close 时写入的**共享加密 vault**（agent 首启从 vault 播种），不依赖共享磁盘 profile。
-        user_data_dir: Some(inner.data_dir.join("login-profile")),
-        ephemeral_profile: false,
-        bundled_dir: inner.bundled_dir.clone(),
-        // 可见窗口(有显示器时)让用户登录。无显示器的服务器会被迫 headless(窗口不可见)。
-        headful: true,
-        chrome_source: ChromeSource::from_source_str(&body.source),
-        ..Default::default()
+    let Some(hub) = state.inner.hub.clone() else {
+        return login_response(false, "launch_failed:browser_not_supported", false, None);
     };
-    match create_engine(config).await {
-        Ok(engine) => {
-            // best-effort 落到起始页;失败不致命(窗口已起,用户可用地址栏)。
-            let _ = engine.navigate(LOGIN_START_URL, false).await;
-            *guard = Some(engine);
-            Json(ApiResponse::ok(LoginStatus {
-                active: true,
-                message: Some("opened".into()),
-                saved: false,
-            }))
+
+    let mut session = state.inner.session.lock().await;
+    if let Some(existing) = session.as_ref() {
+        let lane_present = hub
+            .list_lanes()
+            .await
+            .iter()
+            .any(|lane| lane.lane_id == existing.lane_id);
+        if lane_present && hub.renew_owner_lease(&existing.owner_lease_id).is_ok() {
+            return login_response(
+                true,
+                "already_open",
+                false,
+                Some(existing.lane_id.clone()),
+            );
         }
-        // 现在登录窗用专用隔离 profile，不再与 agent 会话争用 → 主要失败源是本机无 Chrome。给可读信息。
-        Err(e) => Json(ApiResponse::ok(LoginStatus {
-            active: false,
-            message: Some(format!("launch_failed:{e}")),
-            saved: false,
-        })),
     }
+    if let Some(stale) = session.take() {
+        stale.renewal_task.abort();
+        // `renew` may already have removed an expired lease. Hub revocation is
+        // still authoritative for any Lane that survived that expiry.
+        let _ = hub.revoke_owner_lease(&stale.owner_lease_id).await;
+    }
+
+    let runtime_instance_id = format!("browser-login-{}", uuid::Uuid::now_v7());
+    let lease = match hub.issue_owner_lease(
+        state.inner.user_id.to_string(),
+        None,
+        runtime_instance_id.clone(),
+    ) {
+        Ok(lease) => lease,
+        Err(_) => {
+            return login_response(false, "launch_failed:owner_lease", false, None);
+        }
+    };
+    let caller = CallerIdentity {
+        user_id: state.inner.user_id.to_string(),
+        conversation_id: None,
+        runtime_instance_id,
+        agent_id: None,
+        companion_id: None,
+        execution_id: None,
+        step_id: None,
+        attempt_id: None,
+        remote_connection_id: None,
+        surface: BrowserSurface::User,
+        owner_lease_id: lease.lease_id.clone(),
+        // The owner lease is renewable for the duration of the user login
+        // flow. The caller snapshot must therefore not retain the original
+        // short deadline; Hub validation remains authoritative.
+        capability_expires_at_ms: u64::MAX,
+        allowed_operations: BTreeSet::from([
+            BrowserOperationKind::Manage,
+            BrowserOperationKind::Navigate,
+            BrowserOperationKind::Observe,
+            BrowserOperationKind::Act,
+            BrowserOperationKind::Screenshot,
+            BrowserOperationKind::Tabs,
+            BrowserOperationKind::View,
+        ]),
+    };
+    let client = match hub.bind(caller) {
+        Ok(client) => client,
+        Err(_) => {
+            let _ = hub.revoke_owner_lease(&lease.lease_id).await;
+            return login_response(false, "launch_failed:invalid_capability", false, None);
+        }
+    };
+    let outcome = match client
+        .open(
+            Some("login"),
+            BrowserIdentityMode::Primary,
+            None,
+        )
+        .await
+    {
+        Ok(outcome) => outcome,
+        Err(_) => {
+            let _ = hub.revoke_owner_lease(&lease.lease_id).await;
+            return login_response(false, "launch_failed:browser_unavailable", false, None);
+        }
+    };
+    let lane_id = outcome.lane().lane_id.clone();
+    let renewal_period = Duration::from_millis(
+        (lease
+            .expires_at_ms
+            .saturating_sub(lease.issued_at_ms)
+            .max(1)
+            / 3)
+            .max(1),
+    );
+    let renewal_hub = Arc::clone(&hub);
+    let renewal_lease_id = lease.lease_id.clone();
+    let renewal_lane_id = lane_id.clone();
+    let renewal_task = tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(renewal_period).await;
+            // A user or another management surface may have closed the Lane.
+            // Stop renewing an owner lease that no longer owns any resource.
+            let still_present = renewal_hub
+                .list_lanes()
+                .await
+                .iter()
+                .any(|lane| lane.lane_id == renewal_lane_id);
+            if !still_present {
+                let _ = renewal_hub
+                    .revoke_owner_lease(&renewal_lease_id)
+                    .await;
+                break;
+            }
+            if renewal_hub
+                .renew_owner_lease(&renewal_lease_id)
+                .is_err()
+            {
+                let _ = renewal_hub
+                    .revoke_owner_lease(&renewal_lease_id)
+                    .await;
+                break;
+            }
+        }
+    });
+    *session = Some(LoginLane {
+        lane_id: lane_id.clone(),
+        owner_lease_id: lease.lease_id,
+        hub: Arc::clone(&hub),
+        renewal_task,
+    });
+    let message = match outcome {
+        OpenLaneOutcome::Running { .. } => "opened",
+        OpenLaneOutcome::Queued { .. } => "queued",
+    };
+    login_response(true, message, false, Some(lane_id))
 }
 
-/// POST /api/browser/login/close —— 关闭登录窗口:best-effort 把登录态备份进加密 vault,再销毁引擎(=关窗)。
 pub(crate) async fn close_browser_login(
     State(state): State<BrowserLoginState>,
 ) -> Json<ApiResponse<LoginStatus>> {
-    let inner = &state.inner;
-    // 先取走引擎(释放锁),capture/save/drop 都在锁外做。
-    let engine = { inner.session.lock().await.take() };
-    let Some(engine) = engine else {
-        return Json(ApiResponse::ok(LoginStatus {
-            active: false,
-            message: Some("not_open".into()),
-            saved: false,
-        }));
+    let Some(hub) = state.inner.hub.clone() else {
+        return login_response(false, "not_open", false, None);
     };
-    // best-effort 备份:capture 当前登录态 → 加密落共享 vault(profile 被清后可 seed 恢复)。
-    // 空快照(无 cookie 无 localStorage)不落,避免覆盖好备份。磁盘 profile 已原生留存登录态。
-    let saved = match engine.capture_storage_state().await {
-        Ok(s) if !(s.cookies.is_empty() && s.local_storage.is_empty()) => {
-            save_storage_state(&s, &shared_storage_state_path(&inner.data_dir), &inner.key).is_ok()
-        }
-        _ => false,
+    let Some(session) = state.inner.session.lock().await.take() else {
+        return login_response(false, "not_open", false, None);
     };
-    // 销毁引擎 = 关窗(CdpBackend Drop kill 掉 Chrome 子进程;cookie 已 flush 到磁盘 profile)。
-    drop(engine);
-    Json(ApiResponse::ok(LoginStatus {
-        active: false,
-        message: Some("closed".into()),
-        saved,
-    }))
+    session.renewal_task.abort();
+    let saved = hub
+        .revoke_owner_lease(&session.owner_lease_id)
+        .await
+        .is_ok();
+    login_response(false, "closed", saved, None)
 }
 
-/// GET /api/browser/login/status —— 当前是否有登录窗口开着(供 UI 切换按钮态/轮询)。
 pub(crate) async fn browser_login_status(
     State(state): State<BrowserLoginState>,
 ) -> Json<ApiResponse<LoginStatus>> {
-    let active = state.inner.session.lock().await.is_some();
+    let Some(hub) = state.inner.hub.as_ref() else {
+        return login_response(false, "browser_not_supported", false, None);
+    };
+    let mut session = state.inner.session.lock().await;
+    let lane_id = session.as_ref().map(|value| value.lane_id.clone());
+    let lanes = hub.list_lanes().await;
+    let lane_present = lane_id
+        .as_ref()
+        .is_some_and(|lane_id| lanes.iter().any(|lane| &lane.lane_id == lane_id));
+    let active = lane_present
+        && session
+            .as_ref()
+            .is_some_and(|value| hub.renew_owner_lease(&value.owner_lease_id).is_ok());
+    if !active {
+        if let Some(stale) = session.take() {
+            stale.renewal_task.abort();
+            let _ = hub.revoke_owner_lease(&stale.owner_lease_id).await;
+        }
+    }
+    login_response(active, "managed_primary_lane", false, lane_id.filter(|_| active))
+}
+
+fn login_response(
+    active: bool,
+    message: &str,
+    saved: bool,
+    lane_id: Option<BrowserLaneId>,
+) -> Json<ApiResponse<LoginStatus>> {
     Json(ApiResponse::ok(LoginStatus {
         active,
-        message: None,
-        saved: false,
+        message: Some(message.to_owned()),
+        saved,
+        lane_id,
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use async_trait::async_trait;
+    use nomifun_browser_platform::{
+        BrowserHostDriver, BrowserHostFactory, BrowserHostId, BrowserLaneDriver,
+        BrowserOperation, BrowserOperationResult, BrowserPlatformError,
+        DriverOperationContext, HostLaunchRequest, HostLifecycleState, HubConfig,
+        LaneLaunchRequest,
+    };
+
+    use super::*;
+
+    struct FakeFactory;
+    struct FakeHost {
+        id: BrowserHostId,
+    }
+    struct FakeLane;
+
+    #[async_trait]
+    impl BrowserHostFactory for FakeFactory {
+        async fn launch(
+            &self,
+            request: HostLaunchRequest,
+        ) -> Result<Arc<dyn BrowserHostDriver>, BrowserPlatformError> {
+            Ok(Arc::new(FakeHost {
+                id: request.host_id,
+            }))
+        }
+    }
+
+    #[async_trait]
+    impl BrowserHostDriver for FakeHost {
+        fn host_id(&self) -> BrowserHostId {
+            self.id.clone()
+        }
+
+        fn epoch(&self) -> u64 {
+            1
+        }
+
+        fn state(&self) -> HostLifecycleState {
+            HostLifecycleState::Running
+        }
+
+        async fn open_lane(
+            &self,
+            _request: LaneLaunchRequest,
+        ) -> Result<Arc<dyn BrowserLaneDriver>, BrowserPlatformError> {
+            Ok(Arc::new(FakeLane))
+        }
+
+        async fn shutdown(&self) -> Result<(), BrowserPlatformError> {
+            Ok(())
+        }
+    }
+
+    #[async_trait]
+    impl BrowserLaneDriver for FakeLane {
+        async fn execute(
+            &self,
+            _operation: BrowserOperation,
+            _context: DriverOperationContext,
+        ) -> Result<BrowserOperationResult, BrowserPlatformError> {
+            Ok(BrowserOperationResult::default())
+        }
+
+        async fn close(&self) -> Result<(), BrowserPlatformError> {
+            Ok(())
+        }
+    }
+
+    fn open_body() -> OpenLoginBody {
+        OpenLoginBody {
+            _source: "system".to_owned(),
+        }
+    }
+
+    #[tokio::test]
+    async fn login_lane_renews_its_owner_lease_until_explicit_close() {
+        let mut config = HubConfig::default();
+        config.owner_lease_ttl_ms = 90;
+        let hub = Arc::new(BrowserSessionHub::new(Arc::new(FakeFactory), config));
+        let state = BrowserLoginState::new(Some(Arc::clone(&hub)), Arc::from("user-1"));
+
+        let Json(opened) = open_browser_login(
+            State(state.clone()),
+            Json(open_body()),
+        )
+        .await;
+        let opened = opened.data.expect("login response data");
+        assert!(opened.active);
+        assert!(opened.lane_id.is_some());
+
+        tokio::time::sleep(Duration::from_millis(220)).await;
+        assert_eq!(
+            hub.sweep().await.expect("sweep renewed login Lane").closed,
+            0
+        );
+        assert_eq!(hub.list_lanes().await.len(), 1);
+
+        let Json(closed) = close_browser_login(State(state)).await;
+        assert!(
+            !closed
+                .data
+                .expect("close response data")
+                .active
+        );
+        assert!(hub.list_lanes().await.is_empty());
+        hub.shutdown().await.expect("shutdown fake browser Hub");
+    }
+
+    #[tokio::test]
+    async fn externally_closed_login_lane_stops_reporting_active() {
+        let mut config = HubConfig::default();
+        config.owner_lease_ttl_ms = 90;
+        let hub = Arc::new(BrowserSessionHub::new(Arc::new(FakeFactory), config));
+        let state = BrowserLoginState::new(Some(Arc::clone(&hub)), Arc::from("user-1"));
+
+        let Json(opened) = open_browser_login(
+            State(state.clone()),
+            Json(open_body()),
+        )
+        .await;
+        let lane_id = opened
+            .data
+            .expect("login response data")
+            .lane_id
+            .expect("opened login Lane");
+        hub.close_lane(&lane_id)
+            .await
+            .expect("external management close");
+
+        // The renewal worker must revoke the now-resource-less owner without
+        // requiring a status request to perform cleanup.
+        tokio::time::sleep(Duration::from_millis(60)).await;
+        assert!(
+            state
+                .inner
+                .session
+                .lock()
+                .await
+                .as_ref()
+                .is_some_and(|session| {
+                    hub.renew_owner_lease(&session.owner_lease_id).is_err()
+                })
+        );
+
+        let Json(status) = browser_login_status(State(state)).await;
+        assert!(
+            !status
+                .data
+                .expect("status response data")
+                .active
+        );
+        hub.shutdown().await.expect("shutdown fake browser Hub");
+    }
+
+    #[tokio::test]
+    async fn dropping_login_state_revokes_the_owner_without_a_status_call() {
+        let hub = Arc::new(BrowserSessionHub::new(
+            Arc::new(FakeFactory),
+            HubConfig::default(),
+        ));
+        let state = BrowserLoginState::new(Some(Arc::clone(&hub)), Arc::from("user-1"));
+
+        let Json(opened) = open_browser_login(
+            State(state.clone()),
+            Json(open_body()),
+        )
+        .await;
+        assert!(
+            opened
+                .data
+                .expect("login response data")
+                .active
+        );
+        drop(state);
+
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if hub.list_lanes().await.is_empty() {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("dropping BrowserLoginState did not revoke its owner");
+        hub.shutdown().await.expect("shutdown fake browser Hub");
+    }
 }

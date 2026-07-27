@@ -133,7 +133,7 @@ pub struct TerminalLifecycleServer {
     http_port: u16,
     auth_token: String,
     channels: Arc<DashMap<TerminalId, broadcast::Sender<TerminalLifecycleEvent>>>,
-    _handle: tokio::task::JoinHandle<()>,
+    handle: tokio::task::JoinHandle<()>,
 }
 
 #[derive(Deserialize)]
@@ -178,7 +178,7 @@ impl TerminalLifecycleServer {
             http_port,
             auth_token,
             channels,
-            _handle: handle,
+            handle,
         })
     }
 
@@ -209,6 +209,12 @@ impl TerminalLifecycleServer {
             pty_epoch,
             self.subscribe(terminal_id),
         )
+    }
+}
+
+impl Drop for TerminalLifecycleServer {
+    fn drop(&mut self) {
+        self.handle.abort();
     }
 }
 
@@ -401,5 +407,25 @@ mod tests {
             .expect("exact epoch event")
             .unwrap();
         assert_eq!(event.pty_epoch(), Some(9));
+    }
+
+    #[tokio::test]
+    async fn dropping_server_releases_listener() {
+        let port = {
+            let srv = TerminalLifecycleServer::start().await.expect("start");
+            srv.http_port()
+        };
+        let addr = format!("127.0.0.1:{port}");
+
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                match TcpListener::bind(&addr).await {
+                    Ok(listener) => break listener,
+                    Err(_) => tokio::task::yield_now().await,
+                }
+            }
+        })
+        .await
+        .expect("server listener remained bound after drop");
     }
 }

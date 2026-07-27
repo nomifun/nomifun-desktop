@@ -9,7 +9,7 @@
  *
  * This file replaces the original IPC bridge calls with HTTP REST and WebSocket
  * calls routed to nomicore. Electron-native operations (window controls,
- * native dialogs, auto-update, devtools, zoom, CDP, deep links) remain as IPC.
+ * native dialogs, auto-update, devtools, zoom, deep links) remain as IPC.
  */
 
 import type { ConfirmationCorrelationId, IConfirmation } from '@/common/chat/chatLib';
@@ -241,6 +241,25 @@ import {
   wsEmitter,
   wsMappedEmitter,
 } from './httpBridge';
+
+export { browserSession } from '@/common/browser/browserSession';
+export type {
+  BrowserCloseResult,
+  BrowserIdentityMode,
+  BrowserLaneControlState,
+  BrowserLaneLifecycleState,
+  BrowserResourcePressureState,
+  BrowserViewerState,
+  IBrowserCapacityOverview,
+  IBrowserInventoryChangedEvent,
+  IBrowserLane,
+  IBrowserLaneIdentity,
+  IBrowserLaneOwner,
+  IBrowserLaneQueue,
+  IBrowserOverview,
+  IBrowserTab,
+  IBrowserViewerToken,
+} from '@/common/browser/browserTypes';
 import {
   parseConversationArtifactId,
   type ConversationArtifactId,
@@ -816,29 +835,6 @@ export const conversation = {
   },
 };
 
-// ---------------------------------------------------------------------------
-// CDP status / config types (used by application, stays IPC)
-// ---------------------------------------------------------------------------
-
-export interface ICdpStatus {
-  enabled: boolean;
-  port: number | null;
-  startupEnabled: boolean;
-  instances: Array<{
-    pid: number;
-    port: number;
-    cwd: string;
-    startTime: number;
-  }>;
-  configEnabled: boolean;
-  isDevMode: boolean;
-}
-
-export interface ICdpConfig {
-  enabled?: boolean;
-  port?: number;
-}
-
 export interface IStartOnBootStatus {
   supported: boolean;
   enabled: boolean;
@@ -879,7 +875,6 @@ export const application = {
   factoryReset: httpPost<void, void>('/api/system/factory-reset'),
   // DEGRADE_STUB: Tauri v2 has no public JS API to toggle the webview devtools.
   openDevTools: stubShellProvider<boolean, void>(false),
-  isDevToolsOpened: stubShellProvider<boolean, void>(false),
   systemInfo: withResponseMap(
     httpGet<
       {
@@ -920,22 +915,6 @@ export const application = {
     ({ show, quit }) => tauriSetTrayLabels(show, quit),
     undefined
   ),
-  // DEGRADE_STUB: Tauri (WebView2/WKWebView) exposes no Chrome DevTools Protocol surface.
-  getCdpStatus: stubShellProvider<IBridgeResponse<ICdpStatus>, void>({
-    success: true,
-    data: {
-      enabled: false,
-      port: null,
-      startupEnabled: false,
-      instances: [],
-      configEnabled: false,
-      isDevMode: false,
-    },
-  }),
-  updateCdpConfig: stubShellProvider<IBridgeResponse<ICdpConfig>, Partial<ICdpConfig>>({
-    success: false,
-    msg: 'CDP not supported in the Tauri shell',
-  }),
   getStartOnBootStatus: shellProvider<IBridgeResponse<IStartOnBootStatus>, void>(
     async () => ({
       success: true,
@@ -985,7 +964,6 @@ export const application = {
     message: string;
     data?: unknown;
   }>(),
-  devToolsStateChanged: noopEmitter<{ isOpen: boolean }>(),
 };
 
 // ---------------------------------------------------------------------------
