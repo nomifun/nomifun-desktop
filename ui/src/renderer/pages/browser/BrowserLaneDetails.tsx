@@ -40,9 +40,9 @@ const formatBytes = (value?: number | null): string => {
 };
 
 const Field: React.FC<{ label: string; children: React.ReactNode }> = ({ label, children }) => (
-  <div className='min-w-0'>
-    <div className='text-11px text-t-tertiary mb-3px'>{label}</div>
-    <div className='text-12px text-t-primary break-words'>{children}</div>
+  <div className='min-w-0 rd-9px bg-[color:color-mix(in_srgb,var(--color-fill-1)_48%,transparent)] px-10px py-8px'>
+    <div className='text-11px text-t-tertiary mb-4px'>{label}</div>
+    <div className='text-12px text-t-primary break-words leading-18px'>{children}</div>
   </div>
 );
 
@@ -122,7 +122,7 @@ const BrowserLaneDetails: React.FC<BrowserLaneDetailsProps> = ({
 
   return (
     <div className='min-w-0 flex flex-col gap-12px'>
-      <div className='flex items-start gap-10px'>
+      <div className='flex items-start gap-12px rd-14px border border-solid border-[color:color-mix(in_srgb,var(--color-border-2)_58%,transparent)] bg-bg-1 px-16px py-14px shadow-[0_8px_24px_rgba(15,23,42,0.035)]'>
         <div className='min-w-0 flex-1'>
           <div className='flex flex-wrap items-center gap-6px'>
             <h2 className='m-0 text-18px leading-26px truncate'>
@@ -215,9 +215,9 @@ const BrowserLaneDetails: React.FC<BrowserLaneDetailsProps> = ({
         onInventoryRefresh={onInventoryRefresh}
       />
 
-      <section className='border border-solid border-[var(--color-border-2)] rd-10px p-12px bg-bg-1'>
-        <div className='text-13px font-600 mb-10px'>{t('browser.details.title')}</div>
-        <div className='grid grid-cols-2 lg:grid-cols-3 gap-x-16px gap-y-12px'>
+      <section className='rd-14px border border-solid border-[color:color-mix(in_srgb,var(--color-border-2)_58%,transparent)] bg-bg-1 p-16px shadow-[0_8px_24px_rgba(15,23,42,0.035)]'>
+        <div className='mb-12px text-13px font-600'>{t('browser.details.title')}</div>
+        <div className='grid grid-cols-2 lg:grid-cols-3 gap-10px'>
           <Field label={t('browser.details.fields.identity')}>
             {valueOrDash(identity?.label || (identity ? identityLabel(identity.mode) : undefined))}
             {identity?.mode === 'primary' && identity.shared_live !== false ? (
