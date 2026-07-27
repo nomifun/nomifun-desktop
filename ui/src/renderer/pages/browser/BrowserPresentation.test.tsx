@@ -23,6 +23,10 @@ const inventoryTreeSource = readFileSync(
   new URL('./BrowserInventoryTree.tsx', import.meta.url),
   'utf8'
 );
+const laneDetailsSource = readFileSync(
+  new URL('./BrowserLaneDetails.tsx', import.meta.url),
+  'utf8'
+);
 
 const testI18n = createInstance();
 await testI18n.use(initReactI18next).init({
@@ -45,7 +49,6 @@ const lane = (overrides: Partial<IBrowserLane> = {}): IBrowserLane => ({
   lane_id: 'lane-1',
   lane_name: 'Lane one',
   lifecycle_state: 'running',
-  control_state: 'agent',
   tabs: [],
   ...overrides,
 });
@@ -261,7 +264,6 @@ describe('Browser management presentation', () => {
         })}
         closing={false}
         onClose={() => undefined}
-        onInventoryRefresh={async () => undefined}
       />
     );
 
@@ -270,7 +272,8 @@ describe('Browser management presentation', () => {
     expect(html.includes('system_memory_pressure')).toBe(true);
     expect(html.includes('recommended concurrency 2')).toBe(true);
     expect(html.includes('>Close lane<')).toBe(true);
-    expect(html.includes('viewer will become available')).toBe(true);
+    expect(html.includes('Status only')).toBe(true);
+    expect(html.includes('external managed window')).toBe(true);
   });
 
   test('renders critical pressure without disabling close-all when lanes still exist', () => {
@@ -324,24 +327,101 @@ describe('Browser management presentation', () => {
     expect(browserPageSource.includes('canCloseAll={canCloseAll}')).toBe(true);
   });
 
-  test('keeps lane management visible when the embedded stream has failed', () => {
+  test('does not read presentation settings or expose a viewer seam from the Browser page', () => {
+    expect(browserPageSource.includes("from '@/common/browser/browserSettings'")).toBe(false);
+    expect(browserPageSource.includes("useConfig('agent.browserUse.displayMode')")).toBe(false);
+    expect(browserPageSource.includes('displayMode=')).toBe(false);
+    expect(browserPageSource.includes('onInventoryRefresh=')).toBe(false);
+  });
+
+  test('keeps lane management visible when the lane reports an error', () => {
     const html = renderBrowser(
       <BrowserLaneDetails
         lane={lane({
-          lane_id: 'failed-viewer-lane',
+          lane_id: 'failed-managed-lane',
           lane_name: 'Recoverable lane',
-          viewer_state: 'failed',
-          error_code: 'viewer_stream_failed',
-          error_message: 'The embedded viewer disconnected.',
+          error_code: 'managed_window_disconnected',
+          error_message: 'The external managed browser disconnected.',
         })}
         closing={false}
         onClose={() => undefined}
-        onInventoryRefresh={async () => undefined}
       />
     );
 
-    expect(html.includes('viewer_stream_failed: The embedded viewer disconnected.')).toBe(true);
+    expect(
+      html.includes(
+        'managed_window_disconnected: The external managed browser disconnected.'
+      )
+    ).toBe(true);
     expect(html.includes('>Close lane<')).toBe(true);
+  });
+
+  test('renders a complete status-only lane surface without importing viewer code', () => {
+    const html = renderBrowser(
+      <BrowserLaneDetails
+        lane={lane({
+          lane_id: 'status-only-lane',
+          lane_name: 'External managed lane',
+          title: 'Fallback lane title',
+          url: 'https://stale.example/old',
+          active_tab_id: 'active-tab',
+          tabs: [
+            {
+              tab_id: 'active-tab',
+              title: 'Managed browser page',
+              url: 'https://managed.example/current',
+            },
+            {
+              tab_id: 'background-tab',
+              title: 'Background page',
+              url: 'https://managed.example/background',
+            },
+          ],
+          identity: {
+            mode: 'authenticated_replica',
+            label: 'Signed-in replica',
+            generation: 4,
+          },
+          owner: {
+            agent_name: 'Research Agent',
+            runtime_instance_id: 'runtime-status',
+            execution_id: 'execution-status',
+            attempt_id: 'attempt-status',
+            cluster_node_id: 'node-status',
+          },
+          queue: {
+            owner_active: 1,
+            owner_queued: 2,
+            global_active: 3,
+            global_queued: 4,
+          },
+          active_operation_count: 2,
+          resource_estimate_bytes: 64 * 1024 * 1024,
+        })}
+        closing={false}
+        onClose={() => undefined}
+      />
+    );
+
+    expect(html.includes('data-browser-lane-status-only="true"')).toBe(true);
+    expect(html.includes('Managed browser page')).toBe(true);
+    expect(html.includes('https://managed.example/current')).toBe(true);
+    expect(html.includes('>2<')).toBe(true);
+    expect(html.includes('Signed-in replica')).toBe(true);
+    expect(html.includes('Research Agent')).toBe(true);
+    expect(html.includes('64 MiB')).toBe(true);
+    expect(html.includes('1 active · 2 queued')).toBe(true);
+    expect(html.includes('3 active · 4 queued')).toBe(true);
+    expect(html.includes('Take control')).toBe(false);
+    expect(html.includes('Return to Agent')).toBe(false);
+
+    expect(laneDetailsSource.includes('EmbeddedBrowserViewer')).toBe(false);
+    expect(laneDetailsSource.includes('viewerToken')).toBe(false);
+    expect(laneDetailsSource.includes('WebSocket')).toBe(false);
+    expect(laneDetailsSource.includes('onInventoryRefresh')).toBe(false);
+    expect(browserPageSource.includes('EmbeddedBrowserViewer')).toBe(false);
+    expect(browserPageSource.includes('displayMode')).toBe(false);
+    expect(browserPageSource.includes('viewerToken')).toBe(false);
   });
 
   test('renders Host diagnostics collapsed with safe resource metadata', () => {

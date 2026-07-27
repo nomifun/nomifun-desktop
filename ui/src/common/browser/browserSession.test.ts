@@ -16,7 +16,6 @@ describe('normalizeBrowserLane tab projection', () => {
     const lane = normalizeBrowserLane({
       lane_id: 'lane-safe',
       lifecycle_state: 'running',
-      control_state: 'agent',
       tabs: [
         {
           tab_id: 'tab-safe',

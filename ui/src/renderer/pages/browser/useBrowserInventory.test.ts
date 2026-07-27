@@ -165,7 +165,6 @@ describe('browser inventory recovery', () => {
             {
               lane_id: 'lane-recovered',
               lifecycle_state: 'running',
-              control_state: 'agent',
               tabs: [],
             },
           ];

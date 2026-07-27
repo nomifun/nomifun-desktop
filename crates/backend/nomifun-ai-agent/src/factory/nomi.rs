@@ -461,13 +461,12 @@ pub(super) async fn build(
     // 成本，须用户在 System Settings 显式 opt-in。
     let browser_visual_fallback_default =
         read_bool_pref(&deps, PREF_BROWSER_VISUAL_FALLBACK, false).await;
-    // Browser display-mode migration: the new enum is authoritative whenever
-    // present. The legacy silent flag is read only when displayMode is absent;
-    // a fresh install defaults to embedded. Both embedded and headless keep
-    // Chromium non-external, while external requests a visible managed window.
-    // This path is read-only and never writes the legacy key.
-    let browser_silent_default =
-        read_browser_display_mode(&deps).await != BrowserDisplayMode::External;
+    // Browser management is status-only. Primary Chromium is always shown in
+    // its managed external window; historical embedded/headless/silent values
+    // are frontend migration inputs only and never affect runtime headlessness.
+    // Keep this compatibility field false until the resolved config schema can
+    // remove it without breaking downstream constructors.
+    let browser_silent_default = false;
     // Browser Host 可执行文件来源偏好（与 silent 正交）。host_default="system"，优先系统安装
     // 的 Chrome/Edge，未探测到时回退 managed。该值不授予 runtime 所有权：主进程
     // BrowserSessionHub 统一创建/共享 Host，Primary 使用应用管理的稳定 profile，Crawl 使用临时 profile。
@@ -572,7 +571,7 @@ pub(super) async fn build(
         bedrock_config: fields.bedrock_config,
         computer_use: overrides.computer_use.unwrap_or(computer_use_default),
         browser_use: browser_use_enabled,
-        // 有效 display mode 的兼容布尔值：embedded/headless=true，external=false。
+        // 仅用于兼容旧配置结构；产品模式固定为外置受管窗口，因此始终为 false。
         browser_silent: browser_silent_default,
         // Browser Host 可执行文件来源偏好；BrowserSessionHub 仍是唯一 owner。
         browser_source: browser_source_default,
@@ -751,65 +750,12 @@ const PREF_BROWSER_UNRESTRICTED_APPROVAL: &str = "agent.browserUse.unrestrictedA
 /// **P7B**: browser-use 视觉兜底点击（opt-in，有 token 成本）。`true` → DOM/aria 锚定失败时截图交视觉
 /// 模型定位再点；缺/`false`（host_default）→ OFF（不注入 locator、零行为变化）。前端 System Settings 写。
 const PREF_BROWSER_VISUAL_FALLBACK: &str = "agent.browserUse.visualFallback";
-/// New Browser display mode. This enum wins whenever a row exists.
-const PREF_BROWSER_DISPLAY_MODE: &str = "agent.browserUse.displayMode";
-/// Legacy migration fallback only. New code must never write this key.
-const PREF_BROWSER_SILENT: &str = "agent.browserUse.silent";
 /// Browser Host 可执行文件来源偏好（与 silent 正交）。`"managed"` = 内置/下载 CfT；
 /// `"system"`（默认）= 系统 Chrome/Edge 本体优先（未探到回退 managed）。前端写入偏好；
 /// 主进程 BrowserSessionHub 仍统一拥有 Host 和应用管理 profile。
 const PREF_BROWSER_SOURCE: &str = "agent.browserUse.source";
 /// Browser Host 来源默认值（无设置行/无 client_prefs 时）：系统安装的 Chrome / Edge。
 const BROWSER_SOURCE_DEFAULT: &str = "system";
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum BrowserDisplayMode {
-    Embedded,
-    External,
-    Headless,
-}
-
-fn resolve_browser_display_mode(
-    display_mode: Option<&str>,
-    legacy_silent: Option<&str>,
-) -> BrowserDisplayMode {
-    if let Some(value) = display_mode {
-        return match value.trim().trim_matches('"') {
-            "external" => BrowserDisplayMode::External,
-            "headless" => BrowserDisplayMode::Headless,
-            // An invalid-but-present new value does not revive the legacy
-            // setting. Fail safely to the product default.
-            _ => BrowserDisplayMode::Embedded,
-        };
-    }
-    match legacy_silent.map(|value| value.trim().trim_matches('"')) {
-        Some("false") => BrowserDisplayMode::External,
-        Some("true") => BrowserDisplayMode::Headless,
-        _ => BrowserDisplayMode::Embedded,
-    }
-}
-
-async fn read_browser_display_mode(deps: &AgentFactoryDeps) -> BrowserDisplayMode {
-    let Some(repo) = deps.client_prefs.as_ref() else {
-        return BrowserDisplayMode::Embedded;
-    };
-    let rows = match repo
-        .get_by_keys(&[PREF_BROWSER_DISPLAY_MODE, PREF_BROWSER_SILENT])
-        .await
-    {
-        Ok(rows) => rows,
-        Err(_) => return BrowserDisplayMode::Embedded,
-    };
-    let value = |key: &str| {
-        rows.iter()
-            .find(|row| row.key == key)
-            .map(|row| row.value.as_str())
-    };
-    resolve_browser_display_mode(
-        value(PREF_BROWSER_DISPLAY_MODE),
-        value(PREF_BROWSER_SILENT),
-    )
-}
 
 /// Read a boolean `client_preferences` toggle live, falling back to
 /// `host_default` when there is no setting row (fresh install) or no
@@ -1577,43 +1523,6 @@ mod tests {
             binary.into(),
             Arc::<str>::from(owner),
         )
-    }
-
-    #[test]
-    fn browser_display_mode_wins_over_legacy_silent() {
-        assert_eq!(
-            resolve_browser_display_mode(Some("\"embedded\""), Some("false")),
-            BrowserDisplayMode::Embedded
-        );
-        assert_eq!(
-            resolve_browser_display_mode(Some("external"), Some("true")),
-            BrowserDisplayMode::External
-        );
-        assert_eq!(
-            resolve_browser_display_mode(Some("headless"), Some("false")),
-            BrowserDisplayMode::Headless
-        );
-        assert_eq!(
-            resolve_browser_display_mode(Some("invalid"), Some("false")),
-            BrowserDisplayMode::Embedded,
-            "an invalid-but-present new key must not revive the legacy setting"
-        );
-    }
-
-    #[test]
-    fn browser_display_mode_falls_back_only_when_new_key_absent() {
-        assert_eq!(
-            resolve_browser_display_mode(None, Some("false")),
-            BrowserDisplayMode::External
-        );
-        assert_eq!(
-            resolve_browser_display_mode(None, Some("true")),
-            BrowserDisplayMode::Headless
-        );
-        assert_eq!(
-            resolve_browser_display_mode(None, None),
-            BrowserDisplayMode::Embedded
-        );
     }
 
     #[test]

@@ -12,7 +12,6 @@ import {
 const lane = (overrides: Partial<IBrowserLane>): IBrowserLane => ({
   lane_id: 'lane-default',
   lifecycle_state: 'running',
-  control_state: 'agent',
   tabs: [],
   ...overrides,
 });

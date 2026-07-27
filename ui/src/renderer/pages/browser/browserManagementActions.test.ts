@@ -24,7 +24,6 @@ import {
 const lane = (overrides: Partial<IBrowserLane> = {}): IBrowserLane => ({
   lane_id: 'lane-1',
   lifecycle_state: 'running',
-  control_state: 'agent',
   tabs: [],
   ...overrides,
 });
@@ -80,7 +79,7 @@ describe('browser management actions', () => {
     expect(browserPageSource.includes('onCloseAll={handleCloseAll}')).toBe(true);
   });
 
-  test('closes queued and stream-failed lanes without hiding management behind viewer state', async () => {
+  test('closes queued and failed lanes without hiding lifecycle management', async () => {
     for (const candidate of [
       lane({
         lane_id: 'queued-lane',
@@ -88,10 +87,10 @@ describe('browser management actions', () => {
         queue: { position: 4, reason_code: 'system_memory_pressure' },
       }),
       lane({
-        lane_id: 'stream-failed-lane',
-        viewer_state: 'failed',
-        error_code: 'viewer_stream_failed',
-        error_message: 'The embedded viewer failed.',
+        lane_id: 'failed-lane',
+        lifecycle_state: 'failed',
+        error_code: 'browser_unavailable',
+        error_message: 'The managed browser is unavailable.',
       }),
     ]) {
       const calls: string[] = [];

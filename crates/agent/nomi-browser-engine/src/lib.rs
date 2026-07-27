@@ -39,11 +39,8 @@ pub mod vault;
 /// 公共 API 再导出：调用方用 `nomi_browser_engine::{BrowserEngine, Capabilities, …}`，
 /// 无需知晓子模块布局（返回类型 `Arc<dyn BrowserEngine>` 的 trait 与配套类型即此公开面）。
 pub use engine::{
-    BrowserEngine, BrowserError, BrowserInputModifiers, BrowserKeyEventKind, BrowserKeyInput,
-    BrowserMouseButton, BrowserMouseEventKind, BrowserMouseInput, BrowserRawInput, BrowserTabInfo,
-    BrowserViewerFrame, BrowserViewerImageFormat, BrowserWheelInput, Capabilities, CssRect,
-    DetachKind, ElementEntry, LoadState, NavPhase, NavResult, Observation, ObserveOpts, SnapshotGen,
-    browser_key_code_is_allowed, browser_key_value_is_allowed, browser_text_input_is_allowed,
+    BrowserEngine, BrowserError, BrowserTabInfo, Capabilities, CssRect, DetachKind, ElementEntry,
+    LoadState, NavPhase, NavResult, Observation, ObserveOpts, SnapshotGen,
 };
 pub use actions::{
     ActResult, ActSpec, Effect, ScrollDir, ScrollTarget, TypeInput, WaitCondition,

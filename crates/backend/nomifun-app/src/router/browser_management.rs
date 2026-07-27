@@ -19,8 +19,8 @@ use nomifun_browser_platform::{
     BrowserCapacitySnapshot, BrowserErrorCode, BrowserHostId, BrowserIdentityMode,
     BrowserLaneId, BrowserLaneSnapshot, BrowserOverview, BrowserPlatformError,
     BrowserSessionHub, BrowserSurface, BrowserTabSnapshot, CloseResult,
-    HostLifecycleState, LaneControlState, LaneLifecycleState, QueueMetadata,
-    ResourcePolicy, ResourcePolicyPreset, ResourcePressureState, ViewerState,
+    HostLifecycleState, LaneLifecycleState, QueueMetadata, ResourcePolicy, ResourcePolicyPreset,
+    ResourcePressureState,
     MAX_ACTIVE_OPERATIONS, MAX_BROWSER_MEMORY_RATIO, MAX_GLOBAL_QUEUE, MAX_OPEN_LANES,
     MAX_OWNER_QUEUE, MAX_RESERVED_MEMORY_BYTES, MIN_BROWSER_MEMORY_RATIO,
     MIN_RESERVED_MEMORY_BYTES,
@@ -28,8 +28,6 @@ use nomifun_browser_platform::{
 use nomifun_db::IClientPreferenceRepository;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
-
-use super::browser_viewer::BrowserViewerState;
 
 #[path = "browser_url_projection.rs"]
 pub(super) mod browser_url_projection;
@@ -43,7 +41,6 @@ pub struct BrowserManagementState {
     pub hub: Option<Arc<BrowserSessionHub>>,
     pub resource_preferences: Arc<dyn IClientPreferenceRepository>,
     installation_owner_user_id: Arc<str>,
-    viewer_state: Option<BrowserViewerState>,
 }
 
 impl BrowserManagementState {
@@ -56,13 +53,7 @@ impl BrowserManagementState {
             hub,
             resource_preferences,
             installation_owner_user_id,
-            viewer_state: None,
         }
-    }
-
-    pub fn with_viewer_state(mut self, viewer_state: BrowserViewerState) -> Self {
-        self.viewer_state = Some(viewer_state);
-        self
     }
 
     fn require_hub(&self) -> Result<Arc<BrowserSessionHub>, BrowserApiError> {
@@ -87,14 +78,6 @@ pub fn browser_management_user_routes(state: BrowserManagementState) -> Router {
         .route(
             "/api/browser/conversations/{conversation_id}/close",
             post(close_conversation),
-        )
-        .route(
-            "/api/browser/lanes/{lane_id}/return-control",
-            post(return_control),
-        )
-        .route(
-            "/api/browser/lanes/{lane_id}/viewer-token",
-            post(issue_viewer_token),
         )
         .with_state(state)
 }
@@ -218,13 +201,8 @@ impl From<BrowserPlatformError> for BrowserApiError {
             | BrowserErrorCode::StaleLaneRef
             | BrowserErrorCode::TargetCrashed
             | BrowserErrorCode::IdentityReplicaStale
-            | BrowserErrorCode::NeedsPrimaryIdentity
-            | BrowserErrorCode::ViewerTokenInvalid
-            | BrowserErrorCode::ViewerTokenExpired
-            | BrowserErrorCode::ViewerTokenConsumed
-            | BrowserErrorCode::LaneControlledByUser => StatusCode::CONFLICT,
+            | BrowserErrorCode::NeedsPrimaryIdentity => StatusCode::CONFLICT,
             BrowserErrorCode::BrowserRestarted
-            | BrowserErrorCode::ViewerStreamFailed
             | BrowserErrorCode::BrowserUnavailable
             | BrowserErrorCode::BrowserShuttingDown => StatusCode::SERVICE_UNAVAILABLE,
         };
@@ -550,7 +528,6 @@ struct BrowserLaneDto {
     lane_id: BrowserLaneId,
     lane_name: String,
     lifecycle_state: LaneLifecycleState,
-    control_state: LaneControlState,
     user_id: String,
     conversation_id: Option<String>,
     runtime_instance_id: String,
@@ -570,7 +547,6 @@ struct BrowserLaneDto {
     resource_estimate_bytes: u64,
     active_operation: bool,
     active_operation_count: usize,
-    viewer_state: ViewerState,
     error_code: Option<BrowserErrorCode>,
     error_message: Option<String>,
     recoverable: bool,
@@ -580,7 +556,7 @@ struct BrowserLaneDto {
 ///
 /// `BrowserTabSnapshot::target_id` is an internal CDP routing detail. The
 /// public `tab_id` is the only tab handle exposed to browser-management
-/// clients; viewer commands resolve it back to the target inside the server.
+/// clients. It is an inventory identifier, not a page-control capability.
 #[derive(Debug, Serialize)]
 struct BrowserTabDto {
     tab_id: String,
@@ -670,7 +646,6 @@ impl From<BrowserLaneSnapshot> for BrowserLaneDto {
             lane_id: value.lane_id,
             lane_name: value.lane_key.lane_name,
             lifecycle_state: value.lifecycle_state,
-            control_state: value.control_state,
             user_id: caller.user_id,
             conversation_id: caller.conversation_id,
             runtime_instance_id: caller.runtime_instance_id,
@@ -694,19 +669,11 @@ impl From<BrowserLaneSnapshot> for BrowserLaneDto {
             resource_estimate_bytes: value.resource_estimate_bytes,
             active_operation: value.active_operation_count > 0,
             active_operation_count: value.active_operation_count,
-            viewer_state: value.viewer_state,
             error_code: value.error_code,
             error_message: value.error_message,
             recoverable: value.recoverable,
         }
     }
-}
-
-#[derive(Debug, Serialize)]
-struct ViewerTokenDto {
-    token: String,
-    view_url: String,
-    expires_at: u64,
 }
 
 #[derive(Debug, Serialize)]
@@ -827,49 +794,6 @@ async fn close_all(
 ) -> Result<Json<ApiResponse<CloseResult>>, BrowserApiError> {
     let hub = state.require_hub()?;
     Ok(Json(ApiResponse::ok(hub.close_all().await?)))
-}
-
-async fn return_control(
-    State(state): State<BrowserManagementState>,
-    Extension(user): Extension<CurrentUser>,
-    Path(lane_id): Path<String>,
-) -> Result<Json<ApiResponse<CloseResult>>, BrowserApiError> {
-    let hub = state.require_hub()?;
-    let lane_id = parse_lane_id(lane_id)?;
-    authorize_existing_lane(&hub, user.id.as_str(), &lane_id).await?;
-    let returned = match state.viewer_state.as_ref() {
-        Some(viewer_state) => {
-            viewer_state
-                .return_control_and_revoke(user.id.as_str(), &lane_id)
-                .await?
-        }
-        None => {
-            hub.return_control_for_user(user.id.as_str(), &lane_id)
-                .await?
-        }
-    };
-    Ok(Json(ApiResponse::ok(CloseResult {
-        closed: usize::from(returned),
-        already_closed: !returned,
-    })))
-}
-
-async fn issue_viewer_token(
-    State(state): State<BrowserManagementState>,
-    Extension(user): Extension<CurrentUser>,
-    Path(lane_id): Path<String>,
-) -> Result<Json<ApiResponse<ViewerTokenDto>>, BrowserApiError> {
-    let hub = state.require_hub()?;
-    let lane_id = parse_lane_id(lane_id)?;
-    authorize_existing_lane(&hub, user.id.as_str(), &lane_id).await?;
-    let grant = hub
-        .issue_viewer_token(user.id.as_str(), &lane_id)
-        .await?;
-    Ok(Json(ApiResponse::ok(ViewerTokenDto {
-        token: grant.token,
-        view_url: format!("/api/browser/lanes/{lane_id}/view"),
-        expires_at: grant.expires_at_ms,
-    })))
 }
 
 async fn get_resource_policy(
@@ -1139,15 +1063,12 @@ fn apply_resource_policy(
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeSet;
-    use std::net::SocketAddr;
     use std::sync::{Arc, Mutex as StdMutex};
-    use std::time::Duration;
 
     use async_trait::async_trait;
     use axum::body::Body;
-    use axum::http::{Request, StatusCode, header};
+    use axum::http::{Request, StatusCode};
     use axum::middleware;
-    use futures_util::{SinkExt, StreamExt};
     use http_body_util::BodyExt;
     use nomifun_auth::{
         AuthState, CookieConfig, InstanceOwnerState, JwtService, auth_middleware, csrf_middleware,
@@ -1163,12 +1084,8 @@ mod tests {
         IClientPreferenceRepository, IUserRepository, SqliteClientPreferenceRepository,
         SqliteUserRepository,
     };
-    use nomifun_realtime::{NoopMessageRouter, WebSocketManager, WsHandlerState};
-    use tokio::net::TcpListener;
-    use tokio_tungstenite::tungstenite;
     use tower::ServiceExt;
 
-    use super::super::browser_viewer::browser_viewer_routes;
     use super::*;
 
     #[derive(Clone, Default)]
@@ -1296,17 +1213,9 @@ mod tests {
         close_failures: Arc<StdMutex<BTreeSet<BrowserLaneId>>>,
         close_attempts: Arc<StdMutex<Vec<BrowserLaneId>>>,
         preferences: Arc<dyn IClientPreferenceRepository>,
-        viewer_state: Option<BrowserViewerState>,
     }
 
     async fn test_app(with_hub: bool) -> TestApp {
-        test_app_with_viewer_state(with_hub, false).await
-    }
-
-    async fn test_app_with_viewer_state(
-        with_hub: bool,
-        with_viewer_state: bool,
-    ) -> TestApp {
         let database = nomifun_db::init_database_memory().await.unwrap();
         let user_repo_concrete = Arc::new(SqliteUserRepository::new(database.pool().clone()));
         let user = user_repo_concrete.get_system_user().await.unwrap().unwrap();
@@ -1370,21 +1279,11 @@ mod tests {
 
         let preferences: Arc<dyn IClientPreferenceRepository> =
             Arc::new(SqliteClientPreferenceRepository::new(database.pool().clone()));
-        let viewer_state = with_viewer_state.then(|| {
-            BrowserViewerState::new(
-                Arc::clone(&hub),
-                ws_auth(user.user_id.to_string()),
-                false,
-            )
-        });
-        let mut state = BrowserManagementState::new(
+        let state = BrowserManagementState::new(
             with_hub.then_some(Arc::clone(&hub)),
             Arc::clone(&preferences),
             Arc::from(user.user_id.as_str()),
         );
-        if let Some(viewer_state) = viewer_state.clone() {
-            state = state.with_viewer_state(viewer_state);
-        }
         let auth_state = AuthState {
             jwt_service: jwt,
             user_repo,
@@ -1405,16 +1304,10 @@ mod tests {
                 require_instance_owner_middleware,
             ))
             .route_layer(middleware::from_fn_with_state(auth_state, auth_middleware));
-        let management_router = Router::new()
+        let router = Router::new()
             .merge(user_router)
             .merge(owner_router)
             .layer(middleware::from_fn_with_state(cookie, csrf_middleware));
-        let router = match viewer_state.as_ref() {
-            Some(viewer_state) => {
-                management_router.merge(browser_viewer_routes(viewer_state.clone()))
-            }
-            None => management_router,
-        };
         TestApp {
             router,
             token,
@@ -1427,85 +1320,6 @@ mod tests {
             close_failures,
             close_attempts,
             preferences,
-            viewer_state,
-        }
-    }
-
-    fn ws_auth(user_id: String) -> WsHandlerState {
-        WsHandlerState {
-            manager: Arc::new(WebSocketManager::new()),
-            router: Arc::new(NoopMessageRouter),
-            token_authenticator: Arc::new(move |token| {
-                (token == "app-auth").then(|| user_id.clone())
-            }),
-            token_extractor: Arc::new(|headers| {
-                headers
-                    .get(header::AUTHORIZATION)
-                    .and_then(|value| value.to_str().ok())
-                    .and_then(|value| value.strip_prefix("Bearer "))
-                    .map(str::to_owned)
-            }),
-        }
-    }
-
-    type TestViewerSocket = tokio_tungstenite::WebSocketStream<
-        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
-    >;
-
-    async fn start_server(router: Router) -> (SocketAddr, tokio::task::JoinHandle<()>) {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        let task = tokio::spawn(async move {
-            axum::serve(listener, router).await.unwrap();
-        });
-        (addr, task)
-    }
-
-    fn viewer_request(
-        addr: SocketAddr,
-        lane_id: &BrowserLaneId,
-        token: &str,
-    ) -> tungstenite::http::Request<()> {
-        tungstenite::http::Request::builder()
-            .uri(format!(
-                "ws://{addr}/api/browser/lanes/{lane_id}/view?token={token}"
-            ))
-            .header(header::HOST.as_str(), addr.to_string())
-            .header(header::ORIGIN.as_str(), format!("http://{addr}"))
-            .header(header::CONNECTION.as_str(), "Upgrade")
-            .header(header::UPGRADE.as_str(), "websocket")
-            .header(header::SEC_WEBSOCKET_VERSION.as_str(), "13")
-            .header(
-                header::SEC_WEBSOCKET_KEY.as_str(),
-                tungstenite::handshake::client::generate_key(),
-            )
-            .header(header::AUTHORIZATION.as_str(), "Bearer app-auth")
-            .body(())
-            .unwrap()
-    }
-
-    async fn wait_for_viewer_json(
-        socket: &mut TestViewerSocket,
-        predicate: impl Fn(&Value) -> bool,
-    ) -> Value {
-        loop {
-            let message = tokio::time::timeout(Duration::from_secs(5), socket.next())
-                .await
-                .expect("timed out waiting for viewer message")
-                .expect("viewer socket closed before expected message")
-                .expect("viewer socket read failed");
-            match message {
-                tungstenite::Message::Text(text) => {
-                    let value: Value = serde_json::from_str(&text).unwrap();
-                    if predicate(&value) {
-                        return value;
-                    }
-                }
-                tungstenite::Message::Close(frame) => {
-                    panic!("viewer socket closed before expected message: {frame:?}");
-                }
-                _ => {}
-            }
         }
     }
 
@@ -1833,103 +1647,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn management_state_new_remains_viewer_optional() {
-        let app = test_app(false).await;
-        assert!(app.viewer_state.is_none());
-    }
-
-    #[tokio::test]
-    async fn return_control_clears_route_mounted_holder_after_ok_false() {
-        let app = test_app_with_viewer_state(true, true).await;
-        let user_id = app.caller.user_id.as_str();
-        let first_grant = app
-            .hub
-            .issue_viewer_token(user_id, &app.lane_id)
-            .await
-            .unwrap();
-        let (addr, server) = start_server(app.router.clone()).await;
-        let (mut first_viewer, _) =
-            tokio_tungstenite::connect_async(viewer_request(
-                addr,
-                &app.lane_id,
-                &first_grant.token,
-            ))
-            .await
-            .unwrap();
-        wait_for_viewer_json(&mut first_viewer, |message| message["type"] == "ready").await;
-        first_viewer
-            .send(tungstenite::Message::Text(
-                r#"{"type":"takeover"}"#.into(),
-            ))
-            .await
-            .unwrap();
-        let takeover = wait_for_viewer_json(&mut first_viewer, |message| {
-            matches!(message["type"].as_str(), Some("control" | "error"))
-        })
-        .await;
-        assert_eq!(takeover["type"], "control");
-        assert_eq!(takeover["control_state"], "user");
-
-        assert!(
-            app.hub
-                .return_control_for_user(user_id, &app.lane_id)
-                .await
-                .is_ok_and(|returned| returned),
-            "the direct Hub return leaves the route-mounted viewer holder stale"
-        );
-
-        let response = app
-            .router
-            .clone()
-            .oneshot(authorized_request(
-                &app,
-                "POST",
-                format!("/api/browser/lanes/{}/return-control", app.lane_id),
-                true,
-            ))
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
-        let body = response_json(response).await;
-        assert_eq!(body["data"]["closed"], 0);
-        assert_eq!(body["data"]["already_closed"], true);
-
-        let second_grant = app
-            .hub
-            .issue_viewer_token(user_id, &app.lane_id)
-            .await
-            .unwrap();
-        let (mut second_viewer, _) =
-            tokio_tungstenite::connect_async(viewer_request(
-                addr,
-                &app.lane_id,
-                &second_grant.token,
-            ))
-            .await
-            .unwrap();
-        wait_for_viewer_json(&mut second_viewer, |message| message["type"] == "ready").await;
-        second_viewer
-            .send(tungstenite::Message::Text(
-                r#"{"type":"takeover"}"#.into(),
-            ))
-            .await
-            .unwrap();
-        let replacement = wait_for_viewer_json(&mut second_viewer, |message| {
-            matches!(message["type"].as_str(), Some("control" | "error"))
-        })
-        .await;
-        assert_eq!(
-            replacement["type"], "control",
-            "HTTP return-control must clear the stale holder after Hub Ok(false)"
-        );
-        assert_eq!(replacement["control_state"], "user");
-
-        let _ = first_viewer.close(None).await;
-        let _ = second_viewer.close(None).await;
-        server.abort();
-    }
-
-    #[tokio::test]
     async fn management_routes_require_auth_and_csrf() {
         let app = test_app(true).await;
         let unauthenticated = app
@@ -2216,23 +1933,22 @@ mod tests {
         assert_eq!(listed["data"][0]["lane_id"], secondary_lane.as_str());
         assert!(!listed.to_string().contains(app.lane_id.as_str()));
 
-        for path in [
-            format!("/api/browser/lanes/{}/close", app.lane_id),
-            format!("/api/browser/lanes/{}/return-control", app.lane_id),
-            format!("/api/browser/lanes/{}/viewer-token", app.lane_id),
-        ] {
-            let response = app
-                .router
-                .clone()
-                .oneshot(secondary_request(&app, "POST", path, true))
-                .await
-                .unwrap();
-            assert_eq!(
-                response.status(),
-                StatusCode::NOT_FOUND,
-                "another user's lane must be indistinguishable from a missing lane"
-            );
-        }
+        let response = app
+            .router
+            .clone()
+            .oneshot(secondary_request(
+                &app,
+                "POST",
+                format!("/api/browser/lanes/{}/close", app.lane_id),
+                true,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::NOT_FOUND,
+            "another user's lane must be indistinguishable from a missing lane"
+        );
 
         let close_own = app
             .router
@@ -2420,90 +2136,6 @@ mod tests {
         let second = response_json(second).await;
         assert_eq!(second["data"]["closed"], 0);
         assert_eq!(second["data"]["already_closed"], true);
-    }
-
-    #[tokio::test]
-    async fn viewer_token_endpoint_is_lane_bound_single_use_and_safe() {
-        let app = test_app(true).await;
-        let response = app
-            .router
-            .clone()
-            .oneshot(authorized_request(
-                &app,
-                "POST",
-                format!("/api/browser/lanes/{}/viewer-token", app.lane_id),
-                true,
-            ))
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
-
-        let body = response_json(response).await;
-        let token = body["data"]["token"]
-            .as_str()
-            .expect("viewer token response must contain a token")
-            .to_owned();
-        assert_eq!(token.len(), 64);
-        assert!(token.bytes().all(|byte| byte.is_ascii_hexdigit()));
-        assert_eq!(
-            body["data"]["view_url"],
-            format!("/api/browser/lanes/{}/view", app.lane_id)
-        );
-        for forbidden in [
-            "owner_lease_id",
-            "capability_expires_at_ms",
-            "allowed_operations",
-            "remote_connection_id",
-            "browser_epoch",
-            "cdp_endpoint",
-            "debugging_port",
-            "profile_path",
-        ] {
-            assert!(
-                !body.to_string().contains(forbidden),
-                "viewer-token response leaked field {forbidden}"
-            );
-        }
-
-        let owner_user_id = app
-            .hub
-            .list_lanes()
-            .await
-            .into_iter()
-            .find(|lane| lane.lane_id == app.lane_id)
-            .expect("test lane must remain present")
-            .caller
-            .user_id;
-        let other_lane = BrowserLaneId::new();
-
-        let cross_lane = app
-            .hub
-            .consume_viewer_token(&owner_user_id, &other_lane, &token)
-            .await
-            .unwrap_err();
-        assert_eq!(cross_lane.code, BrowserErrorCode::ViewerTokenInvalid);
-
-        let cross_user = app
-            .hub
-            .consume_viewer_token("another-user", &app.lane_id, &token)
-            .await
-            .unwrap_err();
-        assert_eq!(cross_user.code, BrowserErrorCode::ViewerTokenInvalid);
-
-        let consumed = app
-            .hub
-            .consume_viewer_token(&owner_user_id, &app.lane_id, &token)
-            .await
-            .expect("mismatched attempts must not consume the one-shot token");
-        assert_eq!(consumed.lane_id, app.lane_id);
-        assert_eq!(consumed.user_id, owner_user_id);
-
-        let replay = app
-            .hub
-            .consume_viewer_token(&owner_user_id, &app.lane_id, &token)
-            .await
-            .unwrap_err();
-        assert_eq!(replay.code, BrowserErrorCode::ViewerTokenConsumed);
     }
 
     #[tokio::test]

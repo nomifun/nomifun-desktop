@@ -3,6 +3,8 @@ import type { SpeechToTextConfig } from '@/common/types/provider/speech';
 import type { ICssTheme } from '@/common/config/storage';
 import type { CompanionId, ProviderId } from '@/common/types/ids';
 
+// `embedded` and `headless` remain in the read type only so installations can
+// migrate old persisted values. New product code must persist `external`.
 export type BrowserDisplayMode = 'embedded' | 'external' | 'headless';
 
 export type ConfigKeyMap = {
@@ -68,15 +70,13 @@ export type ConfigKeyMap = {
   // opens the user's system Chrome / Edge in a visible, isolated-profile window.
   // Read by the backend agent factory per session.
   'agent.browserUse': boolean | undefined;
-  // Browser presentation mode. New installs persist `embedded`; legacy
-  // `agent.browserUse.silent` values are migrated by the renderer settings
-  // compatibility helper.
+  // Browser presentation mode. New installs persist `external`; historical
+  // `embedded`, `headless`, and `agent.browserUse.silent` values are accepted
+  // only by the migration compatibility helper.
   'agent.browserUse.displayMode': BrowserDisplayMode | undefined;
-  // Silent browser (browser-use sub-setting, visibility axis): run the selected
-  // browser headless (no visible window). OFF by default. Off → a visible
-  // Chromium window pops up (watch/first-login). Maps to
-  // the backend headless flag; ignored on headless hosts (already forced headless).
   // Legacy compatibility read only. New settings code must not write this key.
+  // Primary identity is always shown in an external managed window; elastic
+  // crawl/replica/isolated hosts choose headless execution internally.
   'agent.browserUse.silent': boolean | undefined;
   // Browser source (browser-use sub-setting, orthogonal to silent): 'managed' =
   // bundled/downloaded Chrome for Testing; 'system' (default) = the user's

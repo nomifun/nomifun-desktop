@@ -1,7 +1,8 @@
 //! Safe URL projection for browser data sent to the renderer.
 //!
 //! Hub snapshots, navigation, and Agent-facing tool results retain their exact
-//! URLs. Only renderer/viewer metadata should pass through this module.
+//! URLs. Only renderer-safe Browser inventory metadata should pass through
+//! this module; the product no longer exposes a live Viewer surface.
 
 use url::Url;
 

@@ -55,7 +55,6 @@ pub fn all_browser_operations() -> BTreeSet<BrowserOperationKind> {
         BrowserOperationKind::Download,
         BrowserOperationKind::Debug,
         BrowserOperationKind::Manage,
-        BrowserOperationKind::View,
     ])
 }
 

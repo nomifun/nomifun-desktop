@@ -1,10 +1,11 @@
-//! Compatibility endpoints for opening a user-controlled Primary browser Lane.
+//! Compatibility endpoints for opening a Primary identity-setup Browser Lane.
 //!
 //! The legacy implementation launched a second private Chromium instance and
 //! owned its profile in this route. That violated the process-wide browser
 //! authority. These endpoints now allocate a normal Hub owner lease and a
-//! Primary Lane. In embedded mode the Lane is controlled from `/browser`; in
-//! external mode the same managed host is visible as a native window.
+//! Primary Lane in the external managed Chromium window. This flow is only for
+//! one-time authentication setup; `/browser` remains status-only and does not
+//! expose page input or Agent takeover controls.
 
 #![cfg(feature = "browser-use")]
 
@@ -152,7 +153,6 @@ pub(crate) async fn open_browser_login(
             BrowserOperationKind::Act,
             BrowserOperationKind::Screenshot,
             BrowserOperationKind::Tabs,
-            BrowserOperationKind::View,
         ]),
     };
     let client = match hub.bind(caller) {

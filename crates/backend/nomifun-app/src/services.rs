@@ -104,7 +104,11 @@ struct BrowserStartupPreferences {
 impl Default for BrowserStartupPreferences {
     fn default() -> Self {
         Self {
-            display_mode: "embedded",
+            // Browser management is inventory/lifecycle-only. Interactive
+            // Primary lanes therefore use the real managed Chromium window;
+            // the removed JPEG viewer must never be selected as a fresh-install
+            // presentation default.
+            display_mode: "external",
             source: "system".to_owned(),
             full_power: false,
             persistent_login: true,
@@ -117,30 +121,20 @@ fn resolve_browser_display_mode(
     display_mode: Option<&str>,
     legacy_silent: Option<&str>,
 ) -> (&'static str, bool) {
-    // A valid new value is authoritative. A malformed-but-present new value
-    // fails safe to embedded for this boot, but is deliberately not persisted:
-    // otherwise startup could overwrite a still-meaningful legacy `silent`
-    // value with the default. Legacy migration is used only when the new key
-    // is absent.
+    // The product no longer publishes an embedded viewer or user takeover.
+    // Normalize every historical desktop presentation value to the real
+    // external managed Chromium window. The old values remain accepted only
+    // so upgrades do not strand an installation in headless/JPEG mode.
     if let Some(value) = display_mode {
         return match value.trim().trim_matches('"') {
-            "embedded" => ("embedded", false),
             "external" => ("external", false),
-            "headless" => ("headless", false),
-            _ => ("embedded", false),
+            "embedded" | "headless" => ("external", true),
+            _ => ("external", true),
         };
     }
 
-    match legacy_silent
-        .map(|value| value.trim().trim_matches('"'))
-        .and_then(|value| match value {
-            "false" => Some("external"),
-            "true" => Some("headless"),
-            _ => None,
-        }) {
-        Some(mode) => (mode, true),
-        None => ("embedded", true),
-    }
+    let _ = legacy_silent;
+    ("external", true)
 }
 
 #[cfg(feature = "browser-use")]
@@ -166,9 +160,8 @@ where
         Ok(preferences) => preferences,
         Err(error) => {
             // A read failure is not the same as a fresh install. Keep the
-            // fail-safe runtime defaults, but do not persist them: writing
-            // `embedded` here could permanently replace a legacy external or
-            // headless choice when the database is temporarily unavailable.
+            // fail-safe external runtime default, but do not persist while the
+            // authoritative preference store is unavailable.
             tracing::warn!(
                 %error,
                 "could not read persisted browser startup preferences; using fail-safe defaults without migration"
@@ -190,9 +183,8 @@ where
 
     if persist_display_mode {
         // Persist only after a successful read. This covers fresh-install
-        // defaults and legacy migration, while never rewriting the legacy
-        // `silent` key itself. A malformed present displayMode does not request
-        // persistence, so this path cannot overwrite it with a default.
+        // defaults and migration from the removed embedded/headless modes,
+        // while never rewriting the legacy `silent` key itself.
         let serialized =
             serde_json::to_string(display_mode).expect("browser display mode is static JSON");
         if let Err(error) = preference_repo
@@ -223,7 +215,11 @@ where
 
 #[cfg(feature = "browser-use")]
 fn primary_host_is_headful(display_mode: &str) -> bool {
-    display_mode == "external"
+    // Browser management no longer has a renderer/viewer execution surface.
+    // Primary lanes must always be visible in the managed Chromium window;
+    // crawl/replica/isolated hosts are still forced headless by the Hub.
+    let _ = display_mode;
+    true
 }
 
 #[cfg(feature = "browser-use")]
@@ -1059,7 +1055,7 @@ pub struct AppServices {
     pub(crate) browser_platform_shutdown: BrowserPlatformShutdown,
     /// One-shot bridge shared with the already-built Agent factory. Installing
     /// the Hub-backed provider here makes Native Nomi use the exact same
-    /// process-wide Hub as HTTP, viewer, Gateway, ACP, and knowledge fetching.
+    /// process-wide Hub as HTTP management, Gateway, ACP, and knowledge fetching.
     #[cfg(feature = "browser-use")]
     _browser_lane_provider_slot:
         nomifun_ai_agent::BrowserLaneClientProviderSlot,
@@ -3101,28 +3097,28 @@ mod tests {
         );
         assert_eq!(
             resolve_browser_display_mode(None, Some("true")),
-            ("headless", true)
+            ("external", true)
         );
         assert_eq!(
             resolve_browser_display_mode(None, None),
-            ("embedded", true)
+            ("external", true)
         );
         assert_eq!(
             resolve_browser_display_mode(Some("invalid"), None),
-            ("embedded", false)
+            ("external", true)
         );
         assert_eq!(
             resolve_browser_display_mode(Some("invalid"), Some("false")),
-            ("embedded", false),
-            "an invalid-but-present new value fails safe without overwriting or reviving legacy state"
+            ("external", true),
+            "an invalid-but-present new value fails safe to the real managed window"
         );
         assert_eq!(
             resolve_browser_display_mode(Some("  \"headless\"  "), Some("false")),
-            ("headless", false)
+            ("external", true)
         );
         assert!(primary_host_is_headful("external"));
-        assert!(!primary_host_is_headful("embedded"));
-        assert!(!primary_host_is_headful("headless"));
+        assert!(primary_host_is_headful("embedded"));
+        assert!(primary_host_is_headful("headless"));
     }
 
     #[cfg(feature = "browser-use")]
@@ -3161,17 +3157,21 @@ mod tests {
 
     #[cfg(feature = "browser-use")]
     #[tokio::test]
-    async fn invalid_display_mode_fails_safe_without_overwriting_legacy_choice() {
+    async fn invalid_display_mode_is_repaired_to_external() {
         let repo = BrowserPreferenceTestRepository::with_rows(&[
             ("agent.browserUse.displayMode", "\"visible\""),
             ("agent.browserUse.silent", "false"),
         ]);
 
         let preferences = load_browser_startup_preferences(&repo).await;
-        assert_eq!(preferences.display_mode, "embedded");
-        assert!(
-            repo.writes().is_empty(),
-            "malformed new configuration must not overwrite or revive legacy state"
+        assert_eq!(preferences.display_mode, "external");
+        assert_eq!(
+            repo.writes(),
+            vec![(
+                "agent.browserUse.displayMode".to_owned(),
+                "\"external\"".to_owned()
+            )],
+            "malformed configuration must converge to the supported external mode"
         );
     }
 

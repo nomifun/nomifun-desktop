@@ -160,54 +160,6 @@ export function getBaseUrl(): string {
   return `http://127.0.0.1:${getBackendPort()}`;
 }
 
-/**
- * Create an authenticated application WebSocket for a dedicated protocol.
- *
- * The shared realtime socket below only accepts JSON envelopes. Binary surfaces
- * such as the Browser viewer use their own connection while retaining the same
- * desktop local-trust / WebUI cookie authentication boundary.
- */
-export function createBackendWebSocket(pathOrUrl: string): WebSocket {
-  const backendBase =
-    typeof window !== 'undefined'
-      ? isWebUiBrowserMode()
-        ? window.location.origin
-        : getBaseUrl()
-      : getBaseUrl();
-  const expectedOrigin = new URL(`${backendBase.replace(/\/$/, '')}/`);
-  if (expectedOrigin.protocol === 'http:') expectedOrigin.protocol = 'ws:';
-  if (expectedOrigin.protocol === 'https:') expectedOrigin.protocol = 'wss:';
-
-  const url = new URL(pathOrUrl, expectedOrigin);
-  if (url.protocol === 'http:') url.protocol = 'ws:';
-  if (url.protocol === 'https:') url.protocol = 'wss:';
-  if (url.protocol !== 'ws:' && url.protocol !== 'wss:') {
-    throw new TypeError('Backend WebSocket URL must use the ws or wss protocol');
-  }
-  if (url.username || url.password || url.hash) {
-    throw new TypeError('Backend WebSocket URL must not contain credentials or a fragment');
-  }
-  if (url.origin !== expectedOrigin.origin) {
-    throw new TypeError('Backend WebSocket URL must use the configured backend origin');
-  }
-  if (url.protocol === 'ws:' && !isLoopbackHostname(url.hostname)) {
-    throw new TypeError('Non-loopback backend WebSocket URLs must use wss');
-  }
-
-  const trustSecret = getLocalTrustSecret();
-  return trustSecret ? new WebSocket(url.toString(), [trustSecret]) : new WebSocket(url.toString());
-}
-
-function isLoopbackHostname(hostname: string): boolean {
-  const normalized = hostname.toLowerCase();
-  return (
-    normalized === 'localhost' ||
-    normalized.endsWith('.localhost') ||
-    normalized === '[::1]' ||
-    /^127(?:\.\d{1,3}){3}$/.test(normalized)
-  );
-}
-
 function getWsUrl(): string {
   if (isWebUiBrowserMode()) {
     const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';

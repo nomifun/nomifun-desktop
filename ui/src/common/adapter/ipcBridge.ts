@@ -246,10 +246,8 @@ export { browserSession } from '@/common/browser/browserSession';
 export type {
   BrowserCloseResult,
   BrowserIdentityMode,
-  BrowserLaneControlState,
   BrowserLaneLifecycleState,
   BrowserResourcePressureState,
-  BrowserViewerState,
   IBrowserCapacityOverview,
   IBrowserInventoryChangedEvent,
   IBrowserLane,
@@ -258,7 +256,6 @@ export type {
   IBrowserLaneQueue,
   IBrowserOverview,
   IBrowserTab,
-  IBrowserViewerToken,
 } from '@/common/browser/browserTypes';
 import {
   parseConversationArtifactId,

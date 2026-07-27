@@ -18,10 +18,8 @@ type FutureValue<Known extends string> = Known | (string & {});
 export type BrowserLaneLifecycleState = FutureValue<
   'queued' | 'starting' | 'running' | 'frozen' | 'stopping' | 'failed'
 >;
-export type BrowserLaneControlState = FutureValue<'agent' | 'user' | 'idle'>;
 export type BrowserIdentityMode = FutureValue<'primary' | 'anonymous' | 'authenticated_replica' | 'isolated'>;
 export type BrowserResourcePressureState = FutureValue<'normal' | 'pressured' | 'critical'>;
-export type BrowserViewerState = FutureValue<'idle' | 'starting' | 'streaming' | 'failed'>;
 
 export interface IBrowserLaneOwner {
   user_id?: string | null;
@@ -67,7 +65,6 @@ export interface IBrowserLane {
   lane_id: string;
   lane_name?: string | null;
   lifecycle_state: BrowserLaneLifecycleState;
-  control_state: BrowserLaneControlState;
 
   conversation_id?: string | null;
   conversation_title?: string | null;
@@ -91,7 +88,6 @@ export interface IBrowserLane {
   resource_estimate_bytes?: number | null;
   active_operation?: boolean;
   active_operation_count?: number | null;
-  viewer_state?: BrowserViewerState | null;
   error_code?: string | null;
   error_message?: string | null;
   recoverable?: boolean;
@@ -162,16 +158,6 @@ export const resolveBrowserOverviewCapabilities = (
   canManageBrowserSettings: overview?.can_manage_browser_settings === true,
   canManagePrimaryIdentity: overview?.can_manage_primary_identity === true,
 });
-
-export interface IBrowserViewerToken {
-  token: string;
-  /**
-   * Optional server-selected URL on the configured backend origin. Consumers
-   * must reject cross-origin, cross-Lane, credential-bearing, or fragment URLs.
-   */
-  view_url?: string | null;
-  expires_at?: number | null;
-}
 
 export interface IBrowserInventoryChangedEvent {
   sequence?: number;

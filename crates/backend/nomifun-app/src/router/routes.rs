@@ -805,22 +805,6 @@ pub fn create_router_with_all_state(
     let ws_routes = Router::new()
         .route("/ws", get(ws_upgrade_handler))
         .with_state(ws_state.clone());
-    #[cfg(feature = "browser-use")]
-    let browser_viewer_state = services
-        .browser_session_hub
-        .clone()
-        .map(|hub| {
-            crate::router::browser_viewer::BrowserViewerState::new(
-                hub,
-                ws_state.clone(),
-                services.auth_policy.allows_local_webview(),
-            )
-        });
-    #[cfg(feature = "browser-use")]
-    let browser_viewer_routes = browser_viewer_state
-        .clone()
-        .map(crate::router::browser_viewer::browser_viewer_routes)
-        .unwrap_or_else(Router::new);
     tracing::info!(
         elapsed_ms = boot.elapsed().as_millis(),
         "startup: route groups built"
@@ -854,22 +838,20 @@ pub fn create_router_with_all_state(
         )
     };
 
-    // Browser inventory/control is a projection over the process-wide Hub.
+    // Browser inventory and lifecycle management are projections over the
+    // process-wide Hub. Page execution remains Agent-only.
     // The state may deliberately carry `None` while a browser-enabled host is
     // degraded; handlers then return a stable 501 and never launch a private
     // fallback engine.
     #[cfg(feature = "browser-use")]
     let (browser_management_user_authenticated, browser_management_owner_authenticated) = {
-        let mut state = crate::router::browser_management::BrowserManagementState::new(
+        let state = crate::router::browser_management::BrowserManagementState::new(
             services.browser_session_hub.clone(),
             Arc::new(nomifun_db::SqliteClientPreferenceRepository::new(
                 services.database.pool().clone(),
             )),
             services.authoritative_user_id.clone(),
         );
-        if let Some(viewer_state) = browser_viewer_state.clone() {
-            state = state.with_viewer_state(viewer_state);
-        }
         let user_routes =
             crate::router::browser_management::browser_management_user_routes(state.clone())
                 .route_layer(from_fn_with_state(auth_mw_state.clone(), auth_middleware));
@@ -937,11 +919,6 @@ pub fn create_router_with_all_state(
             csrf_middleware,
         ))
     };
-    // The dedicated viewer socket authenticates inside its upgrade handler and
-    // consumes a lane/user-bound one-shot token. Keep it outside cookie CSRF
-    // just like the shared `/ws` route.
-    #[cfg(feature = "browser-use")]
-    let router = router.merge(browser_viewer_routes);
     let router = router
     .merge(ws_routes)
     .merge(office_proxy)

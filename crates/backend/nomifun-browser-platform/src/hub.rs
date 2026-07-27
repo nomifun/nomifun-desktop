@@ -17,13 +17,13 @@ use crate::{
     BrowserInventoryEvent, BrowserLaneDriver, BrowserLaneId, BrowserLaneScheduler,
     BrowserLaneSnapshot, BrowserOperation, BrowserOperationKind, BrowserOperationResult,
     BrowserOverview, BrowserPlatformError, CallerIdentity, CanonicalIdentitySnapshot,
-    CapturedIdentitySnapshot, Clock, CloseResult, ControlLease, ControlLeaseService,
-    DriverOperationContext, HostLaunchRequest, IdentitySnapshotPayload, LaneControlState,
+    CapturedIdentitySnapshot, Clock, CloseResult,
+    DriverOperationContext, HostLaunchRequest, IdentitySnapshotPayload,
     HostCircuitBreaker, HostRestartTransition, LaneFreezeOutcome, LaneKey, LaneLaunchRequest,
     LaneLifecycleState, LanePriority, OperationContext, OwnerLease, OwnerLeaseService,
     PerKeyHostRestartSingleFlight, PromotionPolicy, ResourceDecision, ResourcePolicy,
     ResourcePressureState, ResourceTelemetry, ResourceWorkload, SchedulerConfig, SnapshotCoverage,
-    SystemClock, ViewerGrant, ViewerState, ViewerTokenService, stale_browser_epoch_error,
+    SystemClock, stale_browser_epoch_error,
 };
 
 const EVENT_BUFFER: usize = 256;
@@ -39,8 +39,6 @@ const PLATFORM_SHUTDOWN_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(8);
 pub struct HubConfig {
     pub resource_policy: ResourcePolicy,
     pub owner_lease_ttl_ms: u64,
-    pub control_lease_ttl_ms: u64,
-    pub viewer_token_ttl_ms: u64,
     pub headful: bool,
 }
 
@@ -49,8 +47,6 @@ impl Default for HubConfig {
         Self {
             resource_policy: ResourcePolicy::default(),
             owner_lease_ttl_ms: 5 * 60_000,
-            control_lease_ttl_ms: 30_000,
-            viewer_token_ttl_ms: 30_000,
             headful: false,
         }
     }
@@ -231,7 +227,6 @@ struct LaneRecord {
     operation_gate: Mutex<()>,
     activity_gate: RwLock<()>,
     close_gate: Mutex<()>,
-    viewer_sessions: Mutex<HashMap<String, ViewerState>>,
     cancellation: CancellationToken,
     closing: AtomicBool,
     active_operation_count: AtomicUsize,
@@ -258,7 +253,6 @@ impl LaneRecord {
             operation_gate: Mutex::new(()),
             activity_gate: RwLock::new(()),
             close_gate: Mutex::new(()),
-            viewer_sessions: Mutex::new(HashMap::new()),
             cancellation: CancellationToken::new(),
             closing: AtomicBool::new(false),
             active_operation_count: AtomicUsize::new(0),
@@ -376,12 +370,10 @@ struct BrowserSessionHubInner {
     operation_budget_gate: Mutex<()>,
     operation_weight_limit: AtomicU64,
     active_operation_weight: AtomicU64,
-    active_operations: AtomicU64,
+    active_regular_operations: AtomicU64,
     operation_capacity_changed: Notify,
-    active_visual_operations: AtomicU64,
+    active_heavy_operations: AtomicU64,
     owner_leases: OwnerLeaseService,
-    control_leases: ControlLeaseService,
-    viewer_tokens: ViewerTokenService,
     identity_generations: IdentityGenerationCoordinator,
     identity_refresh_gate: Mutex<()>,
     lanes: RwLock<HashMap<BrowserLaneId, Arc<LaneRecord>>>,
@@ -407,46 +399,69 @@ struct BrowserSessionHubInner {
     events: broadcast::Sender<BrowserInventoryEvent>,
 }
 
-struct HubOperationPermit {
-    inner: Arc<BrowserSessionHubInner>,
-}
-
-impl Drop for HubOperationPermit {
-    fn drop(&mut self) {
-        self.inner.active_operations.fetch_sub(1, Ordering::AcqRel);
-        self.inner
-            .active_operation_weight
-            .fetch_sub(1, Ordering::AcqRel);
-        self.inner.operation_capacity_changed.notify_waiters();
-    }
-}
-
-struct HubVisualPermit {
-    inner: Arc<BrowserSessionHubInner>,
-}
-
-impl Drop for HubVisualPermit {
-    fn drop(&mut self) {
-        self.inner
-            .active_visual_operations
-            .fetch_sub(1, Ordering::AcqRel);
-        self.inner
-            .active_operation_weight
-            .fetch_sub(2, Ordering::AcqRel);
-        self.inner.operation_capacity_changed.notify_waiters();
-    }
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum DriverResourceClass {
-    Operation,
-    Visual,
-    Unmetered,
+    Regular,
+    Heavy,
+}
+
+impl DriverResourceClass {
+    fn for_operation(operation: &BrowserOperation) -> Self {
+        // Heavy classification is reserved for Agent work whose transient
+        // encoding/rendering cost must still consume two units of the global
+        // operation budget.
+        let captures_image = operation.kind == BrowserOperationKind::Screenshot
+            || operation
+                .input
+                .get("include_screenshot")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false);
+        let renders_pdf = operation.kind == BrowserOperationKind::Download
+            && operation.action == "save_as_pdf";
+        if captures_image || renders_pdf {
+            Self::Heavy
+        } else {
+            Self::Regular
+        }
+    }
+
+    const fn weight(self) -> u64 {
+        match self {
+            Self::Regular => 1,
+            Self::Heavy => 2,
+        }
+    }
 }
 
 struct HubDriverPermit {
-    _operation: Option<HubOperationPermit>,
-    _visual: Option<HubVisualPermit>,
+    inner: Arc<BrowserSessionHubInner>,
+    resource_class: DriverResourceClass,
+    acquired_weight: u64,
+}
+
+impl Drop for HubDriverPermit {
+    fn drop(&mut self) {
+        let previous = match self.resource_class {
+            DriverResourceClass::Regular => self
+                .inner
+                .active_regular_operations
+                .fetch_sub(1, Ordering::AcqRel),
+            DriverResourceClass::Heavy => self
+                .inner
+                .active_heavy_operations
+                .fetch_sub(1, Ordering::AcqRel),
+        };
+        debug_assert!(previous > 0, "Hub operation permit count underflow");
+        let previous_weight = self
+            .inner
+            .active_operation_weight
+            .fetch_sub(self.acquired_weight, Ordering::AcqRel);
+        debug_assert!(
+            previous_weight >= self.acquired_weight,
+            "Hub operation weight underflow"
+        );
+        self.inner.operation_capacity_changed.notify_waiters();
+    }
 }
 
 #[derive(Clone)]
@@ -536,20 +551,12 @@ impl BrowserSessionHub {
                     config.resource_policy.max_active_operations.max(1) as u64,
                 ),
                 active_operation_weight: AtomicU64::new(0),
-                active_operations: AtomicU64::new(0),
+                active_regular_operations: AtomicU64::new(0),
                 operation_capacity_changed: Notify::new(),
-                active_visual_operations: AtomicU64::new(0),
+                active_heavy_operations: AtomicU64::new(0),
                 owner_leases: OwnerLeaseService::new(
                     Arc::clone(&clock),
                     config.owner_lease_ttl_ms,
-                ),
-                control_leases: ControlLeaseService::new(
-                    Arc::clone(&clock),
-                    config.control_lease_ttl_ms,
-                ),
-                viewer_tokens: ViewerTokenService::new(
-                    Arc::clone(&clock),
-                    config.viewer_token_ttl_ms,
                 ),
                 identity_generations: IdentityGenerationCoordinator::new(Arc::clone(&clock)),
                 identity_refresh_gate: Mutex::new(()),
@@ -826,27 +833,31 @@ impl BrowserSessionHub {
         })))
     }
 
-    async fn acquire_operation_permit(
+    async fn acquire_driver_permit(
         &self,
+        operation: &BrowserOperation,
         cancellation: &CancellationToken,
-    ) -> Result<HubOperationPermit, BrowserPlatformError> {
-        self.acquire_operation_weight(1, cancellation).await?;
-        self.inner.active_operations.fetch_add(1, Ordering::AcqRel);
-        Ok(HubOperationPermit {
+    ) -> Result<HubDriverPermit, BrowserPlatformError> {
+        let resource_class = DriverResourceClass::for_operation(operation);
+        let acquired_weight = self
+            .acquire_operation_weight(resource_class.weight(), cancellation)
+            .await?;
+        match resource_class {
+            DriverResourceClass::Regular => {
+                self.inner
+                    .active_regular_operations
+                    .fetch_add(1, Ordering::AcqRel);
+            }
+            DriverResourceClass::Heavy => {
+                self.inner
+                    .active_heavy_operations
+                    .fetch_add(1, Ordering::AcqRel);
+            }
+        }
+        Ok(HubDriverPermit {
             inner: Arc::clone(&self.inner),
-        })
-    }
-
-    async fn acquire_visual_permit(
-        &self,
-        cancellation: &CancellationToken,
-    ) -> Result<HubVisualPermit, BrowserPlatformError> {
-        self.acquire_operation_weight(2, cancellation).await?;
-        self.inner
-            .active_visual_operations
-            .fetch_add(1, Ordering::AcqRel);
-        Ok(HubVisualPermit {
-            inner: Arc::clone(&self.inner),
+            resource_class,
+            acquired_weight,
         })
     }
 
@@ -854,7 +865,7 @@ impl BrowserSessionHub {
         &self,
         weight: u64,
         cancellation: &CancellationToken,
-    ) -> Result<(), BrowserPlatformError> {
+    ) -> Result<u64, BrowserPlatformError> {
         loop {
             let notified = self.inner.operation_capacity_changed.notified();
             let acquired = {
@@ -863,17 +874,23 @@ impl BrowserSessionHub {
                 let _budget_guard = self.inner.operation_budget_gate.lock().await;
                 let limit = self.inner.operation_weight_limit.load(Ordering::Acquire);
                 let current = self.inner.active_operation_weight.load(Ordering::Acquire);
-                if current.saturating_add(weight) <= limit {
+                // A weighted operation must still make progress when a user
+                // policy or Critical pressure lowers the entire budget below
+                // its nominal weight. Admit an oversized operation only into
+                // an empty budget, and retain its nominal weight so it stays
+                // exclusive even if the policy limit rises while it runs.
+                let oversized_exclusive = current == 0 && weight > limit;
+                if oversized_exclusive || current.saturating_add(weight) <= limit {
                     self.inner
                         .active_operation_weight
                         .fetch_add(weight, Ordering::AcqRel);
-                    true
+                    Some(weight)
                 } else {
-                    false
+                    None
                 }
             };
-            if acquired {
-                return Ok(());
+            if let Some(acquired_weight) = acquired {
+                return Ok(acquired_weight);
             }
             tokio::select! {
                 _ = notified => {}
@@ -905,11 +922,13 @@ impl BrowserSessionHub {
                 .filter(|request| request.first_lane)
                 .count(),
             active_operation_permits: usize::try_from(
-                self.inner.active_operations.load(Ordering::Acquire),
+                self.inner
+                    .active_regular_operations
+                    .load(Ordering::Acquire),
             )
             .unwrap_or(usize::MAX),
             active_heavy_operation_permits: usize::try_from(
-                self.inner.active_visual_operations.load(Ordering::Acquire),
+                self.inner.active_heavy_operations.load(Ordering::Acquire),
             )
             .unwrap_or(usize::MAX),
             ..ResourceWorkload::default()
@@ -931,8 +950,6 @@ impl BrowserSessionHub {
             if let Some(snapshot) = snapshot {
                 workload.frozen_lanes +=
                     usize::from(snapshot.lifecycle_state == LaneLifecycleState::Frozen);
-                workload.viewer_lanes +=
-                    usize::from(snapshot.viewer_state != ViewerState::Idle);
                 workload.primary_lanes +=
                     usize::from(snapshot.identity_mode == BrowserIdentityMode::Primary);
             }
@@ -1128,7 +1145,6 @@ impl BrowserSessionHub {
             identity_mode,
             identity_generation,
             lifecycle_state,
-            control_state: LaneControlState::Agent,
             browser_epoch: 0,
             tabs: Vec::new(),
             active_tab_id: None,
@@ -1145,7 +1161,6 @@ impl BrowserSessionHub {
             active_operation_count: 0,
             last_active_at_ms: now,
             created_at_ms: now,
-            viewer_state: ViewerState::Idle,
             error_code: None,
             error_message: None,
             recoverable: true,
@@ -1663,7 +1678,6 @@ impl BrowserSessionHub {
                 snapshot.tabs.clear();
                 snapshot.active_tab_id = None;
                 snapshot.active_frame_id = None;
-                snapshot.viewer_state = ViewerState::Failed;
                 snapshot.error_code = Some(BrowserErrorCode::BrowserRestarted);
                 snapshot.error_message =
                     Some("The managed browser is restarting.".to_owned());
@@ -1698,7 +1712,6 @@ impl BrowserSessionHub {
                 snapshot.tabs.clear();
                 snapshot.active_tab_id = None;
                 snapshot.active_frame_id = None;
-                snapshot.viewer_state = ViewerState::Failed;
                 snapshot.error_code = Some(error.code);
                 snapshot.error_message = Some(error.message.clone());
                 snapshot.recoverable = error.retryable;
@@ -2060,246 +2073,11 @@ impl BrowserSessionHub {
             guard = lane.operation_gate.lock() => guard,
             _ = lane.cancellation.cancelled() => return Err(lane_closed_error(lane_id.clone())),
         };
-        if self.reconcile_control_lease(lane_id, &lane).await? {
-            return Err(BrowserPlatformError::new(
-                BrowserErrorCode::LaneControlledByUser,
-                "A user currently controls this browser lane.",
-                true,
-                "Wait for control to be returned or for the control lease to expire.",
-            )
-            .for_lane(lane_id.clone()));
-        }
         self.execute_lane_driver(
             &lane,
             lane_id,
             operation,
             trusted_out_of_band_confirmation,
-            DriverResourceClass::Operation,
-        )
-        .await
-    }
-
-    /// Returns the authoritative lane snapshot for an authenticated viewer.
-    ///
-    /// This application-facing boundary accepts only the identity resolved by
-    /// the HTTP/WebSocket authentication layer. It deliberately does not
-    /// accept a renderer-supplied [`CallerIdentity`].
-    pub async fn viewer_snapshot(
-        &self,
-        user_id: &str,
-        lane_id: &BrowserLaneId,
-    ) -> Result<BrowserLaneSnapshot, BrowserPlatformError> {
-        let lane = self.viewer_lane(user_id, lane_id).await?;
-        let mut snapshot = lane.current_snapshot().await;
-        self.refresh_queue_metadata(&mut snapshot);
-        Ok(snapshot)
-    }
-
-    /// Counts an authenticated viewer heartbeat as Lane activity even while
-    /// the viewer remains observe-only.
-    pub async fn viewer_heartbeat(
-        &self,
-        user_id: &str,
-        lane_id: &BrowserLaneId,
-    ) -> Result<(), BrowserPlatformError> {
-        self.viewer_lane(user_id, lane_id).await?;
-        self.touch_lane(lane_id).await;
-        Ok(())
-    }
-
-    /// Registers an authenticated viewer connection before frame startup.
-    pub async fn viewer_connected(
-        &self,
-        user_id: &str,
-        lane_id: &BrowserLaneId,
-        viewer_id: &str,
-    ) -> Result<(), BrowserPlatformError> {
-        self.update_viewer_session(user_id, lane_id, viewer_id, Some(ViewerState::Starting))
-            .await
-    }
-
-    /// Marks an authenticated viewer as actively receiving frames.
-    pub async fn viewer_streaming(
-        &self,
-        user_id: &str,
-        lane_id: &BrowserLaneId,
-        viewer_id: &str,
-    ) -> Result<(), BrowserPlatformError> {
-        self.update_viewer_session(user_id, lane_id, viewer_id, Some(ViewerState::Streaming))
-            .await
-    }
-
-    /// Marks an authenticated viewer's frame path as failed while preserving
-    /// management access and any other live viewer's aggregate state.
-    pub async fn viewer_failed(
-        &self,
-        user_id: &str,
-        lane_id: &BrowserLaneId,
-        viewer_id: &str,
-    ) -> Result<(), BrowserPlatformError> {
-        self.update_viewer_session(user_id, lane_id, viewer_id, Some(ViewerState::Failed))
-            .await
-    }
-
-    /// Removes one authenticated viewer connection. The aggregate lane state
-    /// returns to Idle only after the final viewer disconnects.
-    pub async fn viewer_disconnected(
-        &self,
-        user_id: &str,
-        lane_id: &BrowserLaneId,
-        viewer_id: &str,
-    ) -> Result<(), BrowserPlatformError> {
-        self.update_viewer_session(user_id, lane_id, viewer_id, None)
-            .await
-    }
-
-    async fn update_viewer_session(
-        &self,
-        user_id: &str,
-        lane_id: &BrowserLaneId,
-        viewer_id: &str,
-        state: Option<ViewerState>,
-    ) -> Result<(), BrowserPlatformError> {
-        if viewer_id.is_empty() || viewer_id.len() > 128 {
-            return Err(viewer_operation_not_allowed(lane_id.clone()));
-        }
-        let lane = self.viewer_lane(user_id, lane_id).await?;
-        let aggregate = {
-            let mut viewers = lane.viewer_sessions.lock().await;
-            match state {
-                Some(state) => {
-                    viewers.insert(viewer_id.to_owned(), state);
-                }
-                None => {
-                    viewers.remove(viewer_id);
-                }
-            }
-            if viewers
-                .values()
-                .any(|state| *state == ViewerState::Streaming)
-            {
-                ViewerState::Streaming
-            } else if viewers
-                .values()
-                .any(|state| *state == ViewerState::Starting)
-            {
-                ViewerState::Starting
-            } else if viewers
-                .values()
-                .any(|state| *state == ViewerState::Failed)
-            {
-                ViewerState::Failed
-            } else {
-                ViewerState::Idle
-            }
-        };
-        let (snapshot, changed) = {
-            let mut snapshot = lane.snapshot.write().await;
-            let changed = snapshot.viewer_state != aggregate;
-            snapshot.viewer_state = aggregate;
-            snapshot.last_active_at_ms = self.inner.clock.now_ms();
-            (snapshot.clone(), changed)
-        };
-        if changed {
-            self.emit("viewer_state_changed", Some(&snapshot));
-        }
-        Ok(())
-    }
-
-    /// Executes a read-only viewer operation without taking the Lane
-    /// correctness gate. Frame capture has its own global resource permit and
-    /// must not stall navigation/input in this or another Lane.
-    pub async fn viewer_observe(
-        &self,
-        user_id: &str,
-        lane_id: &BrowserLaneId,
-        operation: BrowserOperation,
-    ) -> Result<BrowserOperationResult, BrowserPlatformError> {
-        let allowed = matches!(
-            (operation.kind, operation.action.as_str()),
-            (
-                BrowserOperationKind::View,
-                "viewer_snapshot"
-                    | "viewer_observe"
-                    | "viewer_screencast_frame"
-                    | "viewer_screencast_stop"
-            ) | (
-                BrowserOperationKind::Screenshot,
-                "viewer_screenshot"
-                    | "viewer_screencast_frame"
-                    | "viewer_screencast_stop"
-            )
-        );
-        if !allowed || operation.may_modify_identity {
-            return Err(viewer_operation_not_allowed(lane_id.clone()));
-        }
-        let lane = self.viewer_lane(user_id, lane_id).await?;
-        if lane.closing.load(Ordering::Acquire) {
-            return Err(lane_closed_error(lane_id.clone()));
-        }
-        let resource_class = if operation.action == "viewer_screencast_stop" {
-            DriverResourceClass::Unmetered
-        } else {
-            DriverResourceClass::Visual
-        };
-        self.execute_lane_driver(&lane, lane_id, operation, false, resource_class)
-            .await
-    }
-
-    /// Executes lane-scoped user input after validating the server-held
-    /// control lease. Only the explicit embedded-viewer action vocabulary is
-    /// accepted; arbitrary tool actions cannot cross this authority boundary.
-    pub async fn viewer_input(
-        &self,
-        user_id: &str,
-        lane_id: &BrowserLaneId,
-        lease_id: &str,
-        operation: BrowserOperation,
-    ) -> Result<BrowserOperationResult, BrowserPlatformError> {
-        let allowed = matches!(
-            (operation.kind, operation.action.as_str()),
-            (BrowserOperationKind::Act, "viewer_input")
-                | (
-                    BrowserOperationKind::Navigate,
-                    "viewer_navigate" | "viewer_back" | "viewer_forward" | "viewer_reload"
-                )
-                | (BrowserOperationKind::Tabs, "viewer_select_tab")
-        );
-        if !allowed || operation.may_modify_identity {
-            return Err(viewer_operation_not_allowed(lane_id.clone()));
-        }
-        let lane = self.viewer_lane(user_id, lane_id).await?;
-        if !lane
-            .snapshot
-            .read()
-            .await
-            .identity_mode
-            .permits_interaction()
-        {
-            return Err(needs_primary_identity_error(lane_id));
-        }
-        if lane.closing.load(Ordering::Acquire) {
-            return Err(lane_closed_error(lane_id.clone()));
-        }
-        self.inner
-            .control_leases
-            .validate(lane_id, user_id, lease_id)?;
-
-        let _lane_guard = tokio::select! {
-            guard = lane.operation_gate.lock() => guard,
-            _ = lane.cancellation.cancelled() => return Err(lane_closed_error(lane_id.clone())),
-        };
-        // The lease may have expired while input waited behind an Agent
-        // operation, so validate again immediately before dispatch.
-        self.inner
-            .control_leases
-            .validate(lane_id, user_id, lease_id)?;
-        self.execute_lane_driver(
-            &lane,
-            lane_id,
-            operation,
-            false,
-            DriverResourceClass::Operation,
         )
         .await
     }
@@ -2310,7 +2088,6 @@ impl BrowserSessionHub {
         lane_id: &BrowserLaneId,
         operation: BrowserOperation,
         trusted_out_of_band_confirmation: bool,
-        resource_class: DriverResourceClass,
     ) -> Result<BrowserOperationResult, BrowserPlatformError> {
         let should_refresh_identity = identity_operation_needs_refresh(&operation);
         let is_fresh_observe = operation.kind == BrowserOperationKind::Observe;
@@ -2340,8 +2117,7 @@ impl BrowserSessionHub {
                 Err(error) => Err(error.for_lane(lane_id.clone())),
             };
         }
-        // Viewer capture intentionally bypasses the correctness gate, but all
-        // driver work participates in this read side so pressure lifecycle
+        // All driver work participates in this read side so pressure lifecycle
         // work can prove a lane is idle before freezing or closing it.
         let activity_guard = lane.activity_gate.read().await;
         let (context, identity_mode, host_key) = {
@@ -2418,28 +2194,10 @@ impl BrowserSessionHub {
         if let Err(error) = require_lane_operation(identity_mode, &operation) {
             return Err(error.for_lane(lane_id.clone()));
         }
-        let permit = match resource_class {
-            DriverResourceClass::Operation => HubDriverPermit {
-                _operation: Some(
-                    self.acquire_operation_permit(&lane.cancellation)
-                        .await
-                        .map_err(|_| lane_closed_error(lane_id.clone()))?,
-                ),
-                _visual: None,
-            },
-            DriverResourceClass::Visual => HubDriverPermit {
-                _operation: None,
-                _visual: Some(
-                    self.acquire_visual_permit(&lane.cancellation)
-                        .await
-                        .map_err(|_| lane_closed_error(lane_id.clone()))?,
-                ),
-            },
-            DriverResourceClass::Unmetered => HubDriverPermit {
-                _operation: None,
-                _visual: None,
-            },
-        };
+        let permit = self
+            .acquire_driver_permit(&operation, &lane.cancellation)
+            .await
+            .map_err(|_| lane_closed_error(lane_id.clone()))?;
         let driver = lane.driver.read().await.clone().ok_or_else(|| {
             BrowserPlatformError::new(
                 BrowserErrorCode::BrowserUnavailable,
@@ -2557,10 +2315,7 @@ impl BrowserSessionHub {
             snapshot.last_active_at_ms = self.inner.clock.now_ms();
             let epoch_changed = snapshot.browser_epoch != dispatch_epoch
                 || snapshot.lifecycle_state != LaneLifecycleState::Running;
-            if !epoch_changed
-                && resource_class == DriverResourceClass::Operation
-                && let Ok(output) = &result
-            {
+            if !epoch_changed && let Ok(output) = &result {
                 let active_tab_changed =
                     output.active_tab_id.as_ref().is_some_and(|active_tab_id| {
                         snapshot
@@ -2617,28 +2372,6 @@ impl BrowserSessionHub {
             return Err(lane_restart_notice(lane, &snapshot).for_lane(lane_id.clone()));
         }
         result.map_err(|error| error.for_lane(lane_id.clone()))
-    }
-
-    async fn viewer_lane(
-        &self,
-        user_id: &str,
-        lane_id: &BrowserLaneId,
-    ) -> Result<Arc<LaneRecord>, BrowserPlatformError> {
-        if user_id.trim().is_empty() {
-            return Err(viewer_operation_not_allowed(lane_id.clone()));
-        }
-        let lane = self
-            .inner
-            .lanes
-            .read()
-            .await
-            .get(lane_id)
-            .cloned()
-            .ok_or_else(|| BrowserPlatformError::lane_not_found(lane_id.clone()))?;
-        if lane.snapshot.read().await.caller.user_id != user_id {
-            return Err(viewer_operation_not_allowed(lane_id.clone()));
-        }
-        Ok(lane)
     }
 
     async fn authorized_lane(
@@ -2726,6 +2459,7 @@ impl BrowserSessionHub {
         }
     }
 
+    #[cfg(test)]
     async fn lane_snapshot_unchecked(
         &self,
         lane_id: &BrowserLaneId,
@@ -2883,8 +2617,6 @@ impl BrowserSessionHub {
             snapshot.clone()
         };
         self.emit("lane_stopping", Some(&snapshot));
-        self.inner.control_leases.revoke_lane(lane_id);
-        self.inner.viewer_tokens.revoke_lane(lane_id);
 
         // Acquire every async lock before mutating any authoritative structure.
         // Once this block starts there is no cancellation point until the
@@ -3252,208 +2984,6 @@ impl BrowserSessionHub {
         Ok(result)
     }
 
-    pub async fn take_control(
-        &self,
-        user_id: &str,
-        lane_id: &BrowserLaneId,
-    ) -> Result<ControlLease, BrowserPlatformError> {
-        let lane = self.viewer_lane(user_id, lane_id).await?;
-        if !lane
-            .snapshot
-            .read()
-            .await
-            .identity_mode
-            .permits_interaction()
-        {
-            return Err(needs_primary_identity_error(lane_id));
-        }
-        let lease = self
-            .inner
-            .control_leases
-            .acquire(lane_id.clone(), user_id)?;
-        self.set_control_state(lane_id, LaneControlState::User).await;
-        Ok(lease)
-    }
-
-    pub async fn renew_control(
-        &self,
-        user_id: &str,
-        lane_id: &BrowserLaneId,
-        lease_id: &str,
-    ) -> Result<ControlLease, BrowserPlatformError> {
-        let lane = self.viewer_lane(user_id, lane_id).await?;
-        if !lane
-            .snapshot
-            .read()
-            .await
-            .identity_mode
-            .permits_interaction()
-        {
-            return Err(needs_primary_identity_error(lane_id));
-        }
-        let lease = self
-            .inner
-            .control_leases
-            .renew(lane_id, user_id, lease_id)?;
-        self.touch_lane(lane_id).await;
-        Ok(lease)
-    }
-
-    pub async fn return_control(
-        &self,
-        user_id: &str,
-        lane_id: &BrowserLaneId,
-        lease_id: &str,
-    ) -> bool {
-        let released = self
-            .inner
-            .control_leases
-            .release(lane_id, user_id, lease_id);
-        if released {
-            self.set_control_state(lane_id, LaneControlState::Agent)
-                .await;
-        }
-        released
-    }
-
-    /// Idempotently returns control for an authenticated user without
-    /// exposing the opaque control-lease id to the renderer.
-    pub async fn return_control_for_user(
-        &self,
-        user_id: &str,
-        lane_id: &BrowserLaneId,
-    ) -> Result<bool, BrowserPlatformError> {
-        self.viewer_lane(user_id, lane_id).await?;
-        let Some(current) = self.inner.control_leases.current(lane_id)? else {
-            self.set_control_state(lane_id, LaneControlState::Agent)
-                .await;
-            return Ok(false);
-        };
-        if current.user_id != user_id {
-            return Err(BrowserPlatformError::new(
-                BrowserErrorCode::OperationNotAllowed,
-                "This browser lane is controlled by another user.",
-                false,
-                "Wait for the current control lease to expire.",
-            )
-            .for_lane(lane_id.clone()));
-        }
-        let released = self
-            .inner
-            .control_leases
-            .release(lane_id, user_id, &current.lease_id);
-        self.set_control_state(lane_id, LaneControlState::Agent)
-            .await;
-        Ok(released)
-    }
-
-    pub async fn issue_viewer_token(
-        &self,
-        user_id: &str,
-        lane_id: &BrowserLaneId,
-    ) -> Result<ViewerGrant, BrowserPlatformError> {
-        self.viewer_lane(user_id, lane_id).await?;
-        self.inner
-            .viewer_tokens
-            .issue(user_id, lane_id.clone())
-    }
-
-    pub async fn consume_viewer_token(
-        &self,
-        user_id: &str,
-        lane_id: &BrowserLaneId,
-        raw_token: &str,
-    ) -> Result<ViewerGrant, BrowserPlatformError> {
-        // Consume first so an invalid/cross-user token retains the uniform
-        // ViewerTokenInvalid contract and cannot be used as a Lane-existence
-        // oracle. A valid grant is single-use; if the Lane disappeared after
-        // issuance, fail closed before opening the viewer.
-        let grant = self
-            .inner
-            .viewer_tokens
-            .consume(raw_token, user_id, lane_id)?;
-        if self.viewer_lane(user_id, lane_id).await.is_err() {
-            return Err(viewer_token_invalid());
-        }
-        self.touch_lane(lane_id).await;
-        Ok(grant)
-    }
-
-    async fn touch_lane(&self, lane_id: &BrowserLaneId) {
-        let now = self.inner.clock.now_ms();
-        let lane = self.inner.lanes.read().await.get(lane_id).cloned();
-        if let Some(lane) = lane {
-            lane.snapshot.write().await.last_active_at_ms = now;
-        }
-    }
-
-    async fn set_control_state(&self, lane_id: &BrowserLaneId, state: LaneControlState) {
-        let lane = self.inner.lanes.read().await.get(lane_id).cloned();
-        if let Some(lane) = lane {
-            let (snapshot, changed) = {
-                let mut snapshot = lane.snapshot.write().await;
-                let changed = snapshot.control_state != state;
-                snapshot.control_state = state;
-                snapshot.last_active_at_ms = self.inner.clock.now_ms();
-                (snapshot.clone(), changed)
-            };
-            if changed {
-                self.emit("control_state_changed", Some(&snapshot));
-            }
-        }
-    }
-
-    /// Reconciles the denormalized Lane control state with the authoritative
-    /// lease service. `has_active` may lazily remove an expired lease, so the
-    /// same check must also return a stale User state to Agent ownership.
-    async fn reconcile_control_lease(
-        &self,
-        lane_id: &BrowserLaneId,
-        lane: &LaneRecord,
-    ) -> Result<bool, BrowserPlatformError> {
-        let (active, reconciled) = {
-            let mut snapshot = lane.snapshot.write().await;
-            let active = self
-                .inner
-                .control_leases
-                .has_active(lane_id)
-                .map_err(|error| error.for_lane(lane_id.clone()))?;
-            if active {
-                (true, None)
-            } else if snapshot.control_state == LaneControlState::User {
-                snapshot.control_state = LaneControlState::Agent;
-                snapshot.last_active_at_ms = self.inner.clock.now_ms();
-                (false, Some(snapshot.clone()))
-            } else {
-                // Preserve Idle if another lifecycle path uses it; only stale
-                // User ownership requires reconciliation.
-                (false, None)
-            }
-        };
-        if let Some(snapshot) = reconciled {
-            self.emit("control_state_changed", Some(&snapshot));
-        }
-        Ok(active)
-    }
-
-    async fn reconcile_expired_control_leases(&self) -> Result<(), BrowserPlatformError> {
-        self.inner.control_leases.sweep_expired();
-        let lanes: Vec<_> = self
-            .inner
-            .lanes
-            .read()
-            .await
-            .iter()
-            .map(|(lane_id, lane)| (lane_id.clone(), Arc::clone(lane)))
-            .collect();
-        for (lane_id, lane) in lanes {
-            if lane.snapshot.read().await.control_state == LaneControlState::User {
-                self.reconcile_control_lease(&lane_id, &lane).await?;
-            }
-        }
-        Ok(())
-    }
-
     async fn mark_host_empty_if_unused(&self, key: HostKey) {
         let records: Vec<_> = self.inner.lanes.read().await.values().cloned().collect();
         for lane in records {
@@ -3518,8 +3048,6 @@ impl BrowserSessionHub {
         if lane.closing.load(Ordering::Acquire)
             || snapshot.lifecycle_state != LaneLifecycleState::Running
             || snapshot.active_operation_count != 0
-            || snapshot.viewer_state != ViewerState::Idle
-            || snapshot.control_state == LaneControlState::User
             || now.saturating_sub(snapshot.last_active_at_ms) < idle_limit_ms
             || !(lane.priority == LanePriority::Expansion
                 || is_crawl_identity(snapshot.identity_mode))
@@ -3592,8 +3120,6 @@ impl BrowserSessionHub {
         if lane.closing.load(Ordering::Acquire)
             || !lifecycle_matches
             || snapshot.active_operation_count != 0
-            || snapshot.viewer_state != ViewerState::Idle
-            || snapshot.control_state == LaneControlState::User
             || now.saturating_sub(snapshot.last_active_at_ms) < idle_limit_ms
         {
             return Ok(0);
@@ -3965,13 +3491,6 @@ impl BrowserSessionHub {
                 &mut first_error,
             );
         }
-        if let Err(error) = self.reconcile_expired_control_leases().await {
-            if first_error.is_none() {
-                first_error = Some(error);
-            }
-        }
-        self.inner.viewer_tokens.sweep();
-
         let config = self.inner.config.read().await.clone();
         let telemetry = self.inner.telemetry.read().await.clone();
         let pressure = self
@@ -4431,8 +3950,6 @@ fn replica_operation_requires_primary(operation: &BrowserOperation) -> bool {
         BrowserOperationKind::Screenshot => !matches!(
             operation.action.as_str(),
             "screenshot"
-                | "viewer_screenshot"
-                | "viewer_screencast_frame"
         ),
         BrowserOperationKind::Tabs => !matches!(
             operation.action.as_str(),
@@ -4452,16 +3969,6 @@ fn replica_operation_requires_primary(operation: &BrowserOperation) -> bool {
         BrowserOperationKind::Manage => !matches!(
             operation.action.as_str(),
             "capabilities" | "device_pixel_ratio"
-        ),
-        BrowserOperationKind::View => !matches!(
-            operation.action.as_str(),
-            "screenshot"
-                | "viewer_screenshot"
-                | "viewer_snapshot"
-                | "viewer_observe"
-                | "viewer_screencast_frame"
-                | "viewer_screencast_stop"
-                | "device_pixel_ratio"
         ),
         // Any interaction can submit forms, execute page behavior, or mutate
         // durable account state. It must run against Primary live identity.
@@ -4531,16 +4038,6 @@ fn operation_declares_stateful_request(input: &serde_json::Value) -> bool {
             .get("submits_form")
             .and_then(serde_json::Value::as_bool)
             .unwrap_or(false)
-}
-
-fn needs_primary_identity_error(lane_id: &BrowserLaneId) -> BrowserPlatformError {
-    BrowserPlatformError::new(
-        BrowserErrorCode::NeedsPrimaryIdentity,
-        "This operation may change account identity and cannot run in a replica.",
-        false,
-        "Open a Primary live-identity lane and retry.",
-    )
-    .for_lane(lane_id.clone())
 }
 
 fn identity_operation_needs_refresh(operation: &BrowserOperation) -> bool {
@@ -4737,25 +4234,6 @@ fn host_slot_retired_error() -> BrowserPlatformError {
     .with_metadata(json!({ "host_retired": true }))
 }
 
-fn viewer_operation_not_allowed(lane_id: BrowserLaneId) -> BrowserPlatformError {
-    BrowserPlatformError::new(
-        BrowserErrorCode::OperationNotAllowed,
-        "This viewer operation is not allowed for the browser lane.",
-        false,
-        "Refresh the browser inventory and retry from the embedded viewer.",
-    )
-    .for_lane(lane_id)
-}
-
-fn viewer_token_invalid() -> BrowserPlatformError {
-    BrowserPlatformError::new(
-        BrowserErrorCode::ViewerTokenInvalid,
-        "The browser viewer token is invalid.",
-        false,
-        "Request a fresh viewer token for the selected lane.",
-    )
-}
-
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeSet;
@@ -4807,7 +4285,6 @@ mod tests {
         identity_capture: std::sync::Mutex<Option<CapturedIdentitySnapshot>>,
         fail_identity_capture: AtomicBool,
         agent_snapshot_release: Semaphore,
-        viewer_snapshot_release: Semaphore,
         operation_results: std::sync::Mutex<HashMap<String, BrowserOperationResult>>,
     }
 
@@ -4851,7 +4328,6 @@ mod tests {
                 identity_capture: std::sync::Mutex::new(None),
                 fail_identity_capture: AtomicBool::new(false),
                 agent_snapshot_release: Semaphore::new(0),
-                viewer_snapshot_release: Semaphore::new(0),
                 operation_results: std::sync::Mutex::new(HashMap::new()),
             })
         }
@@ -4986,16 +4462,6 @@ mod tests {
                     .map_err(|_| BrowserPlatformError::shutting_down())?;
                 permit.forget();
                 return Ok(snapshot_result("agent-tab", "agent-target", "agent-frame", 41));
-            }
-            if operation.action == "viewer_snapshot" {
-                let permit = self
-                    .probe
-                    .viewer_snapshot_release
-                    .acquire()
-                    .await
-                    .map_err(|_| BrowserPlatformError::shutting_down())?;
-                permit.forget();
-                return Ok(snapshot_result("viewer-tab", "viewer-target", "viewer-frame", 7));
             }
             if let Some(result) = self
                 .probe
@@ -5494,6 +4960,19 @@ mod tests {
         BrowserOperation {
             kind: BrowserOperationKind::Observe,
             action: "observe".to_owned(),
+            input: json!({}),
+            expected_browser_epoch: None,
+            target_id: None,
+            frame_id: None,
+            ref_generation: None,
+            may_modify_identity: false,
+        }
+    }
+
+    fn screenshot() -> BrowserOperation {
+        BrowserOperation {
+            kind: BrowserOperationKind::Screenshot,
+            action: "screenshot".to_owned(),
             input: json!({}),
             expected_browser_epoch: None,
             target_id: None,
@@ -6265,43 +5744,10 @@ mod tests {
             BrowserErrorCode::NeedsPrimaryIdentity
         );
 
-        let viewer_input = BrowserOperation {
-            kind: BrowserOperationKind::Act,
-            action: "viewer_input".to_owned(),
-            input: json!({"kind": "text", "text": "changed"}),
-            expected_browser_epoch: None,
-            target_id: None,
-            frame_id: None,
-            ref_generation: None,
-            may_modify_identity: false,
-        };
-        assert_eq!(
-            harness
-                .hub
-                .viewer_input(
-                    "user-1",
-                    &lane.lane_id,
-                    "forged-control-lease",
-                    viewer_input,
-                )
-                .await
-                .unwrap_err()
-                .code,
-            BrowserErrorCode::NeedsPrimaryIdentity
-        );
-        assert_eq!(
-            harness
-                .hub
-                .take_control("user-1", &lane.lane_id)
-                .await
-                .unwrap_err()
-                .code,
-            BrowserErrorCode::NeedsPrimaryIdentity
-        );
         assert_eq!(
             harness.probe.entries.load(Ordering::Acquire),
             0,
-            "forged replica operations and takeover must not reach the driver"
+            "forged replica operations must not reach the driver"
         );
         assert_eq!(
             harness
@@ -6451,51 +5897,6 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(harness.probe.entries.load(Ordering::Acquire), 2);
-    }
-
-    #[tokio::test]
-    async fn crawl_identity_cannot_take_or_use_viewer_control() {
-        let harness = harness();
-        let anonymous = open_identity(
-            &harness.client,
-            "anonymous-viewer-control",
-            BrowserIdentityMode::Anonymous,
-        )
-        .await;
-        assert_eq!(
-            harness
-                .hub
-                .take_control("user-1", &anonymous)
-                .await
-                .unwrap_err()
-                .code,
-            BrowserErrorCode::NeedsPrimaryIdentity
-        );
-
-        harness
-            .hub
-            .publish_identity_snapshot(
-                IdentitySnapshotPayload::from_json(json!({"cookies": ["viewer"]})),
-                SnapshotCoverage::cookies_only(),
-            )
-            .unwrap();
-        let replica_client =
-            trusted_system_client(&harness, "runtime-replica-viewer-control");
-        let replica = open_identity(
-            &replica_client,
-            "replica-viewer-control",
-            BrowserIdentityMode::AuthenticatedReplica,
-        )
-        .await;
-        assert_eq!(
-            harness
-                .hub
-                .take_control("user-1", &replica)
-                .await
-                .unwrap_err()
-                .code,
-            BrowserErrorCode::NeedsPrimaryIdentity
-        );
     }
 
     #[tokio::test]
@@ -7841,107 +7242,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn hub_workload_captures_lane_queue_viewer_and_live_permit_state() {
-        let mut config = HubConfig::default();
-        config.resource_policy.max_open_lanes = 1;
-        let harness = harness_with_config(config);
-        let other = client_for_runtime(&harness, "runtime-2");
-        let active = open(&harness.client, "active").await;
-        harness
-            .client
-            .open(
-                Some("queued-expansion"),
-                BrowserIdentityMode::Primary,
-                None,
-            )
-            .await
-            .unwrap();
-        other
-            .open(
-                Some("queued-first"),
-                BrowserIdentityMode::Primary,
-                None,
-            )
-            .await
-            .unwrap();
-        harness
-            .hub
-            .viewer_connected("user-1", &active, "resource-viewer")
-            .await
-            .unwrap();
-
-        let agent_client = harness.client.clone();
-        let agent_lane = active.clone();
-        let agent_operation =
-            tokio::spawn(async move { agent_client.execute(&agent_lane, navigate()).await });
-        harness.probe.wait_for_active(1).await;
-        let viewer_hub = harness.hub.clone();
-        let viewer_lane = active.clone();
-        let viewer_operation = tokio::spawn(async move {
-            viewer_hub
-                .viewer_observe(
-                    "user-1",
-                    &viewer_lane,
-                    BrowserOperation {
-                        kind: BrowserOperationKind::Screenshot,
-                        action: "viewer_screenshot".to_owned(),
-                        input: json!({"format": "jpeg"}),
-                        expected_browser_epoch: None,
-                        target_id: None,
-                        frame_id: None,
-                        ref_generation: None,
-                        may_modify_identity: false,
-                    },
-                )
-                .await
-        });
-        harness.probe.wait_for_active(2).await;
-
-        let policy = harness.hub.resource_policy().await;
-        let workload = harness
-            .hub
-            .resource_workload(policy.lane_cold_start_bytes)
-            .await;
-        assert_eq!(workload.active_lanes, 1);
-        assert_eq!(workload.queued_lanes, 2);
-        assert_eq!(workload.queued_first_lanes, 1);
-        assert_eq!(workload.primary_lanes, 1);
-        assert_eq!(workload.viewer_lanes, 1);
-        assert_eq!(workload.active_operation_permits, 1);
-        assert_eq!(workload.active_heavy_operation_permits, 1);
-        assert_eq!(
-            workload.active_lane_ewma_bytes,
-            policy.lane_cold_start_bytes
-        );
-        assert_eq!(
-            workload.queued_lane_estimate_bytes,
-            policy.lane_cold_start_bytes.saturating_mul(2)
-        );
-
-        harness.probe.releases.add_permits(2);
-        agent_operation.await.unwrap().unwrap();
-        viewer_operation.await.unwrap().unwrap();
-        let record = harness
-            .hub
-            .inner
-            .lanes
-            .read()
-            .await
-            .get(&active)
-            .cloned()
-            .unwrap();
-        record.snapshot.write().await.lifecycle_state = LaneLifecycleState::Frozen;
-        assert_eq!(
-            harness
-                .hub
-                .resource_workload(policy.lane_cold_start_bytes)
-                .await
-                .frozen_lanes,
-            1
-        );
-    }
-
-    #[tokio::test]
     async fn hub_workload_counts_pending_lane_cleanups_with_cold_start_bytes() {
         let harness = harness();
         let lane_id = open(&harness.client, "cleanup-workload").await;
@@ -8091,6 +7391,153 @@ mod tests {
         .unwrap();
         harness.probe.releases.add_permits(1);
         second.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn agent_heavy_operations_use_two_weight_units_and_release_them() {
+        let mut config = HubConfig::default();
+        config.resource_policy.max_active_operations = 2;
+        let harness = harness_with_config(config);
+        let mut allowed_operations = harness.client.caller().allowed_operations.clone();
+        allowed_operations.insert(BrowserOperationKind::Screenshot);
+        let screenshot_client = client_for_surface(
+            &harness,
+            "runtime-heavy-screenshot",
+            BrowserSurface::Native,
+            allowed_operations,
+        );
+        let screenshot_lane = open(&screenshot_client, "heavy-screenshot").await;
+        let regular_lane = open(&harness.client, "regular-after-heavy").await;
+
+        let screenshot_task = tokio::spawn({
+            let client = screenshot_client.clone();
+            let lane = screenshot_lane.clone();
+            async move { client.execute(&lane, screenshot()).await }
+        });
+        harness.probe.wait_for_active(1).await;
+
+        let workload = harness
+            .hub
+            .resource_workload(harness.hub.resource_policy().await.lane_cold_start_bytes)
+            .await;
+        assert_eq!(workload.active_operation_permits, 0);
+        assert_eq!(workload.active_heavy_operation_permits, 1);
+        assert_eq!(
+            harness
+                .hub
+                .inner
+                .active_operation_weight
+                .load(Ordering::Acquire),
+            2
+        );
+
+        let regular_task = tokio::spawn({
+            let client = harness.client.clone();
+            async move { client.execute(&regular_lane, navigate()).await }
+        });
+        assert!(
+            tokio::time::timeout(
+                Duration::from_millis(30),
+                harness.probe.wait_for_entries(2),
+            )
+            .await
+            .is_err(),
+            "a regular operation bypassed the heavy operation's two-unit budget"
+        );
+
+        harness.probe.releases.add_permits(1);
+        screenshot_task.await.unwrap().unwrap();
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            harness.probe.wait_for_entries(2),
+        )
+        .await
+        .unwrap();
+        harness.probe.releases.add_permits(1);
+        regular_task.await.unwrap().unwrap();
+
+        assert_eq!(
+            harness
+                .hub
+                .inner
+                .active_operation_weight
+                .load(Ordering::Acquire),
+            0
+        );
+        let workload = harness
+            .hub
+            .resource_workload(harness.hub.resource_policy().await.lane_cold_start_bytes)
+            .await;
+        assert_eq!(workload.active_operation_permits, 0);
+        assert_eq!(workload.active_heavy_operation_permits, 0);
+    }
+
+    #[tokio::test]
+    async fn heavy_operation_is_not_starved_when_limit_is_below_nominal_weight() {
+        let mut config = HubConfig::default();
+        config.resource_policy.max_active_operations = 1;
+        let harness = harness_with_config(config);
+        let mut allowed_operations = harness.client.caller().allowed_operations.clone();
+        allowed_operations.insert(BrowserOperationKind::Screenshot);
+        let client = client_for_surface(
+            &harness,
+            "runtime-heavy-single-slot",
+            BrowserSurface::Native,
+            allowed_operations,
+        );
+        let lane_id = open(&client, "heavy-single-slot").await;
+
+        let task = tokio::spawn({
+            let client = client.clone();
+            async move { client.execute(&lane_id, screenshot()).await }
+        });
+        harness.probe.wait_for_active(1).await;
+        assert_eq!(
+            harness
+                .hub
+                .inner
+                .active_operation_weight
+                .load(Ordering::Acquire),
+            2,
+            "an oversized heavy operation must retain its nominal weight while running"
+        );
+
+        let regular_lane = open(&harness.client, "regular-during-oversized").await;
+        let regular_task = tokio::spawn({
+            let client = harness.client.clone();
+            async move { client.execute(&regular_lane, navigate()).await }
+        });
+        let mut raised_policy = harness.hub.resource_policy().await;
+        raised_policy.max_active_operations = 2;
+        harness.hub.set_resource_policy(raised_policy).await.unwrap();
+        assert!(
+            tokio::time::timeout(
+                Duration::from_millis(30),
+                harness.probe.wait_for_entries(2),
+            )
+            .await
+            .is_err(),
+            "raising the limit must not admit regular work beside an oversized heavy operation"
+        );
+
+        harness.probe.releases.add_permits(1);
+        task.await.unwrap().unwrap();
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            harness.probe.wait_for_entries(2),
+        )
+        .await
+        .unwrap();
+        harness.probe.releases.add_permits(1);
+        regular_task.await.unwrap().unwrap();
+        assert_eq!(
+            harness
+                .hub
+                .inner
+                .active_operation_weight
+                .load(Ordering::Acquire),
+            0
+        );
     }
 
     #[tokio::test]
@@ -8900,508 +8347,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn viewer_authority_is_user_bound_and_does_not_accept_caller_capabilities() {
-        let harness = harness();
-        let lane_id = open(&harness.client, "viewer-user-bound").await;
-
-        let snapshot = harness
-            .hub
-            .viewer_snapshot("user-1", &lane_id)
-            .await
-            .unwrap();
-        assert_eq!(snapshot.lane_id, lane_id);
-        assert_eq!(
-            harness
-                .hub
-                .viewer_snapshot("user-2", &lane_id)
-                .await
-                .unwrap_err()
-                .code,
-            BrowserErrorCode::OperationNotAllowed
-        );
-    }
-
-    #[tokio::test]
-    async fn viewer_control_and_tokens_fail_closed_for_another_user() {
-        let harness = harness();
-        let lane_id = open(&harness.client, "viewer-user-authority").await;
-
-        assert_eq!(
-            harness
-                .hub
-                .take_control("user-2", &lane_id)
-                .await
-                .unwrap_err()
-                .code,
-            BrowserErrorCode::OperationNotAllowed
-        );
-        assert_eq!(
-            harness
-                .hub
-                .renew_control("user-2", &lane_id, "forged-lease")
-                .await
-                .unwrap_err()
-                .code,
-            BrowserErrorCode::OperationNotAllowed
-        );
-        assert_eq!(
-            harness
-                .hub
-                .issue_viewer_token("user-2", &lane_id)
-                .await
-                .unwrap_err()
-                .code,
-            BrowserErrorCode::OperationNotAllowed
-        );
-        assert_eq!(
-            harness
-                .hub
-                .viewer_snapshot("user-1", &lane_id)
-                .await
-                .unwrap()
-                .control_state,
-            LaneControlState::Agent
-        );
-    }
-
-    #[tokio::test]
-    async fn control_state_changes_emit_realtime_inventory_events() {
-        let harness = harness();
-        let lane_id = open(&harness.client, "control-events").await;
-        let mut events = harness.hub.subscribe();
-
-        let lease = harness
-            .hub
-            .take_control("user-1", &lane_id)
-            .await
-            .unwrap();
-        let takeover = events.recv().await.unwrap();
-        assert_eq!(takeover.change_kind, "control_state_changed");
-        assert_eq!(takeover.lane_id.as_ref(), Some(&lane_id));
-
-        assert!(
-            harness
-                .hub
-                .return_control("user-1", &lane_id, &lease.lease_id)
-                .await
-        );
-        let returned = events.recv().await.unwrap();
-        assert_eq!(returned.change_kind, "control_state_changed");
-        assert_eq!(returned.lane_id.as_ref(), Some(&lane_id));
-    }
-
-    #[tokio::test]
-    async fn expired_control_lease_is_reconciled_by_next_agent_operation() {
-        let mut config = HubConfig::default();
-        config.control_lease_ttl_ms = 10;
-        let harness = harness_with_config(config);
-        let expired_lane = open(&harness.client, "expired-agent-operation").await;
-        let untouched_lane = open(&harness.client, "expired-untouched").await;
-        harness
-            .hub
-            .take_control("user-1", &expired_lane)
-            .await
-            .unwrap();
-        harness
-            .hub
-            .take_control("user-1", &untouched_lane)
-            .await
-            .unwrap();
-        let mut events = harness.hub.subscribe();
-
-        harness.clock.advance(10);
-        harness.probe.releases.add_permits(1);
-        harness
-            .client
-            .execute(&expired_lane, navigate())
-            .await
-            .unwrap();
-
-        let reconciled = events.recv().await.unwrap();
-        assert_eq!(reconciled.change_kind, "control_state_changed");
-        assert_eq!(reconciled.lane_id.as_ref(), Some(&expired_lane));
-        assert_eq!(
-            harness.client.status(&expired_lane).await.unwrap().control_state,
-            LaneControlState::Agent
-        );
-        assert_eq!(
-            harness.client.status(&untouched_lane).await.unwrap().control_state,
-            LaneControlState::User,
-            "an Agent operation must not reconcile another Lane"
-        );
-        assert!(
-            std::iter::from_fn(|| events.try_recv().ok()).all(|event| {
-                event.change_kind != "control_state_changed"
-                    || event.lane_id.as_ref() != Some(&untouched_lane)
-            })
-        );
-    }
-
-    #[tokio::test]
-    async fn unreadable_control_lease_authority_rejects_agent_operation() {
-        let harness = harness();
-        let lane_id = open(&harness.client, "poisoned-control-authority").await;
-        harness
-            .hub
-            .take_control("user-1", &lane_id)
-            .await
-            .unwrap();
-        harness
-            .hub
-            .inner
-            .control_leases
-            .poison_authority_for_test();
-
-        let error = harness
-            .client
-            .execute(&lane_id, navigate())
-            .await
-            .unwrap_err();
-
-        assert_eq!(error.code, BrowserErrorCode::BrowserUnavailable);
-        assert_eq!(error.lane_id.as_ref(), Some(&lane_id));
-        assert!(error.retryable);
-        assert_eq!(
-            harness.probe.entries.load(Ordering::Acquire),
-            0,
-            "the Lane driver must not run when control authority cannot be read"
-        );
-        assert_eq!(
-            harness.client.status(&lane_id).await.unwrap().control_state,
-            LaneControlState::User,
-            "an authority failure must not publish Agent ownership"
-        );
-    }
-
-    #[tokio::test]
-    async fn unreadable_control_lease_authority_preserves_idempotent_lane_close() {
-        let harness = harness();
-        let lane_id = open(&harness.client, "poisoned-authority-close").await;
-        harness
-            .hub
-            .take_control("user-1", &lane_id)
-            .await
-            .unwrap();
-        harness
-            .hub
-            .inner
-            .control_leases
-            .poison_authority_for_test();
-        harness.probe.releases.add_permits(1);
-
-        let first = harness.hub.close_lane(&lane_id).await.unwrap();
-        let repeated = harness.hub.close_lane(&lane_id).await.unwrap();
-
-        assert_eq!(first.closed, 1);
-        assert!(!first.already_closed);
-        assert_eq!(repeated.closed, 0);
-        assert!(repeated.already_closed);
-        assert!(harness.client.status(&lane_id).await.is_err());
-    }
-
-    #[tokio::test]
-    async fn sweep_reconciles_control_state_after_lease_was_lazily_deleted() {
-        let mut config = HubConfig::default();
-        config.control_lease_ttl_ms = 10;
-        let harness = harness_with_config(config);
-        let expired_lane = open(&harness.client, "expired-before-sweep").await;
-        let active_lane = open(&harness.client, "active-during-sweep").await;
-        harness
-            .hub
-            .take_control("user-1", &expired_lane)
-            .await
-            .unwrap();
-        harness.clock.advance(5);
-        harness
-            .hub
-            .take_control("user-1", &active_lane)
-            .await
-            .unwrap();
-        harness.clock.advance(5);
-
-        assert!(
-            harness
-                .hub
-                .inner
-                .control_leases
-                .current(&expired_lane)
-                .unwrap()
-                .is_none(),
-            "the expiry precondition must lazily remove the lease"
-        );
-        assert_eq!(
-            harness.client.status(&expired_lane).await.unwrap().control_state,
-            LaneControlState::User,
-            "lazy lease deletion alone leaves the denormalized state stale"
-        );
-        let mut events = harness.hub.subscribe();
-
-        assert_eq!(harness.hub.sweep().await.unwrap().closed, 0);
-
-        let reconciled = events.recv().await.unwrap();
-        assert_eq!(reconciled.change_kind, "control_state_changed");
-        assert_eq!(reconciled.lane_id.as_ref(), Some(&expired_lane));
-        assert_eq!(
-            harness.client.status(&expired_lane).await.unwrap().control_state,
-            LaneControlState::Agent
-        );
-        assert_eq!(
-            harness.client.status(&active_lane).await.unwrap().control_state,
-            LaneControlState::User,
-            "sweep must preserve another Lane's active control lease"
-        );
-        assert!(
-            harness
-                .hub
-                .inner
-                .control_leases
-                .has_active(&active_lane)
-                .unwrap()
-        );
-        assert!(
-            std::iter::from_fn(|| events.try_recv().ok()).all(|event| {
-                event.change_kind != "control_state_changed"
-                    || event.lane_id.as_ref() != Some(&active_lane)
-            })
-        );
-    }
-
-    #[tokio::test]
-    async fn viewer_lifecycle_aggregates_connections_and_emits_inventory_changes() {
-        let harness = harness();
-        let lane_id = open(&harness.client, "viewer-lifecycle").await;
-        let mut events = harness.hub.subscribe();
-
-        harness.clock.advance(7);
-        harness
-            .hub
-            .viewer_connected("user-1", &lane_id, "viewer-1")
-            .await
-            .unwrap();
-        let event = events.recv().await.unwrap();
-        assert_eq!(event.change_kind, "viewer_state_changed");
-        assert_eq!(event.lane_id.as_ref(), Some(&lane_id));
-        let snapshot = harness
-            .hub
-            .viewer_snapshot("user-1", &lane_id)
-            .await
-            .unwrap();
-        assert_eq!(snapshot.viewer_state, ViewerState::Starting);
-        assert_eq!(snapshot.last_active_at_ms, harness.clock.now_ms());
-
-        harness
-            .hub
-            .viewer_streaming("user-1", &lane_id, "viewer-1")
-            .await
-            .unwrap();
-        assert_eq!(
-            harness
-                .hub
-                .viewer_snapshot("user-1", &lane_id)
-                .await
-                .unwrap()
-                .viewer_state,
-            ViewerState::Streaming
-        );
-        harness
-            .hub
-            .viewer_connected("user-1", &lane_id, "viewer-2")
-            .await
-            .unwrap();
-        harness
-            .hub
-            .viewer_failed("user-1", &lane_id, "viewer-1")
-            .await
-            .unwrap();
-        assert_eq!(
-            harness
-                .hub
-                .viewer_snapshot("user-1", &lane_id)
-                .await
-                .unwrap()
-                .viewer_state,
-            ViewerState::Starting
-        );
-        harness
-            .hub
-            .viewer_disconnected("user-1", &lane_id, "viewer-2")
-            .await
-            .unwrap();
-        assert_eq!(
-            harness
-                .hub
-                .viewer_snapshot("user-1", &lane_id)
-                .await
-                .unwrap()
-                .viewer_state,
-            ViewerState::Failed
-        );
-        harness
-            .hub
-            .viewer_disconnected("user-1", &lane_id, "viewer-1")
-            .await
-            .unwrap();
-        assert_eq!(
-            harness
-                .hub
-                .viewer_snapshot("user-1", &lane_id)
-                .await
-                .unwrap()
-                .viewer_state,
-            ViewerState::Idle
-        );
-    }
-
-    #[tokio::test]
-    async fn viewer_observe_remains_available_while_user_controls_lane() {
-        let harness = harness();
-        let lane_id = open(&harness.client, "viewer-observe").await;
-        harness
-            .hub
-            .take_control("user-1", &lane_id)
-            .await
-            .unwrap();
-
-        assert_eq!(
-            harness
-                .client
-                .execute(&lane_id, navigate())
-                .await
-                .unwrap_err()
-                .code,
-            BrowserErrorCode::LaneControlledByUser
-        );
-
-        harness.probe.releases.add_permits(1);
-        let output = harness
-            .hub
-            .viewer_observe(
-                "user-1",
-                &lane_id,
-                BrowserOperation {
-                    kind: BrowserOperationKind::Screenshot,
-                    action: "viewer_screenshot".to_owned(),
-                    input: json!({"format": "jpeg", "max_width": 1600, "max_height": 1200}),
-                    expected_browser_epoch: None,
-                    target_id: None,
-                    frame_id: None,
-                    ref_generation: None,
-                    may_modify_identity: false,
-                },
-            )
-            .await
-            .unwrap();
-        assert_eq!(output.output["ok"], true);
-    }
-
-    #[tokio::test]
-    async fn viewer_frame_capture_does_not_wait_for_the_lane_correctness_gate() {
-        let harness = harness();
-        let lane_id = open(&harness.client, "viewer-frame-parallel").await;
-        let client = harness.client.clone();
-        let operation_lane = lane_id.clone();
-        let agent_operation =
-            tokio::spawn(async move { client.execute(&operation_lane, navigate()).await });
-        harness.probe.wait_for_active(1).await;
-
-        let hub = harness.hub.clone();
-        let viewer_lane = lane_id.clone();
-        let viewer = tokio::spawn(async move {
-            hub.viewer_observe(
-                "user-1",
-                &viewer_lane,
-                BrowserOperation {
-                    kind: BrowserOperationKind::Screenshot,
-                    action: "viewer_screenshot".to_owned(),
-                    input: json!({"format": "jpeg"}),
-                    expected_browser_epoch: None,
-                    target_id: None,
-                    frame_id: None,
-                    ref_generation: None,
-                    may_modify_identity: false,
-                },
-            )
-            .await
-        });
-        tokio::time::timeout(
-            Duration::from_secs(1),
-            harness.probe.wait_for_active(2),
-        )
-        .await
-        .expect("viewer frame capture waited behind the Lane operation gate");
-        harness.probe.releases.add_permits(2);
-        agent_operation.await.unwrap().unwrap();
-        viewer.await.unwrap().unwrap();
-    }
-
-    #[tokio::test]
-    async fn viewer_snapshot_isolation_preserves_agent_semantic_state() {
-        let harness = harness();
-        let lane_id = open(&harness.client, "viewer-snapshot-isolation").await;
-        let agent_client = harness.client.clone();
-        let agent_lane = lane_id.clone();
-        let agent = tokio::spawn(async move {
-            agent_client
-                .execute(
-                    &agent_lane,
-                    BrowserOperation {
-                        kind: BrowserOperationKind::Observe,
-                        action: "agent_snapshot_isolation".to_owned(),
-                        input: json!({}),
-                        expected_browser_epoch: None,
-                        target_id: None,
-                        frame_id: None,
-                        ref_generation: None,
-                        may_modify_identity: false,
-                    },
-                )
-                .await
-        });
-        harness.probe.wait_for_active(1).await;
-
-        let viewer_hub = harness.hub.clone();
-        let viewer_lane = lane_id.clone();
-        let viewer = tokio::spawn(async move {
-            viewer_hub
-                .viewer_observe(
-                    "user-1",
-                    &viewer_lane,
-                    BrowserOperation {
-                        kind: BrowserOperationKind::View,
-                        action: "viewer_snapshot".to_owned(),
-                        input: json!({}),
-                        expected_browser_epoch: None,
-                        target_id: None,
-                        frame_id: None,
-                        ref_generation: None,
-                        may_modify_identity: false,
-                    },
-                )
-                .await
-        });
-        harness.probe.wait_for_active(2).await;
-
-        harness.probe.agent_snapshot_release.add_permits(1);
-        agent.await.unwrap().unwrap();
-        let agent_snapshot = harness.client.status(&lane_id).await.unwrap();
-        assert_eq!(agent_snapshot.active_tab_id.as_deref(), Some("agent-tab"));
-        assert_eq!(
-            agent_snapshot.active_frame_id.as_deref(),
-            Some("agent-frame")
-        );
-        assert_eq!(agent_snapshot.ref_generation, 41);
-
-        harness.probe.viewer_snapshot_release.add_permits(1);
-        let viewer_output = viewer.await.unwrap().unwrap();
-        assert_eq!(viewer_output.active_tab_id.as_deref(), Some("viewer-tab"));
-        let final_snapshot = harness.client.status(&lane_id).await.unwrap();
-        assert_eq!(final_snapshot.tabs, agent_snapshot.tabs);
-        assert_eq!(final_snapshot.active_tab_id, agent_snapshot.active_tab_id);
-        assert_eq!(final_snapshot.active_frame_id, agent_snapshot.active_frame_id);
-        assert_eq!(final_snapshot.ref_generation, agent_snapshot.ref_generation);
-    }
-
-    #[tokio::test]
     async fn cancelling_an_operation_cannot_leave_lane_activity_stuck() {
         let harness = harness();
         let lane_id = open(&harness.client, "cancelled-activity").await;
@@ -9424,76 +8369,4 @@ mod tests {
         assert_eq!(harness.probe.active.load(Ordering::Acquire), 0);
     }
 
-    #[tokio::test]
-    async fn viewer_input_requires_current_lease_and_explicit_action_allowlist() {
-        let harness = harness();
-        let lane_id = open(&harness.client, "viewer-input").await;
-        let lease = harness
-            .hub
-            .take_control("user-1", &lane_id)
-            .await
-            .unwrap();
-        let input = BrowserOperation {
-            kind: BrowserOperationKind::Act,
-            action: "viewer_input".to_owned(),
-            input: json!({"kind": "pointer", "action": "down", "x": 10, "y": 20}),
-            expected_browser_epoch: None,
-            target_id: None,
-            frame_id: None,
-            ref_generation: None,
-            may_modify_identity: false,
-        };
-
-        assert_eq!(
-            harness
-                .hub
-                .viewer_input("user-1", &lane_id, "wrong-lease", input.clone())
-                .await
-                .unwrap_err()
-                .code,
-            BrowserErrorCode::LaneControlledByUser
-        );
-
-        harness.probe.releases.add_permits(1);
-        harness
-            .hub
-            .viewer_input("user-1", &lane_id, &lease.lease_id, input)
-            .await
-            .unwrap();
-
-        let forbidden = BrowserOperation {
-            kind: BrowserOperationKind::Debug,
-            action: "raw_cdp".to_owned(),
-            input: json!({"method": "Browser.getVersion"}),
-            expected_browser_epoch: None,
-            target_id: None,
-            frame_id: None,
-            ref_generation: None,
-            may_modify_identity: false,
-        };
-        assert_eq!(
-            harness
-                .hub
-                .viewer_input("user-1", &lane_id, &lease.lease_id, forbidden)
-                .await
-                .unwrap_err()
-                .code,
-            BrowserErrorCode::OperationNotAllowed
-        );
-
-        assert!(
-            harness
-                .hub
-                .return_control_for_user("user-1", &lane_id)
-                .await
-                .unwrap()
-        );
-        assert!(
-            !harness
-                .hub
-                .return_control_for_user("user-1", &lane_id)
-                .await
-                .unwrap()
-        );
-    }
 }

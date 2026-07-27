@@ -50,16 +50,14 @@ use chromiumoxide::cdp::browser_protocol::target::{
 use chromiumoxide::cdp::js_protocol::runtime::{
     CallArgument, CallFunctionOnParams, EvaluateParams, ExecutionContextId, RemoteObjectId,
 };
-use tokio::sync::{Mutex as AsyncMutex, watch};
+use tokio::sync::Mutex as AsyncMutex;
 use tokio_util::sync::CancellationToken;
 
 use crate::aria_ref::{frame_prefix, RefRecord, RefTable};
 use crate::actions::{ActResult, Effect};
 use crate::engine::{
-    BrowserEngine, BrowserError, BrowserKeyEventKind, BrowserMouseButton, BrowserMouseEventKind,
-    BrowserRawInput, BrowserTabInfo, BrowserViewerFrame, BrowserViewerImageFormat, Capabilities,
-    ElementEntry, LoadState, NavResult, Observation, ObserveOpts, browser_key_code_is_allowed,
-    browser_key_value_is_allowed, browser_text_input_is_allowed,
+    BrowserEngine, BrowserError, BrowserTabInfo, Capabilities, ElementEntry, LoadState, NavResult,
+    Observation, ObserveOpts,
 };
 use crate::injected::{InjectError, InjectionManager};
 use crate::launch::{LaunchConfig, Launched, launch_chrome, terminate_launched_process_tree};
@@ -123,189 +121,6 @@ pub(crate) fn map_inject_err(e: InjectError) -> BrowserError {
         InjectError::JsException(m) => BrowserError::Other(m),
         InjectError::Protocol(m) => BrowserError::Other(m),
     }
-}
-
-fn raw_input_blocked() -> BrowserError {
-    BrowserError::Blocked {
-        reason: "invalid raw browser input".into(),
-    }
-}
-
-fn finite_positive(value: f64) -> Option<f64> {
-    value.is_finite().then_some(value).filter(|value| *value > 0.0)
-}
-
-fn virtual_key_code_for_browser_code(code: &str) -> Option<i64> {
-    if let Some(suffix) = code.strip_prefix("Key")
-        && suffix.len() == 1
-    {
-        return suffix
-            .as_bytes()
-            .first()
-            .copied()
-            .filter(u8::is_ascii_uppercase)
-            .map(i64::from);
-    }
-    if let Some(suffix) = code.strip_prefix("Digit")
-        && suffix.len() == 1
-    {
-        return suffix
-            .as_bytes()
-            .first()
-            .copied()
-            .filter(u8::is_ascii_digit)
-            .map(i64::from);
-    }
-    if let Some(suffix) = code.strip_prefix("Numpad")
-        && suffix.len() == 1
-    {
-        return suffix
-            .as_bytes()
-            .first()
-            .copied()
-            .filter(u8::is_ascii_digit)
-            .map(|digit| i64::from(digit - b'0') + 96);
-    }
-    Some(match code {
-        "Backspace" => 8,
-        "Tab" => 9,
-        "Enter" | "NumpadEnter" => 13,
-        "ShiftLeft" | "ShiftRight" => 16,
-        "ControlLeft" | "ControlRight" => 17,
-        "AltLeft" | "AltRight" => 18,
-        "Pause" => 19,
-        "CapsLock" => 20,
-        "Escape" => 27,
-        "Space" => 32,
-        "PageUp" => 33,
-        "PageDown" => 34,
-        "End" => 35,
-        "Home" => 36,
-        "ArrowLeft" => 37,
-        "ArrowUp" => 38,
-        "ArrowRight" => 39,
-        "ArrowDown" => 40,
-        "Insert" => 45,
-        "Delete" => 46,
-        "MetaLeft" => 91,
-        "MetaRight" => 92,
-        "ContextMenu" => 93,
-        "NumpadMultiply" => 106,
-        "NumpadAdd" => 107,
-        "NumpadSubtract" => 109,
-        "NumpadDecimal" => 110,
-        "NumpadDivide" => 111,
-        "NumLock" => 144,
-        "ScrollLock" => 145,
-        "Semicolon" => 186,
-        "Equal" => 187,
-        "Comma" => 188,
-        "Minus" => 189,
-        "Period" => 190,
-        "Slash" => 191,
-        "Backquote" => 192,
-        "BracketLeft" => 219,
-        "Backslash" => 220,
-        "BracketRight" => 221,
-        "Quote" => 222,
-        _ => return None,
-    })
-}
-
-fn browser_mouse_button_bit(button: BrowserMouseButton) -> u8 {
-    match button {
-        BrowserMouseButton::None => 0,
-        BrowserMouseButton::Left => 1,
-        BrowserMouseButton::Right => 2,
-        BrowserMouseButton::Middle => 4,
-        BrowserMouseButton::Back => 8,
-        BrowserMouseButton::Forward => 16,
-    }
-}
-
-fn cdp_mouse_button(
-    button: BrowserMouseButton,
-) -> chromiumoxide::cdp::browser_protocol::input::MouseButton {
-    use chromiumoxide::cdp::browser_protocol::input::MouseButton;
-    match button {
-        BrowserMouseButton::None => MouseButton::None,
-        BrowserMouseButton::Left => MouseButton::Left,
-        BrowserMouseButton::Middle => MouseButton::Middle,
-        BrowserMouseButton::Right => MouseButton::Right,
-        BrowserMouseButton::Back => MouseButton::Back,
-        BrowserMouseButton::Forward => MouseButton::Forward,
-    }
-}
-
-async fn send_browser_mouse_event(
-    conn: &Connection,
-    session: &str,
-    kind: chromiumoxide::cdp::browser_protocol::input::DispatchMouseEventType,
-    input: &crate::engine::BrowserMouseInput,
-    buttons: u8,
-    click_count: Option<i64>,
-) -> Result<(), BrowserError> {
-    use chromiumoxide::cdp::browser_protocol::input::DispatchMouseEventParams;
-    let mut params = DispatchMouseEventParams::new(kind, input.x, input.y);
-    params.modifiers = Some(input.modifiers.cdp_bits());
-    params.button = Some(cdp_mouse_button(input.button));
-    params.buttons = Some(i64::from(buttons));
-    params.click_count = click_count;
-    conn.send::<DispatchMouseEventParams>(session, &params)
-        .await
-        .map_err(map_transport_err)?;
-    Ok(())
-}
-
-async fn send_browser_key_event(
-    conn: &Connection,
-    session: &str,
-    input: &crate::engine::BrowserKeyInput,
-) -> Result<(), BrowserError> {
-    use chromiumoxide::cdp::browser_protocol::input::{
-        DispatchKeyEventParams, DispatchKeyEventType,
-    };
-    if !browser_key_code_is_allowed(&input.code)
-        || !browser_key_value_is_allowed(&input.key)
-        || input.code.len() > 64
-    {
-        return Err(raw_input_blocked());
-    }
-    let virtual_key =
-        virtual_key_code_for_browser_code(&input.code).ok_or_else(raw_input_blocked)?;
-    let event_type = match input.kind {
-        BrowserKeyEventKind::Down => DispatchKeyEventType::KeyDown,
-        BrowserKeyEventKind::Up => DispatchKeyEventType::KeyUp,
-    };
-    let mut params = DispatchKeyEventParams::new(event_type);
-    params.modifiers = Some(input.modifiers.cdp_bits());
-    params.key = Some(input.key.clone());
-    params.code = Some(input.code.clone());
-    params.windows_virtual_key_code = Some(virtual_key);
-    params.native_virtual_key_code = Some(virtual_key);
-    params.auto_repeat = Some(input.repeat);
-    params.is_keypad = Some(input.code.starts_with("Numpad"));
-    params.location = Some(if input.code.ends_with("Right") {
-        2
-    } else if input.code.ends_with("Left") {
-        1
-    } else if input.code.starts_with("Numpad") {
-        3
-    } else {
-        0
-    });
-    if input.kind == BrowserKeyEventKind::Down
-        && !input.modifiers.has_command_modifier()
-        && input.key.chars().count() == 1
-        && input.key.chars().all(|ch| !ch.is_control())
-    {
-        params.text = Some(input.key.clone());
-        params.unmodified_text = Some(input.key.clone());
-    }
-    conn.send::<DispatchKeyEventParams>(session, &params)
-        .await
-        .map_err(map_transport_err)?;
-    Ok(())
 }
 
 #[derive(Clone)]
@@ -1367,39 +1182,13 @@ pub struct CdpBackend {
     /// 助手、绝不回调这四个 trait 方法（已对抗式 grep 校验），故非重入锁不会自死锁。
     op_mutex: LaneOperationGate,
     /// Serializes lazy target replacement after the final tab crashes.
-    ///
-    /// The normal Lane operation gate already covers agent actions, but viewer
-    /// capture may resolve a target concurrently. Keeping recovery in its own
-    /// short-lived gate guarantees one replacement target per Lane without
-    /// introducing a Host-global lock.
+    /// Keeping recovery in its own short-lived gate guarantees one replacement
+    /// target per Lane without introducing a Host-global lock.
     target_recovery_gate: AsyncMutex<()>,
-    /// At most one `Page.startScreencast` producer is active per lane. The
-    /// producer acknowledges every CDP frame immediately and publishes into a
-    /// one-slot watch channel, so slow viewers can never accumulate frames.
-    viewer_screencast: AsyncMutex<Option<ViewerScreencastState>>,
     /// Known-secret exact-blackout registry (shared with facade via `Arc`). Debug serializers
     /// read this set and `String::replace` each value with `[KNOWN_SECRET_REDACTED]` before
     /// heuristic redaction passes. See [`crate::KnownSecretValues`] doc for invariants.
     known_secret_values: crate::KnownSecretValues,
-}
-
-struct ViewerScreencastState {
-    target_id: String,
-    session_id: String,
-    latest: watch::Receiver<Option<BrowserViewerFrame>>,
-    cancel: CancellationToken,
-    task: tokio::task::JoinHandle<()>,
-}
-
-impl Drop for CdpBackend {
-    fn drop(&mut self) {
-        if let Ok(mut state) = self.viewer_screencast.try_lock()
-            && let Some(state) = state.take()
-        {
-            state.cancel.cancel();
-            state.task.abort();
-        }
-    }
 }
 
 impl CdpBackend {
@@ -1603,7 +1392,6 @@ impl CdpBackend {
             // 引擎级 observe⊥act 串行门（见字段 doc）。每引擎一把,初始空闲。
             op_mutex: LaneOperationGate::default(),
             target_recovery_gate: AsyncMutex::new(()),
-            viewer_screencast: AsyncMutex::new(None),
             // Known-secret blackout: store the shared Arc for debug serializers to read.
             known_secret_values,
         };
@@ -1744,7 +1532,6 @@ impl CdpBackend {
             display_available: host.display_available,
             op_mutex: LaneOperationGate::default(),
             target_recovery_gate: AsyncMutex::new(()),
-            viewer_screencast: AsyncMutex::new(None),
             known_secret_values,
         };
 
@@ -1775,7 +1562,6 @@ impl CdpBackend {
             return Ok(());
         }
         self.lane_closing.store(true, Ordering::Release);
-        self.stop_viewer_screencast_impl().await;
         self.lane_cancel.cancel();
         let target_ids = {
             let tabs = self.tabs.lock().await;
@@ -1838,15 +1624,14 @@ impl CdpBackend {
     ///
     /// `active_target` 指向的 tab 已崩溃/不在 `tabs` 时，先剔除崩溃记录并按 target id
     /// 确定性选择仍存活的 tab；没有 survivor 时按需创建 replacement target。整条恢复链由
-    /// lane-local gate 串行化，因此 agent/viewer 并发访问只会发布一个 replacement。
+    /// lane-local gate 串行化，因此并发访问只会发布一个 replacement。
     pub(crate) async fn active_tab_handles(&self) -> Result<TabHandles, BrowserError> {
         if self.lane_closing.load(Ordering::Acquire) {
             return Err(BrowserError::TargetClosed);
         }
 
         // Agent operations are already serialized by `op_mutex`; this
-        // additional Lane-local gate covers viewer target resolution too and
-        // makes final-tab replacement single-flight.
+        // additional Lane-local gate makes final-tab replacement single-flight.
         let _recovery = self.target_recovery_gate.lock().await;
         if self.lane_closing.load(Ordering::Acquire) {
             return Err(BrowserError::TargetClosed);
@@ -1906,7 +1691,7 @@ impl CdpBackend {
 
     /// Lazily create the replacement required after a Lane loses its final
     /// target. The recovery gate held by [`Self::active_tab_handles`] ensures
-    /// concurrent agent/viewer callers create at most one target.
+    /// concurrent callers create at most one target.
     async fn create_replacement_target(&self) -> Result<TabHandles, BrowserError> {
         use chromiumoxide::cdp::browser_protocol::target::CloseTargetParams;
 
@@ -2002,191 +1787,6 @@ impl CdpBackend {
             "created replacement target after the Lane lost its final tab"
         );
         Ok(handles)
-    }
-
-    /// Resolve an exact, full target id to this lane's immutable page handles.
-    /// This never consults `active_target`, so viewer input remains bound to
-    /// the frame it came from even if another operation switches tabs between
-    /// frame delivery and input dispatch.
-    async fn tab_handles_for_target(&self, target_id: &str) -> Result<TabHandles, BrowserError> {
-        if self.lane_closing.load(Ordering::Acquire) {
-            return Err(BrowserError::TargetClosed);
-        }
-        let guard = self.tabs.lock().await;
-        let tab = guard.get(target_id).ok_or(BrowserError::TargetClosed)?;
-        Ok(tab_handles(tab))
-    }
-
-    async fn start_viewer_screencast(
-        &self,
-        handles: &TabHandles,
-    ) -> Result<ViewerScreencastState, BrowserError> {
-        use chromiumoxide::cdp::browser_protocol::page::{
-            EventScreencastFrame, ScreencastFrameAckParams, StartScreencastFormat,
-            StartScreencastParams,
-        };
-
-        // Subscribe before starting so the first frame cannot race past us.
-        let mut events = self.conn.subscribe(
-            EventScreencastFrame::IDENTIFIER,
-            Some(&handles.session_id),
-        );
-        let params = StartScreencastParams::builder()
-            .format(StartScreencastFormat::Jpeg)
-            .quality(70)
-            .max_width(1_600)
-            .max_height(1_200)
-            .every_nth_frame(1)
-            .build();
-        if let Err(error) = self
-            .conn
-            .send::<StartScreencastParams>(&handles.session_id, &params)
-            .await
-        {
-            return match error {
-                TransportError::Cdp { code, message } => Err(BrowserError::Unsupported {
-                    capability: "viewer_screencast".into(),
-                    hint: format!("Page.startScreencast unavailable ({code}: {message})"),
-                }),
-                TransportError::Timeout => Err(BrowserError::Unsupported {
-                    capability: "viewer_screencast".into(),
-                    hint: "Page.startScreencast did not become available".into(),
-                }),
-                other => Err(map_transport_err(other)),
-            };
-        }
-
-        let (latest_tx, latest) = watch::channel(None);
-        let cancel = CancellationToken::new();
-        let task_cancel = cancel.clone();
-        let lane_cancel = self.lane_cancel.clone();
-        let conn = self.conn.clone();
-        let target_id = handles.target_id.clone();
-        let session_id = handles.session_id.clone();
-        let task_target_id = target_id.clone();
-        let task_session_id = session_id.clone();
-        let task = tokio::spawn(async move {
-            const MIN_PUBLISH_INTERVAL: Duration = Duration::from_millis(84);
-            let mut last_publish: Option<tokio::time::Instant> = None;
-            loop {
-                let event = tokio::select! {
-                    biased;
-                    _ = task_cancel.cancelled() => break,
-                    _ = lane_cancel.cancelled() => break,
-                    event = events.recv() => event,
-                };
-                let event = match event {
-                    Ok(event) => event,
-                    Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
-                        // CDP normally waits for each ack before producing the
-                        // next frame. Keep the bounded subscription alive if a
-                        // transport burst nevertheless overflowed it.
-                        tracing::debug!(
-                            target_id_suffix = %cdp_id_suffix(&task_target_id),
-                            skipped,
-                            "viewer screencast event subscriber lagged"
-                        );
-                        continue;
-                    }
-                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
-                };
-                let Ok(frame) =
-                    serde_json::from_value::<EventScreencastFrame>(event.params.clone())
-                else {
-                    continue;
-                };
-
-                // Ack before decoding or rate limiting. This is the flow-control
-                // boundary Chromium expects and prevents a slow consumer from
-                // stalling compositor capture.
-                let ack = ScreencastFrameAckParams::new(frame.session_id);
-                let ack_result = tokio::select! {
-                    biased;
-                    _ = task_cancel.cancelled() => break,
-                    _ = lane_cancel.cancelled() => break,
-                    result = conn.send::<ScreencastFrameAckParams>(&task_session_id, &ack) => result,
-                };
-                if let Err(error) = ack_result {
-                    tracing::debug!(
-                        target_id_suffix = %cdp_id_suffix(&task_target_id),
-                        %error,
-                        "viewer screencast frame acknowledgement failed"
-                    );
-                    break;
-                }
-
-                let now = tokio::time::Instant::now();
-                if last_publish
-                    .is_some_and(|previous| now.duration_since(previous) < MIN_PUBLISH_INTERVAL)
-                {
-                    continue;
-                }
-                let Some(image) = decode_base64(frame.data.as_ref()) else {
-                    continue;
-                };
-                let css_viewport_width = finite_positive(frame.metadata.device_width);
-                let css_viewport_height = finite_positive(frame.metadata.device_height);
-                latest_tx.send_replace(Some(BrowserViewerFrame {
-                    image,
-                    format: BrowserViewerImageFormat::Jpeg,
-                    target_id: Some(task_target_id.clone()),
-                    css_viewport_width,
-                    css_viewport_height,
-                    // The authoritative CSS dimensions above are used for
-                    // coordinate mapping. Keep DPR neutral rather than making
-                    // an incorrect inference from a downscaled JPEG.
-                    device_pixel_ratio: 1.0,
-                }));
-                last_publish = Some(now);
-            }
-        });
-
-        Ok(ViewerScreencastState {
-            target_id,
-            session_id,
-            latest,
-            cancel,
-            task,
-        })
-    }
-
-    async fn stop_viewer_screencast_state(&self, state: ViewerScreencastState) {
-        use chromiumoxide::cdp::browser_protocol::page::StopScreencastParams;
-        state.cancel.cancel();
-        state.task.abort();
-        let _ = self
-            .conn
-            .send_may_fail::<StopScreencastParams>(
-                &state.session_id,
-                &StopScreencastParams::default(),
-            )
-            .await;
-    }
-
-    async fn stop_viewer_screencast_impl(&self) {
-        let state = self.viewer_screencast.lock().await.take();
-        if let Some(state) = state {
-            self.stop_viewer_screencast_state(state).await;
-        }
-    }
-
-    async fn viewer_screencast_receiver(
-        &self,
-        handles: &TabHandles,
-    ) -> Result<watch::Receiver<Option<BrowserViewerFrame>>, BrowserError> {
-        let mut state = self.viewer_screencast.lock().await;
-        if let Some(current) = state.as_ref()
-            && current.target_id == handles.target_id
-        {
-            return Ok(current.latest.clone());
-        }
-        if let Some(previous) = state.take() {
-            self.stop_viewer_screencast_state(previous).await;
-        }
-        let next = self.start_viewer_screencast(handles).await?;
-        let receiver = next.latest.clone();
-        *state = Some(next);
-        Ok(receiver)
     }
 
     /// **Takeover seam: bring the headful browser window to the foreground.**
@@ -2772,82 +2372,6 @@ impl BrowserEngine for CdpBackend {
         })
     }
 
-    async fn capture_viewer_frame(&self) -> Result<BrowserViewerFrame, BrowserError> {
-        // Viewer frames are observational and intentionally bypass the
-        // lane-local op_mutex so a bounded capture does not queue behind a
-        // long navigation/action. The active target/session snapshot is still
-        // lane-owned, and cancellation remains authoritative.
-        let handles = self.active_tab_handles().await?;
-        let session = handles.session_id;
-        let params = CaptureScreenshotParams::builder()
-            .format(CaptureScreenshotFormat::Png)
-            .build();
-        let result = tokio::select! {
-            result = self.conn.send::<CaptureScreenshotParams>(&session, &params) => {
-                result.map_err(map_transport_err)?
-            }
-            _ = self.lane_cancel.cancelled() => return Err(BrowserError::TargetClosed),
-        };
-        let shot: CaptureScreenshotReturns = serde_json::from_value(result).map_err(|error| {
-            BrowserError::Other(format!("parse viewer captureScreenshot response: {error}"))
-        })?;
-        let image = decode_base64(shot.data.as_ref()).ok_or_else(|| {
-            BrowserError::Other("viewer captureScreenshot returned non-base64 data".into())
-        })?;
-        let mut dpr_params = EvaluateParams::new("window.devicePixelRatio".to_owned());
-        dpr_params.return_by_value = Some(true);
-        let device_pixel_ratio = self
-            .conn
-            .send::<EvaluateParams>(&session, &dpr_params)
-            .await
-            .ok()
-            .and_then(|result| {
-                result
-                    .get("result")
-                    .and_then(|value| value.get("value"))
-                    .and_then(serde_json::Value::as_f64)
-            })
-            .filter(|dpr| dpr.is_finite() && *dpr > 0.0)
-            .unwrap_or(1.0);
-        Ok(BrowserViewerFrame {
-            image,
-            format: BrowserViewerImageFormat::Png,
-            target_id: Some(handles.target_id),
-            css_viewport_width: None,
-            css_viewport_height: None,
-            device_pixel_ratio,
-        })
-    }
-
-    async fn viewer_screencast_frame(&self) -> Result<BrowserViewerFrame, BrowserError> {
-        let handles = self.active_tab_handles().await?;
-        let mut latest = self.viewer_screencast_receiver(&handles).await?;
-        if let Some(frame) = latest.borrow().clone() {
-            return Ok(frame);
-        }
-        let changed = tokio::select! {
-            biased;
-            _ = self.lane_cancel.cancelled() => return Err(BrowserError::TargetClosed),
-            result = tokio::time::timeout(Duration::from_secs(3), latest.changed()) => result,
-        };
-        match changed {
-            Ok(Ok(())) => latest.borrow().clone().ok_or_else(|| {
-                BrowserError::Other("viewer screencast produced an empty frame".into())
-            }),
-            Ok(Err(_)) => Err(BrowserError::Other(
-                "viewer screencast producer stopped".into(),
-            )),
-            Err(_) => Err(BrowserError::Other(
-                "viewer screencast did not produce a frame in time".into(),
-            )),
-        }
-    }
-
-    async fn stop_viewer_screencast(&self) -> Result<(), BrowserError> {
-        self.stop_viewer_screencast_impl().await;
-        Ok(())
-    }
-
     async fn observe(&self, opts: &ObserveOpts) -> Result<Observation, BrowserError> {
         // observe⊥act：整段快照持 op_mutex，动作不可在序列化中途改 DOM（否则交回模型陈旧 ref）。
         let _op = tokio::select! {
@@ -2912,137 +2436,6 @@ impl BrowserEngine for CdpBackend {
 
     async fn tabs(&self) -> Result<Vec<BrowserTabInfo>, BrowserError> {
         self.structured_tab_inventory().await
-    }
-
-    async fn dispatch_raw_input(
-        &self,
-        target_id: &str,
-        event: &BrowserRawInput,
-    ) -> Result<(), BrowserError> {
-        use chromiumoxide::cdp::browser_protocol::input::{
-            DispatchMouseEventParams, DispatchMouseEventType, InsertTextParams, MouseButton,
-        };
-
-        let _op = tokio::select! {
-            guard = self.op_mutex.lock() => guard,
-            _ = self.lane_cancel.cancelled() => return Err(BrowserError::TargetClosed),
-        };
-        let session = self.tab_handles_for_target(target_id).await?.session_id;
-        match event {
-            BrowserRawInput::Mouse(input) => {
-                if !input.x.is_finite()
-                    || !input.y.is_finite()
-                    || input.x < 0.0
-                    || input.y < 0.0
-                    || input.x > 1_000_000.0
-                    || input.y > 1_000_000.0
-                    || input.buttons > 31
-                    || (input.kind != BrowserMouseEventKind::Move
-                        && input.button == BrowserMouseButton::None)
-                {
-                    return Err(raw_input_blocked());
-                }
-                match input.kind {
-                    BrowserMouseEventKind::Move => {
-                        send_browser_mouse_event(
-                            &self.conn,
-                            &session,
-                            DispatchMouseEventType::MouseMoved,
-                            input,
-                            input.buttons,
-                            None,
-                        )
-                        .await
-                    }
-                    BrowserMouseEventKind::Down => {
-                        send_browser_mouse_event(
-                            &self.conn,
-                            &session,
-                            DispatchMouseEventType::MousePressed,
-                            input,
-                            input.buttons,
-                            Some(1),
-                        )
-                        .await
-                    }
-                    BrowserMouseEventKind::Up => {
-                        send_browser_mouse_event(
-                            &self.conn,
-                            &session,
-                            DispatchMouseEventType::MouseReleased,
-                            input,
-                            input.buttons,
-                            Some(1),
-                        )
-                        .await
-                    }
-                    BrowserMouseEventKind::Click => {
-                        let bit = browser_mouse_button_bit(input.button);
-                        send_browser_mouse_event(
-                            &self.conn,
-                            &session,
-                            DispatchMouseEventType::MousePressed,
-                            input,
-                            input.buttons | bit,
-                            Some(1),
-                        )
-                        .await?;
-                        send_browser_mouse_event(
-                            &self.conn,
-                            &session,
-                            DispatchMouseEventType::MouseReleased,
-                            input,
-                            input.buttons & !bit,
-                            Some(1),
-                        )
-                        .await
-                    }
-                }
-            }
-            BrowserRawInput::Wheel(input) => {
-                if !input.x.is_finite()
-                    || !input.y.is_finite()
-                    || !input.delta_x.is_finite()
-                    || !input.delta_y.is_finite()
-                    || input.x < 0.0
-                    || input.y < 0.0
-                    || input.x > 1_000_000.0
-                    || input.y > 1_000_000.0
-                    || input.delta_x.abs() > 10_000.0
-                    || input.delta_y.abs() > 10_000.0
-                {
-                    return Err(raw_input_blocked());
-                }
-                let mut params = DispatchMouseEventParams::new(
-                    DispatchMouseEventType::MouseWheel,
-                    input.x,
-                    input.y,
-                );
-                params.modifiers = Some(input.modifiers.cdp_bits());
-                params.button = Some(MouseButton::None);
-                params.buttons = Some(0);
-                params.delta_x = Some(input.delta_x);
-                params.delta_y = Some(input.delta_y);
-                self.conn
-                    .send::<DispatchMouseEventParams>(&session, &params)
-                    .await
-                    .map_err(map_transport_err)?;
-                Ok(())
-            }
-            BrowserRawInput::Key(input) => {
-                send_browser_key_event(&self.conn, &session, input).await
-            }
-            BrowserRawInput::Text(text) => {
-                if !browser_text_input_is_allowed(text) {
-                    return Err(raw_input_blocked());
-                }
-                self.conn
-                    .send::<InsertTextParams>(&session, &InsertTextParams::new(text.clone()))
-                    .await
-                    .map_err(map_transport_err)?;
-                Ok(())
-            }
-        }
     }
 
     async fn click_at_css_point(&self, x: f64, y: f64) -> Result<(), BrowserError> {
@@ -6882,7 +6275,6 @@ mod tests {
             display_available: false,
             op_mutex: LaneOperationGate::default(),
             target_recovery_gate: AsyncMutex::new(()),
-            viewer_screencast: AsyncMutex::new(None),
             known_secret_values: crate::KnownSecretValues::default(),
         }
     }

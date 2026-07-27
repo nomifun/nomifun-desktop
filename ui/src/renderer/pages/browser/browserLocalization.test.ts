@@ -32,7 +32,6 @@ const componentSources = [
   new URL('./BrowserHostDiagnostics.tsx', import.meta.url),
   new URL('./BrowserInventoryTree.tsx', import.meta.url),
   new URL('./BrowserLaneDetails.tsx', import.meta.url),
-  new URL('./viewer/EmbeddedBrowserViewer.tsx', import.meta.url),
   new URL(
     '../../components/layout/Sider/SiderNav/SiderBrowserEntry.tsx',
     import.meta.url
@@ -75,8 +74,6 @@ describe('Browser UI localization', () => {
       'Waiting for browser capacity',
       'Lane details',
       'You control this lane',
-      'Retry viewer',
-      'Viewer idle',
     ];
 
     for (const phrase of hardcodedPhrases) {

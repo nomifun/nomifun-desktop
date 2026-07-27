@@ -57,8 +57,8 @@ const conversationIdFromLocationState = (state: unknown): string | null => {
  *
  * Explicit Browser query scope always wins. When a caller has supplied an
  * existing router state, use that next; a canonical conversation route is
- * also accepted for embedded/deep-link renderers. Otherwise return null and
- * let inventory ordering use its existing activity-based fallback.
+ * also accepted for deep-link routing. Otherwise return null and let the
+ * status-only inventory ordering use its existing activity-based fallback.
  */
 export const resolveBrowserConversationId = ({
   requestedConversationId,

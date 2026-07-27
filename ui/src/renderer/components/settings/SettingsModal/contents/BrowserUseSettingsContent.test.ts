@@ -71,15 +71,19 @@ const createManualScheduler = () => {
 };
 
 describe('Browser Use settings contract', () => {
-  test('reads silent only for migration and persists the three-state display mode', () => {
+  test('reads silent only for migration and exposes external as the only display mode', () => {
     const source = readSource(new URL('./BrowserUseSettingsContent.tsx', import.meta.url));
 
     expect(source.includes("configService.get('agent.browserUse.silent')")).toBe(true);
     expect(source.includes("configService.set('agent.browserUse.displayMode'")).toBe(true);
     expect(/configService\.(?:set|setLocal|setBatch)\('agent\.browserUse\.silent'/.test(source)).toBe(false);
-    expect(source.includes("<Radio value='embedded'>")).toBe(true);
-    expect(source.includes("<Radio value='external'>")).toBe(true);
-    expect(source.includes("<Radio value='headless'>")).toBe(true);
+    expect(source.includes("<Radio value='embedded'>")).toBe(false);
+    expect(source.includes("<Radio value='external'>")).toBe(false);
+    expect(source.includes("<Radio value='headless'>")).toBe(false);
+    expect(source.includes("t('settings.browserDisplayModeExternal')")).toBe(true);
+    expect(source.includes("t('settings.browserDisplayModeDesc')")).toBe(false);
+    expect(source.includes("persistBoolean('agent.browserUse.takeover'")).toBe(true);
+    expect(source.includes("configService.get('agent.browserUse.takeover')")).toBe(true);
   });
 
   test('exposes the three resource presets and advanced resource fields', () => {
@@ -602,9 +606,7 @@ describe('Browser Use settings contract', () => {
     );
     const requiredKeys = [
       'browserDisplayMode',
-      'browserDisplayModeEmbedded',
       'browserDisplayModeExternal',
-      'browserDisplayModeHeadless',
       'browserResourcePolicy',
       'browserResourcePolicyAutomatic',
       'browserResourcePolicySaving',

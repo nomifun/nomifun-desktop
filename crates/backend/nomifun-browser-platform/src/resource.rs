@@ -59,9 +59,8 @@ pub struct ResourcePolicy {
 
 impl ResourcePolicy {
     pub fn automatic(total_memory_bytes: u64, logical_cpus: usize) -> Self {
-        let reserved_memory_bytes = (total_memory_bytes / 5)
-            .max(2 * GIB)
-            .min(MAX_RESERVED_MEMORY_BYTES);
+        let reserved_memory_bytes =
+            (total_memory_bytes / 5).clamp(2 * GIB, MAX_RESERVED_MEMORY_BYTES);
         let browser_budget = ((total_memory_bytes as f64) * 0.4) as u64;
         let memory_permits = browser_budget
             .saturating_sub(reserved_memory_bytes.min(browser_budget))
@@ -281,10 +280,9 @@ pub struct ResourceWorkload {
     pub queued_lanes: usize,
     pub queued_first_lanes: usize,
     pub frozen_lanes: usize,
-    pub viewer_lanes: usize,
     pub primary_lanes: usize,
     pub active_operation_permits: usize,
-    /// Weighted visual/PDF/frame-encoding permits.
+    /// Weighted Agent screenshot/PDF permits.
     pub active_heavy_operation_permits: usize,
     pub active_lane_ewma_bytes: u64,
     pub queued_lane_estimate_bytes: u64,
@@ -297,7 +295,7 @@ pub struct ResourceDecision {
     pub admit_expansion_lane: bool,
     /// Shared weighted budget for newly dispatched driver operations.
     ///
-    /// Ordinary operations cost one unit and visual/PDF/frame work costs two.
+    /// Ordinary operations cost one unit and screenshot/PDF work costs two.
     /// Unlike `recommended_concurrency`, this is a total live hard limit and
     /// therefore does not subtract operations which already hold permits.
     pub operation_weight_limit: usize,
@@ -361,19 +359,14 @@ impl ResourcePolicy {
         let system_headroom = telemetry.available_memory_bytes.saturating_sub(reserved);
         let browser_headroom = browser_limit.saturating_sub(telemetry.chromium_rss_bytes);
         let admission_headroom = system_headroom.min(browser_headroom);
-        // Heavy operations and live viewers can allocate between samples. Keep
-        // a bounded transient reserve so a Lane promotion does not spend their
-        // entire safety margin using stale RSS.
+        // Heavy operations can allocate between samples. Keep a bounded
+        // transient reserve so a Lane promotion does not spend their entire
+        // safety margin using stale RSS.
         let transient_reserve = predicted_lane_bytes
             .saturating_mul(
                 u64::try_from(workload.active_heavy_operation_permits).unwrap_or(u64::MAX),
             )
-            .saturating_div(2)
-            .saturating_add(
-                predicted_lane_bytes
-                    .saturating_mul(u64::try_from(workload.viewer_lanes).unwrap_or(u64::MAX))
-                    .saturating_div(4),
-            );
+            .saturating_div(2);
         let first_lane_budget = predicted_lane_bytes.saturating_add(transient_reserve);
         // Expansion may not consume the budget needed by the oldest waiting
         // first Lane. An active Primary identity also keeps a small interactive
@@ -483,7 +476,6 @@ fn available_operation_concurrency(
                 .active_heavy_operation_permits
                 .saturating_mul(2),
         )
-        .saturating_sub(workload.viewer_lanes)
         .saturating_sub(usize::from(workload.primary_lanes > 0))
         .max(1)
 }
@@ -718,7 +710,7 @@ mod tests {
     }
 
     #[test]
-    fn permits_viewers_and_primary_reserve_real_recommended_capacity() {
+    fn permits_and_primary_reserve_real_recommended_capacity() {
         let policy = ResourcePolicy::automatic(32 * GIB, 16);
         let telemetry = ResourceTelemetry {
             total_memory_bytes: 32 * GIB,
@@ -735,7 +727,6 @@ mod tests {
                 &telemetry,
                 &ResourceWorkload {
                     active_lanes: 3,
-                    viewer_lanes: 1,
                     primary_lanes: 2,
                     active_operation_permits: 2,
                     active_heavy_operation_permits: 1,
@@ -745,7 +736,7 @@ mod tests {
             )
             .recommended_concurrency;
 
-        assert_eq!(loaded, baseline.saturating_sub(6).max(1));
+        assert_eq!(loaded, baseline.saturating_sub(5).max(1));
     }
 
     #[test]

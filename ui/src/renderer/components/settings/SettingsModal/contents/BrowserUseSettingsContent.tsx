@@ -8,10 +8,8 @@ import { isBackendHttpError } from '@/common/adapter/httpBridge';
 import { configService } from '@/common/config/configService';
 import {
   browserResourcePolicyApi,
-  isBrowserDisplayMode,
   isBrowserResourcePolicyUnavailableError,
   migrateBrowserDisplayMode,
-  type BrowserDisplayMode,
   type BrowserResourcePolicy,
   type BrowserResourcePolicyAdvanced,
   type BrowserResourcePolicyPreset,
@@ -352,7 +350,6 @@ const BrowserUseSettingsContent: React.FC = () => {
   const viewMode = useSettingsViewMode();
   const isPageMode = viewMode === 'page';
   const [browserUse, setBrowserUse] = useState(false);
-  const [displayMode, setDisplayMode] = useState<BrowserDisplayMode>('embedded');
   const [source, setSource] = useState<BrowserSource>('system');
   const [persistentLogin, setPersistentLogin] = useState(true);
   const [fullPower, setFullPower] = useState(false);
@@ -385,7 +382,6 @@ const BrowserUseSettingsContent: React.FC = () => {
       displayMode: configService.get('agent.browserUse.displayMode'),
       silent: configService.get('agent.browserUse.silent'),
     });
-    setDisplayMode(displayModeMigration.displayMode);
     if (displayModeMigration.shouldPersist) {
       configService.set('agent.browserUse.displayMode', displayModeMigration.displayMode).catch(() => {
         configService.setLocal('agent.browserUse.displayMode', undefined);
@@ -396,6 +392,8 @@ const BrowserUseSettingsContent: React.FC = () => {
     setPersistentLogin(storedPersistentLogin);
     setFullPower(storedPersistentLogin ? false : storedFullPower);
     setSiteMemory(configService.get('agent.browserUse.siteMemory') ?? false);
+    // This setting controls approval for irreversible Agent actions. It is not
+    // the removed Browser viewer's user-input takeover capability.
     setTakeover(configService.get('agent.browserUse.takeover') ?? true);
     setUnrestrictedApproval(configService.get('agent.browserUse.unrestrictedApproval') ?? false);
     setVisualFallback(configService.get('agent.browserUse.visualFallback') ?? false);
@@ -464,7 +462,7 @@ const BrowserUseSettingsContent: React.FC = () => {
     void loadResourcePolicy();
   }, [canManageBrowserSettings, loadResourcePolicy]);
 
-  // Phase 2b: reflect whether a login browser is already open (global singleton).
+  // Phase 2b: reflect whether the managed Primary login window is already open.
   useEffect(() => {
     if (!canManagePrimaryIdentity) {
       setLoginOpen(false);
@@ -482,7 +480,7 @@ const BrowserUseSettingsContent: React.FC = () => {
     };
   }, [canManagePrimaryIdentity]);
 
-  // Toggle the user-visible login window for the selected browser source.
+  // Toggle the managed Primary login window for the selected browser source.
   const handleLoginToggle = useCallback(async () => {
     if (!canManagePrimaryIdentity || loginBusy) return;
     setLoginBusy(true);
@@ -525,21 +523,8 @@ const BrowserUseSettingsContent: React.FC = () => {
     [persistBoolean]
   );
 
-  const handleDisplayModeChange = useCallback(
-    (value: string) => {
-      if (!isBrowserDisplayMode(value)) return;
-      const previous = displayMode;
-      setDisplayMode(value);
-      configService.set('agent.browserUse.displayMode', value).catch(() => {
-        setDisplayMode(previous);
-        configService.setLocal('agent.browserUse.displayMode', previous);
-        Message.error(t('settings.browserDisplayModeSaveFailed'));
-      });
-    },
-    [displayMode, t]
-  );
-
-  // Browser source is orthogonal to display mode.
+  // Browser source only selects the executable. Both choices remain isolated,
+  // managed instances shown in an external window.
   const handleSourceChange = useCallback(
     (value: string) => {
       const next: BrowserSource = value === 'system' ? 'system' : 'managed';
@@ -742,20 +727,10 @@ const BrowserUseSettingsContent: React.FC = () => {
                   <Radio value='system'>{t('settings.browserSourceSystem')}</Radio>
                 </RadioGroup>
               </PreferenceRow>
-              <PreferenceRow
-                label={t('settings.browserDisplayMode')}
-                description={t('settings.browserDisplayModeDesc')}
-              >
-                <RadioGroup
-                  type='button'
-                  value={displayMode}
-                  disabled={!browserUse}
-                  onChange={handleDisplayModeChange}
-                >
-                  <Radio value='embedded'>{t('settings.browserDisplayModeEmbedded')}</Radio>
-                  <Radio value='external'>{t('settings.browserDisplayModeExternal')}</Radio>
-                  <Radio value='headless'>{t('settings.browserDisplayModeHeadless')}</Radio>
-                </RadioGroup>
+              <PreferenceRow label={t('settings.browserDisplayMode')}>
+                <span className='text-13px text-t-secondary'>
+                  {t('settings.browserDisplayModeExternal')}
+                </span>
               </PreferenceRow>
               {canManagePrimaryIdentity && (
                 <PreferenceRow
