@@ -8,7 +8,7 @@
 //! 手动跑（本机 Windows 有系统 Chrome）：
 //!   set NOMIFUN_CHROME_BINARY=...\chrome.exe
 //!   cargo nextest run -p nomi-browser-engine --run-ignored all -E 'test(single_tab)'
-//! headful 用例会开一个**可见** chrome 窗口（验 keep-alive 在 headful 下生效）。
+//! headful 用例会开一个启动时最小化的真 Chrome 窗口（验 keep-alive 在 headful 下生效）。
 //! 跑完核对任务管理器无残留 chrome（Builder kill_on_drop 应自动清）。
 
 mod common;

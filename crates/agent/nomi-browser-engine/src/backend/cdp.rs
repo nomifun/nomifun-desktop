@@ -1791,8 +1791,8 @@ impl CdpBackend {
 
     /// **Takeover seam: bring the headful browser window to the foreground.**
     ///
-    /// - Headful + display available → sends `Page.bringToFront` (CDP) on the active
-    ///   page session + `Target.activateTarget` on the browser session. Returns `Ok(())`.
+    /// - Headful + display available → resolves the active target's real browser window,
+    ///   restores it to `normal`, then activates the active target/tab. Returns `Ok(())`.
     /// - Headless or no display → returns `Err(BrowserError::Unsupported)` with
     ///   capability="takeover" so the caller can map it to [`TakeoverResolution::Unavailable`].
     ///
@@ -1807,28 +1807,52 @@ impl CdpBackend {
             });
         }
 
-        // Get the active page session.
+        // Resolve both handles before issuing any window-management command. The
+        // target id is required because this command runs on the browser session.
         let handles = self.active_tab_handles().await?;
-        let session = handles.session_id.as_str();
+        use chromiumoxide::cdp::browser_protocol::browser::{
+            Bounds, GetWindowForTargetParams, GetWindowForTargetReturns, SetWindowBoundsParams,
+            WindowState,
+        };
+        use chromiumoxide::cdp::browser_protocol::target::ActivateTargetParams;
 
-        // Page.bringToFront — brings the page to front (activates the tab in the window
-        // and focuses the window). This is the primary CDP command for foregrounding.
-        use chromiumoxide::cdp::browser_protocol::page::BringToFrontParams;
+        // Page.bringToFront/Target.activateTarget alone do not restore a window
+        // created with --start-minimized. Ask Chromium for the native window that
+        // owns this target, then explicitly restore that exact window first.
+        let window = self
+            .conn
+            .send::<GetWindowForTargetParams>(
+                ROOT_SESSION,
+                &GetWindowForTargetParams::builder()
+                    .target_id(handles.target_id.clone())
+                    .build(),
+            )
+            .await
+            .map_err(map_transport_err)?;
+        let window: GetWindowForTargetReturns = serde_json::from_value(window)
+            .map_err(|_| BrowserError::Other("invalid Browser.getWindowForTarget response".into()))?;
+        let restore = SetWindowBoundsParams::new(
+            window.window_id,
+            Bounds::builder().window_state(WindowState::Normal).build(),
+        );
         let _ = self
             .conn
-            .send::<BringToFrontParams>(session, &BringToFrontParams::default())
+            .send::<SetWindowBoundsParams>(ROOT_SESSION, &restore)
             .await
             .map_err(map_transport_err)?;
 
-        // Also activate the target at the browser level (best-effort, like switch_tab).
-        use chromiumoxide::cdp::browser_protocol::target::ActivateTargetParams;
+        // Activate only after the native window has been restored so Chromium can
+        // select the requested tab in a visible window. Unlike switch_tab's
+        // cosmetic best-effort activation, this trusted foreground seam reports a
+        // failure if activation itself fails.
         let _ = self
             .conn
             .send::<ActivateTargetParams>(
                 ROOT_SESSION,
                 &ActivateTargetParams::new(handles.target_id.clone()),
             )
-            .await;
+            .await
+            .map_err(map_transport_err)?;
 
         Ok(())
     }
@@ -2005,8 +2029,12 @@ async fn create_page_session(
     // 1) 先订阅 attach 事件（在 createTarget 之前，避免错过）。
     let mut attached_rx = conn.subscribe(EventAttachedToTarget::IDENTIFIER, None);
 
-    // 2) 在根 session 上建 page target（默认 browser context）。
-    let params = CreateTargetParams::new("about:blank");
+    // 2) 在根 session 上建 page target（默认 browser context）。始终显式要求后台
+    // target：Primary Host 虽然是 headful，普通 Agent Lane 的创建也不能把最小化的
+    // 受管窗口恢复或抢占当前焦点。受信任的 Browser 管理入口会单独恢复窗口并激活
+    // target；headless Chrome 会忽略这个展示提示。
+    let mut params = CreateTargetParams::new("about:blank");
+    params.background = Some(true);
     let result = conn
         .send::<CreateTargetParams>(ROOT_SESSION, &params)
         .await
@@ -6215,6 +6243,70 @@ mod tests {
         (connection, server)
     }
 
+    async fn foreground_fake_connection() -> (
+        Connection,
+        tokio::task::JoinHandle<Vec<serde_json::Value>>,
+    ) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind foreground fake websocket");
+        let address = listener.local_addr().expect("read fake websocket address");
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("accept fake client");
+            let mut websocket = tokio_tungstenite::accept_async(stream)
+                .await
+                .expect("complete fake websocket handshake");
+            let mut requests = Vec::new();
+            while requests.len() < 3 {
+                let Some(Ok(tokio_tungstenite::tungstenite::Message::Text(text))) =
+                    futures_util::StreamExt::next(&mut websocket).await
+                else {
+                    break;
+                };
+                let request: serde_json::Value =
+                    serde_json::from_str(&text).expect("fake received valid json");
+                let id = request
+                    .get("id")
+                    .and_then(serde_json::Value::as_u64)
+                    .expect("fake request has id");
+                let method = request
+                    .get("method")
+                    .and_then(serde_json::Value::as_str)
+                    .expect("fake request has method");
+                let result = if method == "Browser.getWindowForTarget" {
+                    serde_json::json!({
+                        "windowId": 73,
+                        "bounds": {
+                            "left": 80,
+                            "top": 80,
+                            "width": 1280,
+                            "height": 800,
+                            "windowState": "minimized"
+                        }
+                    })
+                } else {
+                    serde_json::json!({})
+                };
+                requests.push(request);
+                futures_util::SinkExt::send(
+                    &mut websocket,
+                    tokio_tungstenite::tungstenite::Message::Text(
+                        serde_json::json!({ "id": id, "result": result })
+                            .to_string()
+                            .into(),
+                    ),
+                )
+                .await
+                .expect("fake sends foreground response");
+            }
+            requests
+        });
+        let connection = Connection::connect(&format!("ws://{address}"))
+            .await
+            .expect("connect foreground fake websocket");
+        (connection, server)
+    }
+
     fn inert_loop() -> tokio::task::JoinHandle<()> {
         tokio::spawn(std::future::pending::<()>())
     }
@@ -6277,6 +6369,44 @@ mod tests {
             target_recovery_gate: AsyncMutex::new(()),
             known_secret_values: crate::KnownSecretValues::default(),
         }
+    }
+
+    #[tokio::test]
+    async fn bring_to_front_restores_real_window_before_activating_target() {
+        let (connection, server) = foreground_fake_connection().await;
+        let mut backend = test_backend_with_tabs(connection.clone(), &["target-active"]);
+        backend.headful = true;
+        backend.display_available = true;
+
+        backend
+            .bring_to_front()
+            .await
+            .expect("foreground command sequence succeeds");
+
+        drop(backend);
+        connection.shutdown().await;
+        let requests = server.await.expect("fake server joins");
+        let methods = requests
+            .iter()
+            .map(|request| request["method"].as_str().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            methods,
+            vec![
+                "Browser.getWindowForTarget",
+                "Browser.setWindowBounds",
+                "Target.activateTarget",
+            ],
+            "the native window must be restored before target activation"
+        );
+        assert_eq!(requests[0]["params"]["targetId"], "target-active");
+        assert_eq!(requests[1]["params"]["windowId"], 73);
+        assert_eq!(requests[1]["params"]["bounds"]["windowState"], "normal");
+        assert_eq!(requests[2]["params"]["targetId"], "target-active");
+        assert!(
+            requests.iter().all(|request| request.get("sessionId").is_none()),
+            "Browser and Target window commands must use the root session"
+        );
     }
 
     #[tokio::test]

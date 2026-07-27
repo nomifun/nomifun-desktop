@@ -2408,6 +2408,102 @@ impl BrowserSessionHub {
         Ok(lane)
     }
 
+    /// Brings one authenticated user's running Primary Lane to the foreground.
+    ///
+    /// This is an application-authenticated, process-internal boundary. It
+    /// accepts a resolved user id rather than a model-controlled
+    /// [`CallerIdentity`], and dispatches through the dedicated driver seam
+    /// rather than manufacturing a `Manage` operation.
+    pub async fn foreground_lane_for_user(
+        &self,
+        user_id: &str,
+        lane_id: &BrowserLaneId,
+    ) -> Result<BrowserLaneSnapshot, BrowserPlatformError> {
+        if self.inner.shutting_down.load(Ordering::Acquire) {
+            return Err(BrowserPlatformError::shutting_down());
+        }
+        if user_id.trim().is_empty() {
+            return Err(foreground_operation_not_allowed(lane_id.clone()));
+        }
+
+        let lane = self
+            .inner
+            .lanes
+            .read()
+            .await
+            .get(lane_id)
+            .cloned()
+            .ok_or_else(|| BrowserPlatformError::lane_not_found(lane_id.clone()))?;
+
+        // Foregrounding participates in the same activity fence as driver
+        // operations. Pressure cleanup therefore cannot select the Lane after
+        // authorization but before the driver call, and close cancellation is
+        // observed while waiting for the fence.
+        let _activity_guard = tokio::select! {
+            guard = lane.activity_gate.read() => guard,
+            _ = lane.cancellation.cancelled() => return Err(lane_closed_error(lane_id.clone())),
+        };
+        let authorized_epoch = {
+            let snapshot = lane.snapshot.read().await;
+            if snapshot.caller.user_id != user_id {
+                return Err(foreground_operation_not_allowed(lane_id.clone()));
+            }
+            if lane.closing.load(Ordering::Acquire) {
+                return Err(lane_closed_error(lane_id.clone()));
+            }
+            if snapshot.identity_mode != BrowserIdentityMode::Primary {
+                return Err(foreground_needs_primary_identity_error(lane_id));
+            }
+            if snapshot.lifecycle_state != LaneLifecycleState::Running {
+                return Err(foreground_lane_not_ready_error(lane_id.clone()));
+            }
+            snapshot.browser_epoch
+        };
+        // Never acquire the driver lock while retaining a snapshot guard.
+        // Lane start/rebind installs the driver before updating its snapshot,
+        // so using the opposite order here could deadlock with recovery.
+        let driver = tokio::select! {
+            driver = lane.driver.read() => driver.clone(),
+            _ = lane.cancellation.cancelled() => return Err(lane_closed_error(lane_id.clone())),
+        }
+        .ok_or_else(|| foreground_lane_not_ready_error(lane_id.clone()))?;
+
+        tokio::select! {
+            result = driver.bring_to_front() => result,
+            _ = lane.cancellation.cancelled() => Err(lane_closed_error(lane_id.clone())),
+        }
+        .map_err(|error| error.for_lane(lane_id.clone()))?;
+
+        let snapshot = {
+            let mut snapshot = lane.snapshot.write().await;
+            // Revalidate before publishing success. A host recovery can change
+            // lifecycle state independently of the Lane activity fence.
+            if lane.closing.load(Ordering::Acquire) {
+                return Err(lane_closed_error(lane_id.clone()));
+            }
+            if snapshot.caller.user_id != user_id {
+                return Err(foreground_operation_not_allowed(lane_id.clone()));
+            }
+            if snapshot.identity_mode != BrowserIdentityMode::Primary {
+                return Err(foreground_needs_primary_identity_error(lane_id));
+            }
+            if snapshot.lifecycle_state != LaneLifecycleState::Running {
+                return Err(foreground_lane_not_ready_error(lane_id.clone()));
+            }
+            if snapshot.browser_epoch != authorized_epoch {
+                return Err(stale_browser_epoch_error(
+                    authorized_epoch,
+                    snapshot.browser_epoch,
+                )
+                .for_lane(lane_id.clone()));
+            }
+            snapshot.last_active_at_ms = self.inner.clock.now_ms();
+            snapshot.clone()
+        };
+        self.emit("lane_foregrounded", Some(&snapshot));
+        Ok(snapshot)
+    }
+
     pub async fn list_lanes(&self) -> Vec<BrowserLaneSnapshot> {
         let lanes: Vec<_> = self.inner.lanes.read().await.values().cloned().collect();
         let mut snapshots = Vec::with_capacity(lanes.len());
@@ -3799,6 +3895,36 @@ fn lane_restart_notice(
     }))
 }
 
+fn foreground_operation_not_allowed(lane_id: BrowserLaneId) -> BrowserPlatformError {
+    BrowserPlatformError::new(
+        BrowserErrorCode::OperationNotAllowed,
+        "This browser lane is not available to the current user.",
+        false,
+        "Refresh the browser inventory and select one of your running Primary lanes.",
+    )
+    .for_lane(lane_id)
+}
+
+fn foreground_needs_primary_identity_error(lane_id: &BrowserLaneId) -> BrowserPlatformError {
+    BrowserPlatformError::new(
+        BrowserErrorCode::NeedsPrimaryIdentity,
+        "Only a Primary browser lane can be brought to the foreground.",
+        false,
+        "Select a running Primary browser lane and retry.",
+    )
+    .for_lane(lane_id.clone())
+}
+
+fn foreground_lane_not_ready_error(lane_id: BrowserLaneId) -> BrowserPlatformError {
+    BrowserPlatformError::new(
+        BrowserErrorCode::BrowserUnavailable,
+        "The browser lane is not ready to be brought to the foreground.",
+        true,
+        "Wait for the Primary lane to become running, then retry.",
+    )
+    .for_lane(lane_id)
+}
+
 #[derive(Clone)]
 pub struct BrowserLaneClient {
     hub: BrowserSessionHub,
@@ -4251,6 +4377,11 @@ mod tests {
         active: AtomicUsize,
         maximum: AtomicUsize,
         entries: AtomicUsize,
+        foregrounds: AtomicUsize,
+        foreground_failures_remaining: AtomicUsize,
+        block_foreground: AtomicBool,
+        foreground_release: Semaphore,
+        foreground_changed: Notify,
         host_fatal_executions_remaining: AtomicUsize,
         generic_failures_remaining: AtomicUsize,
         releases: Semaphore,
@@ -4294,6 +4425,11 @@ mod tests {
                 active: AtomicUsize::new(0),
                 maximum: AtomicUsize::new(0),
                 entries: AtomicUsize::new(0),
+                foregrounds: AtomicUsize::new(0),
+                foreground_failures_remaining: AtomicUsize::new(0),
+                block_foreground: AtomicBool::new(false),
+                foreground_release: Semaphore::new(0),
+                foreground_changed: Notify::new(),
                 host_fatal_executions_remaining: AtomicUsize::new(0),
                 generic_failures_remaining: AtomicUsize::new(0),
                 releases: Semaphore::new(0),
@@ -4355,6 +4491,15 @@ mod tests {
                     return;
                 }
                 self.changed.notified().await;
+            }
+        }
+
+        async fn wait_for_foregrounds(&self, expected: usize) {
+            loop {
+                if self.foregrounds.load(Ordering::Acquire) >= expected {
+                    return;
+                }
+                self.foreground_changed.notified().await;
             }
         }
 
@@ -4527,6 +4672,36 @@ mod tests {
                 .lane_close_completions
                 .fetch_add(1, Ordering::AcqRel);
             self.probe.lane_close_completed.notify_waiters();
+            Ok(())
+        }
+
+        async fn bring_to_front(&self) -> Result<(), BrowserPlatformError> {
+            self.probe.foregrounds.fetch_add(1, Ordering::AcqRel);
+            self.probe.foreground_changed.notify_waiters();
+            if self.probe.block_foreground.load(Ordering::Acquire) {
+                let permit = self
+                    .probe
+                    .foreground_release
+                    .acquire()
+                    .await
+                    .map_err(|_| BrowserPlatformError::shutting_down())?;
+                permit.forget();
+            }
+            if self
+                .probe
+                .foreground_failures_remaining
+                .fetch_update(Ordering::AcqRel, Ordering::Acquire, |remaining| {
+                    remaining.checked_sub(1)
+                })
+                .is_ok()
+            {
+                return Err(BrowserPlatformError::new(
+                    BrowserErrorCode::BrowserUnavailable,
+                    "Synthetic foreground failure.",
+                    true,
+                    "Retry the synthetic foreground request.",
+                ));
+            }
             Ok(())
         }
 
@@ -4943,6 +5118,30 @@ mod tests {
             .clone()
     }
 
+    async fn open_for_user(
+        harness: &Harness,
+        user_id: &str,
+        runtime_instance_id: &str,
+        name: &str,
+        identity_mode: BrowserIdentityMode,
+    ) -> BrowserLaneId {
+        let owner = harness
+            .hub
+            .issue_owner_lease(
+                user_id,
+                Some("conversation-1".to_owned()),
+                runtime_instance_id,
+            )
+            .unwrap();
+        let mut caller = harness.client.caller().clone();
+        caller.user_id = user_id.to_owned();
+        caller.runtime_instance_id = runtime_instance_id.to_owned();
+        caller.owner_lease_id = owner.lease_id;
+        caller.capability_expires_at_ms = harness.clock.now_ms() + 2 * 60 * 60_000;
+        let client = harness.hub.bind(caller).unwrap();
+        open_identity(&client, name, identity_mode).await
+    }
+
     fn navigate() -> BrowserOperation {
         BrowserOperation {
             kind: BrowserOperationKind::Navigate,
@@ -5002,6 +5201,191 @@ mod tests {
             active_frame_id: Some(frame_id.to_owned()),
             ref_generation: Some(ref_generation),
         }
+    }
+
+    #[tokio::test]
+    async fn foreground_lane_for_user_uses_trusted_seam_and_publishes_activity() {
+        let harness = harness();
+        let lane_id = open(&harness.client, "foreground-primary").await;
+        let before = harness.client.status(&lane_id).await.unwrap();
+        let mut events = harness.hub.subscribe();
+        harness.clock.advance(25);
+
+        let foregrounded = harness
+            .hub
+            .foreground_lane_for_user("user-1", &lane_id)
+            .await
+            .unwrap();
+
+        assert_eq!(harness.probe.foregrounds.load(Ordering::Acquire), 1);
+        assert_eq!(
+            harness.probe.entries.load(Ordering::Acquire),
+            0,
+            "foregrounding must not manufacture a model-visible operation"
+        );
+        assert_eq!(foregrounded.lane_id, lane_id);
+        assert_eq!(foregrounded.last_active_at_ms, before.last_active_at_ms + 25);
+        let event = events.recv().await.unwrap();
+        assert_eq!(event.change_kind, "lane_foregrounded");
+        assert_eq!(event.lane_id.as_ref(), Some(&lane_id));
+        assert_eq!(event.user_id.as_deref(), Some("user-1"));
+        assert_eq!(event.at_ms, foregrounded.last_active_at_ms);
+    }
+
+    #[tokio::test]
+    async fn foreground_lane_for_user_fails_closed_for_other_user_and_non_primary_lane() {
+        let harness = harness();
+        let foreign_lane = open_for_user(
+            &harness,
+            "user-2",
+            "runtime-user-2",
+            "foreign-primary",
+            BrowserIdentityMode::Primary,
+        )
+        .await;
+        let anonymous_lane = open_identity(
+            &harness.client,
+            "foreground-anonymous",
+            BrowserIdentityMode::Anonymous,
+        )
+        .await;
+
+        let foreign_error = harness
+            .hub
+            .foreground_lane_for_user("user-1", &foreign_lane)
+            .await
+            .unwrap_err();
+        assert_eq!(foreign_error.code, BrowserErrorCode::OperationNotAllowed);
+        assert_eq!(foreign_error.lane_id.as_ref(), Some(&foreign_lane));
+
+        let identity_error = harness
+            .hub
+            .foreground_lane_for_user("user-1", &anonymous_lane)
+            .await
+            .unwrap_err();
+        assert_eq!(identity_error.code, BrowserErrorCode::NeedsPrimaryIdentity);
+        assert_eq!(identity_error.lane_id.as_ref(), Some(&anonymous_lane));
+        assert_eq!(harness.probe.foregrounds.load(Ordering::Acquire), 0);
+    }
+
+    #[tokio::test]
+    async fn foreground_lane_for_user_rejects_blank_trusted_user_without_dispatch() {
+        let harness = harness();
+        let lane_id = open(&harness.client, "foreground-blank-user").await;
+
+        let error = harness
+            .hub
+            .foreground_lane_for_user("  ", &lane_id)
+            .await
+            .unwrap_err();
+
+        assert_eq!(error.code, BrowserErrorCode::OperationNotAllowed);
+        assert_eq!(error.lane_id.as_ref(), Some(&lane_id));
+        assert_eq!(harness.probe.foregrounds.load(Ordering::Acquire), 0);
+    }
+
+    #[tokio::test]
+    async fn foreground_lane_for_user_rejects_missing_lane_without_leaking_other_inventory() {
+        let harness = harness();
+        let missing = BrowserLaneId::parse("missing-foreground-lane").unwrap();
+
+        let error = harness
+            .hub
+            .foreground_lane_for_user("user-1", &missing)
+            .await
+            .unwrap_err();
+
+        assert_eq!(error.code, BrowserErrorCode::LaneNotFound);
+        assert_eq!(error.lane_id.as_ref(), Some(&missing));
+        assert_eq!(harness.probe.foregrounds.load(Ordering::Acquire), 0);
+    }
+
+    #[tokio::test]
+    async fn foreground_lane_for_user_requires_running_lane_and_propagates_safe_driver_error() {
+        let mut config = HubConfig::default();
+        config.resource_policy.max_open_lanes = 1;
+        let harness = harness_with_config(config);
+        let capacity_holder = open(&harness.client, "foreground-capacity-holder").await;
+        let queued = harness
+            .client
+            .open(
+                Some("foreground-queued"),
+                BrowserIdentityMode::Primary,
+                None,
+            )
+            .await
+            .unwrap()
+            .lane()
+            .lane_id
+            .clone();
+
+        let queued_error = harness
+            .hub
+            .foreground_lane_for_user("user-1", &queued)
+            .await
+            .unwrap_err();
+        assert_eq!(queued_error.code, BrowserErrorCode::BrowserUnavailable);
+        assert_eq!(queued_error.lane_id.as_ref(), Some(&queued));
+        assert_eq!(harness.probe.foregrounds.load(Ordering::Acquire), 0);
+
+        harness.hub.close_lane(&capacity_holder).await.unwrap();
+        let running = queued;
+        assert_eq!(
+            harness.client.status(&running).await.unwrap().lifecycle_state,
+            LaneLifecycleState::Running
+        );
+        harness
+            .probe
+            .foreground_failures_remaining
+            .store(1, Ordering::Release);
+        let mut events = harness.hub.subscribe();
+        let before = harness.client.status(&running).await.unwrap();
+        harness.clock.advance(50);
+        let driver_error = harness
+            .hub
+            .foreground_lane_for_user("user-1", &running)
+            .await
+            .unwrap_err();
+        assert_eq!(driver_error.code, BrowserErrorCode::BrowserUnavailable);
+        assert_eq!(driver_error.message, "Synthetic foreground failure.");
+        assert_eq!(driver_error.lane_id.as_ref(), Some(&running));
+        assert_eq!(
+            harness.client.status(&running).await.unwrap().last_active_at_ms,
+            before.last_active_at_ms,
+            "a failed foreground request must not publish successful activity"
+        );
+        assert!(events.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn closing_lane_cancels_in_flight_foreground_without_success_event() {
+        let harness = harness();
+        let lane_id = open(&harness.client, "foreground-close-race").await;
+        harness
+            .probe
+            .block_foreground
+            .store(true, Ordering::Release);
+        let mut events = harness.hub.subscribe();
+        let foreground_hub = harness.hub.clone();
+        let foreground_lane = lane_id.clone();
+        let foreground = tokio::spawn(async move {
+            foreground_hub
+                .foreground_lane_for_user("user-1", &foreground_lane)
+                .await
+        });
+        harness.probe.wait_for_foregrounds(1).await;
+
+        harness.hub.close_lane(&lane_id).await.unwrap();
+        let error = foreground.await.unwrap().unwrap_err();
+
+        assert_eq!(error.code, BrowserErrorCode::LaneClosedByUser);
+        assert_eq!(error.lane_id.as_ref(), Some(&lane_id));
+        let kinds = std::iter::from_fn(|| events.try_recv().ok())
+            .map(|event| event.change_kind)
+            .collect::<Vec<_>>();
+        assert!(kinds.contains(&"lane_stopping".to_owned()));
+        assert!(kinds.contains(&"lane_closed".to_owned()));
+        assert!(!kinds.contains(&"lane_foregrounded".to_owned()));
     }
 
     #[tokio::test]

@@ -187,6 +187,14 @@ interface BrowserLaneCloseDependencies extends BrowserCloseFeedback {
   setBusyLaneId: (laneId: string | null) => void;
 }
 
+interface BrowserLaneForegroundDependencies {
+  invoke: (request: { lane_id: string }) => Promise<unknown>;
+  setForegroundingLaneId: (laneId: string | null) => void;
+  notifySuccess: (message: string) => void;
+  notifyError: (message: string) => void;
+  successMessage: string;
+}
+
 interface BrowserConversationCloseDependencies extends BrowserCloseFeedback {
   invoke: (request: { conversation_id: string }) => Promise<unknown>;
   setBusyConversationId: (conversationId: string | null) => void;
@@ -199,6 +207,27 @@ interface BrowserCloseAllDependencies extends BrowserCloseFeedback {
 
 export const browserLaneHasActiveWork = (lane: IBrowserLane): boolean =>
   Boolean(lane.active_operation || (lane.active_operation_count ?? 0) > 0);
+
+/** Foregrounding is deliberately narrower than lifecycle management. */
+export const canForegroundBrowserLane = (lane: IBrowserLane): boolean =>
+  lane.lifecycle_state === 'running' && lane.identity?.mode === 'primary';
+
+export const runBrowserLaneForeground = async (
+  lane: IBrowserLane,
+  dependencies: BrowserLaneForegroundDependencies
+): Promise<void> => {
+  if (!canForegroundBrowserLane(lane)) return;
+
+  dependencies.setForegroundingLaneId(lane.lane_id);
+  try {
+    await dependencies.invoke({ lane_id: lane.lane_id });
+    dependencies.notifySuccess(dependencies.successMessage);
+  } catch (error) {
+    dependencies.notifyError(errorMessage(error));
+  } finally {
+    dependencies.setForegroundingLaneId(null);
+  }
+};
 
 export const runBrowserLaneClose = async (
   lane: IBrowserLane,

@@ -11,12 +11,14 @@ import type { BrowserConversationGroup } from './browserInventoryModel';
 import {
   browserInstallationWideCloseCopy,
   browserClosePartialFailureMessage,
+  canForegroundBrowserLane,
   browserLaneHasActiveWork,
   requestBrowserCloseAll,
   requestBrowserConversationClose,
   requestBrowserLaneClose,
   runBrowserCloseAll,
   runBrowserConversationClose,
+  runBrowserLaneForeground,
   runBrowserLaneClose,
   type BrowserConfirmationRequest,
 } from './browserManagementActions';
@@ -65,7 +67,7 @@ describe('browser management actions', () => {
     expect(zh.warning.includes('所有用户')).toBe(true);
   });
 
-  test('wires the visible page controls to the tested close action layer', () => {
+  test('wires visible page controls to the tested management action layer', () => {
     expect(browserPageSource.includes('runBrowserLaneClose(lane, {')).toBe(true);
     expect(browserPageSource.includes('requestBrowserLaneClose(lane, closeLane, confirmDanger')).toBe(
       true
@@ -77,6 +79,81 @@ describe('browser management actions', () => {
     expect(browserPageSource.includes('onCloseLane={handleCloseLane}')).toBe(true);
     expect(browserPageSource.includes('onCloseConversation={handleCloseConversation}')).toBe(true);
     expect(browserPageSource.includes('onCloseAll={handleCloseAll}')).toBe(true);
+    expect(browserPageSource.includes('runBrowserLaneForeground(lane, {')).toBe(true);
+    expect(
+      browserPageSource.includes('ipcBridge.browserSession.foregroundLane.invoke(request)')
+    ).toBe(true);
+    expect(browserPageSource.includes('onForeground={handleForegroundLane}')).toBe(true);
+  });
+
+  test('foregrounds only running Primary lanes and reports success', async () => {
+    const primary = lane({ identity: { mode: 'primary' } });
+    expect(canForegroundBrowserLane(primary)).toBe(true);
+    for (const unavailable of [
+      lane({ lifecycle_state: 'queued', identity: { mode: 'primary' } }),
+      lane({ lifecycle_state: 'failed', identity: { mode: 'primary' } }),
+      lane({ identity: { mode: 'anonymous' } }),
+      lane(),
+    ]) {
+      expect(canForegroundBrowserLane(unavailable)).toBe(false);
+    }
+
+    const calls: string[] = [];
+    await runBrowserLaneForeground(primary, {
+      invoke: async ({ lane_id }) => {
+        calls.push(`foreground:${lane_id}`);
+      },
+      setForegroundingLaneId: (value) => calls.push(`busy:${value}`),
+      notifySuccess: (message) => calls.push(`success:${message}`),
+      notifyError: (message) => calls.push(`error:${message}`),
+      successMessage: 'opened',
+    });
+
+    expect(calls).toEqual([
+      'busy:lane-1',
+      'foreground:lane-1',
+      'success:opened',
+      'busy:null',
+    ]);
+  });
+
+  test('does not invoke foreground for queued, failed, or non-Primary lanes', async () => {
+    for (const unavailable of [
+      lane({ lifecycle_state: 'queued', identity: { mode: 'primary' } }),
+      lane({ lifecycle_state: 'failed', identity: { mode: 'primary' } }),
+      lane({ identity: { mode: 'isolated' } }),
+    ]) {
+      let invoked = false;
+      let busy = false;
+      await runBrowserLaneForeground(unavailable, {
+        invoke: async () => {
+          invoked = true;
+        },
+        setForegroundingLaneId: () => {
+          busy = true;
+        },
+        notifySuccess: () => undefined,
+        notifyError: () => undefined,
+        successMessage: 'opened',
+      });
+      expect(invoked).toBe(false);
+      expect(busy).toBe(false);
+    }
+  });
+
+  test('reports foreground failures and always releases busy state', async () => {
+    const calls: string[] = [];
+    await runBrowserLaneForeground(lane({ identity: { mode: 'primary' } }), {
+      invoke: async () => {
+        throw new Error('foreground failed');
+      },
+      setForegroundingLaneId: (value) => calls.push(`busy:${value}`),
+      notifySuccess: (message) => calls.push(`success:${message}`),
+      notifyError: (message) => calls.push(`error:${message}`),
+      successMessage: 'opened',
+    });
+
+    expect(calls).toEqual(['busy:lane-1', 'error:foreground failed', 'busy:null']);
   });
 
   test('closes queued and failed lanes without hiding lifecycle management', async () => {

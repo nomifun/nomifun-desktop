@@ -64,6 +64,22 @@ pub trait BrowserLaneDriver: Send + Sync {
     /// Must be idempotent and must not wait for the lane operation gate.
     async fn close(&self) -> Result<(), BrowserPlatformError>;
 
+    /// Trusted process-internal seam for foregrounding this Lane's visible
+    /// browser window.
+    ///
+    /// This is deliberately separate from [`Self::execute`] so model JSON and
+    /// ordinary browser capabilities cannot request operating-system focus.
+    /// Drivers that can foreground a headful browser should override it; the
+    /// fail-closed default reports that the capability is unavailable.
+    async fn bring_to_front(&self) -> Result<(), BrowserPlatformError> {
+        Err(BrowserPlatformError::new(
+            crate::BrowserErrorCode::OperationNotAllowed,
+            "This browser lane cannot be brought to the foreground.",
+            false,
+            "Use a running Primary browser lane with a visible browser window.",
+        ))
+    }
+
     /// Trusted process-internal Primary identity capture seam. This is not a
     /// browser operation and therefore cannot be invoked from model JSON.
     async fn capture_identity_snapshot(
@@ -107,4 +123,39 @@ pub trait BrowserHostFactory: Send + Sync {
         &self,
         request: HostLaunchRequest,
     ) -> Result<Arc<dyn BrowserHostDriver>, BrowserPlatformError>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{BrowserErrorCode, BrowserOperation};
+
+    struct DriverWithoutForegroundSupport;
+
+    #[async_trait]
+    impl BrowserLaneDriver for DriverWithoutForegroundSupport {
+        async fn execute(
+            &self,
+            _operation: BrowserOperation,
+            _context: DriverOperationContext,
+        ) -> Result<BrowserOperationResult, BrowserPlatformError> {
+            Ok(BrowserOperationResult::default())
+        }
+
+        async fn close(&self) -> Result<(), BrowserPlatformError> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn foreground_seam_defaults_to_fail_closed() {
+        let error = DriverWithoutForegroundSupport
+            .bring_to_front()
+            .await
+            .unwrap_err();
+
+        assert_eq!(error.code, BrowserErrorCode::OperationNotAllowed);
+        assert!(!error.retryable);
+        assert!(error.lane_id.is_none());
+    }
 }

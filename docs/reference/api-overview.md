@@ -131,11 +131,22 @@ opens a user's personal Chrome or Edge profile.
 |---|---|
 | `GET /api/browser/overview` | Return user-visible capacity, pressure, queue, identity, lifecycle, Lane, and safe Host diagnostics. |
 | `GET /api/browser/lanes` | List the authenticated user's visible Browser Lanes and their management-safe state. |
+| `POST /api/browser/lanes/{lane_id}/foreground` | For the authenticated user's own running `primary` Lane only, restore the same managed real Chromium window and its current target to the foreground. This is lifecycle/visibility management only; it grants no page input, user takeover, or Agent execution capability. |
 | `POST /api/browser/lanes/{lane_id}/close` | Idempotently close one Lane without closing its conversation or Agent execution. |
 | `POST /api/browser/conversations/{conversation_id}/close` | Close the authenticated user's Lanes for one conversation. |
 | `POST /api/browser/close-all` | Installation owner only: close every Browser Lane managed by this application instance. |
 | `GET /api/browser/resource-policy` | Installation owner only: read the active Browser resource-policy preset and advanced limits. |
 | `PUT /api/browser/resource-policy` | Installation owner only: validate, persist, and apply a Browser resource policy. |
+
+The foreground endpoint requires normal application authentication and, for
+cookie-authenticated requests, the standard `x-csrf-token` header. It returns
+`404` both when the Lane does not exist and when it belongs to another user, so
+the endpoint cannot be used to probe another user's inventory. A `409` reports
+a state conflict such as a non-Primary identity or a Lane becoming stale or
+closed during the request; a Lane that is not ready or running can return
+`503`. Clients should refresh inventory and select a running Primary Lane. The
+endpoint restores the existing window and target rather than creating a new
+Host, Lane, window, or page.
 
 The installation-owner-only compatibility endpoints
 `POST /api/browser/login/open`, `POST /api/browser/login/close`, and

@@ -6,14 +6,17 @@
 
 import React from 'react';
 import { Alert, Button, Tag } from '@arco-design/web-react';
-import { Delete, WebPage } from '@icon-park/react';
+import { BringToFront, Delete, WebPage } from '@icon-park/react';
 import { useTranslation } from 'react-i18next';
 import type { IBrowserLane } from '@/common/browser/browserTypes';
 
 interface BrowserLaneDetailsProps {
   lane: IBrowserLane;
   closing: boolean;
+  foregrounding: boolean;
+  canForeground: boolean;
   onClose: (lane: IBrowserLane) => void;
+  onForeground: (lane: IBrowserLane) => void;
 }
 
 const DASH = '—';
@@ -97,7 +100,14 @@ const StatusSection: React.FC<{
   </section>
 );
 
-const BrowserLaneDetails: React.FC<BrowserLaneDetailsProps> = ({ lane, closing, onClose }) => {
+const BrowserLaneDetails: React.FC<BrowserLaneDetailsProps> = ({
+  lane,
+  closing,
+  foregrounding,
+  canForeground,
+  onClose,
+  onForeground,
+}) => {
   const { t } = useTranslation();
   const activeTab =
     lane.tabs.find((tab) => tab.tab_id === lane.active_tab_id) ||
@@ -187,15 +197,28 @@ const BrowserLaneDetails: React.FC<BrowserLaneDetailsProps> = ({ lane, closing, 
               {lane.lane_id}
             </div>
           </div>
-          <Button
-            status='danger'
-            type='outline'
-            loading={closing}
-            icon={<Delete theme='outline' size='14' />}
-            onClick={() => onClose(lane)}
-          >
-            {t('browser.details.closeLane')}
-          </Button>
+          <div className='flex flex-wrap items-center justify-end gap-8px'>
+            <Button
+              type='primary'
+              loading={foregrounding}
+              disabled={!canForeground}
+              icon={<BringToFront theme='outline' size='14' />}
+              onClick={() => onForeground(lane)}
+              title={canForeground ? undefined : t('browser.foreground.unavailable')}
+              data-browser-foreground-action
+            >
+              {t('browser.foreground.action')}
+            </Button>
+            <Button
+              status='danger'
+              type='outline'
+              loading={closing}
+              icon={<Delete theme='outline' size='14' />}
+              onClick={() => onClose(lane)}
+            >
+              {t('browser.details.closeLane')}
+            </Button>
+          </div>
         </div>
       </header>
 

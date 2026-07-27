@@ -29,11 +29,13 @@ import {
 } from './browserInventoryModel';
 import {
   browserInstallationWideCloseCopy,
+  canForegroundBrowserLane,
   requestBrowserCloseAll,
   requestBrowserConversationClose,
   requestBrowserLaneClose,
   runBrowserCloseAll,
   runBrowserConversationClose,
+  runBrowserLaneForeground,
   runBrowserLaneClose,
   type BrowserConfirmationRequest,
 } from './browserManagementActions';
@@ -49,6 +51,7 @@ const BrowserPage: React.FC = () => {
   const { lanes, overview, loading, refreshing, error, refresh } = useBrowserInventory();
   const [selectedLaneId, setSelectedLaneId] = useState<string | null>(null);
   const [busyLaneId, setBusyLaneId] = useState<string | null>(null);
+  const [foregroundingLaneId, setForegroundingLaneId] = useState<string | null>(null);
   const [busyConversationId, setBusyConversationId] = useState<string | null>(null);
   const [closingAll, setClosingAll] = useState(false);
 
@@ -159,6 +162,25 @@ const BrowserPage: React.FC = () => {
       });
     },
     [closeLane, confirmDanger, t]
+  );
+
+  const foregroundLane = useCallback(
+    (lane: IBrowserLane) =>
+      runBrowserLaneForeground(lane, {
+        invoke: (request) => ipcBridge.browserSession.foregroundLane.invoke(request),
+        setForegroundingLaneId,
+        notifySuccess: Message.success,
+        notifyError: Message.error,
+        successMessage: t('browser.foreground.success'),
+      }),
+    [t]
+  );
+
+  const handleForegroundLane = useCallback(
+    (lane: IBrowserLane) => {
+      void foregroundLane(lane);
+    },
+    [foregroundLane]
   );
 
   const closeConversation = useCallback(
@@ -291,7 +313,10 @@ const BrowserPage: React.FC = () => {
               <BrowserLaneDetails
                 lane={selectedLane}
                 closing={busyLaneId === selectedLane.lane_id}
+                foregrounding={foregroundingLaneId === selectedLane.lane_id}
+                canForeground={canForegroundBrowserLane(selectedLane)}
                 onClose={handleCloseLane}
+                onForeground={handleForegroundLane}
               />
             ) : (
               <Empty description={t('browser.page.selectLane')} />

@@ -168,7 +168,8 @@ pub async fn build_backend_for_fixture_headful(profile: &str) -> CdpBackend {
         user_data_dir: std::env::temp_dir().join(format!("nomifun-observe-{profile}-profile")),
         headful: true,
     };
-    // force_headless=false → headful（带可见窗口）。这是 --no-startup-window keep-alive 的风险路径。
+    // force_headless=false → headful 真窗口（启动时最小化）。这是 --no-startup-window
+    // keep-alive 与受信任 foreground 恢复的风险路径。
     let launched = launch_chrome(&cfg, false).await.expect("launch headful chrome");
     CdpBackend::from_launched(
         launched,

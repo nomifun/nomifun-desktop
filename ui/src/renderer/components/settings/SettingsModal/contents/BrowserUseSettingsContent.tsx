@@ -727,7 +727,10 @@ const BrowserUseSettingsContent: React.FC = () => {
                   <Radio value='system'>{t('settings.browserSourceSystem')}</Radio>
                 </RadioGroup>
               </PreferenceRow>
-              <PreferenceRow label={t('settings.browserDisplayMode')}>
+              <PreferenceRow
+                label={t('settings.browserDisplayMode')}
+                description={t('settings.browserDisplayModeDesc')}
+              >
                 <span className='text-13px text-t-secondary'>
                   {t('settings.browserDisplayModeExternal')}
                 </span>

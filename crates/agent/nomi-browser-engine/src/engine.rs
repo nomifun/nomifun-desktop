@@ -313,9 +313,9 @@ pub trait BrowserEngine: Send + Sync {
 
     /// **Takeover seam: bring the browser window to the foreground.**
     ///
-    /// Headful + display → foreground the window (CDP `Page.bringToFront` +
-    /// `Target.activateTarget`). Headless or no display → `Unsupported` (the caller
-    /// maps this to `TakeoverResolution::Unavailable`).
+    /// Headful + display → restore the active target's native Chromium window and
+    /// activate that target. Headless or no display → `Unsupported` (the caller maps
+    /// this to `TakeoverResolution::Unavailable`).
     ///
     /// Default impl returns `Unsupported` for backends that don't support it.
     async fn bring_to_front(&self) -> Result<(), BrowserError> {

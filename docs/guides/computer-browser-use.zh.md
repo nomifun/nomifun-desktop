@@ -27,14 +27,15 @@ NomiFun agent 内置/接入两项可选的系统级能力：
 后续新会话不会获得对应能力。Browser 设置还提供：
 
 - **浏览器来源**：系统 Chrome/Edge 可执行文件或 managed source；
-- **呈现方式**：Primary 固定使用可见的外置受管 Chromium 窗口；
+- **呈现方式**：Primary 使用真实、headful 的外置受管 Chromium；普通 Agent 任务默认以最小化窗口在后台运行；
 - **资源策略**：Automatic、Resource saving、High concurrency；
 - 高级资源上限（仅在需要诊断或精细调优时修改）。
 
 右侧边栏的 **Browser** 页面（`/browser`）只展示 running/queued Lane 的状态、
 容量、队列、身份、owner 与生命周期，并在权限允许时关闭单个 Lane、某个
-conversation 的 Lane 或全部 Lane。它不嵌入页面，也不提供页面输入、tab 控制、
-用户接管或地址导航；Primary 的真实页面保留在外置受管窗口中。
+conversation 的 Lane 或全部 Lane。对 running Primary Lane，它还提供“前台打开”，
+恢复同一个外置窗口和活动 target。该页面仍不嵌入页面，也不提供页面输入、tab
+控制、用户接管或地址导航。
 
 ### 2. 会话级
 
@@ -66,7 +67,8 @@ max_screenshot_edge = 1568   # 截图长边像素上限
 [tools.browser]
 enabled = true
 allowed_origins = []         # 可选 origin 白名单；空=全放行，仅纵深防御
-# 注：Primary 固定显示为外置受管窗口。
+# 注：Primary 使用真实外置受管窗口；普通 Agent 使用时默认最小化在后台，
+# 仅由用户显式操作或登录流程前台打开。
 # browser_path / idle_timeout_secs / 私有 headless ownership 均为旧兼容字段，
 # 不能绕过 BrowserSessionHub 的身份、容量或生命周期策略。
 ```
@@ -93,7 +95,8 @@ user-data directory 也不会被两个存活 Chromium 同时打开。
 - 同一 Lane 内的导航、观察和动作严格串行；不同 Lane 可以并行，target、frame、
   ref、tab、download 和 cancellation 状态互不串线。
 - 普通交互式浏览默认使用 **Primary shared live identity**。多个 Primary Lane
-  始终在可见的外置受管 Chromium 窗口中运行；它们共享 cookies、站点存储和
+  使用真实、headful 的外置受管 Chromium，但普通 Agent 任务默认以最小化窗口在
+  后台运行，不自动弹窗或抢焦点；它们共享 cookies、站点存储和
   其他 profile-backed 身份状态，但不共享活动 target、frame、ref、操作 gate
   或下载归属。
 - 公开读取默认使用 **Anonymous crawl**，不携带 Primary cookies/站点存储。
@@ -121,6 +124,18 @@ user-data directory 也不会被两个存活 Chromium 同时打开。
 关闭 Lane 只会让相关浏览器调用收到类型化错误，不会关闭 conversation 或
 AgentExecution。attempt 完成/取消、runtime 终止、conversation 删除、远程连接断开、
 capability 过期和应用退出都会撤销 owner lease 并触发权威清理。
+
+### 显式前台打开 running Primary Lane
+
+需要查看真实受管浏览器时，进入 `/browser`，选择身份为 Primary、状态为
+`running` 的 Lane，再点击“前台打开”。该操作恢复同一个原生 Chromium 窗口及其
+当前活动 target；不会重新打开或刷新页面，不会创建第二浏览器，不会改变 Lane
+所有权，也不会恢复内嵌 preview、用户接管或页面输入表面。queued、failed 和
+非 Primary Lane 不能前台打开。
+
+对应的认证管理接口为 `POST /api/browser/lanes/{id}/foreground`；改变状态的请求
+继续使用现有 CSRF 防护。它不是 Agent 可调用的 Browser action。显式 Primary
+登录流程会自动前台打开受管窗口，供用户完成登录。
 
 ## macOS 权限
 

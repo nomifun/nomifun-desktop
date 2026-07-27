@@ -175,10 +175,10 @@
 
 - **Computer use** —— 无障碍树 + Set-of-Marks 叠层 + OCR，引导模型操作真实 UI 元素而非猜像素。macOS（AXUIElement + Vision OCR）与 Windows（UI Automation）已完整，Linux（AT-SPI2）为部分支持。
 - **Browser use** —— 由应用主进程中的 `BrowserSessionHub` 统一管理 Chromium Host 与可寻址 Browser Lane；内置 Agent、ACP/Codex、Gateway、远程 Agent 和并行 AgentExecution attempt 都进入同一平台，不再各自启动私有浏览器。
-- **只展示浏览器管理状态。** 右侧 **Browser** 页面展示会话、runtime、Lane、Tab、URL、身份模式、容量、队列位置、压力、资源估算和错误；它不嵌入页面预览，也不提供页面输入，避免用户误触中断 Agent 工作。
+- **只做浏览器状态与生命周期管理。** 右侧 **Browser** 页面展示会话、runtime、Lane、Tab、URL、身份模式、容量、队列位置、压力、资源估算和错误；用户可对 running Primary Lane 显式“前台打开”，但页面不嵌入预览，也不提供页面输入或接管控件。
 - **共享实时登录身份。** 普通交互式 Lane 使用 NomiFun 管理的稳定 Primary profile，并实时共享登录状态；公开抓取使用不携带 Primary cookies/站点存储的匿名身份，显式隔离任务使用独立身份。NomiFun 不读取用户真实 Chrome / Edge profile。
 - **并发有界且可观察。** 不同 Lane 可真正并行，同一 Lane 严格串行；容量不足时显示队列位置、压力原因和建议并发，而不是用不可见的全局锁假装浏览器已就绪。
-- **外置受管浏览器与权威清理。** Primary 任务始终使用可见的外置受管 Chromium 窗口，NomiFun 保留完整生命周期所有权。用户可关闭单个 Lane、当前会话全部 Lane或全部浏览器；runtime、attempt、远程连接或应用结束时也由 Hub 显式清理受管 Chromium 进程树。
+- **默认静默后台，按需前台打开。** 普通 Primary Agent 任务使用真实、headful 的受管 Chromium，但默认以最小化窗口在后台启动，不自动弹窗或抢焦点。对 running Primary Lane 执行“前台打开”会恢复同一个窗口和活动 target；显式登录流程则会自动前台打开。NomiFun 继续权威管理用户关闭、owner 撤销和受管进程树清理。
 - **仅 Agent 操作页面。** 页面导航与输入只属于执行中的 Agent；浏览器高风险操作仍遵循既有 danger × surface 审批策略，但不再存在独立的查看器接管路径。
 - **生而受控** —— 每个动作都带 danger × surface 审批矩阵，不可逆操作须显式确认。
 

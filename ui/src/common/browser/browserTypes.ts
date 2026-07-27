@@ -93,6 +93,12 @@ export interface IBrowserLane {
   recoverable?: boolean;
 }
 
+/** Result returned after surfacing an existing managed Primary Lane window. */
+export interface IBrowserForegroundResult {
+  foregrounded: boolean;
+  lane_id?: string;
+}
+
 export interface IBrowserCapacityOverview {
   active?: number | null;
   queued?: number | null;

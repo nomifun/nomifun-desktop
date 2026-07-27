@@ -1578,6 +1578,14 @@ fn operation_from_input(
             )
         })?
         .to_owned();
+    if action == "bring_to_front" {
+        return Err(BrowserPlatformError::new(
+            BrowserErrorCode::OperationNotAllowed,
+            "Foregrounding the managed browser is not an Agent browser operation.",
+            false,
+            "Use the authenticated Browser management page to open a running Primary lane in the foreground.",
+        ));
+    }
     let kind = operation_kind(&action);
     let mut sanitized = input.as_object().cloned().unwrap_or_default();
     sanitized.remove("lane_id");
@@ -1622,7 +1630,7 @@ fn operation_kind(action: &str) -> BrowserOperationKind {
         "download" | "save_as_pdf" => BrowserOperationKind::Download,
         "get_console_logs" | "get_page_errors" | "get_network_log"
         | "rendered_html" => BrowserOperationKind::Debug,
-        "capabilities" | "bring_to_front" | "device_pixel_ratio" => {
+        "capabilities" | "device_pixel_ratio" => {
             BrowserOperationKind::Manage
         }
         "crawl" | "crawl_many" => BrowserOperationKind::Crawl,
@@ -1660,7 +1668,6 @@ fn may_modify_identity(action: &str, input: &Value) -> bool {
         | "get_network_log"
         | "rendered_html"
         | "capabilities"
-        | "bring_to_front"
         | "device_pixel_ratio"
         | "hover"
         | "scroll"
@@ -3605,7 +3612,6 @@ mod tests {
             "get_network_log",
             "rendered_html",
             "capabilities",
-            "bring_to_front",
             "device_pixel_ratio",
             "hover",
             "scroll",
@@ -3639,6 +3645,18 @@ mod tests {
             .unwrap()
             .may_modify_identity
         );
+    }
+
+    #[test]
+    fn model_cannot_foreground_the_managed_browser_through_gateway_json() {
+        let error = operation_from_input(&json!({
+            "action": "bring_to_front",
+        }))
+        .unwrap_err();
+
+        assert_eq!(error.code, BrowserErrorCode::OperationNotAllowed);
+        assert!(!error.retryable);
+        assert_eq!(operation_kind("bring_to_front"), BrowserOperationKind::Act);
     }
 
     #[test]

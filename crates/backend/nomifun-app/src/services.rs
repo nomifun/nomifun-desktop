@@ -105,9 +105,10 @@ impl Default for BrowserStartupPreferences {
     fn default() -> Self {
         Self {
             // Browser management is inventory/lifecycle-only. Interactive
-            // Primary lanes therefore use the real managed Chromium window;
-            // the removed JPEG viewer must never be selected as a fresh-install
-            // presentation default.
+            // Primary lanes use a real managed Chromium window that starts in
+            // the background. The removed JPEG viewer must never be selected
+            // as a fresh-install presentation default; users explicitly
+            // foreground the same window from Browser management when needed.
             display_mode: "external",
             source: "system".to_owned(),
             full_power: false,
@@ -123,8 +124,10 @@ fn resolve_browser_display_mode(
 ) -> (&'static str, bool) {
     // The product no longer publishes an embedded viewer or user takeover.
     // Normalize every historical desktop presentation value to the real
-    // external managed Chromium window. The old values remain accepted only
-    // so upgrades do not strand an installation in headless/JPEG mode.
+    // external managed Chromium window. It is launched headful but minimized,
+    // so ordinary Agent work remains silent and can later foreground the same
+    // profile and target. The old values remain accepted only so upgrades do
+    // not strand an installation in the removed headless/JPEG modes.
     if let Some(value) = display_mode {
         return match value.trim().trim_matches('"') {
             "external" => ("external", false),
@@ -216,8 +219,10 @@ where
 #[cfg(feature = "browser-use")]
 fn primary_host_is_headful(display_mode: &str) -> bool {
     // Browser management no longer has a renderer/viewer execution surface.
-    // Primary lanes must always be visible in the managed Chromium window;
-    // crawl/replica/isolated hosts are still forced headless by the Hub.
+    // Primary must remain headful so Browser management can restore the same
+    // live window without restarting the Host or losing identity/targets. The
+    // engine starts that window minimized; crawl/replica/isolated hosts remain
+    // forced headless by the Hub.
     let _ = display_mode;
     true
 }

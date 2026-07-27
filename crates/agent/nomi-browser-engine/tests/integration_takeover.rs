@@ -1,8 +1,8 @@
 //! Task 3: `bring_to_front` engine seam — `#[ignore]` real-Chrome test (headful).
 //!
-//! Verifies that `CdpBackend::bring_to_front()` successfully sends `Page.bringToFront`
-//! + `Target.activateTarget` when the engine is headful. Also verifies that a headless
-//! engine returns `BrowserError::Unsupported`.
+//! Verifies that `CdpBackend::bring_to_front()` restores the active target's real
+//! Chromium window and activates that target when the engine is headful. Also verifies
+//! that a headless engine returns `BrowserError::Unsupported`.
 //!
 //! Manual run (requires a display + Chrome):
 //!   NOMIFUN_CHROME_BINARY="/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" \
