@@ -1,11 +1,19 @@
 {
   "version": "0.3.2",
   "notes": "## NomiFun v0.3.2\n\n- 修复桌面端会话删除与编辑后重提交流程。\n- 修正计划任务更新请求，确保不可变执行模式下的数据一致性。\n- 升级时安全处理早期 v3 数据集。\n\n## Windows 包\n\n- 首发 Windows x64 安装包及 Tauri 自动更新签名资产。\n- 安装包未包含 Authenticode 签名，手动下载时可能出现 SmartScreen 或未知发布者提示；自动更新仍使用 Tauri 签名校验。",
-  "pub_date": "2026-07-27T13:45:57.109Z",
+  "pub_date": "2026-07-27T14:41:14.964Z",
   "platforms": {
     "windows-x86_64": {
       "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSU2VhcGdMaWVxODVXM0lTU3B6eUtkNXZsMlcwWmdQUVkzUk9BK1dmT1FGSU5ZUUlGWnpoSTVPRmM2UlBsY2kyZHlZTGR0MG1sM1lKVHRLQjB4Y2o2U29DU25SU0VXZlFvPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzg1MTU5OTU2CWZpbGU6Tm9taUZ1bl8wLjMuMl94NjQtc2V0dXAuZXhlCnozdGt2RldoaWUxYnJvMVhwTCtHUXh0Z1hOL0NQbUQ0SnhBQUFWVDhRWUIrSWJvRTVVNEN2OEhCS0p0QVVZb1JRMnFlcURyWlVHSUEvU1NDdll1NENRPT0K",
       "url": "https://github.com/nomifun/nomifun-tauri/releases/download/v0.3.2/NomiFun_0.3.2_x64-setup.exe"
+    },
+    "darwin-x86_64": {
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSU2VhcGdMaWVxODA4ZHdKcWNHY2NHQnBuaEFEUlFoWEI0MFBPeE8rVlh3QXd1NXVTUDgxSUQvY1Z4NFVPL0NjMzQ4cHJpZVBHc1o4NlVWbTVIa1c5QW9OTlBtb3VlZWdnPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzg1MTYzMjIxCWZpbGU6Tm9taUZ1bi5hcHAudGFyLmd6CmxSL1FUY0dCNXFwWGxWRFhyOEtQSGY1U0VKM3l6VFlqdjBYeVA1d3EzTkppSkV3aGJIT0FaQnFpa0tSUUpCNWwwMDJqNXcxdkVJRUtnZ2dxWWRkeEJ3PT0K",
+      "url": "https://github.com/nomifun/nomifun-tauri/releases/download/v0.3.2/NomiFun.app.tar.gz"
+    },
+    "darwin-aarch64": {
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSU2VhcGdMaWVxODA4ZHdKcWNHY2NHQnBuaEFEUlFoWEI0MFBPeE8rVlh3QXd1NXVTUDgxSUQvY1Z4NFVPL0NjMzQ4cHJpZVBHc1o4NlVWbTVIa1c5QW9OTlBtb3VlZWdnPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzg1MTYzMjIxCWZpbGU6Tm9taUZ1bi5hcHAudGFyLmd6CmxSL1FUY0dCNXFwWGxWRFhyOEtQSGY1U0VKM3l6VFlqdjBYeVA1d3EzTkppSkV3aGJIT0FaQnFpa0tSUUpCNWwwMDJqNXcxdkVJRUtnZ2dxWWRkeEJ3PT0K",
+      "url": "https://github.com/nomifun/nomifun-tauri/releases/download/v0.3.2/NomiFun.app.tar.gz"
     }
   }
 }
