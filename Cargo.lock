@@ -5649,7 +5649,7 @@ dependencies = [
 
 [[package]]
 name = "nomifun-browser-platform"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "async-trait",
  "serde",
