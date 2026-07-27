@@ -2334,7 +2334,7 @@ async fn update_extra_merge() {
 
 #[tokio::test]
 async fn update_rejects_acp_agent_identity_patch() {
-    let (svc, _broadcaster, repo, runtime_registry) = make_service();
+    let (svc, _broadcaster, repo, _runtime_registry) = make_service();
     let conversation = svc.create(TEST_USER_1, make_create_req()).await.unwrap();
     let before = repo.get(&conversation.conversation_id).await.unwrap().unwrap().extra;
     let req = serde_json::from_value(json!({
@@ -14870,6 +14870,52 @@ async fn check_approval_not_found() {
 }
 
 // ── Skill snapshot tests ───────────────────────────────────────────
+
+#[tokio::test]
+async fn replace_skill_snapshot_updates_and_recycles_only_on_change() {
+    let (svc, _broadcaster, repo, runtime_registry) = make_service();
+    let conv = svc.create(TEST_USER_1, make_create_req()).await.unwrap();
+
+    assert!(
+        svc.replace_skill_snapshot(&conv.conversation_id, &["pdf".into(), "pdf".into()])
+            .await
+            .unwrap()
+    );
+    assert!(
+        !svc
+            .replace_skill_snapshot(&conv.conversation_id, &["pdf".into()])
+            .await
+            .unwrap()
+    );
+
+    let row = repo.get(&conv.conversation_id).await.unwrap().unwrap();
+    let extra: serde_json::Value = serde_json::from_str(&row.extra).unwrap();
+    assert_eq!(extra["skills"], json!(["pdf"]));
+}
+
+#[tokio::test]
+async fn replace_skill_snapshot_repairs_non_object_extra() {
+    let (svc, _broadcaster, repo, _runtime_registry) = make_service();
+    let conv = svc.create(TEST_USER_1, make_create_req()).await.unwrap();
+    repo.update(
+        &conv.conversation_id,
+        &ConversationRowUpdate {
+            extra: Some("[]".into()),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+
+    assert!(
+        svc.replace_skill_snapshot(&conv.conversation_id, &["pdf".into()])
+            .await
+            .unwrap()
+    );
+    let row = repo.get(&conv.conversation_id).await.unwrap().unwrap();
+    let extra: serde_json::Value = serde_json::from_str(&row.extra).unwrap();
+    assert_eq!(extra["skills"], json!(["pdf"]));
+}
 
 #[tokio::test]
 async fn create_writes_extra_skills_from_auto_inject_and_preset() {
