@@ -16,7 +16,9 @@ use futures_util::future::join_all;
 use tokio::sync::Mutex;
 
 use crate::backend::cdp::{CdpBackend, CdpHostRuntime};
-use crate::{BrowserEngine, BrowserError, EngineConfig, KnownSecretValues};
+use crate::{
+    BrowserEngine, BrowserError, BrowserHostLaunchMode, EngineConfig, KnownSecretValues,
+};
 
 const HOST_LANE_CLOSE_GRACE: Duration = Duration::from_millis(750);
 
@@ -31,7 +33,6 @@ impl LaneOperationGate {
         self.0.lock().await
     }
 }
-
 /// Stable caller-supplied identifier for one ownership/concurrency lane.
 pub type LaneId = String;
 
@@ -342,18 +343,59 @@ pub struct ManagedBrowserHost {
     default_lane_config: LaneEngineConfig,
 }
 
+/// Result of an explicit process-mode replacement.
+///
+/// The old Host has been synchronously shut down before `host` is launched,
+/// so the two Chromium processes never concurrently own the stable profile.
+/// `fresh_observe_required` is always true because CDP identifiers and refs
+/// cannot survive a Chromium process boundary.
+pub struct ManagedBrowserHostReplacement {
+    pub host: ManagedBrowserHost,
+    pub previous_epoch: u64,
+}
+
+impl ManagedBrowserHostReplacement {
+    /// A process replacement always invalidates target/frame/ref state.
+    pub const fn fresh_observe_required(&self) -> bool {
+        true
+    }
+}
+
 impl ManagedBrowserHost {
     /// Launch exactly one managed Chromium process and establish its single CDP
     /// connection.  No page/lane is created until [`Self::open_lane`].
     pub async fn launch(config: EngineConfig) -> Result<Self, BrowserError> {
+        let mode = BrowserHostLaunchMode::from_headful(config.headful);
+        Self::launch_in_mode(config, mode).await
+    }
+
+    /// Launch one Host in an explicit process presentation mode.
+    ///
+    /// [`BrowserHostLaunchMode::Headless`] is the safe default for ordinary
+    /// Agent work. A trusted foreground coordinator may replace a stopped
+    /// Headless Host by calling this with `Headful` and the same
+    /// application-owned stable profile. It **must** first await
+    /// [`Self::shutdown`] on the old Host: Chromium forbids two live processes
+    /// owning the same profile. The returned Host has a new epoch, so all old
+    /// target/frame/ref handles are stale and callers must rebuild lanes and
+    /// perform a fresh observe.
+    ///
+    /// This primitive intentionally does not pretend to migrate live targets;
+    /// lane URL reconstruction and logical epoch publication belong to the
+    /// authoritative platform layer.
+    pub async fn launch_in_mode(
+        mut config: EngineConfig,
+        mode: BrowserHostLaunchMode,
+    ) -> Result<Self, BrowserError> {
         static NEXT_EPOCH: AtomicU64 = AtomicU64::new(1);
+        config.headful = mode.is_headful();
         let default_lane_config = LaneEngineConfig {
             workspace_dir: config.workspace_dir.clone(),
             evaluate_full_power: config.evaluate_full_power,
             evaluate_persistent_login: config.evaluate_persistent_login,
             known_secret_values: Some(config.known_secret_values.clone()),
         };
-        let runtime = CdpHostRuntime::launch(config).await?;
+        let runtime = CdpHostRuntime::launch_in_mode(config, mode).await?;
         Ok(Self {
             runtime,
             lanes: HostLaneCoordinator::default(),
@@ -361,6 +403,33 @@ impl ManagedBrowserHost {
             epoch: NEXT_EPOCH.fetch_add(1, Ordering::Relaxed),
             shutdown: AtomicBool::new(false),
             default_lane_config,
+        })
+    }
+
+    /// Authoritatively replace this Host with one in `mode`.
+    ///
+    /// This is the low-level seam for a trusted Headless→Headful foreground
+    /// transition (and the reverse transition when hiding again). It performs
+    /// the only safe order for a shared profile: close/cancel every old Lane,
+    /// prove the old process tree has stopped, then launch the replacement.
+    /// No Lane is silently recreated and no old target is retained. The
+    /// caller must rebuild its logical Lane inventory/URLs and require a fresh
+    /// observe before accepting Agent operations.
+    ///
+    /// If replacement launch fails, the old Host remains stopped and the
+    /// error is returned; this method never reports a successful transition
+    /// without a live replacement Host.
+    pub async fn replace_in_mode(
+        &self,
+        config: EngineConfig,
+        mode: BrowserHostLaunchMode,
+    ) -> Result<ManagedBrowserHostReplacement, BrowserError> {
+        let previous_epoch = self.epoch;
+        self.shutdown().await?;
+        let host = Self::launch_in_mode(config, mode).await?;
+        Ok(ManagedBrowserHostReplacement {
+            host,
+            previous_epoch,
         })
     }
 
@@ -376,6 +445,16 @@ impl ManagedBrowserHost {
     /// process detail and returns `None` after the host has stopped.
     pub fn process_id(&self) -> Option<u32> {
         self.runtime.process_id()
+    }
+
+    /// The effective process presentation mode after display capability
+    /// probing. This is telemetry only; changing it requires a new Host.
+    pub fn launch_mode(&self) -> BrowserHostLaunchMode {
+        if self.runtime.is_headful() {
+            BrowserHostLaunchMode::Headful
+        } else {
+            BrowserHostLaunchMode::Headless
+        }
     }
 
     /// Open (or retrieve) one lane.  The returned engine has lane-local tabs,
@@ -748,4 +827,5 @@ mod tests {
             "once shutdown begins, open_lane must remain fenced even when cleanup needs retry"
         );
     }
+
 }

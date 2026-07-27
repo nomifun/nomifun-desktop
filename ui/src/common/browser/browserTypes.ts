@@ -93,7 +93,7 @@ export interface IBrowserLane {
   recoverable?: boolean;
 }
 
-/** Result returned after surfacing an existing managed Primary Lane window. */
+/** Result returned after explicitly presenting a managed Primary Lane. */
 export interface IBrowserForegroundResult {
   foregrounded: boolean;
   lane_id?: string;

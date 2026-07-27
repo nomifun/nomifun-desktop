@@ -943,6 +943,8 @@ impl crate::runtime_handle::AgentRuntimeControl for NomiAgentManager {
             process_supervisor: process_supervisor.clone(),
             mcp_managers: self.mcp_managers.clone(),
             turn_teardown_fence: Arc::clone(&self.turn_teardown_fence),
+            #[cfg(feature = "browser-use")]
+            browser_lane_binding: self.browser_lane_binding.clone(),
             armed: true,
         };
 
@@ -993,7 +995,7 @@ impl crate::runtime_handle::AgentRuntimeControl for NomiAgentManager {
                     let stream_error = send_error.stream_error().clone();
                     term_guard.terminalize(move |runtime, turn| {
                         runtime.emit_error_data_for_turn(turn, stream_error)
-                    });
+                    }).await.map_err(AgentSendError::from_app_error)?;
                     return Err(send_error);
                 }
             };
@@ -1144,7 +1146,7 @@ impl crate::runtime_handle::AgentRuntimeControl for NomiAgentManager {
                     None,
                     Some(TurnStopReason::Cancelled),
                 )
-            });
+            }).await.map_err(AgentSendError::from_app_error)?;
             return Ok(());
         };
 
@@ -1184,7 +1186,7 @@ impl crate::runtime_handle::AgentRuntimeControl for NomiAgentManager {
                     let stream_error = send_error.stream_error().clone();
                     term_guard.terminalize(move |runtime, turn| {
                         runtime.emit_error_data_for_turn(turn, stream_error)
-                    });
+                    }).await.map_err(AgentSendError::from_app_error)?;
                     return Err(send_error);
                 }
 
@@ -1259,13 +1261,13 @@ impl crate::runtime_handle::AgentRuntimeControl for NomiAgentManager {
                             None,
                             Some(TurnStopReason::Cancelled),
                         )
-                    });
+                    }).await.map_err(AgentSendError::from_app_error)?;
                     return Ok(());
                 }
 
                 term_guard.terminalize(|runtime, turn| {
                     runtime.emit_finish_for_turn(turn, None, Some(stop_reason))
-                });
+                }).await.map_err(AgentSendError::from_app_error)?;
                 Ok(())
             }
             Err(e) => {
@@ -1283,7 +1285,7 @@ impl crate::runtime_handle::AgentRuntimeControl for NomiAgentManager {
                 let stream_error = send_error.stream_error().clone();
                 term_guard.terminalize(move |runtime, turn| {
                     runtime.emit_error_data_for_turn(turn, stream_error)
-                });
+                }).await.map_err(AgentSendError::from_app_error)?;
                 Err(send_error)
             }
         };
@@ -1336,17 +1338,30 @@ struct TurnTerminationGuard {
     process_supervisor: Option<Arc<nomi_process_runtime::ProcessSupervisor>>,
     mcp_managers: Vec<Arc<McpManager>>,
     turn_teardown_fence: Arc<TurnTeardownFence>,
+    /// Reusable runtime binding. Turn cleanup closes its current Lanes but must
+    /// not revoke the owner lease; the next turn lazily opens a fresh Lane.
+    #[cfg(feature = "browser-use")]
+    browser_lane_binding: Option<crate::BrowserLaneBinding>,
     armed: bool,
 }
 
 impl TurnTerminationGuard {
-    fn terminalize(
+    async fn terminalize(
         &mut self,
         terminal: impl FnOnce(
             &AgentRuntimeState,
             crate::runtime_state::AgentRuntimeTurn,
         ) -> bool,
-    ) -> bool {
+    ) -> Result<bool, AppError> {
+        #[cfg(feature = "browser-use")]
+        if let Some(binding) = &self.browser_lane_binding {
+            // A terminal event is the externally observable proof that a turn
+            // has ended. Do not publish it while that turn still owns browser
+            // pages or Chromium capacity. `close_turn_lanes` preserves the
+            // owner lease, so this manager remains reusable.
+            binding.close_turn_lanes().await?;
+        }
+
         let emitted = terminalize_exact_nomi_turn(
             &self.runtime,
             &self.lifecycle_gate,
@@ -1356,7 +1371,7 @@ impl TurnTerminationGuard {
             terminal,
         );
         self.armed = false;
-        emitted
+        Ok(emitted)
     }
 
     async fn fence_cancelled_processes(&self) -> Result<(), AppError> {
@@ -1396,6 +1411,8 @@ impl Drop for TurnTerminationGuard {
             let process_supervisor = self.process_supervisor.clone();
             let mcp_managers = self.mcp_managers.clone();
             let turn_teardown_fence = Arc::clone(&self.turn_teardown_fence);
+            #[cfg(feature = "browser-use")]
+            let browser_lane_binding = self.browser_lane_binding.clone();
             let terminalize = move || {
                 terminalize_exact_nomi_turn(
                     &runtime,
@@ -1414,10 +1431,6 @@ impl Drop for TurnTerminationGuard {
                 turn_teardown_fence.complete();
             };
 
-            let Some(supervisor) = process_supervisor else {
-                terminalize();
-                return;
-            };
             let Ok(runtime_handle) = tokio::runtime::Handle::try_current() else {
                 error!(
                     conversation_id = %self.runtime.conversation_id(),
@@ -1426,20 +1439,33 @@ impl Drop for TurnTerminationGuard {
                 return;
             };
             runtime_handle.spawn(async move {
-                if let Err(error) = shutdown_mcp_managers_exact(&mcp_managers).await {
-                    error!(
-                        conversation_id = %conversation_id,
-                        error = %error,
-                        "Nomi turn MCP teardown was not exact; retaining non-terminal quarantine"
-                    );
-                    return;
+                if let Some(supervisor) = process_supervisor {
+                    if let Err(error) = shutdown_mcp_managers_exact(&mcp_managers).await {
+                        error!(
+                            conversation_id = %conversation_id,
+                            error = %error,
+                            "Nomi turn MCP teardown was not exact; retaining non-terminal quarantine"
+                        );
+                        return;
+                    }
+                    let report = supervisor.quiesce().await;
+                    if !report.is_exact() {
+                        error!(
+                            conversation_id = %conversation_id,
+                            failure = %describe_quiesce_failure(&report),
+                            "Nomi turn process-tree teardown was not exact; retaining non-terminal quarantine"
+                        );
+                        return;
+                    }
                 }
-                let report = supervisor.quiesce().await;
-                if !report.is_exact() {
+                #[cfg(feature = "browser-use")]
+                if let Some(binding) = browser_lane_binding
+                    && let Err(error) = binding.close_turn_lanes().await
+                {
                     error!(
                         conversation_id = %conversation_id,
-                        failure = %describe_quiesce_failure(&report),
-                        "Nomi turn process-tree teardown was not exact; retaining non-terminal quarantine"
+                        error = %ErrorChain(&error),
+                        "Nomi turn Browser Lane cleanup was not exact; retaining non-terminal quarantine"
                     );
                     return;
                 }
@@ -3879,6 +3905,8 @@ mod tests {
                 process_supervisor: None,
                 mcp_managers: Vec::new(),
                 turn_teardown_fence: Arc::new(TurnTeardownFence::new()),
+                #[cfg(feature = "browser-use")]
+                browser_lane_binding: None,
                 armed: true,
             };
         }
@@ -3923,11 +3951,13 @@ mod tests {
                 process_supervisor: None,
                 mcp_managers: Vec::new(),
                 turn_teardown_fence: Arc::new(TurnTeardownFence::new()),
+                #[cfg(feature = "browser-use")]
+                browser_lane_binding: None,
                 armed: true,
             };
             assert!(g.terminalize(|runtime, turn| {
                 runtime.emit_finish_for_turn(turn, None, Some(TurnStopReason::EndTurn))
-            }));
+            }).await.unwrap());
         }
         assert!(matches!(rx.try_recv(), Ok(AgentStreamEvent::Finish(_))));
         assert!(matches!(rx.try_recv(), Err(broadcast::error::TryRecvError::Empty)));

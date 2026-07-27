@@ -10,9 +10,10 @@ Lane, but it is not a browser rendering or page-control surface.
 > JPEG/screencast transport, dedicated viewer WebSocket, viewer token, and user
 > takeover/return-control flow have been removed. References to those features
 > in historical plans, requirements, or test records are superseded and are not
-> current capabilities or work to restore. Foregrounding the real managed
-> window restores that same window and active target; it does not restore any
-> former viewer capability.
+> current capabilities or work to restore. Ordinary Agent Browser Use launches
+> the Primary Host with Chromium `--headless=new`. Only an explicit management
+> action replaces that Host with a headful managed Host; this does not restore
+> any former viewer capability.
 
 ## Core model
 
@@ -40,7 +41,7 @@ do not replace per-Lane serialization.
 
 | Mode | Purpose | Storage and presentation |
 |---|---|---|
-| `primary` | Interactive browsing, sign-in, and account-affecting work | Uses a stable, application-isolated profile in a real headful managed Chromium window. Ordinary Agent use starts it minimized in the background and does not pop it up; an explicit foreground request or sign-in flow restores the same window and active target. Primary Lanes share live identity state. |
+| `primary` | Interactive browsing, sign-in, and account-affecting work | Uses a stable, application-isolated profile. Ordinary Agent Browser Use launches the managed Host with `--headless=new`, so no OS browser window is created. Only the user's explicit foreground action on the Browser management page safely shuts down the headless Host and creates a headful replacement Host with the same application-managed profile. Primary Lanes share live identity state. |
 | `anonymous` | Public-page and knowledge-source crawl work | Uses a temporary isolated profile, never reads Primary cookies or site storage, and may run headless. |
 | `authenticated_replica` | Bounded read-only authenticated crawl expansion | Uses a generation-tagged point-in-time isolated replica, never writes back automatically to Primary, and may run headless. |
 | `isolated` | Account switching, logout tests, untrusted browsing, or explicit isolation | Uses an independent temporary identity and may run headless. |
@@ -70,8 +71,8 @@ All production call paths ultimately use the same Hub:
 - ACP browser stdio holds only a short-lived, renewable loopback capability
   scoped to an audience and operation set; it does not own Chromium.
 - Knowledge URL rendering uses a fixed Anonymous Lane.
-- Browser sign-in uses a managed Primary Lane and explicitly foregrounds its
-  external Chromium window.
+- Browser sign-in uses a managed Primary Lane and remains headless unless the
+  user explicitly chooses the management page's foreground action.
 - HTTP management endpoints invoke only user-scoped inventory and lifecycle
   boundaries—including foregrounding an existing running Primary Lane—or
   installation-owner resource controls.
@@ -83,6 +84,10 @@ from trusted application context.
 When a runtime, attempt, remote connection, or capability ends, its owner lease
 must be revoked and that owner's Lanes closed. Application shutdown waits for
 the Hub to close all Lanes and Hosts explicitly before process exit completes.
+Native Agent turn completion or cancellation also closes that turn owner's
+Lanes. Closing the last Lane on a Host shuts that Host down immediately after
+target cleanup; normal turn/Lane cleanup does not wait for idle expiry, a
+periodic sweep, or a warm timer.
 
 ## Agent tools
 
@@ -119,8 +124,10 @@ Scheduling follows these constraints:
   an owner's only active Lane.
 
 Normal idle expiry is 10 minutes; reclaimable Lanes use a 2-minute idle expiry
-under pressure. The periodic sweep also handles expired owner credentials,
-Lane lifecycle, and Host warm timers.
+under pressure. The periodic sweep remains a recovery backstop for expired
+owner credentials and stale Lane lifecycle state, not the normal cleanup path:
+explicit Lane closure and Agent-turn completion close the final Host
+immediately.
 
 ## Browser management page boundary
 
@@ -128,18 +135,22 @@ Lane lifecycle, and Host warm timers.
 identity and owner information, concurrency policy, and lifecycle state. It can
 close a Lane, the current user's Lanes for a conversation, or—when authorized—
 all Lanes for the installation and can manage installation-wide resource
-policy. For a running Primary Lane, it can also ask the Hub to open that Lane's
-existing managed window in the foreground.
+policy. For a running Primary Lane, it can also ask the Hub to replace its
+headless Host with a headful managed Host and open the Lane in the foreground.
 
 The page does not display browser pixels, mirror a page, navigate, accept page
 input, operate tabs, broker a control handoff, or attach a client to Chromium.
 It creates no image stream, browser-specific WebSocket, or raw CDP/profile
-connection. Ordinary Agent Browser Use starts the real headful Primary window
-minimized in the background without surfacing it. The explicit foreground
-action restores that same native window and its existing active target; it does
-not create or restart a Host, Lane, window, or target, and it grants no page
-input or takeover capability. Closing a Lane through the management page does
-not close its conversation or Agent execution.
+connection. Ordinary Agent Browser Use launches Primary with Chromium
+`--headless=new`; it does not create a hidden or minimized OS window. The
+explicit foreground action safely shuts down that headless Host, increments the
+browser epoch, starts a headful replacement Host with the application-managed
+profile, and rebinds the Lane. The Hub makes a best effort to restore each
+Lane's active URL, but process-local target/frame/ref state is invalid: callers
+must perform a fresh observe and must not reuse old refs. The action grants no
+page input or takeover capability. Closing a Lane through the management page
+does not close its conversation or Agent execution; when it was the Host's last
+Lane, target cleanup is followed by immediate Host shutdown.
 
 Page execution remains subject to the Agent action and approval model.
 Read-only observation is handled as Info work; actions that may change a page,
@@ -163,16 +174,20 @@ The authenticated management API consists of:
 
 `POST /api/browser/lanes/{id}/foreground` is user-scoped and accepts only an
 owned Lane whose identity is Primary and whose lifecycle state is `running`.
-It raises the Lane's existing Chromium window and restores its current active
-target. It does not allocate a new Host/Lane/target, navigate or reload the
-page, transfer page control, or expose a model-callable Browser operation.
+If the Lane is on the normal headless Primary Host, the Hub safely closes that
+Host and creates a headful replacement with the same application-managed
+profile. This changes the browser epoch and invalidates all old target, frame,
+and ref state. The Hub makes a best effort to restore the Lane's active URL;
+the caller must refresh inventory and perform a fresh observe. It does not
+transfer page control or expose a model-callable Browser operation.
 
 The installation-owner-only Primary sign-in compatibility flow also exposes
 `POST /api/browser/login/open`, `POST /api/browser/login/close`, and
 `GET /api/browser/login/status`. These routes allocate and manage a normal Hub
-Primary Lane. An explicit login-open request foregrounds its real external
-Chromium window, including when it reuses an existing Lane; it does not create
-a second browser, embed its page, or grant control through the Browser page.
+Primary Lane but do not bypass the headless default. Creating or reusing that
+Lane does not foreground Chromium; the user must select the Lane's explicit
+foreground action on `/browser`. These routes do not create a second browser,
+embed its page, or grant control through the Browser page.
 
 Inventory and Lane/conversation lifecycle operations are filtered to the
 authenticated user. Installation-wide close and resource-policy operations
@@ -191,14 +206,16 @@ interfaces, not current API endpoints.
 ## Settings migration
 
 The product display mode is fixed to `external`. New installations write
-`agent.browserUse.displayMode = external`. Here `external` means a real,
-foregroundable managed window, not an automatic pop-up: a new Primary Host is
-headful but starts minimized, and ordinary Agent Browser Use does not bring it
-forward. Historical `embedded`, `headless`, invalid values, and the old
+`agent.browserUse.displayMode = external`. Here `external` means that a real,
+headful managed window is available only after an explicit foreground action;
+ordinary Agent Browser Use still launches Primary with `--headless=new`.
+Historical `embedded`, `headless`, invalid values, and the old
 `agent.browserUse.silent` key are compatibility inputs only and converge to
 `external`; the old `silent` key is no longer written. This migration affects
-Primary only. Anonymous/Crawl, Authenticated Replica, and Isolated Hosts may
-still run headless under Hub policy.
+the product preference, not permission for ordinary work to open a window.
+Anonymous/Crawl, Authenticated Replica, and Isolated Hosts also remain
+headless under Hub policy unless a separate trusted flow explicitly requires
+otherwise.
 
 `agent.browserUse.source` chooses whether system Chrome/Edge or a managed source
 is preferred. It never authorizes personal-profile reuse and does not change

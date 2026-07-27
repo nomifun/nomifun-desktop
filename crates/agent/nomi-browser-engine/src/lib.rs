@@ -68,7 +68,11 @@ pub use vault::{
 /// **浏览器来源**（「浏览器模式」的来源维度，与 headless 正交）：托管 CfT vs 系统 Chrome/Edge。
 /// 见 [`acquire::ChromeSource`]。经 [`EngineConfig::chrome_source`] 注入 → `create_engine` 解析二进制。
 pub use acquire::ChromeSource;
-pub use host::{LaneEngineConfig, LaneId, ManagedBrowserHost, TargetOwnership, TargetRoute};
+pub use launch::{BrowserHostLaunchMode, build_chrome_args_for_mode};
+pub use host::{
+    LaneEngineConfig, LaneId, ManagedBrowserHost, ManagedBrowserHostReplacement, TargetOwnership,
+    TargetRoute,
+};
 
 use std::collections::HashSet;
 use std::path::PathBuf;

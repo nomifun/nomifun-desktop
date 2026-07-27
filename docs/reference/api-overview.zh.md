@@ -135,16 +135,18 @@ NomiFun 启动时进入三种鉴权策略之一：
 调试端口、profile 路径或 profile 内容。
 
 Hub 继续作为 Host/Lane 所有权、容量、身份、并发与关闭的唯一权威。同一
-Lane 内的操作严格串行，不同 Lane 可在当前资源策略范围内并发。`primary`
-始终运行在可见的外置受管 Chromium 窗口中，使用应用隔离的稳定 profile；
-Crawl（`anonymous`）、`authenticated_replica` 与 `isolated` 工作可按需
-headless。NomiFun 绝不会打开用户个人 Chrome 或 Edge 的 profile。
+Lane 内的操作严格串行，不同 Lane 可在当前资源策略范围内并发。普通
+`primary` Agent 任务使用应用隔离的稳定 profile，并以 Chromium
+`--headless=new` 运行；仅 Browser 管理页显式前台请求或登录流程会将其替换为
+headful 受管 Host。Crawl（`anonymous`）、`authenticated_replica` 与 `isolated`
+工作继续按 Hub 策略 headless。NomiFun 绝不会打开用户个人 Chrome 或 Edge 的
+profile。
 
 | 方法 + 路径 | 用途 |
 |---|---|
 | `GET /api/browser/overview` | 返回当前用户可见的容量、压力、队列、身份、生命周期、Lane 与安全 Host 诊断信息。 |
 | `GET /api/browser/lanes` | 列出当前已鉴权用户可见的 Browser Lane 及其管理安全状态。 |
-| `POST /api/browser/lanes/{lane_id}/foreground` | 仅允许当前已鉴权用户自己的、处于 `running` 状态的 `primary` Lane；把同一个受管真实 Chromium 窗口及其当前 target 恢复到前台。该操作只管理生命周期/可见性，不授予页面输入、用户接管或 Agent 执行能力。 |
+| `POST /api/browser/lanes/{lane_id}/foreground` | 仅允许当前已鉴权用户自己的、处于 `running` 状态的 `primary` Lane；安全关闭其 headless Host，并用同一应用托管 profile 创建 headful 替代 Host。browser epoch 会变化，旧 target/frame/ref 失效，活动 URL 仅尽力恢复；客户端必须刷新库存并 fresh observe。该操作只管理生命周期/可见性，不授予页面输入、用户接管或 Agent 执行能力。 |
 | `POST /api/browser/lanes/{lane_id}/close` | 幂等关闭一个 Lane，不关闭其 conversation 或 Agent execution。 |
 | `POST /api/browser/conversations/{conversation_id}/close` | 关闭当前用户在指定 conversation 下的全部 Lane。 |
 | `POST /api/browser/close-all` | 仅安装 owner：关闭当前应用实例管理的全部 Browser Lane。 |
@@ -155,12 +157,13 @@ headless。NomiFun 绝不会打开用户个人 Chrome 或 Edge 的 profile。
 `x-csrf-token` 请求头。Lane 不存在与 Lane 属于其他用户都会返回 `404`，以免
 该端点被用于探测其他用户的库存。`409` 表示状态冲突，例如 Lane 不是 Primary，
 或在请求期间已经失效或关闭；尚未就绪或未处于 `running` 状态的 Lane 可能返回
-`503`。客户端应刷新库存并选择处于 `running` 状态的 Primary Lane。该端点只
-恢复现有窗口与 target，不会新建 Host、Lane、窗口或页面。
+`503`。客户端应刷新库存并选择处于 `running` 状态的 Primary Lane。该端点会把
+普通 headless Host 替换为 headful Host；这个过程递增 browser epoch 并使旧
+target/frame/ref 状态失效，URL 恢复仅为 best effort，调用方必须 fresh observe。
 
 仅安装 owner 可用的兼容端点 `POST /api/browser/login/open`、
-`POST /api/browser/login/close` 与 `GET /api/browser/login/status`，用于在可见的
-外置 Chromium 窗口中管理一个由 Hub 持有的普通 Primary 登录 Lane；它们不会
+`POST /api/browser/login/close` 与 `GET /api/browser/login/status`，用于管理一个
+由 Hub 持有的普通 Primary 登录 Lane，并显式请求其 headful 受管 Host；它们不会
 创建嵌入式或第二浏览器表面，也不会向 Browser 管理页面/API 增加页面输入控件。
 
 除显式不安全的无鉴权本地模式外，所有端点都要求正常的应用鉴权。库存以及

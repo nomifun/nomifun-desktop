@@ -106,6 +106,23 @@ impl BrowserLaneBinding {
         self.inner.revoke();
     }
 
+    /// Close every Lane created by the current Agent turn without revoking the
+    /// runtime's owner lease.
+    ///
+    /// Native Nomi runtimes are intentionally reusable across turns.  A turn
+    /// boundary must release its Chromium resources immediately, while the
+    /// same trusted client remains valid so the next turn can lazily open a
+    /// fresh default Lane.  This operation therefore uses the Hub's
+    /// owner-scoped `close_all` semantics rather than the lease-revocation
+    /// path used by runtime teardown.
+    pub async fn close_turn_lanes(&self) -> Result<(), AppError> {
+        self.inner.client.close_all().await.map(|_| ()).map_err(|error| {
+            AppError::Internal(format!(
+                "failed to close Native Nomi browser lanes at the turn boundary: {error}"
+            ))
+        })
+    }
+
     /// Revoke this exact owner and wait for the provider's bounded completion
     /// proof. Concurrent callers join one cleanup flight. A timeout leaves the
     /// flight and Hub-owned pending cleanup available to later callers.

@@ -562,7 +562,10 @@ describe('Browser Use settings contract', () => {
     const initializationStart = source.lastIndexOf('useEffect(() => {', initializationMarker);
     const loadCallbackStart = source.indexOf('const loadResourcePolicy', initializationMarker);
     const loadEffectStart = source.indexOf('useEffect(() => {', loadCallbackStart);
-    const loginStatusMarker = source.indexOf('// Phase 2b:', loadEffectStart);
+    const loginStatusMarker = source.indexOf(
+      '// Reflect whether the managed Primary sign-in Lane is already open.',
+      loadEffectStart
+    );
 
     expect(componentStart).toBeGreaterThan(-1);
     expect(initializationMarker).toBeGreaterThan(-1);

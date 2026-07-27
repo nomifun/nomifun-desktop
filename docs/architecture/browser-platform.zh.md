@@ -2,7 +2,7 @@
 
 本文说明 NomiFun 内置浏览器的生产架构、信任边界、并发模型和运维接口。浏览器平台的执行单位是 Browser Lane，而不是 Agent 会话或单个 Chromium 进程。`/browser` 仍是状态与生命周期管理页面；它可以显式前台打开已有的 running Primary Lane，但不是页面渲染或控制表面。
 
-> **2026-07-27 取代性说明：**普通 Agent Browser Use 不再自动弹出 Primary。真实受管 Chromium 默认以最小化窗口在后台运行；显式前台打开只恢复同一窗口和活动 target，不恢复早期的内嵌 preview、Viewer、用户接管或页面输入能力。
+> **2026-07-27 取代性说明：**普通 Agent Browser Use 默认以 Chromium `--headless=new` 运行 Primary，不创建操作系统浏览器窗口。只有用户在 Browser 管理页显式“前台打开”或进入显式登录流程时，Hub 才会安全关闭旧 headless Host，并用应用托管 profile 创建 headful 替代 Host；这不会恢复早期的内嵌 preview、Viewer、用户接管或页面输入能力。
 
 ## 核心模型
 
@@ -23,7 +23,7 @@
 
 | 模式 | 用途 | 存储语义 |
 | --- | --- | --- |
-| `primary` | 普通交互式浏览、登录和账户操作 | 使用应用管理的稳定隔离 profile 和真实、headful 的受管 Chromium；普通 Agent 使用时默认最小化在后台，不自动弹窗；显式前台请求或登录流程会恢复同一窗口和活动 target；多个 Primary Lane 实时共享身份状态 |
+| `primary` | 普通交互式浏览、登录和账户操作 | 使用应用管理的稳定隔离 profile；普通 Agent Browser Use 以 `--headless=new` 启动受管 Host，不创建窗口；仅用户在 Browser 管理页显式“前台打开”时会安全关闭 headless Host，并用同一应用托管 profile 创建 headful 替代 Host；多个 Primary Lane 实时共享身份状态 |
 | `anonymous` | 公开网页和知识源抓取 | 使用临时隔离 profile，不读取 Primary cookies 或站点存储；可 headless |
 | `authenticated_replica` | 有界的只读认证抓取扩展 | 使用带 generation 的时间点隔离副本，不会自动回写 Primary；可 headless |
 | `isolated` | 切换账户、退出测试、不可信浏览或显式隔离 | 使用独立临时身份；可 headless |
@@ -41,12 +41,13 @@ Chromium 可执行文件可来自系统 Chrome/Edge 或 managed source；来源�
 - Gateway 从认证的 conversation/runtime 上下文解析 `CallerIdentity`，再转发到 Hub；
 - ACP browser stdio 只持有短期、可续期且限定 audience/operation 的 loopback capability；
 - 知识 URL 渲染器使用固定的 Anonymous Lane；
-- Browser 登录接口使用受管 Primary Lane，并显式前台打开其外置 Chromium 窗口；
+- Browser 登录接口使用受管 Primary Lane，除非用户在 Browser 管理页显式“前台打开”，否则仍保持 headless；
 - HTTP 管理接口只调用 Hub 的用户级库存、资源策略和生命周期边界，其中包括前台打开已有的 running Primary Lane。
 
 模型只能选择长度受限的 Lane 名称。`user_id`、conversation、runtime instance、attempt、owner lease、允许的操作和有效期都来自可信的应用上下文。
 
 runtime、attempt、远程连接或 capability 结束时必须撤销 owner lease，并关闭该 owner 的 Lane。应用退出时先等待 Hub 显式关闭所有 Lane 和 Host，再完成进程退出。
+Native Agent turn 正常完成或取消时也会关闭该 turn owner 的 Lane。最后一个 Lane 完成 target 清理后，所属 Host 立即关闭；正常清理不等待 idle expiry、周期 sweep 或 warm timer。
 
 ## Agent 工具
 
@@ -73,7 +74,7 @@ Automatic 策略从系统总内存和逻辑 CPU 推导安全上限。运行期�
 - 资源平衡不抢占正在执行的操作；
 - 压力回收优先处理空闲扩展或 Crawl Lane，并保护 owner 唯一活动 Lane。
 
-正常 idle expiry 为 10 分钟；压力状态下可回收 Lane 的 idle expiry 为 2 分钟。周期 sweep 同时处理过期 owner 凭据、Lane 生命周期和 Host warm timer。
+正常 idle expiry 为 10 分钟；压力状态下可回收 Lane 的 idle expiry 为 2 分钟。周期 sweep 只是处理过期 owner 凭据与遗留 Lane 状态的恢复兜底，不是正常清理路径；显式关闭 Lane 或 Agent turn 结束后，最后一个 Host 会立即退出。
 
 ## Browser 管理页面边界
 
@@ -83,11 +84,13 @@ Lane/Host 状态、容量与队列、身份和 owner 信息，并关闭 Lane、c
 “前台打开”。
 
 该页面不嵌入图像流，不建立专用 Viewer WebSocket，也不提供用户接管、页面
-输入、tab 操作或地址导航入口。普通 Agent Browser Use 会让真实、headful 的
-Primary 窗口以最小化状态在后台启动，不弹窗或抢焦点；“前台打开”只恢复已有
-原生窗口及其当前活动 target，不新建或重启 Host、Lane、窗口、target，也不授予
-页面输入或接管能力。关闭操作仍由 Hub 执行，不会关闭 conversation 或
-AgentExecution。
+输入、tab 操作或地址导航入口。普通 Agent Browser Use 以 `--headless=new` 启动
+Primary，不创建隐藏或最小化窗口。“前台打开”会安全关闭旧 headless Host、递增
+browser epoch，并用应用托管 profile 创建 headful 替代 Host，再重新绑定 Lane。
+Hub 会尽力恢复各 Lane 的活动 URL，但旧 target/frame/ref 必然失效；调用方必须
+刷新库存并 fresh observe，不能复用旧 ref。该操作不授予页面输入或接管能力。
+关闭操作仍由 Hub 执行，不会关闭 conversation 或 AgentExecution；若关闭的是
+所属 Host 的最后一个 Lane，target 清理后 Host 会立即退出。
 
 ## Agent 审批与安全边界
 
@@ -110,15 +113,18 @@ Browser 页面没有页面操作权限。Agent 发起的只读观察按 Info 类
 - `PUT /api/browser/resource-policy`
 
 `POST /api/browser/lanes/{id}/foreground` 按认证用户过滤，仅接受该用户拥有且身份为
-Primary、生命周期为 `running` 的 Lane。它恢复同一个 Chromium 窗口和当前活动
-target，不创建新 Host/Lane/target，不导航或刷新页面，不转移页面控制权，也不是
-模型可调用的 Browser action。
+Primary、生命周期为 `running` 的 Lane。如果该 Lane 位于普通 headless Primary
+Host，Hub 会安全关闭旧 Host，并用同一应用托管 profile 创建 headful 替代 Host。
+这个过程会改变 browser epoch，并使旧 target、frame 与 ref 状态失效；Hub 只尽力
+恢复 Lane 的活动 URL，客户端必须刷新库存并 fresh observe。该端点不转移页面
+控制权，也不是模型可调用的 Browser action。
 
 仅安装 owner 可用的 Primary 登录兼容流程还提供
 `POST /api/browser/login/open`、`POST /api/browser/login/close` 和
-`GET /api/browser/login/status`。显式 login-open 会前台打开其普通 Hub Primary
-Lane，即使复用已有 Lane 也一样；它不会创建第二浏览器、内嵌页面或授予 Browser
-管理页页面控制权。
+`GET /api/browser/login/status`。这些接口创建或复用普通 Hub Primary Lane，但不
+绕过 headless 默认，也不会自动前台打开 Chromium；用户仍须在 `/browser` 对该
+Lane 显式“前台打开”。它不会创建第二浏览器、内嵌页面或授予 Browser 管理页
+页面控制权。
 
 所有用户可见库存和实时事件都按认证用户过滤。改变状态的 HTTP 请求继续使用应用现有的 CSRF 防护。
 
@@ -126,11 +132,12 @@ Lane，即使复用已有 Lane 也一样；它不会创建第二浏览器、内�
 
 产品显示模式固定为 `external`。新安装写入
 `agent.browserUse.displayMode = external`；这里的 `external` 表示真实、可前台恢复的
-受管窗口，不表示自动弹窗。Primary 始终 headful，但新 Host 默认以最小化状态在
-后台启动，普通 Agent Browser Use 不会主动将其置于前台。历史 `embedded`、
+受管窗口只会在显式前台操作后创建，不表示自动弹窗；普通 Agent Browser Use
+仍以 `--headless=new` 运行 Primary。历史 `embedded`、
 `headless`、无效值以及旧 `agent.browserUse.silent` 都只用于兼容读取，并收敛为
-`external`，不再写入旧 `silent` 键。该迁移只影响 Primary；Anonymous、
-Authenticated Replica 与 Isolated Host 仍可由 Hub 以 headless 运行。
+`external`，不再写入旧 `silent` 键。该迁移不允许普通任务打开窗口；Anonymous、
+Authenticated Replica 与 Isolated Host 也继续按 Hub 策略 headless 运行，除非另有
+可信流程明确要求。
 
 `agent.browserUse.source` 选择系统 Chrome/Edge 优先或 managed source 优先；它不
 授权复用个人 profile，也不改变 Hub 的身份、容量、审批或生命周期策略。
