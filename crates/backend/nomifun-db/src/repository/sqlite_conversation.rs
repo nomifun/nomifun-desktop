@@ -4737,6 +4737,166 @@ impl IConversationRepository for SqliteConversationRepository {
         Ok(result.rows_affected())
     }
 
+    async fn truncate_messages_for_admitted_edit(
+        &self,
+        user_id: &str,
+        conversation_id: &str,
+        operation_id: &str,
+        request_payload: &str,
+        expected_admission_epoch: i64,
+        from_created_at: i64,
+        from_message_id: &str,
+        updated_at: TimestampMs,
+    ) -> Result<u64, DbError> {
+        if operation_id.trim().is_empty()
+            || expected_admission_epoch < 0
+            || from_message_id.trim().is_empty()
+        {
+            return Err(DbError::Conflict(
+                "invalid admitted edit transcript authority".to_owned(),
+            ));
+        }
+
+        let mut tx = self.pool.begin().await?;
+        let authority = sqlx::query(
+            "UPDATE conversations SET updated_at = updated_at \
+             WHERE conversation_id = ? AND user_id = ? AND status = 'running' \
+               AND active_turn_operation_id = ? AND admission_epoch = ? \
+               AND json_extract(extra, '$._edit_resubmit_fence.operation_id') = ? \
+               AND json_extract(extra, '$._edit_resubmit_fence.target_message_id') = ? \
+               AND json_extract(extra, '$._edit_resubmit_fence.phase') = 'accepted' \
+               AND EXISTS( \
+                   SELECT 1 FROM conversation_delivery_receipts receipt \
+                   WHERE receipt.operation_id = ? \
+                     AND receipt.conversation_id = conversations.conversation_id \
+                     AND receipt.user_id = conversations.user_id \
+                     AND receipt.kind = 'turn' AND receipt.status = 'accepted' \
+                     AND receipt.request_payload = ? \
+               ) \
+               AND EXISTS( \
+                   SELECT 1 FROM messages target \
+                   WHERE target.conversation_id = conversations.conversation_id \
+                     AND target.message_id = ? AND target.created_at = ? \
+                     AND target.position = 'right' AND target.type = 'text' \
+                     AND target.message_id = ( \
+                         SELECT latest.message_id FROM messages latest \
+                         WHERE latest.conversation_id = conversations.conversation_id \
+                           AND latest.position = 'right' AND latest.type = 'text' \
+                         ORDER BY latest.created_at DESC, latest.message_id DESC LIMIT 1 \
+                     ) \
+               )",
+        )
+        .bind(conversation_id)
+        .bind(user_id)
+        .bind(operation_id)
+        .bind(expected_admission_epoch)
+        .bind(operation_id)
+        .bind(from_message_id)
+        .bind(operation_id)
+        .bind(request_payload)
+        .bind(from_message_id)
+        .bind(from_created_at)
+        .execute(&mut *tx)
+        .await?;
+        if authority.rows_affected() != 1 {
+            return Err(DbError::Conflict(
+                "admitted edit transcript authority changed before truncation".to_owned(),
+            ));
+        }
+
+        // Completed receipts are immutable replay evidence. Detach only their
+        // nullable projections into the suffix being replaced; never relax the
+        // generic transcript deletion guard or mutate accepted receipts.
+        sqlx::query(
+            "UPDATE conversation_delivery_receipts \
+             SET projected_conversation_id = NULL, projected_message_id = NULL, \
+                 updated_at = MAX(updated_at, ?) \
+             WHERE status = 'completed' \
+               AND conversation_id = ? AND user_id = ? \
+               AND projected_conversation_id = ? \
+               AND projected_message_id IN ( \
+                 SELECT message_id FROM messages \
+                 WHERE conversation_id = ? \
+                   AND (created_at > ? OR (created_at = ? AND message_id >= ?)) \
+             )",
+        )
+        .bind(updated_at)
+        .bind(conversation_id)
+        .bind(user_id)
+        .bind(conversation_id)
+        .bind(conversation_id)
+        .bind(from_created_at)
+        .bind(from_created_at)
+        .bind(from_message_id)
+        .execute(&mut *tx)
+        .await?;
+
+        // Correlations are nullable projections of streamed child rows. Delete
+        // only correlations whose projected message is in this suffix; wire
+        // reservations without a projected row remain immutable protocol
+        // history.
+        sqlx::query(
+            "DELETE FROM message_correlations \
+             WHERE conversation_id = ? AND message_id IN ( \
+                 SELECT message_id FROM messages \
+                 WHERE conversation_id = ? \
+                   AND (created_at > ? OR (created_at = ? AND message_id >= ?)) \
+             )",
+        )
+        .bind(conversation_id)
+        .bind(conversation_id)
+        .bind(from_created_at)
+        .bind(from_created_at)
+        .bind(from_message_id)
+        .execute(&mut *tx)
+        .await?;
+
+        // Fail closed if an unexpected accepted receipt or another retained
+        // projection still owns any row in the exact suffix.
+        ensure_messages_are_not_retained(
+            &mut tx,
+            conversation_id,
+            Some(from_created_at),
+            Some(from_message_id),
+        )
+        .await?;
+
+        sqlx::query(
+            "UPDATE channel_inbound_receipts SET message_id = NULL \
+             WHERE message_id IN ( \
+                 SELECT message_id FROM messages \
+                 WHERE conversation_id = ? \
+                   AND (created_at > ? OR (created_at = ? AND message_id >= ?)) \
+             )",
+        )
+        .bind(conversation_id)
+        .bind(from_created_at)
+        .bind(from_created_at)
+        .bind(from_message_id)
+        .execute(&mut *tx)
+        .await?;
+
+        let deleted = sqlx::query(
+            "DELETE FROM messages \
+             WHERE conversation_id = ? \
+               AND (created_at > ? OR (created_at = ? AND message_id >= ?))",
+        )
+        .bind(conversation_id)
+        .bind(from_created_at)
+        .bind(from_created_at)
+        .bind(from_message_id)
+        .execute(&mut *tx)
+        .await?;
+        if deleted.rows_affected() == 0 {
+            return Err(DbError::Conflict(
+                "admitted edit target disappeared before transcript truncation".to_owned(),
+            ));
+        }
+
+        tx.commit().await?;
+        Ok(deleted.rows_affected())
+    }
+
     async fn get_message_by_msg_id(
         &self,
         conversation_id: &str,
@@ -7417,6 +7577,238 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(f.effective_limit(), 50);
+    }
+
+    #[tokio::test]
+    async fn truncate_messages_for_admitted_edit_preserves_replay_and_wire_history() {
+        let (repo, db) = setup().await;
+        let mut conv = sample_conversation(TEST_INSTALLATION_OWNER);
+        conv.status = Some("finished".to_owned());
+        conv.conversation_id = repo.create(&conv).await.unwrap();
+        let now = nomifun_common::now_ms();
+
+        let original_operation_id = "edit-truncate-original-turn";
+        let original_payload = r#"{"content":"original"}"#;
+        let original_claim = repo
+            .claim_delivery_receipt_once(
+                TEST_INSTALLATION_OWNER,
+                &conv.conversation_id,
+                original_operation_id,
+                "turn",
+                original_payload,
+                now,
+            )
+            .await
+            .unwrap();
+        let mut target = sample_message(conv.conversation_id.clone());
+        target.message_id = original_claim.receipt.message_id.clone();
+        target.msg_id = Some(target.message_id.clone());
+        target.created_at = now + 1;
+        repo.insert_message(&target).await.unwrap();
+        assert!(
+            repo.complete_delivery_receipt(
+                TEST_INSTALLATION_OWNER,
+                &conv.conversation_id,
+                original_operation_id,
+                true,
+                Some("original-result"),
+                None,
+                now + 2,
+            )
+            .await
+            .unwrap()
+        );
+
+        let projected_turn_id = MessageId::new().into_string();
+        let projected_message_id = repo
+            .claim_message_correlation(
+                &conv.conversation_id,
+                &projected_turn_id,
+                "tool_call",
+                "projected-child",
+            )
+            .await
+            .unwrap();
+        let projected_child = MessageRow {
+            id: 0,
+            message_id: projected_message_id.clone(),
+            conversation_id: conv.conversation_id.clone(),
+            msg_id: Some(projected_message_id.clone()),
+            r#type: "tool_call".to_owned(),
+            content: r#"{"name":"fixture"}"#.to_owned(),
+            position: Some("left".to_owned()),
+            status: Some("finish".to_owned()),
+            hidden: false,
+            created_at: now + 3,
+        };
+        repo.insert_message(&projected_child).await.unwrap();
+
+        let unprojected_turn_id = MessageId::new().into_string();
+        let unprojected_message_id = repo
+            .claim_message_correlation(
+                &conv.conversation_id,
+                &unprojected_turn_id,
+                "tool_call",
+                "unprojected-reservation",
+            )
+            .await
+            .unwrap();
+
+        let before_edit = repo
+            .get_turn_admission_state(TEST_INSTALLATION_OWNER, &conv.conversation_id)
+            .await
+            .unwrap();
+        let edit_operation_id = "edit-truncate-resubmit";
+        let edit_payload = r#"{"content":"replacement"}"#;
+        assert!(
+            repo.claim_edit_resubmit_receipt_and_fence(
+                TEST_INSTALLATION_OWNER,
+                &conv.conversation_id,
+                edit_operation_id,
+                &MessageId::new().into_string(),
+                edit_payload,
+                &target.message_id,
+                before_edit.epoch,
+                now + 4,
+            )
+            .await
+            .unwrap()
+            .claimed_new
+        );
+        assert!(
+            repo.admit_reserved_edit_turn(
+                TEST_INSTALLATION_OWNER,
+                &conv.conversation_id,
+                edit_operation_id,
+                edit_payload,
+                before_edit.epoch + 1,
+                now + 5,
+            )
+            .await
+            .unwrap()
+        );
+        let admitted = repo
+            .get_turn_admission_state(TEST_INSTALLATION_OWNER, &conv.conversation_id)
+            .await
+            .unwrap();
+
+        let wrong_authority = repo
+            .truncate_messages_for_admitted_edit(
+                TEST_INSTALLATION_OWNER,
+                &conv.conversation_id,
+                edit_operation_id,
+                edit_payload,
+                admitted.epoch + 1,
+                target.created_at,
+                &target.message_id,
+                now + 6,
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(wrong_authority, DbError::Conflict(_)));
+        assert!(
+            repo.get_message(&conv.conversation_id, &target.message_id)
+                .await
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            repo.get_message(&conv.conversation_id, &projected_message_id)
+                .await
+                .unwrap()
+                .is_some()
+        );
+        let receipt_after_rejection = repo
+            .get_delivery_receipt(
+                TEST_INSTALLATION_OWNER,
+                &conv.conversation_id,
+                original_operation_id,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            receipt_after_rejection.projected_message_id.as_deref(),
+            Some(target.message_id.as_str())
+        );
+        let projected_correlation_after_rejection: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM message_correlations \
+             WHERE conversation_id = ? AND message_id = ?",
+        )
+        .bind(&conv.conversation_id)
+        .bind(&projected_message_id)
+        .fetch_one(db.pool())
+        .await
+        .unwrap();
+        assert_eq!(projected_correlation_after_rejection, 1);
+
+        let deleted = repo
+            .truncate_messages_for_admitted_edit(
+                TEST_INSTALLATION_OWNER,
+                &conv.conversation_id,
+                edit_operation_id,
+                edit_payload,
+                admitted.epoch,
+                target.created_at,
+                &target.message_id,
+                now + 7,
+            )
+            .await
+            .unwrap();
+        assert_eq!(deleted, 2);
+        assert!(
+            repo.get_message(&conv.conversation_id, &target.message_id)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            repo.get_message(&conv.conversation_id, &projected_message_id)
+                .await
+                .unwrap()
+                .is_none()
+        );
+
+        let completed_receipt = repo
+            .get_delivery_receipt(
+                TEST_INSTALLATION_OWNER,
+                &conv.conversation_id,
+                original_operation_id,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(completed_receipt.message_id, target.message_id);
+        assert_eq!(completed_receipt.status, "completed");
+        assert_eq!(completed_receipt.result_ok, Some(true));
+        assert_eq!(
+            completed_receipt.result_text.as_deref(),
+            Some("original-result")
+        );
+        assert!(completed_receipt.projected_conversation_id.is_none());
+        assert!(completed_receipt.projected_message_id.is_none());
+
+        let projected_correlation_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM message_correlations \
+             WHERE conversation_id = ? AND message_id = ?",
+        )
+        .bind(&conv.conversation_id)
+        .bind(&projected_message_id)
+        .fetch_one(db.pool())
+        .await
+        .unwrap();
+        assert_eq!(projected_correlation_count, 0);
+        assert_eq!(
+            repo.claim_message_correlation(
+                &conv.conversation_id,
+                &unprojected_turn_id,
+                "tool_call",
+                "unprojected-reservation",
+            )
+            .await
+            .unwrap(),
+            unprojected_message_id
+        );
     }
 
     #[tokio::test]

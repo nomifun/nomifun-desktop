@@ -8,7 +8,7 @@ use async_trait::async_trait;
 use nomi_agent::engine::{AgentEngine, AgentError};
 use nomi_agent::output::OutputSink;
 use nomi_agent::output::terminal::TerminalSink;
-use nomi_agent::session::SessionManager;
+use nomi_agent::session::{EditableTurnCheckpoint, Session, SessionManager};
 use nomi_config::compat::ProviderCompat;
 use nomi_protocol::events::ToolCategory;
 use nomi_providers::openai::OpenAIProvider;
@@ -1097,6 +1097,51 @@ async fn test_engine_message_accumulation() {
         "expected 4 messages (user+assistant for each run), got {}",
         session.messages.len()
     );
+}
+
+#[test]
+fn resumed_engine_restores_the_exact_editable_turn_checkpoint() {
+    let now = chrono::Utc::now();
+    let session = Session {
+        id: "resume-editable-turn".into(),
+        created_at: now,
+        updated_at: now,
+        provider: "anthropic".into(),
+        model: "test-model".into(),
+        cwd: "/tmp".into(),
+        total_usage: TokenUsage::default(),
+        messages: vec![
+            Message::new(
+                Role::User,
+                vec![ContentBlock::Text {
+                    text: "editable request".into(),
+                }],
+            ),
+            Message::new(
+                Role::Assistant,
+                vec![ContentBlock::Text {
+                    text: "prior answer".into(),
+                }],
+            ),
+        ],
+        owner_token: None,
+        activated_deferred_tools: Vec::new(),
+        editable_turn: Some(EditableTurnCheckpoint {
+            source_message_id: "message-root".into(),
+            start_len: 0,
+        }),
+    };
+    let engine = AgentEngine::resume_with_provider(
+        Arc::new(MockLlmProvider::with_text_response("unused")),
+        test_config(),
+        ToolRegistry::new(),
+        silent_output(),
+        session,
+        std::env::temp_dir(),
+    );
+
+    assert!(engine.can_rewind_last_turn("message-root"));
+    assert!(!engine.can_rewind_last_turn("another-message"));
 }
 
 // ---------------------------------------------------------------------------

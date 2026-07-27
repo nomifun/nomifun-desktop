@@ -801,6 +801,11 @@ impl crate::runtime_handle::AgentRuntimeControl for NomiAgentManager {
 
     async fn send_message(&self, data: SendMessageData) -> Result<(), AgentSendError> {
         let started_at = now_ms();
+        let source_message_id = data
+            .source_message_id
+            .as_deref()
+            .unwrap_or(&data.msg_id)
+            .to_owned();
         info!(
             conversation_id = %self.runtime.conversation_id(),
             msg_id = %data.msg_id,
@@ -951,7 +956,11 @@ impl crate::runtime_handle::AgentRuntimeControl for NomiAgentManager {
                         engine.set_system_resource_inbox(None);
                         break 'accepted None;
                     }
-                    res = engine.execute_turn_with_content(current_content, &data.msg_id) => res,
+                    res = engine.execute_turn_with_content_for_source(
+                        current_content,
+                        &data.msg_id,
+                        &source_message_id,
+                    ) => res,
                 };
 
                 // Race-tail: only a clean Ok can carry leftover steering worth a
@@ -1664,21 +1673,39 @@ impl NomiAgentManager {
         Ok(())
     }
 
+    /// Read-only preflight for edit/resubmit. This is called before the
+    /// Conversation service claims its durable destructive receipt.
+    pub async fn ensure_can_rewind_last_turn(
+        &self,
+        expected_source_message_id: &str,
+    ) -> Result<(), AppError> {
+        let engine = self.engine.lock().await;
+        if !engine.can_rewind_last_turn(expected_source_message_id) {
+            return Err(AppError::BadRequest(
+                "无法安全回退该历史消息：缺少匹配的持久化编辑检查点，原消息未改变".into(),
+            ));
+        }
+        Ok(())
+    }
+
     /// Rewind the last user turn (edit & resubmit the most recent user message):
     /// stop any in-flight turn, then truncate the engine's in-memory transcript
     /// back to that turn's start so a fresh send re-runs without the stale turn.
     /// Returns BadRequest when there is no valid anchor (e.g. context was
     /// compacted away) so the caller can surface a retriable error.
-    pub async fn rewind_last_turn(&self) -> Result<(), AppError> {
+    pub async fn rewind_last_turn(
+        &self,
+        expected_source_message_id: &str,
+    ) -> Result<(), AppError> {
         info!(
             conversation_id = %self.runtime.conversation_id(),
             "Rewinding last Nomi turn"
         );
         self.request_stop(None, "rewind_last_turn", false);
         let mut engine = self.engine.lock().await;
-        if !engine.rewind_last_turn() {
+        if !engine.rewind_last_turn(expected_source_message_id) {
             return Err(AppError::BadRequest(
-                "无法回退上一轮（上下文可能已被压缩），请清空上下文后重试".into(),
+                "无法安全回退该历史消息：编辑检查点已失效，原消息未改变".into(),
             ));
         }
         Ok(())
@@ -2101,6 +2128,7 @@ mod tests {
             .send_message(SendMessageData {
                 content: "continue".into(),
                 msg_id: "msg-after-idle-resource".into(),
+                source_message_id: None,
                 files: Vec::new(),
                 inject_skills: Vec::new(),
                 origin: None,
@@ -2197,6 +2225,7 @@ mod tests {
             .send_message(SendMessageData {
                 content: "What is shown?".into(),
                 msg_id: "msg-image".into(),
+                source_message_id: None,
                 files: vec![path.to_string_lossy().into_owned()],
                 inject_skills: Vec::new(),
                 origin: None,
@@ -2277,6 +2306,7 @@ mod tests {
             .send_message(SendMessageData {
                 content: "Answer using text only.".into(),
                 msg_id: "msg-text-only".into(),
+                source_message_id: None,
                 files: vec![missing_image],
                 inject_skills: Vec::new(),
                 origin: None,
@@ -2322,6 +2352,7 @@ mod tests {
             .send_message(SendMessageData {
                 content: "create the file".into(),
                 msg_id: "msg-1".into(),
+                source_message_id: None,
                 files: Vec::new(),
                 inject_skills: Vec::new(),
                 origin: None,
@@ -2379,6 +2410,7 @@ mod tests {
             .send_message(SendMessageData {
                 content: "generate an image".into(),
                 msg_id: "msg-missing-image".into(),
+                source_message_id: None,
                 files: Vec::new(),
                 inject_skills: Vec::new(),
                 origin: None,
@@ -2444,6 +2476,7 @@ mod tests {
             .send_message(SendMessageData {
                 content: "trigger malformed structured progress".into(),
                 msg_id: "msg-error".into(),
+                source_message_id: None,
                 files: Vec::new(),
                 inject_skills: Vec::new(),
                 origin: None,
@@ -2468,6 +2501,7 @@ mod tests {
             .send_message(SendMessageData {
                 content: "start a clean turn".into(),
                 msg_id: "msg-next".into(),
+                source_message_id: None,
                 files: Vec::new(),
                 inject_skills: Vec::new(),
                 origin: None,
@@ -2509,6 +2543,7 @@ mod tests {
                     .send_message(SendMessageData {
                         content: "start a committed tool call".into(),
                         msg_id: "msg-cancel-tool".into(),
+                        source_message_id: None,
                         files: Vec::new(),
                         inject_skills: Vec::new(),
                         origin: None,
@@ -2637,6 +2672,7 @@ mod tests {
                     .send_message(SendMessageData {
                         content: "run the hanging tool".into(),
                         msg_id: "msg-hanging-tool".into(),
+                        source_message_id: None,
                         files: Vec::new(),
                         inject_skills: Vec::new(),
                         origin: None,
@@ -2694,6 +2730,7 @@ mod tests {
                     .send_message(SendMessageData {
                         content: "search the mounted knowledge base".into(),
                         msg_id: "msg-hanging-rag".into(),
+                        source_message_id: None,
                         files: Vec::new(),
                         inject_skills: Vec::new(),
                         origin: None,
@@ -2732,6 +2769,7 @@ mod tests {
                     .send_message(SendMessageData {
                         content: "wait for engine preparation".into(),
                         msg_id: "msg-blocked-engine-lock".into(),
+                        source_message_id: None,
                         files: Vec::new(),
                         inject_skills: Vec::new(),
                         origin: None,
@@ -2796,6 +2834,7 @@ mod tests {
             .send_message(SendMessageData {
                 content: "keep calling the tool".into(),
                 msg_id: "msg-max-turns".into(),
+                source_message_id: None,
                 files: Vec::new(),
                 inject_skills: Vec::new(),
                 origin: None,
@@ -2847,6 +2886,7 @@ mod tests {
                     .send_message(SendMessageData {
                         content: "start".into(),
                         msg_id: "msg-max-turns-late-steer".into(),
+                        source_message_id: None,
                         files: Vec::new(),
                         inject_skills: Vec::new(),
                         origin: None,
@@ -2929,6 +2969,7 @@ mod tests {
                     .send_message(SendMessageData {
                         content: "next explicit turn".into(),
                         msg_id: "msg-after-max-turns".into(),
+                        source_message_id: None,
                         files: Vec::new(),
                         inject_skills: Vec::new(),
                         origin: None,
@@ -3012,6 +3053,7 @@ mod tests {
             .send_message(SendMessageData {
                 content: "create a polished single page site".into(),
                 msg_id: "msg-1".into(),
+                source_message_id: None,
                 files: Vec::new(),
                 inject_skills: Vec::new(),
                 origin: None,
@@ -3280,6 +3322,7 @@ mod tests {
             .send_message(SendMessageData {
                 content: "must not start".into(),
                 msg_id: "raced-after-kill".into(),
+                source_message_id: None,
                 files: Vec::new(),
                 inject_skills: Vec::new(),
                 origin: None,
@@ -3306,6 +3349,7 @@ mod tests {
                     .send_message(SendMessageData {
                         content: "first".into(),
                         msg_id: "first".into(),
+                        source_message_id: None,
                         files: Vec::new(),
                         inject_skills: Vec::new(),
                         origin: None,
@@ -3322,6 +3366,7 @@ mod tests {
                     .send_message(SendMessageData {
                         content: "second".into(),
                         msg_id: "second".into(),
+                        source_message_id: None,
                         files: Vec::new(),
                         inject_skills: Vec::new(),
                         origin: None,

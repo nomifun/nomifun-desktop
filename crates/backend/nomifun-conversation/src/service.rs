@@ -8302,6 +8302,7 @@ impl ConversationService {
                 SendMessageData {
                     content: req.content,
                     msg_id: first_turn_msg_id.clone(),
+                    source_message_id: Some(source_user_message_id.clone()),
                     files: req.files,
                     inject_skills: req.inject_skills,
                     origin: origin.clone(),
@@ -8723,6 +8724,7 @@ impl ConversationService {
                     SendMessageData {
                         content: outcome.system_responses.join("\n"),
                         msg_id: next_turn_msg_id.clone(),
+                        source_message_id: Some(source_user_message_id.clone()),
                         files: vec![],
                         inject_skills: vec![],
                         // A system-driven continuation is not the human owner
@@ -10106,6 +10108,59 @@ impl ConversationService {
         let (from_created_at, from_id) =
             (target.created_at, target.message_id.clone());
 
+        // An editable terminal conversation is not required to keep a
+        // process-local runtime alive. App restart, Stop, idle eviction, and
+        // runtime recovery all legitimately leave this registry cold. Restore
+        // through the same execution preparation path as a normal send, while
+        // still outside the durable destructive receipt/fence.
+        let agent = if let Some(agent) = runtime_registry.get_runtime(conv_id) {
+            agent
+        } else {
+            let (runtime_options, knowledge_signature) = self
+                .prepare_runtime_options_for_execution(
+                    &row,
+                    runtime_registry,
+                    Some(&preparation_token),
+                )
+                .await?;
+            runtime_build_lease.ensure_active()?;
+            let stored_workspace = runtime_options.workspace.clone();
+            let agent = runtime_registry
+                .get_or_create_runtime_for_preparation(
+                    conv_id,
+                    preparation_token.clone(),
+                    runtime_options,
+                )
+                .await?;
+            if runtime_build_lease.is_cancelled() {
+                Self::terminate_runtime_until_confirmed(
+                    runtime_registry,
+                    conv_id,
+                    AgentKillReason::UserCancelled,
+                    "cancelled edit/resubmit runtime preparation",
+                )
+                .await;
+                return Err(AppError::Conflict(format!(
+                    "conversation {conversation_id} runtime preparation was cancelled"
+                )));
+            }
+            self.maybe_persist_workspace(
+                conv_id,
+                &stored_workspace,
+                agent.workspace(),
+            )
+            .await?;
+            self.commit_runtime_knowledge_signature(conv_id, knowledge_signature);
+            agent
+        };
+        runtime_build_lease.ensure_active()?;
+
+        // Legacy/compacted sessions do not contain enough information to infer
+        // a safe transcript boundary. Fail before claiming the durable edit
+        // receipt, preserving both the database transcript and retry freedom.
+        agent.ensure_can_rewind_last_turn(message_id).await?;
+        runtime_build_lease.ensure_active()?;
+
         // Snapshot the exact terminal generation immediately before claiming
         // the destructive workflow. The repository consumes this epoch while
         // inserting the receipt and fence in one SQLite writer transaction, so
@@ -10270,12 +10325,22 @@ impl ConversationService {
         let preparation_result: Result<(), AppError> = async {
             runtime_build_lease.ensure_active()?;
             runtime_build_lease.promote_to_turn_execution()?;
-            let agent = self.runtime_handle(conversation_id)?;
             edit_admission_custodian.mark_destructive_runtime_mutation()?;
-            agent.rewind_last_turn().await?;
+            agent.rewind_last_turn(message_id).await?;
+            runtime_build_lease.ensure_active()?;
+            self.cancel_and_wait_for_turn_writebacks(conv_id).await?;
             runtime_build_lease.ensure_active()?;
             self.conversation_repo
-                .delete_messages_from(conv_id, from_created_at, &from_id)
+                .truncate_messages_for_admitted_edit(
+                    user_id,
+                    conv_id,
+                    &operation_id,
+                    &request_payload,
+                    admitted_admission_epoch,
+                    from_created_at,
+                    &from_id,
+                    now_ms(),
+                )
                 .await?;
             runtime_build_lease.ensure_active()?;
             Ok(())
@@ -10432,7 +10497,7 @@ impl ConversationService {
 
         // 4. 取在飞 agent 并回退最后一个 turn（内部会先停掉在飞 turn）。
         let agent = self.runtime_handle(conversation_id)?;
-        agent.rewind_last_turn().await?;
+        agent.rewind_last_turn(message_id).await?;
         runtime_build_lease.ensure_active()?;
 
         // The completed old turn may already own a detached knowledge

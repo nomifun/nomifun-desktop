@@ -9283,7 +9283,6 @@ async fn explicit_claim_error_disarms_ambiguity_custodian_after_proven_rollback(
         .await
         .unwrap();
 
-    eprintln!("edit-failure-test: before edit");
     let error = service
         .send_message_with_idempotency_key(
             SQLITE_TEST_OWNER,
@@ -13639,6 +13638,175 @@ async fn restart_view_recovers_only_the_unadmitted_edit_reservation_cutpoint() {
 }
 
 #[tokio::test]
+async fn edit_resubmit_rebuilds_a_missing_terminal_runtime_before_rewind() {
+    const USER_ID: &str = SQLITE_TEST_OWNER;
+    const EDIT_KEY: &str = "edit-cold-runtime";
+    let database = init_database_memory().await.unwrap();
+    nomifun_db::sqlx::query(
+        "INSERT INTO providers (\
+            provider_id, platform, name, base_url, api_key_encrypted, models, enabled, \
+            capabilities, created_at, updated_at\
+         ) VALUES (?1, 'openai', 'edit fixture', 'https://example.invalid', \
+                   'encrypted', '[\"m1\"]', 1, '[]', 1, 1)",
+    )
+    .bind(PROVIDER_ID_1)
+    .execute(database.pool())
+    .await
+    .unwrap();
+    let repo = Arc::new(SqliteConversationRepository::new(database.pool().clone()));
+    let registry = Arc::new(MockAgentRuntimeRegistry::new());
+    let runtime_registry: Arc<dyn AgentRuntimeRegistry> = registry.clone();
+    let service = ConversationService::new(
+        Arc::<str>::from(USER_ID),
+        std::env::temp_dir(),
+        Arc::new(MockBroadcaster::new()),
+        Arc::new(FixedSkillResolver { names: vec![] }),
+        runtime_registry.clone(),
+        repo.clone(),
+        Arc::new(StubAgentMetadataRepo),
+        Arc::new(StubAcpSessionRepo::default()),
+        Arc::new(crate::NoExecutionConversationBoundary),
+    );
+    let conversation = service
+        .create(
+            USER_ID,
+            serde_json::from_value(json!({
+                "type": "nomi",
+                "model": { "provider_id": PROVIDER_ID_1, "model": "m1" },
+                "extra": { "workspace": isolated_test_workspace("edit-cold-runtime") }
+            }))
+            .unwrap(),
+    )
+    .await
+    .unwrap();
+    let target_message_id = MessageId::new().into_string();
+    let original_operation_id = "completed-turn-projecting-edit-target";
+    let original_request_payload = json!({"content": "original"}).to_string();
+    let original_admission = repo
+        .get_turn_admission_state(USER_ID, &conversation.conversation_id)
+        .await
+        .unwrap();
+    let original_claim = repo
+        .claim_turn_delivery_receipt_and_admit_with_candidate(
+            USER_ID,
+            &conversation.conversation_id,
+            original_operation_id,
+            &target_message_id,
+            &original_request_payload,
+            original_admission.epoch,
+            now_ms(),
+        )
+        .await
+        .unwrap();
+    assert!(original_claim.claimed_new);
+    repo.insert_message(&MessageRow {
+        id: 0,
+        message_id: target_message_id.clone(),
+        conversation_id: conversation.conversation_id.clone(),
+        msg_id: Some(target_message_id.clone()),
+        r#type: "text".to_owned(),
+        content: json!({ "content": "original" }).to_string(),
+        position: Some("right".to_owned()),
+        status: Some("finish".to_owned()),
+        hidden: false,
+        created_at: now_ms(),
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        repo.finalize_exact_turn_operation(
+            USER_ID,
+            &conversation.conversation_id,
+            &TurnReceiptCompletion {
+                operation_id: original_operation_id.to_owned(),
+                kind: "turn".to_owned(),
+                request_payload: original_request_payload.clone(),
+                result_ok: true,
+                result_text: None,
+                result_error: None,
+            },
+            now_ms(),
+        )
+        .await
+        .unwrap(),
+        TurnLifecycleTransition::Committed
+    );
+    let original_receipt = repo
+        .get_delivery_receipt(
+            USER_ID,
+            &conversation.conversation_id,
+            original_operation_id,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        original_receipt.projected_message_id.as_deref(),
+        Some(target_message_id.as_str()),
+        "the regression fixture must reproduce the completed receipt that retained the real user message"
+    );
+    assert!(
+        registry.get_runtime(&conversation.conversation_id).is_none(),
+        "the regression requires a terminal conversation with a cold registry"
+    );
+
+    let delivery = service
+        .edit_and_resubmit_with_idempotency_key(
+            USER_ID,
+            &conversation.conversation_id,
+            &target_message_id,
+            EDIT_KEY,
+            serde_json::from_value(json!({"content": "replacement"})).unwrap(),
+            &runtime_registry,
+        )
+        .await
+        .expect("edit/resubmit must restore a missing runtime");
+    assert!(!delivery.replayed);
+    wait_for_turn_released(&service, &conversation.conversation_id).await;
+
+    let messages = repo
+        .get_messages_keyset(&conversation.conversation_id, None, 50)
+        .await
+        .unwrap()
+        .items;
+    assert!(
+        messages
+            .iter()
+            .all(|message| message.message_id != target_message_id),
+        "the old user turn must be removed only after runtime rewind succeeds"
+    );
+    assert!(
+        messages.iter().any(|message| {
+            message.message_id == delivery.message_id
+                && message.position.as_deref() == Some("right")
+                && message.content.contains("replacement")
+        }),
+        "the edited user message must be persisted as the replacement turn"
+    );
+    let preserved_receipt = repo
+        .get_delivery_receipt(
+            USER_ID,
+            &conversation.conversation_id,
+            original_operation_id,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(preserved_receipt.message_id, target_message_id);
+    assert_eq!(preserved_receipt.status, "completed");
+    assert_eq!(preserved_receipt.result_ok, Some(true));
+    assert!(
+        preserved_receipt.projected_conversation_id.is_none()
+            && preserved_receipt.projected_message_id.is_none(),
+        "edit replacement detaches only the deleted aggregate projection and preserves immutable replay evidence"
+    );
+    assert!(
+        registry.build_count() >= 1,
+        "a cold edit must construct or restore the runtime"
+    );
+}
+
+#[tokio::test]
 async fn edit_rewind_then_transcript_delete_failure_quarantines_runtime_before_fence_release() {
     const USER_ID: &str = SQLITE_TEST_OWNER;
     const EDIT_KEY: &str = "edit-delete-failure";
@@ -13736,7 +13904,6 @@ async fn edit_rewind_then_transcript_delete_failure_quarantines_runtime_before_f
         )
         .await
         .expect_err("the injected transcript delete must fail after rewind");
-    eprintln!("edit-failure-test: after edit");
     assert!(error.to_string().contains("injected edit transcript delete failure"));
     assert!(
         registry.termination_wait_count() >= 1,
@@ -13793,7 +13960,6 @@ async fn edit_rewind_then_transcript_delete_failure_quarantines_runtime_before_f
         "the failed edit must not start a replacement model turn"
     );
 
-    eprintln!("edit-failure-test: before fresh send");
     let fresh = service
         .send_message_with_idempotency_key(
             USER_ID,
@@ -13804,7 +13970,6 @@ async fn edit_rewind_then_transcript_delete_failure_quarantines_runtime_before_f
         )
         .await
         .unwrap();
-    eprintln!("edit-failure-test: after fresh send");
     assert!(!fresh.replayed);
     wait_for_turn_released(&service, &conversation.conversation_id).await;
     assert_eq!(
