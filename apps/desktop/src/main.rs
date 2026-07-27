@@ -186,7 +186,16 @@ fn resolve_webui_spa_dir(
 
 /// Snapshot Tauri's production asset resolver into the backend's host-agnostic
 /// WebUI source. A custom-protocol build already embeds `frontendDist` in the
-/// executable, so this is available to release bundles and fast no-bundle builds.
+/// executable, so this is available to release bundles *and* `tauri build
+/// --debug --no-bundle` without relying on a platform-specific resource path.
+///
+/// Every asset is resolved exactly once here. The immutable snapshot uses
+/// ref-counted bytes, bounds decompression work to startup, and lets the Tauri
+/// resolver (which owns an AppManager reference) drop before the backend is put
+/// back into Tauri managed state.
+///
+/// Development deliberately returns `None`: the LAN listener proxies to the
+/// same live Vite server as the desktop webview instead.
 fn resolve_embedded_webui_assets<R: tauri::Runtime>(
     app: &tauri::App<R>,
 ) -> anyhow::Result<Option<WebUiAssetSource>> {
@@ -206,6 +215,8 @@ fn resolve_embedded_webui_assets<R: tauri::Runtime>(
         return Ok(None);
     }
 
+    // Use the LAN listener's HTTP scheme explicitly. During setup no webview
+    // exists yet, so AssetResolver::get() would infer HTTPS from all(empty).
     let mut assets = Vec::with_capacity(asset_keys.len());
     let mut manifest_bytes = None;
     let mut uncompressed_bytes = 0usize;
@@ -224,6 +235,9 @@ fn resolve_embedded_webui_assets<R: tauri::Runtime>(
         assets.push((key, asset));
     }
 
+    // Keep the exact host/frontend pairing invariant for embedded assets too.
+    // The manifest is selected from the exact embedded key set, so a missing
+    // manifest cannot be hidden by Tauri's normal index.html SPA fallback.
     let expected_build_id = option_env!("NOMIFUN_FRONTEND_BUILD_ID").context(
         "this production desktop host has no exact frontend build identity; run `bun run build:ui` and rebuild the desktop application",
     )?;
@@ -249,7 +263,7 @@ fn validate_webui_snapshot_asset(key: &str, asset: &WebUiAsset) -> anyhow::Resul
             .csp_header
             .as_deref()
             .is_some_and(|value| value.contains("'nonce-")),
-        "embedded WebUI asset {key} uses a per-response CSP nonce, which cannot be safely reused from an immutable snapshot"
+        "embedded WebUI asset {key} uses a per-response CSP nonce, which cannot be safely reused from an immutable snapshot; configure a hash-only CSP or disable CSP nonce injection"
     );
     Ok(())
 }
@@ -1946,6 +1960,7 @@ fn main() -> std::process::ExitCode {
 
             // In dev, the desktop webview loads the live Vite server; the LAN
             // listener must proxy to the same source instead of stale assets.
+            // In production, the embedded assets below are canonical.
             let dev_frontend_url: Option<String> = if tauri::is_dev() {
                 app.config()
                     .build
@@ -1957,6 +1972,10 @@ fn main() -> std::process::ExitCode {
                 None
             };
             let explicit_dist_override = configured_webui_dist_override();
+            // Production custom-protocol builds already contain frontendDist in
+            // the executable. This is the canonical, cross-platform source for
+            // remote WebUI requests and also covers --no-bundle fast builds.
+            // An explicit directory override keeps its historical precedence.
             let webui_asset_source =
                 if dev_frontend_url.is_none() && explicit_dist_override.is_none() {
                     match resolve_embedded_webui_assets(app) {
@@ -1975,6 +1994,9 @@ fn main() -> std::process::ExitCode {
                 } else {
                     None
                 };
+            // Only probe platform resource/cwd layouts when explicitly requested
+            // or when an older/custom host has no embedded frontend. A stale
+            // sidecar must never block a valid canonical embedded distribution.
             let spa_dir = if should_resolve_filesystem_webui(
                 explicit_dist_override.is_some(),
                 dev_frontend_url.is_some(),
@@ -2668,6 +2690,10 @@ mod tests {
     #[test]
     fn generated_custom_protocol_context_contains_a_valid_embedded_webui_snapshot() {
         if tauri::is_dev() {
+            // Normal desktop tests intentionally use Vite/no embedded assets.
+            // The generated-context gate sets the requirement variable and runs:
+            //   cargo test -p nomifun-desktop --features tauri/custom-protocol \
+            //     generated_custom_protocol_context_contains_a_valid_embedded_webui_snapshot
             assert!(
                 std::env::var_os("NOMIFUN_REQUIRE_EMBEDDED_WEBUI_TEST").is_none(),
                 "embedded WebUI gate requires tauri/custom-protocol, but Tauri is still in dev mode"
