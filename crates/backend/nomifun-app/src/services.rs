@@ -104,11 +104,11 @@ struct BrowserStartupPreferences {
 impl Default for BrowserStartupPreferences {
     fn default() -> Self {
         Self {
-            // Browser management is inventory/lifecycle-only. Interactive
-            // Primary lanes use a real managed Chromium window that starts in
-            // the background. The removed JPEG viewer must never be selected
-            // as a fresh-install presentation default; users explicitly
-            // foreground the same window from Browser management when needed.
+            // Browser management is inventory/lifecycle-only. Agent work must
+            // start in a real headless Chromium process; an external window is
+            // created only by an authenticated, explicit foreground request.
+            // The removed JPEG viewer is never selected as a presentation
+            // surface.
             display_mode: "external",
             source: "system".to_owned(),
             full_power: false,
@@ -123,11 +123,10 @@ fn resolve_browser_display_mode(
     legacy_silent: Option<&str>,
 ) -> (&'static str, bool) {
     // The product no longer publishes an embedded viewer or user takeover.
-    // Normalize every historical desktop presentation value to the real
-    // external managed Chromium window. It is launched headful but minimized,
-    // so ordinary Agent work remains silent and can later foreground the same
-    // profile and target. The old values remain accepted only so upgrades do
-    // not strand an installation in the removed headless/JPEG modes.
+    // Keep `external` as the management presentation label, but do not confuse
+    // that label with Host launch visibility: ordinary Agent Hosts are truly
+    // headless and only an authenticated foreground command may replace one
+    // with a visible managed Host.
     if let Some(value) = display_mode {
         return match value.trim().trim_matches('"') {
             "external" => ("external", false),
@@ -218,13 +217,10 @@ where
 
 #[cfg(feature = "browser-use")]
 fn primary_host_is_headful(display_mode: &str) -> bool {
-    // Browser management no longer has a renderer/viewer execution surface.
-    // Primary must remain headful so Browser management can restore the same
-    // live window without restarting the Host or losing identity/targets. The
-    // engine starts that window minimized; crawl/replica/isolated hosts remain
-    // forced headless by the Hub.
+    // Presentation preferences must never make routine Agent work visible.
+    // Foregrounding is a separate trusted Host transition owned by the Hub.
     let _ = display_mode;
-    true
+    false
 }
 
 #[cfg(feature = "browser-use")]
@@ -3121,9 +3117,9 @@ mod tests {
             resolve_browser_display_mode(Some("  \"headless\"  "), Some("false")),
             ("external", true)
         );
-        assert!(primary_host_is_headful("external"));
-        assert!(primary_host_is_headful("embedded"));
-        assert!(primary_host_is_headful("headless"));
+        assert!(!primary_host_is_headful("external"));
+        assert!(!primary_host_is_headful("embedded"));
+        assert!(!primary_host_is_headful("headless"));
     }
 
     #[cfg(feature = "browser-use")]

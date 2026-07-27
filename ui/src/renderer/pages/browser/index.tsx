@@ -29,6 +29,7 @@ import {
 } from './browserInventoryModel';
 import {
   browserInstallationWideCloseCopy,
+  browserClosePartialFailureMessage,
   canForegroundBrowserLane,
   requestBrowserCloseAll,
   requestBrowserConversationClose,
@@ -148,6 +149,15 @@ const BrowserPage: React.FC = () => {
         notifySuccess: Message.success,
         notifyError: Message.error,
         successMessage: t('browser.close.laneSuccess'),
+        formatPartialFailure: (result) =>
+          browserClosePartialFailureMessage(result, {
+            withoutDetails: t('browser.close.partialFailure'),
+            withDetails: (details) =>
+              t('browser.close.partialFailureWithDetails', { details }),
+          }),
+        formatRefreshFailure: (message) =>
+          t('browser.close.refreshFailed', { error: message }),
+        unconfirmedMessage: t('browser.close.unconfirmed'),
       }),
     [refresh, t]
   );
@@ -168,12 +178,16 @@ const BrowserPage: React.FC = () => {
     (lane: IBrowserLane) =>
       runBrowserLaneForeground(lane, {
         invoke: (request) => ipcBridge.browserSession.foregroundLane.invoke(request),
+        refresh,
         setForegroundingLaneId,
         notifySuccess: Message.success,
         notifyError: Message.error,
         successMessage: t('browser.foreground.success'),
+        formatRefreshFailure: (message) =>
+          t('browser.foreground.refreshFailed', { error: message }),
+        unconfirmedMessage: t('browser.foreground.unconfirmed'),
       }),
-    [t]
+    [refresh, t]
   );
 
   const handleForegroundLane = useCallback(
@@ -192,6 +206,15 @@ const BrowserPage: React.FC = () => {
         notifySuccess: Message.success,
         notifyError: Message.error,
         successMessage: t('browser.close.conversationSuccess'),
+        formatPartialFailure: (result) =>
+          browserClosePartialFailureMessage(result, {
+            withoutDetails: t('browser.close.partialFailure'),
+            withDetails: (details) =>
+              t('browser.close.partialFailureWithDetails', { details }),
+          }),
+        formatRefreshFailure: (message) =>
+          t('browser.close.refreshFailed', { error: message }),
+        unconfirmedMessage: t('browser.close.unconfirmed'),
       }),
     [refresh, t]
   );
@@ -217,8 +240,17 @@ const BrowserPage: React.FC = () => {
         notifySuccess: Message.success,
         notifyError: Message.error,
         successMessage: installationWideCloseCopy.success,
+        formatPartialFailure: (result) =>
+          browserClosePartialFailureMessage(result, {
+            withoutDetails: t('browser.close.partialFailure'),
+            withDetails: (details) =>
+              t('browser.close.partialFailureWithDetails', { details }),
+          }),
+        formatRefreshFailure: (message) =>
+          t('browser.close.refreshFailed', { error: message }),
+        unconfirmedMessage: t('browser.close.unconfirmed'),
       }),
-    [installationWideCloseCopy.success, refresh]
+    [installationWideCloseCopy.success, refresh, t]
   );
 
   const handleCloseAll = useCallback(() => {

@@ -122,16 +122,18 @@ expose raw CDP endpoints, debugging ports, profile paths, or profile contents.
 The Hub remains authoritative for Host/Lane ownership, capacity, identity,
 concurrency, and shutdown. Operations within one Lane are serialized, while
 different Lanes can run concurrently within the active resource policy.
-`primary` runs in a visible, external managed Chromium window with an
-application-isolated stable profile; crawl (`anonymous`),
-`authenticated_replica`, and `isolated` work may run headless. NomiFun never
-opens a user's personal Chrome or Edge profile.
+Ordinary `primary` Agent work runs with Chromium `--headless=new` and an
+application-isolated stable profile. Only an explicit Browser-management
+foreground request or sign-in flow replaces that Host with a headful managed
+Host. Crawl (`anonymous`), `authenticated_replica`, and `isolated` work remain
+headless under Hub policy. NomiFun never opens a user's personal Chrome or Edge
+profile.
 
 | Method + path | Purpose |
 |---|---|
 | `GET /api/browser/overview` | Return user-visible capacity, pressure, queue, identity, lifecycle, Lane, and safe Host diagnostics. |
 | `GET /api/browser/lanes` | List the authenticated user's visible Browser Lanes and their management-safe state. |
-| `POST /api/browser/lanes/{lane_id}/foreground` | For the authenticated user's own running `primary` Lane only, restore the same managed real Chromium window and its current target to the foreground. This is lifecycle/visibility management only; it grants no page input, user takeover, or Agent execution capability. |
+| `POST /api/browser/lanes/{lane_id}/foreground` | For the authenticated user's own running `primary` Lane only, safely replace its headless Host with a headful managed Host using the same application profile. The browser epoch changes, old target/frame/refs become stale, and the active URL is restored only on a best-effort basis; clients must refresh inventory and perform a fresh observe. This is lifecycle/visibility management only and grants no page input, user takeover, or Agent execution capability. |
 | `POST /api/browser/lanes/{lane_id}/close` | Idempotently close one Lane without closing its conversation or Agent execution. |
 | `POST /api/browser/conversations/{conversation_id}/close` | Close the authenticated user's Lanes for one conversation. |
 | `POST /api/browser/close-all` | Installation owner only: close every Browser Lane managed by this application instance. |
@@ -145,14 +147,15 @@ the endpoint cannot be used to probe another user's inventory. A `409` reports
 a state conflict such as a non-Primary identity or a Lane becoming stale or
 closed during the request; a Lane that is not ready or running can return
 `503`. Clients should refresh inventory and select a running Primary Lane. The
-endpoint restores the existing window and target rather than creating a new
-Host, Lane, window, or page.
+endpoint intentionally replaces the normal headless Host with a headful Host.
+This increments the browser epoch and invalidates old target/frame/ref state;
+URL restoration is best effort and callers must perform a fresh observe.
 
 The installation-owner-only compatibility endpoints
 `POST /api/browser/login/open`, `POST /api/browser/login/close`, and
 `GET /api/browser/login/status` manage a normal Hub-owned Primary sign-in Lane
-in the visible external Chromium window. They do not create an embedded or
-second browser surface or add page-input controls to the Browser management
+and explicitly request its headful managed Host. They do not create an embedded
+or second browser surface or add page-input controls to the Browser management
 page/API.
 
 Outside the intentionally insecure no-auth local mode, all routes require

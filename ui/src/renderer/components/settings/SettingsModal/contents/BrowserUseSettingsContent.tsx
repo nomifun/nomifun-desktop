@@ -462,7 +462,7 @@ const BrowserUseSettingsContent: React.FC = () => {
     void loadResourcePolicy();
   }, [canManageBrowserSettings, loadResourcePolicy]);
 
-  // Phase 2b: reflect whether the managed Primary login window is already open.
+  // Reflect whether the managed Primary sign-in Lane is already open.
   useEffect(() => {
     if (!canManagePrimaryIdentity) {
       setLoginOpen(false);
@@ -480,7 +480,7 @@ const BrowserUseSettingsContent: React.FC = () => {
     };
   }, [canManagePrimaryIdentity]);
 
-  // Toggle the managed Primary login window for the selected browser source.
+  // Toggle the managed Primary sign-in Lane for the selected browser source.
   const handleLoginToggle = useCallback(async () => {
     if (!canManagePrimaryIdentity || loginBusy) return;
     setLoginBusy(true);
@@ -524,7 +524,7 @@ const BrowserUseSettingsContent: React.FC = () => {
   );
 
   // Browser source only selects the executable. Both choices remain isolated,
-  // managed instances shown in an external window.
+  // Hub-owned instances; routine Agent work stays headless.
   const handleSourceChange = useCallback(
     (value: string) => {
       const next: BrowserSource = value === 'system' ? 'system' : 'managed';

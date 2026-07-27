@@ -43,8 +43,9 @@ preference and prevents new sessions from receiving that capability. Browser
 Settings also provides:
 
 - browser source: a system Chrome/Edge executable or the managed source;
-- presentation: a real headful managed Chromium window for Primary that starts
-  minimized in the background for ordinary Agent work;
+- presentation: ordinary Primary Agent work runs with Chromium
+  `--headless=new`; a real headful managed window is created only after an
+  explicit foreground request from the Browser management page;
 - resource policy: Automatic, Resource saving, or High concurrency;
 - advanced resource limits for diagnostics and explicit tuning.
 
@@ -52,8 +53,8 @@ The sidebar **Browser** page (`/browser`) lists running and queued Lanes and
 shows status, capacity, queue, identity, owner, and lifecycle data. It can close
 a Lane, a conversation's Lanes, or all Lanes when authorized. For a running
 Primary Lane it also offers **Open browser in foreground**, which restores the
-same external window and active target. The page still does not embed the page
-or provide page input, tab control, user takeover, or address navigation.
+Lane on a headful replacement Host. The page still does not embed the page or
+provide page input, tab control, user takeover, or address navigation.
 
 ### Per Session
 
@@ -90,8 +91,8 @@ max_screenshot_edge = 1568
 [tools.browser]
 enabled = true
 allowed_origins = []
-# Primary uses a real external managed window, minimized in the background by
-# default and foregrounded only by an explicit user or sign-in flow.
+# Ordinary Primary Agent work uses Chromium --headless=new. Only an explicit
+# foreground action on the Browser page creates a headful replacement Host.
 # browser_path, idle_timeout_secs, and private headless ownership are legacy
 # compatibility fields and cannot bypass BrowserSessionHub policy.
 ```
@@ -124,8 +125,9 @@ features, the backend should warn rather than expose a non-working tool.
   concurrently without crossing target, frame, ref, tab, download, or
   cancellation state.
 - Ordinary interactive work defaults to the **Primary shared live identity**.
-  Primary is headful in a real external managed Chromium window, but ordinary
-  Agent use starts it minimized in the background and does not pop it up.
+  Ordinary Agent use runs Primary with Chromium `--headless=new`, so it creates
+  no OS browser window. An explicit Browser-management foreground action safely
+  replaces that Host with a headful Host using the application-managed profile.
   Primary Lanes share cookies and profile-backed site state, but never share
   active targets, frame/ref cursors, operation gates, or downloads.
 - Public reads default to **Anonymous crawl**, with no Primary cookies or site
@@ -160,22 +162,28 @@ Lane management actions are:
 Closing a Lane gives its browser calls a typed error but does not close the
 conversation or AgentExecution. Attempt completion/cancellation, runtime
 termination, conversation deletion, remote disconnect, capability expiry, and
-app exit revoke owner leases and trigger authoritative cleanup.
+app exit revoke owner leases and trigger authoritative cleanup. A Native Agent
+turn also closes its owner Lanes when it completes or is cancelled. Once target
+cleanup closes the final Lane on a Host, that Host exits immediately rather
+than waiting for idle expiry or a periodic sweep.
 
 ### Opening A Running Primary Lane In The Foreground
 
 To inspect the real managed browser, open `/browser`, select a Lane whose
 identity is Primary and whose state is `running`, then choose **Open browser in
-foreground**. This restores the same native Chromium window and its current
-active target. It does not reopen or reload the page, create a second browser,
-change Lane ownership, or add an embedded preview, takeover, or page-input
-surface. Queued, failed, and non-Primary Lanes cannot be foregrounded.
+foreground**. The normal Host is truly headless, so the Hub safely shuts it
+down, increments the browser epoch, and starts a headful replacement Host with
+the same application-managed profile. It makes a best effort to restore the
+Lane's active URL, but old target/frame/ref state is stale: refresh inventory
+and perform a fresh observe before continuing. This does not change Lane
+ownership or add an embedded preview, takeover, or page-input surface. Queued,
+failed, and non-Primary Lanes cannot be foregrounded.
 
 The authenticated management endpoint for the same explicit user action is
 `POST /api/browser/lanes/{id}/foreground`; state-changing requests retain the
-normal CSRF protection. It is not exposed as an Agent Browser action. An
-explicit Primary sign-in flow foregrounds its managed window automatically so
-the user can complete the login.
+normal CSRF protection. It is not exposed as an Agent Browser action. Primary
+sign-in Lane creation does not bypass this rule or foreground a window by
+itself; foregrounding remains an explicit action on the Browser page.
 
 ## macOS Permissions
 

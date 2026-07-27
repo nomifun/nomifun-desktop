@@ -21,6 +21,16 @@ interface BrowserCloseOutcome {
   failures: BrowserCloseFailure[];
 }
 
+export interface BrowserClosePartialFailureCopy {
+  withoutDetails: string;
+  withDetails: (details: string) => string;
+}
+
+const DEFAULT_CLOSE_PARTIAL_FAILURE_COPY: BrowserClosePartialFailureCopy = {
+  withoutDetails: 'Some browser lanes could not be closed.',
+  withDetails: (details) => `Some browser lanes could not be closed: ${details}`,
+};
+
 const asRecord = (value: unknown): Record<string, unknown> | null =>
   value && typeof value === 'object' && !Array.isArray(value)
     ? (value as Record<string, unknown>)
@@ -118,13 +128,12 @@ const browserCloseOutcome = (result: unknown): BrowserCloseOutcome => {
 };
 
 export const browserClosePartialFailureMessage = (
-  result: unknown
+  result: unknown,
+  copy: BrowserClosePartialFailureCopy = DEFAULT_CLOSE_PARTIAL_FAILURE_COPY
 ): string | null => {
   const outcome = browserCloseOutcome(result);
   if (!outcome.partial) return null;
-  if (outcome.failures.length === 0) {
-    return 'Some browser lanes could not be closed. The inventory was refreshed with the latest state.';
-  }
+  if (outcome.failures.length === 0) return copy.withoutDetails;
   const details = outcome.failures
     .map((failure) => {
       const label = failure.laneId ? `Lane ${failure.laneId}` : 'Browser lane';
@@ -132,7 +141,23 @@ export const browserClosePartialFailureMessage = (
       return `${label}${code}: ${failure.message}`;
     })
     .join('; ');
-  return `Some browser lanes could not be closed: ${details}`;
+  return copy.withDetails(details);
+};
+
+/**
+ * A successful HTTP response is not enough to claim that a close happened.
+ * The backend's idempotent no-op is explicit (`already_closed: true`); an
+ * explicit zero-close response without that marker is treated as unconfirmed.
+ */
+export const browserCloseResultIsUnconfirmed = (result: unknown): boolean => {
+  const payload = closeResultPayload(result);
+  if (!payload) return true;
+  const closed = firstNumber(payload, 'closed');
+  return (
+    !browserCloseOutcome(result).partial &&
+    payload.already_closed !== true &&
+    !(closed != null && closed > 0)
+  );
 };
 
 export interface BrowserInstallationWideCloseCopy {
@@ -180,6 +205,9 @@ interface BrowserCloseFeedback {
   notifySuccess: (message: string) => void;
   notifyError: (message: string) => void;
   successMessage: string;
+  formatPartialFailure?: (result: unknown) => string | null;
+  formatRefreshFailure?: (message: string) => string;
+  unconfirmedMessage?: string;
 }
 
 interface BrowserLaneCloseDependencies extends BrowserCloseFeedback {
@@ -189,10 +217,13 @@ interface BrowserLaneCloseDependencies extends BrowserCloseFeedback {
 
 interface BrowserLaneForegroundDependencies {
   invoke: (request: { lane_id: string }) => Promise<unknown>;
+  refresh: () => Promise<void>;
   setForegroundingLaneId: (laneId: string | null) => void;
   notifySuccess: (message: string) => void;
   notifyError: (message: string) => void;
   successMessage: string;
+  formatRefreshFailure?: (message: string) => string;
+  unconfirmedMessage?: string;
 }
 
 interface BrowserConversationCloseDependencies extends BrowserCloseFeedback {
@@ -220,13 +251,83 @@ export const runBrowserLaneForeground = async (
 
   dependencies.setForegroundingLaneId(lane.lane_id);
   try {
-    await dependencies.invoke({ lane_id: lane.lane_id });
-    dependencies.notifySuccess(dependencies.successMessage);
-  } catch (error) {
-    dependencies.notifyError(errorMessage(error));
+    let operationError: string | null = null;
+    let unconfirmed = false;
+    try {
+      const result = await dependencies.invoke({ lane_id: lane.lane_id });
+      const payload = closeResultPayload(result);
+      unconfirmed = payload?.foregrounded !== true;
+    } catch (error) {
+      operationError = errorMessage(error);
+    }
+
+    let refreshError: string | null = null;
+    try {
+      await dependencies.refresh();
+    } catch (error) {
+      const message = errorMessage(error);
+      refreshError = dependencies.formatRefreshFailure?.(message) ?? message;
+    }
+
+    if (operationError) {
+      dependencies.notifyError(
+        refreshError ? `${operationError}; ${refreshError}` : operationError
+      );
+    } else if (unconfirmed) {
+      const message =
+        dependencies.unconfirmedMessage ??
+        'The browser foreground request was not confirmed. Review its status and try again.';
+      dependencies.notifyError(refreshError ? `${message}; ${refreshError}` : message);
+    } else if (refreshError) {
+      dependencies.notifyError(refreshError);
+    } else {
+      dependencies.notifySuccess(dependencies.successMessage);
+    }
   } finally {
     dependencies.setForegroundingLaneId(null);
   }
+};
+
+const reportCloseAttempt = async (
+  result: unknown,
+  operationError: string | null,
+  dependencies: BrowserCloseFeedback
+): Promise<void> => {
+  let refreshError: string | null = null;
+  try {
+    await dependencies.refresh();
+  } catch (error) {
+    const message = errorMessage(error);
+    refreshError = dependencies.formatRefreshFailure?.(message) ?? message;
+  }
+
+  if (operationError) {
+    dependencies.notifyError(
+      refreshError ? `${operationError}; ${refreshError}` : operationError
+    );
+    return;
+  }
+
+  const partialFailure =
+    dependencies.formatPartialFailure?.(result) ?? browserClosePartialFailureMessage(result);
+  if (partialFailure) {
+    dependencies.notifyError(refreshError ? `${partialFailure}; ${refreshError}` : partialFailure);
+    return;
+  }
+  if (browserCloseResultIsUnconfirmed(result)) {
+    const message =
+      dependencies.unconfirmedMessage ??
+      'The browser manager did not confirm the close. Review the inventory and try again.';
+    dependencies.notifyError(
+      refreshError ? `${message}; ${refreshError}` : message
+    );
+    return;
+  }
+  if (refreshError) {
+    dependencies.notifyError(refreshError);
+    return;
+  }
+  dependencies.notifySuccess(dependencies.successMessage);
 };
 
 export const runBrowserLaneClose = async (
@@ -234,23 +335,20 @@ export const runBrowserLaneClose = async (
   dependencies: BrowserLaneCloseDependencies
 ): Promise<void> => {
   dependencies.setBusyLaneId(lane.lane_id);
+  let result: unknown;
+  let operationError: string | null = null;
   try {
-    const result = await dependencies.invoke({ lane_id: lane.lane_id });
-    const partialFailure = browserClosePartialFailureMessage(result);
-    if (partialFailure) {
-      dependencies.notifyError(partialFailure);
-    } else {
-      dependencies.notifySuccess(dependencies.successMessage);
-    }
+    result = await dependencies.invoke({ lane_id: lane.lane_id });
   } catch (error) {
-    dependencies.notifyError(errorMessage(error));
+    operationError = errorMessage(error);
   } finally {
     try {
-      await dependencies.refresh();
+      await reportCloseAttempt(result, operationError, dependencies);
     } catch (error) {
       dependencies.notifyError(errorMessage(error));
+    } finally {
+      dependencies.setBusyLaneId(null);
     }
-    dependencies.setBusyLaneId(null);
   }
 };
 
@@ -259,23 +357,20 @@ export const runBrowserConversationClose = async (
   dependencies: BrowserConversationCloseDependencies
 ): Promise<void> => {
   dependencies.setBusyConversationId(conversationId);
+  let result: unknown;
+  let operationError: string | null = null;
   try {
-    const result = await dependencies.invoke({ conversation_id: conversationId });
-    const partialFailure = browserClosePartialFailureMessage(result);
-    if (partialFailure) {
-      dependencies.notifyError(partialFailure);
-    } else {
-      dependencies.notifySuccess(dependencies.successMessage);
-    }
+    result = await dependencies.invoke({ conversation_id: conversationId });
   } catch (error) {
-    dependencies.notifyError(errorMessage(error));
+    operationError = errorMessage(error);
   } finally {
     try {
-      await dependencies.refresh();
+      await reportCloseAttempt(result, operationError, dependencies);
     } catch (error) {
       dependencies.notifyError(errorMessage(error));
+    } finally {
+      dependencies.setBusyConversationId(null);
     }
-    dependencies.setBusyConversationId(null);
   }
 };
 
@@ -283,23 +378,20 @@ export const runBrowserCloseAll = async (
   dependencies: BrowserCloseAllDependencies
 ): Promise<void> => {
   dependencies.setClosingAll(true);
+  let result: unknown;
+  let operationError: string | null = null;
   try {
-    const result = await dependencies.invoke();
-    const partialFailure = browserClosePartialFailureMessage(result);
-    if (partialFailure) {
-      dependencies.notifyError(partialFailure);
-    } else {
-      dependencies.notifySuccess(dependencies.successMessage);
-    }
+    result = await dependencies.invoke();
   } catch (error) {
-    dependencies.notifyError(errorMessage(error));
+    operationError = errorMessage(error);
   } finally {
     try {
-      await dependencies.refresh();
+      await reportCloseAttempt(result, operationError, dependencies);
     } catch (error) {
       dependencies.notifyError(errorMessage(error));
+    } finally {
+      dependencies.setClosingAll(false);
     }
-    dependencies.setClosingAll(false);
   }
 };
 

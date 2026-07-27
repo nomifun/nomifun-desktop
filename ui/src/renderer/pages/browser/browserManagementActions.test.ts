@@ -11,6 +11,7 @@ import type { BrowserConversationGroup } from './browserInventoryModel';
 import {
   browserInstallationWideCloseCopy,
   browserClosePartialFailureMessage,
+  browserCloseResultIsUnconfirmed,
   canForegroundBrowserLane,
   browserLaneHasActiveWork,
   requestBrowserCloseAll,
@@ -102,6 +103,10 @@ describe('browser management actions', () => {
     await runBrowserLaneForeground(primary, {
       invoke: async ({ lane_id }) => {
         calls.push(`foreground:${lane_id}`);
+        return { foregrounded: true };
+      },
+      refresh: async () => {
+        calls.push('refresh');
       },
       setForegroundingLaneId: (value) => calls.push(`busy:${value}`),
       notifySuccess: (message) => calls.push(`success:${message}`),
@@ -112,6 +117,7 @@ describe('browser management actions', () => {
     expect(calls).toEqual([
       'busy:lane-1',
       'foreground:lane-1',
+      'refresh',
       'success:opened',
       'busy:null',
     ]);
@@ -129,6 +135,7 @@ describe('browser management actions', () => {
         invoke: async () => {
           invoked = true;
         },
+        refresh: async () => {},
         setForegroundingLaneId: () => {
           busy = true;
         },
@@ -147,13 +154,53 @@ describe('browser management actions', () => {
       invoke: async () => {
         throw new Error('foreground failed');
       },
+      refresh: async () => {
+        calls.push('refresh');
+      },
       setForegroundingLaneId: (value) => calls.push(`busy:${value}`),
       notifySuccess: (message) => calls.push(`success:${message}`),
       notifyError: (message) => calls.push(`error:${message}`),
       successMessage: 'opened',
     });
 
-    expect(calls).toEqual(['busy:lane-1', 'error:foreground failed', 'busy:null']);
+    expect(calls).toEqual([
+      'busy:lane-1',
+      'refresh',
+      'error:foreground failed',
+      'busy:null',
+    ]);
+  });
+
+  test('does not report foreground success when the response is unconfirmed or refresh fails', async () => {
+    for (const scenario of [
+      {
+        invoke: async () => ({}),
+        refresh: async () => undefined,
+        expected: 'error:foreground unconfirmed',
+      },
+      {
+        invoke: async () => ({ foregrounded: true }),
+        refresh: async () => {
+          throw new Error('inventory offline');
+        },
+        expected: 'error:foreground refresh failed: inventory offline',
+      },
+    ]) {
+      const calls: string[] = [];
+      await runBrowserLaneForeground(lane({ identity: { mode: 'primary' } }), {
+        invoke: scenario.invoke,
+        refresh: scenario.refresh,
+        setForegroundingLaneId: (value) => calls.push(`busy:${value}`),
+        notifySuccess: (message) => calls.push(`success:${message}`),
+        notifyError: (message) => calls.push(`error:${message}`),
+        successMessage: 'opened',
+        unconfirmedMessage: 'foreground unconfirmed',
+        formatRefreshFailure: (message) => `foreground refresh failed: ${message}`,
+      });
+
+      expect(calls).toEqual(['busy:lane-1', scenario.expected, 'busy:null']);
+      expect(calls.some((call) => call.startsWith('success:'))).toBe(false);
+    }
   });
 
   test('closes queued and failed lanes without hiding lifecycle management', async () => {
@@ -175,6 +222,7 @@ describe('browser management actions', () => {
       await runBrowserLaneClose(candidate, {
         invoke: async ({ lane_id }) => {
           calls.push(`close:${lane_id}`);
+          return { closed: 1, already_closed: false };
         },
         refresh: async () => {
           calls.push('refresh');
@@ -187,8 +235,8 @@ describe('browser management actions', () => {
 
       expect(calls).toEqual([
         `close:${candidate.lane_id}`,
-        'success:closed',
         'refresh',
+        'success:closed',
       ]);
       expect(busy).toEqual([candidate.lane_id, null]);
     }
@@ -239,6 +287,12 @@ describe('browser management actions', () => {
     expect(browserClosePartialFailureMessage(result)).toBe(
       'Some browser lanes could not be closed: Lane lane-timeout (browser_close_timeout): Cleanup is still pending.; Lane lane-crashed: The target crashed during close.'
     );
+    expect(
+      browserClosePartialFailureMessage(result, {
+        withoutDetails: 'localized partial',
+        withDetails: (details) => `localized: ${details}`,
+      })?.startsWith('localized: Lane lane-timeout')
+    ).toBe(true);
 
     await runBrowserConversationClose('conversation-partial', {
       invoke: async () => result,
@@ -253,8 +307,8 @@ describe('browser management actions', () => {
 
     expect(calls).toEqual([
       'busy:conversation-partial',
-      'error:Some browser lanes could not be closed: Lane lane-timeout (browser_close_timeout): Cleanup is still pending.; Lane lane-crashed: The target crashed during close.',
       'refresh',
+      'error:Some browser lanes could not be closed: Lane lane-timeout (browser_close_timeout): Cleanup is still pending.; Lane lane-crashed: The target crashed during close.',
       'busy:null',
     ]);
   });
@@ -284,8 +338,8 @@ describe('browser management actions', () => {
 
     expect(calls).toEqual([
       'loading:true',
-      'error:Some browser lanes could not be closed: Lane lane-a (lane_closed_by_user): Already being cleaned up.',
       'refresh',
+      'error:Some browser lanes could not be closed: Lane lane-a (lane_closed_by_user): Already being cleaned up.',
       'loading:false',
     ]);
   });
@@ -332,6 +386,7 @@ describe('browser management actions', () => {
         runBrowserConversationClose(conversationId, {
           invoke: async ({ conversation_id }) => {
             calls.push(`close:${conversation_id}`);
+            return { closed: 1, already_closed: false };
           },
           refresh: async () => {
             calls.push('refresh');
@@ -352,8 +407,8 @@ describe('browser management actions', () => {
     expect(calls).toEqual([
       'busy:conversation-authoritative',
       'close:conversation-authoritative',
-      'success:conversation closed',
       'refresh',
+      'success:conversation closed',
       'busy:null',
     ]);
   });
@@ -383,6 +438,7 @@ describe('browser management actions', () => {
         runBrowserCloseAll({
           invoke: async () => {
             calls.push('close-all');
+            return { closed: 2, already_closed: false };
           },
           refresh: async () => {
             throw new Error('refresh failed');
@@ -403,9 +459,59 @@ describe('browser management actions', () => {
     expect(calls).toEqual([
       'loading:true',
       'close-all',
-      'success:all closed',
       'error:refresh failed',
       'loading:false',
+    ]);
+  });
+
+  test('accepts explicit idempotent no-op but rejects malformed and zero-close responses', async () => {
+    expect(browserCloseResultIsUnconfirmed({ closed: 1, already_closed: false })).toBe(false);
+    expect(browserCloseResultIsUnconfirmed({ closed: 0, already_closed: true })).toBe(false);
+    expect(browserCloseResultIsUnconfirmed({ closed: 0, already_closed: false })).toBe(true);
+    expect(browserCloseResultIsUnconfirmed({})).toBe(true);
+    expect(browserCloseResultIsUnconfirmed(undefined)).toBe(true);
+
+    const calls: string[] = [];
+    await runBrowserCloseAll({
+      invoke: async () => ({ closed: 0, already_closed: false }),
+      refresh: async () => {
+        calls.push('refresh');
+      },
+      setClosingAll: (value) => calls.push(`loading:${value}`),
+      notifySuccess: (message) => calls.push(`success:${message}`),
+      notifyError: (message) => calls.push(`error:${message}`),
+      successMessage: 'all closed',
+      unconfirmedMessage: 'close unconfirmed',
+    });
+
+    expect(calls).toEqual([
+      'loading:true',
+      'refresh',
+      'error:close unconfirmed',
+      'loading:false',
+    ]);
+  });
+
+  test('combines operation and refresh failures without reporting close success', async () => {
+    const calls: string[] = [];
+    await runBrowserLaneClose(lane(), {
+      invoke: async () => {
+        throw new Error('close failed');
+      },
+      refresh: async () => {
+        throw new Error('refresh failed');
+      },
+      setBusyLaneId: (value) => calls.push(`busy:${value}`),
+      notifySuccess: (message) => calls.push(`success:${message}`),
+      notifyError: (message) => calls.push(`error:${message}`),
+      successMessage: 'closed',
+      formatRefreshFailure: (message) => `inventory failed: ${message}`,
+    });
+
+    expect(calls).toEqual([
+      'busy:lane-1',
+      'error:close failed; inventory failed: refresh failed',
+      'busy:null',
     ]);
   });
 });

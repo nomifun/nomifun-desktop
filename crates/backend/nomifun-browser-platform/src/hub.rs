@@ -118,19 +118,25 @@ struct HostSlot {
     shutdown_gate: Mutex<()>,
     shutdown_complete: AtomicBool,
     retired: AtomicBool,
+    headful: AtomicBool,
     epoch: u64,
 }
 
 impl HostSlot {
-    fn new(epoch: u64) -> Self {
+    fn new(epoch: u64, headful: bool) -> Self {
         Self {
             driver: OnceCell::new(),
             initialization_gate: Mutex::new(()),
             shutdown_gate: Mutex::new(()),
             shutdown_complete: AtomicBool::new(false),
             retired: AtomicBool::new(false),
+            headful: AtomicBool::new(headful),
             epoch,
         }
+    }
+
+    fn is_headful(&self) -> bool {
+        self.headful.load(Ordering::Acquire)
     }
 
     fn get(&self) -> Option<&Arc<dyn BrowserHostDriver>> {
@@ -275,8 +281,26 @@ impl LaneRecord {
 struct PendingLaneCleanup {
     cleanup_id: u64,
     lane_id: BrowserLaneId,
+    host_key: HostKey,
     driver: Arc<dyn BrowserLaneDriver>,
     flight: Mutex<Option<Arc<LaneCleanupFlight>>>,
+}
+
+/// A detached Lane may still have an in-flight start operation. The Host must
+/// not be retired until that start either publishes its driver (which is then
+/// represented by a pending lane cleanup) or finishes without one. This record
+/// is Hub-owned so cancellation of the caller cannot lose the final shutdown
+/// obligation.
+#[derive(Clone)]
+struct PendingHostRetirement {
+    key: HostKey,
+    lane_id: BrowserLaneId,
+    start_flight: Arc<LaneStartFlight>,
+}
+
+struct DetachedLane {
+    host_key: HostKey,
+    cleanup_id: Option<u64>,
 }
 
 type LaneStartResult = Result<BrowserLaneSnapshot, BrowserPlatformError>;
@@ -310,6 +334,7 @@ impl LaneStartFlight {
             notified.await;
         }
     }
+
 }
 
 type LaneCleanupResult = Result<(), BrowserPlatformError>;
@@ -317,6 +342,41 @@ type LaneCleanupResult = Result<(), BrowserPlatformError>;
 struct LaneCleanupFlight {
     result: OnceLock<LaneCleanupResult>,
     completed: Notify,
+}
+
+type HostFinalizationResult = Result<(), BrowserPlatformError>;
+
+/// Hub-owned single-flight for retiring one empty Host. Explicit close,
+/// cleanup completion callbacks and the lifecycle sweep must observe the same
+/// attempt/result; otherwise a background retry can consume a transient
+/// shutdown failure and make the original close falsely look successful.
+struct HostFinalizationFlight {
+    result: OnceLock<HostFinalizationResult>,
+    completed: Notify,
+}
+
+impl HostFinalizationFlight {
+    fn new() -> Self {
+        Self {
+            result: OnceLock::new(),
+            completed: Notify::new(),
+        }
+    }
+
+    fn complete(&self, result: HostFinalizationResult) {
+        let _ = self.result.set(result);
+        self.completed.notify_waiters();
+    }
+
+    async fn wait(&self) -> HostFinalizationResult {
+        loop {
+            let notified = self.completed.notified();
+            if let Some(result) = self.result.get() {
+                return result.clone();
+            }
+            notified.await;
+        }
+    }
 }
 
 impl LaneCleanupFlight {
@@ -385,6 +445,8 @@ struct BrowserSessionHubInner {
     retiring_hosts_changed: Notify,
     orphaned_host_slots: Mutex<Vec<(HostKey, Arc<HostSlot>)>>,
     pending_lane_cleanups: Mutex<Vec<Arc<PendingLaneCleanup>>>,
+    pending_host_retirements: Mutex<Vec<PendingHostRetirement>>,
+    host_finalizations: Mutex<HashMap<HostKey, Arc<HostFinalizationFlight>>>,
     lane_cleanup_retry_gate: Mutex<()>,
     host_cleanup_retry_gate: Mutex<()>,
     cleanup_sequence: AtomicU64,
@@ -572,6 +634,8 @@ impl BrowserSessionHub {
                 retiring_hosts_changed: Notify::new(),
                 orphaned_host_slots: Mutex::new(Vec::new()),
                 pending_lane_cleanups: Mutex::new(Vec::new()),
+                pending_host_retirements: Mutex::new(Vec::new()),
+                host_finalizations: Mutex::new(HashMap::new()),
                 lane_cleanup_retry_gate: Mutex::new(()),
                 host_cleanup_retry_gate: Mutex::new(()),
                 cleanup_sequence: AtomicU64::new(0),
@@ -1245,11 +1309,14 @@ impl BrowserSessionHub {
                     Err(lane_start_task_failed_error(lane_id.clone(), &join_error))
                 }
             };
-            if result.is_err() {
+            let failed = result.is_err();
+            if failed {
+                // Detach and retain any late driver before publishing the
+                // terminal start result. A close racing this task waits for
+                // the flight, and may retire the Host only after this cleanup
+                // authority has been established.
                 hub.discard_lane_after_start_failure(&lane_id).await;
             }
-            let failed = result.is_err();
-            flight.complete(result);
             let mut active = lane.start_flight.lock().await;
             if active
                 .as_ref()
@@ -1258,7 +1325,9 @@ impl BrowserSessionHub {
                 *active = None;
             }
             drop(active);
+            flight.complete(result);
             if failed {
+                hub.finalize_hosts_ready_after_cleanup().await;
                 hub.promote_released_capacity().await;
             }
         });
@@ -1313,10 +1382,11 @@ impl BrowserSessionHub {
             None
         };
         drop(_open_guard);
-        if let Some(cleanup_id) = detached.flatten() {
-            let _ = self.attempt_pending_lane_cleanup(cleanup_id).await;
-        }
-        if detached.is_some() {
+        if let Some(detached) = detached {
+            if let Some(cleanup_id) = detached.cleanup_id {
+                let _ = self.attempt_pending_lane_cleanup(cleanup_id).await;
+            }
+            let _ = self.finalize_detached_host(detached).await;
             self.promote_released_capacity().await;
         }
     }
@@ -1426,8 +1496,9 @@ impl BrowserSessionHub {
             .get(&lane_id)
             .is_some_and(|current| Arc::ptr_eq(current, &lane));
         if lane.closing.load(Ordering::Acquire) || !lane_is_current {
+            let host_key = HostKey::for_lane(identity_mode, identity_generation, &lane_id);
             let cleanup_id = self
-                .retain_pending_lane_cleanup(lane_id.clone(), driver)
+                .retain_pending_lane_cleanup(lane_id.clone(), host_key, driver)
                 .await;
             drop(close_guard);
             self.discard_lane_after_start_failure(&lane_id).await;
@@ -1435,7 +1506,10 @@ impl BrowserSessionHub {
             return Err(lane_closed_error(lane_id));
         }
         if let Err(error) = self.validate_lane_owner(&lane).await {
-            let cleanup_id = self.retain_pending_lane_cleanup(lane_id.clone(), driver).await;
+            let host_key = HostKey::for_lane(identity_mode, identity_generation, &lane_id);
+            let cleanup_id = self
+                .retain_pending_lane_cleanup(lane_id.clone(), host_key, driver)
+                .await;
             drop(close_guard);
             // The owner may expire while Host I/O is in flight.  Do not leave
             // a failed Lane in inventory or an active scheduler permit behind
@@ -1474,10 +1548,10 @@ impl BrowserSessionHub {
     /// that owns the scheduler transition performs promotion after it has
     /// finished handling the failed start.
     async fn discard_lane_after_start_failure(&self, lane_id: &BrowserLaneId) {
-        let Some(cleanup_id) = self.detach_lane_for_close(lane_id).await else {
+        let Some(detached) = self.detach_lane_for_close(lane_id).await else {
             return;
         };
-        if let Some(cleanup_id) = cleanup_id {
+        if let Some(cleanup_id) = detached.cleanup_id {
             let _ = self.attempt_pending_lane_cleanup(cleanup_id).await;
         }
     }
@@ -1485,6 +1559,7 @@ impl BrowserSessionHub {
     async fn retain_pending_lane_cleanup(
         &self,
         lane_id: BrowserLaneId,
+        host_key: HostKey,
         driver: Arc<dyn BrowserLaneDriver>,
     ) -> u64 {
         let cleanup_id = self.inner.cleanup_sequence.fetch_add(1, Ordering::AcqRel) + 1;
@@ -1495,6 +1570,7 @@ impl BrowserSessionHub {
             .push(Arc::new(PendingLaneCleanup {
                 cleanup_id,
                 lane_id,
+                host_key,
                 driver,
                 flight: Mutex::new(None),
             }));
@@ -1548,24 +1624,34 @@ impl BrowserSessionHub {
             .write()
             .await
             .remove(&key);
-        let slot = if let Some(slot) = self.inner.host_slots.read().await.get(&key).cloned() {
-            slot
-        } else {
-            let mut slots = self.inner.host_slots.write().await;
-            // Shutdown publishes `shutting_down` before taking this write
-            // lock and draining the map. Checking under the same lock prevents
-            // a start that passed the earlier fast check from inserting a new
-            // HostSlot after the authoritative drain.
-            if self.inner.shutting_down.load(Ordering::Acquire) {
-                return Err(BrowserPlatformError::shutting_down());
+        let slot = {
+            // The caller inserted its Lane while holding `open_gate`, then
+            // released that gate before Chromium I/O. Reacquire it for Host
+            // slot selection so explicit final-Lane retirement cannot detach
+            // a slot between the retiring-key check above and this map access.
+            let _open_guard = self.inner.open_gate.lock().await;
+            if self.inner.retiring_host_keys.read().await.contains(&key) {
+                return Err(retiring_host_wait_timeout_error(&key));
             }
-            Arc::clone(
-                slots.entry(key.clone()).or_insert_with(|| {
-                    let epoch =
-                        self.inner.host_epoch_sequence.fetch_add(1, Ordering::AcqRel) + 1;
-                    Arc::new(HostSlot::new(epoch))
-                }),
-            )
+            if let Some(slot) = self.inner.host_slots.read().await.get(&key).cloned() {
+                slot
+            } else {
+                let mut slots = self.inner.host_slots.write().await;
+                // Shutdown publishes `shutting_down` before taking this write
+                // lock and draining the map. Checking under the same lock prevents
+                // a start that passed the earlier fast check from inserting a new
+                // HostSlot after the authoritative drain.
+                if self.inner.shutting_down.load(Ordering::Acquire) {
+                    return Err(BrowserPlatformError::shutting_down());
+                }
+                Arc::clone(
+                    slots.entry(key.clone()).or_insert_with(|| {
+                        let epoch =
+                            self.inner.host_epoch_sequence.fetch_add(1, Ordering::AcqRel) + 1;
+                        Arc::new(HostSlot::new(epoch, false))
+                    }),
+                )
+            }
         };
         match self.initialize_host_slot(&key, Arc::clone(&slot)).await {
             Ok(driver) => {
@@ -1588,6 +1674,15 @@ impl BrowserSessionHub {
         key: &HostKey,
         slot: Arc<HostSlot>,
     ) -> Result<Arc<dyn BrowserHostDriver>, BrowserPlatformError> {
+        self.initialize_host_slot_with_visibility(key, slot, None).await
+    }
+
+    async fn initialize_host_slot_with_visibility(
+        &self,
+        key: &HostKey,
+        slot: Arc<HostSlot>,
+        requested_headful: Option<bool>,
+    ) -> Result<Arc<dyn BrowserHostDriver>, BrowserPlatformError> {
         let identity_mode = key.identity_mode;
         let host_identity_generation = key.identity_generation;
         let identity_snapshot_payload =
@@ -1602,8 +1697,10 @@ impl BrowserSessionHub {
             };
         let factory = Arc::clone(&self.inner.factory);
         let browser_epoch = slot.epoch;
-        let headful = self.inner.config.read().await.headful
-            && identity_mode == BrowserIdentityMode::Primary;
+        let configured_headful = self.inner.config.read().await.headful;
+        let headful = identity_mode == BrowserIdentityMode::Primary
+            && requested_headful.unwrap_or(configured_headful);
+        slot.headful.store(headful, Ordering::Release);
         let host = slot
             .get_or_try_init(|| async move {
                 factory
@@ -1618,6 +1715,9 @@ impl BrowserSessionHub {
                     .await
             })
             .await?;
+        // A factory is the final launch-policy authority. Record what it
+        // actually produced rather than trusting the request bit.
+        slot.headful.store(host.is_headful(), Ordering::Release);
         Ok(Arc::clone(host))
     }
 
@@ -1784,9 +1884,25 @@ impl BrowserSessionHub {
         key: HostKey,
         observed_epoch: u64,
     ) -> Result<HostRestartTransition, BrowserPlatformError> {
+        self.restart_host_once_with_visibility(key, observed_epoch, None)
+            .await
+    }
+
+    async fn restart_host_once_with_visibility(
+        &self,
+        key: HostKey,
+        observed_epoch: u64,
+        requested_headful: Option<bool>,
+    ) -> Result<HostRestartTransition, BrowserPlatformError> {
         if let Some(current) = self.inner.host_slots.read().await.get(&key).cloned() {
             if current.epoch > observed_epoch {
-                let host = self.initialize_host_slot(&key, Arc::clone(&current)).await?;
+                let host = self
+                    .initialize_host_slot_with_visibility(
+                        &key,
+                        Arc::clone(&current),
+                        requested_headful,
+                    )
+                    .await?;
                 let transition = HostRestartTransition::new(observed_epoch, current.epoch)?;
                 self.rebind_host_lanes(&key, observed_epoch, transition, host)
                     .await?;
@@ -1795,8 +1911,19 @@ impl BrowserSessionHub {
         }
 
         let circuit = self.host_circuit(&key).await;
-        let circuit_attempt = circuit.acquire_attempt()?;
-        if !circuit_attempt.is_half_open() {
+        // A user-requested visibility transition is not a Host failure. It
+        // deliberately replaces a healthy headless process and must not
+        // consume the recovery circuit's failure budget.
+        let circuit_attempt = if requested_headful.is_some() {
+            None
+        } else {
+            Some(circuit.acquire_attempt()?)
+        };
+        if requested_headful.is_none()
+            && !circuit_attempt
+                .as_ref()
+                .is_some_and(|attempt| attempt.is_half_open())
+        {
             let recorded = circuit.record_failure();
             if recorded.is_open() {
             // Do not carry the map's read guard into exact-slot retirement,
@@ -1842,7 +1969,10 @@ impl BrowserSessionHub {
         }
 
         let new_epoch = self.inner.host_epoch_sequence.fetch_add(1, Ordering::AcqRel) + 1;
-        let new_slot = Arc::new(HostSlot::new(new_epoch));
+        let new_slot = Arc::new(HostSlot::new(
+            new_epoch,
+            requested_headful.unwrap_or(false),
+        ));
         {
             let mut slots = self.inner.host_slots.write().await;
             if self.inner.shutting_down.load(Ordering::Acquire) {
@@ -1864,7 +1994,14 @@ impl BrowserSessionHub {
             slots.insert(key.clone(), Arc::clone(&new_slot));
         }
 
-        let host = match self.initialize_host_slot(&key, Arc::clone(&new_slot)).await {
+        let host = match self
+            .initialize_host_slot_with_visibility(
+                &key,
+                Arc::clone(&new_slot),
+                requested_headful,
+            )
+            .await
+        {
             Ok(host) => host,
             Err(error) => {
                 if self
@@ -1881,7 +2018,9 @@ impl BrowserSessionHub {
         let transition = HostRestartTransition::new(observed_epoch, new_epoch)?;
         self.rebind_host_lanes(&key, observed_epoch, transition, host)
             .await?;
-        circuit_attempt.succeed();
+        if let Some(circuit_attempt) = circuit_attempt {
+            circuit_attempt.succeed();
+        }
         self.emit("host_restarted", None);
         Ok(transition)
     }
@@ -1942,7 +2081,17 @@ impl BrowserSessionHub {
         }
 
         for (lane, driver) in prepared {
-            let lane_id = lane.snapshot.read().await.lane_id.clone();
+            let (lane_id, host_key) = {
+                let snapshot = lane.snapshot.read().await;
+                (
+                    snapshot.lane_id.clone(),
+                    HostKey::for_lane(
+                        snapshot.identity_mode,
+                        snapshot.identity_generation,
+                        &snapshot.lane_id,
+                    ),
+                )
+            };
             // Closing and host recovery may race after the replacement driver
             // has been prepared.  Serialize the final driver assignment with
             // detach_lane_for_close so a detached Lane can never receive a
@@ -1961,7 +2110,7 @@ impl BrowserSessionHub {
             if !can_rebind {
                 drop(close_guard);
                 let cleanup_id = self
-                    .retain_pending_lane_cleanup(lane_id, driver)
+                    .retain_pending_lane_cleanup(lane_id, host_key, driver)
                     .await;
                 let _ = self.attempt_pending_lane_cleanup(cleanup_id).await;
                 continue;
@@ -1996,9 +2145,19 @@ impl BrowserSessionHub {
     ) -> Option<BrowserPlatformError> {
         let mut cleanup_ids = Vec::with_capacity(prepared.len());
         for (lane, driver) in prepared {
-            let lane_id = lane.snapshot.read().await.lane_id.clone();
+            let (lane_id, host_key) = {
+                let snapshot = lane.snapshot.read().await;
+                (
+                    snapshot.lane_id.clone(),
+                    HostKey::for_lane(
+                        snapshot.identity_mode,
+                        snapshot.identity_generation,
+                        &snapshot.lane_id,
+                    ),
+                )
+            };
             let cleanup_id = self
-                .retain_pending_lane_cleanup(lane_id, driver)
+                .retain_pending_lane_cleanup(lane_id, host_key, driver)
                 .await;
             cleanup_ids.push(cleanup_id);
         }
@@ -2462,11 +2621,80 @@ impl BrowserSessionHub {
         // Never acquire the driver lock while retaining a snapshot guard.
         // Lane start/rebind installs the driver before updating its snapshot,
         // so using the opposite order here could deadlock with recovery.
-        let driver = tokio::select! {
+        let mut driver = tokio::select! {
             driver = lane.driver.read() => driver.clone(),
             _ = lane.cancellation.cancelled() => return Err(lane_closed_error(lane_id.clone())),
         }
         .ok_or_else(|| foreground_lane_not_ready_error(lane_id.clone()))?;
+
+        let host_key = {
+            let snapshot = lane.snapshot.read().await;
+            HostKey::for_lane(
+                snapshot.identity_mode,
+                snapshot.identity_generation,
+                &snapshot.lane_id,
+            )
+        };
+        let host_slot = self
+            .inner
+            .host_slots
+            .read()
+            .await
+            .get(&host_key)
+            .cloned()
+            .ok_or_else(|| foreground_lane_not_ready_error(lane_id.clone()))?;
+
+        if !host_slot.is_headful() {
+            // A headless Chromium process has no native window for CDP to
+            // restore. The trusted UI request therefore performs one exact
+            // Host replacement. Primary's stable profile is opened only after
+            // the old process has been explicitly stopped; every Lane is
+            // rebound under a new epoch and must fresh-observe before Agent
+            // work resumes.
+            self.mark_host_restarting(&host_key, authorized_epoch).await;
+            let hub = self.clone();
+            let restart_key = host_key.clone();
+            let flight = self
+                .inner
+                .host_restarts
+                .run_bounded(
+                    host_key.clone(),
+                    authorized_epoch,
+                    HOST_RESTART_ATTEMPT_TIMEOUT,
+                    move || async move {
+                        hub.restart_host_once_with_visibility(
+                            restart_key,
+                            authorized_epoch,
+                            Some(true),
+                        )
+                        .await
+                    },
+                )
+                .await;
+            match flight.result {
+                Ok(_) => {}
+                Err(error) => {
+                    self.mark_host_recovery_failed(&host_key, authorized_epoch, &error)
+                        .await;
+                    return Err(error.for_lane(lane_id.clone()));
+                }
+            };
+            driver = lane
+                .driver
+                .read()
+                .await
+                .clone()
+                .ok_or_else(|| foreground_lane_not_ready_error(lane_id.clone()))?;
+            tokio::select! {
+                result = driver.bring_to_front() => result,
+                _ = lane.cancellation.cancelled() => Err(lane_closed_error(lane_id.clone())),
+            }
+            .map_err(|error| error.for_lane(lane_id.clone()))?;
+
+            let snapshot = lane.snapshot.read().await.clone();
+            self.emit("lane_foregrounded", Some(&snapshot));
+            return Ok(snapshot);
+        }
 
         tokio::select! {
             result = driver.bring_to_front() => result,
@@ -2672,15 +2900,24 @@ impl BrowserSessionHub {
         &self,
         lane_id: &BrowserLaneId,
     ) -> Result<CloseResult, BrowserPlatformError> {
-        let Some(cleanup_id) = self.detach_lane_for_close(lane_id).await else {
+        let Some(detached) = self.detach_lane_for_close(lane_id).await else {
             return Ok(CloseResult {
                 closed: 0,
                 already_closed: true,
             });
         };
         self.promote_released_capacity().await;
-        if let Some(cleanup_id) = cleanup_id {
-            self.attempt_pending_lane_cleanup(cleanup_id).await?;
+        let mut cleanup_error = None;
+        if let Some(cleanup_id) = detached.cleanup_id {
+            if let Err(error) = self.attempt_pending_lane_cleanup(cleanup_id).await {
+                cleanup_error = Some(error);
+            }
+        }
+        if cleanup_error.is_none() {
+            self.finalize_detached_host(detached).await?;
+        }
+        if let Some(error) = cleanup_error {
+            return Err(error);
         }
         Ok(CloseResult {
             closed: 1,
@@ -2691,7 +2928,7 @@ impl BrowserSessionHub {
     /// Detach one Lane from inventory and scheduler capacity before any driver
     /// I/O. The driver is first copied into the Hub-owned retry queue, so caller
     /// cancellation cannot lose cleanup authority after detachment.
-    async fn detach_lane_for_close(&self, lane_id: &BrowserLaneId) -> Option<Option<u64>> {
+    async fn detach_lane_for_close(&self, lane_id: &BrowserLaneId) -> Option<DetachedLane> {
         let lane = self.inner.lanes.read().await.get(lane_id).cloned()?;
         let _close_guard = lane.close_gate.lock().await;
         if !self
@@ -2712,6 +2949,15 @@ impl BrowserSessionHub {
             snapshot.lifecycle_state = LaneLifecycleState::Stopping;
             snapshot.clone()
         };
+        let host_key = HostKey::for_lane(
+            snapshot.identity_mode,
+            snapshot.identity_generation,
+            &snapshot.lane_id,
+        );
+        // Keep the start flight alive independently of the removed Lane. If a
+        // caller closes a Lane while Host.open_lane is still in flight, the
+        // late driver must be cleaned before the last Host is retired.
+        let start_flight = lane.start_flight.lock().await.clone();
         self.emit("lane_stopping", Some(&snapshot));
 
         // Acquire every async lock before mutating any authoritative structure.
@@ -2734,6 +2980,7 @@ impl BrowserSessionHub {
                 pending.push(Arc::new(PendingLaneCleanup {
                     cleanup_id,
                     lane_id: lane_id.clone(),
+                    host_key: host_key.clone(),
                     driver,
                     flight: Mutex::new(None),
                 }));
@@ -2747,15 +2994,23 @@ impl BrowserSessionHub {
             self.inner.scheduler.release_without_promotion(lane_id);
             cleanup_id
         };
-
-        self.mark_host_empty_if_unused(HostKey::for_lane(
-            snapshot.identity_mode,
-            snapshot.identity_generation,
-            &snapshot.lane_id,
-        ))
-        .await;
+        let pending_start_flight = start_flight
+            .as_ref()
+            .filter(|flight| flight.result.get().is_none())
+            .cloned();
+        if let Some(start_flight) = pending_start_flight {
+            self.inner
+                .pending_host_retirements
+                .lock()
+                .await
+                .push(PendingHostRetirement {
+                    key: host_key.clone(),
+                    lane_id: lane_id.clone(),
+                    start_flight,
+                });
+        }
         self.emit("lane_closed", Some(&snapshot));
-        Some(cleanup_id)
+        Some(DetachedLane { host_key, cleanup_id })
     }
 
     async fn attempt_pending_lane_cleanup(
@@ -2844,12 +3099,30 @@ impl BrowserSessionHub {
         let result = tokio::spawn(async move { driver.close().await }).await;
         match result {
             Ok(Ok(())) => {
+                let host_key = entry.host_key.clone();
                 self.inner
                     .pending_lane_cleanups
                     .lock()
                     .await
                     .retain(|pending| !Arc::ptr_eq(pending, &entry));
                 self.emit("lane_cleanup_finished", None);
+                let hub = self.clone();
+                tokio::spawn(async move {
+                    hub.finalize_hosts_ready_after_cleanup().await;
+                });
+                // This task is Hub-owned. Even when the explicit close caller
+                // is cancelled after target cleanup, the final Host retirement
+                // obligation remains live and can be retried by sweep.
+                let hub = self.clone();
+                tokio::spawn(async move {
+                    if let Err(error) = hub.finalize_empty_host(host_key.clone()).await {
+                        tracing::warn!(
+                            identity_mode = ?host_key.identity_mode,
+                            code = ?error.code,
+                            "browser Host finalization remains pending after Lane cleanup"
+                        );
+                    }
+                });
                 Ok(())
             }
             Ok(Err(error)) => {
@@ -3029,20 +3302,21 @@ impl BrowserSessionHub {
             closed: 0,
             already_closed: ids.is_empty(),
         };
-        let mut cleanup_ids = Vec::new();
+        let mut detached_lanes = Vec::new();
         for lane_id in &ids {
-            if let Some(cleanup_id) = self.detach_lane_for_close(lane_id).await {
+            if let Some(detached) = self.detach_lane_for_close(lane_id).await {
                 result.closed += 1;
-                if let Some(cleanup_id) = cleanup_id {
-                    cleanup_ids.push(cleanup_id);
-                }
+                detached_lanes.push(detached);
             }
         }
         result.already_closed = result.closed == 0;
         self.promote_released_capacity().await;
         let deadline = Instant::now() + CLEANUP_BATCH_WAIT_TIMEOUT;
         let mut attempts = tokio::task::JoinSet::new();
-        for cleanup_id in cleanup_ids {
+        for cleanup_id in detached_lanes
+            .iter()
+            .filter_map(|detached| detached.cleanup_id)
+        {
             let hub = self.clone();
             attempts.spawn(async move {
                 hub.attempt_pending_lane_cleanup_until(cleanup_id, deadline)
@@ -3068,6 +3342,20 @@ impl BrowserSessionHub {
                 }
             }
         }
+        let host_keys = detached_lanes
+            .into_iter()
+            .map(|detached| detached.host_key)
+            .collect::<HashSet<_>>();
+        if first_error.is_none() {
+            for host_key in host_keys {
+                self.wait_for_pending_host_starts(&host_key).await;
+                if let Err(error) = self.finalize_empty_host(host_key).await
+                    && first_error.is_none()
+                {
+                    first_error = Some(error);
+                }
+            }
+        }
         if let Some(error) = first_error {
             let mut metadata = error.metadata.as_object().cloned().unwrap_or_default();
             metadata.insert("cleanup_pending".to_owned(), json!(true));
@@ -3080,32 +3368,183 @@ impl BrowserSessionHub {
         Ok(result)
     }
 
-    async fn mark_host_empty_if_unused(&self, key: HostKey) {
-        let records: Vec<_> = self.inner.lanes.read().await.values().cloned().collect();
-        for lane in records {
-            let snapshot = lane.snapshot.read().await;
-            if HostKey::for_lane(
-                snapshot.identity_mode,
-                snapshot.identity_generation,
-                &snapshot.lane_id,
-            ) == key
-            {
-                self.inner
-                    .host_empty_since_ms
-                    .write()
-                    .await
-                    .remove(&key);
-                return;
+    async fn finalize_detached_host(
+        &self,
+        detached: DetachedLane,
+    ) -> Result<(), BrowserPlatformError> {
+        self.wait_for_pending_host_starts(&detached.host_key).await;
+        self.finalize_empty_host(detached.host_key).await
+    }
+
+    async fn wait_for_pending_host_starts(&self, key: &HostKey) {
+        let pending = self
+            .inner
+            .pending_host_retirements
+            .lock()
+            .await
+            .iter()
+            .filter(|pending| &pending.key == key)
+            .cloned()
+            .collect::<Vec<_>>();
+        for pending in pending {
+            let _ = pending.start_flight.wait().await;
+            self.inner
+                .pending_host_retirements
+                .lock()
+                .await
+                .retain(|current| {
+                    current.key != pending.key || current.lane_id != pending.lane_id
+                });
+        }
+    }
+
+    async fn host_has_pending_lane_cleanup(&self, key: &HostKey) -> bool {
+        self.inner
+            .pending_lane_cleanups
+            .lock()
+            .await
+            .iter()
+            .any(|cleanup| &cleanup.host_key == key)
+    }
+
+    async fn host_has_unsettled_lane_start(&self, key: &HostKey) -> bool {
+        self.inner
+            .pending_host_retirements
+            .lock()
+            .await
+            .iter()
+            .any(|pending| &pending.key == key && pending.start_flight.result.get().is_none())
+    }
+
+    /// Retry the Host part of a close after a late Lane-start or retained
+    /// target cleanup has converged. This is a recovery path, so it never
+    /// waits on unfinished work and never hides an error from the explicit
+    /// close caller; failed Host shutdown remains in the existing retirement
+    /// queue for the periodic lifecycle retry.
+    async fn finalize_hosts_ready_after_cleanup(&self) {
+        let pending_starts = self
+            .inner
+            .pending_host_retirements
+            .lock()
+            .await
+            .clone();
+        let keys = pending_starts
+            .iter()
+            .filter(|pending| pending.start_flight.result.get().is_some())
+            .map(|pending| pending.key.clone())
+            .collect::<HashSet<_>>();
+        self.inner
+            .pending_host_retirements
+            .lock()
+            .await
+            .retain(|pending| pending.start_flight.result.get().is_none());
+        for key in keys {
+            if let Err(error) = self.finalize_empty_host(key.clone()).await {
+                tracing::warn!(
+                    identity_mode = ?key.identity_mode,
+                    code = ?error.code,
+                    "browser Host finalization remains pending after late Lane cleanup"
+                );
             }
         }
-        if self.inner.host_slots.read().await.contains_key(&key) {
-            self.inner
-                .host_empty_since_ms
-                .write()
+    }
+
+    /// Retire and shut down a Host as soon as its final Lane cleanup has
+    /// completed. The active Host map is detached while holding `open_gate`,
+    /// so an overlapping open cannot attach a new Lane to a process that is
+    /// already being stopped. Failed shutdown remains in the durable
+    /// retirement queue and is retried by the lifecycle worker.
+    async fn finalize_empty_host(&self, key: HostKey) -> Result<(), BrowserPlatformError> {
+        let slot = {
+            let _open_guard = self.inner.open_gate.lock().await;
+
+            // A detached target or a Lane start that has not yet published its
+            // terminal result still belongs to this Host. Retiring the process
+            // first would make target cleanup race a dead CDP connection and
+            // could discard a driver which appears just after this check.
+            if self.host_has_pending_lane_cleanup(&key).await
+                || self.host_has_unsettled_lane_start(&key).await
+            {
+                return Ok(());
+            }
+            let lanes = self
+                .inner
+                .lanes
+                .read()
                 .await
-                .entry(key)
-                .or_insert_with(|| self.inner.clock.now_ms());
+                .values()
+                .cloned()
+                .collect::<Vec<_>>();
+            for lane in lanes {
+                let snapshot = lane.snapshot.read().await;
+                if HostKey::for_lane(
+                    snapshot.identity_mode,
+                    snapshot.identity_generation,
+                    &snapshot.lane_id,
+                ) == key
+                {
+                    return Ok(());
+                }
+            }
+            // Acquire the retirement authority and active map before mutating
+            // either one. Once every lock is held, the hand-off below contains
+            // no await point: cancellation therefore leaves the slot either
+            // wholly active or wholly retained for retry.
+            let mut retiring_keys = self.inner.retiring_host_keys.write().await;
+            let mut slots = self.inner.host_slots.write().await;
+            let mut retiring_slots = self.inner.retiring_host_slots.lock().await;
+            let slot = if let Some(slot) = slots.remove(&key) {
+                slot.retire();
+                retiring_keys.insert(key.clone());
+                retiring_slots.push((key.clone(), Arc::clone(&slot)));
+                slot
+            } else if let Some((_, slot)) = retiring_slots
+                .iter()
+                .find(|(pending_key, _)| pending_key == &key)
+            {
+                Arc::clone(slot)
+            } else {
+                return Ok(());
+            };
+            drop(retiring_slots);
+            drop(slots);
+            drop(retiring_keys);
+            self.inner.host_empty_since_ms.write().await.remove(&key);
+            slot
+        };
+
+        let result = slot.shutdown_retired().await;
+        match result {
+            Ok(_) => {
+                self.forget_retired_host_slot(&key, &slot).await;
+                self.emit("host_shutdown_finished", None);
+                Ok(())
+            }
+            Err(error) => {
+                self.emit("host_shutdown_pending", None);
+                Err(error)
+            }
         }
+    }
+
+    /// Atomically release the retry queue entry and its reopen fence after an
+    /// exact Host shutdown proof. Cancellation before both locks are held
+    /// leaves both authorities intact; after that there is no await point.
+    async fn forget_retired_host_slot(&self, key: &HostKey, slot: &Arc<HostSlot>) {
+        let mut retiring_keys = self.inner.retiring_host_keys.write().await;
+        let mut retiring_slots = self.inner.retiring_host_slots.lock().await;
+        retiring_slots.retain(|(pending_key, pending_slot)| {
+            pending_key != key || !Arc::ptr_eq(pending_slot, slot)
+        });
+        if !retiring_slots
+            .iter()
+            .any(|(pending_key, _)| pending_key == key)
+        {
+            retiring_keys.remove(key);
+        }
+        drop(retiring_slots);
+        drop(retiring_keys);
+        self.inner.retiring_hosts_changed.notify_waiters();
     }
 
     async fn owner_live_lane_count(&self, runtime_instance_id: &str) -> usize {
@@ -3330,15 +3769,7 @@ impl BrowserSessionHub {
             match result {
                 Ok(had_host) => {
                     stopped += usize::from(had_host);
-                    self.inner
-                        .retiring_host_slots
-                        .lock()
-                        .await
-                        .retain(|(pending_key, pending_slot)| {
-                            pending_key != &key || !Arc::ptr_eq(pending_slot, &slot)
-                        });
-                    self.inner.retiring_host_keys.write().await.remove(&key);
-                    self.inner.retiring_hosts_changed.notify_waiters();
+                    self.forget_retired_host_slot(&key, &slot).await;
                     self.emit("host_warm_shutdown_finished", None);
                 }
                 Err(error) => {
@@ -3567,6 +3998,15 @@ impl BrowserSessionHub {
         if let Err(error) = self.retry_pending_lane_cleanups().await {
             first_error = Some(error);
         }
+        // Lane cleanup is the prerequisite for exact Host shutdown. Retry
+        // retained retirements immediately afterwards; explicit close already
+        // attempts this synchronously, while this path covers cancellation or
+        // a previously failed Host shutdown.
+        if let Err(error) = self.retry_retiring_host_slots().await
+            && first_error.is_none()
+        {
+            first_error = Some(error);
+        }
         if let Err(error) = self.retry_orphaned_host_slots().await {
             if first_error.is_none() {
                 first_error = Some(error);
@@ -3778,8 +4218,17 @@ impl BrowserSessionHub {
 
     async fn shutdown_once(&self) -> Result<(), BrowserPlatformError> {
         self.inner.shutting_down.store(true, Ordering::Release);
-        let _ = self.close_all().await;
-        let _ = self.retry_pending_lane_cleanups().await;
+        // Preserve the first explicit cleanup failure for the caller, but do
+        // not short-circuit the remaining Hub-owned cleanup authority. A
+        // close may already have retired the last Host before returning its
+        // target error; swallowing that error would falsely report exact
+        // application shutdown.
+        let mut first_error = self.close_all().await.err();
+        if let Err(error) = self.retry_pending_lane_cleanups().await
+            && first_error.is_none()
+        {
+            first_error = Some(error);
+        }
 
         // Move active slots into a retained queue before the first shutdown
         // await. A cancelled/failed shutdown therefore leaves every Host under
@@ -3794,7 +4243,11 @@ impl BrowserSessionHub {
         }
         self.inner.host_empty_since_ms.write().await.clear();
 
-        let mut first_error = self.retry_orphaned_host_slots().await.err();
+        if let Err(error) = self.retry_orphaned_host_slots().await
+            && first_error.is_none()
+        {
+            first_error = Some(error);
+        }
         if let Err(error) = self.retry_retiring_host_slots().await {
             if first_error.is_none() {
                 first_error = Some(error);

@@ -146,12 +146,15 @@ impl BrowserHostFactory for ManagedEngineHostFactory {
             known_secret_values: Some(config.known_secret_values.clone()),
         };
         let data_dir = config.data_dir.clone();
-        let headful = config.headful;
         let host = Arc::new(
             ManagedBrowserHost::launch(config)
                 .await
                 .map_err(map_engine_error)?,
         );
+        // Record the effective mode after display-capability probing. A
+        // requested Headful launch is forced Headless on machines without a
+        // usable display and must not be reported as foregroundable.
+        let headful = host.launch_mode().is_headful();
         Ok(Arc::new(ManagedEngineHostDriver {
             host_id: request.host_id,
             epoch: request.browser_epoch,
@@ -214,6 +217,13 @@ impl BrowserHostDriver for ManagedEngineHostDriver {
 
     fn state(&self) -> HostLifecycleState {
         self.lifecycle_state()
+    }
+
+    fn is_headful(&self) -> bool {
+        // This is the effective engine launch mode, not a user preference.
+        // The Hub uses it to distinguish a real native window from a Host
+        // that must be replaced before an explicit foreground request.
+        self.headful
     }
 
     fn process_id(&self) -> Option<u32> {

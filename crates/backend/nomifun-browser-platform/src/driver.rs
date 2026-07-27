@@ -105,6 +105,13 @@ pub trait BrowserHostDriver: Send + Sync {
     fn host_id(&self) -> BrowserHostId;
     fn epoch(&self) -> u64;
     fn state(&self) -> HostLifecycleState;
+    /// Whether this Host was launched with a real native browser window.
+    ///
+    /// A headless Host cannot be made visible through CDP window commands;
+    /// callers must perform an explicit, trusted Host replacement instead.
+    fn is_headful(&self) -> bool {
+        false
+    }
     fn process_id(&self) -> Option<u32> {
         None
     }

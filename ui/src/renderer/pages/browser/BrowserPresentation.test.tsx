@@ -284,7 +284,7 @@ describe('Browser management presentation', () => {
     expect(html.includes('recommended concurrency 2')).toBe(true);
     expect(html.includes('>Close lane<')).toBe(true);
     expect(html.includes('Status only')).toBe(true);
-    expect(html.includes('external managed window')).toBe(true);
+    expect(html.includes('runs headlessly with no visible window by default')).toBe(true);
   });
 
   test('renders critical pressure without disabling close-all when lanes still exist', () => {
@@ -444,9 +444,8 @@ describe('Browser management presentation', () => {
       lane({ identity: { mode: 'anonymous' } }),
     ]) {
       const html = renderLaneDetails(unavailable);
-      expect(html.includes('Open browser in foreground')).toBe(true);
-      expect(html.includes('disabled')).toBe(true);
-      expect(html.includes('Only a running Primary lane')).toBe(true);
+      expect(html.includes('Open browser in foreground')).toBe(false);
+      expect(html.includes('data-browser-foreground-action')).toBe(false);
     }
   });
 

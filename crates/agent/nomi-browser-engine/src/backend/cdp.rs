@@ -60,7 +60,10 @@ use crate::engine::{
     Observation, ObserveOpts,
 };
 use crate::injected::{InjectError, InjectionManager};
-use crate::launch::{LaunchConfig, Launched, launch_chrome, terminate_launched_process_tree};
+use crate::launch::{
+    BrowserHostLaunchMode, LaunchConfig, Launched, launch_chrome,
+    terminate_launched_process_tree,
+};
 use crate::nav::{
     self, InflightCounter, LifecycleSignal, NavSettleState, NETWORK_IDLE_CAP, NETWORK_IDLE_QUIET,
     SETTLE_QUIET, SPA_SETTLE_TIMEOUT,
@@ -727,7 +730,11 @@ pub(crate) struct CdpHostRuntime {
 }
 
 impl CdpHostRuntime {
-    pub(crate) async fn launch(config: EngineConfig) -> Result<Arc<Self>, BrowserError> {
+    pub(crate) async fn launch_in_mode(
+        mut config: EngineConfig,
+        requested_mode: BrowserHostLaunchMode,
+    ) -> Result<Arc<Self>, BrowserError> {
+        config.headful = requested_mode.is_headful();
         let chrome_path = crate::acquire::resolve_chrome_path_with_source(
             &config.data_dir,
             config.bundled_dir.as_deref(),
@@ -750,8 +757,17 @@ impl CdpHostRuntime {
             .await
             .expect("browser launch semaphore is never closed");
         let display_available = crate::display::display_available();
-        let headful = display_available && config.headful;
-        let launched = launch_chrome(&launch_config, !headful).await?;
+        let effective_mode = if display_available {
+            requested_mode
+        } else {
+            BrowserHostLaunchMode::Headless
+        };
+        let headful = effective_mode.is_headful();
+        let launched = launch_chrome(
+            &launch_config,
+            effective_mode == BrowserHostLaunchMode::Headless,
+        )
+        .await?;
         let cleanup_user_data_dir = config.ephemeral_profile.then_some(user_data_dir);
         Self::from_launched(
             launched,
@@ -857,6 +873,10 @@ impl CdpHostRuntime {
         } else {
             self.root_process_id
         }
+    }
+
+    pub(crate) fn is_headful(&self) -> bool {
+        self.headful && self.display_available
     }
 
     pub(crate) async fn shutdown(&self) -> Result<(), BrowserError> {
@@ -1816,9 +1836,10 @@ impl CdpBackend {
         };
         use chromiumoxide::cdp::browser_protocol::target::ActivateTargetParams;
 
-        // Page.bringToFront/Target.activateTarget alone do not restore a window
-        // created with --start-minimized. Ask Chromium for the native window that
-        // owns this target, then explicitly restore that exact window first.
+        // Ask Chromium for the native window which owns this target and
+        // normalize it before activation. Headful Hosts are created only by an
+        // explicit trusted presentation transition; this is not a mechanism
+        // for simulating headless work with a minimized window.
         let window = self
             .conn
             .send::<GetWindowForTargetParams>(
@@ -2030,9 +2051,9 @@ async fn create_page_session(
     let mut attached_rx = conn.subscribe(EventAttachedToTarget::IDENTIFIER, None);
 
     // 2) 在根 session 上建 page target（默认 browser context）。始终显式要求后台
-    // target：Primary Host 虽然是 headful，普通 Agent Lane 的创建也不能把最小化的
-    // 受管窗口恢复或抢占当前焦点。受信任的 Browser 管理入口会单独恢复窗口并激活
-    // target；headless Chrome 会忽略这个展示提示。
+    // target：普通 Agent Lane 运行在真正的 Headless Host；只有受信任的 Browser
+    // 管理入口才会用 Headful Host 替换它并显式激活 target。对 Headless Chromium，
+    // 这个展示提示自然不会创建任何系统窗口。
     let mut params = CreateTargetParams::new("about:blank");
     params.background = Some(true);
     let result = conn

@@ -12,8 +12,8 @@
 //! direct child 已回收且 cleanup proof 完成后，才能报告 Chromium 已停止。
 //!
 //! headless 决策：[`crate::display::display_available`] 为 false（无显示器：无头 server /
-//! CI / SSH 无 X）→ 强制 `--headless=new`。headful 时给 `--window-position`（非主屏角）+
-//! `--window-size` 并以最小化状态启动；受信任的前台入口再恢复同一个真实窗口。
+//! CI / SSH 无 X）→ 强制 `--headless=new`。日常 Agent 工作同样显式使用现代 headless；
+//! 只有受信任的“前台打开”入口才会创建带真实窗口的替代 Host。
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -21,6 +21,27 @@ use std::time::Duration;
 use std::time::Instant;
 
 use crate::engine::BrowserError;
+
+/// Chromium Host 的进程级展示模式。
+///
+/// 这是不可在存活进程上切换的启动属性。普通 Agent 工作必须使用
+/// [`Self::Headless`]；只有 Hub 的受信任前台入口可以在先完整关闭旧 Host 后，
+/// 用同一应用托管 profile 创建 [`Self::Headful`] 替代 Host。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BrowserHostLaunchMode {
+    Headless,
+    Headful,
+}
+
+impl BrowserHostLaunchMode {
+    pub const fn from_headful(headful: bool) -> Self {
+        if headful { Self::Headful } else { Self::Headless }
+    }
+
+    pub const fn is_headful(self) -> bool {
+        matches!(self, Self::Headful)
+    }
+}
 
 /// 轮询 DevToolsActivePort 文件的最长等待（chrome 冷启 + 端口监听就绪）。仅 Windows ws 路径用。
 #[cfg(windows)]
@@ -118,8 +139,7 @@ pub enum LaunchTransport {
 /// - [`crate::switches::chromium_switches`] 全量静态硬化开关。
 /// - `--no-first-run` / `--no-default-browser-check`：免首启向导/默认浏览器询问。
 /// - `--headless=new`：仅当 `force_headless`（无显示器或显式 headless）。
-/// - headful（`!force_headless`）：`--window-position` + `--window-size`（非主屏角）+
-///   `--start-minimized`，后台启动且不抢用户焦点。
+/// - headful（`!force_headless`）：`--window-position` + `--window-size`，创建真实可见窗口。
 /// - `--no-startup-window`：不自动开启动窗口（消除冗余 about:blank；受控页由 backend
 ///   `Target.createTarget` 单独建）。靠 `--remote-debugging-port` 触发的 REMOTE_DEBUGGING
 ///   keep-alive 保进程存活、不无窗口自退。
@@ -127,6 +147,25 @@ pub enum LaunchTransport {
 /// `force_headless` 由调用方按 `display_available()` 与 `LaunchConfig::headful` 算好后传入，
 /// 使本函数保持纯逻辑、无平台/环境探测，单测可在任意宿主断言。
 pub fn build_chrome_args(user_data_dir: &Path, force_headless: bool) -> Vec<String> {
+    build_chrome_args_for_mode(
+        user_data_dir,
+        if force_headless {
+            BrowserHostLaunchMode::Headless
+        } else {
+            BrowserHostLaunchMode::Headful
+        },
+    )
+}
+
+/// 按显式 Host 展示模式构造 Chromium 参数。
+///
+/// 不允许用 `--start-minimized` 模拟静默执行：Headless 必须包含
+/// `--headless=new`，Headful 必须创建正常窗口。这样系统托盘/任务栏中不会残留一个
+/// 用户未请求的隐藏窗口，且“前台打开”的可见性完全由 Hub 的显式替换流程控制。
+pub fn build_chrome_args_for_mode(
+    user_data_dir: &Path,
+    mode: BrowserHostLaunchMode,
+) -> Vec<String> {
     let mut args: Vec<String> = Vec::new();
 
     // CDP 运输开关：Unix 用 `--remote-debugging-pipe`（fd3/fd4；浏览器在父死/管道 EOF 时自退,
@@ -144,15 +183,14 @@ pub fn build_chrome_args(user_data_dir: &Path, force_headless: bool) -> Vec<Stri
     args.push("--no-first-run".into());
     args.push("--no-default-browser-check".into());
 
-    if force_headless {
+    if mode == BrowserHostLaunchMode::Headless {
         // 无显示器强制无头；`=new` 是现代 headless（非旧 --headless），CDP 截图可用。
         args.push("--headless=new".into());
     } else {
-        // headful：保留真实窗口供后续受信任入口恢复，但启动时最小化，避免后台
-        // Agent 首次创建 target 时抢占用户当前应用的焦点。
+        // Headful Host 仅由受信任的显式前台入口创建，因此直接使用正常窗口，
+        // 不再通过最小化窗口伪装后台执行。
         args.push("--window-position=80,80".into());
         args.push("--window-size=1280,800".into());
-        args.push("--start-minimized".into());
     }
 
     // Linux 容器内 sandbox 常因缺 user-namespace 而启动失败；回退 --no-sandbox。
@@ -771,9 +809,21 @@ mod tests {
         assert!(headful.iter().any(|a| a.starts_with("--window-position")));
         assert!(headful.iter().any(|a| a.starts_with("--window-size")));
         assert!(
-            headful.iter().any(|a| a == "--start-minimized"),
-            "headful must start minimized until trusted foregrounding: {headful:?}"
+            !headful.iter().any(|a| a == "--start-minimized"),
+            "headful must be a normal explicitly requested window: {headful:?}"
         );
+    }
+
+    #[test]
+    fn typed_launch_modes_never_use_a_minimized_window_as_headless() {
+        let dir = Path::new("/tmp/x");
+        let headless = build_chrome_args_for_mode(dir, BrowserHostLaunchMode::Headless);
+        let headful = build_chrome_args_for_mode(dir, BrowserHostLaunchMode::Headful);
+
+        assert!(headless.iter().any(|arg| arg == "--headless=new"));
+        assert!(!headful.iter().any(|arg| arg == "--headless=new"));
+        assert!(!headless.iter().any(|arg| arg == "--start-minimized"));
+        assert!(!headful.iter().any(|arg| arg == "--start-minimized"));
     }
 
     #[cfg(target_os = "linux")]

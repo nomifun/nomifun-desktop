@@ -10,10 +10,10 @@ import type { BrowserDisplayMode } from '@/common/config/configKeys';
 export type { BrowserDisplayMode } from '@/common/config/configKeys';
 
 // The browser management page is intentionally status-only. Keep the legacy
-// union values readable so old config payloads remain type-compatible, but the
-// only product mode that can be selected or persisted is the real managed
-// external Chromium window. It starts in the background and is foregrounded
-// only after an explicit user action in Browser management.
+// union values readable so old config payloads remain type-compatible. The
+// persisted `external` value now means that routine Agent work is truly
+// headless; only an explicit Browser-management action may create a visible
+// managed Primary window.
 export const BROWSER_DISPLAY_MODES = ['external'] as const;
 
 export type BrowserDisplayModeMigration = {
@@ -34,7 +34,7 @@ export function isBrowserDisplayMode(value: unknown): value is (typeof BROWSER_D
  * - an explicit external displayMode remains external;
  * - historical embedded/headless/malformed values fail safe to external;
  * - legacy silent values are read only for migration bookkeeping;
- * - a fresh install defaults to the background external managed window.
+ * - a fresh install defaults to headless Agent execution with foreground on demand.
  */
 export function migrateBrowserDisplayMode(input: {
   displayMode?: unknown;

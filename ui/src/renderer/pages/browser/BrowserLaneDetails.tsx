@@ -191,24 +191,24 @@ const BrowserLaneDetails: React.FC<BrowserLaneDetailsProps> = ({
               {valueOrDash(activeUrl)}
             </div>
             <div className='mt-7px text-11px leading-17px text-t-tertiary'>
-              {t('browser.details.externalManagedWindow')}
+              {t('browser.details.backgroundExecution')}
             </div>
             <div className='mt-4px break-all font-mono text-10px leading-16px text-t-tertiary'>
               {lane.lane_id}
             </div>
           </div>
           <div className='flex flex-wrap items-center justify-end gap-8px'>
-            <Button
-              type='primary'
-              loading={foregrounding}
-              disabled={!canForeground}
-              icon={<BringToFront theme='outline' size='14' />}
-              onClick={() => onForeground(lane)}
-              title={canForeground ? undefined : t('browser.foreground.unavailable')}
-              data-browser-foreground-action
-            >
-              {t('browser.foreground.action')}
-            </Button>
+            {canForeground && (
+              <Button
+                type='primary'
+                loading={foregrounding}
+                icon={<BringToFront theme='outline' size='14' />}
+                onClick={() => onForeground(lane)}
+                data-browser-foreground-action
+              >
+                {t('browser.foreground.action')}
+              </Button>
+            )}
             <Button
               status='danger'
               type='outline'
