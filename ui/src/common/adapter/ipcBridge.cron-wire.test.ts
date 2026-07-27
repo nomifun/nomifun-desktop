@@ -6,7 +6,7 @@
 
 import { describe, expect, test } from 'bun:test';
 import { InvalidEntityIdError, parseCronJobId } from '@/common/types/ids';
-import { cron } from './ipcBridge';
+import { cron, type IUpdateCronJobParams } from './ipcBridge';
 
 const CRON_JOB_ID = '0190f5fe-7c00-7a00-8000-000000000010';
 const CRON_JOB_RUN_ID = '0190f5fe-7c00-7a00-8000-000000000011';
@@ -91,6 +91,56 @@ describe('cron response wire ID contract', () => {
           cron.listRuns.invoke({ cron_job_id: parseCronJobId(CRON_JOB_ID) }),
         );
       }
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+  });
+
+  test('update serializes only fields accepted by the strict backend DTO', async () => {
+    let requestBody: unknown;
+    try {
+      globalThis.fetch = ((_input: RequestInfo | URL, init?: RequestInit) => {
+        requestBody = JSON.parse(String(init?.body));
+        return Promise.resolve(
+          new Response(JSON.stringify({ success: true, data: rawCronJob(CRON_JOB_ID) }), {
+            status: 200,
+            headers: { 'Content-Type': 'application/json' },
+          })
+        );
+      }) as typeof fetch;
+
+      // Deliberately simulate an unsafely widened caller. The HTTP boundary
+      // must still whitelist the update DTO instead of forwarding response-only
+      // or creation-only fields such as execution_mode, metadata, and state.
+      const updates = {
+        name: 'Renamed boundary test',
+        description: 'Updated description',
+        enabled: false,
+        schedule: { kind: 'every', every_ms: 120_000, description: 'Every two minutes' },
+        message: 'Run the updated boundary test',
+        agent_config: { name: 'Nomi', clear_context_each_run: true },
+        conversation_title: 'Updated title',
+        max_retries: 5,
+        execution_mode: 'new_conversation',
+        metadata: { agent_type: 'nomi' },
+        state: { run_count: 99 },
+      } as unknown as IUpdateCronJobParams;
+
+      await cron.updateJob.invoke({
+        cron_job_id: parseCronJobId(CRON_JOB_ID),
+        updates,
+      });
+
+      expect(requestBody).toEqual({
+        name: 'Renamed boundary test',
+        description: 'Updated description',
+        enabled: false,
+        schedule: { kind: 'every', every_ms: 120_000, description: 'Every two minutes' },
+        message: 'Run the updated boundary test',
+        agent_config: { name: 'Nomi', clear_context_each_run: true },
+        conversation_title: 'Updated title',
+        max_retries: 5,
+      });
     } finally {
       globalThis.fetch = realFetch;
     }
