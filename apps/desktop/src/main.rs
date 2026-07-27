@@ -32,6 +32,17 @@ mod memory_panel_window;
 mod companion_pointer;
 mod updater_install_context;
 
+/// Private process-handoff variable carrying the desktop shell's already
+/// resolved data directory across `tauri-plugin-process` relaunches.
+///
+/// `NOMIFUN_DATA_DIR` cannot serve this purpose: for compatibility, the
+/// desktop interprets an externally supplied value as a parent and appends
+/// `/Nomi`, while the embedded backend later exports the effective directory
+/// back through that same variable for child services. A relaunched desktop
+/// inherits the latter value and would append `/Nomi` a second time.
+const DESKTOP_EFFECTIVE_DATA_DIR_ENV: &str =
+    "NOMIFUN_DESKTOP_EFFECTIVE_DATA_DIR";
+
 /// Build the webview initialization script. Injects the loopback backend port
 /// (`window.__backendPort`), the OS tag, and the per-boot local-trust secret
 /// (`window.__nomiLocalTrust`). Also installs `fetch` AND `XMLHttpRequest`
@@ -274,19 +285,96 @@ fn should_resolve_filesystem_webui(
 
 /// Data root resolution, in priority order:
 ///
-/// 1. `NOMIFUN_DATA_DIR` env — explicit override; the shell appends `/Nomi`
-///    (semantics unchanged since the Electron era).
-/// 2. The shared per-channel default from `nomifun_app::cli::default_data_dir()`:
+/// 1. The private effective-path handoff inherited from a patched desktop
+///    process relaunch.
+/// 2. `NOMIFUN_DATA_DIR` env — explicit override; the shell appends `/Nomi`
+///    (semantics unchanged since the Electron era). The sole compatibility
+///    exception is a canonical path that already proves a complete v3 data
+///    root, as exported by an older embedded backend before an update relaunch.
+/// 3. The shared per-channel default from `nomifun_app::cli::default_data_dir()`:
 ///    stable builds use the `Nomi` leaf; non-stable builds use a suffixed
 ///    sibling such as `Nomi-dev`. The web host and the `nomicore` bin resolve
 ///    to the same directory when built for the same channel, while dev state
 ///    remains isolated from the installed stable app. The historic system-temp
 ///    stable location remains an extreme fallback (see `relocate.rs`).
 fn default_data_dir() -> PathBuf {
-    if let Some(dir) = std::env::var_os("NOMIFUN_DATA_DIR") {
-        return PathBuf::from(dir).join("Nomi");
+    resolve_desktop_data_dir(
+        std::env::var_os(DESKTOP_EFFECTIVE_DATA_DIR_ENV),
+        std::env::var_os("NOMIFUN_DATA_DIR"),
+    )
+}
+
+fn resolve_desktop_data_dir(
+    inherited_effective_dir: Option<std::ffi::OsString>,
+    external_parent_override: Option<std::ffi::OsString>,
+) -> PathBuf {
+    if let Some(dir) = inherited_effective_dir.filter(|dir| !dir.is_empty()) {
+        return PathBuf::from(dir);
+    }
+    if let Some(dir) = external_parent_override {
+        let dir = PathBuf::from(dir);
+        // The first launch after upgrading from a build without the private
+        // handoff variable still inherits the effective path that its embedded
+        // backend exported through NOMIFUN_DATA_DIR. Recognize only a
+        // canonical, real directory whose complete v3 receipt/generation/db
+        // tuple proves that it is already a data root. Anything missing,
+        // malformed, linked, or merely named "Nomi" keeps the historical
+        // external parent + /Nomi behavior.
+        if is_proven_inherited_effective_data_root(&dir) {
+            return dir;
+        }
+        return dir.join("Nomi");
     }
     nomifun_app::cli::default_data_dir()
+}
+
+fn is_proven_inherited_effective_data_root(candidate: &Path) -> bool {
+    let Ok(metadata) = std::fs::symlink_metadata(candidate) else {
+        return false;
+    };
+    if !metadata.is_dir() || metadata.file_type().is_symlink() {
+        return false;
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0000_0400;
+        if metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+            return false;
+        }
+    }
+    let Ok(canonical) = std::fs::canonicalize(candidate) else {
+        return false;
+    };
+    if canonical != candidate {
+        return false;
+    }
+
+    // Passing the data root itself as the probe work root deliberately accepts
+    // WorkRootMismatch: both statuses are reached only after the receipt,
+    // UUIDv7 storage generation, and regular database file have all validated.
+    // This keeps upgrades working when the user selected a distinct work root.
+    matches!(
+        nomifun_common::factory_reset::inspect_v3_dataset_receipt(
+            candidate, candidate,
+        ),
+        Ok(
+            nomifun_common::factory_reset::DatasetReceiptStatus::Current
+                | nomifun_common::factory_reset::DatasetReceiptStatus::WorkRootMismatch
+        )
+    )
+}
+
+/// Publish the resolved directory before Tauri or the backend starts threads.
+/// Tauri's process-plugin relaunch inherits this private value, so the next
+/// desktop process can distinguish an effective path from the public
+/// parent-directory override without guessing from the path's basename.
+fn publish_effective_data_dir_for_relaunch(data_dir: &Path) {
+    // SAFETY: called at the start of `main`, before runtime initialization or
+    // Tauri/backend thread creation.
+    unsafe {
+        std::env::set_var(DESKTOP_EFFECTIVE_DATA_DIR_ENV, data_dir);
+    }
 }
 
 /// Updater scaffold: ask the configured update endpoint whether a newer signed
@@ -696,6 +784,7 @@ fn main() -> std::process::ExitCode {
     // before the shared dataset gate runs. The backend will quarantine any
     // incompatible dataset already present at the current data root.
     let data_dir = default_data_dir();
+    publish_effective_data_dir_for_relaunch(&data_dir);
     nomifun_runtime::init(&data_dir);
     // SAFETY: no worker threads exist yet (Tauri's runtime is built by .run()).
     let merged_path = unsafe { nomifun_runtime::enhance_process_path() };
@@ -1040,6 +1129,153 @@ mod tests {
     use super::*;
     use std::fs;
     use std::sync::{Arc, Mutex};
+
+    fn write_v3_data_root_identity(data: &Path, work: &Path) {
+        let generation = nomifun_common::generate_id();
+        fs::write(data.join("nomifun-backend.db"), b"sqlite fixture")
+            .expect("write database");
+        fs::write(data.join("storage-generation"), &generation)
+            .expect("write storage generation");
+        fs::write(
+            data.join(
+                nomifun_common::factory_reset::V3_DATASET_RECEIPT_FILE,
+            ),
+            serde_json::to_vec(&serde_json::json!({
+                "contract_version":
+                    nomifun_common::factory_reset::V3_DATASET_CONTRACT_VERSION,
+                "generation": generation,
+                "work_root": work.display().to_string(),
+                "work_root_binding_required": false,
+                "installed_at": 1
+            }))
+            .expect("serialize receipt"),
+        )
+        .expect("write receipt");
+    }
+
+    #[test]
+    fn external_desktop_data_dir_keeps_parent_override_semantics() {
+        assert_eq!(
+            resolve_desktop_data_dir(
+                None,
+                Some(std::ffi::OsString::from("custom-parent")),
+            ),
+            PathBuf::from("custom-parent").join("Nomi")
+        );
+    }
+
+    #[test]
+    fn first_relaunch_from_an_old_build_recognizes_a_proven_v3_data_root() {
+        let data = tempfile::tempdir().expect("create data root");
+        let work = tempfile::tempdir().expect("create external work root");
+        let data = fs::canonicalize(data.path()).expect("canonicalize data root");
+        let work = fs::canonicalize(work.path()).expect("canonicalize work root");
+        write_v3_data_root_identity(&data, &work);
+
+        assert!(is_proven_inherited_effective_data_root(&data));
+        assert_eq!(
+            resolve_desktop_data_dir(
+                None,
+                Some(data.clone().into_os_string()),
+            ),
+            data,
+            "the first patched process must not turn an old backend export into Nomi/Nomi"
+        );
+    }
+
+    #[test]
+    fn unproven_directory_named_nomi_remains_an_external_parent_override() {
+        let fixture = tempfile::tempdir().expect("create fixture root");
+        let parent = fixture.path().join("Nomi");
+        fs::create_dir(&parent).expect("create explicitly named parent");
+        let parent = fs::canonicalize(parent).expect("canonicalize parent");
+        fs::write(parent.join("nomifun-backend.db"), b"sqlite fixture")
+            .expect("write ambiguous database");
+        fs::write(
+            parent.join("storage-generation"),
+            nomifun_common::generate_id(),
+        )
+        .expect("write ambiguous generation");
+        fs::write(
+            parent.join(
+                nomifun_common::factory_reset::V3_DATASET_RECEIPT_FILE,
+            ),
+            br#"{"contract_version":3,"generation":"not-a-uuid"}"#,
+        )
+        .expect("write malformed receipt");
+
+        assert!(!is_proven_inherited_effective_data_root(&parent));
+        assert_eq!(
+            resolve_desktop_data_dir(
+                None,
+                Some(parent.clone().into_os_string()),
+            ),
+            parent.join("Nomi")
+        );
+    }
+
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn linked_v3_data_root_fails_closed_as_an_external_parent_override() {
+        let data = tempfile::tempdir().expect("create real data root");
+        let work = tempfile::tempdir().expect("create work root");
+        let data = fs::canonicalize(data.path()).expect("canonicalize data root");
+        let work = fs::canonicalize(work.path()).expect("canonicalize work root");
+        write_v3_data_root_identity(&data, &work);
+
+        let links = tempfile::tempdir().expect("create alias parent");
+        let alias = links.path().join("data-alias");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&data, &alias).expect("create data-root symlink");
+        #[cfg(windows)]
+        junction::create(&data, &alias).expect("create data-root junction");
+
+        assert!(!is_proven_inherited_effective_data_root(&alias));
+        assert_eq!(
+            resolve_desktop_data_dir(
+                None,
+                Some(alias.clone().into_os_string()),
+            ),
+            alias.join("Nomi")
+        );
+    }
+
+    #[test]
+    fn relaunch_uses_explicit_effective_data_dir_without_appending_nomi() {
+        let effective = PathBuf::from("custom-parent").join("Nomi");
+        assert_eq!(
+            resolve_desktop_data_dir(
+                Some(effective.clone().into_os_string()),
+                // The embedded backend republishes its effective data dir
+                // through this public variable before Tauri relaunches.
+                Some(effective.clone().into_os_string()),
+            ),
+            effective
+        );
+    }
+
+    #[test]
+    fn internal_effective_data_dir_is_not_inferred_from_a_path_basename() {
+        let effective = PathBuf::from("canonicalized").join("dataset-root");
+        assert_eq!(
+            resolve_desktop_data_dir(
+                Some(effective.clone().into_os_string()),
+                Some(std::ffi::OsString::from("different-backend-export")),
+            ),
+            effective
+        );
+    }
+
+    #[test]
+    fn empty_internal_effective_data_dir_does_not_shadow_external_override() {
+        assert_eq!(
+            resolve_desktop_data_dir(
+                Some(std::ffi::OsString::new()),
+                Some(std::ffi::OsString::from("custom-parent")),
+            ),
+            PathBuf::from("custom-parent").join("Nomi")
+        );
+    }
 
     #[test]
     fn macos_reopen_surfaces_main_window_when_no_windows_are_visible() {
