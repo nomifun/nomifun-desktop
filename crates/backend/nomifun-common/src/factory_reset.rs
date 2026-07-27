@@ -6275,6 +6275,239 @@ mod tests {
     }
 
     #[test]
+    fn automatic_retirement_plan_publication_is_the_only_retry_authority() {
+        let data = tempfile::tempdir().unwrap();
+        touch(&data.path().join(DB_FILE));
+        let plan = arm_v3_dataset_reset(
+            data.path(),
+            data.path(),
+            DatasetResetReason::NonV3Dataset,
+        )
+        .unwrap();
+        assert!(plan.automatic_legacy_retirement);
+        assert!(data.path().join(DB_FILE).is_file());
+
+        let duplicate =
+            retire_non_v3_dataset_after_probe(data.path(), data.path())
+                .unwrap_err();
+        assert!(
+            duplicate
+                .to_string()
+                .contains("dataset reset is already pending")
+        );
+        let resumed = arm_v3_dataset_reset(
+            data.path(),
+            data.path(),
+            DatasetResetReason::NonV3Dataset,
+        )
+        .unwrap();
+        assert_eq!(resumed.operation_id, plan.operation_id);
+        assert_eq!(resumed.generation, plan.generation);
+        assert_eq!(resumed.retired_dir, plan.retired_dir);
+
+        assert!(
+            apply_pending_v3_dataset_reset(data.path(), data.path())
+                .unwrap()
+        );
+        let pending =
+            read_pending_v3_reset(data.path(), data.path())
+                .unwrap()
+                .expect("the same automatic plan remains pending");
+        assert_eq!(pending.operation_id, plan.operation_id);
+        assert_eq!(pending.generation, plan.generation);
+    }
+
+    #[test]
+    fn partially_moved_automatic_retirement_resumes_only_its_original_plan() {
+        let data = tempfile::tempdir().unwrap();
+        touch(&data.path().join(DB_FILE));
+        fs::create_dir_all(data.path().join("knowledge")).unwrap();
+        touch(&data.path().join("knowledge/legacy-sentinel"));
+        let plan = arm_v3_dataset_reset(
+            data.path(),
+            data.path(),
+            DatasetResetReason::NonV3Dataset,
+        )
+        .unwrap();
+        let knowledge = plan
+            .roots
+            .iter()
+            .find(|root| root.relative_path == "knowledge")
+            .expect("knowledge is covered by the immutable plan");
+        let source = data.path().join(&knowledge.relative_path);
+        let destination =
+            data.path().join(&knowledge.retired_relative_path);
+        fs::create_dir_all(destination.parent().unwrap()).unwrap();
+        write_phase(data.path(), "quarantine-started").unwrap();
+        fs::rename(&source, &destination).unwrap();
+
+        let duplicate =
+            retire_non_v3_dataset_after_probe(data.path(), data.path())
+                .unwrap_err();
+        assert!(
+            duplicate
+                .to_string()
+                .contains("dataset reset is already pending")
+        );
+        assert!(
+            apply_pending_v3_dataset_reset(data.path(), data.path())
+                .unwrap()
+        );
+        let pending =
+            read_pending_v3_reset(data.path(), data.path())
+                .unwrap()
+                .expect("partial quarantine must resume the same plan");
+        assert_eq!(pending.operation_id, plan.operation_id);
+        assert_eq!(pending.generation, plan.generation);
+        assert!(destination.join("legacy-sentinel").is_file());
+        let retired_generations = fs::read_dir(
+            data.path().join(RETIRED_DATASETS_DIR),
+        )
+        .unwrap()
+        .filter_map(Result::ok)
+        .filter(|entry| {
+            entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with("id-reference-v3-")
+        })
+        .count();
+        assert_eq!(
+            retired_generations, 1,
+            "recovery must not mint an unrelated retired generation"
+        );
+    }
+
+    #[test]
+    fn generation_installed_automatic_retirement_keeps_one_pending_plan() {
+        let data = tempfile::tempdir().unwrap();
+        touch(&data.path().join(DB_FILE));
+        assert_eq!(
+            retire_non_v3_dataset_after_probe(
+                data.path(),
+                data.path(),
+            )
+            .unwrap(),
+            DatasetPreparation::ResetApplied
+        );
+        let plan =
+            read_pending_v3_reset(data.path(), data.path())
+                .unwrap()
+                .expect("automatic plan remains pending for bootstrap");
+        assert!(has_phase(data.path(), "generation-installed"));
+
+        let duplicate =
+            retire_non_v3_dataset_after_probe(data.path(), data.path())
+                .unwrap_err();
+        assert!(
+            duplicate
+                .to_string()
+                .contains("dataset reset is already pending")
+        );
+        assert_eq!(
+            prepare_v3_dataset(data.path(), data.path()).unwrap(),
+            DatasetPreparation::ResetApplied
+        );
+        let resumed =
+            read_pending_v3_reset(data.path(), data.path())
+                .unwrap()
+                .expect("generation-installed recovery keeps its plan");
+        assert_eq!(resumed.operation_id, plan.operation_id);
+        assert_eq!(resumed.generation, plan.generation);
+        assert_eq!(
+            fs::read_to_string(
+                data.path().join(STORAGE_GENERATION_FILE)
+            )
+            .unwrap(),
+            plan.generation
+        );
+    }
+
+    #[test]
+    fn fresh_database_and_receipt_cannot_reopen_automatic_retirement() {
+        let data = tempfile::tempdir().unwrap();
+        touch(&data.path().join(DB_FILE));
+        assert_eq!(
+            retire_non_v3_dataset_after_probe(
+                data.path(),
+                data.path(),
+            )
+            .unwrap(),
+            DatasetPreparation::ResetApplied
+        );
+        let plan =
+            read_pending_v3_reset(data.path(), data.path())
+                .unwrap()
+                .expect("automatic plan remains pending for bootstrap");
+        let retired_generation_count = || {
+            fs::read_dir(
+                data.path().join(RETIRED_DATASETS_DIR),
+            )
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with("id-reference-v3-")
+            })
+            .count()
+        };
+        let retired_count = retired_generation_count();
+
+        touch(&data.path().join(DB_FILE));
+        let before_receipt =
+            retire_non_v3_dataset_after_probe(data.path(), data.path())
+                .unwrap_err();
+        assert!(
+            before_receipt
+                .to_string()
+                .contains("dataset reset is already pending")
+        );
+
+        write_v3_dataset_receipt(
+            data.path(),
+            &plan.generation,
+        )
+        .unwrap();
+        let after_receipt =
+            retire_non_v3_dataset_after_probe(data.path(), data.path())
+                .unwrap_err();
+        assert!(
+            after_receipt
+                .to_string()
+                .contains("dataset reset is already pending")
+        );
+        assert!(
+            finalize_v3_dataset_reset(data.path(), data.path())
+                .unwrap()
+        );
+        assert!(
+            automatic_legacy_retirement_path(data.path()).is_file()
+        );
+        assert!(
+            !finalize_v3_dataset_reset(data.path(), data.path())
+                .unwrap(),
+            "finalization itself is idempotent"
+        );
+
+        let second =
+            retire_non_v3_dataset_after_probe(data.path(), data.path())
+                .unwrap_err();
+        assert!(
+            second
+                .to_string()
+                .contains("already consumed its one automatic")
+        );
+        assert!(data.path().join(DB_FILE).is_file());
+        assert_eq!(
+            retired_generation_count(),
+            retired_count,
+            "no second retired generation may be created"
+        );
+    }
+
+    #[test]
     fn completed_request_replay_does_not_block_a_newer_pending_plan() {
         let data = tempfile::tempdir().unwrap();
         touch(&data.path().join(DB_FILE));

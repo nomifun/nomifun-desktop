@@ -601,7 +601,7 @@ export const conversation = {
     httpGet<unknown[], { cron_job_id: CronJobId }>((p) => `/api/cron/jobs/${p.cron_job_id}/conversations`),
     (list) => list.map(fromApiConversation)
   ),
-  remove: httpDelete<boolean, { conversation_id: ConversationId }>(
+  remove: httpDelete<void, { conversation_id: ConversationId }>(
     (p) => `/api/conversations/${p.conversation_id}`
   ),
   // updates 额外允许顶层 `pinned`：对应 conversations 表真列（UpdateConversationRequest.pinned，
@@ -2182,7 +2182,7 @@ export const cron = {
   ),
   getJob: withResponseMap(httpGet<ICronJob | null, { cron_job_id: CronJobId }>((p) => `/api/cron/jobs/${p.cron_job_id}`), (job) => job ? fromApiCronJob(job) : null),
   addJob: withResponseMap(httpPost<ICronJob, ICreateCronJobParams>('/api/cron/jobs'), fromApiCronJob),
-  updateJob: withResponseMap(httpPut<ICronJob, { cron_job_id: CronJobId; updates: Partial<ICronJob> }>(
+  updateJob: withResponseMap(httpPut<ICronJob, { cron_job_id: CronJobId; updates: IUpdateCronJobParams }>(
     (p) => `/api/cron/jobs/${p.cron_job_id}`,
     (p) => ({
       name: p.updates.name,
@@ -2190,10 +2190,9 @@ export const cron = {
       enabled: p.updates.enabled,
       schedule: p.updates.schedule,
       message: p.updates.message,
-      execution_mode: p.updates.execution_mode,
-      agent_config: p.updates.metadata?.agent_config,
-      conversation_title: p.updates.metadata?.conversation_title,
-      max_retries: p.updates.state?.max_retries,
+      agent_config: p.updates.agent_config,
+      conversation_title: p.updates.conversation_title,
+      max_retries: p.updates.max_retries,
     })
   ), fromApiCronJob),
   removeJob: httpDelete<void, { cron_job_id: CronJobId }>((p) => `/api/cron/jobs/${p.cron_job_id}`),
@@ -2309,6 +2308,23 @@ export interface ICreateCronJobParams {
   created_by: 'user' | 'agent';
   execution_mode?: 'existing' | 'new_conversation';
   agent_config?: ICronAgentConfig;
+}
+
+/**
+ * Mutable fields accepted by PUT /api/cron/jobs/{cron_job_id}.
+ *
+ * Keep this separate from ICronJob: response-only and creation-only fields
+ * (especially execution_mode) must never leak into the strict update DTO.
+ */
+export interface IUpdateCronJobParams {
+  name?: string;
+  description?: string;
+  enabled?: boolean;
+  schedule?: ICronSchedule;
+  message?: string;
+  agent_config?: ICronAgentConfig;
+  conversation_title?: string;
+  max_retries?: number;
 }
 
 // ---------------------------------------------------------------------------

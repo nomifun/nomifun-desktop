@@ -865,20 +865,24 @@ async fn internal_creation_and_delivery_operations_are_durable_and_repository_id
     assert_eq!(completed.result_text, None);
     assert_eq!(completed.result_error.as_deref(), Some("terminal provider error"));
 
-    let delete_error = repo.delete(&conversation_id).await.unwrap_err();
+    repo.delete(&conversation_id)
+        .await
+        .expect("a terminal delivery receipt must not make a normal Conversation undeletable");
     assert!(
-        matches!(delete_error, nomifun_db::DbError::Conflict(_)),
-        "delivery history keeps the Conversation identity alive"
+        repo.get(&conversation_id).await.unwrap().is_none(),
+        "the user-visible Conversation aggregate is deleted"
     );
-    let remaining: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM conversation_delivery_receipts WHERE operation_id = 'decision:1'",
+    let retained_receipt: (i64, Option<String>, Option<String>) = sqlx::query_as(
+        "SELECT COUNT(*), projected_conversation_id, projected_message_id \
+         FROM conversation_delivery_receipts WHERE operation_id = 'decision:1'",
     )
     .fetch_one(db.pool())
     .await
     .unwrap();
     assert_eq!(
-        remaining, 1,
-        "Conversation deletion is restricted while a durable receipt exists"
+        retained_receipt,
+        (1, None, None),
+        "deletion retains immutable replay evidence but detaches aggregate projections"
     );
     let remaining_creation_keys: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM conversation_creation_keys \
@@ -888,8 +892,27 @@ async fn internal_creation_and_delivery_operations_are_durable_and_repository_id
     .await
     .unwrap();
     assert_eq!(
-        remaining_creation_keys, 1,
-        "Conversation deletion is atomic and keeps its creation replay fence"
+        remaining_creation_keys, 0,
+        "the deleted Conversation no longer owns a creation replay fence"
+    );
+
+    let replay_after_delete = repo
+        .claim_delivery_receipt(
+            USER_ID,
+            &conversation_id,
+            "decision:1",
+            "turn",
+            request,
+            accepted_at + 5,
+        )
+        .await
+        .unwrap();
+    assert_eq!(replay_after_delete.status, "completed");
+    assert_eq!(replay_after_delete.result_ok, Some(false));
+    assert_eq!(
+        replay_after_delete.result_error.as_deref(),
+        Some("terminal provider error"),
+        "a delayed replay remains terminal and cannot recreate the deleted Conversation"
     );
 }
 

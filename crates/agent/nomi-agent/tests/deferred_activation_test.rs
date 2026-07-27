@@ -146,6 +146,7 @@ fn resumed_session(id: &str) -> Session {
         messages: Vec::new(),
         owner_token: None,
         activated_deferred_tools: vec![DEFERRED_TOOL.into()],
+        editable_turn: None,
     }
 }
 

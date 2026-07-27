@@ -260,12 +260,10 @@ const WorkpathSessionList: React.FC<WorkpathSessionListProps> = ({
           const convResults = await Promise.all(
             convIds.map(async (conversation_id) => {
               try {
-                const success = await ipcBridge.conversation.remove.invoke({ conversation_id: conversation_id });
-                if (success) {
-                  emitter.emit('conversation.deleted', conversation_id);
-                  if (activeConversationId === conversation_id) void navigate('/guid');
-                }
-                return success;
+                await ipcBridge.conversation.remove.invoke({ conversation_id: conversation_id });
+                emitter.emit('conversation.deleted', conversation_id);
+                if (activeConversationId === conversation_id) void navigate('/guid');
+                return true;
               } catch {
                 return false;
               }

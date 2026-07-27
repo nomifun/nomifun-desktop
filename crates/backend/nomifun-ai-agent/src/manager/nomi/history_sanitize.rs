@@ -38,6 +38,16 @@ pub struct SessionRepairStats {
     pub removed_thinking: usize,
 }
 
+impl SessionRepairStats {
+    pub(crate) fn merge(&mut self, other: Self) {
+        self.removed_messages += other.removed_messages;
+        self.removed_tool_calls += other.removed_tool_calls;
+        self.removed_tool_results += other.removed_tool_results;
+        self.removed_images += other.removed_images;
+        self.removed_thinking += other.removed_thinking;
+    }
+}
+
 /// Repair a resumed transcript to the provider-safe subset of its history.
 ///
 /// A tool result is valid only when it belongs to the immediately preceding

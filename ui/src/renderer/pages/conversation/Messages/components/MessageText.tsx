@@ -345,11 +345,12 @@ const MessageText: React.FC<{ message: IMessageText; hideActions?: boolean }> = 
 
   // 仅 Nomi、且为最近一条用户文本消息时可编辑（与后端"仅最近一条"对齐）。
   const messageList = useMessageList();
+  const editableMessageId = message.message_id ?? message.msg_id;
   const isLatestUserMessage = useMemo(() => {
-    if (!isUserMessage) return false;
+    if (!isUserMessage || !editableMessageId) return false;
     const lastRight = [...messageList].reverse().find((m) => m.position === 'right' && m.type === 'text');
-    return lastRight?.msg_id != null && lastRight.msg_id === message.msg_id;
-  }, [isUserMessage, messageList, message.msg_id]);
+    return (lastRight?.message_id ?? lastRight?.msg_id) === editableMessageId;
+  }, [editableMessageId, isUserMessage, messageList]);
 
   // 过滤空内容，避免渲染空DOM
   const hasRenderableContent = contentToRender.trim().length > 0;
@@ -385,13 +386,20 @@ const MessageText: React.FC<{ message: IMessageText; hideActions?: boolean }> = 
   );
 
   // 编辑（仅 Nomi 原生、且为最近一条用户文本消息）：把原文回填输入框并截断本地后续消息。
-  const canEdit = conversationContext?.type === 'nomi' && isUserMessage && message.type === 'text' && isLatestUserMessage;
+  const canEdit =
+    conversationContext?.type === 'nomi' &&
+    conversationContext.isProcessing !== true &&
+    isUserMessage &&
+    message.type === 'text' &&
+    editableMessageId != null &&
+    message.created_at != null &&
+    isLatestUserMessage;
 
   const handleEdit = () => {
-    if (!message.msg_id || !message.created_at) return;
+    if (!editableMessageId || message.created_at == null) return;
     const rawContent = typeof message.content?.content === 'string' ? message.content.content : '';
     const { text: editText } = parseMessageFileMarker(rawContent, 'right');
-    emitter.emit('sendbox.edit', { msgId: message.msg_id, createdAt: message.created_at, content: editText });
+    emitter.emit('sendbox.edit', { msgId: editableMessageId, createdAt: message.created_at, content: editText });
   };
 
   const editButton = canEdit ? (

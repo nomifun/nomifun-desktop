@@ -537,7 +537,7 @@ We'd love to hear from you. The fastest way to reach us is GitHub; the social ch
 <div align="center">
 <table>
   <tr>
-    <td align="center"><img src="docs/images/contact/wechat-group-qr.png" alt="WeChat group QR" width="220"><br/><sub><b>WeChat group / 微信群</b></sub></td>
+    <td align="center"><img src="docs/images/contact/wechat-group-qr.jpg" alt="WeChat group QR" width="220"><br/><sub><b>WeChat group / 微信群</b></sub></td>
     <td align="center"><img src="docs/images/contact/qq-group-qr.png" alt="QQ group QR" width="220"><br/><sub><b>QQ group / QQ 群</b></sub></td>
   </tr>
 </table>
