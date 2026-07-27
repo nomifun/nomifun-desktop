@@ -110,7 +110,9 @@ async fn webui_lan_spa_deep_link_serves_app_shell() {
 }
 
 /// HTTP-layer regression coverage for custom-protocol builds, which can have an
-/// embedded frontend source but no external webui-dist directory.
+/// embedded frontend source but no external webui-dist directory. A separate
+/// desktop test exercises Tauri's generated custom-protocol context and exact
+/// frontend build-ID pairing.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn webui_lan_embedded_asset_source_needs_no_filesystem_shell() {
     const INDEX: &str = "<!doctype html><title>EMBEDDED_WEBUI_MARKER</title>";
@@ -451,7 +453,8 @@ async fn webui_enable_preserves_user_set_username_and_reports_persisted_state() 
 }
 
 /// Browser login contract regression: the desktop-generated credentials must
-/// authenticate through the real LAN listener with the bundled WebUI schema.
+/// authenticate through the real LAN listener when the request body matches
+/// the strict `/login` schema used by the bundled WebUI.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn webui_browser_login_contract_accepts_generated_credentials() {
     let tmp = tempfile::TempDir::new().unwrap();

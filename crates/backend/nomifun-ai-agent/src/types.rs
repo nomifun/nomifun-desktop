@@ -264,7 +264,9 @@ impl std::fmt::Debug for BrowserSecretVault {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nomifun_api_types::{AcpBuildExtra, AcpModelInfo, NomiBuildExtra, OpenClawGatewayConfig, SlashCommandItem};
+    use nomifun_api_types::{
+        AcpBuildExtra, AcpModelInfo, NomiBuildExtra, OpenClawGatewayConfig, SlashCommandItem,
+    };
     use serde_json::json;
 
     #[test]
@@ -363,7 +365,10 @@ mod tests {
         assert_eq!(json["agent_type"], "acp");
         assert_eq!(json["user_id"], "0190f5fe-7c00-7a00-8000-000000000001");
         assert_eq!(json["workspace"], "/project");
-        assert_eq!(json["conversation_id"], "0190f5fe-7c00-7a00-8000-000000000001");
+        assert_eq!(
+            json["conversation_id"],
+            "0190f5fe-7c00-7a00-8000-000000000001"
+        );
         assert_eq!(json["delegation_policy"], "automatic");
     }
 

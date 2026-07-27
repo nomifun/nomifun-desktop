@@ -26,7 +26,7 @@
     "dev:web":       { "group": "dev",   "desc": "启动 Web 全栈开发（后端 API + 前端 vite）" },
     "dev:ui":        { "group": "dev",   "desc": "仅启动前端开发服务器（纯 vite，无后端）" },
     "build":         { "group": "build", "desc": "为当前操作系统打桌面安装包" },
-    "build:fast":    { "group": "build", "desc": "Build the dev-channel desktop binary quickly (debug, no installer bundle)." },
+    "build:fast":    { "group": "build", "desc": "快速构建可直接运行的 debug 桌面二进制（不打安装包）" },
     "build:win":     { "group": "build", "desc": "打 Windows 安装包（NSIS），汇总到 dist/desktop/" },
     "build:mac":     { "group": "build", "desc": "打 macOS 安装包（.dmg），汇总到 dist/desktop/" },
     "build:linux":   { "group": "build", "desc": "打 Linux 安装包（.deb/.AppImage/.rpm），汇总到 dist/desktop/" },

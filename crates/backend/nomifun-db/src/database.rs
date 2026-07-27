@@ -200,9 +200,10 @@ pub async fn validate_current_migration_lineage(pool: &SqlitePool) -> Result<(),
 /// Validate that the applied migration rows are an exact, non-empty prefix of
 /// the migrations embedded in this binary.
 ///
-/// Startup may admit an older supported prefix so [`init_database`] can apply
-/// the missing suffix. This still rejects unknown versions, gaps, failed rows,
-/// and checksum mismatches before the database is opened for migration.
+/// This is intentionally less strict than the backup/restore contract:
+/// startup must admit an older supported prefix so [`init_database`] can apply
+/// the missing suffix. It still rejects every lineage that the migrator cannot
+/// authenticate, including unknown future versions and edited checksums.
 pub async fn inspect_supported_migration_lineage(
     pool: &SqlitePool,
 ) -> Result<MigrationLineageStatus, DbError> {
