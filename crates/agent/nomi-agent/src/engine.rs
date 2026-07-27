@@ -27,7 +27,7 @@ use crate::tool_execution::{
 use crate::output::{OutputSink, ToolCallExecutionContext, ToolCallRetryContext};
 use crate::plan::prompt as plan_prompt;
 use crate::plan::state::PlanState;
-use crate::session::{Session, SessionManager};
+use crate::session::{EditableTurnCheckpoint, Session, SessionManager};
 
 /// Decide how a prompt-cache-break diagnostic should surface to the user.
 /// Returns the info-level message to emit, or `None` to stay silent.
@@ -705,11 +705,12 @@ pub struct AgentEngine {
     /// Owns every supervised command launched by this engine's command tools.
     /// Bootstrap installs it; direct/test constructors leave it empty.
     process_supervisor: Option<Arc<nomi_process_runtime::ProcessSupervisor>>,
-    /// transcript 长度锚点：最近一个 turn 的用户消息 push 之前的 messages.len()。
-    /// 供 rewind_last_turn 把内存历史回退到最后一个用户 turn 之前（编辑最近一条
-    /// 用户消息重跑）。压缩会重写整个 messages 使下标失效，故压缩时清空；
-    /// clear_context 时一并清空。仅内存态，不持久化到 session。
-    last_turn_start_len: Option<usize>,
+    /// Persisted boundary for the latest editable root user turn.
+    ///
+    /// The durable source message id keeps automatic continuations and
+    /// provider retries from moving the boundary into the middle of one
+    /// logical user turn. Compaction and context clearing invalidate it.
+    editable_turn: Option<EditableTurnCheckpoint>,
 }
 
 impl AgentEngine {
@@ -783,7 +784,7 @@ impl AgentEngine {
             steering_inbox: None,
             system_resource_inbox: None,
             process_supervisor: None,
-            last_turn_start_len: None,
+            editable_turn: None,
         }
     }
 
@@ -828,6 +829,14 @@ impl AgentEngine {
             tools.restore_deferred_tool_activation(identity);
         }
 
+        let editable_turn = session
+            .editable_turn
+            .clone()
+            .filter(|checkpoint| {
+                !checkpoint.source_message_id.is_empty()
+                    && checkpoint.start_len <= session.messages.len()
+            });
+
         Self {
             provider,
             tools,
@@ -864,7 +873,7 @@ impl AgentEngine {
             steering_inbox: None,
             system_resource_inbox: None,
             process_supervisor: None,
-            last_turn_start_len: None,
+            editable_turn,
         }
     }
 
@@ -1186,6 +1195,10 @@ impl AgentEngine {
         // SAFETY: cmd_ptr points to a command inside self.commands which is only
         // borrowed immutably and not mutated during execute().
         let result = unsafe { &*cmd_ptr }.execute(&mut ctx, args).await;
+        if result.is_ok() && matches!(name, "clear" | "compact") {
+            self.editable_turn = None;
+            self.save_session();
+        }
         Some(result)
     }
 
@@ -1214,6 +1227,21 @@ impl AgentEngine {
         user_content: Vec<ContentBlock>,
         msg_id: &str,
     ) -> Result<AgentResult, AgentError> {
+        self.execute_turn_with_content_for_source(user_content, msg_id, msg_id)
+            .await
+    }
+
+    /// Execute an engine pass belonging to one durable root user message.
+    ///
+    /// Automatic continuation and provider-retry passes carry the same
+    /// `source_message_id`, so they retain the root checkpoint rather than
+    /// moving it into the middle of the logical turn.
+    pub async fn execute_turn_with_content_for_source(
+        &mut self,
+        user_content: Vec<ContentBlock>,
+        msg_id: &str,
+        source_message_id: &str,
+    ) -> Result<AgentResult, AgentError> {
         let first_new_message = self.messages.len();
         let session_id = self
             .current_session
@@ -1234,6 +1262,7 @@ impl AgentEngine {
                 .execute_turn_inner(
                     user_content,
                     msg_id,
+                    source_message_id,
                     &mut efficiency,
                     &mut safe_messages,
                     &mut turn_started,
@@ -1254,7 +1283,6 @@ impl AgentEngine {
         // performs the same cleanup explicitly.
         if result.is_err() && turn_started {
             self.messages = safe_messages;
-            self.last_turn_start_len = None;
             if matches!(
                 &result,
                 Err(AgentError::Provider(_)
@@ -1283,6 +1311,7 @@ impl AgentEngine {
         &mut self,
         user_content: Vec<ContentBlock>,
         msg_id: &str,
+        source_message_id: &str,
         efficiency: &mut ToolEfficiencyStats,
         safe_messages: &mut Vec<Message>,
         turn_started: &mut bool,
@@ -1333,10 +1362,21 @@ impl AgentEngine {
         self.stagnation_guard.reset();
         self.current_msg_id = msg_id.to_string();
         self.output.emit_stream_start(msg_id);
-        // 记录本 turn 的起始锚点（用户消息 push 之前），供 rewind_last_turn 回退。
-        self.last_turn_start_len = Some(self.messages.len());
+        if self
+            .editable_turn
+            .as_ref()
+            .is_none_or(|checkpoint| checkpoint.source_message_id != source_message_id)
+        {
+            self.editable_turn = Some(EditableTurnCheckpoint {
+                source_message_id: source_message_id.to_owned(),
+                start_len: self.messages.len(),
+            });
+        }
         self.messages.push(Message::now(Role::User, user_content));
         *turn_started = true;
+        // Persist before the first provider await. A stop or process exit must
+        // not discard rewind authority for the accepted user message.
+        self.save_session();
 
         let mut turn: usize = 0;
         let mut tool_retry_tracker = ToolRetryTracker::default();
@@ -2328,7 +2368,7 @@ impl AgentEngine {
                         result.messages_summarized, result.pre_compact_tokens
                     ));
                     self.messages = result.messages;
-                    self.last_turn_start_len = None;
+                    self.editable_turn = None;
                     compacted = true;
                 }
                 Err(auto::CompactError::CircuitBroken { .. }) => {
@@ -2435,6 +2475,7 @@ impl AgentEngine {
             session.messages = self.messages.clone();
             session.total_usage = self.total_usage.clone();
             session.activated_deferred_tools = self.tools.session_deferred_tool_identities();
+            session.editable_turn = self.editable_turn.clone();
             session.updated_at = chrono::Utc::now();
             if let Err(e) = mgr.save(session) {
                 self.output
@@ -2478,25 +2519,45 @@ impl AgentEngine {
     /// the conversation keeps its identity; only its contents are emptied.
     pub fn clear_context(&mut self) {
         self.messages.clear();
-        self.last_turn_start_len = None;
+        self.editable_turn = None;
         self.compact_state = CompactState::new();
         self.total_usage = TokenUsage::default();
         self.save_session();
     }
 
-    /// 把内存 transcript 回退到最近一个 turn 的用户消息之前（丢弃最后一个用户
-    /// turn 及其后内容），用于"编辑最近一条用户消息并重跑"。成功返回 true；
-    /// 无有效锚点（如已被压缩清空、或越界）返回 false，调用方应回退处理。
-    pub fn rewind_last_turn(&mut self) -> bool {
-        let Some(start) = self.last_turn_start_len else {
-            return false;
+    /// Validate that the exact durable user message still owns the latest
+    /// rewind checkpoint. This is deliberately read-only so callers can fail
+    /// before claiming a destructive edit receipt.
+    pub fn can_rewind_last_turn(&self, expected_source_message_id: &str) -> bool {
+        if let Some(checkpoint) = self.editable_turn.as_ref() {
+            return !expected_source_message_id.is_empty()
+                && checkpoint.source_message_id == expected_source_message_id
+                && checkpoint.start_len <= self.messages.len();
+        }
+
+        // A prior fail-closed reset may leave no resumable transcript at all.
+        // The Conversation service still validates the exact latest durable
+        // user message, so an empty engine has nothing stale to truncate and a
+        // no-op rewind is safe. Never infer a boundary for non-empty legacy
+        // history from Role::User messages.
+        !expected_source_message_id.is_empty() && self.messages.is_empty()
+    }
+
+    /// Rewind the engine transcript to the exact persisted root-turn boundary.
+    ///
+    /// The source id is checked again at mutation time so a stale preflight can
+    /// never truncate a different turn.
+    pub fn rewind_last_turn(&mut self, expected_source_message_id: &str) -> bool {
+        let Some(checkpoint) = self.editable_turn.as_ref().cloned() else {
+            return !expected_source_message_id.is_empty() && self.messages.is_empty();
         };
-        if start > self.messages.len() {
-            self.last_turn_start_len = None;
+        if checkpoint.source_message_id != expected_source_message_id
+            || checkpoint.start_len > self.messages.len()
+        {
             return false;
         }
-        self.messages.truncate(start);
-        self.last_turn_start_len = None;
+        self.messages.truncate(checkpoint.start_len);
+        self.editable_turn = None;
         self.save_session();
         true
     }
@@ -2607,6 +2668,7 @@ mod set_config_tests {
 
     use crate::confirm::ToolConfirmer;
     use crate::output::{OutputSink, ToolMediaDelivery, artifact_contract};
+    use crate::session::EditableTurnCheckpoint;
 
     struct NullOutput;
     impl OutputSink for NullOutput {
@@ -3586,7 +3648,7 @@ mod set_config_tests {
             steering_inbox: None,
             system_resource_inbox: None,
             process_supervisor: None,
-            last_turn_start_len: None,
+            editable_turn: None,
         }
     }
 
@@ -3859,24 +3921,114 @@ mod set_config_tests {
         engine.messages.push(Message::now(Role::User, vec![ContentBlock::Text { text: "u0".into() }]));
         engine.messages.push(Message::now(Role::Assistant, vec![ContentBlock::Text { text: "a0".into() }]));
         // 标记最后一个 turn 起始 = 当前长度(2)，再 push U1（被中断的 turn）
-        engine.last_turn_start_len = Some(engine.messages.len());
+        engine.editable_turn = Some(EditableTurnCheckpoint {
+            source_message_id: "message-u1".into(),
+            start_len: engine.messages.len(),
+        });
         engine.messages.push(Message::now(Role::User, vec![ContentBlock::Text { text: "u1".into() }]));
         assert_eq!(engine.messages.len(), 3);
 
-        assert!(engine.rewind_last_turn());
+        assert!(engine.can_rewind_last_turn("message-u1"));
+        assert!(engine.rewind_last_turn("message-u1"));
         assert_eq!(engine.messages.len(), 2); // U1 被回退
-        assert!(engine.last_turn_start_len.is_none()); // 锚点被消费
+        assert!(engine.editable_turn.is_none()); // 锚点被消费
 
         // 再次回退无锚点 → false
-        assert!(!engine.rewind_last_turn());
+        assert!(!engine.rewind_last_turn("message-u1"));
     }
 
     #[test]
     fn rewind_last_turn_rejects_stale_marker() {
         let mut engine = make_engine("rewind-stale");
         // 锚点越界（如压缩后未清理的极端情况）→ 拒绝
-        engine.last_turn_start_len = Some(5);
-        assert!(!engine.rewind_last_turn());
+        engine.editable_turn = Some(EditableTurnCheckpoint {
+            source_message_id: "message-stale".into(),
+            start_len: 5,
+        });
+        assert!(!engine.rewind_last_turn("message-stale"));
+    }
+
+    #[test]
+    fn rewind_last_turn_allows_only_an_empty_checkpointless_transcript() {
+        use nomi_types::message::{ContentBlock, Message, Role};
+
+        let mut empty = make_engine("rewind-empty-no-checkpoint");
+        assert!(empty.can_rewind_last_turn("message-empty"));
+        assert!(empty.rewind_last_turn("message-empty"));
+        assert!(empty.messages.is_empty());
+        assert!(empty.editable_turn.is_none());
+
+        let mut non_empty = make_engine("rewind-nonempty-no-checkpoint");
+        non_empty.messages.push(Message::now(
+            Role::User,
+            vec![ContentBlock::Text {
+                text: "legacy history".into(),
+            }],
+        ));
+        assert!(!non_empty.can_rewind_last_turn("message-legacy"));
+        assert!(!non_empty.rewind_last_turn("message-legacy"));
+        assert_eq!(non_empty.messages.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn continuation_passes_keep_the_root_user_checkpoint() {
+        let mut engine = make_engine("rewind-continuation");
+        engine.provider = Arc::new(RecordingProvider::successful());
+
+        engine
+            .execute_turn_with_content_for_source(
+                vec![ContentBlock::Text {
+                    text: "root request".into(),
+                }],
+                "wire-segment-1",
+                "message-root",
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            engine.editable_turn,
+            Some(EditableTurnCheckpoint {
+                source_message_id: "message-root".into(),
+                start_len: 0,
+            })
+        );
+
+        engine
+            .execute_turn_with_content_for_source(
+                vec![ContentBlock::Text {
+                    text: "automatic continuation".into(),
+                }],
+                "wire-segment-2",
+                "message-root",
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            engine.editable_turn.as_ref().map(|checkpoint| checkpoint.start_len),
+            Some(0),
+            "a continuation must not move the root turn boundary"
+        );
+
+        let next_root_start = engine.messages.len();
+        engine
+            .execute_turn_with_content_for_source(
+                vec![ContentBlock::Text {
+                    text: "next user request".into(),
+                }],
+                "wire-segment-3",
+                "message-next",
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            engine.editable_turn,
+            Some(EditableTurnCheckpoint {
+                source_message_id: "message-next".into(),
+                start_len: next_root_start,
+            })
+        );
+        assert!(!engine.can_rewind_last_turn("message-root"));
+        assert!(engine.can_rewind_last_turn("message-next"));
     }
 
     fn make_engine_with_compat(
@@ -5044,7 +5196,7 @@ mod phase6_tests {
             steering_inbox: None,
             system_resource_inbox: None,
             process_supervisor: None,
-            last_turn_start_len: None,
+            editable_turn: None,
         }
     }
 
@@ -5191,6 +5343,7 @@ mod compact_tests {
     use crate::compact::state::CompactState;
     use crate::confirm::ToolConfirmer;
     use crate::output::OutputSink;
+    use crate::session::EditableTurnCheckpoint;
 
     struct NullOutput;
     impl OutputSink for NullOutput {
@@ -5319,7 +5472,7 @@ mod compact_tests {
             steering_inbox: None,
             system_resource_inbox: None,
             process_supervisor: None,
-            last_turn_start_len: None,
+            editable_turn: None,
         }
     }
 
@@ -5600,7 +5753,10 @@ mod compact_tests {
                 ],
             )],
         );
-        engine.last_turn_start_len = Some(0);
+        engine.editable_turn = Some(EditableTurnCheckpoint {
+            source_message_id: "message-image".into(),
+            start_len: 0,
+        });
 
         engine.abort_current_turn("Canceled by user");
 
@@ -5862,7 +6018,7 @@ mod plan_mode_tests {
             steering_inbox: None,
             system_resource_inbox: None,
             process_supervisor: None,
-            last_turn_start_len: None,
+            editable_turn: None,
         }
     }
 
@@ -6082,7 +6238,7 @@ mod handle_command_tests {
             steering_inbox: None,
             system_resource_inbox: None,
             process_supervisor: None,
-            last_turn_start_len: None,
+            editable_turn: None,
         }
     }
 

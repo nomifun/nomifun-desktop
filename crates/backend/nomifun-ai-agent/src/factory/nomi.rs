@@ -64,6 +64,39 @@ fn persist_repaired_session(manager: &SessionManager, session: &Session) -> Resu
     Ok(())
 }
 
+/// Sanitize a resumed transcript without losing an exact rewind boundary.
+///
+/// The sanitizer removes messages but never reorders or inserts them. Splitting
+/// at the root-turn boundary therefore lets each side be repaired independently
+/// and remaps `start_len` to the retained prefix length. No valid tool-call /
+/// tool-result pair can cross this boundary because a root user message starts
+/// the suffix.
+fn sanitize_resumed_session(
+    session: &mut Session,
+    provider_changed: bool,
+) -> crate::manager::nomi::history_sanitize::SessionRepairStats {
+    let Some(start_len) = session
+        .editable_turn
+        .as_ref()
+        .map(|checkpoint| checkpoint.start_len)
+    else {
+        return sanitize_session_messages(&mut session.messages, provider_changed);
+    };
+    if start_len > session.messages.len() {
+        session.editable_turn = None;
+        return sanitize_session_messages(&mut session.messages, provider_changed);
+    }
+
+    let mut suffix = session.messages.split_off(start_len);
+    let mut stats = sanitize_session_messages(&mut session.messages, provider_changed);
+    stats.merge(sanitize_session_messages(&mut suffix, provider_changed));
+    if let Some(checkpoint) = session.editable_turn.as_mut() {
+        checkpoint.start_len = session.messages.len();
+    }
+    session.messages.append(&mut suffix);
+    stats
+}
+
 pub(super) async fn build(
     deps: Arc<AgentFactoryDeps>,
     options: AgentRuntimeBuildOptions,
@@ -370,7 +403,7 @@ pub(super) async fn build(
                 // with `tool_calls != null` and `content == null` when no
                 // matching tool_result follows. See ELECTRON-1HV / ELECTRON-1J6.
                 let provider_changed = session.provider != fields.provider;
-                let repair = sanitize_session_messages(&mut session.messages, provider_changed);
+                let repair = sanitize_resumed_session(&mut session, provider_changed);
                 info!(
                     conversation_id = %ctx.conversation_id,
                     session_id = %session.id,
@@ -1590,6 +1623,7 @@ mod tests {
             messages: Vec::new(),
             owner_token: None,
             activated_deferred_tools: Vec::new(),
+            editable_turn: None,
         };
 
         assert!(retarget_resumed_session(
@@ -1606,6 +1640,61 @@ mod tests {
         ));
         assert_eq!(session.provider, "provider-a");
         assert_eq!(session.model, "model-a2");
+    }
+
+    #[test]
+    fn session_sanitizer_remaps_the_editable_turn_boundary() {
+        use nomi_agent::session::EditableTurnCheckpoint;
+        use nomi_types::message::{ContentBlock, Message, Role};
+
+        let now = chrono::Utc::now();
+        let mut session = Session {
+            id: "rewind-boundary".into(),
+            created_at: now,
+            updated_at: now,
+            provider: "provider-a".into(),
+            model: "model-a".into(),
+            cwd: "/workspace".into(),
+            total_usage: Default::default(),
+            messages: vec![
+                Message::new(
+                    Role::User,
+                    vec![ContentBlock::Text {
+                        text: "stable history".into(),
+                    }],
+                ),
+                Message::new(
+                    Role::Assistant,
+                    vec![ContentBlock::Text {
+                        text: String::new(),
+                    }],
+                ),
+                Message::new(
+                    Role::User,
+                    vec![ContentBlock::Text {
+                        text: "editable root".into(),
+                    }],
+                ),
+            ],
+            owner_token: None,
+            activated_deferred_tools: Vec::new(),
+            editable_turn: Some(EditableTurnCheckpoint {
+                source_message_id: "message-root".into(),
+                start_len: 2,
+            }),
+        };
+
+        let repair = sanitize_resumed_session(&mut session, false);
+
+        assert_eq!(repair.removed_messages, 1);
+        assert_eq!(session.messages.len(), 2);
+        assert_eq!(
+            session
+                .editable_turn
+                .as_ref()
+                .map(|checkpoint| checkpoint.start_len),
+            Some(1)
+        );
     }
 
     #[test]
