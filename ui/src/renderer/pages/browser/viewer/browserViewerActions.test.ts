@@ -25,7 +25,11 @@ describe('browser viewer control actions', () => {
   test('keeps lane management and return-control independent from viewer retry state', () => {
     expect(viewerSource.includes("if (!canStream) {")).toBe(true);
     expect(viewerSource.includes('returnBrowserViewerControl(lane.lane_id, {')).toBe(true);
-    expect(viewerSource.includes('disabled={connectionState !== \'streaming\'}\n            onClick={handleTakeControl}')).toBe(true);
+    expect(
+      /disabled=\{connectionState !== 'streaming'\}\s+onClick=\{handleTakeControl\}/.test(
+        viewerSource
+      )
+    ).toBe(true);
     expect(viewerSource.includes("socketRef.current = null;\n                setRetryKey")).toBe(true);
   });
 

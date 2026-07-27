@@ -61,9 +61,9 @@ const DiagnosticField: React.FC<{
   children: React.ReactNode;
   mono?: boolean;
 }> = ({ label, children, mono = false }) => (
-  <div className='min-w-0'>
-    <div className='text-10px text-t-tertiary mb-2px'>{label}</div>
-    <div className={mono ? 'text-11px text-t-primary font-mono break-all' : 'text-12px text-t-primary break-words'}>
+  <div className='min-w-0 rd-9px bg-[color:color-mix(in_srgb,var(--color-fill-1)_48%,transparent)] px-10px py-8px'>
+    <div className='text-10px text-t-tertiary mb-3px'>{label}</div>
+    <div className={mono ? 'text-11px text-t-primary font-mono break-all leading-17px' : 'text-12px text-t-primary break-words leading-18px'}>
       {children}
     </div>
   </div>
@@ -124,7 +124,7 @@ const BrowserHostDiagnostics: React.FC<BrowserHostDiagnosticsProps> = ({ overvie
   const renderHost = (host: IBrowserHost) => (
     <article
       key={host.host_id}
-      className='min-w-0 border border-solid border-[var(--color-border-2)] rd-8px p-10px bg-bg-1'
+      className='min-w-0 rd-12px border border-solid border-[color:color-mix(in_srgb,var(--color-border-2)_58%,transparent)] bg-bg-1 p-12px shadow-[0_6px_18px_rgba(15,23,42,0.03)]'
       data-browser-host-id={host.host_id}
     >
       <div className='flex items-center gap-6px mb-9px'>
@@ -135,7 +135,7 @@ const BrowserHostDiagnostics: React.FC<BrowserHostDiagnosticsProps> = ({ overvie
           {hostStateLabel(host.state)}
         </Tag>
       </div>
-      <div className='grid grid-cols-2 lg:grid-cols-3 gap-x-14px gap-y-10px'>
+      <div className='grid grid-cols-2 lg:grid-cols-3 gap-10px'>
         <DiagnosticField
           label={t('browser.diagnostics.fields.identity')}
         >
@@ -168,10 +168,10 @@ const BrowserHostDiagnostics: React.FC<BrowserHostDiagnosticsProps> = ({ overvie
 
   return (
     <details
-      className='shrink-0 mb-12px border border-solid border-[var(--color-border-2)] rd-10px bg-fill-1'
+      className='shrink-0 mb-14px overflow-hidden rd-14px border border-solid border-[color:color-mix(in_srgb,var(--color-border-2)_58%,transparent)] bg-fill-1 shadow-[0_8px_24px_rgba(15,23,42,0.035)]'
       data-browser-host-diagnostics
     >
-      <summary className='cursor-pointer select-none px-12px py-9px text-12px text-t-primary'>
+      <summary className='cursor-pointer select-none px-14px py-11px text-12px text-t-primary transition-colors hover:bg-[color:color-mix(in_srgb,var(--color-fill-1)_48%,transparent)]'>
         <span className='font-600'>
           {t('browser.diagnostics.title')}
         </span>
@@ -185,8 +185,8 @@ const BrowserHostDiagnostics: React.FC<BrowserHostDiagnosticsProps> = ({ overvie
         </Tag>
       </summary>
 
-      <div className='border-t border-solid border-[var(--color-border-2)] border-b-0 border-l-0 border-r-0 p-10px'>
-        <section className='mb-10px grid grid-cols-2 md:grid-cols-3 xl:grid-cols-6 gap-x-14px gap-y-10px'>
+      <div className='border-t border-solid border-[color:color-mix(in_srgb,var(--color-border-2)_52%,transparent)] border-b-0 border-l-0 border-r-0 p-12px'>
+        <section className='mb-12px grid grid-cols-2 md:grid-cols-3 xl:grid-cols-6 gap-10px'>
           <DiagnosticField label={t('browser.diagnostics.fields.activeOperations')}>
             {valueOrDash(capacity?.active)}
             {capacity?.max_active != null ? ` / ${capacity.max_active}` : null}
@@ -210,11 +210,11 @@ const BrowserHostDiagnostics: React.FC<BrowserHostDiagnosticsProps> = ({ overvie
         </section>
 
         {hosts.length > 0 ? (
-          <section className='grid grid-cols-1 xl:grid-cols-2 gap-8px'>
+          <section className='grid grid-cols-1 xl:grid-cols-2 gap-10px'>
             {hosts.map(renderHost)}
           </section>
         ) : (
-          <div className='text-12px text-t-tertiary py-3px'>
+          <div className='text-12px text-t-tertiary py-6px'>
             {t('browser.diagnostics.noHosts')}
           </div>
         )}

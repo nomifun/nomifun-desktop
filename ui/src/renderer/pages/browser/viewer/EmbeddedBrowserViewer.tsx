@@ -653,82 +653,94 @@ const EmbeddedBrowserViewer: React.FC<EmbeddedBrowserViewerProps> = ({
     );
   }
 
+  const viewerAspectRatio = frameSize
+    ? `${frameSize.width} / ${frameSize.height}`
+    : '16 / 10';
+
   return (
-    <section className='border border-solid border-[var(--color-border-2)] rd-10px overflow-hidden bg-[#111]'>
-      <div className='flex flex-wrap items-center gap-6px p-7px bg-bg-1 border-b border-solid border-[var(--color-border-2)] border-t-0 border-l-0 border-r-0'>
-        <Button
-          size='mini'
-          type='text'
-          aria-label={t('browser.viewer.back')}
-          icon={<Left theme='outline' size='13' />}
-          disabled={!interactionEnabled}
-          onClick={() => sendCommand({ type: 'back' })}
-        />
-        <Button
-          size='mini'
-          type='text'
-          aria-label={t('browser.viewer.forward')}
-          icon={<Right theme='outline' size='13' />}
-          disabled={!interactionEnabled}
-          onClick={() => sendCommand({ type: 'forward' })}
-        />
-        <Button
-          size='mini'
-          type='text'
-          aria-label={t('browser.viewer.reload')}
-          icon={<Refresh theme='outline' size='13' />}
-          disabled={!interactionEnabled}
-          onClick={() => sendCommand({ type: 'reload' })}
-        />
-        <Input
-          size='mini'
-          className='min-w-160px flex-1'
-          value={address}
-          aria-label={t('browser.viewer.address')}
-          disabled={!interactionEnabled}
-          onChange={setAddress}
-          onPressEnter={navigate}
-        />
-        {lane.tabs.length > 0 && (
-          <Select
+    <section className='overflow-hidden rd-14px border border-solid border-[var(--color-border-2)] bg-bg-1 shadow-[0_12px_36px_rgba(15,23,42,0.10)]'>
+      <div className='flex flex-col gap-7px p-8px bg-fill-1'>
+        <div className='flex min-w-0 items-center gap-6px'>
+          <div className='flex shrink-0 items-center gap-1px rd-9px bg-bg-1 p-2px shadow-[0_1px_4px_rgba(15,23,42,0.08)]'>
+            <Button
+              size='mini'
+              type='text'
+              aria-label={t('browser.viewer.back')}
+              icon={<Left theme='outline' size='13' />}
+              disabled={!interactionEnabled}
+              onClick={() => sendCommand({ type: 'back' })}
+            />
+            <Button
+              size='mini'
+              type='text'
+              aria-label={t('browser.viewer.forward')}
+              icon={<Right theme='outline' size='13' />}
+              disabled={!interactionEnabled}
+              onClick={() => sendCommand({ type: 'forward' })}
+            />
+            <Button
+              size='mini'
+              type='text'
+              aria-label={t('browser.viewer.reload')}
+              icon={<Refresh theme='outline' size='13' />}
+              disabled={!interactionEnabled}
+              onClick={() => sendCommand({ type: 'reload' })}
+            />
+          </div>
+          <Input
             size='mini'
-            className='w-180px'
-            value={activeTabId}
-            aria-label={t('browser.viewer.tab')}
+            className='min-w-0 flex-1'
+            value={address}
+            aria-label={t('browser.viewer.address')}
             disabled={!interactionEnabled}
-            onChange={(tabId) => {
-              setActiveTabId(tabId);
-              sendCommand({ type: 'select_tab', tab_id: tabId });
-            }}
-          >
-            {lane.tabs.map((tab) => (
-              <Select.Option key={tab.tab_id} value={tab.tab_id}>
-                {tab.title || tab.url || tab.tab_id}
-                {tab.crashed ? ` (${t('browser.viewer.crashed')})` : ''}
-              </Select.Option>
-            ))}
-          </Select>
-        )}
-        <Tag color={!readOnly && controlState === 'user' ? 'orange' : 'gray'}>
-          {readOnly
-            ? `🔒 ${readOnlyIdentityLabel} · ${t('browser.viewer.readOnly')}`
-            : controlState === 'user'
-            ? t('browser.viewer.userControl')
-            : t('browser.viewer.agentControl')}
-        </Tag>
-        {!readOnly && controlState === 'user' ? (
-          <Button size='mini' loading={returningControl} onClick={() => void handleReturnControl()}>
-            {t('browser.viewer.returnToAgent')}
-          </Button>
-        ) : !readOnly ? (
-          <Button
-            size='mini'
-            disabled={connectionState !== 'streaming'}
-            onClick={handleTakeControl}
-          >
-            {t('browser.viewer.takeControl')}
-          </Button>
-        ) : null}
+            onChange={setAddress}
+            onPressEnter={navigate}
+          />
+        </div>
+        <div className='flex min-w-0 flex-wrap items-center gap-6px'>
+          {lane.tabs.length > 0 && (
+            <Select
+              size='mini'
+              className='min-w-180px max-w-320px flex-1'
+              value={activeTabId}
+              aria-label={t('browser.viewer.tab')}
+              disabled={!interactionEnabled}
+              onChange={(tabId) => {
+                setActiveTabId(tabId);
+                sendCommand({ type: 'select_tab', tab_id: tabId });
+              }}
+            >
+              {lane.tabs.map((tab) => (
+                <Select.Option key={tab.tab_id} value={tab.tab_id}>
+                  {tab.title || tab.url || tab.tab_id}
+                  {tab.crashed ? ` (${t('browser.viewer.crashed')})` : ''}
+                </Select.Option>
+              ))}
+            </Select>
+          )}
+          <div className='ml-auto flex min-w-0 items-center gap-6px'>
+            <Tag color={!readOnly && controlState === 'user' ? 'orange' : 'gray'}>
+              {readOnly
+                ? `🔒 ${readOnlyIdentityLabel} · ${t('browser.viewer.readOnly')}`
+                : controlState === 'user'
+                  ? t('browser.viewer.userControl')
+                  : t('browser.viewer.agentControl')}
+            </Tag>
+            {!readOnly && controlState === 'user' ? (
+              <Button size='mini' loading={returningControl} onClick={() => void handleReturnControl()}>
+                {t('browser.viewer.returnToAgent')}
+              </Button>
+            ) : !readOnly ? (
+              <Button
+                size='mini'
+                disabled={connectionState !== 'streaming'}
+                onClick={handleTakeControl}
+              >
+                {t('browser.viewer.takeControl')}
+              </Button>
+            ) : null}
+          </div>
+        </div>
       </div>
 
       {viewerError && (
@@ -752,78 +764,81 @@ const EmbeddedBrowserViewer: React.FC<EmbeddedBrowserViewerProps> = ({
         />
       )}
 
-      <div
-        className='relative h-[min(58vh,620px)] min-h-300px outline-none flex items-center justify-center overflow-hidden'
-        role='application'
-        aria-label={t('browser.viewer.surfaceAria')}
-      >
-        <textarea
-          ref={surfaceRef}
-          defaultValue=''
-          readOnly={!inputEnabled}
-          disabled={!inputEnabled}
-          tabIndex={inputEnabled ? 0 : -1}
+      <div className='bg-fill-2 p-8px'>
+        <div
+          className='relative mx-auto w-full min-h-300px max-h-[min(68vh,760px)] outline-none flex items-center justify-center overflow-hidden bg-[#0b0d12] shadow-[0_10px_30px_rgba(0,0,0,0.28)]'
+          style={{ aspectRatio: viewerAspectRatio }}
+          role='application'
           aria-label={t('browser.viewer.surfaceAria')}
-          aria-readonly={!inputEnabled}
-          className='absolute inset-0 size-full opacity-0 resize-none bg-transparent text-transparent caret-transparent outline-none z-1'
-          onFocus={() => {
-            if (inputEnabledRef.current) focusedRef.current = true;
-          }}
-          onBlur={() => {
-            releasePressedInputState();
-          }}
-          onCompositionStart={interactionHandlers.onCompositionStart}
-          onCompositionEnd={interactionHandlers.onCompositionEnd}
-          onBeforeInput={interactionHandlers.onBeforeInput}
-          onPaste={interactionHandlers.onPaste}
-          onKeyDown={interactionHandlers.onKeyDown}
-          onKeyUp={interactionHandlers.onKeyUp}
-        />
-        {frameUrl ? (
-          <img
-            ref={imageRef}
-            src={frameUrl}
-            alt={t('browser.viewer.frameAlt')}
-            draggable={false}
-            className={`relative size-full object-contain select-none ${
-              !inputEnabled ? 'pointer-events-none' : 'z-2'
-            }`}
-            onLoad={(event) => {
-              if (!frameSize && event.currentTarget.naturalWidth && event.currentTarget.naturalHeight) {
-                setFrameSize({
-                  width: event.currentTarget.naturalWidth,
-                  height: event.currentTarget.naturalHeight,
-                });
-              }
+        >
+          <textarea
+            ref={surfaceRef}
+            defaultValue=''
+            readOnly={!inputEnabled}
+            disabled={!inputEnabled}
+            tabIndex={inputEnabled ? 0 : -1}
+            aria-label={t('browser.viewer.surfaceAria')}
+            aria-readonly={!inputEnabled}
+            className='absolute inset-0 size-full opacity-0 resize-none bg-transparent text-transparent caret-transparent outline-none z-1'
+            onFocus={() => {
+              if (inputEnabledRef.current) focusedRef.current = true;
             }}
-            onPointerMove={interactionHandlers.onPointerMove}
-            onPointerDown={interactionHandlers.onPointerDown}
-            onPointerUp={interactionHandlers.onPointerUp}
-            onPointerCancel={interactionHandlers.onPointerCancel}
-            onLostPointerCapture={interactionHandlers.onLostPointerCapture}
-            onWheel={handleWheel}
-            onContextMenu={(event) => event.preventDefault()}
+            onBlur={() => {
+              releasePressedInputState();
+            }}
+            onCompositionStart={interactionHandlers.onCompositionStart}
+            onCompositionEnd={interactionHandlers.onCompositionEnd}
+            onBeforeInput={interactionHandlers.onBeforeInput}
+            onPaste={interactionHandlers.onPaste}
+            onKeyDown={interactionHandlers.onKeyDown}
+            onKeyUp={interactionHandlers.onKeyUp}
           />
-        ) : connectionState === 'connecting' || connectionState === 'streaming' ? (
-          <Spin
-            dot
-            tip={
-              connectionState === 'connecting'
-                ? t('browser.viewer.connecting')
-                : t('browser.viewer.waitingFrame')
-            }
-          />
-        ) : (
-          <div className='text-13px text-white/65'>{t('browser.viewer.idle')}</div>
-        )}
-        <div className='absolute left-8px bottom-8px px-6px py-3px rd-5px bg-black/55 text-10px text-white/70 pointer-events-none'>
-          {t('browser.viewer.frameStatus', {
-            frame: frameSize
-              ? `${frameSize.width}×${frameSize.height}`
-              : t('browser.viewer.jpegLiveView'),
-            mode: t('browser.viewer.latestFrameOnly'),
-          })}
+          {frameUrl ? (
+            <img
+              ref={imageRef}
+              src={frameUrl}
+              alt={t('browser.viewer.frameAlt')}
+              draggable={false}
+              className={`relative size-full object-contain select-none ${
+                !inputEnabled ? 'pointer-events-none' : 'z-2'
+              }`}
+              onLoad={(event) => {
+                if (!frameSize && event.currentTarget.naturalWidth && event.currentTarget.naturalHeight) {
+                  setFrameSize({
+                    width: event.currentTarget.naturalWidth,
+                    height: event.currentTarget.naturalHeight,
+                  });
+                }
+              }}
+              onPointerMove={interactionHandlers.onPointerMove}
+              onPointerDown={interactionHandlers.onPointerDown}
+              onPointerUp={interactionHandlers.onPointerUp}
+              onPointerCancel={interactionHandlers.onPointerCancel}
+              onLostPointerCapture={interactionHandlers.onLostPointerCapture}
+              onWheel={handleWheel}
+              onContextMenu={(event) => event.preventDefault()}
+            />
+          ) : connectionState === 'connecting' || connectionState === 'streaming' ? (
+            <Spin
+              dot
+              tip={
+                connectionState === 'connecting'
+                  ? t('browser.viewer.connecting')
+                  : t('browser.viewer.waitingFrame')
+              }
+            />
+          ) : (
+            <div className='text-13px text-white/65'>{t('browser.viewer.idle')}</div>
+          )}
         </div>
+      </div>
+      <div className='flex items-center justify-end bg-fill-1 px-10px py-6px text-10px text-t-tertiary'>
+        {t('browser.viewer.frameStatus', {
+          frame: frameSize
+            ? `${frameSize.width}×${frameSize.height}`
+            : t('browser.viewer.jpegLiveView'),
+          mode: t('browser.viewer.latestFrameOnly'),
+        })}
       </div>
     </section>
   );
