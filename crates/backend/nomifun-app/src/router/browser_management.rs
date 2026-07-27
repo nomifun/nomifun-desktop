@@ -76,6 +76,10 @@ pub fn browser_management_user_routes(state: BrowserManagementState) -> Router {
         .route("/api/browser/lanes", get(get_lanes))
         .route("/api/browser/lanes/{lane_id}/close", post(close_lane))
         .route(
+            "/api/browser/lanes/{lane_id}/foreground",
+            post(foreground_lane),
+        )
+        .route(
             "/api/browser/conversations/{conversation_id}/close",
             post(close_conversation),
         )
@@ -152,6 +156,21 @@ impl BrowserApiError {
                 message: message.into(),
                 retryable: false,
                 next_action: "Provide a valid conversation id and retry.".to_owned(),
+                lane_id: None,
+                metadata: Value::Null,
+            },
+        }
+    }
+
+    fn invalid_browser_lane_id() -> Self {
+        Self {
+            status: StatusCode::BAD_REQUEST,
+            body: BrowserApiErrorBody {
+                code: json!("invalid_lane_id"),
+                message: "The browser lane id is invalid.".to_owned(),
+                retryable: false,
+                next_action: "Refresh the browser inventory and retry with a current lane id."
+                    .to_owned(),
                 lane_id: None,
                 metadata: Value::Null,
             },
@@ -762,6 +781,50 @@ async fn close_lane(
     Ok(Json(ApiResponse::ok(hub.close_lane(&lane_id).await?)))
 }
 
+#[derive(Debug, Serialize)]
+struct BrowserForegroundResultDto {
+    foregrounded: bool,
+    lane_id: BrowserLaneId,
+}
+
+async fn foreground_lane(
+    State(state): State<BrowserManagementState>,
+    Extension(user): Extension<CurrentUser>,
+    Path(lane_id): Path<String>,
+) -> Result<Json<ApiResponse<BrowserForegroundResultDto>>, BrowserApiError> {
+    let hub = state.require_hub()?;
+    let lane_id = parse_foreground_lane_id(lane_id)?;
+    hub.foreground_lane_for_user(user.id.as_str(), &lane_id)
+        .await
+        .map_err(|error| foreground_api_error(error, &lane_id))?;
+    Ok(Json(ApiResponse::ok(BrowserForegroundResultDto {
+        foregrounded: true,
+        lane_id,
+    })))
+}
+
+fn foreground_api_error(
+    error: BrowserPlatformError,
+    lane_id: &BrowserLaneId,
+) -> BrowserApiError {
+    if matches!(
+        error.code,
+        BrowserErrorCode::OperationNotAllowed | BrowserErrorCode::LaneNotFound
+    ) {
+        // The platform deliberately distinguishes a missing Lane from a Lane
+        // owned by another user for trusted in-process callers. Collapse both
+        // at the HTTP boundary so the authenticated API cannot be used to
+        // probe another user's inventory.
+        BrowserApiError::not_found()
+    } else {
+        let mut error = BrowserApiError::from(error);
+        // The request path is already known to this caller. Keep the public
+        // error scoped to that value even if a driver supplied no Lane id.
+        error.body.lane_id = Some(lane_id.clone());
+        error
+    }
+}
+
 async fn close_conversation(
     State(state): State<BrowserManagementState>,
     Extension(user): Extension<CurrentUser>,
@@ -847,6 +910,10 @@ async fn put_resource_policy(
 
 fn parse_lane_id(value: String) -> Result<BrowserLaneId, BrowserApiError> {
     BrowserLaneId::parse(value).map_err(BrowserApiError::from)
+}
+
+fn parse_foreground_lane_id(value: String) -> Result<BrowserLaneId, BrowserApiError> {
+    BrowserLaneId::parse(value).map_err(|_| BrowserApiError::invalid_browser_lane_id())
 }
 
 async fn authorize_existing_lane(
@@ -1092,18 +1159,24 @@ mod tests {
     struct FakeFactory {
         close_failures: Arc<StdMutex<BTreeSet<BrowserLaneId>>>,
         close_attempts: Arc<StdMutex<Vec<BrowserLaneId>>>,
+        foreground_attempts: Arc<StdMutex<Vec<BrowserLaneId>>>,
+        foreground_failure: Arc<StdMutex<Option<BrowserPlatformError>>>,
     }
 
     struct FakeHost {
         id: BrowserHostId,
         close_failures: Arc<StdMutex<BTreeSet<BrowserLaneId>>>,
         close_attempts: Arc<StdMutex<Vec<BrowserLaneId>>>,
+        foreground_attempts: Arc<StdMutex<Vec<BrowserLaneId>>>,
+        foreground_failure: Arc<StdMutex<Option<BrowserPlatformError>>>,
     }
 
     struct FakeLane {
         lane_id: BrowserLaneId,
         close_failures: Arc<StdMutex<BTreeSet<BrowserLaneId>>>,
         close_attempts: Arc<StdMutex<Vec<BrowserLaneId>>>,
+        foreground_attempts: Arc<StdMutex<Vec<BrowserLaneId>>>,
+        foreground_failure: Arc<StdMutex<Option<BrowserPlatformError>>>,
     }
 
     #[async_trait]
@@ -1116,6 +1189,8 @@ mod tests {
                 id: request.host_id,
                 close_failures: Arc::clone(&self.close_failures),
                 close_attempts: Arc::clone(&self.close_attempts),
+                foreground_attempts: Arc::clone(&self.foreground_attempts),
+                foreground_failure: Arc::clone(&self.foreground_failure),
             }))
         }
     }
@@ -1146,6 +1221,8 @@ mod tests {
                 lane_id: request.lane_id,
                 close_failures: Arc::clone(&self.close_failures),
                 close_attempts: Arc::clone(&self.close_attempts),
+                foreground_attempts: Arc::clone(&self.foreground_attempts),
+                foreground_failure: Arc::clone(&self.foreground_failure),
             }))
         }
 
@@ -1199,6 +1276,22 @@ mod tests {
             }
             Ok(())
         }
+
+        async fn bring_to_front(&self) -> Result<(), BrowserPlatformError> {
+            self.foreground_attempts
+                .lock()
+                .expect("foreground attempt list must not be poisoned")
+                .push(self.lane_id.clone());
+            if let Some(error) = self
+                .foreground_failure
+                .lock()
+                .expect("foreground failure must not be poisoned")
+                .clone()
+            {
+                return Err(error);
+            }
+            Ok(())
+        }
     }
 
     struct TestApp {
@@ -1212,6 +1305,8 @@ mod tests {
         hub: Arc<BrowserSessionHub>,
         close_failures: Arc<StdMutex<BTreeSet<BrowserLaneId>>>,
         close_attempts: Arc<StdMutex<Vec<BrowserLaneId>>>,
+        foreground_attempts: Arc<StdMutex<Vec<BrowserLaneId>>>,
+        foreground_failure: Arc<StdMutex<Option<BrowserPlatformError>>>,
         preferences: Arc<dyn IClientPreferenceRepository>,
     }
 
@@ -1233,6 +1328,8 @@ mod tests {
         let factory = FakeFactory::default();
         let close_failures = Arc::clone(&factory.close_failures);
         let close_attempts = Arc::clone(&factory.close_attempts);
+        let foreground_attempts = Arc::clone(&factory.foreground_attempts);
+        let foreground_failure = Arc::clone(&factory.foreground_failure);
         let hub = Arc::new(BrowserSessionHub::new(
             Arc::new(factory),
             HubConfig::default(),
@@ -1319,6 +1416,8 @@ mod tests {
             hub,
             close_failures,
             close_attempts,
+            foreground_attempts,
+            foreground_failure,
             preferences,
         }
     }
@@ -1686,6 +1785,157 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(without_csrf.status(), StatusCode::FORBIDDEN);
+
+        let foreground_without_csrf = app
+            .router
+            .clone()
+            .oneshot(authorized_request(
+                &app,
+                "POST",
+                format!("/api/browser/lanes/{}/foreground", app.lane_id),
+                false,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(foreground_without_csrf.status(), StatusCode::FORBIDDEN);
+        assert!(
+            app.foreground_attempts
+                .lock()
+                .expect("foreground attempts must not be poisoned")
+                .is_empty(),
+            "CSRF rejection must happen before foreground dispatch"
+        );
+    }
+
+    #[tokio::test]
+    async fn foreground_route_dispatches_for_the_authenticated_lane_owner() {
+        let app = test_app(true).await;
+        let uri = format!("/api/browser/lanes/{}/foreground", app.lane_id);
+
+        let response = app
+            .router
+            .clone()
+            .oneshot(authorized_request(&app, "POST", &uri, true))
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await;
+        assert_eq!(body["data"]["foregrounded"], true);
+        assert_eq!(body["data"]["lane_id"], app.lane_id.as_str());
+        assert_eq!(
+            body["data"]
+                .as_object()
+                .expect("foreground result must be an object")
+                .keys()
+                .map(String::as_str)
+                .collect::<BTreeSet<_>>(),
+            BTreeSet::from(["foregrounded", "lane_id"])
+        );
+        assert_eq!(
+            app.foreground_attempts
+                .lock()
+                .expect("foreground attempts must not be poisoned")
+                .as_slice(),
+            &[app.lane_id.clone()]
+        );
+    }
+
+    #[tokio::test]
+    async fn foreground_route_hides_other_users_lane_and_does_not_dispatch() {
+        let app = test_app(true).await;
+
+        let response = app
+            .router
+            .clone()
+            .oneshot(secondary_request(
+                &app,
+                "POST",
+                format!("/api/browser/lanes/{}/foreground", app.lane_id),
+                true,
+            ))
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        let body = response_json(response).await;
+        assert_eq!(body["code"], "lane_not_found");
+        assert!(body.get("lane_id").is_none());
+        assert!(
+            app.foreground_attempts
+                .lock()
+                .expect("foreground attempts must not be poisoned")
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn foreground_route_rejects_invalid_lane_ids_without_echoing_input() {
+        let app = test_app(true).await;
+        let response = app
+            .router
+            .clone()
+            .oneshot(authorized_request(
+                &app,
+                "POST",
+                "/api/browser/lanes/%20/foreground",
+                true,
+            ))
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = response_json(response).await;
+        assert_eq!(body["code"], "invalid_lane_id");
+        assert!(body.get("lane_id").is_none());
+        assert!(!body.to_string().contains("InvalidLaneName"));
+        assert!(
+            app.foreground_attempts
+                .lock()
+                .expect("foreground attempts must not be poisoned")
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn foreground_route_projects_driver_failures_without_internal_metadata() {
+        let app = test_app(true).await;
+        *app.foreground_failure
+            .lock()
+            .expect("foreground failure must not be poisoned") =
+            Some(BrowserPlatformError::new(
+                BrowserErrorCode::BrowserUnavailable,
+                "The managed browser operation failed.",
+                true,
+                "Retry the foreground request.",
+            )
+            .with_metadata(json!({
+                "profile_path": "C:\\private\\profile",
+                "cdp_endpoint": "ws://127.0.0.1:9222/devtools/browser/private",
+                "debug_token": "secret"
+            })));
+
+        let response = app
+            .router
+            .clone()
+            .oneshot(authorized_request(
+                &app,
+                "POST",
+                format!("/api/browser/lanes/{}/foreground", app.lane_id),
+                true,
+            ))
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body = response_json(response).await;
+        assert_eq!(body["code"], "browser_unavailable");
+        assert_eq!(body["lane_id"], app.lane_id.as_str());
+        assert!(body.get("metadata").is_none());
+        let encoded = body.to_string();
+        for secret in ["profile_path", "cdp_endpoint", "debug_token", "private"] {
+            assert!(!encoded.contains(secret), "leaked internal field {secret}");
+        }
     }
 
     #[tokio::test]

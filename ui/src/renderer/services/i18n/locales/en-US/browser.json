@@ -38,6 +38,11 @@
     "cancel": "Cancel",
     "allSuccess": "All managed browser lanes closed."
   },
+  "foreground": {
+    "action": "Open browser in foreground",
+    "success": "Browser opened in the foreground.",
+    "unavailable": "Only a running Primary lane can be opened in the foreground."
+  },
   "tree": {
     "noActivePage": "No active page",
     "current": "Current",
@@ -61,7 +66,7 @@
   "details": {
     "laneFallback": "Browser lane",
     "statusOnly": "Status only",
-    "externalManagedWindow": "The live browser remains in its external managed window. This page does not embed, control, or connect to it.",
+    "externalManagedWindow": "The live browser runs in its external managed window. This page shows status only; opening it in the foreground does not add viewer, takeover, or page input controls.",
     "closeLane": "Close lane",
     "waitingCapacity": "Waiting for browser capacity",
     "queuePositionInline": "queue position {{position}}",

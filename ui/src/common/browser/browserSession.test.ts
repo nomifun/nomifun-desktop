@@ -6,10 +6,42 @@
 
 import { describe, expect, test } from 'bun:test';
 import {
+  browserSession,
   normalizeBrowserLane,
   normalizeBrowserOverview,
 } from './browserSession';
 import { resolveBrowserOverviewCapabilities } from './browserTypes';
+
+const realFetch = globalThis.fetch;
+
+describe('browserSession foreground request', () => {
+  test('posts a URL-encoded lane id without exposing a page-control body', async () => {
+    let request: { url: string; method?: string; body?: BodyInit | null } | undefined;
+    try {
+      globalThis.fetch = ((input: RequestInfo | URL, init?: RequestInit) => {
+        request = { url: String(input), method: init?.method, body: init?.body };
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({ success: true, data: { foregrounded: true } }),
+            { status: 200, headers: { 'Content-Type': 'application/json' } }
+          )
+        );
+      }) as typeof fetch;
+
+      const result = await browserSession.foregroundLane.invoke({
+        lane_id: 'primary/lane 1',
+      });
+      expect(result).toEqual({ foregrounded: true });
+      expect(request?.url.endsWith('/api/browser/lanes/primary%2Flane%201/foreground')).toBe(
+        true
+      );
+      expect(request?.method).toBe('POST');
+      expect(request?.body).toBeUndefined();
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+  });
+});
 
 describe('normalizeBrowserLane tab projection', () => {
   test('keeps public tab handles without retaining or falling back to raw CDP target ids', () => {

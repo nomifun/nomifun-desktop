@@ -144,11 +144,19 @@ headless。NomiFun 绝不会打开用户个人 Chrome 或 Edge 的 profile。
 |---|---|
 | `GET /api/browser/overview` | 返回当前用户可见的容量、压力、队列、身份、生命周期、Lane 与安全 Host 诊断信息。 |
 | `GET /api/browser/lanes` | 列出当前已鉴权用户可见的 Browser Lane 及其管理安全状态。 |
+| `POST /api/browser/lanes/{lane_id}/foreground` | 仅允许当前已鉴权用户自己的、处于 `running` 状态的 `primary` Lane；把同一个受管真实 Chromium 窗口及其当前 target 恢复到前台。该操作只管理生命周期/可见性，不授予页面输入、用户接管或 Agent 执行能力。 |
 | `POST /api/browser/lanes/{lane_id}/close` | 幂等关闭一个 Lane，不关闭其 conversation 或 Agent execution。 |
 | `POST /api/browser/conversations/{conversation_id}/close` | 关闭当前用户在指定 conversation 下的全部 Lane。 |
 | `POST /api/browser/close-all` | 仅安装 owner：关闭当前应用实例管理的全部 Browser Lane。 |
 | `GET /api/browser/resource-policy` | 仅安装 owner：读取当前 Browser 资源策略档位与高级上限。 |
 | `PUT /api/browser/resource-policy` | 仅安装 owner：校验、持久化并应用 Browser 资源策略。 |
+
+前台打开端点要求正常的应用鉴权；使用 cookie 鉴权时，还必须携带标准
+`x-csrf-token` 请求头。Lane 不存在与 Lane 属于其他用户都会返回 `404`，以免
+该端点被用于探测其他用户的库存。`409` 表示状态冲突，例如 Lane 不是 Primary，
+或在请求期间已经失效或关闭；尚未就绪或未处于 `running` 状态的 Lane 可能返回
+`503`。客户端应刷新库存并选择处于 `running` 状态的 Primary Lane。该端点只
+恢复现有窗口与 target，不会新建 Host、Lane、窗口或页面。
 
 仅安装 owner 可用的兼容端点 `POST /api/browser/login/open`、
 `POST /api/browser/login/close` 与 `GET /api/browser/login/status`，用于在可见的

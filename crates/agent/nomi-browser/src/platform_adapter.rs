@@ -466,17 +466,6 @@ impl ManagedEngineLaneDriver {
                     ..Default::default()
                 })
             }
-            (BrowserOperationKind::Manage, "bring_to_front") => {
-                self.engine
-                    .bring_to_front()
-                    .await
-                    .map_err(map_engine_error)?;
-                Ok(BrowserOperationResult {
-                    output: json!({ "foregrounded": true }),
-                    active_tab_id,
-                    ..Default::default()
-                })
-            }
             (BrowserOperationKind::Manage, "device_pixel_ratio") => {
                 let dpr = self
                     .engine
@@ -670,6 +659,19 @@ impl BrowserLaneDriver for ManagedEngineLaneDriver {
         Ok(())
     }
 
+    async fn bring_to_front(&self) -> Result<(), BrowserPlatformError> {
+        // This trait method is the platform's trusted process-internal seam. It
+        // deliberately bypasses the model-visible JSON operation dispatcher,
+        // while retaining the same close fence and safe error mapping.
+        if self.closing.load(Ordering::Acquire) {
+            return Err(lane_closed_error());
+        }
+        self.engine
+            .bring_to_front()
+            .await
+            .map_err(map_engine_error)
+    }
+
     async fn freeze(&self) -> Result<LaneFreezeOutcome, BrowserPlatformError> {
         // The managed engine currently has no paired Page lifecycle
         // freeze/resume contract, and the platform cannot transition a Frozen
@@ -811,9 +813,7 @@ fn authorize_action_shape(
                 | "rendered_html"
                 | "evaluate"
         ),
-        BrowserOperationKind::Manage => {
-            matches!(action, "capabilities" | "bring_to_front" | "device_pixel_ratio")
-        }
+        BrowserOperationKind::Manage => matches!(action, "capabilities" | "device_pixel_ratio"),
         BrowserOperationKind::Crawl => matches!(
             action,
             "navigate" | "observe" | "get_page_text" | "extract" | "rendered_html"
@@ -1098,6 +1098,7 @@ mod tests {
 
     struct FakeEngine {
         act_calls: AtomicUsize,
+        bring_to_front_calls: AtomicUsize,
         navigate_calls: AtomicUsize,
         observe_calls: AtomicUsize,
         next_observation_generation: AtomicU64,
@@ -1115,6 +1116,7 @@ mod tests {
         fn with_observation_generation(generation: u64) -> Self {
             Self {
                 act_calls: AtomicUsize::new(0),
+                bring_to_front_calls: AtomicUsize::new(0),
                 navigate_calls: AtomicUsize::new(0),
                 observe_calls: AtomicUsize::new(0),
                 next_observation_generation: AtomicU64::new(generation),
@@ -1216,6 +1218,11 @@ mod tests {
             })
         }
 
+        async fn bring_to_front(&self) -> Result<(), BrowserError> {
+            self.bring_to_front_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+
         async fn capture_storage_state(&self) -> Result<StorageState, BrowserError> {
             let local_storage = self
                 .storage_origin
@@ -1294,6 +1301,56 @@ mod tests {
             ref_generation: None,
             may_modify_identity: false,
         }
+    }
+
+    #[tokio::test]
+    async fn trusted_foreground_seam_calls_engine_without_json_operation() {
+        let engine = Arc::new(FakeEngine::new());
+        let driver = test_driver(engine.clone());
+
+        BrowserLaneDriver::bring_to_front(&driver)
+            .await
+            .expect("trusted foreground seam succeeds");
+
+        assert_eq!(engine.bring_to_front_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(engine.act_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(engine.navigate_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(engine.observe_calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn trusted_foreground_seam_respects_lane_close_fence() {
+        let engine = Arc::new(FakeEngine::new());
+        let driver = test_driver(engine.clone());
+        driver.closing.store(true, Ordering::Release);
+
+        let error = BrowserLaneDriver::bring_to_front(&driver)
+            .await
+            .unwrap_err();
+
+        assert_eq!(error.code, BrowserErrorCode::LaneClosedByUser);
+        assert_eq!(engine.bring_to_front_calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn model_json_cannot_request_trusted_foregrounding() {
+        let engine = Arc::new(FakeEngine::new());
+        let driver = test_driver(engine.clone());
+
+        let error = driver
+            .execute(
+                operation(
+                    BrowserOperationKind::Manage,
+                    "bring_to_front",
+                    Value::Object(Map::new()),
+                ),
+                context(),
+            )
+            .await
+            .unwrap_err();
+
+        assert_eq!(error.code, BrowserErrorCode::OperationNotAllowed);
+        assert_eq!(engine.bring_to_front_calls.load(Ordering::SeqCst), 0);
     }
 
     #[tokio::test]

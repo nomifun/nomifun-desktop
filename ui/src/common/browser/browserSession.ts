@@ -17,6 +17,7 @@ import type {
   BrowserLaneLifecycleState,
   BrowserResourcePressureState,
   IBrowserCapacityOverview,
+  IBrowserForegroundResult,
   IBrowserHost,
   IBrowserInventoryChangedEvent,
   IBrowserLane,
@@ -284,6 +285,10 @@ export const browserSession = {
   ),
   closeLane: httpPost<BrowserCloseResult, { lane_id: string }>(
     ({ lane_id }) => `/api/browser/lanes/${encodeURIComponent(lane_id)}/close`,
+    () => undefined
+  ),
+  foregroundLane: httpPost<IBrowserForegroundResult, { lane_id: string }>(
+    ({ lane_id }) => `/api/browser/lanes/${encodeURIComponent(lane_id)}/foreground`,
     () => undefined
   ),
   closeConversation: httpPost<BrowserCloseResult, { conversation_id: string }>(

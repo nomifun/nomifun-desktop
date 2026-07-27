@@ -13,7 +13,7 @@
 //!
 //! headless 决策：[`crate::display::display_available`] 为 false（无显示器：无头 server /
 //! CI / SSH 无 X）→ 强制 `--headless=new`。headful 时给 `--window-position`（非主屏角）+
-//! `--window-size`，避免遮主屏。
+//! `--window-size` 并以最小化状态启动；受信任的前台入口再恢复同一个真实窗口。
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -118,7 +118,8 @@ pub enum LaunchTransport {
 /// - [`crate::switches::chromium_switches`] 全量静态硬化开关。
 /// - `--no-first-run` / `--no-default-browser-check`：免首启向导/默认浏览器询问。
 /// - `--headless=new`：仅当 `force_headless`（无显示器或显式 headless）。
-/// - headful（`!force_headless`）：`--window-position` + `--window-size`（非主屏角）。
+/// - headful（`!force_headless`）：`--window-position` + `--window-size`（非主屏角）+
+///   `--start-minimized`，后台启动且不抢用户焦点。
 /// - `--no-startup-window`：不自动开启动窗口（消除冗余 about:blank；受控页由 backend
 ///   `Target.createTarget` 单独建）。靠 `--remote-debugging-port` 触发的 REMOTE_DEBUGGING
 ///   keep-alive 保进程存活、不无窗口自退。
@@ -147,9 +148,11 @@ pub fn build_chrome_args(user_data_dir: &Path, force_headless: bool) -> Vec<Stri
         // 无显示器强制无头；`=new` 是现代 headless（非旧 --headless），CDP 截图可用。
         args.push("--headless=new".into());
     } else {
-        // headful：摆到非主屏角、给定窗口尺寸，避免遮挡主屏中心。
+        // headful：保留真实窗口供后续受信任入口恢复，但启动时最小化，避免后台
+        // Agent 首次创建 target 时抢占用户当前应用的焦点。
         args.push("--window-position=80,80".into());
         args.push("--window-size=1280,800".into());
+        args.push("--start-minimized".into());
     }
 
     // Linux 容器内 sandbox 常因缺 user-namespace 而启动失败；回退 --no-sandbox。
@@ -754,6 +757,10 @@ mod tests {
         );
         // headless 时不该有 headful 的窗口摆位开关。
         assert!(!headless.iter().any(|a| a.starts_with("--window-position")));
+        assert!(
+            !headless.iter().any(|a| a == "--start-minimized"),
+            "headless must not receive a window-only minimized flag: {headless:?}"
+        );
 
         let headful = build_chrome_args(dir, false);
         assert!(
@@ -763,6 +770,10 @@ mod tests {
         // headful 时给窗口摆位/尺寸。
         assert!(headful.iter().any(|a| a.starts_with("--window-position")));
         assert!(headful.iter().any(|a| a.starts_with("--window-size")));
+        assert!(
+            headful.iter().any(|a| a == "--start-minimized"),
+            "headful must start minimized until trusted foregrounding: {headful:?}"
+        );
     }
 
     #[cfg(target_os = "linux")]

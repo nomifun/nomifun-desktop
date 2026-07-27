@@ -81,7 +81,7 @@ describe('Browser Use settings contract', () => {
     expect(source.includes("<Radio value='external'>")).toBe(false);
     expect(source.includes("<Radio value='headless'>")).toBe(false);
     expect(source.includes("t('settings.browserDisplayModeExternal')")).toBe(true);
-    expect(source.includes("t('settings.browserDisplayModeDesc')")).toBe(false);
+    expect(source.includes("t('settings.browserDisplayModeDesc')")).toBe(true);
     expect(source.includes("persistBoolean('agent.browserUse.takeover'")).toBe(true);
     expect(source.includes("configService.get('agent.browserUse.takeover')")).toBe(true);
   });
@@ -606,6 +606,7 @@ describe('Browser Use settings contract', () => {
     );
     const requiredKeys = [
       'browserDisplayMode',
+      'browserDisplayModeDesc',
       'browserDisplayModeExternal',
       'browserResourcePolicy',
       'browserResourcePolicyAutomatic',

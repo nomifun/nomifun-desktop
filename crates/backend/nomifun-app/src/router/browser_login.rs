@@ -104,6 +104,17 @@ pub(crate) async fn open_browser_login(
             .iter()
             .any(|lane| lane.lane_id == existing.lane_id);
         if lane_present && hub.renew_owner_lease(&existing.owner_lease_id).is_ok() {
+            if hub
+                .foreground_lane_for_user(state.inner.user_id.as_ref(), &existing.lane_id)
+                .await
+                .is_err()
+            {
+                if let Some(stale) = session.take() {
+                    stale.renewal_task.abort();
+                    let _ = hub.revoke_owner_lease(&stale.owner_lease_id).await;
+                }
+                return login_response(false, "launch_failed:browser_unavailable", false, None);
+            }
             return login_response(
                 true,
                 "already_open",
@@ -222,7 +233,24 @@ pub(crate) async fn open_browser_login(
         renewal_task,
     });
     let message = match outcome {
-        OpenLaneOutcome::Running { .. } => "opened",
+        OpenLaneOutcome::Running { .. } => {
+            if hub
+                .foreground_lane_for_user(state.inner.user_id.as_ref(), &lane_id)
+                .await
+                .is_err()
+            {
+                // Opening the sign-in Lane without making its real managed
+                // Chromium window visible leaves the explicit login request
+                // unusable. Tear down the stored session and exact owner
+                // capability so failure cannot strand a live background Lane.
+                if let Some(stale) = session.take() {
+                    stale.renewal_task.abort();
+                    let _ = hub.revoke_owner_lease(&stale.owner_lease_id).await;
+                }
+                return login_response(false, "launch_failed:browser_unavailable", false, None);
+            }
+            "opened"
+        }
         OpenLaneOutcome::Queued { .. } => "queued",
     };
     login_response(true, message, false, Some(lane_id))
@@ -286,6 +314,7 @@ fn login_response(
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::Arc;
 
     use async_trait::async_trait;
@@ -298,11 +327,22 @@ mod tests {
 
     use super::*;
 
-    struct FakeFactory;
+    #[derive(Default)]
+    struct FakeProbe {
+        foregrounds: AtomicUsize,
+        fail_foreground: AtomicBool,
+    }
+
+    struct FakeFactory {
+        probe: Arc<FakeProbe>,
+    }
     struct FakeHost {
         id: BrowserHostId,
+        probe: Arc<FakeProbe>,
     }
-    struct FakeLane;
+    struct FakeLane {
+        probe: Arc<FakeProbe>,
+    }
 
     #[async_trait]
     impl BrowserHostFactory for FakeFactory {
@@ -312,6 +352,7 @@ mod tests {
         ) -> Result<Arc<dyn BrowserHostDriver>, BrowserPlatformError> {
             Ok(Arc::new(FakeHost {
                 id: request.host_id,
+                probe: Arc::clone(&self.probe),
             }))
         }
     }
@@ -334,7 +375,9 @@ mod tests {
             &self,
             _request: LaneLaunchRequest,
         ) -> Result<Arc<dyn BrowserLaneDriver>, BrowserPlatformError> {
-            Ok(Arc::new(FakeLane))
+            Ok(Arc::new(FakeLane {
+                probe: Arc::clone(&self.probe),
+            }))
         }
 
         async fn shutdown(&self) -> Result<(), BrowserPlatformError> {
@@ -355,6 +398,30 @@ mod tests {
         async fn close(&self) -> Result<(), BrowserPlatformError> {
             Ok(())
         }
+
+        async fn bring_to_front(&self) -> Result<(), BrowserPlatformError> {
+            self.probe.foregrounds.fetch_add(1, Ordering::AcqRel);
+            if self.probe.fail_foreground.load(Ordering::Acquire) {
+                return Err(BrowserPlatformError::new(
+                    nomifun_browser_platform::BrowserErrorCode::BrowserUnavailable,
+                    "Synthetic login foreground failure.",
+                    true,
+                    "Retry the login request.",
+                ));
+            }
+            Ok(())
+        }
+    }
+
+    fn login_hub(config: HubConfig) -> (Arc<BrowserSessionHub>, Arc<FakeProbe>) {
+        let probe = Arc::new(FakeProbe::default());
+        let hub = Arc::new(BrowserSessionHub::new(
+            Arc::new(FakeFactory {
+                probe: Arc::clone(&probe),
+            }),
+            config,
+        ));
+        (hub, probe)
     }
 
     fn open_body() -> OpenLoginBody {
@@ -367,7 +434,7 @@ mod tests {
     async fn login_lane_renews_its_owner_lease_until_explicit_close() {
         let mut config = HubConfig::default();
         config.owner_lease_ttl_ms = 90;
-        let hub = Arc::new(BrowserSessionHub::new(Arc::new(FakeFactory), config));
+        let (hub, probe) = login_hub(config);
         let state = BrowserLoginState::new(Some(Arc::clone(&hub)), Arc::from("user-1"));
 
         let Json(opened) = open_browser_login(
@@ -378,6 +445,7 @@ mod tests {
         let opened = opened.data.expect("login response data");
         assert!(opened.active);
         assert!(opened.lane_id.is_some());
+        assert_eq!(probe.foregrounds.load(Ordering::Acquire), 1);
 
         tokio::time::sleep(Duration::from_millis(220)).await;
         assert_eq!(
@@ -401,7 +469,7 @@ mod tests {
     async fn externally_closed_login_lane_stops_reporting_active() {
         let mut config = HubConfig::default();
         config.owner_lease_ttl_ms = 90;
-        let hub = Arc::new(BrowserSessionHub::new(Arc::new(FakeFactory), config));
+        let (hub, _probe) = login_hub(config);
         let state = BrowserLoginState::new(Some(Arc::clone(&hub)), Arc::from("user-1"));
 
         let Json(opened) = open_browser_login(
@@ -445,10 +513,7 @@ mod tests {
 
     #[tokio::test]
     async fn dropping_login_state_revokes_the_owner_without_a_status_call() {
-        let hub = Arc::new(BrowserSessionHub::new(
-            Arc::new(FakeFactory),
-            HubConfig::default(),
-        ));
+        let (hub, _probe) = login_hub(HubConfig::default());
         let state = BrowserLoginState::new(Some(Arc::clone(&hub)), Arc::from("user-1"));
 
         let Json(opened) = open_browser_login(
@@ -474,6 +539,82 @@ mod tests {
         })
         .await
         .expect("dropping BrowserLoginState did not revoke its owner");
+        hub.shutdown().await.expect("shutdown fake browser Hub");
+    }
+
+    #[tokio::test]
+    async fn login_open_foregrounds_an_existing_running_primary_lane_again() {
+        let (hub, probe) = login_hub(HubConfig::default());
+        let state = BrowserLoginState::new(Some(Arc::clone(&hub)), Arc::from("user-1"));
+
+        let Json(first) = open_browser_login(
+            State(state.clone()),
+            Json(open_body()),
+        )
+        .await;
+        assert!(first.data.expect("first login response").active);
+        let Json(second) = open_browser_login(
+            State(state.clone()),
+            Json(open_body()),
+        )
+        .await;
+        assert!(second.data.expect("second login response").active);
+
+        assert_eq!(
+            probe.foregrounds.load(Ordering::Acquire),
+            2,
+            "each explicit login-open request should reveal the managed Primary Lane"
+        );
+        let _ = close_browser_login(State(state)).await;
+        hub.shutdown().await.expect("shutdown fake browser Hub");
+    }
+
+    #[tokio::test]
+    async fn failed_login_foreground_revokes_the_new_owner_and_lane() {
+        let (hub, probe) = login_hub(HubConfig::default());
+        probe.fail_foreground.store(true, Ordering::Release);
+        let state = BrowserLoginState::new(Some(Arc::clone(&hub)), Arc::from("user-1"));
+
+        let Json(response) = open_browser_login(
+            State(state.clone()),
+            Json(open_body()),
+        )
+        .await;
+        let response = response.data.expect("login response data");
+
+        assert!(!response.active);
+        assert_eq!(response.message.as_deref(), Some("launch_failed:browser_unavailable"));
+        assert!(response.lane_id.is_none());
+        assert_eq!(probe.foregrounds.load(Ordering::Acquire), 1);
+        assert!(hub.list_lanes().await.is_empty());
+        assert!(state.inner.session.lock().await.is_none());
+        hub.shutdown().await.expect("shutdown fake browser Hub");
+    }
+
+    #[tokio::test]
+    async fn failed_reopen_foreground_revokes_the_existing_login_session() {
+        let (hub, probe) = login_hub(HubConfig::default());
+        let state = BrowserLoginState::new(Some(Arc::clone(&hub)), Arc::from("user-1"));
+        let Json(first) = open_browser_login(
+            State(state.clone()),
+            Json(open_body()),
+        )
+        .await;
+        assert!(first.data.expect("first login response").active);
+        probe.fail_foreground.store(true, Ordering::Release);
+
+        let Json(second) = open_browser_login(
+            State(state.clone()),
+            Json(open_body()),
+        )
+        .await;
+        let second = second.data.expect("second login response");
+
+        assert!(!second.active);
+        assert_eq!(second.message.as_deref(), Some("launch_failed:browser_unavailable"));
+        assert_eq!(probe.foregrounds.load(Ordering::Acquire), 2);
+        assert!(hub.list_lanes().await.is_empty());
+        assert!(state.inner.session.lock().await.is_none());
         hub.shutdown().await.expect("shutdown fake browser Hub");
     }
 }

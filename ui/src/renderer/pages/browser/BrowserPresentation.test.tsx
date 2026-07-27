@@ -45,6 +45,21 @@ await testI18n.use(initReactI18next).init({
 const renderBrowser = (content: React.ReactElement): string =>
   renderToStaticMarkup(<I18nextProvider i18n={testI18n}>{content}</I18nextProvider>);
 
+const renderLaneDetails = (
+  candidate: IBrowserLane,
+  canForeground = false
+): string =>
+  renderBrowser(
+    <BrowserLaneDetails
+      lane={candidate}
+      closing={false}
+      foregrounding={false}
+      canForeground={canForeground}
+      onClose={() => undefined}
+      onForeground={() => undefined}
+    />
+  );
+
 const lane = (overrides: Partial<IBrowserLane> = {}): IBrowserLane => ({
   lane_id: 'lane-1',
   lane_name: 'Lane one',
@@ -250,21 +265,17 @@ describe('Browser management presentation', () => {
   });
 
   test('renders queued pressure metadata while preserving the lane close action', () => {
-    const html = renderBrowser(
-      <BrowserLaneDetails
-        lane={lane({
-          lane_id: 'queued-lane',
-          lane_name: 'Queued lane',
-          lifecycle_state: 'queued',
-          queue: {
-            position: 7,
-            reason_code: 'system_memory_pressure',
-            recommended_concurrency: 2,
-          },
-        })}
-        closing={false}
-        onClose={() => undefined}
-      />
+    const html = renderLaneDetails(
+      lane({
+        lane_id: 'queued-lane',
+        lane_name: 'Queued lane',
+        lifecycle_state: 'queued',
+        queue: {
+          position: 7,
+          reason_code: 'system_memory_pressure',
+          recommended_concurrency: 2,
+        },
+      })
     );
 
     expect(html.includes('Waiting for browser capacity')).toBe(true);
@@ -335,17 +346,13 @@ describe('Browser management presentation', () => {
   });
 
   test('keeps lane management visible when the lane reports an error', () => {
-    const html = renderBrowser(
-      <BrowserLaneDetails
-        lane={lane({
-          lane_id: 'failed-managed-lane',
-          lane_name: 'Recoverable lane',
-          error_code: 'managed_window_disconnected',
-          error_message: 'The external managed browser disconnected.',
-        })}
-        closing={false}
-        onClose={() => undefined}
-      />
+    const html = renderLaneDetails(
+      lane({
+        lane_id: 'failed-managed-lane',
+        lane_name: 'Recoverable lane',
+        error_code: 'managed_window_disconnected',
+        error_message: 'The external managed browser disconnected.',
+      })
     );
 
     expect(
@@ -357,50 +364,46 @@ describe('Browser management presentation', () => {
   });
 
   test('renders a complete status-only lane surface without importing viewer code', () => {
-    const html = renderBrowser(
-      <BrowserLaneDetails
-        lane={lane({
-          lane_id: 'status-only-lane',
-          lane_name: 'External managed lane',
-          title: 'Fallback lane title',
-          url: 'https://stale.example/old',
-          active_tab_id: 'active-tab',
-          tabs: [
-            {
-              tab_id: 'active-tab',
-              title: 'Managed browser page',
-              url: 'https://managed.example/current',
-            },
-            {
-              tab_id: 'background-tab',
-              title: 'Background page',
-              url: 'https://managed.example/background',
-            },
-          ],
-          identity: {
-            mode: 'authenticated_replica',
-            label: 'Signed-in replica',
-            generation: 4,
+    const html = renderLaneDetails(
+      lane({
+        lane_id: 'status-only-lane',
+        lane_name: 'External managed lane',
+        title: 'Fallback lane title',
+        url: 'https://stale.example/old',
+        active_tab_id: 'active-tab',
+        tabs: [
+          {
+            tab_id: 'active-tab',
+            title: 'Managed browser page',
+            url: 'https://managed.example/current',
           },
-          owner: {
-            agent_name: 'Research Agent',
-            runtime_instance_id: 'runtime-status',
-            execution_id: 'execution-status',
-            attempt_id: 'attempt-status',
-            cluster_node_id: 'node-status',
+          {
+            tab_id: 'background-tab',
+            title: 'Background page',
+            url: 'https://managed.example/background',
           },
-          queue: {
-            owner_active: 1,
-            owner_queued: 2,
-            global_active: 3,
-            global_queued: 4,
-          },
-          active_operation_count: 2,
-          resource_estimate_bytes: 64 * 1024 * 1024,
-        })}
-        closing={false}
-        onClose={() => undefined}
-      />
+        ],
+        identity: {
+          mode: 'authenticated_replica',
+          label: 'Signed-in replica',
+          generation: 4,
+        },
+        owner: {
+          agent_name: 'Research Agent',
+          runtime_instance_id: 'runtime-status',
+          execution_id: 'execution-status',
+          attempt_id: 'attempt-status',
+          cluster_node_id: 'node-status',
+        },
+        queue: {
+          owner_active: 1,
+          owner_queued: 2,
+          global_active: 3,
+          global_queued: 4,
+        },
+        active_operation_count: 2,
+        resource_estimate_bytes: 64 * 1024 * 1024,
+      })
     );
 
     expect(html.includes('data-browser-lane-status-only="true"')).toBe(true);
@@ -419,9 +422,32 @@ describe('Browser management presentation', () => {
     expect(laneDetailsSource.includes('viewerToken')).toBe(false);
     expect(laneDetailsSource.includes('WebSocket')).toBe(false);
     expect(laneDetailsSource.includes('onInventoryRefresh')).toBe(false);
+    expect(laneDetailsSource.includes('Take control')).toBe(false);
+    expect(laneDetailsSource.includes('onInput')).toBe(false);
     expect(browserPageSource.includes('EmbeddedBrowserViewer')).toBe(false);
     expect(browserPageSource.includes('displayMode')).toBe(false);
     expect(browserPageSource.includes('viewerToken')).toBe(false);
+  });
+
+  test('enables foreground only for a running Primary lane', () => {
+    const runningPrimary = renderLaneDetails(
+      lane({ identity: { mode: 'primary' } }),
+      true
+    );
+    expect(runningPrimary.includes('Open browser in foreground')).toBe(true);
+    expect(runningPrimary.includes('data-browser-foreground-action="true"')).toBe(true);
+    expect(runningPrimary.includes('disabled')).toBe(false);
+
+    for (const unavailable of [
+      lane({ lifecycle_state: 'queued', identity: { mode: 'primary' } }),
+      lane({ lifecycle_state: 'failed', identity: { mode: 'primary' } }),
+      lane({ identity: { mode: 'anonymous' } }),
+    ]) {
+      const html = renderLaneDetails(unavailable);
+      expect(html.includes('Open browser in foreground')).toBe(true);
+      expect(html.includes('disabled')).toBe(true);
+      expect(html.includes('Only a running Primary lane')).toBe(true);
+    }
   });
 
   test('renders Host diagnostics collapsed with safe resource metadata', () => {

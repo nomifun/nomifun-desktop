@@ -38,6 +38,11 @@
     "cancel": "取消",
     "allSuccess": "所有受管浏览器通道已关闭。"
   },
+  "foreground": {
+    "action": "前台打开浏览器",
+    "success": "已在前台打开浏览器。",
+    "unavailable": "仅运行中的主身份通道可在前台打开。"
+  },
   "tree": {
     "noActivePage": "没有活动页面",
     "current": "当前",
@@ -61,7 +66,7 @@
   "details": {
     "laneFallback": "浏览器通道",
     "statusOnly": "仅状态",
-    "externalManagedWindow": "实际浏览器保留在外部托管窗口中；此页面不会内嵌、控制或连接浏览器。",
+    "externalManagedWindow": "实际浏览器在外部受管窗口中运行。本页仅展示状态；前台打开不会增加查看器、接管或页面输入控件。",
     "closeLane": "关闭通道",
     "waitingCapacity": "正在等待浏览器容量",
     "queuePositionInline": "队列第 {{position}} 位",
