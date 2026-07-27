@@ -75,10 +75,7 @@ export const useConversationActions = ({
 
   const removeConversation = useCallback(
     async (conversation_id: ConversationId) => {
-      const success = await ipcBridge.conversation.remove.invoke({ conversation_id: conversation_id });
-      if (!success) {
-        return false;
-      }
+      await ipcBridge.conversation.remove.invoke({ conversation_id: conversation_id });
 
       emitter.emit('conversation.deleted', conversation_id);
       if (activeConversationId === conversation_id) {

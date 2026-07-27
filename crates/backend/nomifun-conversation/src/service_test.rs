@@ -7837,10 +7837,8 @@ async fn writeback_retry_is_linearized_against_stop_clear_reset_and_delete() {
             Arc::new(crate::NoExecutionConversationBoundary),
         );
         let conversation = if matches!(mutation, WritebackRetryLifecycleMutation::Delete) {
-            // Delete correctly rejects Conversations retained by delivery
-            // history. Seed the orthogonal legal case directly: a terminal
-            // transcript with no receipt/Execution retention, so this race
-            // exercises deletion quiescence rather than retention policy.
+            // Seed a terminal aggregate directly so this race exercises
+            // deletion quiescence without first running a model turn.
             let conversation_id = ConversationId::new().into_string();
             let created_at = now_ms();
             nomifun_db::sqlx::query(

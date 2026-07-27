@@ -3838,10 +3838,28 @@ impl IConversationRepository for SqliteConversationRepository {
                 "Conversation '{conversation_id}' not found"
             )));
         }
+        let status: String =
+            sqlx::query_scalar("SELECT status FROM conversations WHERE conversation_id = ?")
+                .bind(conversation_id)
+                .fetch_one(&mut *tx)
+                .await?;
+        if status == "running" {
+            return Err(DbError::Conflict(format!(
+                "Running Conversation '{conversation_id}' must be settled before deletion"
+            )));
+        }
 
-        // These rows are registered KEEP_HISTORY. Since Conversation has no
-        // tombstone row, hard deletion must be restricted rather than leave a
-        // dangling historical identity.
+        // Execution events and execution links are registered KEEP_HISTORY.
+        // Since Conversation has no tombstone row, hard deletion must be
+        // restricted rather than leave a dangling historical identity.
+        //
+        // `conversation_delivery_receipts.conversation_id` is deliberately
+        // different: it is an immutable idempotency-scope token, not a logical
+        // parent reference (the nullable `projected_conversation_id` is the
+        // aggregate reference). Explicit Conversation deletion detaches that
+        // projection below while retaining the receipt, so a delayed replay
+        // still resolves to its terminal outcome without keeping the user
+        // visible Conversation alive forever.
         let historical_reference_exists: bool = sqlx::query_scalar(
             "SELECT \
                 EXISTS(\
@@ -3850,10 +3868,6 @@ impl IConversationRepository for SqliteConversationRepository {
                 ) \
                 OR EXISTS(\
                     SELECT 1 FROM conversation_execution_links \
-                    WHERE conversation_id = ?1\
-                ) \
-                OR EXISTS(\
-                    SELECT 1 FROM conversation_delivery_receipts \
                     WHERE conversation_id = ?1\
                 )",
         )
