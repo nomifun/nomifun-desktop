@@ -3,7 +3,7 @@
 NomiFun agent 内置/接入两项可选的系统级能力：
 
 - **Computer**（computer use，进程内 Rust）：截屏、鼠标键盘合成输入、窗口枚举/聚焦——让 agent 看到并操作本机桌面。crate：`nomi-computer`（xcap + enigo）。
-- **Browser**（browser use，主进程统一托管）：应用只创建一个 `BrowserSessionHub`，由它管理 Chromium Host、Browser Lane、身份、资源队列、嵌入式 Viewer 和清理。`nomi-browser-engine` 提供 CDP 驱动，`nomi-browser` 提供 Lane-aware 工具适配；Native Nomi、Gateway、ACP/Codex、远程 Agent 和并行 AgentExecution attempt 都接入同一个 Hub。
+- **Browser**（browser use，主进程统一托管）：应用只创建一个 `BrowserSessionHub`，由它管理 Chromium Host、Browser Lane、身份、资源队列和清理。`nomi-browser-engine` 提供 CDP 驱动，`nomi-browser` 提供 Lane-aware 工具适配；Native Nomi、Gateway、ACP/Codex、远程 Agent 和并行 AgentExecution attempt 都接入同一个 Hub。
 
 > 注：早期的外接 `@playwright/mcp` sidecar，以及 Native/Gateway/ACP 各自持有私有 `BrowserTool` 或 Chromium 的路径均已移除。`mcp-browser-stdio` 现在是带作用域能力的 Hub 代理，不创建浏览器或 profile。
 >
@@ -26,12 +26,15 @@ NomiFun agent 内置/接入两项可选的系统级能力：
 当前桌面构建默认把两个能力开关设为开启；关闭任一开关会持久化到用户偏好，
 后续新会话不会获得对应能力。Browser 设置还提供：
 
-- **显示模式**：`embedded`（新安装默认）、`external`、`headless`；
+- **浏览器来源**：系统 Chrome/Edge 可执行文件或 managed source；
+- **呈现方式**：Primary 固定使用可见的外置受管 Chromium 窗口；
 - **资源策略**：Automatic、Resource saving、High concurrency；
 - 高级资源上限（仅在需要诊断或精细调优时修改）。
 
-右侧边栏的 **Browser** 页面（`/browser`）列出 running/queued Lane，并提供
-嵌入式查看、tab 选择、后退/前进/刷新、接管、交还控制和关闭操作。
+右侧边栏的 **Browser** 页面（`/browser`）只展示 running/queued Lane 的状态、
+容量、队列、身份、owner 与生命周期，并在权限允许时关闭单个 Lane、某个
+conversation 的 Lane 或全部 Lane。它不嵌入页面，也不提供页面输入、tab 控制、
+用户接管或地址导航；Primary 的真实页面保留在外置受管窗口中。
 
 ### 2. 会话级
 
@@ -63,14 +66,15 @@ max_screenshot_edge = 1568   # 截图长边像素上限
 [tools.browser]
 enabled = true
 allowed_origins = []         # 可选 origin 白名单；空=全放行，仅纵深防御
-# 注：桌面显示模式由 agent.browserUse.displayMode 管理。
+# 注：Primary 固定显示为外置受管窗口。
 # browser_path / idle_timeout_secs / 私有 headless ownership 均为旧兼容字段，
 # 不能绕过 BrowserSessionHub 的身份、容量或生命周期策略。
 ```
 
-启用 Browser 后，Hub 首次需要 Host 时按需解析或获取受管 Chromium，无需
-Node/npm/Playwright。所有 profile 都由 NomiFun 管理，绝不读取或共用用户真实
-Chrome/Edge profile；同一个 user-data directory 也不会被两个存活 Chromium 同时打开。
+启用 Browser 后，Hub 首次需要 Host 时按需解析系统 Chrome/Edge 可执行文件或
+managed source，无需 Node/npm/Playwright。来源只决定二进制；进程始终由 NomiFun
+托管并应用隔离 profile，绝不读取或共用用户真实 Chrome/Edge profile；同一个
+user-data directory 也不会被两个存活 Chromium 同时打开。
 
 ## 构建形态（feature 门控）
 
@@ -89,19 +93,21 @@ Chrome/Edge profile；同一个 user-data directory 也不会被两个存活 Chr
 - 同一 Lane 内的导航、观察和动作严格串行；不同 Lane 可以并行，target、frame、
   ref、tab、download 和 cancellation 状态互不串线。
 - 普通交互式浏览默认使用 **Primary shared live identity**。多个 Primary Lane
-  共享 cookies、站点存储和其他 profile-backed 身份状态，但不共享活动 target、
-  frame、ref、操作 gate、下载归属或控制权。
+  始终在可见的外置受管 Chromium 窗口中运行；它们共享 cookies、站点存储和
+  其他 profile-backed 身份状态，但不共享活动 target、frame、ref、操作 gate
+  或下载归属。
 - 公开读取默认使用 **Anonymous crawl**，不携带 Primary cookies/站点存储。
   有界只读认证扩展可使用 **Authenticated replica**，副本变更不会自动写回
   Primary；可能修改登录或持久账户状态的动作必须回到 Primary。
 - 切换账户、退出测试、不可信浏览或用户显式隔离使用 **Isolated identity**。
+  crawl、replica 与 isolated Host 均可 headless 运行。
 
 容量有明确上限。超过安全预算的 Lane 会进入可取消队列，返回
 `browser_capacity_queued` 或 `system_memory_pressure`，并携带队列位置、原因、
 建议并发和重试延迟。此时应等待、复用已有 Lane、降低并发，或让批量公开读取使用
 `browser_crawl_many`；不要尝试额外启动浏览器绕过限制。
 
-## Browser 工具与用户控制
+## Browser 工具与生命周期
 
 现有导航、观察、动作、截图、tab、下载和 debug action 都可传可选 `lane_id`；
 省略时使用调用方默认 Lane。平台管理 action 包括：
@@ -111,10 +117,6 @@ Chrome/Edge profile；同一个 user-data directory 也不会被两个存活 Chr
 - `browser_list` / `browser_status`：查看 Lane、身份、容量、队列和恢复状态；
 - `browser_close` / `browser_close_all`：关闭当前 owner 的一个或全部 Lane；
 - `browser_crawl_many`：有界并发处理一组 URL，并负责 Lane 复用、排序、取消和清理。
-
-打开 Viewer 只观察，不会自动暂停 Agent。首次用户输入会取得仅作用于当前 Lane
-的临时 control lease；其他 Lane 继续运行。用户可显式“交还 Agent 控制权”，
-控制权在停止续租后也会自动过期。
 
 关闭 Lane 只会让相关浏览器调用收到类型化错误，不会关闭 conversation 或
 AgentExecution。attempt 完成/取消、runtime 终止、conversation 删除、远程连接断开、
@@ -134,7 +136,7 @@ Computer 能力首次使用需在「系统设置 → 隐私与安全性」中授
 - Computer 为单工具 + `action` 参数形态。
 - 只读 action（`screenshot`、`cursor_position`、`list_windows`、`wait`）按 **Info** 类审批——AutoEdit/Default 模式自动放行；操作类 action（点击、输入、滚动、拖拽、`focus_window` 等）按 **Exec** 类——Default 模式需用户确认。
 - Plan mode 下 Computer 整工具不可见（只读规划阶段不操作桌面）。
-- Browser 工具按动作语义派生审批类别：只读观察（如 `observe`/快照）→ Info，写操作（导航、点击、输入等）→ Exec。用户接管只改变当前 Lane 的输入调度，不会绕过 egress、approval、secret、下载或 full-power 策略。
+- Browser 工具按动作语义派生审批类别：只读观察（如 `observe`/快照）→ Info，写操作（导航、点击、输入等）→ Exec；Browser 管理页不能触发这些页面动作。egress、approval、secret、下载、full-power 与不可逆动作护栏继续生效，模型输入不能伪造可信批准。
 - 推荐工作流：`screenshot` 观察 → 操作 → 再次 `screenshot` 验证。
 
 ## 截图与 token 治理

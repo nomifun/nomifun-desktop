@@ -6,8 +6,8 @@ NomiFun exposes two optional automation capability families to agents:
   focus control through the in-process Rust implementation (`nomi-computer`,
   with accessibility helpers in `nomi-a11y`).
 - **Browser use**: a single main-process `BrowserSessionHub` manages Chromium
-  Hosts, addressable Browser Lanes, identity, resource queues, the embedded
-  viewer, and cleanup. `nomi-browser-engine` supplies the CDP driver and
+  Hosts, addressable Browser Lanes, identity, resource queues, and cleanup.
+  `nomi-browser-engine` supplies the CDP driver and
   `nomi-browser` supplies the Lane-aware tool adapter. Native Nomi, Gateway,
   ACP/Codex, remote agents, and parallel AgentExecution attempts all enter
   this Hub.
@@ -42,14 +42,16 @@ corresponding feature is compiled. Turning either toggle off persists a user
 preference and prevents new sessions from receiving that capability. Browser
 Settings also provides:
 
-- display mode: `embedded` (the fresh-install default), `external`, or
-  `headless`;
+- browser source: a system Chrome/Edge executable or the managed source;
+- presentation: a visible external managed Chromium window for Primary;
 - resource policy: Automatic, Resource saving, or High concurrency;
 - advanced resource limits for diagnostics and explicit tuning.
 
 The sidebar **Browser** page (`/browser`) lists running and queued Lanes and
-provides the embedded viewer, tab selection, navigation controls, takeover,
-return-control, and close actions.
+shows status, capacity, queue, identity, owner, and lifecycle data. It can close
+a Lane, a conversation's Lanes, or all Lanes when authorized. It does not embed
+the page or provide page input, tab control, user takeover, or address
+navigation; the live Primary page remains in its external managed window.
 
 ### Per Session
 
@@ -86,15 +88,17 @@ max_screenshot_edge = 1568
 [tools.browser]
 enabled = true
 allowed_origins = []
-# Desktop presentation is controlled by agent.browserUse.displayMode.
+# Primary presentation is always an external managed window.
 # browser_path, idle_timeout_secs, and private headless ownership are legacy
 # compatibility fields and cannot bypass BrowserSessionHub policy.
 ```
 
-On first use, the Hub resolves or acquires managed Chromium without requiring
-Node, npm, or Playwright. Every profile is application-managed and isolated
-from the user's real Chrome or Edge profile. Two live Chromium processes are
-never allowed to open the same user-data directory.
+On first use, the Hub resolves a system Chrome/Edge executable or the managed
+source without requiring Node, npm, or Playwright. The selected source chooses
+only the executable: every process remains managed by NomiFun and always uses
+an application-owned isolated profile, never the user's real Chrome or Edge
+profile. Two live Chromium processes are never allowed to open the same
+user-data directory.
 
 ## Build Matrix
 
@@ -117,14 +121,15 @@ features, the backend should warn rather than expose a non-working tool.
   concurrently without crossing target, frame, ref, tab, download, or
   cancellation state.
 - Ordinary interactive work defaults to the **Primary shared live identity**.
+  Primary is always headful in a visible external managed Chromium window.
   Primary Lanes share cookies and profile-backed site state, but never share
-  active targets, frame/ref cursors, operation gates, downloads, or control.
+  active targets, frame/ref cursors, operation gates, or downloads.
 - Public reads default to **Anonymous crawl**, with no Primary cookies or site
   storage. Bounded read-only authenticated expansion may use an
   **Authenticated replica**; replica changes never merge back automatically,
   and identity-changing operations require Primary. Account switching,
   sign-out tests, untrusted browsing, and explicit isolation use an
-  **Isolated identity**.
+  **Isolated identity**. Crawl, replica, and isolated Hosts may run headless.
 
 Capacity is explicitly bounded. Requests beyond the safe budget enter a
 cancellable queue and return `browser_capacity_queued` or
@@ -133,7 +138,7 @@ and retry delay. Wait, reuse a Lane, lower concurrency, or use
 `browser_crawl_many` for bounded batch reads; do not launch another browser to
 bypass capacity.
 
-## Browser Tools And User Control
+## Browser Tools And Lifecycle
 
 Existing navigation, observation, action, screenshot, tab, download, and debug
 actions accept an optional `lane_id`; omission uses the caller's default Lane.
@@ -147,11 +152,6 @@ Lane management actions are:
   caller;
 - `browser_crawl_many`: process a bounded URL batch while owning Lane reuse,
   ordering, cancellation, and cleanup.
-
-Opening a viewer observes without pausing the agent. The first user input takes
-a temporary control lease for only that Lane, while other Lanes continue.
-Control can be explicitly returned to the agent and also expires when its
-heartbeat stops.
 
 Closing a Lane gives its browser calls a typed error but does not close the
 conversation or AgentExecution. Attempt completion/cancellation, runtime
@@ -199,8 +199,9 @@ Backed by `GET/POST /api/computer/permissions[/request|/open-settings]`
 - Plan mode hides the whole computer-use tool.
 - Browser actions derive approval from behavior: observation is info-level;
   navigation, clicking, typing, and other page mutations are execution-level.
-  User takeover only changes input scheduling for the selected Lane; it does
-  not bypass egress, approval, secret, download, or full-power policy.
+  The Browser management page cannot invoke those actions. Egress, approval,
+  secret, download, full-power, and irreversible-action safeguards remain in
+  force, and model input cannot manufacture trusted approval.
 
 Recommended loop: observe with a screenshot or browser snapshot, perform one
 small operation, then observe again.
