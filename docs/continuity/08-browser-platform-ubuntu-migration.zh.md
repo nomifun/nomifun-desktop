@@ -273,6 +273,6 @@ warm timer/sweep 只能兜底。
 - `.github/workflows` 下没有 `.yml`/`.yaml`；
 - 已明确记录 7 个当前失败测试和 P0 阻塞项。
 
-归档提交：见下方 `归档提交` 字段（提交后填写）。
+归档代码提交：`00823ec3fb470ee4d0dda98176679a0786cfc565`
 
-<!-- ARCHIVE_COMMIT: fill after local commit -->
+契约补充提交：本文所在的后续文档提交（可通过 `git log -2` 确认）。
