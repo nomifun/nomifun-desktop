@@ -10,6 +10,7 @@ pub(crate) const ITEM_TYPE_IMAGE: i32 = 2;
 pub(crate) const ITEM_TYPE_VOICE: i32 = 3;
 #[allow(dead_code)]
 pub(crate) const ITEM_TYPE_FILE: i32 = 4;
+pub(crate) const MESSAGE_TYPE_USER: i32 = 1;
 
 // `getuploadurl` media_type (proto UploadMediaType) — DISTINCT from the
 // `item_list[].type` constants above: FILE is 3 here but 4 as an item type.
@@ -84,18 +85,77 @@ pub(crate) struct GetUpdatesResponse {
     pub msgs: Option<Vec<WeixinRawMessage>>,
     #[serde(default)]
     pub get_updates_buf: Option<String>,
+    #[serde(default)]
+    pub longpolling_timeout_ms: Option<u64>,
+}
+
+/// Provider-owned identity from the top-level `WeixinMessage.message_id`.
+///
+/// Tencent's protocol currently emits a JSON number, while accepting a string
+/// here keeps the adapter compatible with older gateways and recorded fixtures
+/// without losing precision or manufacturing an unstable local ID.
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(untagged)]
+pub(crate) enum WeixinMessageId {
+    Unsigned(u64),
+    Signed(i64),
+    String(String),
+}
+
+impl WeixinMessageId {
+    pub(crate) fn stable_value(&self) -> Option<String> {
+        match self {
+            Self::Unsigned(value) => Some(value.to_string()),
+            Self::Signed(value) => Some(value.to_string()),
+            Self::String(value) => {
+                let trimmed = value.trim();
+                (!trimmed.is_empty()).then(|| trimmed.to_owned())
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
+#[allow(dead_code)]
 pub(crate) struct WeixinRawMessage {
+    #[serde(default)]
+    pub seq: Option<u64>,
+    #[serde(default)]
+    pub client_id: Option<String>,
     #[serde(default)]
     pub from_user_id: Option<String>,
     #[serde(default)]
-    pub context_token: Option<String>,
+    pub to_user_id: Option<String>,
     #[serde(default)]
-    pub msg_id: Option<String>,
+    pub context_token: Option<String>,
+    /// Official top-level event ID. `msg_id` belongs to an item in the current
+    /// protocol; the alias is deliberately retained for legacy gateway payloads.
+    #[serde(default, alias = "msg_id")]
+    pub message_id: Option<WeixinMessageId>,
+    #[serde(default)]
+    pub create_time_ms: Option<i64>,
+    #[serde(default)]
+    pub session_id: Option<String>,
+    #[serde(default)]
+    pub message_type: Option<i32>,
+    #[serde(default)]
+    pub message_state: Option<i32>,
     #[serde(default)]
     pub item_list: Option<Vec<WeixinRawItem>>,
+}
+
+impl WeixinRawMessage {
+    /// Return a provider-stable id suitable for the durable inbound receipt.
+    ///
+    /// `message_id` is authoritative. `seq` is the documented provider message
+    /// sequence and is only used when an older payload omits `message_id`.
+    pub(crate) fn stable_event_id(&self) -> Option<String> {
+        self.message_id
+            .as_ref()
+            .and_then(WeixinMessageId::stable_value)
+            .map(|value| format!("message:{value}"))
+            .or_else(|| self.seq.map(|value| format!("seq:{value}")))
+    }
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -148,6 +208,16 @@ pub(crate) struct MediaEncryptInfo {
 // ---------------------------------------------------------------------------
 // sendmessage
 // ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub(crate) struct SendMessageResponse {
+    #[serde(default)]
+    pub ret: Option<i32>,
+    #[serde(default)]
+    pub errcode: Option<i32>,
+    #[serde(default)]
+    pub errmsg: Option<String>,
+}
 
 #[derive(Debug, Serialize)]
 pub(crate) struct SendMessageRequest {
@@ -206,6 +276,7 @@ pub(crate) struct GetUploadUrlRequest {
     pub no_need_thumb: bool,
     /// AES-128 key, hex-encoded (32 chars).
     pub aeskey: String,
+    pub base_info: serde_json::Value,
 }
 
 /// `getuploadurl` response.
@@ -326,14 +397,16 @@ mod tests {
             "ret": 0,
             "errcode": 0,
             "msgs": [{
+                "seq": 41,
+                "message_id": 9007199254740993,
                 "from_user_id": "user_1",
                 "context_token": "ctx_abc",
-                "msg_id": "msg_1",
                 "item_list": [
                     {"type": 1, "text_item": {"text": "Hello"}}
                 ]
             }],
-            "get_updates_buf": "base64buf=="
+            "get_updates_buf": "base64buf==",
+            "longpolling_timeout_ms": 35000
         }"#;
         let resp: GetUpdatesResponse = serde_json::from_str(json).unwrap();
         assert_eq!(resp.ret, Some(0));
@@ -342,10 +415,29 @@ mod tests {
         assert_eq!(msgs.len(), 1);
         assert_eq!(msgs[0].from_user_id.as_deref(), Some("user_1"));
         assert_eq!(msgs[0].context_token.as_deref(), Some("ctx_abc"));
+        assert_eq!(msgs[0].stable_event_id().as_deref(), Some("message:9007199254740993"));
         let items = msgs[0].item_list.as_ref().unwrap();
         assert_eq!(items[0].item_type, Some(1));
         assert_eq!(items[0].text_item.as_ref().unwrap().text.as_deref(), Some("Hello"));
         assert_eq!(resp.get_updates_buf.as_deref(), Some("base64buf=="));
+        assert_eq!(resp.longpolling_timeout_ms, Some(35_000));
+    }
+
+    #[test]
+    fn deserialize_legacy_string_message_id_and_sequence_fallback() {
+        let legacy: WeixinRawMessage = serde_json::from_str(
+            r#"{"msg_id":" legacy-42 ","seq":7,"from_user_id":"user_1","item_list":[]}"#,
+        )
+        .unwrap();
+        assert_eq!(legacy.stable_event_id().as_deref(), Some("message:legacy-42"));
+
+        let sequence_only: WeixinRawMessage =
+            serde_json::from_str(r#"{"seq":8,"from_user_id":"user_1","item_list":[]}"#).unwrap();
+        assert_eq!(sequence_only.stable_event_id().as_deref(), Some("seq:8"));
+
+        let missing: WeixinRawMessage =
+            serde_json::from_str(r#"{"from_user_id":"user_1","item_list":[]}"#).unwrap();
+        assert!(missing.stable_event_id().is_none());
     }
 
     #[test]
@@ -354,7 +446,7 @@ mod tests {
             "ret": 0,
             "msgs": [{
                 "from_user_id": "user_2",
-                "msg_id": "msg_2",
+                "message_id": 2,
                 "item_list": [
                     {"type": 2, "image_item": {"media": {"encrypt_query_param": "enc_param", "aes_key": "key123"}, "aeskey": "hex_key"}},
                     {"type": 4, "file_item": {"media": {"encrypt_query_param": "enc_f"}, "file_name": "doc.pdf"}}

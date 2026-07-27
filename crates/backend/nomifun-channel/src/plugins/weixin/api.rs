@@ -5,20 +5,24 @@ use aes::cipher::generic_array::GenericArray;
 use aes::cipher::{BlockEncrypt, KeyInit};
 use base64::Engine;
 use md5::{Digest, Md5};
+use reqwest::header::{AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderName, HeaderValue};
 use reqwest::Client;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use tracing::{debug, warn};
 use uuid::Uuid;
 
-use crate::constants::{WEIXIN_API_TIMEOUT, WEIXIN_POLL_TIMEOUT};
+use crate::constants::WEIXIN_API_TIMEOUT;
 use crate::error::ChannelError;
 
 use super::types::{
     GetUpdatesRequest, GetUpdatesResponse, GetUploadUrlRequest, GetUploadUrlResponse, ILinkResponse, ITEM_TYPE_FILE,
     ITEM_TYPE_IMAGE, ITEM_TYPE_TEXT, QrCodeData, QrCodeStatusData, SendCdnMedia, SendFileItem, SendImageItem,
-    SendMessageItem, SendMessageMsg, SendMessageRequest, SendTextItem, UPLOAD_MEDIA_TYPE_FILE, UPLOAD_MEDIA_TYPE_IMAGE,
+    SendMessageItem, SendMessageMsg, SendMessageRequest, SendMessageResponse, SendTextItem, UPLOAD_MEDIA_TYPE_FILE,
+    UPLOAD_MEDIA_TYPE_IMAGE,
 };
+
+const ILINK_APP_ID: &str = "bot";
 
 /// AES-128-ECB ciphertext size for `n` plaintext bytes (PKCS7 always pads, so a
 /// full-block plaintext still grows by one block).
@@ -40,38 +44,111 @@ fn aes128_ecb_pkcs7_encrypt(plaintext: &[u8], key: &[u8; 16]) -> Vec<u8> {
     buf
 }
 
+/// Official wire format: random uint32 -> decimal UTF-8 -> base64.
+fn encode_wechat_uin(value: u32) -> String {
+    base64::engine::general_purpose::STANDARD.encode(value.to_string().as_bytes())
+}
+
+fn random_wechat_uin() -> Result<String, ChannelError> {
+    let mut bytes = [0u8; 4];
+    getrandom::getrandom(&mut bytes)
+        .map_err(|error| ChannelError::PlatformApi(format!("failed to generate X-WECHAT-UIN: {error}")))?;
+    Ok(encode_wechat_uin(u32::from_be_bytes(bytes)))
+}
+
+/// Encode semver as the iLink uint32 client version (0x00MMNNPP).
+fn ilink_client_version(version: &str) -> u32 {
+    let mut parts = version
+        .split_once('-')
+        .map_or(version, |(core, _)| core)
+        .split('.')
+        .map(|part| part.parse::<u32>().unwrap_or(0) & 0xff);
+    let major = parts.next().unwrap_or(0);
+    let minor = parts.next().unwrap_or(0);
+    let patch = parts.next().unwrap_or(0);
+    (major << 16) | (minor << 8) | patch
+}
+
+fn base_info() -> serde_json::Value {
+    serde_json::json!({
+        "channel_version": env!("CARGO_PKG_VERSION"),
+        "bot_agent": format!("NomiFun/{}", env!("CARGO_PKG_VERSION")),
+    })
+}
+
+fn common_headers() -> HeaderMap {
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        HeaderName::from_static("ilink-app-id"),
+        HeaderValue::from_static(ILINK_APP_ID),
+    );
+    headers.insert(
+        HeaderName::from_static("ilink-app-clientversion"),
+        HeaderValue::from_str(&ilink_client_version(env!("CARGO_PKG_VERSION")).to_string())
+            .expect("packed client version is always a valid header"),
+    );
+    headers
+}
+
+fn authenticated_headers(bot_token: &str) -> Result<HeaderMap, ChannelError> {
+    let wechat_uin = random_wechat_uin()?;
+    authenticated_headers_with_uin(bot_token, &wechat_uin)
+}
+
+fn authenticated_headers_with_uin(bot_token: &str, wechat_uin: &str) -> Result<HeaderMap, ChannelError> {
+    let mut headers = common_headers();
+    headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+    headers.insert(
+        HeaderName::from_static("authorizationtype"),
+        HeaderValue::from_static("ilink_bot_token"),
+    );
+    headers.insert(
+        AUTHORIZATION,
+        HeaderValue::from_str(&format!("Bearer {}", bot_token.trim()))
+            .map_err(|error| ChannelError::InvalidConfig(format!("invalid WeChat bot token header: {error}")))?,
+    );
+    headers.insert(
+        HeaderName::from_static("x-wechat-uin"),
+        HeaderValue::from_str(wechat_uin)
+            .map_err(|error| ChannelError::InvalidConfig(format!("invalid X-WECHAT-UIN header: {error}")))?,
+    );
+    Ok(headers)
+}
+
+fn ensure_send_message_success(response: &SendMessageResponse) -> Result<(), ChannelError> {
+    let ret = response.ret.unwrap_or(0);
+    let errcode = response.errcode.unwrap_or(0);
+    if ret == 0 && errcode == 0 {
+        return Ok(());
+    }
+
+    Err(ChannelError::MessageSendFailed(format!(
+        "sendmessage API error: ret={ret}, errcode={errcode}, errmsg={}",
+        response.errmsg.as_deref().unwrap_or("(none)")
+    )))
+}
+
 /// HTTP client for the WeChat iLink Bot API.
 pub(crate) struct WeixinApi {
     client: Client,
     base_url: String,
     bot_token: String,
-    wechat_uin: String,
 }
 
 impl WeixinApi {
     pub fn new(client: Client, base_url: &str, bot_token: &str) -> Self {
         let base = base_url.trim_end_matches('/');
 
-        let mut uin_bytes = [0u8; 4];
-        getrandom::getrandom(&mut uin_bytes).expect("RNG failure");
-        let wechat_uin = base64::engine::general_purpose::STANDARD.encode(uin_bytes);
-
         Self {
             client,
             base_url: base.to_string(),
             bot_token: bot_token.to_string(),
-            wechat_uin,
         }
     }
 
     #[cfg(test)]
     pub fn bot_token(&self) -> &str {
         &self.bot_token
-    }
-
-    #[cfg(test)]
-    pub fn wechat_uin(&self) -> &str {
-        &self.wechat_uin
     }
 
     // -----------------------------------------------------------------------
@@ -85,14 +162,12 @@ impl WeixinApi {
         timeout: Duration,
     ) -> Result<T, ChannelError> {
         let url = format!("{}/{}", self.base_url, endpoint);
+        let headers = authenticated_headers(&self.bot_token)?;
 
         let resp = self
             .client
             .post(&url)
-            .header("Content-Type", "application/json")
-            .header("AuthorizationType", "ilink_bot_token")
-            .header("Authorization", format!("Bearer {}", self.bot_token))
-            .header("X-WECHAT-UIN", &self.wechat_uin)
+            .headers(headers)
             .timeout(timeout)
             .json(body)
             .send()
@@ -116,7 +191,7 @@ impl WeixinApi {
         let resp = self
             .client
             .get(&url)
-            .header("iLink-App-ClientVersion", "1")
+            .headers(common_headers())
             .query(query)
             .send()
             .await
@@ -187,13 +262,17 @@ impl WeixinApi {
     /// Long-poll for new updates using buffer-based protocol.
     ///
     /// `POST /ilink/bot/getupdates`
-    pub async fn get_updates(&self, buf: &str) -> Result<GetUpdatesResponse, ChannelError> {
+    pub async fn get_updates(
+        &self,
+        buf: &str,
+        long_poll_timeout: Duration,
+    ) -> Result<GetUpdatesResponse, ChannelError> {
         let body = GetUpdatesRequest {
             get_updates_buf: buf.to_string(),
-            base_info: serde_json::json!({}),
+            base_info: base_info(),
         };
 
-        let timeout = WEIXIN_POLL_TIMEOUT + Duration::from_secs(10);
+        let timeout = long_poll_timeout + Duration::from_secs(10);
 
         self.authenticated_post("ilink/bot/getupdates", &body, timeout).await
     }
@@ -227,10 +306,10 @@ impl WeixinApi {
                 }],
                 context_token: context_token.map(String::from),
             },
-            base_info: serde_json::json!({}),
+            base_info: base_info(),
         };
 
-        let _resp: serde_json::Value = self
+        let response: SendMessageResponse = self
             .authenticated_post("ilink/bot/sendmessage", &body, WEIXIN_API_TIMEOUT)
             .await
             .map_err(|e| {
@@ -238,7 +317,10 @@ impl WeixinApi {
                 ChannelError::MessageSendFailed(format!("sendmessage failed: {e}"))
             })?;
 
-        Ok(())
+        ensure_send_message_success(&response).map_err(|error| {
+            warn!(to_user_id, error = %error, "sendmessage API rejected request");
+            error
+        })
     }
 
     // -----------------------------------------------------------------------
@@ -293,6 +375,7 @@ impl WeixinApi {
             filesize,
             no_need_thumb: true,
             aeskey: aeskey_hex.clone(),
+            base_info: base_info(),
         };
         let upload_resp: GetUploadUrlResponse = self
             .authenticated_post("ilink/bot/getuploadurl", &upload_req, WEIXIN_API_TIMEOUT)
@@ -351,9 +434,9 @@ impl WeixinApi {
                 item_list: vec![item],
                 context_token: context_token.map(String::from),
             },
-            base_info: serde_json::json!({}),
+            base_info: base_info(),
         };
-        let _resp: serde_json::Value = self
+        let response: SendMessageResponse = self
             .authenticated_post("ilink/bot/sendmessage", &body, WEIXIN_API_TIMEOUT)
             .await
             .map_err(|e| {
@@ -361,7 +444,10 @@ impl WeixinApi {
                 ChannelError::MessageSendFailed(format!("send media message failed: {e}"))
             })?;
 
-        Ok(())
+        ensure_send_message_success(&response).map_err(|error| {
+            warn!(to_user_id, error = %error, "send media message API rejected request");
+            error
+        })
     }
 
     /// POST AES-encrypted `ciphertext` to the CDN `upload_url` returned by
@@ -466,24 +552,60 @@ mod tests {
     }
 
     #[test]
-    fn api_generates_wechat_uin() {
-        let client = Client::new();
-        let api = WeixinApi::new(client, "https://example.com", "tok");
-        // base64 of 4 bytes should be 8 chars (with padding)
-        assert_eq!(api.wechat_uin().len(), 8);
-        // Should be valid base64
-        let decoded = base64::engine::general_purpose::STANDARD.decode(api.wechat_uin());
-        assert!(decoded.is_ok());
-        assert_eq!(decoded.unwrap().len(), 4);
+    fn wechat_uin_encodes_decimal_uint32_bytes() {
+        let encoded = encode_wechat_uin(305_419_896);
+        let decoded = base64::engine::general_purpose::STANDARD.decode(encoded).unwrap();
+        assert_eq!(String::from_utf8(decoded).unwrap(), "305419896");
     }
 
     #[test]
-    fn api_generates_different_uin_each_time() {
-        let client1 = Client::new();
-        let api1 = WeixinApi::new(client1, "https://example.com", "tok");
-        let client2 = Client::new();
-        let api2 = WeixinApi::new(client2, "https://example.com", "tok");
-        // Extremely unlikely to collide (2^32 space)
-        assert_ne!(api1.wechat_uin(), api2.wechat_uin());
+    fn random_wechat_uin_decodes_to_uint32_decimal() {
+        let encoded = random_wechat_uin().unwrap();
+        let decoded = base64::engine::general_purpose::STANDARD.decode(encoded).unwrap();
+        let decimal = String::from_utf8(decoded).unwrap();
+        assert!(decimal.bytes().all(|byte| byte.is_ascii_digit()));
+        decimal.parse::<u32>().unwrap();
+    }
+
+    #[test]
+    fn client_version_matches_official_packed_semver_format() {
+        assert_eq!(ilink_client_version("1.0.11"), 65_547);
+        assert_eq!(ilink_client_version("0.3.2-beta.1"), 770);
+    }
+
+    #[test]
+    fn base_info_identifies_nomifun_version() {
+        let info = base_info();
+        assert_eq!(info["channel_version"], env!("CARGO_PKG_VERSION"));
+        assert_eq!(info["bot_agent"], format!("NomiFun/{}", env!("CARGO_PKG_VERSION")));
+    }
+
+    #[test]
+    fn send_message_business_error_is_not_treated_as_success() {
+        let response = SendMessageResponse {
+            ret: Some(-1),
+            errcode: Some(40003),
+            errmsg: Some("invalid context".into()),
+        };
+        let error = ensure_send_message_success(&response).unwrap_err();
+        assert!(error.to_string().contains("ret=-1"));
+        assert!(error.to_string().contains("errcode=40003"));
+        assert!(ensure_send_message_success(&SendMessageResponse::default()).is_ok());
+    }
+
+    #[test]
+    fn authenticated_posts_follow_official_headers() {
+        let encoded_uin = encode_wechat_uin(123_456_789);
+        let headers = authenticated_headers_with_uin("test-token", &encoded_uin).unwrap();
+        let expected_version = ilink_client_version(env!("CARGO_PKG_VERSION")).to_string();
+
+        assert_eq!(headers["authorizationtype"], "ilink_bot_token");
+        assert_eq!(headers["authorization"], "Bearer test-token");
+        assert_eq!(headers["ilink-app-id"], ILINK_APP_ID);
+        assert_eq!(
+            headers["ilink-app-clientversion"],
+            expected_version.as_str()
+        );
+        assert_eq!(headers["x-wechat-uin"], encoded_uin);
     }
 }
