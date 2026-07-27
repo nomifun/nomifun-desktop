@@ -26,8 +26,20 @@
 - 不使用用户个人 Chrome/Edge profile；
 - Primary 仍使用应用管理的稳定 profile，但其进程默认无头；
 - Anonymous、Authenticated Replica、Isolated Host 也默认无头；
-- 用户可在设置中调整资源策略，但**可见性不能被普通 Agent action 或模型参数
-  随意打开**。
+- 用户可在 Settings 调整应用级的默认可见策略：新安装默认“后台静默
+  （headless）”，用户可以显式改成“默认前台可见（external/headful）”；该选择
+  属于可信用户偏好，**不能被普通 Agent action 或模型参数覆盖**。即使用户选择
+  默认前台，也不得恢复嵌入式 Viewer 或用户接管能力。
+
+推荐迁移契约：
+
+- `agent.browserUse.displayMode=headless`：默认无头；
+- `agent.browserUse.displayMode=external`：用户明确选择默认前台可见；
+- 历史 `embedded`：迁移为 `headless`，因为嵌入式 Viewer 已退出产品；
+- 历史 `silent=true`：迁移为 `headless`；
+- 历史 `silent=false`：迁移为 `external`；
+- 两者都不存在：使用并持久化 `headless`；
+- 不再写入 `agent.browserUse.silent`。
 
 ### 2.2 前台打开是管理操作，不是 Agent 能力
 
@@ -70,6 +82,11 @@ POST /api/browser/lanes/{lane_id}/foreground
 5. 旧 `agent.browserUse.silent` 仅作迁移读取，不再写回；display mode 统一收敛
    到管理层的 `external` 语义（routine Agent execution 仍然 headless）。
 6. 文档、i18n、Browser 管理页测试和 Engine/Agent 定向测试已同步过一轮。
+
+注意：归档代码中的设置层目前把所有旧 display mode 统一迁移为单一
+`external` 展示标签，而后端 `primary_host_is_headful()` 又始终返回 `false`。因此
+“默认真正无头”已实现，但“用户可以调整全局默认可见策略”**尚未实现**，见
+P0-G；不要把当前单选 UI 当作最终产品契约。
 
 主要改动区域：
 
@@ -165,6 +182,21 @@ cargo test -p nomifun-browser-platform --lib
 归档前 `hub.rs` 中临时的 `#[cfg(test)] eprintln!` 已删除。当前代码仍可能有编译
 warning（未接线的 finalization 脚手架），不要把 warning 当作完成证明。
 
+### P0-G：补齐用户可调整的全局默认可见策略
+
+当前归档实现将 `BrowserStartupPreferences.display_mode` 和前端
+`BROWSER_DISPLAY_MODES` 收敛为 `external`，同时始终以 headless 启动 Primary。
+Ubuntu 续作需要按 2.1 的迁移契约重新提供两个可信用户选项：
+
+- 后台静默（默认，`headless`）；
+- 默认前台可见（用户显式选择，`external`）。
+
+后端必须在 Host launch policy 中执行该偏好，而不是只改变文案；普通 Agent/模型
+不能通过 lane name、tool JSON 或请求参数覆盖它。无论选择哪一项，用户仍可在
+管理页手动“前台打开”当前 running Primary。不得重新加入 `embedded`、截图预览、
+Viewer token、接管或输入桥接。应补新安装、旧 `displayMode`、旧 `silent`、损坏值
+以及“不再写 silent”的前后端迁移测试。
+
 ## 5. Ubuntu 继续开发启动步骤
 
 ```bash
@@ -199,12 +231,14 @@ handoff.zh.md、architecture/browser-platform.zh.md 和 guides/computer-browser-
 不要 push。先输出 git status、HEAD、origin/main...HEAD 和 .github/workflows 下的
 文件检查。
 
-产品决策不可改变：普通和大多数简单的 Browser Search/知识检索全局默认使用真正的
-Chromium --headless=new，不弹窗、不抢焦点；Primary 也默认无头。只有认证用户从
-/browser 管理页对 running Primary 明确调用 POST /api/browser/lanes/{id}/foreground
-时，才关闭旧 headless Host 并用同一应用 profile 创建 headful Host。没有嵌入式预览、
-JPEG 轮询、Viewer WebSocket、用户接管或页面输入能力。关闭最后 Lane/turn/runtime
-后必须立即关闭最后 Host，warm timer/sweep 只能兜底。
+产品决策不可改变：普通和大多数简单的 Browser Search/知识检索在新安装上全局默认
+使用真正的 Chromium --headless=new，不弹窗、不抢焦点；Primary 也默认无头。
+Settings 必须允许可信用户把应用级默认策略改成 external/headful，但普通 Agent/模型
+不能覆盖该偏好。无头模式下，认证用户仍可从 /browser 管理页对 running Primary
+明确调用 POST /api/browser/lanes/{id}/foreground，关闭旧 headless Host 并用同一
+应用 profile 创建 headful Host。没有嵌入式预览、JPEG 轮询、Viewer WebSocket、
+用户接管或页面输入能力。关闭最后 Lane/turn/runtime 后必须立即关闭最后 Host，
+warm timer/sweep 只能兜底。
 
 先修 P0：
 1. 在 crates/backend/nomifun-browser-platform/src/hub.rs 接通 per-Host
@@ -219,6 +253,9 @@ JPEG 轮询、Viewer WebSocket、用户接管或页面输入能力。关闭最�
 5. 按新契约改写 Hub 测试：显式最后 Lane close 立即 Host shutdown，warm timer 仅测
    被动回收；FakeHost 要记录并反映 request.headful；补跨 Lane/turn/runtime cleanup
    和 Ubuntu bundled/configured Chromium 进程残留测试。
+6. 修复设置契约：displayMode 只提供 headless（新安装默认）与 external（用户显式
+   默认前台）两项；按迁移表保留用户明确选择，不再写 silent；后端 launch policy
+   必须实际执行该偏好，Agent tool JSON 无权覆盖。
 
 每个改动后运行定向测试，最后运行 cargo fmt --all、cargo check/test、bun typecheck
 和 git diff --check。禁止 GitHub Actions；.github/workflows 下不得有 yml/yaml。完成
