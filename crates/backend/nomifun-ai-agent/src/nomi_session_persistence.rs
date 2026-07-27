@@ -177,6 +177,7 @@ impl NomiSessionPersistence {
         session.messages.clear();
         session.total_usage = Default::default();
         session.activated_deferred_tools.clear();
+        session.editable_turn = None;
         session.updated_at = chrono::Utc::now();
         save_json_atomic(path, &session)?;
 
@@ -349,7 +350,7 @@ fn io_error(operation: &str, path: &Path, error: std::io::Error) -> AppError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nomi_agent::session::SessionManager;
+    use nomi_agent::session::{EditableTurnCheckpoint, SessionManager};
     use nomi_types::message::{ContentBlock, Message, Role};
 
     fn add_context(manager: &SessionManager, session: &mut Session, text: &str, owner: i64) {
@@ -381,6 +382,11 @@ mod tests {
             .create("openai", "model", "/target", Some(&target_id))
             .expect("create target");
         add_context(&manager, &mut target, "old target context", owner);
+        target.editable_turn = Some(EditableTurnCheckpoint {
+            source_message_id: "target-message".to_owned(),
+            start_len: 0,
+        });
+        manager.save(&target).expect("save target checkpoint");
         let mut sibling = manager
             .create("openai", "model", "/sibling", Some(&sibling_id))
             .expect("create sibling");
@@ -390,6 +396,12 @@ mod tests {
             "unrelated context must survive",
             sibling_owner,
         );
+        let sibling_checkpoint = EditableTurnCheckpoint {
+            source_message_id: "sibling-message".to_owned(),
+            start_len: 0,
+        };
+        sibling.editable_turn = Some(sibling_checkpoint.clone());
+        manager.save(&sibling).expect("save sibling checkpoint");
 
         let persistence = NomiSessionPersistence::new(session_dir.clone());
         assert_eq!(
@@ -405,6 +417,7 @@ mod tests {
         let cleared = fresh_loader.load(&target_id).expect("load cleared target");
         assert!(cleared.messages.is_empty());
         assert!(cleared.activated_deferred_tools.is_empty());
+        assert!(cleared.editable_turn.is_none());
         assert_eq!(cleared.total_usage, Default::default());
         let fresh_index = fresh_loader.list().expect("load repaired session index");
         let cleared_meta = fresh_index
@@ -427,6 +440,7 @@ mod tests {
             preserved.activated_deferred_tools,
             vec!["knowledge_search".to_owned()]
         );
+        assert_eq!(preserved.editable_turn, Some(sibling_checkpoint));
         let sibling_meta = fresh_index
             .iter()
             .find(|meta| meta.id == sibling_id)

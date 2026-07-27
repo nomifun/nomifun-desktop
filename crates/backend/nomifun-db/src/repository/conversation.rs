@@ -880,6 +880,30 @@ pub trait IConversationRepository: Send + Sync {
         Ok(0)
     }
 
+    /// Atomically detaches historical projections and truncates the exact
+    /// message suffix owned by an already-admitted edit/resubmit operation.
+    ///
+    /// Unlike [`Self::delete_messages_from`], this operation may remove
+    /// messages projected by completed delivery receipts. Immutable receipt
+    /// identity remains permanent; only nullable aggregate projections and
+    /// projected message correlations may be detached. Implementations must
+    /// verify the exact active edit owner before changing any projection.
+    async fn truncate_messages_for_admitted_edit(
+        &self,
+        _user_id: &str,
+        _conversation_id: &str,
+        _operation_id: &str,
+        _request_payload: &str,
+        _expected_admission_epoch: i64,
+        _from_created_at: i64,
+        _from_message_id: &str,
+        _updated_at: TimestampMs,
+    ) -> Result<u64, DbError> {
+        Err(DbError::Init(
+            "conversation repository cannot atomically truncate an admitted edit".to_owned(),
+        ))
+    }
+
     /// Finds a message by (conversation_id, msg_id, type) triple.
     async fn get_message_by_msg_id(
         &self,

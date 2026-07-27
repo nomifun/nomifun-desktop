@@ -489,14 +489,35 @@ impl AgentRuntimeHandle {
         }
     }
 
+    /// Validate an exact rewind checkpoint without mutating the runtime.
+    pub async fn ensure_can_rewind_last_turn(
+        &self,
+        expected_source_message_id: &str,
+    ) -> Result<(), AppError> {
+        match self {
+            Self::Nomi(m) => {
+                m.ensure_can_rewind_last_turn(expected_source_message_id)
+                    .await
+            }
+            Self::Acp(_) | Self::OpenClaw(_) | Self::Nanobot(_) | Self::Remote(_) => Err(
+                AppError::BadRequest("Edit & resubmit is not supported for this agent type".into()),
+            ),
+            #[cfg(any(test, feature = "test-support"))]
+            Self::Mock(_) => Ok(()),
+        }
+    }
+
     /// Rewind the last user turn (edit & resubmit the most recent user message).
     /// Only the Nomi native engine can rewind its in-memory transcript; every
     /// other variant is an external process whose context cannot be rewound, so
     /// they return a `BadRequest` (the frontend never exposes the entry for
     /// non-Nomi conversations).
-    pub async fn rewind_last_turn(&self) -> Result<(), AppError> {
+    pub async fn rewind_last_turn(
+        &self,
+        expected_source_message_id: &str,
+    ) -> Result<(), AppError> {
         match self {
-            Self::Nomi(m) => m.rewind_last_turn().await,
+            Self::Nomi(m) => m.rewind_last_turn(expected_source_message_id).await,
             Self::Acp(_) | Self::OpenClaw(_) | Self::Nanobot(_) | Self::Remote(_) => Err(
                 AppError::BadRequest("Edit & resubmit is not supported for this agent type".into()),
             ),

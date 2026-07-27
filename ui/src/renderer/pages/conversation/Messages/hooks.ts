@@ -575,12 +575,46 @@ export const useRemoveMessageByMsgId = () => {
   );
 };
 
-export const useRemoveMessagesFrom = () => {
+/**
+ * Capture the frontend-local rows that belong to the old edit suffix.
+ *
+ * The target row's durable identity wins over timestamps. The timestamp
+ * fallback only covers a stale/incomplete local cache. Capturing local `id`s
+ * before the request means replacement stream rows that arrive before the HTTP
+ * response are not accidentally removed on success.
+ */
+export function snapshotEditSuffixLocalIds(
+  list: TMessage[],
+  targetMessageId: MessageId,
+  targetCreatedAt: number
+): Set<string> {
+  const targetIndex = list.findIndex(
+    (message) =>
+      message.position === 'right' &&
+      message.type === 'text' &&
+      (message.message_id === targetMessageId || message.msg_id === targetMessageId)
+  );
+  const suffix =
+    targetIndex >= 0
+      ? list.slice(targetIndex)
+      : list.filter((message) => (message.created_at ?? 0) >= targetCreatedAt);
+  return new Set(suffix.map((message) => message.id));
+}
+
+export function removeMessagesByLocalIds(
+  list: TMessage[],
+  localIds: ReadonlySet<string>
+): TMessage[] {
+  if (localIds.size === 0) return list;
+  return list.filter((message) => !localIds.has(message.id));
+}
+
+export const useRemoveMessagesByLocalIds = () => {
   const update = useUpdateMessageList();
 
   return useCallback(
-    (createdAt: number) => {
-      update((list) => list.filter((message) => (message.created_at ?? 0) < createdAt));
+    (localIds: ReadonlySet<string>) => {
+      update((list) => removeMessagesByLocalIds(list, localIds));
     },
     [update]
   );

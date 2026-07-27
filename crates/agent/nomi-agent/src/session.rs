@@ -5,6 +5,18 @@ use serde::{Deserialize, Serialize};
 
 use nomi_types::message::{Message, TokenUsage};
 
+/// Exact engine transcript boundary for the latest editable root user turn.
+///
+/// `source_message_id` is the durable database identity of that user message;
+/// `start_len` is the engine message count immediately before the turn began.
+/// Keeping both values prevents an automatic continuation from moving the
+/// rewind boundary into the middle of the same logical user turn.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EditableTurnCheckpoint {
+    pub source_message_id: String,
+    pub start_len: usize,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Session {
     pub id: String,
@@ -31,6 +43,14 @@ pub struct Session {
     /// its dynamic MCP tool is registered before the first message.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub activated_deferred_tools: Vec<String>,
+    /// Persisted authority for "edit latest message and resubmit".
+    ///
+    /// Legacy sessions do not contain this field and deserialize as `None`.
+    /// They must not guess a rewind boundary from message roles because tool
+    /// results, steering, and continuations are also represented as user
+    /// messages.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub editable_turn: Option<EditableTurnCheckpoint>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -93,6 +113,7 @@ impl SessionManager {
             messages: Vec::new(),
             owner_token: None,
             activated_deferred_tools: Vec::new(),
+            editable_turn: None,
         };
         self.save(&session)?;
         self.update_index(&session)?;
@@ -327,6 +348,10 @@ mod tests {
             "nomi_knowledge_create_base".into(),
             "nomi_knowledge_update_base".into(),
         ];
+        session.editable_turn = Some(EditableTurnCheckpoint {
+            source_message_id: "message-root".into(),
+            start_len: 0,
+        });
         manager.save(&session).unwrap();
         let loaded = manager.load(&session.id).unwrap();
 
@@ -335,6 +360,7 @@ mod tests {
         assert_eq!(loaded.model, "claude-3");
         assert_eq!(loaded.cwd, "/home");
         assert_eq!(loaded.activated_deferred_tools, session.activated_deferred_tools);
+        assert_eq!(loaded.editable_turn, session.editable_turn);
     }
 
     #[test]
@@ -351,6 +377,19 @@ mod tests {
         let loaded: Session = serde_json::from_value(value).unwrap();
 
         assert!(loaded.activated_deferred_tools.is_empty());
+    }
+
+    #[test]
+    fn legacy_session_without_editable_checkpoint_fails_closed() {
+        let dir = tempdir().unwrap();
+        let manager = SessionManager::new(dir.path().to_path_buf(), 10);
+        let session = manager.create("openai", "gpt-4", "/tmp", None).unwrap();
+        let mut value = serde_json::to_value(&session).unwrap();
+        value.as_object_mut().unwrap().remove("editable_turn");
+
+        let loaded: Session = serde_json::from_value(value).unwrap();
+
+        assert!(loaded.editable_turn.is_none());
     }
 
     #[test]
