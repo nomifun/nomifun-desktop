@@ -5,7 +5,7 @@
  */
 
 import { ipcBridge } from '@/common';
-import type { ICronJob, ICronJobRun } from '@/common/adapter/ipcBridge';
+import type { ICronJob, ICronJobRun, IUpdateCronJobParams } from '@/common/adapter/ipcBridge';
 import {
   indexCronJobsByConversation,
   reconcileCronJobsForConversation,
@@ -28,7 +28,7 @@ interface CronJobActionsResult {
   pauseJob: (cron_job_id: CronJobId) => Promise<void>;
   resumeJob: (cron_job_id: CronJobId) => Promise<void>;
   deleteJob: (cron_job_id: CronJobId) => Promise<void>;
-  updateJob: (cron_job_id: CronJobId, updates: Partial<ICronJob>) => Promise<ICronJob>;
+  updateJob: (cron_job_id: CronJobId, updates: IUpdateCronJobParams) => Promise<ICronJob>;
 }
 
 /**
@@ -63,7 +63,7 @@ function useCronJobActions(
   );
 
   const updateJob = useCallback(
-    async (cron_job_id: CronJobId, updates: Partial<ICronJob>) => {
+    async (cron_job_id: CronJobId, updates: IUpdateCronJobParams) => {
       const updated = await ipcBridge.cron.updateJob.invoke({ cron_job_id, updates });
       onJobUpdated?.(cron_job_id, updated);
       return updated;

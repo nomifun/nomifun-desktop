@@ -542,13 +542,7 @@ const CreateTaskDialog: React.FC<CreateTaskDialogProps> = ({
             description: values.description,
             schedule,
             message: values.prompt,
-            execution_mode: backendExecutionMode,
-            metadata: {
-              ...editJob!.metadata,
-              agent_type: resolvedAgentType,
-              agent_config,
-              updated_at: Date.now(),
-            },
+            agent_config,
           },
         });
         Message.success(t('cron.page.updateSuccess'));
