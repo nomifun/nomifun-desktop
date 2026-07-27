@@ -9,11 +9,11 @@
 - 受管 Chromium Host 及其显式关闭；
 - Lane 的所有权、生命周期、排队和取消；
 - Primary、Anonymous、Authenticated Replica 与 Isolated 身份路由；
-- owner lease、viewer token 与 control lease；
+- owner lease 与可信调用方能力；
 - 全局资源策略、动态遥测和周期清理；
-- Browser 页面使用的库存快照和用户级实时事件。
+- Browser 管理页面使用的状态、容量、身份和生命周期库存快照，以及用户级实时事件。
 
-一个 `BrowserHost` 对应一个受管 Chromium 进程树和一条 CDP 连接。一个 Host 可以承载多个 Lane。每个 Lane 有独立的 target/tab 集合、活动 target/frame、ref generation、操作 gate、取消令牌、下载归属和用户控制状态。
+一个 `BrowserHost` 对应一个受管 Chromium 进程树和一条 CDP 连接。一个 Host 可以承载多个 Lane。每个 Lane 有独立的 target/tab 集合、活动 target/frame、ref generation、操作 gate、取消令牌和下载归属。
 
 同一 Lane 的语义操作严格串行；不同 Lane 可以并发。全局操作 permit 只限制资源消耗，不承担正确性串行化。
 
@@ -21,15 +21,15 @@
 
 | 模式 | 用途 | 存储语义 |
 | --- | --- | --- |
-| `primary` | 普通交互式浏览、登录和账户操作 | 使用应用管理的稳定 profile；多个 Primary Lane 实时共享身份状态 |
-| `anonymous` | 公开网页和知识源抓取 | 使用临时 profile，不读取 Primary cookies 或站点存储 |
-| `authenticated_replica` | 有界的只读认证抓取扩展 | 使用带 generation 的时间点副本；不会自动回写 Primary |
-| `isolated` | 切换账户、退出测试、不可信浏览或显式隔离 | 使用独立临时身份 |
+| `primary` | 普通交互式浏览、登录和账户操作 | 使用应用管理的稳定隔离 profile；始终在可见的外置受管 Chromium 窗口中运行；多个 Primary Lane 实时共享身份状态 |
+| `anonymous` | 公开网页和知识源抓取 | 使用临时隔离 profile，不读取 Primary cookies 或站点存储；可 headless |
+| `authenticated_replica` | 有界的只读认证抓取扩展 | 使用带 generation 的时间点隔离副本，不会自动回写 Primary；可 headless |
+| `isolated` | 切换账户、退出测试、不可信浏览或显式隔离 | 使用独立临时身份；可 headless |
 
 Replica 上声明为可能修改身份或持久账户状态的操作会失败为
 `needs_primary_identity`。可信动作分类在进程内完成；模型输入不能降低该分类，也不能伪造“已由用户确认”。
 
-Primary profile 属于 NomiFun，不使用用户个人 Chrome 或 Edge profile。API、Agent 工具和 renderer 都不会收到 profile 路径、原始 CDP endpoint 或调试端口。
+Chromium 可执行文件可来自系统 Chrome/Edge 或 managed source；来源只决定使用哪个二进制。无论来源如何，NomiFun 都会启动受管进程并应用自己的隔离 profile，绝不打开用户个人 Chrome/Edge profile。API、Agent 工具和 renderer 都不会收到 profile 路径、原始 CDP endpoint 或调试端口。
 
 ## 调用入口
 
@@ -40,7 +40,7 @@ Primary profile 属于 NomiFun，不使用用户个人 Chrome 或 Edge profile�
 - ACP browser stdio 只持有短期、可续期且限定 audience/operation 的 loopback capability；
 - 知识 URL 渲染器使用固定的 Anonymous Lane；
 - Browser 登录接口使用受管 Primary Lane；
-- HTTP 管理接口和嵌入式 Viewer 直接调用 Hub 的用户级管理边界。
+- HTTP 管理接口只调用 Hub 的用户级库存、资源策略和生命周期边界。
 
 模型只能选择长度受限的 Lane 名称。`user_id`、conversation、runtime instance、attempt、owner lease、允许的操作和有效期都来自可信的应用上下文。
 
@@ -71,24 +71,25 @@ Automatic 策略从系统总内存和逻辑 CPU 推导安全上限。运行期�
 - 资源平衡不抢占正在执行的操作；
 - 压力回收优先处理空闲扩展或 Crawl Lane，并保护 owner 唯一活动 Lane。
 
-正常 idle expiry 为 10 分钟；压力状态下可回收 Lane 的 idle expiry 为 2 分钟。周期 sweep 同时处理过期 owner/control/viewer 凭据和 Host warm timer。
+正常 idle expiry 为 10 分钟；压力状态下可回收 Lane 的 idle expiry 为 2 分钟。周期 sweep 同时处理过期 owner 凭据、Lane 生命周期和 Host warm timer。
 
-## 嵌入式 Viewer
+## Browser 管理页面边界
 
-`embedded` 是新安装的默认显示模式。Viewer 展示 Agent 正在操作的同一 target，不创建第二个页面会话。
+`/browser` 是状态与生命周期管理页面，不是浏览器执行表面。它只用于查看
+Lane/Host 状态、容量与队列、身份和 owner 信息，并关闭 Lane、conversation
+下的 Lane 或安装范围内的 Lane。
 
-安全边界如下：
+该页面不嵌入图像流，不建立专用 Viewer WebSocket，也不提供用户接管、页面
+输入、tab 操作或地址导航入口。Primary 的真实页面始终保留在可见的外置受管
+Chromium 窗口中；关闭操作仍由 Hub 执行，不会关闭 conversation 或
+AgentExecution。
 
-- Viewer token 短期、单次使用，并绑定用户和 Lane；
-- WebSocket 校验认证身份、Origin、Lane 路径和 token；
-- 二进制消息只承载 JPEG，JSON 消息只承载固定的元数据和输入词汇；
-- 帧队列只保留最新帧；
-- 用户首次输入取得当前 Lane 的 control lease；
-- control lease 每 10 秒续期，30 秒未续期自动归还；
-- 输入按实际显示内容区域和浏览器 viewport 归一化；
-- control lease 不改变网络、审批、下载或 secret policy。
+## Agent 审批与安全边界
 
-Screencast 不可用时 Viewer 可以退化为有界截图轮询。流失败不会阻止 Lane 管理和关闭。
+Browser 页面没有页面操作权限。Agent 发起的只读观察按 Info 类处理；可能改变
+页面、账户或外部状态的操作按 Exec 类处理，并继续经过应用审批、出口、secret、
+下载和 full-power 策略。模型 JSON 不能构造可信身份、放宽动作分类或伪造带外
+批准；敏感或不可逆操作保持 fail-closed。
 
 ## HTTP 管理接口
 
@@ -99,32 +100,21 @@ Screencast 不可用时 Viewer 可以退化为有界截图轮询。流失败不�
 - `POST /api/browser/lanes/{id}/close`
 - `POST /api/browser/conversations/{id}/close`
 - `POST /api/browser/close-all`
-- `POST /api/browser/lanes/{id}/return-control`
-- `POST /api/browser/lanes/{id}/viewer-token`
 - `GET /api/browser/resource-policy`
 - `PUT /api/browser/resource-policy`
-- `GET /api/browser/lanes/{id}/view`（WebSocket）
 
 所有用户可见库存和实时事件都按认证用户过滤。改变状态的 HTTP 请求继续使用应用现有的 CSRF 防护。
 
 ## 设置迁移
 
-显示模式键为 `agent.browserUse.displayMode`，可取：
+产品显示模式固定为 `external`。新安装写入
+`agent.browserUse.displayMode = external`；历史 `embedded`、`headless`、无效值
+以及旧 `agent.browserUse.silent` 都只用于兼容读取，并收敛为 `external`，不再写入
+旧 `silent` 键。该迁移只影响 Primary：Primary 始终 headful 且可见，
+Anonymous/Authenticated Replica/Isolated Host 仍可由 Hub 以 headless 运行。
 
-- `embedded`
-- `external`
-- `headless`
-
-读取优先级为：
-
-1. 已存在的 `displayMode`；
-2. 旧 `silent === false` 映射为 `external`；
-3. 旧 `silent === true` 映射为 `headless`；
-4. 两者都不存在时写入并使用 `embedded`。
-
-迁移后不再写入旧的 `agent.browserUse.silent`。
-
-显示模式在应用组合根创建 `BrowserSessionHub` 和 Browser Host 工厂时读取。运行中修改会持久化，但不会把现有 Host 在 headful/headless 之间热切换；重启 Nomi 后，新模式对所有后续 Host 生效。
+`agent.browserUse.source` 选择系统 Chrome/Edge 优先或 managed source 优先；它不
+授权复用个人 profile，也不改变 Hub 的身份、容量、审批或生命周期策略。
 
 ## 稳定错误
 
@@ -140,6 +130,5 @@ Screencast 不可用时 Viewer 可以退化为有界截图轮询。流失败不�
 - `browser_restarted`
 - `identity_replica_stale`
 - `needs_primary_identity`
-- `viewer_stream_failed`
 
 错误文本不得包含 cookie、站点存储值、CDP endpoint、调试端口或 profile 路径。
