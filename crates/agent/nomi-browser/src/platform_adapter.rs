@@ -9,24 +9,16 @@
 //! taxonomy.
 
 use std::collections::HashSet;
-use std::io::Cursor;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
-use std::sync::{Arc, Mutex, Weak};
+use std::sync::{Arc, Weak};
 use std::time::Duration;
 
 use async_trait::async_trait;
 use base64::Engine as _;
-use image::codecs::jpeg::JpegEncoder;
-use image::imageops::FilterType;
-use image::{GenericImageView, ImageFormat};
 use nomi_browser_engine::{
-    ActResult, ActSpec, BrowserEngine, BrowserError, BrowserInputModifiers,
-    BrowserKeyEventKind, BrowserKeyInput, BrowserMouseButton, BrowserMouseEventKind,
-    BrowserMouseInput, BrowserRawInput, BrowserTabInfo, BrowserViewerFrame,
-    BrowserViewerImageFormat, BrowserWheelInput, EngineConfig, LaneEngineConfig,
-    ManagedBrowserHost, ObserveOpts, Observation,
-    browser_key_code_is_allowed, browser_key_value_is_allowed, browser_text_input_is_allowed,
+    ActResult, ActSpec, BrowserEngine, BrowserError, BrowserTabInfo, EngineConfig,
+    LaneEngineConfig, ManagedBrowserHost, ObserveOpts, Observation,
 };
 use nomifun_browser_platform::{
     BrowserErrorCode, BrowserHostDriver, BrowserHostFactory, BrowserHostId,
@@ -42,9 +34,6 @@ use crate::BrowserTool;
 
 const DEFAULT_ACTION_TIMEOUT: Duration = Duration::from_secs(45);
 const MAX_ACTION_TIMEOUT: Duration = Duration::from_secs(120);
-const MAX_VIEWER_DIMENSION: u32 = 4_096;
-const MAX_VIEWER_COORDINATE: f64 = 1_000_000.0;
-const MAX_VIEWER_WHEEL_DELTA: f64 = 10_000.0;
 const MAX_OBSERVATION_GENERATION_ADVANCE: u64 = 65_536;
 
 /// Synchronous, side-effect-free resolver used immediately before launching a
@@ -285,7 +274,6 @@ impl BrowserHostDriver for ManagedEngineHostDriver {
             host: Arc::downgrade(&self.host),
             identity_mode: self.identity_mode,
             identity_snapshot_persister: self.identity_snapshot_persister.clone(),
-            viewer_frame: Mutex::new(None),
             closing: AtomicBool::new(false),
             closed: AtomicBool::new(false),
             close_gate: AsyncMutex::new(()),
@@ -326,22 +314,9 @@ pub struct ManagedEngineLaneDriver {
     host: Weak<ManagedBrowserHost>,
     identity_mode: BrowserIdentityMode,
     identity_snapshot_persister: Option<IdentitySnapshotPersister>,
-    viewer_frame: Mutex<Option<ViewerFrameGeometry>>,
     closing: AtomicBool,
     closed: AtomicBool,
     close_gate: AsyncMutex<()>,
-}
-
-#[derive(Clone, Debug)]
-struct ViewerFrameGeometry {
-    target_id: Option<String>,
-    source_width: u32,
-    source_height: u32,
-    frame_width: u32,
-    frame_height: u32,
-    css_viewport_width: Option<f64>,
-    css_viewport_height: Option<f64>,
-    device_pixel_ratio: f64,
 }
 
 impl ManagedEngineLaneDriver {
@@ -377,16 +352,8 @@ impl ManagedEngineLaneDriver {
         // id into `active_tab_id`; the structured inventory below supplies the
         // authoritative mapping.
         let active_tab_id: Option<String> = None;
-        let refresh_tab_inventory = !matches!(
-            (operation.kind, action),
-            (BrowserOperationKind::Screenshot, "viewer_screenshot")
-                | (BrowserOperationKind::View, "viewer_screenshot")
-                | (BrowserOperationKind::Screenshot, "viewer_screencast_frame")
-                | (BrowserOperationKind::View, "viewer_screencast_frame")
-                | (BrowserOperationKind::View, "viewer_screencast_stop")
-                | (BrowserOperationKind::Act, "viewer_input")
-        );
-        let active_frame_follows_active_tab = matches!(action, "switch_tab" | "viewer_select_tab")
+        let refresh_tab_inventory = true;
+        let active_frame_follows_active_tab = matches!(action, "switch_tab")
             || (action == "switch_frame"
                 && operation
                     .input
@@ -399,7 +366,6 @@ impl ManagedEngineLaneDriver {
 
         let result = match (operation.kind, action) {
             (BrowserOperationKind::Navigate, "navigate")
-            | (BrowserOperationKind::Navigate, "viewer_navigate")
             | (BrowserOperationKind::Crawl, "navigate") => {
                 self.select_target_if_requested(&operation, context).await?;
                 let url = required_string(&operation.input, "url", "navigate")?;
@@ -424,18 +390,15 @@ impl ManagedEngineLaneDriver {
                     ..Default::default()
                 })
             }
-            (BrowserOperationKind::Navigate, "back")
-            | (BrowserOperationKind::Navigate, "viewer_back") => {
+            (BrowserOperationKind::Navigate, "back") => {
                 self.execute_act("back", &operation.input, context, active_tab_id)
                     .await
             }
-            (BrowserOperationKind::Navigate, "forward")
-            | (BrowserOperationKind::Navigate, "viewer_forward") => {
+            (BrowserOperationKind::Navigate, "forward") => {
                 self.execute_act("forward", &operation.input, context, active_tab_id)
                     .await
             }
-            (BrowserOperationKind::Navigate, "reload")
-            | (BrowserOperationKind::Navigate, "viewer_reload") => {
+            (BrowserOperationKind::Navigate, "reload") => {
                 self.execute_act("reload", &operation.input, context, active_tab_id)
                     .await
             }
@@ -454,8 +417,7 @@ impl ManagedEngineLaneDriver {
                     ..Default::default()
                 })
             }
-            (BrowserOperationKind::Screenshot, "screenshot")
-            | (BrowserOperationKind::View, "screenshot") => {
+            (BrowserOperationKind::Screenshot, "screenshot") => {
                 self.select_target_if_requested(&operation, context).await?;
                 let png = self
                     .engine
@@ -470,45 +432,6 @@ impl ManagedEngineLaneDriver {
                     active_tab_id,
                     ..Default::default()
                 })
-            }
-            (BrowserOperationKind::Screenshot, "viewer_screenshot")
-            | (BrowserOperationKind::View, "viewer_screenshot") => {
-                self.select_target_if_requested(&operation, context).await?;
-                self.viewer_screenshot(&operation.input, active_tab_id).await
-            }
-            (BrowserOperationKind::Screenshot, "viewer_screencast_frame")
-            | (BrowserOperationKind::View, "viewer_screencast_frame") => {
-                self.select_target_if_requested(&operation, context).await?;
-                self.viewer_screencast_frame(&operation.input, active_tab_id)
-                    .await
-            }
-            (BrowserOperationKind::View, "viewer_screencast_stop") => {
-                self.engine
-                    .stop_viewer_screencast()
-                    .await
-                    .map_err(map_engine_error)?;
-                Ok(BrowserOperationResult {
-                    output: json!({ "accepted": true }),
-                    active_tab_id,
-                    ..Default::default()
-                })
-            }
-            (BrowserOperationKind::Tabs, "viewer_select_tab") => {
-                let tab_id = operation
-                    .input
-                    .get("tab_id")
-                    .or_else(|| operation.input.get("target_id"))
-                    .and_then(Value::as_str)
-                    .ok_or_else(|| invalid_operation("viewer_select_tab requires `tab_id`."))?;
-                let mut input = Map::new();
-                input.insert("tab_id".to_string(), Value::String(tab_id.to_string()));
-                self.execute_act(
-                    "switch_tab",
-                    &Value::Object(input),
-                    context,
-                    Some(tab_id.to_string()),
-                )
-                .await
             }
             (BrowserOperationKind::Debug, "rendered_html")
             | (BrowserOperationKind::Crawl, "rendered_html") => {
@@ -543,8 +466,7 @@ impl ManagedEngineLaneDriver {
                     ..Default::default()
                 })
             }
-            (BrowserOperationKind::Manage, "bring_to_front")
-            | (BrowserOperationKind::View, "bring_to_front") => {
+            (BrowserOperationKind::Manage, "bring_to_front") => {
                 self.engine
                     .bring_to_front()
                     .await
@@ -555,8 +477,7 @@ impl ManagedEngineLaneDriver {
                     ..Default::default()
                 })
             }
-            (BrowserOperationKind::Manage, "device_pixel_ratio")
-            | (BrowserOperationKind::View, "device_pixel_ratio") => {
+            (BrowserOperationKind::Manage, "device_pixel_ratio") => {
                 let dpr = self
                     .engine
                     .device_pixel_ratio()
@@ -567,10 +488,6 @@ impl ManagedEngineLaneDriver {
                     active_tab_id,
                     ..Default::default()
                 })
-            }
-            (BrowserOperationKind::Act, "viewer_input") => {
-                self.execute_viewer_input(&operation.input, context, active_tab_id)
-                    .await
             }
             (
                 BrowserOperationKind::Act
@@ -658,10 +575,7 @@ impl ManagedEngineLaneDriver {
         let Some(target_id) = operation.target_id.as_deref() else {
             return Ok(());
         };
-        if matches!(
-            operation.action.as_str(),
-            "switch_tab" | "close_tab" | "viewer_select_tab"
-        ) {
+        if matches!(operation.action.as_str(), "switch_tab" | "close_tab") {
             return Ok(());
         }
         let progress = operation_progress(&operation.input, context);
@@ -722,132 +636,6 @@ impl ManagedEngineLaneDriver {
         ))
     }
 
-    async fn viewer_screenshot(
-        &self,
-        input: &Value,
-        active_tab_id: Option<String>,
-    ) -> Result<BrowserOperationResult, BrowserPlatformError> {
-        let frame = self
-            .engine
-            .capture_viewer_frame()
-            .await
-            .map_err(map_engine_error)?;
-        self.serialize_viewer_frame(frame, input, active_tab_id)
-    }
-
-    async fn viewer_screencast_frame(
-        &self,
-        input: &Value,
-        active_tab_id: Option<String>,
-    ) -> Result<BrowserOperationResult, BrowserPlatformError> {
-        let frame = match self.engine.viewer_screencast_frame().await {
-            Ok(frame) => frame,
-            Err(error @ BrowserError::Unsupported { .. })
-            | Err(error @ BrowserError::TargetClosed)
-            | Err(error @ BrowserError::TargetCrashed) => {
-                return Err(map_engine_error(error));
-            }
-            Err(_) => return Err(viewer_stream_error()),
-        };
-        self.serialize_viewer_frame(frame, input, active_tab_id)
-    }
-
-    fn serialize_viewer_frame(
-        &self,
-        frame: BrowserViewerFrame,
-        input: &Value,
-        active_tab_id: Option<String>,
-    ) -> Result<BrowserOperationResult, BrowserPlatformError> {
-        let image_format = match frame.format {
-            BrowserViewerImageFormat::Jpeg => ImageFormat::Jpeg,
-            BrowserViewerImageFormat::Png => ImageFormat::Png,
-        };
-        let mut image = image::load_from_memory_with_format(&frame.image, image_format)
-            .map_err(|_| viewer_stream_error())?;
-        let max_width = bounded_dimension(input.get("max_width"), 1_600);
-        let max_height = bounded_dimension(input.get("max_height"), 1_200);
-        let (source_width, source_height) = image.dimensions();
-        let mut resized = false;
-        if source_width > max_width || source_height > max_height {
-            image = image.resize(max_width, max_height, FilterType::Triangle);
-            resized = true;
-        }
-        let (width, height) = image.dimensions();
-        let quality = input
-            .get("quality")
-            .and_then(Value::as_u64)
-            .unwrap_or(70)
-            .clamp(1, 100) as u8;
-        let jpeg = if frame.format == BrowserViewerImageFormat::Jpeg
-            && !resized
-            && quality == 70
-        {
-            frame.image.clone()
-        } else {
-            let mut jpeg = Vec::new();
-            JpegEncoder::new_with_quality(Cursor::new(&mut jpeg), quality)
-                .encode_image(&image)
-                .map_err(|_| viewer_stream_error())?;
-            jpeg
-        };
-        let frame_target_id = frame.target_id.clone();
-        *self
-            .viewer_frame
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(ViewerFrameGeometry {
-            target_id: frame.target_id,
-            source_width,
-            source_height,
-            frame_width: width,
-            frame_height: height,
-            css_viewport_width: frame
-                .css_viewport_width
-                .filter(|value| value.is_finite() && *value > 0.0),
-            css_viewport_height: frame
-                .css_viewport_height
-                .filter(|value| value.is_finite() && *value > 0.0),
-            device_pixel_ratio: frame.device_pixel_ratio,
-        });
-        Ok(BrowserOperationResult {
-            output: json!({
-                "media_type": "image/jpeg",
-                "data": base64::engine::general_purpose::STANDARD.encode(jpeg),
-                "width": width,
-                "height": height,
-                "target_id": frame_target_id,
-            }),
-            active_tab_id,
-            ..Default::default()
-        })
-    }
-
-    async fn execute_viewer_input(
-        &self,
-        input: &Value,
-        context: &DriverOperationContext,
-        active_tab_id: Option<String>,
-    ) -> Result<BrowserOperationResult, BrowserPlatformError> {
-        let geometry = self
-            .viewer_frame
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .clone();
-        let (event, label) = parse_viewer_input(input, geometry.as_ref(), context)?;
-        let target_id = context
-            .operation
-            .target_id
-            .as_deref()
-            .ok_or_else(stale_viewer_frame)?;
-        self.engine
-            .dispatch_raw_input(target_id, &event)
-            .await
-            .map_err(map_engine_error)?;
-        Ok(BrowserOperationResult {
-            output: json!({ "accepted": true, "event": label }),
-            active_tab_id,
-            ..Default::default()
-        })
-    }
 }
 
 #[async_trait]
@@ -998,14 +786,7 @@ fn authorize_action_shape(
     let allowed = match kind {
         BrowserOperationKind::Navigate => matches!(
             action,
-            "navigate"
-                | "back"
-                | "forward"
-                | "reload"
-                | "viewer_navigate"
-                | "viewer_back"
-                | "viewer_forward"
-                | "viewer_reload"
+            "navigate" | "back" | "forward" | "reload"
         ),
         BrowserOperationKind::Observe => matches!(
             action,
@@ -1016,15 +797,10 @@ fn authorize_action_shape(
                 | "get_dropdown_options"
                 | "cursor"
         ),
-        BrowserOperationKind::Screenshot => {
-            matches!(
-                action,
-                "screenshot" | "viewer_screenshot" | "viewer_screencast_frame"
-            )
-        }
+        BrowserOperationKind::Screenshot => matches!(action, "screenshot"),
         BrowserOperationKind::Tabs => matches!(
             action,
-            "tabs" | "switch_tab" | "close_tab" | "open_link_new_tab" | "viewer_select_tab"
+            "tabs" | "switch_tab" | "close_tab" | "open_link_new_tab"
         ),
         BrowserOperationKind::Download => matches!(action, "download" | "save_as_pdf"),
         BrowserOperationKind::Debug => matches!(
@@ -1037,17 +813,6 @@ fn authorize_action_shape(
         ),
         BrowserOperationKind::Manage => {
             matches!(action, "capabilities" | "bring_to_front" | "device_pixel_ratio")
-        }
-        BrowserOperationKind::View => {
-            matches!(
-                action,
-                "screenshot"
-                    | "viewer_screenshot"
-                    | "viewer_screencast_frame"
-                    | "viewer_screencast_stop"
-                    | "bring_to_front"
-                    | "device_pixel_ratio"
-            )
         }
         BrowserOperationKind::Crawl => matches!(
             action,
@@ -1159,379 +924,6 @@ fn serialize_tab(tab: BrowserTabInfo) -> BrowserTabSnapshot {
     }
 }
 
-fn parse_viewer_input(
-    input: &Value,
-    geometry: Option<&ViewerFrameGeometry>,
-    context: &DriverOperationContext,
-) -> Result<(BrowserRawInput, &'static str), BrowserPlatformError> {
-    let object = input
-        .as_object()
-        .ok_or_else(|| invalid_operation("Viewer input must be an object."))?;
-    let legacy_event = object
-        .get("event")
-        .or_else(|| object.get("input_type"))
-        .or_else(|| object.get("type"))
-        .and_then(Value::as_str);
-    if let Some(event) = legacy_event {
-        if object.contains_key("kind") {
-            return Err(invalid_operation(
-                "Viewer input cannot contain both legacy and typed event fields.",
-            ));
-        }
-        if !matches!(event, "click" | "tap" | "pointer_click") {
-            return Err(invalid_operation("This viewer input event is not supported."));
-        }
-        let (x, y) = viewer_css_point(input, geometry, context)?;
-        let button = viewer_mouse_button(input, "button")?;
-        let modifiers = viewer_modifiers(input)?;
-        return Ok((
-            BrowserRawInput::Mouse(BrowserMouseInput {
-                kind: BrowserMouseEventKind::Click,
-                x,
-                y,
-                button,
-                buttons: 0,
-                modifiers,
-            }),
-            "click",
-        ));
-    }
-
-    match object.get("kind").and_then(Value::as_str) {
-        Some("pointer") => {
-            let action = required_string(input, "action", "viewer pointer input")?;
-            let kind = match action {
-                "move" => BrowserMouseEventKind::Move,
-                "down" => BrowserMouseEventKind::Down,
-                "up" => BrowserMouseEventKind::Up,
-                _ => return Err(invalid_operation("Viewer pointer action is not supported.")),
-            };
-            let (x, y) = viewer_css_point(input, geometry, context)?;
-            let buttons = bounded_u8(input, "buttons", 31, "viewer pointer input")?;
-            let mut button = viewer_mouse_button(input, "button")?;
-            if kind == BrowserMouseEventKind::Move && buttons == 0 {
-                button = BrowserMouseButton::None;
-            }
-            if kind != BrowserMouseEventKind::Move && button == BrowserMouseButton::None {
-                return Err(invalid_operation(
-                    "Pointer down/up requires a concrete mouse button.",
-                ));
-            }
-            Ok((
-                BrowserRawInput::Mouse(BrowserMouseInput {
-                    kind,
-                    x,
-                    y,
-                    button,
-                    buttons,
-                    modifiers: viewer_modifiers(input)?,
-                }),
-                match kind {
-                    BrowserMouseEventKind::Move => "pointer_move",
-                    BrowserMouseEventKind::Down => "pointer_down",
-                    BrowserMouseEventKind::Up => "pointer_up",
-                    BrowserMouseEventKind::Click => unreachable!(),
-                },
-            ))
-        }
-        Some("wheel") => {
-            let (x, y) = viewer_css_point(input, geometry, context)?;
-            let delta_x = signed_bounded_number(
-                input,
-                "delta_x",
-                MAX_VIEWER_WHEEL_DELTA,
-                "viewer wheel input",
-            )?;
-            let delta_y = signed_bounded_number(
-                input,
-                "delta_y",
-                MAX_VIEWER_WHEEL_DELTA,
-                "viewer wheel input",
-            )?;
-            Ok((
-                BrowserRawInput::Wheel(BrowserWheelInput {
-                    x,
-                    y,
-                    delta_x,
-                    delta_y,
-                    modifiers: viewer_modifiers(input)?,
-                }),
-                "wheel",
-            ))
-        }
-        Some("key") => {
-            validate_viewer_frame_target(geometry, context)?;
-            validate_optional_frame_dimensions(input, geometry)?;
-            let action = required_string(input, "action", "viewer key input")?;
-            let kind = match action {
-                "down" => BrowserKeyEventKind::Down,
-                "up" => BrowserKeyEventKind::Up,
-                _ => return Err(invalid_operation("Viewer key action is not supported.")),
-            };
-            let key = required_string(input, "key", "viewer key input")?;
-            let code = required_string(input, "code", "viewer key input")?;
-            if !browser_key_code_is_allowed(code) || !browser_key_value_is_allowed(key) {
-                return Err(invalid_operation(
-                    "The requested keyboard key is outside the viewer allowlist.",
-                ));
-            }
-            let repeat = optional_bool(input, "repeat", false, "viewer key input")?;
-            Ok((
-                BrowserRawInput::Key(BrowserKeyInput {
-                    kind,
-                    key: key.to_owned(),
-                    code: code.to_owned(),
-                    repeat,
-                    modifiers: viewer_modifiers(input)?,
-                }),
-                match kind {
-                    BrowserKeyEventKind::Down => "key_down",
-                    BrowserKeyEventKind::Up => "key_up",
-                },
-            ))
-        }
-        Some("text") => {
-            validate_viewer_frame_target(geometry, context)?;
-            validate_optional_frame_dimensions(input, geometry)?;
-            let text = input
-                .get("text")
-                .and_then(Value::as_str)
-                .ok_or_else(|| invalid_operation("Viewer text input requires `text`."))?;
-            if !browser_text_input_is_allowed(text) {
-                return Err(invalid_operation(
-                    "Viewer text is empty, too large, or contains unsupported controls.",
-                ));
-            }
-            Ok((BrowserRawInput::Text(text.to_owned()), "text"))
-        }
-        _ => Err(invalid_operation(
-            "This raw viewer input is not supported by the browser engine.",
-        )),
-    }
-}
-
-fn validate_viewer_frame_target<'a>(
-    geometry: Option<&'a ViewerFrameGeometry>,
-    context: &DriverOperationContext,
-) -> Result<&'a ViewerFrameGeometry, BrowserPlatformError> {
-    let geometry = geometry.ok_or_else(stale_viewer_frame)?;
-    let requested_target = context
-        .operation
-        .target_id
-        .as_deref()
-        .ok_or_else(stale_viewer_frame)?;
-    if geometry.target_id.as_deref() != Some(requested_target) {
-        return Err(stale_viewer_frame());
-    }
-    Ok(geometry)
-}
-
-fn viewer_css_point(
-    input: &Value,
-    geometry: Option<&ViewerFrameGeometry>,
-    context: &DriverOperationContext,
-) -> Result<(f64, f64), BrowserPlatformError> {
-    let geometry = validate_viewer_frame_target(geometry, context)?;
-    validate_frame_dimensions(input, geometry)?;
-    let x = bounded_coordinate(input, "x", f64::from(geometry.frame_width))?;
-    let y = bounded_coordinate(input, "y", f64::from(geometry.frame_height))?;
-    if geometry.frame_width == 0 || geometry.frame_height == 0 {
-        return Err(stale_viewer_frame());
-    }
-    let (css_x, css_y) = match (
-        geometry.css_viewport_width,
-        geometry.css_viewport_height,
-    ) {
-        (Some(css_width), Some(css_height))
-            if css_width.is_finite()
-                && css_height.is_finite()
-                && css_width > 0.0
-                && css_height > 0.0 =>
-        {
-            (
-                x * css_width / f64::from(geometry.frame_width),
-                y * css_height / f64::from(geometry.frame_height),
-            )
-        }
-        _ => {
-            if geometry.source_width == 0
-                || geometry.source_height == 0
-                || !geometry.device_pixel_ratio.is_finite()
-                || geometry.device_pixel_ratio <= 0.0
-            {
-                return Err(stale_viewer_frame());
-            }
-            (
-                x * f64::from(geometry.source_width)
-                    / f64::from(geometry.frame_width)
-                    / geometry.device_pixel_ratio,
-                y * f64::from(geometry.source_height)
-                    / f64::from(geometry.frame_height)
-                    / geometry.device_pixel_ratio,
-            )
-        }
-    };
-    if !css_x.is_finite()
-        || !css_y.is_finite()
-        || css_x < 0.0
-        || css_y < 0.0
-        || css_x > MAX_VIEWER_COORDINATE
-        || css_y > MAX_VIEWER_COORDINATE
-    {
-        return Err(invalid_operation(
-            "Viewer coordinates are outside the active page viewport.",
-        ));
-    }
-    Ok((css_x, css_y))
-}
-
-fn validate_frame_dimensions(
-    input: &Value,
-    geometry: &ViewerFrameGeometry,
-) -> Result<(), BrowserPlatformError> {
-    let width = input
-        .get("frame_width")
-        .and_then(Value::as_u64)
-        .and_then(|value| u32::try_from(value).ok())
-        .filter(|value| *value > 0)
-        .ok_or_else(stale_viewer_frame)?;
-    let height = input
-        .get("frame_height")
-        .and_then(Value::as_u64)
-        .and_then(|value| u32::try_from(value).ok())
-        .filter(|value| *value > 0)
-        .ok_or_else(stale_viewer_frame)?;
-    if width != geometry.frame_width || height != geometry.frame_height {
-        return Err(stale_viewer_frame());
-    }
-    Ok(())
-}
-
-fn validate_optional_frame_dimensions(
-    input: &Value,
-    geometry: Option<&ViewerFrameGeometry>,
-) -> Result<(), BrowserPlatformError> {
-    if input.get("frame_width").is_none() && input.get("frame_height").is_none() {
-        return Ok(());
-    }
-    let geometry = geometry.ok_or_else(stale_viewer_frame)?;
-    validate_frame_dimensions(input, geometry)
-}
-
-fn viewer_mouse_button(
-    input: &Value,
-    field: &str,
-) -> Result<BrowserMouseButton, BrowserPlatformError> {
-    let value = input
-        .get(field)
-        .and_then(Value::as_u64)
-        .ok_or_else(|| invalid_operation("Viewer pointer input requires a numeric `button`."))?;
-    match value {
-        0 => Ok(BrowserMouseButton::Left),
-        1 => Ok(BrowserMouseButton::Middle),
-        2 => Ok(BrowserMouseButton::Right),
-        3 => Ok(BrowserMouseButton::Back),
-        4 => Ok(BrowserMouseButton::Forward),
-        _ => Err(invalid_operation("Viewer mouse button is outside the allowlist.")),
-    }
-}
-
-fn viewer_modifiers(input: &Value) -> Result<BrowserInputModifiers, BrowserPlatformError> {
-    let Some(value) = input.get("modifiers") else {
-        return Ok(BrowserInputModifiers::default());
-    };
-    let object = value
-        .as_object()
-        .ok_or_else(|| invalid_operation("Viewer modifiers must be an object."))?;
-    if object
-        .keys()
-        .any(|key| !matches!(key.as_str(), "alt" | "ctrl" | "meta" | "shift"))
-    {
-        return Err(invalid_operation(
-            "Viewer modifiers contain an unsupported field.",
-        ));
-    }
-    let flag = |name: &str| -> Result<bool, BrowserPlatformError> {
-        match object.get(name) {
-            None => Ok(false),
-            Some(value) => value
-                .as_bool()
-                .ok_or_else(|| invalid_operation("Viewer modifier flags must be booleans.")),
-        }
-    };
-    Ok(BrowserInputModifiers {
-        alt: flag("alt")?,
-        ctrl: flag("ctrl")?,
-        meta: flag("meta")?,
-        shift: flag("shift")?,
-    })
-}
-
-fn bounded_coordinate(
-    input: &Value,
-    field: &str,
-    maximum: f64,
-) -> Result<f64, BrowserPlatformError> {
-    input
-        .get(field)
-        .and_then(Value::as_f64)
-        .filter(|value| value.is_finite() && *value >= 0.0 && *value <= maximum)
-        .ok_or_else(|| {
-            invalid_operation(&format!(
-                "Viewer input requires `{field}` inside the current frame."
-            ))
-        })
-}
-
-fn signed_bounded_number(
-    input: &Value,
-    field: &str,
-    maximum_absolute: f64,
-    action: &str,
-) -> Result<f64, BrowserPlatformError> {
-    input
-        .get(field)
-        .and_then(Value::as_f64)
-        .filter(|value| value.is_finite() && value.abs() <= maximum_absolute)
-        .ok_or_else(|| {
-            invalid_operation(&format!(
-                "{action} requires `{field}` within the allowed range."
-            ))
-        })
-}
-
-fn bounded_u8(
-    input: &Value,
-    field: &str,
-    maximum: u8,
-    action: &str,
-) -> Result<u8, BrowserPlatformError> {
-    input
-        .get(field)
-        .and_then(Value::as_u64)
-        .and_then(|value| u8::try_from(value).ok())
-        .filter(|value| *value <= maximum)
-        .ok_or_else(|| {
-            invalid_operation(&format!(
-                "{action} requires `{field}` within the allowed range."
-            ))
-        })
-}
-
-fn optional_bool(
-    input: &Value,
-    field: &str,
-    default: bool,
-    action: &str,
-) -> Result<bool, BrowserPlatformError> {
-    match input.get(field) {
-        None => Ok(default),
-        Some(value) => value
-            .as_bool()
-            .ok_or_else(|| invalid_operation(&format!("{action} requires boolean `{field}`."))),
-    }
-}
-
 fn serialize_act_result(
     result: ActResult,
     active_tab_id: Option<String>,
@@ -1586,13 +978,6 @@ fn required_string<'a>(
         .ok_or_else(|| invalid_operation(&format!("{action} requires `{field}`.")))
 }
 
-fn bounded_dimension(value: Option<&Value>, default: u32) -> u32 {
-    value
-        .and_then(Value::as_u64)
-        .unwrap_or(default as u64)
-        .clamp(1, MAX_VIEWER_DIMENSION as u64) as u32
-}
-
 fn invalid_operation(message: &str) -> BrowserPlatformError {
     BrowserPlatformError::new(
         BrowserErrorCode::OperationNotAllowed,
@@ -1608,24 +993,6 @@ fn lane_closed_error() -> BrowserPlatformError {
         "The browser lane was closed before the operation completed.",
         false,
         "Open a new lane before retrying.",
-    )
-}
-
-fn viewer_stream_error() -> BrowserPlatformError {
-    BrowserPlatformError::new(
-        BrowserErrorCode::ViewerStreamFailed,
-        "The browser viewer could not encode the next frame.",
-        true,
-        "Keep the management connection open and retry the viewer frame.",
-    )
-}
-
-fn stale_viewer_frame() -> BrowserPlatformError {
-    BrowserPlatformError::new(
-        BrowserErrorCode::StaleLaneRef,
-        "The viewer input belongs to an older frame or browser target.",
-        true,
-        "Wait for the next browser frame, then retry the input.",
     )
 }
 
@@ -1714,8 +1081,11 @@ fn map_engine_error(error: BrowserError) -> BrowserPlatformError {
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
+    use std::io::Cursor;
+    use std::sync::Mutex;
     use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
+    use image::ImageFormat;
     use nomi_browser_engine::{
         Capabilities, DebugSnapshot, Effect, ElementEntry, IndexedDbDump, LoadState, NavResult,
         OriginStorage, SnapshotGen, StorageState,
@@ -1892,7 +1262,6 @@ mod tests {
             host: Weak::new(),
             identity_mode: BrowserIdentityMode::Primary,
             identity_snapshot_persister: None,
-            viewer_frame: Mutex::new(None),
             closing: AtomicBool::new(false),
             closed: AtomicBool::new(false),
             close_gate: AsyncMutex::new(()),
@@ -2260,30 +1629,6 @@ mod tests {
         assert_eq!(error.code, BrowserErrorCode::BrowserUnavailable);
         assert!(!error.message.contains("9222"));
         assert!(!error.message.contains("profile"));
-    }
-
-    #[tokio::test]
-    async fn viewer_screenshot_is_real_jpeg_with_dimensions() {
-        let engine = Arc::new(FakeEngine::new());
-        let driver = test_driver(engine);
-        let result = driver
-            .execute(
-                operation(
-                    BrowserOperationKind::Screenshot,
-                    "viewer_screenshot",
-                    json!({"quality": 72, "max_width": 2, "max_height": 2}),
-                ),
-                context(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(result.output["media_type"], "image/jpeg");
-        assert_eq!(result.output["width"], 2);
-        assert_eq!(result.output["height"], 2);
-        let bytes = base64::engine::general_purpose::STANDARD
-            .decode(result.output["data"].as_str().unwrap())
-            .unwrap();
-        assert_eq!(&bytes[..2], &[0xff, 0xd8]);
     }
 
     #[tokio::test]

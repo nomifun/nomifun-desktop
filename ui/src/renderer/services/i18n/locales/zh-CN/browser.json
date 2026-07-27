@@ -6,7 +6,7 @@
   },
   "page": {
     "title": "浏览器管理",
-    "description": "查看、接管和关闭由 Agent 运行时持有的浏览器通道。",
+    "description": "管理外部托管浏览器窗口的生命周期、容量、队列与身份状态。",
     "runningCount": "{{count}} 个运行中",
     "queuedCount": "{{count}} 个排队中",
     "pressure": "{{state}}负载",
@@ -45,6 +45,7 @@
     "closeConversationAria": "关闭 {{name}} 的所有浏览器通道",
     "laneFallback": "浏览器通道",
     "queuePosition": "队列第 {{position}} 位",
+    "crashed": "已崩溃",
     "closeLaneAria": "关闭 {{name}}"
   },
   "fallback": {
@@ -59,19 +60,41 @@
   },
   "details": {
     "laneFallback": "浏览器通道",
-    "controlState": "{{state}}控制",
+    "statusOnly": "仅状态",
+    "externalManagedWindow": "实际浏览器保留在外部托管窗口中；此页面不会内嵌、控制或连接浏览器。",
     "closeLane": "关闭通道",
     "waitingCapacity": "正在等待浏览器容量",
     "queuePositionInline": "队列第 {{position}} 位",
     "recommendedConcurrency": "建议并发数 {{count}}",
-    "title": "通道详情",
+    "retryDelay": "{{delay}} 后重试",
+    "capacityCounts": "{{active}} 个活动 · {{queued}} 个排队",
+    "errorRecoverable": "此错误可恢复，浏览器管理器可能会重试该通道。",
+    "errorTerminal": "此错误不可恢复，请查看错误后关闭该通道。",
     "sharedLiveIdentity": "共享实时身份",
+    "queueState": {
+      "queued": "排队中",
+      "notQueued": "未排队"
+    },
+    "sections": {
+      "current": "当前状态",
+      "currentDescription": "来自浏览器管理器的只读生命周期与活动页面元数据。",
+      "identityOwner": "身份与所有者",
+      "identityOwnerDescription": "持有此通道的身份域与 Agent 执行。",
+      "queueResources": "队列与资源",
+      "queueResourcesDescription": "容量调度、重试时间与通道资源估算。"
+    },
     "fields": {
       "identity": "身份",
+      "identityGeneration": "身份代次",
       "lifecycle": "生命周期",
-      "control": "控制方",
+      "activeOperations": "活动操作",
+      "queueState": "队列状态",
       "queuePosition": "队列位置",
       "capacityReason": "容量原因",
+      "retryDelay": "重试延迟",
+      "recommendedConcurrency": "建议并发数",
+      "ownerCapacity": "所有者容量",
+      "globalCapacity": "全局容量",
       "resourceEstimate": "资源估算",
       "activePageTitle": "活动页面标题",
       "activeUrl": "活动网址",
@@ -84,37 +107,6 @@
       "clusterNode": "集群节点",
       "tabs": "标签页"
     }
-  },
-  "viewer": {
-    "errors": {
-      "streamFailed": "Viewer 视频流失败。",
-      "connectionFailed": "嵌入式 Viewer 连接失败，通道管理仍可使用。",
-      "disconnected": "嵌入式 Viewer 已断开。你可以重试，不会影响浏览器通道。",
-      "startFailed": "无法启动嵌入式 Viewer：{{error}}"
-    },
-    "queuedUnavailable": "此通道获得容量后即可使用 Viewer。",
-    "stateUnavailable": "此通道状态下没有可用的实时 Viewer。",
-    "back": "后退",
-    "forward": "前进",
-    "reload": "重新加载",
-    "address": "浏览器地址",
-    "tab": "浏览器标签页",
-    "crashed": "已崩溃",
-    "readOnly": "只读",
-    "unknownReadOnlyIdentity": "未知身份",
-    "userControl": "你正在控制此通道",
-    "agentControl": "Agent 控制",
-    "returnToAgent": "交还给 Agent",
-    "takeControl": "接管",
-    "retry": "重试 Viewer",
-    "surfaceAria": "嵌入式 Agent 浏览器 Viewer",
-    "frameAlt": "Agent 浏览器实时画面",
-    "connecting": "正在连接 Viewer…",
-    "waitingFrame": "正在等待画面…",
-    "idle": "Viewer 空闲",
-    "jpegLiveView": "JPEG 实时视图",
-    "latestFrameOnly": "仅保留最新画面",
-    "frameStatus": "{{frame}} · {{mode}}"
   },
   "diagnostics": {
     "title": "主机诊断",
@@ -149,11 +141,6 @@
       "frozen": "已冻结",
       "stopping": "停止中",
       "failed": "失败"
-    },
-    "control": {
-      "agent": "Agent",
-      "user": "用户",
-      "idle": "空闲"
     },
     "identity": {
       "primary": "主身份",

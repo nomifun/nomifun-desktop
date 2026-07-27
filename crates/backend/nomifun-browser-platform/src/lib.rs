@@ -27,10 +27,7 @@ pub use identity::{
     CanonicalIdentitySnapshot, IdentitySnapshotPayload, SnapshotComponentCoverage,
     SnapshotCoverage,
 };
-pub use lease::{
-    ControlLease, ControlLeaseService, OwnerLease, OwnerLeaseService, ViewerGrant,
-    ViewerTokenService,
-};
+pub use lease::{OwnerLease, OwnerLeaseService};
 pub use lifecycle::{
     HOST_FAILURE_THRESHOLD, HOST_FAILURE_WINDOW_MS, HostCircuitBreaker, HostCircuitPolicy,
     HostCircuitSnapshot, HostRestartFlightResult, HostRestartSingleFlight,

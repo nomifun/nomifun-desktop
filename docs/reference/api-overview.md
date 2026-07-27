@@ -77,7 +77,7 @@ Each group is owned by a specific crate. The base path is the actual URL prefix 
 | Companion | `/api/companion/*` | authenticated | [`nomifun-companion/src/routes.rs`](../../crates/backend/nomifun-companion/src/routes.rs) |
 | Companion access tokens for WebUI/public capability use | `/api/webui/companions/{id}/access-token` | authenticated/local WebUI admin flow | [`router/companion_token_routes.rs`](../../crates/backend/nomifun-app/src/router/companion_token_routes.rs) |
 | Browser-use secrets | `/api/browser-secrets/*` | authenticated | [`nomifun-secret/src/routes.rs`](../../crates/backend/nomifun-secret/src/routes.rs) |
-| Browser platform management + embedded viewer | `/api/browser/*` | authenticated; state-changing HTTP requests are CSRF-protected; viewer WebSocket also requires a one-shot token | [`router/browser_management.rs`](../../crates/backend/nomifun-app/src/router/browser_management.rs), [`router/browser_viewer.rs`](../../crates/backend/nomifun-app/src/router/browser_viewer.rs) |
+| Browser platform management (Agent-only managed browser) | `/api/browser/*` | authenticated; state-changing HTTP requests are CSRF-protected; installation-owner-only routes are separately gated | [`router/browser_management.rs`](../../crates/backend/nomifun-app/src/router/browser_management.rs), [`router/browser_login.rs`](../../crates/backend/nomifun-app/src/router/browser_login.rs) |
 | Filesystem | `/api/fs/*` | authenticated | [`nomifun-file/src/routes.rs`](../../crates/backend/nomifun-file/src/routes.rs) |
 | Office preview | `/api/word-preview/*`, `/api/excel-preview/*`, `/api/ppt-preview/*`, `/api/document/convert`, `/api/preview-history/*`, `/api/star-office/detect` | authenticated | [`nomifun-office/src/routes.rs`](../../crates/backend/nomifun-office/src/routes.rs) |
 | Office iframe proxies | `/api/ppt-proxy/*`, `/api/office-watch-proxy/*` | public (serve iframe content; no auth) | same as above |
@@ -112,39 +112,65 @@ These are the auth endpoints clients are most likely to interact with directly:
 
 ### Browser platform endpoints
 
-The Browser management surface exposes the authenticated user's managed
-Browser Lanes without exposing raw CDP endpoints, debugging ports, or profile
-paths:
+The current Browser product is **Agent-only**. Browser execution is owned by the
+process-wide `BrowserSessionHub` and organized into Browser Lanes; the Browser
+page and `/api/browser/*` are an observability and management surface for
+status, capacity/queue pressure, identity, and lifecycle only. They do not
+provide page navigation, page input, or direct browser control, and they never
+expose raw CDP endpoints, debugging ports, profile paths, or profile contents.
+
+The Hub remains authoritative for Host/Lane ownership, capacity, identity,
+concurrency, and shutdown. Operations within one Lane are serialized, while
+different Lanes can run concurrently within the active resource policy.
+`primary` runs in a visible, external managed Chromium window with an
+application-isolated stable profile; crawl (`anonymous`),
+`authenticated_replica`, and `isolated` work may run headless. NomiFun never
+opens a user's personal Chrome or Edge profile.
 
 | Method + path | Purpose |
 |---|---|
-| `GET /api/browser/overview` | Return browser capacity, pressure, queue, Lane, and safe Host diagnostics. |
-| `GET /api/browser/lanes` | List the Browser Lanes visible to the authenticated user. |
+| `GET /api/browser/overview` | Return user-visible capacity, pressure, queue, identity, lifecycle, Lane, and safe Host diagnostics. |
+| `GET /api/browser/lanes` | List the authenticated user's visible Browser Lanes and their management-safe state. |
 | `POST /api/browser/lanes/{lane_id}/close` | Idempotently close one Lane without closing its conversation or Agent execution. |
 | `POST /api/browser/conversations/{conversation_id}/close` | Close the authenticated user's Lanes for one conversation. |
-| `POST /api/browser/close-all` | Close all Browser Lanes owned by the authenticated user. |
-| `POST /api/browser/lanes/{lane_id}/return-control` | Release the current viewer control lease back to the Agent. |
-| `GET /api/browser/resource-policy` | Read the active Browser resource-policy preset and advanced limits. |
-| `PUT /api/browser/resource-policy` | Validate, persist, and apply a Browser resource policy. |
-| `POST /api/browser/lanes/{lane_id}/viewer-token` | Issue a short-lived, single-use token bound to the authenticated user and Lane. |
-| `GET /api/browser/lanes/{lane_id}/view` | Upgrade to the embedded-viewer WebSocket using application authentication plus the viewer token. |
+| `POST /api/browser/close-all` | Installation owner only: close every Browser Lane managed by this application instance. |
+| `GET /api/browser/resource-policy` | Installation owner only: read the active Browser resource-policy preset and advanced limits. |
+| `PUT /api/browser/resource-policy` | Installation owner only: validate, persist, and apply a Browser resource policy. |
+
+The installation-owner-only compatibility endpoints
+`POST /api/browser/login/open`, `POST /api/browser/login/close`, and
+`GET /api/browser/login/status` manage a normal Hub-owned Primary sign-in Lane
+in the visible external Chromium window. They do not create an embedded or
+second browser surface or add page-input controls to the Browser management
+page/API.
 
 Outside the intentionally insecure no-auth local mode, all routes require
-normal application authentication and apply the current user/host authorization
-policy. Cookie-authenticated `POST` and `PUT` requests must include the normal
-`x-csrf-token` header. Safe `GET` requests bypass CSRF. The viewer WebSocket
-upgrade is also outside cookie CSRF, but it fails closed unless application
-authentication, Origin checks, the Lane path, and the short-lived one-shot
-viewer token all agree. The viewer socket carries binary JPEG frames and
-lane-scoped JSON metadata/input messages on one connection.
+normal application authentication. Inventory and Lane/conversation lifecycle
+operations are user-scoped; installation-wide close and resource-policy routes
+also enforce installation-owner authority. Cookie-authenticated `POST` and
+`PUT` requests must include the normal `x-csrf-token` header. Safe `GET`
+requests bypass CSRF.
+
+> **Superseded (historical only):** the embedded JPEG/screencast viewer, its
+> dedicated Browser WebSocket, user takeover/return-control flow, and viewer
+> tokens have been removed from the product surface. The former
+> `POST /api/browser/lanes/{lane_id}/return-control`,
+> `POST /api/browser/lanes/{lane_id}/viewer-token`, and
+> `GET /api/browser/lanes/{lane_id}/view` routes are not current API endpoints
+> and must not be used by clients.
+
+Page execution remains Agent-only. Agent actions continue through the existing
+application approval and safety policy, including fail-closed handling for
+high-risk or irreversible actions. Browser management endpoints do not grant
+an execution capability and cannot bypass those gates.
 
 Browser inventory and lifecycle changes are delivered as authenticated JSON
-events on the shared `/ws` realtime channel; image frames and viewer input stay
-on the dedicated `/api/browser/lanes/{lane_id}/view` socket.
+events on the shared `/ws` realtime channel. There is no Browser image-frame or
+viewer-input transport.
 
 ## WebSocket event model
 
-`/ws` is the shared JSON realtime channel for application updates: agent token streams, terminal output, Browser inventory/lifecycle events, and requirement / scheduled-task / collaboration state changes. Binary Browser viewer frames and viewer input use the dedicated Lane socket described above.
+`/ws` is the shared JSON realtime channel for application updates: agent token streams, terminal output, Browser inventory/lifecycle events, and requirement / scheduled-task / collaboration state changes. It remains the general application event channel; it is not a Browser page viewer or input channel.
 
 - Authentication: a JWT obtained from `GET /api/ws-token`, sent in the WebSocket `Sec-WebSocket-Protocol` header (or `Authorization`). Invalid or expired token → server sends an `auth-expired` event and closes with code `1008`. No token at all → close with `1008`, reason `"no token provided"`.
 - After a successful upgrade, every message is a JSON object with a `type` and a `payload`. Messages are pushed by the server when domain events occur (a new agent token, a terminal byte, a requirement transition); clients usually do not need to send anything back. The server multiplexes a single `BroadcastEventBus` to every connected client.
@@ -176,6 +202,6 @@ The list above is meant to get you to the right module. From there, read the sou
 ## See also
 
 - [Configuration Reference](./configuration.md) — flags, env vars, the auth secret resolution order.
-- [Browser Platform Architecture (Chinese)](../architecture/browser-platform.zh.md) — BrowserSessionHub, Browser Hosts/Lanes, identity domains, Viewer, and lifecycle guarantees.
+- [Browser Platform Architecture](../architecture/browser-platform.md) — BrowserSessionHub, Browser Hosts/Lanes, identity domains, Agent-only external managed Chromium, and lifecycle guarantees.
 - [Troubleshooting](./troubleshooting.md) — common API and WebSocket failure modes.
 - [Web Server Deployment](../guides/web-server-deployment.md) — exposing the API over the network behind TLS.

@@ -9,7 +9,11 @@ import type { BrowserDisplayMode } from '@/common/config/configKeys';
 
 export type { BrowserDisplayMode } from '@/common/config/configKeys';
 
-export const BROWSER_DISPLAY_MODES = ['embedded', 'external', 'headless'] as const;
+// The browser management page is intentionally status-only. Keep the legacy
+// union values readable so old config payloads remain type-compatible, but the
+// only product mode that can be selected or persisted is the real managed
+// external Chromium window.
+export const BROWSER_DISPLAY_MODES = ['external'] as const;
 
 export type BrowserDisplayModeMigration = {
   displayMode: BrowserDisplayMode;
@@ -17,8 +21,8 @@ export type BrowserDisplayModeMigration = {
   source: 'displayMode' | 'silent' | 'default';
 };
 
-export function isBrowserDisplayMode(value: unknown): value is BrowserDisplayMode {
-  return typeof value === 'string' && BROWSER_DISPLAY_MODES.includes(value as BrowserDisplayMode);
+export function isBrowserDisplayMode(value: unknown): value is (typeof BROWSER_DISPLAY_MODES)[number] {
+  return value === 'external';
 }
 
 /**
@@ -26,18 +30,16 @@ export function isBrowserDisplayMode(value: unknown): value is BrowserDisplayMod
  *
  * The caller owns persistence so this helper remains deterministic and easy to
  * exercise without a renderer or backend:
- * - an explicit valid displayMode wins;
- * - an explicit but malformed displayMode fails safe to embedded and is not
- *   replaced by the legacy key;
- * - legacy silent=false maps to external;
- * - legacy silent=true maps to headless;
- * - a fresh install defaults to embedded.
+ * - an explicit external displayMode remains external;
+ * - historical embedded/headless/malformed values fail safe to external;
+ * - legacy silent values are read only for migration bookkeeping;
+ * - a fresh install defaults to external.
  */
 export function migrateBrowserDisplayMode(input: {
   displayMode?: unknown;
   silent?: unknown;
 }): BrowserDisplayModeMigration {
-  if (isBrowserDisplayMode(input.displayMode)) {
+  if (input.displayMode === 'external') {
     return {
       displayMode: input.displayMode,
       shouldPersist: false,
@@ -45,40 +47,22 @@ export function migrateBrowserDisplayMode(input: {
     };
   }
 
-  // Presence of the new key is authoritative even when its value is
-  // malformed.  The backend follows the same fail-closed rule: a corrupted
-  // new value must not be silently reinterpreted through the legacy `silent`
-  // preference, otherwise the renderer and backend can boot in different
-  // modes.  Keep the malformed value untouched so a later settings write or
-  // explicit repair remains the only mutation.
+  // Any old or malformed value is deliberately normalized to external. This
+  // prevents a stale embedded viewer preference from opening a JPEG stream or
+  // a headless lane that the user cannot see. Persistence is requested for
+  // historical values so the migration converges.
   if (input.displayMode !== undefined) {
     return {
-      displayMode: 'embedded',
-      shouldPersist: false,
+      displayMode: 'external',
+      shouldPersist: true,
       source: 'displayMode',
     };
   }
 
-  if (input.silent === false) {
-    return {
-      displayMode: 'external',
-      shouldPersist: true,
-      source: 'silent',
-    };
-  }
-
-  if (input.silent === true) {
-    return {
-      displayMode: 'headless',
-      shouldPersist: true,
-      source: 'silent',
-    };
-  }
-
   return {
-    displayMode: 'embedded',
+    displayMode: 'external',
     shouldPersist: true,
-    source: 'default',
+    source: input.silent !== undefined ? 'silent' : 'default',
   };
 }
 

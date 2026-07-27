@@ -10,16 +10,10 @@ import { WebPage } from '@icon-park/react';
 import { useTranslation } from 'react-i18next';
 import { useLocation, useSearchParams } from 'react-router-dom';
 import { ipcBridge } from '@/common';
-import { configService } from '@/common/config/configService';
-import {
-  migrateBrowserDisplayMode,
-  type BrowserDisplayMode,
-} from '@/common/browser/browserSettings';
 import {
   resolveBrowserOverviewCapabilities,
   type IBrowserLane,
 } from '@/common/browser/browserTypes';
-import { useConfig } from '@/renderer/hooks/config/useConfig';
 import { useConversationHistoryContext } from '@/renderer/hooks/context/ConversationHistoryContext';
 import { useLayoutContext } from '@/renderer/hooks/context/LayoutContext';
 import BrowserInventoryTree from './BrowserInventoryTree';
@@ -53,30 +47,11 @@ const BrowserPage: React.FC = () => {
   const layout = useLayoutContext();
   const { conversations } = useConversationHistoryContext();
   const { lanes, overview, loading, refreshing, error, refresh } = useBrowserInventory();
-  const [storedDisplayMode] = useConfig('agent.browserUse.displayMode');
-  const [storedLegacySilent] = useConfig('agent.browserUse.silent');
-  const [displayModeReady, setDisplayModeReady] = useState(configService.isInitialized());
   const [selectedLaneId, setSelectedLaneId] = useState<string | null>(null);
   const [busyLaneId, setBusyLaneId] = useState<string | null>(null);
   const [busyConversationId, setBusyConversationId] = useState<string | null>(null);
   const [closingAll, setClosingAll] = useState(false);
 
-  useEffect(() => {
-    let active = true;
-    void configService.whenReady().finally(() => {
-      if (active) setDisplayModeReady(true);
-    });
-    return () => {
-      active = false;
-    };
-  }, []);
-
-  const displayMode: BrowserDisplayMode | null = displayModeReady
-    ? migrateBrowserDisplayMode({
-        displayMode: storedDisplayMode,
-        silent: storedLegacySilent,
-      }).displayMode
-    : null;
   const installationWideCloseCopy = browserInstallationWideCloseCopy(
     i18n.resolvedLanguage ?? i18n.language
   );
@@ -295,8 +270,8 @@ const BrowserPage: React.FC = () => {
           <aside
             className={
               layout?.isMobile
-                ? 'shrink-0'
-                : 'min-h-0 overflow-y-auto pr-2px'
+                ? 'shrink-0 rd-14px border border-solid border-[color:color-mix(in_srgb,var(--color-border-2)_72%,transparent)] bg-[color:color-mix(in_srgb,var(--color-bg-1)_76%,transparent)] p-8px'
+                : 'min-h-0 overflow-y-auto rd-14px border border-solid border-[color:color-mix(in_srgb,var(--color-border-2)_72%,transparent)] bg-[color:color-mix(in_srgb,var(--color-bg-1)_76%,transparent)] p-8px pr-6px shadow-[0_6px_20px_rgba(15,23,42,0.025)]'
             }
             aria-label={t('browser.page.inventoryAria')}
           >
@@ -315,10 +290,8 @@ const BrowserPage: React.FC = () => {
             {selectedLane ? (
               <BrowserLaneDetails
                 lane={selectedLane}
-                displayMode={displayMode}
                 closing={busyLaneId === selectedLane.lane_id}
                 onClose={handleCloseLane}
-                onInventoryRefresh={refresh}
               />
             ) : (
               <Empty description={t('browser.page.selectLane')} />

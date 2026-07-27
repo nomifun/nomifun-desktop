@@ -6,29 +6,27 @@
 
 import React from 'react';
 import { Alert, Button, Tag } from '@arco-design/web-react';
-import { Delete } from '@icon-park/react';
+import { Delete, WebPage } from '@icon-park/react';
 import { useTranslation } from 'react-i18next';
-import type { BrowserDisplayMode } from '@/common/browser/browserSettings';
 import type { IBrowserLane } from '@/common/browser/browserTypes';
-import EmbeddedBrowserViewer from './viewer/EmbeddedBrowserViewer';
 
 interface BrowserLaneDetailsProps {
   lane: IBrowserLane;
   closing: boolean;
-  displayMode?: BrowserDisplayMode | null;
   onClose: (lane: IBrowserLane) => void;
-  onInventoryRefresh: () => Promise<void>;
 }
 
+const DASH = '—';
+
 const displayTime = (value?: number | null): string => {
-  if (!value) return '—';
+  if (!value) return DASH;
   const timestamp = value < 10_000_000_000 ? value * 1000 : value;
   const date = new Date(timestamp);
-  return Number.isNaN(date.getTime()) ? '—' : date.toLocaleString();
+  return Number.isNaN(date.getTime()) ? DASH : date.toLocaleString();
 };
 
 const formatBytes = (value?: number | null): string => {
-  if (value == null || value < 0) return '—';
+  if (value == null || value < 0) return DASH;
   const units = ['B', 'KiB', 'MiB', 'GiB'];
   let amount = value;
   let unit = 0;
@@ -39,16 +37,6 @@ const formatBytes = (value?: number | null): string => {
   return `${amount >= 10 || unit === 0 ? amount.toFixed(0) : amount.toFixed(1)} ${units[unit]}`;
 };
 
-const Field: React.FC<{ label: string; children: React.ReactNode }> = ({ label, children }) => (
-  <div className='min-w-0 rd-9px bg-[color:color-mix(in_srgb,var(--color-fill-1)_48%,transparent)] px-10px py-8px'>
-    <div className='text-11px text-t-tertiary mb-4px'>{label}</div>
-    <div className='text-12px text-t-primary break-words leading-18px'>{children}</div>
-  </div>
-);
-
-const valueOrDash = (value?: string | number | null): React.ReactNode =>
-  value == null || value === '' ? '—' : value;
-
 const formatDelay = (milliseconds?: number | null): string | null => {
   if (milliseconds == null || milliseconds < 0) return null;
   if (milliseconds < 1_000) return `${milliseconds} ms`;
@@ -56,25 +44,81 @@ const formatDelay = (milliseconds?: number | null): string | null => {
   return `${Number.isInteger(seconds) ? seconds.toFixed(0) : seconds.toFixed(1)} s`;
 };
 
-const BrowserLaneDetails: React.FC<BrowserLaneDetailsProps> = ({
-  lane,
-  closing,
-  displayMode,
-  onClose,
-  onInventoryRefresh,
-}) => {
+const valueOrDash = (value?: string | number | null): React.ReactNode =>
+  value == null || value === '' ? DASH : value;
+
+const lifecycleColor = (state: string): string => {
+  if (state === 'running') return 'green';
+  if (state === 'queued' || state === 'starting' || state === 'stopping') return 'orange';
+  if (state === 'failed') return 'red';
+  if (state === 'frozen') return 'arcoblue';
+  return 'gray';
+};
+
+const Field: React.FC<{
+  label: string;
+  children: React.ReactNode;
+  wide?: boolean;
+  mono?: boolean;
+}> = ({ label, children, wide = false, mono = false }) => (
+  <div
+    className={`${wide ? 'sm:col-span-2' : ''} min-w-0 rd-10px border border-solid border-[color:color-mix(in_srgb,var(--color-border-2)_56%,transparent)] bg-[color:color-mix(in_srgb,var(--color-fill-1)_44%,transparent)] px-11px py-9px`}
+  >
+    <div className='mb-4px text-10px font-500 uppercase tracking-[0.04em] text-t-tertiary'>
+      {label}
+    </div>
+    <div
+      className={
+        mono
+          ? 'break-all font-mono text-11px leading-18px text-t-primary'
+          : 'break-words text-12px leading-18px text-t-primary'
+      }
+    >
+      {children}
+    </div>
+  </div>
+);
+
+const StatusSection: React.FC<{
+  id: string;
+  title: string;
+  description: string;
+  children: React.ReactNode;
+}> = ({ id, title, description, children }) => (
+  <section
+    className='min-w-0 rd-14px border border-solid border-[color:color-mix(in_srgb,var(--color-border-2)_74%,transparent)] bg-bg-1 p-15px shadow-[0_6px_18px_rgba(15,23,42,0.025)]'
+    data-browser-status-section={id}
+  >
+    <div className='mb-11px border-b border-solid border-[color:color-mix(in_srgb,var(--color-border-2)_52%,transparent)] border-l-0 border-r-0 border-t-0 pb-10px'>
+      <h3 className='m-0 text-13px font-600 leading-20px'>{title}</h3>
+      <div className='mt-2px text-11px leading-17px text-t-tertiary'>{description}</div>
+    </div>
+    <div className='grid grid-cols-1 gap-9px sm:grid-cols-2'>{children}</div>
+  </section>
+);
+
+const BrowserLaneDetails: React.FC<BrowserLaneDetailsProps> = ({ lane, closing, onClose }) => {
   const { t } = useTranslation();
   const activeTab =
     lane.tabs.find((tab) => tab.tab_id === lane.active_tab_id) ||
     lane.tabs.find((tab) => tab.active) ||
     lane.tabs[0];
+  const activeTitle = activeTab?.title || lane.title;
+  const activeUrl = activeTab?.url || lane.url;
   const owner = lane.owner;
   const identity = lane.identity;
   const queue = lane.queue;
   const retryDelay = formatDelay(queue?.retry_delay_ms);
-  const recoveryAction = lane.recoverable
-    ? t('browser.details.errorRetryAction')
-    : t('browser.details.errorTerminalAction');
+  const isQueued = lane.lifecycle_state === 'queued' || queue?.position != null;
+  const activeOperations =
+    lane.active_operation_count != null
+      ? lane.active_operation_count
+      : lane.active_operation === true
+        ? 1
+        : lane.active_operation === false
+          ? 0
+          : null;
+
   const lifecycleLabel = (state: string): string => {
     switch (state) {
       case 'queued':
@@ -93,18 +137,7 @@ const BrowserLaneDetails: React.FC<BrowserLaneDetailsProps> = ({
         return state;
     }
   };
-  const controlLabel = (state: string): string => {
-    switch (state) {
-      case 'agent':
-        return t('browser.state.control.agent');
-      case 'user':
-        return t('browser.state.control.user');
-      case 'idle':
-        return t('browser.state.control.idle');
-      default:
-        return state;
-    }
-  };
+
   const identityLabel = (mode: string): string => {
     switch (mode) {
       case 'primary':
@@ -121,43 +154,59 @@ const BrowserLaneDetails: React.FC<BrowserLaneDetailsProps> = ({
   };
 
   return (
-    <div className='min-w-0 flex flex-col gap-12px'>
-      <div className='flex items-start gap-12px rd-14px border border-solid border-[color:color-mix(in_srgb,var(--color-border-2)_58%,transparent)] bg-bg-1 px-16px py-14px shadow-[0_8px_24px_rgba(15,23,42,0.035)]'>
-        <div className='min-w-0 flex-1'>
-          <div className='flex flex-wrap items-center gap-6px'>
-            <h2 className='m-0 text-18px leading-26px truncate'>
-              {lane.title || activeTab?.title || lane.lane_name || t('browser.details.laneFallback')}
-            </h2>
-            <Tag color={lane.lifecycle_state === 'failed' ? 'red' : 'arcoblue'}>
-              {lifecycleLabel(lane.lifecycle_state)}
-            </Tag>
-            <Tag color={lane.control_state === 'user' ? 'orange' : 'gray'}>
-              {t('browser.details.controlState', {
-                state: controlLabel(lane.control_state),
-              })}
-            </Tag>
+    <div
+      className='min-w-0 flex flex-col gap-12px'
+      data-browser-lane-status-only
+      data-browser-lane-id={lane.lane_id}
+    >
+      <header className='rd-14px border border-solid border-[color:color-mix(in_srgb,var(--color-border-2)_82%,transparent)] bg-bg-1 px-16px py-15px shadow-[0_7px_22px_rgba(15,23,42,0.03)]'>
+        <div className='flex flex-wrap items-start gap-12px'>
+          <div className='size-36px shrink-0 rd-10px border border-solid border-[rgba(var(--primary-6),0.16)] bg-primary-1 text-primary-6 flex items-center justify-center'>
+            <WebPage theme='outline' size='18' />
           </div>
-          <div className='mt-3px text-11px text-t-tertiary font-mono break-all'>{lane.lane_id}</div>
+          <div className='min-w-0 flex-1'>
+            <div className='flex flex-wrap items-center gap-6px'>
+              <h2 className='m-0 min-w-0 truncate text-18px leading-26px'>
+                {lane.lane_name || activeTitle || t('browser.details.laneFallback')}
+              </h2>
+              <Tag color={lifecycleColor(lane.lifecycle_state)}>
+                {lifecycleLabel(lane.lifecycle_state)}
+              </Tag>
+              <Tag color='gray'>{t('browser.details.statusOnly')}</Tag>
+            </div>
+            <div className='mt-4px text-12px font-500 leading-18px text-t-primary'>
+              {valueOrDash(activeTitle)}
+            </div>
+            <div className='mt-2px break-all font-mono text-11px leading-17px text-t-secondary'>
+              {valueOrDash(activeUrl)}
+            </div>
+            <div className='mt-7px text-11px leading-17px text-t-tertiary'>
+              {t('browser.details.externalManagedWindow')}
+            </div>
+            <div className='mt-4px break-all font-mono text-10px leading-16px text-t-tertiary'>
+              {lane.lane_id}
+            </div>
+          </div>
+          <Button
+            status='danger'
+            type='outline'
+            loading={closing}
+            icon={<Delete theme='outline' size='14' />}
+            onClick={() => onClose(lane)}
+          >
+            {t('browser.details.closeLane')}
+          </Button>
         </div>
-        <Button
-          status='danger'
-          type='outline'
-          loading={closing}
-          icon={<Delete theme='outline' size='14' />}
-          onClick={() => onClose(lane)}
-        >
-          {t('browser.details.closeLane')}
-        </Button>
-      </div>
+      </header>
 
-      {lane.lifecycle_state === 'queued' && (
+      {isQueued && (
         <Alert
           type='warning'
           showIcon
           content={
             <span>
               {t('browser.details.waitingCapacity')}
-              {queue?.position
+              {queue?.position != null
                 ? ` · ${t('browser.details.queuePositionInline', {
                     position: queue.position,
                   })}`
@@ -165,7 +214,7 @@ const BrowserLaneDetails: React.FC<BrowserLaneDetailsProps> = ({
               {queue?.reason || queue?.reason_code
                 ? ` · ${queue.reason || queue.reason_code}`
                 : ''}
-              {queue?.recommended_concurrency
+              {queue?.recommended_concurrency != null
                 ? ` · ${t('browser.details.recommendedConcurrency', {
                     count: queue.recommended_concurrency,
                   })}`
@@ -173,51 +222,70 @@ const BrowserLaneDetails: React.FC<BrowserLaneDetailsProps> = ({
               {retryDelay
                 ? ` · ${t('browser.details.retryDelay', { delay: retryDelay })}`
                 : ''}
-              {queue?.owner_active != null || queue?.owner_queued != null
-                ? ` · ${t('browser.details.ownerLoad', {
-                    active: queue.owner_active ?? 0,
-                    queued: queue.owner_queued ?? 0,
-                  })}`
-                : ''}
-              {queue?.global_active != null || queue?.global_queued != null
-                ? ` · ${t('browser.details.globalLoad', {
-                    active: queue.global_active ?? 0,
-                    queued: queue.global_queued ?? 0,
-                  })}`
-                : ''}
             </span>
           }
         />
       )}
 
-      {lane.error_message && (
+      {(lane.error_code || lane.error_message) && (
         <Alert
           type='error'
           showIcon
           content={
-            <span>
-              {lane.error_code ? `${lane.error_code}: ` : ''}
-              {lane.error_message}
-              {' · '}
-              {lane.recoverable
-                ? t('browser.details.retryable')
-                : t('browser.details.notRetryable')}
-              {' · '}
-              {t('browser.details.nextAction', { action: recoveryAction })}
-            </span>
+            <div>
+              <div className='font-500'>
+                {lane.error_code ? `${lane.error_code}: ` : ''}
+                {lane.error_message || DASH}
+              </div>
+              {lane.recoverable != null && (
+                <div className='mt-2px text-11px'>
+                  {lane.recoverable
+                    ? t('browser.details.errorRecoverable')
+                    : t('browser.details.errorTerminal')}
+                </div>
+              )}
+            </div>
           }
         />
       )}
 
-      <EmbeddedBrowserViewer
-        lane={lane}
-        displayMode={displayMode}
-        onInventoryRefresh={onInventoryRefresh}
-      />
+      <StatusSection
+        id='current'
+        title={t('browser.details.sections.current')}
+        description={t('browser.details.sections.currentDescription')}
+      >
+        <Field label={t('browser.details.fields.lifecycle')}>
+          <Tag size='small' color={lifecycleColor(lane.lifecycle_state)}>
+            {lifecycleLabel(lane.lifecycle_state)}
+          </Tag>
+        </Field>
+        <Field label={t('browser.details.fields.activeOperations')}>
+          {valueOrDash(activeOperations)}
+        </Field>
+        <Field label={t('browser.details.fields.activePageTitle')} wide>
+          {valueOrDash(activeTitle)}
+        </Field>
+        <Field label={t('browser.details.fields.activeUrl')} wide mono>
+          {valueOrDash(activeUrl)}
+        </Field>
+        <Field label={t('browser.details.fields.tabs')}>{lane.tabs.length}</Field>
+        <Field label={t('browser.details.fields.resourceEstimate')}>
+          {formatBytes(lane.resource_estimate_bytes)}
+        </Field>
+        <Field label={t('browser.details.fields.lastActivity')}>
+          {displayTime(lane.last_active_at)}
+        </Field>
+        <Field label={t('browser.details.fields.created')}>
+          {displayTime(lane.created_at)}
+        </Field>
+      </StatusSection>
 
-      <section className='rd-14px border border-solid border-[color:color-mix(in_srgb,var(--color-border-2)_58%,transparent)] bg-bg-1 p-16px shadow-[0_8px_24px_rgba(15,23,42,0.035)]'>
-        <div className='mb-12px text-13px font-600'>{t('browser.details.title')}</div>
-        <div className='grid grid-cols-2 lg:grid-cols-3 gap-10px'>
+      <div className='grid grid-cols-1 gap-12px xl:grid-cols-2'>
+        <StatusSection
+          id='identity-owner'
+          title={t('browser.details.sections.identityOwner')}
+          description={t('browser.details.sections.identityOwnerDescription')}
+        >
           <Field label={t('browser.details.fields.identity')}>
             {valueOrDash(identity?.label || (identity ? identityLabel(identity.mode) : undefined))}
             {identity?.mode === 'primary' && identity.shared_live !== false ? (
@@ -229,22 +297,46 @@ const BrowserLaneDetails: React.FC<BrowserLaneDetailsProps> = ({
           <Field label={t('browser.details.fields.identityGeneration')}>
             {identity?.mode === 'authenticated_replica'
               ? valueOrDash(identity.generation)
-              : '—'}
+              : DASH}
           </Field>
-          <Field label={t('browser.details.fields.lifecycle')}>
-            {lifecycleLabel(lane.lifecycle_state)}
+          <Field label={t('browser.details.fields.owner')} wide>
+            {valueOrDash(owner?.agent_name || owner?.label || owner?.surface)}
           </Field>
-          <Field label={t('browser.details.fields.control')}>
-            {controlLabel(lane.control_state)}
+          <Field label={t('browser.details.fields.runtime')} mono>
+            {valueOrDash(lane.runtime_label || lane.runtime_instance_id || owner?.runtime_instance_id)}
+          </Field>
+          <Field label={t('browser.details.fields.execution')} mono>
+            {valueOrDash(lane.execution_id || owner?.execution_id)}
+          </Field>
+          <Field label={t('browser.details.fields.attempt')} mono>
+            {valueOrDash(lane.attempt_id || owner?.attempt_id)}
+          </Field>
+          <Field label={t('browser.details.fields.clusterNode')} mono>
+            {valueOrDash(lane.cluster_node_label || lane.cluster_node_id || owner?.cluster_node_id)}
+          </Field>
+        </StatusSection>
+
+        <StatusSection
+          id='queue-resources'
+          title={t('browser.details.sections.queueResources')}
+          description={t('browser.details.sections.queueResourcesDescription')}
+        >
+          <Field label={t('browser.details.fields.queueState')}>
+            {isQueued
+              ? t('browser.details.queueState.queued')
+              : t('browser.details.queueState.notQueued')}
           </Field>
           <Field label={t('browser.details.fields.queuePosition')}>
             {valueOrDash(queue?.position)}
           </Field>
-          <Field label={t('browser.details.fields.capacityReason')}>
+          <Field label={t('browser.details.fields.capacityReason')} wide>
             {valueOrDash(queue?.reason || queue?.reason_code)}
           </Field>
           <Field label={t('browser.details.fields.retryDelay')}>
             {valueOrDash(retryDelay)}
+          </Field>
+          <Field label={t('browser.details.fields.recommendedConcurrency')}>
+            {valueOrDash(queue?.recommended_concurrency)}
           </Field>
           <Field label={t('browser.details.fields.ownerCapacity')}>
             {queue?.owner_active != null || queue?.owner_queued != null
@@ -252,7 +344,7 @@ const BrowserLaneDetails: React.FC<BrowserLaneDetailsProps> = ({
                   active: queue.owner_active ?? 0,
                   queued: queue.owner_queued ?? 0,
                 })
-              : '—'}
+              : DASH}
           </Field>
           <Field label={t('browser.details.fields.globalCapacity')}>
             {queue?.global_active != null || queue?.global_queued != null
@@ -260,41 +352,13 @@ const BrowserLaneDetails: React.FC<BrowserLaneDetailsProps> = ({
                   active: queue.global_active ?? 0,
                   queued: queue.global_queued ?? 0,
                 })
-              : '—'}
+              : DASH}
           </Field>
-          <Field label={t('browser.details.fields.resourceEstimate')}>
+          <Field label={t('browser.details.fields.resourceEstimate')} wide>
             {formatBytes(lane.resource_estimate_bytes)}
           </Field>
-          <Field label={t('browser.details.fields.activePageTitle')}>
-            {valueOrDash(activeTab?.title || lane.title)}
-          </Field>
-          <Field label={t('browser.details.fields.activeUrl')}>
-            {valueOrDash(activeTab?.url || lane.url)}
-          </Field>
-          <Field label={t('browser.details.fields.lastActivity')}>
-            {displayTime(lane.last_active_at)}
-          </Field>
-          <Field label={t('browser.details.fields.created')}>
-            {displayTime(lane.created_at)}
-          </Field>
-          <Field label={t('browser.details.fields.owner')}>
-            {valueOrDash(owner?.agent_name || owner?.label || owner?.surface)}
-          </Field>
-          <Field label={t('browser.details.fields.runtime')}>
-            {valueOrDash(lane.runtime_label || lane.runtime_instance_id || owner?.runtime_instance_id)}
-          </Field>
-          <Field label={t('browser.details.fields.execution')}>
-            {valueOrDash(lane.execution_id || owner?.execution_id)}
-          </Field>
-          <Field label={t('browser.details.fields.attempt')}>
-            {valueOrDash(lane.attempt_id || owner?.attempt_id)}
-          </Field>
-          <Field label={t('browser.details.fields.clusterNode')}>
-            {valueOrDash(lane.cluster_node_label || lane.cluster_node_id || owner?.cluster_node_id)}
-          </Field>
-          <Field label={t('browser.details.fields.tabs')}>{lane.tabs.length}</Field>
-        </div>
-      </section>
+        </StatusSection>
+      </div>
     </div>
   );
 };

@@ -7,12 +7,12 @@
 import { describe, expect, test } from 'bun:test';
 import {
   AUTH_EXPIRED_EVENT,
-  createBackendWebSocket,
   httpPost,
   httpRequest,
   isAuthExpiredHttpError,
   isBackendHttpError,
   isHandledAuthExpiredHttpError,
+  redactSensitiveText,
   wsEmitter,
 } from './httpBridge';
 
@@ -21,16 +21,6 @@ const realFetch = globalThis.fetch;
 const realWindow = (globalThis as { window?: Window }).window;
 const realDocument = (globalThis as { document?: Document }).document;
 const realWebSocket = globalThis.WebSocket;
-
-function expectToThrow(callback: () => unknown): void {
-  let threw = false;
-  try {
-    callback();
-  } catch {
-    threw = true;
-  }
-  expect(threw).toBe(true);
-}
 
 function installBrowserGlobals(windowPatch: Partial<Window> & { __backendPort?: number; __nomiLocalTrust?: string }) {
   (globalThis as { window?: unknown }).window = {
@@ -308,23 +298,23 @@ describe('httpRequest client deadline + network-failure diagnosis', () => {
     }
   });
 
-  test('adds the existing double-submit CSRF token to Browser mutations in WebUI mode', async () => {
+  test('adds the existing double-submit CSRF token to WebUI mutations', async () => {
     let capturedHeaders: Record<string, string> | undefined;
     installBrowserGlobals({
       location: {
         origin: 'https://nomifun.example',
         protocol: 'https:',
         host: 'nomifun.example',
-        pathname: '/browser',
+        pathname: '/settings',
         hash: '',
       } as Location,
     });
     (globalThis as { document?: { cookie: string } }).document!.cookie =
-      'nomifun-csrf-token=csrf-browser-value';
+      'nomifun-csrf-token=csrf-value';
     globalThis.fetch = ((_url: string, init?: RequestInit) => {
       capturedHeaders = init?.headers as Record<string, string>;
       return Promise.resolve(
-        new Response(JSON.stringify({ success: true, data: { token: 'viewer-token' } }), {
+        new Response(JSON.stringify({ success: true, data: { updated: true } }), {
           status: 200,
           headers: { 'Content-Type': 'application/json' },
         })
@@ -332,32 +322,51 @@ describe('httpRequest client deadline + network-failure diagnosis', () => {
     }) as unknown as typeof fetch;
 
     try {
-      await httpRequest('POST', '/api/browser/lanes/lane-1/viewer-token');
-      expect(capturedHeaders?.['x-csrf-token']).toBe('csrf-browser-value');
+      await httpRequest('POST', '/api/settings/preferences', { theme: 'system' });
+      expect(capturedHeaders?.['x-csrf-token']).toBe('csrf-value');
     } finally {
       globalThis.fetch = realFetch;
       restoreBrowserGlobals();
     }
   });
 
-  test('redacts Browser credentials and internals from logs and BackendHttpError', async () => {
+  test('redacts sensitive query values from generic HTTP URLs', () => {
+    const accessToken = 'access-token-value';
+    const apiKey = 'api-key-value';
+    const redacted = redactSensitiveText(
+      `/api/integrations/status?access_token=${accessToken}&api_key=${apiKey}&page=2`
+    );
+
+    expect(redacted).toBe(
+      '/api/integrations/status?access_token=[REDACTED]&api_key=[REDACTED]&page=2'
+    );
+    expect(redacted.includes(accessToken)).toBe(false);
+    expect(redacted.includes(apiKey)).toBe(false);
+  });
+
+  test('redacts generic HTTP credentials from logs and BackendHttpError', async () => {
     const realConsoleError = console.error;
     const consoleCalls: unknown[][] = [];
-    const viewerToken = 'a'.repeat(64);
-    globalThis.fetch = (() =>
-      Promise.resolve(
+    const requestToken = 'request-access-token';
+    const responseToken = 'response-bearer-token';
+    const apiKey = 'upstream-api-key';
+    const password = 'database-password';
+    const path = `/api/integrations/status?access_token=${requestToken}&page=2`;
+    let requestedUrl = '';
+    globalThis.fetch = ((url: string | URL | Request) => {
+      requestedUrl = String(url);
+      return Promise.resolve(
         new Response(
           JSON.stringify({
             success: false,
-            code: 'viewer_stream_failed',
+            code: 'upstream_request_failed',
             error:
-              `failed at ws://127.0.0.1:9222/devtools/browser/internal?token=${viewerToken} ` +
-              'profile_path=C:\\Users\\rika0\\Chrome\\User Data\\Profile 1',
+              `request rejected with Bearer ${responseToken}; ` +
+              `retry URL https://service.example/status?api_key=${apiKey}`,
             details: {
-              viewer_token: viewerToken,
-              debugging_port: 9222,
-              profile_path: 'C:\\Users\\rika0\\Chrome\\User Data\\Profile 1',
-              cookie: 'session=secret-cookie',
+              authorization: `Bearer ${responseToken}`,
+              api_key: apiKey,
+              password,
               retryable: true,
             },
           }),
@@ -366,7 +375,8 @@ describe('httpRequest client deadline + network-failure diagnosis', () => {
             headers: { 'Content-Type': 'application/json' },
           }
         )
-      )) as unknown as typeof fetch;
+      );
+    }) as typeof fetch;
     console.error = (...args: unknown[]) => {
       consoleCalls.push(args);
     };
@@ -374,14 +384,12 @@ describe('httpRequest client deadline + network-failure diagnosis', () => {
     try {
       let caught: unknown;
       try {
-        await httpRequest(
-          'POST',
-          `/api/browser/lanes/lane-1/viewer-token?token=${viewerToken}`
-        );
+        await httpRequest('GET', path);
       } catch (error) {
         caught = error;
       }
 
+      expect(requestedUrl.endsWith(path)).toBe(true);
       expect(isBackendHttpError(caught)).toBe(true);
       if (!isBackendHttpError(caught)) throw new Error('expected BackendHttpError');
       const exposed = JSON.stringify({
@@ -391,132 +399,16 @@ describe('httpRequest client deadline + network-failure diagnosis', () => {
         details: caught.details,
         consoleCalls,
       });
-      expect(exposed.includes(viewerToken)).toBe(false);
-      expect(exposed.includes('secret-cookie')).toBe(false);
-      expect(exposed.includes('9222')).toBe(false);
-      expect(exposed.includes('User Data')).toBe(false);
+      expect(exposed.includes(requestToken)).toBe(false);
+      expect(exposed.includes(responseToken)).toBe(false);
+      expect(exposed.includes(apiKey)).toBe(false);
+      expect(exposed.includes(password)).toBe(false);
+      expect(exposed.includes('page=2')).toBe(true);
       expect(exposed.includes('retryable')).toBe(true);
       expect(exposed.includes('[REDACTED')).toBe(true);
     } finally {
       globalThis.fetch = realFetch;
       console.error = realConsoleError;
-    }
-  });
-});
-
-describe('dedicated backend WebSocket security boundary', () => {
-  test('keeps desktop local trust on the configured loopback backend origin', () => {
-    class RecordingWebSocket {
-      static readonly instances: RecordingWebSocket[] = [];
-
-      constructor(
-        readonly url: string,
-        readonly protocols?: string | string[]
-      ) {
-        RecordingWebSocket.instances.push(this);
-      }
-    }
-
-    installBrowserGlobals({
-      __backendPort: 25808,
-      __nomiLocalTrust: 'local-trust-secret',
-      location: {
-        origin: 'http://tauri.localhost',
-        protocol: 'http:',
-        host: 'tauri.localhost',
-        pathname: '/browser',
-        hash: '',
-      } as Location,
-    });
-    globalThis.WebSocket = RecordingWebSocket as unknown as typeof WebSocket;
-
-    try {
-      expectToThrow(() =>
-        createBackendWebSocket(
-          'wss://evil.example/api/browser/lanes/lane-1/view?token=viewer-token'
-        )
-      );
-      expectToThrow(() =>
-        createBackendWebSocket(
-          '//evil.example/api/browser/lanes/lane-1/view?token=viewer-token'
-        )
-      );
-      expect(RecordingWebSocket.instances.length).toBe(0);
-
-      createBackendWebSocket('/api/browser/lanes/lane-1/view?token=viewer-token');
-      expect(RecordingWebSocket.instances[0]?.url).toBe(
-        'ws://127.0.0.1:25808/api/browser/lanes/lane-1/view?token=viewer-token'
-      );
-      expect(RecordingWebSocket.instances[0]?.protocols).toEqual(['local-trust-secret']);
-    } finally {
-      restoreWebSocketGlobal();
-      restoreBrowserGlobals();
-    }
-  });
-
-  test('requires wss for a non-loopback WebUI backend', () => {
-    class RecordingWebSocket {
-      static readonly instances: RecordingWebSocket[] = [];
-
-      constructor(readonly url: string) {
-        RecordingWebSocket.instances.push(this);
-      }
-    }
-
-    installBrowserGlobals({
-      location: {
-        origin: 'http://nomifun.example',
-        protocol: 'http:',
-        host: 'nomifun.example',
-        pathname: '/browser',
-        hash: '',
-      } as Location,
-    });
-    globalThis.WebSocket = RecordingWebSocket as unknown as typeof WebSocket;
-    try {
-      expectToThrow(() =>
-        createBackendWebSocket('/api/browser/lanes/lane-1/view?token=viewer-token')
-      );
-      expect(RecordingWebSocket.instances.length).toBe(0);
-    } finally {
-      restoreWebSocketGlobal();
-      restoreBrowserGlobals();
-    }
-  });
-
-  test('allows a same-origin wss WebUI viewer without desktop local trust', () => {
-    class RecordingWebSocket {
-      static readonly instances: RecordingWebSocket[] = [];
-
-      constructor(
-        readonly url: string,
-        readonly protocols?: string | string[]
-      ) {
-        RecordingWebSocket.instances.push(this);
-      }
-    }
-
-    installBrowserGlobals({
-      location: {
-        origin: 'https://nomifun.example',
-        protocol: 'https:',
-        host: 'nomifun.example',
-        pathname: '/browser',
-        hash: '',
-      } as Location,
-    });
-    globalThis.WebSocket = RecordingWebSocket as unknown as typeof WebSocket;
-    try {
-      createBackendWebSocket(
-        'https://nomifun.example/api/browser/lanes/lane-1/view?token=viewer-token'
-      );
-      expect(RecordingWebSocket.instances[0]?.url).toBe(
-        'wss://nomifun.example/api/browser/lanes/lane-1/view?token=viewer-token'
-      );
-      expect(RecordingWebSocket.instances[0]?.protocols).toBeUndefined();
-    } finally {
-      restoreWebSocketGlobal();
-      restoreBrowserGlobals();
     }
   });
 });

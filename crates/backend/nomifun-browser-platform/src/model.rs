@@ -80,7 +80,6 @@ pub enum BrowserOperationKind {
     Download,
     Debug,
     Manage,
-    View,
     Crawl,
 }
 
@@ -186,14 +185,6 @@ pub enum BrowserIdentityMode {
     Isolated,
 }
 
-impl BrowserIdentityMode {
-    /// Only live interactive identity domains may accept user or Agent input.
-    /// Explicit enumeration keeps future identity modes fail-closed.
-    pub const fn permits_interaction(self) -> bool {
-        matches!(self, Self::Primary | Self::Isolated)
-    }
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LaneLifecycleState {
@@ -203,14 +194,6 @@ pub enum LaneLifecycleState {
     Frozen,
     Stopping,
     Failed,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum LaneControlState {
-    Agent,
-    User,
-    Idle,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -230,15 +213,6 @@ pub enum ResourcePressureState {
     Normal,
     Pressured,
     Critical,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ViewerState {
-    Idle,
-    Starting,
-    Streaming,
-    Failed,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -272,7 +246,6 @@ pub struct BrowserLaneSnapshot {
     pub identity_mode: BrowserIdentityMode,
     pub identity_generation: u64,
     pub lifecycle_state: LaneLifecycleState,
-    pub control_state: LaneControlState,
     pub browser_epoch: u64,
     pub tabs: Vec<BrowserTabSnapshot>,
     pub active_tab_id: Option<String>,
@@ -283,7 +256,6 @@ pub struct BrowserLaneSnapshot {
     pub active_operation_count: usize,
     pub last_active_at_ms: u64,
     pub created_at_ms: u64,
-    pub viewer_state: ViewerState,
     pub error_code: Option<BrowserErrorCode>,
     pub error_message: Option<String>,
     pub recoverable: bool,

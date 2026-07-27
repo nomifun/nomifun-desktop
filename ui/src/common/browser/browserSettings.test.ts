@@ -5,17 +5,33 @@
  */
 
 import { describe, expect, test } from 'bun:test';
-import { migrateBrowserDisplayMode, normalizeBrowserResourcePolicy } from './browserSettings';
+import {
+  BROWSER_DISPLAY_MODES,
+  isBrowserDisplayMode,
+  migrateBrowserDisplayMode,
+  normalizeBrowserResourcePolicy,
+} from './browserSettings';
 
 describe('migrateBrowserDisplayMode', () => {
-  test('prefers an explicit display mode over the legacy silent value', () => {
+  test('publishes external as the only product display mode', () => {
+    expect(BROWSER_DISPLAY_MODES).toEqual(['external']);
+    expect(isBrowserDisplayMode('external')).toBe(true);
+    expect(isBrowserDisplayMode('embedded')).toBe(false);
+    expect(isBrowserDisplayMode('headless')).toBe(false);
+  });
+
+  test('keeps external and migrates historical modes to external', () => {
     expect(migrateBrowserDisplayMode({ displayMode: 'embedded', silent: true })).toEqual({
-      displayMode: 'embedded',
-      shouldPersist: false,
+      displayMode: 'external',
+      shouldPersist: true,
       source: 'displayMode',
     });
     expect(migrateBrowserDisplayMode({ displayMode: 'external', silent: true }).displayMode).toBe('external');
-    expect(migrateBrowserDisplayMode({ displayMode: 'headless', silent: false }).displayMode).toBe('headless');
+    expect(migrateBrowserDisplayMode({ displayMode: 'headless', silent: false })).toEqual({
+      displayMode: 'external',
+      shouldPersist: true,
+      source: 'displayMode',
+    });
   });
 
   test('migrates silent=false to external and requests persistence', () => {
@@ -26,34 +42,34 @@ describe('migrateBrowserDisplayMode', () => {
     });
   });
 
-  test('migrates silent=true to headless and requests persistence', () => {
+  test('migrates silent=true to external and requests persistence', () => {
     expect(migrateBrowserDisplayMode({ silent: true })).toEqual({
-      displayMode: 'headless',
+      displayMode: 'external',
       shouldPersist: true,
       source: 'silent',
     });
   });
 
-  test('defaults a fresh install to embedded and requests persistence', () => {
+  test('defaults a fresh install to external and requests persistence', () => {
     expect(migrateBrowserDisplayMode({})).toEqual({
-      displayMode: 'embedded',
+      displayMode: 'external',
       shouldPersist: true,
       source: 'default',
     });
   });
 
-  test('fails safe for an invalid new mode without consulting legacy silent', () => {
+  test('repairs an invalid new mode without consulting legacy silent', () => {
     expect(migrateBrowserDisplayMode({ displayMode: 'visible', silent: true })).toEqual({
-      displayMode: 'embedded',
-      shouldPersist: false,
+      displayMode: 'external',
+      shouldPersist: true,
       source: 'displayMode',
     });
   });
 
   test('treats an explicitly present null mode as malformed new configuration', () => {
     expect(migrateBrowserDisplayMode({ displayMode: null, silent: false })).toEqual({
-      displayMode: 'embedded',
-      shouldPersist: false,
+      displayMode: 'external',
+      shouldPersist: true,
       source: 'displayMode',
     });
   });

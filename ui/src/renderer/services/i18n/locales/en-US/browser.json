@@ -6,7 +6,7 @@
   },
   "page": {
     "title": "Browser management",
-    "description": "Inspect, take over, and close browser lanes owned by Agent runtimes.",
+    "description": "Monitor lifecycle, capacity, queues, and identity for externally managed browser windows.",
     "runningCount": "{{count}} running",
     "queuedCount": "{{count}} queued",
     "pressure": "{{state}} pressure",
@@ -45,6 +45,7 @@
     "closeConversationAria": "Close all browser lanes for {{name}}",
     "laneFallback": "Browser lane",
     "queuePosition": "queue #{{position}}",
+    "crashed": "crashed",
     "closeLaneAria": "Close {{name}}"
   },
   "fallback": {
@@ -59,19 +60,41 @@
   },
   "details": {
     "laneFallback": "Browser lane",
-    "controlState": "{{state}} control",
+    "statusOnly": "Status only",
+    "externalManagedWindow": "The live browser remains in its external managed window. This page does not embed, control, or connect to it.",
     "closeLane": "Close lane",
     "waitingCapacity": "Waiting for browser capacity",
     "queuePositionInline": "queue position {{position}}",
     "recommendedConcurrency": "recommended concurrency {{count}}",
-    "title": "Lane details",
+    "retryDelay": "retry in {{delay}}",
+    "capacityCounts": "{{active}} active · {{queued}} queued",
+    "errorRecoverable": "Recoverable. The browser manager may retry this lane.",
+    "errorTerminal": "Not recoverable. Close this lane after reviewing the error.",
     "sharedLiveIdentity": "shared live identity",
+    "queueState": {
+      "queued": "Queued",
+      "notQueued": "Not queued"
+    },
+    "sections": {
+      "current": "Current status",
+      "currentDescription": "Read-only lifecycle and active-page metadata from the browser manager.",
+      "identityOwner": "Identity and owner",
+      "identityOwnerDescription": "The identity domain and Agent execution that own this lane.",
+      "queueResources": "Queue and resources",
+      "queueResourcesDescription": "Capacity scheduling, retry timing, and the lane resource estimate."
+    },
     "fields": {
       "identity": "Identity",
+      "identityGeneration": "Identity generation",
       "lifecycle": "Lifecycle",
-      "control": "Control",
+      "activeOperations": "Active operations",
+      "queueState": "Queue state",
       "queuePosition": "Queue position",
       "capacityReason": "Capacity reason",
+      "retryDelay": "Retry delay",
+      "recommendedConcurrency": "Recommended concurrency",
+      "ownerCapacity": "Owner capacity",
+      "globalCapacity": "Global capacity",
       "resourceEstimate": "Resource estimate",
       "activePageTitle": "Active page title",
       "activeUrl": "Active URL",
@@ -84,37 +107,6 @@
       "clusterNode": "Cluster node",
       "tabs": "Tabs"
     }
-  },
-  "viewer": {
-    "errors": {
-      "streamFailed": "Viewer stream failed.",
-      "connectionFailed": "The embedded viewer connection failed. Lane management remains available.",
-      "disconnected": "The embedded viewer disconnected. You can retry without affecting the browser lane.",
-      "startFailed": "Unable to start the embedded viewer: {{error}}"
-    },
-    "queuedUnavailable": "The viewer will become available when this lane receives capacity.",
-    "stateUnavailable": "No live viewer is available for this lane state.",
-    "back": "Back",
-    "forward": "Forward",
-    "reload": "Reload",
-    "address": "Browser address",
-    "tab": "Browser tab",
-    "crashed": "crashed",
-    "readOnly": "read-only",
-    "unknownReadOnlyIdentity": "Unknown identity",
-    "userControl": "You control this lane",
-    "agentControl": "Agent control",
-    "returnToAgent": "Return to Agent",
-    "takeControl": "Take control",
-    "retry": "Retry viewer",
-    "surfaceAria": "Embedded Agent browser viewer",
-    "frameAlt": "Live Agent browser frame",
-    "connecting": "Connecting viewer…",
-    "waitingFrame": "Waiting for frame…",
-    "idle": "Viewer idle",
-    "jpegLiveView": "JPEG live view",
-    "latestFrameOnly": "latest frame only",
-    "frameStatus": "{{frame}} · {{mode}}"
   },
   "diagnostics": {
     "title": "Host diagnostics",
@@ -149,11 +141,6 @@
       "frozen": "Frozen",
       "stopping": "Stopping",
       "failed": "Failed"
-    },
-    "control": {
-      "agent": "Agent",
-      "user": "User",
-      "idle": "Idle"
     },
     "identity": {
       "primary": "Primary",

@@ -510,11 +510,11 @@ impl NomiAgentManager {
         // bootstrap 据它给 Hub-backed Browser tool adapter 注入会话模型的 VisualLocator。
         config.tools.browser.visual_fallback = config_extra.browser_visual_fallback;
         config.tools.browser.unrestricted_approval = config_extra.browser_unrestricted_approval;
-        // Browser 显示与 Host 来源偏好（与上面的 opt-in 开关正交，每会话 LIVE）：
-        // - browser_silent 是兼容布尔值：embedded/headless=true，external=false；
-        // - source("managed"/"system") 是 Browser Host 可执行文件偏好。
-        // 二者都不创建 runtime 私有浏览器；BrowserSessionHub 统一拥有 Primary/Crawl Host 与 profile。
-        config.tools.browser.headless = config_extra.browser_silent;
+        // Browser is status-only: Primary runs in the external managed window.
+        // `browser_silent` remains in the resolved config solely for old
+        // constructors and is deliberately ignored here. BrowserSessionHub
+        // owns every Host/profile; this runtime never creates a private one.
+        config.tools.browser.headless = false;
         config.tools.browser.source = config_extra.browser_source.clone();
 
         // Companion memory tools only touch the companion's own memory.db — never
@@ -2149,7 +2149,7 @@ mod tests {
             bedrock_config: None,
             computer_use: false,
             browser_use: false,
-            browser_silent: true,
+            browser_silent: false,
             browser_source: "managed".to_owned(),
             browser_full_power: false,
             browser_persistent_login: false,

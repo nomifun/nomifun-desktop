@@ -87,7 +87,7 @@ const BrowserInventoryTree: React.FC<BrowserInventoryTreeProps> = ({
   };
 
   return (
-    <div className='flex flex-col gap-10px'>
+    <div className='flex flex-col gap-9px'>
       {groups.map((group) => {
         const isCurrentConversation = group.conversationId === currentConversationId;
 
@@ -95,15 +95,15 @@ const BrowserInventoryTree: React.FC<BrowserInventoryTreeProps> = ({
           <section
             key={group.key}
             className={classNames(
-              'overflow-hidden rd-12px bg-bg-1 transition-[box-shadow,transform] duration-200',
+              'overflow-hidden rd-12px border border-solid bg-bg-1 transition-[border-color,box-shadow,transform] duration-200',
               isCurrentConversation
-                ? 'shadow-[inset_0_0_0_1px_rgba(var(--primary-6),0.24),0_6px_20px_rgba(var(--primary-6),0.08)]'
-                : 'shadow-[inset_0_0_0_1px_var(--color-border-1),0_4px_16px_rgba(128,128,128,0.08)]'
+                ? 'border-[rgba(var(--primary-6),0.30)] shadow-[0_5px_16px_rgba(var(--primary-6),0.07)]'
+                : 'border-[color:color-mix(in_srgb,var(--color-border-2)_72%,transparent)] shadow-[0_3px_12px_rgba(15,23,42,0.025)]'
             )}
           >
             <div
               className={classNames(
-                'flex items-center gap-8px px-12px py-10px shadow-[inset_0_-1px_0_rgba(128,128,128,0.06)]',
+                'flex items-center gap-8px border-b border-solid border-[color:color-mix(in_srgb,var(--color-border-2)_58%,transparent)] border-l-0 border-r-0 border-t-0 px-12px py-10px',
                 isCurrentConversation ? 'bg-[rgba(var(--primary-6),0.06)]' : 'bg-fill-1'
               )}
             >
@@ -140,7 +140,7 @@ const BrowserInventoryTree: React.FC<BrowserInventoryTreeProps> = ({
               {group.owners.map((owner) => (
                 <div
                   key={owner.key}
-                  className='rounded-10px bg-[var(--color-fill-1)] px-4px py-5px'
+                  className='rounded-10px border border-solid border-[color:color-mix(in_srgb,var(--color-border-2)_52%,transparent)] bg-[color:color-mix(in_srgb,var(--color-fill-1)_66%,transparent)] px-4px py-5px'
                 >
                   <div className='truncate px-6px pb-5px text-11px font-600 tracking-[0.01em] text-t-secondary'>
                     {owner.label}
@@ -221,7 +221,7 @@ const BrowserInventoryTree: React.FC<BrowserInventoryTreeProps> = ({
 
                           {lane.tabs.length > 0 && (
                             <div
-                              className='ml-18px mt-3px flex flex-col gap-2px rounded-8px bg-[var(--color-bg-1)] px-4px py-4px shadow-[inset_0_0_0_1px_var(--color-border-1)]'
+                              className='ml-18px mt-3px flex flex-col gap-2px rounded-8px border border-solid border-[color:color-mix(in_srgb,var(--color-border-2)_62%,transparent)] bg-[var(--color-bg-1)] px-4px py-4px'
                               role='list'
                               data-browser-lane-tabs={lane.lane_id}
                             >
@@ -269,7 +269,7 @@ const BrowserInventoryTree: React.FC<BrowserInventoryTreeProps> = ({
                                       )}
                                       {tab.crashed && (
                                         <Tag size='small' color='red'>
-                                          {t('browser.viewer.crashed')}
+                                          {t('browser.tree.crashed')}
                                         </Tag>
                                       )}
                                     </div>

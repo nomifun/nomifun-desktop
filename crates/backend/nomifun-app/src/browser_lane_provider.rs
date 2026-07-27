@@ -25,7 +25,7 @@ use nomifun_conversation::{
 
 const OWNER_REVOKE_WAITER_TIMEOUT: Duration = Duration::from_secs(6);
 
-const ALL_NATIVE_BROWSER_OPERATIONS: [BrowserOperationKind; 10] = [
+const ALL_NATIVE_BROWSER_OPERATIONS: [BrowserOperationKind; 9] = [
     BrowserOperationKind::Navigate,
     BrowserOperationKind::Observe,
     BrowserOperationKind::Act,
@@ -34,7 +34,6 @@ const ALL_NATIVE_BROWSER_OPERATIONS: [BrowserOperationKind; 10] = [
     BrowserOperationKind::Download,
     BrowserOperationKind::Debug,
     BrowserOperationKind::Manage,
-    BrowserOperationKind::View,
     BrowserOperationKind::Crawl,
 ];
 

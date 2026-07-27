@@ -14,10 +14,8 @@ import {
 import type {
   BrowserCloseResult,
   BrowserIdentityMode,
-  BrowserLaneControlState,
   BrowserLaneLifecycleState,
   BrowserResourcePressureState,
-  BrowserViewerState,
   IBrowserCapacityOverview,
   IBrowserHost,
   IBrowserInventoryChangedEvent,
@@ -27,7 +25,6 @@ import type {
   IBrowserLaneQueue,
   IBrowserOverview,
   IBrowserTab,
-  IBrowserViewerToken,
 } from './browserTypes';
 
 type UnknownRecord = Record<string, unknown>;
@@ -145,14 +142,12 @@ export const normalizeBrowserLane = (raw: unknown): IBrowserLane | null => {
   const tabs = rawTabs.map(normalizeTab).filter((tab): tab is IBrowserTab => tab != null);
   const lifecycle =
     firstString(value, 'lifecycle_state', 'state', 'status') ?? 'failed';
-  const control = firstString(value, 'control_state', 'control') ?? 'idle';
   const owner = normalizeOwner(value.owner, value);
 
   return {
     lane_id: laneId,
     lane_name: nullableString(value, 'lane_name', 'name'),
     lifecycle_state: lifecycle as BrowserLaneLifecycleState,
-    control_state: control as BrowserLaneControlState,
     conversation_id:
       nullableString(value, 'conversation_id') ?? owner?.conversation_id,
     conversation_title: nullableString(value, 'conversation_title'),
@@ -176,7 +171,6 @@ export const normalizeBrowserLane = (raw: unknown): IBrowserLane | null => {
     resource_estimate_bytes: firstNumber(value, 'resource_estimate_bytes', 'estimated_bytes'),
     active_operation: firstBoolean(value, 'active_operation', 'has_active_operation'),
     active_operation_count: firstNumber(value, 'active_operation_count'),
-    viewer_state: nullableString(value, 'viewer_state') as BrowserViewerState | null | undefined,
     error_code: nullableString(value, 'error_code', 'code'),
     error_message: (() => {
       const message = nullableString(value, 'error_message', 'message');
@@ -279,17 +273,6 @@ export const normalizeBrowserOverview = (raw: unknown): IBrowserOverview => {
   };
 };
 
-export const normalizeBrowserViewerToken = (raw: unknown): IBrowserViewerToken => {
-  const value = asRecord(raw);
-  const token = firstString(value, 'token', 'viewer_token');
-  if (!token) throw new TypeError('Browser viewer-token response did not include a token');
-  return {
-    token,
-    view_url: nullableString(value, 'view_url', 'url'),
-    expires_at: firstNumber(value, 'expires_at'),
-  };
-};
-
 export const browserSession = {
   overview: withResponseMap(
     httpGet<unknown, void>('/api/browser/overview', { silentStatuses: [404, 501] }),
@@ -309,17 +292,6 @@ export const browserSession = {
     () => undefined
   ),
   closeAll: httpPost<BrowserCloseResult, void>('/api/browser/close-all'),
-  returnControl: httpPost<BrowserCloseResult, { lane_id: string }>(
-    ({ lane_id }) => `/api/browser/lanes/${encodeURIComponent(lane_id)}/return-control`,
-    () => undefined
-  ),
-  viewerToken: withResponseMap(
-    httpPost<unknown, { lane_id: string }>(
-      ({ lane_id }) => `/api/browser/lanes/${encodeURIComponent(lane_id)}/viewer-token`,
-      () => undefined
-    ),
-    normalizeBrowserViewerToken
-  ),
   events: {
     inventoryChanged: wsEmitter<IBrowserInventoryChangedEvent>('browser.inventory.changed'),
     lifecycleChanged: wsEmitter<IBrowserInventoryChangedEvent>('browser.lifecycle.changed'),
