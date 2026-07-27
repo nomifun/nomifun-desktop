@@ -3014,6 +3014,12 @@ interface IChannelBridgeResponse {
   error?: string;
 }
 
+function requireSuccessfulChannelResponse(raw: IChannelBridgeResponse): void {
+  if (!raw.success) {
+    throw new Error(raw.error || raw.message || 'Channel operation failed');
+  }
+}
+
 type IChannelEnableResponse = {
   success: boolean;
   plugin_id?: ChannelPluginId;
@@ -3110,9 +3116,19 @@ export const channel = {
       ...(raw.error == null ? {} : { error: raw.error }),
     };
   }),
-  disablePlugin: httpPost<void, { plugin_id: import('../types/ids').ChannelPluginId }>('/api/channel/plugins/disable'),
+  disablePlugin: withResponseMap(
+    httpPost<IChannelBridgeResponse, { plugin_id: import('../types/ids').ChannelPluginId }>(
+      '/api/channel/plugins/disable'
+    ),
+    requireSuccessfulChannelResponse
+  ),
   /** 删除渠道行：停实例 + 清该渠道会话 + 删行（会话所产生的对话保留）。 */
-  deletePlugin: httpPost<void, { plugin_id: import('../types/ids').ChannelPluginId }>('/api/channel/plugins/delete'),
+  deletePlugin: withResponseMap(
+    httpPost<IChannelBridgeResponse, { plugin_id: import('../types/ids').ChannelPluginId }>(
+      '/api/channel/plugins/delete'
+    ),
+    requireSuccessfulChannelResponse
+  ),
   testPlugin: httpPost<
     { success: boolean; bot_username?: string; error?: string },
     { plugin_type: string; token: string; extra_config?: { app_id?: string; app_secret?: string; app_token?: string; homeserver_url?: string; user_id?: string; server_url?: string; nostr_relays?: string } }
@@ -3178,6 +3194,9 @@ export const channel = {
     };
   }),
   userAuthorized: wsMappedEmitter<IChannelUser, unknown>('channel.user-authorized', (raw) => toChannelUser(raw as RawUser)),
+  /** Channel events are not replayed; reload durable pairings/users after a
+   * successful WebSocket reconnect to cover the disconnected interval. */
+  reconnected: wsEmitter<undefined>('ws.reconnected'),
   /**
    * 微信扫码登录生命周期事件（替代旧 SSE 流）。`phase` 区分阶段：
    * `qr`(带 qrcodeData) → `scanned` → 终态 `done`(带 accountId/botToken) 或 `error`(带 message)。

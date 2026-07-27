@@ -281,12 +281,32 @@ impl ChannelMessageLoop {
             };
             let status = match executor.handle_incoming_message(&msg, &plugin_id).await {
                 Ok(MessageResult::Action(response)) => {
-                    send_action_response(&sender, &plugin_id, &chat_id, &response).await;
-                    settlement.outcome_json = Some(
-                        serde_json::json!({ "kind": "action", "behavior": response.behavior })
-                            .to_string(),
-                    );
-                    "completed"
+                    match send_action_response(&sender, &plugin_id, &chat_id, &response).await {
+                        Ok(()) => {
+                            settlement.outcome_json = Some(
+                                serde_json::json!({ "kind": "action", "behavior": response.behavior })
+                                    .to_string(),
+                            );
+                            "completed"
+                        }
+                        Err(error) => {
+                            error!(
+                                channel_plugin_id = %plugin_id,
+                                chat_id = %chat_id,
+                                error = %error,
+                                "channel action response could not be delivered"
+                            );
+                            settlement.error_text = Some(error.to_string());
+                            settlement.outcome_json = Some(
+                                serde_json::json!({
+                                    "kind": "action_delivery_failed",
+                                    "behavior": response.behavior
+                                })
+                                .to_string(),
+                            );
+                            "failed"
+                        }
+                    }
                 }
                 Ok(MessageResult::Dispatched {
                     session_id,
@@ -409,7 +429,7 @@ async fn send_action_response(
     plugin_id: &str,
     chat_id: &str,
     response: &crate::types::ActionResponse,
-) {
+) -> Result<(), ChannelError> {
     if let Some(text) = &response.text {
         let outgoing = UnifiedOutgoingMessage {
             message_type: OutgoingMessageType::Text,
@@ -428,14 +448,15 @@ async fn send_action_response(
         match response.behavior {
             ActionBehavior::Edit => {
                 if let Some(ref edit_id) = response.edit_message_id {
-                let _ = sender.edit_message(plugin_id, chat_id, edit_id, outgoing).await;
+                    sender.edit_message(plugin_id, chat_id, edit_id, outgoing).await?;
                 }
             }
             _ => {
-                let _ = sender.send_message(plugin_id, chat_id, outgoing).await;
+                sender.send_message(plugin_id, chat_id, outgoing).await?;
             }
         }
     }
+    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -699,8 +720,43 @@ fn parse_choice(text: &str, n: usize) -> Option<usize> {
 mod tests {
     use super::*;
     use crate::types::{
-        MessageContentType, PluginType, UnifiedMessageContent, UnifiedUser,
+        ActionResponse, MessageContentType, OutgoingMedia, PluginType,
+        UnifiedMessageContent, UnifiedUser,
     };
+
+    struct FailingActionSender;
+
+    #[async_trait::async_trait]
+    impl ChannelSender for FailingActionSender {
+        async fn send_message(
+            &self,
+            _plugin_id: &str,
+            _chat_id: &str,
+            _message: UnifiedOutgoingMessage,
+        ) -> Result<String, ChannelError> {
+            Err(ChannelError::MessageSendFailed("test delivery failure".into()))
+        }
+
+        async fn edit_message(
+            &self,
+            _plugin_id: &str,
+            _chat_id: &str,
+            _message_id: &str,
+            _message: UnifiedOutgoingMessage,
+        ) -> Result<(), ChannelError> {
+            Err(ChannelError::MessageSendFailed("test delivery failure".into()))
+        }
+
+        async fn send_media(
+            &self,
+            _plugin_id: &str,
+            _chat_id: &str,
+            _media: OutgoingMedia,
+            _caption: Option<&str>,
+        ) -> Result<String, ChannelError> {
+            Err(ChannelError::MessageSendFailed("test delivery failure".into()))
+        }
+    }
 
     fn sample_inbound(id: &str, chat_id: &str, text: &str) -> UnifiedIncomingMessage {
         UnifiedIncomingMessage {
@@ -790,6 +846,25 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[tokio::test]
+    async fn action_response_delivery_failure_is_propagated() {
+        let sender: Arc<dyn ChannelSender> = Arc::new(FailingActionSender);
+        let response = ActionResponse {
+            text: Some("pairing code".into()),
+            parse_mode: None,
+            buttons: None,
+            keyboard: None,
+            behavior: ActionBehavior::Send,
+            toast: None,
+            edit_message_id: None,
+        };
+
+        let error = send_action_response(&sender, "plugin", "chat", &response)
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("test delivery failure"));
     }
 
     #[test]
