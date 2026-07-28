@@ -6,7 +6,10 @@ use axum::http::StatusCode;
 use serde_json::json;
 use tower::ServiceExt;
 
-use common::{body_json, build_app, delete_with_token, get_request, get_with_token, json_with_token, setup_and_login};
+use common::{
+    acp_extra_with_workspace, body_json, build_app, delete_with_token, get_request,
+    get_with_token, json_with_token, setup_and_login,
+};
 
 #[tokio::test]
 async fn unauthenticated_webhook_list_is_rejected() {
@@ -362,7 +365,11 @@ async fn tag_bindings_lists_enabled_autowork_conversations() {
         .oneshot(json_with_token(
             "POST",
             "/api/conversations",
-            json!({ "type": "acp", "name": "Conv X", "extra": { "workspace": "/project" } }),
+            json!({
+                "type": "acp",
+                "name": "Conv X",
+                "extra": acp_extra_with_workspace("/project")
+            }),
             &token,
             &csrf,
         ))
@@ -415,7 +422,11 @@ async fn admin_disable_of_idle_target_is_allowed() {
         .oneshot(json_with_token(
             "POST",
             "/api/conversations",
-            json!({ "type": "acp", "name": "Conv Y", "extra": { "workspace": "/project" } }),
+            json!({
+                "type": "acp",
+                "name": "Conv Y",
+                "extra": acp_extra_with_workspace("/project")
+            }),
             &token,
             &csrf,
         ))

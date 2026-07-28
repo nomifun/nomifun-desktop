@@ -139,6 +139,21 @@ pub struct CssRect {
     pub height: f64,
 }
 
+/// A structured snapshot of one top-level page target owned by this engine.
+///
+/// `tab_id` is the short, user-facing identifier accepted by tab actions;
+/// `target_id` is the complete CDP target identifier used for authoritative
+/// routing. Callers must never reconstruct one from the other.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BrowserTabInfo {
+    pub tab_id: String,
+    pub target_id: String,
+    pub title: Option<String>,
+    pub url: Option<String>,
+    pub active: bool,
+    pub crashed: bool,
+}
+
 /// 一次 `observe` 的产物：序列化给 LLM 的 aria YAML + 配套的 ref 表 + 出处/封顶元信息。
 #[derive(Clone, Debug)]
 pub struct Observation {
@@ -227,9 +242,10 @@ pub enum DetachKind {
 
 /// **引擎并发契约（DESIGN §22）**：每个 [`BrowserEngine`] 实现**必须**在单个引擎实例上把 `observe`
 /// 与 `act`/`navigate`/`screenshot` 串行化——快照绝不与改 DOM 的动作交错（否则交回模型陈旧 `ref`）。
-/// 后端用一把引擎内 per-engine mutex（跨每个操作体持有）实现。facade 仍报 `is_concurrency_safe == false`
-/// （调度器也串行），但正确性**不再依赖**它——并发调用方也无法交错 observe/act。并发只在**不同引擎**
-/// （各自 Chrome 进程）之间，绝不在单引擎内。本常量令该契约被代码引用并由测试钉死。
+/// 后端用一把 lane adapter 内 mutex（跨每个操作体持有）实现。facade 仍报
+/// `is_concurrency_safe == false`（调度器也串行），但正确性**不再依赖**它——并发调用方也无法交错
+/// observe/act。共享 Host 中每个 Lane 都有独立 adapter/gate，所以不同 Lane 可以在同一 Chromium/CDP
+/// Connection 上重叠执行；同一 Lane 内仍严格串行。本常量令该契约被代码引用并由测试钉死。
 pub const OBSERVE_ACT_MUTEX_IS_ENGINE_ENFORCED: bool = true;
 
 /// The contract every browser backend implements. Async because the CDP
@@ -239,7 +255,7 @@ pub const OBSERVE_ACT_MUTEX_IS_ENGINE_ENFORCED: bool = true;
 /// **并发契约（DESIGN §22）**：实现必须在单引擎实例上串行化 `observe` 与
 /// `act`/`navigate`/`screenshot`（引擎内 per-engine mutex，见
 /// [`OBSERVE_ACT_MUTEX_IS_ENGINE_ENFORCED`]）；正确性不依赖 `is_concurrency_safe`。
-/// 并发跨不同引擎实现，绝不在单引擎内。
+/// 一个实现值代表一个 Lane：并发跨不同 Lane adapter 实现，绝不在同一 Lane 内。
 #[async_trait]
 pub trait BrowserEngine: Send + Sync {
     /// Honest report of what this session can do.
@@ -297,9 +313,9 @@ pub trait BrowserEngine: Send + Sync {
 
     /// **Takeover seam: bring the browser window to the foreground.**
     ///
-    /// Headful + display → foreground the window (CDP `Page.bringToFront` +
-    /// `Target.activateTarget`). Headless or no display → `Unsupported` (the caller
-    /// maps this to `TakeoverResolution::Unavailable`).
+    /// Headful + display → restore the active target's native Chromium window and
+    /// activate that target. Headless or no display → `Unsupported` (the caller maps
+    /// this to `TakeoverResolution::Unavailable`).
     ///
     /// Default impl returns `Unsupported` for backends that don't support it.
     async fn bring_to_front(&self) -> Result<(), BrowserError> {
@@ -324,6 +340,14 @@ pub trait BrowserEngine: Send + Sync {
         Err(BrowserError::Unsupported {
             capability: "capture_storage_state".into(),
             hint: "storage_state capture not supported by this backend".into(),
+        })
+    }
+
+    /// Return a structured snapshot of all top-level tabs owned by this engine.
+    async fn tabs(&self) -> Result<Vec<BrowserTabInfo>, BrowserError> {
+        Err(BrowserError::Unsupported {
+            capability: "tabs".into(),
+            hint: "structured tab inventory not supported by this backend".into(),
         })
     }
 

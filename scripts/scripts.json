@@ -14,6 +14,10 @@
       "group": "check",
       "desc": "Enforce the supervised process runtime boundary and exact hand-off allowlist."
     },
+    "check:browser-platform-boundary": {
+      "group": "check",
+      "desc": "Enforce the single BrowserSessionHub ownership boundary and reject private browser launch paths."
+    },
     "check:agent-vocabulary": {
       "group": "check",
       "desc": "Enforce AgentExecution as the only active collaboration aggregate and permit only exact migration fences."

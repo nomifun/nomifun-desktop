@@ -20,7 +20,6 @@ import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import useSWR from 'swr';
 import { useSettingsViewMode } from '../../settingsViewContext';
-import DevSettings from './DevSettings';
 import DirInputItem from './DirInputItem';
 import FactoryResetModal from './FactoryResetModal';
 import PreferenceRow from './PreferenceRow';
@@ -430,9 +429,6 @@ const SystemModalContent: React.FC = () => {
               )}
             </Form>
           </div>
-
-          {/* Developer settings: DevTools + CDP (only visible in dev mode) */}
-          <DevSettings />
 
           {/* Danger zone: factory reset (clears the database + derived data) */}
           <div className='px-[12px] md:px-[32px] py-16px bg-2 rd-16px space-y-12px'>

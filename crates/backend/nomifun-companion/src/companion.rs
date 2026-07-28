@@ -10,6 +10,7 @@
 //! registers the memory tools, and (b) the main sidebar filters them out;
 //! `extra.companion_id` records the owning companion for persona/knowledge selection.
 
+use std::path::Path;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -20,7 +21,11 @@ use nomifun_conversation::ConversationService;
 
 use crate::collector::{self, SharedConfig};
 use crate::events::CompanionEventEmitter;
-use crate::profile::CompanionProfileConfig;
+use crate::managed_skills::{
+    load_manifest, record_managed_entry, record_source_matches, remove_stale_managed_entries,
+    save_manifest,
+};
+use crate::profile::{CompanionProfileConfig, normalized_effective_skill_names};
 use crate::registry::CompanionRegistry;
 use crate::store::{CompanionThread, MEMORY_KINDS, MemoryFilter, MemoryScope, CompanionStore};
 
@@ -478,9 +483,141 @@ pub struct CompanionThreads {
     pub registry: Arc<CompanionRegistry>,
     pub conversations: Arc<ConversationService>,
     pub runtime_registry: Arc<dyn nomifun_ai_agent::AgentRuntimeRegistry>,
+    pub skill_paths: Arc<nomifun_extension::SkillPaths>,
 }
 
 impl CompanionThreads {
+    async fn builtin_auto_skill_names(&self) -> Vec<String> {
+        match nomifun_extension::list_builtin_auto_skills(&self.skill_paths).await {
+            Ok(skills) => skills.into_iter().map(|skill| skill.name).collect(),
+            Err(error) => {
+                tracing::warn!(error = %error, "list builtin auto skills for companion failed");
+                Vec::new()
+            }
+        }
+    }
+
+    async fn effective_skill_names(&self, profile: &CompanionProfileConfig) -> Vec<String> {
+        let auto_names = self.builtin_auto_skill_names().await;
+        let configured = normalized_effective_skill_names(auto_names, &profile.skills);
+        match nomifun_extension::materialize_skills_for_agent(
+            &self.skill_paths,
+            &profile.companion_id,
+            &configured,
+        )
+        .await
+        {
+            Ok(resolved) => resolved.into_iter().map(|skill| skill.name).collect(),
+            Err(error) => {
+                tracing::warn!(error = %error, companion_id = %profile.companion_id, "resolve companion skills failed");
+                Vec::new()
+            }
+        }
+    }
+
+    async fn sync_workspace_skills(
+        &self,
+        conversation_id: &str,
+        workspace: &Path,
+        skill_names: &[String],
+    ) {
+        let nomi_dir = workspace.join(".nomi");
+        let skills_dir = nomi_dir.join("skills");
+        let resolved = match nomifun_extension::materialize_skills_for_agent(
+            &self.skill_paths,
+            conversation_id,
+            skill_names,
+        )
+        .await
+        {
+            Ok(resolved) => resolved,
+            Err(error) => {
+                tracing::warn!(error = %error, conversation_id, "resolve companion workspace skills failed");
+                return;
+            }
+        };
+
+        let old_manifest = load_manifest(&nomi_dir);
+        let desired: std::collections::HashSet<&str> = resolved
+            .iter()
+            .filter(|skill| {
+                old_manifest
+                    .managed
+                    .get(&skill.name)
+                    .is_none_or(|record| record_source_matches(record, &skill.source_path))
+            })
+            .map(|skill| skill.name.as_str())
+            .collect();
+        let mut manifest = remove_stale_managed_entries(&skills_dir, &old_manifest, &desired);
+        let to_link: Vec<_> = resolved
+            .into_iter()
+            .filter(|skill| !skills_dir.join(&skill.name).exists())
+            .collect();
+        if let Err(error) = nomifun_extension::link_workspace_skills(
+            workspace,
+            &[".nomi/skills"],
+            &to_link,
+        )
+        .await
+        {
+            tracing::warn!(error = %error, conversation_id, "link companion workspace skills failed");
+        }
+        for skill in &to_link {
+            let target = skills_dir.join(&skill.name);
+            match record_managed_entry(&target, &skill.source_path) {
+                Ok(Some(record)) => {
+                    manifest.managed.insert(skill.name.clone(), record);
+                }
+                Ok(None) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => tracing::warn!(
+                    error = %error,
+                    target = %target.display(),
+                    "record managed companion skill failed"
+                ),
+            }
+        }
+        if let Err(error) = save_manifest(&nomi_dir, &manifest) {
+            tracing::warn!(error = %error, manifest = %nomi_dir.display(), "save companion skill manifest failed");
+        }
+    }
+
+    /// Reconcile the workspace links and immutable conversation skill snapshot
+    /// for one existing companion thread. All failures are best-effort at this
+    /// boundary; a profile patch must not become unusable because a stale
+    /// workspace or runtime is temporarily unavailable.
+    pub(crate) async fn reconcile_profile_skills(
+        &self,
+        profile: &CompanionProfileConfig,
+        conversation_id: &str,
+    ) {
+        let Ok(response) = self
+            .conversations
+            .get(self.authoritative_user_id.as_ref(), conversation_id)
+            .await
+        else {
+            return;
+        };
+        let effective = self.effective_skill_names(profile).await;
+        if let Some(workspace) = response
+            .extra
+            .get("workspace")
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|workspace| !workspace.is_empty())
+        {
+            self.sync_workspace_skills(conversation_id, Path::new(workspace), &effective)
+                .await;
+        }
+        if let Err(error) = self
+            .conversations
+            .replace_skill_snapshot(conversation_id, &effective)
+            .await
+        {
+            tracing::warn!(error = %error, conversation_id, "reconcile companion skill snapshot failed");
+        }
+    }
+
     /// `NotFound` unless `conversation_id` is a registered thread owned by
     /// `companion_id`.
     async fn assert_owned(&self, companion_id: &str, conversation_id: &str) -> Result<(), AppError> {
@@ -568,6 +705,7 @@ impl CompanionThreads {
             // 外来 temp cwd 仍留置不动（见 plan_workspace_reconcile 的 Leave 分支：
             // 移动 live cwd 会孤立已写文件）。新伙伴走下面的 create 分支直接落 pretty 名。
             self.reconcile_thread_workspace(&profile, &existing.conversation_id).await;
+            self.reconcile_profile_skills(&profile, &existing.conversation_id).await;
             let _ = set_active_thread_ptr(&self.store, companion_id, Some(&existing.conversation_id)).await;
             return Ok(existing);
         }
@@ -591,6 +729,8 @@ impl CompanionThreads {
             tracing::warn!(error = %e, dir = %workspace_dir.display(), "create companion workspace dir failed");
         }
         let workspace = workspace_dir.to_string_lossy().into_owned();
+        let auto_skill_names = self.builtin_auto_skill_names().await;
+        let effective_skill_names = self.effective_skill_names(&profile).await;
 
         let req = CreateConversationRequest {
             r#type: nomifun_common::AgentType::Nomi,
@@ -613,6 +753,12 @@ impl CompanionThreads {
                 // preset instructions. Prevent the generic conversation path
                 // from appending the same block a second time.
                 "preset_instructions_embedded": true,
+                // The conversation service freezes this into `extra.skills`.
+                // Supplying the resolved set also filters configured names that
+                // are not installed; the follow-up reconciliation repairs the
+                // snapshot against the authoritative resolver.
+                "preset_enabled_skills": effective_skill_names,
+                "exclude_auto_inject_skills": auto_skill_names,
                 // Fixed private work folder (locked, browsable in the chat tab's file
                 // sidebar). Marks the conversation as a custom (non-temp) workspace, so
                 // no skill symlinks are wired — the companion uses gateway tools, not skills.
@@ -648,6 +794,7 @@ impl CompanionThreads {
                 return Err(e);
             }
         };
+        self.reconcile_profile_skills(&profile, &created_id).await;
         let _ = set_active_thread_ptr(&self.store, companion_id, Some(&created_id)).await;
         Ok(thread)
     }

@@ -40,16 +40,26 @@ impl ShellService {
         self.opener.open_detached(url)
     }
 
-    /// Launch a URL, file, folder, or application (by name or path) via the OS
+    /// Launch a file, folder, or application (by name or path) via the OS
     /// shell (ShellExecute on Windows). Unlike `open_external`/`open_file`, this
-    /// accepts any target — app names like `msedge`, arbitrary paths — so an
-    /// agent can reliably open browsers/apps WITHOUT the fragile `cmd /c start`
+    /// accepts app names like `notepad` and arbitrary paths — so an agent can
+    /// reliably open applications WITHOUT the fragile `cmd /c start`
     /// window-title-argument quirk. `app` optionally launches the target with a
-    /// specific application (e.g. open a URL in a named browser). The target is
-    /// guarded against the empty / bare-path-separator inputs (e.g. `\\`) that
-    /// otherwise surface a Windows "cannot find '\\'" ShellExecute dialog.
+    /// specific application. The target is guarded against the empty /
+    /// bare-path-separator inputs (e.g. `\\`) that otherwise surface a Windows
+    /// "cannot find '\\'" ShellExecute dialog.
+    ///
+    /// Every production caller is an Agent surface (the `nomifun-open` MCP
+    /// server), so web URLs fail closed here: an Agent-initiated `http/https`
+    /// open through the OS browser would bypass the managed Browser Hub's
+    /// approval, egress and lifecycle policies. Trusted user-clicked links use
+    /// [`Self::open_external`] instead.
     pub async fn launch(&self, target: &str, app: Option<&str>) -> Result<(), ShellError> {
         validate_launch_target(target)?;
+        validate_agent_launch_is_not_web(target)?;
+        if let Some(app) = app {
+            validate_agent_launch_app_is_not_browser(app)?;
+        }
         match app {
             Some(app) => self.opener.open_with_detached(target, app),
             None => self.opener.open_detached(target),
@@ -302,6 +312,72 @@ fn validate_launch_target(target: &str) -> Result<(), ShellError> {
     Ok(())
 }
 
+/// Fail closed on Agent-initiated web-page opens through the OS browser.
+/// Matching is on the scheme prefix (`http:`/`https:`) rather than `://`,
+/// because browsers normalize scheme-only forms such as `https:example.com`
+/// back to a real web navigation, and the substring check also catches wrapper
+/// protocols such as `microsoft-edge:https://…`.
+fn validate_agent_launch_is_not_web(target: &str) -> Result<(), ShellError> {
+    let lower = target.to_ascii_lowercase();
+    if lower.contains("http:") || lower.contains("https:") {
+        return Err(ShellError::InvalidTarget(format!(
+            "opening web URLs through the operating-system browser is not available to Agent \
+             tools ({target:?}). Use the managed Browser tool (browser navigate) to read or \
+             interact with web pages; the user can foreground a running Primary browser lane \
+             from the Browser management page when a visible window is needed."
+        )));
+    }
+    Ok(())
+}
+
+/// Browser and generic URL-opener executables that must not be selected as
+/// the `app` to open a target WITH: launching a browser with a bare-domain
+/// argument is the same OS-browser bypass as an http target.
+const AGENT_BLOCKED_OPENER_APPS: &[&str] = &[
+    "xdg-open",
+    "open",
+    "gio",
+    "kde-open",
+    "kde-open5",
+    "gnome-open",
+    "sensible-browser",
+    "x-www-browser",
+    "explorer",
+    "rundll32",
+    "google-chrome",
+    "google-chrome-stable",
+    "chrome",
+    "chromium",
+    "chromium-browser",
+    "firefox",
+    "msedge",
+    "microsoft-edge",
+    "edge",
+    "brave",
+    "brave-browser",
+    "opera",
+    "vivaldi",
+    "safari",
+];
+
+fn validate_agent_launch_app_is_not_browser(app: &str) -> Result<(), ShellError> {
+    let base = app
+        .trim()
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or(app)
+        .to_ascii_lowercase();
+    let base = base.strip_suffix(".exe").unwrap_or(&base);
+    if AGENT_BLOCKED_OPENER_APPS.contains(&base) {
+        return Err(ShellError::InvalidTarget(format!(
+            "opening a target with the {app:?} browser/opener is not available to Agent \
+             tools; it would hand agent-chosen content to a visible operating-system \
+             browser. Use the managed Browser tool (browser navigate) for web pages."
+        )));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
@@ -461,10 +537,47 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn launch_accepts_url_with_and_without_app() {
+    async fn launch_fails_closed_on_agent_web_targets() {
+        // Agent-facing launch must not open web pages through the OS browser;
+        // that path belongs to the managed Browser Hub. Scheme-only forms and
+        // wrapper protocols forwarding to a web URL are the same bypass.
         let svc = ShellService::new(Arc::new(NoopSystemOpener));
-        assert!(svc.launch("https://www.baidu.com", None).await.is_ok());
-        assert!(svc.launch("https://www.baidu.com", Some("msedge")).await.is_ok());
+        for target in [
+            "https://www.baidu.com",
+            "http://example.com",
+            "HTTPS://EXAMPLE.COM",
+            "https:example.com",
+            "https:\\\\example.com",
+            "microsoft-edge:https://example.com",
+        ] {
+            assert!(
+                matches!(svc.launch(target, None).await, Err(ShellError::InvalidTarget(_))),
+                "should fail closed for {target:?}"
+            );
+        }
+        assert!(matches!(
+            svc.launch("https://www.baidu.com", Some("msedge")).await,
+            Err(ShellError::InvalidTarget(_))
+        ));
+        // A browser as the opening app is the same bypass even for a
+        // non-URL target: browsers navigate bare-domain arguments.
+        for app in ["msedge", "chrome", "Firefox", "/usr/bin/google-chrome", "xdg-open"] {
+            assert!(
+                matches!(
+                    svc.launch("example.com", Some(app)).await,
+                    Err(ShellError::InvalidTarget(_))
+                ),
+                "should fail closed for app {app:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn launch_accepts_apps_files_and_non_web_protocols() {
+        let svc = ShellService::new(Arc::new(NoopSystemOpener));
+        assert!(svc.launch("notepad", None).await.is_ok());
+        assert!(svc.launch("C:\\tools\\report.pdf", Some("acrobat")).await.is_ok());
+        assert!(svc.launch("mailto:a@b.com", None).await.is_ok());
     }
 
     #[tokio::test]

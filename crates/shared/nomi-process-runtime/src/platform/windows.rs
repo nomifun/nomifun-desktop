@@ -8,6 +8,7 @@ use std::{
     io,
     mem,
     os::windows::ffi::{OsStrExt, OsStringExt},
+    path::PathBuf,
     ptr,
     sync::{
         Arc, Mutex, OnceLock,
@@ -22,8 +23,8 @@ use tokio::sync::watch;
 use windows_sys::Win32::{
     Foundation::{
         DUPLICATE_SAME_ACCESS, DuplicateHandle, ERROR_BROKEN_PIPE,
-        ERROR_INVALID_PARAMETER, ERROR_NO_DATA, HANDLE, HANDLE_FLAG_INHERIT, WAIT_FAILED,
-        WAIT_OBJECT_0, WAIT_TIMEOUT, SetHandleInformation,
+        ERROR_INVALID_PARAMETER, ERROR_NO_DATA, FILETIME, HANDLE, HANDLE_FLAG_INHERIT,
+        WAIT_FAILED, WAIT_OBJECT_0, WAIT_TIMEOUT, SetHandleInformation,
     },
     Globalization::{CSTR_GREATER_THAN, CSTR_LESS_THAN, CompareStringOrdinal},
     Security::SECURITY_ATTRIBUTES,
@@ -45,9 +46,11 @@ use windows_sys::Win32::{
         Threading::{
             CREATE_NO_WINDOW, CREATE_SUSPENDED, CREATE_UNICODE_ENVIRONMENT,
             CreateProcessW, EXTENDED_STARTUPINFO_PRESENT, GetCurrentProcess, GetExitCodeProcess,
-            OpenProcess, OpenThread, PROCESS_INFORMATION, PROCESS_SET_QUOTA, PROCESS_SYNCHRONIZE,
-            PROCESS_TERMINATE, ResumeThread, STARTF_USESTDHANDLES, STARTUPINFOEXW,
-            THREAD_SUSPEND_RESUME, TerminateProcess, WaitForSingleObject,
+            GetProcessId, GetProcessTimes, OpenProcess, OpenThread, PROCESS_INFORMATION,
+            PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SET_QUOTA,
+            PROCESS_SYNCHRONIZE, PROCESS_TERMINATE, QueryFullProcessImageNameW, ResumeThread,
+            STARTF_USESTDHANDLES, STARTUPINFOEXW, THREAD_SUSPEND_RESUME, TerminateProcess,
+            WaitForSingleObject,
         },
     },
 };
@@ -71,6 +74,142 @@ const WRITE_CHUNK_BYTES: usize = 64 * 1024;
 const LIFECYCLE_WAIT_HORIZON: Duration = Duration::from_secs(60 * 60 * 24 * 365);
 const MAX_COMMAND_LINE_UNITS: usize = 32_767;
 const TERMINATED_BY_HOST_EXIT_CODE: u32 = 0xC000_013A;
+
+/// Exact creation identity read through one live Windows process handle.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WindowsProcessIdentity {
+    pub pid: u32,
+    pub start_time_epoch_seconds: u64,
+    pub platform_start_key: u64,
+    pub executable: PathBuf,
+}
+
+/// Owns an exact Windows process handle suitable for fail-closed recovery.
+pub struct WindowsExactProcess {
+    process: OwnedHandle,
+    identity: WindowsProcessIdentity,
+}
+
+impl WindowsExactProcess {
+    /// Open a process with the rights required for Job assignment,
+    /// termination, exact identity inspection, and terminal waiting.
+    pub fn open_for_recovery(pid: u32) -> io::Result<Self> {
+        let process = open_exact_process(pid, true)?;
+        let identity = process_identity_from_handle(process.as_raw())?;
+        if identity.pid != pid {
+            return Err(io::Error::other(format!(
+                "opened process handle reports PID {}, expected {pid}",
+                identity.pid
+            )));
+        }
+        Ok(Self { process, identity })
+    }
+
+    pub fn identity(&self) -> &WindowsProcessIdentity {
+        &self.identity
+    }
+
+    fn wait_until(&self, deadline: Instant) -> io::Result<()> {
+        wait_handle_until(self.process.as_raw(), deadline)
+    }
+}
+
+/// Inspect one PID through an exact, non-inheritable process handle.
+pub fn windows_process_identity(pid: u32) -> io::Result<WindowsProcessIdentity> {
+    let process = open_exact_process(pid, false)?;
+    let identity = process_identity_from_handle(process.as_raw())?;
+    if identity.pid != pid {
+        return Err(io::Error::other(format!(
+            "opened process handle reports PID {}, expected {pid}",
+            identity.pid
+        )));
+    }
+    Ok(identity)
+}
+
+/// Inspect a Tokio child through the exact handle already owned by the child.
+pub fn windows_child_process_identity(
+    child: &tokio::process::Child,
+) -> io::Result<WindowsProcessIdentity> {
+    let raw = child
+        .raw_handle()
+        .ok_or_else(|| io::Error::other("child process handle is unavailable"))?;
+    process_identity_from_handle(raw.cast())
+}
+
+/// A recovery-only Job assembled after caller-side durable identity validation.
+///
+/// The Job is deliberately unarmed while verified descendants are collected.
+/// Once armed, any failure path that drops it retains kill-on-close semantics.
+pub struct WindowsRecoveryJob {
+    job: JobControl,
+    armed: bool,
+}
+
+impl WindowsRecoveryJob {
+    pub fn new_unarmed() -> io::Result<Self> {
+        Ok(Self {
+            job: JobControl::new(create_unarmed_process_job()?),
+            armed: false,
+        })
+    }
+
+    pub fn assign(&self, process: &WindowsExactProcess) -> io::Result<()> {
+        if self.armed {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "cannot add a process after the recovery Job is armed",
+            ));
+        }
+        let job = self
+            .job
+            .raw_handle()
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "recovery Job is closed"))?;
+        // SAFETY: both exact handles remain live for this call.
+        if unsafe { AssignProcessToJobObject(job, process.process.as_raw()) } == 0 {
+            Err(io::Error::last_os_error())
+        } else {
+            Ok(())
+        }
+    }
+
+    pub fn arm_kill_on_close(&mut self) -> io::Result<()> {
+        if self.armed {
+            return Ok(());
+        }
+        let job = self
+            .job
+            .raw_handle()
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "recovery Job is closed"))?;
+        arm_process_job(job)?;
+        self.armed = true;
+        Ok(())
+    }
+
+    /// Terminate all members and prove every supplied exact process plus Job
+    /// membership is terminal before closing the Job.
+    pub fn terminate_and_wait<'a>(
+        &self,
+        processes: impl IntoIterator<Item = &'a WindowsExactProcess>,
+        timeout: Duration,
+    ) -> io::Result<()> {
+        if !self.armed {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "recovery Job must be armed before termination",
+            ));
+        }
+        let deadline = Instant::now()
+            .checked_add(timeout)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "timeout is too large"))?;
+        self.job.terminate()?;
+        for process in processes {
+            process.wait_until(deadline)?;
+        }
+        self.job.wait_empty_until(deadline)?;
+        self.job.close_proven_empty()
+    }
+}
 
 /// Owns a kill-on-close Windows Job attached to an already-started process.
 ///
@@ -155,23 +294,24 @@ pub(super) async fn spawn_pipe(
 
 #[derive(Clone)]
 pub(crate) struct ChildProcessCleanup {
-    completion: Option<watch::Receiver<Option<Result<(), Arc<str>>>>>,
+    process: Option<Arc<ChildProcessJob>>,
 }
 
 impl ChildProcessCleanup {
-    fn from_process(process: &ChildProcessJob) -> Self {
+    fn from_process(process: &Arc<ChildProcessJob>) -> Self {
         Self {
-            completion: Some(process.completion.subscribe()),
+            process: Some(Arc::clone(process)),
         }
     }
 
-    pub(crate) async fn wait(mut self) -> io::Result<()> {
-        let Some(mut completion) = self.completion.take() else {
+    pub(crate) async fn wait(&self) -> io::Result<()> {
+        let Some(process) = self.process.as_ref() else {
             return Err(io::Error::new(
                 io::ErrorKind::Unsupported,
                 "handed-off child process has no host-owned Windows Job cleanup proof",
             ));
         };
+        let mut completion = process.completion.subscribe();
         let wait = async {
             loop {
                 if let Some(result) = completion.borrow().clone() {
@@ -192,6 +332,30 @@ impl ChildProcessCleanup {
                 "child-process Job cleanup proof timed out",
             ))?
     }
+
+    pub(crate) async fn shutdown(
+        &self,
+        child: &mut tokio::process::Child,
+    ) -> io::Result<()> {
+        let Some(process) = self.process.as_ref() else {
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "handed-off child process has no host-owned Windows Job cleanup authority",
+            ));
+        };
+        let members = process.job.member_process_handles()?;
+        process.job.terminate()?;
+        let child_result = child.wait().await.map(|_| ());
+        let cleanup_result = self.wait().await;
+        child_result?;
+        cleanup_result?;
+        wait_process_handles_until(
+            &members,
+            Instant::now()
+                .checked_add(CLEANUP_TIMEOUT)
+                .unwrap_or_else(Instant::now),
+        )
+    }
 }
 
 pub(crate) fn spawn_child_process(
@@ -202,7 +366,7 @@ pub(crate) fn spawn_child_process(
         return command.spawn().map(|child| {
             (
                 child,
-                ChildProcessCleanup { completion: None },
+                ChildProcessCleanup { process: None },
             )
         });
     }
@@ -1463,16 +1627,25 @@ fn clear_inheritance(handle: HANDLE) -> io::Result<()> {
 }
 
 fn create_process_job() -> io::Result<OwnedHandle> {
+    let job = create_unarmed_process_job()?;
+    arm_process_job(job.as_raw())?;
+    Ok(job)
+}
+
+fn create_unarmed_process_job() -> io::Result<OwnedHandle> {
     // SAFETY: null security/name pointers request a non-inheritable anonymous Job.
     let raw = unsafe { CreateJobObjectW(ptr::null(), ptr::null()) };
     // SAFETY: a non-null result is a fresh Job handle.
-    let job = unsafe { OwnedHandle::from_raw(raw)? };
+    unsafe { OwnedHandle::from_raw(raw) }
+}
+
+fn arm_process_job(job: HANDLE) -> io::Result<()> {
     let mut limits = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
     limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
     // SAFETY: job and limits remain valid for the duration of the call.
     if unsafe {
         SetInformationJobObject(
-            job.as_raw(),
+            job,
             JobObjectExtendedLimitInformation,
             (&limits as *const JOBOBJECT_EXTENDED_LIMIT_INFORMATION).cast::<c_void>(),
             u32::try_from(mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>())
@@ -1480,9 +1653,94 @@ fn create_process_job() -> io::Result<OwnedHandle> {
         )
     } == 0
     {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
+}
+
+fn open_exact_process(pid: u32, recovery: bool) -> io::Result<OwnedHandle> {
+    if pid == 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "cannot open exact process PID 0",
+        ));
+    }
+    let mut access = PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SYNCHRONIZE;
+    if recovery {
+        access |= PROCESS_SET_QUOTA | PROCESS_TERMINATE;
+    }
+    // SAFETY: OpenProcess validates the PID and returns a fresh,
+    // non-inheritable handle on success.
+    let raw = unsafe { OpenProcess(access, 0, pid) };
+    // SAFETY: a non-null OpenProcess result is a fresh owned handle.
+    unsafe { OwnedHandle::from_raw(raw) }
+}
+
+fn process_identity_from_handle(handle: HANDLE) -> io::Result<WindowsProcessIdentity> {
+    let mut creation = FILETIME::default();
+    let mut exit = FILETIME::default();
+    let mut kernel = FILETIME::default();
+    let mut user = FILETIME::default();
+    // SAFETY: every FILETIME pointer is writable and the exact process handle
+    // remains live for the complete query.
+    if unsafe {
+        GetProcessTimes(
+            handle,
+            &mut creation,
+            &mut exit,
+            &mut kernel,
+            &mut user,
+        )
+    } == 0
+    {
         return Err(io::Error::last_os_error());
     }
-    Ok(job)
+    let platform_start_key =
+        (u64::from(creation.dwHighDateTime) << 32) | u64::from(creation.dwLowDateTime);
+    const WINDOWS_TO_UNIX_EPOCH_100NS: u64 = 116_444_736_000_000_000;
+    if platform_start_key <= WINDOWS_TO_UNIX_EPOCH_100NS {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "process creation FILETIME is invalid",
+        ));
+    }
+    let start_time_epoch_seconds =
+        (platform_start_key - WINDOWS_TO_UNIX_EPOCH_100NS) / 10_000_000;
+
+    let mut image = vec![0_u16; 32_768];
+    let mut image_len = image.len() as u32;
+    // SAFETY: image is writable for image_len UTF-16 units and the exact
+    // process handle remains live.
+    if unsafe {
+        QueryFullProcessImageNameW(
+            handle,
+            PROCESS_NAME_WIN32,
+            image.as_mut_ptr(),
+            &mut image_len,
+        )
+    } == 0
+    {
+        return Err(io::Error::last_os_error());
+    }
+    if image_len == 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "process executable query returned an empty path",
+        ));
+    }
+    let executable = PathBuf::from(OsString::from_wide(&image[..image_len as usize]));
+    // SAFETY: handle remains live and identifies one exact process.
+    let pid = unsafe { GetProcessId(handle) };
+    if pid == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(WindowsProcessIdentity {
+        pid,
+        start_time_epoch_seconds,
+        platform_start_key,
+        executable,
+    })
 }
 
 struct JobControl {

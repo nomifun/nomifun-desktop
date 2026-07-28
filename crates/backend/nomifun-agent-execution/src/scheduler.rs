@@ -1,6 +1,7 @@
 //! Private bounded-parallel scheduler used only by `AgentExecutionEngine`.
 
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::hash::Hash;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicI64, Ordering};
@@ -8,6 +9,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use dashmap::DashMap;
+use futures::future::BoxFuture;
 use futures::stream::{FuturesUnordered, StreamExt};
 use nomifun_api_types::{
     AgentExecution, AgentExecutionDetail, ExecutionModelRef, ExecutionParticipant, ExecutionStep,
@@ -46,6 +48,74 @@ const EFFECT_RETRY_MIN: Duration = Duration::from_secs(1);
 const EFFECT_RETRY_MAX: Duration = Duration::from_secs(60);
 const CLEANUP_EFFECT_TIMEOUT: Duration = Duration::from_secs(2);
 const CLEANUP_PARALLELISM: usize = 8;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CleanupValidation {
+    Current,
+    Stale,
+    Retry,
+}
+
+async fn reconcile_cleanup_batch<T, K, KeyFn, ValidateFn, CancelFn, AcknowledgeFn>(
+    pending: Vec<T>,
+    key: KeyFn,
+    validate: ValidateFn,
+    cancel: CancelFn,
+    acknowledge: AcknowledgeFn,
+) -> bool
+where
+    T: Send + Sync,
+    K: Eq + Hash,
+    KeyFn: Fn(&T) -> K,
+    ValidateFn: Fn(&T) -> BoxFuture<'static, CleanupValidation> + Sync,
+    CancelFn: Fn(&T) -> BoxFuture<'static, bool> + Sync,
+    AcknowledgeFn: Fn(&T) -> BoxFuture<'static, bool> + Sync,
+{
+    let mut grouped = HashMap::<K, Vec<T>>::new();
+    for cleanup in pending {
+        grouped.entry(key(&cleanup)).or_default().push(cleanup);
+    }
+
+    let validate = &validate;
+    let cancel = &cancel;
+    let acknowledge = &acknowledge;
+    let completed = futures::stream::iter(grouped.into_values().map(|cleanups| async move {
+        let mut validation_failed = false;
+        let mut cancel_attempted = false;
+        let mut cancel_succeeded = false;
+        let mut current_found = false;
+        let mut acknowledgement_succeeded = false;
+
+        for cleanup in &cleanups {
+            match validate(cleanup).await {
+                CleanupValidation::Stale => {}
+                CleanupValidation::Retry => validation_failed = true,
+                CleanupValidation::Current => {
+                    current_found = true;
+                    if acknowledgement_succeeded {
+                        continue;
+                    }
+                    if !cancel_attempted {
+                        cancel_attempted = true;
+                        cancel_succeeded = cancel(cleanup).await;
+                    }
+                    if cancel_succeeded && acknowledge(cleanup).await {
+                        // Exact acknowledgement retires every pending inactive
+                        // generation for this Conversation. Continue only to
+                        // validate the remaining records in the fetched batch.
+                        acknowledgement_succeeded = true;
+                    }
+                }
+            }
+        }
+
+        !validation_failed && (!current_found || acknowledgement_succeeded)
+    }))
+    .buffer_unordered(CLEANUP_PARALLELISM)
+    .collect::<Vec<_>>()
+    .await;
+    completed.into_iter().all(|done| done)
+}
 
 #[derive(Debug, Clone, Copy)]
 struct AttemptSettlementFence {
@@ -282,61 +352,120 @@ impl ExecutionScheduler {
             return true;
         }
         let batch_is_full = pending.len() == 100;
-        let completed = futures::stream::iter(pending.into_iter().map(|cleanup| async move {
-            let cancelled = tokio::time::timeout(
-                CLEANUP_EFFECT_TIMEOUT,
-                self.inner
-                    .deps
-                    .conversation_effects
-                    .cancel_attempt(&cleanup.user_id, &cleanup.conversation_id),
-            )
-            .await;
-            match cancelled {
-                Ok(Ok(())) => match self
-                    .inner
-                    .deps
-                    .repository
-                    .mark_conversation_cleanup_completed(
-                        &cleanup.execution_id,
-                        &cleanup.conversation_id,
-                        now_ms(),
-                    )
-                    .await
-                {
-                    Ok(_) => true,
-                    Err(error) => {
-                        tracing::warn!(
-                            execution_id = %cleanup.execution_id,
-                            conversation_id = cleanup.conversation_id,
-                            %error,
-                            "Agent conversation cleanup acknowledgement remains pending"
-                        );
-                        false
+        let validate_repository = self.inner.deps.repository.clone();
+        let acknowledge_repository = self.inner.deps.repository.clone();
+        let conversation_effects = self.inner.deps.conversation_effects.clone();
+        let completed = reconcile_cleanup_batch(
+            pending,
+            |cleanup| (cleanup.user_id.clone(), cleanup.conversation_id.clone()),
+            move |cleanup| {
+                let repository = validate_repository.clone();
+                let cleanup = cleanup.clone();
+                Box::pin(async move {
+                    match repository.validate_conversation_cleanup(&cleanup).await {
+                        Ok(true) => CleanupValidation::Current,
+                        Ok(false) => {
+                            tracing::debug!(
+                                link_id = cleanup.link_id,
+                                execution_id = %cleanup.execution_id,
+                                step_id = %cleanup.step_id,
+                                attempt_id = %cleanup.attempt_id,
+                                conversation_id = cleanup.conversation_id,
+                                "skipping stale Agent conversation cleanup generation"
+                            );
+                            CleanupValidation::Stale
+                        }
+                        Err(error) => {
+                            tracing::warn!(
+                                link_id = cleanup.link_id,
+                                execution_id = %cleanup.execution_id,
+                                step_id = %cleanup.step_id,
+                                attempt_id = %cleanup.attempt_id,
+                                conversation_id = cleanup.conversation_id,
+                                %error,
+                                "failed to atomically revalidate Agent conversation cleanup"
+                            );
+                            CleanupValidation::Retry
+                        }
                     }
-                },
-                Ok(Err(error)) => {
-                    tracing::warn!(
-                        execution_id = %cleanup.execution_id,
-                        conversation_id = cleanup.conversation_id,
-                        %error,
-                        "Agent conversation cleanup remains pending"
-                    );
-                    false
-                }
-                Err(_) => {
-                    tracing::warn!(
-                        execution_id = %cleanup.execution_id,
-                        conversation_id = cleanup.conversation_id,
-                        "Agent conversation cleanup timed out and remains pending"
-                    );
-                    false
-                }
-            }
-        }))
-        .buffer_unordered(CLEANUP_PARALLELISM)
-        .collect::<Vec<_>>()
+                })
+            },
+            move |cleanup| {
+                let conversation_effects = conversation_effects.clone();
+                let cleanup = cleanup.clone();
+                Box::pin(async move {
+                    let cancelled = tokio::time::timeout(
+                        CLEANUP_EFFECT_TIMEOUT,
+                        conversation_effects
+                            .cancel_attempt(&cleanup.user_id, &cleanup.conversation_id),
+                    )
+                    .await;
+                    match cancelled {
+                        Ok(Ok(())) => true,
+                        Ok(Err(error)) => {
+                            tracing::warn!(
+                                link_id = cleanup.link_id,
+                                execution_id = %cleanup.execution_id,
+                                step_id = %cleanup.step_id,
+                                attempt_id = %cleanup.attempt_id,
+                                conversation_id = cleanup.conversation_id,
+                                %error,
+                                "Agent conversation cleanup remains pending"
+                            );
+                            false
+                        }
+                        Err(_) => {
+                            tracing::warn!(
+                                link_id = cleanup.link_id,
+                                execution_id = %cleanup.execution_id,
+                                step_id = %cleanup.step_id,
+                                attempt_id = %cleanup.attempt_id,
+                                conversation_id = cleanup.conversation_id,
+                                "Agent conversation cleanup timed out and remains pending"
+                            );
+                            false
+                        }
+                    }
+                })
+            },
+            move |cleanup| {
+                let repository = acknowledge_repository.clone();
+                let cleanup = cleanup.clone();
+                Box::pin(async move {
+                    match repository
+                        .mark_conversation_cleanup_completed_exact(&cleanup, now_ms())
+                        .await
+                    {
+                        Ok(true) => true,
+                        Ok(false) => {
+                            tracing::warn!(
+                                link_id = cleanup.link_id,
+                                execution_id = %cleanup.execution_id,
+                                step_id = %cleanup.step_id,
+                                attempt_id = %cleanup.attempt_id,
+                                conversation_id = cleanup.conversation_id,
+                                "Agent conversation cleanup acknowledgement lost exact-generation authority"
+                            );
+                            false
+                        }
+                        Err(error) => {
+                            tracing::warn!(
+                                link_id = cleanup.link_id,
+                                execution_id = %cleanup.execution_id,
+                                step_id = %cleanup.step_id,
+                                attempt_id = %cleanup.attempt_id,
+                                conversation_id = cleanup.conversation_id,
+                                %error,
+                                "Agent conversation cleanup acknowledgement remains pending"
+                            );
+                            false
+                        }
+                    }
+                })
+            },
+        )
         .await;
-        !batch_is_full && completed.into_iter().all(|done| done)
+        !batch_is_full && completed
     }
 
     fn schedule_cleanup_reconciliation(&self) {
@@ -400,11 +529,12 @@ impl ExecutionScheduler {
         }
     }
 
-    /// One post-commit path for every terminal transition. The terminal event
-    /// already carries the stable report operation id; this method projects the
-    /// outbox, reloads canonical state, and reconciles that idempotent effect.
+    /// One post-commit path for every terminal transition. It publishes the
+    /// terminal outbox, drains inactive Attempt links as durable cleanup work,
+    /// then reloads canonical state and reconciles the idempotent lead report.
     pub async fn after_terminal_commit(&self, owner_id: &str, execution_id: &str) {
         self.publish().await;
+        self.reconcile_conversation_cleanup(Some(execution_id)).await;
         let Ok(detail) = self.detail(owner_id, execution_id).await else {
             return;
         };
@@ -797,7 +927,7 @@ impl ExecutionScheduler {
                     owner_id,
                     execution_id,
                     "no schedulable active step",
-                    Some(&lease),
+                    &lease,
                 )
                 .await;
                 return Ok(SchedulerLoopExit::Normal);
@@ -812,7 +942,7 @@ impl ExecutionScheduler {
             if scheduler_error_is_recoverable(error) || lease_was_lost {
                 self.request_generation_restart(execution_id, generation);
             } else {
-                self.fail_if_active(owner_id, execution_id, &error.to_string(), Some(&lease))
+                self.fail_if_active(owner_id, execution_id, &error.to_string(), &lease)
                     .await;
             }
         } else if lease_was_lost {
@@ -1882,43 +2012,107 @@ impl ExecutionScheduler {
         owner_id: &str,
         execution_id: &str,
         reason: &str,
-        lease: Option<&AgentExecutionLeaseToken>,
+        lease: &AgentExecutionLeaseToken,
     ) {
-        let Ok(detail) = self.detail(owner_id, execution_id).await else {
-            return;
-        };
-        if !status_is_active_for_scheduler_failure(detail.execution.status) {
+        if reason.trim().is_empty() {
+            tracing::warn!(%execution_id, "refusing to persist an empty scheduler failure");
             return;
         }
-        if let Err(error) = self
-            .inner
-            .deps
-            .repository
-            .update_execution(
-                owner_id,
-                execution_id,
-                detail.execution.version,
-                lease,
-                &UpdateAgentExecutionParams {
-                    status: Some(AgentExecutionStatus::Failed),
-                    summary: Some(Some(reason.to_owned())),
-                    ..Default::default()
-                },
-                &system_event(
-                    AgentExecutionEventKind::StatusChanged,
-                    None,
-                    None,
-                    terminal_transition_payload(
-                        &detail.execution,
-                        AgentExecutionStatus::Failed,
-                        Some(reason),
+        loop {
+            let Ok(detail) = self.detail(owner_id, execution_id).await else {
+                return;
+            };
+            if !status_is_active_for_scheduler_failure(detail.execution.status) {
+                return;
+            }
+            match self
+                .inner
+                .deps
+                .repository
+                .fail_active_execution(
+                    owner_id,
+                    execution_id,
+                    detail.execution.version,
+                    lease,
+                    reason,
+                    &system_event(
+                        AgentExecutionEventKind::StatusChanged,
+                        None,
+                        None,
+                        terminal_transition_payload(
+                            &detail.execution,
+                            AgentExecutionStatus::Failed,
+                            Some(reason),
+                        ),
                     ),
-                ),
-            )
-            .await
-        {
-            tracing::warn!(%execution_id, %error, "failed to persist scheduler failure");
-            return;
+                )
+                .await
+            {
+                Ok(_) => break,
+                Err(nomifun_db::DbError::Conflict(error)) => {
+                    let current = match self
+                        .inner
+                        .deps
+                        .repository
+                        .get_execution(owner_id, execution_id)
+                        .await
+                    {
+                        Ok(Some(current)) => current,
+                        Ok(None) => return,
+                        Err(load_error) => {
+                            tracing::warn!(
+                                %execution_id,
+                                %load_error,
+                                "failed to reload scheduler failure conflict"
+                            );
+                            return;
+                        }
+                    };
+                    let status = match current.status.parse::<AgentExecutionStatus>() {
+                        Ok(status) => status,
+                        Err(status_error) => {
+                            tracing::warn!(
+                                %execution_id,
+                                %status_error,
+                                "scheduler failure reload found an invalid aggregate status"
+                            );
+                            return;
+                        }
+                    };
+                    if !status_is_active_for_scheduler_failure(status) {
+                        return;
+                    }
+                    if current.lease_owner.as_deref() != Some(lease.owner())
+                        || current
+                            .lease_expires_at
+                            .is_none_or(|expires_at| expires_at <= now_ms())
+                    {
+                        tracing::warn!(
+                            %execution_id,
+                            "scheduler failure lost lease authority before commit"
+                        );
+                        return;
+                    }
+                    if current.version == detail.execution.version {
+                        tracing::warn!(
+                            %execution_id,
+                            %error,
+                            "scheduler failure conflicted without aggregate version drift"
+                        );
+                        return;
+                    }
+                    tracing::debug!(
+                        %execution_id,
+                        old_version = detail.execution.version,
+                        new_version = current.version,
+                        "retrying scheduler failure after concurrent active aggregate update"
+                    );
+                }
+                Err(error) => {
+                    tracing::warn!(%execution_id, %error, "failed to persist scheduler failure");
+                    return;
+                }
+            }
         }
         self.after_terminal_commit(owner_id, execution_id).await;
     }
@@ -2485,6 +2679,80 @@ pub(crate) fn system_event(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[derive(Debug)]
+    struct TestCleanup {
+        link_id: i64,
+        user_id: String,
+        conversation_id: String,
+    }
+
+    #[tokio::test]
+    async fn cleanup_batch_keeps_current_generation_when_stale_generation_is_listed_first() {
+        let validated = Arc::new(Mutex::new(Vec::new()));
+        let cancelled = Arc::new(Mutex::new(Vec::new()));
+        let acknowledged = Arc::new(Mutex::new(Vec::new()));
+
+        assert!(
+            reconcile_cleanup_batch(
+                vec![
+                    TestCleanup {
+                        link_id: 1,
+                        user_id: "user-1".to_owned(),
+                        conversation_id: "conversation-1".to_owned(),
+                    },
+                    TestCleanup {
+                        link_id: 2,
+                        user_id: "user-1".to_owned(),
+                        conversation_id: "conversation-1".to_owned(),
+                    },
+                ],
+                |cleanup| (cleanup.user_id.clone(), cleanup.conversation_id.clone()),
+                {
+                    let validated = validated.clone();
+                    move |cleanup: &TestCleanup| {
+                        validated.lock().unwrap().push(cleanup.link_id);
+                        let validation = if cleanup.link_id == 2 {
+                            CleanupValidation::Current
+                        } else {
+                            CleanupValidation::Stale
+                        };
+                        Box::pin(async move { validation })
+                    }
+                },
+                {
+                    let cancelled = cancelled.clone();
+                    move |cleanup: &TestCleanup| {
+                        let cancelled = cancelled.clone();
+                        let key = (cleanup.user_id.clone(), cleanup.conversation_id.clone());
+                        Box::pin(async move {
+                            cancelled.lock().unwrap().push(key);
+                            true
+                        })
+                    }
+                },
+                {
+                    let acknowledged = acknowledged.clone();
+                    move |cleanup: &TestCleanup| {
+                        let acknowledged = acknowledged.clone();
+                        let link_id = cleanup.link_id;
+                        Box::pin(async move {
+                            acknowledged.lock().unwrap().push(link_id);
+                            true
+                        })
+                    }
+                },
+            )
+            .await
+        );
+
+        assert_eq!(*validated.lock().unwrap(), vec![1, 2]);
+        assert_eq!(
+            *cancelled.lock().unwrap(),
+            vec![("user-1".to_owned(), "conversation-1".to_owned())]
+        );
+        assert_eq!(*acknowledged.lock().unwrap(), vec![2]);
+    }
 
     #[test]
     fn persistent_role_context_path_uses_the_shared_prompt_contract() {

@@ -196,8 +196,11 @@ computer-use = [
 browser-use = [
     "nomifun-ai-agent/browser-use",
     "nomifun-gateway/browser-use",
+    "nomifun-public/browser-use",
     "dep:nomi-browser",
     "dep:nomi-browser-engine",
+    "dep:nomifun-browser-platform",
+    "dep:sysinfo",
     "dep:nomi-config",
     "dep:nomi-tools",
     "dep:nomi-types",
@@ -251,12 +254,15 @@ tracing-subscriber.workspace = true
 clap.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+base64.workspace = true
 sha2.workspace = true
 uuid.workspace = true
 reqwest.workspace = true
+url.workspace = true
 rmcp = { version = "1.5", features = ["server", "transport-io", "schemars"] }
 anyhow.workspace = true
 async-trait.workspace = true
+futures-util.workspace = true
 # Network-interface enumeration for desktop LAN-IP detection (WebUI remote access).
 if-addrs = "0.13"
 # Decode request paths before matching the immutable embedded WebUI asset map.
@@ -266,15 +272,18 @@ percent-encoding = "2"
 # ComputerTool. Optional; only the `computer-use` feature pulls the native
 # screen/input/UI-Automation stack, so web/headless builds stay lean.
 nomi-computer = { workspace = true, optional = true }
-# Browser-use discrete-tool MCP bridge (`mcp-browser-stdio`) — facade over
-# BrowserTool. Optional; only the `browser-use` feature pulls the self-hosted-CDP
-# browser engine + Chromium, so web/headless builds stay lean. Shares the
-# optional nomi-config/-tools/-types deps with computer-use.
+# Browser-use discrete-tool MCP bridge (`mcp-browser-stdio`) — authenticated
+# proxy into the application-owned BrowserSessionHub. Optional; only the
+# `browser-use` feature pulls the managed browser engine + Chromium, so
+# web/headless builds stay lean. Shares the optional nomi-config/-tools/-types
+# deps with computer-use.
 nomi-browser = { workspace = true, optional = true }
-# Phase 2b: the "log into my browser" settings action drives a headful engine
-# directly (create_engine + capture_storage_state + storage_state vault), so the
-# login persists into the shared profile/vault. Only the browser-use feature pulls it.
+# Browser engine types used by the application-owned managed Host and identity
+# vault. Login routes allocate a Primary Hub Lane; they never launch a private
+# engine. Only the browser-use feature pulls this dependency.
 nomi-browser-engine = { workspace = true, optional = true }
+nomifun-browser-platform = { workspace = true, optional = true }
+sysinfo = { workspace = true, optional = true }
 nomi-config = { workspace = true, optional = true }
 nomi-tools = { workspace = true, optional = true }
 nomi-types = { workspace = true, optional = true }
@@ -299,13 +308,11 @@ sqlx.workspace = true
 # through the trait-object escape hatch without spawning real CLI processes.
 nomifun-ai-agent = { workspace = true, features = ["test-support"] }
 async-trait.workspace = true
-base64.workspace = true
 git2.workspace = true
 http-body-util.workspace = true
 rust_xlsxwriter.workspace = true
 tempfile = "3"
 tower = { workspace = true, features = ["util"] }
 tokio-tungstenite.workspace = true
-futures-util.workspace = true
 wiremock = "0.6"
 toml.workspace = true

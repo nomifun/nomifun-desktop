@@ -127,11 +127,12 @@ struct ScrollParams {
 
 #[derive(Deserialize, schemars::JsonSchema)]
 struct LaunchParams {
-    /// What to open: a URL (https://…), a file/folder path, or an application
-    /// name (e.g. "notepad", "msedge").
+    /// What to open: a file/folder path or an application name
+    /// (e.g. "notepad"). Web URLs (http/https) are rejected — use the managed
+    /// Browser tool for web pages.
     target: String,
-    /// Optional application to open the target WITH (e.g. target a URL and
-    /// app="msedge" to open it in Microsoft Edge).
+    /// Optional application to open the target WITH (e.g. open a file with a
+    /// specific editor).
     #[serde(default)]
     app: Option<String>,
 }
@@ -242,7 +243,7 @@ impl ComputerStdioServer {
 
     #[tool(
         name = "launch",
-        description = "Open an application, URL, file, or folder reliably via the OS shell (ShellExecute). ALWAYS use this to open apps/URLs — do NOT run `cmd /c start`, `Start-Process`, or `explorer` in a shell, which are unreliable on Windows and pop a 'Windows cannot find' dialog. Pass `target` (a URL, path, or app name) and optionally `app` to open the target WITH a specific application."
+        description = "Open an application, file, or folder reliably via the OS shell (ShellExecute). ALWAYS use this to open apps/files — do NOT run `cmd /c start`, `Start-Process`, or `explorer` in a shell, which are unreliable on Windows and pop a 'Windows cannot find' dialog. Pass `target` (a path or app name) and optionally `app` to open the target WITH a specific application. Web URLs (http/https) are rejected: read or interact with web pages through the managed Browser tool instead."
     )]
     async fn launch(&self, Parameters(p): Parameters<LaunchParams>) -> CallToolResult {
         self.run(json!({"action": "launch", "target": p.target, "app": p.app})).await

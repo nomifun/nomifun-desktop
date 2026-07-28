@@ -13,7 +13,10 @@ use tower::ServiceExt;
 
 use nomifun_db::{ICronRepository, SqliteCronRepository};
 
-use common::{body_json, build_app, delete_with_token, get_request, get_with_token, json_with_token, setup_and_login};
+use common::{
+    GEMINI_AGENT_ID, acp_extra_with_workspace, body_json, build_app, delete_with_token,
+    get_request, get_with_token, json_with_token, setup_and_login,
+};
 
 // Deterministic canonical UUIDv7 values keep conversation fixtures readable.
 // Each test gets an isolated database, so reusing these values across tests
@@ -64,8 +67,9 @@ fn create_cron_job_body(name: &str, expr: &str) -> serde_json::Value {
 async fn create_job(app: &mut axum::Router, token: &str, csrf: &str, body: serde_json::Value) -> serde_json::Value {
     let req = json_with_token("POST", "/api/cron/jobs", body, token, csrf);
     let resp = app.clone().oneshot(req).await.unwrap();
-    assert_eq!(resp.status(), StatusCode::CREATED);
+    let status = resp.status();
     let json = body_json(resp).await;
+    assert_eq!(status, StatusCode::CREATED, "cron create failed: {json}");
     assert_eq!(json["success"], true);
     json["data"].clone()
 }
@@ -108,12 +112,19 @@ fn run_now_request(
 /// resolved by application bootstrap from the database's
 /// `installation_identity` singleton.
 async fn seed_conversation(services: &nomifun_app::AppServices, id: &str) {
+    let workspace = services
+        .work_dir
+        .join("cron-fixtures")
+        .join(id);
+    std::fs::create_dir_all(&workspace).unwrap();
     sqlx::query(
-        "INSERT INTO conversations (conversation_id, user_id, name, type, created_at, updated_at) \
-         VALUES (?, ?, 'Seeded Conv', 'acp', 0, 0)",
+        "INSERT INTO conversations \
+         (conversation_id, user_id, name, type, extra, created_at, updated_at) \
+         VALUES (?, ?, 'Seeded Conv', 'acp', ?, 0, 0)",
     )
     .bind(id)
     .bind(services.authoritative_user_id.as_ref())
+    .bind(acp_extra_with_workspace(workspace.to_string_lossy().into_owned()).to_string())
     .execute(services.database.pool())
     .await
     .unwrap();
@@ -185,7 +196,7 @@ async fn au3_authenticated_users_cannot_observe_or_mutate_each_others_cron_jobs(
         json!({
             "type": "acp",
             "name": "Owner Cron Conversation",
-            "extra": { "workspace": "/project" }
+            "extra": acp_extra_with_workspace("/project")
         }),
         &owner_token,
         &owner_csrf,
@@ -284,9 +295,9 @@ async fn au3_authenticated_users_cannot_observe_or_mutate_each_others_cron_jobs(
                 "created_by": "user",
                 "execution_mode": "new_conversation",
                 "agent_config": {
-                    "backend": SECONDARY_PROVIDER_ID,
+                    "provider_id": SECONDARY_PROVIDER_ID,
                     "name": "Nomi",
-                    "model_id": "model-secondary",
+                    "model": "model-secondary",
                     "cli_path": "/bin/sh",
                     "custom_agent_id": FORGED_CUSTOM_AGENT_ID,
                     "mode": "yolo",
@@ -305,8 +316,8 @@ async fn au3_authenticated_users_cannot_observe_or_mutate_each_others_cron_jobs(
     let secondary_job_id = secondary_job["cron_job_id"].as_str().unwrap().to_owned();
     let config = &secondary_job["metadata"]["agent_config"];
     assert_eq!(secondary_job["metadata"]["agent_type"], "nomi");
-    assert_eq!(config["backend"], SECONDARY_PROVIDER_ID);
-    assert_eq!(config["model_id"], "model-secondary");
+    assert_eq!(config["provider_id"], SECONDARY_PROVIDER_ID);
+    assert_eq!(config["model"], "model-secondary");
     for removed in [
         "cli_path",
         "custom_agent_id",
@@ -430,24 +441,40 @@ async fn cj2_create_three_schedule_types() {
 
     let now = nomifun_common::now_ms();
 
-    seed_conversation(&services, TEST_CONV_1).await;
-    let at = create_job(&mut app, &token, &csrf, create_at_job_body("At Job", now + 3_600_000)).await;
+    for conversation_id in [TEST_CONV_1, TEST_CONV_2, TEST_CONV_3] {
+        seed_conversation(&services, conversation_id).await;
+    }
+
+    let at = create_job(
+        &mut app,
+        &token,
+        &csrf,
+        create_at_job_body("At Job", now + 3_600_000),
+    )
+    .await;
     assert_eq!(at["schedule"]["kind"], "at");
+    assert_eq!(at["metadata"]["conversation_id"], TEST_CONV_1);
     assert!(at["state"]["next_run_at_ms"].as_i64().unwrap() > now);
 
-    let every = create_job(&mut app, &token, &csrf, create_job_body("Every Job")).await;
+    let mut every_body = create_job_body("Every Job");
+    every_body["conversation_id"] = json!(TEST_CONV_2);
+    let every = create_job(&mut app, &token, &csrf, every_body).await;
     assert_eq!(every["schedule"]["kind"], "every");
+    assert_eq!(every["metadata"]["conversation_id"], TEST_CONV_2);
     let next = every["state"]["next_run_at_ms"].as_i64().unwrap();
     assert!((next - now - 60000).abs() < 3000);
 
+    let mut cron_body = create_cron_job_body("Cron Job", "0 */5 * * * *");
+    cron_body["conversation_id"] = json!(TEST_CONV_3);
     let cron = create_job(
         &mut app,
         &token,
         &csrf,
-        create_cron_job_body("Cron Job", "0 */5 * * * *"),
+        cron_body,
     )
     .await;
     assert_eq!(cron["schedule"]["kind"], "cron");
+    assert_eq!(cron["metadata"]["conversation_id"], TEST_CONV_3);
     assert!(cron["state"]["next_run_at_ms"].as_i64().unwrap() > now);
 }
 
@@ -501,8 +528,9 @@ async fn cj3b_create_rejects_workspace_with_edge_whitespace_segment() {
         "created_by": "user",
         "execution_mode": "new_conversation",
         "agent_config": {
-            "backend": "acp",
-            "name": "Cron Agent",
+            "backend": "gemini",
+            "name": "Gemini CLI",
+            "custom_agent_id": GEMINI_AGENT_ID,
             "workspace": "/Users/zhoukai/Documents/Archive "
         }
     });
@@ -578,8 +606,9 @@ async fn cj5b_run_now_legacy_workspace_uses_runtime_edge_whitespace_code() {
             execution_mode: "new_conversation".into(),
             agent_config: Some(
                 json!({
-                    "backend": "acp",
-                    "name": "Cron Agent",
+                    "backend": "gemini",
+                    "name": "Gemini CLI",
+                    "custom_agent_id": GEMINI_AGENT_ID,
                     "workspace": "/Users/zhoukai/Documents/Archive "
                 })
                 .to_string(),
@@ -628,9 +657,14 @@ async fn cj6_list_all_jobs() {
     let (mut app, services) = build_app().await;
     let (token, csrf) = setup_and_login(&mut app, &services, "admin", "StrongP@ss1").await;
 
-    seed_conversation(&services, TEST_CONV_1).await;
-    for i in 0..3 {
-        create_job(&mut app, &token, &csrf, create_job_body(&format!("Job {i}"))).await;
+    for (i, conversation_id) in [TEST_CONV_1, TEST_CONV_2, TEST_CONV_3]
+        .into_iter()
+        .enumerate()
+    {
+        seed_conversation(&services, conversation_id).await;
+        let mut body = create_job_body(&format!("Job {i}"));
+        body["conversation_id"] = json!(conversation_id);
+        create_job(&mut app, &token, &csrf, body).await;
     }
 
     let req = get_with_token("/api/cron/jobs", &token);
@@ -649,10 +683,11 @@ async fn cj7_list_by_conversation() {
     let (mut app, services) = build_app().await;
     let (token, csrf) = setup_and_login(&mut app, &services, "admin", "StrongP@ss1").await;
 
+    seed_conversation(&services, TEST_CONV_1).await;
     seed_conversation(&services, TEST_CONV_2).await;
     seed_conversation(&services, TEST_CONV_3).await;
     let mut body_a = create_job_body("Job A");
-    body_a["conversation_id"] = json!(TEST_CONV_2);
+    body_a["conversation_id"] = json!(TEST_CONV_1);
     create_job(&mut app, &token, &csrf, body_a).await;
 
     let mut body_b = create_job_body("Job B");
@@ -669,7 +704,9 @@ async fn cj7_list_by_conversation() {
 
     let json = body_json(resp).await;
     let items = json["data"].as_array().unwrap();
-    assert_eq!(items.len(), 2);
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0]["name"], "Job B");
+    assert_eq!(items[0]["metadata"]["conversation_id"], TEST_CONV_2);
 }
 
 // ── CJ-8: Update job ────────────────────────────────────────────────
@@ -692,7 +729,8 @@ async fn cj8_update_job() {
     assert_eq!(json["data"]["name"], "Updated Name");
     assert_eq!(json["data"]["enabled"], false);
     assert!(
-        json["data"]["metadata"]["updated_at"].as_str().unwrap().to_owned() >= created["metadata"]["created_at"].as_str().unwrap().to_owned()
+        json["data"]["metadata"]["updated_at"].as_i64().unwrap()
+            >= created["metadata"]["created_at"].as_i64().unwrap()
     );
 }
 
@@ -843,12 +881,7 @@ async fn rn1_run_now_returns_conversation_id_for_new_conversation_job() {
         json!({
             "type": "acp",
             "name": "Run Now Source",
-            "extra": {
-                "agent_id": "0190f5fe-7c00-7a00-8000-000000000103",
-                "agent_source": "builtin",
-                "backend": "gemini",
-                "workspace": workspace
-            }
+            "extra": acp_extra_with_workspace(workspace)
         }),
         &token,
         &csrf,

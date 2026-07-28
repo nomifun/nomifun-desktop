@@ -18,6 +18,7 @@ mod idempotency;
 mod rest;
 mod result;
 mod router;
+mod session;
 
 pub use handler::RemoteMcpHandler;
 pub use rest::public_rest_router;

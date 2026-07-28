@@ -19,7 +19,9 @@ use tracing::{debug, info, warn};
 use crate::runtime_handle::AgentRuntimeHandle;
 use crate::factory::AgentFactoryDeps;
 use crate::factory::context::FactoryContext;
-use crate::manager::nomi::{NomiAgentManager, sanitize_session_messages};
+use crate::manager::nomi::{
+    NomiAgentManager, NomiHostWiring, sanitize_session_messages,
+};
 use crate::types::{AgentRuntimeBuildOptions, NomiCompatOverrides, NomiResolvedConfig};
 
 /// Apply the complete ceiling for an authenticated principal that does not own
@@ -442,21 +444,22 @@ pub(super) async fn build(
     // System Settings capability toggles, read LIVE per session (toggling in
     // System Settings affects new sessions without a restart). No setting row →
     // host default. computer-use defaults ON on the desktop build (the only one
-    // with the feature); browser-use now also defaults ON (native CDP engine,
-    // Chrome fetched lazily on first use) — the toggle just lets the user turn
-    // it off.
+    // with the feature); browser-use also defaults ON. Browser execution is
+    // delegated through a runtime-scoped BrowserLaneClient to the process-wide
+    // BrowserSessionHub, which starts managed Browser Hosts lazily. The toggle
+    // only controls whether this runtime exposes Browser tools.
     let computer_use_default = read_bool_pref(
         &deps,
         PREF_COMPUTER_USE,
         cfg!(feature = "computer-use") || env_flag("NOMIFUN_COMPUTER_USE"),
     )
     .await;
-    // browser-use has a cargo-feature gate (`browser-use`, desktop builds); on those
-    // builds it defaults **ON** (user decision). The native CDP engine launches the user's
-    // system Chrome / Edge in a visible, isolated-profile window by default, and falls back
-    // to managed Chromium when no supported system browser is found. The master toggle just
-    // lets the user turn it off. Builds without the feature register no browser tool
-    // regardless. `NOMIFUN_BROWSER_USE` env forces it on for feature-less parity/testing.
+    // browser-use has a cargo-feature gate (`browser-use`, desktop builds); on
+    // those builds it defaults **ON** (user decision). The main-process
+    // BrowserSessionHub is the only Chromium/profile owner and shares managed
+    // Primary or Crawl Hosts across authorized Lanes. A Nomi runtime receives
+    // only a BrowserLaneClient. Builds without the feature register no Browser
+    // tools. `NOMIFUN_BROWSER_USE` forces the setting on for parity/testing.
     let browser_use_default = read_bool_pref(
         &deps,
         PREF_BROWSER_USE,
@@ -465,8 +468,9 @@ pub(super) async fn build(
     .await;
     // F1-sec: evaluate「全权模式」LIVE 值（裁决⑨，default-deny）。用户在 System Settings 显式 opt-in
     // 的 `agent.browserUse.fullPower` 开关，每会话构造时 LIVE 读（read_bool_pref 范式，与上面的启用开关
-    // 同源），灌进 BrowserConfig.full_power → BrowserTool::with_policy → 引擎 evaluate gate。默认 OFF
-    // （host_default=false）——evaluate 是最高危逃生舱，无 opt-in 即封死。**绝不看 session_mode**（不变量⑧）。
+    // 同源），灌进 BrowserConfig.full_power，由 Hub-backed Browser tool adapter 在进入
+    // BrowserLaneClient 前执行 evaluate gate。默认 OFF（host_default=false）——evaluate 是最高危
+    // 逃生舱，无 opt-in 即封死。**绝不看 session_mode**（不变量⑧）。
     let browser_full_power_default = read_bool_pref(
         &deps,
         PREF_BROWSER_FULL_POWER,
@@ -490,30 +494,79 @@ pub(super) async fn build(
     // 成本，须用户在 System Settings 显式 opt-in。
     let browser_visual_fallback_default =
         read_bool_pref(&deps, PREF_BROWSER_VISUAL_FALLBACK, false).await;
-    // 静默浏览器 LIVE 值（「浏览器模式」可见性维度）。host_default=false（产品默认可见）；
-    // 用户仍可在 System Settings 开启静默运行。映射到 headless。
-    let browser_silent_default = read_bool_pref(&deps, PREF_BROWSER_SILENT, false).await;
-    // 浏览器来源 LIVE 值（与 silent 正交）。host_default="system"，优先使用用户系统安装的
-    // Chrome/Edge；未探测到时回退 managed。红线不变：专属 user-data-dir 起独立托管实例。
+    // Browser management is status-only. Primary Chromium is always shown in
+    // its managed external window; historical embedded/headless/silent values
+    // are frontend migration inputs only and never affect runtime headlessness.
+    // Keep this compatibility field false until the resolved config schema can
+    // remove it without breaking downstream constructors.
+    let browser_silent_default = false;
+    // Browser Host 可执行文件来源偏好（与 silent 正交）。host_default="system"，优先系统安装
+    // 的 Chrome/Edge，未探测到时回退 managed。该值不授予 runtime 所有权：主进程
+    // BrowserSessionHub 统一创建/共享 Host，Primary 使用应用管理的稳定 profile，Crawl 使用临时 profile。
     let browser_source_default =
         read_string_pref(&deps, PREF_BROWSER_SOURCE, BROWSER_SOURCE_DEFAULT).await;
 
     let browser_use_enabled = overrides.browser_use.unwrap_or(browser_use_default);
 
-    // P3-X2: build the browser secret vault descriptor when browser-use is on.
-    // User decision (去 per-pet 键化): browser identity is GLOBALLY SHARED — the
-    // shared path routes every caller to the one vault
-    // `{data_dir}/browser-secrets/shared`; the *same* shared
-    // vault backs every companion + session, the gateway-driven browser, and the
-    // registration endpoint. The key is the machine-bound `encryption_key`. The
-    // native `BrowserTool` loads the store from this shared vault on first use →
-    // `secret:NAME` resolves (origin-gated) and the firewall `allow_etld1` is derived
-    // from the registered `allowed_origins` (裁决⑤), shared across all companions.
+    // Build the shared browser secret-vault descriptor when browser-use is on.
+    // Every caller uses `{data_dir}/browser-secrets/shared`; this policy store
+    // backs Native, Gateway, and registration paths. Bootstrap passes the
+    // machine-bound key to the Hub-backed Browser tool adapter so `secret:NAME`
+    // resolves under origin checks and registered `allowed_origins` contribute
+    // to the egress firewall. It is not a Chromium profile and conveys no
+    // Browser Host ownership.
     let browser_secret_vault = if browser_use_enabled {
         Some(crate::types::BrowserSecretVault {
             vault_path: nomifun_secret::shared_vault_path(&deps.data_dir),
             key: deps.encryption_key,
         })
+    } else {
+        None
+    };
+
+    #[cfg(feature = "browser-use")]
+    let browser_lane_binding = if browser_use_enabled {
+        match deps.browser_lane_provider.as_ref() {
+            Some(slot) => {
+                let provider = slot.get().ok_or_else(|| {
+                    AppError::Internal(
+                        "browser use is enabled but the process-wide Browser Session Hub provider \
+                         has not been installed"
+                            .to_owned(),
+                    )
+                })?;
+                let runtime_instance_id = format!(
+                    "native:{}:{}",
+                    ctx.conversation_id,
+                    uuid::Uuid::now_v7()
+                );
+                Some(
+                    provider
+                        .issue(
+                            crate::factory::browser_lane::TrustedBrowserRuntimeContext {
+                                user_id: options.user_id.clone(),
+                                conversation_id: Some(ctx.conversation_id.clone()),
+                                runtime_instance_id,
+                                agent_id: Some("nomi".to_owned()),
+                                // Execution ownership is resolved by the host
+                                // provider from the authoritative persisted
+                                // ConversationLink. It is never read from
+                                // `options.extra`.
+                                execution_id: None,
+                                step_id: None,
+                                attempt_id: None,
+                                surface:
+                                    nomifun_browser_platform::BrowserSurface::Native,
+                            },
+                        )
+                        .await?,
+                )
+            }
+            // Explicit standalone/test composition. Production AppServices
+            // always supplies a slot, so a provider outage cannot create an
+            // alternate browser owner outside BrowserSessionHub.
+            None => None,
+        }
     } else {
         None
     };
@@ -551,9 +604,9 @@ pub(super) async fn build(
         bedrock_config: fields.bedrock_config,
         computer_use: overrides.computer_use.unwrap_or(computer_use_default),
         browser_use: browser_use_enabled,
-        // 静默浏览器 LIVE 值（产品默认 OFF=可见；无 per-session override，纯全局开关）。
+        // 仅用于兼容旧配置结构；产品模式固定为外置受管窗口，因此始终为 false。
         browser_silent: browser_silent_default,
-        // 浏览器来源 LIVE 值（默认 "system"；未探测到系统浏览器时回退 managed）。
+        // Browser Host 可执行文件来源偏好；BrowserSessionHub 仍是唯一 owner。
         browser_source: browser_source_default,
         // F1-sec: 全权模式 LIVE 值（无 per-session override，纯 client_preferences 全局开关）。
         browser_full_power: browser_full_power_default,
@@ -572,7 +625,9 @@ pub(super) async fn build(
                 g.max_auto_continuations.unwrap_or(8),
             )
         }),
-        // P3-X2: per-pet secret vault descriptor (built above; None when browser-use off).
+        // Shared browser secret-vault descriptor (built above; None when
+        // browser-use is off). It carries policy credentials, not Host/profile
+        // ownership.
         browser_secret_vault,
         // Owning conversation instance identity — the nomi manager stamps it
         // onto the session after build so a future reused id is rejected.
@@ -657,7 +712,11 @@ pub(super) async fn build(
         .map(str::trim)
         .filter(|owner| !owner.is_empty())
         .map(ToOwned::to_owned);
-    let agent = NomiAgentManager::new(
+    let host_wiring = NomiHostWiring {
+        #[cfg(feature = "browser-use")]
+        browser_lane_binding,
+    };
+    let agent = NomiAgentManager::new_with_host_wiring(
         ctx.conversation_id,
         ctx.workspace,
         config,
@@ -679,6 +738,7 @@ pub(super) async fn build(
         } else {
             None
         },
+        host_wiring,
     )
     .await?;
     // Native cron tools persist background work and can recursively create
@@ -723,14 +783,11 @@ const PREF_BROWSER_UNRESTRICTED_APPROVAL: &str = "agent.browserUse.unrestrictedA
 /// **P7B**: browser-use 视觉兜底点击（opt-in，有 token 成本）。`true` → DOM/aria 锚定失败时截图交视觉
 /// 模型定位再点；缺/`false`（host_default）→ OFF（不注入 locator、零行为变化）。前端 System Settings 写。
 const PREF_BROWSER_VISUAL_FALLBACK: &str = "agent.browserUse.visualFallback";
-/// **静默浏览器开关**（「浏览器模式」可见性维度）。`true` → 引擎 headless（无可见窗口）；
-/// `false`（产品默认，host_default=false）→ 弹出可见窗口。映射到 headless。前端写。
-const PREF_BROWSER_SILENT: &str = "agent.browserUse.silent";
-/// **浏览器来源**（「浏览器模式」来源维度，与 silent 正交）。`"managed"` = 内置/下载 CfT；
-/// `"system"`（默认）= 系统 Chrome/Edge 本体优先（未探到回退 managed）。红线不变：专属
-/// user-data-dir。前端写。
+/// Browser Host 可执行文件来源偏好（与 silent 正交）。`"managed"` = 内置/下载 CfT；
+/// `"system"`（默认）= 系统 Chrome/Edge 本体优先（未探到回退 managed）。前端写入偏好；
+/// 主进程 BrowserSessionHub 仍统一拥有 Host 和应用管理 profile。
 const PREF_BROWSER_SOURCE: &str = "agent.browserUse.source";
-/// 浏览器来源 host default（无设置行/无 client_prefs 时）：用户系统安装的 Chrome / Edge。
+/// Browser Host 来源默认值（无设置行/无 client_prefs 时）：系统安装的 Chrome / Edge。
 const BROWSER_SOURCE_DEFAULT: &str = "system";
 
 /// Read a boolean `client_preferences` toggle live, falling back to

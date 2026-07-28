@@ -4,6 +4,12 @@
 //! submodules. All logic lives in the modules below.
 
 mod config;
+#[cfg(feature = "browser-use")]
+mod browser_mcp_server;
+#[cfg(feature = "browser-use")]
+mod browser_lane_provider;
+#[cfg(feature = "browser-use")]
+mod browser_resource;
 mod provider_deletion;
 mod router;
 mod services;
@@ -20,7 +26,8 @@ pub mod desktop;
 
 pub use config::{AppConfig, derive_encryption_key, load_or_create_data_encryption_key};
 pub use desktop::{
-    DesktopKeepAlive, DesktopServer, WebUiAsset, WebUiAssetSource, WebUiStatus,
+    DesktopKeepAlive, DesktopServer, DesktopStartError, StartupCleanupDisposition,
+    WebUiAsset, WebUiAssetSource, WebUiStatus,
 };
 pub use nomifun_auth::AuthPolicy;
 pub use router::{
@@ -44,6 +51,8 @@ pub async fn run_embedded_server(cli: &cli::Cli, merged_path: &str) -> anyhow::R
             &env.config,
         )
         .await?;
-    bootstrap::finalize_data_layer(&env.config)?;
+    if let Err(error) = bootstrap::finalize_data_layer(&env.config) {
+        return Err(services.cleanup_after_startup_failure(error).await);
+    }
     commands::run_server(env, services).await
 }

@@ -11,6 +11,8 @@ mod unix_pty;
 #[cfg(windows)]
 pub(crate) mod windows;
 #[cfg(target_os = "linux")]
+pub(crate) mod linux_recovery;
+#[cfg(target_os = "linux")]
 mod linux_watchdog;
 #[cfg(target_os = "macos")]
 mod macos_watchdog;

@@ -12,6 +12,7 @@ import {
   isAuthExpiredHttpError,
   isBackendHttpError,
   isHandledAuthExpiredHttpError,
+  redactSensitiveText,
   wsEmitter,
 } from './httpBridge';
 
@@ -294,6 +295,120 @@ describe('httpRequest client deadline + network-failure diagnosis', () => {
     } finally {
       globalThis.fetch = realFetch;
       restoreBrowserGlobals();
+    }
+  });
+
+  test('adds the existing double-submit CSRF token to WebUI mutations', async () => {
+    let capturedHeaders: Record<string, string> | undefined;
+    installBrowserGlobals({
+      location: {
+        origin: 'https://nomifun.example',
+        protocol: 'https:',
+        host: 'nomifun.example',
+        pathname: '/settings',
+        hash: '',
+      } as Location,
+    });
+    (globalThis as { document?: { cookie: string } }).document!.cookie =
+      'nomifun-csrf-token=csrf-value';
+    globalThis.fetch = ((_url: string, init?: RequestInit) => {
+      capturedHeaders = init?.headers as Record<string, string>;
+      return Promise.resolve(
+        new Response(JSON.stringify({ success: true, data: { updated: true } }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        })
+      );
+    }) as unknown as typeof fetch;
+
+    try {
+      await httpRequest('POST', '/api/settings/preferences', { theme: 'system' });
+      expect(capturedHeaders?.['x-csrf-token']).toBe('csrf-value');
+    } finally {
+      globalThis.fetch = realFetch;
+      restoreBrowserGlobals();
+    }
+  });
+
+  test('redacts sensitive query values from generic HTTP URLs', () => {
+    const accessToken = 'access-token-value';
+    const apiKey = 'api-key-value';
+    const redacted = redactSensitiveText(
+      `/api/integrations/status?access_token=${accessToken}&api_key=${apiKey}&page=2`
+    );
+
+    expect(redacted).toBe(
+      '/api/integrations/status?access_token=[REDACTED]&api_key=[REDACTED]&page=2'
+    );
+    expect(redacted.includes(accessToken)).toBe(false);
+    expect(redacted.includes(apiKey)).toBe(false);
+  });
+
+  test('redacts generic HTTP credentials from logs and BackendHttpError', async () => {
+    const realConsoleError = console.error;
+    const consoleCalls: unknown[][] = [];
+    const requestToken = 'request-access-token';
+    const responseToken = 'response-bearer-token';
+    const apiKey = 'upstream-api-key';
+    const password = 'database-password';
+    const path = `/api/integrations/status?access_token=${requestToken}&page=2`;
+    let requestedUrl = '';
+    globalThis.fetch = ((url: string | URL | Request) => {
+      requestedUrl = String(url);
+      return Promise.resolve(
+        new Response(
+          JSON.stringify({
+            success: false,
+            code: 'upstream_request_failed',
+            error:
+              `request rejected with Bearer ${responseToken}; ` +
+              `retry URL https://service.example/status?api_key=${apiKey}`,
+            details: {
+              authorization: `Bearer ${responseToken}`,
+              api_key: apiKey,
+              password,
+              retryable: true,
+            },
+          }),
+          {
+            status: 500,
+            headers: { 'Content-Type': 'application/json' },
+          }
+        )
+      );
+    }) as typeof fetch;
+    console.error = (...args: unknown[]) => {
+      consoleCalls.push(args);
+    };
+
+    try {
+      let caught: unknown;
+      try {
+        await httpRequest('GET', path);
+      } catch (error) {
+        caught = error;
+      }
+
+      expect(requestedUrl.endsWith(path)).toBe(true);
+      expect(isBackendHttpError(caught)).toBe(true);
+      if (!isBackendHttpError(caught)) throw new Error('expected BackendHttpError');
+      const exposed = JSON.stringify({
+        message: caught.message,
+        backendMessage: caught.backendMessage,
+        body: caught.body,
+        details: caught.details,
+        consoleCalls,
+      });
+      expect(exposed.includes(requestToken)).toBe(false);
+      expect(exposed.includes(responseToken)).toBe(false);
+      expect(exposed.includes(apiKey)).toBe(false);
+      expect(exposed.includes(password)).toBe(false);
+      expect(exposed.includes('page=2')).toBe(true);
+      expect(exposed.includes('retryable')).toBe(true);
+      expect(exposed.includes('[REDACTED')).toBe(true);
+    } finally {
+      globalThis.fetch = realFetch;
+      console.error = realConsoleError;
     }
   });
 });
