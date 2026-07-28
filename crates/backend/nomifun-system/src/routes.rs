@@ -6,15 +6,17 @@ use axum::routing::{delete, get, patch, post};
 use std::path::PathBuf;
 
 use nomifun_api_types::{
-    ApiResponse, ClientPreferencesResponse, CreateProviderRequest, DetectProtocolRequest,
+    ApiResponse, ClientPreferencesResponse, CreateProviderModelRequest, CreateProviderRequest,
+    DetectProtocolRequest,
     FetchModelsAnonymousRequest, FetchModelsRequest, FetchModelsResponse, ManagedModel,
     ManagedModelHealthBatchResult,
     ManagedModelHealthResult, ManagedModelServiceStatus, ModelProfile, ModelProfileKeyRequest,
     ModelProfileUpsertRequest, ProtocolDetectionResponse, ProviderConnectionResponse,
-    ProviderResponse, ResolveModelsRequest,
+    ProviderModelKeyRequest, ProviderModelResponse, ProviderResponse, ResolveModelsRequest,
     ResolveModelsResponse, SetManagedModelEnabledRequest,
     SetManagedModelServiceEnabledRequest, SystemInfoResponse, SystemSettingsResponse, UpdateCheckRequest,
-    UpdateCheckResult, UpdateClientPreferencesRequest, UpdateProviderRequest, UpdateSettingsRequest,
+    UpdateCheckResult, UpdateClientPreferencesRequest, UpdateProviderModelRequest,
+    UpdateProviderRequest, UpdateSettingsRequest,
     UpdateWorkDirRequest, UpsertProviderConnectionRequest,
 };
 use nomifun_common::AppError;
@@ -26,6 +28,7 @@ use crate::model_profile::ModelProfileService;
 use crate::protocol::ProtocolDetectionService;
 use crate::provider::ProviderService;
 use crate::provider_connection::ProviderConnectionService;
+use crate::provider_model::ProviderModelService;
 use crate::settings::SettingsService;
 use crate::version::VersionCheckService;
 
@@ -38,6 +41,7 @@ pub struct SystemRouterState {
     pub provider_connection_service: ProviderConnectionService,
     pub model_fetch_service: ModelFetchService,
     pub model_profile_service: ModelProfileService,
+    pub provider_model_service: ProviderModelService,
     pub managed_model_service: Option<std::sync::Arc<ManagedModelService>>,
     pub protocol_detection_service: ProtocolDetectionService,
     pub version_check_service: VersionCheckService,
@@ -70,6 +74,10 @@ pub struct SystemRouterState {
 /// - `POST /api/providers/:provider_id/models` — fetch models from remote API
 /// - `POST /api/providers/fetch-models`      — fetch models anonymously (pre-create preview)
 /// - `POST /api/providers/detect-protocol`   — detect API protocol
+/// - `GET  /api/provider-models`             — list model catalog rows (`?provider_id=` filter)
+/// - `POST /api/provider-models`             — create a model catalog row
+/// - `POST /api/provider-models/update`      — partially update a model catalog row
+/// - `POST /api/provider-models/delete`      — delete a model catalog row
 /// - `GET  /api/system/info`                 — system directory & platform info
 /// - `POST /api/system/check-update`         — check GitHub for new versions
 /// - `POST /api/system/factory-reset`        — arm a factory reset (wipes on next boot)
@@ -123,6 +131,14 @@ pub fn system_routes(state: SystemRouterState) -> Router {
         .route("/api/model-profiles", get(list_model_profiles).post(upsert_model_profile))
         .route("/api/model-profiles/delete", post(delete_model_profile))
         .route("/api/model-profiles/resolve", post(resolve_model_profiles))
+        // Row-level model catalog CRUD over the authoritative provider_models
+        // entity (`(provider_id, model)` composite natural key).
+        .route(
+            "/api/provider-models",
+            get(list_provider_models).post(create_provider_model),
+        )
+        .route("/api/provider-models/update", post(update_provider_model))
+        .route("/api/provider-models/delete", post(delete_provider_model))
         .route("/api/system/info", get(get_system_info))
         .route("/api/system/check-update", post(check_update))
         .route("/api/system/factory-reset", post(factory_reset))
@@ -452,6 +468,62 @@ async fn resolve_model_profiles(
     let profiles = state.model_profile_service.list().await?;
     let models = nomifun_api_types::resolve_models(&providers, &profiles, req.task, &req.required_traits);
     Ok(Json(ApiResponse::ok(ResolveModelsResponse { models })))
+}
+
+// ===========================================================================
+// Provider-model handlers (row-level model catalog CRUD)
+// ===========================================================================
+
+#[derive(Debug, serde::Deserialize, Default)]
+struct ListProviderModelsQuery {
+    provider_id: Option<String>,
+}
+
+async fn list_provider_models(
+    State(state): State<SystemRouterState>,
+    Query(query): Query<ListProviderModelsQuery>,
+) -> Result<Json<ApiResponse<Vec<ProviderModelResponse>>>, AppError> {
+    let models = state
+        .provider_model_service
+        .list(query.provider_id.as_deref())
+        .await?;
+    Ok(Json(ApiResponse::ok(models)))
+}
+
+async fn create_provider_model(
+    State(state): State<SystemRouterState>,
+    body: Result<Json<CreateProviderModelRequest>, JsonRejection>,
+) -> Result<(StatusCode, Json<ApiResponse<ProviderModelResponse>>), AppError> {
+    let Json(req) = body.map_err(|e| AppError::BadRequest(e.to_string()))?;
+    let model = state.provider_model_service.create(req).await?;
+    Ok((StatusCode::CREATED, Json(ApiResponse::ok(model))))
+}
+
+async fn update_provider_model(
+    State(state): State<SystemRouterState>,
+    body: Result<Json<UpdateProviderModelRequest>, JsonRejection>,
+) -> Result<Json<ApiResponse<ProviderModelResponse>>, AppError> {
+    let Json(req) = body.map_err(|e| AppError::BadRequest(e.to_string()))?;
+    let model = state.provider_model_service.update(req).await?;
+    Ok(Json(ApiResponse::ok(model)))
+}
+
+async fn delete_provider_model(
+    State(state): State<SystemRouterState>,
+    body: Result<Json<ProviderModelKeyRequest>, JsonRejection>,
+) -> Result<Json<ApiResponse<()>>, AppError> {
+    let Json(req) = body.map_err(|e| AppError::BadRequest(e.to_string()))?;
+    let deleted = state
+        .provider_model_service
+        .delete(&req.provider_id, &req.model)
+        .await?;
+    if !deleted {
+        return Err(AppError::NotFound(format!(
+            "Provider model '{}' not found for provider '{}'",
+            req.model, req.provider_id
+        )));
+    }
+    Ok(Json(ApiResponse::success()))
 }
 
 // ===========================================================================

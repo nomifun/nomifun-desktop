@@ -65,7 +65,8 @@ impl ModelProfileService {
         let row = if self.repo.get(&provider_id, model).await?.is_some() {
             self.repo.update(&provider_id, model, &profile_update).await?
         } else {
-            let next_sort = next_sort_order(self.repo.as_ref(), &provider_id).await?;
+            let next_sort =
+                crate::provider_model::next_sort_order(self.repo.as_ref(), &provider_id).await?;
             match self
                 .repo
                 .create(
@@ -218,20 +219,6 @@ where
         }
     }
     Ok(changed)
-}
-
-/// Next append position for a provider's catalog.
-async fn next_sort_order(
-    repo: &dyn IProviderModelRepository,
-    provider_id: &str,
-) -> Result<i64, AppError> {
-    Ok(repo
-        .list_for_provider(provider_id)
-        .await?
-        .iter()
-        .map(|row| row.sort_order)
-        .max()
-        .map_or(0, |max| max + 1))
 }
 
 fn source_to_str(source: ProfileSource) -> &'static str {

@@ -1,5 +1,6 @@
 //! Wire DTO for a single `provider_models` row — the authoritative per-model
-//! entity exposed on `ProviderResponse::models_detail`.
+//! entity exposed on `ProviderResponse::models_detail` — plus the request
+//! bodies for the row-level `/api/provider-models` CRUD surface.
 
 use serde::{Deserialize, Serialize};
 
@@ -35,6 +36,101 @@ pub struct ProviderModelResponse {
     pub health_checked_at: Option<i64>,
     pub created_at: i64,
     pub updated_at: i64,
+}
+
+/// Body for `POST /api/provider-models` — create one catalog row.
+///
+/// `tasks` left empty means "no explicit profile": the service seeds the
+/// heuristic profile ([`crate::derive_tasks_and_traits`]) with
+/// `source = inferred`; a non-empty `tasks` is an explicit user profile
+/// (`source = user`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CreateProviderModelRequest {
+    #[serde(deserialize_with = "crate::serde_util::deserialize_provider_id")]
+    pub provider_id: String,
+    #[serde(deserialize_with = "crate::serde_util::deserialize_model_name")]
+    pub model: String,
+    #[serde(default = "crate::provider_model::default_true")]
+    pub enabled: bool,
+    #[serde(default)]
+    pub tasks: Vec<ModelTask>,
+    #[serde(default)]
+    pub traits: Vec<ModelTrait>,
+    #[serde(default)]
+    pub protocol: Option<String>,
+    #[serde(default)]
+    pub connection_role: Option<String>,
+    #[serde(default)]
+    pub params: Option<serde_json::Value>,
+    #[serde(default)]
+    pub context_limit: Option<i64>,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub sort_order: Option<i64>,
+}
+
+pub(crate) fn default_true() -> bool {
+    true
+}
+
+/// Body for `POST /api/provider-models/update` — partial update of one row.
+///
+/// Nullable columns use double-Option: field absent = keep, `null` = clear,
+/// value = set.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UpdateProviderModelRequest {
+    #[serde(deserialize_with = "crate::serde_util::deserialize_provider_id")]
+    pub provider_id: String,
+    #[serde(deserialize_with = "crate::serde_util::deserialize_model_name")]
+    pub model: String,
+    #[serde(default)]
+    pub enabled: Option<bool>,
+    #[serde(default)]
+    pub sort_order: Option<i64>,
+    #[serde(default)]
+    pub tasks: Option<Vec<ModelTask>>,
+    #[serde(default)]
+    pub traits: Option<Vec<ModelTrait>>,
+    #[serde(
+        default,
+        deserialize_with = "crate::serde_util::deserialize_double_option",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub protocol: Option<Option<String>>,
+    #[serde(
+        default,
+        deserialize_with = "crate::serde_util::deserialize_double_option",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub connection_role: Option<Option<String>>,
+    #[serde(default)]
+    pub params: Option<serde_json::Value>,
+    #[serde(
+        default,
+        deserialize_with = "crate::serde_util::deserialize_double_option",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub context_limit: Option<Option<i64>>,
+    #[serde(
+        default,
+        deserialize_with = "crate::serde_util::deserialize_double_option",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub description: Option<Option<String>>,
+}
+
+/// Body identifying one row by its composite natural key
+/// (`POST /api/provider-models/delete`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProviderModelKeyRequest {
+    #[serde(deserialize_with = "crate::serde_util::deserialize_provider_id")]
+    pub provider_id: String,
+    #[serde(deserialize_with = "crate::serde_util::deserialize_model_name")]
+    pub model: String,
 }
 
 #[cfg(test)]
@@ -162,5 +258,142 @@ mod tests {
             });
             assert!(serde_json::from_value::<ProviderModelResponse>(raw).is_err());
         }
+    }
+
+    // --- CreateProviderModelRequest ---
+
+    #[test]
+    fn create_request_minimal_defaults() {
+        let req: CreateProviderModelRequest = serde_json::from_value(json!({
+            "provider_id": PROVIDER_ID,
+            "model": "gpt-4o"
+        }))
+        .unwrap();
+        assert!(req.enabled, "enabled defaults to true");
+        assert!(req.tasks.is_empty());
+        assert!(req.traits.is_empty());
+        assert_eq!(req.protocol, None);
+        assert_eq!(req.connection_role, None);
+        assert_eq!(req.params, None);
+        assert_eq!(req.context_limit, None);
+        assert_eq!(req.description, None);
+        assert_eq!(req.sort_order, None);
+    }
+
+    #[test]
+    fn create_request_rejects_unknown_fields_and_bad_keys() {
+        assert!(serde_json::from_value::<CreateProviderModelRequest>(json!({
+            "provider_id": PROVIDER_ID,
+            "model": "gpt-4o",
+            "bogus": 1
+        }))
+        .is_err());
+        assert!(serde_json::from_value::<CreateProviderModelRequest>(json!({
+            "provider_id": "openai",
+            "model": "gpt-4o"
+        }))
+        .is_err());
+        assert!(serde_json::from_value::<CreateProviderModelRequest>(json!({
+            "provider_id": PROVIDER_ID,
+            "model": " padded "
+        }))
+        .is_err());
+    }
+
+    // --- UpdateProviderModelRequest (double-Option tri-state) ---
+
+    #[test]
+    fn update_request_absent_nullables_mean_keep() {
+        let req: UpdateProviderModelRequest = serde_json::from_value(json!({
+            "provider_id": PROVIDER_ID,
+            "model": "gpt-4o"
+        }))
+        .unwrap();
+        assert_eq!(req.protocol, None);
+        assert_eq!(req.connection_role, None);
+        assert_eq!(req.context_limit, None);
+        assert_eq!(req.description, None);
+        assert_eq!(req.enabled, None);
+        assert_eq!(req.tasks, None);
+        assert_eq!(req.traits, None);
+        assert_eq!(req.params, None);
+        assert_eq!(req.sort_order, None);
+    }
+
+    #[test]
+    fn update_request_null_nullables_mean_clear() {
+        let req: UpdateProviderModelRequest = serde_json::from_value(json!({
+            "provider_id": PROVIDER_ID,
+            "model": "gpt-4o",
+            "protocol": null,
+            "connection_role": null,
+            "context_limit": null,
+            "description": null
+        }))
+        .unwrap();
+        assert_eq!(req.protocol, Some(None));
+        assert_eq!(req.connection_role, Some(None));
+        assert_eq!(req.context_limit, Some(None));
+        assert_eq!(req.description, Some(None));
+    }
+
+    #[test]
+    fn update_request_values_mean_set() {
+        let req: UpdateProviderModelRequest = serde_json::from_value(json!({
+            "provider_id": PROVIDER_ID,
+            "model": "gpt-4o",
+            "enabled": false,
+            "sort_order": 9,
+            "tasks": ["chat"],
+            "traits": ["vision_input"],
+            "protocol": "openai",
+            "connection_role": "primary",
+            "params": {"temperature": 0.1},
+            "context_limit": 200000,
+            "description": "desc"
+        }))
+        .unwrap();
+        assert_eq!(req.enabled, Some(false));
+        assert_eq!(req.sort_order, Some(9));
+        assert_eq!(req.tasks, Some(vec![ModelTask::Chat]));
+        assert_eq!(req.traits, Some(vec![ModelTrait::VisionInput]));
+        assert_eq!(req.protocol, Some(Some("openai".into())));
+        assert_eq!(req.connection_role, Some(Some("primary".into())));
+        assert_eq!(req.context_limit, Some(Some(200_000)));
+        assert_eq!(req.description, Some(Some("desc".into())));
+    }
+
+    #[test]
+    fn update_request_rejects_unknown_fields() {
+        assert!(serde_json::from_value::<UpdateProviderModelRequest>(json!({
+            "provider_id": PROVIDER_ID,
+            "model": "gpt-4o",
+            "healthy": true
+        }))
+        .is_err());
+    }
+
+    // --- ProviderModelKeyRequest ---
+
+    #[test]
+    fn key_request_roundtrip_and_strictness() {
+        let req: ProviderModelKeyRequest = serde_json::from_value(json!({
+            "provider_id": PROVIDER_ID,
+            "model": "gpt-4o"
+        }))
+        .unwrap();
+        assert_eq!(req.provider_id, PROVIDER_ID);
+        assert_eq!(req.model, "gpt-4o");
+        assert!(serde_json::from_value::<ProviderModelKeyRequest>(json!({
+            "provider_id": PROVIDER_ID,
+            "model": "gpt-4o",
+            "extra": true
+        }))
+        .is_err());
+        assert!(serde_json::from_value::<ProviderModelKeyRequest>(json!({
+            "provider_id": PROVIDER_ID,
+            "model": ""
+        }))
+        .is_err());
     }
 }

@@ -578,6 +578,10 @@ pub fn build_system_state(services: &AppServices) -> SystemRouterState {
         model_profile_service: nomifun_system::ModelProfileService::new(
             services.provider_model_repo.clone(),
         ),
+        provider_model_service: nomifun_system::ProviderModelService::new(
+            services.provider_model_repo.clone(),
+            Arc::new(SqliteProviderRepository::new(pool.clone())),
+        ),
         managed_model_service: Some(services.managed_model_service.clone()),
         protocol_detection_service: ProtocolDetectionService::new_dynamic(),
         version_check_service: VersionCheckService::new_dynamic(env!("CARGO_PKG_VERSION").to_owned()),
