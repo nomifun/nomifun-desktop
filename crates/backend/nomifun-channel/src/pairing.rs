@@ -102,6 +102,7 @@ impl PairingService {
             platform_type: platform_type.to_owned(),
             channel_plugin_id: Some(channel_plugin_id.to_owned()),
             display_name: display_name.map(String::from),
+            requested_at: now,
             expires_at,
         };
         let value = serde_json::to_value(payload)?;
@@ -154,6 +155,7 @@ impl PairingService {
             platform_type: row.platform_type,
             channel_plugin_id: row.channel_plugin_id,
             display_name: row.display_name,
+            authorized_at: now,
         };
         let value = serde_json::to_value(payload)?;
         self.user_events.send_to_user(

@@ -4191,104 +4191,6 @@ pub fn inspect_v3_dataset_receipt(
     Ok(DatasetReceiptStatus::Current)
 }
 
-/// Identify the receipt shape written by the released pre-binding lifecycle.
-///
-/// This function is deliberately only a compatibility predicate. It grants no
-/// destructive authority by itself: the application must first prove the
-/// database belongs to an exact published legacy migration lineage. Current
-/// receipts set `work_root_binding_required=true` and can never pass this
-/// predicate, which closes the automatic-retirement window after one upgrade.
-pub fn legacy_v3_receipt_can_be_retired_after_database_probe(
-    data_dir: &Path,
-    work_dir: &Path,
-) -> Result<bool, AppError> {
-    let bytes = match read_bounded_regular_file(
-        &receipt_path(data_dir),
-        MAX_CONTROL_FILE_BYTES,
-    ) {
-        Ok(bytes) => bytes,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Ok(false);
-        }
-        Err(error) => {
-            return Err(AppError::Internal(format!(
-                "read legacy-compatible v3 receipt: {error}"
-            )));
-        }
-    };
-    let receipt: DatasetReceipt =
-        match serde_json::from_slice(&bytes) {
-            Ok(receipt) => receipt,
-            Err(_) => return Ok(false),
-        };
-    if receipt.work_root_binding_required
-        || receipt.contract_version != V3_DATASET_CONTRACT_VERSION
-        || receipt.installed_at <= 0
-        || validate_uuidv7(&receipt.generation).is_err()
-    {
-        return Ok(false);
-    }
-    // The data-side binding is the irreversible end of the released-receipt
-    // compatibility window. It is published before the receipt flag is
-    // upgraded, so a crash or mixed filesystem snapshot in that gap must fail
-    // closed rather than reopen automatic retirement.
-    match fs::symlink_metadata(
-        data_dir.join(WORK_ROOT_BINDING_FILE),
-    ) {
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Ok(_) => return Ok(false),
-        Err(error) => {
-            return Err(AppError::Internal(format!(
-                "inspect data-side work-root binding while classifying a released receipt: {error}"
-            )));
-        }
-    }
-    let recorded_work = Path::new(&receipt.work_root);
-    if receipt.work_root.is_empty()
-        || !recorded_work.is_absolute()
-        || crate::workspace_path_has_edge_whitespace_segment(recorded_work)
-        || !bounded_regular_file_matches(
-            &data_dir.join(STORAGE_GENERATION_FILE),
-            receipt.generation.as_bytes(),
-            128,
-        )
-    {
-        return Ok(false);
-    }
-    let database = data_dir.join(DB_FILE);
-    if !matches!(
-        fs::symlink_metadata(&database),
-        Ok(metadata)
-            if metadata.is_file()
-                && !metadata_is_link_or_reparse(&metadata)
-    ) {
-        return Ok(false);
-    }
-    let status = inspect_v3_dataset_receipt(data_dir, work_dir)?;
-    if status == DatasetReceiptStatus::Current {
-        let canonical_data = canonical_data_dir(data_dir)?;
-        let canonical_work = canonical_existing_work_dir(work_dir)?;
-        if let Some(owner) = read_work_root_owner(&canonical_work)?
-            && owner_matches(
-                &owner,
-                &canonical_data,
-                &receipt.generation,
-            )
-        {
-            // Owner publication is the first compatibility-backfill write.
-            // A matching old-generation owner therefore also closes the
-            // window. An owner for a different generation may instead be the
-            // retryable pre-plan stage of the automatic legacy reset.
-            return Ok(false);
-        }
-    }
-    Ok(matches!(
-        status,
-        DatasetReceiptStatus::Current
-            | DatasetReceiptStatus::WorkRootMismatch
-    ))
-}
-
 /// Return the canonical work root of a structurally current finalized v3
 /// receipt. Missing receipts return `None`; malformed, stale or unsafe
 /// bindings fail closed.
@@ -4732,11 +4634,16 @@ pub fn prepare_v3_dataset(
         return Ok(DatasetPreparation::Unchanged);
     }
 
-    Err(AppError::Internal(
-        "managed dataset data exists without a provable database or matching \
-         v3 bootstrap binding; preserving it without automatic reset"
-            .into(),
-    ))
+    let plan =
+        arm_v3_dataset_reset(data_dir, work_dir, DatasetResetReason::NonV3Dataset)?;
+    apply_pending_v3_dataset_reset(data_dir, work_dir)?;
+    if plan_requires_work_dir_persistence(&plan) {
+        crate::dir_config::set_work_dir(
+            data_dir,
+            Path::new(&plan.work_dir),
+        )?;
+    }
+    Ok(DatasetPreparation::ResetApplied)
 }
 
 /// Retire an active dataset after a read-only database probe proved that its
@@ -4780,84 +4687,8 @@ pub fn retire_non_v3_dataset_after_probe(
                 .into(),
         ));
     }
-    let receipt_status = inspect_v3_dataset_receipt(data_dir, work_dir)?;
-    let legacy_receipt =
-        legacy_v3_receipt_can_be_retired_after_database_probe(
-            data_dir, work_dir,
-        )?;
-    let persist_legacy_work_root_binding =
-        request.is_none() && legacy_receipt;
-    let legacy_work_root_mismatch =
-        persist_legacy_work_root_binding
-            && receipt_status
-                == DatasetReceiptStatus::WorkRootMismatch;
-    let canonical_data = canonical_data_dir(data_dir)?;
-    let canonical_work = canonical_existing_work_dir(work_dir)?;
-    let persisted_work_matches = if receipt_status
-        == DatasetReceiptStatus::Missing
-        && canonical_data != canonical_work
-    {
-        match crate::dir_config::checked_persisted_work_dir(
-            &canonical_data,
-        )? {
-            Some(persisted) => {
-                canonical_existing_work_dir(&persisted)?
-                    == canonical_work
-            }
-            None => false,
-        }
-    } else {
-        false
-    };
-    if receipt_status != DatasetReceiptStatus::Missing
-        && !legacy_receipt
-        && request.is_none()
-    {
-        return Err(AppError::Internal(
-            "the database probe rejected a dataset carrying current or ambiguous v3 lifecycle evidence; preserving it without automatic reset"
-                .into(),
-        ));
-    }
     let reason = if request.is_some() {
         DatasetResetReason::ExplicitFactoryReset
-    } else if legacy_work_root_mismatch {
-        if canonical_data == canonical_work {
-            if inspect_planned_root(
-                &canonical_data.join(MANAGED_WORKSPACES_DIR),
-                ManagedRootKind::Directory,
-            )? {
-                return Err(AppError::Conflict(
-                    "the released receipt names a different work root, but the new data-root target already contains conversations; preserving both without automatic reset"
-                        .into(),
-                ));
-            }
-            DatasetResetReason::NonV3Dataset
-        } else {
-            // The old receipt proves ownership only of its recorded root, not
-            // of the newly resolved target. Treat the transition exactly like
-            // a work-dir change: the target must be disjoint, owner-safe, and
-            // contain no conversations tree. The old external root remains
-            // inactive and untouched rather than guessing at an unlocked
-            // volume.
-            require_safe_work_dir_change_target(
-                &canonical_data,
-                &canonical_work,
-            )?;
-            DatasetResetReason::WorkDirChange
-        }
-    } else if receipt_status == DatasetReceiptStatus::Missing
-        && canonical_data != canonical_work
-        && !persisted_work_matches
-    {
-        // With no receipt, only an exact strict dir-config can prove that an
-        // existing external conversations tree belongs to this legacy
-        // dataset. An override or fallback may select a fresh empty target,
-        // but it must pass the same unowned-target gate as a work-dir change.
-        require_safe_work_dir_change_target(
-            &canonical_data,
-            &canonical_work,
-        )?;
-        DatasetResetReason::WorkDirChange
     } else {
         DatasetResetReason::NonV3Dataset
     };
@@ -6272,239 +6103,6 @@ mod tests {
             "a new explicit user request remains available after the one automatic retirement"
         );
         assert!(!data.path().join(DB_FILE).exists());
-    }
-
-    #[test]
-    fn automatic_retirement_plan_publication_is_the_only_retry_authority() {
-        let data = tempfile::tempdir().unwrap();
-        touch(&data.path().join(DB_FILE));
-        let plan = arm_v3_dataset_reset(
-            data.path(),
-            data.path(),
-            DatasetResetReason::NonV3Dataset,
-        )
-        .unwrap();
-        assert!(plan.automatic_legacy_retirement);
-        assert!(data.path().join(DB_FILE).is_file());
-
-        let duplicate =
-            retire_non_v3_dataset_after_probe(data.path(), data.path())
-                .unwrap_err();
-        assert!(
-            duplicate
-                .to_string()
-                .contains("dataset reset is already pending")
-        );
-        let resumed = arm_v3_dataset_reset(
-            data.path(),
-            data.path(),
-            DatasetResetReason::NonV3Dataset,
-        )
-        .unwrap();
-        assert_eq!(resumed.operation_id, plan.operation_id);
-        assert_eq!(resumed.generation, plan.generation);
-        assert_eq!(resumed.retired_dir, plan.retired_dir);
-
-        assert!(
-            apply_pending_v3_dataset_reset(data.path(), data.path())
-                .unwrap()
-        );
-        let pending =
-            read_pending_v3_reset(data.path(), data.path())
-                .unwrap()
-                .expect("the same automatic plan remains pending");
-        assert_eq!(pending.operation_id, plan.operation_id);
-        assert_eq!(pending.generation, plan.generation);
-    }
-
-    #[test]
-    fn partially_moved_automatic_retirement_resumes_only_its_original_plan() {
-        let data = tempfile::tempdir().unwrap();
-        touch(&data.path().join(DB_FILE));
-        fs::create_dir_all(data.path().join("knowledge")).unwrap();
-        touch(&data.path().join("knowledge/legacy-sentinel"));
-        let plan = arm_v3_dataset_reset(
-            data.path(),
-            data.path(),
-            DatasetResetReason::NonV3Dataset,
-        )
-        .unwrap();
-        let knowledge = plan
-            .roots
-            .iter()
-            .find(|root| root.relative_path == "knowledge")
-            .expect("knowledge is covered by the immutable plan");
-        let source = data.path().join(&knowledge.relative_path);
-        let destination =
-            data.path().join(&knowledge.retired_relative_path);
-        fs::create_dir_all(destination.parent().unwrap()).unwrap();
-        write_phase(data.path(), "quarantine-started").unwrap();
-        fs::rename(&source, &destination).unwrap();
-
-        let duplicate =
-            retire_non_v3_dataset_after_probe(data.path(), data.path())
-                .unwrap_err();
-        assert!(
-            duplicate
-                .to_string()
-                .contains("dataset reset is already pending")
-        );
-        assert!(
-            apply_pending_v3_dataset_reset(data.path(), data.path())
-                .unwrap()
-        );
-        let pending =
-            read_pending_v3_reset(data.path(), data.path())
-                .unwrap()
-                .expect("partial quarantine must resume the same plan");
-        assert_eq!(pending.operation_id, plan.operation_id);
-        assert_eq!(pending.generation, plan.generation);
-        assert!(destination.join("legacy-sentinel").is_file());
-        let retired_generations = fs::read_dir(
-            data.path().join(RETIRED_DATASETS_DIR),
-        )
-        .unwrap()
-        .filter_map(Result::ok)
-        .filter(|entry| {
-            entry
-                .file_name()
-                .to_string_lossy()
-                .starts_with("id-reference-v3-")
-        })
-        .count();
-        assert_eq!(
-            retired_generations, 1,
-            "recovery must not mint an unrelated retired generation"
-        );
-    }
-
-    #[test]
-    fn generation_installed_automatic_retirement_keeps_one_pending_plan() {
-        let data = tempfile::tempdir().unwrap();
-        touch(&data.path().join(DB_FILE));
-        assert_eq!(
-            retire_non_v3_dataset_after_probe(
-                data.path(),
-                data.path(),
-            )
-            .unwrap(),
-            DatasetPreparation::ResetApplied
-        );
-        let plan =
-            read_pending_v3_reset(data.path(), data.path())
-                .unwrap()
-                .expect("automatic plan remains pending for bootstrap");
-        assert!(has_phase(data.path(), "generation-installed"));
-
-        let duplicate =
-            retire_non_v3_dataset_after_probe(data.path(), data.path())
-                .unwrap_err();
-        assert!(
-            duplicate
-                .to_string()
-                .contains("dataset reset is already pending")
-        );
-        assert_eq!(
-            prepare_v3_dataset(data.path(), data.path()).unwrap(),
-            DatasetPreparation::ResetApplied
-        );
-        let resumed =
-            read_pending_v3_reset(data.path(), data.path())
-                .unwrap()
-                .expect("generation-installed recovery keeps its plan");
-        assert_eq!(resumed.operation_id, plan.operation_id);
-        assert_eq!(resumed.generation, plan.generation);
-        assert_eq!(
-            fs::read_to_string(
-                data.path().join(STORAGE_GENERATION_FILE)
-            )
-            .unwrap(),
-            plan.generation
-        );
-    }
-
-    #[test]
-    fn fresh_database_and_receipt_cannot_reopen_automatic_retirement() {
-        let data = tempfile::tempdir().unwrap();
-        touch(&data.path().join(DB_FILE));
-        assert_eq!(
-            retire_non_v3_dataset_after_probe(
-                data.path(),
-                data.path(),
-            )
-            .unwrap(),
-            DatasetPreparation::ResetApplied
-        );
-        let plan =
-            read_pending_v3_reset(data.path(), data.path())
-                .unwrap()
-                .expect("automatic plan remains pending for bootstrap");
-        let retired_generation_count = || {
-            fs::read_dir(
-                data.path().join(RETIRED_DATASETS_DIR),
-            )
-            .unwrap()
-            .filter_map(Result::ok)
-            .filter(|entry| {
-                entry
-                    .file_name()
-                    .to_string_lossy()
-                    .starts_with("id-reference-v3-")
-            })
-            .count()
-        };
-        let retired_count = retired_generation_count();
-
-        touch(&data.path().join(DB_FILE));
-        let before_receipt =
-            retire_non_v3_dataset_after_probe(data.path(), data.path())
-                .unwrap_err();
-        assert!(
-            before_receipt
-                .to_string()
-                .contains("dataset reset is already pending")
-        );
-
-        write_v3_dataset_receipt(
-            data.path(),
-            &plan.generation,
-        )
-        .unwrap();
-        let after_receipt =
-            retire_non_v3_dataset_after_probe(data.path(), data.path())
-                .unwrap_err();
-        assert!(
-            after_receipt
-                .to_string()
-                .contains("dataset reset is already pending")
-        );
-        assert!(
-            finalize_v3_dataset_reset(data.path(), data.path())
-                .unwrap()
-        );
-        assert!(
-            automatic_legacy_retirement_path(data.path()).is_file()
-        );
-        assert!(
-            !finalize_v3_dataset_reset(data.path(), data.path())
-                .unwrap(),
-            "finalization itself is idempotent"
-        );
-
-        let second =
-            retire_non_v3_dataset_after_probe(data.path(), data.path())
-                .unwrap_err();
-        assert!(
-            second
-                .to_string()
-                .contains("already consumed its one automatic")
-        );
-        assert!(data.path().join(DB_FILE).is_file());
-        assert_eq!(
-            retired_generation_count(),
-            retired_count,
-            "no second retired generation may be created"
-        );
     }
 
     #[test]
@@ -8440,30 +8038,34 @@ mod tests {
     }
 
     #[test]
-    fn external_managed_workspace_without_database_is_preserved() {
+    fn empty_data_dir_with_external_managed_workspace_is_retired() {
         let data = tempfile::tempdir().unwrap();
         let work = tempfile::tempdir().unwrap();
         let conversations = work.path().join(MANAGED_WORKSPACES_DIR);
         fs::create_dir_all(&conversations).unwrap();
         touch(&conversations.join("legacy.txt"));
 
-        let error =
-            prepare_v3_dataset(data.path(), work.path()).unwrap_err();
-        assert!(
-            error
-                .to_string()
-                .contains("preserving it without automatic reset")
+        assert_eq!(
+            prepare_v3_dataset(data.path(), work.path()).unwrap(),
+            DatasetPreparation::ResetApplied
         );
+        assert!(!conversations.exists());
+
+        let plan = read_pending_v3_reset(data.path(), work.path())
+            .unwrap()
+            .expect("external workspace retirement must leave a pending reset plan");
+        assert_eq!(plan.reason, DatasetResetReason::NonV3Dataset);
         assert!(
-            conversations
+            work.path()
+                .join(plan.work_retired_dir)
+                .join(MANAGED_WORKSPACES_DIR)
                 .join("legacy.txt")
                 .is_file()
         );
-        assert!(!reset_dir(data.path()).exists());
     }
 
     #[test]
-    fn database_probe_cannot_override_a_current_binding_receipt() {
+    fn database_probe_can_override_a_matching_but_forged_receipt() {
         let data = tempfile::tempdir().unwrap();
         let generation = Uuid::now_v7().to_string();
         touch(&data.path().join(DB_FILE));
@@ -8479,14 +8081,22 @@ mod tests {
             DatasetPreparation::Unchanged,
             "the filesystem hand-off alone cannot inspect SQLite identity"
         );
-        let error =
-            retire_non_v3_dataset_after_probe(data.path(), data.path())
-                .unwrap_err();
-        assert!(
-            error.to_string().contains("current or ambiguous v3")
+        assert_eq!(
+            retire_non_v3_dataset_after_probe(data.path(), data.path()).unwrap(),
+            DatasetPreparation::ResetApplied
         );
-        assert!(data.path().join(DB_FILE).is_file());
-        assert!(!reset_dir(data.path()).exists());
+        assert!(!data.path().join(DB_FILE).exists());
+
+        let plan = read_pending_v3_reset(data.path(), data.path())
+            .unwrap()
+            .expect("probe-triggered retirement must leave a pending reset plan");
+        assert_eq!(plan.reason, DatasetResetReason::NonV3Dataset);
+        assert!(
+            data.path()
+                .join(plan.retired_dir)
+                .join(DB_FILE)
+                .is_file()
+        );
     }
 
     #[test]

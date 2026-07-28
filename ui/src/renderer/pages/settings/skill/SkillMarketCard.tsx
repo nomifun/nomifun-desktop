@@ -129,7 +129,7 @@ const SkillMarketCard: React.FC<SkillMarketCardProps> = ({ item, tagByKey, local
         </div>
       )}
 
-      <div className='mt-12px pt-10px flex min-w-0 items-center justify-between gap-10px border-t border-solid border-[var(--color-border-1)]'>
+      <div className='mt-auto pt-10px flex min-w-0 items-center justify-between gap-10px'>
         <span className='truncate text-11px text-[var(--color-text-3)] font-mono' title={item.install_command}>
           {item.install_command}
         </span>

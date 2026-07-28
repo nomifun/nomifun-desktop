@@ -1304,21 +1304,26 @@ impl ChannelManager {
 
     /// Converts a DB row + optional live status to a `PluginStatusResponse`.
     fn row_to_status_response(&self, row: &ChannelPluginRow, live_status: Option<String>) -> PluginStatusResponse {
-        let is_running = self.plugins.contains_key(&row.channel_plugin_id);
         let has_token = !row.config.is_empty();
+        // Presence in the runtime map only means that an instance exists. Its
+        // background receive loop may already have reported Error, so only a
+        // live Running status is a truthful connected signal. A stale DB
+        // "running" value without a live instance must also remain disconnected.
+        let connected = row.enabled && live_status.as_deref() == Some("running");
+        let status = live_status.or_else(|| row.status.clone());
         PluginStatusResponse {
             plugin_id: row.channel_plugin_id.clone(),
             plugin_type: row.r#type.clone(),
             name: row.name.clone(),
             enabled: row.enabled,
-            status: live_status.or_else(|| row.status.clone()),
+            status,
             last_connected: row.last_connected,
             companion_id: row.companion_id.clone(),
             public_agent_id: row.public_agent_id.clone(),
             bot_key: row.bot_key.clone(),
             created_at: row.created_at,
             updated_at: row.updated_at,
-            connected: is_running,
+            connected,
             has_token,
             bot_username: None,
             active_users: 0,
@@ -1963,6 +1968,10 @@ mod tests {
         assert_eq!(statuses[0].plugin_type, "telegram");
         assert_eq!(statuses[0].name, "Telegram Bot");
         assert!(statuses[0].enabled);
+        assert!(
+            !statuses[0].connected,
+            "a stale DB running value without a live instance is not connected"
+        );
     }
 
     #[tokio::test]
@@ -1991,6 +2000,36 @@ mod tests {
         assert_eq!(statuses.len(), 1);
         // Live status (running) should override DB status (stopped)
         assert_eq!(statuses[0].status.as_deref(), Some("running"));
+        assert!(statuses[0].connected);
+    }
+
+    #[tokio::test]
+    async fn live_error_instance_is_not_reported_connected() {
+        let (mgr, repo, _bc) = make_manager();
+        let now = now_ms();
+        let channel_id = test_channel_id();
+        repo.plugins.lock().unwrap().push(ChannelPluginRow {
+            channel_plugin_id: channel_id.clone(),
+            r#type: "weixin".into(),
+            name: "WeChat Bot".into(),
+            enabled: true,
+            config: "encrypted".into(),
+            status: Some("running".into()),
+            last_connected: Some(now),
+            companion_id: Some(COMPANION_A.into()),
+            public_agent_id: None,
+            bot_key: None,
+            created_at: now,
+            updated_at: now,
+        });
+        let mut failed = MockPlugin::new(PluginType::Weixin);
+        failed.status = PluginStatus::Error;
+        let failed: Box<dyn ChannelPlugin> = Box::new(failed);
+        mgr.plugins.insert(channel_id, failed);
+
+        let statuses = mgr.get_plugin_status().await.unwrap();
+        assert_eq!(statuses[0].status.as_deref(), Some("error"));
+        assert!(!statuses[0].connected);
     }
 
     // ── enable_plugin ──────────────────────────────────────────────────

@@ -339,6 +339,7 @@ pub struct PairingRequestedPayload {
     pub channel_plugin_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub display_name: Option<String>,
+    pub requested_at: TimestampMs,
     pub expires_at: TimestampMs,
 }
 
@@ -371,6 +372,7 @@ pub struct UserAuthorizedPayload {
     pub channel_plugin_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub display_name: Option<String>,
+    pub authorized_at: TimestampMs,
 }
 
 // ---------------------------------------------------------------------------
@@ -829,6 +831,7 @@ mod tests {
             platform_type: "telegram".into(),
             channel_plugin_id: Some(CHANNEL_ID.into()),
             display_name: Some("Alice".into()),
+            requested_at: 1700000000000,
             expires_at: 1700000600000,
         };
         let json = serde_json::to_value(&payload).unwrap();
@@ -837,6 +840,7 @@ mod tests {
         assert_eq!(json["platform_type"], "telegram");
         assert_eq!(json["channel_plugin_id"], CHANNEL_ID);
         assert_eq!(json["display_name"], "Alice");
+        assert_eq!(json["requested_at"], 1700000000000_i64);
         assert_eq!(json["expires_at"], 1700000600000_i64);
     }
 
@@ -848,6 +852,7 @@ mod tests {
             platform_type: "dingtalk".into(),
             channel_plugin_id: None,
             display_name: None,
+            requested_at: 1700000000000,
             expires_at: 1700000600000,
         };
         let json = serde_json::to_value(&payload).unwrap();
@@ -892,6 +897,7 @@ mod tests {
             platform_type: "telegram".into(),
             channel_plugin_id: Some(CHANNEL_ID.into()),
             display_name: Some("Alice".into()),
+            authorized_at: 1700000000000,
         };
         let json = serde_json::to_value(&payload).unwrap();
         assert_eq!(json["channel_user_id"], CHANNEL_USER_ID);
@@ -899,6 +905,7 @@ mod tests {
         assert_eq!(json["platform_type"], "telegram");
         assert_eq!(json["channel_plugin_id"], CHANNEL_ID);
         assert_eq!(json["display_name"], "Alice");
+        assert_eq!(json["authorized_at"], 1700000000000_i64);
     }
 
     #[test]
@@ -909,6 +916,7 @@ mod tests {
             platform_type: "lark".into(),
             channel_plugin_id: None,
             display_name: None,
+            authorized_at: 1700000000000,
         };
         let json = serde_json::to_value(&payload).unwrap();
         assert!(json.get("display_name").is_none());
