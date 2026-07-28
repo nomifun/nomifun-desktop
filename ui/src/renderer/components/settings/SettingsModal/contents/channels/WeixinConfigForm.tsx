@@ -12,8 +12,18 @@ import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { QRCodeSVG } from 'qrcode.react';
 import type { ChannelTarget } from './channelTarget';
+import {
+  applyWeixinAuthorizedUserMutations,
+  applyWeixinPairingMutations,
+  buildWeixinEnableConfig,
+  findWeixinPluginStatusById,
+  isWeixinRuntimeConnected,
+  type WeixinAuthorizedUserMutation,
+  type WeixinPairingMutation,
+} from './weixinConfigState';
 
-type LoginState = 'idle' | 'loading_qr' | 'showing_qr' | 'scanned' | 'connected';
+type LoginState = 'idle' | 'loading_qr' | 'showing_qr' | 'scanned';
+const TRANSITIONAL_PLUGIN_STATUSES = new Set(['created', 'initializing', 'ready', 'starting']);
 
 /**
  * Preference row component (local, mirrors other config forms)
@@ -60,9 +70,7 @@ const WeixinConfigForm: React.FC<WeixinConfigFormProps> = ({
 }) => {
   const { t } = useTranslation();
 
-  const [loginState, setLoginState] = useState<LoginState>(
-    pluginStatus?.hasToken && pluginStatus?.enabled ? 'connected' : 'idle'
-  );
+  const [loginState, setLoginState] = useState<LoginState>('idle');
   // In Electron mode this holds a base64 data URL; in WebUI mode it holds the raw QR ticket string.
   const [qrcodeDataUrl, setQrcodeDataUrl] = useState<string | null>(null);
   // Active `channel.weixin-login` WS subscription disposer for the in-flight
@@ -73,9 +81,17 @@ const WeixinConfigForm: React.FC<WeixinConfigFormProps> = ({
 
   // Pairing state
   const [pairingLoading, setPairingLoading] = useState(false);
+  const [pairingError, setPairingError] = useState<string | null>(null);
   const [usersLoading, setUsersLoading] = useState(false);
   const [pendingPairings, setPendingPairings] = useState<IChannelPairingRequest[]>([]);
   const [authorizedUsers, setAuthorizedUsers] = useState<IChannelUser[]>([]);
+  const pairingLoadSequenceRef = useRef(0);
+  const pairingMutationSequenceRef = useRef(0);
+  const pairingMutationsRef = useRef<WeixinPairingMutation[]>([]);
+  const usersLoadSequenceRef = useRef(0);
+  const authorizedUserMutationSequenceRef = useRef(0);
+  const authorizedUserMutationsRef = useRef<WeixinAuthorizedUserMutation[]>([]);
+  const runtimeConnected = isWeixinRuntimeConnected(pluginStatus);
 
   // Drop the WS subscription on unmount to prevent stale callbacks firing.
   useEffect(() => {
@@ -85,48 +101,82 @@ const WeixinConfigForm: React.FC<WeixinConfigFormProps> = ({
     };
   }, []);
 
-  // Sync connected state when pluginStatus changes externally.
-  // Require enabled to be true so that a post-disable pluginStatusChanged event
-  // (which still carries hasToken: true but enabled: false) does not flip back to connected.
-  useEffect(() => {
-    if (pluginStatus?.hasToken && pluginStatus?.enabled && loginState === 'idle') {
-      setLoginState('connected');
-    }
-  }, [pluginStatus, loginState]);
-
   const loadPendingPairings = useCallback(async () => {
+    const loadSequence = ++pairingLoadSequenceRef.current;
+    const mutationSequenceAtStart = pairingMutationSequenceRef.current;
     setPairingLoading(true);
+    setPairingError(null);
     try {
       const pairings = await channel.getPendingPairings.invoke();
-      if (pairings) {
-        setPendingPairings(
-          pairings.filter(
-            (p) => p.platformType === 'weixin' && (!channelTarget?.channelPluginId || p.channel_plugin_id === channelTarget.channelPluginId)
-          )
-        );
-      }
+      if (loadSequence !== pairingLoadSequenceRef.current) return;
+
+      const snapshot = (pairings ?? []).filter(
+        (pairing) =>
+          pairing.platformType === 'weixin' &&
+          (!channelTarget?.channelPluginId ||
+            pairing.channel_plugin_id === channelTarget.channelPluginId)
+      );
+      const appliedThrough = pairingMutationSequenceRef.current;
+      const newerMutations = pairingMutationsRef.current.filter(
+        (mutation) =>
+          mutation.sequence > mutationSequenceAtStart &&
+          mutation.sequence <= appliedThrough
+      );
+
+      setPendingPairings(applyWeixinPairingMutations(snapshot, newerMutations));
+      pairingMutationsRef.current = pairingMutationsRef.current.filter(
+        (mutation) => mutation.sequence > appliedThrough
+      );
     } catch (error) {
+      if (loadSequence !== pairingLoadSequenceRef.current) return;
       console.error('[WeixinConfig] Failed to load pending pairings:', error);
+      setPairingError(
+        error instanceof Error && error.message
+          ? error.message
+          : t('common.unknownError', 'Unknown error')
+      );
     } finally {
-      setPairingLoading(false);
+      if (loadSequence === pairingLoadSequenceRef.current) {
+        setPairingLoading(false);
+      }
     }
-  }, [channelTarget?.channelPluginId]);
+  }, [channelTarget?.channelPluginId, t]);
 
   const loadAuthorizedUsers = useCallback(async () => {
+    const loadSequence = ++usersLoadSequenceRef.current;
+    const mutationSequenceAtStart = authorizedUserMutationSequenceRef.current;
     setUsersLoading(true);
     try {
       const users = await channel.getAuthorizedUsers.invoke();
-      if (users) {
-        setAuthorizedUsers(
-          users.filter(
-            (u) => u.platformType === 'weixin' && (!channelTarget?.channelPluginId || u.channel_plugin_id === channelTarget.channelPluginId)
-          )
+      if (loadSequence !== usersLoadSequenceRef.current) return;
+
+      const snapshot = (users ?? []).filter(
+        (user) =>
+          user.platformType === 'weixin' &&
+          (!channelTarget?.channelPluginId ||
+            user.channel_plugin_id === channelTarget.channelPluginId)
+      );
+      const appliedThrough = authorizedUserMutationSequenceRef.current;
+      const newerMutations = authorizedUserMutationsRef.current.filter(
+        (mutation) =>
+          mutation.sequence > mutationSequenceAtStart &&
+          mutation.sequence <= appliedThrough
+      );
+
+      setAuthorizedUsers(
+        applyWeixinAuthorizedUserMutations(snapshot, newerMutations)
+      );
+      authorizedUserMutationsRef.current =
+        authorizedUserMutationsRef.current.filter(
+          (mutation) => mutation.sequence > appliedThrough
         );
-      }
     } catch (error) {
+      if (loadSequence !== usersLoadSequenceRef.current) return;
       console.error('[WeixinConfig] Failed to load authorized users:', error);
     } finally {
-      setUsersLoading(false);
+      if (loadSequence === usersLoadSequenceRef.current) {
+        setUsersLoading(false);
+      }
     }
   }, [channelTarget?.channelPluginId]);
 
@@ -135,16 +185,30 @@ const WeixinConfigForm: React.FC<WeixinConfigFormProps> = ({
     void loadAuthorizedUsers();
   }, [loadPendingPairings, loadAuthorizedUsers]);
 
+  // Server channel events are live-only. Re-read the durable projections after
+  // reconnect so a pairing/approval emitted while WebSocket was down is not
+  // invisible until the user manually refreshes.
+  useEffect(() => {
+    return channel.reconnected.on(() => {
+      void loadPendingPairings();
+      void loadAuthorizedUsers();
+    });
+  }, [loadPendingPairings, loadAuthorizedUsers]);
+
   // Listen for incoming weixin pairing requests
   useEffect(() => {
     const unsubscribe = channel.pairingRequested.on((request) => {
       if (request.platformType !== 'weixin') return;
       if (channelTarget?.channelPluginId && request.channel_plugin_id !== channelTarget.channelPluginId) return;
-      setPendingPairings((prev) => {
-        const exists = prev.some((p) => p.code === request.code);
-        if (exists) return prev;
-        return [request, ...prev];
-      });
+      const mutation: WeixinPairingMutation = {
+        sequence: ++pairingMutationSequenceRef.current,
+        type: 'upsert',
+        request,
+      };
+      pairingMutationsRef.current.push(mutation);
+      setPendingPairings((previous) =>
+        applyWeixinPairingMutations(previous, [mutation])
+      );
     });
     return () => unsubscribe();
   }, [channelTarget?.channelPluginId]);
@@ -154,12 +218,26 @@ const WeixinConfigForm: React.FC<WeixinConfigFormProps> = ({
     const unsubscribe = channel.userAuthorized.on((user) => {
       if (user.platformType !== 'weixin') return;
       if (channelTarget?.channelPluginId && user.channel_plugin_id !== channelTarget.channelPluginId) return;
-      setAuthorizedUsers((prev) => {
-        const exists = prev.some((u) => u.channel_user_id === user.channel_user_id);
-        if (exists) return prev;
-        return [user, ...prev];
-      });
-      setPendingPairings((prev) => prev.filter((p) => p.platformUserId !== user.platformUserId));
+      const authorizedUserMutation: WeixinAuthorizedUserMutation = {
+        sequence: ++authorizedUserMutationSequenceRef.current,
+        user,
+      };
+      authorizedUserMutationsRef.current.push(authorizedUserMutation);
+      setAuthorizedUsers((previous) =>
+        applyWeixinAuthorizedUserMutations(previous, [
+          authorizedUserMutation,
+        ])
+      );
+      const mutation: WeixinPairingMutation = {
+        sequence: ++pairingMutationSequenceRef.current,
+        type: 'remove-user',
+        platformUserId: user.platformUserId,
+        channelPluginId: user.channel_plugin_id,
+      };
+      pairingMutationsRef.current.push(mutation);
+      setPendingPairings((previous) =>
+        applyWeixinPairingMutations(previous, [mutation])
+      );
     });
     return () => unsubscribe();
   }, [channelTarget?.channelPluginId]);
@@ -200,28 +278,45 @@ const WeixinConfigForm: React.FC<WeixinConfigFormProps> = ({
     Message.success(t('common.copySuccess', 'Copied'));
   };
 
-  const enableWeixinPlugin = async (accountId: string, botToken: string) => {
-    const config = { credentials: { account_id: accountId, bot_token: botToken } };
+  const enableWeixinPlugin = async (
+    accountId: string,
+    botToken: string,
+    baseUrl?: string
+  ) => {
+    const config = buildWeixinEnableConfig(accountId, botToken, baseUrl);
     const result = await channel.enablePlugin.invoke(
       channelTarget
-        ? { plugin_id: channelTarget.channelPluginId, plugin_type: 'weixin', ...(channelTarget.publicAgentId ? { public_agent_id: channelTarget.publicAgentId } : { companion_id: channelTarget.companionId }), config }
+        ? {
+            plugin_id: channelTarget.channelPluginId,
+            plugin_type: 'weixin',
+            ...(channelTarget.publicAgentId
+              ? { public_agent_id: channelTarget.publicAgentId }
+              : { companion_id: channelTarget.companionId }),
+            config,
+          }
         : { plugin_type: 'weixin', config }
     );
     if (!result.success) {
-      throw new Error(result.error || t('nomi.settings.remoteEnableFailed', { defaultValue: 'Failed to enable channel' }));
+      throw new Error(
+        result.error ||
+          t('nomi.settings.remoteEnableFailed', {
+            defaultValue: 'Failed to enable channel',
+          })
+      );
     }
-    Message.success(t('settings.weixin.pluginEnabled', 'WeChat channel enabled'));
+    if (!result.plugin_id) {
+      throw new Error(t('settings.weixin.enableFailed', 'Failed to enable WeChat plugin'));
+    }
+
     const plugins = await channel.getPluginStatus.invoke();
-    if (plugins) {
-      // Multi-plugin model: resolve by business UUID, or by owner after create.
-      const weixinPlugin = channelTarget
-        ? channelTarget.channelPluginId
-          ? plugins.find((p) => p.plugin_id === channelTarget.channelPluginId)
-          : plugins.find((p) => p.type === 'weixin' && p.companionId === channelTarget.companionId)
-        : plugins.find((p) => p.type === 'weixin');
-      onStatusChange(weixinPlugin || null);
+    const weixinPlugin = findWeixinPluginStatusById(plugins ?? [], result.plugin_id);
+    if (!weixinPlugin) {
+      throw new Error(t('settings.weixin.enableFailed', 'Failed to enable WeChat plugin'));
     }
-    setLoginState('connected');
+    onStatusChange(weixinPlugin);
+    setLoginState('idle');
+    setQrcodeDataUrl(null);
+    Message.success(t('settings.weixin.pluginEnabled', 'WeChat channel enabled'));
   };
 
   const handleLogin = () => {
@@ -251,7 +346,11 @@ const WeixinConfigForm: React.FC<WeixinConfigFormProps> = ({
           break;
         case 'done':
           finishAttempt();
-          enableWeixinPlugin(evt.accountId ?? '', evt.botToken ?? '').catch((err: unknown) => {
+          enableWeixinPlugin(
+            evt.accountId ?? '',
+            evt.botToken ?? '',
+            evt.baseUrl
+          ).catch((err: unknown) => {
             const msg = err instanceof Error ? err.message : String(err);
             Message.error(msg || t('settings.weixin.enableFailed', 'Failed to enable WeChat plugin'));
             setLoginState('idle');
@@ -300,12 +399,47 @@ const WeixinConfigForm: React.FC<WeixinConfigFormProps> = ({
   };
 
   const renderLoginArea = () => {
-    if (loginState === 'connected' || (pluginStatus?.hasToken && pluginStatus?.enabled)) {
+    if (runtimeConnected) {
       return (
         <div className='flex items-center gap-8px'>
           <CheckOne theme='filled' size={16} className='text-green-500' />
           <span className='text-14px text-t-primary'>{t('settings.weixin.connected', 'Connected')}</span>
           {pluginStatus?.botUsername && <span className='text-12px text-t-tertiary'>({pluginStatus.botUsername})</span>}
+          <Button
+            type='secondary'
+            size='small'
+            status='danger'
+            onClick={() => {
+              void handleDisconnect();
+            }}
+          >
+            {t('settings.weixin.disconnect', 'Disconnect')}
+          </Button>
+        </div>
+      );
+    }
+
+    if (pluginStatus?.enabled && pluginStatus.hasToken) {
+      const isTransitioning = TRANSITIONAL_PLUGIN_STATUSES.has(pluginStatus.status ?? '');
+      const statusLabel = isTransitioning
+        ? `${t('common.loading', 'Please wait...')} (${pluginStatus.status})`
+        : pluginStatus.error ||
+          `${t('common.error', 'Error')}${pluginStatus.status ? ` (${pluginStatus.status})` : ''}`;
+
+      return (
+        <div className='flex items-center gap-8px'>
+          {isTransitioning ? (
+            <Spin size={14} />
+          ) : (
+            <CloseOne theme='filled' size={16} className='text-red-500' />
+          )}
+          <span
+            className={
+              isTransitioning ? 'text-14px text-t-secondary' : 'text-14px text-red-500'
+            }
+          >
+            {statusLabel}
+          </span>
           <Button
             type='secondary'
             size='small'
@@ -358,7 +492,8 @@ const WeixinConfigForm: React.FC<WeixinConfigFormProps> = ({
       <PreferenceRow
         label={t('settings.weixin.accountId', 'Account ID')}
         description={
-          loginState === 'idle' || loginState === 'loading_qr'
+          !pluginStatus?.hasToken &&
+          (loginState === 'idle' || loginState === 'loading_qr')
             ? t('settings.weixin.scanPrompt', 'Please scan the QR code with WeChat')
             : undefined
         }
@@ -366,9 +501,8 @@ const WeixinConfigForm: React.FC<WeixinConfigFormProps> = ({
         {renderLoginArea()}
       </PreferenceRow>
 
-
       {/* Next Steps Guide - shown when connected but no authorized users yet */}
-      {pluginStatus?.connected && authorizedUsers.length === 0 && (
+      {runtimeConnected && authorizedUsers.length === 0 && (
         <div className='bg-[rgba(var(--primary-rgb),0.08)] rd-12px p-16px border border-[rgba(var(--primary-rgb),0.2)]'>
           <SectionHeader title={t('settings.channels.nextSteps', 'Next Steps')} />
           <div className='text-14px text-t-secondary space-y-8px'>
@@ -394,7 +528,9 @@ const WeixinConfigForm: React.FC<WeixinConfigFormProps> = ({
       )}
 
       {/* Pending Pairing Requests */}
-      {pluginStatus?.connected && (
+      {(pluginStatus !== null ||
+        pairingError !== null ||
+        pendingPairings.length > 0) && (
         <div className='bg-fill-1 rd-12px pt-16px pr-16px pb-16px pl-0'>
           <SectionHeader
             title={t('settings.channels.pendingPairings', 'Pending Pairing Requests')}
@@ -410,12 +546,33 @@ const WeixinConfigForm: React.FC<WeixinConfigFormProps> = ({
               </Button>
             }
           />
-          {pairingLoading ? (
+          {pairingError && (
+            <div
+              role='alert'
+              className='flex items-center justify-between gap-12px bg-red-50 dark:bg-red-900/20 rd-8px p-12px mb-12px'
+            >
+              <span className='text-13px text-red-600 dark:text-red-400 break-all'>
+                {t('common.error', 'Error')}: {pairingError}
+              </span>
+              <Button
+                size='mini'
+                status='danger'
+                onClick={() => {
+                  void loadPendingPairings();
+                }}
+              >
+                {t('common.retry', 'Retry')}
+              </Button>
+            </div>
+          )}
+          {pairingLoading && pendingPairings.length === 0 ? (
             <div className='flex justify-center py-24px'>
               <Spin />
             </div>
           ) : pendingPairings.length === 0 ? (
-            <Empty description={t('settings.channels.noPendingPairings', 'No pending pairing requests')} />
+            pairingError ? null : (
+              <Empty description={t('settings.channels.noPendingPairings', 'No pending pairing requests')} />
+            )
           ) : (
             <div className='flex flex-col gap-12px'>
               {pendingPairings.map((pairing) => (

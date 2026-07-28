@@ -19,6 +19,15 @@ describe('ipc bridge wire ID contracts', () => {
     expect(source.includes('revokeUser: httpPost<void, { user_id:')).toBe(false);
   });
 
+  test('channel disable and delete reject HTTP-200 business failures', () => {
+    expect(source.includes('function requireSuccessfulChannelResponse')).toBe(true);
+    expect(source.includes('disablePlugin: withResponseMap(')).toBe(true);
+    expect(source.includes('deletePlugin: withResponseMap(')).toBe(true);
+    expect(source.includes("throw new Error(raw.error || raw.message || 'Channel operation failed')")).toBe(
+      true
+    );
+  });
+
   test('turn.completed last_message uses message_id and rejects generic id', () => {
     expect(source.includes('message_id?: MessageId;')).toBe(true);
     expect(source.includes('last_message legacy field "id" is not accepted')).toBe(true);
