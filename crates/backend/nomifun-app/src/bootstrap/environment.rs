@@ -10,7 +10,6 @@ use fs2::FileExt;
 use nomifun_db::sqlx::pool::PoolOptions;
 use nomifun_db::sqlx::sqlite::SqliteConnectOptions;
 use nomifun_db::sqlx::{Row, Sqlite, SqlitePool};
-use sha2::{Digest, Sha384};
 use tracing::{info, warn};
 
 use crate::{AppConfig, config::load_or_create_storage_generation};
@@ -284,26 +283,6 @@ const POST_SQUASH_LEGACY_MIGRATION_CHECKSUMS: &[&str] = &[
     "aed5a04a283f8febfb31ca8400ae588cbf85af04985f487fd9a559eb6e37ca1ced9dc0d134e697ca481becac14a577e6",
 ];
 
-/// SHA-384 checksum embedded by the short-lived v3 baseline from `eca7963d`.
-///
-/// That baseline was run by development builds which still reported v0.2.30,
-/// then migration 1 was replaced before the first v3 release. It is therefore
-/// an incompatible, retired dataset lineage rather than an upgradeable prefix
-/// of the published v3 migration family.
-const RETIRED_EARLY_V3_BASELINE_CHECKSUM: &str =
-    "0a0dc5df9cdf00e9c48980cf3a36c05e44f9ccdaf3e84560747b83c65f5440cbe58c9a1b4f99d98eaef898d9f2f0a860";
-
-/// SHA-384 over the complete non-SQLx `sqlite_schema` created by the retired
-/// `eca7963d` baseline. The row framing is defined by
-/// [`database_schema_fingerprint`].
-///
-/// The migration checksum alone is not deletion authority: a damaged current
-/// database could have its lineage row rewritten to this known value. Requiring
-/// the exact retired schema as a second independent proof prevents that case
-/// from being classified for automatic retirement.
-const RETIRED_EARLY_V3_SCHEMA_FINGERPRINT: &str =
-    "ab22d64ca755ff0b90826ef313d15ef59b390132e480acc18a442fe1b664b76a50a5aab55da9b2647bfb0363436d859c";
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PublishedLegacyLineage {
     PreSquash,
@@ -377,77 +356,6 @@ fn migration_rows_match_exact_prefix(
                     && checksum == checksums[index]
             },
         )
-}
-
-async fn has_exact_retired_early_v3_lineage(pool: &SqlitePool) -> Result<bool> {
-    let rows: Vec<(i64, i64, String)> = nomifun_db::sqlx::query_as(
-        "SELECT version, CAST(success AS INTEGER), lower(hex(checksum)) \
-         FROM _sqlx_migrations ORDER BY version",
-    )
-    .fetch_all(pool)
-    .await?;
-    Ok(migration_rows_match_exact_prefix(
-        &rows,
-        &[RETIRED_EARLY_V3_BASELINE_CHECKSUM],
-    ))
-}
-
-fn update_fingerprint_field(digest: &mut Sha384, value: &str) {
-    digest.update((value.len() as u64).to_be_bytes());
-    digest.update(value.as_bytes());
-}
-
-async fn database_schema_fingerprint(pool: &SqlitePool) -> Result<String> {
-    let rows: Vec<(String, String, String, String)> =
-        nomifun_db::sqlx::query_as(
-            "SELECT type, name, tbl_name, sql \
-             FROM sqlite_schema \
-             WHERE name NOT LIKE 'sqlite_%' \
-               AND name <> '_sqlx_migrations' \
-               AND sql IS NOT NULL \
-             ORDER BY type, name",
-        )
-        .fetch_all(pool)
-        .await?;
-    let mut digest = Sha384::new();
-    digest.update(b"nomifun-retired-early-v3-schema-v1\0");
-    digest.update((rows.len() as u64).to_be_bytes());
-    for (kind, name, table, sql) in rows {
-        update_fingerprint_field(&mut digest, &kind);
-        update_fingerprint_field(&mut digest, &name);
-        update_fingerprint_field(&mut digest, &table);
-        update_fingerprint_field(&mut digest, &sql);
-    }
-    Ok(format!("{:x}", digest.finalize()))
-}
-
-async fn has_exact_retired_early_v3_schema(pool: &SqlitePool) -> Result<bool> {
-    Ok(database_schema_fingerprint(pool).await?
-        == RETIRED_EARLY_V3_SCHEMA_FINGERPRINT)
-}
-
-async fn has_canonical_v3_installation_identity(
-    pool: &SqlitePool,
-) -> Result<bool> {
-    let identities: Vec<(String, String)> = nomifun_db::sqlx::query_as(
-        "SELECT singleton_key, owner_user_id FROM installation_identity",
-    )
-    .fetch_all(pool)
-    .await?;
-    let [(singleton_key, owner_user_id)] = identities.as_slice() else {
-        return Ok(false);
-    };
-    if singleton_key != "installation"
-        || nomifun_common::UserId::parse(owner_user_id.clone()).is_err()
-    {
-        return Ok(false);
-    }
-    let owner_rows: i64 =
-        nomifun_db::sqlx::query_scalar("SELECT COUNT(*) FROM users WHERE user_id = ?")
-            .bind(owner_user_id)
-            .fetch_one(pool)
-            .await?;
-    Ok(owner_rows == 1)
 }
 
 async fn has_exact_published_legacy_lineage(
@@ -558,30 +466,6 @@ async fn probe_v3_database_pool(pool: &SqlitePool) -> Result<ExistingV3DatabaseP
         return Ok(ExistingV3DatabaseProbe::ConfirmedLegacy(format!(
             "database matches an exact published pre-v3 {family} migration prefix and legacy-only identity schema"
         )));
-    }
-    if has_migrations_table == 1
-        && has_exact_retired_early_v3_lineage(pool).await?
-    {
-        if !has_exact_retired_early_v3_schema(pool).await? {
-            return Ok(ExistingV3DatabaseProbe::InvalidOrDamagedV3(
-                "retired early-v3 migration checksum is present but the \
-                 database schema does not match the frozen eca7963d baseline"
-                    .into(),
-            ));
-        }
-        if !has_canonical_v3_installation_identity(pool).await? {
-            return Ok(ExistingV3DatabaseProbe::InvalidOrDamagedV3(
-                "retired early-v3 schema is present but its installation \
-                 identity is missing, non-canonical, or orphaned"
-                    .into(),
-            ));
-        }
-        return Ok(ExistingV3DatabaseProbe::ConfirmedLegacy(
-            "database matches the checksum-exact retired eca7963d v3 \
-             baseline, its complete frozen schema, and its canonical \
-             installation identity"
-                .into(),
-        ));
     }
 
     let required_tables: Vec<String> = nomifun_db::sqlx::query_scalar(
@@ -996,7 +880,7 @@ async fn prepare_v3_data_layer(config: &AppConfig) -> Result<V3DataLayerState> {
                 )?
             {
                 anyhow::bail!(
-                    "database matches a strictly recognized retired lineage but active v3 \
+                    "database matches a published legacy lineage but active v3 \
                      lifecycle artifact {artifact} is also present; preserving \
                      the ambiguous dataset and refusing automatic reset"
                 );
@@ -1166,69 +1050,6 @@ mod tests {
     const V3_BASELINE_SQL: &str =
         include_str!("../../../nomifun-db/migrations/001_v3_baseline.sql");
 
-    const RETIRED_EARLY_V3_ORIGIN_CONTRACT: &str = r#"                           AND coalesce(json_type(origin, '$.task_id'), 'missing') = 'missing'
-                           AND (
-                               coalesce(json_type(origin, '$.creation_task_id'), 'missing')
-                                   IN ('missing', 'null')
-                               OR (
-                                   json_type(origin, '$.creation_task_id') = 'text'
-                                   AND length(json_extract(origin, '$.creation_task_id')) = 36
-                                   AND lower(json_extract(origin, '$.creation_task_id')) =
-                                       json_extract(origin, '$.creation_task_id')
-                                   AND json_extract(origin, '$.creation_task_id')
-                                       GLOB '????????-????-7???-[89ab]???-????????????'
-                                   AND replace(json_extract(origin, '$.creation_task_id'), '-', '')
-                                       NOT GLOB '*[^0-9a-f]*'
-                               )
-                           )"#;
-
-    fn replace_migration_range_once(
-        source: &str,
-        start: &str,
-        end: &str,
-        replacement: &str,
-    ) -> String {
-        assert_eq!(
-            source.matches(start).count(),
-            1,
-            "retired migration reconstruction start anchor must be unique"
-        );
-        let start_index = source.find(start).unwrap();
-        let after_start = &source[start_index..];
-        let relative_end = after_start
-            .find(end)
-            .expect("retired migration reconstruction end anchor");
-        let end_index = start_index + relative_end;
-        let mut reconstructed = String::with_capacity(
-            source.len() - (end_index - start_index) + replacement.len(),
-        );
-        reconstructed.push_str(&source[..start_index]);
-        reconstructed.push_str(replacement);
-        reconstructed.push_str(&source[end_index..]);
-        reconstructed
-    }
-
-    fn retired_early_v3_baseline_sql() -> String {
-        let without_current_origin_contract = replace_migration_range_once(
-            V3_BASELINE_SQL,
-            "                           AND json_type(origin, '$.task_id') IS NULL",
-            "\n                       )\n                   ),\n    created_at     INTEGER NOT NULL,",
-            RETIRED_EARLY_V3_ORIGIN_CONTRACT,
-        );
-        let retired = replace_migration_range_once(
-            &without_current_origin_contract,
-            "    node_id          TEXT\n                     CHECK (",
-            "\n    provider_id      TEXT NOT NULL,",
-            "    node_id          TEXT,",
-        );
-        assert_eq!(
-            format!("{:x}", Sha384::digest(retired.as_bytes())),
-            RETIRED_EARLY_V3_BASELINE_CHECKSUM,
-            "the hermetic fixture must reconstruct eca7963d byte-for-byte"
-        );
-        retired
-    }
-
     fn v3_baseline_checksum() -> Vec<u8> {
         Sha384::digest(V3_BASELINE_SQL.as_bytes()).to_vec()
     }
@@ -1333,55 +1154,6 @@ mod tests {
             POST_SQUASH_LEGACY_MIGRATION_CHECKSUMS.len(),
         )
         .await;
-    }
-
-    async fn create_retired_early_v3_database(path: &Path) {
-        let options = SqliteConnectOptions::new()
-            .filename(path)
-            .create_if_missing(true);
-        let pool = PoolOptions::<Sqlite>::new()
-            .max_connections(1)
-            .connect_with(options)
-            .await
-            .unwrap();
-        create_migrations_table(&pool).await;
-        nomifun_db::sqlx::raw_sql(&retired_early_v3_baseline_sql())
-            .execute(&pool)
-            .await
-            .unwrap();
-        nomifun_db::sqlx::query(
-            "INSERT INTO _sqlx_migrations \
-                 (version, description, success, checksum, execution_time) \
-             VALUES (1, 'v3 baseline', 1, ?, 0)",
-        )
-        .bind(checksum_bytes(RETIRED_EARLY_V3_BASELINE_CHECKSUM))
-        .execute(&pool)
-        .await
-        .unwrap();
-        let owner = nomifun_common::UserId::new();
-        nomifun_db::sqlx::query(
-            "INSERT INTO users \
-                 (user_id, username, password_hash, created_at, updated_at) \
-             VALUES (?, 'admin', '', 1, 1)",
-        )
-        .bind(owner.as_str())
-        .execute(&pool)
-        .await
-        .unwrap();
-        nomifun_db::sqlx::query(
-            "INSERT INTO installation_identity (singleton_key, owner_user_id) \
-             VALUES ('installation', ?)",
-        )
-        .bind(owner.as_str())
-        .execute(&pool)
-        .await
-        .unwrap();
-        assert_eq!(
-            database_schema_fingerprint(&pool).await.unwrap(),
-            RETIRED_EARLY_V3_SCHEMA_FINGERPRINT,
-            "the reconstructed historical schema must match the frozen fingerprint"
-        );
-        pool.close().await;
     }
 
     fn test_config(data_dir: &Path, work_dir: &Path) -> AppConfig {
@@ -1493,191 +1265,6 @@ mod tests {
                 .unwrap();
         assert!(applied > 1, "embedded migration suffix must be applied");
         upgraded.close().await;
-    }
-
-    #[tokio::test]
-    async fn probe_confirms_checksum_exact_retired_early_v3_database() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("nomifun-backend.db");
-        create_retired_early_v3_database(&path).await;
-
-        assert!(matches!(
-            probe_existing_v3_database(&path).await.unwrap(),
-            ExistingV3DatabaseProbe::ConfirmedLegacy(reason)
-                if reason.contains("eca7963d")
-                    && reason.contains("complete frozen schema")
-                    && reason.contains("canonical installation identity")
-        ));
-    }
-
-    #[tokio::test]
-    async fn retired_early_v3_checksum_bitflip_is_preserved() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("nomifun-backend.db");
-        create_retired_early_v3_database(&path).await;
-        let options = SqliteConnectOptions::new()
-            .filename(&path)
-            .create_if_missing(false);
-        let pool = PoolOptions::<Sqlite>::new()
-            .max_connections(1)
-            .connect_with(options)
-            .await
-            .unwrap();
-        nomifun_db::sqlx::query(
-            "UPDATE _sqlx_migrations SET checksum = X'00' WHERE version = 1",
-        )
-        .execute(&pool)
-        .await
-        .unwrap();
-        pool.close().await;
-
-        assert!(matches!(
-            probe_existing_v3_database(&path).await.unwrap(),
-            ExistingV3DatabaseProbe::InvalidOrDamagedV3(reason)
-                if reason.contains("migration lineage")
-        ));
-        assert!(path.is_file());
-    }
-
-    #[tokio::test]
-    async fn retired_early_v3_schema_tampering_is_preserved() {
-        for mutation in [
-            "CREATE TABLE forged_extra (id INTEGER PRIMARY KEY)",
-            "ALTER TABLE users ADD COLUMN forged TEXT",
-            "DROP TABLE agent_metadata",
-        ] {
-            let dir = tempfile::tempdir().unwrap();
-            let path = dir.path().join("nomifun-backend.db");
-            create_retired_early_v3_database(&path).await;
-            let options = SqliteConnectOptions::new()
-                .filename(&path)
-                .create_if_missing(false);
-            let pool = PoolOptions::<Sqlite>::new()
-                .max_connections(1)
-                .connect_with(options)
-                .await
-                .unwrap();
-            nomifun_db::sqlx::query(mutation)
-                .execute(&pool)
-                .await
-                .unwrap();
-            pool.close().await;
-
-            assert!(matches!(
-                probe_existing_v3_database(&path).await.unwrap(),
-                ExistingV3DatabaseProbe::InvalidOrDamagedV3(reason)
-                    if reason.contains("schema")
-                        && reason.contains("eca7963d")
-            ));
-            assert!(path.is_file());
-        }
-    }
-
-    #[tokio::test]
-    async fn retired_early_v3_with_invalid_identity_is_preserved() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("nomifun-backend.db");
-        create_retired_early_v3_database(&path).await;
-        let options = SqliteConnectOptions::new()
-            .filename(&path)
-            .create_if_missing(false);
-        let pool = PoolOptions::<Sqlite>::new()
-            .max_connections(1)
-            .connect_with(options)
-            .await
-            .unwrap();
-        nomifun_db::sqlx::query("DELETE FROM installation_identity")
-            .execute(&pool)
-            .await
-            .unwrap();
-        pool.close().await;
-
-        assert!(matches!(
-            probe_existing_v3_database(&path).await.unwrap(),
-            ExistingV3DatabaseProbe::InvalidOrDamagedV3(reason)
-                if reason.contains("installation identity")
-        ));
-        assert!(path.is_file());
-    }
-
-    #[tokio::test]
-    async fn retired_early_v3_is_retired_once_then_fresh_v3_restarts() {
-        let data = tempfile::tempdir().unwrap();
-        let config = test_config(data.path(), data.path());
-        create_retired_early_v3_database(&config.database_path()).await;
-        let retired_generation = uuid::Uuid::now_v7().to_string();
-        std::fs::write(
-            data.path().join("storage-generation"),
-            &retired_generation,
-        )
-        .unwrap();
-        write_released_v3_receipt_without_binding_flag(
-            data.path(),
-            data.path(),
-            &retired_generation,
-        );
-        std::fs::create_dir_all(data.path().join("knowledge")).unwrap();
-        let retired_side_store =
-            data.path().join("knowledge/retired-early-v3");
-        std::fs::write(&retired_side_store, b"old").unwrap();
-
-        assert_eq!(
-            prepare_v3_data_layer(&config).await.unwrap(),
-            V3DataLayerState::BootstrapRequired
-        );
-        let plan =
-            nomifun_common::factory_reset::read_pending_v3_reset(
-                data.path(),
-                data.path(),
-            )
-            .unwrap()
-            .expect("known retired early-v3 lineage must arm the one-time reset");
-        assert!(!config.database_path().exists());
-        assert!(
-            data.path()
-                .join(&plan.retired_dir)
-                .join("nomifun-backend.db")
-                .is_file(),
-            "the incompatible database must be retired without migration or mutation"
-        );
-        assert!(
-            data.path()
-                .join(&plan.retired_dir)
-                .join("knowledge/retired-early-v3")
-                .is_file(),
-            "the incompatible side store must be retired with its database"
-        );
-        assert!(
-            !retired_side_store.exists(),
-            "old side-store contents must never migrate into the fresh dataset"
-        );
-
-        install_storage_generation_environment(&config).unwrap();
-        let database =
-            nomifun_db::init_database(&config.database_path()).await.unwrap();
-        database.close().await;
-        finalize_data_layer(&config).unwrap();
-        std::fs::create_dir_all(data.path().join("knowledge")).unwrap();
-        let fresh_sentinel = data.path().join("knowledge/fresh-v3");
-        std::fs::write(&fresh_sentinel, b"preserve").unwrap();
-
-        assert_eq!(
-            prepare_v3_data_layer(&config).await.unwrap(),
-            V3DataLayerState::FinalizedCurrent
-        );
-        let fresh_generation =
-            std::fs::read_to_string(data.path().join("storage-generation"))
-                .unwrap();
-        assert_ne!(fresh_generation, retired_generation);
-        assert!(config.database_path().is_file());
-        assert!(fresh_sentinel.is_file());
-        assert!(
-            data.path()
-                .join(&plan.retired_dir)
-                .join("nomifun-backend.db")
-                .is_file(),
-            "the first retired generation remains archived after restart"
-        );
     }
 
     #[tokio::test]
