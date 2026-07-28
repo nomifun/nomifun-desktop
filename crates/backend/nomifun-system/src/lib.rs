@@ -8,6 +8,7 @@ pub mod model_profile;
 pub mod protocol;
 pub mod provider;
 pub mod provider_deletion;
+pub mod provider_model;
 pub mod routes;
 pub mod settings;
 pub mod sysinfo;

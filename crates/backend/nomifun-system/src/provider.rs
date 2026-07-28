@@ -1,28 +1,45 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use nomifun_api_types::{CreateProviderRequest, ProviderResponse, UpdateProviderRequest};
+use nomifun_api_types::{
+    CreateProviderRequest, ModelHealthStatus, ProviderModelResponse, ProviderResponse,
+    UpdateProviderRequest,
+};
 use nomifun_common::{
     AppError, ProviderId, ProviderInUseDetails, decrypt_string, encrypt_string,
 };
-use nomifun_db::{CreateProviderParams, IProviderRepository, UpdateProviderParams, models::Provider};
+use nomifun_db::{
+    CreateProviderParams, IProviderModelRepository, IProviderRepository, ProviderModelRow,
+    UpdateProviderParams, models::Provider,
+};
 use serde::de::DeserializeOwned;
 
 use crate::managed_model::is_managed_provider_platform;
 use crate::provider_deletion::SharedProviderDeletionCoordinator;
+use crate::provider_model::row_to_model_response;
 
 /// Business logic for model provider CRUD with API key encryption/masking.
+///
+/// Reads project the per-model surface (`models` + the per-model maps +
+/// `models_detail`) from the authoritative `provider_models` rows; the legacy
+/// JSON map columns on `providers` are still dual-written but no longer read.
 #[derive(Clone)]
 pub struct ProviderService {
     repo: Arc<dyn IProviderRepository>,
+    provider_model_repo: Arc<dyn IProviderModelRepository>,
     encryption_key: [u8; 32],
     coordinator: Option<SharedProviderDeletionCoordinator>,
 }
 
 impl ProviderService {
-    pub fn new(repo: Arc<dyn IProviderRepository>, encryption_key: [u8; 32]) -> Self {
+    pub fn new(
+        repo: Arc<dyn IProviderRepository>,
+        provider_model_repo: Arc<dyn IProviderModelRepository>,
+        encryption_key: [u8; 32],
+    ) -> Self {
         Self {
             repo,
+            provider_model_repo,
             encryption_key,
             coordinator: None,
         }
@@ -39,7 +56,20 @@ impl ProviderService {
     /// List all providers with masked API keys.
     pub async fn list(&self) -> Result<Vec<ProviderResponse>, AppError> {
         let rows = self.repo.list().await?;
-        rows.into_iter().map(|row| self.row_to_response(row)).collect()
+        let model_rows = self.provider_model_repo.list().await?;
+        let mut grouped: HashMap<String, Vec<ProviderModelRow>> = HashMap::new();
+        for model_row in model_rows {
+            grouped
+                .entry(model_row.provider_id.clone())
+                .or_default()
+                .push(model_row);
+        }
+        rows.into_iter()
+            .map(|row| {
+                let models = grouped.remove(&row.provider_id).unwrap_or_default();
+                self.row_to_response(row, models)
+            })
+            .collect()
     }
 
     /// Create a new provider. The API key is encrypted before storage.
@@ -79,7 +109,8 @@ impl ProviderService {
         };
 
         let row = self.repo.create(params).await?;
-        self.row_to_response(row)
+        let model_rows = self.provider_model_repo.list_for_provider(&row.provider_id).await?;
+        self.row_to_response(row, model_rows)
     }
 
     /// Update an existing provider. Only provided fields are changed.
@@ -122,7 +153,8 @@ impl ProviderService {
         };
 
         let row = self.repo.update(id, params).await?;
-        self.row_to_response(row)
+        let model_rows = self.provider_model_repo.list_for_provider(&row.provider_id).await?;
+        self.row_to_response(row, model_rows)
     }
 
     /// Delete a provider by ID.
@@ -173,7 +205,24 @@ impl ProviderService {
     /// Convert a DB row into the v3 response DTO with the plaintext API key
     /// (decrypted) and deserialized JSON fields. The named `provider_id`
     /// business identity crosses the wire; the SQLite technical `id` does not.
-    fn row_to_response(&self, row: Provider) -> Result<ProviderResponse, AppError> {
+    ///
+    /// The per-model surface is projected from `provider_models` rows (the
+    /// authoritative entity), NOT from the legacy JSON map columns on the
+    /// providers row:
+    /// - `models` = row `model` names ordered by `(sort_order, id)`;
+    /// - `model_enabled` holds an entry only for disabled rows (absent =
+    ///   enabled, matching the legacy readers' `!= false` semantics);
+    /// - `model_protocols`/`model_context_limits`/`model_descriptions` hold an
+    ///   entry when the row field is non-NULL;
+    /// - `model_health` holds an entry when the row's health JSON parses;
+    /// - every map is `None` when empty, preserving the legacy
+    ///   `skip_serializing_if` wire shape;
+    /// - `models_detail` = all rows, fully projected.
+    fn row_to_response(
+        &self,
+        row: Provider,
+        mut model_rows: Vec<ProviderModelRow>,
+    ) -> Result<ProviderResponse, AppError> {
         ProviderId::parse(&row.provider_id).map_err(|error| {
             AppError::Internal(format!(
                 "stored providers.provider_id '{}' is not canonical: {error}",
@@ -187,23 +236,52 @@ impl ProviderService {
             decrypt_string(&row.api_key_encrypted, &self.encryption_key)?
         };
 
-        let models: Vec<String> = serde_json::from_str(&row.models)
-            .map_err(|e| AppError::Internal(format!("Failed to parse models JSON: {e}")))?;
         let capabilities = serde_json::from_str(&row.capabilities)
             .map_err(|e| AppError::Internal(format!("Failed to parse capabilities JSON: {e}")))?;
-        let model_protocols: Option<HashMap<String, String>> =
-            deserialize_opt(&row.model_protocols, "model_protocols")?;
-        let model_context_limits: Option<HashMap<String, i64>> =
-            deserialize_opt::<HashMap<String, i64>>(
-                &row.model_context_limits,
-                "model_context_limits",
-            )?
-                .filter(|limits| !limits.is_empty());
-        let model_descriptions: Option<HashMap<String, String>> =
-            deserialize_opt(&row.model_descriptions, "model_descriptions")?;
-        let model_enabled: Option<HashMap<String, bool>> = deserialize_opt(&row.model_enabled, "model_enabled")?;
-        let model_health = deserialize_opt(&row.model_health, "model_health")?;
         let bedrock_config = deserialize_opt(&row.bedrock_config, "bedrock_config")?;
+
+        model_rows.sort_by(|a, b| (a.sort_order, a.id).cmp(&(b.sort_order, b.id)));
+
+        let models: Vec<String> = model_rows.iter().map(|m| m.model.clone()).collect();
+        let mut model_enabled: HashMap<String, bool> = HashMap::new();
+        let mut model_protocols: HashMap<String, String> = HashMap::new();
+        let mut model_context_limits: HashMap<String, i64> = HashMap::new();
+        let mut model_descriptions: HashMap<String, String> = HashMap::new();
+        let mut model_health: HashMap<String, ModelHealthStatus> = HashMap::new();
+        for model_row in &model_rows {
+            if !model_row.enabled {
+                model_enabled.insert(model_row.model.clone(), false);
+            }
+            if let Some(protocol) = &model_row.protocol {
+                model_protocols.insert(model_row.model.clone(), protocol.clone());
+            }
+            if let Some(limit) = model_row.context_limit {
+                model_context_limits.insert(model_row.model.clone(), limit);
+            }
+            if let Some(description) = &model_row.description {
+                model_descriptions.insert(model_row.model.clone(), description.clone());
+            }
+            if let Some(health_json) = &model_row.health {
+                match serde_json::from_str::<ModelHealthStatus>(health_json) {
+                    Ok(health) => {
+                        model_health.insert(model_row.model.clone(), health);
+                    }
+                    Err(error) => {
+                        tracing::warn!(
+                            provider_id = %model_row.provider_id,
+                            model = %model_row.model,
+                            %error,
+                            "invalid provider_models.health JSON; dropping model_health entry"
+                        );
+                    }
+                }
+            }
+        }
+
+        let models_detail: Vec<ProviderModelResponse> = model_rows
+            .into_iter()
+            .map(row_to_model_response)
+            .collect::<Result<_, _>>()?;
 
         Ok(ProviderResponse {
             provider_id: row.provider_id,
@@ -214,12 +292,13 @@ impl ProviderService {
             models,
             enabled: row.enabled,
             capabilities,
-            model_context_limits,
-            model_protocols,
-            model_descriptions,
-            model_enabled,
-            model_health,
+            model_context_limits: (!model_context_limits.is_empty()).then_some(model_context_limits),
+            model_protocols: (!model_protocols.is_empty()).then_some(model_protocols),
+            model_descriptions: (!model_descriptions.is_empty()).then_some(model_descriptions),
+            model_enabled: (!model_enabled.is_empty()).then_some(model_enabled),
+            model_health: (!model_health.is_empty()).then_some(model_health),
             bedrock_config,
+            models_detail,
             is_full_url: row.is_full_url,
             sort_order: row.sort_order,
             created_at: row.created_at,
@@ -363,16 +442,28 @@ fn validate_base_url(url: &str) -> Result<(), AppError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nomifun_db::{SqliteProviderRepository, init_database_memory};
+    use nomifun_db::{SqliteProviderModelRepository, SqliteProviderRepository, init_database_memory};
 
     // A fixed 32-byte key for testing
     const TEST_KEY: [u8; 32] = [0x42; 32];
 
-    async fn setup() -> ProviderService {
+    fn service_for_pool(pool: &nomifun_db::SqlitePool) -> ProviderService {
+        ProviderService::new(
+            Arc::new(SqliteProviderRepository::new(pool.clone())),
+            Arc::new(SqliteProviderModelRepository::new(pool.clone())),
+            TEST_KEY,
+        )
+    }
+
+    async fn setup_with_pool() -> (ProviderService, nomifun_db::SqlitePool) {
         let db = init_database_memory().await.unwrap();
-        let repo = Arc::new(SqliteProviderRepository::new(db.pool().clone()));
+        let pool = db.pool().clone();
         std::mem::forget(db);
-        ProviderService::new(repo, TEST_KEY)
+        (service_for_pool(&pool), pool)
+    }
+
+    async fn setup() -> ProviderService {
+        setup_with_pool().await.0
     }
 
     fn sample_create_request() -> CreateProviderRequest {
@@ -619,6 +710,173 @@ mod tests {
         assert_eq!(all[0].api_key, "sk-ant-api03-test1234");
     }
 
+    // -- row projection tests (reads come from provider_models rows) --
+
+    #[tokio::test]
+    async fn list_projects_models_and_maps_from_provider_model_rows() {
+        use std::collections::HashMap;
+        let (svc, _pool) = setup_with_pool().await;
+        let req = CreateProviderRequest {
+            models: vec!["m1".into(), "m2".into(), "m3".into()],
+            model_enabled: Some(HashMap::from([("m2".into(), false)])),
+            model_protocols: Some(HashMap::from([("m1".into(), "openai".into())])),
+            model_context_limits: Some(HashMap::from([("m1".into(), 32_000)])),
+            model_descriptions: Some(HashMap::from([("m3".into(), "描述".into())])),
+            model_health: Some(HashMap::from([(
+                "m1".into(),
+                nomifun_api_types::ModelHealthStatus {
+                    status: nomifun_api_types::HealthStatus::Healthy,
+                    last_check: Some(11),
+                    latency: Some(22),
+                    error: None,
+                },
+            )])),
+            ..sample_create_request()
+        };
+        let created = svc.create(req).await.unwrap();
+
+        let all = svc.list().await.unwrap();
+        assert_eq!(all.len(), 1);
+        let provider = &all[0];
+
+        // models keep the creation (sort_order) order.
+        assert_eq!(provider.models, vec!["m1", "m2", "m3"]);
+
+        // model_enabled contains only explicit-false entries (absent = enabled).
+        assert_eq!(
+            provider.model_enabled,
+            Some(HashMap::from([("m2".to_string(), false)]))
+        );
+        assert_eq!(
+            provider.model_protocols,
+            Some(HashMap::from([("m1".to_string(), "openai".to_string())]))
+        );
+        assert_eq!(
+            provider.model_context_limits,
+            Some(HashMap::from([("m1".to_string(), 32_000)]))
+        );
+        assert_eq!(
+            provider.model_descriptions,
+            Some(HashMap::from([("m3".to_string(), "描述".to_string())]))
+        );
+        let health = provider.model_health.as_ref().unwrap();
+        assert_eq!(health.len(), 1);
+        assert_eq!(health["m1"].status, nomifun_api_types::HealthStatus::Healthy);
+        assert_eq!(health["m1"].latency, Some(22));
+
+        // models_detail mirrors all rows, in order, consistent with the maps.
+        let detail = &provider.models_detail;
+        assert_eq!(detail.len(), 3);
+        assert_eq!(
+            detail.iter().map(|d| d.model.as_str()).collect::<Vec<_>>(),
+            vec!["m1", "m2", "m3"]
+        );
+        assert!(detail.iter().all(|d| d.provider_id == created.provider_id));
+        assert!(detail[0].enabled);
+        assert!(!detail[1].enabled);
+        assert!(detail[2].enabled);
+        assert_eq!(detail[0].protocol.as_deref(), Some("openai"));
+        assert_eq!(detail[0].context_limit, Some(32_000));
+        assert_eq!(detail[2].description.as_deref(), Some("描述"));
+        assert_eq!(
+            detail[0].health.as_ref().map(|h| h.status),
+            Some(nomifun_api_types::HealthStatus::Healthy)
+        );
+        assert!(detail[1].health.is_none());
+    }
+
+    #[tokio::test]
+    async fn list_reads_from_rows_not_legacy_map_columns() {
+        use std::collections::HashMap;
+        let (svc, pool) = setup_with_pool().await;
+        let req = CreateProviderRequest {
+            models: vec!["m1".into(), "m2".into()],
+            ..sample_create_request()
+        };
+        let created = svc.create(req).await.unwrap();
+        // Baseline: everything enabled, no legacy map entries.
+        assert!(svc.list().await.unwrap()[0].model_enabled.is_none());
+
+        // Flip one provider_models row directly, bypassing the repository's
+        // dual-write, so the legacy providers.model_enabled column still says
+        // "all enabled". A row-projected read must reflect the row.
+        nomifun_db::sqlx::query(
+            "UPDATE provider_models SET enabled = 0 WHERE provider_id = ? AND model = 'm2'",
+        )
+        .bind(&created.provider_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let provider = svc.list().await.unwrap().remove(0);
+        assert_eq!(
+            provider.model_enabled,
+            Some(HashMap::from([("m2".to_string(), false)])),
+            "list() must read enabled from provider_models rows, not the legacy column"
+        );
+        assert_eq!(provider.models, vec!["m1", "m2"]);
+        let m2 = provider
+            .models_detail
+            .iter()
+            .find(|d| d.model == "m2")
+            .unwrap();
+        assert!(!m2.enabled);
+
+        // Direct row reorder is reflected in models order too.
+        nomifun_db::sqlx::query(
+            "UPDATE provider_models SET sort_order = 99 WHERE provider_id = ? AND model = 'm1'",
+        )
+        .bind(&created.provider_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+        let provider = svc.list().await.unwrap().remove(0);
+        assert_eq!(provider.models, vec!["m2", "m1"]);
+        assert_eq!(
+            provider
+                .models_detail
+                .iter()
+                .map(|d| d.model.as_str())
+                .collect::<Vec<_>>(),
+            vec!["m2", "m1"]
+        );
+    }
+
+    #[tokio::test]
+    async fn provider_without_model_rows_projects_empty_surface() {
+        let (svc, _pool) = setup_with_pool().await;
+        let req = CreateProviderRequest {
+            models: vec![],
+            ..sample_create_request()
+        };
+        svc.create(req).await.unwrap();
+        let provider = svc.list().await.unwrap().remove(0);
+        assert!(provider.models.is_empty());
+        assert!(provider.models_detail.is_empty());
+        assert!(provider.model_enabled.is_none());
+        assert!(provider.model_protocols.is_none());
+        assert!(provider.model_context_limits.is_none());
+        assert!(provider.model_descriptions.is_none());
+        assert!(provider.model_health.is_none());
+    }
+
+    #[tokio::test]
+    async fn corrupt_health_row_degrades_without_killing_list() {
+        let (svc, pool) = setup_with_pool().await;
+        let created = svc.create(sample_create_request()).await.unwrap();
+        nomifun_db::sqlx::query(
+            "UPDATE provider_models SET health = 'not-json' WHERE provider_id = ?",
+        )
+        .bind(&created.provider_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+        let provider = svc.list().await.unwrap().remove(0);
+        assert!(provider.model_health.is_none());
+        assert_eq!(provider.models_detail.len(), 1);
+        assert!(provider.models_detail[0].health.is_none());
+    }
+
     #[tokio::test]
     async fn create_with_provided_id() {
         let svc = setup().await;
@@ -665,6 +923,7 @@ mod tests {
         use std::collections::HashMap;
         let svc = setup().await;
         let req = CreateProviderRequest {
+            models: vec!["gpt-4".into(), "gpt-3.5".into()],
             model_protocols: Some(HashMap::from([("gpt-4".into(), "openai".into())])),
             model_enabled: Some(HashMap::from([("gpt-4".into(), true), ("gpt-3.5".into(), false)])),
             ..sample_create_request()
@@ -675,7 +934,9 @@ mod tests {
             created.model_protocols.as_ref().and_then(|m| m.get("gpt-4")),
             Some(&"openai".to_string())
         );
-        assert_eq!(created.model_enabled.as_ref().and_then(|m| m.get("gpt-4")), Some(&true));
+        // Row projection surfaces only explicit-false entries; an enabled
+        // model is absent from the map (absent = enabled for all readers).
+        assert_eq!(created.model_enabled.as_ref().and_then(|m| m.get("gpt-4")), None);
         assert_eq!(
             created.model_enabled.as_ref().and_then(|m| m.get("gpt-3.5")),
             Some(&false)
@@ -683,7 +944,8 @@ mod tests {
 
         // And persist through a fresh read.
         let all = svc.list().await.unwrap();
-        assert_eq!(all[0].model_enabled.as_ref().and_then(|m| m.get("gpt-4")), Some(&true));
+        assert_eq!(all[0].model_enabled.as_ref().and_then(|m| m.get("gpt-3.5")), Some(&false));
+        assert_eq!(all[0].model_enabled.as_ref().and_then(|m| m.get("gpt-4")), None);
     }
 
     #[tokio::test]
@@ -693,6 +955,7 @@ mod tests {
 
         // create with a model description map
         let req = CreateProviderRequest {
+            models: vec!["m1".into()],
             model_descriptions: Some(HashMap::from([("m1".into(), "擅长前端".into())])),
             ..sample_create_request()
         };
@@ -817,7 +1080,7 @@ mod tests {
         })
         .await
         .unwrap();
-        let svc = ProviderService::new(repo, TEST_KEY);
+        let svc = service_for_pool(db.pool());
         let providers = svc.list().await.unwrap();
         assert_eq!(providers.len(), 1);
         assert_eq!(providers[0].provider_id, provider_id);
@@ -850,7 +1113,7 @@ mod tests {
         })
         .await
         .unwrap();
-        let svc = ProviderService::new(repo, TEST_KEY);
+        let svc = service_for_pool(db.pool());
 
         assert!(matches!(
             svc.update(
@@ -958,7 +1221,10 @@ mod tests {
 mod delete_guard_tests {
     use super::*;
     use nomifun_common::{ProviderUsage, ProviderUsageFeature};
-    use nomifun_db::{SqliteProviderRepository, init_database_memory, models::Provider};
+    use nomifun_db::{
+        SqliteProviderModelRepository, SqliteProviderRepository, init_database_memory,
+        models::Provider,
+    };
     use std::sync::atomic::{AtomicBool, Ordering};
 
     const PROVIDER_ID: &str = "0190f5fe-7c00-7a00-8000-000000000098";
@@ -983,6 +1249,49 @@ mod delete_guard_tests {
         async fn delete(&self, _: &str) -> Result<(), nomifun_db::DbError> {
             self.deleted.store(true, Ordering::SeqCst);
             Ok(())
+        }
+    }
+
+    /// Empty stand-in for the delete path, which never reads model rows.
+    struct NoopModelRepo;
+    #[async_trait::async_trait]
+    impl IProviderModelRepository for NoopModelRepo {
+        async fn list(&self) -> Result<Vec<ProviderModelRow>, nomifun_db::DbError> {
+            Ok(vec![])
+        }
+        async fn list_for_provider(&self, _: &str) -> Result<Vec<ProviderModelRow>, nomifun_db::DbError> {
+            Ok(vec![])
+        }
+        async fn get(&self, _: &str, _: &str) -> Result<Option<ProviderModelRow>, nomifun_db::DbError> {
+            Ok(None)
+        }
+        async fn create(
+            &self,
+            _: &str,
+            _: &nomifun_db::NewProviderModel<'_>,
+        ) -> Result<ProviderModelRow, nomifun_db::DbError> {
+            unimplemented!()
+        }
+        async fn insert_if_absent(
+            &self,
+            _: &str,
+            _: &nomifun_db::NewProviderModel<'_>,
+        ) -> Result<bool, nomifun_db::DbError> {
+            unimplemented!()
+        }
+        async fn update(
+            &self,
+            _: &str,
+            _: &str,
+            _: &nomifun_db::ProviderModelUpdate<'_>,
+        ) -> Result<ProviderModelRow, nomifun_db::DbError> {
+            unimplemented!()
+        }
+        async fn set_health(&self, _: &str, _: &str, _: Option<&str>) -> Result<bool, nomifun_db::DbError> {
+            unimplemented!()
+        }
+        async fn delete(&self, _: &str, _: &str) -> Result<bool, nomifun_db::DbError> {
+            unimplemented!()
         }
     }
 
@@ -1038,7 +1347,8 @@ mod delete_guard_tests {
                 target_id: None,
             }],
         });
-        let svc = ProviderService::new(repo.clone(), [0u8; 32]).with_deletion_coordinator(coord);
+        let svc = ProviderService::new(repo.clone(), Arc::new(NoopModelRepo), [0u8; 32])
+            .with_deletion_coordinator(coord);
         let err = svc.delete(PROVIDER_ID).await.unwrap_err();
         assert!(matches!(err, AppError::ProviderInUse(_)));
         assert!(!repo.deleted.load(Ordering::SeqCst), "must not delete when in use");
@@ -1052,7 +1362,8 @@ mod delete_guard_tests {
         let coord = Arc::new(FakeCoord {
             usages: vec![],
         });
-        let svc = ProviderService::new(repo.clone(), [0u8; 32]).with_deletion_coordinator(coord);
+        let svc = ProviderService::new(repo.clone(), Arc::new(NoopModelRepo), [0u8; 32])
+            .with_deletion_coordinator(coord);
         svc.delete(PROVIDER_ID).await.unwrap();
         assert!(repo.deleted.load(Ordering::SeqCst));
     }
@@ -1077,8 +1388,12 @@ mod delete_guard_tests {
         let coordinator = Arc::new(RacingCoord {
             pool: database.pool().clone(),
         });
-        let service =
-            ProviderService::new(repo.clone(), [0u8; 32]).with_deletion_coordinator(coordinator);
+        let service = ProviderService::new(
+            repo.clone(),
+            Arc::new(SqliteProviderModelRepository::new(database.pool().clone())),
+            [0u8; 32],
+        )
+        .with_deletion_coordinator(coordinator);
 
         let provider_id = "0190f5fe-7c00-7a00-8000-000000000097";
         let error = service.delete(provider_id).await.unwrap_err();
