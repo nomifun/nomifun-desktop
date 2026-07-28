@@ -1316,6 +1316,8 @@ impl crate::runtime_handle::AgentRuntimeControl for NomiAgentManager {
                 self.backend_output_sink.clone(),
                 self.process_supervisor.clone(),
                 self.mcp_managers.clone(),
+                #[cfg(feature = "browser-use")]
+                self.browser_lane_binding.clone(),
             )?;
         }
         Ok(())
@@ -1375,20 +1377,25 @@ impl TurnTerminationGuard {
     }
 
     async fn fence_cancelled_processes(&self) -> Result<(), AppError> {
-        shutdown_mcp_managers_exact(&self.mcp_managers).await?;
-        let Some(supervisor) = &self.process_supervisor else {
-            return Ok(());
-        };
-        let report = supervisor.quiesce().await;
-        if report.is_exact() {
-            Ok(())
-        } else {
-            Err(AppError::Internal(format!(
-                "Nomi process-tree teardown for conversation {} was not exact: {}",
-                self.runtime.conversation_id(),
-                describe_quiesce_failure(&report),
-            )))
+        // Attempt both fences even when the first is not exact: an MCP
+        // shutdown failure must not leave the process tree unquiesced, and
+        // vice versa. The aggregated error preserves the first failure.
+        let mut failures = NomiTeardownFailures::default();
+        failures.record("MCP", shutdown_mcp_managers_exact(&self.mcp_managers).await);
+        if let Some(supervisor) = &self.process_supervisor {
+            let report = supervisor.quiesce().await;
+            if !report.is_exact() {
+                failures.record(
+                    "process tree",
+                    Err(AppError::Internal(format!(
+                        "Nomi process-tree teardown for conversation {} was not exact: {}",
+                        self.runtime.conversation_id(),
+                        describe_quiesce_failure(&report),
+                    ))),
+                );
+            }
         }
+        failures.finish()
     }
 }
 
@@ -1439,15 +1446,20 @@ impl Drop for TurnTerminationGuard {
                 return;
             };
             runtime_handle.spawn(async move {
+                // Every fence below is attempted unconditionally. An inexact
+                // MCP or process teardown must never skip the Browser Lane
+                // cleanup (or vice versa); only the terminal publication is
+                // conditioned on the aggregate proof.
+                let mut exact = true;
+                if let Err(error) = shutdown_mcp_managers_exact(&mcp_managers).await {
+                    error!(
+                        conversation_id = %conversation_id,
+                        error = %error,
+                        "Nomi turn MCP teardown was not exact; retaining non-terminal quarantine"
+                    );
+                    exact = false;
+                }
                 if let Some(supervisor) = process_supervisor {
-                    if let Err(error) = shutdown_mcp_managers_exact(&mcp_managers).await {
-                        error!(
-                            conversation_id = %conversation_id,
-                            error = %error,
-                            "Nomi turn MCP teardown was not exact; retaining non-terminal quarantine"
-                        );
-                        return;
-                    }
                     let report = supervisor.quiesce().await;
                     if !report.is_exact() {
                         error!(
@@ -1455,7 +1467,7 @@ impl Drop for TurnTerminationGuard {
                             failure = %describe_quiesce_failure(&report),
                             "Nomi turn process-tree teardown was not exact; retaining non-terminal quarantine"
                         );
-                        return;
+                        exact = false;
                     }
                 }
                 #[cfg(feature = "browser-use")]
@@ -1467,9 +1479,14 @@ impl Drop for TurnTerminationGuard {
                         error = %ErrorChain(&error),
                         "Nomi turn Browser Lane cleanup was not exact; retaining non-terminal quarantine"
                     );
-                    return;
+                    exact = false;
                 }
-                terminalize();
+                if exact {
+                    terminalize();
+                }
+                // A non-exact teardown deliberately withholds the terminal
+                // event: the runtime-registry quarantine remains authoritative
+                // until a later kill/teardown path proves exact cleanup.
             });
         }
     }
@@ -1607,6 +1624,7 @@ fn schedule_nomi_cancelled_terminal_after_process_fence(
     backend_output_sink: Arc<BackendOutputSink>,
     process_supervisor: Option<Arc<nomi_process_runtime::ProcessSupervisor>>,
     mcp_managers: Vec<Arc<McpManager>>,
+    #[cfg(feature = "browser-use")] browser_lane_binding: Option<crate::BrowserLaneBinding>,
 ) -> Result<(), AppError> {
     let terminalize = move || {
         backend_output_sink.cancel_active_tool_calls(
@@ -1634,32 +1652,56 @@ fn schedule_nomi_cancelled_terminal_after_process_fence(
         }
     };
 
-    let Some(supervisor) = process_supervisor else {
+    #[cfg(feature = "browser-use")]
+    let has_browser_binding = browser_lane_binding.is_some();
+    #[cfg(not(feature = "browser-use"))]
+    let has_browser_binding = false;
+    if process_supervisor.is_none() && mcp_managers.is_empty() && !has_browser_binding {
         terminalize();
         return Ok(());
-    };
+    }
     let runtime_handle = tokio::runtime::Handle::try_current().map_err(|_| {
         AppError::Internal(
             "Cannot schedule Nomi process-tree teardown outside a Tokio runtime".to_owned(),
         )
     })?;
     runtime_handle.spawn(async move {
+        // Every fence is attempted unconditionally; only the terminal
+        // publication is conditioned on the aggregate exactness proof.
+        let mut exact = true;
         if let Err(error) = shutdown_mcp_managers_exact(&mcp_managers).await {
             error!(
                 error = %error,
                 "Idle Nomi kill could not prove exact MCP teardown; retaining non-terminal quarantine"
             );
-            return;
+            exact = false;
         }
-        let report = supervisor.quiesce().await;
-        if !report.is_exact() {
+        if let Some(supervisor) = process_supervisor {
+            let report = supervisor.quiesce().await;
+            if !report.is_exact() {
+                error!(
+                    failure = %describe_quiesce_failure(&report),
+                    "Idle Nomi kill could not prove exact process-tree teardown; retaining non-terminal quarantine"
+                );
+                exact = false;
+            }
+        }
+        // `kill()` already started the Hub-owned owner-lease revocation
+        // flight; join it here so the idle terminal is published only after
+        // the bounded Browser cleanup proof, not merely after its request.
+        #[cfg(feature = "browser-use")]
+        if let Some(binding) = browser_lane_binding
+            && let Err(error) = binding.revoke_and_wait().await
+        {
             error!(
-                failure = %describe_quiesce_failure(&report),
-                "Idle Nomi kill could not prove exact process-tree teardown; retaining non-terminal quarantine"
+                error = %ErrorChain(&error),
+                "Idle Nomi kill could not prove exact Browser owner cleanup; retaining non-terminal quarantine"
             );
-            return;
+            exact = false;
         }
-        terminalize();
+        if exact {
+            terminalize();
+        }
     });
     Ok(())
 }
@@ -2043,6 +2085,17 @@ mod tests {
     fn teardown_test_browser_binding(
         lease: Arc<BlockingBrowserOwnerLease>,
     ) -> crate::BrowserLaneBinding {
+        teardown_test_browser_binding_with_hub(lease).0
+    }
+
+    #[cfg(feature = "browser-use")]
+    fn teardown_test_browser_binding_with_hub(
+        lease: Arc<BlockingBrowserOwnerLease>,
+    ) -> (
+        crate::BrowserLaneBinding,
+        nomifun_browser_platform::BrowserSessionHub,
+        nomifun_browser_platform::OwnerLeaseId,
+    ) {
         use std::collections::BTreeSet;
 
         let hub = nomifun_browser_platform::BrowserSessionHub::new(
@@ -2056,6 +2109,7 @@ mod tests {
                 "teardown-runtime",
             )
             .expect("teardown test owner lease should be issued");
+        let lease_id = owner.lease_id.clone();
         let client = hub
             .bind(nomifun_browser_platform::CallerIdentity {
                 user_id: owner.user_id,
@@ -2075,7 +2129,11 @@ mod tests {
                 ]),
             })
             .expect("teardown test caller should bind");
-        crate::BrowserLaneBinding::new(client, lease)
+        (
+            crate::BrowserLaneBinding::new(client, lease),
+            hub,
+            lease_id,
+        )
     }
 
     #[cfg(feature = "browser-use")]
@@ -2182,6 +2240,157 @@ mod tests {
         assert!(message.contains("process tree: Internal error: process failed"));
         assert!(message.contains("Browser owner lease: Internal error: browser failed"));
         assert_eq!(lease.shutdown_calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[cfg(feature = "browser-use")]
+    #[tokio::test]
+    async fn turn_boundary_close_treats_revoked_owner_lease_as_satisfied() {
+        // The kill() race: runtime kill revokes the owner lease while the turn
+        // is still unwinding. The Hub-owned revocation flight covers exactly
+        // these Lanes, so the turn boundary must treat the expired-lease
+        // refusal as satisfied-by-revocation instead of a cleanup failure.
+        let lease = BlockingBrowserOwnerLease::new(None);
+        let (binding, hub, lease_id) = teardown_test_browser_binding_with_hub(lease);
+        hub.close_owner_lease(&lease_id)
+            .await
+            .expect("hub-owned owner revocation should close zero lanes");
+
+        binding
+            .close_turn_lanes()
+            .await
+            .expect("a lease revoked by the hub-owned flight must not fail the turn boundary");
+    }
+
+    #[cfg(feature = "browser-use")]
+    #[tokio::test]
+    async fn termination_guard_drop_emits_finish_after_revoked_lease_browser_cleanup() {
+        // End-to-end kill race at the guard level: an armed guard drop whose
+        // close_turn_lanes hits the already-revoked owner lease must still
+        // publish the terminal event and complete the teardown fence, because
+        // the Hub-owned revocation flight is the cleanup authority.
+        let lease = BlockingBrowserOwnerLease::new(None);
+        let (binding, hub, lease_id) = teardown_test_browser_binding_with_hub(lease);
+        hub.close_owner_lease(&lease_id)
+            .await
+            .expect("hub-owned owner revocation should close zero lanes");
+
+        let rt = AgentRuntimeState::new("c-guard-kill-race", "/w", 16);
+        let mut rx = rt.subscribe();
+        let backend_output_sink = Arc::new(BackendOutputSink::new(rt.event_sender()));
+        let turn = rt.reset_for_new_turn(ConversationStatus::Running);
+        let active_turn = Arc::new(std::sync::Mutex::new(Some(turn)));
+        let fence = Arc::new(TurnTeardownFence::new());
+        {
+            let _g = TurnTerminationGuard {
+                runtime: rt.clone(),
+                turn,
+                active_turn: Arc::clone(&active_turn),
+                lifecycle_gate: Arc::new(std::sync::Mutex::new(())),
+                steering_inbox: Arc::new(std::sync::Mutex::new(
+                    std::collections::VecDeque::new(),
+                )),
+                backend_output_sink,
+                process_supervisor: None,
+                mcp_managers: Vec::new(),
+                turn_teardown_fence: Arc::clone(&fence),
+                browser_lane_binding: Some(binding),
+                armed: true,
+            };
+        }
+        let event = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            rx.recv(),
+        )
+        .await
+        .expect("armed drop must publish a terminal event despite the revoked lease")
+        .expect("terminal event channel closed unexpectedly");
+        assert!(
+            matches!(event, AgentStreamEvent::Finish(_)),
+            "expected Finish after browser cleanup, got {event:?}"
+        );
+        assert_eq!(rt.status(), Some(ConversationStatus::Finished));
+        assert!(active_turn.lock().unwrap().is_none());
+    }
+
+    #[cfg(feature = "browser-use")]
+    #[tokio::test]
+    async fn idle_kill_terminal_waits_for_browser_cleanup_proof() {
+        // The idle-kill fence must publish its cancelled terminal only after
+        // the Hub-owned Browser owner cleanup proof, not merely after the
+        // cleanup request was issued.
+        let lease = BlockingBrowserOwnerLease::new(None);
+        let binding = teardown_test_browser_binding(Arc::clone(&lease));
+        let rt = AgentRuntimeState::new("c-idle-kill", "/w", 16);
+        let mut rx = rt.subscribe();
+        let backend_output_sink = Arc::new(BackendOutputSink::new(rt.event_sender()));
+
+        schedule_nomi_cancelled_terminal_after_process_fence(
+            rt.clone(),
+            Arc::new(std::sync::Mutex::new(None)),
+            Arc::new(std::sync::Mutex::new(())),
+            Arc::new(std::sync::Mutex::new(std::collections::VecDeque::new())),
+            backend_output_sink,
+            None,
+            Vec::new(),
+            Some(binding),
+        )
+        .expect("idle-kill fence should schedule");
+
+        lease.wait_until_shutdown_started().await;
+        assert!(
+            matches!(rx.try_recv(), Err(broadcast::error::TryRecvError::Empty)),
+            "the terminal must not be published while Browser cleanup is pending"
+        );
+
+        lease.release_shutdown();
+        let event = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            rx.recv(),
+        )
+        .await
+        .expect("terminal must follow the completed Browser cleanup proof")
+        .expect("terminal event channel closed unexpectedly");
+        assert!(
+            matches!(event, AgentStreamEvent::Finish(_)),
+            "expected Finish after browser proof, got {event:?}"
+        );
+        assert_eq!(lease.shutdown_calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[cfg(feature = "browser-use")]
+    #[tokio::test]
+    async fn idle_kill_withholds_terminal_when_browser_cleanup_fails() {
+        // A failed Browser cleanup proof retains the non-terminal quarantine;
+        // the result-bearing kill_and_wait path surfaces the error instead.
+        let lease = BlockingBrowserOwnerLease::new(Some("browser failed"));
+        let binding = teardown_test_browser_binding(Arc::clone(&lease));
+        let rt = AgentRuntimeState::new("c-idle-kill-fail", "/w", 16);
+        let mut rx = rt.subscribe();
+        let backend_output_sink = Arc::new(BackendOutputSink::new(rt.event_sender()));
+
+        schedule_nomi_cancelled_terminal_after_process_fence(
+            rt.clone(),
+            Arc::new(std::sync::Mutex::new(None)),
+            Arc::new(std::sync::Mutex::new(())),
+            Arc::new(std::sync::Mutex::new(std::collections::VecDeque::new())),
+            backend_output_sink,
+            None,
+            Vec::new(),
+            Some(binding),
+        )
+        .expect("idle-kill fence should schedule");
+
+        lease.wait_until_shutdown_started().await;
+        lease.release_shutdown();
+        assert!(
+            tokio::time::timeout(
+                std::time::Duration::from_millis(200),
+                rx.recv(),
+            )
+            .await
+            .is_err(),
+            "a failed Browser cleanup proof must withhold the idle terminal"
+        );
     }
 
     fn make_test_config() -> NomiResolvedConfig {
@@ -3918,8 +4127,11 @@ mod tests {
             }
             other => panic!("expected tool cleanup on armed drop, got {:?}", other),
         }
-        match rx.try_recv() {
-            Ok(AgentStreamEvent::Finish(_)) => {}
+        // The terminal is published by the guard's spawned teardown task only
+        // after every cleanup fence has been attempted, so it is asynchronous
+        // relative to the drop itself.
+        match tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv()).await {
+            Ok(Ok(AgentStreamEvent::Finish(_))) => {}
             other => panic!("expected Finish after tool cleanup, got {:?}", other),
         }
         assert_eq!(rt.status(), Some(ConversationStatus::Finished));

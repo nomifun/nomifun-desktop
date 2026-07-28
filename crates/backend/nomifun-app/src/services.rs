@@ -104,12 +104,12 @@ struct BrowserStartupPreferences {
 impl Default for BrowserStartupPreferences {
     fn default() -> Self {
         Self {
-            // Browser management is inventory/lifecycle-only. Agent work must
-            // start in a real headless Chromium process; an external window is
-            // created only by an authenticated, explicit foreground request.
-            // The removed JPEG viewer is never selected as a presentation
-            // surface.
-            display_mode: "external",
+            // New installs default to truly silent Agent browsing: routine
+            // Browser Use launches Chromium `--headless=new` and never opens
+            // an operating-system window. A user may explicitly choose the
+            // `external` default-visible policy in Settings; the removed
+            // embedded viewer is never selected as a presentation surface.
+            display_mode: "headless",
             source: "system".to_owned(),
             full_power: false,
             persistent_login: true,
@@ -117,26 +117,34 @@ impl Default for BrowserStartupPreferences {
     }
 }
 
+/// Resolve the trusted application-level browser visibility policy.
+///
+/// The two supported values are user preferences, not Agent capabilities:
+/// `headless` (default) keeps routine Primary work invisible; `external` is a
+/// user's explicit choice to launch the Primary Host with a visible window.
+/// Migration mapping: an explicit valid choice is preserved without a
+/// rewrite; historical `embedded` (the removed viewer) and invalid values
+/// repair to `headless`; when `displayMode` is absent, legacy
+/// `silent=true` maps to `headless`, legacy `silent=false` maps to
+/// `external`, and a fresh install persists `headless`. The legacy `silent`
+/// key itself is read-only and never written back.
 #[cfg(feature = "browser-use")]
 fn resolve_browser_display_mode(
     display_mode: Option<&str>,
     legacy_silent: Option<&str>,
 ) -> (&'static str, bool) {
-    // The product no longer publishes an embedded viewer or user takeover.
-    // Keep `external` as the management presentation label, but do not confuse
-    // that label with Host launch visibility: ordinary Agent Hosts are truly
-    // headless and only an authenticated foreground command may replace one
-    // with a visible managed Host.
     if let Some(value) = display_mode {
         return match value.trim().trim_matches('"') {
+            "headless" => ("headless", false),
             "external" => ("external", false),
-            "embedded" | "headless" => ("external", true),
-            _ => ("external", true),
+            _ => ("headless", true),
         };
     }
 
-    let _ = legacy_silent;
-    ("external", true)
+    match legacy_silent.map(|value| value.trim().trim_matches('"')) {
+        Some("false") => ("external", true),
+        _ => ("headless", true),
+    }
 }
 
 #[cfg(feature = "browser-use")]
@@ -217,10 +225,12 @@ where
 
 #[cfg(feature = "browser-use")]
 fn primary_host_is_headful(display_mode: &str) -> bool {
-    // Presentation preferences must never make routine Agent work visible.
-    // Foregrounding is a separate trusted Host transition owned by the Hub.
-    let _ = display_mode;
-    false
+    // The trusted application-level preference is the only input that can
+    // make the Primary Host launch visible; Agent tool JSON, lane names and
+    // request parameters have no path into this policy. Non-Primary Hosts
+    // stay headless regardless, and explicit foregrounding remains a separate
+    // trusted Host transition owned by the Hub.
+    display_mode == "external"
 }
 
 #[cfg(feature = "browser-use")]
@@ -3088,38 +3098,55 @@ mod tests {
     #[cfg(feature = "browser-use")]
     #[test]
     fn browser_display_mode_migration_is_authoritative_and_persistable() {
+        // Explicit valid user choices are preserved without a rewrite.
+        assert_eq!(
+            resolve_browser_display_mode(Some("headless"), Some("false")),
+            ("headless", false)
+        );
         assert_eq!(
             resolve_browser_display_mode(Some("external"), Some("true")),
             ("external", false)
+        );
+        // Legacy `silent` is consulted only when the new key is absent:
+        // silent=true was the quiet default (headless); silent=false was an
+        // explicit visible preference (external).
+        assert_eq!(
+            resolve_browser_display_mode(None, Some("true")),
+            ("headless", true)
         );
         assert_eq!(
             resolve_browser_display_mode(None, Some("false")),
             ("external", true)
         );
-        assert_eq!(
-            resolve_browser_display_mode(None, Some("true")),
-            ("external", true)
-        );
+        // Fresh installs persist the silent default.
         assert_eq!(
             resolve_browser_display_mode(None, None),
-            ("external", true)
+            ("headless", true)
+        );
+        // The removed embedded viewer and any invalid value repair to the
+        // silent default, regardless of the legacy silent value.
+        assert_eq!(
+            resolve_browser_display_mode(Some("embedded"), None),
+            ("headless", true)
         );
         assert_eq!(
             resolve_browser_display_mode(Some("invalid"), None),
-            ("external", true)
+            ("headless", true)
         );
         assert_eq!(
             resolve_browser_display_mode(Some("invalid"), Some("false")),
-            ("external", true),
-            "an invalid-but-present new value fails safe to the real managed window"
+            ("headless", true),
+            "an invalid-but-present new value fails safe to silent headless"
         );
         assert_eq!(
             resolve_browser_display_mode(Some("  \"headless\"  "), Some("false")),
-            ("external", true)
+            ("headless", false)
         );
-        assert!(!primary_host_is_headful("external"));
-        assert!(!primary_host_is_headful("embedded"));
+        // Only the user's explicit external policy launches a visible
+        // Primary Host; everything else stays truly headless.
+        assert!(primary_host_is_headful("external"));
         assert!(!primary_host_is_headful("headless"));
+        assert!(!primary_host_is_headful("embedded"));
     }
 
     #[cfg(feature = "browser-use")]
@@ -3146,7 +3173,10 @@ mod tests {
         ]);
 
         let preferences = load_browser_startup_preferences(&repo).await;
-        assert_eq!(preferences.display_mode, "external");
+        assert_eq!(
+            preferences.display_mode, "external",
+            "legacy silent=false is an explicit visible preference and must survive migration"
+        );
         assert_eq!(
             repo.writes(),
             vec![(
@@ -3158,21 +3188,56 @@ mod tests {
 
     #[cfg(feature = "browser-use")]
     #[tokio::test]
-    async fn invalid_display_mode_is_repaired_to_external() {
+    async fn browser_display_mode_migrates_legacy_silent_true_to_headless() {
+        let repo = BrowserPreferenceTestRepository::with_rows(&[
+            ("agent.browserUse.silent", "true"),
+        ]);
+
+        let preferences = load_browser_startup_preferences(&repo).await;
+        assert_eq!(preferences.display_mode, "headless");
+        assert_eq!(
+            repo.writes(),
+            vec![(
+                "agent.browserUse.displayMode".to_owned(),
+                "\"headless\"".to_owned()
+            )],
+            "the migrated value must be persisted without rewriting the silent key"
+        );
+    }
+
+    #[cfg(feature = "browser-use")]
+    #[tokio::test]
+    async fn fresh_install_persists_headless_display_mode() {
+        let repo = BrowserPreferenceTestRepository::with_rows(&[]);
+
+        let preferences = load_browser_startup_preferences(&repo).await;
+        assert_eq!(preferences.display_mode, "headless");
+        assert_eq!(
+            repo.writes(),
+            vec![(
+                "agent.browserUse.displayMode".to_owned(),
+                "\"headless\"".to_owned()
+            )]
+        );
+    }
+
+    #[cfg(feature = "browser-use")]
+    #[tokio::test]
+    async fn invalid_display_mode_is_repaired_to_headless() {
         let repo = BrowserPreferenceTestRepository::with_rows(&[
             ("agent.browserUse.displayMode", "\"visible\""),
             ("agent.browserUse.silent", "false"),
         ]);
 
         let preferences = load_browser_startup_preferences(&repo).await;
-        assert_eq!(preferences.display_mode, "external");
+        assert_eq!(preferences.display_mode, "headless");
         assert_eq!(
             repo.writes(),
             vec![(
                 "agent.browserUse.displayMode".to_owned(),
-                "\"external\"".to_owned()
+                "\"headless\"".to_owned()
             )],
-            "malformed configuration must converge to the supported external mode"
+            "malformed configuration must converge to the silent headless default"
         );
     }
 

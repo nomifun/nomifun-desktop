@@ -7,6 +7,10 @@ pub(crate) const SHELL_PTY_ROWS: u16 = 30;
 const WINDOW_LAUNCH_ERROR: &str =
     "Windows shell commands cannot open a separate console or application window; use the dedicated launch tool";
 
+const AGENT_WEB_OPEN_ERROR: &str =
+    "shell commands must not open web URLs in the operating-system browser; use the managed \
+     Browser tool (browser navigate) to read or interact with web pages";
+
 pub(crate) fn shell_transport(requested_tty: bool) -> Transport {
     if cfg!(windows) || requested_tty {
         Transport::Pty {
@@ -24,10 +28,77 @@ pub(crate) fn validate_shell_script(script: &str) -> Result<(), String> {
         return Err(WINDOW_LAUNCH_ERROR.to_owned());
     }
 
-    #[cfg(not(windows))]
-    let _ = script;
+    if contains_agent_web_open(script) {
+        return Err(AGENT_WEB_OPEN_ERROR.to_owned());
+    }
 
     Ok(())
+}
+
+/// OS opener and browser executables that would hand an `http/https` URL to a
+/// visible operating-system browser. Invoking one of these with a web URL from
+/// the Agent shell bypasses the managed Browser Hub's approval, egress and
+/// lifecycle policies, so it fails closed on every platform. Local files and
+/// plain application launches (no web URL argument) stay allowed.
+const WEB_OPENER_PROGRAMS: &[&str] = &[
+    "xdg-open",
+    "open",
+    "gio",
+    "kde-open",
+    "kde-open5",
+    "gnome-open",
+    "sensible-browser",
+    "x-www-browser",
+    "explorer",
+    "start",
+    "start-process",
+    "saps",
+    "rundll32",
+    "google-chrome",
+    "google-chrome-stable",
+    "chrome",
+    "chromium",
+    "chromium-browser",
+    "firefox",
+    "msedge",
+    "microsoft-edge",
+    "brave",
+    "brave-browser",
+    "opera",
+    "vivaldi",
+    "safari",
+];
+
+fn contains_agent_web_open(script: &str) -> bool {
+    command_tokens(script)
+        .into_iter()
+        .any(|command| command_opens_web_url(&command))
+}
+
+fn command_opens_web_url(command: &[String]) -> bool {
+    let Some(program) = command.first().map(|word| program_basename(word)) else {
+        return false;
+    };
+    if !WEB_OPENER_PROGRAMS.contains(&program.as_str()) {
+        return false;
+    }
+    command.iter().skip(1).any(|argument| {
+        // Scheme-prefix match: browsers normalize scheme-only forms such as
+        // `https:example.com` back to a real web navigation.
+        let lower = argument.to_ascii_lowercase();
+        lower.contains("http:") || lower.contains("https:")
+    })
+}
+
+/// Lowercased executable basename: strips any path prefix and a trailing
+/// `.exe`, so `/usr/bin/xdg-open` and `C:\...\msedge.exe` match their entries.
+fn program_basename(word: &str) -> String {
+    let base = word
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or(word)
+        .to_ascii_lowercase();
+    base.strip_suffix(".exe").unwrap_or(&base).to_owned()
 }
 
 #[cfg(windows)]
@@ -73,7 +144,6 @@ fn starts_with_command(command: &str, program: &str) -> bool {
     rest.is_empty() || rest.chars().next().is_some_and(char::is_whitespace)
 }
 
-#[cfg(windows)]
 fn command_tokens(script: &str) -> Vec<Vec<String>> {
     let mut commands = Vec::new();
     let mut command = Vec::new();
@@ -125,15 +195,71 @@ fn command_tokens(script: &str) -> Vec<Vec<String>> {
 }
 
 #[cfg(all(test, windows))]
-mod tests {
+mod windows_tests {
     use super::*;
 
-    #[cfg(windows)]
     #[test]
     fn launch_policy_recognizes_command_boundaries() {
         assert!(contains_explicit_window_launch("start cmd"));
         assert!(contains_explicit_window_launch("cmd /c \"start notepad\""));
         assert!(!contains_explicit_window_launch("Write-Output 'cmd /k is data'"));
         assert!(!contains_explicit_window_launch("cmd /c echo start"));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn shell_web_opens_fail_closed_on_every_platform() {
+        for script in [
+            "xdg-open https://example.com",
+            "open https://example.com",
+            "open -a Safari 'https://example.com'",
+            "/usr/bin/xdg-open http://example.com",
+            "gio open https://example.com",
+            "google-chrome https://example.com",
+            "firefox \"https://example.com\"",
+            "ls; xdg-open https://example.com",
+            "\"C:\\Program Files\\msedge.exe\" https://example.com",
+            // Scheme-only forms are normalized to web navigations by browsers.
+            "xdg-open https:example.com",
+            "firefox http:example.com",
+        ] {
+            assert!(
+                validate_shell_script(script).is_err(),
+                "must fail closed for {script:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn shell_local_opens_and_non_opener_web_commands_stay_allowed() {
+        for script in [
+            // Local files and app launches carry no web URL.
+            "xdg-open ./report.html",
+            "open -R /tmp/file.txt",
+            "open .",
+            // Network clients without an OS window are egress, not openers.
+            "curl https://example.com",
+            "wget https://example.com/file.tar.gz",
+            "git clone https://example.com/repo.git",
+            // A URL as plain data for a non-opener program.
+            "echo https://example.com",
+            "firefox --version",
+        ] {
+            assert!(
+                validate_shell_script(script).is_ok(),
+                "must stay allowed for {script:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn program_basename_strips_paths_and_exe() {
+        assert_eq!(program_basename("/usr/bin/xdg-open"), "xdg-open");
+        assert_eq!(program_basename("C:\\apps\\MSEdge.EXE"), "msedge");
+        assert_eq!(program_basename("open"), "open");
     }
 }

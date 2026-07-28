@@ -27,7 +27,11 @@ NomiFun agent 内置/接入两项可选的系统级能力：
 后续新会话不会获得对应能力。Browser 设置还提供：
 
 - **浏览器来源**：系统 Chrome/Edge 可执行文件或 managed source；
-- **呈现方式**：普通 Primary Agent 任务以 Chromium `--headless=new` 静默运行；仅用户在 Browser 管理页显式“前台打开”时会创建 headful 替代 Host；
+- **显示模式**：应用级默认可见策略。"后台静默"（新安装默认）让普通 Primary
+  Agent 任务以 Chromium `--headless=new` 静默运行；"前台可见"是用户显式选择的
+  默认前台策略，Primary Host 以真实窗口启动。普通 Agent/模型无权覆盖该偏好；
+  更改在应用重启后生效。任一模式下，用户都可在 Browser 管理页对 running
+  Primary 显式"前台打开"；
 - **资源策略**：Automatic、Resource saving、High concurrency；
 - 高级资源上限（仅在需要诊断或精细调优时修改）。
 

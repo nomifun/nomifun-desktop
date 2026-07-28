@@ -31,6 +31,10 @@ import PreferenceRow from './SystemModalContent/PreferenceRow';
 const RadioGroup = Radio.Group;
 
 type BrowserSource = 'managed' | 'system';
+// The two user-selectable application-level default visibility policies.
+// `headless` keeps routine Agent browsing silent; `external` is the user's
+// explicit default-visible choice. Agent tool input can never select this.
+type BrowserDisplayModeSetting = 'headless' | 'external';
 type ResourcePolicyStatus = 'loading' | 'ready' | 'unavailable' | 'error';
 type BrowserSettingsError = {
   message?: string;
@@ -351,6 +355,7 @@ const BrowserUseSettingsContent: React.FC = () => {
   const isPageMode = viewMode === 'page';
   const [browserUse, setBrowserUse] = useState(false);
   const [source, setSource] = useState<BrowserSource>('system');
+  const [displayMode, setDisplayMode] = useState<BrowserDisplayModeSetting>('headless');
   const [persistentLogin, setPersistentLogin] = useState(true);
   const [fullPower, setFullPower] = useState(false);
   const [siteMemory, setSiteMemory] = useState(false);
@@ -382,6 +387,9 @@ const BrowserUseSettingsContent: React.FC = () => {
       displayMode: configService.get('agent.browserUse.displayMode'),
       silent: configService.get('agent.browserUse.silent'),
     });
+    setDisplayMode(
+      displayModeMigration.displayMode === 'external' ? 'external' : 'headless'
+    );
     if (displayModeMigration.shouldPersist) {
       configService.set('agent.browserUse.displayMode', displayModeMigration.displayMode).catch(() => {
         configService.setLocal('agent.browserUse.displayMode', undefined);
@@ -532,6 +540,25 @@ const BrowserUseSettingsContent: React.FC = () => {
         configService.set('agent.browserUse.source', next).catch(() => {
           setSource(prev);
           configService.setLocal('agent.browserUse.source', prev);
+        });
+        return next;
+      });
+    },
+    []
+  );
+
+  // The display mode is a trusted user preference for the application-level
+  // default visibility policy. It is enforced by the backend Host launch
+  // policy; Agent tool JSON has no path into it, and neither option restores
+  // the removed embedded viewer or user takeover.
+  const handleDisplayModeChange = useCallback(
+    (value: string) => {
+      const next: BrowserDisplayModeSetting = value === 'external' ? 'external' : 'headless';
+      setDisplayMode((prev) => {
+        configService.set('agent.browserUse.displayMode', next).catch(() => {
+          setDisplayMode(prev);
+          configService.setLocal('agent.browserUse.displayMode', prev);
+          Message.error(translationRef.current('settings.browserDisplayModeSaveFailed'));
         });
         return next;
       });
@@ -731,9 +758,15 @@ const BrowserUseSettingsContent: React.FC = () => {
                 label={t('settings.browserDisplayMode')}
                 description={t('settings.browserDisplayModeDesc')}
               >
-                <span className='text-13px text-t-secondary'>
-                  {t('settings.browserDisplayModeExternal')}
-                </span>
+                <RadioGroup
+                  type='button'
+                  value={displayMode}
+                  disabled={!browserUse}
+                  onChange={handleDisplayModeChange}
+                >
+                  <Radio value='headless'>{t('settings.browserDisplayModeHeadless')}</Radio>
+                  <Radio value='external'>{t('settings.browserDisplayModeExternal')}</Radio>
+                </RadioGroup>
               </PreferenceRow>
               {canManagePrimaryIdentity && (
                 <PreferenceRow

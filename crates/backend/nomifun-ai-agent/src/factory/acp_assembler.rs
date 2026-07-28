@@ -254,14 +254,16 @@ fn append_launch_nudge(
     // never reaches macOS/Linux sessions.
     if open_injected {
         rule.push_str(
-            "[Launching apps/URLs — MANDATORY on this Windows host] To open ANY URL, file, folder, or \
+            "[Launching apps/files — MANDATORY on this Windows host] To open ANY file, folder, or \
             application on the user's desktop, you MUST call the `open` tool (MCP server `nomifun-open`). \
-            Pass `target` = a URL (https://…), a file/folder path, or an app name (\"msedge\", \"notepad\"); \
-            optionally pass `app` to open a URL in a specific browser (e.g. target=URL, app=\"msedge\"). \
-            NEVER launch apps/URLs by running `cmd /c start`, `start`, `Start-Process`, `explorer`, or an \
+            Pass `target` = a file/folder path or an app name (\"notepad\"); optionally pass `app` to \
+            open the target with a specific application. \
+            NEVER launch apps/files by running `cmd /c start`, `start`, `Start-Process`, `explorer`, or an \
             `.exe` path in the shell (Bash/exec_command) — on this host those FAIL (the shell has no \
             console) and pop a blocking \"Windows 找不到\" / \"cannot find\" modal dialog at the user. Use \
-            the shell only for non-launch work (file ops, `taskkill` to close apps, queries).",
+            the shell only for non-launch work (file ops, `taskkill` to close apps, queries). Web URLs \
+            (http/https) are NOT openable through `open` or the shell: read or interact with web pages \
+            with the managed Browser tools instead.",
         );
     }
 
@@ -276,7 +278,8 @@ fn append_launch_nudge(
             `nomifun-computer` MCP tools: call `snapshot` to get a numbered [ref] tree of windows \
             and controls (+ a screenshot), then act with `click`/`right_click`/`double_click`/\
             `set_value` by [ref], or `type`/`key`/`scroll`/`click_xy` for raw input. To open an \
-            application, URL, file, or folder, use the `launch` tool. Re-run `snapshot` after any \
+            application, file, or folder, use the `launch` tool; web URLs are read through the \
+            managed Browser tools, never launched into the OS browser. Re-run `snapshot` after any \
             UI change — a [ref] is only valid for the latest snapshot. Prefer these over guessing \
             pixel coordinates.",
         );

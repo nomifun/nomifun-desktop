@@ -33,6 +33,8 @@ const HOST_INITIALIZATION_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(5);
 const HOST_RESTART_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(8);
 const HOST_SHUTDOWN_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(5);
 const HOST_RETIREMENT_WAIT_TIMEOUT: Duration = Duration::from_secs(5);
+const HOST_FINALIZATION_WAITER_TIMEOUT: Duration = Duration::from_secs(7);
+const PENDING_LANE_START_WAIT_TIMEOUT: Duration = Duration::from_secs(6);
 const PLATFORM_SHUTDOWN_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(8);
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -438,6 +440,10 @@ struct BrowserSessionHubInner {
     identity_refresh_gate: Mutex<()>,
     lanes: RwLock<HashMap<BrowserLaneId, Arc<LaneRecord>>>,
     lane_keys: RwLock<HashMap<LaneKey, BrowserLaneId>>,
+    // Retirement lock order is contractual for every path that touches more
+    // than one of these structures:
+    //   open_gate -> retiring_host_keys -> host_slots -> retiring_host_slots
+    // Never acquire `retiring_host_keys` while holding `retiring_host_slots`.
     host_slots: RwLock<HashMap<HostKey, Arc<HostSlot>>>,
     host_empty_since_ms: RwLock<HashMap<HostKey, u64>>,
     retiring_host_slots: Mutex<Vec<(HostKey, Arc<HostSlot>)>>,
@@ -1377,7 +1383,7 @@ impl BrowserSessionHub {
             .get(lane_id)
             .is_some_and(|current| Arc::ptr_eq(current, lane));
         let detached = if lane_is_current {
-            self.detach_lane_for_close(lane_id).await
+            self.detach_lane_for_close_locked(lane_id).await
         } else {
             None
         };
@@ -1953,6 +1959,28 @@ impl BrowserSessionHub {
             }
         }
 
+        // A restart only exists for the benefit of live Lanes. When an
+        // explicit close has already emptied this key (it may even have
+        // retired the slot entirely), relaunching would create a Host with
+        // zero Lanes that nothing owns — for the trusted foreground
+        // transition that would be a visible headful window the user just
+        // closed. Fail the flight instead; the caller re-validates its Lane.
+        let mut has_live_lane = false;
+        for lane in self.lanes_for_host_key(&key).await {
+            if !lane.closing.load(Ordering::Acquire) {
+                has_live_lane = true;
+                break;
+            }
+        }
+        if !has_live_lane {
+            return Err(BrowserPlatformError::new(
+                BrowserErrorCode::BrowserUnavailable,
+                "The managed browser Host changed during recovery.",
+                true,
+                "Refresh browser status and retry.",
+            ));
+        }
+
         let old_slot = self.inner.host_slots.read().await.get(&key).cloned();
         if let Some(old_slot) = &old_slot {
             if old_slot.epoch != observed_epoch {
@@ -2018,6 +2046,19 @@ impl BrowserSessionHub {
         let transition = HostRestartTransition::new(observed_epoch, new_epoch)?;
         self.rebind_host_lanes(&key, observed_epoch, transition, host)
             .await?;
+        // Close the remaining race window: an explicit close may have emptied
+        // this key between the live-lane check above and the slot insert.
+        // `finalize_empty_host` re-validates under `open_gate` and retires the
+        // fresh Host immediately when no Lane is attached; with live Lanes it
+        // is a no-op. This keeps "explicit last-Lane close retires the Host
+        // immediately" true across a concurrent restart.
+        if let Err(error) = self.finalize_empty_host(key.clone()).await {
+            tracing::warn!(
+                identity_mode = ?key.identity_mode,
+                code = ?error.code,
+                "browser Host restart left a pending retirement for an emptied key"
+            );
+        }
         if let Some(circuit_attempt) = circuit_attempt {
             circuit_attempt.succeed();
         }
@@ -2691,7 +2732,19 @@ impl BrowserSessionHub {
             }
             .map_err(|error| error.for_lane(lane_id.clone()))?;
 
-            let snapshot = lane.snapshot.read().await.clone();
+            let snapshot = {
+                let mut snapshot = lane.snapshot.write().await;
+                // Revalidate before publishing success: an explicit close can
+                // race the replacement flight independently of the activity
+                // fence held by this request.
+                if lane.closing.load(Ordering::Acquire) {
+                    return Err(lane_closed_error(lane_id.clone()));
+                }
+                // Foregrounding is user activity: refresh the idle stamp so a
+                // lifecycle sweep cannot reap the Lane the user just opened.
+                snapshot.last_active_at_ms = self.inner.clock.now_ms();
+                snapshot.clone()
+            };
             self.emit("lane_foregrounded", Some(&snapshot));
             return Ok(snapshot);
         }
@@ -2929,6 +2982,23 @@ impl BrowserSessionHub {
     /// I/O. The driver is first copied into the Hub-owned retry queue, so caller
     /// cancellation cannot lose cleanup authority after detachment.
     async fn detach_lane_for_close(&self, lane_id: &BrowserLaneId) -> Option<DetachedLane> {
+        // Lane removal and pending-start retirement registration must be
+        // atomic under the same gate that `finalize_empty_host` holds while it
+        // decides a Host is empty. Without this, a finalization racing between
+        // "Lane removed" and "pending start registered" can retire the Host
+        // while its late `open_lane` driver is still in flight.
+        let _open_guard = self.inner.open_gate.lock().await;
+        self.detach_lane_for_close_locked(lane_id).await
+    }
+
+    /// Gate-held detachment core. The caller must hold `open_gate`; this keeps
+    /// Lane removal, pending Lane-start retirement registration and Host
+    /// retirement authority publication in one critical section.
+    /// `abandon_unclaimed_lane_start` shares this exact lock semantics.
+    async fn detach_lane_for_close_locked(
+        &self,
+        lane_id: &BrowserLaneId,
+    ) -> Option<DetachedLane> {
         let lane = self.inner.lanes.read().await.get(lane_id).cloned()?;
         let _close_guard = lane.close_gate.lock().await;
         if !self
@@ -3112,10 +3182,13 @@ impl BrowserSessionHub {
                 });
                 // This task is Hub-owned. Even when the explicit close caller
                 // is cancelled after target cleanup, the final Host retirement
-                // obligation remains live and can be retried by sweep.
+                // obligation remains live and can be retried by sweep. It
+                // joins the same per-Host finalization flight as explicit
+                // close, so it can never consume a failure that an explicit
+                // caller still has to observe.
                 let hub = self.clone();
                 tokio::spawn(async move {
-                    if let Err(error) = hub.finalize_empty_host(host_key.clone()).await {
+                    if let Err(error) = hub.finalize_host_once(host_key.clone()).await {
                         tracing::warn!(
                             identity_mode = ?host_key.identity_mode,
                             code = ?error.code,
@@ -3348,8 +3421,13 @@ impl BrowserSessionHub {
             .collect::<HashSet<_>>();
         if first_error.is_none() {
             for host_key in host_keys {
-                self.wait_for_pending_host_starts(&host_key).await;
-                if let Err(error) = self.finalize_empty_host(host_key).await
+                if let Err(error) = self.wait_for_pending_host_starts(&host_key).await {
+                    if first_error.is_none() {
+                        first_error = Some(error);
+                    }
+                    continue;
+                }
+                if let Err(error) = self.finalize_host_once(host_key).await
                     && first_error.is_none()
                 {
                     first_error = Some(error);
@@ -3372,11 +3450,93 @@ impl BrowserSessionHub {
         &self,
         detached: DetachedLane,
     ) -> Result<(), BrowserPlatformError> {
-        self.wait_for_pending_host_starts(&detached.host_key).await;
-        self.finalize_empty_host(detached.host_key).await
+        self.wait_for_pending_host_starts(&detached.host_key).await?;
+        self.finalize_host_once(detached.host_key).await
     }
 
-    async fn wait_for_pending_host_starts(&self, key: &HostKey) {
+    /// Single-flight entry for retiring one empty Host. Explicit close, the
+    /// cleanup completion callback and the lifecycle sweep all join the same
+    /// Hub-owned attempt, so a transient shutdown failure cannot be consumed
+    /// by one caller while another falsely reports success. The failed result
+    /// is published to every waiter; retirement authority stays in
+    /// `retiring_host_slots`, and only a later sweep or a fresh explicit call
+    /// opens a deliberate new retry.
+    async fn finalize_host_once(&self, key: HostKey) -> Result<(), BrowserPlatformError> {
+        let (flight, is_runner) = {
+            let mut flights = self.inner.host_finalizations.lock().await;
+            match flights.get(&key) {
+                // Join an in-flight attempt or a retained first failure. A
+                // settled success is never replayed: the Host may have gained
+                // and lost lanes since that attempt proved emptiness, so a
+                // later caller needs a fresh authoritative attempt.
+                Some(flight) if !matches!(flight.result.get(), Some(Ok(()))) => {
+                    (Arc::clone(flight), false)
+                }
+                _ => {
+                    let flight = Arc::new(HostFinalizationFlight::new());
+                    flights.insert(key.clone(), Arc::clone(&flight));
+                    (flight, true)
+                }
+            }
+        };
+        if is_runner {
+            // The attempt itself is Hub-owned. Caller cancellation or a caller
+            // wait timeout must not abort a shutdown that is already talking
+            // to the process, and every overlapping caller must observe this
+            // exact first result.
+            let hub = self.clone();
+            let run_key = key.clone();
+            let run_flight = Arc::clone(&flight);
+            tokio::spawn(async move {
+                let result = hub.finalize_empty_host(run_key.clone()).await;
+                let failed = result.is_err();
+                // Publish the terminal result before releasing the flight
+                // slot. A new caller must never observe an empty slot while
+                // the previous attempt's result is still unpublished and start
+                // a second shutdown whose outcome hides the first failure.
+                run_flight.complete(result);
+                if !failed {
+                    let mut flights = hub.inner.host_finalizations.lock().await;
+                    if flights
+                        .get(&run_key)
+                        .is_some_and(|current| Arc::ptr_eq(current, &run_flight))
+                    {
+                        flights.remove(&run_key);
+                    }
+                }
+                // A failed attempt stays in the map. Every later explicit
+                // caller joins the same first failure instead of silently
+                // consuming the retirement with a fresh attempt; only the
+                // lifecycle sweep opens a deliberate new retry and clears
+                // the settled flight.
+            });
+        }
+        match tokio::time::timeout(HOST_FINALIZATION_WAITER_TIMEOUT, flight.wait()).await {
+            Ok(result) => result,
+            Err(_) => {
+                tracing::warn!(
+                    identity_mode = ?key.identity_mode,
+                    timeout_ms = HOST_FINALIZATION_WAITER_TIMEOUT.as_millis() as u64,
+                    "browser Host finalization is still running after caller wait timeout"
+                );
+                self.emit("host_shutdown_pending", None);
+                Err(host_finalization_wait_timeout_error(&key))
+            }
+        }
+    }
+
+    async fn wait_for_pending_host_starts(
+        &self,
+        key: &HostKey,
+    ) -> Result<(), BrowserPlatformError> {
+        // Bounded wait: a Lane start that never settles must not block an
+        // explicit close forever. On timeout the Hub-owned retirement record
+        // is deliberately retained so the periodic sweep resumes the Host
+        // retirement once the start flight finally publishes its result — and
+        // the timeout is surfaced to the close caller as pending cleanup, so
+        // an explicit close can never report full success while its Host is
+        // still provably running.
+        let wait_deadline = Instant::now() + PENDING_LANE_START_WAIT_TIMEOUT;
         let pending = self
             .inner
             .pending_host_retirements
@@ -3387,15 +3547,32 @@ impl BrowserSessionHub {
             .cloned()
             .collect::<Vec<_>>();
         for pending in pending {
-            let _ = pending.start_flight.wait().await;
-            self.inner
-                .pending_host_retirements
-                .lock()
-                .await
-                .retain(|current| {
-                    current.key != pending.key || current.lane_id != pending.lane_id
-                });
+            match tokio::time::timeout_at(wait_deadline, pending.start_flight.wait()).await {
+                Ok(_) => {
+                    self.inner
+                        .pending_host_retirements
+                        .lock()
+                        .await
+                        .retain(|current| {
+                            current.key != pending.key || current.lane_id != pending.lane_id
+                        });
+                }
+                Err(_) => {
+                    tracing::warn!(
+                        lane_id = %pending.lane_id,
+                        identity_mode = ?pending.key.identity_mode,
+                        timeout_ms = PENDING_LANE_START_WAIT_TIMEOUT.as_millis() as u64,
+                        "browser Lane start is still unsettled after retirement wait timeout; retained for sweep"
+                    );
+                    self.emit("host_retirement_pending", None);
+                    return Err(pending_lane_start_wait_timeout_error(
+                        pending.lane_id.clone(),
+                        key,
+                    ));
+                }
+            }
         }
+        Ok(())
     }
 
     async fn host_has_pending_lane_cleanup(&self, key: &HostKey) -> bool {
@@ -3439,7 +3616,7 @@ impl BrowserSessionHub {
             .await
             .retain(|pending| pending.start_flight.result.get().is_none());
         for key in keys {
-            if let Err(error) = self.finalize_empty_host(key.clone()).await {
+            if let Err(error) = self.finalize_host_once(key.clone()).await {
                 tracing::warn!(
                     identity_mode = ?key.identity_mode,
                     code = ?error.code,
@@ -3742,6 +3919,16 @@ impl BrowserSessionHub {
 
     async fn retry_retiring_host_slots(&self) -> Result<usize, BrowserPlatformError> {
         let _retry_guard = self.inner.host_cleanup_retry_gate.lock().await;
+        // This is the deliberate new retry boundary. Settled finalization
+        // flights have already published their first failure to every explicit
+        // caller; releasing them here lets the next explicit close start a
+        // fresh attempt instead of replaying a stale result. In-flight
+        // attempts are kept so a running shutdown is never duplicated.
+        self.inner
+            .host_finalizations
+            .lock()
+            .await
+            .retain(|_, flight| flight.result.get().is_none());
         // Clone, do not drain: cancellation or a failed shutdown must leave the
         // authoritative slot in the retry queue.
         let slots = self.inner.retiring_host_slots.lock().await.clone();
@@ -3998,6 +4185,11 @@ impl BrowserSessionHub {
         if let Err(error) = self.retry_pending_lane_cleanups().await {
             first_error = Some(error);
         }
+        // A close whose pending Lane-start wait timed out has retained its
+        // Hub-owned retirement record. Settled start flights are resolved
+        // here so the retained Host retirement converges without requiring
+        // another explicit close call.
+        self.finalize_hosts_ready_after_cleanup().await;
         // Lane cleanup is the prerequisite for exact Host shutdown. Retry
         // retained retirements immediately afterwards; explicit close already
         // attempts this synchronously, while this path covers cancellation or
@@ -4813,6 +5005,40 @@ fn host_slot_retired_error() -> BrowserPlatformError {
     .with_metadata(json!({ "host_retired": true }))
 }
 
+fn host_finalization_wait_timeout_error(key: &HostKey) -> BrowserPlatformError {
+    BrowserPlatformError::new(
+        BrowserErrorCode::BrowserUnavailable,
+        "The managed browser Host is still shutting down.",
+        true,
+        "Retry after the retained Host shutdown completes.",
+    )
+    .with_metadata(json!({
+        "cleanup_pending": true,
+        "host_finalization_pending": true,
+        "identity_mode": key.identity_mode,
+        "timeout_ms": HOST_FINALIZATION_WAITER_TIMEOUT.as_millis() as u64,
+    }))
+}
+
+fn pending_lane_start_wait_timeout_error(
+    lane_id: BrowserLaneId,
+    key: &HostKey,
+) -> BrowserPlatformError {
+    BrowserPlatformError::new(
+        BrowserErrorCode::BrowserUnavailable,
+        "The browser lane was closed, but its Host is still finishing a pending lane start.",
+        true,
+        "Retry cleanup through the lifecycle worker.",
+    )
+    .for_lane(lane_id)
+    .with_metadata(json!({
+        "cleanup_pending": true,
+        "host_retirement_pending": true,
+        "identity_mode": key.identity_mode,
+        "timeout_ms": PENDING_LANE_START_WAIT_TIMEOUT.as_millis() as u64,
+    }))
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeSet;
@@ -5194,6 +5420,7 @@ mod tests {
         epoch: u64,
         probe: Arc<Probe>,
         process_id: u32,
+        headful: bool,
     }
 
     #[async_trait]
@@ -5208,6 +5435,14 @@ mod tests {
 
         fn state(&self) -> HostLifecycleState {
             HostLifecycleState::Running
+        }
+
+        fn is_headful(&self) -> bool {
+            // Reflect the launch request exactly. The Hub's foreground seam
+            // chooses between window focus and Host replacement based on this
+            // bit, so a fake that always reports headless would silently move
+            // every test onto the replacement path.
+            self.headful
         }
 
         fn process_id(&self) -> Option<u32> {
@@ -5364,6 +5599,7 @@ mod tests {
                 epoch: request.browser_epoch,
                 probe: Arc::clone(&self.probe),
                 process_id: self.next_process_id.fetch_add(1, Ordering::AcqRel) as u32,
+                headful: request.headful,
             }))
         }
     }
@@ -5658,7 +5894,11 @@ mod tests {
 
     #[tokio::test]
     async fn foreground_lane_for_user_uses_trusted_seam_and_publishes_activity() {
-        let harness = harness();
+        // Headful seam: the Host already owns a native window, so the trusted
+        // request focuses it directly without replacing the process.
+        let mut config = HubConfig::default();
+        config.headful = true;
+        let harness = harness_with_config(config);
         let lane_id = open(&harness.client, "foreground-primary").await;
         let before = harness.client.status(&lane_id).await.unwrap();
         let mut events = harness.hub.subscribe();
@@ -5672,17 +5912,72 @@ mod tests {
 
         assert_eq!(harness.probe.foregrounds.load(Ordering::Acquire), 1);
         assert_eq!(
+            harness.factory.launches.load(Ordering::Acquire),
+            1,
+            "a headful Host must be focused in place, not replaced"
+        );
+        assert_eq!(
             harness.probe.entries.load(Ordering::Acquire),
             0,
             "foregrounding must not manufacture a model-visible operation"
         );
         assert_eq!(foregrounded.lane_id, lane_id);
+        assert_eq!(foregrounded.browser_epoch, before.browser_epoch);
         assert_eq!(foregrounded.last_active_at_ms, before.last_active_at_ms + 25);
         let event = events.recv().await.unwrap();
         assert_eq!(event.change_kind, "lane_foregrounded");
         assert_eq!(event.lane_id.as_ref(), Some(&lane_id));
         assert_eq!(event.user_id.as_deref(), Some("user-1"));
         assert_eq!(event.at_ms, foregrounded.last_active_at_ms);
+    }
+
+    #[tokio::test]
+    async fn foreground_lane_for_user_replaces_headless_host_with_headful_replacement() {
+        // Headless transition: the default policy launches a truly headless
+        // Primary; the trusted foreground request performs one exact Host
+        // replacement with the same identity and a fresh epoch.
+        let harness = harness();
+        let lane_id = open(&harness.client, "foreground-headless").await;
+        let before = harness.client.status(&lane_id).await.unwrap();
+        harness.clock.advance(25);
+
+        let foregrounded = harness
+            .hub
+            .foreground_lane_for_user("user-1", &lane_id)
+            .await
+            .unwrap();
+
+        let launch_requests = harness
+            .probe
+            .host_launch_requests
+            .lock()
+            .expect("host launch probe poisoned")
+            .clone();
+        assert_eq!(launch_requests.len(), 2);
+        assert!(
+            !launch_requests[0].headful,
+            "routine Agent work must launch the Primary Host headless"
+        );
+        assert!(
+            launch_requests[1].headful,
+            "the trusted foreground replacement must request a headful Host"
+        );
+        assert_eq!(
+            harness.probe.host_shutdowns.load(Ordering::Acquire),
+            1,
+            "the old headless Host must be explicitly stopped before its replacement"
+        );
+        assert_eq!(harness.probe.foregrounds.load(Ordering::Acquire), 1);
+        assert_ne!(
+            foregrounded.browser_epoch, before.browser_epoch,
+            "the process replacement must advance the browser epoch"
+        );
+        assert_eq!(
+            foregrounded.error_code,
+            Some(BrowserErrorCode::BrowserRestarted),
+            "old refs must be invalidated and a fresh observe required"
+        );
+        assert_eq!(foregrounded.last_active_at_ms, before.last_active_at_ms + 25);
     }
 
     #[tokio::test]
@@ -5755,7 +6050,10 @@ mod tests {
 
     #[tokio::test]
     async fn foreground_lane_for_user_requires_running_lane_and_propagates_safe_driver_error() {
+        // Headful seam so a driver failure surfaces directly, without the
+        // headless-replacement path emitting restart events first.
         let mut config = HubConfig::default();
+        config.headful = true;
         config.resource_policy.max_open_lanes = 1;
         let harness = harness_with_config(config);
         let capacity_holder = open(&harness.client, "foreground-capacity-holder").await;
@@ -7537,21 +7835,68 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn crawl_host_waits_for_the_sixty_second_warm_timer() {
+    async fn explicit_last_lane_close_shuts_down_crawl_host_immediately() {
         let harness = harness();
         let lane_id = open_identity(
             &harness.client,
-            "crawl-warm",
+            "crawl-immediate",
             BrowserIdentityMode::Anonymous,
         )
         .await;
         let warm_ms = harness.hub.resource_policy().await.host_warm_ms;
+
+        // Explicit close of the last Lane retires the Host in the same call.
+        // The warm timer must not be a precondition for explicit closure.
         harness.hub.close_lane(&lane_id).await.unwrap();
+        assert_eq!(harness.probe.host_shutdowns.load(Ordering::Acquire), 1);
+        assert!(harness.hub.managed_host_process_ids().await.is_empty());
+
+        // The warm timer stays a passive backstop: a later sweep finds
+        // nothing left to reclaim and must not double-shut the same Host.
+        harness.clock.advance(warm_ms);
+        harness.hub.sweep().await.unwrap();
+        assert_eq!(harness.probe.host_shutdowns.load(Ordering::Acquire), 1);
+    }
+
+    /// Simulates a Lane record that vanished without any close-path
+    /// finalization — the defensive inconsistency that the passive warm-timer
+    /// sweep exists to reclaim. Normal explicit close never takes this path.
+    async fn strand_lane_record(harness: &Harness, lane_id: &BrowserLaneId) {
+        let lane = harness
+            .hub
+            .inner
+            .lanes
+            .write()
+            .await
+            .remove(lane_id)
+            .expect("stranded lane must exist");
+        let lane_key = lane.snapshot.read().await.lane_key.clone();
+        harness.hub.inner.lane_keys.write().await.remove(&lane_key);
+        harness.hub.inner.scheduler.cancel_lane(lane_id);
+        harness.hub.inner.scheduler.release_without_promotion(lane_id);
+    }
+
+    #[tokio::test]
+    async fn warm_timer_sweep_reclaims_stranded_empty_crawl_host_as_backstop() {
+        let harness = harness();
+        let lane_id = open_identity(
+            &harness.client,
+            "crawl-stranded",
+            BrowserIdentityMode::Anonymous,
+        )
+        .await;
+        let warm_ms = harness.hub.resource_policy().await.host_warm_ms;
+        strand_lane_record(&harness, &lane_id).await;
+
+        // First sweep only marks the empty Host; the crawl warm interval has
+        // not elapsed, so the passive path must not reclaim it yet.
+        harness.hub.sweep().await.unwrap();
+        assert_eq!(harness.probe.host_shutdowns.load(Ordering::Acquire), 0);
+        assert!(!harness.hub.managed_host_process_ids().await.is_empty());
 
         harness.clock.advance(warm_ms - 1);
         harness.hub.sweep().await.unwrap();
         assert_eq!(harness.probe.host_shutdowns.load(Ordering::Acquire), 0);
-        assert!(!harness.hub.managed_host_process_ids().await.is_empty());
 
         let mut events = harness.hub.subscribe();
         harness.clock.advance(1);
@@ -7571,7 +7916,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn failed_warm_shutdown_keeps_the_host_slot_for_the_next_sweep() {
+    async fn failed_explicit_close_shutdown_keeps_host_authority_for_the_next_sweep() {
         let harness = harness();
         let lane_id = open_identity(
             &harness.client,
@@ -7579,19 +7924,19 @@ mod tests {
             BrowserIdentityMode::Anonymous,
         )
         .await;
-        let warm_ms = harness.hub.resource_policy().await.host_warm_ms;
-        harness.hub.close_lane(&lane_id).await.unwrap();
         harness
             .probe
             .host_shutdown_failures_remaining
             .store(1, Ordering::Release);
-        harness.clock.advance(warm_ms);
 
-        assert!(harness.hub.sweep().await.is_err());
-        assert!(!harness.hub.managed_host_process_ids().await.is_empty());
+        // The explicit close performs the immediate Host shutdown and must
+        // surface the real first failure to its caller.
+        assert!(harness.hub.close_lane(&lane_id).await.is_err());
         assert_eq!(harness.probe.host_shutdowns.load(Ordering::Acquire), 1);
+        assert!(!harness.hub.managed_host_process_ids().await.is_empty());
 
-        harness.clock.advance(warm_ms);
+        // The retained retirement authority is retried by the next sweep
+        // without waiting for any warm interval.
         harness.hub.sweep().await.unwrap();
         assert!(harness.hub.managed_host_process_ids().await.is_empty());
         assert_eq!(harness.probe.host_shutdowns.load(Ordering::Acquire), 2);
@@ -7608,17 +7953,24 @@ mod tests {
         .await;
         let key = HostKey::for_lane(BrowserIdentityMode::Anonymous, 0, &lane_id);
         let warm_ms = harness.hub.resource_policy().await.host_warm_ms;
-        harness.hub.close_lane(&lane_id).await.unwrap();
+        strand_lane_record(&harness, &lane_id).await;
+
+        // First sweep marks the stranded Host empty; the warm interval then
+        // elapses so the next sweep would perform the retirement handoff.
+        harness.hub.sweep().await.unwrap();
         harness.clock.advance(warm_ms);
 
-        let retiring_queue_guard = harness.hub.inner.retiring_host_slots.lock().await;
+        // Park the sweep on the first lock of the retirement handoff
+        // (open_gate -> retiring_host_keys -> host_slots -> retiring_host_slots)
+        // and cancel it there, before any authoritative structure changed.
+        let retiring_keys_guard = harness.hub.inner.retiring_host_keys.write().await;
         let sweeping_hub = harness.hub.clone();
         let sweep = tokio::spawn(async move { sweeping_hub.sweep().await });
         tokio::task::yield_now().await;
 
         sweep.abort();
         assert!(sweep.await.unwrap_err().is_cancelled());
-        drop(retiring_queue_guard);
+        drop(retiring_keys_guard);
 
         assert!(harness.hub.inner.host_slots.read().await.contains_key(&key));
         assert!(!harness.hub.inner.retiring_host_keys.read().await.contains(&key));
@@ -7632,7 +7984,6 @@ mod tests {
                 .is_empty()
         );
 
-        assert!(harness.hub.inner.host_slots.read().await.contains_key(&key));
         // The cancelled sweep may already have consumed the empty-since mark
         // before it was aborted, so a fresh warm interval may be needed after
         // cancellation before the next sweep can retire the host.
@@ -7666,7 +8017,9 @@ mod tests {
         .await;
         let key = HostKey::for_lane(BrowserIdentityMode::Anonymous, 0, &lane_id);
         let warm_ms = harness.hub.resource_policy().await.host_warm_ms;
-        harness.hub.close_lane(&lane_id).await.unwrap();
+        strand_lane_record(&harness, &lane_id).await;
+
+        harness.hub.sweep().await.unwrap();
         harness.clock.advance(warm_ms);
         harness
             .probe
@@ -9155,21 +9508,26 @@ mod tests {
             .host_shutdown_failures_remaining
             .store(1, Ordering::Release);
 
+        // The explicit close inside platform shutdown performs the immediate
+        // Host retirement, so it is the caller that observes the real first
+        // shutdown failure. The retained authority is retried by the same
+        // shutdown pass; the terminal result still reports that first error
+        // instead of letting the background retry consume it.
         assert!(harness.hub.shutdown().await.is_err());
-        assert_eq!(
-            harness.hub.inner.orphaned_host_slots.lock().await.len(),
-            1
-        );
-        harness.hub.shutdown().await.unwrap();
+        assert_eq!(harness.probe.host_shutdowns.load(Ordering::Acquire), 2);
+        assert!(harness.hub.managed_host_process_ids().await.is_empty());
         assert!(
             harness
                 .hub
                 .inner
-                .orphaned_host_slots
+                .retiring_host_slots
                 .lock()
                 .await
                 .is_empty()
         );
+
+        // A repeated explicit shutdown converges without another attempt.
+        harness.hub.shutdown().await.unwrap();
         assert_eq!(harness.probe.host_shutdowns.load(Ordering::Acquire), 2);
     }
 

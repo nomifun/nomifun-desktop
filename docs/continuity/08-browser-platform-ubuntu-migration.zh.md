@@ -276,3 +276,160 @@ warm timer/sweep 只能兜底。
 归档代码提交：`00823ec3fb470ee4d0dda98176679a0786cfc565`
 
 契约补充提交：本文所在的后续文档提交（可通过 `git log -2` 确认）。
+
+## 8. Ubuntu 续作进展（2026-07-28）
+
+本节记录在 Ubuntu 上对 P0-A 至 P0-G 的实施结果。环境：Linux 7.0.0-28-generic，
+rustup 安装的 rustc 1.97.1（发行版 rustc 1.93.1 无法编译锁定的 sysinfo 0.39.6），
+bun 1.3.14。
+
+### 已完成
+
+- **P0-A**：`hub.rs` 实现 `finalize_host_once(key)` per-Host single-flight。
+  显式 close、`run_pending_lane_cleanup` 的完成回调和 `close_matching` 全部 join
+  同一 `HostFinalizationFlight`；attempt 本身由 Hub-owned spawned task 执行，调用
+  方取消/超时不会中断进行中的 shutdown。失败结果保留在 flight map 中（sticky），
+  后续显式调用者 join 同一个第一次失败；只有 `retry_retiring_host_slots`（sweep/
+  shutdown 路径）清除 settled flight 并开启明确的新 retry。调用方等待有
+  `HOST_FINALIZATION_WAITER_TIMEOUT`（7s）上界。
+- **P0-B**：`detach_lane_for_close` 拆为公开入口（获取 `open_gate`）+
+  `detach_lane_for_close_locked`（临界区内完成 Lane 移除、pending start 登记与
+  调度器释放）。`abandon_unclaimed_lane_start` 已持有 `open_gate`，改调 locked
+  版本，消除与 `finalize_empty_host` 空 Host 判定的 TOCTOU。
+- **P0-C**：锁序 `open_gate -> retiring_host_keys -> host_slots ->
+  retiring_host_slots` 在 `BrowserSessionHubInner` 字段声明处作为契约注释固化；
+  审计确认 `finalize_empty_host`、`sweep_empty_hosts`、`forget_retired_host_slot`
+  均已按此顺序。`wait_for_pending_host_starts` 增加
+  `PENDING_LANE_START_WAIT_TIMEOUT`（6s）有界等待；超时保留 Hub-owned
+  `pending_host_retirements` 记录并交给 sweep 的
+  `finalize_hosts_ready_after_cleanup`（已加入 `sweep()` 开头）恢复。
+- **P0-D**：`manager/nomi/agent.rs` + `factory/browser_lane.rs`：
+  1. `TurnTerminationGuard::Drop` 的 teardown task 重写为无条件尝试全部三个
+     fence（MCP 不再嵌套于 `if let Some(supervisor)`、process quiesce、Browser
+     `close_turn_lanes`），terminal 仅在聚合证明 exact 时发布（保留非终态
+     quarantine 语义）；
+  2. `fence_cancelled_processes` 用 `NomiTeardownFailures` 聚合 MCP 与 process
+     两阶段，不再短路；
+  3. kill 竞态：`close_turn_lanes` 感知 `revocation_requested` 位与
+     `OwnerLeaseExpired` 错误码，将"lease 已被 Hub-owned revocation flight 撤销"
+     视为 satisfied-by-revocation（Hub 的 `close_owner_lease` 按 lease id 关闭
+     Lane，不依赖 lease 记录存在）；
+  4. idle-kill 路径 `schedule_nomi_cancelled_terminal_after_process_fence` 接收
+     browser binding，terminal 发布前 `revoke_and_wait` 等待有界 Browser cleanup
+     证明；无 supervisor 时也执行 MCP shutdown。
+  新增测试：`turn_boundary_close_treats_revoked_owner_lease_as_satisfied`、
+  `termination_guard_drop_emits_finish_after_revoked_lease_browser_cleanup`、
+  `idle_kill_terminal_waits_for_browser_cleanup_proof`、
+  `idle_kill_withholds_terminal_when_browser_cleanup_fails`。
+  另修复基线上已失败的 `termination_guard_emits_finish_on_armed_drop`
+  （terminal 由 spawned task 异步发布，测试原先同步 `try_recv`）。
+- **P0-E**：Agent 外部 http/https opener 全链路 fail-closed，错误文本统一引导
+  使用受管 Browser（`browser navigate`）：
+  1. `nomi-computer/src/launch.rs` 新增 `validate_agent_web_target`（含
+     `microsoft-edge:https://…` 等 wrapper 协议），一处封堵 in-process
+     ComputerTool、`nomifun-computer` MCP 与 Gateway `nomi_computer_launch`；
+  2. `nomifun-shell` `ShellService::launch` 同规则封堵（唯一生产调用方是
+     `nomifun-open` MCP）；`open_external` 不变，继续服务 UI 可信链接；
+  3. Gateway `nomi_shell_open_external` 收窄为仅 `mailto:`；
+  4. `nomi-tools/windows_shell.rs` 的脚本校验扩展为跨平台：OS opener/浏览器
+     二进制（`xdg-open`/`open`/`gio`/浏览器名等）+ http(s) URL 参数组合被拒，
+     本地文件打开与 `curl`/`wget` 等非 opener egress 不受影响；
+  5. `acp_assembler.rs` 提示语与各工具 schema/描述改写为"URL 走受管 Browser"。
+  边界说明：`/browser` 管理页 foreground、login-open 与 UI 链接
+  （`POST /api/shell/open-external`）不经过以上任何守卫，保持可信路径不变。
+- **P0-F**：`hub.rs` 7 个失败测试按新契约重写，全套 135 通过：
+  - `explicit_last_lane_close_shuts_down_crawl_host_immediately`（原 warm-timer
+    等待测试）：显式关闭立即回收，warm sweep 不得二次 shutdown；
+  - `warm_timer_sweep_reclaims_stranded_empty_crawl_host_as_backstop`（新增）：
+    用 `strand_lane_record` 构造无 close 路径的 stranded Host，验证被动兜底；
+  - `failed_explicit_close_shutdown_keeps_host_authority_for_the_next_sweep`
+    （原 failed_warm_shutdown）：失败在 close 调用方可见，权威保留给 sweep 重试；
+  - 两个 sweep 取消测试改用 stranded Host 构造，"before handoff"改为持有
+    `retiring_host_keys` 写锁（锁序中 handoff 的第一把锁）；
+  - `failed_shutdown_retains_host_authority_for_explicit_retry`：首次 shutdown
+    返回第一次真实失败、同一调用内 retry 收敛（host_shutdowns==2）、重复
+    shutdown 幂等；
+  - foreground 两测试拆分为 headful seam（`HubConfig.headful=true`，原地
+    `bring_to_front`，发布活动）与新增 headless transition 测试（第二次 launch
+    请求 `headful==true`、旧 Host 显式停止、epoch 递增、`BrowserRestarted`
+    fresh-observe 语义）；FakeHost 记录 `HostLaunchRequest.headful` 并实现准确
+    `is_headful()`。
+  产品代码同步修复：foreground 的 headless 分支现在与 headful 分支一致地在
+  成功后发布 `last_active_at_ms` 活动戳（带 closing 复验）。
+- **P0-G**：headless/external 用户设置与迁移契约（前后端）：
+  - 后端 `services.rs`：`BrowserStartupPreferences::default().display_mode =
+    "headless"`；`resolve_browser_display_mode` 实现第 2.1 节迁移表（headless/
+    external 保留不重写；embedded/无效→headless 持久化；silent=true→headless、
+    silent=false→external、缺失→headless 均持久化；读失败不持久化）；
+    `primary_host_is_headful` 返回 `display_mode == "external"`，经
+    `HubConfig.headful` 由 Host launch policy 执行（仅 Primary 生效，非 Primary
+    Host 恒 headless；`open_lane`/`LaneLaunchRequest` 无可见性参数，Agent JSON
+    无路径可达）。对应 6 个迁移测试重写/新增；
+  - 前端 `browserSettings.ts`：`BROWSER_DISPLAY_MODES = ['headless','external']`，
+    `migrateBrowserDisplayMode` 与后端映射一致；设置页
+    `BrowserUseSettingsContent.tsx` 提供两选项 RadioGroup（保留挂载时迁移与
+    "永不写 silent"约束）；`configKeys.ts`、i18n（en/zh）与 source-scan 测试
+    同步更新；
+  - 生效语义：与其它启动偏好一致，更改在应用重启后生效（设置描述已注明）。
+    Hub 每次 Host 启动都从 `HubConfig`（RwLock）读取 headful，如后续需要热更新
+    可加 `set_resource_policy` 同款 setter，本次未引入未接线的 API。
+
+### 测试与门禁证据（本机，2026-07-28）
+
+- `cargo test -p nomifun-browser-platform --lib`：135 passed / 0 failed
+  （基线 126/7）；
+- `cargo test -p nomifun-ai-agent --features browser-use --lib`：全部通过；
+- `cargo test -p nomifun-app --features browser-use --lib`：全部通过；
+- `cargo test -p nomi-computer --lib`：77 passed；
+- `cargo test -p nomifun-shell --lib`：77 passed；
+- `cargo test -p nomifun-gateway --lib`：127 passed；
+- `cargo test -p nomi-tools --lib -- windows_shell`：通过。注意：本机存在一组
+  **HEAD 基线即失败**的环境性测试（`git stash` 复验，与本次改动无关）：
+  `nomi-tools` 22 个（bash/pty/exec_command/write_stdin，沙箱 PTY 限制）、
+  `nomifun-ai-agent` 1 个（openclaw construction；openclaw/herman 已计划移除，
+  不再投入）、`nomifun-app` 1 个（server lock authority）、
+  `nomifun-conversation` 1 个、`nomifun-terminal` 2 个。工作树失败集合与
+  HEAD 基线完全一致，本次改动未引入新失败；
+- `bun test`（browserSettings + BrowserUseSettingsContent）：25 passed；
+- `bun run typecheck`：通过；
+- `cargo fmt --all -- --check`：通过；`git diff --check`：干净；
+- `.github/workflows/` 仅含 README.md，无任何 `.yml`/`.yaml`。
+
+### 对抗性审查轮（2026-07-28，多 Agent diff review）
+
+对本次 diff 做了三维度（hub 并发 / turn teardown / settings+opener）审查加逐项
+反驳验证，13 项原始发现中 6 项确认并已全部修复：
+
+1. **foreground×close 竞态产生零 Lane headful 僵尸 Host**（hub.rs restart
+   flight 在 slot 已被显式关闭移除后仍无条件插入新 slot 并启动 headful
+   Chromium）：`restart_host_once_with_visibility` 增加 live-lane 前置检查
+   （无存活 Lane 直接返回 recovery 错误），并在 rebind 后调用
+   `finalize_empty_host`（open_gate 下复查）立即回收窗口期内被清空的 key；
+2. **pending-start 有界等待超时导致显式关闭静默假成功**：
+   `wait_for_pending_host_starts` 改为返回 `Result`，超时向 close 调用方返回
+   `cleanup_pending` 错误（`pending_lane_start_wait_timeout_error`），权威记录
+   仍保留给 sweep；
+3. **settled-Ok finalization flight 在"结果已发布、尚未从 map 移除"窗口被后续
+   close 复用**，跳过真正的最后一 Lane 回收：`finalize_host_once` 不再复用
+   settled-Ok flight（仅 join 进行中与 sticky 失败），后续调用开启新 attempt；
+4. **`close_turn_lanes` 的 revocation_requested 位可掩盖已失败的 revocation
+   flight**：收窄为仅对 `OwnerLeaseExpired` 错误码映射 satisfied-by-revocation；
+5. **web 守卫 `http://` 子串可被 scheme-only 形式绕过**（`https:example.com`
+   会被浏览器规范化为真实导航）：三处守卫（nomi-computer、nomifun-shell、
+   nomi-tools shell 校验）全部改为 `http:`/`https:` scheme 前缀匹配；
+6. **`app` 参数绕过**（`{target:"example.com", app:"msedge"}`）：nomi-computer
+   与 ShellService 的 launch 对 `app` 增加浏览器/opener 黑名单
+   （basename 匹配，含 `.exe` 剥离），拒绝并引导受管 Browser。
+
+其余 7 项经验证反驳（含 idle-kill 死锁、guard-drop 回归、fast-path 语义收窄
+等，均为不可达或与既有语义一致）。修复后全部受影响套件复跑通过。
+
+### 遗留事项
+
+- 07 文档的 P0 门禁（workspace 全量 `cargo test`、完整 UI 矩阵、最新 main
+  集成、真实 Chromium/发布 smoke）仍未在本机执行完毕；本节不构成发布验收。
+- Agent shell 的 URL-opener 校验为已知 opener/浏览器清单 + http(s) 参数组合，
+  属纵深防御；任意二进制间接打开 URL 无法在词法层穷尽，Exec 审批与 egress
+  策略仍是主约束。
+- displayMode 热更新（无需重启）未实现，见 P0-G 记录。
+- 未 push；本机 rustup 工具链变更不影响仓库内容。

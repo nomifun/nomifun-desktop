@@ -71,15 +71,18 @@ const createManualScheduler = () => {
 };
 
 describe('Browser Use settings contract', () => {
-  test('reads silent only for migration and exposes external as the only display mode', () => {
+  test('reads silent only for migration and exposes the two-option display mode control', () => {
     const source = readSource(new URL('./BrowserUseSettingsContent.tsx', import.meta.url));
 
     expect(source.includes("configService.get('agent.browserUse.silent')")).toBe(true);
     expect(source.includes("configService.set('agent.browserUse.displayMode'")).toBe(true);
     expect(/configService\.(?:set|setLocal|setBatch)\('agent\.browserUse\.silent'/.test(source)).toBe(false);
+    // The removed embedded viewer must never come back as a selectable mode;
+    // headless (default) and external are the two trusted user policies.
     expect(source.includes("<Radio value='embedded'>")).toBe(false);
-    expect(source.includes("<Radio value='external'>")).toBe(false);
-    expect(source.includes("<Radio value='headless'>")).toBe(false);
+    expect(source.includes("<Radio value='headless'>")).toBe(true);
+    expect(source.includes("<Radio value='external'>")).toBe(true);
+    expect(source.includes("t('settings.browserDisplayModeHeadless')")).toBe(true);
     expect(source.includes("t('settings.browserDisplayModeExternal')")).toBe(true);
     expect(source.includes("t('settings.browserDisplayModeDesc')")).toBe(true);
     expect(source.includes("persistBoolean('agent.browserUse.takeover'")).toBe(true);
@@ -610,6 +613,7 @@ describe('Browser Use settings contract', () => {
     const requiredKeys = [
       'browserDisplayMode',
       'browserDisplayModeDesc',
+      'browserDisplayModeHeadless',
       'browserDisplayModeExternal',
       'browserResourcePolicy',
       'browserResourcePolicyAutomatic',
