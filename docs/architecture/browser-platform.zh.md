@@ -130,14 +130,26 @@ Lane 显式“前台打开”。它不会创建第二浏览器、内嵌页面或
 
 ## 设置迁移
 
-产品显示模式固定为 `external`。新安装写入
-`agent.browserUse.displayMode = external`；这里的 `external` 表示真实、可前台恢复的
-受管窗口只会在显式前台操作后创建，不表示自动弹窗；普通 Agent Browser Use
-仍以 `--headless=new` 运行 Primary。历史 `embedded`、
-`headless`、无效值以及旧 `agent.browserUse.silent` 都只用于兼容读取，并收敛为
-`external`，不再写入旧 `silent` 键。该迁移不允许普通任务打开窗口；Anonymous、
-Authenticated Replica 与 Isolated Host 也继续按 Hub 策略 headless 运行，除非另有
-可信流程明确要求。
+产品提供两个可信的应用级默认可见策略：`headless`（新安装默认，普通 Agent
+Browser Use 以 `--headless=new` 静默运行 Primary）与 `external`（用户显式选择
+默认前台可见，Primary Host 以真实窗口启动）。该偏好由后端 Host launch policy
+在启动 Primary Host 时执行；普通 Agent action、lane 名称或工具 JSON 无权覆盖。
+无论选择哪一项，Anonymous、Authenticated Replica 与 Isolated Host 都继续按
+Hub 策略 headless 运行，用户仍可在 `/browser` 对 running Primary 手动"前台
+打开"。该偏好更改在应用重启后生效。
+
+迁移契约：
+
+- `agent.browserUse.displayMode = headless`：保留，不重写；
+- `agent.browserUse.displayMode = external`：保留，不重写；
+- 历史 `embedded`（已移除的嵌入式 Viewer）与无效值：修复为 `headless` 并持久化；
+- `displayMode` 缺失且旧 `agent.browserUse.silent = true`：迁移为 `headless` 并持久化；
+- `displayMode` 缺失且旧 `silent = false`：迁移为 `external` 并持久化；
+- 两者都缺失（新安装）：持久化 `headless`；
+- 旧 `silent` 键只读，不再写入；偏好存储读取失败时使用 `headless` 兜底且不持久化。
+
+该迁移不允许普通任务绕过用户策略打开窗口；`embedded` 不会作为可选项回归，
+也不恢复截图预览、Viewer token、接管或输入桥接。
 
 `agent.browserUse.source` 选择系统 Chrome/Edge 优先或 managed source 优先；它不
 授权复用个人 profile，也不改变 Hub 的身份、容量、审批或生命周期策略。

@@ -1,11 +1,15 @@
 //! `nomicore mcp-open-stdio` subcommand: MCP stdio server exposing a single
-//! reliable `open` tool that ShellExecutes a URL / file / folder / application.
+//! reliable `open` tool that ShellExecutes a file / folder / application.
 //!
 //! Spawned by ACP agent CLIs (claude / codex / gemini) when the open MCP is
 //! injected into a session (Windows only — see `OpenMcpConfig`). It gives the
 //! agent a dependable launch path instead of fragile `cmd /c start` /
 //! `Start-Process` shell commands, whose `start` window-title-argument quirk
-//! mis-handles URLs/paths and surfaces "Windows cannot find 'X'" dialogs.
+//! mis-handles paths and surfaces "Windows cannot find 'X'" dialogs.
+//!
+//! Web URLs (http/https) deliberately fail closed: this is an Agent surface,
+//! and Agent-initiated web opens belong to the managed Browser Hub rather than
+//! the operating-system browser (`ShellService::launch` enforces the policy).
 //!
 //! Unlike the requirement/gateway bridges this is STATELESS: opening is a pure
 //! local OS call (`open::that_detached` via `ShellService::launch`), so there is
@@ -54,12 +58,12 @@ struct OpenStdioServer {
 
 #[derive(Deserialize, schemars::JsonSchema)]
 struct OpenParams {
-    /// What to open: a URL (e.g. "https://www.example.com"), a file or folder
-    /// path, or an application name/path (e.g. "msedge", "notepad").
+    /// What to open: a file or folder path, or an application name/path
+    /// (e.g. "notepad"). Web URLs (http/https) are rejected — use the managed
+    /// Browser tool for web pages.
     target: String,
-    /// Optional application to open the target WITH — e.g. set target to a URL
-    /// and app to "msedge" to open that URL in Microsoft Edge specifically.
-    /// Omit to use the system's default handler.
+    /// Optional application to open the target WITH — e.g. open a file with a
+    /// specific editor. Omit to use the system's default handler.
     #[serde(default)]
     app: Option<String>,
 }
@@ -68,7 +72,7 @@ struct OpenParams {
 impl OpenStdioServer {
     #[tool(
         name = "open",
-        description = "Open a URL, file, folder, or application on the user's desktop reliably via the OS shell (ShellExecute). ALWAYS prefer this over running `cmd /c start`, `Start-Process`, or `explorer` in the shell to launch things — those are unreliable on Windows (the `start` builtin mis-parses URLs/paths as window titles and pops 'Windows cannot find' dialogs). `target` is a URL (https://…), a filesystem path, or an application name/path. Optionally pass `app` to open the target with a specific application (e.g. target a URL and app=\"msedge\" to open it in Microsoft Edge)."
+        description = "Open a file, folder, or application on the user's desktop reliably via the OS shell (ShellExecute). ALWAYS prefer this over running `cmd /c start`, `Start-Process`, or `explorer` in the shell to launch things — those are unreliable on Windows (the `start` builtin mis-parses paths as window titles and pops 'Windows cannot find' dialogs). `target` is a filesystem path or an application name/path. Optionally pass `app` to open the target with a specific application. Web URLs (http/https) are rejected: read or interact with web pages through the managed Browser tool instead."
     )]
     async fn open(&self, Parameters(params): Parameters<OpenParams>) -> CallToolResult {
         let OpenParams { target, app } = params;
@@ -129,6 +133,23 @@ mod tests {
 
         assert_eq!(result.is_error, Some(true));
         assert!(serde_json::to_string(&result).unwrap().contains("Error:"));
+    }
+
+    #[tokio::test]
+    async fn web_urls_fail_closed_toward_the_managed_browser() {
+        let result = test_server()
+            .open(Parameters(OpenParams {
+                target: "https://example.com".to_string(),
+                app: None,
+            }))
+            .await;
+
+        assert_eq!(result.is_error, Some(true));
+        let rendered = serde_json::to_string(&result).unwrap();
+        assert!(
+            rendered.contains("browser navigate"),
+            "must steer the agent to the managed Browser: {rendered}"
+        );
     }
 
     #[tokio::test]

@@ -9,7 +9,7 @@ use std::fmt;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
 
-use nomifun_browser_platform::{BrowserLaneClient, BrowserSurface};
+use nomifun_browser_platform::{BrowserErrorCode, BrowserLaneClient, BrowserSurface};
 use nomifun_common::AppError;
 
 /// Server-derived ownership facts used to issue one native runtime's browser
@@ -116,11 +116,28 @@ impl BrowserLaneBinding {
     /// owner-scoped `close_all` semantics rather than the lease-revocation
     /// path used by runtime teardown.
     pub async fn close_turn_lanes(&self) -> Result<(), AppError> {
-        self.inner.client.close_all().await.map(|_| ()).map_err(|error| {
-            AppError::Internal(format!(
-                "failed to close Native Nomi browser lanes at the turn boundary: {error}"
-            ))
-        })
+        match self.inner.client.close_all().await {
+            Ok(_) => Ok(()),
+            Err(error) => {
+                // Runtime `kill()` revokes the owner lease before an unwinding
+                // turn reaches this boundary, so `close_all` can fail with an
+                // expired-lease refusal even though the Hub already treats
+                // this owner's Lanes as its own cleanup obligation
+                // (`close_owner_lease` closes by lease id without requiring a
+                // live record, and the sweep covers naturally expired leases).
+                // Only that exact refusal maps to satisfied-by-revocation; any
+                // other failure — even after a revocation was requested — is a
+                // real cleanup failure and must surface so the terminal event
+                // is not published over a live Chromium Lane. The
+                // result-bearing `revoke_and_wait` remains the teardown proof.
+                if error.code == BrowserErrorCode::OwnerLeaseExpired {
+                    return Ok(());
+                }
+                Err(AppError::Internal(format!(
+                    "failed to close Native Nomi browser lanes at the turn boundary: {error}"
+                )))
+            }
+        }
     }
 
     /// Revoke this exact owner and wait for the provider's bounded completion
