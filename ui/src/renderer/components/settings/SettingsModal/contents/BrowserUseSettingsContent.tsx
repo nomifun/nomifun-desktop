@@ -7,6 +7,7 @@
 import { isBackendHttpError } from '@/common/adapter/httpBridge';
 import { configService } from '@/common/config/configService';
 import {
+  BROWSER_DISPLAY_MODE_POLICY_VERSION,
   browserResourcePolicyApi,
   isBrowserResourcePolicyUnavailableError,
   migrateBrowserDisplayMode,
@@ -14,8 +15,10 @@ import {
   type BrowserResourcePolicyAdvanced,
   type BrowserResourcePolicyPreset,
 } from '@/common/browser/browserSettings';
+import { createBrowserDisplayModeController } from '@/common/browser/browserDisplayModeController';
 import {
   resolveBrowserOverviewCapabilities,
+  type BrowserDisplayMode,
   type IBrowserOverview,
   type IBrowserOverviewCapabilities,
 } from '@/common/browser/browserTypes';
@@ -31,14 +34,19 @@ import PreferenceRow from './SystemModalContent/PreferenceRow';
 const RadioGroup = Radio.Group;
 
 type BrowserSource = 'managed' | 'system';
-// The two user-selectable application-level default visibility policies.
-// `headless` keeps routine Agent browsing silent; `external` is the user's
-// explicit default-visible choice. Agent tool input can never select this.
-type BrowserDisplayModeSetting = 'headless' | 'external';
+type BrowserDisplayModeStatus = 'loading' | 'ready' | 'unavailable' | 'error';
 type ResourcePolicyStatus = 'loading' | 'ready' | 'unavailable' | 'error';
 type BrowserSettingsError = {
   message?: string;
   fallbackKey: BrowserSettingsErrorKey;
+};
+
+const cacheAuthoritativeBrowserDisplayMode = (displayMode: BrowserDisplayMode): void => {
+  configService.setLocal('agent.browserUse.displayMode', displayMode);
+  configService.setLocal(
+    'agent.browserUse.displayModeVersion',
+    BROWSER_DISPLAY_MODE_POLICY_VERSION
+  );
 };
 type BrowserSettingsErrorKey =
   | 'common.unknownError'
@@ -68,6 +76,9 @@ const isBrowserOverviewUnavailableError = (error: unknown): boolean =>
     error.status === 501 ||
     error.code.toLowerCase() === 'browser_not_supported' ||
     error.code.toLowerCase() === 'browser_disabled');
+
+const isBrowserDisplayModeUnavailableError = (error: unknown): boolean =>
+  isBackendHttpError(error) && (error.status === 404 || error.status === 501);
 
 /**
  * Loads installation-owner capabilities without turning a transient startup
@@ -355,7 +366,19 @@ const BrowserUseSettingsContent: React.FC = () => {
   const isPageMode = viewMode === 'page';
   const [browserUse, setBrowserUse] = useState(false);
   const [source, setSource] = useState<BrowserSource>('system');
-  const [displayMode, setDisplayMode] = useState<BrowserDisplayModeSetting>('headless');
+  const [displayMode, setDisplayMode] = useState<BrowserDisplayMode>('headless');
+  const [displayModeStatus, setDisplayModeStatus] =
+    useState<BrowserDisplayModeStatus>('loading');
+  const [displayModeSaving, setDisplayModeSaving] = useState(false);
+  const [displayModeError, setDisplayModeError] = useState<string | null>(null);
+  const displayModeSavingRef = useRef(false);
+  const displayModeControllerRef = useRef(
+    createBrowserDisplayModeController({
+      get: () => ipcBridge.browserSession.displayMode.get.invoke(),
+      put: (next) =>
+        ipcBridge.browserSession.displayMode.put.invoke({ display_mode: next }),
+    })
+  );
   const [persistentLogin, setPersistentLogin] = useState(true);
   const [fullPower, setFullPower] = useState(false);
   const [siteMemory, setSiteMemory] = useState(false);
@@ -385,17 +408,11 @@ const BrowserUseSettingsContent: React.FC = () => {
     setBrowserUse(configService.get('agent.browserUse') ?? true);
     const displayModeMigration = migrateBrowserDisplayMode({
       displayMode: configService.get('agent.browserUse.displayMode'),
-      silent: configService.get('agent.browserUse.silent'),
+      displayModeVersion: configService.get('agent.browserUse.displayModeVersion'),
     });
     setDisplayMode(
       displayModeMigration.displayMode === 'external' ? 'external' : 'headless'
     );
-    if (displayModeMigration.shouldPersist) {
-      configService.set('agent.browserUse.displayMode', displayModeMigration.displayMode).catch(() => {
-        configService.setLocal('agent.browserUse.displayMode', undefined);
-        Message.error(translationRef.current('settings.browserDisplayModeSaveFailed'));
-      });
-    }
     setSource((configService.get('agent.browserUse.source') as BrowserSource) ?? 'system');
     setPersistentLogin(storedPersistentLogin);
     setFullPower(storedPersistentLogin ? false : storedFullPower);
@@ -442,6 +459,45 @@ const BrowserUseSettingsContent: React.FC = () => {
       capabilityLoader.dispose();
     };
   }, []);
+
+  const loadDisplayMode = useCallback(async () => {
+    setDisplayModeStatus('loading');
+    setDisplayModeError(null);
+    const result = await displayModeControllerRef.current.load();
+    if (result.kind === 'applied') {
+      setDisplayMode(result.displayMode);
+      // Keep the renderer cache aligned only after the authoritative backend
+      // has answered. Mode plus v2 marker form one trusted lineage boundary;
+      // neither cache entry is used as proof that a write succeeded.
+      cacheAuthoritativeBrowserDisplayMode(result.displayMode);
+      setDisplayModeStatus('ready');
+    } else if (result.kind === 'error') {
+      const unavailable = isBrowserDisplayModeUnavailableError(result.error);
+      setDisplayModeStatus(unavailable ? 'unavailable' : 'error');
+      setDisplayModeError(
+        unavailable
+          ? null
+          : (browserSettingsServerErrorMessage(result.error) ?? null)
+      );
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!canManageBrowserSettings) return;
+    void loadDisplayMode();
+  }, [canManageBrowserSettings, loadDisplayMode]);
+
+  useEffect(
+    () => () => displayModeControllerRef.current.dispose(),
+    []
+  );
+
+  useEffect(() => {
+    if (!canManageBrowserSettings) return;
+    return ipcBridge.conversation.reconnected.on(() => {
+      void loadDisplayMode();
+    });
+  }, [canManageBrowserSettings, loadDisplayMode]);
 
   const loadResourcePolicy = useCallback(async () => {
     setResourcePolicyStatus('loading');
@@ -552,18 +608,65 @@ const BrowserUseSettingsContent: React.FC = () => {
   // policy; Agent tool JSON has no path into it, and neither option restores
   // the removed embedded viewer or user takeover.
   const handleDisplayModeChange = useCallback(
-    (value: string) => {
-      const next: BrowserDisplayModeSetting = value === 'external' ? 'external' : 'headless';
-      setDisplayMode((prev) => {
-        configService.set('agent.browserUse.displayMode', next).catch(() => {
-          setDisplayMode(prev);
-          configService.setLocal('agent.browserUse.displayMode', prev);
-          Message.error(translationRef.current('settings.browserDisplayModeSaveFailed'));
-        });
-        return next;
-      });
+    async (value: string) => {
+      if (
+        displayModeStatus !== 'ready' ||
+        displayModeSaving ||
+        displayModeSavingRef.current
+      ) {
+        return;
+      }
+      const next: BrowserDisplayMode = value === 'external' ? 'external' : 'headless';
+      if (next === displayMode) return;
+      displayModeSavingRef.current = true;
+      setDisplayModeSaving(true);
+      setDisplayModeError(null);
+      try {
+        const result = await displayModeControllerRef.current.save(next);
+        if (result.kind === 'applied') {
+          setDisplayMode(result.displayMode);
+          setDisplayModeStatus('ready');
+          cacheAuthoritativeBrowserDisplayMode(result.displayMode);
+          Message.success(translationRef.current('settings.browserDisplayModeSaved'));
+          if (result.verificationError) {
+            const message = browserSettingsServerErrorMessage(result.verificationError);
+            setDisplayModeError(message ?? null);
+            Message.error(
+              message ||
+                translationRef.current('settings.browserDisplayModeLoadFailedWithDetails', {
+                  error: translationRef.current('common.unknownError'),
+                })
+            );
+          }
+        } else if (result.kind === 'rejected') {
+          const message = result.nonPersistent
+            ? browserSettingsServerErrorMessage(result.error)
+            : result.unconfirmed
+              ? translationRef.current('settings.browserDisplayModeUnconfirmed')
+              : browserSettingsServerErrorMessage(result.error);
+          setDisplayMode(result.displayMode);
+          setDisplayModeStatus('ready');
+          setDisplayModeError(message ?? null);
+          // A live GET reconciles what the Hub currently runs, but a rejected
+          // PUT does not prove that value was persisted. Never promote a
+          // rejected result into the trusted mode+v2 fallback cache.
+          Message.error(
+            message || translationRef.current('settings.browserDisplayModeSaveFailed')
+          );
+        } else if (result.kind === 'unknown') {
+          const message = browserSettingsServerErrorMessage(result.error);
+          setDisplayModeStatus('error');
+          setDisplayModeError(message ?? null);
+          Message.error(
+            message || translationRef.current('settings.browserDisplayModeSaveFailed')
+          );
+        }
+      } finally {
+        displayModeSavingRef.current = false;
+        setDisplayModeSaving(false);
+      }
     },
-    []
+    [displayMode, displayModeSaving, displayModeStatus]
   );
 
   const persistResourcePolicy = useCallback(
@@ -754,20 +857,40 @@ const BrowserUseSettingsContent: React.FC = () => {
                   <Radio value='system'>{t('settings.browserSourceSystem')}</Radio>
                 </RadioGroup>
               </PreferenceRow>
-              <PreferenceRow
-                label={t('settings.browserDisplayMode')}
-                description={t('settings.browserDisplayModeDesc')}
-              >
-                <RadioGroup
-                  type='button'
-                  value={displayMode}
-                  disabled={!browserUse}
-                  onChange={handleDisplayModeChange}
-                >
-                  <Radio value='headless'>{t('settings.browserDisplayModeHeadless')}</Radio>
-                  <Radio value='external'>{t('settings.browserDisplayModeExternal')}</Radio>
-                </RadioGroup>
-              </PreferenceRow>
+              {canManageBrowserSettings && (
+                <>
+                  <PreferenceRow
+                    label={t('settings.browserDisplayMode')}
+                    description={t('settings.browserDisplayModeDesc')}
+                  >
+                    <RadioGroup
+                      type='button'
+                      value={displayMode}
+                      disabled={displayModeStatus !== 'ready' || displayModeSaving}
+                      onChange={(value) => void handleDisplayModeChange(value)}
+                    >
+                      <Radio value='headless'>{t('settings.browserDisplayModeHeadless')}</Radio>
+                      <Radio value='external'>{t('settings.browserDisplayModeExternal')}</Radio>
+                    </RadioGroup>
+                  </PreferenceRow>
+                  {(displayModeStatus === 'unavailable' ||
+                    displayModeStatus === 'error' ||
+                    displayModeError) && (
+                    <Alert
+                      className='my-8px'
+                      type='warning'
+                      showIcon
+                      content={
+                        displayModeError
+                          ? t('settings.browserDisplayModeLoadFailedWithDetails', {
+                              error: displayModeError,
+                            })
+                          : t('settings.browserDisplayModeUnavailable')
+                      }
+                    />
+                  )}
+                </>
+              )}
               {canManagePrimaryIdentity && (
                 <PreferenceRow
                   label={t('settings.browserLogin')}

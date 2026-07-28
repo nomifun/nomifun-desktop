@@ -50,6 +50,76 @@ pub async fn build_backend_for_fixture(profile: &str) -> CdpBackend {
         .await
 }
 
+/// 同 [`build_backend_for_fixture`]，但用本次测试独占的临时 user-data-dir。
+///
+/// 固定的 temp profile 会保留上次测试进程写入的 ownership marker；直接调用 `launch_chrome`
+/// 不会越权接管另一个 app instance 的 marker（产品启动恢复层才负责该动作），因此重复运行会按
+/// 安全契约 fail closed。返回 guard 让 profile 至少活到 backend 被显式 drop。
+pub async fn build_backend_for_fixture_in_temp_profile(
+    profile: &str,
+) -> (CdpBackend, tempfile::TempDir) {
+    let profile_dir = tempfile::Builder::new()
+        .prefix(&format!("nomifun-observe-{profile}-"))
+        .tempdir()
+        .expect("create unique browser test profile");
+    let backend = build_backend_for_fixture_inner_at(
+        profile_dir.path().to_path_buf(),
+        None,
+        false,
+        false,
+        FirewallConfig::default(),
+        None,
+        None,
+        None,
+    )
+    .await;
+    (backend, profile_dir)
+}
+
+/// Build the standalone/direct backend on an exact caller-owned stable profile.
+/// Lifecycle regressions use this to prove Drop removes only runtime artifacts
+/// and permits a second launch on the same path.
+pub async fn build_backend_for_fixture_at_profile(
+    user_data_dir: std::path::PathBuf,
+) -> CdpBackend {
+    build_backend_for_fixture_inner_at(
+        user_data_dir,
+        None,
+        false,
+        false,
+        FirewallConfig::default(),
+        None,
+        None,
+        None,
+    )
+    .await
+}
+
+/// `CdpBackend` 的 Drop 会关闭 Chrome，但 Windows 可能在极短时间内仍持有 profile 文件句柄。
+/// `TempDir::drop` 只尝试删除一次，因此测试在 backend drop 后用有界重试完成临时目录清理。
+pub async fn cleanup_temp_profile(profile_dir: tempfile::TempDir) {
+    let path = profile_dir.path().to_path_buf();
+    if profile_dir.close().is_ok() {
+        return;
+    }
+
+    let mut last_error = None;
+    for _ in 0..40 {
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        match std::fs::remove_dir_all(&path) {
+            Ok(()) => return,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return,
+            Err(error) => last_error = Some(error),
+        }
+    }
+    panic!(
+        "temporary browser test profile remained after bounded cleanup: {}",
+        last_error
+            .map(|error| error.to_string())
+            .unwrap_or_else(|| "unknown cleanup error".into())
+    );
+}
+
 /// 同 [`build_backend_for_fixture`]，但 **evaluate 全权模式 ON**（`EngineConfig.evaluate_full_power
 /// = true` 的等价 test seam）——F1-sec 验「全权 LIVE 开 → act(Evaluate) 放行」。
 pub async fn build_backend_for_fixture_full_power(profile: &str) -> CdpBackend {
@@ -168,8 +238,8 @@ pub async fn build_backend_for_fixture_headful(profile: &str) -> CdpBackend {
         user_data_dir: std::env::temp_dir().join(format!("nomifun-observe-{profile}-profile")),
         headful: true,
     };
-    // force_headless=false → headful 真窗口（启动时最小化）。这是 --no-startup-window
-    // keep-alive 与受信任 foreground 恢复的风险路径。
+    // force_headless=false → headful 真窗口；CdpBackend 会把初始 target 作为前台 target
+    // 创建。这是 --no-startup-window keep-alive 与受信任 foreground 的风险路径。
     let launched = launch_chrome(&cfg, false).await.expect("launch headful chrome");
     CdpBackend::from_launched(
         launched,
@@ -271,6 +341,30 @@ async fn build_backend_for_fixture_inner(
     storage_state: Option<serde_json::Value>,
     dns_resolver: Option<Arc<dyn HostResolver>>,
 ) -> CdpBackend {
+    build_backend_for_fixture_inner_at(
+        std::env::temp_dir().join(format!("nomifun-observe-{profile}-profile")),
+        download_dir,
+        evaluate_full_power,
+        evaluate_persistent_login,
+        firewall,
+        egress_approver,
+        storage_state,
+        dns_resolver,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn build_backend_for_fixture_inner_at(
+    user_data_dir: std::path::PathBuf,
+    download_dir: Option<String>,
+    evaluate_full_power: bool,
+    evaluate_persistent_login: bool,
+    firewall: FirewallConfig,
+    egress_approver: Option<Arc<dyn EgressApprover>>,
+    storage_state: Option<serde_json::Value>,
+    dns_resolver: Option<Arc<dyn HostResolver>>,
+) -> CdpBackend {
     let chrome = nomi_browser_engine::acquire::resolve_chrome_path(
         &std::env::temp_dir().join("nomifun-browser-data"),
         None,
@@ -279,7 +373,7 @@ async fn build_backend_for_fixture_inner(
     .expect("resolve chrome (set NOMIFUN_CHROME_BINARY)");
     let cfg = LaunchConfig {
         chrome_path: chrome,
-        user_data_dir: std::env::temp_dir().join(format!("nomifun-observe-{profile}-profile")),
+        user_data_dir,
         headful: false,
     };
     let launched = launch_chrome(&cfg, true).await.expect("launch chrome");

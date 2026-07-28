@@ -12,6 +12,7 @@ import { I18nextProvider, initReactI18next } from 'react-i18next';
 import { renderToStaticMarkup } from 'react-dom/server';
 import type { IBrowserLane, IBrowserOverview } from '@/common/browser/browserTypes';
 import enBrowser from '../../services/i18n/locales/en-US/browser.json';
+import BrowserDisplayModeControl from './BrowserDisplayModeControl';
 import BrowserHostDiagnostics from './BrowserHostDiagnostics';
 import BrowserInventoryTree from './BrowserInventoryTree';
 import BrowserLaneDetails from './BrowserLaneDetails';
@@ -47,16 +48,19 @@ const renderBrowser = (content: React.ReactElement): string =>
 
 const renderLaneDetails = (
   candidate: IBrowserLane,
-  canForeground = false
+  canChangeVisibility = false,
+  hostHeadful: boolean | null = false
 ): string =>
   renderBrowser(
     <BrowserLaneDetails
       lane={candidate}
       closing={false}
-      foregrounding={false}
-      canForeground={canForeground}
+      visibilityChanging={false}
+      hostHeadful={hostHeadful}
+      canChangeVisibility={canChangeVisibility}
       onClose={() => undefined}
       onForeground={() => undefined}
+      onBackground={() => undefined}
     />
   );
 
@@ -283,8 +287,8 @@ describe('Browser management presentation', () => {
     expect(html.includes('system_memory_pressure')).toBe(true);
     expect(html.includes('recommended concurrency 2')).toBe(true);
     expect(html.includes('>Close lane<')).toBe(true);
-    expect(html.includes('Status only')).toBe(true);
-    expect(html.includes('runs headlessly with no visible window by default')).toBe(true);
+    expect(html.includes('Managed')).toBe(true);
+    expect(html.includes('runs silently with no visible window by default')).toBe(true);
   });
 
   test('renders critical pressure without disabling close-all when lanes still exist', () => {
@@ -295,7 +299,7 @@ describe('Browser management presentation', () => {
         pressureState='critical'
         refreshing={false}
         closingAll={false}
-        hasLanes
+        hasManagedResources
         canCloseAll
         closeAllLabel='Close all globally'
         onRefresh={() => undefined}
@@ -318,7 +322,7 @@ describe('Browser management presentation', () => {
           queuedCount={0}
           refreshing={false}
           closingAll={false}
-          hasLanes
+          hasManagedResources
           canCloseAll={canCloseAll}
           closeAllLabel='Owner-only close all'
           onRefresh={() => undefined}
@@ -333,16 +337,62 @@ describe('Browser management presentation', () => {
     expect(deniedHtml.includes('1 running')).toBe(true);
   });
 
+  test('keeps close-all enabled for a zero-lane managed Host or pending cleanup', () => {
+    const html = renderBrowser(
+      <BrowserPageHeader
+        runningCount={0}
+        queuedCount={0}
+        refreshing={false}
+        closingAll={false}
+        hasManagedResources
+        canCloseAll
+        closeAllLabel='Terminate residual browser resources'
+        onRefresh={() => undefined}
+        onCloseAll={() => undefined}
+      />
+    );
+
+    expect(html.includes('Terminate residual browser resources')).toBe(true);
+    expect(html.includes('disabled')).toBe(false);
+    expect(browserPageSource.includes('hasResidualResources')).toBe(true);
+    expect(browserPageSource.includes("'browser.page.residualResources'")).toBe(true);
+    expect(browserPageSource.includes("'browser.page.residualResourcesUser'")).toBe(true);
+    expect(browserPageSource.includes('overview?.managed_host_count')).toBe(true);
+    expect(browserPageSource.includes('overview?.pending_cleanup_count')).toBe(true);
+  });
+
   test('wires Browser page close-all visibility to normalized overview capability', () => {
     expect(browserPageSource.includes('resolveBrowserOverviewCapabilities(overview)')).toBe(true);
     expect(browserPageSource.includes('canCloseAll={canCloseAll}')).toBe(true);
   });
 
-  test('does not read presentation settings or expose a viewer seam from the Browser page', () => {
-    expect(browserPageSource.includes("from '@/common/browser/browserSettings'")).toBe(false);
-    expect(browserPageSource.includes("useConfig('agent.browserUse.displayMode')")).toBe(false);
-    expect(browserPageSource.includes('displayMode=')).toBe(false);
+  test('uses the live owner policy API without restoring an embedded viewer seam', () => {
+    expect(browserPageSource.includes('ipcBridge.browserSession.displayMode.get.invoke()')).toBe(true);
+    expect(browserPageSource.includes('ipcBridge.browserSession.displayMode.put.invoke')).toBe(true);
+    expect(browserPageSource.includes('<BrowserDisplayModeControl')).toBe(true);
+    expect(
+      browserPageSource.includes(
+        '{canManageBrowserSettings && !capabilityUnavailable && ('
+      )
+    ).toBe(true);
     expect(browserPageSource.includes('onInventoryRefresh=')).toBe(false);
+    expect(browserPageSource.includes('EmbeddedBrowserViewer')).toBe(false);
+  });
+
+  test('presents silent headless as the adjustable global default', () => {
+    const html = renderBrowser(
+      <BrowserDisplayModeControl
+        displayMode='headless'
+        status='ready'
+        saving={false}
+        onChange={() => undefined}
+      />
+    );
+
+    expect(html.includes('Global browser visibility default')).toBe(true);
+    expect(html.includes('Routine Browser search and knowledge lookup')).toBe(true);
+    expect(html.includes('Silent headless (default)')).toBe(true);
+    expect(html.includes('Visible window')).toBe(true);
   });
 
   test('keeps lane management visible when the lane reports an error', () => {
@@ -363,7 +413,7 @@ describe('Browser management presentation', () => {
     expect(html.includes('>Close lane<')).toBe(true);
   });
 
-  test('renders a complete status-only lane surface without importing viewer code', () => {
+  test('renders a complete managed lane surface without importing viewer code', () => {
     const html = renderLaneDetails(
       lane({
         lane_id: 'status-only-lane',
@@ -406,7 +456,7 @@ describe('Browser management presentation', () => {
       })
     );
 
-    expect(html.includes('data-browser-lane-status-only="true"')).toBe(true);
+    expect(html.includes('data-browser-lane-management="true"')).toBe(true);
     expect(html.includes('Managed browser page')).toBe(true);
     expect(html.includes('https://managed.example/current')).toBe(true);
     expect(html.includes('>2<')).toBe(true);
@@ -425,7 +475,7 @@ describe('Browser management presentation', () => {
     expect(laneDetailsSource.includes('Take control')).toBe(false);
     expect(laneDetailsSource.includes('onInput')).toBe(false);
     expect(browserPageSource.includes('EmbeddedBrowserViewer')).toBe(false);
-    expect(browserPageSource.includes('displayMode')).toBe(false);
+    expect(browserPageSource.includes('displayMode.put.invoke')).toBe(true);
     expect(browserPageSource.includes('viewerToken')).toBe(false);
   });
 
@@ -435,7 +485,9 @@ describe('Browser management presentation', () => {
       true
     );
     expect(runningPrimary.includes('Open browser in foreground')).toBe(true);
-    expect(runningPrimary.includes('data-browser-foreground-action="true"')).toBe(true);
+    expect(
+      runningPrimary.includes('data-browser-visibility-action="foreground"')
+    ).toBe(true);
     expect(runningPrimary.includes('disabled')).toBe(false);
 
     for (const unavailable of [
@@ -445,8 +497,47 @@ describe('Browser management presentation', () => {
     ]) {
       const html = renderLaneDetails(unavailable);
       expect(html.includes('Open browser in foreground')).toBe(false);
-      expect(html.includes('data-browser-foreground-action')).toBe(false);
+      expect(html.includes('data-browser-visibility-action')).toBe(false);
     }
+  });
+
+  test('uses actual Host headful state to offer a return to silent headless action', () => {
+    const html = renderLaneDetails(
+      lane({
+        browser_epoch: 8,
+        identity: { mode: 'primary' },
+      }),
+      true,
+      true
+    );
+
+    expect(html.includes('Return to silent headless')).toBe(true);
+    expect(
+      html.includes('data-browser-visibility-action="background"')
+    ).toBe(true);
+    expect(html.includes('Open browser in foreground')).toBe(false);
+    expect(
+      browserPageSource.includes('host.epoch === selectedLane.browser_epoch')
+    ).toBe(true);
+    expect(browserPageSource.includes('hostHeadful={selectedLaneHost?.headful}')).toBe(
+      true
+    );
+  });
+
+  test('makes visibility and close actions mutually exclusive while either is busy', () => {
+    expect(laneDetailsSource.includes('disabled={closing || actionsDisabled}')).toBe(true);
+    expect(
+      laneDetailsSource.includes('disabled={visibilityChanging || actionsDisabled}')
+    ).toBe(true);
+    expect(browserPageSource.includes('managementMutationBusy')).toBe(true);
+    expect(browserPageSource.includes('if (managementMutationBusy) return;')).toBe(true);
+    expect(browserPageSource.includes('managementDisabled={managementMutationBusy}')).toBe(
+      true
+    );
+    expect(
+      browserPageSource.includes('disabled={managementMutationBusy && !displayModeSaving}')
+    ).toBe(true);
+    expect(inventoryTreeSource.includes('disabled={managementDisabled}')).toBe(true);
   });
 
   test('renders Host diagnostics collapsed with safe resource metadata', () => {
@@ -470,6 +561,7 @@ describe('Browser management presentation', () => {
           host_id: 'host-primary',
           state: 'running',
           epoch: 7,
+          headful: false,
           identity_mode: 'primary',
           lane_count: 2,
           rss_bytes: 64 * 1024 * 1024,
@@ -486,6 +578,7 @@ describe('Browser management presentation', () => {
     expect(html.includes('host-primary')).toBe(true);
     expect(html.includes('64 MiB')).toBe(true);
     expect(html.includes('Primary')).toBe(true);
+    expect(html.includes('Silent headless')).toBe(true);
     expect(html.includes('browser_memory_pressure')).toBe(true);
     expect(html.includes('cdp')).toBe(false);
     expect(html.includes('profile')).toBe(false);

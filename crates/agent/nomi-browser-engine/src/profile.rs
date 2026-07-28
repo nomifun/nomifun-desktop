@@ -26,9 +26,10 @@
 //! 全保留）。文件不存在 = 首启，跳过；JSON 损坏 = best-effort 不致命（warn 后照常启动）。
 //! 必须在 chrome **未运行**时改（launch 前，本引擎专属 dir 同一时刻只一个 chrome）。
 
-#[cfg(any(windows, test))]
-use std::collections::{HashMap, HashSet};
-use std::io::Write;
+use std::collections::HashMap;
+#[cfg(windows)]
+use std::collections::HashSet;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
@@ -85,18 +86,36 @@ pub fn scrub_prefs_json(text: &str) -> Result<Option<String>, String> {
 /// 返回 `Err` 仅限**非 NotFound 的读 I/O 错误**（如权限），交调用方 warn。
 pub fn scrub_crash_markers(user_data_dir: &Path) -> std::io::Result<()> {
     let path = preferences_path(user_data_dir);
-    let text = match std::fs::read_to_string(&path) {
-        Ok(t) => t,
+    let (mut source, source_identity) = match open_verified_preferences(&path) {
+        Ok(opened) => opened,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()), // 首启，无 profile
         Err(e) => return Err(e),
     };
+    let mut text = String::new();
+    source.read_to_string(&mut text)?;
     match scrub_prefs_json(&text) {
         Ok(Some(new_text)) => {
             // 原子回写：写同目录临时文件再 rename（同卷 rename 是原子替换）。
-            let tmp = path.with_extension("nomi-scrub.tmp");
-            std::fs::write(&tmp, new_text)?;
-            std::fs::rename(&tmp, &path)?;
-            Ok(())
+            drop(source);
+            let (tmp_path, mut tmp_file) = create_unique_preferences_temp(&path)?;
+            let replace_result = (|| -> std::io::Result<()> {
+                tmp_file.write_all(new_text.as_bytes())?;
+                tmp_file.sync_all()?;
+                drop(tmp_file);
+                let (current, current_identity) = open_verified_preferences(&path)?;
+                if current_identity != source_identity {
+                    return Err(std::io::Error::other(
+                        "Preferences changed during crash-marker scrub",
+                    ));
+                }
+                replace_preferences_file(&path, &tmp_path)?;
+                drop(current);
+                Ok(())
+            })();
+            if replace_result.is_err() {
+                let _ = std::fs::remove_file(&tmp_path);
+            }
+            replace_result
         }
         Ok(None) => Ok(()), // 已干净
         Err(msg) => {
@@ -127,15 +146,192 @@ pub fn clear_stale_singleton(user_data_dir: &Path) {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct PreferencesFileIdentity {
+    #[cfg(windows)]
+    volume_serial_number: u32,
+    #[cfg(windows)]
+    file_index: u64,
+    #[cfg(unix)]
+    device: u64,
+    #[cfg(unix)]
+    inode: u64,
+}
+
+fn invalid_preferences_file(reason: &'static str) -> std::io::Error {
+    std::io::Error::new(std::io::ErrorKind::InvalidData, reason)
+}
+
+fn open_verified_preferences(
+    path: &Path,
+) -> std::io::Result<(std::fs::File, PreferencesFileIdentity)> {
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
+        use windows_sys::Win32::Storage::FileSystem::{
+            FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_OPEN_REPARSE_POINT,
+            FILE_SHARE_DELETE, FILE_SHARE_READ,
+        };
+
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(FILE_SHARE_READ | FILE_SHARE_DELETE)
+            .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+            .open(path)?;
+        let metadata = file.metadata()?;
+        if !metadata.is_file()
+            || metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+        {
+            return Err(invalid_preferences_file(
+                "Preferences is a reparse point or non-regular file",
+            ));
+        }
+        let (volume_serial_number, file_index, number_of_links) =
+            windows_file_identity(&file)?;
+        if number_of_links != 1 {
+            return Err(invalid_preferences_file(
+                "Preferences has multiple hard links",
+            ));
+        }
+        return Ok((
+            file,
+            PreferencesFileIdentity {
+                volume_serial_number,
+                file_index,
+            },
+        ));
+    }
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW)
+            .open(path)?;
+        let metadata = file.metadata()?;
+        if !metadata.is_file() {
+            return Err(invalid_preferences_file(
+                "Preferences is not a regular file",
+            ));
+        }
+        if metadata.nlink() != 1 {
+            return Err(invalid_preferences_file(
+                "Preferences has multiple hard links",
+            ));
+        }
+        Ok((
+            file,
+            PreferencesFileIdentity {
+                device: metadata.dev(),
+                inode: metadata.ino(),
+            },
+        ))
+    }
+}
+
+fn create_unique_preferences_temp(
+    preferences: &Path,
+) -> std::io::Result<(PathBuf, std::fs::File)> {
+    let parent = preferences.parent().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "Preferences has no parent directory",
+        )
+    })?;
+    for _ in 0..16 {
+        let mut random = [0_u8; 16];
+        getrandom::getrandom(&mut random)
+            .map_err(|error| std::io::Error::other(error.to_string()))?;
+        let path = parent.join(format!(
+            ".{PREFERENCES_FILE}.nomi-scrub-{}.tmp",
+            hex::encode(random)
+        ));
+        match std::fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&path)
+        {
+            Ok(file) => return Ok((path, file)),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Err(std::io::Error::new(
+        std::io::ErrorKind::AlreadyExists,
+        "could not allocate a unique Preferences scrub temp file",
+    ))
+}
+
+#[cfg(windows)]
+fn replace_preferences_file(
+    preferences: &Path,
+    replacement: &Path,
+) -> std::io::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Storage::FileSystem::{
+        ReplaceFileW, REPLACEFILE_WRITE_THROUGH,
+    };
+
+    let preferences = preferences
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect::<Vec<_>>();
+    let replacement = replacement
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect::<Vec<_>>();
+    // SAFETY: both buffers are live, NUL-terminated UTF-16 paths; optional
+    // backup/exclusion pointers are intentionally null.
+    let replaced = unsafe {
+        ReplaceFileW(
+            preferences.as_ptr(),
+            replacement.as_ptr(),
+            std::ptr::null(),
+            REPLACEFILE_WRITE_THROUGH,
+            std::ptr::null(),
+            std::ptr::null(),
+        )
+    };
+    if replaced == 0 {
+        Err(std::io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
+}
+
+#[cfg(unix)]
+fn replace_preferences_file(
+    preferences: &Path,
+    replacement: &Path,
+) -> std::io::Result<()> {
+    std::fs::rename(replacement, preferences)
+}
+
 /// Ownership marker written into every application-managed Chromium
 /// `--user-data-dir`.
 ///
 /// The payload deliberately contains only process ownership data. It never
 /// stores a CDP endpoint, websocket URL, cookie, lease, token, or other secret.
 pub const OWNERSHIP_MARKER_FILE: &str = ".nomifun-browser-owner.json";
+/// Append-only committed half of an ephemeral ownership transition.
+///
+/// The provisional record deliberately remains at [`OWNERSHIP_MARKER_FILE`].
+/// Publishing the committed browser identity at a distinct path means the
+/// transition never needs a compare-then-overwrite rename: a competing writer
+/// can make the transition fail closed, but can never be overwritten.
+const COMMITTED_OWNERSHIP_RECORD_FILE: &str =
+    ".nomifun-browser-owner.committed.json";
+const DEVTOOLS_ACTIVE_PORT_FILE: &str = "DevToolsActivePort";
 
 const OWNERSHIP_MARKER_VERSION: u32 = 1;
-const MAX_MARKER_SCAN_DEPTH: usize = 4;
+/// Defensive bound for a complete no-follow ownership-marker walk. Hitting the
+/// bound is an explicit incomplete scan and every destructive caller fails
+/// closed; directories are never silently truncated by depth.
+const MAX_MARKER_SCAN_ENTRIES: usize = 100_000;
+const MAX_EPHEMERAL_DELETE_DEPTH: usize = 256;
 #[cfg(not(windows))]
 const PROCESS_DISCOVERY_RETRIES: usize = 40;
 #[cfg(not(windows))]
@@ -146,6 +342,49 @@ const PROCESS_TREE_ABSENCE_CONFIRMATIONS: usize = 2;
 const PROFILE_OPERATION_LOCK_PREFIX: &str = ".nomifun-browser-operation";
 
 static MANAGED_APP_INSTANCE_ID: OnceLock<String> = OnceLock::new();
+
+#[cfg(test)]
+thread_local! {
+    static OWNERSHIP_COMMIT_DIRECTORY_BOUND_HOOK:
+        std::cell::RefCell<Option<Box<dyn FnOnce(&Path)>>> =
+        std::cell::RefCell::new(None);
+    static OWNERSHIP_COMMIT_BARRIER_HOOK:
+        std::cell::RefCell<Option<Box<dyn FnOnce(&Path, &Path)>>> =
+        std::cell::RefCell::new(None);
+    static FINAL_PROFILE_RMDIR_BARRIER_HOOK:
+        std::cell::RefCell<Option<Box<dyn FnOnce(&Path)>>> =
+        std::cell::RefCell::new(None);
+}
+
+#[cfg(test)]
+fn run_ownership_commit_directory_bound_hook(profile_dir: &Path) {
+    OWNERSHIP_COMMIT_DIRECTORY_BOUND_HOOK.with(|hook| {
+        if let Some(hook) = hook.borrow_mut().take() {
+            hook(profile_dir);
+        }
+    });
+}
+
+#[cfg(test)]
+fn run_ownership_commit_barrier_hook(
+    profile_dir: &Path,
+    committed_path: &Path,
+) {
+    OWNERSHIP_COMMIT_BARRIER_HOOK.with(|hook| {
+        if let Some(hook) = hook.borrow_mut().take() {
+            hook(profile_dir, committed_path);
+        }
+    });
+}
+
+#[cfg(test)]
+fn run_final_profile_rmdir_barrier_hook(profile_dir: &Path) {
+    FINAL_PROFILE_RMDIR_BARRIER_HOOK.with(|hook| {
+        if let Some(hook) = hook.borrow_mut().take() {
+            hook(profile_dir);
+        }
+    });
+}
 
 #[derive(Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -175,25 +414,114 @@ impl std::fmt::Debug for ProcessIdentity {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
+enum BrowserOwnershipPhase {
+    /// An explicitly ephemeral profile exists and may have spawned Chromium,
+    /// but the exact browser identity has not been committed yet.
+    Provisional,
+    /// The marker contains the exact managed Chromium process identity.
+    Committed,
+}
+
+impl Default for BrowserOwnershipPhase {
+    fn default() -> Self {
+        // Markers written before the phase field was introduced always carried
+        // an exact browser identity.
+        Self::Committed
+    }
+}
+
 #[derive(Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct BrowserOwnershipMarker {
     version: u32,
+    #[serde(default)]
+    phase: BrowserOwnershipPhase,
     app_instance_id: String,
     owner_app: ProcessIdentity,
     browser: ProcessIdentity,
     profile_id: String,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ProfileDirectoryIdentity {
+    #[cfg(windows)]
+    volume_serial_number: u32,
+    #[cfg(windows)]
+    file_index: u64,
+    #[cfg(unix)]
+    device: u64,
+    #[cfg(unix)]
+    inode: u64,
+    #[cfg(unix)]
+    mount_key: [u8; 8],
+    #[cfg(target_os = "linux")]
+    mount_id: u64,
+}
+
 impl std::fmt::Debug for BrowserOwnershipMarker {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("BrowserOwnershipMarker")
             .field("version", &self.version)
+            .field("phase", &self.phase)
             .field("app_instance_id_configured", &!self.app_instance_id.is_empty())
             .field("owner_app", &self.owner_app)
             .field("browser", &self.browser)
             .field("profile_id_configured", &!self.profile_id.is_empty())
             .finish()
+    }
+}
+
+/// Opaque proof of the exact ownership marker committed for one managed
+/// Chromium launch.
+///
+/// The canonical profile directory is captured at commit time so normal
+/// shutdown cannot accidentally clear an identical marker copied into another
+/// profile. The marker payload and profile path are deliberately not exposed.
+#[derive(Clone)]
+pub(crate) struct BrowserOwnershipToken {
+    profile_dir: PathBuf,
+    profile_identity: ProfileDirectoryIdentity,
+    marker_path: PathBuf,
+    marker: BrowserOwnershipMarker,
+}
+
+impl std::fmt::Debug for BrowserOwnershipToken {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BrowserOwnershipToken")
+            .field("profile_configured", &true)
+            .field("marker", &self.marker)
+            .finish()
+    }
+}
+
+/// Opaque authority for deleting one exact, explicitly ephemeral browser
+/// profile before an ownership marker has been committed.
+///
+/// The path is canonicalized while the caller holds the per-profile launch
+/// claim. Keeping this separate from [`BrowserOwnershipToken`] makes it
+/// impossible for a stable profile to enter the uncommitted whole-directory
+/// cleanup path by accident.
+#[derive(Clone)]
+pub(crate) struct EphemeralProfileCleanupToken {
+    profile_dir: PathBuf,
+    profile_identity: ProfileDirectoryIdentity,
+    provisional_marker: BrowserOwnershipMarker,
+}
+
+impl std::fmt::Debug for EphemeralProfileCleanupToken {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("EphemeralProfileCleanupToken")
+            .field("profile_configured", &true)
+            .finish()
+    }
+}
+
+impl EphemeralProfileCleanupToken {
+    pub(crate) fn into_profile_dir(self) -> PathBuf {
+        self.profile_dir
     }
 }
 
@@ -254,7 +582,6 @@ enum ProcessLookup {
 trait ProcessControl {
     fn current_process(&mut self) -> Result<ProcessIdentity, String>;
     fn lookup(&mut self, pid: u32) -> ProcessLookup;
-    fn terminate_tree(&mut self, expected: &ProcessIdentity) -> Result<usize, String>;
     fn confirm_tree_absent(&mut self, expected: &ProcessIdentity) -> Result<bool, String>;
 }
 
@@ -263,10 +590,31 @@ struct SystemProcessControl;
 struct ProfileOperationClaim {
     file: std::fs::File,
     profile_dir: PathBuf,
+    profile_identity: std::sync::Mutex<ProfileDirectoryIdentity>,
+    #[cfg(windows)]
+    profile_guard: std::sync::Mutex<Option<std::fs::File>>,
 }
 
 impl ProfileOperationClaim {
+    #[cfg(windows)]
     fn acquire(profile_dir: &Path) -> Result<Self, String> {
+        Self::acquire_internal(profile_dir, false)
+    }
+
+    #[cfg(not(windows))]
+    fn acquire(profile_dir: &Path) -> Result<Self, String> {
+        Self::acquire_internal(profile_dir)
+    }
+
+    #[cfg(windows)]
+    fn acquire_pinned(profile_dir: &Path) -> Result<Self, String> {
+        Self::acquire_internal(profile_dir, true)
+    }
+
+    fn acquire_internal(
+        profile_dir: &Path,
+        #[cfg(windows)] pin_profile_directory: bool,
+    ) -> Result<Self, String> {
         let metadata = std::fs::symlink_metadata(profile_dir)
             .map_err(|error| format!("inspect browser profile before locking: {error}"))?;
         if metadata.file_type().is_symlink() || !metadata.is_dir() {
@@ -301,9 +649,31 @@ impl ProfileOperationClaim {
         fs2::FileExt::try_lock_exclusive(&file).map_err(|error| {
             format!("browser profile is already being launched or recovered: {error}")
         })?;
+        #[cfg(windows)]
+        let (profile_identity, profile_guard) = if pin_profile_directory {
+            let guard = open_locked_non_reparse_directory(&canonical_profile)?;
+            let identity = windows_directory_identity(&guard)?;
+            (
+                ProfileDirectoryIdentity {
+                    volume_serial_number: identity.volume_serial_number,
+                    file_index: identity.file_index,
+                },
+                Some(guard),
+            )
+        } else {
+            (
+                capture_profile_directory_identity(&canonical_profile)?,
+                None,
+            )
+        };
+        #[cfg(not(windows))]
+        let profile_identity = capture_profile_directory_identity(&canonical_profile)?;
         Ok(Self {
             file,
             profile_dir: canonical_profile,
+            profile_identity: std::sync::Mutex::new(profile_identity),
+            #[cfg(windows)]
+            profile_guard: std::sync::Mutex::new(profile_guard),
         })
     }
 
@@ -313,6 +683,116 @@ impl ProfileOperationClaim {
         if canonical != self.profile_dir {
             return Err("browser profile operation claim belongs to a different directory".into());
         }
+        let expected = self.directory_identity()?;
+        if capture_profile_directory_identity(&canonical)? != expected {
+            return Err("browser profile directory identity changed under its operation claim".into());
+        }
+        Ok(())
+    }
+
+    /// Recreate the one exact claimed directory after a completed ephemeral
+    /// launch attempt removed it.
+    ///
+    /// The operation lock lives in the canonical parent, so deleting the child
+    /// directory does not release or change this claim. Re-creation is allowed
+    /// only when the caller supplies the same final component below that exact
+    /// canonical parent. Existing symlinks/junctions, files, or a directory
+    /// resolving anywhere else fail closed.
+    fn restore_exact_directory(&self, profile_dir: &Path) -> Result<(), String> {
+        match std::fs::symlink_metadata(profile_dir) {
+            Ok(metadata) => {
+                if metadata.file_type().is_symlink() || !metadata.is_dir() {
+                    return Err(
+                        "claimed browser profile retry target is not a regular directory".into(),
+                    );
+                }
+                return self.validates(profile_dir);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(format!(
+                    "inspect claimed browser profile retry target: {error}"
+                ));
+            }
+        }
+
+        let claimed_parent = self
+            .profile_dir
+            .parent()
+            .ok_or_else(|| "claimed browser profile has no parent directory".to_string())?;
+        let supplied_parent = profile_dir
+            .parent()
+            .ok_or_else(|| "browser profile retry target has no parent directory".to_string())?;
+        let supplied_name = profile_dir
+            .file_name()
+            .ok_or_else(|| "browser profile retry target has no final component".to_string())?;
+        let canonical_parent = std::fs::canonicalize(supplied_parent)
+            .map_err(|error| format!("canonicalize browser profile retry parent: {error}"))?;
+        if canonical_parent != claimed_parent
+            || claimed_parent.join(supplied_name) != self.profile_dir
+        {
+            return Err(
+                "browser profile retry target no longer matches the claimed directory".into(),
+            );
+        }
+
+        match std::fs::create_dir(profile_dir) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(error) => {
+                return Err(format!(
+                    "recreate exact ephemeral browser profile for retry: {error}"
+                ));
+            }
+        }
+        let metadata = std::fs::symlink_metadata(profile_dir)
+            .map_err(|error| format!("inspect recreated browser profile: {error}"))?;
+        if metadata.file_type().is_symlink() || !metadata.is_dir() {
+            return Err("recreated browser profile is not a regular directory".into());
+        }
+        let canonical = std::fs::canonicalize(profile_dir)
+            .map_err(|error| format!("canonicalize recreated browser profile: {error}"))?;
+        if canonical != self.profile_dir {
+            return Err("recreated browser profile no longer matches its claim".into());
+        }
+        let identity = capture_profile_directory_identity(&canonical)?;
+        *self
+            .profile_identity
+            .lock()
+            .map_err(|_| "browser profile identity lock was poisoned".to_string())? =
+            identity;
+        Ok(())
+    }
+
+    fn directory_identity(&self) -> Result<ProfileDirectoryIdentity, String> {
+        #[cfg(windows)]
+        {
+            let guard = self
+                .profile_guard
+                .lock()
+                .map_err(|_| "browser profile guard lock was poisoned".to_string())?;
+            if let Some(directory) = guard.as_ref() {
+                let identity = windows_directory_identity(directory)?;
+                return Ok(ProfileDirectoryIdentity {
+                    volume_serial_number: identity.volume_serial_number,
+                    file_index: identity.file_index,
+                });
+            }
+        }
+        self.profile_identity
+            .lock()
+            .map(|identity| *identity)
+            .map_err(|_| "browser profile identity lock was poisoned".to_string())
+    }
+
+    #[cfg(windows)]
+    fn release_profile_guard_for_directory_removal(&self) -> Result<(), String> {
+        let guard = self
+            .profile_guard
+            .lock()
+            .map_err(|_| "browser profile guard lock was poisoned".to_string())?
+            .take();
+        drop(guard);
         Ok(())
     }
 }
@@ -356,10 +836,6 @@ impl ProcessControl for SystemProcessControl {
         }
     }
 
-    fn terminate_tree(&mut self, expected: &ProcessIdentity) -> Result<usize, String> {
-        terminate_process_tree(expected)
-    }
-
     fn confirm_tree_absent(&mut self, expected: &ProcessIdentity) -> Result<bool, String> {
         confirm_process_tree_absent(expected)
     }
@@ -373,6 +849,14 @@ fn managed_app_instance_id() -> &'static str {
 
 fn ownership_marker_path(profile_dir: &Path) -> PathBuf {
     profile_dir.join(OWNERSHIP_MARKER_FILE)
+}
+
+fn committed_ownership_record_path(profile_dir: &Path) -> PathBuf {
+    profile_dir.join(COMMITTED_OWNERSHIP_RECORD_FILE)
+}
+
+fn is_ownership_record_name(name: &std::ffi::OsStr) -> bool {
+    name == OWNERSHIP_MARKER_FILE || name == COMMITTED_OWNERSHIP_RECORD_FILE
 }
 
 fn normalized_executable(path: &Path) -> Result<String, String> {
@@ -555,6 +1039,20 @@ fn validate_marker(marker: &BrowserOwnershipMarker, profile_dir: &Path) -> Resul
     }
     validate_marker_process(&marker.owner_app)?;
     validate_marker_process(&marker.browser)?;
+    if marker.phase == BrowserOwnershipPhase::Provisional
+        && !same_process(&marker.owner_app, &marker.browser)
+    {
+        return Err(
+            "provisional ownership marker does not match its exact owner identity".into(),
+        );
+    }
+    if marker.phase == BrowserOwnershipPhase::Committed
+        && same_process(&marker.owner_app, &marker.browser)
+    {
+        return Err(
+            "committed browser ownership marker aliases the application identity".into(),
+        );
+    }
     Ok(())
 }
 
@@ -578,8 +1076,10 @@ fn validate_marker_process(identity: &ProcessIdentity) -> Result<(), String> {
     Ok(())
 }
 
-fn read_marker(profile_dir: &Path) -> Result<BrowserOwnershipMarker, String> {
-    let path = ownership_marker_path(profile_dir);
+fn read_marker_at(
+    profile_dir: &Path,
+    path: &Path,
+) -> Result<BrowserOwnershipMarker, String> {
     let metadata = std::fs::symlink_metadata(&path)
         .map_err(|error| format!("read ownership marker metadata: {error}"))?;
     if metadata.file_type().is_symlink() || !metadata.is_file() {
@@ -591,6 +1091,231 @@ fn read_marker(profile_dir: &Path) -> Result<BrowserOwnershipMarker, String> {
         .map_err(|error| format!("parse ownership marker: {error}"))?;
     validate_marker(&marker, profile_dir)?;
     Ok(marker)
+}
+
+fn exact_provisional_to_committed_lineage(
+    provisional: &BrowserOwnershipMarker,
+    committed: &BrowserOwnershipMarker,
+) -> bool {
+    committed.phase == BrowserOwnershipPhase::Committed
+        && *provisional == provisional_predecessor(committed)
+}
+
+fn provisional_predecessor(
+    committed: &BrowserOwnershipMarker,
+) -> BrowserOwnershipMarker {
+    let mut provisional = committed.clone();
+    provisional.phase = BrowserOwnershipPhase::Provisional;
+    provisional.browser = provisional.owner_app.clone();
+    provisional
+}
+
+#[derive(Clone)]
+struct OwnershipRecordSet {
+    active_path: PathBuf,
+    active: BrowserOwnershipMarker,
+    provisional_predecessor: Option<(PathBuf, BrowserOwnershipMarker)>,
+}
+
+#[cfg(windows)]
+struct PinnedOwnershipRecord {
+    _file: std::fs::File,
+    path: PathBuf,
+    marker: BrowserOwnershipMarker,
+}
+
+#[cfg(windows)]
+struct WindowsOwnershipCommitGuards {
+    _committed: std::fs::File,
+    _provisional_predecessor: Option<PinnedOwnershipRecord>,
+}
+
+#[cfg(windows)]
+struct PinnedOwnershipRecordSet {
+    active: PinnedOwnershipRecord,
+    provisional_predecessor: Option<PinnedOwnershipRecord>,
+}
+
+#[cfg(windows)]
+impl PinnedOwnershipRecordSet {
+    fn marker(&self) -> &BrowserOwnershipMarker {
+        &self.active.marker
+    }
+
+    fn records(&self) -> OwnershipRecordSet {
+        OwnershipRecordSet {
+            active_path: self.active.path.clone(),
+            active: self.active.marker.clone(),
+            provisional_predecessor: self
+                .provisional_predecessor
+                .as_ref()
+                .map(|record| (record.path.clone(), record.marker.clone())),
+        }
+    }
+}
+
+#[cfg(windows)]
+fn open_pinned_ownership_record(
+    profile_dir: &Path,
+    path: PathBuf,
+) -> Result<Option<PinnedOwnershipRecord>, String> {
+    use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_OPEN_REPARSE_POINT,
+        FILE_SHARE_READ,
+    };
+
+    let mut file = match std::fs::OpenOptions::new()
+        .read(true)
+        // Existing or future write/delete handles are incompatible with this
+        // authority handle. Its parsed bytes therefore remain immutable until
+        // startup recovery has completed every absence proof.
+        .share_mode(FILE_SHARE_READ)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(&path)
+    {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(format!(
+                "open pinned browser ownership record: {error}"
+            ));
+        }
+    };
+    let metadata = file
+        .metadata()
+        .map_err(|error| format!("inspect pinned browser ownership record: {error}"))?;
+    if !metadata.is_file()
+        || metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+    {
+        return Err(
+            "pinned browser ownership record is a reparse point or non-file".into(),
+        );
+    }
+    let (_, _, links) = windows_file_identity(&file)
+        .map_err(|error| format!("identify pinned browser ownership record: {error}"))?;
+    if links != 1 {
+        return Err("pinned browser ownership record has multiple hard links".into());
+    }
+    const MAX_OWNERSHIP_RECORD_BYTES: u64 = 64 * 1024;
+    if metadata.len() > MAX_OWNERSHIP_RECORD_BYTES {
+        return Err("pinned browser ownership record is too large".into());
+    }
+    let mut bytes = Vec::with_capacity(metadata.len() as usize);
+    file.read_to_end(&mut bytes)
+        .map_err(|error| format!("read pinned browser ownership record: {error}"))?;
+    let marker: BrowserOwnershipMarker = serde_json::from_slice(&bytes)
+        .map_err(|error| format!("parse pinned browser ownership record: {error}"))?;
+    validate_marker(&marker, profile_dir)?;
+    Ok(Some(PinnedOwnershipRecord {
+        _file: file,
+        path,
+        marker,
+    }))
+}
+
+#[cfg(windows)]
+fn read_pinned_ownership_record_set(
+    profile_dir: &Path,
+) -> Result<PinnedOwnershipRecordSet, String> {
+    let marker_path = ownership_marker_path(profile_dir);
+    let committed_path = committed_ownership_record_path(profile_dir);
+    let committed =
+        open_pinned_ownership_record(profile_dir, committed_path)?;
+    let provisional =
+        open_pinned_ownership_record(profile_dir, marker_path)?;
+    match (committed, provisional) {
+        (None, None) => Err("browser ownership record disappeared before pinning".into()),
+        (None, Some(active)) => Ok(PinnedOwnershipRecordSet {
+            active,
+            provisional_predecessor: None,
+        }),
+        (Some(committed), provisional) => {
+            if committed.marker.phase != BrowserOwnershipPhase::Committed {
+                return Err(
+                    "pinned committed ownership sidecar has a non-committed phase".into(),
+                );
+            }
+            if let Some(predecessor) = provisional.as_ref()
+                && !exact_provisional_to_committed_lineage(
+                    &predecessor.marker,
+                    &committed.marker,
+                )
+            {
+                return Err(
+                    "pinned committed ownership record does not match its exact provisional predecessor"
+                        .into(),
+                );
+            }
+            Ok(PinnedOwnershipRecordSet {
+                active: committed,
+                provisional_predecessor: provisional,
+            })
+        }
+    }
+}
+
+/// Resolve one profile's append-only ownership state.
+///
+/// A valid pair resolves to its exact committed record. A committed sidecar
+/// also remains authoritative by itself: cleanup deletes the provisional
+/// predecessor first and the committed record last, so a crash between those
+/// unlinks retains the stronger exact browser lineage. A present but
+/// mismatched predecessor always quarantines the profile.
+fn read_ownership_record_set(
+    profile_dir: &Path,
+) -> Result<OwnershipRecordSet, String> {
+    let marker_path = ownership_marker_path(profile_dir);
+    let committed_path = committed_ownership_record_path(profile_dir);
+    match std::fs::symlink_metadata(&committed_path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            let active = read_marker_at(profile_dir, &marker_path)?;
+            Ok(OwnershipRecordSet {
+                active_path: marker_path,
+                active,
+                provisional_predecessor: None,
+            })
+        }
+        Err(error) => Err(format!(
+            "inspect committed ownership record: {error}"
+        )),
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
+            Err("committed ownership record is not a regular file".into())
+        }
+        Ok(_) => {
+            let committed = read_marker_at(profile_dir, &committed_path)?;
+            if committed.phase != BrowserOwnershipPhase::Committed {
+                return Err("committed ownership sidecar has a non-committed phase".into());
+            }
+            let provisional_predecessor = match std::fs::symlink_metadata(&marker_path) {
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+                Err(error) => {
+                    return Err(format!(
+                        "inspect provisional ownership predecessor: {error}"
+                    ));
+                }
+                Ok(_) => {
+                    let provisional = read_marker_at(profile_dir, &marker_path)?;
+                    if !exact_provisional_to_committed_lineage(&provisional, &committed) {
+                        return Err(
+                            "committed ownership record does not match its exact provisional predecessor"
+                                .into(),
+                        );
+                    }
+                    Some((marker_path, provisional))
+                }
+            };
+            Ok(OwnershipRecordSet {
+                active_path: committed_path,
+                active: committed,
+                provisional_predecessor,
+            })
+        }
+    }
+}
+
+fn read_marker(profile_dir: &Path) -> Result<BrowserOwnershipMarker, String> {
+    Ok(read_ownership_record_set(profile_dir)?.active)
 }
 
 /// Acquire the per-profile OS lock and refuse to launch over a profile which
@@ -616,19 +1341,132 @@ pub fn prepare_ownership_marker_for_retry(
     prepare_ownership_marker_under_claim(profile_dir, claim)
 }
 
+/// Bind whole-directory cleanup authority to the exact profile protected by a
+/// held launch claim. Callers must invoke this only for an explicitly
+/// ephemeral engine configuration.
+pub(crate) fn claim_ephemeral_profile_cleanup(
+    profile_dir: &Path,
+    claim: &ProfileLaunchClaim,
+) -> Result<EphemeralProfileCleanupToken, String> {
+    claim.0.validates(profile_dir)?;
+    let mut control = SystemProcessControl;
+    let owner_app = control.current_process()?;
+    let profile_id = profile_dir
+        .file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.is_empty())
+        .ok_or_else(|| "profile directory has no valid Unicode id".to_string())?
+        .to_owned();
+    // Until Chromium's identity is committed, the current app identity is a
+    // conservative provisional browser identity. Recovery always checks the
+    // live owner first, so it never signals the running application. On the
+    // next startup both identities refer to the absent prior app and provide
+    // durable, fail-closed lineage for this otherwise unmarked profile.
+    let provisional_marker = BrowserOwnershipMarker {
+        version: OWNERSHIP_MARKER_VERSION,
+        phase: BrowserOwnershipPhase::Provisional,
+        app_instance_id: managed_app_instance_id().to_owned(),
+        owner_app: owner_app.clone(),
+        browser: owner_app,
+        profile_id,
+    };
+    if let Err(error) = commit_ownership_marker_under_claim(
+        profile_dir,
+        &provisional_marker,
+        None,
+        &claim.0,
+    ) {
+        // No browser has spawned yet, so an explicitly ephemeral directory can
+        // be removed immediately only while a complete scan proves that no
+        // ownership marker appeared. A namespace replacement must never be
+        // mistaken for that original unmarked directory: only a still-valid
+        // exact claim may authorize this best-effort rollback.
+        if claim.0.validates(profile_dir).is_ok() {
+            let _ = cleanup_unmarked_ephemeral_profile_under_launch_claim(profile_dir, claim);
+        }
+        return Err(error);
+    }
+    Ok(EphemeralProfileCleanupToken {
+        profile_dir: claim.0.profile_dir.clone(),
+        profile_identity: claim.0.directory_identity()?,
+        provisional_marker,
+    })
+}
+
+fn cleanup_unmarked_ephemeral_profile_under_launch_claim(
+    profile_dir: &Path,
+    claim: &ProfileLaunchClaim,
+) -> Result<(), String> {
+    claim.0.validates(profile_dir)?;
+    let (markers, scan_errors, _) = collect_marker_paths(profile_dir);
+    if let Some(error) = scan_errors.into_iter().next() {
+        return Err(format!(
+            "refusing unmarked ephemeral cleanup after an incomplete marker scan: {error}"
+        ));
+    }
+    if !markers.is_empty() {
+        return Err(
+            "refusing unmarked ephemeral cleanup after ownership appeared".into(),
+        );
+    }
+    remove_ephemeral_profile_contents_marker_last(
+        profile_dir,
+        None,
+        claim.0.directory_identity()?,
+    )
+}
+
+/// Restore an ephemeral profile removed by a completed first launch attempt,
+/// then re-run the normal ownership preflight under the same still-held OS
+/// claim.
+pub(crate) fn restore_ephemeral_profile_for_retry(
+    profile_dir: &Path,
+    claim: &ProfileLaunchClaim,
+) -> Result<EphemeralProfileCleanupToken, String> {
+    claim.0.restore_exact_directory(profile_dir)?;
+    prepare_ownership_marker_under_claim(profile_dir, claim)?;
+    claim_ephemeral_profile_cleanup(profile_dir, claim)
+}
+
+/// Remove a stale runtime endpoint before spawning Chromium. Ignoring a
+/// deletion failure could make a new process/marker pair appear connected to
+/// an endpoint left by a prior process, so every unsafe file type or I/O error
+/// fails the launch closed.
+pub(crate) fn prepare_runtime_port_for_launch(
+    profile_dir: &Path,
+    claim: &ProfileLaunchClaim,
+) -> Result<(), String> {
+    claim.0.validates(profile_dir)?;
+    remove_regular_devtools_active_port(profile_dir, "launch preparation")
+}
+
 fn prepare_ownership_marker_under_claim(
     profile_dir: &Path,
     claim: &ProfileLaunchClaim,
 ) -> Result<(), String> {
     claim.0.validates(profile_dir)?;
-    let path = ownership_marker_path(profile_dir);
-    match std::fs::symlink_metadata(&path) {
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+    let provisional_path = ownership_marker_path(profile_dir);
+    let committed_path = committed_ownership_record_path(profile_dir);
+    let provisional_exists = match std::fs::symlink_metadata(&provisional_path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
         Err(error) => return Err(format!("inspect existing ownership marker: {error}")),
-        Ok(_) => {}
+        Ok(_) => true,
+    };
+    let committed_exists = match std::fs::symlink_metadata(&committed_path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+        Err(error) => {
+            return Err(format!(
+                "inspect existing committed ownership record: {error}"
+            ));
+        }
+        Ok(_) => true,
+    };
+    if !provisional_exists && !committed_exists {
+        return Ok(());
     }
 
-    let marker = read_marker(profile_dir)?;
+    let records = read_ownership_record_set(profile_dir)?;
+    let marker = records.active.clone();
     let mut control = SystemProcessControl;
     let current = control.current_process()?;
     let owner_is_current = same_process(&marker.owner_app, &current)
@@ -636,6 +1474,12 @@ fn prepare_ownership_marker_under_claim(
     if !owner_is_current {
         return Err(
             "profile ownership belongs to another or unverified app instance; startup recovery must resolve it"
+                .into(),
+        );
+    }
+    if marker.phase == BrowserOwnershipPhase::Provisional {
+        return Err(
+            "ephemeral profile has provisional ownership; startup recovery must quarantine it"
                 .into(),
         );
     }
@@ -654,8 +1498,33 @@ fn prepare_ownership_marker_under_claim(
             if !control.confirm_tree_absent(&marker.browser)? {
                 return Err("the previous managed browser tree is not proven absent".into());
             }
-            std::fs::remove_file(path)
-                .map_err(|error| format!("remove completed ownership marker: {error}"))
+            remove_regular_devtools_active_port(profile_dir, "launch recovery")?;
+            let current = read_ownership_record_set(profile_dir)?;
+            if current.active != marker
+                || current.active_path != records.active_path
+                || current.provisional_predecessor != records.provisional_predecessor
+            {
+                return Err(
+                    "ownership records changed before launch recovery cleanup".into(),
+                );
+            }
+            if let Some((path, expected)) = &records.provisional_predecessor {
+                if read_marker_at(profile_dir, path)? != *expected {
+                    return Err(
+                        "provisional ownership predecessor changed before launch recovery".into(),
+                    );
+                }
+                std::fs::remove_file(path).map_err(|error| {
+                    format!("remove completed provisional ownership record: {error}")
+                })?;
+            }
+            if read_marker_at(profile_dir, &records.active_path)? != marker {
+                return Err(
+                    "active ownership record changed before launch recovery".into(),
+                );
+            }
+            std::fs::remove_file(&records.active_path)
+                .map_err(|error| format!("remove completed ownership record: {error}"))
         }
     }
 }
@@ -666,13 +1535,27 @@ fn prepare_ownership_marker_under_claim(
 /// the marker records the observed creation identity, not caller-supplied PID
 /// metadata. The caller must kill the newly spawned child if this returns an
 /// error.
-pub async fn write_browser_ownership_marker(
+pub(crate) async fn write_browser_ownership_marker(
     claim: &ProfileLaunchClaim,
     profile_dir: &Path,
     expected_executable: &Path,
     child: &tokio::process::Child,
-) -> Result<(), String> {
+    provisional_cleanup: Option<&EphemeralProfileCleanupToken>,
+) -> Result<BrowserOwnershipToken, String> {
     claim.0.validates(profile_dir)?;
+    if let Some(provisional_cleanup) = provisional_cleanup {
+        if provisional_cleanup.profile_dir != claim.0.profile_dir {
+            return Err(
+                "provisional ephemeral marker belongs to a different launch claim".into(),
+            );
+        }
+        if provisional_cleanup.profile_identity != claim.0.directory_identity()? {
+            return Err(
+                "provisional ephemeral marker directory identity changed".into(),
+            );
+        }
+    }
+    let canonical_profile_dir = claim.0.profile_dir.clone();
     let expected_executable = normalized_executable(expected_executable)?;
     let profile_id = profile_dir
         .file_name()
@@ -736,67 +1619,2141 @@ pub async fn write_browser_ownership_marker(
 
     let marker = BrowserOwnershipMarker {
         version: OWNERSHIP_MARKER_VERSION,
+        phase: BrowserOwnershipPhase::Committed,
         app_instance_id: managed_app_instance_id().to_owned(),
         owner_app,
         browser,
         profile_id,
     };
-    commit_ownership_marker(profile_dir, &marker)
+    let expected_profile_identity = claim.0.directory_identity()?;
+    // Process discovery may await and refresh several OS snapshots. Commit
+    // through the original launch claim so Unix binds every namespace
+    // operation to one exact directory fd; the helper also proves that exact
+    // directory still occupies the public path before a token is published.
+    let marker_path = commit_ownership_marker_under_claim(
+        &canonical_profile_dir,
+        &marker,
+        provisional_cleanup.map(|cleanup| &cleanup.provisional_marker),
+        &claim.0,
+    )?;
+    if claim.0.directory_identity()? != expected_profile_identity {
+        return Err(
+            "browser profile directory identity changed across ownership commit".into(),
+        );
+    }
+    Ok(BrowserOwnershipToken {
+        profile_dir: canonical_profile_dir,
+        profile_identity: expected_profile_identity,
+        marker_path,
+        marker,
+    })
 }
 
+fn commit_ownership_marker_under_claim(
+    profile_dir: &Path,
+    marker: &BrowserOwnershipMarker,
+    expected_existing: Option<&BrowserOwnershipMarker>,
+    claim: &ProfileOperationClaim,
+) -> Result<PathBuf, String> {
+    claim.validates(profile_dir)?;
+    let expected_identity = claim.directory_identity()?;
+
+    #[cfg(windows)]
+    let profile_guard = {
+        let guard = open_locked_non_reparse_directory(profile_dir)?;
+        let identity = windows_directory_identity(&guard)?;
+        if (ProfileDirectoryIdentity {
+            volume_serial_number: identity.volume_serial_number,
+            file_index: identity.file_index,
+        }) != expected_identity
+        {
+            return Err(
+                "browser profile directory changed before pinned ownership commit".into(),
+            );
+        }
+        guard
+    };
+    #[cfg(unix)]
+    let marker_path = {
+        let directory = UnixDirectory::open_path(profile_dir)?;
+        if directory.identity() != expected_identity {
+            return Err(
+                "browser profile directory changed before fd-bound ownership commit".into(),
+            );
+        }
+        #[cfg(test)]
+        run_ownership_commit_directory_bound_hook(profile_dir);
+        commit_ownership_marker_unix(
+            profile_dir,
+            &directory,
+            marker,
+            expected_existing,
+        )?
+    };
+
+    #[cfg(windows)]
+    let (marker_path, _keep_committed_record_pinned) = {
+        let _keep_exact_profile_pinned = &profile_guard;
+        commit_ownership_marker_path(
+            profile_dir,
+            marker,
+            expected_existing,
+            Some(expected_identity),
+        )?
+    };
+
+    // A successful append into an unlinked/replaced Unix directory remains
+    // durable lineage for that exact inode, but it must never publish a token
+    // for the replacement now occupying the configured path.
+    claim.validates(profile_dir)?;
+    if claim.directory_identity()? != expected_identity {
+        return Err(
+            "browser profile directory identity changed across ownership commit".into(),
+        );
+    }
+    Ok(marker_path)
+}
+
+#[cfg(test)]
 fn commit_ownership_marker(
     profile_dir: &Path,
     marker: &BrowserOwnershipMarker,
-) -> Result<(), String> {
-    validate_marker(marker, profile_dir)?;
-    let marker_path = ownership_marker_path(profile_dir);
-    if marker_path.exists() {
-        return Err("ownership marker unexpectedly appeared during browser spawn".into());
+    expected_existing: Option<&BrowserOwnershipMarker>,
+) -> Result<PathBuf, String> {
+    #[cfg(unix)]
+    {
+        let directory = UnixDirectory::open_path(profile_dir)?;
+        #[cfg(test)]
+        run_ownership_commit_directory_bound_hook(profile_dir);
+        return commit_ownership_marker_unix(
+            profile_dir,
+            &directory,
+            marker,
+            expected_existing,
+        );
     }
-    let temp_path = profile_dir.join(format!(
-        "{OWNERSHIP_MARKER_FILE}.{}.{}.tmp",
-        marker.app_instance_id, marker.browser.pid
-    ));
+
+    #[cfg(not(unix))]
+    {
+        #[cfg(windows)]
+        {
+            let (path, _keep_committed_record_pinned) =
+                commit_ownership_marker_path(
+                    profile_dir,
+                    marker,
+                    expected_existing,
+                    None,
+                )?;
+            Ok(path)
+        }
+    }
+}
+
+#[cfg(not(unix))]
+fn commit_ownership_marker_path(
+    profile_dir: &Path,
+    marker: &BrowserOwnershipMarker,
+    expected_existing: Option<&BrowserOwnershipMarker>,
+    expected_profile_identity: Option<ProfileDirectoryIdentity>,
+) -> Result<(PathBuf, WindowsOwnershipCommitGuards), String> {
+    use std::io::{Seek, SeekFrom};
+    use std::os::windows::fs::MetadataExt;
+    use std::os::windows::fs::OpenOptionsExt;
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_OPEN_REPARSE_POINT,
+        FILE_SHARE_READ,
+    };
+
+    validate_marker(marker, profile_dir)?;
+    let provisional_path = ownership_marker_path(profile_dir);
+    let committed_path = committed_ownership_record_path(profile_dir);
+    let marker_path = if expected_existing.is_some() {
+        committed_path.clone()
+    } else {
+        provisional_path.clone()
+    };
+
+    let pinned_predecessor = match expected_existing {
+        Some(expected) => {
+            validate_marker(expected, profile_dir)?;
+            if *expected != provisional_predecessor(marker) {
+                return Err(
+                    "ownership record is not an exact provisional-to-committed transition"
+                        .into(),
+                );
+            }
+            let predecessor = open_pinned_ownership_record(
+                profile_dir,
+                provisional_path.clone(),
+            )?
+            .ok_or_else(|| {
+                "provisional ownership marker disappeared during browser spawn"
+                    .to_string()
+            })?;
+            if predecessor.marker != *expected {
+                return Err(
+                    "provisional ownership marker changed during browser spawn".into(),
+                );
+            }
+            match std::fs::symlink_metadata(&committed_path) {
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => {
+                    return Err(format!(
+                        "inspect committed ownership record before commit: {error}"
+                    ));
+                }
+                Ok(_) => {
+                    return Err(
+                        "ownership record unexpectedly appeared during browser spawn".into(),
+                    );
+                }
+            }
+            Some(predecessor)
+        }
+        None => {
+            for path in [
+                provisional_path.as_path(),
+                committed_path.as_path(),
+            ] {
+                match std::fs::symlink_metadata(path) {
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(error) => {
+                        return Err(format!(
+                            "inspect ownership record before commit: {error}"
+                        ));
+                    }
+                    Ok(_) => {
+                        return Err(
+                            "ownership record unexpectedly appeared during browser spawn".into(),
+                        );
+                    }
+                }
+            }
+            None
+        }
+    };
+
+    // On Windows an open directory handle without FILE_SHARE_DELETE does not
+    // by itself prevent that directory entry from being renamed. Creating the
+    // append-only final record first and retaining its no-share-write/delete
+    // child handle does. If the process crashes mid-write, the visible
+    // malformed record quarantines the profile instead of granting ownership.
+    let mut marker_guard = std::fs::OpenOptions::new()
+        .create_new(true)
+        .read(true)
+        .write(true)
+        .share_mode(FILE_SHARE_READ)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(&marker_path)
+        .map_err(|error| format!("create pinned ownership record: {error}"))?;
+    let metadata = marker_guard
+        .metadata()
+        .map_err(|error| format!("inspect pinned new ownership record: {error}"))?;
+    if !metadata.is_file()
+        || metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+    {
+        return Err("new pinned ownership record is a reparse point or non-file".into());
+    }
+    let (_, _, links) = windows_file_identity(&marker_guard)
+        .map_err(|error| format!("identify pinned new ownership record: {error}"))?;
+    if links != 1 {
+        return Err("new pinned ownership record has multiple hard links".into());
+    }
+
+    let root_guard = open_locked_non_reparse_directory(profile_dir)?;
+    if let Some(expected_identity) = expected_profile_identity {
+        let identity = windows_directory_identity(&root_guard)?;
+        if (ProfileDirectoryIdentity {
+            volume_serial_number: identity.volume_serial_number,
+            file_index: identity.file_index,
+        }) != expected_identity
+        {
+            return Err(
+                "browser profile directory changed before anchored ownership commit"
+                    .into(),
+            );
+        }
+    }
+    #[cfg(test)]
+    run_ownership_commit_directory_bound_hook(profile_dir);
+
+    // The pinned child record prevents a profile A/B namespace swap from this
+    // point onward. Recheck the append-only inventory under that anchor before
+    // writing any bytes.
+    match expected_existing {
+        Some(expected) => {
+            let predecessor = pinned_predecessor
+                .as_ref()
+                .ok_or_else(|| "missing pinned provisional predecessor".to_string())?;
+            if predecessor.marker != *expected {
+                return Err(
+                    "provisional ownership marker changed before append-only commit".into(),
+                );
+            }
+        }
+        None => match std::fs::symlink_metadata(&committed_path) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(format!(
+                    "reinspect committed ownership record before commit: {error}"
+                ));
+            }
+            Ok(_) => {
+                return Err(
+                    "ownership record appeared before atomic commit".into(),
+                );
+            }
+        },
+    }
+
     let bytes = serde_json::to_vec_pretty(&marker)
         .map_err(|error| format!("serialize ownership marker: {error}"))?;
-    let write_result = (|| -> Result<(), String> {
+    marker_guard
+        .write_all(&bytes)
+        .map_err(|error| format!("write pinned ownership record: {error}"))?;
+    marker_guard
+        .sync_all()
+        .map_err(|error| format!("flush pinned ownership record: {error}"))?;
+
+    #[cfg(test)]
+    run_ownership_commit_barrier_hook(profile_dir, &marker_path);
+
+    marker_guard
+        .seek(SeekFrom::Start(0))
+        .map_err(|error| format!("rewind pinned ownership record: {error}"))?;
+    let mut readback = Vec::new();
+    marker_guard
+        .read_to_end(&mut readback)
+        .map_err(|error| format!("read back pinned ownership record: {error}"))?;
+    let observed: BrowserOwnershipMarker = serde_json::from_slice(&readback)
+        .map_err(|error| format!("parse pinned ownership record readback: {error}"))?;
+    validate_marker(&observed, profile_dir)?;
+    if observed != *marker {
+        return Err("ownership record changed across pinned append-only commit".into());
+    }
+    if let (Some(expected), Some(predecessor)) =
+        (expected_existing, pinned_predecessor.as_ref())
+        && predecessor.marker != *expected
+    {
+        return Err(
+            "committed ownership record lost its exact pinned provisional predecessor"
+                .into(),
+        );
+    }
+    drop(root_guard);
+    Ok((
+        marker_path,
+        WindowsOwnershipCommitGuards {
+            _committed: marker_guard,
+            _provisional_predecessor: pinned_predecessor,
+        },
+    ))
+}
+
+#[cfg(windows)]
+fn create_exact_ownership_record_no_overwrite(
+    profile_dir: &Path,
+    record_path: &Path,
+    marker: &BrowserOwnershipMarker,
+) -> Result<(), String> {
+    validate_marker(marker, profile_dir)?;
+    let mut random = [0_u8; 16];
+    getrandom::getrandom(&mut random)
+        .map_err(|error| format!("generate ownership record restore nonce: {error}"))?;
+    let temp_path = profile_dir.join(format!(
+        "{OWNERSHIP_MARKER_FILE}.restore-{}.tmp",
+        hex::encode(random)
+    ));
+    let bytes = serde_json::to_vec_pretty(marker)
+        .map_err(|error| format!("serialize ownership record restore: {error}"))?;
+    let restore = (|| -> Result<(), String> {
         let mut file = std::fs::OpenOptions::new()
             .create_new(true)
             .write(true)
             .open(&temp_path)
-            .map_err(|error| format!("create ownership marker temp file: {error}"))?;
+            .map_err(|error| format!("create ownership record restore temp: {error}"))?;
         file.write_all(&bytes)
-            .map_err(|error| format!("write ownership marker temp file: {error}"))?;
+            .map_err(|error| format!("write ownership record restore temp: {error}"))?;
         file.sync_all()
-            .map_err(|error| format!("flush ownership marker temp file: {error}"))?;
-        std::fs::rename(&temp_path, &marker_path)
-            .map_err(|error| format!("commit ownership marker: {error}"))
+            .map_err(|error| format!("flush ownership record restore temp: {error}"))?;
+        drop(file);
+        if let Err(link_error) = std::fs::hard_link(&temp_path, record_path) {
+            // A Windows no-share-delete directory handle intentionally blocks
+            // namespace link/rename operations while it pins the exact root.
+            // Creating the absent final name is still identity-safe under that
+            // guard. O_EXCL preserves the no-overwrite barrier; an interrupted
+            // direct write leaves a visible malformed record and recovery
+            // therefore remains fail closed.
+            let direct_restore = (|| -> Result<(), String> {
+                let mut record = std::fs::OpenOptions::new()
+                    .create_new(true)
+                    .write(true)
+                    .open(record_path)
+                    .map_err(|error| {
+                        format!(
+                            "create direct ownership restore after hard-link failure ({link_error}): {error}"
+                        )
+                    })?;
+                if let Err(error) = record
+                    .write_all(&bytes)
+                    .and_then(|()| record.sync_all())
+                {
+                    drop(record);
+                    let _ = std::fs::remove_file(record_path);
+                    return Err(format!(
+                        "write direct ownership restore after hard-link failure ({link_error}): {error}"
+                    ));
+                }
+                Ok(())
+            })();
+            direct_restore?;
+        }
+        let _ = std::fs::remove_file(&temp_path);
+        Ok(())
+    })();
+    if restore.is_err() {
+        let _ = std::fs::remove_file(&temp_path);
+    }
+    restore
+}
+
+/// Clear the launch ownership artifacts after the caller has authoritatively
+/// proven that the exact managed Chromium process tree has exited.
+///
+/// This function intentionally does not infer process-tree exit from a PID.
+/// Its caller owns the exact process handle and cleanup proof. Under the same
+/// per-profile OS lock used by launch and recovery, it revalidates the current
+/// application identity and requires the on-disk marker to exactly equal the
+/// opaque launch token. Any mismatch or unverifiable state preserves both
+/// artifacts. A missing marker is an idempotent success and never authorizes
+/// deletion of `DevToolsActivePort`.
+pub(crate) fn cleanup_browser_ownership_after_exact_shutdown(
+    token: &BrowserOwnershipToken,
+) -> Result<(), String> {
+    let operation_claim = ProfileOperationClaim::acquire(&token.profile_dir)?;
+    cleanup_browser_ownership_under_claim(token, &operation_claim)
+}
+
+/// Remove one exact uncommitted ephemeral profile after the caller has proven
+/// that its spawned process tree is absent.
+///
+/// No ownership marker exists in this phase, so authority comes from the
+/// opaque canonical token captured under the original launch claim. Any marker
+/// which appeared meanwhile makes the operation fail closed.
+pub(crate) fn cleanup_uncommitted_ephemeral_profile_after_exact_shutdown(
+    token: &EphemeralProfileCleanupToken,
+) -> Result<(), String> {
+    match std::fs::symlink_metadata(&token.profile_dir) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => {
+            return Err(format!(
+                "inspect uncommitted ephemeral browser profile: {error}"
+            ));
+        }
+        Ok(_) => {}
+    }
+    let operation_claim = ProfileOperationClaim::acquire(&token.profile_dir)?;
+    cleanup_uncommitted_ephemeral_profile_under_claim(token, &operation_claim)
+}
+
+pub(crate) fn cleanup_uncommitted_ephemeral_profile_after_exact_shutdown_under_launch_claim(
+    token: &EphemeralProfileCleanupToken,
+    launch_claim: &ProfileLaunchClaim,
+) -> Result<(), String> {
+    if token.profile_dir != launch_claim.0.profile_dir {
+        return Err(
+            "uncommitted ephemeral cleanup token belongs to a different launch claim".into(),
+        );
+    }
+    match std::fs::symlink_metadata(&token.profile_dir) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => {
+            return Err(format!(
+                "inspect claimed uncommitted ephemeral browser profile: {error}"
+            ));
+        }
+        Ok(_) => {}
+    }
+    launch_claim.0.validates(&token.profile_dir)?;
+    cleanup_uncommitted_ephemeral_profile_under_claim(token, &launch_claim.0)
+}
+
+fn cleanup_uncommitted_ephemeral_profile_under_claim(
+    token: &EphemeralProfileCleanupToken,
+    operation_claim: &ProfileOperationClaim,
+) -> Result<(), String> {
+    operation_claim.validates(&token.profile_dir)?;
+    if operation_claim.directory_identity()? != token.profile_identity {
+        return Err(
+            "uncommitted ephemeral cleanup directory identity changed".into(),
+        );
+    }
+    let metadata = std::fs::symlink_metadata(&token.profile_dir)
+        .map_err(|error| format!("inspect exact uncommitted browser profile: {error}"))?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err("exact uncommitted browser profile is not a regular directory".into());
+    }
+
+    let current_marker = read_marker(&token.profile_dir)?;
+    if current_marker != token.provisional_marker {
+        return Err(
+            "provisional ownership marker changed before uncommitted cleanup".into(),
+        );
+    }
+    let (nested_markers, scan_errors, _) =
+        collect_marker_paths(&token.profile_dir);
+    if let Some(error) = scan_errors.into_iter().next() {
+        return Err(format!(
+            "refusing uncommitted ephemeral cleanup after an incomplete marker scan: {error}"
+        ));
+    }
+    let expected_marker = ownership_marker_path(&token.profile_dir);
+    if nested_markers.len() != 1 || nested_markers[0] != expected_marker {
+        return Err(
+            "refusing uncommitted ephemeral cleanup while an unexpected ownership marker remains"
+                .into(),
+        );
+    }
+    remove_ephemeral_profile_contents_marker_last(
+        &token.profile_dir,
+        Some(&token.provisional_marker),
+        token.profile_identity,
+    )
+}
+
+/// Remove an explicitly ephemeral profile after the caller has proven exact
+/// process-tree exit.
+///
+/// Unlike stable cleanup, this keeps the ownership marker inside the directory
+/// until the same operation removes the whole profile. Therefore a cancelled
+/// or failed removal remains discoverable by startup recovery.
+pub(crate) fn cleanup_ephemeral_profile_after_exact_shutdown(
+    token: &BrowserOwnershipToken,
+    profile_dir: &Path,
+) -> Result<(), String> {
+    match std::fs::symlink_metadata(profile_dir) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => {
+            return Err(format!(
+                "inspect ephemeral profile before exact cleanup: {error}"
+            ));
+        }
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
+            return Err("ephemeral profile cleanup target is not a regular directory".into());
+        }
+        Ok(_) => {}
+    }
+    let operation_claim = ProfileOperationClaim::acquire(profile_dir)?;
+    cleanup_ephemeral_profile_under_claim(token, profile_dir, &operation_claim)
+}
+
+pub(crate) fn cleanup_ephemeral_profile_after_exact_shutdown_under_launch_claim(
+    token: &BrowserOwnershipToken,
+    profile_dir: &Path,
+    launch_claim: &ProfileLaunchClaim,
+) -> Result<(), String> {
+    launch_claim.0.validates(profile_dir)?;
+    cleanup_ephemeral_profile_under_claim(token, profile_dir, &launch_claim.0)
+}
+
+fn cleanup_ephemeral_profile_under_claim(
+    token: &BrowserOwnershipToken,
+    profile_dir: &Path,
+    operation_claim: &ProfileOperationClaim,
+) -> Result<(), String> {
+    operation_claim.validates(&token.profile_dir)?;
+    if operation_claim.directory_identity()? != token.profile_identity {
+        return Err("ephemeral cleanup directory identity changed".into());
+    }
+    validate_marker(&token.marker, &token.profile_dir)?;
+
+    let current_marker = read_marker(profile_dir)?;
+    if current_marker != token.marker {
+        return Err(
+            "ownership marker changed before ephemeral profile cleanup; profile preserved"
+                .into(),
+        );
+    }
+    let mut control = SystemProcessControl;
+    let current_app = control.current_process()?;
+    if current_marker.app_instance_id != managed_app_instance_id()
+        || !same_process(&current_marker.owner_app, &current_app)
+    {
+        return Err(
+            "ephemeral profile marker no longer belongs to this exact application instance"
+                .into(),
+        );
+    }
+
+    let canonical_profile = std::fs::canonicalize(profile_dir)
+        .map_err(|error| format!("canonicalize ephemeral profile cleanup target: {error}"))?;
+    if canonical_profile != token.profile_dir {
+        return Err("ephemeral profile cleanup target changed before removal".into());
+    }
+    let (mut nested_markers, scan_errors, _) =
+        collect_marker_paths(&canonical_profile);
+    if let Some(error) = scan_errors.into_iter().next() {
+        return Err(format!(
+            "refusing ephemeral cleanup after an incomplete marker scan: {error}"
+        ));
+    }
+    let expected_records = read_ownership_record_set(&canonical_profile)?;
+    if expected_records.active != token.marker
+        || expected_records.active_path != token.marker_path
+    {
+        return Err(
+            "ephemeral ownership record paths changed before cleanup".into(),
+        );
+    }
+    let mut expected_paths = vec![expected_records.active_path.clone()];
+    if let Some((path, _)) = &expected_records.provisional_predecessor {
+        expected_paths.push(path.clone());
+    }
+    nested_markers.sort();
+    expected_paths.sort();
+    if nested_markers != expected_paths {
+        return Err(
+            "refusing ephemeral cleanup while unexpected ownership markers remain".into(),
+        );
+    }
+    remove_ephemeral_profile_contents_marker_last(
+        &canonical_profile,
+        Some(&token.marker),
+        token.profile_identity,
+    )
+}
+
+/// Delete browser profile contents while preserving the ownership marker until
+/// every other entry is gone.
+///
+/// If deleting any browser artifact fails, the marker remains in place and
+/// startup recovery can retry. Once the marker is removed, only deletion of the
+/// now-empty directory remains; a failure at that final step cannot strand
+/// browser state or an endpoint behind missing lineage.
+#[cfg(not(windows))]
+fn remove_ephemeral_profile_contents_marker_last(
+    canonical_profile: &Path,
+    expected_marker: Option<&BrowserOwnershipMarker>,
+    expected_profile_identity: ProfileDirectoryIdentity,
+) -> Result<(), String> {
+    remove_ephemeral_profile_contents_marker_last_unix(
+        canonical_profile,
+        expected_marker,
+        expected_profile_identity,
+    )
+}
+
+#[cfg(windows)]
+fn remove_ephemeral_profile_contents_marker_last(
+    canonical_profile: &Path,
+    expected_marker: Option<&BrowserOwnershipMarker>,
+    expected_profile_identity: ProfileDirectoryIdentity,
+) -> Result<(), String> {
+    let root_directory_guard =
+        open_locked_non_reparse_directory_for_deletion(canonical_profile)?;
+    let root_identity = windows_directory_identity(&root_directory_guard)?;
+    if expected_profile_identity
+        != (ProfileDirectoryIdentity {
+            volume_serial_number: root_identity.volume_serial_number,
+            file_index: root_identity.file_index,
+        })
+    {
+        return Err(
+            "Windows profile directory identity changed before deletion".into(),
+        );
+    }
+    let expected_records = match expected_marker {
+        Some(expected) => {
+            let records = read_ownership_record_set(canonical_profile)?;
+            if records.active != *expected {
+                return Err(
+                    "ownership marker changed before ephemeral profile deletion began".into(),
+                );
+            }
+            Some(records)
+        }
+        None => {
+            let (records, errors, _) = collect_marker_paths(canonical_profile);
+            if let Some(error) = errors.into_iter().next() {
+                return Err(format!(
+                    "inspect unmarked ephemeral profile records: {error}"
+                ));
+            }
+            if !records.is_empty() {
+                return Err(
+                    "ownership appeared before unmarked ephemeral profile deletion".into(),
+                );
+            }
+            None
+        }
+    };
+    let mut preserved_record_paths = expected_records
+        .as_ref()
+        .map(|records| {
+            let mut paths = vec![records.active_path.clone()];
+            if let Some((path, _)) = &records.provisional_predecessor {
+                paths.push(path.clone());
+            }
+            paths
+        })
+        .unwrap_or_default();
+    preserved_record_paths.sort();
+
+    let mut removed_entries = 0_usize;
+    for entry in std::fs::read_dir(canonical_profile)
+        .map_err(|error| format!("read exact ephemeral browser profile: {error}"))?
+    {
+        let entry =
+            entry.map_err(|error| format!("read exact ephemeral profile entry: {error}"))?;
+        if preserved_record_paths
+            .iter()
+            .any(|record| entry.path() == *record)
+        {
+            continue;
+        }
+        if is_ownership_record_name(&entry.file_name()) {
+            return Err(
+                "unexpected ownership record appeared during ephemeral profile cleanup".into(),
+            );
+        }
+        remove_ephemeral_entry_tree_no_follow(
+            &entry.path(),
+            0,
+            &mut removed_entries,
+        )?;
+    }
+
+    // A non-cooperating writer may have added a nested marker while ordinary
+    // browser data was being removed. Complete the no-follow scan again before
+    // unlinking any durable lineage.
+    let (mut remaining_records, scan_errors, _) =
+        collect_marker_paths(canonical_profile);
+    if let Some(error) = scan_errors.into_iter().next() {
+        return Err(format!(
+            "refusing marker-last cleanup after an incomplete final scan: {error}"
+        ));
+    }
+    remaining_records.sort();
+    if remaining_records != preserved_record_paths {
+        return Err(
+            "ownership record inventory changed before marker-last profile deletion".into(),
+        );
+    }
+
+    if let (Some(expected_marker), Some(expected_records)) =
+        (expected_marker, expected_records.as_ref())
+    {
+        let current = read_ownership_record_set(canonical_profile)?;
+        if current.active != *expected_marker
+            || current.active_path != expected_records.active_path
+            || current.provisional_predecessor
+                != expected_records.provisional_predecessor
+        {
+            return Err(
+                "ownership marker changed before marker-last profile deletion".into(),
+            );
+        }
+
+        // The committed sidecar is the last record removed. If cleanup is
+        // interrupted after unlinking its provisional predecessor, exact
+        // browser recovery remains possible from the sidecar alone.
+        if let Some((provisional_path, provisional)) =
+            &expected_records.provisional_predecessor
+        {
+            if read_marker_at(canonical_profile, provisional_path)? != *provisional {
+                return Err(
+                    "provisional ownership predecessor changed before removal".into(),
+                );
+            }
+            std::fs::remove_file(provisional_path).map_err(|error| {
+                format!("remove exact provisional ownership predecessor: {error}")
+            })?;
+        }
+        if read_marker_at(canonical_profile, &expected_records.active_path)?
+            != *expected_marker
+        {
+            return Err(
+                "active ownership record changed before marker-last removal".into(),
+            );
+        }
+        let metadata = std::fs::symlink_metadata(&expected_records.active_path)
+            .map_err(|error| format!("inspect exact ephemeral ownership marker: {error}"))?;
+        if metadata.file_type().is_symlink() || !metadata.is_file() {
+            return Err("exact ephemeral ownership marker is not a regular file".into());
+        }
+        std::fs::remove_file(&expected_records.active_path)
+            .map_err(|error| format!("remove exact ephemeral ownership marker: {error}"))?;
+    }
+    #[cfg(test)]
+    run_final_profile_rmdir_barrier_hook(canonical_profile);
+    match delete_locked_empty_directory(&root_directory_guard) {
+        Ok(()) => {
+            // FileDispositionInfo binds deletion to the exact guarded file
+            // identity. Closing the final handle completes removal without a
+            // path-based rename/replacement window.
+            drop(root_directory_guard);
+            Ok(())
+        }
+        Err(error) => {
+            // A concurrent new entry can make the final rmdir fail after the
+            // last record was unlinked. The no-share-delete handle still pins
+            // this exact directory and its ancestor namespace, so restoring
+            // the exact active record cannot write through a replacement.
+            let restore_error = if let (Some(expected), Some(records)) =
+                (expected_marker, expected_records.as_ref())
+            {
+                if windows_directory_identity(&root_directory_guard).ok()
+                    == Some(root_identity)
+                {
+                    create_exact_ownership_record_no_overwrite(
+                        canonical_profile,
+                        &records.active_path,
+                        expected,
+                    )
+                    .err()
+                } else {
+                    Some(
+                        "guarded browser profile identity changed before ownership restore"
+                            .into(),
+                    )
+                }
+            } else {
+                None
+            };
+            match restore_error {
+                Some(restore_error) => Err(format!(
+                    "delete exact ephemeral browser profile by handle: {error}; ownership restore failed: {restore_error}"
+                )),
+                None => Err(format!(
+                    "delete exact ephemeral browser profile by handle: {error}"
+                )),
+            }
+        }
+    }
+}
+
+#[cfg(windows)]
+fn open_locked_non_reparse_directory(path: &Path) -> Result<std::fs::File, String> {
+    use windows_sys::Win32::Storage::FileSystem::FILE_READ_ATTRIBUTES;
+    open_locked_non_reparse_directory_with_access(path, FILE_READ_ATTRIBUTES)
+}
+
+#[cfg(windows)]
+fn open_locked_non_reparse_directory_for_deletion(
+    path: &Path,
+) -> Result<std::fs::File, String> {
+    use windows_sys::Win32::Storage::FileSystem::{
+        DELETE, FILE_READ_ATTRIBUTES,
+    };
+    open_locked_non_reparse_directory_with_access(
+        path,
+        FILE_READ_ATTRIBUTES | DELETE,
+    )
+}
+
+#[cfg(windows)]
+fn open_locked_non_reparse_directory_with_access(
+    path: &Path,
+    access: u32,
+) -> Result<std::fs::File, String> {
+    use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_BACKUP_SEMANTICS,
+        FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_READ,
+    };
+
+    let file = std::fs::OpenOptions::new()
+        .access_mode(access)
+        // Deliberately omit FILE_SHARE_DELETE: while this handle is alive the
+        // directory path cannot be renamed, removed, or swapped for a junction.
+        .share_mode(FILE_SHARE_READ)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(path)
+        .map_err(|error| format!("open exact browser profile directory handle: {error}"))?;
+    let metadata = file
+        .metadata()
+        .map_err(|error| format!("inspect exact browser profile directory handle: {error}"))?;
+    if !metadata.is_dir()
+        || metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+    {
+        return Err(
+            "exact browser profile directory handle is a reparse point or non-directory".into(),
+        );
+    }
+    Ok(file)
+}
+
+#[cfg(windows)]
+fn delete_locked_empty_directory(
+    directory: &std::fs::File,
+) -> Result<(), String> {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Storage::FileSystem::{
+        FileDispositionInfo, SetFileInformationByHandle,
+        FILE_DISPOSITION_INFO,
+    };
+
+    let disposition = FILE_DISPOSITION_INFO { DeleteFile: true };
+    // SAFETY: `directory` keeps the exact DELETE-capable handle alive and the
+    // disposition buffer has the class-required layout and size.
+    let succeeded = unsafe {
+        SetFileInformationByHandle(
+            directory.as_raw_handle(),
+            FileDispositionInfo,
+            std::ptr::addr_of!(disposition).cast(),
+            std::mem::size_of::<FILE_DISPOSITION_INFO>() as u32,
+        )
+    };
+    if succeeded == 0 {
+        return Err(std::io::Error::last_os_error().to_string());
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct WindowsDirectoryIdentity {
+    volume_serial_number: u32,
+    file_index: u64,
+}
+
+#[cfg(windows)]
+fn windows_directory_identity(
+    directory: &std::fs::File,
+) -> Result<WindowsDirectoryIdentity, String> {
+    let (volume_serial_number, file_index, _) = windows_file_identity(directory)
+        .map_err(|error| format!("inspect browser profile directory identity: {error}"))?;
+    Ok(WindowsDirectoryIdentity {
+        volume_serial_number,
+        file_index,
+    })
+}
+
+#[cfg(windows)]
+fn windows_file_identity(
+    file: &std::fs::File,
+) -> std::io::Result<(u32, u64, u32)> {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Storage::FileSystem::{
+        GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION,
+    };
+
+    let mut information = BY_HANDLE_FILE_INFORMATION::default();
+    // SAFETY: `file` keeps the valid handle alive and `information` is a
+    // correctly sized writable output buffer.
+    let succeeded = unsafe {
+        GetFileInformationByHandle(
+            file.as_raw_handle(),
+            &mut information,
+        )
+    };
+    if succeeded == 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    let file_index =
+        (u64::from(information.nFileIndexHigh) << 32)
+            | u64::from(information.nFileIndexLow);
+    Ok((
+        information.dwVolumeSerialNumber,
+        file_index,
+        information.nNumberOfLinks,
+    ))
+}
+
+fn capture_profile_directory_identity(
+    path: &Path,
+) -> Result<ProfileDirectoryIdentity, String> {
+    #[cfg(windows)]
+    {
+        let directory = open_locked_non_reparse_directory(path)?;
+        let identity = windows_directory_identity(&directory)?;
+        return Ok(ProfileDirectoryIdentity {
+            volume_serial_number: identity.volume_serial_number,
+            file_index: identity.file_index,
+        });
+    }
+
+    #[cfg(unix)]
+    {
+        let directory = UnixDirectory::open_path(path)?;
+        Ok(ProfileDirectoryIdentity {
+            device: directory.device,
+            inode: directory.inode,
+            mount_key: directory.mount_key,
+            #[cfg(target_os = "linux")]
+            mount_id: directory.mount_id,
+        })
+    }
+}
+
+#[cfg(unix)]
+struct UnixDirectory {
+    file: std::fs::File,
+    device: u64,
+    inode: u64,
+    mount_key: [u8; 8],
+    #[cfg(target_os = "linux")]
+    mount_id: u64,
+}
+
+#[cfg(unix)]
+impl UnixDirectory {
+    fn open_path(path: &Path) -> Result<Self, String> {
+        use std::os::unix::fs::OpenOptionsExt;
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_CLOEXEC | libc::O_DIRECTORY | libc::O_NOFOLLOW)
+            .open(path)
+            .map_err(|error| format!("open exact Unix profile directory: {error}"))?;
+        Self::from_file(file)
+    }
+
+    fn open_child(&self, name: &std::ffi::OsStr) -> Result<Self, String> {
+        use std::os::fd::{AsRawFd, FromRawFd};
+        let name = unix_component_cstring(name)?;
+        #[cfg(target_os = "linux")]
+        let fd = openat2_unix_directory(self.file.as_raw_fd(), &name)?;
+        #[cfg(not(target_os = "linux"))]
+        // SAFETY: the parent fd and NUL-terminated component are live for this
+        // call. O_NOFOLLOW and O_DIRECTORY bind the result to the exact child
+        // directory entry without traversing a final symlink.
+        let fd = unsafe {
+            libc::openat(
+                self.file.as_raw_fd(),
+                name.as_ptr(),
+                libc::O_RDONLY
+                    | libc::O_CLOEXEC
+                    | libc::O_DIRECTORY
+                    | libc::O_NOFOLLOW,
+            )
+        };
+        #[cfg(not(target_os = "linux"))]
+        if fd < 0 {
+            return Err(format!(
+                "open exact Unix profile child: {}",
+                std::io::Error::last_os_error()
+            ));
+        }
+        // SAFETY: openat returned a new owned fd.
+        let file = unsafe { std::fs::File::from_raw_fd(fd) };
+        Self::from_file(file)
+    }
+
+    fn from_file(file: std::fs::File) -> Result<Self, String> {
+        use std::os::unix::fs::MetadataExt;
+        let metadata = file
+            .metadata()
+            .map_err(|error| format!("inspect exact Unix profile directory: {error}"))?;
+        if !metadata.is_dir() {
+            return Err("exact Unix profile handle is not a directory".into());
+        }
+        Ok(Self {
+            mount_key: unix_mount_key(&file)?,
+            #[cfg(target_os = "linux")]
+            mount_id: unix_mount_id(&file)?,
+            file,
+            device: metadata.dev(),
+            inode: metadata.ino(),
+        })
+    }
+
+    fn identity(&self) -> ProfileDirectoryIdentity {
+        ProfileDirectoryIdentity {
+            device: self.device,
+            inode: self.inode,
+            mount_key: self.mount_key,
+            #[cfg(target_os = "linux")]
+            mount_id: self.mount_id,
+        }
+    }
+
+    fn entries(&self) -> Result<Vec<std::ffi::OsString>, String> {
+        use std::os::fd::AsRawFd;
+        use std::os::unix::ffi::OsStringExt;
+
+        // fdopendir owns and closes the supplied descriptor. Opening "." via
+        // openat creates a new open file description with an independent
+        // directory offset; dup/fcntl would share the authoritative handle's
+        // offset and make the second enumeration start at EOF.
+        let dot = b".\0";
+        // SAFETY: the parent fd and static NUL-terminated "." component live.
+        let duplicate = unsafe {
+            libc::openat(
+                self.file.as_raw_fd(),
+                dot.as_ptr().cast(),
+                libc::O_RDONLY
+                    | libc::O_CLOEXEC
+                    | libc::O_DIRECTORY
+                    | libc::O_NOFOLLOW,
+            )
+        };
+        if duplicate < 0 {
+            return Err(format!(
+                "duplicate Unix profile directory handle: {}",
+                std::io::Error::last_os_error()
+            ));
+        }
+        // SAFETY: duplicate is a fresh directory fd owned by fdopendir.
+        let directory = unsafe { libc::fdopendir(duplicate) };
+        if directory.is_null() {
+            // SAFETY: fdopendir did not take ownership on failure.
+            unsafe {
+                libc::close(duplicate);
+            }
+            return Err(format!(
+                "enumerate Unix profile directory: {}",
+                std::io::Error::last_os_error()
+            ));
+        }
+        let mut entries = Vec::new();
+        loop {
+            // errno must be cleared to distinguish end-of-directory from an
+            // enumeration error.
+            set_unix_errno_zero();
+            // SAFETY: directory remains live until closed below.
+            let entry = unsafe { libc::readdir(directory) };
+            if entry.is_null() {
+                let error = std::io::Error::last_os_error();
+                // SAFETY: directory was returned by fdopendir and is closed
+                // exactly once here.
+                unsafe {
+                    libc::closedir(directory);
+                }
+                if error.raw_os_error().unwrap_or(0) == 0 {
+                    return Ok(entries);
+                }
+                return Err(format!("read Unix profile directory: {error}"));
+            }
+            // SAFETY: d_name is NUL-terminated for the live dirent.
+            let bytes = unsafe {
+                std::ffi::CStr::from_ptr((*entry).d_name.as_ptr())
+                    .to_bytes()
+                    .to_vec()
+            };
+            if bytes == b"." || bytes == b".." {
+                continue;
+            }
+            entries.push(std::ffi::OsString::from_vec(bytes));
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn unix_mount_id(file: &std::fs::File) -> Result<u64, String> {
+    use std::os::fd::AsRawFd;
+    // SAFETY: statx is a correctly sized writable output structure and an
+    // empty pathname with AT_EMPTY_PATH queries the supplied live fd.
+    let mut stat: libc::statx = unsafe { std::mem::zeroed() };
+    let empty = b"\0";
+    let result = unsafe {
+        libc::statx(
+            file.as_raw_fd(),
+            empty.as_ptr().cast(),
+            libc::AT_EMPTY_PATH | libc::AT_SYMLINK_NOFOLLOW,
+            libc::STATX_MNT_ID,
+            &mut stat,
+        )
+    };
+    if result != 0 {
+        return Err(format!(
+            "inspect Linux profile mount id: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    if stat.stx_mask & libc::STATX_MNT_ID == 0 || stat.stx_mnt_id == 0 {
+        return Err("Linux profile mount id is unavailable".into());
+    }
+    Ok(stat.stx_mnt_id)
+}
+
+#[cfg(unix)]
+fn unix_mount_key(file: &std::fs::File) -> Result<[u8; 8], String> {
+    use std::os::fd::AsRawFd;
+    // SAFETY: statfs is a correctly sized writable output structure.
+    let mut stat: libc::statfs = unsafe { std::mem::zeroed() };
+    let result = unsafe { libc::fstatfs(file.as_raw_fd(), &mut stat) };
+    if result != 0 {
+        return Err(format!(
+            "inspect Unix profile mount identity: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    if std::mem::size_of_val(&stat.f_fsid) != 8 {
+        return Err("unsupported Unix mount identity width".into());
+    }
+    let mut key = [0_u8; 8];
+    // SAFETY: the size check above proves f_fsid fills the 8-byte output.
+    unsafe {
+        std::ptr::copy_nonoverlapping(
+            std::ptr::addr_of!(stat.f_fsid).cast::<u8>(),
+            key.as_mut_ptr(),
+            key.len(),
+        );
+    }
+    Ok(key)
+}
+
+#[cfg(all(unix, target_os = "linux"))]
+fn set_unix_errno_zero() {
+    // SAFETY: __errno_location returns this thread's errno slot.
+    unsafe {
+        *libc::__errno_location() = 0;
+    }
+}
+
+#[cfg(all(unix, target_os = "macos"))]
+fn set_unix_errno_zero() {
+    // SAFETY: __error returns this thread's errno slot.
+    unsafe {
+        *libc::__error() = 0;
+    }
+}
+
+#[cfg(all(unix, not(any(target_os = "linux", target_os = "macos"))))]
+fn set_unix_errno_zero() {}
+
+#[cfg(unix)]
+fn unix_component_cstring(
+    component: &std::ffi::OsStr,
+) -> Result<std::ffi::CString, String> {
+    use std::os::unix::ffi::OsStrExt;
+    let bytes = component.as_bytes();
+    if bytes.is_empty() || bytes == b"." || bytes == b".." || bytes.contains(&b'/') {
+        return Err("invalid Unix profile path component".into());
+    }
+    std::ffi::CString::new(bytes)
+        .map_err(|_| "Unix profile path component contains NUL".into())
+}
+
+#[cfg(target_os = "linux")]
+fn openat2_unix_directory(
+    parent_fd: std::os::fd::RawFd,
+    name: &std::ffi::CStr,
+) -> Result<std::os::fd::RawFd, String> {
+    #[repr(C)]
+    struct OpenHow {
+        flags: u64,
+        mode: u64,
+        resolve: u64,
+    }
+    const RESOLVE_NO_XDEV: u64 = 0x01;
+    const RESOLVE_NO_SYMLINKS: u64 = 0x04;
+    const RESOLVE_BENEATH: u64 = 0x08;
+    let how = OpenHow {
+        flags: (libc::O_RDONLY
+            | libc::O_CLOEXEC
+            | libc::O_DIRECTORY
+            | libc::O_NOFOLLOW) as u64,
+        mode: 0,
+        resolve: RESOLVE_NO_XDEV | RESOLVE_NO_SYMLINKS | RESOLVE_BENEATH,
+    };
+    // SAFETY: the parent fd/name are live and `how` has Linux open_how's
+    // stable ABI layout. Unsupported kernels fail closed with ENOSYS.
+    let fd = unsafe {
+        libc::syscall(
+            libc::SYS_openat2,
+            parent_fd,
+            name.as_ptr(),
+            &how,
+            std::mem::size_of::<OpenHow>(),
+        )
+    };
+    if fd < 0 {
+        Err(format!(
+            "open exact Unix profile child without crossing mounts: {}",
+            std::io::Error::last_os_error()
+        ))
+    } else {
+        Ok(fd as std::os::fd::RawFd)
+    }
+}
+
+#[cfg(unix)]
+fn unix_entry_stat(
+    directory: &UnixDirectory,
+    name: &std::ffi::OsStr,
+) -> Result<libc::stat, String> {
+    use std::os::fd::AsRawFd;
+    let name = unix_component_cstring(name)?;
+    // SAFETY: stat is a correctly sized output buffer and both fd/name live.
+    let mut stat: libc::stat = unsafe { std::mem::zeroed() };
+    let result = unsafe {
+        libc::fstatat(
+            directory.file.as_raw_fd(),
+            name.as_ptr(),
+            &mut stat,
+            libc::AT_SYMLINK_NOFOLLOW,
+        )
+    };
+    if result == 0 {
+        Ok(stat)
+    } else {
+        Err(format!(
+            "inspect exact Unix profile entry: {}",
+            std::io::Error::last_os_error()
+        ))
+    }
+}
+
+#[cfg(unix)]
+fn same_unix_entry(
+    stat: &libc::stat,
+    directory: &UnixDirectory,
+) -> bool {
+    stat.st_dev as u64 == directory.device
+        && stat.st_ino as u64 == directory.inode
+}
+
+#[cfg(unix)]
+fn unlink_unix_entry(
+    directory: &UnixDirectory,
+    name: &std::ffi::OsStr,
+    flags: libc::c_int,
+) -> Result<(), String> {
+    use std::os::fd::AsRawFd;
+    let name = unix_component_cstring(name)?;
+    // SAFETY: fd/name live and flags is either zero or AT_REMOVEDIR.
+    let result = unsafe {
+        libc::unlinkat(directory.file.as_raw_fd(), name.as_ptr(), flags)
+    };
+    if result == 0 {
+        Ok(())
+    } else {
+        Err(format!(
+            "remove exact Unix profile entry: {}",
+            std::io::Error::last_os_error()
+        ))
+    }
+}
+
+#[cfg(unix)]
+fn read_unix_marker_record(
+    directory: &UnixDirectory,
+    profile_dir: &Path,
+    name: &std::ffi::OsStr,
+) -> Result<BrowserOwnershipMarker, String> {
+    use std::os::fd::{AsRawFd, FromRawFd};
+    use std::os::unix::fs::MetadataExt;
+    let name = unix_component_cstring(name)?;
+    // SAFETY: parent fd/name live. O_NOFOLLOW rejects a marker symlink.
+    let fd = unsafe {
+        libc::openat(
+            directory.file.as_raw_fd(),
+            name.as_ptr(),
+            libc::O_RDONLY | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+        )
+    };
+    if fd < 0 {
+        return Err(format!(
+            "open exact Unix ownership record: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    // SAFETY: openat returned a new owned descriptor.
+    let file = unsafe { std::fs::File::from_raw_fd(fd) };
+    let metadata = file
+        .metadata()
+        .map_err(|error| format!("inspect exact Unix ownership record: {error}"))?;
+    if !metadata.is_file() || metadata.nlink() != 1 {
+        return Err(
+            "Unix ownership record is not a single-link regular file".into(),
+        );
+    }
+    let mut bytes = Vec::new();
+    file.take(1024 * 1024)
+        .read_to_end(&mut bytes)
+        .map_err(|error| format!("read exact Unix ownership record: {error}"))?;
+    let marker: BrowserOwnershipMarker = serde_json::from_slice(&bytes)
+        .map_err(|error| format!("parse exact Unix ownership record: {error}"))?;
+    validate_marker(&marker, profile_dir)?;
+    Ok(marker)
+}
+
+#[cfg(unix)]
+fn unix_entry_exists(
+    directory: &UnixDirectory,
+    name: &std::ffi::OsStr,
+) -> Result<bool, String> {
+    use std::os::fd::AsRawFd;
+    let name = unix_component_cstring(name)?;
+    // SAFETY: stat is a correctly sized output buffer and both fd/name live.
+    let mut stat: libc::stat = unsafe { std::mem::zeroed() };
+    let result = unsafe {
+        libc::fstatat(
+            directory.file.as_raw_fd(),
+            name.as_ptr(),
+            &mut stat,
+            libc::AT_SYMLINK_NOFOLLOW,
+        )
+    };
+    if result == 0 {
+        return Ok(true);
+    }
+    let error = std::io::Error::last_os_error();
+    if error.kind() == std::io::ErrorKind::NotFound {
+        Ok(false)
+    } else {
+        Err(format!("inspect exact Unix ownership entry: {error}"))
+    }
+}
+
+#[cfg(unix)]
+fn create_unix_ownership_temp(
+    directory: &UnixDirectory,
+    name: &std::ffi::OsStr,
+    bytes: &[u8],
+) -> Result<(), String> {
+    use std::os::fd::{AsRawFd, FromRawFd};
+    let name = unix_component_cstring(name)?;
+    // SAFETY: the directory fd/name live. O_EXCL provides the no-overwrite
+    // barrier and O_NOFOLLOW rejects a racing symbolic link.
+    let fd = unsafe {
+        libc::openat(
+            directory.file.as_raw_fd(),
+            name.as_ptr(),
+            libc::O_WRONLY
+                | libc::O_CREAT
+                | libc::O_EXCL
+                | libc::O_CLOEXEC
+                | libc::O_NOFOLLOW,
+            0o600,
+        )
+    };
+    if fd < 0 {
+        return Err(format!(
+            "create exact Unix ownership temp: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    // SAFETY: openat returned a new owned descriptor.
+    let mut file = unsafe { std::fs::File::from_raw_fd(fd) };
+    file.write_all(bytes)
+        .map_err(|error| format!("write exact Unix ownership temp: {error}"))?;
+    file.sync_all()
+        .map_err(|error| format!("flush exact Unix ownership temp: {error}"))
+}
+
+#[cfg(unix)]
+fn link_unix_entry_no_overwrite(
+    directory: &UnixDirectory,
+    source: &std::ffi::OsStr,
+    destination: &std::ffi::OsStr,
+) -> Result<(), String> {
+    use std::os::fd::AsRawFd;
+    let source = unix_component_cstring(source)?;
+    let destination = unix_component_cstring(destination)?;
+    // SAFETY: both names and the common exact directory fd remain live.
+    // linkat never overwrites an existing destination.
+    let result = unsafe {
+        libc::linkat(
+            directory.file.as_raw_fd(),
+            source.as_ptr(),
+            directory.file.as_raw_fd(),
+            destination.as_ptr(),
+            0,
+        )
+    };
+    if result == 0 {
+        Ok(())
+    } else {
+        Err(format!(
+            "commit exact Unix ownership record: {}",
+            std::io::Error::last_os_error()
+        ))
+    }
+}
+
+#[cfg(unix)]
+fn commit_ownership_marker_unix(
+    profile_dir: &Path,
+    directory: &UnixDirectory,
+    marker: &BrowserOwnershipMarker,
+    expected_existing: Option<&BrowserOwnershipMarker>,
+) -> Result<PathBuf, String> {
+    validate_marker(marker, profile_dir)?;
+    let provisional_name = std::ffi::OsStr::new(OWNERSHIP_MARKER_FILE);
+    let committed_name =
+        std::ffi::OsStr::new(COMMITTED_OWNERSHIP_RECORD_FILE);
+    let marker_name = if expected_existing.is_some() {
+        committed_name
+    } else {
+        provisional_name
+    };
+
+    match expected_existing {
+        Some(expected) => {
+            validate_marker(expected, profile_dir)?;
+            if *expected != provisional_predecessor(marker) {
+                return Err(
+                    "ownership record is not an exact provisional-to-committed transition"
+                        .into(),
+                );
+            }
+            if !unix_entry_exists(directory, provisional_name)?
+                || read_unix_marker_record(
+                    directory,
+                    profile_dir,
+                    provisional_name,
+                )? != *expected
+            {
+                return Err(
+                    "provisional ownership marker changed during browser spawn".into(),
+                );
+            }
+            if unix_entry_exists(directory, committed_name)? {
+                return Err(
+                    "ownership record unexpectedly appeared during browser spawn".into(),
+                );
+            }
+        }
+        None => {
+            if unix_entry_exists(directory, provisional_name)?
+                || unix_entry_exists(directory, committed_name)?
+            {
+                return Err(
+                    "ownership record unexpectedly appeared during browser spawn".into(),
+                );
+            }
+        }
+    }
+
+    let temp_name = std::ffi::OsString::from(format!(
+        "{OWNERSHIP_MARKER_FILE}.{}.{}.tmp",
+        marker.app_instance_id, marker.browser.pid
+    ));
+    let marker_path = profile_dir.join(marker_name);
+    let bytes = serde_json::to_vec_pretty(marker)
+        .map_err(|error| format!("serialize ownership marker: {error}"))?;
+    let write_result = (|| -> Result<PathBuf, String> {
+        create_unix_ownership_temp(directory, &temp_name, &bytes)?;
+
+        match expected_existing {
+            Some(expected)
+                if unix_entry_exists(directory, provisional_name)?
+                    && read_unix_marker_record(
+                        directory,
+                        profile_dir,
+                        provisional_name,
+                    )? == *expected => {}
+            Some(_) => {
+                return Err(
+                    "provisional ownership marker changed before append-only commit".into(),
+                );
+            }
+            None => {
+                if unix_entry_exists(directory, provisional_name)?
+                    || unix_entry_exists(directory, committed_name)?
+                {
+                    return Err(
+                        "ownership record appeared before atomic commit".into(),
+                    );
+                }
+            }
+        }
+
+        link_unix_entry_no_overwrite(directory, &temp_name, marker_name)?;
+        unlink_unix_entry(directory, &temp_name, 0)
+            .map_err(|error| format!("remove exact Unix ownership temp: {error}"))?;
+        directory
+            .file
+            .sync_all()
+            .map_err(|error| format!("flush exact Unix ownership namespace: {error}"))?;
+
+        #[cfg(test)]
+        run_ownership_commit_barrier_hook(profile_dir, &marker_path);
+
+        if read_unix_marker_record(directory, profile_dir, marker_name)?
+            != *marker
+        {
+            return Err(
+                "ownership record changed across fd-bound append-only commit".into(),
+            );
+        }
+        match expected_existing {
+            Some(expected)
+                if read_unix_marker_record(
+                    directory,
+                    profile_dir,
+                    provisional_name,
+                )? == *expected => {}
+            Some(_) => {
+                return Err(
+                    "committed ownership record lost its exact provisional predecessor"
+                        .into(),
+                );
+            }
+            None if unix_entry_exists(directory, committed_name)? => {
+                return Err(
+                    "unexpected committed ownership sidecar appeared after initial commit"
+                        .into(),
+                );
+            }
+            None => {}
+        }
+        Ok(marker_path.clone())
     })();
     if write_result.is_err() {
-        let _ = std::fs::remove_file(&temp_path);
+        let _ = unlink_unix_entry(directory, &temp_name, 0);
+        let _ = directory.file.sync_all();
     }
     write_result
 }
 
-fn collect_marker_paths(root: &Path) -> (Vec<PathBuf>, Vec<String>) {
-    let mut markers = Vec::new();
-    let mut errors = Vec::new();
-    match std::fs::symlink_metadata(root) {
+#[cfg(unix)]
+fn remove_unix_profile_entry_tree(
+    parent: &UnixDirectory,
+    name: &std::ffi::OsStr,
+    root_device: u64,
+    depth: usize,
+    removed_entries: &mut usize,
+) -> Result<(), String> {
+    if depth > MAX_EPHEMERAL_DELETE_DEPTH {
+        return Err("Unix profile deletion exceeded the safe directory depth".into());
+    }
+    *removed_entries = removed_entries.saturating_add(1);
+    if *removed_entries > MAX_MARKER_SCAN_ENTRIES {
+        return Err("Unix profile deletion exceeded the safe entry budget".into());
+    }
+    if is_ownership_record_name(name) {
+        return Err(
+            "unexpected nested ownership record appeared during Unix profile cleanup"
+                .into(),
+        );
+    }
+    let stat = unix_entry_stat(parent, name)?;
+    let is_directory =
+        stat.st_mode & libc::S_IFMT == libc::S_IFDIR;
+    if !is_directory {
+        return unlink_unix_entry(parent, name, 0);
+    }
+    let child = parent.open_child(name)?;
+    if child.device != root_device
+        || child.mount_key != parent.mount_key
+        || {
+            #[cfg(target_os = "linux")]
+            {
+                child.mount_id != parent.mount_id
+            }
+            #[cfg(not(target_os = "linux"))]
+            {
+                false
+            }
+        }
+        || !same_unix_entry(&stat, &child)
+    {
+        return Err(
+            "Unix profile child crossed a mount or changed identity".into(),
+        );
+    }
+    for child_name in child.entries()? {
+        remove_unix_profile_entry_tree(
+            &child,
+            &child_name,
+            root_device,
+            depth.saturating_add(1),
+            removed_entries,
+        )?;
+    }
+    if !child.entries()?.is_empty() {
+        return Err("Unix profile child changed before directory removal".into());
+    }
+    let current = unix_entry_stat(parent, name)?;
+    if !same_unix_entry(&current, &child) {
+        return Err("Unix profile child changed before unlinkat".into());
+    }
+    unlink_unix_entry(parent, name, libc::AT_REMOVEDIR)
+}
+
+#[cfg(unix)]
+fn restore_unix_record_relative(
+    root: &UnixDirectory,
+    name: &std::ffi::OsStr,
+    marker: &BrowserOwnershipMarker,
+) -> Result<(), String> {
+    use std::os::fd::{AsRawFd, FromRawFd};
+    let name = unix_component_cstring(name)?;
+    let bytes = serde_json::to_vec_pretty(marker)
+        .map_err(|error| format!("serialize Unix ownership restore: {error}"))?;
+    // SAFETY: parent fd/name live. O_EXCL is the no-overwrite commit barrier.
+    let fd = unsafe {
+        libc::openat(
+            root.file.as_raw_fd(),
+            name.as_ptr(),
+            libc::O_WRONLY
+                | libc::O_CREAT
+                | libc::O_EXCL
+                | libc::O_CLOEXEC
+                | libc::O_NOFOLLOW,
+            0o600,
+        )
+    };
+    if fd < 0 {
+        return Err(format!(
+            "restore Unix ownership record: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    // SAFETY: openat returned a new owned fd.
+    let mut file = unsafe { std::fs::File::from_raw_fd(fd) };
+    file.write_all(&bytes)
+        .map_err(|error| format!("write Unix ownership restore: {error}"))?;
+    file.sync_all()
+        .map_err(|error| format!("flush Unix ownership restore: {error}"))
+}
+
+#[cfg(unix)]
+fn remove_ephemeral_profile_contents_marker_last_unix(
+    canonical_profile: &Path,
+    expected_marker: Option<&BrowserOwnershipMarker>,
+    expected_profile_identity: ProfileDirectoryIdentity,
+) -> Result<(), String> {
+    let parent_path = canonical_profile
+        .parent()
+        .ok_or_else(|| "Unix profile has no parent directory".to_string())?;
+    let leaf = canonical_profile
+        .file_name()
+        .ok_or_else(|| "Unix profile has no final component".to_string())?;
+    let parent = UnixDirectory::open_path(parent_path)?;
+    let root = parent.open_child(leaf)?;
+    let root_identity = ProfileDirectoryIdentity {
+        device: root.device,
+        inode: root.inode,
+        mount_key: root.mount_key,
+        #[cfg(target_os = "linux")]
+        mount_id: root.mount_id,
+    };
+    if root_identity != expected_profile_identity {
+        return Err("Unix profile directory identity changed before deletion".into());
+    }
+    if root.device != parent.device
+        || root.mount_key != parent.mount_key
+        || {
+            #[cfg(target_os = "linux")]
+            {
+                root.mount_id != parent.mount_id
+            }
+            #[cfg(not(target_os = "linux"))]
+            {
+                false
+            }
+        }
+    {
+        return Err("Unix profile root is a mount point; cleanup refused".into());
+    }
+    let initial_root_stat = unix_entry_stat(&parent, leaf)?;
+    if !same_unix_entry(&initial_root_stat, &root) {
+        return Err("Unix profile identity changed before fd-relative cleanup".into());
+    }
+
+    let fixed_name = std::ffi::OsStr::new(OWNERSHIP_MARKER_FILE);
+    let committed_name =
+        std::ffi::OsStr::new(COMMITTED_OWNERSHIP_RECORD_FILE);
+    let initial_names = root.entries()?;
+    let has_fixed = initial_names.iter().any(|name| name == fixed_name);
+    let has_committed = initial_names.iter().any(|name| name == committed_name);
+
+    let (active_name, predecessor) = match expected_marker {
+        None => {
+            if has_fixed || has_committed {
+                return Err(
+                    "ownership appeared before Unix unmarked profile cleanup".into(),
+                );
+            }
+            (None, None)
+        }
+        Some(expected) if expected.phase == BrowserOwnershipPhase::Provisional => {
+            if !has_fixed || has_committed {
+                return Err("Unix provisional ownership inventory changed".into());
+            }
+            if read_unix_marker_record(&root, canonical_profile, fixed_name)?
+                != *expected
+            {
+                return Err("Unix provisional ownership record changed".into());
+            }
+            (Some(fixed_name), None)
+        }
+        Some(expected) => {
+            if has_committed {
+                if read_unix_marker_record(
+                    &root,
+                    canonical_profile,
+                    committed_name,
+                )? != *expected
+                {
+                    return Err("Unix committed ownership sidecar changed".into());
+                }
+                let predecessor = if has_fixed {
+                    let provisional =
+                        read_unix_marker_record(&root, canonical_profile, fixed_name)?;
+                    if provisional != provisional_predecessor(expected) {
+                        return Err(
+                            "Unix committed sidecar predecessor mismatched".into(),
+                        );
+                    }
+                    Some((fixed_name, provisional))
+                } else {
+                    None
+                };
+                (Some(committed_name), predecessor)
+            } else {
+                if !has_fixed
+                    || read_unix_marker_record(
+                        &root,
+                        canonical_profile,
+                        fixed_name,
+                    )? != *expected
+                {
+                    return Err("Unix stable ownership record changed".into());
+                }
+                (Some(fixed_name), None)
+            }
+        }
+    };
+
+    let mut removed_entries = 0_usize;
+    for name in initial_names {
+        if name == fixed_name || name == committed_name {
+            continue;
+        }
+        remove_unix_profile_entry_tree(
+            &root,
+            &name,
+            root.device,
+            0,
+            &mut removed_entries,
+        )?;
+    }
+
+    let remaining = root.entries()?;
+    if remaining.iter().any(|name| {
+        name != fixed_name && name != committed_name
+    }) {
+        return Err(
+            "Unix profile changed before marker-last cleanup".into(),
+        );
+    }
+    if remaining.iter().any(|name| name == fixed_name) != has_fixed
+        || remaining.iter().any(|name| name == committed_name) != has_committed
+    {
+        return Err("Unix ownership inventory changed before marker-last cleanup".into());
+    }
+    let current_root = unix_entry_stat(&parent, leaf)?;
+    if !same_unix_entry(&current_root, &root) {
+        return Err("Unix profile leaf changed before marker-last cleanup".into());
+    }
+
+    if let Some((name, expected)) = predecessor {
+        if read_unix_marker_record(&root, canonical_profile, name)? != expected {
+            return Err("Unix provisional predecessor changed before unlink".into());
+        }
+        unlink_unix_entry(&root, name, 0)?;
+    }
+    if let (Some(name), Some(expected)) = (active_name, expected_marker) {
+        if read_unix_marker_record(&root, canonical_profile, name)? != *expected {
+            return Err("Unix active ownership record changed before unlink".into());
+        }
+        unlink_unix_entry(&root, name, 0)?;
+    }
+
+    if !root.entries()?.is_empty() {
+        if let (Some(name), Some(expected)) = (active_name, expected_marker) {
+            let _ = restore_unix_record_relative(&root, name, expected);
+        }
+        return Err("Unix profile changed before final unlinkat".into());
+    }
+    let current_root = unix_entry_stat(&parent, leaf)?;
+    if !same_unix_entry(&current_root, &root) {
+        if let (Some(name), Some(expected)) = (active_name, expected_marker) {
+            let _ = restore_unix_record_relative(&root, name, expected);
+        }
+        return Err("Unix profile leaf changed before final unlinkat".into());
+    }
+    match unlink_unix_entry(&parent, leaf, libc::AT_REMOVEDIR) {
+        Ok(()) => Ok(()),
+        Err(error) => {
+            if let (Some(name), Some(expected)) = (active_name, expected_marker) {
+                let restore =
+                    restore_unix_record_relative(&root, name, expected);
+                if let Err(restore_error) = restore {
+                    return Err(format!(
+                        "{error}; ownership restore also failed: {restore_error}"
+                    ));
+                }
+            }
+            Err(error)
+        }
+    }
+}
+
+fn remove_ephemeral_entry_tree_no_follow(
+    path: &Path,
+    depth: usize,
+    removed_entries: &mut usize,
+) -> Result<(), String> {
+    if depth > MAX_EPHEMERAL_DELETE_DEPTH {
+        return Err("ephemeral profile deletion exceeded the safe directory depth".into());
+    }
+    *removed_entries = removed_entries.saturating_add(1);
+    if *removed_entries > MAX_MARKER_SCAN_ENTRIES {
+        return Err("ephemeral profile deletion exceeded the safe entry budget".into());
+    }
+    let metadata = std::fs::symlink_metadata(path)
+        .map_err(|error| format!("inspect exact ephemeral profile entry: {error}"))?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return std::fs::remove_file(path)
+            .map_err(|error| format!("remove exact ephemeral profile file: {error}"));
+    }
+    // Rust's platform implementation is explicitly symlink-race resistant on
+    // Windows and Unix. Keeping the root ownership record outside this subtree
+    // preserves marker-last recovery while avoiding a custom path-recursive
+    // walker whose metadata/read_dir gap could cross a junction.
+    std::fs::remove_dir_all(path)
+        .map_err(|error| format!("remove exact ephemeral profile subtree: {error}"))
+}
+
+/// Variant used by launch failures which occur while the original exclusive
+/// launch claim is still held. Reusing that exact claim avoids a non-reentrant
+/// attempt to lock the same profile while retaining the same validation and
+/// fail-closed artifact rules as normal shutdown.
+pub(crate) fn cleanup_browser_ownership_after_exact_shutdown_under_launch_claim(
+    token: &BrowserOwnershipToken,
+    launch_claim: &ProfileLaunchClaim,
+) -> Result<(), String> {
+    launch_claim.0.validates(&token.profile_dir)?;
+    cleanup_browser_ownership_under_claim(token, &launch_claim.0)
+}
+
+fn cleanup_browser_ownership_under_claim(
+    token: &BrowserOwnershipToken,
+    operation_claim: &ProfileOperationClaim,
+) -> Result<(), String> {
+    operation_claim.validates(&token.profile_dir)?;
+    if operation_claim.directory_identity()? != token.profile_identity {
+        return Err("normal shutdown profile directory identity changed".into());
+    }
+    validate_marker(&token.marker, &token.profile_dir)?;
+
+    match std::fs::symlink_metadata(&token.marker_path) {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return (markers, errors);
+            // A prior idempotent cleanup may already have removed the exact
+            // final record. Never use a different path as replacement
+            // authority.
+            return Ok(());
         }
         Err(error) => {
-            errors.push(format!("inspect browser profile recovery root: {error}"));
-            return (markers, errors);
+            return Err(format!(
+                "inspect exact ownership record during normal shutdown: {error}"
+            ));
         }
-        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
-            errors.push("browser profile recovery root is not a regular directory".into());
-            return (markers, errors);
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
+            return Err(
+                "exact ownership record is not a regular file during normal shutdown".into(),
+            );
         }
         Ok(_) => {}
     }
-    let mut pending = vec![(root.to_path_buf(), 0_usize)];
-    while let Some((directory, depth)) = pending.pop() {
+
+    let current_records = read_ownership_record_set(&token.profile_dir)?;
+    let current_marker = &current_records.active;
+    if *current_marker != token.marker
+        || current_records.active_path != token.marker_path
+    {
+        return Err(
+            "ownership marker changed before normal shutdown cleanup; artifacts preserved".into(),
+        );
+    }
+
+    let mut control = SystemProcessControl;
+    let current_app = control.current_process()?;
+    if current_marker.app_instance_id != managed_app_instance_id()
+        || !same_process(&current_marker.owner_app, &current_app)
+    {
+        return Err(
+            "ownership marker no longer belongs to this exact application instance".into(),
+        );
+    }
+
+    remove_regular_devtools_active_port(&token.profile_dir, "normal shutdown")?;
+
+    // Remove a provisional predecessor first. The exact committed sidecar
+    // remains authoritative if the process crashes between the two unlinks.
+    if let Some((path, expected)) = &current_records.provisional_predecessor {
+        if read_marker_at(&token.profile_dir, path)? != *expected {
+            return Err(
+                "provisional predecessor changed during normal shutdown cleanup".into(),
+            );
+        }
+        std::fs::remove_file(path)
+            .map_err(|error| format!("remove completed provisional record: {error}"))?;
+    }
+    if read_marker_at(&token.profile_dir, &token.marker_path)? != token.marker {
+        return Err("active ownership record changed during normal shutdown cleanup".into());
+    }
+    std::fs::remove_file(&token.marker_path)
+        .map_err(|error| format!("remove completed ownership record: {error}"))
+}
+
+fn remove_regular_devtools_active_port(
+    profile_dir: &Path,
+    operation: &str,
+) -> Result<(), String> {
+    let port_path = profile_dir.join(DEVTOOLS_ACTIVE_PORT_FILE);
+    match std::fs::symlink_metadata(&port_path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(format!(
+                "inspect DevToolsActivePort during {operation}: {error}"
+            ));
+        }
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
+            return Err(
+                format!("DevToolsActivePort is not a regular file during {operation}"),
+            );
+        }
+        Ok(_) => {
+            std::fs::remove_file(&port_path)
+                .map_err(|error| format!("remove DevToolsActivePort: {error}"))?;
+        }
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn collect_marker_paths(
+    root: &Path,
+) -> (
+    Vec<PathBuf>,
+    Vec<String>,
+    HashMap<PathBuf, ProfileDirectoryIdentity>,
+) {
+    let root_directory = match UnixDirectory::open_path(root) {
+        Ok(directory) => directory,
+        Err(error) => {
+            if std::fs::symlink_metadata(root)
+                .is_err_and(|io| io.kind() == std::io::ErrorKind::NotFound)
+            {
+                return (Vec::new(), Vec::new(), HashMap::new());
+            }
+            return (Vec::new(), vec![error], HashMap::new());
+        }
+    };
+    let root_device = root_directory.device;
+    let root_mount_key = root_directory.mount_key;
+    #[cfg(target_os = "linux")]
+    let root_mount_id = root_directory.mount_id;
+    let mut markers: Vec<PathBuf> = Vec::new();
+    let mut errors = Vec::new();
+    let mut identities = HashMap::new();
+    let mut pending = vec![(root_directory, root.to_path_buf())];
+    let mut scanned_entries = 0_usize;
+    while let Some((directory, display_path)) = pending.pop() {
+        let entries = match directory.entries() {
+            Ok(entries) => entries,
+            Err(error) => {
+                errors.push(error);
+                continue;
+            }
+        };
+        for name in entries {
+            scanned_entries = scanned_entries.saturating_add(1);
+            if scanned_entries > MAX_MARKER_SCAN_ENTRIES {
+                errors.push(format!(
+                    "browser profile marker scan exceeded {MAX_MARKER_SCAN_ENTRIES} entries"
+                ));
+                markers.sort_by_key(|path| {
+                    std::cmp::Reverse(path.components().count())
+                });
+                return (markers, errors, identities);
+            }
+            let stat = match unix_entry_stat(&directory, &name) {
+                Ok(stat) => stat,
+                Err(error) => {
+                    errors.push(error);
+                    continue;
+                }
+            };
+            let path = display_path.join(&name);
+            let kind = stat.st_mode & libc::S_IFMT;
+            if is_ownership_record_name(&name) {
+                if kind == libc::S_IFREG {
+                    markers.push(path);
+                    identities
+                        .entry(display_path.clone())
+                        .or_insert(ProfileDirectoryIdentity {
+                            device: directory.device,
+                            inode: directory.inode,
+                            mount_key: directory.mount_key,
+                            #[cfg(target_os = "linux")]
+                            mount_id: directory.mount_id,
+                        });
+                } else {
+                    errors.push(
+                        "ownership record name is occupied by a non-regular file".into(),
+                    );
+                }
+                continue;
+            }
+            if kind != libc::S_IFDIR {
+                continue;
+            }
+            match directory.open_child(&name) {
+                Ok(child)
+                    if child.device == root_device
+                        && child.mount_key == root_mount_key
+                        && {
+                            #[cfg(target_os = "linux")]
+                            {
+                                child.mount_id == root_mount_id
+                            }
+                            #[cfg(not(target_os = "linux"))]
+                            {
+                                true
+                            }
+                        } =>
+                {
+                    pending.push((child, path));
+                }
+                Ok(_) | Err(_) => {
+                    errors.push(
+                        "browser profile scan refused a mount boundary or changed directory"
+                            .into(),
+                    );
+                }
+            }
+        }
+    }
+    markers.sort_by_key(|path| std::cmp::Reverse(path.components().count()));
+    (markers, errors, identities)
+}
+
+#[cfg(windows)]
+fn collect_marker_paths(
+    root: &Path,
+) -> (
+    Vec<PathBuf>,
+    Vec<String>,
+    HashMap<PathBuf, ProfileDirectoryIdentity>,
+) {
+    let mut markers = Vec::new();
+    let mut errors = Vec::new();
+    let mut identities = HashMap::new();
+    match std::fs::symlink_metadata(root) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return (markers, errors, identities);
+        }
+        Err(error) => {
+            errors.push(format!("inspect browser profile recovery root: {error}"));
+            return (markers, errors, identities);
+        }
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
+            errors.push("browser profile recovery root is not a regular directory".into());
+            return (markers, errors, identities);
+        }
+        Ok(_) => {}
+    }
+    let mut pending = vec![root.to_path_buf()];
+    let mut scanned_entries = 0_usize;
+    while let Some(directory) = pending.pop() {
         let entries = match std::fs::read_dir(&directory) {
             Ok(entries) => entries,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
@@ -806,6 +3763,14 @@ fn collect_marker_paths(root: &Path) -> (Vec<PathBuf>, Vec<String>) {
             }
         };
         for entry in entries {
+            scanned_entries = scanned_entries.saturating_add(1);
+            if scanned_entries > MAX_MARKER_SCAN_ENTRIES {
+                errors.push(format!(
+                    "browser profile marker scan exceeded {MAX_MARKER_SCAN_ENTRIES} entries"
+                ));
+                markers.sort_by_key(|path| std::cmp::Reverse(path.components().count()));
+                return (markers, errors, identities);
+            }
             let entry = match entry {
                 Ok(entry) => entry,
                 Err(error) => {
@@ -820,35 +3785,50 @@ fn collect_marker_paths(root: &Path) -> (Vec<PathBuf>, Vec<String>) {
                     continue;
                 }
             };
+            if is_ownership_record_name(&entry.file_name()) {
+                if file_type.is_file() && !file_type.is_symlink() {
+                    markers.push(entry.path());
+                    match capture_profile_directory_identity(&directory) {
+                        Ok(identity) => {
+                            identities
+                                .entry(directory.clone())
+                                .or_insert(identity);
+                        }
+                        Err(error) => errors.push(error),
+                    }
+                } else {
+                    errors.push(
+                        "ownership record name is occupied by a non-regular file".into(),
+                    );
+                }
+                continue;
+            }
             if file_type.is_symlink() {
                 continue;
             }
-            if file_type.is_file() && entry.file_name() == OWNERSHIP_MARKER_FILE {
-                markers.push(entry.path());
-            } else if file_type.is_dir() && depth < MAX_MARKER_SCAN_DEPTH {
-                pending.push((entry.path(), depth + 1));
+            if file_type.is_dir() {
+                pending.push(entry.path());
             }
         }
     }
     markers.sort_by_key(|path| std::cmp::Reverse(path.components().count()));
-    (markers, errors)
+    (markers, errors, identities)
 }
 
 fn cleanup_recovered_profile(
-    recovery_root: &Path,
-    profile_dir: &Path,
+    canonical_recovery_root: &Path,
+    operation_claim: &ProfileOperationClaim,
     mode: ProfileRecoveryMode,
+    expected: &BrowserOwnershipMarker,
 ) -> Result<(), String> {
-    let canonical_root = std::fs::canonicalize(recovery_root)
-        .map_err(|error| format!("canonicalize browser recovery root: {error}"))?;
-    let canonical_profile = std::fs::canonicalize(profile_dir)
-        .map_err(|error| format!("canonicalize recovered profile: {error}"))?;
-    if !canonical_profile.starts_with(&canonical_root) {
+    operation_claim.validates(&operation_claim.profile_dir)?;
+    let canonical_profile = operation_claim.profile_dir.clone();
+    if !canonical_profile.starts_with(canonical_recovery_root) {
         return Err("refusing to clean a profile outside the canonical recovery root".into());
     }
     match mode {
         ProfileRecoveryMode::DeleteEphemeralProfile => {
-            if canonical_profile == canonical_root {
+            if canonical_profile == canonical_recovery_root {
                 return Err("refusing to remove a profile outside the ephemeral recovery root".into());
             }
             let metadata = std::fs::symlink_metadata(&canonical_profile)
@@ -856,25 +3836,71 @@ fn cleanup_recovered_profile(
             if metadata.file_type().is_symlink() || !metadata.is_dir() {
                 return Err("recovered ephemeral profile is not a regular directory".into());
             }
-            let (nested_markers, scan_errors) = collect_marker_paths(&canonical_profile);
+            let (mut nested_markers, scan_errors, _) =
+                collect_marker_paths(&canonical_profile);
             if let Some(error) = scan_errors.into_iter().next() {
                 return Err(format!(
                     "refusing recursive cleanup after an incomplete nested marker scan: {error}"
                 ));
             }
-            let expected_marker = ownership_marker_path(&canonical_profile);
-            if nested_markers.len() != 1 || nested_markers[0] != expected_marker {
+            let records = read_ownership_record_set(&canonical_profile)?;
+            if records.active != *expected {
+                return Err(
+                    "recovered ownership record changed before recursive cleanup".into(),
+                );
+            }
+            let mut expected_paths = vec![records.active_path];
+            if let Some((path, _)) = records.provisional_predecessor {
+                expected_paths.push(path);
+            }
+            nested_markers.sort();
+            expected_paths.sort();
+            if nested_markers != expected_paths {
                 return Err(
                     "refusing recursive cleanup while a descendant ownership marker remains"
                         .into(),
                 );
             }
-            std::fs::remove_dir_all(&canonical_profile)
-                .map_err(|error| format!("remove recovered ephemeral profile: {error}"))
+            let expected_profile_identity =
+                operation_claim.directory_identity()?;
+            #[cfg(windows)]
+            operation_claim.release_profile_guard_for_directory_removal()?;
+            remove_ephemeral_profile_contents_marker_last(
+                &canonical_profile,
+                Some(expected),
+                expected_profile_identity,
+            )
         }
         ProfileRecoveryMode::PreserveStableProfile => {
-            std::fs::remove_file(ownership_marker_path(&canonical_profile))
-                .map_err(|error| format!("clear recovered stable profile marker: {error}"))
+            let records = read_ownership_record_set(&canonical_profile)?;
+            if records.active != *expected {
+                return Err("stable ownership changed before recovery cleanup".into());
+            }
+            remove_regular_devtools_active_port(&canonical_profile, "startup recovery")?;
+            let current = read_ownership_record_set(&canonical_profile)?;
+            if current.active != *expected
+                || current.active_path != records.active_path
+                || current.provisional_predecessor != records.provisional_predecessor
+            {
+                return Err("stable ownership changed before marker-last cleanup".into());
+            }
+            if let Some((path, predecessor)) = &records.provisional_predecessor {
+                if read_marker_at(&canonical_profile, path)? != *predecessor {
+                    return Err(
+                        "stable provisional predecessor changed before cleanup".into(),
+                    );
+                }
+                std::fs::remove_file(path).map_err(|error| {
+                    format!("clear recovered stable provisional record: {error}")
+                })?;
+            }
+            if read_marker_at(&canonical_profile, &records.active_path)? != *expected {
+                return Err(
+                    "stable active ownership record changed before cleanup".into(),
+                );
+            }
+            std::fs::remove_file(&records.active_path)
+                .map_err(|error| format!("clear recovered stable ownership record: {error}"))
         }
     }
 }
@@ -891,13 +3917,148 @@ pub fn recover_owned_profiles(
     recover_owned_profiles_with(recovery_root, mode, &mut control)
 }
 
+fn recover_provisional_profile(
+    recovery_root: &Path,
+    profile_dir: &Path,
+    marker: &BrowserOwnershipMarker,
+    operation_claim: &ProfileOperationClaim,
+    #[cfg(windows)] authority: PinnedOwnershipRecordSet,
+    mode: ProfileRecoveryMode,
+    control: &mut dyn ProcessControl,
+    report: &mut ProfileRecoveryReport,
+) {
+    #[cfg(not(windows))]
+    {
+        let _ = (
+            recovery_root,
+            profile_dir,
+            marker,
+            operation_claim,
+            mode,
+            control,
+        );
+        report.failures += 1;
+        report.profiles_preserved += 1;
+        tracing::warn!(
+            target: "nomi_browser_engine::profile",
+            reason = "provisional_cleanup_unsupported",
+            "provisional browser profile cleanup lacks a safe application-tree absence proof on this platform; profile preserved"
+        );
+    }
+
+    #[cfg(windows)]
+    {
+        if mode != ProfileRecoveryMode::DeleteEphemeralProfile {
+            report.failures += 1;
+            report.profiles_preserved += 1;
+            tracing::warn!(
+                target: "nomi_browser_engine::profile",
+                reason = "provisional_stable_profile_preserved",
+                "provisional ownership can never authorize stable profile deletion"
+            );
+            return;
+        }
+        if operation_claim.validates(profile_dir).is_err() {
+            report.failures += 1;
+            report.profiles_preserved += 1;
+            return;
+        }
+        if authority.marker() != marker {
+            report.failures += 1;
+            report.profiles_preserved += 1;
+            return;
+        }
+        // Recheck after acquiring the profile claim. A Missing -> Found race,
+        // PID reuse, or unverifiable snapshot always preserves the profile.
+        match control.lookup(marker.owner_app.pid) {
+            ProcessLookup::Missing => {}
+            ProcessLookup::Found(_) | ProcessLookup::Unverified(_) => {
+                report.failures += 1;
+                report.profiles_preserved += 1;
+                return;
+            }
+        }
+        match control.confirm_tree_absent(&marker.owner_app) {
+            Ok(true) => {}
+            Ok(false) | Err(_) => {
+                report.failures += 1;
+                report.profiles_preserved += 1;
+                return;
+            }
+        }
+        // Release the immutable authority file only after every process-tree
+        // absence proof. Cleanup immediately re-resolves the exact record set
+        // under the still-pinned profile directory and fails closed on change.
+        drop(authority);
+        match cleanup_recovered_profile(
+            recovery_root,
+            operation_claim,
+            ProfileRecoveryMode::DeleteEphemeralProfile,
+            marker,
+        ) {
+            Ok(()) => report.ephemeral_profiles_removed += 1,
+            Err(_) => {
+                report.failures += 1;
+                report.profiles_preserved += 1;
+            }
+        }
+    }
+}
+
+#[cfg(not(windows))]
 fn recover_owned_profiles_with(
     recovery_root: &Path,
     mode: ProfileRecoveryMode,
     control: &mut dyn ProcessControl,
 ) -> ProfileRecoveryReport {
-    let (markers, scan_errors) = collect_marker_paths(recovery_root);
     let mut report = ProfileRecoveryReport::default();
+    let _ = (mode, control);
+    let (markers, scan_errors, _) = collect_marker_paths(recovery_root);
+    report.markers_scanned = markers.len();
+    if markers.is_empty() && scan_errors.is_empty() {
+        return report;
+    }
+    // Unix managed launches use an inherited debugging pipe/process-group
+    // relay for parent-death cleanup. Startup orphan recovery is disabled
+    // after fd-relative, no-cross-mount inventory. We deliberately do not read
+    // record payloads or call ProcessControl here. An empty, completely scanned
+    // root is safe and must not disable the browser on the next normal launch;
+    // any record or incomplete scan degrades fail closed.
+    report.failures = scan_errors.len() + usize::from(!markers.is_empty());
+    report.profiles_preserved = markers
+        .iter()
+        .filter_map(|path| path.parent())
+        .collect::<std::collections::HashSet<_>>()
+        .len()
+        .max(usize::from(!scan_errors.is_empty()));
+    tracing::warn!(
+        target: "nomi_browser_engine::profile",
+        reason = "unix_startup_recovery_fail_closed",
+        marker_records = markers.len(),
+        scan_failures = scan_errors.len(),
+        "Unix startup browser-profile recovery found unresolved state; profile data preserved without process actions"
+    );
+    report
+}
+
+#[cfg(windows)]
+fn recover_owned_profiles_with(
+    recovery_root: &Path,
+    mode: ProfileRecoveryMode,
+    control: &mut dyn ProcessControl,
+) -> ProfileRecoveryReport {
+    let mut report = ProfileRecoveryReport::default();
+    let canonical_recovery_root = match std::fs::canonicalize(recovery_root) {
+        Ok(root) => root,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return report,
+        Err(_) => {
+            report.failures += 1;
+            return report;
+        }
+    };
+    let (markers, scan_errors, scanned_profile_identities) =
+        collect_marker_paths(recovery_root);
+    report.markers_scanned = markers.len();
     for error in scan_errors {
         report.failures += 1;
         tracing::warn!(
@@ -908,15 +4069,56 @@ fn recover_owned_profiles_with(
         let _ = error;
     }
 
+    let mut processed_profiles = HashSet::new();
     for marker_path in markers {
-        report.markers_scanned += 1;
         let Some(profile_dir) = marker_path.parent() else {
             report.failures += 1;
             report.profiles_preserved += 1;
             continue;
         };
-        let marker = match read_marker(profile_dir) {
-            Ok(marker) => marker,
+        if !processed_profiles.insert(profile_dir.to_path_buf()) {
+            continue;
+        }
+        let Some(scanned_profile_identity) =
+            scanned_profile_identities.get(profile_dir).copied()
+        else {
+            report.failures += 1;
+            report.profiles_preserved += 1;
+            continue;
+        };
+        // Establish the filesystem capability boundary before *any* process
+        // lookup, absence proof, or termination. A scanned ancestor may have
+        // been swapped for a junction/symlink since traversal; the held claim's
+        // canonical final directory must remain a strict descendant of the
+        // fixed canonical recovery root.
+        let operation_claim = match ProfileOperationClaim::acquire_pinned(profile_dir) {
+            Ok(claim) => claim,
+            Err(error) => {
+                report.failures += 1;
+                report.profiles_preserved += 1;
+                let _ = error;
+                continue;
+            }
+        };
+        if operation_claim.profile_dir == canonical_recovery_root
+            || !operation_claim
+                .profile_dir
+                .starts_with(&canonical_recovery_root)
+        {
+            report.failures += 1;
+            report.profiles_preserved += 1;
+            continue;
+        }
+        let claimed_profile_dir = operation_claim.profile_dir.clone();
+        if operation_claim.directory_identity().ok()
+            != Some(scanned_profile_identity)
+        {
+            report.failures += 1;
+            report.profiles_preserved += 1;
+            continue;
+        }
+        let authority = match read_pinned_ownership_record_set(&claimed_profile_dir) {
+            Ok(authority) => authority,
             Err(error) => {
                 report.failures += 1;
                 report.profiles_preserved += 1;
@@ -929,8 +4131,14 @@ fn recover_owned_profiles_with(
                 continue;
             }
         };
+        if operation_claim.validates(&claimed_profile_dir).is_err() {
+            report.failures += 1;
+            report.profiles_preserved += 1;
+            continue;
+        }
+        let marker = authority.marker().clone();
 
-        match control.lookup(marker.owner_app.pid) {
+        let owner_was_missing = match control.lookup(marker.owner_app.pid) {
             ProcessLookup::Found(observed) if same_process(&marker.owner_app, &observed) => {
                 report.live_owners_preserved += 1;
                 tracing::info!(
@@ -953,77 +4161,47 @@ fn recover_owned_profiles_with(
                 let _ = error;
                 continue;
             }
-            ProcessLookup::Missing | ProcessLookup::Found(_) => {}
-        }
-
-        let _operation_claim = match ProfileOperationClaim::acquire(profile_dir) {
-            Ok(claim) => claim,
-            Err(error) => {
+            ProcessLookup::Missing => true,
+            ProcessLookup::Found(_) => {
                 report.failures += 1;
                 report.profiles_preserved += 1;
                 tracing::warn!(
                     target: "nomi_browser_engine::profile",
-                    reason = "profile_operation_claim_unavailable",
-                    "browser profile is being launched or recovered elsewhere; profile preserved"
+                    reason = "owner_pid_reused",
+                    "browser owner PID was reused by a different identity; profile preserved"
                 );
-                let _ = error;
                 continue;
             }
         };
-        match read_marker(profile_dir) {
-            Ok(current) if current == marker => {}
-            Ok(_) => {
-                report.failures += 1;
-                report.profiles_preserved += 1;
-                tracing::warn!(
-                    target: "nomi_browser_engine::profile",
-                    reason = "ownership_changed_before_claim",
-                    "browser ownership changed before recovery claim; profile preserved"
+        if marker.phase == BrowserOwnershipPhase::Provisional {
+            if owner_was_missing {
+                recover_provisional_profile(
+                    &canonical_recovery_root,
+                    &claimed_profile_dir,
+                    &marker,
+                    &operation_claim,
+                    authority,
+                    mode,
+                    control,
+                    &mut report,
                 );
-                continue;
+            } else {
+                unreachable!("only a missing owner reaches provisional recovery");
             }
-            Err(error) => {
-                report.failures += 1;
-                report.profiles_preserved += 1;
-                tracing::warn!(
-                    target: "nomi_browser_engine::profile",
-                    reason = "marker_revalidation_failed_before_recovery",
-                    "browser ownership marker disappeared before recovery claim; profile preserved"
-                );
-                let _ = error;
-                continue;
-            }
+            continue;
         }
 
-        let mut terminated = false;
         let tree_absent = match control.lookup(marker.browser.pid) {
             ProcessLookup::Found(observed) if same_process(&marker.browser, &observed) => {
-                match control.terminate_tree(&marker.browser) {
-                    Ok(terminated_count) => {
-                        terminated = true;
-                        report.process_trees_terminated += 1;
-                        tracing::warn!(
-                            target: "nomi_browser_engine::profile",
-                            terminated_processes = terminated_count,
-                            browser_pid = marker.browser.pid,
-                            reason = "verified_orphan",
-                            "terminated a verified orphan browser process tree"
-                        );
-                        true
-                    }
-                    Err(error) => {
-                        report.failures += 1;
-                        report.profiles_preserved += 1;
-                        tracing::warn!(
-                            target: "nomi_browser_engine::profile",
-                            browser_pid = marker.browser.pid,
-                            reason = "termination_unconfirmed",
-                            "orphan browser termination was not confirmed; profile preserved"
-                        );
-                        let _ = error;
-                        false
-                    }
-                }
+                let _ = observed;
+                report.profiles_preserved += 1;
+                tracing::warn!(
+                    target: "nomi_browser_engine::profile",
+                    browser_pid = marker.browser.pid,
+                    reason = "startup_recovery_never_signals_live_browser",
+                    "verified orphan browser remains live; startup recovery preserves its profile and never signals marker-derived processes"
+                );
+                false
             }
             ProcessLookup::Found(_) => {
                 report.failures += 1;
@@ -1032,7 +4210,7 @@ fn recover_owned_profiles_with(
                     target: "nomi_browser_engine::profile",
                     browser_pid = marker.browser.pid,
                     reason = "browser_pid_reused",
-                    "browser PID was reused by a different process identity; reused process was not signaled and profile was preserved"
+                    "browser PID was reused by a different process identity; startup recovery preserved the profile"
                 );
                 false
             }
@@ -1081,37 +4259,28 @@ fn recover_owned_profiles_with(
             continue;
         }
 
-        match read_marker(profile_dir) {
-            Ok(current) if current == marker => {}
-            Ok(_) => {
-                report.failures += 1;
-                report.profiles_preserved += 1;
-                tracing::warn!(
-                    target: "nomi_browser_engine::profile",
-                    reason = "ownership_changed_after_recovery",
-                    "browser ownership changed after process recovery; profile preserved"
-                );
-                continue;
-            }
-            Err(error) => {
-                report.failures += 1;
-                report.profiles_preserved += 1;
-                tracing::warn!(
-                    target: "nomi_browser_engine::profile",
-                    reason = "marker_revalidation_failed_after_recovery",
-                    "browser ownership marker could not be revalidated after process recovery; profile preserved"
-                );
-                let _ = error;
-                continue;
-            }
+        if authority.records().active != marker {
+            report.failures += 1;
+            report.profiles_preserved += 1;
+            continue;
         }
+        // The deny-write/delete record handles remain the sole authority
+        // throughout every absence proof. Release them only when cleanup is
+        // ready to re-resolve and remove the exact records under the still
+        // pinned profile directory.
+        drop(authority);
 
-        if let Err(error) = cleanup_recovered_profile(recovery_root, profile_dir, mode) {
+        if let Err(error) = cleanup_recovered_profile(
+            &canonical_recovery_root,
+            &operation_claim,
+            mode,
+            &marker,
+        )
+        {
             report.failures += 1;
             report.profiles_preserved += 1;
             tracing::warn!(
                 target: "nomi_browser_engine::profile",
-                terminated,
                 recovery_mode = ?mode,
                 reason = "profile_cleanup_failed",
                 "browser process tree is absent but profile cleanup failed; profile preserved"
@@ -1132,305 +4301,24 @@ fn recover_owned_profiles_with(
 }
 
 #[cfg(windows)]
-#[derive(Clone, Debug)]
-struct DescendantIdentity {
-    parent: ProcessIdentity,
-    identity: ProcessIdentity,
-}
-
-#[cfg(windows)]
-fn snapshot_descendants(
+fn has_verified_descendant(
     system: &sysinfo::System,
     root: &ProcessIdentity,
-) -> Result<Vec<DescendantIdentity>, String> {
-    let mut children: HashMap<u32, Vec<u32>> = HashMap::new();
+) -> Result<bool, String> {
     for process in system.processes().values() {
-        if let Some(parent) = process.parent() {
-            children
-                .entry(parent.as_u32())
-                .or_default()
-                .push(process.pid().as_u32());
-        }
-    }
-    let mut result = Vec::new();
-    let mut seen = HashSet::new();
-    let mut pending = vec![(root.clone(), 0_usize)];
-    while let Some((parent, depth)) = pending.pop() {
-        let Some(child_pids) = children.get(&parent.pid) else {
+        if process.parent().map(sysinfo::Pid::as_u32) != Some(root.pid) {
             continue;
-        };
-        for child_pid in child_pids {
-            if !seen.insert(*child_pid) {
-                return Err("cycle detected in browser process tree".into());
-            }
-            let process = system
-                .process(sysinfo::Pid::from_u32(*child_pid))
-                .ok_or_else(|| format!("process {child_pid} disappeared from its own snapshot"))?;
-            let identity = process_identity(process)?;
-            if identity.platform_start_key < parent.platform_start_key {
-                return Err(format!(
-                    "browser child {} predates immediate parent {}",
-                    identity.pid, parent.pid
-                ));
-            }
-            pending.push((identity.clone(), depth + 1));
-            result.push(DescendantIdentity {
-                parent: parent.clone(),
-                identity,
-            });
         }
-    }
-    Ok(result)
-}
-
-#[cfg(windows)]
-struct AnchoredWindowsProcess {
-    edge: Option<DescendantIdentity>,
-    identity: ProcessIdentity,
-    handle: nomi_process_runtime::WindowsExactProcess,
-}
-
-#[cfg(windows)]
-fn validate_windows_anchor_snapshot(
-    system: &sysinfo::System,
-    expected_root: &ProcessIdentity,
-    anchored: &[AnchoredWindowsProcess],
-) -> Result<(), String> {
-    let root = system
-        .process(sysinfo::Pid::from_u32(expected_root.pid))
-        .ok_or_else(|| "browser root disappeared during Job collection".to_string())?;
-    let observed = process_identity(root)?;
-    if !same_process(expected_root, &observed) {
-        return Err("browser root PID changed identity during Job collection".into());
-    }
-    for anchor in anchored {
-        let Some(edge) = &anchor.edge else {
-            continue;
-        };
-        let process = system
-            .process(sysinfo::Pid::from_u32(anchor.identity.pid))
-            .ok_or_else(|| {
-                format!(
-                    "browser descendant {} disappeared during Job collection",
-                    anchor.identity.pid
-                )
-            })?;
-        let observed = process_identity(process)?;
-        if !same_process(&anchor.identity, &observed) {
+        let identity = process_identity(process)?;
+        if identity.platform_start_key < root.platform_start_key {
             return Err(format!(
-                "browser descendant {} changed identity during Job collection",
-                anchor.identity.pid
+                "browser child {} predates its expected root {}",
+                identity.pid, root.pid
             ));
         }
-        if process.parent().map(sysinfo::Pid::as_u32) != Some(edge.parent.pid) {
-            return Err(format!(
-                "browser descendant {} changed its recorded parent edge",
-                anchor.identity.pid
-            ));
-        }
-        let parent = system
-            .process(sysinfo::Pid::from_u32(edge.parent.pid))
-            .ok_or_else(|| {
-                format!(
-                    "browser descendant {} lost its verified parent during Job collection",
-                    anchor.identity.pid
-                )
-            })?;
-        let observed_parent = process_identity(parent)?;
-        if !same_process(&edge.parent, &observed_parent) {
-            return Err(format!(
-                "browser descendant {} refers to a reused parent PID",
-                anchor.identity.pid
-            ));
-        }
+        return Ok(true);
     }
-    Ok(())
-}
-
-#[cfg(windows)]
-fn validate_windows_candidate_snapshot(
-    system: &sysinfo::System,
-    candidate: &DescendantIdentity,
-) -> Result<(), String> {
-    let process = system
-        .process(sysinfo::Pid::from_u32(candidate.identity.pid))
-        .ok_or_else(|| {
-            format!(
-                "new browser descendant {} disappeared before Job assignment",
-                candidate.identity.pid
-            )
-        })?;
-    let observed = process_identity(process)?;
-    if !same_process(&candidate.identity, &observed) {
-        return Err(format!(
-            "new browser descendant {} changed identity before Job assignment",
-            candidate.identity.pid
-        ));
-    }
-    if process.parent().map(sysinfo::Pid::as_u32) != Some(candidate.parent.pid) {
-        return Err(format!(
-            "new browser descendant {} changed parent before Job assignment",
-            candidate.identity.pid
-        ));
-    }
-    let parent = system
-        .process(sysinfo::Pid::from_u32(candidate.parent.pid))
-        .ok_or_else(|| {
-            format!(
-                "new browser descendant {} lost its verified parent before Job assignment",
-                candidate.identity.pid
-            )
-        })?;
-    let observed_parent = process_identity(parent)?;
-    if !same_process(&candidate.parent, &observed_parent) {
-        return Err(format!(
-            "new browser descendant {} refers to a reused parent PID",
-            candidate.identity.pid
-        ));
-    }
-    Ok(())
-}
-
-#[cfg(windows)]
-fn terminate_process_tree(expected: &ProcessIdentity) -> Result<usize, String> {
-    let system = fresh_process_snapshot()?;
-    let root_process = system
-        .process(sysinfo::Pid::from_u32(expected.pid))
-        .ok_or_else(|| "browser root disappeared before termination".to_string())?;
-    let observed_root = process_identity(root_process)?;
-    if !same_process(expected, &observed_root) {
-        return Err("browser root identity changed before termination".into());
-    }
-    let descendants = snapshot_descendants(&system, &observed_root)?;
-
-    // Open and validate every exact handle before any destructive call. A PID
-    // reuse after this point cannot retarget these handles.
-    let root_handle = nomi_process_runtime::WindowsExactProcess::open_for_recovery(expected.pid)
-        .map_err(|error| format!("open verified browser root for recovery: {error}"))?;
-    if !same_process(
-        expected,
-        &process_identity_from_windows(root_handle.identity())?,
-    ) {
-        return Err("browser root handle identity changed before termination".into());
-    }
-    let mut job = nomi_process_runtime::WindowsRecoveryJob::new_unarmed()
-        .map_err(|error| format!("create recovery Job: {error}"))?;
-    job.assign(&root_handle)
-        .map_err(|error| format!("assign verified browser root to recovery Job: {error}"))?;
-    let mut anchored = vec![AnchoredWindowsProcess {
-        edge: None,
-        identity: expected.clone(),
-        handle: root_handle,
-    }];
-    for descendant in descendants {
-        if descendant.identity.platform_start_key < expected.platform_start_key {
-            return Err("browser descendant predates its verified root".into());
-        }
-        let handle = nomi_process_runtime::WindowsExactProcess::open_for_recovery(
-            descendant.identity.pid,
-        )
-        .map_err(|error| {
-            format!(
-                "open browser descendant {} for recovery: {error}",
-                descendant.identity.pid
-            )
-        })?;
-        if !same_process(
-            &descendant.identity,
-            &process_identity_from_windows(handle.identity())?,
-        ) {
-            return Err(format!(
-                "browser descendant {} changed identity before termination",
-                descendant.identity.pid
-            ));
-        }
-        job.assign(&handle).map_err(|error| {
-            format!(
-                "assign verified browser descendant {} to recovery Job: {error}",
-                descendant.identity.pid
-            )
-        })?;
-        anchored.push(AnchoredWindowsProcess {
-            identity: descendant.identity.clone(),
-            edge: Some(descendant),
-            handle,
-        });
-    }
-    validate_windows_anchor_snapshot(&fresh_process_snapshot()?, expected, &anchored)?;
-
-    // Root is now in the Job, so its future children inherit membership. Scan
-    // twice for descendants which raced before their parent was assigned.
-    let mut stable_rounds = 0;
-    while stable_rounds < PROCESS_TREE_ABSENCE_CONFIRMATIONS {
-        let system = fresh_process_snapshot()?;
-        validate_windows_anchor_snapshot(&system, expected, &anchored)?;
-        let mut candidates = Vec::new();
-        for descendant in snapshot_descendants(&system, expected)? {
-            if anchored
-                .iter()
-                .any(|known| known.identity.pid == descendant.identity.pid)
-            {
-                continue;
-            }
-            if descendant.identity.platform_start_key < expected.platform_start_key {
-                return Err("new browser descendant predates its verified root".into());
-            }
-            let handle = nomi_process_runtime::WindowsExactProcess::open_for_recovery(
-                descendant.identity.pid,
-            )
-            .map_err(|error| {
-                format!(
-                    "open new browser descendant {} for recovery: {error}",
-                    descendant.identity.pid
-                )
-            })?;
-            if !same_process(
-                &descendant.identity,
-                &process_identity_from_windows(handle.identity())?,
-            ) {
-                return Err(format!(
-                    "new browser descendant {} changed identity before Job assignment",
-                    descendant.identity.pid
-                ));
-            }
-            candidates.push((descendant, handle));
-        }
-        if candidates.is_empty() {
-            stable_rounds += 1;
-        } else {
-            let validation = fresh_process_snapshot()?;
-            validate_windows_anchor_snapshot(&validation, expected, &anchored)?;
-            for (candidate, handle) in candidates {
-                validate_windows_candidate_snapshot(&validation, &candidate)?;
-                job.assign(&handle).map_err(|error| {
-                    format!(
-                        "assign new browser descendant {} to recovery Job: {error}",
-                        candidate.identity.pid
-                    )
-                })?;
-                anchored.push(AnchoredWindowsProcess {
-                    identity: candidate.identity.clone(),
-                    edge: Some(candidate),
-                    handle,
-                });
-            }
-            stable_rounds = 0;
-        }
-        std::thread::sleep(PROCESS_TREE_CONFIRM_INTERVAL);
-    }
-
-    job.arm_kill_on_close()
-        .map_err(|error| format!("arm recovery Job kill-on-close: {error}"))?;
-    job.terminate_and_wait(
-        anchored.iter().map(|process| &process.handle),
-        PROCESS_TREE_CONFIRM_TIMEOUT,
-    )
-    .map_err(|error| format!("wait for recovery Job and verified process exit: {error}"))?;
-
-    if !confirm_process_tree_absent(expected)? {
-        return Err("a browser process-tree survivor remained outside the recovery Job".into());
-    }
-    Ok(anchored.len())
+    Ok(false)
 }
 
 #[cfg(unix)]
@@ -1461,95 +4349,6 @@ fn snapshot_process_group(
     Ok(members)
 }
 
-#[cfg(target_os = "linux")]
-fn terminate_process_tree(expected: &ProcessIdentity) -> Result<usize, String> {
-    if expected.process_group_id != Some(expected.pid) {
-        return Err("browser marker does not identify a process-group leader".into());
-    }
-    // SAFETY: getpgrp only reads the current process-group id.
-    let app_group = unsafe { libc::getpgrp() };
-    if app_group <= 0 || expected.process_group_id == Some(app_group as u32) {
-        return Err("browser process group overlaps the current application group".into());
-    }
-    let system = fresh_process_snapshot()?;
-    let root_process = system
-        .process(sysinfo::Pid::from_u32(expected.pid))
-        .ok_or_else(|| "browser root disappeared before termination".to_string())?;
-    let observed_root = process_identity(root_process)?;
-    if !same_process(expected, &observed_root) {
-        return Err("browser root identity changed before termination".into());
-    }
-    let members = snapshot_process_group(&system, expected.pid)?;
-    if !members
-        .iter()
-        .any(|identity| same_process(expected, identity))
-    {
-        return Err("verified browser root is absent from its process group".into());
-    }
-    for identity in &members {
-        if identity.platform_start_key < expected.platform_start_key {
-            return Err("browser process-group member predates its verified root".into());
-        }
-    }
-
-    let mut root_anchor = nomi_process_runtime::LinuxProcessGroupAnchor::open(expected.pid)
-        .map_err(|error| format!("open exact browser pidfd for recovery: {error}"))?;
-
-    // Opening a pidfd is itself PID-based, so bind it back to the full marker
-    // identity before any signal. A PID reuse between snapshot and pidfd_open
-    // is therefore quarantined.
-    let system = fresh_process_snapshot()?;
-    let root_process = system
-        .process(sysinfo::Pid::from_u32(expected.pid))
-        .ok_or_else(|| "browser root disappeared after opening its pidfd".to_string())?;
-    let observed_root = process_identity(root_process)?;
-    if !same_process(expected, &observed_root) {
-        return Err("browser root identity changed after opening its pidfd".into());
-    }
-
-    // Stop the exact anchored root before using a numeric group signal. While
-    // the pidfd is held, the kernel PID object remains allocated; while the
-    // root is stopped it cannot voluntarily exit or create a reuse window.
-    // Drop resumes it on every failure path before the destructive group kill.
-    root_anchor
-        .stop()
-        .map_err(|error| format!("stop exact browser process before recovery: {error}"))?;
-    let system = fresh_process_snapshot()?;
-    let root_process = system
-        .process(sysinfo::Pid::from_u32(expected.pid))
-        .ok_or_else(|| "browser root disappeared after exact pidfd stop".to_string())?;
-    let observed_root = process_identity(root_process)?;
-    if !same_process(expected, &observed_root) {
-        return Err("browser root identity changed after exact pidfd stop".into());
-    }
-    // SAFETY: getpgid is a read-only query for the exact, anchored root.
-    let observed_group = root_anchor
-        .process_group_id()
-        .map_err(|error| format!("query anchored browser process group: {error}"))?;
-    if observed_group != expected.pid {
-        return Err("anchored browser root changed process group before termination".into());
-    }
-
-    // SAFETY: PID 0 and non-leader markers were rejected, the exact root was
-    // revalidated after SIGSTOP, and its pidfd prevents this numeric PGID from
-    // being recycled until after the signal.
-    root_anchor
-        .terminate_group()
-        .map_err(|error| format!("signal pidfd-anchored browser process group: {error}"))?;
-    if !confirm_process_tree_absent(expected)? {
-        return Err("verified browser process group did not become absent".into());
-    }
-    Ok(members.len())
-}
-
-#[cfg(all(unix, not(target_os = "linux")))]
-fn terminate_process_tree(_expected: &ProcessIdentity) -> Result<usize, String> {
-    Err(
-        "safe orphan process-tree termination requires an exact process handle; this Unix platform preserves the profile fail-closed"
-            .into(),
-    )
-}
-
 #[cfg(windows)]
 fn one_process_tree_absence_check(expected: &ProcessIdentity) -> Result<bool, String> {
     let system = fresh_process_snapshot()?;
@@ -1562,8 +4361,7 @@ fn one_process_tree_absence_check(expected: &ProcessIdentity) -> Result<bool, St
         // unrelated process as proof that the original tree is absent.
         return Ok(false);
     }
-    let descendants = snapshot_descendants(&system, expected)?;
-    Ok(descendants.is_empty())
+    Ok(!has_verified_descendant(&system, expected)?)
 }
 
 #[cfg(unix)]
@@ -1624,10 +4422,11 @@ mod tests {
     struct FakeProcessControl {
         current: ProcessIdentity,
         processes: HashMap<u32, ProcessLookup>,
-        terminate_result: Result<usize, String>,
         absence_result: Result<bool, String>,
         terminate_calls: usize,
         absence_calls: usize,
+        terminate_identities: Vec<ProcessIdentity>,
+        absence_identities: Vec<ProcessIdentity>,
     }
 
     impl ProcessControl for FakeProcessControl {
@@ -1642,13 +4441,44 @@ mod tests {
                 .unwrap_or(ProcessLookup::Missing)
         }
 
-        fn terminate_tree(&mut self, _expected: &ProcessIdentity) -> Result<usize, String> {
-            self.terminate_calls += 1;
-            self.terminate_result.clone()
+        fn confirm_tree_absent(&mut self, expected: &ProcessIdentity) -> Result<bool, String> {
+            self.absence_calls += 1;
+            self.absence_identities.push(expected.clone());
+            self.absence_result.clone()
+        }
+    }
+
+    struct SequencedLookupControl {
+        current: ProcessIdentity,
+        lookups: std::collections::VecDeque<ProcessLookup>,
+        terminate_calls: usize,
+        absence_calls: usize,
+        terminate_identities: Vec<ProcessIdentity>,
+        absence_identities: Vec<ProcessIdentity>,
+        absence_result: Result<bool, String>,
+        replace_marker_on_absence: Option<(PathBuf, BrowserOwnershipMarker)>,
+    }
+
+    impl ProcessControl for SequencedLookupControl {
+        fn current_process(&mut self) -> Result<ProcessIdentity, String> {
+            Ok(self.current.clone())
         }
 
-        fn confirm_tree_absent(&mut self, _expected: &ProcessIdentity) -> Result<bool, String> {
+        fn lookup(&mut self, _pid: u32) -> ProcessLookup {
+            self.lookups
+                .pop_front()
+                .unwrap_or(ProcessLookup::Missing)
+        }
+
+        fn confirm_tree_absent(&mut self, expected: &ProcessIdentity) -> Result<bool, String> {
             self.absence_calls += 1;
+            self.absence_identities.push(expected.clone());
+            if let Some((profile, replacement)) = self.replace_marker_on_absence.take() {
+                let _ = std::fs::write(
+                    ownership_marker_path(&profile),
+                    serde_json::to_vec_pretty(&replacement).unwrap(),
+                );
+            }
             self.absence_result.clone()
         }
     }
@@ -1685,6 +4515,7 @@ mod tests {
         std::fs::create_dir_all(profile_dir).unwrap();
         let marker = BrowserOwnershipMarker {
             version: OWNERSHIP_MARKER_VERSION,
+            phase: BrowserOwnershipPhase::Committed,
             app_instance_id: nomifun_common::generate_id(),
             owner_app,
             browser,
@@ -1702,6 +4533,90 @@ mod tests {
         marker
     }
 
+    fn write_provisional_test_marker(
+        profile_dir: &Path,
+        owner_app: ProcessIdentity,
+    ) -> BrowserOwnershipMarker {
+        std::fs::create_dir_all(profile_dir).unwrap();
+        let marker = BrowserOwnershipMarker {
+            version: OWNERSHIP_MARKER_VERSION,
+            phase: BrowserOwnershipPhase::Provisional,
+            app_instance_id: nomifun_common::generate_id(),
+            owner_app: owner_app.clone(),
+            browser: owner_app,
+            profile_id: profile_dir
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .into_owned(),
+        };
+        std::fs::write(
+            ownership_marker_path(profile_dir),
+            serde_json::to_vec_pretty(&marker).unwrap(),
+        )
+        .unwrap();
+        marker
+    }
+
+    fn write_current_app_test_token(profile_dir: &Path) -> BrowserOwnershipToken {
+        std::fs::create_dir_all(profile_dir).unwrap();
+        let mut control = SystemProcessControl;
+        let marker = BrowserOwnershipMarker {
+            version: OWNERSHIP_MARKER_VERSION,
+            phase: BrowserOwnershipPhase::Committed,
+            app_instance_id: managed_app_instance_id().to_owned(),
+            owner_app: control
+                .current_process()
+                .expect("resolve exact current application identity"),
+            browser: identity(8_282, "chrome"),
+            profile_id: profile_dir
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .into_owned(),
+        };
+        let canonical_profile = std::fs::canonicalize(profile_dir)
+            .expect("canonicalize current-app test profile");
+        let marker_path = commit_ownership_marker(&canonical_profile, &marker, None)
+            .expect("commit current-app test marker");
+        BrowserOwnershipToken {
+            profile_identity: capture_profile_directory_identity(&canonical_profile)
+                .expect("capture current-app test profile identity"),
+            profile_dir: canonical_profile,
+            marker_path,
+            marker,
+        }
+    }
+
+    fn write_current_app_ephemeral_pair_token(
+        profile_dir: &Path,
+    ) -> BrowserOwnershipToken {
+        std::fs::create_dir_all(profile_dir).unwrap();
+        let claim =
+            prepare_ownership_marker_for_launch(profile_dir).expect("claim pair profile");
+        let provisional =
+            claim_ephemeral_profile_cleanup(profile_dir, &claim)
+                .expect("write provisional ownership record");
+        let mut committed = provisional.provisional_marker.clone();
+        committed.phase = BrowserOwnershipPhase::Committed;
+        committed.browser = identity(8_283, "chrome-pair");
+        let marker_path = commit_ownership_marker(
+            &claim.0.profile_dir,
+            &committed,
+            Some(&provisional.provisional_marker),
+        )
+        .expect("append committed ownership sidecar");
+        BrowserOwnershipToken {
+            profile_dir: claim.0.profile_dir.clone(),
+            profile_identity: claim
+                .0
+                .directory_identity()
+                .expect("capture pair profile identity"),
+            marker_path,
+            marker: committed,
+        }
+    }
+
     fn fake_control(
         current: ProcessIdentity,
         processes: HashMap<u32, ProcessLookup>,
@@ -1709,13 +4624,63 @@ mod tests {
         FakeProcessControl {
             current,
             processes,
-            terminate_result: Ok(1),
             absence_result: Ok(true),
             terminate_calls: 0,
             absence_calls: 0,
+            terminate_identities: Vec::new(),
+            absence_identities: Vec::new(),
         }
     }
 
+    #[cfg(not(windows))]
+    #[test]
+    fn unix_startup_recovery_treats_an_empty_complete_root_as_safe() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path().join("ephemeral");
+        std::fs::create_dir_all(&root).unwrap();
+        let mut control = fake_control(identity(999, "current"), HashMap::new());
+
+        let report = recover_owned_profiles_with(
+            &root,
+            ProfileRecoveryMode::DeleteEphemeralProfile,
+            &mut control,
+        );
+
+        assert_eq!(report.markers_scanned, 0);
+        assert_eq!(report.failures, 0);
+        assert_eq!(report.profiles_preserved, 0);
+        assert_eq!(control.terminate_calls, 0);
+        assert_eq!(control.absence_calls, 0);
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn unix_startup_recovery_degrades_on_inventory_without_process_actions() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path().join("ephemeral");
+        let profile = root.join("unresolved");
+        write_test_marker(
+            &profile,
+            identity(101, "nomifun-gone"),
+            identity(201, "chrome-gone"),
+        );
+        let mut control = fake_control(identity(999, "current"), HashMap::new());
+
+        let report = recover_owned_profiles_with(
+            &root,
+            ProfileRecoveryMode::DeleteEphemeralProfile,
+            &mut control,
+        );
+
+        assert_eq!(report.markers_scanned, 1);
+        assert!(report.failures > 0);
+        assert_eq!(report.profiles_preserved, 1);
+        assert_eq!(control.terminate_calls, 0);
+        assert_eq!(control.absence_calls, 0);
+        assert!(profile.exists());
+    }
+
+    #[cfg(windows)]
     #[test]
     fn live_verified_owner_is_never_taken_over() {
         let tmp = tempfile::TempDir::new().unwrap();
@@ -1744,6 +4709,238 @@ mod tests {
         assert_eq!(control.absence_calls, 0);
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn live_provisional_owner_is_preserved_without_process_tree_actions() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path().join("ephemeral");
+        let profile = root.join("provisional-live");
+        let owner = identity(103, "nomifun-live");
+        write_provisional_test_marker(&profile, owner.clone());
+        let mut control = fake_control(
+            identity(999, "current"),
+            HashMap::from([(owner.pid, ProcessLookup::Found(owner))]),
+        );
+
+        let report = recover_owned_profiles_with(
+            &root,
+            ProfileRecoveryMode::DeleteEphemeralProfile,
+            &mut control,
+        );
+
+        assert!(profile.exists());
+        assert_eq!(report.live_owners_preserved, 1);
+        assert_eq!(control.terminate_calls, 0);
+        assert_eq!(control.absence_calls, 0);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn missing_provisional_owner_is_rechecked_and_then_marker_last_removed() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path().join("ephemeral");
+        let profile = root.join("provisional-missing");
+        let owner = identity(104, "nomifun-gone");
+        write_provisional_test_marker(&profile, owner.clone());
+        std::fs::write(profile.join("cache.bin"), b"ephemeral").unwrap();
+        let mut control = SequencedLookupControl {
+            current: identity(999, "current"),
+            lookups: std::collections::VecDeque::from([
+                ProcessLookup::Missing,
+                ProcessLookup::Missing,
+            ]),
+            terminate_calls: 0,
+            absence_calls: 0,
+            terminate_identities: Vec::new(),
+            absence_identities: Vec::new(),
+            absence_result: Ok(true),
+            replace_marker_on_absence: None,
+        };
+
+        let report = recover_owned_profiles_with(
+            &root,
+            ProfileRecoveryMode::DeleteEphemeralProfile,
+            &mut control,
+        );
+
+        assert!(!profile.exists());
+        assert_eq!(report.ephemeral_profiles_removed, 1);
+        assert_eq!(control.terminate_calls, 0);
+        assert_eq!(control.absence_calls, 1);
+        assert_eq!(control.terminate_identities, Vec::<ProcessIdentity>::new());
+        assert_eq!(control.absence_identities, vec![owner]);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn provisional_missing_to_found_race_never_signals_the_application_identity() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path().join("ephemeral");
+        let profile = root.join("provisional-race");
+        let owner = identity(105, "nomifun-race");
+        write_provisional_test_marker(&profile, owner.clone());
+        let mut control = SequencedLookupControl {
+            current: identity(999, "current"),
+            lookups: std::collections::VecDeque::from([
+                ProcessLookup::Missing,
+                ProcessLookup::Found(owner),
+            ]),
+            terminate_calls: 0,
+            absence_calls: 0,
+            terminate_identities: Vec::new(),
+            absence_identities: Vec::new(),
+            absence_result: Ok(true),
+            replace_marker_on_absence: None,
+        };
+
+        let report = recover_owned_profiles_with(
+            &root,
+            ProfileRecoveryMode::DeleteEphemeralProfile,
+            &mut control,
+        );
+
+        assert!(profile.exists());
+        assert_eq!(report.profiles_preserved, 1);
+        assert_eq!(control.terminate_calls, 0);
+        assert_eq!(control.absence_calls, 0);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn pinned_provisional_marker_rejects_change_during_absence_proof() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path().join("ephemeral");
+        let profile = root.join("provisional-proof-race");
+        let original =
+            write_provisional_test_marker(&profile, identity(109, "nomifun-gone"));
+        let replacement = BrowserOwnershipMarker {
+            version: OWNERSHIP_MARKER_VERSION,
+            phase: BrowserOwnershipPhase::Committed,
+            app_instance_id: nomifun_common::generate_id(),
+            owner_app: identity(110, "replacement-owner"),
+            browser: identity(111, "replacement-browser"),
+            profile_id: original.profile_id.clone(),
+        };
+        let state = profile.join("Default").join("Cookies");
+        std::fs::create_dir_all(state.parent().unwrap()).unwrap();
+        std::fs::write(&state, b"preserve").unwrap();
+        let mut control = SequencedLookupControl {
+            current: identity(999, "current"),
+            lookups: std::collections::VecDeque::from([
+                ProcessLookup::Missing,
+                ProcessLookup::Missing,
+            ]),
+            terminate_calls: 0,
+            absence_calls: 0,
+            terminate_identities: Vec::new(),
+            absence_identities: Vec::new(),
+            absence_result: Ok(true),
+            replace_marker_on_absence: Some((profile.clone(), replacement.clone())),
+        };
+
+        let report = recover_owned_profiles_with(
+            &root,
+            ProfileRecoveryMode::DeleteEphemeralProfile,
+            &mut control,
+        );
+
+        assert!(!profile.exists());
+        assert_eq!(report.ephemeral_profiles_removed, 1);
+        assert_eq!(control.terminate_calls, 0);
+        assert_eq!(control.absence_calls, 1);
+        assert_eq!(
+            control.absence_identities,
+            vec![original.owner_app.clone()]
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn provisional_pid_reuse_and_unverified_owner_are_fail_closed() {
+        for (name, lookup) in [
+            (
+                "pid-reused",
+                ProcessLookup::Found(identity(106, "unrelated")),
+            ),
+            (
+                "unverified",
+                ProcessLookup::Unverified("snapshot unavailable".into()),
+            ),
+        ] {
+            let tmp = tempfile::TempDir::new().unwrap();
+            let root = tmp.path().join("ephemeral");
+            let profile = root.join(name);
+            let owner = identity(106, "nomifun-gone");
+            write_provisional_test_marker(&profile, owner.clone());
+            let mut control = fake_control(
+                identity(999, "current"),
+                HashMap::from([(owner.pid, lookup)]),
+            );
+
+            let report = recover_owned_profiles_with(
+                &root,
+                ProfileRecoveryMode::DeleteEphemeralProfile,
+                &mut control,
+            );
+
+            assert!(profile.exists(), "{name}");
+            assert_eq!(report.profiles_preserved, 1, "{name}");
+            assert_eq!(control.terminate_calls, 0, "{name}");
+            assert_eq!(control.absence_calls, 0, "{name}");
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn provisional_marker_never_authorizes_stable_profile_deletion() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path().join("primary");
+        let profile = root.join("provisional-stable");
+        let owner = identity(107, "nomifun-gone");
+        write_provisional_test_marker(&profile, owner);
+        let mut control = fake_control(identity(999, "current"), HashMap::new());
+
+        let report = recover_owned_profiles_with(
+            &root,
+            ProfileRecoveryMode::PreserveStableProfile,
+            &mut control,
+        );
+
+        assert!(profile.exists());
+        assert_eq!(report.profiles_preserved, 1);
+        assert_eq!(control.terminate_calls, 0);
+        assert_eq!(control.absence_calls, 0);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn malformed_committed_owner_alias_is_preserved_without_process_actions() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path().join("ephemeral");
+        let profile = root.join("committed-owner-alias");
+        let owner = identity(108, "nomifun-alias");
+        let mut marker = write_provisional_test_marker(&profile, owner);
+        marker.phase = BrowserOwnershipPhase::Committed;
+        std::fs::write(
+            ownership_marker_path(&profile),
+            serde_json::to_vec_pretty(&marker).unwrap(),
+        )
+        .unwrap();
+        let mut control = fake_control(identity(999, "current"), HashMap::new());
+
+        let report = recover_owned_profiles_with(
+            &root,
+            ProfileRecoveryMode::DeleteEphemeralProfile,
+            &mut control,
+        );
+
+        assert!(profile.exists());
+        assert_eq!(report.profiles_preserved, 1);
+        assert_eq!(control.terminate_calls, 0);
+        assert_eq!(control.absence_calls, 0);
+    }
+
+    #[cfg(windows)]
     #[test]
     fn pid_reuse_or_browser_identity_mismatch_preserves_without_kill() {
         let tmp = tempfile::TempDir::new().unwrap();
@@ -1772,8 +4969,78 @@ mod tests {
         assert_eq!(report.profiles_preserved, 1);
     }
 
+    #[cfg(windows)]
     #[test]
-    fn exact_orphan_is_terminated_and_ephemeral_profile_removed() {
+    fn owner_executable_only_mismatch_preserves_without_process_actions() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path().join("ephemeral");
+        let profile = root.join("owner-executable-mismatch");
+        let owner = identity(112, "nomifun");
+        let browser = identity(223, "chrome");
+        write_test_marker(&profile, owner.clone(), browser);
+        let mut observed_owner = owner.clone();
+        observed_owner.executable = test_executable("different-owner");
+        let mut control = fake_control(
+            identity(999, "current"),
+            HashMap::from([(
+                owner.pid,
+                ProcessLookup::Found(observed_owner),
+            )]),
+        );
+
+        let report = recover_owned_profiles_with(
+            &root,
+            ProfileRecoveryMode::DeleteEphemeralProfile,
+            &mut control,
+        );
+
+        assert!(profile.exists());
+        assert_eq!(report.profiles_preserved, 1);
+        assert_eq!(control.terminate_calls, 0);
+        assert_eq!(control.absence_calls, 0);
+        assert!(control.terminate_identities.is_empty());
+        assert!(control.absence_identities.is_empty());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn browser_executable_only_mismatch_preserves_without_process_actions() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path().join("ephemeral");
+        let profile = root.join("browser-executable-mismatch");
+        let browser = identity(224, "chrome");
+        write_test_marker(
+            &profile,
+            identity(113, "nomifun-gone"),
+            browser.clone(),
+        );
+        let mut observed_browser = browser.clone();
+        observed_browser.executable = test_executable("different-browser");
+        let mut control = fake_control(
+            identity(999, "current"),
+            HashMap::from([(
+                browser.pid,
+                ProcessLookup::Found(observed_browser),
+            )]),
+        );
+
+        let report = recover_owned_profiles_with(
+            &root,
+            ProfileRecoveryMode::DeleteEphemeralProfile,
+            &mut control,
+        );
+
+        assert!(profile.exists());
+        assert_eq!(report.profiles_preserved, 1);
+        assert_eq!(control.terminate_calls, 0);
+        assert_eq!(control.absence_calls, 0);
+        assert!(control.terminate_identities.is_empty());
+        assert!(control.absence_identities.is_empty());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn exact_live_orphan_is_preserved_without_startup_signal() {
         let tmp = tempfile::TempDir::new().unwrap();
         let root = tmp.path().join("ephemeral");
         let profile = root.join("host-orphan");
@@ -1782,9 +5049,8 @@ mod tests {
         std::fs::write(profile.join("cache.bin"), b"cache").unwrap();
         let mut control = fake_control(
             identity(999, "current"),
-            HashMap::from([(browser.pid, ProcessLookup::Found(browser))]),
+            HashMap::from([(browser.pid, ProcessLookup::Found(browser.clone()))]),
         );
-        control.terminate_result = Ok(4);
 
         let report = recover_owned_profiles_with(
             &root,
@@ -1792,12 +5058,15 @@ mod tests {
             &mut control,
         );
 
-        assert!(!profile.exists());
-        assert_eq!(control.terminate_calls, 1);
-        assert_eq!(report.process_trees_terminated, 1);
-        assert_eq!(report.ephemeral_profiles_removed, 1);
+        assert!(profile.exists());
+        assert_eq!(control.terminate_calls, 0);
+        assert!(control.terminate_identities.is_empty());
+        assert_eq!(report.process_trees_terminated, 0);
+        assert_eq!(report.ephemeral_profiles_removed, 0);
+        assert_eq!(report.profiles_preserved, 1);
     }
 
+    #[cfg(windows)]
     #[test]
     fn outer_ephemeral_marker_never_deletes_a_preserved_nested_profile() {
         let tmp = tempfile::TempDir::new().unwrap();
@@ -1819,13 +5088,7 @@ mod tests {
         std::fs::write(inner.join("Cookies"), b"must survive").unwrap();
         let mut control = fake_control(
             identity(999, "current"),
-            HashMap::from([
-                (
-                    outer_browser.pid,
-                    ProcessLookup::Found(outer_browser.clone()),
-                ),
-                (inner_owner.pid, ProcessLookup::Found(inner_owner)),
-            ]),
+            HashMap::from([(inner_owner.pid, ProcessLookup::Found(inner_owner))]),
         );
 
         let report = recover_owned_profiles_with(
@@ -1837,15 +5100,136 @@ mod tests {
         assert!(outer.exists());
         assert!(inner.join("Cookies").exists());
         assert!(ownership_marker_path(&inner).exists());
-        assert_eq!(control.terminate_calls, 1);
+        assert_eq!(control.terminate_calls, 0);
         assert_eq!(report.live_owners_preserved, 1);
         assert_eq!(report.ephemeral_profiles_removed, 0);
         assert_eq!(report.profiles_preserved, 1);
         assert_eq!(report.failures, 1);
     }
 
+    #[cfg(windows)]
     #[test]
-    fn unconfirmed_termination_preserves_ephemeral_profile() {
+    fn deeply_nested_ownership_marker_is_found_and_preserved() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path().join("ephemeral");
+        let outer = root.join("outer-deep-marker");
+        let outer_browser = identity(235, "chrome-outer");
+        write_test_marker(
+            &outer,
+            identity(124, "nomifun-gone"),
+            outer_browser.clone(),
+        );
+        let mut inner = outer.clone();
+        for level in 0..12 {
+            inner = inner.join(format!("level-{level}"));
+        }
+        let inner_owner = identity(125, "nomifun-deep-live");
+        write_test_marker(
+            &inner,
+            inner_owner.clone(),
+            identity(236, "chrome-inner"),
+        );
+        std::fs::write(inner.join("Cookies"), b"must survive").unwrap();
+        let mut control = fake_control(
+            identity(999, "current"),
+            HashMap::from([(inner_owner.pid, ProcessLookup::Found(inner_owner))]),
+        );
+
+        let report = recover_owned_profiles_with(
+            &root,
+            ProfileRecoveryMode::DeleteEphemeralProfile,
+            &mut control,
+        );
+
+        assert!(outer.exists());
+        assert!(inner.join("Cookies").exists());
+        assert_eq!(report.ephemeral_profiles_removed, 0);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn deep_profile_without_nested_marker_remains_cleanable() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path().join("ephemeral");
+        let profile = root.join("deep-cache-only");
+        let browser = identity(237, "chrome");
+        write_test_marker(&profile, identity(126, "nomifun-gone"), browser.clone());
+        let mut cache = profile.clone();
+        for level in 0..12 {
+            cache = cache.join(format!("cache-{level}"));
+        }
+        std::fs::create_dir_all(&cache).unwrap();
+        std::fs::write(cache.join("entry.bin"), b"cache").unwrap();
+        let mut control = fake_control(identity(999, "current"), HashMap::new());
+
+        let report = recover_owned_profiles_with(
+            &root,
+            ProfileRecoveryMode::DeleteEphemeralProfile,
+            &mut control,
+        );
+
+        assert!(!profile.exists());
+        assert_eq!(report.ephemeral_profiles_removed, 1);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn marker_named_directory_makes_recursive_cleanup_fail_closed() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path().join("ephemeral");
+        let profile = root.join("marker-directory");
+        let browser = identity(238, "chrome");
+        write_test_marker(&profile, identity(127, "nomifun-gone"), browser.clone());
+        let malformed = profile.join("nested").join(OWNERSHIP_MARKER_FILE);
+        std::fs::create_dir_all(&malformed).unwrap();
+        std::fs::write(malformed.join("state"), b"preserve").unwrap();
+        let mut control = fake_control(identity(999, "current"), HashMap::new());
+
+        let report = recover_owned_profiles_with(
+            &root,
+            ProfileRecoveryMode::DeleteEphemeralProfile,
+            &mut control,
+        );
+
+        assert!(profile.exists());
+        assert!(malformed.join("state").exists());
+        assert_eq!(report.ephemeral_profiles_removed, 0);
+        assert!(report.failures > 0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn marker_named_symlink_makes_recursive_cleanup_fail_closed() {
+        use std::os::unix::fs::symlink;
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path().join("ephemeral");
+        let profile = root.join("marker-symlink");
+        let browser = identity(239, "chrome");
+        write_test_marker(&profile, identity(128, "nomifun-gone"), browser.clone());
+        let nested = profile.join("nested");
+        std::fs::create_dir_all(&nested).unwrap();
+        symlink(
+            profile.join("outside-target"),
+            nested.join(OWNERSHIP_MARKER_FILE),
+        )
+        .unwrap();
+        let mut control = fake_control(identity(999, "current"), HashMap::new());
+
+        let report = recover_owned_profiles_with(
+            &root,
+            ProfileRecoveryMode::DeleteEphemeralProfile,
+            &mut control,
+        );
+
+        assert!(profile.exists());
+        assert_eq!(report.ephemeral_profiles_removed, 0);
+        assert!(report.failures > 0);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn live_browser_is_preserved_even_when_legacy_termination_result_would_fail() {
         let tmp = tempfile::TempDir::new().unwrap();
         let root = tmp.path().join("ephemeral");
         let profile = root.join("host-stuck");
@@ -1855,7 +5239,6 @@ mod tests {
             identity(999, "current"),
             HashMap::from([(browser.pid, ProcessLookup::Found(browser))]),
         );
-        control.terminate_result = Err("wait deadline expired".into());
 
         let report = recover_owned_profiles_with(
             &root,
@@ -1864,20 +5247,22 @@ mod tests {
         );
 
         assert!(profile.exists());
-        assert_eq!(control.terminate_calls, 1);
+        assert_eq!(control.terminate_calls, 0);
         assert_eq!(report.ephemeral_profiles_removed, 0);
-        assert_eq!(report.failures, 1);
+        assert_eq!(report.failures, 0);
     }
 
+    #[cfg(windows)]
     #[test]
     fn already_absent_tree_can_release_ephemeral_profile() {
         let tmp = tempfile::TempDir::new().unwrap();
         let root = tmp.path().join("ephemeral");
         let profile = root.join("host-gone");
+        let browser = identity(252, "chrome");
         write_test_marker(
             &profile,
             identity(141, "nomifun"),
-            identity(252, "chrome"),
+            browser.clone(),
         );
         let mut control = fake_control(identity(999, "current"), HashMap::new());
         control.absence_result = Ok(true);
@@ -1891,21 +5276,26 @@ mod tests {
         assert!(!profile.exists());
         assert_eq!(control.terminate_calls, 0);
         assert_eq!(control.absence_calls, 1);
+        assert_eq!(control.absence_identities, vec![browser]);
         assert_eq!(report.ephemeral_profiles_removed, 1);
     }
 
+    #[cfg(windows)]
     #[test]
-    fn stable_primary_terminates_orphan_but_keeps_profile_data() {
+    fn stable_primary_clears_absent_orphan_artifacts_but_keeps_profile_data() {
         let tmp = tempfile::TempDir::new().unwrap();
         let root = tmp.path().join("primary");
         let profile = root.join("generation-7");
         let browser = identity(262, "chrome");
         write_test_marker(&profile, identity(151, "nomifun"), browser.clone());
         std::fs::write(profile.join("Cookies"), b"persistent").unwrap();
+        let port_path = profile.join(DEVTOOLS_ACTIVE_PORT_FILE);
+        std::fs::write(&port_path, b"9222\n/devtools/browser/recovered\n").unwrap();
         let mut control = fake_control(
             identity(999, "current"),
-            HashMap::from([(browser.pid, ProcessLookup::Found(browser))]),
+            HashMap::new(),
         );
+        control.absence_result = Ok(true);
 
         let report = recover_owned_profiles_with(
             &root,
@@ -1915,11 +5305,41 @@ mod tests {
 
         assert!(profile.join("Cookies").exists());
         assert!(!ownership_marker_path(&profile).exists());
-        assert_eq!(report.process_trees_terminated, 1);
+        assert!(
+            !port_path.exists(),
+            "startup recovery must remove the exact runtime port artifact before its marker"
+        );
+        assert_eq!(report.process_trees_terminated, 0);
+        assert!(control.terminate_identities.is_empty());
+        assert_eq!(control.absence_identities, vec![browser]);
         assert_eq!(report.stable_markers_cleared, 1);
         assert_eq!(report.ephemeral_profiles_removed, 0);
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn stable_recovery_preserves_marker_when_port_artifact_is_unsafe() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path().join("primary");
+        let profile = root.join("generation-unsafe-port");
+        let browser = identity(263, "chrome");
+        write_test_marker(&profile, identity(152, "nomifun"), browser.clone());
+        std::fs::create_dir(profile.join(DEVTOOLS_ACTIVE_PORT_FILE)).unwrap();
+        let mut control = fake_control(identity(999, "current"), HashMap::new());
+
+        let report = recover_owned_profiles_with(
+            &root,
+            ProfileRecoveryMode::PreserveStableProfile,
+            &mut control,
+        );
+
+        assert!(ownership_marker_path(&profile).is_file());
+        assert!(profile.join(DEVTOOLS_ACTIVE_PORT_FILE).is_dir());
+        assert_eq!(report.stable_markers_cleared, 0);
+        assert_eq!(report.failures, 1);
+    }
+
+    #[cfg(windows)]
     #[test]
     fn malformed_and_unmarked_profiles_are_never_removed() {
         let tmp = tempfile::TempDir::new().unwrap();
@@ -2000,6 +5420,7 @@ mod tests {
         };
         let marker = BrowserOwnershipMarker {
             version: OWNERSHIP_MARKER_VERSION,
+            phase: BrowserOwnershipPhase::Committed,
             app_instance_id: marker_payload_sentinel.into(),
             owner_app: process.clone(),
             browser: process,
@@ -2034,6 +5455,7 @@ mod tests {
         );
     }
 
+    #[cfg(windows)]
     #[test]
     fn orphan_recovery_logs_do_not_echo_profile_paths_or_marker_payload() {
         #[derive(Default)]
@@ -2129,16 +5551,17 @@ mod tests {
         std::fs::create_dir_all(&profile).unwrap();
         let marker = BrowserOwnershipMarker {
             version: OWNERSHIP_MARKER_VERSION,
+            phase: BrowserOwnershipPhase::Committed,
             app_instance_id: nomifun_common::generate_id(),
             owner_app: identity(171, "nomifun"),
             browser: identity(282, "chrome"),
             profile_id: "profile-commit".into(),
         };
 
-        commit_ownership_marker(&profile, &marker).expect("first marker commit");
+        commit_ownership_marker(&profile, &marker, None).expect("first marker commit");
         assert_eq!(read_marker(&profile).unwrap(), marker);
         assert!(
-            commit_ownership_marker(&profile, &marker).is_err(),
+            commit_ownership_marker(&profile, &marker, None).is_err(),
             "an existing ownership marker must never be overwritten"
         );
         let temp_prefix = format!("{OWNERSHIP_MARKER_FILE}.");
@@ -2152,6 +5575,759 @@ mod tests {
                 }),
             "marker commit must not leave a temp file"
         );
+    }
+
+    #[test]
+    fn provisional_marker_is_atomically_replaced_by_exact_committed_identity() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let profile = tmp.path().join("provisional-transition");
+        std::fs::create_dir_all(&profile).unwrap();
+        let claim = prepare_ownership_marker_for_launch(&profile).unwrap();
+        let cleanup = claim_ephemeral_profile_cleanup(&profile, &claim).unwrap();
+        assert_eq!(
+            read_marker(&profile).unwrap().phase,
+            BrowserOwnershipPhase::Provisional
+        );
+        let mut committed = cleanup.provisional_marker.clone();
+        committed.phase = BrowserOwnershipPhase::Committed;
+        committed.browser = identity(8_401, "chrome");
+
+        commit_ownership_marker(
+            &profile,
+            &committed,
+            Some(&cleanup.provisional_marker),
+        )
+        .expect("exact provisional marker is atomically replaced");
+
+        assert_eq!(read_marker(&profile).unwrap(), committed);
+    }
+
+    #[test]
+    fn changed_provisional_marker_is_never_replaced() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let profile = tmp.path().join("provisional-changed");
+        std::fs::create_dir_all(&profile).unwrap();
+        let claim = prepare_ownership_marker_for_launch(&profile).unwrap();
+        let cleanup = claim_ephemeral_profile_cleanup(&profile, &claim).unwrap();
+        let replacement = write_test_marker(
+            &profile,
+            identity(8_402, "foreign-owner"),
+            identity(8_403, "foreign-chrome"),
+        );
+        let mut committed = cleanup.provisional_marker.clone();
+        committed.phase = BrowserOwnershipPhase::Committed;
+        committed.browser = identity(8_404, "chrome");
+
+        let error = commit_ownership_marker(
+            &profile,
+            &committed,
+            Some(&cleanup.provisional_marker),
+        )
+        .expect_err("changed provisional marker must fail closed");
+
+        assert!(error.contains("changed"), "{error}");
+        assert_eq!(read_marker(&profile).unwrap(), replacement);
+    }
+
+    #[test]
+    fn append_only_commit_never_overwrites_a_barrier_race_replacement() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Arc;
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let profile = tmp.path().join("provisional-barrier-race");
+        std::fs::create_dir_all(&profile).unwrap();
+        let claim = prepare_ownership_marker_for_launch(&profile).unwrap();
+        let cleanup = claim_ephemeral_profile_cleanup(&profile, &claim).unwrap();
+        let mut committed = cleanup.provisional_marker.clone();
+        committed.phase = BrowserOwnershipPhase::Committed;
+        committed.browser = identity(8_407, "chrome");
+        let foreign = BrowserOwnershipMarker {
+            version: OWNERSHIP_MARKER_VERSION,
+            phase: BrowserOwnershipPhase::Provisional,
+            app_instance_id: nomifun_common::generate_id(),
+            owner_app: identity(8_408, "foreign-owner"),
+            browser: identity(8_408, "foreign-owner"),
+            profile_id: profile.file_name().unwrap().to_string_lossy().into_owned(),
+        };
+        let foreign_bytes = serde_json::to_vec_pretty(&foreign).unwrap();
+        let replacement_succeeded = Arc::new(AtomicBool::new(false));
+        let observed = Arc::clone(&replacement_succeeded);
+        OWNERSHIP_COMMIT_BARRIER_HOOK.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move |profile, _committed_path| {
+                if std::fs::write(ownership_marker_path(profile), &foreign_bytes).is_ok() {
+                    observed.store(true, Ordering::SeqCst);
+                }
+            }));
+        });
+
+        let result = commit_ownership_marker(
+            &profile,
+            &committed,
+            Some(&cleanup.provisional_marker),
+        );
+        #[cfg(unix)]
+        {
+            let error =
+                result.expect_err("successful barrier replacement must quarantine lineage");
+            assert!(
+                error.contains("does not match")
+                    || error.contains("provisional predecessor"),
+                "{error}"
+            );
+            assert!(replacement_succeeded.load(Ordering::SeqCst));
+        }
+        #[cfg(windows)]
+        {
+            result.expect(
+                "the pinned predecessor must reject a racing in-place replacement",
+            );
+            assert!(
+                !replacement_succeeded.load(Ordering::SeqCst),
+                "the predecessor handle must deny a racing writer"
+            );
+        }
+        assert_eq!(
+            read_marker_at(&profile, &ownership_marker_path(&profile)).unwrap(),
+            if replacement_succeeded.load(Ordering::SeqCst) {
+                foreign
+            } else {
+                cleanup.provisional_marker
+            },
+            "the racing record is never overwritten"
+        );
+        assert_eq!(
+            read_marker_at(
+                &profile,
+                &committed_ownership_record_path(&profile)
+            )
+            .unwrap(),
+            committed,
+            "the exact browser lineage remains durable in its append-only sidecar"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_initial_child_anchor_blocks_profile_namespace_replacement() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Arc;
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let profile = tmp.path().join("windows-pinned-commit");
+        let replacement = tmp.path().join("windows-pinned-replacement");
+        let displaced = tmp.path().join("windows-pinned-displaced");
+        std::fs::create_dir_all(&profile).unwrap();
+        std::fs::create_dir_all(&replacement).unwrap();
+        std::fs::write(replacement.join("sentinel"), b"replacement").unwrap();
+        let claim = prepare_ownership_marker_for_launch(&profile).unwrap();
+        let rename_succeeded = Arc::new(AtomicBool::new(false));
+        let observed = Arc::clone(&rename_succeeded);
+        let profile_for_hook = profile.clone();
+        let replacement_for_hook = replacement.clone();
+        let displaced_for_hook = displaced.clone();
+        OWNERSHIP_COMMIT_DIRECTORY_BOUND_HOOK.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move |_| {
+                if std::fs::rename(&profile_for_hook, &displaced_for_hook).is_ok() {
+                    observed.store(true, Ordering::SeqCst);
+                    std::fs::rename(&replacement_for_hook, &profile_for_hook)
+                        .expect("install unexpected test replacement");
+                }
+            }));
+        });
+
+        let cleanup = claim_ephemeral_profile_cleanup(&profile, &claim)
+            .expect("pinned exact profile accepts its provisional marker");
+
+        assert!(
+            !rename_succeeded.load(Ordering::SeqCst),
+            "the no-share-delete root handle must reject a namespace rename"
+        );
+        assert_eq!(
+            read_marker(&profile).unwrap(),
+            cleanup.provisional_marker
+        );
+        assert_eq!(
+            std::fs::read(replacement.join("sentinel")).unwrap(),
+            b"replacement"
+        );
+        assert!(!ownership_marker_path(&replacement).exists());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_transition_pins_predecessor_and_committed_child_against_replacement() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Arc;
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let profile = tmp.path().join("windows-transition-commit");
+        let replacement = tmp.path().join("windows-transition-replacement");
+        let displaced = tmp.path().join("windows-transition-displaced");
+        std::fs::create_dir_all(&profile).unwrap();
+        std::fs::create_dir_all(&replacement).unwrap();
+        std::fs::write(replacement.join("sentinel"), b"replacement").unwrap();
+        let claim = prepare_ownership_marker_for_launch(&profile).unwrap();
+        let cleanup = claim_ephemeral_profile_cleanup(&profile, &claim).unwrap();
+        let mut committed = cleanup.provisional_marker.clone();
+        committed.phase = BrowserOwnershipPhase::Committed;
+        committed.browser = identity(8_411, "chrome");
+
+        let rename_succeeded = Arc::new(AtomicBool::new(false));
+        let observed = Arc::clone(&rename_succeeded);
+        let profile_for_hook = profile.clone();
+        let replacement_for_hook = replacement.clone();
+        let displaced_for_hook = displaced.clone();
+        OWNERSHIP_COMMIT_DIRECTORY_BOUND_HOOK.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move |_| {
+                if std::fs::rename(&profile_for_hook, &displaced_for_hook).is_ok() {
+                    observed.store(true, Ordering::SeqCst);
+                    std::fs::rename(&replacement_for_hook, &profile_for_hook)
+                        .expect("install unexpected test replacement");
+                }
+            }));
+        });
+
+        let marker_path = commit_ownership_marker_under_claim(
+            &profile,
+            &committed,
+            Some(&cleanup.provisional_marker),
+            &claim.0,
+        )
+        .expect("both exact child handles keep the transition namespace stable");
+
+        assert!(
+            !rename_succeeded.load(Ordering::SeqCst),
+            "the predecessor/final child handles must reject profile replacement"
+        );
+        assert_eq!(marker_path, committed_ownership_record_path(&profile));
+        assert_eq!(read_marker(&profile).unwrap(), committed);
+        assert_eq!(
+            std::fs::read(replacement.join("sentinel")).unwrap(),
+            b"replacement"
+        );
+        assert!(
+            !ownership_marker_path(&replacement).exists()
+                && !committed_ownership_record_path(&replacement).exists()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unix_initial_commit_never_writes_or_cleans_namespace_replacement() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let profile = tmp.path().join("unix-initial-a");
+        let replacement = tmp.path().join("unix-initial-b");
+        let displaced = tmp.path().join("unix-initial-displaced");
+        std::fs::create_dir_all(&profile).unwrap();
+        std::fs::create_dir_all(&replacement).unwrap();
+        std::fs::write(replacement.join("sentinel"), b"replacement").unwrap();
+        let claim = prepare_ownership_marker_for_launch(&profile).unwrap();
+
+        let profile_for_hook = profile.clone();
+        let replacement_for_hook = replacement.clone();
+        let displaced_for_hook = displaced.clone();
+        OWNERSHIP_COMMIT_DIRECTORY_BOUND_HOOK.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move |_| {
+                std::fs::rename(&profile_for_hook, &displaced_for_hook).unwrap();
+                std::fs::rename(&replacement_for_hook, &profile_for_hook).unwrap();
+            }));
+        });
+
+        let error = claim_ephemeral_profile_cleanup(&profile, &claim)
+            .expect_err("namespace replacement must block provisional publication");
+
+        assert!(error.contains("directory"), "{error}");
+        assert_eq!(
+            std::fs::read(profile.join("sentinel")).unwrap(),
+            b"replacement"
+        );
+        assert!(
+            !ownership_marker_path(&profile).exists(),
+            "the replacement must remain marker-free"
+        );
+        let displaced_marker: BrowserOwnershipMarker = serde_json::from_slice(
+            &std::fs::read(ownership_marker_path(&displaced)).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            displaced_marker.phase,
+            BrowserOwnershipPhase::Provisional,
+            "fd-relative commit stays with the displaced original inode"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unix_transition_postcommit_mismatch_never_publishes_replacement_path() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let profile = tmp.path().join("unix-transition-a");
+        let replacement = tmp.path().join("unix-transition-b");
+        let displaced = tmp.path().join("unix-transition-displaced");
+        std::fs::create_dir_all(&profile).unwrap();
+        std::fs::create_dir_all(&replacement).unwrap();
+        std::fs::write(replacement.join("sentinel"), b"replacement").unwrap();
+        let claim = prepare_ownership_marker_for_launch(&profile).unwrap();
+        let cleanup = claim_ephemeral_profile_cleanup(&profile, &claim).unwrap();
+        let mut committed = cleanup.provisional_marker.clone();
+        committed.phase = BrowserOwnershipPhase::Committed;
+        committed.browser = identity(8_409, "chrome");
+
+        let profile_for_hook = profile.clone();
+        let replacement_for_hook = replacement.clone();
+        let displaced_for_hook = displaced.clone();
+        OWNERSHIP_COMMIT_BARRIER_HOOK.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move |_, _| {
+                std::fs::rename(&profile_for_hook, &displaced_for_hook).unwrap();
+                std::fs::rename(&replacement_for_hook, &profile_for_hook).unwrap();
+            }));
+        });
+
+        let error = commit_ownership_marker_under_claim(
+            &profile,
+            &committed,
+            Some(&cleanup.provisional_marker),
+            &claim.0,
+        )
+        .expect_err("postcommit namespace mismatch must withhold the token path");
+
+        assert!(error.contains("directory"), "{error}");
+        assert_eq!(
+            std::fs::read(profile.join("sentinel")).unwrap(),
+            b"replacement"
+        );
+        assert!(
+            !ownership_marker_path(&profile).exists()
+                && !committed_ownership_record_path(&profile).exists(),
+            "the replacement must not receive ownership lineage"
+        );
+        let displaced_marker: BrowserOwnershipMarker = serde_json::from_slice(
+            &std::fs::read(committed_ownership_record_path(&displaced)).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            displaced_marker,
+            committed,
+            "the committed record remains bound to the displaced original"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unix_transition_aba_swap_keeps_every_operation_on_original_fd() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let profile = tmp.path().join("unix-aba-a");
+        let replacement = tmp.path().join("unix-aba-b");
+        let displaced = tmp.path().join("unix-aba-displaced");
+        std::fs::create_dir_all(&profile).unwrap();
+        std::fs::create_dir_all(&replacement).unwrap();
+        std::fs::write(replacement.join("sentinel"), b"replacement").unwrap();
+        let claim = prepare_ownership_marker_for_launch(&profile).unwrap();
+        let cleanup = claim_ephemeral_profile_cleanup(&profile, &claim).unwrap();
+        let mut committed = cleanup.provisional_marker.clone();
+        committed.phase = BrowserOwnershipPhase::Committed;
+        committed.browser = identity(8_410, "chrome");
+
+        let profile_for_bind = profile.clone();
+        let replacement_for_bind = replacement.clone();
+        let displaced_for_bind = displaced.clone();
+        OWNERSHIP_COMMIT_DIRECTORY_BOUND_HOOK.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move |_| {
+                std::fs::rename(&profile_for_bind, &displaced_for_bind).unwrap();
+                std::fs::rename(&replacement_for_bind, &profile_for_bind).unwrap();
+            }));
+        });
+        let profile_for_restore = profile.clone();
+        let replacement_for_restore = replacement.clone();
+        let displaced_for_restore = displaced.clone();
+        OWNERSHIP_COMMIT_BARRIER_HOOK.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move |_, _| {
+                std::fs::rename(&profile_for_restore, &replacement_for_restore).unwrap();
+                std::fs::rename(&displaced_for_restore, &profile_for_restore).unwrap();
+            }));
+        });
+
+        let marker_path = commit_ownership_marker_under_claim(
+            &profile,
+            &committed,
+            Some(&cleanup.provisional_marker),
+            &claim.0,
+        )
+        .expect("restored original namespace may publish its exact lineage");
+
+        assert_eq!(marker_path, committed_ownership_record_path(&profile));
+        assert_eq!(read_marker(&profile).unwrap(), committed);
+        assert_eq!(
+            std::fs::read(replacement.join("sentinel")).unwrap(),
+            b"replacement",
+            "the temporary namespace occupant is never read, written, or cleaned"
+        );
+        assert!(
+            !ownership_marker_path(&replacement).exists()
+                && !committed_ownership_record_path(&replacement).exists()
+        );
+    }
+
+    #[test]
+    fn provisional_commit_error_preserves_appeared_ownership_and_profile_data() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let profile = tmp.path().join("provisional-appeared-marker");
+        std::fs::create_dir_all(&profile).unwrap();
+        let claim = prepare_ownership_marker_for_launch(&profile).unwrap();
+        let foreign = write_test_marker(
+            &profile,
+            identity(8_405, "foreign-owner"),
+            identity(8_406, "foreign-chrome"),
+        );
+        let state = profile.join("Default").join("Cookies");
+        std::fs::create_dir_all(state.parent().unwrap()).unwrap();
+        std::fs::write(&state, b"preserve").unwrap();
+
+        let error = claim_ephemeral_profile_cleanup(&profile, &claim)
+            .expect_err("appeared ownership prevents provisional commit");
+
+        assert!(error.contains("unexpectedly appeared"), "{error}");
+        assert_eq!(read_marker(&profile).unwrap(), foreign);
+        assert_eq!(std::fs::read(&state).unwrap(), b"preserve");
+    }
+
+    #[test]
+    fn exact_shutdown_cleanup_removes_only_runtime_artifacts() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let profile = tmp.path().join("stable-profile-cleanup");
+        let stable_data = profile.join("Default").join("stable-state.json");
+        std::fs::create_dir_all(stable_data.parent().unwrap()).unwrap();
+        std::fs::write(&stable_data, br#"{"keep":true}"#).unwrap();
+        let token = write_current_app_test_token(&profile);
+        let port_path = profile.join(DEVTOOLS_ACTIVE_PORT_FILE);
+        std::fs::write(&port_path, b"9222\n/devtools/browser/test\n").unwrap();
+
+        cleanup_browser_ownership_after_exact_shutdown(&token)
+            .expect("matching exact token authorizes runtime-artifact cleanup");
+
+        assert!(!ownership_marker_path(&profile).exists());
+        assert!(!port_path.exists());
+        assert_eq!(
+            std::fs::read(&stable_data).unwrap(),
+            br#"{"keep":true}"#,
+            "normal shutdown must preserve stable profile data"
+        );
+    }
+
+    #[test]
+    fn exact_ephemeral_shutdown_removes_profile_with_marker_still_authoritative() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let profile = tmp.path().join("ephemeral-profile-cleanup");
+        let token = write_current_app_test_token(&profile);
+        std::fs::write(
+            profile.join(DEVTOOLS_ACTIVE_PORT_FILE),
+            b"9222\n/devtools/browser/test\n",
+        )
+        .unwrap();
+        std::fs::create_dir_all(profile.join("Default")).unwrap();
+        std::fs::write(profile.join("Default").join("Cookies"), b"ephemeral").unwrap();
+
+        cleanup_ephemeral_profile_after_exact_shutdown(&token, &profile)
+            .expect("exact token authorizes whole ephemeral profile cleanup");
+
+        assert!(!profile.exists());
+    }
+
+    #[test]
+    fn exact_ephemeral_shutdown_removes_append_only_record_pair() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let profile = tmp.path().join("ephemeral-pair-cleanup");
+        let token = write_current_app_ephemeral_pair_token(&profile);
+        assert_eq!(
+            token.marker_path,
+            committed_ownership_record_path(&token.profile_dir),
+            "token paths must stay in the held canonical profile namespace"
+        );
+        assert!(ownership_marker_path(&token.profile_dir).is_file());
+        assert!(token.marker_path.is_file());
+        std::fs::create_dir_all(profile.join("Default")).unwrap();
+        std::fs::write(profile.join("Default").join("Cookies"), b"ephemeral").unwrap();
+
+        cleanup_ephemeral_profile_after_exact_shutdown(&token, &profile)
+            .expect("the exact append-only pair authorizes whole-profile cleanup");
+
+        assert!(!profile.exists());
+    }
+
+    #[test]
+    fn committed_sidecar_alone_remains_authoritative_for_cleanup() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let profile = tmp.path().join("ephemeral-sidecar-only");
+        let token = write_current_app_ephemeral_pair_token(&profile);
+        std::fs::remove_file(ownership_marker_path(&token.profile_dir))
+            .expect("simulate crash after predecessor unlink");
+        assert_eq!(read_marker(&token.profile_dir).unwrap(), token.marker);
+
+        cleanup_ephemeral_profile_after_exact_shutdown(&token, &profile)
+            .expect("committed sidecar alone retains exact cleanup authority");
+
+        assert!(!profile.exists());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn append_only_pair_is_scanned_once_per_profile() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path().join("ephemeral");
+        let profile = root.join("pair-live-owner");
+        let token = write_current_app_ephemeral_pair_token(&profile);
+        let owner = token.marker.owner_app.clone();
+        let mut control = fake_control(
+            identity(999, "current"),
+            HashMap::from([(owner.pid, ProcessLookup::Found(owner))]),
+        );
+
+        let report = recover_owned_profiles_with(
+            &root,
+            ProfileRecoveryMode::DeleteEphemeralProfile,
+            &mut control,
+        );
+
+        assert_eq!(report.markers_scanned, 2);
+        assert_eq!(report.live_owners_preserved, 1);
+        assert_eq!(control.terminate_calls, 0);
+        assert!(profile.exists());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn late_root_entry_restores_committed_lineage_after_final_rmdir_failure() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let ancestor = tmp.path().join("managed-root");
+        let profile = ancestor.join("late-root-entry");
+        let moved_ancestor = tmp.path().join("moved-root");
+        let moved_profile = ancestor.join("moved-profile");
+        let token = write_current_app_ephemeral_pair_token(&profile);
+        let hook_ancestor = ancestor.clone();
+        let hook_moved_ancestor = moved_ancestor.clone();
+        let hook_moved_profile = moved_profile.clone();
+        FINAL_PROFILE_RMDIR_BARRIER_HOOK.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move |profile| {
+                assert!(
+                    std::fs::rename(&hook_ancestor, &hook_moved_ancestor).is_err(),
+                    "held DELETE-capable profile handle must block ancestor replacement"
+                );
+                assert!(
+                    std::fs::rename(profile, &hook_moved_profile).is_err(),
+                    "held DELETE-capable profile handle must block leaf replacement"
+                );
+                std::fs::write(profile.join("late-entry"), b"late").unwrap();
+            }));
+        });
+
+        let error = cleanup_ephemeral_profile_after_exact_shutdown(&token, &profile)
+            .expect_err("late entry must make the final rmdir fail closed");
+
+        assert!(error.contains("delete exact"), "{error}");
+        assert!(!error.contains("restore failed"), "{error}");
+        assert_eq!(read_marker(&token.profile_dir).unwrap(), token.marker);
+        assert!(profile.join("late-entry").is_file());
+        cleanup_ephemeral_profile_after_exact_shutdown(&token, &profile)
+            .expect("restored lineage authorizes a later exact retry");
+        assert!(!profile.exists());
+    }
+
+    #[test]
+    fn exact_ephemeral_cleanup_rejects_a_replaced_non_directory_target() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let profile = tmp.path().join("ephemeral-replaced-before-cleanup");
+        let token = write_current_app_test_token(&profile);
+        std::fs::remove_dir_all(&profile).unwrap();
+        std::fs::write(&profile, b"replacement").unwrap();
+
+        let error = cleanup_ephemeral_profile_after_exact_shutdown(&token, &profile)
+            .expect_err("replaced non-directory target must fail closed");
+
+        assert!(error.contains("not a regular directory"), "{error}");
+        assert_eq!(std::fs::read(&profile).unwrap(), b"replacement");
+    }
+
+    #[test]
+    fn exact_ephemeral_shutdown_reuses_held_launch_claim() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let profile = tmp.path().join("ephemeral-held-launch-claim");
+        std::fs::create_dir_all(&profile).unwrap();
+        let launch_claim =
+            prepare_ownership_marker_for_launch(&profile).expect("hold launch claim");
+        let token = write_current_app_test_token(&profile);
+        std::fs::write(
+            profile.join(DEVTOOLS_ACTIVE_PORT_FILE),
+            b"9222\n/devtools/browser/test\n",
+        )
+        .unwrap();
+
+        cleanup_ephemeral_profile_after_exact_shutdown_under_launch_claim(
+            &token,
+            &profile,
+            &launch_claim,
+        )
+        .expect("failed launch cleans its ephemeral profile under the existing claim");
+
+        assert!(!profile.exists());
+    }
+
+    #[test]
+    fn ephemeral_retry_recreates_only_the_exact_claimed_directory() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let profile = tmp.path().join("ephemeral-retry");
+        std::fs::create_dir_all(&profile).unwrap();
+        let launch_claim =
+            prepare_ownership_marker_for_launch(&profile).expect("hold exact launch claim");
+        let cleanup_token = claim_ephemeral_profile_cleanup(&profile, &launch_claim)
+            .expect("bind exact ephemeral cleanup authority");
+
+        cleanup_uncommitted_ephemeral_profile_after_exact_shutdown_under_launch_claim(
+            &cleanup_token,
+            &launch_claim,
+        )
+        .expect("completed first attempt removes its exact ephemeral profile");
+        assert!(!profile.exists());
+
+        let sibling = tmp.path().join("different-profile");
+        assert!(
+            restore_ephemeral_profile_for_retry(&sibling, &launch_claim).is_err(),
+            "the held claim must not authorize a sibling directory"
+        );
+        assert!(!sibling.exists());
+
+        let restored = restore_ephemeral_profile_for_retry(&profile, &launch_claim)
+            .expect("same exact profile path can be restored under the held claim");
+        assert!(profile.is_dir());
+        assert_eq!(
+            std::fs::canonicalize(&profile).unwrap(),
+            launch_claim.0.profile_dir
+        );
+        cleanup_uncommitted_ephemeral_profile_after_exact_shutdown_under_launch_claim(
+            &restored,
+            &launch_claim,
+        )
+        .expect("restored cleanup authority remains exact");
+        assert!(!profile.exists());
+    }
+
+    #[test]
+    fn ephemeral_retry_rejects_a_replaced_non_directory_target() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let profile = tmp.path().join("ephemeral-replaced-retry");
+        std::fs::create_dir_all(&profile).unwrap();
+        let launch_claim =
+            prepare_ownership_marker_for_launch(&profile).expect("hold exact launch claim");
+        let cleanup_token = claim_ephemeral_profile_cleanup(&profile, &launch_claim).unwrap();
+        cleanup_uncommitted_ephemeral_profile_after_exact_shutdown_under_launch_claim(
+            &cleanup_token,
+            &launch_claim,
+        )
+        .unwrap();
+        std::fs::write(&profile, b"replacement").unwrap();
+
+        let error = restore_ephemeral_profile_for_retry(&profile, &launch_claim)
+            .expect_err("a replaced file must fail closed");
+
+        assert!(error.contains("not a regular directory"), "{error}");
+        assert!(profile.is_file());
+    }
+
+    #[test]
+    fn launch_port_preparation_removes_only_a_regular_runtime_artifact() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let profile = tmp.path().join("launch-port-preparation");
+        std::fs::create_dir_all(&profile).unwrap();
+        let launch_claim = prepare_ownership_marker_for_launch(&profile).unwrap();
+        let port = profile.join(DEVTOOLS_ACTIVE_PORT_FILE);
+        std::fs::write(&port, b"9222\n/devtools/browser/stale\n").unwrap();
+
+        prepare_runtime_port_for_launch(&profile, &launch_claim)
+            .expect("regular stale port artifact is removed before spawn");
+        assert!(!port.exists());
+
+        std::fs::create_dir(&port).unwrap();
+        let error = prepare_runtime_port_for_launch(&profile, &launch_claim)
+            .expect_err("unsafe port artifact type must fail launch closed");
+        assert!(error.contains("not a regular file"), "{error}");
+        assert!(port.is_dir());
+    }
+
+    #[test]
+    fn exact_shutdown_cleanup_reuses_the_held_launch_claim() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let profile = tmp.path().join("held-launch-claim-cleanup");
+        std::fs::create_dir_all(&profile).unwrap();
+        let launch_claim =
+            prepare_ownership_marker_for_launch(&profile).expect("hold launch claim");
+        let token = write_current_app_test_token(&profile);
+        let port_path = profile.join(DEVTOOLS_ACTIVE_PORT_FILE);
+        std::fs::write(&port_path, b"9222\n/devtools/browser/test\n").unwrap();
+
+        cleanup_browser_ownership_after_exact_shutdown_under_launch_claim(
+            &token,
+            &launch_claim,
+        )
+        .expect("committed launch failure must clean under its existing claim");
+
+        assert!(!ownership_marker_path(&profile).exists());
+        assert!(!port_path.exists());
+    }
+
+    #[test]
+    fn exact_shutdown_cleanup_preserves_replaced_marker_and_port() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let profile = tmp.path().join("stable-profile-replaced");
+        let token = write_current_app_test_token(&profile);
+        let port_path = profile.join(DEVTOOLS_ACTIVE_PORT_FILE);
+        std::fs::write(&port_path, b"9222\n/devtools/browser/replaced\n").unwrap();
+        let mut replacement = token.marker.clone();
+        replacement.browser = identity(8_383, "replacement-chrome");
+        std::fs::write(
+            ownership_marker_path(&profile),
+            serde_json::to_vec_pretty(&replacement).unwrap(),
+        )
+        .unwrap();
+
+        let error = cleanup_browser_ownership_after_exact_shutdown(&token)
+            .expect_err("a replaced marker must fail closed");
+
+        assert!(error.contains("changed"), "{error}");
+        assert_eq!(read_marker(&profile).unwrap(), replacement);
+        assert!(port_path.is_file());
+    }
+
+    #[test]
+    fn exact_shutdown_cleanup_missing_marker_never_deletes_port() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let profile = tmp.path().join("stable-profile-missing-marker");
+        let token = write_current_app_test_token(&profile);
+        std::fs::remove_file(ownership_marker_path(&profile)).unwrap();
+        let port_path = profile.join(DEVTOOLS_ACTIVE_PORT_FILE);
+        std::fs::write(&port_path, b"9222\n/devtools/browser/unowned\n").unwrap();
+
+        cleanup_browser_ownership_after_exact_shutdown(&token)
+            .expect("missing marker is idempotent");
+
+        assert!(
+            port_path.is_file(),
+            "a missing marker must never authorize deleting DevToolsActivePort"
+        );
+    }
+
+    #[test]
+    fn exact_shutdown_cleanup_rejects_unsafe_port_type_and_preserves_marker() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let profile = tmp.path().join("stable-profile-unsafe-port");
+        let token = write_current_app_test_token(&profile);
+        let port_path = profile.join(DEVTOOLS_ACTIVE_PORT_FILE);
+        std::fs::create_dir(&port_path).unwrap();
+
+        let error = cleanup_browser_ownership_after_exact_shutdown(&token)
+            .expect_err("a non-file port artifact must fail closed");
+
+        assert!(error.contains("not a regular file"), "{error}");
+        assert!(ownership_marker_path(&profile).is_file());
+        assert!(port_path.is_dir());
     }
 
     #[cfg(windows)]
@@ -2170,7 +6346,7 @@ mod tests {
         let mut child = command.spawn().expect("spawn exact marker test child");
         let expected_pid = child.id().expect("child pid");
 
-        write_browser_ownership_marker(&claim, &profile, &command_shell, &child)
+        write_browser_ownership_marker(&claim, &profile, &command_shell, &child, None)
             .await
             .expect("write marker from exact child handle");
         let marker = read_marker(&profile).expect("read committed ownership marker");
@@ -2199,6 +6375,7 @@ mod tests {
         ProfileOperationClaim::acquire(&profile).expect("OS releases lock with guard handle");
     }
 
+    #[cfg(windows)]
     #[test]
     fn launch_claim_blocks_recovery_until_marker_commit_window_closes() {
         let tmp = tempfile::TempDir::new().unwrap();
@@ -2325,5 +6502,185 @@ mod tests {
         // 损坏 JSON → best-effort Ok（warn），不阻断启动；原文件不被破坏成空。
         scrub_crash_markers(tmp.path()).expect("corrupt json is best-effort benign");
         assert_eq!(std::fs::read_to_string(&prefs).unwrap(), "{ corrupt");
+    }
+
+    #[test]
+    fn scrub_ignores_a_precreated_legacy_fixed_temp_hardlink() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let prefs = preferences_path(tmp.path());
+        std::fs::create_dir_all(prefs.parent().unwrap()).unwrap();
+        std::fs::write(&prefs, r#"{"profile":{"exit_type":"Crashed"}}"#).unwrap();
+        let sentinel = tmp.path().join("outside-sentinel");
+        std::fs::write(&sentinel, b"outside-must-not-change").unwrap();
+        let legacy_temp = prefs.with_extension("nomi-scrub.tmp");
+        std::fs::hard_link(&sentinel, &legacy_temp).unwrap();
+
+        scrub_crash_markers(tmp.path()).expect("random create-new temp bypasses fixed alias");
+
+        assert_eq!(
+            std::fs::read(&sentinel).unwrap(),
+            b"outside-must-not-change"
+        );
+        assert_eq!(
+            std::fs::read(&legacy_temp).unwrap(),
+            b"outside-must-not-change"
+        );
+    }
+
+    #[test]
+    fn scrub_rejects_a_hardlinked_preferences_file() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let prefs = preferences_path(tmp.path());
+        std::fs::create_dir_all(prefs.parent().unwrap()).unwrap();
+        let outside = tmp.path().join("outside-preferences");
+        let original = r#"{"profile":{"exit_type":"Crashed"},"outside":true}"#;
+        std::fs::write(&outside, original).unwrap();
+        std::fs::hard_link(&outside, &prefs).unwrap();
+
+        scrub_crash_markers(tmp.path())
+            .expect_err("multi-link Preferences must fail closed");
+
+        assert_eq!(std::fs::read_to_string(&outside).unwrap(), original);
+    }
+
+    #[test]
+    fn scrub_rejects_a_symlinked_preferences_file() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let prefs = preferences_path(tmp.path());
+        std::fs::create_dir_all(prefs.parent().unwrap()).unwrap();
+        let outside = tmp.path().join("outside-symlink-preferences");
+        let original = r#"{"profile":{"exit_type":"Crashed"},"outside":true}"#;
+        std::fs::write(&outside, original).unwrap();
+        #[cfg(windows)]
+        if std::os::windows::fs::symlink_file(&outside, &prefs).is_err() {
+            // Creating symlinks can require Developer Mode on Windows. The
+            // hardlink test above still exercises the no-external-write rule.
+            return;
+        }
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&outside, &prefs).unwrap();
+
+        scrub_crash_markers(tmp.path())
+            .expect_err("symlinked Preferences must fail closed");
+
+        assert_eq!(std::fs::read_to_string(&outside).unwrap(), original);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn guarded_profile_handle_blocks_ancestor_namespace_rename() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let ancestor = tmp.path().join("managed-root");
+        let profile = ancestor.join("profile");
+        std::fs::create_dir_all(&profile).unwrap();
+        let guard =
+            open_locked_non_reparse_directory(&profile).expect("open root profile guard");
+        let moved = tmp.path().join("moved-root");
+
+        assert!(
+            std::fs::rename(&ancestor, &moved).is_err(),
+            "an ancestor containing the guarded profile cannot be renamed"
+        );
+        drop(guard);
+        std::fs::rename(&ancestor, &moved)
+            .expect("ancestor rename succeeds after guard release");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn pinned_recovery_authority_blocks_namespace_replacement_without_process_actions() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let ancestor = tmp.path().join("managed-root");
+        let profile = ancestor.join("profile");
+        write_test_marker(
+            &profile,
+            identity(301, "nomifun-gone"),
+            identity(302, "chrome-gone"),
+        );
+        let claim =
+            ProfileOperationClaim::acquire_pinned(&profile).expect("pin recovery profile");
+        let authority =
+            read_pinned_ownership_record_set(&profile).expect("pin recovery authority");
+        claim
+            .validates(&profile)
+            .expect("pinned marker still occupies claimed profile");
+        let moved_ancestor = tmp.path().join("moved-root");
+        let moved_profile = ancestor.join("replacement");
+        let control = fake_control(identity(999, "current"), HashMap::new());
+
+        assert!(std::fs::rename(&ancestor, &moved_ancestor).is_err());
+        assert!(std::fs::rename(&profile, &moved_profile).is_err());
+        assert_eq!(control.terminate_calls, 0);
+        assert_eq!(control.absence_calls, 0);
+        assert!(control.terminate_identities.is_empty());
+        assert!(control.absence_identities.is_empty());
+
+        drop(authority);
+        drop(claim);
+        std::fs::rename(&ancestor, &moved_ancestor)
+            .expect("namespace rename succeeds after pinned claim drops");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unix_directory_enumerations_have_independent_offsets() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        std::fs::write(tmp.path().join("one"), b"1").unwrap();
+        std::fs::write(tmp.path().join("two"), b"2").unwrap();
+        let directory = UnixDirectory::open_path(tmp.path()).unwrap();
+        let mut first = directory.entries().unwrap();
+        let mut second = directory.entries().unwrap();
+        first.sort();
+        second.sort();
+
+        assert_eq!(first, second);
+        assert_eq!(first.len(), 2);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_openat2_rejects_same_filesystem_bind_mounts() {
+        struct BindMountGuard(PathBuf);
+        impl Drop for BindMountGuard {
+            fn drop(&mut self) {
+                let _ = std::process::Command::new("umount")
+                    .arg(&self.0)
+                    .status();
+            }
+        }
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let profile = tmp.path().join("profile");
+        let mounted = profile.join("mounted");
+        let outside = tmp.path().join("outside");
+        std::fs::create_dir_all(&mounted).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("sentinel"), b"must-survive").unwrap();
+        let status = std::process::Command::new("mount")
+            .args(["--bind"])
+            .arg(&outside)
+            .arg(&mounted)
+            .status();
+        let Ok(status) = status else {
+            return;
+        };
+        if !status.success() {
+            // Unprivileged developer environments cannot create bind mounts.
+            // Privileged Linux CI executes the actual boundary assertion.
+            return;
+        }
+        let _guard = BindMountGuard(mounted.clone());
+        let directory = UnixDirectory::open_path(&profile).unwrap();
+
+        assert!(
+            directory
+                .open_child(std::ffi::OsStr::new("mounted"))
+                .is_err(),
+            "RESOLVE_NO_XDEV must reject even a same-filesystem bind mount"
+        );
+        assert_eq!(
+            std::fs::read(outside.join("sentinel")).unwrap(),
+            b"must-survive"
+        );
     }
 }

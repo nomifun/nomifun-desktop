@@ -71,12 +71,34 @@ const createManualScheduler = () => {
 };
 
 describe('Browser Use settings contract', () => {
-  test('reads silent only for migration and exposes the two-option display mode control', () => {
+  test('trusts only v2 local fallback state and applies display mode through the live API', () => {
     const source = readSource(new URL('./BrowserUseSettingsContent.tsx', import.meta.url));
 
-    expect(source.includes("configService.get('agent.browserUse.silent')")).toBe(true);
-    expect(source.includes("configService.set('agent.browserUse.displayMode'")).toBe(true);
+    expect(source.includes("configService.get('agent.browserUse.displayModeVersion')")).toBe(true);
+    expect(source.includes("configService.get('agent.browserUse.silent')")).toBe(false);
+    expect(source.includes("configService.set('agent.browserUse.displayMode'")).toBe(false);
+    expect(source.includes('ipcBridge.browserSession.displayMode.get.invoke()')).toBe(true);
+    expect(source.includes('ipcBridge.browserSession.displayMode.put.invoke')).toBe(true);
+    expect(source.includes('createBrowserDisplayModeController')).toBe(true);
+    expect(source.includes('setDisplayMode(previous)')).toBe(false);
+    expect(source.includes("configService.setLocal('agent.browserUse.displayMode'")).toBe(true);
+    expect(
+      source.includes("configService.setLocal(\n    'agent.browserUse.displayModeVersion'")
+    ).toBe(true);
+    expect(source.includes('BROWSER_DISPLAY_MODE_POLICY_VERSION')).toBe(true);
     expect(/configService\.(?:set|setLocal|setBatch)\('agent\.browserUse\.silent'/.test(source)).toBe(false);
+    const rejectedStart = source.indexOf("} else if (result.kind === 'rejected') {");
+    const rejectedEnd = source.indexOf("} else if (result.kind === 'unknown') {", rejectedStart);
+    expect(rejectedStart).toBeGreaterThan(-1);
+    expect(rejectedEnd).toBeGreaterThan(rejectedStart);
+    expect(
+      source
+        .slice(rejectedStart, rejectedEnd)
+        .includes('cacheAuthoritativeBrowserDisplayMode')
+    ).toBe(false);
+    expect(source.slice(rejectedStart, rejectedEnd).includes('result.nonPersistent')).toBe(
+      true
+    );
     // The removed embedded viewer must never come back as a selectable mode;
     // headless (default) and external are the two trusted user policies.
     expect(source.includes("<Radio value='embedded'>")).toBe(false);
@@ -87,6 +109,7 @@ describe('Browser Use settings contract', () => {
     expect(source.includes("t('settings.browserDisplayModeDesc')")).toBe(true);
     expect(source.includes("persistBoolean('agent.browserUse.takeover'")).toBe(true);
     expect(source.includes("configService.get('agent.browserUse.takeover')")).toBe(true);
+    expect(source.includes('displayModeStatus !== \'ready\'')).toBe(true);
   });
 
   test('exposes the three resource presets and advanced resource fields', () => {
@@ -115,9 +138,10 @@ describe('Browser Use settings contract', () => {
     expect(source.includes('{canManagePrimaryIdentity && (')).toBe(true);
     expect(source.includes('{canManageBrowserSettings && (')).toBe(true);
 
-    // Display and security preferences remain outside installation-owner
-    // capability gates and therefore remain available to ordinary users.
+    // The global display policy is owner-scoped, while per-user security
+    // preferences remain available to ordinary users.
     expect(source.includes("label={t('settings.browserDisplayMode')}")).toBe(true);
+    expect(source.includes('{canManageBrowserSettings && (')).toBe(true);
     expect(source.includes("label={t('settings.browserPersistentLogin')}")).toBe(true);
     expect(source.includes("label={t('settings.browserFullPower')}")).toBe(true);
     expect(source.includes("label={t('settings.browserTakeover')}")).toBe(true);
@@ -563,6 +587,8 @@ describe('Browser Use settings contract', () => {
     const componentStart = source.indexOf('const BrowserUseSettingsContent');
     const initializationMarker = source.indexOf('const storedPersistentLogin', componentStart);
     const initializationStart = source.lastIndexOf('useEffect(() => {', initializationMarker);
+    const initializationEnd =
+      source.indexOf('}, []);', initializationMarker) + '}, []);'.length;
     const loadCallbackStart = source.indexOf('const loadResourcePolicy', initializationMarker);
     const loadEffectStart = source.indexOf('useEffect(() => {', loadCallbackStart);
     const loginStatusMarker = source.indexOf(
@@ -577,7 +603,7 @@ describe('Browser Use settings contract', () => {
     expect(loadEffectStart).toBeGreaterThan(loadCallbackStart);
     expect(loginStatusMarker).toBeGreaterThan(loadEffectStart);
 
-    const initializationEffect = source.slice(initializationStart, loadCallbackStart).trim();
+    const initializationEffect = source.slice(initializationStart, initializationEnd).trim();
     const loadResourcePolicyCallback = source.slice(loadCallbackStart, loadEffectStart).trim();
     const loadResourcePolicyEffect = source.slice(loadEffectStart, loginStatusMarker).trim();
 
@@ -615,6 +641,10 @@ describe('Browser Use settings contract', () => {
       'browserDisplayModeDesc',
       'browserDisplayModeHeadless',
       'browserDisplayModeExternal',
+      'browserDisplayModeSaved',
+      'browserDisplayModeUnconfirmed',
+      'browserDisplayModeUnavailable',
+      'browserDisplayModeLoadFailedWithDetails',
       'browserResourcePolicy',
       'browserResourcePolicyAutomatic',
       'browserResourcePolicySaving',

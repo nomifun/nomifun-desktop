@@ -7,16 +7,20 @@
 import {
   httpGet,
   httpPost,
+  httpPut,
   redactSensitiveText,
   withResponseMap,
   wsEmitter,
 } from '@/common/adapter/httpBridge';
 import type {
+  BrowserDisplayMode,
   BrowserCloseResult,
   BrowserIdentityMode,
   BrowserLaneLifecycleState,
   BrowserResourcePressureState,
+  IBrowserBackgroundResult,
   IBrowserCapacityOverview,
+  IBrowserDisplayModePolicy,
   IBrowserForegroundResult,
   IBrowserHost,
   IBrowserInventoryChangedEvent,
@@ -149,6 +153,7 @@ export const normalizeBrowserLane = (raw: unknown): IBrowserLane | null => {
     lane_id: laneId,
     lane_name: nullableString(value, 'lane_name', 'name'),
     lifecycle_state: lifecycle as BrowserLaneLifecycleState,
+    browser_epoch: nonNegativeNumber(value, 'browser_epoch', 'epoch'),
     conversation_id:
       nullableString(value, 'conversation_id') ?? owner?.conversation_id,
     conversation_title: nullableString(value, 'conversation_title'),
@@ -226,6 +231,7 @@ export const normalizeBrowserHost = (raw: unknown): IBrowserHost | null => {
     state: (firstString(value, 'state', 'lifecycle_state', 'status') ?? 'unknown') as
       IBrowserHost['state'],
     epoch: nonNegativeNumber(value, 'epoch', 'browser_epoch'),
+    headful: firstBoolean(value, 'headful', 'is_headful'),
     identity_mode: firstString(value, 'identity_mode', 'mode') as
       | IBrowserHost['identity_mode']
       | undefined,
@@ -267,11 +273,33 @@ export const normalizeBrowserOverview = (raw: unknown): IBrowserOverview => {
       | undefined,
     capacity: normalizeCapacity(value.capacity),
     hosts: normalizeBrowserHosts(value.hosts),
+    managed_host_count: nonNegativeNumber(
+      value,
+      'managed_host_count',
+      'managed_hosts'
+    ),
+    pending_cleanup_count: nonNegativeNumber(
+      value,
+      'pending_cleanup_count',
+      'pending_cleanups'
+    ),
     can_close_all: firstBoolean(value, 'can_close_all'),
     can_manage_browser_settings: firstBoolean(value, 'can_manage_browser_settings'),
     can_manage_primary_identity: firstBoolean(value, 'can_manage_primary_identity'),
     updated_at: firstNumber(value, 'updated_at'),
   };
+};
+
+const normalizeBrowserDisplayModePolicy = (raw: unknown): IBrowserDisplayModePolicy => {
+  const root = asRecord(raw);
+  const value = asRecord(root.data);
+  const displayMode =
+    firstString(value, 'display_mode', 'mode') ??
+    firstString(root, 'display_mode', 'mode');
+  if (displayMode !== 'headless' && displayMode !== 'external') {
+    throw new Error('The browser manager returned an invalid display mode.');
+  }
+  return { display_mode: displayMode };
 };
 
 export const browserSession = {
@@ -291,6 +319,25 @@ export const browserSession = {
     ({ lane_id }) => `/api/browser/lanes/${encodeURIComponent(lane_id)}/foreground`,
     () => undefined
   ),
+  backgroundLane: httpPost<IBrowserBackgroundResult, { lane_id: string }>(
+    ({ lane_id }) => `/api/browser/lanes/${encodeURIComponent(lane_id)}/background`,
+    () => undefined
+  ),
+  displayMode: {
+    get: withResponseMap(
+      httpGet<unknown, void>('/api/browser/display-mode', {
+        silentStatuses: [404, 501],
+      }),
+      normalizeBrowserDisplayModePolicy
+    ),
+    put: withResponseMap(
+      httpPut<unknown, { display_mode: BrowserDisplayMode }>(
+        '/api/browser/display-mode',
+        ({ display_mode }) => ({ display_mode })
+      ),
+      normalizeBrowserDisplayModePolicy
+    ),
+  },
   closeConversation: httpPost<BrowserCloseResult, { conversation_id: string }>(
     ({ conversation_id }) =>
       `/api/browser/conversations/${encodeURIComponent(conversation_id)}/close`,

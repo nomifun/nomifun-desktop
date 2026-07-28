@@ -149,9 +149,47 @@ export const browserClosePartialFailureMessage = (
  * The backend's idempotent no-op is explicit (`already_closed: true`); an
  * explicit zero-close response without that marker is treated as unconfirmed.
  */
-export const browserCloseResultIsUnconfirmed = (result: unknown): boolean => {
+export const browserCloseResultIsUnconfirmed = (
+  result: unknown,
+  options: { requireFullyDrained?: boolean } = {}
+): boolean => {
   const payload = closeResultPayload(result);
   if (!payload) return true;
+  if (options.requireFullyDrained) {
+    const remainingLaneCount = firstNumber(
+      payload,
+      'remaining_lane_count',
+      'remaining_lanes'
+    );
+    const remainingCleanupCount = firstNumber(
+      payload,
+      'remaining_cleanup_count',
+      'remaining_cleanups'
+    );
+    const remainingManagedHostCount = firstNumber(
+      payload,
+      'remaining_managed_host_count',
+      'remaining_host_count',
+      'remaining_hosts'
+    );
+    if (
+      remainingLaneCount == null ||
+      remainingCleanupCount == null ||
+      remainingManagedHostCount == null ||
+      remainingLaneCount !== 0 ||
+      remainingCleanupCount !== 0 ||
+      remainingManagedHostCount !== 0
+    ) {
+      return true;
+    }
+    // Installation-wide close-all may drain only a zero-Lane residual Host or
+    // pending cleanup record. In that case `closed` is correctly zero and
+    // `already_closed` is correctly false because resources existed at the
+    // start of the drain. The three explicit post-close counts are the
+    // authoritative completion proof, so do not reject that successful drain
+    // merely because no Lane was counted as closed.
+    return false;
+  }
   const closed = firstNumber(payload, 'closed');
   return (
     !browserCloseOutcome(result).partial &&
@@ -173,20 +211,23 @@ export const browserInstallationWideCloseCopy = (
 ): BrowserInstallationWideCloseCopy => {
   if (language?.toLowerCase().startsWith('zh')) {
     return {
-      button: '全局关闭所有浏览器',
-      title: '关闭整个安装中的所有浏览器通道？',
-      warning: '这是整个安装范围的全局操作，会影响此 NomiFun 安装中的所有用户。',
-      action: '全局关闭所有浏览器',
-      success: '已全局关闭整个安装中的所有浏览器通道。',
+      button: '全局关闭所有浏览器资源',
+      title: '关闭整个安装中的所有受管浏览器资源？',
+      warning:
+        '这是整个安装范围的全局操作：会关闭所有用户的浏览器通道、排空待清理任务，并终止受管浏览器主机及进程。只有通道、待清理任务和受管主机三项权威剩余计数全部为 0 时才会报告成功。',
+      action: '全局关闭所有浏览器资源',
+      success:
+        '已确认整个安装中的浏览器通道、待清理任务和受管主机及进程全部归零。',
     };
   }
   return {
-    button: 'Close all globally',
-    title: 'Close every browser lane across this installation?',
+    button: 'Close all browser resources globally',
+    title: 'Close every managed browser resource across this installation?',
     warning:
-      "This is an installation-wide global action affecting every user's browser lanes.",
-    action: 'Close all globally',
-    success: 'All browser lanes across this installation were closed.',
+      "This installation-wide global action closes every user's browser lanes, drains pending cleanup, and terminates managed Browser Hosts/processes. Success is reported only when the three authoritative remaining counts—lanes, pending cleanup, and managed Hosts—are all zero.",
+    action: 'Close all browser resources globally',
+    success:
+      'All browser resources across this installation are confirmed at zero: lanes, pending cleanup, and managed Hosts/processes.',
   };
 };
 
@@ -200,6 +241,33 @@ export interface BrowserConfirmationRequest {
 
 export type BrowserConfirm = (request: BrowserConfirmationRequest) => void;
 
+export interface BrowserManagementMutationGate {
+  run: (operation: () => Promise<void>, onBusy?: () => void) => Promise<boolean>;
+  isBusy: () => boolean;
+}
+
+/** Synchronous acquisition keeps delayed confirmation callbacks mutually exclusive. */
+export const createBrowserManagementMutationGate =
+  (): BrowserManagementMutationGate => {
+    let busy = false;
+    return {
+      run: async (operation, onBusy) => {
+        if (busy) {
+          onBusy?.();
+          return false;
+        }
+        busy = true;
+        try {
+          await operation();
+          return true;
+        } finally {
+          busy = false;
+        }
+      },
+      isBusy: () => busy,
+    };
+  };
+
 interface BrowserCloseFeedback {
   refresh: () => Promise<void>;
   notifySuccess: (message: string) => void;
@@ -208,6 +276,8 @@ interface BrowserCloseFeedback {
   formatPartialFailure?: (result: unknown) => string | null;
   formatRefreshFailure?: (message: string) => string;
   unconfirmedMessage?: string;
+  /** Installation-wide close-all must prove that no managed resource remains. */
+  requireFullyDrained?: boolean;
 }
 
 interface BrowserLaneCloseDependencies extends BrowserCloseFeedback {
@@ -215,10 +285,10 @@ interface BrowserLaneCloseDependencies extends BrowserCloseFeedback {
   setBusyLaneId: (laneId: string | null) => void;
 }
 
-interface BrowserLaneForegroundDependencies {
+interface BrowserLaneVisibilityDependencies {
   invoke: (request: { lane_id: string }) => Promise<unknown>;
   refresh: () => Promise<void>;
-  setForegroundingLaneId: (laneId: string | null) => void;
+  setChangingVisibilityLaneId: (laneId: string | null) => void;
   notifySuccess: (message: string) => void;
   notifyError: (message: string) => void;
   successMessage: string;
@@ -243,20 +313,21 @@ export const browserLaneHasActiveWork = (lane: IBrowserLane): boolean =>
 export const canForegroundBrowserLane = (lane: IBrowserLane): boolean =>
   lane.lifecycle_state === 'running' && lane.identity?.mode === 'primary';
 
-export const runBrowserLaneForeground = async (
+const runBrowserLaneVisibilityChange = async (
   lane: IBrowserLane,
-  dependencies: BrowserLaneForegroundDependencies
+  dependencies: BrowserLaneVisibilityDependencies,
+  confirmationField: 'foregrounded' | 'backgrounded'
 ): Promise<void> => {
   if (!canForegroundBrowserLane(lane)) return;
 
-  dependencies.setForegroundingLaneId(lane.lane_id);
+  dependencies.setChangingVisibilityLaneId(lane.lane_id);
   try {
     let operationError: string | null = null;
     let unconfirmed = false;
     try {
       const result = await dependencies.invoke({ lane_id: lane.lane_id });
       const payload = closeResultPayload(result);
-      unconfirmed = payload?.foregrounded !== true;
+      unconfirmed = payload?.[confirmationField] !== true;
     } catch (error) {
       operationError = errorMessage(error);
     }
@@ -284,9 +355,21 @@ export const runBrowserLaneForeground = async (
       dependencies.notifySuccess(dependencies.successMessage);
     }
   } finally {
-    dependencies.setForegroundingLaneId(null);
+    dependencies.setChangingVisibilityLaneId(null);
   }
 };
+
+export const runBrowserLaneForeground = (
+  lane: IBrowserLane,
+  dependencies: BrowserLaneVisibilityDependencies
+): Promise<void> =>
+  runBrowserLaneVisibilityChange(lane, dependencies, 'foregrounded');
+
+export const runBrowserLaneBackground = (
+  lane: IBrowserLane,
+  dependencies: BrowserLaneVisibilityDependencies
+): Promise<void> =>
+  runBrowserLaneVisibilityChange(lane, dependencies, 'backgrounded');
 
 const reportCloseAttempt = async (
   result: unknown,
@@ -314,7 +397,11 @@ const reportCloseAttempt = async (
     dependencies.notifyError(refreshError ? `${partialFailure}; ${refreshError}` : partialFailure);
     return;
   }
-  if (browserCloseResultIsUnconfirmed(result)) {
+  if (
+    browserCloseResultIsUnconfirmed(result, {
+      requireFullyDrained: dependencies.requireFullyDrained,
+    })
+  ) {
     const message =
       dependencies.unconfirmedMessage ??
       'The browser manager did not confirm the close. Review the inventory and try again.';
@@ -386,7 +473,10 @@ export const runBrowserCloseAll = async (
     operationError = errorMessage(error);
   } finally {
     try {
-      await reportCloseAttempt(result, operationError, dependencies);
+      await reportCloseAttempt(result, operationError, {
+        ...dependencies,
+        requireFullyDrained: true,
+      });
     } catch (error) {
       dependencies.notifyError(errorMessage(error));
     } finally {

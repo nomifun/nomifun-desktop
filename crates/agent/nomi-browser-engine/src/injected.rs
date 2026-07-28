@@ -1300,11 +1300,8 @@ mod tests {
             headful: false,
         };
         let launched = launch_chrome(&cfg, true).await.expect("launch chrome");
-        // 保活 child（drop 即清理 chrome）；transport（pipe/ws）交给连接。
-        let _child = launched.child;
-        let conn = Connection::connect_launched(launched.transport)
-            .await
-            .expect("connect");
+        // 保活精确 process/profile 清理权；transport 已交给连接。
+        let (_process, conn) = launched.connect().await.expect("connect");
         let _attach_loop = conn.run_attach_loop();
         conn.enable_auto_attach().await.expect("auto attach");
 

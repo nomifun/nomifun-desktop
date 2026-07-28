@@ -310,6 +310,21 @@ impl TargetOwnership {
         self.target_owner.get(target_id).map(String::as_str)
     }
 
+    /// Snapshot every top-level target still owned by one Lane.
+    ///
+    /// Ownership intentionally outlives the live tab record until Lane
+    /// teardown, so this is the authoritative cleanup inventory even when a
+    /// detach/destroy event has already removed the target from the UI-facing
+    /// tab registry.
+    pub fn targets_for_lane(&self, lane_id: &str) -> Vec<String> {
+        self.target_owner
+            .iter()
+            .filter_map(|(target_id, owner)| {
+                (owner == lane_id).then_some(target_id.clone())
+            })
+            .collect()
+    }
+
     pub fn route_attached(
         &mut self,
         target_id: &str,
@@ -638,6 +653,20 @@ mod tests {
         released.sort();
         assert_eq!(released, vec!["a1", "a2"]);
         assert_eq!(ownership.owner("b1"), Some("lane-b"));
+    }
+
+    #[test]
+    fn lane_target_snapshot_is_scoped_and_keeps_cleanup_tombstones() {
+        let mut ownership = TargetOwnership::default();
+        ownership.claim("lane-a", "a2").unwrap();
+        ownership.claim("lane-b", "b1").unwrap();
+        ownership.claim("lane-a", "a1").unwrap();
+
+        let mut lane_a = ownership.targets_for_lane("lane-a");
+        lane_a.sort();
+        assert_eq!(lane_a, vec!["a1", "a2"]);
+        assert_eq!(ownership.targets_for_lane("lane-b"), vec!["b1"]);
+        assert!(ownership.targets_for_lane("unknown").is_empty());
     }
 
     #[test]

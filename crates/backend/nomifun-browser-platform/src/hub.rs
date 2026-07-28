@@ -17,10 +17,11 @@ use crate::{
     BrowserInventoryEvent, BrowserLaneDriver, BrowserLaneId, BrowserLaneScheduler,
     BrowserLaneSnapshot, BrowserOperation, BrowserOperationKind, BrowserOperationResult,
     BrowserOverview, BrowserPlatformError, CallerIdentity, CanonicalIdentitySnapshot,
-    CapturedIdentitySnapshot, Clock, CloseResult,
+    BrowserVisibility, CapturedIdentitySnapshot, Clock, CloseResult,
     DriverOperationContext, HostLaunchRequest, IdentitySnapshotPayload,
     HostCircuitBreaker, HostRestartTransition, LaneFreezeOutcome, LaneKey, LaneLaunchRequest,
-    LaneLifecycleState, LanePriority, OperationContext, OwnerLease, OwnerLeaseService,
+    LaneLifecycleState, LanePriority, OperationContext, OwnerLease, OwnerLeaseId,
+    OwnerLeaseService,
     PerKeyHostRestartSingleFlight, PromotionPolicy, ResourceDecision, ResourcePolicy,
     ResourcePressureState, ResourceTelemetry, ResourceWorkload, SchedulerConfig, SnapshotCoverage,
     SystemClock, stale_browser_epoch_error,
@@ -29,8 +30,16 @@ use crate::{
 const EVENT_BUFFER: usize = 256;
 const LANE_CLEANUP_WAITER_TIMEOUT: Duration = Duration::from_secs(6);
 const CLEANUP_BATCH_WAIT_TIMEOUT: Duration = Duration::from_secs(7);
-const HOST_INITIALIZATION_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(5);
-const HOST_RESTART_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(8);
+// On Windows the engine may legitimately spend up to 30 seconds waiting for
+// DevToolsActivePort, followed by its first bounded CDP initialization command.
+// The platform must not cancel that engine-owned cold start first. A caller
+// waiting on the initialization gate needs the same budget because it is
+// joining that exact in-flight Host launch.
+const HOST_INITIALIZATION_GATE_TIMEOUT: Duration = Duration::from_secs(65);
+const HOST_INITIALIZATION_LAUNCH_TIMEOUT: Duration = Duration::from_secs(65);
+// Host replacement first shuts down the old process, then performs the same
+// bounded cold start and rebinds its Lanes.
+const HOST_RESTART_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(75);
 const HOST_SHUTDOWN_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(5);
 const HOST_RETIREMENT_WAIT_TIMEOUT: Duration = Duration::from_secs(5);
 const HOST_FINALIZATION_WAITER_TIMEOUT: Duration = Duration::from_secs(7);
@@ -74,6 +83,13 @@ struct HostKey {
     identity_mode: BrowserIdentityMode,
     identity_generation: u64,
     isolation_lane_id: Option<BrowserLaneId>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct OwnerCleanupTarget {
+    user_id: String,
+    host_key: HostKey,
+    browser_epoch: u64,
 }
 
 impl HostKey {
@@ -153,17 +169,36 @@ impl HostSlot {
         F: FnOnce() -> Fut,
         Fut: Future<Output = Result<Arc<dyn BrowserHostDriver>, BrowserPlatformError>>,
     {
-        let deadline = Instant::now() + HOST_INITIALIZATION_ATTEMPT_TIMEOUT;
-        let _initialization_guard =
-            tokio::time::timeout_at(deadline, self.initialization_gate.lock())
-                .await
-                .map_err(|_| host_initialization_timeout_error(self.epoch, "gate"))?;
+        let _initialization_guard = tokio::time::timeout(
+            HOST_INITIALIZATION_GATE_TIMEOUT,
+            self.initialization_gate.lock(),
+        )
+        .await
+        .map_err(|_| {
+            host_initialization_timeout_error(
+                self.epoch,
+                "gate",
+                HOST_INITIALIZATION_GATE_TIMEOUT,
+            )
+        })?;
         if self.retired.load(Ordering::Acquire) {
             return Err(host_slot_retired_error());
         }
-        let host = tokio::time::timeout_at(deadline, self.driver.get_or_try_init(init))
-            .await
-            .map_err(|_| host_initialization_timeout_error(self.epoch, "launch"))??;
+        // Gate contention must not consume the factory's own cold-start
+        // budget. This matters after a failed initializer: the next caller is
+        // allowed one complete, independently bounded launch attempt.
+        let host = tokio::time::timeout(
+            HOST_INITIALIZATION_LAUNCH_TIMEOUT,
+            self.driver.get_or_try_init(init),
+        )
+        .await
+        .map_err(|_| {
+            host_initialization_timeout_error(
+                self.epoch,
+                "launch",
+                HOST_INITIALIZATION_LAUNCH_TIMEOUT,
+            )
+        })??;
         // Retirement is published before cleanup waits for the initialization
         // gate. If shutdown/sweep selected this slot while launch was in
         // flight, never hand the late Host back to a Lane; the cleanup waiter
@@ -283,7 +318,10 @@ impl LaneRecord {
 struct PendingLaneCleanup {
     cleanup_id: u64,
     lane_id: BrowserLaneId,
+    user_id: String,
+    owner_lease_id: OwnerLeaseId,
     host_key: HostKey,
+    browser_epoch: u64,
     driver: Arc<dyn BrowserLaneDriver>,
     flight: Mutex<Option<Arc<LaneCleanupFlight>>>,
 }
@@ -297,12 +335,22 @@ struct PendingLaneCleanup {
 struct PendingHostRetirement {
     key: HostKey,
     lane_id: BrowserLaneId,
+    user_id: String,
+    owner_lease_id: OwnerLeaseId,
     start_flight: Arc<LaneStartFlight>,
 }
 
 struct DetachedLane {
     host_key: HostKey,
+    browser_epoch: u64,
     cleanup_id: Option<u64>,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct RemainingResources {
+    lane_count: usize,
+    cleanup_count: usize,
+    managed_host_count: usize,
 }
 
 type LaneStartResult = Result<BrowserLaneSnapshot, BrowserPlatformError>;
@@ -442,8 +490,9 @@ struct BrowserSessionHubInner {
     lane_keys: RwLock<HashMap<LaneKey, BrowserLaneId>>,
     // Retirement lock order is contractual for every path that touches more
     // than one of these structures:
-    //   open_gate -> retiring_host_keys -> host_slots -> retiring_host_slots
-    // Never acquire `retiring_host_keys` while holding `retiring_host_slots`.
+    //   open_gate -> retiring_host_keys -> host_slots
+    //     -> retiring_host_slots -> orphaned_host_slots
+    // Never acquire an earlier authority while holding a later one.
     host_slots: RwLock<HashMap<HostKey, Arc<HostSlot>>>,
     host_empty_since_ms: RwLock<HashMap<HostKey, u64>>,
     retiring_host_slots: Mutex<Vec<(HostKey, Arc<HostSlot>)>>,
@@ -452,6 +501,7 @@ struct BrowserSessionHubInner {
     orphaned_host_slots: Mutex<Vec<(HostKey, Arc<HostSlot>)>>,
     pending_lane_cleanups: Mutex<Vec<Arc<PendingLaneCleanup>>>,
     pending_host_retirements: Mutex<Vec<PendingHostRetirement>>,
+    owner_cleanup_targets: Mutex<HashMap<OwnerLeaseId, HashSet<OwnerCleanupTarget>>>,
     host_finalizations: Mutex<HashMap<HostKey, Arc<HostFinalizationFlight>>>,
     lane_cleanup_retry_gate: Mutex<()>,
     host_cleanup_retry_gate: Mutex<()>,
@@ -459,6 +509,13 @@ struct BrowserSessionHubInner {
     host_epoch_sequence: AtomicU64,
     host_restarts: PerKeyHostRestartSingleFlight<HostKey>,
     host_circuits: Mutex<HashMap<HostKey, Arc<HostCircuitBreaker>>>,
+    // Primary process visibility is a Host-wide property. Serialize explicit
+    // display transitions with Primary Host selection/start so opposite
+    // headful/headless requests cannot join the same restart flight or launch
+    // a process from a stale default in the middle of a transition.
+    primary_visibility_gate: Mutex<()>,
+    drain_gate: Mutex<()>,
+    draining: AtomicBool,
     open_gate: Mutex<()>,
     shutdown_gate: Mutex<()>,
     shutdown_result: RwLock<Option<Result<(), BrowserPlatformError>>>,
@@ -505,6 +562,16 @@ struct HubDriverPermit {
     inner: Arc<BrowserSessionHubInner>,
     resource_class: DriverResourceClass,
     acquired_weight: u64,
+}
+
+struct HubDrainGuard {
+    inner: Arc<BrowserSessionHubInner>,
+}
+
+impl Drop for HubDrainGuard {
+    fn drop(&mut self) {
+        self.inner.draining.store(false, Ordering::Release);
+    }
 }
 
 impl Drop for HubDriverPermit {
@@ -641,6 +708,7 @@ impl BrowserSessionHub {
                 orphaned_host_slots: Mutex::new(Vec::new()),
                 pending_lane_cleanups: Mutex::new(Vec::new()),
                 pending_host_retirements: Mutex::new(Vec::new()),
+                owner_cleanup_targets: Mutex::new(HashMap::new()),
                 host_finalizations: Mutex::new(HashMap::new()),
                 lane_cleanup_retry_gate: Mutex::new(()),
                 host_cleanup_retry_gate: Mutex::new(()),
@@ -648,6 +716,9 @@ impl BrowserSessionHub {
                 host_epoch_sequence: AtomicU64::new(0),
                 host_restarts: PerKeyHostRestartSingleFlight::default(),
                 host_circuits: Mutex::new(HashMap::new()),
+                primary_visibility_gate: Mutex::new(()),
+                drain_gate: Mutex::new(()),
+                draining: AtomicBool::new(false),
                 open_gate: Mutex::new(()),
                 shutdown_gate: Mutex::new(()),
                 shutdown_result: RwLock::new(None),
@@ -691,6 +762,18 @@ impl BrowserSessionHub {
     /// account for each Chromium process tree without exposing host internals
     /// through public management DTOs.
     pub async fn managed_host_process_ids(&self) -> Vec<u32> {
+        let slots = self.managed_host_slots().await;
+        let mut process_ids = slots
+            .iter()
+            .filter_map(|slot| slot.get().and_then(|host| host.process_id()))
+            .filter(|process_id| *process_id != 0)
+            .collect::<Vec<_>>();
+        process_ids.sort_unstable();
+        process_ids.dedup();
+        process_ids
+    }
+
+    async fn managed_host_slots(&self) -> Vec<Arc<HostSlot>> {
         let mut slots: Vec<_> = self
             .inner
             .host_slots
@@ -715,14 +798,170 @@ impl BrowserSessionHub {
                 .iter()
                 .map(|(_, slot)| Arc::clone(slot)),
         );
-        let mut process_ids = slots
+        let mut seen = HashSet::new();
+        slots.retain(|slot| seen.insert(Arc::as_ptr(slot) as usize));
+        slots
+    }
+
+    async fn remaining_resources(&self) -> RemainingResources {
+        let lane_count = self.inner.lanes.read().await.len();
+        let pending_lane_cleanups = self.inner.pending_lane_cleanups.lock().await.len();
+        let pending_host_retirements =
+            self.inner.pending_host_retirements.lock().await.len();
+        let retiring_host_slots = self.inner.retiring_host_slots.lock().await.len();
+        let orphaned_host_slots = self.inner.orphaned_host_slots.lock().await.len();
+        RemainingResources {
+            lane_count,
+            cleanup_count: pending_lane_cleanups
+                .saturating_add(pending_host_retirements)
+                .saturating_add(retiring_host_slots)
+                .saturating_add(orphaned_host_slots),
+            managed_host_count: self.managed_host_slots().await.len(),
+        }
+    }
+
+    async fn close_result(&self, closed: usize, already_closed: bool) -> CloseResult {
+        let remaining = self.remaining_resources().await;
+        CloseResult {
+            closed,
+            already_closed,
+            remaining_lane_count: remaining.lane_count,
+            remaining_cleanup_count: remaining.cleanup_count,
+            remaining_managed_host_count: remaining.managed_host_count,
+        }
+    }
+
+    fn scoped_close_result(closed: usize, already_closed: bool) -> CloseResult {
+        // Caller/owner-scoped close paths must not disclose installation-wide
+        // Host or cleanup inventory. The installation-owner `close_all` path
+        // replaces these zeroed fields with authoritative global counts.
+        CloseResult {
+            closed,
+            already_closed,
+            ..CloseResult::default()
+        }
+    }
+
+    async fn pending_cleanup_count_for_user(&self, user_id: &str) -> usize {
+        let lane_cleanups = self
+            .inner
+            .pending_lane_cleanups
+            .lock()
+            .await
             .iter()
-            .filter_map(|slot| slot.get().and_then(|host| host.process_id()))
-            .filter(|process_id| *process_id != 0)
+            .cloned()
             .collect::<Vec<_>>();
-        process_ids.sort_unstable();
-        process_ids.dedup();
-        process_ids
+        let host_retirements = self
+            .inner
+            .pending_host_retirements
+            .lock()
+            .await
+            .iter()
+            .cloned()
+            .collect::<Vec<_>>();
+        let owner_targets = self
+            .inner
+            .owner_cleanup_targets
+            .lock()
+            .await
+            .iter()
+            .flat_map(|(owner_lease_id, targets)| {
+                targets
+                    .iter()
+                    .cloned()
+                    .map(|target| (owner_lease_id.clone(), target))
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+        let lane_records = self
+            .inner
+            .lanes
+            .read()
+            .await
+            .values()
+            .cloned()
+            .collect::<Vec<_>>();
+        let mut live_lanes = Vec::with_capacity(lane_records.len());
+        for lane in lane_records {
+            live_lanes.push(lane.current_snapshot().await);
+        }
+        let lane_cleanup_count = lane_cleanups
+            .iter()
+            .filter(|entry| entry.user_id == user_id)
+            .count();
+        let host_retirement_count = host_retirements
+            .iter()
+            .filter(|entry| entry.user_id == user_id)
+            .count();
+        let standalone_target_count = owner_targets
+            .iter()
+            .filter(|(owner_lease_id, target)| {
+                target.user_id == user_id
+                    && !lane_cleanups.iter().any(|entry| {
+                        &entry.owner_lease_id == owner_lease_id
+                            && entry.host_key == target.host_key
+                            && entry.browser_epoch == target.browser_epoch
+                    })
+                    && !host_retirements.iter().any(|entry| {
+                        &entry.owner_lease_id == owner_lease_id
+                            && entry.key == target.host_key
+                    })
+                    && !live_lanes.iter().any(|lane| {
+                        lane.browser_epoch == target.browser_epoch
+                            && HostKey::for_lane(
+                                lane.identity_mode,
+                                lane.identity_generation,
+                                &lane.lane_id,
+                            ) == target.host_key
+                    })
+            })
+            .count();
+        lane_cleanup_count
+            .saturating_add(host_retirement_count)
+            .saturating_add(standalone_target_count)
+    }
+
+    async fn cleanup_error_with_remaining(
+        &self,
+        error: BrowserPlatformError,
+        detached_closed: usize,
+    ) -> BrowserPlatformError {
+        let remaining = self.remaining_resources().await;
+        let mut metadata = error.metadata.as_object().cloned().unwrap_or_default();
+        metadata.insert("cleanup_pending".to_owned(), json!(true));
+        metadata.insert("detached_closed".to_owned(), json!(detached_closed));
+        metadata.insert("remaining_lane_count".to_owned(), json!(remaining.lane_count));
+        metadata.insert(
+            "remaining_cleanup_count".to_owned(),
+            json!(remaining.cleanup_count),
+        );
+        metadata.insert(
+            "remaining_managed_host_count".to_owned(),
+            json!(remaining.managed_host_count),
+        );
+        BrowserPlatformError {
+            metadata: serde_json::Value::Object(metadata),
+            ..error
+        }
+    }
+
+    fn scoped_cleanup_error(
+        error: BrowserPlatformError,
+        detached_closed: usize,
+    ) -> BrowserPlatformError {
+        let mut metadata = error.metadata.as_object().cloned().unwrap_or_default();
+        metadata.insert("cleanup_pending".to_owned(), json!(true));
+        metadata.insert("detached_closed".to_owned(), json!(detached_closed));
+        metadata.insert("remaining_lane_count".to_owned(), json!(0));
+        // The error itself proves at least one caller-authorized cleanup is
+        // pending. Report that safe lower bound without exposing unrelated
+        // installation inventory.
+        metadata.insert("remaining_cleanup_count".to_owned(), json!(1));
+        metadata.insert("remaining_managed_host_count".to_owned(), json!(0));
+        BrowserPlatformError {
+            metadata: serde_json::Value::Object(metadata),
+            ..error
+        }
     }
 
     pub fn bind(&self, caller: CallerIdentity) -> Result<BrowserLaneClient, BrowserPlatformError> {
@@ -775,8 +1014,11 @@ impl BrowserSessionHub {
         &self,
         lease_id: &crate::OwnerLeaseId,
     ) -> Result<CloseResult, BrowserPlatformError> {
-        self.close_matching(|lane| &lane.caller.owner_lease_id == lease_id)
-            .await
+        let result = self
+            .close_matching(|lane| &lane.caller.owner_lease_id == lease_id)
+            .await?;
+        self.finish_owner_cleanup(lease_id).await?;
+        Ok(result)
     }
 
     /// Revokes one exact owner lease and closes only the lanes that carry that
@@ -806,6 +1048,143 @@ impl BrowserSessionHub {
         // avoids a stale capability closing resources issued to a replacement
         // lease that happens to carry the same runtime identifier.
         self.close_owner_lanes(lease_id).await
+    }
+
+    async fn finish_owner_cleanup(
+        &self,
+        owner_lease_id: &OwnerLeaseId,
+    ) -> Result<(), BrowserPlatformError> {
+        // A Lane may have been detached while its Host.open_lane call was
+        // still running. Settle only this owner's starts before looking for
+        // retained target drivers; a late driver is published into the same
+        // owner-scoped pending cleanup inventory.
+        self.wait_for_pending_owner_starts(owner_lease_id).await?;
+        self.retry_pending_lane_cleanups_for_owner(owner_lease_id)
+            .await?;
+
+        let targets = self
+            .inner
+            .owner_cleanup_targets
+            .lock()
+            .await
+            .get(owner_lease_id)
+            .cloned()
+            .unwrap_or_default();
+        let lane_records = self
+            .inner
+            .lanes
+            .read()
+            .await
+            .values()
+            .cloned()
+            .collect::<Vec<_>>();
+        let mut snapshots = Vec::with_capacity(lane_records.len());
+        for lane in lane_records {
+            snapshots.push(lane.current_snapshot().await);
+        }
+        let pending_starts = self.inner.pending_host_retirements.lock().await.clone();
+        let pending_cleanups = self
+            .inner
+            .pending_lane_cleanups
+            .lock()
+            .await
+            .iter()
+            .cloned()
+            .collect::<Vec<_>>();
+
+        let mut completed = HashSet::new();
+        let mut first_error = None;
+        for target in targets {
+            let matching_lanes = snapshots
+                .iter()
+                .filter(|snapshot| {
+                    snapshot.browser_epoch == target.browser_epoch
+                        && HostKey::for_lane(
+                            snapshot.identity_mode,
+                            snapshot.identity_generation,
+                            &snapshot.lane_id,
+                        ) == target.host_key
+                })
+                .collect::<Vec<_>>();
+            if matching_lanes
+                .iter()
+                .any(|snapshot| &snapshot.caller.owner_lease_id == owner_lease_id)
+            {
+                if first_error.is_none() {
+                    first_error = Some(owner_cleanup_pending_error());
+                }
+                continue;
+            }
+            if pending_cleanups.iter().any(|entry| {
+                &entry.owner_lease_id == owner_lease_id
+                    && entry.host_key == target.host_key
+                    && entry.browser_epoch == target.browser_epoch
+            }) {
+                if first_error.is_none() {
+                    first_error = Some(owner_cleanup_pending_error());
+                }
+                continue;
+            }
+
+            // Once the exact target is gone, a sibling Lane (or a foreign
+            // in-flight start) owns the shared Primary Host. This owner is
+            // fully clean and must not shut down that shared process.
+            let shared_by_sibling = !matching_lanes.is_empty()
+                || pending_starts.iter().any(|pending| {
+                    pending.key == target.host_key
+                        && &pending.owner_lease_id != owner_lease_id
+                });
+            if shared_by_sibling || target.browser_epoch == 0 {
+                completed.insert(target);
+                continue;
+            }
+
+            match self
+                .retire_empty_host_authoritatively(
+                    &target.host_key,
+                    target.browser_epoch,
+                )
+                .await
+            {
+                Ok(true) => {
+                    completed.insert(target);
+                }
+                Ok(false) => {
+                    if first_error.is_none() {
+                        first_error = Some(owner_cleanup_pending_error());
+                    }
+                }
+                Err(error) => {
+                    if first_error.is_none() {
+                        first_error = Some(error);
+                    }
+                }
+            }
+        }
+
+        if !completed.is_empty() {
+            let mut owner_targets = self.inner.owner_cleanup_targets.lock().await;
+            if let Some(targets) = owner_targets.get_mut(owner_lease_id) {
+                targets.retain(|target| !completed.contains(target));
+                if targets.is_empty() {
+                    owner_targets.remove(owner_lease_id);
+                }
+            }
+        }
+        if let Some(error) = first_error {
+            return Err(error);
+        }
+        if self
+            .inner
+            .owner_cleanup_targets
+            .lock()
+            .await
+            .get(owner_lease_id)
+            .is_some_and(|targets| !targets.is_empty())
+        {
+            return Err(owner_cleanup_pending_error());
+        }
+        Ok(())
     }
 
     fn validate_caller(&self, caller: &CallerIdentity) -> Result<(), BrowserPlatformError> {
@@ -1089,8 +1468,13 @@ impl BrowserSessionHub {
         // waiting for allocation. Revalidate under the shared allocation gate
         // so a revoked owner cannot insert a Lane after authoritative cleanup.
         self.validate_caller(caller)?;
-        if let Some(existing) = self.inner.lane_keys.read().await.get(&lane_key).cloned() {
-            if let Some(lane) = self.inner.lanes.read().await.get(&existing).cloned() {
+        if self.inner.draining.load(Ordering::Acquire) {
+            return Err(platform_drain_in_progress_error());
+        }
+        let existing = { self.inner.lane_keys.read().await.get(&lane_key).cloned() };
+        if let Some(existing) = existing {
+            let lane = { self.inner.lanes.read().await.get(&existing).cloned() };
+            if let Some(lane) = lane {
                 let snapshot = lane.current_snapshot().await;
                 if snapshot.caller.user_id != caller.user_id
                     || snapshot.caller.runtime_instance_id != caller.runtime_instance_id
@@ -1423,6 +1807,16 @@ impl BrowserSessionHub {
             let snapshot = lane.snapshot.read().await;
             (snapshot.identity_mode, snapshot.identity_generation)
         };
+        // The Lane start flight is Hub-owned, so holding this guard across
+        // Host selection, target creation and driver publication survives
+        // caller cancellation. A display transition can therefore never stop
+        // the selected Primary Host in the gap before this Lane publishes its
+        // browser epoch.
+        let _primary_visibility_guard = if identity_mode == BrowserIdentityMode::Primary {
+            Some(self.inner.primary_visibility_gate.lock().await)
+        } else {
+            None
+        };
         if identity_mode == BrowserIdentityMode::AuthenticatedReplica {
             if let Err(error) = self
                 .inner
@@ -1443,6 +1837,25 @@ impl BrowserSessionHub {
                 return Err(error.for_lane(lane_id));
             }
         };
+        // Record the exact selected Host epoch before target creation. If
+        // open_lane later fails or completes after this Lane was detached, an
+        // exact-owner retry still knows which retained Host process it must
+        // prove stopped; browser_epoch has not yet been published to the Lane
+        // snapshot at this point.
+        {
+            let caller = lane.snapshot.read().await.caller.clone();
+            self.inner
+                .owner_cleanup_targets
+                .lock()
+                .await
+                .entry(caller.owner_lease_id)
+                .or_default()
+                .insert(OwnerCleanupTarget {
+                    user_id: caller.user_id,
+                    host_key: host.key.clone(),
+                    browser_epoch: host.slot.epoch,
+                });
+        }
         let host_driver = Arc::clone(&host.driver);
         let request = LaneLaunchRequest {
             lane_id: lane_id.clone(),
@@ -1504,7 +1917,19 @@ impl BrowserSessionHub {
         if lane.closing.load(Ordering::Acquire) || !lane_is_current {
             let host_key = HostKey::for_lane(identity_mode, identity_generation, &lane_id);
             let cleanup_id = self
-                .retain_pending_lane_cleanup(lane_id.clone(), host_key, driver)
+                .retain_pending_lane_cleanup(
+                    lane_id.clone(),
+                    lane.snapshot.read().await.caller.user_id.clone(),
+                    lane.snapshot
+                        .read()
+                        .await
+                        .caller
+                        .owner_lease_id
+                        .clone(),
+                    host_key,
+                    host.slot.epoch,
+                    driver,
+                )
                 .await;
             drop(close_guard);
             self.discard_lane_after_start_failure(&lane_id).await;
@@ -1514,7 +1939,19 @@ impl BrowserSessionHub {
         if let Err(error) = self.validate_lane_owner(&lane).await {
             let host_key = HostKey::for_lane(identity_mode, identity_generation, &lane_id);
             let cleanup_id = self
-                .retain_pending_lane_cleanup(lane_id.clone(), host_key, driver)
+                .retain_pending_lane_cleanup(
+                    lane_id.clone(),
+                    lane.snapshot.read().await.caller.user_id.clone(),
+                    lane.snapshot
+                        .read()
+                        .await
+                        .caller
+                        .owner_lease_id
+                        .clone(),
+                    host_key,
+                    host.slot.epoch,
+                    driver,
+                )
                 .await;
             drop(close_guard);
             // The owner may expire while Host I/O is in flight.  Do not leave
@@ -1565,21 +2002,33 @@ impl BrowserSessionHub {
     async fn retain_pending_lane_cleanup(
         &self,
         lane_id: BrowserLaneId,
+        user_id: String,
+        owner_lease_id: OwnerLeaseId,
         host_key: HostKey,
+        browser_epoch: u64,
         driver: Arc<dyn BrowserLaneDriver>,
     ) -> u64 {
         let cleanup_id = self.inner.cleanup_sequence.fetch_add(1, Ordering::AcqRel) + 1;
-        self.inner
-            .pending_lane_cleanups
-            .lock()
-            .await
-            .push(Arc::new(PendingLaneCleanup {
-                cleanup_id,
-                lane_id,
-                host_key,
-                driver,
-                flight: Mutex::new(None),
-            }));
+        let mut pending = self.inner.pending_lane_cleanups.lock().await;
+        let mut owner_targets = self.inner.owner_cleanup_targets.lock().await;
+        owner_targets
+            .entry(owner_lease_id.clone())
+            .or_default()
+            .insert(OwnerCleanupTarget {
+                user_id: user_id.clone(),
+                host_key: host_key.clone(),
+                browser_epoch,
+            });
+        pending.push(Arc::new(PendingLaneCleanup {
+            cleanup_id,
+            lane_id,
+            user_id,
+            owner_lease_id,
+            host_key,
+            browser_epoch,
+            driver,
+            flight: Mutex::new(None),
+        }));
         cleanup_id
     }
 
@@ -1639,7 +2088,8 @@ impl BrowserSessionHub {
             if self.inner.retiring_host_keys.read().await.contains(&key) {
                 return Err(retiring_host_wait_timeout_error(&key));
             }
-            if let Some(slot) = self.inner.host_slots.read().await.get(&key).cloned() {
+            let current = { self.inner.host_slots.read().await.get(&key).cloned() };
+            if let Some(slot) = current {
                 slot
             } else {
                 let mut slots = self.inner.host_slots.write().await;
@@ -1649,6 +2099,9 @@ impl BrowserSessionHub {
                 // HostSlot after the authoritative drain.
                 if self.inner.shutting_down.load(Ordering::Acquire) {
                     return Err(BrowserPlatformError::shutting_down());
+                }
+                if self.inner.draining.load(Ordering::Acquire) {
+                    return Err(platform_drain_in_progress_error());
                 }
                 Arc::clone(
                     slots.entry(key.clone()).or_insert_with(|| {
@@ -1706,7 +2159,6 @@ impl BrowserSessionHub {
         let configured_headful = self.inner.config.read().await.headful;
         let headful = identity_mode == BrowserIdentityMode::Primary
             && requested_headful.unwrap_or(configured_headful);
-        slot.headful.store(headful, Ordering::Release);
         let host = slot
             .get_or_try_init(|| async move {
                 factory
@@ -1721,8 +2173,10 @@ impl BrowserSessionHub {
                     .await
             })
             .await?;
-        // A factory is the final launch-policy authority. Record what it
-        // actually produced rather than trusting the request bit.
+        // A factory is the final launch-policy authority. In particular, do
+        // not write `requested_headful` before OnceCell initialization: when
+        // the slot already contains a Host that would only falsify metadata
+        // without replacing the process.
         slot.headful.store(host.is_headful(), Ordering::Release);
         Ok(Arc::clone(host))
     }
@@ -1837,6 +2291,8 @@ impl BrowserSessionHub {
         // is also locked. Cancellation while waiting for the second lock
         // therefore leaves the slot active; after both locks are held, removal
         // and authority transfer contain no await point.
+        let _open_guard = self.inner.open_gate.lock().await;
+        let mut retiring_keys = self.inner.retiring_host_keys.write().await;
         let mut slots = self.inner.host_slots.write().await;
         let is_exact = slots.get(key).is_some_and(|current| {
             current.epoch == observed_epoch && Arc::ptr_eq(current, observed_slot)
@@ -1849,6 +2305,7 @@ impl BrowserSessionHub {
             .remove(key)
             .expect("exact browser Host slot disappeared while write-locked");
         slot.retire();
+        retiring_keys.insert(key.clone());
         if !orphaned.iter().any(|(pending_key, pending_slot)| {
             pending_key == key && Arc::ptr_eq(pending_slot, &slot)
         }) {
@@ -1856,6 +2313,7 @@ impl BrowserSessionHub {
         }
         drop(orphaned);
         drop(slots);
+        drop(retiring_keys);
         self.inner.host_empty_since_ms.write().await.remove(key);
         true
     }
@@ -1865,9 +2323,9 @@ impl BrowserSessionHub {
         key: HostKey,
         observed_epoch: u64,
     ) -> Result<HostRestartTransition, BrowserPlatformError> {
-        self.mark_host_restarting(&key, observed_epoch).await;
         let hub = self.clone();
         let restart_key = key.clone();
+        let restart_identity_mode = key.identity_mode;
         let flight = self
             .inner
             .host_restarts
@@ -1875,13 +2333,26 @@ impl BrowserSessionHub {
                 key.clone(),
                 observed_epoch,
                 HOST_RESTART_ATTEMPT_TIMEOUT,
-                move || async move { hub.restart_host_once(restart_key, observed_epoch).await },
+                move || async move {
+                    let _primary_visibility_guard =
+                        if restart_identity_mode == BrowserIdentityMode::Primary {
+                            Some(hub.inner.primary_visibility_gate.lock().await)
+                        } else {
+                            None
+                        };
+                    hub.mark_host_restarting(&restart_key, observed_epoch)
+                        .await;
+                    let result = hub
+                        .restart_host_once(restart_key.clone(), observed_epoch)
+                        .await;
+                    if let Err(error) = &result {
+                        hub.mark_host_recovery_failed(&restart_key, observed_epoch, error)
+                            .await;
+                    }
+                    result
+                },
             )
             .await;
-        if let Err(error) = &flight.result {
-            self.mark_host_recovery_failed(&key, observed_epoch, error)
-                .await;
-        }
         flight.result
     }
 
@@ -1900,7 +2371,8 @@ impl BrowserSessionHub {
         observed_epoch: u64,
         requested_headful: Option<bool>,
     ) -> Result<HostRestartTransition, BrowserPlatformError> {
-        if let Some(current) = self.inner.host_slots.read().await.get(&key).cloned() {
+        let current = { self.inner.host_slots.read().await.get(&key).cloned() };
+        if let Some(current) = current {
             if current.epoch > observed_epoch {
                 let host = self
                     .initialize_host_slot_with_visibility(
@@ -1909,6 +2381,13 @@ impl BrowserSessionHub {
                         requested_headful,
                     )
                     .await?;
+                if requested_headful
+                    .is_some_and(|desired_headful| current.is_headful() != desired_headful)
+                {
+                    return Err(visibility_transition_not_applied_error(
+                        requested_headful.unwrap_or(false),
+                    ));
+                }
                 let transition = HostRestartTransition::new(observed_epoch, current.epoch)?;
                 self.rebind_host_lanes(&key, observed_epoch, transition, host)
                     .await?;
@@ -2005,6 +2484,9 @@ impl BrowserSessionHub {
             let mut slots = self.inner.host_slots.write().await;
             if self.inner.shutting_down.load(Ordering::Acquire) {
                 return Err(BrowserPlatformError::shutting_down());
+            }
+            if self.inner.draining.load(Ordering::Acquire) {
+                return Err(platform_drain_in_progress_error());
             }
             if let Some(old_slot) = &old_slot {
                 if !slots
@@ -2107,7 +2589,10 @@ impl BrowserSessionHub {
                     // the recovery error.  Failed closes remain in the
                     // lifecycle retry queue.
                     let cleanup_error = self
-                        .cleanup_prepared_rebind_drivers(std::mem::take(&mut prepared))
+                        .cleanup_prepared_rebind_drivers(
+                            std::mem::take(&mut prepared),
+                            transition.new_epoch,
+                        )
                         .await;
                     if let Some(cleanup_error) = cleanup_error {
                         tracing::warn!(
@@ -2151,7 +2636,19 @@ impl BrowserSessionHub {
             if !can_rebind {
                 drop(close_guard);
                 let cleanup_id = self
-                    .retain_pending_lane_cleanup(lane_id, host_key, driver)
+                    .retain_pending_lane_cleanup(
+                        lane_id,
+                        lane.snapshot.read().await.caller.user_id.clone(),
+                        lane.snapshot
+                            .read()
+                            .await
+                            .caller
+                            .owner_lease_id
+                            .clone(),
+                        host_key,
+                        transition.new_epoch,
+                        driver,
+                    )
                     .await;
                 let _ = self.attempt_pending_lane_cleanup(cleanup_id).await;
                 continue;
@@ -2183,6 +2680,7 @@ impl BrowserSessionHub {
     async fn cleanup_prepared_rebind_drivers(
         &self,
         prepared: Vec<(Arc<LaneRecord>, Arc<dyn BrowserLaneDriver>)>,
+        browser_epoch: u64,
     ) -> Option<BrowserPlatformError> {
         let mut cleanup_ids = Vec::with_capacity(prepared.len());
         for (lane, driver) in prepared {
@@ -2198,7 +2696,19 @@ impl BrowserSessionHub {
                 )
             };
             let cleanup_id = self
-                .retain_pending_lane_cleanup(lane_id, host_key, driver)
+                .retain_pending_lane_cleanup(
+                    lane_id,
+                    lane.snapshot.read().await.caller.user_id.clone(),
+                    lane.snapshot
+                        .read()
+                        .await
+                        .caller
+                        .owner_lease_id
+                        .clone(),
+                    host_key,
+                    browser_epoch,
+                    driver,
+                )
                 .await;
             cleanup_ids.push(cleanup_id);
         }
@@ -2608,24 +3118,129 @@ impl BrowserSessionHub {
         Ok(lane)
     }
 
-    /// Brings one authenticated user's running Primary Lane to the foreground.
+    /// Returns the default visibility applied to future Primary Host launches.
+    pub async fn primary_visibility(&self) -> BrowserVisibility {
+        if self.inner.config.read().await.headful {
+            BrowserVisibility::Headful
+        } else {
+            BrowserVisibility::Headless
+        }
+    }
+
+    /// Applies the installation-wide Primary display policy.
     ///
-    /// This is an application-authenticated, process-internal boundary. It
-    /// accepts a resolved user id rather than a model-controlled
-    /// [`CallerIdentity`], and dispatches through the dedicated driver seam
-    /// rather than manufacturing a `Manage` operation.
-    pub async fn foreground_lane_for_user(
+    /// A live Primary Host is replaced in-place and every Lane is rebound to a
+    /// fresh epoch before the future-launch default is committed. Primary Host
+    /// selection is serialized with this transition so no launch can observe a
+    /// half-applied policy.
+    pub async fn set_primary_visibility(
+        &self,
+        visibility: BrowserVisibility,
+    ) -> Result<BrowserVisibility, BrowserPlatformError> {
+        let hub = self.clone();
+        tokio::spawn(async move { hub.set_primary_visibility_once(visibility).await })
+            .await
+            .map_err(|error| visibility_task_failed_error("primary", &error))?
+    }
+
+    async fn set_primary_visibility_once(
+        &self,
+        visibility: BrowserVisibility,
+    ) -> Result<BrowserVisibility, BrowserPlatformError> {
+        if self.inner.shutting_down.load(Ordering::Acquire) {
+            return Err(BrowserPlatformError::shutting_down());
+        }
+        if self.inner.draining.load(Ordering::Acquire) {
+            return Err(platform_drain_in_progress_error());
+        }
+        let _visibility_guard = self.inner.primary_visibility_gate.lock().await;
+        if self.inner.draining.load(Ordering::Acquire) {
+            return Err(platform_drain_in_progress_error());
+        }
+        let desired_headful = visibility.is_headful();
+        let key = HostKey {
+            identity_mode: BrowserIdentityMode::Primary,
+            identity_generation: 0,
+            isolation_lane_id: None,
+        };
+
+        let slot = { self.inner.host_slots.read().await.get(&key).cloned() };
+        if let Some(slot) = slot {
+            if slot.is_headful() != desired_headful {
+                let live_lanes = self.lanes_for_host_key(&key).await;
+                if live_lanes
+                    .iter()
+                    .any(|lane| !lane.closing.load(Ordering::Acquire))
+                {
+                    self.transition_primary_visibility_locked(
+                        &key,
+                        slot.epoch,
+                        desired_headful,
+                    )
+                    .await?;
+                } else {
+                    // An empty visible Host has no user work to rebind. Retire
+                    // it instead of launching another empty process solely to
+                    // change its mode.
+                    if !self
+                        .retire_empty_host_authoritatively(&key, slot.epoch)
+                        .await?
+                    {
+                        return Err(visibility_transition_not_applied_error(
+                            desired_headful,
+                        ));
+                    }
+                }
+            }
+        }
+        self.inner.config.write().await.headful = desired_headful;
+        Ok(visibility)
+    }
+
+    /// Changes the live Primary Host visibility for an authenticated Lane.
+    ///
+    /// This does not mutate the installation default; the management policy
+    /// endpoint owns that choice. Because Primary Lanes share one canonical
+    /// Host, the process replacement and epoch transition apply to every live
+    /// Primary Lane.
+    pub async fn set_lane_visibility_for_user(
         &self,
         user_id: &str,
         lane_id: &BrowserLaneId,
+        visibility: BrowserVisibility,
+    ) -> Result<BrowserLaneSnapshot, BrowserPlatformError> {
+        let hub = self.clone();
+        let user_id = user_id.to_owned();
+        let lane_id = lane_id.clone();
+        tokio::spawn(async move {
+            hub.set_lane_visibility_and_maybe_focus_once(
+                &user_id,
+                &lane_id,
+                visibility,
+                false,
+            )
+            .await
+        })
+        .await
+        .map_err(|error| visibility_task_failed_error("lane", &error))?
+    }
+
+    async fn set_lane_visibility_and_maybe_focus_once(
+        &self,
+        user_id: &str,
+        lane_id: &BrowserLaneId,
+        visibility: BrowserVisibility,
+        focus: bool,
     ) -> Result<BrowserLaneSnapshot, BrowserPlatformError> {
         if self.inner.shutting_down.load(Ordering::Acquire) {
             return Err(BrowserPlatformError::shutting_down());
         }
+        if self.inner.draining.load(Ordering::Acquire) {
+            return Err(platform_drain_in_progress_error());
+        }
         if user_id.trim().is_empty() {
             return Err(foreground_operation_not_allowed(lane_id.clone()));
         }
-
         let lane = self
             .inner
             .lanes
@@ -2634,16 +3249,15 @@ impl BrowserSessionHub {
             .get(lane_id)
             .cloned()
             .ok_or_else(|| BrowserPlatformError::lane_not_found(lane_id.clone()))?;
-
-        // Foregrounding participates in the same activity fence as driver
-        // operations. Pressure cleanup therefore cannot select the Lane after
-        // authorization but before the driver call, and close cancellation is
-        // observed while waiting for the fence.
         let _activity_guard = tokio::select! {
             guard = lane.activity_gate.read() => guard,
             _ = lane.cancellation.cancelled() => return Err(lane_closed_error(lane_id.clone())),
         };
-        let authorized_epoch = {
+        let _visibility_guard = self.inner.primary_visibility_gate.lock().await;
+        if self.inner.draining.load(Ordering::Acquire) {
+            return Err(platform_drain_in_progress_error());
+        }
+        let (host_key, authorized_epoch) = {
             let snapshot = lane.snapshot.read().await;
             if snapshot.caller.user_id != user_id {
                 return Err(foreground_operation_not_allowed(lane_id.clone()));
@@ -2657,26 +3271,16 @@ impl BrowserSessionHub {
             if snapshot.lifecycle_state != LaneLifecycleState::Running {
                 return Err(foreground_lane_not_ready_error(lane_id.clone()));
             }
-            snapshot.browser_epoch
-        };
-        // Never acquire the driver lock while retaining a snapshot guard.
-        // Lane start/rebind installs the driver before updating its snapshot,
-        // so using the opposite order here could deadlock with recovery.
-        let mut driver = tokio::select! {
-            driver = lane.driver.read() => driver.clone(),
-            _ = lane.cancellation.cancelled() => return Err(lane_closed_error(lane_id.clone())),
-        }
-        .ok_or_else(|| foreground_lane_not_ready_error(lane_id.clone()))?;
-
-        let host_key = {
-            let snapshot = lane.snapshot.read().await;
-            HostKey::for_lane(
-                snapshot.identity_mode,
-                snapshot.identity_generation,
-                &snapshot.lane_id,
+            (
+                HostKey::for_lane(
+                    snapshot.identity_mode,
+                    snapshot.identity_generation,
+                    &snapshot.lane_id,
+                ),
+                snapshot.browser_epoch,
             )
         };
-        let host_slot = self
+        let slot = self
             .inner
             .host_slots
             .read()
@@ -2684,43 +3288,19 @@ impl BrowserSessionHub {
             .get(&host_key)
             .cloned()
             .ok_or_else(|| foreground_lane_not_ready_error(lane_id.clone()))?;
+        let desired_headful = visibility.is_headful();
+        if slot.is_headful() != desired_headful {
+            self.transition_primary_visibility_locked(
+                &host_key,
+                authorized_epoch,
+                desired_headful,
+            )
+            .await
+            .map_err(|error| error.for_lane(lane_id.clone()))?;
+        }
 
-        if !host_slot.is_headful() {
-            // A headless Chromium process has no native window for CDP to
-            // restore. The trusted UI request therefore performs one exact
-            // Host replacement. Primary's stable profile is opened only after
-            // the old process has been explicitly stopped; every Lane is
-            // rebound under a new epoch and must fresh-observe before Agent
-            // work resumes.
-            self.mark_host_restarting(&host_key, authorized_epoch).await;
-            let hub = self.clone();
-            let restart_key = host_key.clone();
-            let flight = self
-                .inner
-                .host_restarts
-                .run_bounded(
-                    host_key.clone(),
-                    authorized_epoch,
-                    HOST_RESTART_ATTEMPT_TIMEOUT,
-                    move || async move {
-                        hub.restart_host_once_with_visibility(
-                            restart_key,
-                            authorized_epoch,
-                            Some(true),
-                        )
-                        .await
-                    },
-                )
-                .await;
-            match flight.result {
-                Ok(_) => {}
-                Err(error) => {
-                    self.mark_host_recovery_failed(&host_key, authorized_epoch, &error)
-                        .await;
-                    return Err(error.for_lane(lane_id.clone()));
-                }
-            };
-            driver = lane
+        if focus {
+            let driver = lane
                 .driver
                 .read()
                 .await
@@ -2731,58 +3311,97 @@ impl BrowserSessionHub {
                 _ = lane.cancellation.cancelled() => Err(lane_closed_error(lane_id.clone())),
             }
             .map_err(|error| error.for_lane(lane_id.clone()))?;
-
-            let snapshot = {
-                let mut snapshot = lane.snapshot.write().await;
-                // Revalidate before publishing success: an explicit close can
-                // race the replacement flight independently of the activity
-                // fence held by this request.
-                if lane.closing.load(Ordering::Acquire) {
-                    return Err(lane_closed_error(lane_id.clone()));
-                }
-                // Foregrounding is user activity: refresh the idle stamp so a
-                // lifecycle sweep cannot reap the Lane the user just opened.
-                snapshot.last_active_at_ms = self.inner.clock.now_ms();
-                snapshot.clone()
-            };
-            self.emit("lane_foregrounded", Some(&snapshot));
-            return Ok(snapshot);
         }
-
-        tokio::select! {
-            result = driver.bring_to_front() => result,
-            _ = lane.cancellation.cancelled() => Err(lane_closed_error(lane_id.clone())),
-        }
-        .map_err(|error| error.for_lane(lane_id.clone()))?;
-
         let snapshot = {
             let mut snapshot = lane.snapshot.write().await;
-            // Revalidate before publishing success. A host recovery can change
-            // lifecycle state independently of the Lane activity fence.
             if lane.closing.load(Ordering::Acquire) {
                 return Err(lane_closed_error(lane_id.clone()));
             }
-            if snapshot.caller.user_id != user_id {
-                return Err(foreground_operation_not_allowed(lane_id.clone()));
-            }
-            if snapshot.identity_mode != BrowserIdentityMode::Primary {
-                return Err(foreground_needs_primary_identity_error(lane_id));
-            }
-            if snapshot.lifecycle_state != LaneLifecycleState::Running {
+            if snapshot.caller.user_id != user_id
+                || snapshot.identity_mode != BrowserIdentityMode::Primary
+                || snapshot.lifecycle_state != LaneLifecycleState::Running
+            {
                 return Err(foreground_lane_not_ready_error(lane_id.clone()));
-            }
-            if snapshot.browser_epoch != authorized_epoch {
-                return Err(stale_browser_epoch_error(
-                    authorized_epoch,
-                    snapshot.browser_epoch,
-                )
-                .for_lane(lane_id.clone()));
             }
             snapshot.last_active_at_ms = self.inner.clock.now_ms();
             snapshot.clone()
         };
-        self.emit("lane_foregrounded", Some(&snapshot));
+        if focus {
+            self.emit("lane_foregrounded", Some(&snapshot));
+        } else {
+            self.emit("lane_visibility_changed", Some(&snapshot));
+        }
         Ok(snapshot)
+    }
+
+    async fn transition_primary_visibility_locked(
+        &self,
+        host_key: &HostKey,
+        observed_epoch: u64,
+        desired_headful: bool,
+    ) -> Result<(), BrowserPlatformError> {
+        self.mark_host_restarting(host_key, observed_epoch).await;
+        let hub = self.clone();
+        let restart_key = host_key.clone();
+        let flight = self
+            .inner
+            .host_restarts
+            .run_bounded(
+                host_key.clone(),
+                observed_epoch,
+                HOST_RESTART_ATTEMPT_TIMEOUT,
+                move || async move {
+                    hub.restart_host_once_with_visibility(
+                        restart_key,
+                        observed_epoch,
+                        Some(desired_headful),
+                    )
+                    .await
+                },
+            )
+            .await;
+        if let Err(error) = flight.result {
+            self.mark_host_recovery_failed(host_key, observed_epoch, &error)
+                .await;
+            return Err(error);
+        }
+        let actual = self
+            .inner
+            .host_slots
+            .read()
+            .await
+            .get(host_key)
+            .cloned()
+            .ok_or_else(|| visibility_transition_not_applied_error(desired_headful))?;
+        if actual.is_headful() != desired_headful {
+            return Err(visibility_transition_not_applied_error(desired_headful));
+        }
+        Ok(())
+    }
+
+    /// Brings one authenticated user's running Primary Lane to the foreground.
+    ///
+    /// Headless Primary Hosts are first replaced through the same symmetric
+    /// visibility transition used by browser management.
+    pub async fn foreground_lane_for_user(
+        &self,
+        user_id: &str,
+        lane_id: &BrowserLaneId,
+    ) -> Result<BrowserLaneSnapshot, BrowserPlatformError> {
+        let hub = self.clone();
+        let user_id = user_id.to_owned();
+        let lane_id = lane_id.clone();
+        tokio::spawn(async move {
+            hub.set_lane_visibility_and_maybe_focus_once(
+                &user_id,
+                &lane_id,
+                BrowserVisibility::Headful,
+                true,
+            )
+            .await
+        })
+        .await
+        .map_err(|error| visibility_task_failed_error("foreground", &error))?
     }
 
     pub async fn list_lanes(&self) -> Vec<BrowserLaneSnapshot> {
@@ -2849,7 +3468,7 @@ impl BrowserSessionHub {
 
     pub async fn overview(&self) -> BrowserOverview {
         let lanes = self.list_lanes().await;
-        self.overview_for_lanes(lanes).await
+        self.overview_for_lanes(lanes, None).await
     }
 
     /// Returns management inventory counts and Host attribution scoped to one
@@ -2865,13 +3484,15 @@ impl BrowserSessionHub {
             .into_iter()
             .filter(|lane| lane.caller.user_id == user_id)
             .collect();
-        self.overview_for_lanes(lanes).await
+        self.overview_for_lanes(lanes, Some(user_id)).await
     }
 
     async fn overview_for_lanes(
         &self,
         lanes: Vec<BrowserLaneSnapshot>,
+        user_scope: Option<&str>,
     ) -> BrowserOverview {
+        let include_empty_hosts = user_scope.is_none();
         let running = lanes
             .iter()
             .filter(|lane| lane.lifecycle_state == LaneLifecycleState::Running)
@@ -2911,13 +3532,14 @@ impl BrowserSessionHub {
                             && lane.lifecycle_state == LaneLifecycleState::Running
                     })
                     .count();
-                if lane_count == 0 {
+                if lane_count == 0 && !include_empty_hosts {
                     continue;
                 }
                 hosts.push(BrowserHostSnapshot {
                     host_id: host.host_id(),
                     state: host.state(),
                     epoch: slot.epoch,
+                    headful: slot.is_headful(),
                     identity_mode: key.identity_mode,
                     lane_count,
                     rss_bytes: host.process_id().and_then(|process_id| {
@@ -2929,12 +3551,23 @@ impl BrowserSessionHub {
                 });
             }
         }
+        let remaining = self.remaining_resources().await;
+        let (managed_host_count, pending_cleanup_count) = if let Some(user_id) = user_scope {
+            (
+                hosts.len(),
+                self.pending_cleanup_count_for_user(user_id).await,
+            )
+        } else {
+            (remaining.managed_host_count, remaining.cleanup_count)
+        };
         BrowserOverview {
             supported: true,
             enabled: !self.inner.shutting_down.load(Ordering::Acquire),
             running_lanes: running,
             queued_lanes: queued,
             total_lanes: lanes.len(),
+            managed_host_count,
+            pending_cleanup_count,
             pressure_state: decision.state,
             capacity: BrowserCapacitySnapshot {
                 active: self.inner.scheduler.active_count(),
@@ -2954,28 +3587,38 @@ impl BrowserSessionHub {
         lane_id: &BrowserLaneId,
     ) -> Result<CloseResult, BrowserPlatformError> {
         let Some(detached) = self.detach_lane_for_close(lane_id).await else {
-            return Ok(CloseResult {
-                closed: 0,
-                already_closed: true,
-            });
+            return Ok(Self::scoped_close_result(0, true));
         };
         self.promote_released_capacity().await;
-        let mut cleanup_error = None;
         if let Some(cleanup_id) = detached.cleanup_id {
             if let Err(error) = self.attempt_pending_lane_cleanup(cleanup_id).await {
-                cleanup_error = Some(error);
+                let cleanup_still_running = error
+                    .metadata
+                    .get("cleanup_wait_timeout")
+                    .and_then(serde_json::Value::as_bool)
+                    .unwrap_or(false);
+                if !cleanup_still_running {
+                    match self
+                        .retire_empty_host_authoritatively(
+                            &detached.host_key,
+                            detached.browser_epoch,
+                        )
+                        .await
+                    {
+                        Ok(true) => return Ok(Self::scoped_close_result(1, false)),
+                        Ok(false) => {}
+                        Err(host_error) => {
+                            return Err(Self::scoped_cleanup_error(host_error, 1));
+                        }
+                    }
+                }
+                return Err(Self::scoped_cleanup_error(error, 1));
             }
         }
-        if cleanup_error.is_none() {
-            self.finalize_detached_host(detached).await?;
+        if let Err(error) = self.finalize_detached_host(detached).await {
+            return Err(Self::scoped_cleanup_error(error, 1));
         }
-        if let Some(error) = cleanup_error {
-            return Err(error);
-        }
-        Ok(CloseResult {
-            closed: 1,
-            already_closed: false,
-        })
+        Ok(Self::scoped_close_result(1, false))
     }
 
     /// Detach one Lane from inventory and scheduler capacity before any driver
@@ -3044,13 +3687,25 @@ impl BrowserSessionHub {
             let mut keys = self.inner.lane_keys.write().await;
             let mut driver = lane.driver.write().await;
             let mut pending = self.inner.pending_lane_cleanups.lock().await;
+            let mut owner_targets = self.inner.owner_cleanup_targets.lock().await;
+            owner_targets
+                .entry(snapshot.caller.owner_lease_id.clone())
+                .or_default()
+                .insert(OwnerCleanupTarget {
+                    user_id: snapshot.caller.user_id.clone(),
+                    host_key: host_key.clone(),
+                    browser_epoch: snapshot.browser_epoch,
+                });
             let cleanup_id = driver.take().map(|driver| {
                 let cleanup_id =
                     self.inner.cleanup_sequence.fetch_add(1, Ordering::AcqRel) + 1;
                 pending.push(Arc::new(PendingLaneCleanup {
                     cleanup_id,
                     lane_id: lane_id.clone(),
+                    user_id: snapshot.caller.user_id.clone(),
+                    owner_lease_id: snapshot.caller.owner_lease_id.clone(),
                     host_key: host_key.clone(),
+                    browser_epoch: snapshot.browser_epoch,
                     driver,
                     flight: Mutex::new(None),
                 }));
@@ -3076,11 +3731,17 @@ impl BrowserSessionHub {
                 .push(PendingHostRetirement {
                     key: host_key.clone(),
                     lane_id: lane_id.clone(),
+                    user_id: snapshot.caller.user_id.clone(),
+                    owner_lease_id: snapshot.caller.owner_lease_id.clone(),
                     start_flight,
                 });
         }
         self.emit("lane_closed", Some(&snapshot));
-        Some(DetachedLane { host_key, cleanup_id })
+        Some(DetachedLane {
+            host_key,
+            browser_epoch: snapshot.browser_epoch,
+            cleanup_id,
+        })
     }
 
     async fn attempt_pending_lane_cleanup(
@@ -3244,6 +3905,30 @@ impl BrowserSessionHub {
             .iter()
             .map(|entry| entry.cleanup_id)
             .collect::<Vec<_>>();
+        self.retry_pending_lane_cleanup_ids(cleanup_ids).await
+    }
+
+    async fn retry_pending_lane_cleanups_for_owner(
+        &self,
+        owner_lease_id: &OwnerLeaseId,
+    ) -> Result<(), BrowserPlatformError> {
+        let _retry_guard = self.inner.lane_cleanup_retry_gate.lock().await;
+        let cleanup_ids = self
+            .inner
+            .pending_lane_cleanups
+            .lock()
+            .await
+            .iter()
+            .filter(|entry| &entry.owner_lease_id == owner_lease_id)
+            .map(|entry| entry.cleanup_id)
+            .collect::<Vec<_>>();
+        self.retry_pending_lane_cleanup_ids(cleanup_ids).await
+    }
+
+    async fn retry_pending_lane_cleanup_ids(
+        &self,
+        cleanup_ids: Vec<u64>,
+    ) -> Result<(), BrowserPlatformError> {
         let deadline = Instant::now() + CLEANUP_BATCH_WAIT_TIMEOUT;
         let mut attempts = tokio::task::JoinSet::new();
         for cleanup_id in cleanup_ids {
@@ -3283,6 +3968,9 @@ impl BrowserSessionHub {
                 // released before any Host or Chromium I/O.
                 let _open_guard = self.inner.open_gate.lock().await;
                 if self.inner.shutting_down.load(Ordering::Acquire) {
+                    return;
+                }
+                if self.inner.draining.load(Ordering::Acquire) {
                     return;
                 }
                 let policy = self.inner.config.read().await.resource_policy.clone();
@@ -3357,7 +4045,141 @@ impl BrowserSessionHub {
     }
 
     pub async fn close_all(&self) -> Result<CloseResult, BrowserPlatformError> {
-        self.close_matching(|_| true).await
+        let hub = self.clone();
+        tokio::spawn(async move { hub.close_all_once().await })
+            .await
+            .map_err(|error| drain_task_failed_error(&error))?
+    }
+
+    async fn close_all_once(&self) -> Result<CloseResult, BrowserPlatformError> {
+        let _drain_gate = self.inner.drain_gate.lock().await;
+        {
+            let _open_guard = self.inner.open_gate.lock().await;
+            self.inner.draining.store(true, Ordering::Release);
+        }
+        let _drain_state = HubDrainGuard {
+            inner: Arc::clone(&self.inner),
+        };
+        let initial = self.remaining_resources().await;
+        let already_closed = initial == RemainingResources::default();
+        let mut first_error = None;
+        let closed = match self.close_matching(|_| true).await {
+            Ok(result) => result.closed,
+            Err(error) => {
+                let detached_closed = error
+                    .metadata
+                    .get("detached_closed")
+                    .and_then(serde_json::Value::as_u64)
+                    .map(|count| count as usize)
+                    .unwrap_or(0);
+                first_error = Some(error);
+                detached_closed
+            }
+        };
+
+        let pending_start_keys = self
+            .inner
+            .pending_host_retirements
+            .lock()
+            .await
+            .iter()
+            .map(|pending| pending.key.clone())
+            .collect::<HashSet<_>>();
+        for key in pending_start_keys {
+            if let Err(error) = self.wait_for_pending_host_starts(&key).await
+                && first_error.is_none()
+            {
+                first_error = Some(error);
+            }
+        }
+        if let Err(error) = self.retry_pending_lane_cleanups().await
+            && first_error.is_none()
+        {
+            first_error = Some(error);
+        }
+        self.finalize_hosts_ready_after_cleanup().await;
+
+        self.retire_all_active_host_slots().await;
+        if let Err(error) = self.retry_retiring_host_slots().await
+            && first_error.is_none()
+        {
+            first_error = Some(error);
+        }
+        if let Err(error) = self.retry_orphaned_host_slots().await
+            && first_error.is_none()
+        {
+            first_error = Some(error);
+        }
+        // Host shutdown is an authoritative target-disappearance proof. The
+        // retry methods clear completed failed target cleanups for stopped
+        // epochs; a genuinely in-flight close remains single-flight here.
+        if let Err(error) = self.retry_pending_lane_cleanups().await
+            && first_error.is_none()
+        {
+            first_error = Some(error);
+        }
+        self.finalize_hosts_ready_after_cleanup().await;
+        if let Err(error) = self.retry_retiring_host_slots().await
+            && first_error.is_none()
+        {
+            first_error = Some(error);
+        }
+        if let Err(error) = self.retry_orphaned_host_slots().await
+            && first_error.is_none()
+        {
+            first_error = Some(error);
+        }
+        self.reconcile_retiring_host_keys().await;
+
+        let remaining = self.remaining_resources().await;
+        if remaining == RemainingResources::default() {
+            self.inner.owner_cleanup_targets.lock().await.clear();
+            return Ok(self.close_result(closed, already_closed).await);
+        }
+        let error = first_error.unwrap_or_else(close_all_incomplete_error);
+        Err(self.cleanup_error_with_remaining(error, closed).await)
+    }
+
+    async fn retire_all_active_host_slots(&self) {
+        let _open_guard = self.inner.open_gate.lock().await;
+        let mut retiring_keys = self.inner.retiring_host_keys.write().await;
+        let mut active = self.inner.host_slots.write().await;
+        let mut retiring = self.inner.retiring_host_slots.lock().await;
+        for (key, slot) in active.drain() {
+            slot.retire();
+            retiring_keys.insert(key.clone());
+            if !retiring.iter().any(|(pending_key, pending_slot)| {
+                pending_key == &key && Arc::ptr_eq(pending_slot, &slot)
+            }) {
+                retiring.push((key, slot));
+            }
+        }
+        for (key, _) in self.inner.orphaned_host_slots.lock().await.iter() {
+            retiring_keys.insert(key.clone());
+        }
+        drop(retiring);
+        drop(active);
+        drop(retiring_keys);
+        drop(_open_guard);
+        self.inner.host_empty_since_ms.write().await.clear();
+    }
+
+    async fn reconcile_retiring_host_keys(&self) {
+        let mut keys = self.inner.retiring_host_keys.write().await;
+        let retiring = self.inner.retiring_host_slots.lock().await;
+        let orphaned = self.inner.orphaned_host_slots.lock().await;
+        keys.retain(|key| {
+            retiring
+                .iter()
+                .any(|(pending_key, _)| pending_key == key)
+                || orphaned
+                    .iter()
+                    .any(|(pending_key, _)| pending_key == key)
+        });
+        drop(orphaned);
+        drop(retiring);
+        drop(keys);
+        self.inner.retiring_hosts_changed.notify_waiters();
     }
 
     async fn close_matching(
@@ -3371,41 +4193,60 @@ impl BrowserSessionHub {
             .filter(predicate)
             .map(|lane| lane.lane_id)
             .collect();
-        let mut result = CloseResult {
-            closed: 0,
-            already_closed: ids.is_empty(),
-        };
+        let mut closed = 0;
         let mut detached_lanes = Vec::new();
         for lane_id in &ids {
             if let Some(detached) = self.detach_lane_for_close(lane_id).await {
-                result.closed += 1;
+                closed += 1;
                 detached_lanes.push(detached);
             }
         }
-        result.already_closed = result.closed == 0;
         self.promote_released_capacity().await;
         let deadline = Instant::now() + CLEANUP_BATCH_WAIT_TIMEOUT;
         let mut attempts = tokio::task::JoinSet::new();
-        for cleanup_id in detached_lanes
+        for detached in detached_lanes
             .iter()
-            .filter_map(|detached| detached.cleanup_id)
+            .filter(|detached| detached.cleanup_id.is_some())
         {
             let hub = self.clone();
+            let cleanup_id = detached.cleanup_id.expect("filtered cleanup id");
+            let host_key = detached.host_key.clone();
+            let browser_epoch = detached.browser_epoch;
             attempts.spawn(async move {
-                hub.attempt_pending_lane_cleanup_until(cleanup_id, deadline)
-                    .await
+                (
+                    host_key,
+                    browser_epoch,
+                    hub.attempt_pending_lane_cleanup_until(cleanup_id, deadline)
+                        .await,
+                )
             });
         }
         let mut first_error = None;
+        let mut terminal_cleanup_errors =
+            HashMap::<(HostKey, u64), BrowserPlatformError>::new();
+        let mut running_cleanup_targets = HashSet::<(HostKey, u64)>::new();
+        let mut unknown_cleanup_task_failure = false;
         while let Some(attempt) = attempts.join_next().await {
             match attempt {
-                Ok(Ok(())) => {}
-                Ok(Err(error)) => {
-                    if first_error.is_none() {
-                        first_error = Some(error);
+                Ok((_, _, Ok(()))) => {}
+                Ok((host_key, browser_epoch, Err(error))) => {
+                    let target = (host_key, browser_epoch);
+                    if error
+                        .metadata
+                        .get("cleanup_wait_timeout")
+                        .and_then(serde_json::Value::as_bool)
+                        .unwrap_or(false)
+                    {
+                        running_cleanup_targets.insert(target);
+                        if first_error.is_none() {
+                            first_error = Some(error);
+                        }
+                    } else {
+                        terminal_cleanup_errors.entry(target).or_insert(error);
                     }
                 }
                 Err(join_error) => {
+                    unknown_cleanup_task_failure = true;
                     if first_error.is_none() {
                         first_error = Some(cleanup_batch_task_failed_error(
                             "lane",
@@ -3415,35 +4256,56 @@ impl BrowserSessionHub {
                 }
             }
         }
-        let host_keys = detached_lanes
+        let host_targets = detached_lanes
             .into_iter()
-            .map(|detached| detached.host_key)
+            .map(|detached| (detached.host_key, detached.browser_epoch))
             .collect::<HashSet<_>>();
-        if first_error.is_none() {
-            for host_key in host_keys {
-                if let Err(error) = self.wait_for_pending_host_starts(&host_key).await {
+        for (host_key, browser_epoch) in host_targets {
+            let target = (host_key.clone(), browser_epoch);
+            if let Some(cleanup_error) = terminal_cleanup_errors.remove(&target) {
+                if unknown_cleanup_task_failure || running_cleanup_targets.contains(&target) {
                     if first_error.is_none() {
-                        first_error = Some(error);
+                        first_error = Some(cleanup_error);
                     }
                     continue;
                 }
-                if let Err(error) = self.finalize_host_once(host_key).await
-                    && first_error.is_none()
+                match self
+                    .retire_empty_host_authoritatively(&host_key, browser_epoch)
+                    .await
                 {
+                    Ok(true) => continue,
+                    Ok(false) => {
+                        if first_error.is_none() {
+                            first_error = Some(cleanup_error);
+                        }
+                    }
+                    Err(error) => {
+                        if first_error.is_none() {
+                            first_error = Some(error);
+                        }
+                    }
+                }
+                continue;
+            }
+            if unknown_cleanup_task_failure || running_cleanup_targets.contains(&target) {
+                continue;
+            }
+            if let Err(error) = self.wait_for_pending_host_starts(&host_key).await {
+                if first_error.is_none() {
                     first_error = Some(error);
                 }
+                continue;
+            }
+            if let Err(error) = self.finalize_host_once(host_key).await
+                && first_error.is_none()
+            {
+                first_error = Some(error);
             }
         }
         if let Some(error) = first_error {
-            let mut metadata = error.metadata.as_object().cloned().unwrap_or_default();
-            metadata.insert("cleanup_pending".to_owned(), json!(true));
-            metadata.insert("detached_closed".to_owned(), json!(result.closed));
-            return Err(BrowserPlatformError {
-                metadata: serde_json::Value::Object(metadata),
-                ..error
-            });
+            return Err(Self::scoped_cleanup_error(error, closed));
         }
-        Ok(result)
+        Ok(Self::scoped_close_result(closed, closed == 0))
     }
 
     async fn finalize_detached_host(
@@ -3452,6 +4314,227 @@ impl BrowserSessionHub {
     ) -> Result<(), BrowserPlatformError> {
         self.wait_for_pending_host_starts(&detached.host_key).await?;
         self.finalize_host_once(detached.host_key).await
+    }
+
+    /// Stops every retained HostSlot for an empty key even when target cleanup
+    /// itself completed with an error.
+    ///
+    /// A successful process shutdown is the stronger cleanup proof: production
+    /// Lane drivers only keep weak Host references, so no target can remain
+    /// live after every process for the key is gone. The emptiness check and
+    /// active-to-retiring hand-off occur under `open_gate`; a shared Primary
+    /// Host with any sibling Lane is therefore never selected.
+    async fn retire_empty_host_authoritatively(
+        &self,
+        key: &HostKey,
+        browser_epoch: u64,
+    ) -> Result<bool, BrowserPlatformError> {
+        let slots = {
+            let _open_guard = self.inner.open_gate.lock().await;
+            if self.host_has_unsettled_lane_start(key).await {
+                return Ok(false);
+            }
+            for lane in self
+                .inner
+                .lanes
+                .read()
+                .await
+                .values()
+                .cloned()
+                .collect::<Vec<_>>()
+            {
+                let snapshot = lane.snapshot.read().await;
+                if snapshot.browser_epoch == browser_epoch
+                    && HostKey::for_lane(
+                        snapshot.identity_mode,
+                        snapshot.identity_generation,
+                        &snapshot.lane_id,
+                    ) == *key
+                {
+                    return Ok(false);
+                }
+            }
+
+            let mut retiring_keys = self.inner.retiring_host_keys.write().await;
+            let mut active = self.inner.host_slots.write().await;
+            let mut retiring = self.inner.retiring_host_slots.lock().await;
+            if active
+                .get(key)
+                .is_some_and(|slot| slot.epoch == browser_epoch)
+            {
+                let slot = active
+                    .remove(key)
+                    .expect("epoch-matched active Host disappeared while write-locked");
+                slot.retire();
+                retiring_keys.insert(key.clone());
+                if !retiring.iter().any(|(pending_key, pending_slot)| {
+                    pending_key == key && Arc::ptr_eq(pending_slot, &slot)
+                }) {
+                    retiring.push((key.clone(), slot));
+                }
+            }
+            let mut slots = retiring
+                .iter()
+                .filter(|(pending_key, slot)| {
+                    pending_key == key && slot.epoch == browser_epoch
+                })
+                .map(|(_, slot)| (Arc::clone(slot), false))
+                .collect::<Vec<_>>();
+            drop(retiring);
+            drop(active);
+            drop(retiring_keys);
+            slots.extend(
+                self.inner
+                    .orphaned_host_slots
+                    .lock()
+                    .await
+                    .iter()
+                    .filter(|(pending_key, slot)| {
+                        pending_key == key && slot.epoch == browser_epoch
+                    })
+                    .map(|(_, slot)| (Arc::clone(slot), true)),
+            );
+            self.inner.host_empty_since_ms.write().await.remove(key);
+            let mut seen = HashSet::new();
+            slots.retain(|(slot, _)| seen.insert(Arc::as_ptr(slot) as usize));
+            slots
+        };
+
+        let _retry_guard = self.inner.host_cleanup_retry_gate.lock().await;
+        for (slot, orphaned) in slots {
+            slot.shutdown_retired().await?;
+            if orphaned {
+                self.forget_orphaned_host_slot(key, &slot).await;
+            } else {
+                self.forget_retired_host_slot(key, &slot).await;
+            }
+            self.emit("host_shutdown_finished", None);
+        }
+        drop(_retry_guard);
+        if !self
+            .managed_host_exists_for_key_epoch(key, browser_epoch)
+            .await
+        {
+            self.clear_completed_cleanup_authority_for_stopped_host(key, browser_epoch)
+                .await;
+        }
+        Ok(true)
+    }
+
+    async fn managed_host_exists_for_key(&self, key: &HostKey) -> bool {
+        if self.inner.host_slots.read().await.contains_key(key) {
+            return true;
+        }
+        if self
+            .inner
+            .retiring_host_slots
+            .lock()
+            .await
+            .iter()
+            .any(|(pending_key, _)| pending_key == key)
+        {
+            return true;
+        }
+        self.inner
+            .orphaned_host_slots
+            .lock()
+            .await
+            .iter()
+            .any(|(pending_key, _)| pending_key == key)
+    }
+
+    async fn managed_host_exists_for_key_epoch(
+        &self,
+        key: &HostKey,
+        browser_epoch: u64,
+    ) -> bool {
+        if self
+            .inner
+            .host_slots
+            .read()
+            .await
+            .get(key)
+            .is_some_and(|slot| slot.epoch == browser_epoch)
+        {
+            return true;
+        }
+        if self
+            .inner
+            .retiring_host_slots
+            .lock()
+            .await
+            .iter()
+            .any(|(pending_key, slot)| {
+                pending_key == key && slot.epoch == browser_epoch
+            })
+        {
+            return true;
+        }
+        self.inner
+            .orphaned_host_slots
+            .lock()
+            .await
+            .iter()
+            .any(|(pending_key, slot)| {
+                pending_key == key && slot.epoch == browser_epoch
+            })
+    }
+
+    /// Releases only completed/no-flight target authority after all processes
+    /// for a Host key are proven stopped. An unfinished target close remains
+    /// authoritative and is never duplicated or discarded.
+    async fn clear_completed_cleanup_authority_for_stopped_host(
+        &self,
+        key: &HostKey,
+        browser_epoch: u64,
+    ) {
+        let entries = self
+            .inner
+            .pending_lane_cleanups
+            .lock()
+            .await
+            .iter()
+            .filter(|entry| {
+                &entry.host_key == key && entry.browser_epoch == browser_epoch
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        let mut removable = HashSet::new();
+        for entry in entries {
+            let flight = entry.flight.lock().await.clone();
+            if flight
+                .as_ref()
+                .is_none_or(|flight| flight.result.get().is_some())
+            {
+                removable.insert(entry.cleanup_id);
+            }
+        }
+        if !removable.is_empty() {
+            self.inner
+                .pending_lane_cleanups
+                .lock()
+                .await
+                .retain(|entry| !removable.contains(&entry.cleanup_id));
+            self.emit("lane_cleanup_finished", None);
+        }
+        {
+            let mut owner_targets = self.inner.owner_cleanup_targets.lock().await;
+            owner_targets.retain(|_, targets| {
+                targets.retain(|target| {
+                    &target.host_key != key || target.browser_epoch != browser_epoch
+                });
+                !targets.is_empty()
+            });
+        }
+        if !self.managed_host_exists_for_key(key).await {
+            self.inner
+                .host_finalizations
+                .lock()
+                .await
+                .retain(|pending_key, flight| {
+                    pending_key != key || flight.result.get().is_none()
+                });
+        }
     }
 
     /// Single-flight entry for retiring one empty Host. Explicit close, the
@@ -3568,6 +4651,45 @@ impl BrowserSessionHub {
                     return Err(pending_lane_start_wait_timeout_error(
                         pending.lane_id.clone(),
                         key,
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    async fn wait_for_pending_owner_starts(
+        &self,
+        owner_lease_id: &OwnerLeaseId,
+    ) -> Result<(), BrowserPlatformError> {
+        let wait_deadline = Instant::now() + PENDING_LANE_START_WAIT_TIMEOUT;
+        let pending = self
+            .inner
+            .pending_host_retirements
+            .lock()
+            .await
+            .iter()
+            .filter(|pending| &pending.owner_lease_id == owner_lease_id)
+            .cloned()
+            .collect::<Vec<_>>();
+        for pending in pending {
+            match tokio::time::timeout_at(wait_deadline, pending.start_flight.wait()).await {
+                Ok(_) => {
+                    self.inner
+                        .pending_host_retirements
+                        .lock()
+                        .await
+                        .retain(|current| {
+                            current.owner_lease_id != pending.owner_lease_id
+                                || current.key != pending.key
+                                || current.lane_id != pending.lane_id
+                        });
+                }
+                Err(_) => {
+                    self.emit("host_retirement_pending", None);
+                    return Err(pending_lane_start_wait_timeout_error(
+                        pending.lane_id.clone(),
+                        &pending.key,
                     ));
                 }
             }
@@ -3710,15 +4832,42 @@ impl BrowserSessionHub {
     async fn forget_retired_host_slot(&self, key: &HostKey, slot: &Arc<HostSlot>) {
         let mut retiring_keys = self.inner.retiring_host_keys.write().await;
         let mut retiring_slots = self.inner.retiring_host_slots.lock().await;
+        let orphaned_slots = self.inner.orphaned_host_slots.lock().await;
         retiring_slots.retain(|(pending_key, pending_slot)| {
             pending_key != key || !Arc::ptr_eq(pending_slot, slot)
         });
         if !retiring_slots
             .iter()
             .any(|(pending_key, _)| pending_key == key)
+            && !orphaned_slots
+                .iter()
+                .any(|(pending_key, _)| pending_key == key)
         {
             retiring_keys.remove(key);
         }
+        drop(orphaned_slots);
+        drop(retiring_slots);
+        drop(retiring_keys);
+        self.inner.retiring_hosts_changed.notify_waiters();
+    }
+
+    async fn forget_orphaned_host_slot(&self, key: &HostKey, slot: &Arc<HostSlot>) {
+        let mut retiring_keys = self.inner.retiring_host_keys.write().await;
+        let retiring_slots = self.inner.retiring_host_slots.lock().await;
+        let mut orphaned_slots = self.inner.orphaned_host_slots.lock().await;
+        orphaned_slots.retain(|(pending_key, pending_slot)| {
+            pending_key != key || !Arc::ptr_eq(pending_slot, slot)
+        });
+        if !retiring_slots
+            .iter()
+            .any(|(pending_key, _)| pending_key == key)
+            && !orphaned_slots
+                .iter()
+                .any(|(pending_key, _)| pending_key == key)
+        {
+            retiring_keys.remove(key);
+        }
+        drop(orphaned_slots);
         drop(retiring_slots);
         drop(retiring_keys);
         self.inner.retiring_hosts_changed.notify_waiters();
@@ -3957,6 +5106,16 @@ impl BrowserSessionHub {
                 Ok(had_host) => {
                     stopped += usize::from(had_host);
                     self.forget_retired_host_slot(&key, &slot).await;
+                    if !self
+                        .managed_host_exists_for_key_epoch(&key, slot.epoch)
+                        .await
+                    {
+                        self.clear_completed_cleanup_authority_for_stopped_host(
+                            &key,
+                            slot.epoch,
+                        )
+                        .await;
+                    }
                     self.emit("host_warm_shutdown_finished", None);
                 }
                 Err(error) => {
@@ -3996,13 +5155,17 @@ impl BrowserSessionHub {
             match result {
                 Ok(had_host) => {
                     stopped += usize::from(had_host);
-                    self.inner
-                        .orphaned_host_slots
-                        .lock()
+                    self.forget_orphaned_host_slot(&key, &slot).await;
+                    if !self
+                        .managed_host_exists_for_key_epoch(&key, slot.epoch)
                         .await
-                        .retain(|(pending_key, pending_slot)| {
-                            pending_key != &key || !Arc::ptr_eq(pending_slot, &slot)
-                        });
+                    {
+                        self.clear_completed_cleanup_authority_for_stopped_host(
+                            &key,
+                            slot.epoch,
+                        )
+                        .await;
+                    }
                     self.emit("host_cleanup_finished", None);
                 }
                 Err(error) => {
@@ -4038,13 +5201,17 @@ impl BrowserSessionHub {
     ) -> Result<bool, BrowserPlatformError> {
         match slot.shutdown_retired().await {
             Ok(had_host) => {
-                self.inner
-                    .orphaned_host_slots
-                    .lock()
+                self.forget_orphaned_host_slot(key, slot).await;
+                if !self
+                    .managed_host_exists_for_key_epoch(key, slot.epoch)
                     .await
-                    .retain(|(pending_key, pending_slot)| {
-                        pending_key != key || !Arc::ptr_eq(pending_slot, slot)
-                    });
+                {
+                    self.clear_completed_cleanup_authority_for_stopped_host(
+                        key,
+                        slot.epoch,
+                    )
+                    .await;
+                }
                 self.emit("host_cleanup_finished", None);
                 Ok(had_host)
             }
@@ -4243,6 +5410,7 @@ impl BrowserSessionHub {
                         .map(|closed| CloseResult {
                             closed,
                             already_closed: closed == 0,
+                            ..CloseResult::default()
                         }),
                         &mut closed,
                         &mut first_error,
@@ -4263,6 +5431,7 @@ impl BrowserSessionHub {
                         .map(|closed| CloseResult {
                             closed,
                             already_closed: closed == 0,
+                            ..CloseResult::default()
                         }),
                         &mut closed,
                         &mut first_error,
@@ -4321,6 +5490,7 @@ impl BrowserSessionHub {
                         .map(|closed| CloseResult {
                             closed,
                             already_closed: closed == 0,
+                            ..CloseResult::default()
                         }),
                         &mut closed,
                         &mut first_error,
@@ -4339,6 +5509,7 @@ impl BrowserSessionHub {
                         .map(|closed| CloseResult {
                             closed,
                             already_closed: closed == 0,
+                            ..CloseResult::default()
                         }),
                         &mut closed,
                         &mut first_error,
@@ -4357,6 +5528,7 @@ impl BrowserSessionHub {
                         .map(|closed| CloseResult {
                             closed,
                             already_closed: closed == 0,
+                            ..CloseResult::default()
                         }),
                         &mut closed,
                         &mut first_error,
@@ -4383,15 +5555,13 @@ impl BrowserSessionHub {
         if let Some(error) = first_error {
             return Err(error);
         }
-        Ok(CloseResult {
-            closed,
-            already_closed: closed == 0,
-        })
+        Ok(self.close_result(closed, closed == 0).await)
     }
 
     pub async fn shutdown(&self) -> Result<(), BrowserPlatformError> {
         let _shutdown_guard = self.inner.shutdown_gate.lock().await;
-        if let Some(result) = self.inner.shutdown_result.read().await.clone() {
+        let cached_result = { self.inner.shutdown_result.read().await.clone() };
+        if let Some(result) = cached_result {
             return result;
         }
         match tokio::time::timeout(
@@ -4415,7 +5585,7 @@ impl BrowserSessionHub {
         // close may already have retired the last Host before returning its
         // target error; swallowing that error would falsely report exact
         // application shutdown.
-        let mut first_error = self.close_all().await.err();
+        let mut first_error = self.close_matching(|_| true).await.err();
         if let Err(error) = self.retry_pending_lane_cleanups().await
             && first_error.is_none()
         {
@@ -4568,6 +5738,52 @@ fn foreground_lane_not_ready_error(lane_id: BrowserLaneId) -> BrowserPlatformErr
         "Wait for the Primary lane to become running, then retry.",
     )
     .for_lane(lane_id)
+}
+
+fn visibility_transition_not_applied_error(
+    desired_headful: bool,
+) -> BrowserPlatformError {
+    BrowserPlatformError::new(
+        BrowserErrorCode::BrowserUnavailable,
+        "The managed Primary browser did not apply the requested display mode.",
+        true,
+        "Refresh browser status and retry the display-mode transition.",
+    )
+    .with_metadata(json!({
+        "visibility_transition_failed": true,
+        "requested_visibility": if desired_headful { "headful" } else { "headless" },
+    }))
+}
+
+fn visibility_task_failed_error(
+    scope: &'static str,
+    join_error: &tokio::task::JoinError,
+) -> BrowserPlatformError {
+    BrowserPlatformError::new(
+        BrowserErrorCode::BrowserUnavailable,
+        "The managed browser display transition terminated unexpectedly.",
+        true,
+        "Refresh browser status and retry the display-mode transition.",
+    )
+    .with_metadata(json!({
+        "visibility_transition_failed": true,
+        "scope": scope,
+        "task_cancelled": join_error.is_cancelled(),
+        "task_panicked": join_error.is_panic(),
+    }))
+}
+
+fn platform_drain_in_progress_error() -> BrowserPlatformError {
+    BrowserPlatformError::new(
+        BrowserErrorCode::BrowserUnavailable,
+        "The browser platform is closing all managed resources.",
+        true,
+        "Retry after browser cleanup finishes.",
+    )
+    .with_metadata(json!({
+        "cleanup_pending": true,
+        "platform_drain_in_progress": true,
+    }))
 }
 
 #[derive(Clone)]
@@ -4911,6 +6127,7 @@ fn lane_cleanup_wait_timeout_error(lane_id: BrowserLaneId) -> BrowserPlatformErr
 fn host_initialization_timeout_error(
     browser_epoch: u64,
     phase: &'static str,
+    timeout: Duration,
 ) -> BrowserPlatformError {
     BrowserPlatformError::new(
         BrowserErrorCode::BrowserUnavailable,
@@ -4922,7 +6139,7 @@ fn host_initialization_timeout_error(
         "host_initialization_timeout": true,
         "browser_epoch": browser_epoch,
         "phase": phase,
-        "timeout_ms": HOST_INITIALIZATION_ATTEMPT_TIMEOUT.as_millis() as u64,
+        "timeout_ms": timeout.as_millis() as u64,
     }))
 }
 
@@ -4978,6 +6195,47 @@ fn cleanup_batch_task_failed_error(
         "cleanup_task_failed": true,
         "task_cancelled": join_error.is_cancelled(),
         "task_panicked": join_error.is_panic(),
+    }))
+}
+
+fn drain_task_failed_error(join_error: &tokio::task::JoinError) -> BrowserPlatformError {
+    BrowserPlatformError::new(
+        BrowserErrorCode::BrowserUnavailable,
+        "The installation-wide browser cleanup task terminated unexpectedly.",
+        true,
+        "Retry closing all managed browser resources.",
+    )
+    .with_metadata(json!({
+        "cleanup_pending": true,
+        "platform_drain_task_failed": true,
+        "task_cancelled": join_error.is_cancelled(),
+        "task_panicked": join_error.is_panic(),
+    }))
+}
+
+fn owner_cleanup_pending_error() -> BrowserPlatformError {
+    BrowserPlatformError::new(
+        BrowserErrorCode::BrowserUnavailable,
+        "The exact browser owner still has retained cleanup authority.",
+        true,
+        "Retry exact-owner cleanup through the lifecycle owner.",
+    )
+    .with_metadata(json!({
+        "cleanup_pending": true,
+        "owner_cleanup_pending": true,
+    }))
+}
+
+fn close_all_incomplete_error() -> BrowserPlatformError {
+    BrowserPlatformError::new(
+        BrowserErrorCode::BrowserUnavailable,
+        "Some managed browser resources are still closing.",
+        true,
+        "Retry closing all managed browser resources.",
+    )
+    .with_metadata(json!({
+        "cleanup_pending": true,
+        "platform_drain_incomplete": true,
     }))
 }
 
@@ -5221,6 +6479,22 @@ mod tests {
                     return;
                 }
                 self.open_lane_changed.notified().await;
+            }
+        }
+
+        async fn wait_for_host_launches(&self, expected: usize) {
+            loop {
+                let changed = self.host_launch_changed.notified();
+                if self
+                    .host_launch_requests
+                    .lock()
+                    .expect("host launch probe poisoned")
+                    .len()
+                    >= expected
+                {
+                    return;
+                }
+                changed.await;
             }
         }
     }
@@ -5978,6 +7252,319 @@ mod tests {
             "old refs must be invalidated and a fresh observe required"
         );
         assert_eq!(foregrounded.last_active_at_ms, before.last_active_at_ms + 25);
+        assert_eq!(
+            harness.hub.primary_visibility().await,
+            BrowserVisibility::Headless,
+            "one foreground request must not mutate the installation default"
+        );
+    }
+
+    #[tokio::test]
+    async fn primary_visibility_round_trip_restarts_and_rebinds_all_primary_lanes() {
+        let harness = harness();
+        let second_client = client_for_runtime(&harness, "runtime-visibility-sibling");
+        let first = open(&harness.client, "visibility-a").await;
+        let second = open(&second_client, "visibility-b").await;
+        let initial_first = harness.client.status(&first).await.unwrap();
+        let initial_second = second_client.status(&second).await.unwrap();
+        assert_eq!(initial_first.browser_epoch, initial_second.browser_epoch);
+        assert_eq!(
+            harness.hub.primary_visibility().await,
+            BrowserVisibility::Headless
+        );
+
+        harness
+            .hub
+            .set_primary_visibility(BrowserVisibility::Headful)
+            .await
+            .unwrap();
+        let headful_first = harness.client.status(&first).await.unwrap();
+        let headful_second = second_client.status(&second).await.unwrap();
+        assert_ne!(headful_first.browser_epoch, initial_first.browser_epoch);
+        assert_eq!(headful_first.browser_epoch, headful_second.browser_epoch);
+        assert_eq!(
+            headful_first.error_code,
+            Some(BrowserErrorCode::BrowserRestarted)
+        );
+        assert_eq!(
+            harness.hub.primary_visibility().await,
+            BrowserVisibility::Headful
+        );
+
+        harness
+            .hub
+            .set_primary_visibility(BrowserVisibility::Headless)
+            .await
+            .unwrap();
+        let headless_first = harness.client.status(&first).await.unwrap();
+        let headless_second = second_client.status(&second).await.unwrap();
+        assert_ne!(headless_first.browser_epoch, headful_first.browser_epoch);
+        assert_eq!(headless_first.browser_epoch, headless_second.browser_epoch);
+        assert_eq!(
+            harness.hub.primary_visibility().await,
+            BrowserVisibility::Headless
+        );
+        assert_eq!(harness.probe.host_shutdowns.load(Ordering::Acquire), 2);
+        let requests = harness
+            .probe
+            .host_launch_requests
+            .lock()
+            .expect("host launch probe poisoned")
+            .clone();
+        assert_eq!(
+            requests
+                .iter()
+                .map(|request| request.headful)
+                .collect::<Vec<_>>(),
+            vec![false, true, false]
+        );
+
+        let launches = harness.factory.launches.load(Ordering::Acquire);
+        harness
+            .hub
+            .set_primary_visibility(BrowserVisibility::Headless)
+            .await
+            .unwrap();
+        assert_eq!(
+            harness.factory.launches.load(Ordering::Acquire),
+            launches,
+            "setting the actual mode again must be a no-op"
+        );
+
+        let drained = tokio::time::timeout(Duration::from_secs(2), harness.hub.close_all())
+            .await
+            .expect("installation drain hung after visibility round trip")
+            .unwrap();
+        assert_eq!(drained.remaining_lane_count, 0);
+        assert_eq!(drained.remaining_cleanup_count, 0);
+        assert_eq!(drained.remaining_managed_host_count, 0);
+        harness
+            .hub
+            .set_primary_visibility(BrowserVisibility::Headful)
+            .await
+            .unwrap();
+        let reopened = open(&harness.client, "visibility-reopened").await;
+        assert!(harness.client.status(&reopened).await.is_ok());
+        assert!(
+            harness
+                .probe
+                .host_launch_requests
+                .lock()
+                .expect("host launch probe poisoned")
+                .last()
+                .expect("reopened Host launch")
+                .headful,
+            "a future Primary Host must use the updated default"
+        );
+    }
+
+    #[tokio::test]
+    async fn opposite_primary_visibility_transitions_are_serialized() {
+        let harness = harness();
+        let lane_id = open(&harness.client, "visibility-serialized").await;
+        harness
+            .probe
+            .block_host_launch
+            .store(true, Ordering::Release);
+
+        let headful_hub = harness.hub.clone();
+        let headful = tokio::spawn(async move {
+            headful_hub
+                .set_primary_visibility(BrowserVisibility::Headful)
+                .await
+        });
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            harness.probe.wait_for_host_launches(2),
+        )
+        .await
+        .expect("headful replacement never reached the blocked launch");
+
+        let headless_hub = harness.hub.clone();
+        let headless = tokio::spawn(async move {
+            headless_hub
+                .set_primary_visibility(BrowserVisibility::Headless)
+                .await
+        });
+        tokio::task::yield_now().await;
+        assert_eq!(
+            harness.factory.launches.load(Ordering::Acquire),
+            2,
+            "the opposite transition must wait behind the first visibility gate"
+        );
+
+        harness.probe.host_launch_release.add_permits(1);
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            harness.probe.wait_for_host_launches(3),
+        )
+        .await
+        .expect("headless successor never started after the first transition");
+        harness.probe.host_launch_release.add_permits(1);
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(1), headful)
+                .await
+                .expect("headful transition did not settle")
+                .unwrap()
+                .unwrap(),
+            BrowserVisibility::Headful
+        );
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(1), headless)
+                .await
+                .expect("headless transition did not settle")
+                .unwrap()
+                .unwrap(),
+            BrowserVisibility::Headless
+        );
+        harness
+            .probe
+            .block_host_launch
+            .store(false, Ordering::Release);
+
+        let requests = harness
+            .probe
+            .host_launch_requests
+            .lock()
+            .expect("host launch probe poisoned")
+            .iter()
+            .map(|request| request.headful)
+            .collect::<Vec<_>>();
+        assert_eq!(requests, vec![false, true, false]);
+        assert_eq!(
+            harness.hub.primary_visibility().await,
+            BrowserVisibility::Headless
+        );
+        let overview = harness.hub.overview().await;
+        assert_eq!(overview.hosts.len(), 1);
+        assert!(!overview.hosts[0].headful);
+        assert!(harness.client.status(&lane_id).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn visibility_transition_racing_start_never_publishes_old_epoch_driver() {
+        let harness = harness();
+        harness
+            .probe
+            .block_open_lane
+            .store(true, Ordering::Release);
+        let opening_client = harness.client.clone();
+        let opening = tokio::spawn(async move {
+            opening_client
+                .open(
+                    Some("visibility-start-race"),
+                    BrowserIdentityMode::Primary,
+                    None,
+                )
+                .await
+        });
+        harness.probe.wait_for_open_lane_calls(1).await;
+
+        let visibility_hub = harness.hub.clone();
+        let visibility = tokio::spawn(async move {
+            visibility_hub
+                .set_primary_visibility(BrowserVisibility::Headful)
+                .await
+        });
+        tokio::task::yield_now().await;
+        assert_eq!(
+            harness.factory.launches.load(Ordering::Acquire),
+            1,
+            "visibility replacement must wait until the Hub-owned Lane start publishes its driver"
+        );
+
+        harness.probe.open_lane_release.add_permits(1);
+        let opened = tokio::time::timeout(Duration::from_secs(1), opening)
+            .await
+            .expect("initial Lane start did not settle")
+            .unwrap()
+            .unwrap()
+            .lane()
+            .clone();
+        harness
+            .probe
+            .block_open_lane
+            .store(false, Ordering::Release);
+        // If the replacement observed the old blocking bit before this task
+        // resumed, release that exact rebind call as well.
+        harness.probe.open_lane_release.add_permits(1);
+        tokio::time::timeout(Duration::from_secs(1), visibility)
+            .await
+            .expect("visibility transition did not settle after the Lane start")
+            .unwrap()
+            .unwrap();
+        let current = harness.client.status(&opened.lane_id).await.unwrap();
+        assert_ne!(current.browser_epoch, opened.browser_epoch);
+        assert_eq!(
+            current.error_code,
+            Some(BrowserErrorCode::BrowserRestarted)
+        );
+        assert_eq!(harness.factory.launches.load(Ordering::Acquire), 2);
+        assert!(harness.hub.overview().await.hosts[0].headful);
+    }
+
+    #[tokio::test]
+    async fn close_racing_visibility_transition_leaves_no_replacement_host() {
+        let harness = harness();
+        let lane_id = open(&harness.client, "visibility-close-race").await;
+        harness
+            .probe
+            .block_host_launch
+            .store(true, Ordering::Release);
+        let visibility_hub = harness.hub.clone();
+        let visibility_lane = lane_id.clone();
+        let visibility = tokio::spawn(async move {
+            visibility_hub
+                .set_lane_visibility_for_user(
+                    "user-1",
+                    &visibility_lane,
+                    BrowserVisibility::Headful,
+                )
+                .await
+        });
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            harness.probe.wait_for_host_launches(2),
+        )
+        .await
+        .expect("visibility replacement did not reach the blocked launch");
+
+        let close_hub = harness.hub.clone();
+        let closing_lane = lane_id.clone();
+        let close = tokio::spawn(async move { close_hub.close_lane(&closing_lane).await });
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if harness.hub.list_lanes().await.is_empty() {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("close waited behind the visibility transition before detaching its Lane");
+
+        harness
+            .probe
+            .block_host_launch
+            .store(false, Ordering::Release);
+        harness.probe.host_launch_release.add_permits(1);
+        let visibility_error = tokio::time::timeout(Duration::from_secs(2), visibility)
+            .await
+            .expect("visibility transition did not settle after close")
+            .unwrap()
+            .unwrap_err();
+        assert!(matches!(
+            visibility_error.code,
+            BrowserErrorCode::LaneClosedByUser | BrowserErrorCode::BrowserUnavailable
+        ));
+        let closed = tokio::time::timeout(Duration::from_secs(2), close)
+            .await
+            .expect("close did not finish replacement Host cleanup")
+            .unwrap()
+            .unwrap();
+        assert_eq!(closed.closed, 1);
+        let remaining = harness.hub.remaining_resources().await;
+        assert_eq!(remaining, RemainingResources::default());
     }
 
     #[tokio::test]
@@ -6335,6 +7922,92 @@ mod tests {
         assert!(!result.already_closed);
         assert!(harness.hub.lane_snapshot_unchecked(&lane_id).await.is_none());
         assert_eq!(harness.probe.lane_closes.load(Ordering::Acquire), 1);
+    }
+
+    #[tokio::test]
+    async fn exact_owner_retry_retains_host_obligation_after_target_cleanup() {
+        let harness = harness();
+        let (client, lease_id) =
+            client_for_runtime_with_lease(&harness, "runtime-owner-host-retry");
+        let _lane_id = open(&client, "owner-host-retry").await;
+        harness
+            .probe
+            .host_shutdown_failures_remaining
+            .store(1, Ordering::Release);
+
+        let first = harness
+            .hub
+            .revoke_owner_lease(&lease_id)
+            .await
+            .unwrap_err();
+        assert_eq!(first.metadata["cleanup_pending"], true);
+        assert_eq!(harness.probe.lane_closes.load(Ordering::Acquire), 1);
+        assert_eq!(harness.probe.host_shutdowns.load(Ordering::Acquire), 1);
+        assert!(harness.hub.list_lanes().await.is_empty());
+
+        harness
+            .hub
+            .revoke_owner_lease(&lease_id)
+            .await
+            .expect("exact owner must retry its retained Host epoch");
+        assert_eq!(
+            harness.probe.lane_closes.load(Ordering::Acquire),
+            1,
+            "Host-only retry must not close the already-clean target again"
+        );
+        assert_eq!(harness.probe.host_shutdowns.load(Ordering::Acquire), 2);
+        let overview = harness.hub.overview().await;
+        assert_eq!(overview.total_lanes, 0);
+        assert_eq!(overview.pending_cleanup_count, 0);
+        assert_eq!(overview.managed_host_count, 0);
+    }
+
+    #[tokio::test]
+    async fn exact_owner_target_retry_never_kills_or_waits_on_shared_primary_sibling() {
+        let harness = harness();
+        let (target, target_lease_id) =
+            client_for_runtime_with_lease(&harness, "runtime-owner-target-retry");
+        let (sibling, _sibling_lease_id) =
+            client_for_runtime_with_lease(&harness, "runtime-owner-target-sibling");
+        let _target_lane = open(&target, "owner-target-retry").await;
+        let sibling_lane = open(&sibling, "owner-target-sibling").await;
+        let sibling_epoch = sibling.status(&sibling_lane).await.unwrap().browser_epoch;
+        harness
+            .probe
+            .lane_close_failures_remaining
+            .store(2, Ordering::Release);
+
+        assert!(
+            harness
+                .hub
+                .revoke_owner_lease(&target_lease_id)
+                .await
+                .is_err()
+        );
+        assert!(
+            harness
+                .hub
+                .revoke_owner_lease(&target_lease_id)
+                .await
+                .is_err(),
+            "a second failure of this owner's detached target must not be reported as success"
+        );
+        harness
+            .hub
+            .revoke_owner_lease(&target_lease_id)
+            .await
+            .expect("the third exact target attempt must converge");
+
+        assert_eq!(harness.probe.lane_closes.load(Ordering::Acquire), 3);
+        assert_eq!(
+            harness.probe.host_shutdowns.load(Ordering::Acquire),
+            0,
+            "exact-owner cleanup must never stop a shared Primary Host"
+        );
+        assert_eq!(
+            sibling.status(&sibling_lane).await.unwrap().browser_epoch,
+            sibling_epoch
+        );
     }
 
     #[tokio::test]
@@ -7342,6 +9015,68 @@ mod tests {
         );
     }
 
+    #[tokio::test(start_paused = true)]
+    async fn windows_sized_cold_start_outlives_old_five_second_hub_deadline() {
+        let harness = harness();
+        harness
+            .probe
+            .block_host_launch
+            .store(true, Ordering::Release);
+
+        let first_client = harness.client.clone();
+        let first = tokio::spawn(async move {
+            first_client
+                .open(
+                    Some("slow-cold-start-a"),
+                    BrowserIdentityMode::Primary,
+                    None,
+                )
+                .await
+        });
+        while harness.factory.launches.load(Ordering::Acquire) == 0 {
+            tokio::task::yield_now().await;
+        }
+
+        // A sibling Primary Lane joins the same Host initialization gate. It
+        // must share the legitimate cold start instead of failing after the
+        // former five-second platform deadline.
+        let second_client = harness.client.clone();
+        let second = tokio::spawn(async move {
+            second_client
+                .open(
+                    Some("slow-cold-start-b"),
+                    BrowserIdentityMode::Primary,
+                    None,
+                )
+                .await
+        });
+        for _ in 0..4 {
+            tokio::task::yield_now().await;
+        }
+
+        tokio::time::advance(Duration::from_secs(31)).await;
+        tokio::task::yield_now().await;
+        assert!(
+            !first.is_finished(),
+            "the Hub cancelled a Windows-sized engine cold start"
+        );
+        assert!(
+            !second.is_finished(),
+            "a gate waiter failed before the shared cold start completed"
+        );
+
+        harness.probe.host_launch_release.add_permits(1);
+        let first = first.await.unwrap().unwrap();
+        let second = second.await.unwrap().unwrap();
+        assert!(matches!(first, OpenLaneOutcome::Running { .. }));
+        assert!(matches!(second, OpenLaneOutcome::Running { .. }));
+        assert_eq!(
+            harness.factory.launches.load(Ordering::Acquire),
+            1,
+            "both Primary Lanes should share one cold-started Host"
+        );
+    }
+
     #[tokio::test]
     async fn failed_lane_start_is_detached_and_the_same_name_can_retry() {
         let harness = harness();
@@ -7524,6 +9259,50 @@ mod tests {
                 .await
                 .is_empty()
         );
+    }
+
+    #[tokio::test]
+    async fn installation_close_all_drains_orphaned_host_authority() {
+        let harness = harness();
+        harness
+            .probe
+            .open_lane_panics_remaining
+            .store(1, Ordering::Release);
+        harness
+            .probe
+            .host_shutdown_failures_remaining
+            .store(1, Ordering::Release);
+        harness
+            .client
+            .open(
+                Some("orphaned-installation-drain"),
+                BrowserIdentityMode::Primary,
+                None,
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(harness.hub.inner.orphaned_host_slots.lock().await.len(), 1);
+        let before = harness.hub.overview().await;
+        assert_eq!(before.managed_host_count, 1);
+        assert_eq!(before.pending_cleanup_count, 1);
+
+        let result = harness.hub.close_all().await.unwrap();
+        assert_eq!(result.closed, 0);
+        assert!(!result.already_closed);
+        assert_eq!(result.remaining_lane_count, 0);
+        assert_eq!(result.remaining_cleanup_count, 0);
+        assert_eq!(result.remaining_managed_host_count, 0);
+        assert!(
+            harness
+                .hub
+                .inner
+                .orphaned_host_slots
+                .lock()
+                .await
+                .is_empty()
+        );
+        let reopened = open(&harness.client, "after-orphaned-drain").await;
+        assert!(harness.client.status(&reopened).await.is_ok());
     }
 
     #[tokio::test]
@@ -7913,6 +9692,125 @@ mod tests {
                 "host_warm_shutdown_finished"
             ]
         );
+    }
+
+    #[tokio::test]
+    async fn installation_close_all_drains_stranded_active_host_and_is_reusable() {
+        let mut config = HubConfig::default();
+        config.headful = true;
+        let harness = harness_with_config(config);
+        let lane_id = open(&harness.client, "stranded-primary").await;
+        let epoch = harness.client.status(&lane_id).await.unwrap().browser_epoch;
+        strand_lane_record(&harness, &lane_id).await;
+
+        let overview = harness.hub.overview().await;
+        assert_eq!(overview.total_lanes, 0);
+        assert_eq!(overview.managed_host_count, 1);
+        assert_eq!(overview.pending_cleanup_count, 0);
+        assert_eq!(overview.hosts.len(), 1);
+        assert_eq!(overview.hosts[0].lane_count, 0);
+        assert_eq!(overview.hosts[0].epoch, epoch);
+        assert!(overview.hosts[0].headful);
+
+        let user_overview = harness.hub.overview_for_user("user-1").await;
+        assert_eq!(user_overview.total_lanes, 0);
+        assert_eq!(user_overview.managed_host_count, 0);
+        assert_eq!(user_overview.pending_cleanup_count, 0);
+        assert!(
+            user_overview.hosts.is_empty(),
+            "a user-scoped overview must not expose unattributed empty Hosts"
+        );
+
+        let result = harness.hub.close_all().await.unwrap();
+        assert_eq!(result.closed, 0);
+        assert!(!result.already_closed);
+        assert_eq!(result.remaining_lane_count, 0);
+        assert_eq!(result.remaining_cleanup_count, 0);
+        assert_eq!(result.remaining_managed_host_count, 0);
+        assert_eq!(harness.probe.host_shutdowns.load(Ordering::Acquire), 1);
+
+        let second = harness.hub.close_all().await.unwrap();
+        assert!(second.already_closed);
+        let reopened = open(&harness.client, "after-installation-drain").await;
+        assert!(harness.client.status(&reopened).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn installation_close_all_serializes_concurrent_open_and_then_reopens() {
+        let harness = harness();
+        open(&harness.client, "drain-barrier-existing").await;
+        harness
+            .probe
+            .block_host_shutdown
+            .store(true, Ordering::Release);
+        let hub = harness.hub.clone();
+        let draining = tokio::spawn(async move { hub.close_all().await });
+        harness.probe.wait_for_host_shutdowns(1).await;
+
+        let error = harness
+            .client
+            .open(
+                Some("drain-barrier-racing-open"),
+                BrowserIdentityMode::Primary,
+                None,
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(error.metadata["platform_drain_in_progress"], true);
+        assert_eq!(
+            harness.factory.launches.load(Ordering::Acquire),
+            1,
+            "the drain barrier must reject a new Host before factory launch"
+        );
+
+        harness.probe.host_shutdown_release.add_permits(1);
+        let result = draining.await.unwrap().unwrap();
+        assert_eq!(result.remaining_lane_count, 0);
+        assert_eq!(result.remaining_cleanup_count, 0);
+        assert_eq!(result.remaining_managed_host_count, 0);
+        harness
+            .probe
+            .block_host_shutdown
+            .store(false, Ordering::Release);
+        let reopened = open(&harness.client, "drain-barrier-reopened").await;
+        assert!(harness.client.status(&reopened).await.is_ok());
+        assert_eq!(harness.factory.launches.load(Ordering::Acquire), 2);
+    }
+
+    #[tokio::test]
+    async fn cancelled_close_all_waiter_does_not_abandon_owned_drain() {
+        let harness = harness();
+        open(&harness.client, "cancelled-drain-existing").await;
+        harness
+            .probe
+            .block_host_shutdown
+            .store(true, Ordering::Release);
+        let hub = harness.hub.clone();
+        let waiter = tokio::spawn(async move { hub.close_all().await });
+        harness.probe.wait_for_host_shutdowns(1).await;
+        waiter.abort();
+        assert!(waiter.await.unwrap_err().is_cancelled());
+
+        harness.probe.host_shutdown_release.add_permits(1);
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                let remaining = harness.hub.remaining_resources().await;
+                if remaining == RemainingResources::default()
+                    && !harness.hub.inner.draining.load(Ordering::Acquire)
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("caller cancellation abandoned the Hub-owned installation drain");
+        harness
+            .probe
+            .block_host_shutdown
+            .store(false, Ordering::Release);
+        let reopened = open(&harness.client, "cancelled-drain-reopened").await;
+        assert!(harness.client.status(&reopened).await.is_ok());
     }
 
     #[tokio::test]
@@ -8373,7 +10271,68 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn first_lane_without_reserved_budget_stays_queued_until_memory_recovers() {
+    async fn pressured_stale_sample_admits_only_one_first_lane_across_owners() {
+        let mut config = HubConfig::default();
+        config.resource_policy.max_open_lanes = 4;
+        let harness = harness_with_config(config);
+        let other = client_for_runtime(&harness, "runtime-pressure-2");
+        harness
+            .hub
+            .update_resource_telemetry(ResourceTelemetry {
+                total_memory_bytes: 64 * crate::resource::GIB,
+                available_memory_bytes: 87 * crate::resource::GIB / 10,
+                logical_cpus: 16,
+                ..Default::default()
+            })
+            .await;
+
+        // Both owners spend the same cached telemetry sample. The Hub's open
+        // gate and scheduler-active accounting must let only the first caller
+        // use the critical-floor allowance, even though the static Lane limit
+        // has room for both.
+        let (first, second) = tokio::join!(
+            harness
+                .client
+                .open(Some("pressure-first-a"), BrowserIdentityMode::Primary, None),
+            other.open(Some("pressure-first-b"), BrowserIdentityMode::Primary, None),
+        );
+        let outcomes = [first.unwrap(), second.unwrap()];
+        assert_eq!(
+            outcomes
+                .iter()
+                .filter(|outcome| {
+                    outcome.lane().lifecycle_state == LaneLifecycleState::Running
+                })
+                .count(),
+            1
+        );
+        assert_eq!(
+            outcomes
+                .iter()
+                .filter(|outcome| outcome.lane().lifecycle_state == LaneLifecycleState::Queued)
+                .count(),
+            1
+        );
+
+        let queued = outcomes
+            .iter()
+            .find(|outcome| outcome.lane().lifecycle_state == LaneLifecycleState::Queued)
+            .unwrap()
+            .lane();
+        let queue = queued.queue.as_ref().unwrap();
+        assert_eq!(queue.reason_code, "system_memory_pressure");
+        assert_eq!(queue.global_active, 1);
+        assert_eq!(queue.global_queued, 1);
+        assert_eq!(harness.factory.launches.load(Ordering::Acquire), 1);
+
+        let overview = harness.hub.overview().await;
+        assert_eq!(overview.pressure_state, ResourcePressureState::Pressured);
+        assert_eq!(overview.capacity.active, 1);
+        assert_eq!(overview.capacity.queued, 1);
+    }
+
+    #[tokio::test]
+    async fn first_lane_below_critical_floor_stays_queued_until_basic_capacity_recovers() {
         let mut config = HubConfig::default();
         config.resource_policy.max_open_lanes = 1;
         let harness = harness_with_config(config);
@@ -8394,6 +10353,7 @@ mod tests {
                 total_memory_bytes: 8 * crate::resource::GIB,
                 available_memory_bytes: policy
                     .reserved_memory_bytes
+                    .saturating_div(2)
                     .saturating_add(policy.lane_cold_start_bytes)
                     .saturating_sub(1),
                 logical_cpus: 4,
@@ -8420,7 +10380,9 @@ mod tests {
             .hub
             .update_resource_telemetry(ResourceTelemetry {
                 total_memory_bytes: 8 * crate::resource::GIB,
-                available_memory_bytes: 6 * crate::resource::GIB,
+                // Still below the full reserve, but now safely above the
+                // critical floor plus one cold-start Lane.
+                available_memory_bytes: policy.reserved_memory_bytes.saturating_sub(1),
                 logical_cpus: 4,
                 ..Default::default()
             })
@@ -8428,6 +10390,10 @@ mod tests {
         assert_eq!(
             other.status(&waiting_lane).await.unwrap().lifecycle_state,
             LaneLifecycleState::Running
+        );
+        assert_eq!(
+            harness.hub.overview().await.pressure_state,
+            ResourcePressureState::Pressured
         );
     }
 
@@ -9246,7 +11212,46 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn failed_lane_cleanup_is_retained_and_retried_by_sweep() {
+    async fn overview_exposes_zero_lane_active_host_and_cleanup_authority() {
+        let mut config = HubConfig::default();
+        config.headful = true;
+        let harness = harness_with_config(config);
+        let lane_id = open(&harness.client, "overview-pending-cleanup").await;
+        let epoch = harness.client.status(&lane_id).await.unwrap().browser_epoch;
+        harness
+            .probe
+            .block_lane_close
+            .store(true, Ordering::Release);
+        let hub = harness.hub.clone();
+        let closing_lane = lane_id.clone();
+        let close = tokio::spawn(async move { hub.close_lane(&closing_lane).await });
+        harness.probe.wait_for_lane_closes(1).await;
+
+        let overview = harness.hub.overview().await;
+        assert_eq!(overview.total_lanes, 0);
+        assert_eq!(overview.managed_host_count, 1);
+        assert_eq!(overview.pending_cleanup_count, 1);
+        assert_eq!(overview.hosts.len(), 1);
+        assert_eq!(overview.hosts[0].lane_count, 0);
+        assert_eq!(overview.hosts[0].epoch, epoch);
+        assert!(overview.hosts[0].headful);
+        let owner = harness.hub.overview_for_user("user-1").await;
+        assert_eq!(owner.managed_host_count, 0);
+        assert_eq!(owner.pending_cleanup_count, 1);
+        assert!(owner.hosts.is_empty());
+        let foreign = harness.hub.overview_for_user("user-2").await;
+        assert_eq!(foreign.managed_host_count, 0);
+        assert_eq!(foreign.pending_cleanup_count, 0);
+
+        harness.probe.lane_close_release.add_permits(1);
+        close.await.unwrap().unwrap();
+        let final_overview = harness.hub.overview().await;
+        assert_eq!(final_overview.managed_host_count, 0);
+        assert_eq!(final_overview.pending_cleanup_count, 0);
+    }
+
+    #[tokio::test]
+    async fn failed_last_lane_cleanup_is_resolved_by_authoritative_host_shutdown() {
         let harness = harness();
         let lane_id = open(&harness.client, "retry-cleanup").await;
         harness
@@ -9254,21 +11259,13 @@ mod tests {
             .lane_close_failures_remaining
             .store(1, Ordering::Release);
 
-        let error = harness.hub.close_lane(&lane_id).await.unwrap_err();
-        assert_eq!(error.metadata["cleanup_pending"], true);
+        let result = harness.hub.close_lane(&lane_id).await.unwrap();
+        assert_eq!(result.closed, 1);
+        assert!(!result.already_closed);
+        assert_eq!(result.remaining_lane_count, 0);
+        assert_eq!(result.remaining_cleanup_count, 0);
+        assert_eq!(result.remaining_managed_host_count, 0);
         assert!(harness.hub.list_lanes().await.is_empty());
-        assert_eq!(
-            harness
-                .hub
-                .inner
-                .pending_lane_cleanups
-                .lock()
-                .await
-                .len(),
-            1
-        );
-
-        harness.hub.sweep().await.unwrap();
         assert!(
             harness
                 .hub
@@ -9278,11 +11275,124 @@ mod tests {
                 .await
                 .is_empty()
         );
-        assert_eq!(harness.probe.lane_closes.load(Ordering::Acquire), 2);
+        assert_eq!(harness.probe.lane_closes.load(Ordering::Acquire), 1);
+        assert_eq!(harness.probe.host_shutdowns.load(Ordering::Acquire), 1);
+        harness.hub.sweep().await.unwrap();
+        assert_eq!(harness.probe.host_shutdowns.load(Ordering::Acquire), 1);
     }
 
     #[tokio::test]
-    async fn lane_close_panic_completes_waiter_and_pending_cleanup_can_retry() {
+    async fn failed_lane_cleanup_on_shared_primary_host_never_kills_sibling() {
+        let harness = harness();
+        let first = open(&harness.client, "shared-cleanup-a").await;
+        let second = open(&harness.client, "shared-cleanup-b").await;
+        let second_epoch = harness.client.status(&second).await.unwrap().browser_epoch;
+        harness
+            .probe
+            .lane_close_failures_remaining
+            .store(1, Ordering::Release);
+
+        let error = tokio::time::timeout(Duration::from_secs(1), harness.hub.close_lane(&first))
+            .await
+            .expect("shared-Lane close did not return its terminal cleanup error")
+            .unwrap_err();
+        assert_eq!(error.metadata["cleanup_pending"], true);
+        assert_eq!(error.metadata["remaining_lane_count"], 0);
+        assert_eq!(error.metadata["remaining_cleanup_count"], 1);
+        assert_eq!(error.metadata["remaining_managed_host_count"], 0);
+        assert_eq!(
+            harness.probe.host_shutdowns.load(Ordering::Acquire),
+            0,
+            "a failed target cleanup must never kill a shared Host"
+        );
+        assert_eq!(
+            harness.client.status(&second).await.unwrap().browser_epoch,
+            second_epoch
+        );
+        harness.probe.releases.add_permits(1);
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            harness.client.execute(&second, navigate()),
+        )
+        .await
+        .expect("sibling execution stayed blocked")
+        .expect("the sibling Lane must remain usable");
+
+        let foreign_overview = harness.hub.overview_for_user("user-2").await;
+        assert_eq!(foreign_overview.managed_host_count, 0);
+        assert_eq!(foreign_overview.pending_cleanup_count, 0);
+        let owner_overview = harness.hub.overview_for_user("user-1").await;
+        assert_eq!(owner_overview.managed_host_count, 1);
+        assert_eq!(owner_overview.pending_cleanup_count, 1);
+
+        let drained = tokio::time::timeout(Duration::from_secs(2), harness.hub.close_all())
+            .await
+            .expect("installation drain hung after shared target cleanup failure")
+            .unwrap();
+        assert_eq!(drained.closed, 1);
+        assert_eq!(drained.remaining_lane_count, 0);
+        assert_eq!(drained.remaining_cleanup_count, 0);
+        assert_eq!(drained.remaining_managed_host_count, 0);
+        assert_eq!(harness.probe.host_shutdowns.load(Ordering::Acquire), 1);
+    }
+
+    #[tokio::test]
+    async fn scoped_close_result_does_not_expose_foreign_global_resources() {
+        let harness = harness();
+        let own = open(&harness.client, "scoped-close-own").await;
+        let foreign = open_for_user(
+            &harness,
+            "user-2",
+            "runtime-scoped-close-foreign",
+            "scoped-close-foreign",
+            BrowserIdentityMode::Primary,
+        )
+        .await;
+
+        let result = harness.hub.close_lane(&own).await.unwrap();
+        assert_eq!(result.closed, 1);
+        assert_eq!(result.remaining_lane_count, 0);
+        assert_eq!(result.remaining_cleanup_count, 0);
+        assert_eq!(result.remaining_managed_host_count, 0);
+        assert_eq!(harness.hub.overview().await.total_lanes, 1);
+        assert!(harness.hub.lane_snapshot_unchecked(&foreign).await.is_some());
+    }
+
+    #[tokio::test]
+    async fn failed_last_lane_cleanup_and_failed_host_shutdown_retains_authority() {
+        let harness = harness();
+        let lane_id = open(&harness.client, "failed-target-and-host").await;
+        harness
+            .probe
+            .lane_close_failures_remaining
+            .store(1, Ordering::Release);
+        harness
+            .probe
+            .host_shutdown_failures_remaining
+            .store(1, Ordering::Release);
+
+        let error = harness.hub.close_lane(&lane_id).await.unwrap_err();
+        assert_eq!(error.metadata["cleanup_pending"], true);
+        assert_eq!(error.metadata["remaining_lane_count"], 0);
+        assert_eq!(error.metadata["remaining_cleanup_count"], 1);
+        assert_eq!(error.metadata["remaining_managed_host_count"], 0);
+        let overview = harness.hub.overview().await;
+        assert!(overview.pending_cleanup_count > 0);
+        assert_eq!(overview.managed_host_count, 1);
+        assert_eq!(harness.probe.host_shutdowns.load(Ordering::Acquire), 1);
+
+        let drained = tokio::time::timeout(Duration::from_secs(2), harness.hub.close_all())
+            .await
+            .expect("installation drain hung retrying failed Host shutdown")
+            .unwrap();
+        assert_eq!(drained.remaining_lane_count, 0);
+        assert_eq!(drained.remaining_cleanup_count, 0);
+        assert_eq!(drained.remaining_managed_host_count, 0);
+        assert_eq!(harness.probe.host_shutdowns.load(Ordering::Acquire), 2);
+    }
+
+    #[tokio::test]
+    async fn lane_close_panic_is_resolved_by_authoritative_host_shutdown() {
         let harness = harness();
         let lane_id = open(&harness.client, "panic-cleanup").await;
         harness
@@ -9290,27 +11400,15 @@ mod tests {
             .lane_close_panics_remaining
             .store(1, Ordering::Release);
 
-        let error = tokio::time::timeout(Duration::from_secs(1), harness.hub.close_lane(&lane_id))
+        let result = tokio::time::timeout(Duration::from_secs(1), harness.hub.close_lane(&lane_id))
             .await
             .expect("driver.close panic left the close caller pending")
-            .unwrap_err();
-        assert_eq!(error.code, BrowserErrorCode::BrowserUnavailable);
-        assert_eq!(error.metadata["cleanup_pending"], true);
-        assert_eq!(error.metadata["cleanup_task_failed"], true);
-        assert_eq!(error.metadata["task_panicked"], true);
+            .unwrap();
+        assert_eq!(result.closed, 1);
+        assert_eq!(result.remaining_lane_count, 0);
+        assert_eq!(result.remaining_cleanup_count, 0);
+        assert_eq!(result.remaining_managed_host_count, 0);
         assert!(harness.hub.list_lanes().await.is_empty());
-        assert_eq!(
-            harness
-                .hub
-                .inner
-                .pending_lane_cleanups
-                .lock()
-                .await
-                .len(),
-            1
-        );
-
-        harness.hub.sweep().await.unwrap();
         assert!(
             harness
                 .hub
@@ -9320,13 +11418,14 @@ mod tests {
                 .await
                 .is_empty()
         );
-        assert_eq!(harness.probe.lane_closes.load(Ordering::Acquire), 2);
+        assert_eq!(harness.probe.lane_closes.load(Ordering::Acquire), 1);
+        assert_eq!(harness.probe.host_shutdowns.load(Ordering::Acquire), 1);
         assert_eq!(
             harness
                 .probe
                 .lane_close_completions
                 .load(Ordering::Acquire),
-            1
+            0
         );
     }
 
@@ -9363,6 +11462,11 @@ mod tests {
                 .lane_close_completions
                 .load(Ordering::Acquire),
             0
+        );
+        assert_eq!(
+            harness.probe.host_shutdowns.load(Ordering::Acquire),
+            0,
+            "a waiter timeout must not race the still-running target close by killing its Host"
         );
 
         let cleanup_id = harness

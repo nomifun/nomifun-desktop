@@ -29,17 +29,17 @@ NomiFun agent 内置/接入两项可选的系统级能力：
 - **浏览器来源**：系统 Chrome/Edge 可执行文件或 managed source；
 - **显示模式**：应用级默认可见策略。"后台静默"（新安装默认）让普通 Primary
   Agent 任务以 Chromium `--headless=new` 静默运行；"前台可见"是用户显式选择的
-  默认前台策略，Primary Host 以真实窗口启动。普通 Agent/模型无权覆盖该偏好；
-  更改在应用重启后生效。任一模式下，用户都可在 Browser 管理页对 running
-  Primary 显式"前台打开"；
+  默认前台策略，Primary Host 以真实窗口启动。安装 owner 可在此处或 `/browser`
+  修改；后端会立即应用并持久化已确认的更改。普通 Agent/模型无权覆盖该偏好；
 - **资源策略**：Automatic、Resource saving、High concurrency；
 - 高级资源上限（仅在需要诊断或精细调优时修改）。
 
 右侧边栏的 **Browser** 页面（`/browser`）只展示 running/queued Lane 的状态、
 容量、队列、身份、owner 与生命周期，并在权限允许时关闭单个 Lane、某个
 conversation 的 Lane 或全部 Lane。对 running Primary Lane，它还提供“前台打开”，
-将该 Lane 切换到 headful 替代 Host。该页面仍不嵌入页面，也不提供页面输入、
-tab 控制、用户接管或地址导航。
+以及“转到后台”；它们只改变当前共享 Primary Host，不会修改全局默认值。安装
+owner 也可在该页面实时修改默认值。该页面仍不嵌入页面，也不提供页面输入、tab
+控制、用户接管或地址导航。
 
 ### 2. 会话级
 
@@ -71,8 +71,8 @@ max_screenshot_edge = 1568   # 截图长边像素上限
 [tools.browser]
 enabled = true
 allowed_origins = []         # 可选 origin 白名单；空=全放行，仅纵深防御
-# 注：普通 Primary Agent 任务使用 Chromium --headless=new；仅用户在 Browser
-# 管理页显式“前台打开”时，才创建 headful 替代 Host。
+# 可信全局默认值为 headless；安装 owner 可实时改为 external。
+# 对 Lane 的前台/后台切换不会改写该默认值。
 # browser_path / idle_timeout_secs / 私有 headless ownership 均为旧兼容字段，
 # 不能绕过 BrowserSessionHub 的身份、容量或生命周期策略。
 ```
@@ -81,6 +81,11 @@ allowed_origins = []         # 可选 origin 白名单；空=全放行，仅纵�
 managed source，无需 Node/npm/Playwright。来源只决定二进制；进程始终由 NomiFun
 托管并应用隔离 profile，绝不读取或共用用户真实 Chrome/Edge profile；同一个
 user-data directory 也不会被两个存活 Chromium 同时打开。
+
+对稳定受管 profile 完成可证明的正常关闭后，NomiFun 会删除确属该次已完成启动的
+ownership marker 和 `DevToolsActivePort`，并保留 cookie、站点存储及其他稳定
+profile 数据。若无法重新验证精确 ownership 或进程树已经退出，清理会保留这些
+运行时文件供恢复，并把关闭报告为未完成，而不是猜测成功。
 
 ## 构建形态（feature 门控）
 
@@ -99,11 +104,12 @@ user-data directory 也不会被两个存活 Chromium 同时打开。
 - 同一 Lane 内的导航、观察和动作严格串行；不同 Lane 可以并行，target、frame、
   ref、tab、download 和 cancellation 状态互不串线。
 - 普通交互式浏览默认使用 **Primary shared live identity**。多个 Primary Lane
-  在普通 Agent 任务中使用 Chromium `--headless=new`，不创建操作系统浏览器窗口；
-  显式“前台打开”会安全地用应用托管 profile 创建 headful 替代 Host。它们共享
-  cookies、站点存储和
-  其他 profile-backed 身份状态，但不共享活动 target、frame、ref、操作 gate
-  或下载归属。
+  的全局显示默认值为 `headless`，普通 Agent 任务因此使用 Chromium
+  `--headless=new`，不创建操作系统浏览器窗口；安装 owner 可显式把实时、持久
+  默认值改为 `external`。Lane owner 也可只前台或后台切换当前 Primary Host，
+  而不改变该默认值。多个 Primary Lane 共享 cookies、站点存储和其他
+  profile-backed 身份状态，但不共享活动 target、frame、ref、操作 gate 或下载
+  归属。
 - 公开读取默认使用 **Anonymous crawl**，不携带 Primary cookies/站点存储。
   有界只读认证扩展可使用 **Authenticated replica**，副本变更不会自动写回
   Primary；可能修改登录或持久账户状态的动作必须回到 Primary。
@@ -112,8 +118,12 @@ user-data directory 也不会被两个存活 Chromium 同时打开。
 
 容量有明确上限。超过安全预算的 Lane 会进入可取消队列，返回
 `browser_capacity_queued` 或 `system_memory_pressure`，并携带队列位置、原因、
-建议并发和重试延迟。此时应等待、复用已有 Lane、降低并发，或让批量公开读取使用
-`browser_crawl_many`；不要尝试额外启动浏览器绕过限制。
+建议并发和重试延迟。`browser_open` 会成功报告 Lane 已进入队列，但导航、观察、
+页面 `wait` 等普通 action 在 Lane 变为 `running` 前不会派发，而会返回显式可重试
+工具错误：`ok: false`、`dispatched: false` 和 `browser_capacity_queued`。应按
+`retry_delay_ms` 调用 `browser_status`，确认 `running` 后再重试原 action。不要用
+页面 `wait` 等待 Lane，也不要尝试额外启动浏览器绕过限制；还可复用已有 running
+Lane、降低并发，或让批量公开读取使用 `browser_crawl_many`。
 
 ## Browser 工具与生命周期
 
@@ -128,23 +138,32 @@ user-data directory 也不会被两个存活 Chromium 同时打开。
 
 关闭 Lane 只会让相关浏览器调用收到类型化错误，不会关闭 conversation 或
 AgentExecution。attempt 完成/取消、runtime 终止、conversation 删除、远程连接断开、
-capability 过期和应用退出都会撤销 owner lease 并触发权威清理。Native Agent turn
-正常完成或取消时也会关闭该 owner 的 Lane；完成 target 清理后，若这是 Host 的
-最后一个 Lane，Host 会立即退出，不等待 idle expiry 或周期 sweep。
+capability 过期和应用退出都会撤销 owner lease 并触发权威 drain。Native Agent
+turn 正常完成或取消时会 drain 该 owner 的 Lane；session/conversation 关闭会
+drain 对应 Lane 和 target cleanup，再关闭因此变空的 Host。应用退出与安装级
+“全局关闭所有浏览器”会阻止新 open，同时 drain 所有 Lane、待处理 cleanup 和
+受管 Host。
 
-### 显式前台打开 running Primary Lane
+只有响应同时给出三项权威零值，UI 才确认安装级“全局关闭所有浏览器”成功：
+`remaining_lane_count`、`remaining_cleanup_count` 和
+`remaining_managed_host_count`。仅请求成功或 `closed` 非零都不能证明清理完成。
+
+### 切换 Primary 可见性
 
 需要查看真实受管浏览器时，进入 `/browser`，选择身份为 Primary、状态为
-`running` 的 Lane，再点击“前台打开”。普通 Host 是真正的 headless 进程；Hub 会
-安全关闭它、递增 browser epoch，并用同一应用托管 profile 启动 headful 替代
-Host。系统会尽力恢复 Lane 的活动 URL，但旧 target/frame/ref 已失效；应刷新库存
-并 fresh observe 后再继续。该操作不会改变 Lane 所有权，也不会恢复内嵌 preview、
-用户接管或页面输入表面。queued、failed 和非 Primary Lane 不能前台打开。
+`running` 的 Lane，再点击“前台打开”。这是当前 Primary Host 的一次性显示请求，
+不会改变全局默认值；“转到后台”是其对称操作。Primary Lane 共用一个 canonical
+Host，因此只要 headless/headful 模式需要改变，Hub 都会以新 browser epoch 安全
+替换整个 Host，并重新绑定其上的所有 live Primary Lane。安装 owner 改变全局
+默认值、且 running Primary Host 模式不同时，也使用相同转换。系统会尽力恢复各
+Lane 的活动 URL，但旧 target/frame/ref 已失效；应刷新库存并 fresh observe 后再
+继续。该操作不会改变 Lane 所有权，也不会恢复内嵌 preview、用户接管或页面输入
+表面。queued、failed 和非 Primary Lane 不能使用这些可见性操作。
 
-对应的认证管理接口为 `POST /api/browser/lanes/{id}/foreground`；改变状态的请求
-继续使用现有 CSRF 防护。它不是 Agent 可调用的 Browser action。创建 Primary
-登录 Lane 也不会绕过该规则或自动打开窗口；前台打开仍须由用户在 Browser 页面
-显式触发。
+对应的认证管理接口为 `POST /api/browser/lanes/{id}/foreground` 和
+`POST /api/browser/lanes/{id}/background`；改变状态的请求继续使用现有 CSRF
+防护。它们不是 Agent 可调用的 Browser action。安装 owner 通过设置页和
+`/browser` 使用的 `GET`/`PUT /api/browser/display-mode` 管理持久默认值。
 
 ## macOS 权限
 

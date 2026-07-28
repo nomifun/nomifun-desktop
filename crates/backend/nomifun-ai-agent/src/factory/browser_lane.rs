@@ -41,10 +41,7 @@ pub struct TrustedBrowserRuntimeContext {
 pub trait BrowserOwnerLeaseGuard: Send + Sync {
     fn revoke(&self);
 
-    async fn revoke_and_wait(&self) -> Result<(), AppError> {
-        self.revoke();
-        Ok(())
-    }
+    async fn revoke_and_wait(&self) -> Result<(), AppError>;
 }
 
 struct BrowserLaneBindingInner {
@@ -131,7 +128,11 @@ impl BrowserLaneBinding {
                 // is not published over a live Chromium Lane. The
                 // result-bearing `revoke_and_wait` remains the teardown proof.
                 if error.code == BrowserErrorCode::OwnerLeaseExpired {
-                    return Ok(());
+                    // An expired lease proves that revocation started, not
+                    // that its Chromium cleanup finished. Join the concrete
+                    // guard's exact-owner flight and propagate any failure or
+                    // timeout so no terminal event can overtake cleanup.
+                    return self.inner.revoke_and_wait().await;
                 }
                 Err(AppError::Internal(format!(
                     "failed to close Native Nomi browser lanes at the turn boundary: {error}"

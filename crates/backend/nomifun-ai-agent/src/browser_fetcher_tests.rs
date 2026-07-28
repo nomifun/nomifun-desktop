@@ -445,7 +445,7 @@ async fn shutdown_closes_runtime_and_revokes_owner_lease() {
 }
 
 #[tokio::test]
-async fn failed_shutdown_retains_exact_owner_and_retries_hub_cleanup() {
+async fn failed_last_lane_cleanup_is_resolved_by_authoritative_host_shutdown() {
     let harness = Harness::new(HubConfig::default());
     let fetcher = harness.fetcher();
     fetcher
@@ -458,36 +458,35 @@ async fn failed_shutdown_retains_exact_owner_and_retries_hub_cleanup() {
         .close_failures_remaining
         .store(1, Ordering::Release);
 
-    let first_error = fetcher
-        .shutdown()
-        .await
-        .expect_err("the first retained target cleanup must fail");
-    assert_eq!(first_error.code, BrowserErrorCode::BrowserUnavailable);
-    assert_eq!(harness.probe.lane_closes.load(Ordering::Acquire), 1);
-    assert!(
-        harness.hub.list_lanes().await.is_empty(),
-        "failed cleanup must detach the lane while retaining driver authority"
-    );
-    assert_eq!(
-        fetcher.owner_lease_id().as_ref(),
-        Some(&lease_id),
-        "failed cleanup must preserve the exact owner id for a later retry"
-    );
-
     fetcher
         .shutdown()
         .await
-        .expect("second shutdown must retry the Hub retained cleanup");
-    assert_eq!(harness.probe.lane_closes.load(Ordering::Acquire), 2);
+        .expect("Host shutdown is authoritative after the last target close fails");
+    assert_eq!(harness.probe.lane_closes.load(Ordering::Acquire), 1);
+    assert!(
+        harness.hub.list_lanes().await.is_empty(),
+        "the exact owner Lane must be detached"
+    );
     assert!(fetcher.owner_lease_id().is_none());
+    let overview = harness.hub.overview().await;
+    assert_eq!(overview.total_lanes, 0);
+    assert_eq!(overview.pending_cleanup_count, 0);
+    assert_eq!(overview.managed_host_count, 0);
+    assert_eq!(harness.probe.host_shutdowns.load(Ordering::Acquire), 1);
     assert!(
         harness.hub.sweep().await.is_ok(),
-        "successful retry must drain the retained cleanup queue"
+        "authoritative Host shutdown must drain retained target authority"
     );
     assert_eq!(
         harness.hub.renew_owner_lease(&lease_id).unwrap_err().code,
         BrowserErrorCode::OwnerLeaseExpired
     );
+    fetcher
+        .shutdown()
+        .await
+        .expect("repeated shutdown must remain idempotent");
+    assert_eq!(harness.probe.lane_closes.load(Ordering::Acquire), 1);
+    assert_eq!(harness.probe.host_shutdowns.load(Ordering::Acquire), 1);
 }
 
 #[test]

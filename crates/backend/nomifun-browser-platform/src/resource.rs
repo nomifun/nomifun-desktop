@@ -357,8 +357,25 @@ impl ResourcePolicy {
         let browser_limit = ((total as f64) * self.max_browser_memory_ratio) as u64;
         let predicted_lane_bytes = predicted_lane_cost(self, workload);
         let system_headroom = telemetry.available_memory_bytes.saturating_sub(reserved);
+        // Preserve one global basic-availability Lane while the machine is
+        // pressured but not critical. Requiring the full reserve before the
+        // very first Lane can start makes Browser Use completely unavailable
+        // on large-memory machines that still have several GiB free (for
+        // example, 64 GiB total / 8.7 GiB available). Expansion Lanes continue
+        // to require the full reserve, and once any Lane owns capacity the
+        // emergency allowance is closed until telemetry recovers.
+        let critical_system_reserve = reserved / 2;
+        let first_lane_system_headroom = if workload.active_lanes == 0 {
+            telemetry
+                .available_memory_bytes
+                .saturating_sub(critical_system_reserve)
+        } else {
+            system_headroom
+        };
         let browser_headroom = browser_limit.saturating_sub(telemetry.chromium_rss_bytes);
-        let admission_headroom = system_headroom.min(browser_headroom);
+        let first_lane_admission_headroom =
+            first_lane_system_headroom.min(browser_headroom);
+        let expansion_lane_admission_headroom = system_headroom.min(browser_headroom);
         // Heavy operations can allocate between samples. Keep a bounded
         // transient reserve so a Lane promotion does not spend their entire
         // safety margin using stale RSS.
@@ -398,8 +415,9 @@ impl ResourcePolicy {
             .gpu_pressure
             .filter(|pressure| pressure.is_finite())
             .is_some_and(|pressure| pressure >= 0.9);
-        let first_budget_available = admission_headroom >= first_lane_budget;
-        let expansion_budget_available = admission_headroom >= expansion_lane_budget;
+        let first_budget_available = first_lane_admission_headroom >= first_lane_budget;
+        let expansion_budget_available =
+            expansion_lane_admission_headroom >= expansion_lane_budget;
         let mut pressured = !critical
             && (telemetry.available_memory_bytes < reserved
                 || telemetry.chromium_rss_bytes > browser_limit.saturating_mul(85) / 100
@@ -594,12 +612,13 @@ mod tests {
     }
 
     #[test]
-    fn first_lane_budget_shortfall_has_system_memory_pressure_reason() {
+    fn first_lane_below_critical_floor_has_system_memory_pressure_reason() {
         let policy = ResourcePolicy::automatic(8 * GIB, 8);
         let decision = policy.decide(&ResourceTelemetry {
             total_memory_bytes: 8 * GIB,
             available_memory_bytes: policy
                 .reserved_memory_bytes
+                .saturating_div(2)
                 .saturating_add(policy.lane_cold_start_bytes)
                 .saturating_sub(1),
             logical_cpus: 8,
@@ -615,6 +634,40 @@ mod tests {
         );
         assert_eq!(
             decision.expansion_lane_reason_code,
+            Some("system_memory_pressure")
+        );
+    }
+
+    #[test]
+    fn pressured_machine_admits_exactly_one_basic_availability_lane() {
+        let policy = ResourcePolicy::automatic(64 * GIB, 16);
+        let telemetry = ResourceTelemetry {
+            total_memory_bytes: 64 * GIB,
+            available_memory_bytes: 87 * GIB / 10,
+            logical_cpus: 16,
+            ..Default::default()
+        };
+
+        let first = policy.decide(&telemetry);
+        assert_eq!(first.state, ResourcePressureState::Pressured);
+        assert!(first.admit_first_lane);
+        assert!(!first.admit_expansion_lane);
+        assert_eq!(first.recommended_concurrency, 1);
+
+        let after_basic_lane = policy.decide_with_workload(
+            &telemetry,
+            &ResourceWorkload {
+                active_lanes: 1,
+                primary_lanes: 1,
+                active_lane_ewma_bytes: policy.lane_cold_start_bytes,
+                ..Default::default()
+            },
+        );
+        assert_eq!(after_basic_lane.state, ResourcePressureState::Pressured);
+        assert!(!after_basic_lane.admit_first_lane);
+        assert!(!after_basic_lane.admit_expansion_lane);
+        assert_eq!(
+            after_basic_lane.first_lane_reason_code,
             Some("system_memory_pressure")
         );
     }

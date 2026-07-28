@@ -69,18 +69,23 @@ export type ConfigKeyMap = {
   'agent.computerUse': boolean | undefined;
   // Browser control (browser-use): gates the nomi engine's built-in browser
   // tools (native CDP engine). ON by default on browser-use (desktop) builds; it
-  // opens the user's system Chrome / Edge in a visible, isolated-profile window.
+  // opens an isolated managed Chrome / Edge instance. Routine work is silent
+  // and headless unless the installation owner explicitly selects `external`.
   // Read by the backend agent factory per session.
   'agent.browserUse': boolean | undefined;
   // Application-level browser default visibility policy. New installs persist
   // `headless` (silent Agent browsing); the user may explicitly choose
-  // `external` (default-visible Primary). Historical `embedded` and legacy
-  // `agent.browserUse.silent` values are accepted only by the migration
-  // compatibility helper. Agent tool input can never select the mode.
+  // `external` (default-visible Primary). Historical `embedded`, unversioned,
+  // and legacy `agent.browserUse.silent` state all fail closed to `headless`.
+  // Agent tool input can never select the mode.
   'agent.browserUse.displayMode': BrowserDisplayMode | undefined;
+  // Lineage marker for an explicit visibility policy. Only v2 plus a valid
+  // displayMode may be shown as a trusted local fallback; the live owner API
+  // remains authoritative.
+  'agent.browserUse.displayModeVersion': 2 | undefined;
   // Legacy compatibility read only. New settings code must not write this key.
-  // Migration maps silent=true to headless and silent=false to external;
-  // elastic crawl/replica/isolated hosts choose headless execution internally.
+  // Visibility migration no longer derives an external window from this key.
+  // Elastic crawl/replica/isolated hosts choose headless execution internally.
   'agent.browserUse.silent': boolean | undefined;
   // Browser source (browser-use sub-setting, orthogonal to silent): 'managed' =
   // bundled/downloaded Chrome for Testing; 'system' (default) = the user's

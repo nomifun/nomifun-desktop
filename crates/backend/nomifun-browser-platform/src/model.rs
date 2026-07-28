@@ -185,6 +185,24 @@ pub enum BrowserIdentityMode {
     Isolated,
 }
 
+/// Requested display policy for the canonical Primary browser Host.
+///
+/// Crawl/replica Hosts remain headless regardless of this value. Switching a
+/// running Primary Host is an explicit lifecycle transition: the Hub replaces
+/// the process and rebinds every live Lane under a fresh browser epoch.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BrowserVisibility {
+    Headless,
+    Headful,
+}
+
+impl BrowserVisibility {
+    pub const fn is_headful(self) -> bool {
+        matches!(self, Self::Headful)
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LaneLifecycleState {
@@ -272,6 +290,8 @@ pub struct BrowserHostSnapshot {
     pub host_id: BrowserHostId,
     pub state: HostLifecycleState,
     pub epoch: u64,
+    #[serde(default)]
+    pub headful: bool,
     pub identity_mode: BrowserIdentityMode,
     pub lane_count: usize,
     pub rss_bytes: Option<u64>,
@@ -294,6 +314,10 @@ pub struct BrowserOverview {
     pub running_lanes: usize,
     pub queued_lanes: usize,
     pub total_lanes: usize,
+    #[serde(default)]
+    pub managed_host_count: usize,
+    #[serde(default)]
+    pub pending_cleanup_count: usize,
     pub pressure_state: ResourcePressureState,
     pub capacity: BrowserCapacitySnapshot,
     pub hosts: Vec<BrowserHostSnapshot>,
@@ -352,6 +376,12 @@ pub struct BrowserInventoryEvent {
 pub struct CloseResult {
     pub closed: usize,
     pub already_closed: bool,
+    #[serde(default)]
+    pub remaining_lane_count: usize,
+    #[serde(default)]
+    pub remaining_cleanup_count: usize,
+    #[serde(default)]
+    pub remaining_managed_host_count: usize,
 }
 
 #[cfg(test)]

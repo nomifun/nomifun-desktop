@@ -43,7 +43,10 @@ use nomifun_browser_platform::CloseResult;
 use nomifun_secret::SecretStore;
 
 use crate::extract::{self, ExtractModel, ExtractModelRef, ExtractSchema};
-use crate::managed::{BrowserLaneClientPort, execute_crawl_many_input};
+use crate::managed::{
+    BrowserLaneClientPort, execute_crawl_many_input, lane_next_action,
+    lane_operation_not_dispatched_result,
+};
 use crate::redline::{self, ActionContext, ApprovalTier};
 
 /// **P7B SoM cap**: max clickable elements to label on a Set-of-Marks overlay. Beyond this,
@@ -632,8 +635,10 @@ impl BrowserTool {
         self.engine = Mutex::new(None);
         self.description.push_str(
             "\n\nBROWSER PLATFORM: This tool is bound to the application's shared Browser \
-             Session Hub. `queued`/`pressured` means wait, reuse a Lane, or lower concurrency; \
-             never start another browser to bypass capacity. Existing actions accept optional \
+             Session Hub. For a `queued`/`pressured` Lane, wait for `retry_delay_ms` outside the \
+             Browser tool and call `browser_status`; never use the page `wait` action or start \
+             another browser to bypass capacity. Reuse a running Lane or lower concurrency. \
+             Existing actions accept optional \
              `lane_id`; use browser_open/browser_fork/browser_list/browser_status/browser_close/\
              browser_close_all/browser_crawl_many to manage Lanes.",
         );
@@ -1643,13 +1648,7 @@ impl BrowserTool {
             Err(error) => return platform_error_result("Resolving the browser Lane failed", error),
         };
         if lane.lifecycle_state != LaneLifecycleState::Running {
-            return ToolResult::text(pretty_json(&json!({
-                "ok": true,
-                "action": action,
-                "dispatched": false,
-                "lane": public_lane_json(&lane),
-                "next_action": lane_next_action(&lane),
-            })));
+            return lane_operation_not_dispatched_result(action, &lane);
         }
 
         let operation = BrowserOperation {
@@ -3038,21 +3037,6 @@ fn public_lane_json(lane: &BrowserLaneSnapshot) -> Value {
     })
 }
 
-fn lane_next_action(lane: &BrowserLaneSnapshot) -> &'static str {
-    match lane.lifecycle_state {
-        LaneLifecycleState::Queued => {
-            "Wait for the Lane to become running, reuse an existing Lane, or lower concurrency."
-        }
-        LaneLifecycleState::Starting => "Wait for the Lane to finish starting, then retry.",
-        LaneLifecycleState::Running => "Use the returned lane_id for browser operations.",
-        LaneLifecycleState::Frozen => "Reuse an active Lane or wait for capacity to recover.",
-        LaneLifecycleState::Stopping => "Open a replacement Lane only if more work is required.",
-        LaneLifecycleState::Failed => {
-            "Inspect error_code and recoverable; open a replacement Lane when advised."
-        }
-    }
-}
-
 fn public_platform_error_json(error: &BrowserPlatformError) -> Value {
     json!({
         "code": error.code,
@@ -3974,6 +3958,7 @@ pub(crate) mod tests {
             Ok(CloseResult {
                 closed,
                 already_closed: closed == 0,
+                ..Default::default()
             })
         }
 
@@ -3984,6 +3969,7 @@ pub(crate) mod tests {
             Ok(CloseResult {
                 closed,
                 already_closed: closed == 0,
+                ..Default::default()
             })
         }
     }
@@ -3995,6 +3981,83 @@ pub(crate) mod tests {
 
     fn managed_tool(client: Arc<FakeLaneClient>) -> BrowserTool {
         managed_tool_for_contract(client)
+    }
+
+    fn queued_lane(client: &FakeLaneClient) -> BrowserLaneSnapshot {
+        let mut lane = client.snapshot("default", BrowserIdentityMode::Primary);
+        lane.lifecycle_state = LaneLifecycleState::Queued;
+        lane.browser_epoch = 0;
+        lane.queue = Some(nomifun_browser_platform::QueueMetadata {
+            request_id: nomifun_browser_platform::QueueRequestId::new(),
+            position: 1,
+            recommended_concurrency: 1,
+            owner_active: 0,
+            owner_queued: 1,
+            global_active: 0,
+            global_queued: 1,
+            retry_delay_ms: 1_000,
+            reason_code: "system_memory_pressure".to_owned(),
+        });
+        lane
+    }
+
+    #[tokio::test]
+    async fn managed_queued_navigate_and_wait_are_protocol_errors_without_dispatch() {
+        let client = Arc::new(FakeLaneClient::default());
+        let lane = queued_lane(&client);
+        let lane_id = lane.lane_id.clone();
+        client.lanes.lock().unwrap().push(lane);
+        let tool = managed_tool(Arc::clone(&client));
+
+        for input in [
+            json!({
+                "action": "navigate",
+                "url": "https://example.test/",
+            }),
+            json!({
+                "action": "wait",
+                "ms": 5_000,
+            }),
+        ] {
+            let action = input["action"].as_str().unwrap().to_owned();
+            let result = tool.execute(input).await;
+            assert!(
+                result.is_error,
+                "{action} must reach Nomi as ToolStatus::Error: {}",
+                result.content
+            );
+            let value: Value = serde_json::from_str(&result.content).unwrap();
+            assert_eq!(value["ok"], false);
+            assert_eq!(value["action"], action);
+            assert_eq!(value["dispatched"], false);
+            assert_eq!(value["lane"]["lane_id"], lane_id.as_str());
+            assert_eq!(value["error"]["code"], "browser_capacity_queued");
+            assert_eq!(
+                value["error"]["metadata"]["reason_code"],
+                "system_memory_pressure"
+            );
+            assert_eq!(value["retry_after_ms"], 1_000);
+        }
+
+        assert!(
+            client.operations.lock().unwrap().is_empty(),
+            "queued navigate/wait must never reach the browser engine"
+        );
+
+        let status = tool
+            .execute(json!({
+                "action": "browser_status",
+                "lane_id": lane_id.as_str(),
+            }))
+            .await;
+        assert!(
+            !status.is_error,
+            "reading a queued Lane remains a successful management operation: {}",
+            status.content
+        );
+        let status_value: Value = serde_json::from_str(&status.content).unwrap();
+        assert_eq!(status_value["ok"], true);
+        assert_eq!(status_value["lane"]["lifecycle_state"], "queued");
     }
 
     #[tokio::test]
