@@ -37,7 +37,11 @@ async fn setup() -> (
         client_pref_service: ClientPrefService::new(Arc::new(
             SqliteClientPreferenceRepository::new(db.pool().clone()),
         )),
-        provider_service: ProviderService::new(provider_repo.clone(), TEST_KEY),
+        provider_service: ProviderService::new(
+            provider_repo.clone(),
+            Arc::new(nomifun_db::SqliteProviderModelRepository::new(db.pool().clone())),
+            TEST_KEY,
+        ),
         model_fetch_service: ModelFetchService::new(
             provider_repo,
             TEST_KEY,

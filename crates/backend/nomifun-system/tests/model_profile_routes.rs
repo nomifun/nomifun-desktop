@@ -26,7 +26,11 @@ fn build_state(db: &nomifun_db::Database) -> SystemRouterState {
     SystemRouterState {
         settings_service: SettingsService::new(Arc::new(SqliteSettingsRepository::new(db.pool().clone()))),
         client_pref_service: ClientPrefService::new(Arc::new(SqliteClientPreferenceRepository::new(db.pool().clone()))),
-        provider_service: ProviderService::new(provider_repo.clone(), TEST_KEY),
+        provider_service: ProviderService::new(
+            provider_repo.clone(),
+            Arc::new(nomifun_db::SqliteProviderModelRepository::new(db.pool().clone())),
+            TEST_KEY,
+        ),
         model_fetch_service: ModelFetchService::new(provider_repo, TEST_KEY, http_client.clone()),
         model_profile_service: ModelProfileService::new(Arc::new(SqliteModelProfileRepository::new(db.pool().clone()))),
         managed_model_service: None,
@@ -75,7 +79,7 @@ async fn create_stepfun_plan_provider(db: &nomifun_db::Database) -> String {
         .unwrap();
     assert_eq!(resp.status(), StatusCode::CREATED);
     let v = body_json(resp).await;
-    v["data"]["id"].as_str().unwrap().to_string()
+    v["data"]["provider_id"].as_str().unwrap().to_string()
 }
 
 #[tokio::test]

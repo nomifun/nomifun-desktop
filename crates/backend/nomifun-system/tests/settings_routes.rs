@@ -31,7 +31,11 @@ fn build_state(db: &nomifun_db::Database) -> SystemRouterState {
     SystemRouterState {
         settings_service: SettingsService::new(Arc::new(SqliteSettingsRepository::new(db.pool().clone()))),
         client_pref_service: ClientPrefService::new(Arc::new(SqliteClientPreferenceRepository::new(db.pool().clone()))),
-        provider_service: ProviderService::new(provider_repo.clone(), TEST_ENCRYPTION_KEY),
+        provider_service: ProviderService::new(
+            provider_repo.clone(),
+            Arc::new(nomifun_db::SqliteProviderModelRepository::new(db.pool().clone())),
+            TEST_ENCRYPTION_KEY,
+        ),
         model_fetch_service: ModelFetchService::new(provider_repo, TEST_ENCRYPTION_KEY, http_client.clone()),
         model_profile_service: nomifun_system::ModelProfileService::new(std::sync::Arc::new(
             nomifun_db::SqliteModelProfileRepository::new(db.pool().clone()),
@@ -159,14 +163,14 @@ async fn patch_settings_type_error_rejected() {
 }
 
 #[tokio::test]
-async fn patch_settings_unknown_field_ignored() {
+async fn patch_settings_unknown_field_rejected() {
+    // UpdateSettingsRequest is #[serde(deny_unknown_fields)] — "Unknown or
+    // retired fields are rejected" per its doc contract.
     let (app, _db) = setup().await;
     let req = json_request("PATCH", "/api/settings", serde_json::json!({"unknown_field": 123}));
     let resp = app.oneshot(req).await.unwrap();
 
-    assert_eq!(resp.status(), StatusCode::OK);
-    let json = body_json(resp).await;
-    assert_eq!(json["data"]["language"], "en-US");
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
 }
 
 #[tokio::test]

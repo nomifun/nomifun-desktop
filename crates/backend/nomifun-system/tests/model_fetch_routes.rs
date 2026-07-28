@@ -39,7 +39,11 @@ fn build_state(db: &nomifun_db::Database) -> SystemRouterState {
         client_pref_service: ClientPrefService::new(Arc::new(
             SqliteClientPreferenceRepository::new(db.pool().clone()),
         )),
-        provider_service: ProviderService::new(provider_repo.clone(), TEST_KEY),
+        provider_service: ProviderService::new(
+            provider_repo.clone(),
+            Arc::new(nomifun_db::SqliteProviderModelRepository::new(db.pool().clone())),
+            TEST_KEY,
+        ),
         model_fetch_service: ModelFetchService::new(provider_repo, TEST_KEY, http_client.clone()),
         model_profile_service: nomifun_system::ModelProfileService::new(std::sync::Arc::new(
             nomifun_db::SqliteModelProfileRepository::new(db.pool().clone()),

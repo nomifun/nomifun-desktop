@@ -562,9 +562,13 @@ pub fn build_system_state(services: &AppServices) -> SystemRouterState {
 
     SystemRouterState {
         settings_service: SettingsService::new(Arc::new(SqliteSettingsRepository::new(pool.clone()))),
-        client_pref_service: ClientPrefService::new(Arc::new(SqliteClientPreferenceRepository::new(pool))),
-        provider_service: ProviderService::new(provider_repo.clone(), encryption_key)
-            .with_deletion_coordinator(deletion_coordinator),
+        client_pref_service: ClientPrefService::new(Arc::new(SqliteClientPreferenceRepository::new(pool.clone()))),
+        provider_service: ProviderService::new(
+            provider_repo.clone(),
+            Arc::new(nomifun_db::SqliteProviderModelRepository::new(pool)),
+            encryption_key,
+        )
+        .with_deletion_coordinator(deletion_coordinator),
         model_fetch_service: ModelFetchService::new_dynamic(provider_repo, encryption_key),
         model_profile_service: nomifun_system::ModelProfileService::new(
             services.model_profile_repo.clone(),
@@ -1878,7 +1882,8 @@ pub fn build_shell_state(services: &AppServices) -> ShellRouterState {
     let pool = services.database.pool().clone();
     let client_pref_repo = Arc::new(SqliteClientPreferenceRepository::new(pool.clone()));
     let client_pref_service = ClientPrefService::new(client_pref_repo);
-    let provider_repo = Arc::new(SqliteProviderRepository::new(pool));
+    let provider_repo = Arc::new(SqliteProviderRepository::new(pool.clone()));
+    let provider_model_repo = Arc::new(nomifun_db::SqliteProviderModelRepository::new(pool));
 
     ShellRouterState {
         shell_service: Arc::new(nomifun_shell::ShellService::new(Arc::new(
@@ -1886,7 +1891,11 @@ pub fn build_shell_state(services: &AppServices) -> ShellRouterState {
         ))),
         stt_service: Arc::new(nomifun_shell::SttService::new_dynamic()),
         client_pref_service,
-        provider_service: Some(ProviderService::new(provider_repo, services.encryption_key)),
+        provider_service: Some(ProviderService::new(
+            provider_repo,
+            provider_model_repo,
+            services.encryption_key,
+        )),
     }
 }
 

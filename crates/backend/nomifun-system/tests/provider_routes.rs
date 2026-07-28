@@ -33,7 +33,11 @@ fn build_state(db: &nomifun_db::Database) -> SystemRouterState {
     SystemRouterState {
         settings_service: SettingsService::new(Arc::new(SqliteSettingsRepository::new(db.pool().clone()))),
         client_pref_service: ClientPrefService::new(Arc::new(SqliteClientPreferenceRepository::new(db.pool().clone()))),
-        provider_service: ProviderService::new(provider_repo.clone(), TEST_ENCRYPTION_KEY),
+        provider_service: ProviderService::new(
+            provider_repo.clone(),
+            Arc::new(nomifun_db::SqliteProviderModelRepository::new(db.pool().clone())),
+            TEST_ENCRYPTION_KEY,
+        ),
         model_fetch_service: ModelFetchService::new(provider_repo, TEST_ENCRYPTION_KEY, http_client.clone()),
         model_profile_service: nomifun_system::ModelProfileService::new(std::sync::Arc::new(
             nomifun_db::SqliteModelProfileRepository::new(db.pool().clone()),
@@ -286,6 +290,7 @@ async fn create_provider_with_supplied_id() {
         "name": "OpenAI",
         "base_url": "https://api.openai.com",
         "api_key": "sk-test",
+        "models": ["gpt-4", "gpt-3.5"],
         "model_enabled": {"gpt-4": true, "gpt-3.5": false}
     });
     let resp = app.oneshot(json_request("POST", "/api/providers", body)).await.unwrap();
@@ -295,8 +300,17 @@ async fn create_provider_with_supplied_id() {
     let data = &json["data"];
     assert_eq!(data["provider_id"], provider_id);
     assert_eq!(data["api_key"], "sk-test");
-    assert_eq!(data["model_enabled"]["gpt-4"], true);
+    // Row projection surfaces only explicit-false entries; enabled models
+    // are absent from the map (absent = enabled for every reader).
+    assert!(data["model_enabled"].get("gpt-4").is_none());
     assert_eq!(data["model_enabled"]["gpt-3.5"], false);
+    // models_detail mirrors the authoritative provider_models rows.
+    let detail = data["models_detail"].as_array().unwrap();
+    assert_eq!(detail.len(), 2);
+    assert_eq!(detail[0]["model"], "gpt-4");
+    assert_eq!(detail[0]["enabled"], true);
+    assert_eq!(detail[1]["model"], "gpt-3.5");
+    assert_eq!(detail[1]["enabled"], false);
 }
 
 #[tokio::test]

@@ -26,6 +26,7 @@ pub mod model_catalog;
 pub mod model_task;
 mod office;
 mod provider;
+mod provider_model;
 mod preset;
 mod remote_agent;
 mod requirement;
@@ -189,6 +190,7 @@ pub use provider::{
     ProviderHealthCheckRequest, ProviderHealthCheckResponse, ProviderResponse, SuggestionType,
     UpdateProviderRequest,
 };
+pub use provider_model::ProviderModelResponse;
 pub use remote_agent::{
     CreateRemoteAgentRequest, HandshakeResponse, RemoteAgentListItem, RemoteAgentResponse,
     TestRemoteAgentConnectionRequest, UpdateRemoteAgentRequest,
