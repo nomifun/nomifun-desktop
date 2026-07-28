@@ -322,7 +322,7 @@ pub const OWNERSHIP_MARKER_FILE: &str = ".nomifun-browser-owner.json";
 /// Publishing the committed browser identity at a distinct path means the
 /// transition never needs a compare-then-overwrite rename: a competing writer
 /// can make the transition fail closed, but can never be overwritten.
-const COMMITTED_OWNERSHIP_RECORD_FILE: &str =
+pub const COMMITTED_OWNERSHIP_RECORD_FILE: &str =
     ".nomifun-browser-owner.committed.json";
 const DEVTOOLS_ACTIVE_PORT_FILE: &str = "DevToolsActivePort";
 
