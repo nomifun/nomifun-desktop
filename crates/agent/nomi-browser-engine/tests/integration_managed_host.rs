@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 use nomi_browser_engine::{
     BrowserEngine, EngineConfig, FirewallConfig, LaneEngineConfig, ManagedBrowserHost,
 };
-use nomi_browser_engine::profile::OWNERSHIP_MARKER_FILE;
+use nomi_browser_engine::profile::{COMMITTED_OWNERSHIP_RECORD_FILE, OWNERSHIP_MARKER_FILE};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio::sync::{mpsc, oneshot};
@@ -380,6 +380,7 @@ async fn wait_for_runtime_artifacts_gone(
     let started = Instant::now();
     loop {
         if !profile.join(OWNERSHIP_MARKER_FILE).exists()
+            && !profile.join(COMMITTED_OWNERSHIP_RECORD_FILE).exists()
             && !profile.join("DevToolsActivePort").exists()
         {
             return true;
@@ -391,15 +392,81 @@ async fn wait_for_runtime_artifacts_gone(
     }
 }
 
-fn ownership_marker_browser_pid(profile: &std::path::Path) -> u32 {
-    let marker: serde_json::Value = serde_json::from_slice(
-        &std::fs::read(profile.join(OWNERSHIP_MARKER_FILE))
-            .expect("read browser ownership marker"),
+fn read_ownership_record(path: &std::path::Path) -> serde_json::Value {
+    serde_json::from_slice(
+        &std::fs::read(path).expect("read browser ownership record"),
     )
-    .expect("parse browser ownership marker");
-    marker["browser"]["pid"]
+    .expect("parse browser ownership record")
+}
+
+/// Resolve the exact committed browser root PID for a managed profile.
+///
+/// Ephemeral profiles publish an append-only record pair: the provisional
+/// record at [`OWNERSHIP_MARKER_FILE`] retains the owner-app identity, while
+/// the exact browser identity is committed at
+/// [`COMMITTED_OWNERSHIP_RECORD_FILE`]. Stable profiles have no provisional
+/// predecessor and commit the browser identity directly at
+/// [`OWNERSHIP_MARKER_FILE`].
+fn committed_browser_pid(profile: &std::path::Path) -> u32 {
+    let committed_path = profile.join(COMMITTED_OWNERSHIP_RECORD_FILE);
+    let record = if committed_path.is_file() {
+        read_ownership_record(&committed_path)
+    } else {
+        read_ownership_record(&profile.join(OWNERSHIP_MARKER_FILE))
+    };
+    assert_eq!(
+        record["phase"].as_str(),
+        Some("committed"),
+        "browser identity must come from a committed ownership record"
+    );
+    record["browser"]["pid"]
         .as_u64()
-        .expect("ownership marker contains browser pid") as u32
+        .expect("committed ownership record contains browser pid") as u32
+}
+
+/// Sample the managed process tree until Chromium's descendant processes are
+/// visible, so post-Drop assertions cover the root and its children.
+async fn sample_tree_with_descendants(
+    root_pid: u32,
+    deadline: Duration,
+) -> ProcessTreeSnapshot {
+    let started = Instant::now();
+    let mut system = sysinfo::System::new();
+    loop {
+        let snapshot = sample_process_tree(&mut system, root_pid);
+        if snapshot.pids.len() > 1 || started.elapsed() >= deadline {
+            return snapshot;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+/// Every live process whose command line references `path`. After cleanup this
+/// proves no Chromium process still belongs to the isolated profile, without
+/// touching browsers owned by anything else on the machine.
+fn processes_referencing_path(path: &std::path::Path) -> Vec<u32> {
+    use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, UpdateKind};
+
+    let needle = path.to_string_lossy().to_ascii_lowercase();
+    let mut system = sysinfo::System::new();
+    system.refresh_processes_specifics(
+        ProcessesToUpdate::All,
+        true,
+        ProcessRefreshKind::nothing().with_cmd(UpdateKind::Always),
+    );
+    system
+        .processes()
+        .values()
+        .filter(|process| {
+            process.cmd().iter().any(|argument| {
+                argument
+                    .to_string_lossy()
+                    .to_ascii_lowercase()
+                    .contains(&needle)
+            })
+        })
+        .map(|process| process.pid().as_u32())
+        .collect()
 }
 
 #[cfg(windows)]
@@ -501,9 +568,43 @@ async fn managed_host_drop_reaps_full_tree_and_ephemeral_profile() {
         .await
         .expect("open Lane retained by product caller");
     let root_pid = host.process_id().expect("managed Host root pid");
-    assert_eq!(ownership_marker_browser_pid(&profile), root_pid);
-    let process_tree = sample_process_tree(&mut sysinfo::System::new(), root_pid);
+
+    // The ephemeral profile carries an append-only ownership record pair. The
+    // provisional predecessor conservatively records the owner app as browser
+    // identity; only the committed record names the actual Chromium root.
+    let owner_app_pid = u64::from(std::process::id());
+    let provisional = read_ownership_record(&profile.join(OWNERSHIP_MARKER_FILE));
+    assert_eq!(provisional["phase"].as_str(), Some("provisional"));
+    assert_eq!(provisional["owner_app"]["pid"].as_u64(), Some(owner_app_pid));
+    assert_eq!(
+        provisional["browser"]["pid"].as_u64(),
+        Some(owner_app_pid),
+        "provisional record must keep the owner app as its conservative browser identity"
+    );
+    let committed =
+        read_ownership_record(&profile.join(COMMITTED_OWNERSHIP_RECORD_FILE));
+    assert_eq!(committed["phase"].as_str(), Some("committed"));
+    assert_eq!(committed["owner_app"]["pid"].as_u64(), Some(owner_app_pid));
+    assert_eq!(
+        committed["browser"]["pid"].as_u64(),
+        Some(u64::from(root_pid)),
+        "committed browser identity must match the managed Host root pid"
+    );
+    assert_eq!(committed_browser_pid(&profile), root_pid);
+
+    // Sample the real Chromium tree rooted at the committed browser PID. The
+    // descendants requirement makes the post-Drop assertion prove that the
+    // Windows Job (and Unix process group) reaped more than just the root.
+    let process_tree =
+        sample_tree_with_descendants(root_pid, Duration::from_secs(5)).await;
     assert!(process_tree.pids.contains(&root_pid));
+    assert!(
+        process_tree.pids.len() > 1,
+        "sampled Chromium tree must include descendants beyond the committed root: {:?}",
+        process_tree.pids
+    );
+    #[cfg(windows)]
+    let debug_port = read_windows_debug_port(&profile);
 
     // No explicit close_lane/shutdown: dropping the last Lane and Host must
     // reach CdpHostRuntime's exact Drop relay.
@@ -515,6 +616,11 @@ async fn managed_host_drop_reaps_full_tree_and_ephemeral_profile() {
         residual.is_empty(),
         "sampled Chromium processes survived final Runtime Drop: {residual:?}"
     );
+    #[cfg(windows)]
+    assert!(
+        wait_for_debug_endpoint_closed(debug_port, Duration::from_secs(10)).await,
+        "ephemeral Host debugging endpoint {debug_port} remained reachable after Drop"
+    );
     tokio::time::timeout(Duration::from_secs(10), async {
         while profile.exists() {
             tokio::time::sleep(Duration::from_millis(50)).await;
@@ -522,6 +628,19 @@ async fn managed_host_drop_reaps_full_tree_and_ephemeral_profile() {
     })
     .await
     .expect("exact Drop cleanup removes the whole ephemeral profile");
+    assert!(!profile.join(OWNERSHIP_MARKER_FILE).exists());
+    assert!(!profile.join(COMMITTED_OWNERSHIP_RECORD_FILE).exists());
+    let stragglers = processes_referencing_path(&profile);
+    assert!(
+        stragglers.is_empty(),
+        "processes still reference the reaped ephemeral profile: {stragglers:?}"
+    );
+    println!(
+        "ephemeral-drop acceptance: committed_browser_pid={} owner_app_pid={} \
+         sampled_tree_pids={:?} residual_pids={:?} profile_removed=true \
+         provisional_marker_removed=true committed_record_removed=true",
+        root_pid, owner_app_pid, process_tree.pids, residual,
+    );
 }
 
 #[tokio::test]
@@ -542,8 +661,9 @@ async fn create_engine_drop_reaps_hidden_host_runtime_and_allows_stable_relaunch
         ))
         .await
         .expect("create_engine returns a Lane after dropping its local Host coordinator");
-        let root_pid = ownership_marker_browser_pid(&profile);
-        let process_tree = sample_process_tree(&mut sysinfo::System::new(), root_pid);
+        let root_pid = committed_browser_pid(&profile);
+        let process_tree =
+            sample_tree_with_descendants(root_pid, Duration::from_secs(5)).await;
         assert!(process_tree.pids.contains(&root_pid));
 
         drop(engine);

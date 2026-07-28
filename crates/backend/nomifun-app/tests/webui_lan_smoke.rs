@@ -18,6 +18,9 @@ fn local_http_client() -> reqwest::Client {
 /// global `NOMIFUN_WORK_DIR` that another concurrently running test may set.
 fn isolated_cli(data_dir: &Path) -> nomifun_app::cli::Cli {
     let work_dir = data_dir.join("work");
+    // The work-root lock deliberately fails closed on a missing directory
+    // (dataset-reset hardening); production hosts only pass existing roots.
+    std::fs::create_dir_all(&work_dir).unwrap();
     nomifun_app::cli::Cli::parse_from([
         "nomifun-desktop-test".to_owned(),
         "--data-dir".to_owned(),

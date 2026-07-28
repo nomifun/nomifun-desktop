@@ -885,6 +885,18 @@ impl BrowserSessionHub {
         for lane in lane_records {
             live_lanes.push(lane.current_snapshot().await);
         }
+        // A target whose exact (HostKey, epoch) is still the live active Host
+        // is a retained live-Host obligation that owner EndTurn, the warm
+        // sweep, or an installation drain will retire; it is Host inventory,
+        // not pending cleanup residue.
+        let active_host_epochs = {
+            let slots = self.inner.host_slots.read().await;
+            slots
+                .iter()
+                .filter(|(_, slot)| slot.get().is_some())
+                .map(|(key, slot)| (key.clone(), slot.epoch))
+                .collect::<HashMap<_, _>>()
+        };
         let lane_cleanup_count = lane_cleanups
             .iter()
             .filter(|entry| entry.user_id == user_id)
@@ -897,6 +909,9 @@ impl BrowserSessionHub {
             .iter()
             .filter(|(owner_lease_id, target)| {
                 target.user_id == user_id
+                    && active_host_epochs
+                        .get(&target.host_key)
+                        .is_none_or(|epoch| *epoch != target.browser_epoch)
                     && !lane_cleanups.iter().any(|entry| {
                         &entry.owner_lease_id == owner_lease_id
                             && entry.host_key == target.host_key
