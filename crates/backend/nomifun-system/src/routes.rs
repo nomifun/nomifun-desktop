@@ -68,6 +68,7 @@ pub struct SystemRouterState {
 /// - `POST /api/providers`                   — create a provider
 /// - `PUT  /api/providers/:provider_id`      — update a provider
 /// - `DELETE /api/providers/:provider_id`    — delete a provider
+/// - `POST /api/providers/:provider_id/clone` — clone a provider (models + connections)
 /// - `GET  /api/providers/:provider_id/connections` — list connection profiles
 /// - `POST /api/providers/:provider_id/connections` — upsert a connection profile
 /// - `DELETE /api/providers/:provider_id/connections/:role` — delete a connection profile
@@ -114,6 +115,10 @@ pub fn system_routes(state: SystemRouterState) -> Router {
         .route(
             "/api/providers/{provider_id}",
             delete(delete_provider).put(update_provider),
+        )
+        .route(
+            "/api/providers/{provider_id}/clone",
+            post(clone_provider),
         )
         .route(
             "/api/providers/{provider_id}/connections",
@@ -242,6 +247,22 @@ async fn delete_provider(
 ) -> Result<Json<ApiResponse<()>>, AppError> {
     state.provider_service.delete(&provider_id).await?;
     Ok(Json(ApiResponse::success()))
+}
+
+/// Server-side provider clone: copies the provider row (api-key ciphertext
+/// as-is), every `provider_models` profile row (minus per-deployment health)
+/// and every connection profile. Replaces the frontend clone, which lost the
+/// per-model rows keyed by the old provider_id.
+async fn clone_provider(
+    State(state): State<SystemRouterState>,
+    Path(provider_id): Path<String>,
+) -> Result<(StatusCode, Json<ApiResponse<ProviderResponse>>), AppError> {
+    let connection_repo = state.provider_connection_service.repository();
+    let provider = state
+        .provider_service
+        .clone_provider(&provider_id, &connection_repo)
+        .await?;
+    Ok((StatusCode::CREATED, Json(ApiResponse::ok(provider))))
 }
 
 async fn fetch_models(

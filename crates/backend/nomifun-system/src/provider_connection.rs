@@ -39,6 +39,13 @@ impl ProviderConnectionService {
         }
     }
 
+    /// Crate-internal handle to the underlying repository, for flows that
+    /// copy connection rows verbatim (ciphertext included) and so cannot go
+    /// through the write-only-credentials wire API — e.g. provider clone.
+    pub(crate) fn repository(&self) -> Arc<dyn IProviderConnectionRepository> {
+        self.repo.clone()
+    }
+
     /// List all connection profiles for one provider, ordered by role.
     pub async fn list(&self, provider_id: &str) -> Result<Vec<ProviderConnectionResponse>, AppError> {
         self.require_provider(provider_id).await?;
