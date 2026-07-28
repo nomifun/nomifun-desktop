@@ -37,6 +37,10 @@ pub use models::{
     UpdatePresetTagParams, UpsertPresetStateParams,
 };
 pub use models::{ModelProfileRow, UpsertModelProfileParams};
+pub use models::{
+    NewProviderModel, ProviderConnectionRow, ProviderModelRow, ProviderModelUpdate,
+    UpsertProviderConnectionParams,
+};
 pub use repository::channel::UpdatePluginStatusParams;
 pub use repository::conversation::{
     ConversationDeliveryReceiptClaim, ConversationFilters, ConversationMessageProjection,
@@ -76,7 +80,8 @@ pub use repository::{
     IConversationRepository, ICronRepository, IIdmmInterventionRepository,
     IdmmActionReservationKey, IdmmActionReserveResult, IdmmActionSettleResult,
     IdmmActionSettlement, IdmmActionTurnIdentity, IKnowledgeRepository,
-    IMcpServerRepository, IModelProfileRepository, IOAuthTokenRepository, IProviderRepository,
+    IMcpServerRepository, IModelProfileRepository, IOAuthTokenRepository,
+    IProviderConnectionRepository, IProviderModelRepository, IProviderRepository,
     IRemoteAgentRepository, IRequirementRepository, ISettingsRepository, ISkillTagRepository,
     ITagSettingRepository, ITerminalRepository, IUserRepository, IWebhookRepository,
     ListRequirementsParams, RequirementClaim, RequirementClaimResolution,
@@ -89,7 +94,8 @@ pub use repository::{
     SqliteChannelRepository, SqliteClientPreferenceRepository, SqliteCompanionTokenRepository,
     SqliteConnectorCredentialRepository, SqliteConversationRepository, SqliteCronRepository,
     SqliteIdmmInterventionRepository, SqliteKnowledgeRepository, SqliteMcpServerRepository,
-    SqliteModelProfileRepository, SqliteOAuthTokenRepository, SqliteProviderRepository,
+    SqliteModelProfileRepository, SqliteOAuthTokenRepository,
+    SqliteProviderConnectionRepository, SqliteProviderModelRepository, SqliteProviderRepository,
     SqliteRemoteAgentRepository, SqliteRequirementRepository, SqliteSettingsRepository,
     SqliteSkillTagRepository, SqliteTagSettingRepository, SqliteTerminalRepository,
     SqliteUserRepository, SqliteWebhookRepository, TerminalTurnAdmissionClaim,
