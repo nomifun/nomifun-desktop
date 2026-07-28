@@ -1,3 +1,5 @@
+use std::collections::{HashMap, HashSet};
+
 use sqlx::SqlitePool;
 
 use crate::error::DbError;
@@ -63,6 +65,303 @@ impl SqliteProviderRepository {
     }
 }
 
+/// The five legacy per-model JSON map columns that dual-write mirrors into
+/// typed `provider_models` columns. Profile columns (`tasks`, `traits`,
+/// `params`, `source`) and `connection_role` are intentionally absent: they
+/// are owned by the new-table writers and are NEVER touched by dual-write.
+#[derive(Clone, Copy, Debug)]
+enum ModelMapColumn {
+    Enabled,
+    Protocol,
+    ContextLimit,
+    Description,
+    Health,
+}
+
+impl ModelMapColumn {
+    fn name(self) -> &'static str {
+        match self {
+            Self::Enabled => "model_enabled",
+            Self::Protocol => "model_protocols",
+            Self::ContextLimit => "model_context_limits",
+            Self::Description => "model_descriptions",
+            Self::Health => "model_health",
+        }
+    }
+
+    /// Resets the mirrored column to its default on every row of a provider
+    /// (enabled → 1, all nullable columns → NULL).
+    fn reset_sql(self) -> &'static str {
+        match self {
+            Self::Enabled => {
+                "UPDATE provider_models SET enabled = 1, updated_at = ? WHERE provider_id = ?"
+            }
+            Self::Protocol => {
+                "UPDATE provider_models SET protocol = NULL, updated_at = ? WHERE provider_id = ?"
+            }
+            Self::ContextLimit => {
+                "UPDATE provider_models SET context_limit = NULL, updated_at = ? \
+                 WHERE provider_id = ?"
+            }
+            Self::Description => {
+                "UPDATE provider_models SET description = NULL, updated_at = ? \
+                 WHERE provider_id = ?"
+            }
+            Self::Health => {
+                "UPDATE provider_models SET health = NULL, updated_at = ? WHERE provider_id = ?"
+            }
+        }
+    }
+
+    /// Sets the mirrored column for one `(provider_id, model)` row.
+    fn set_sql(self) -> &'static str {
+        match self {
+            Self::Enabled => {
+                "UPDATE provider_models SET enabled = ?, updated_at = ? \
+                 WHERE provider_id = ? AND model = ?"
+            }
+            Self::Protocol => {
+                "UPDATE provider_models SET protocol = ?, updated_at = ? \
+                 WHERE provider_id = ? AND model = ?"
+            }
+            Self::ContextLimit => {
+                "UPDATE provider_models SET context_limit = ?, updated_at = ? \
+                 WHERE provider_id = ? AND model = ?"
+            }
+            Self::Description => {
+                "UPDATE provider_models SET description = ?, updated_at = ? \
+                 WHERE provider_id = ? AND model = ?"
+            }
+            Self::Health => {
+                "UPDATE provider_models SET health = ?, updated_at = ? \
+                 WHERE provider_id = ? AND model = ?"
+            }
+        }
+    }
+
+    /// Converts one JSON map entry into the typed bind for this column,
+    /// mirroring migration 014's backfill semantics: enabled coerces to a
+    /// boolean (default true), protocol/description store string atoms,
+    /// context_limit stores an integer, health stores minified JSON text.
+    fn to_bind(self, value: &serde_json::Value) -> crate::repository::bind::BindValue {
+        use crate::repository::bind::BindValue;
+        match self {
+            Self::Enabled => BindValue::Bool(match value {
+                serde_json::Value::Bool(flag) => *flag,
+                serde_json::Value::Number(number) => number.as_i64() != Some(0),
+                // Any non-boolean atom falls back to the column default.
+                _ => true,
+            }),
+            Self::Protocol | Self::Description => {
+                BindValue::OptStr(value.as_str().map(String::from))
+            }
+            Self::ContextLimit => BindValue::OptI64(
+                value
+                    .as_i64()
+                    .or_else(|| value.as_f64().map(|v| v as i64)),
+            ),
+            Self::Health => BindValue::OptStr(match value {
+                serde_json::Value::Null => None,
+                other => Some(other.to_string()),
+            }),
+        }
+    }
+}
+
+/// Dual-write rule 2b (map replacement): applying a legacy per-model map to
+/// `provider_models` uses whole-map replacement semantics for that column
+/// across ALL of the provider's rows — a model missing from the map has the
+/// column reset to its default (enabled → 1, others → NULL), exactly matching
+/// the legacy wire semantics where the map column is replaced as a whole. An
+/// empty map (explicit `Some(None)` clear) resets every row to the default.
+/// Map entries for models without a catalog row are ignored, matching
+/// migration 014's backfill, which only materializes `models` entries.
+async fn apply_provider_model_map_tx(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    provider_id: &str,
+    column: ModelMapColumn,
+    map: &HashMap<String, serde_json::Value>,
+    now: i64,
+) -> Result<(), DbError> {
+    sqlx::query(column.reset_sql())
+        .bind(now)
+        .bind(provider_id)
+        .execute(&mut **transaction)
+        .await?;
+
+    for (model, value) in map {
+        let bind = column.to_bind(value);
+        crate::repository::bind::bind_value(sqlx::query(column.set_sql()), &bind)
+            .bind(now)
+            .bind(provider_id)
+            .bind(model)
+            .execute(&mut **transaction)
+            .await?;
+    }
+
+    Ok(())
+}
+
+/// Dual-write rules 1 and 2a (membership): mirror the legacy `models` JSON
+/// array into `provider_models` rows inside the caller's transaction.
+///
+/// - Models present in the array get a row; a new row takes its mirrored
+///   columns (enabled/protocol/context_limit/description/health) from the
+///   effective per-model maps, plus tasks/traits '[]', params '{}',
+///   source 'inferred', and `sort_order` = array index.
+/// - Existing rows keep every column except `sort_order`/`updated_at` — the
+///   profile columns (tasks/traits/params/source) and `connection_role` are
+///   NEVER touched by dual-write.
+/// - Rows whose model is no longer in the array are deleted.
+async fn sync_provider_model_membership_tx(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    provider_id: &str,
+    models_json: &str,
+    maps: &[(ModelMapColumn, HashMap<String, serde_json::Value>, bool)],
+    now: i64,
+) -> Result<(), DbError> {
+    use crate::repository::bind::{bind_value, BindValue};
+
+    let models: Vec<String> = serde_json::from_str(models_json).map_err(|error| {
+        DbError::Conflict(format!("invalid provider models array: {error}"))
+    })?;
+
+    if models.is_empty() {
+        sqlx::query("DELETE FROM provider_models WHERE provider_id = ?")
+            .bind(provider_id)
+            .execute(&mut **transaction)
+            .await?;
+        return Ok(());
+    }
+
+    let placeholders = vec!["?"; models.len()].join(", ");
+    let delete_sql = format!(
+        "DELETE FROM provider_models WHERE provider_id = ? AND model NOT IN ({placeholders})"
+    );
+    let mut delete = sqlx::query(&delete_sql).bind(provider_id);
+    for model in &models {
+        delete = delete.bind(model);
+    }
+    delete.execute(&mut **transaction).await?;
+
+    let mut seen: HashSet<&str> = HashSet::with_capacity(models.len());
+    for (index, model) in models.iter().enumerate() {
+        // A duplicate entry in the legacy array keeps its first index.
+        if !seen.insert(model.as_str()) {
+            continue;
+        }
+
+        // Mirrored-column values for a freshly inserted row; existing rows
+        // ignore these (the upsert only touches sort_order/updated_at).
+        let mut enabled = BindValue::Bool(true);
+        let mut protocol = BindValue::OptStr(None);
+        let mut context_limit = BindValue::OptI64(None);
+        let mut description = BindValue::OptStr(None);
+        let mut health = BindValue::OptStr(None);
+        for (column, map, _) in maps {
+            if let Some(value) = map.get(model.as_str()) {
+                let bind = column.to_bind(value);
+                match column {
+                    ModelMapColumn::Enabled => enabled = bind,
+                    ModelMapColumn::Protocol => protocol = bind,
+                    ModelMapColumn::ContextLimit => context_limit = bind,
+                    ModelMapColumn::Description => description = bind,
+                    ModelMapColumn::Health => health = bind,
+                }
+            }
+        }
+
+        let mut query = sqlx::query(
+            "INSERT INTO provider_models \
+                (provider_id, model, enabled, sort_order, tasks, traits, protocol, \
+                 params, context_limit, description, source, health, created_at, updated_at) \
+             VALUES (?, ?, ?, ?, '[]', '[]', ?, '{}', ?, ?, 'inferred', ?, ?, ?) \
+             ON CONFLICT(provider_id, model) DO UPDATE SET \
+                sort_order = excluded.sort_order, \
+                updated_at = excluded.updated_at",
+        )
+        .bind(provider_id)
+        .bind(model);
+        query = bind_value(query, &enabled);
+        query = query.bind(index as i64);
+        query = bind_value(query, &protocol);
+        query = bind_value(query, &context_limit);
+        query = bind_value(query, &description);
+        query = bind_value(query, &health);
+        query
+            .bind(now)
+            .bind(now)
+            .execute(&mut **transaction)
+            .await?;
+    }
+
+    Ok(())
+}
+
+/// Dual-write orchestrator shared by `create` and `update`: keeps
+/// `provider_models` rows in sync with the legacy `models` array and the five
+/// per-model JSON map columns, inside the caller's providers transaction.
+/// Direction is legacy → new only.
+///
+/// `maps` carries, per mirrored column, the *effective* map JSON after this
+/// write (merged column value; `None` = empty map) and whether the caller
+/// supplied that map param in this call:
+/// - the effective map always feeds mirrored columns of freshly inserted
+///   membership rows, so a re-added model picks up retained map entries;
+/// - `replace = true` additionally applies whole-map replacement for that
+///   column across ALL rows (see [`apply_provider_model_map_tx`]); with
+///   `replace = false` existing rows keep their current column value.
+///
+/// Behavior spec:
+/// 1. create: one row per `models` entry; enabled/protocol/context_limit/
+///    description/health from the corresponding map params; tasks/traits
+///    '[]', params '{}', source 'inferred', sort_order = array index.
+/// 2. update: `models` `Some` syncs membership (insert new, delete removed,
+///    re-index survivors); a map param `Some(...)` is a whole-map replacement
+///    for that column over ALL rows (`Some(None)` = empty map → all defaults);
+///    a map param `None` leaves the column of existing rows untouched.
+///    Profile columns (tasks/traits/params/source) and connection_role are
+///    never written by dual-write.
+/// 3. delete cascades are handled directly in [`IProviderRepository::delete`].
+async fn sync_provider_models_tx(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    provider_id: &str,
+    models_json: Option<&str>,
+    maps: [(ModelMapColumn, Option<&str>, bool); 5],
+    now: i64,
+) -> Result<(), DbError> {
+    // A map is only consulted when seeding freshly inserted membership rows
+    // or when running its whole-map replacement pass; skip parsing (and its
+    // strict-JSON failure mode) for maps this call never touches. A write
+    // that changes neither membership nor any map leaves provider_models
+    // fully untouched.
+    let mut parsed: Vec<(ModelMapColumn, HashMap<String, serde_json::Value>, bool)> =
+        Vec::with_capacity(maps.len());
+    for (column, map_json, replace) in maps {
+        let used = models_json.is_some() || replace;
+        let map: HashMap<String, serde_json::Value> = match map_json.filter(|_| used) {
+            Some(json) => serde_json::from_str(json).map_err(|error| {
+                DbError::Conflict(format!("invalid provider {} map: {error}", column.name()))
+            })?,
+            None => HashMap::new(),
+        };
+        parsed.push((column, map, replace));
+    }
+
+    if let Some(models_json) = models_json {
+        sync_provider_model_membership_tx(transaction, provider_id, models_json, &parsed, now)
+            .await?;
+    }
+
+    for (column, map, replace) in &parsed {
+        if *replace {
+            apply_provider_model_map_tx(transaction, provider_id, *column, map, now).await?;
+        }
+    }
+
+    Ok(())
+}
+
 #[async_trait::async_trait]
 impl IProviderRepository for SqliteProviderRepository {
     async fn list(&self) -> Result<Vec<Provider>, DbError> {
@@ -96,13 +395,14 @@ impl IProviderRepository for SqliteProviderRepository {
             None => nomifun_common::ProviderId::new().into_string(),
         };
         let now = nomifun_common::now_ms();
+        let mut transaction = self.pool.begin().await?;
         let sort_order = match params.sort_order {
             Some(value) => value,
             None => {
                 sqlx::query_scalar::<_, i64>(
                     "SELECT COALESCE(MAX(sort_order), -1) + 1 FROM providers",
                 )
-                .fetch_one(&self.pool)
+                .fetch_one(&mut *transaction)
                 .await?
             }
         };
@@ -133,7 +433,7 @@ impl IProviderRepository for SqliteProviderRepository {
         .bind(sort_order)
         .bind(now)
         .bind(now)
-        .execute(&self.pool)
+        .execute(&mut *transaction)
         .await
         .map_err(|e| match &e {
             sqlx::Error::Database(db_err) if is_unique_violation(db_err.as_ref()) => {
@@ -142,11 +442,41 @@ impl IProviderRepository for SqliteProviderRepository {
             _ => DbError::Query(e),
         })?;
 
+        // Dual-write: mirror the models array + per-model maps into
+        // provider_models rows in the same transaction. Every row is a fresh
+        // insert seeded from the map params, so no whole-map replacement
+        // pass is needed (replace = false).
+        sync_provider_models_tx(
+            &mut transaction,
+            &provider_id,
+            Some(params.models),
+            [
+                (ModelMapColumn::Enabled, params.model_enabled, false),
+                (ModelMapColumn::Protocol, params.model_protocols, false),
+                (
+                    ModelMapColumn::ContextLimit,
+                    params.model_context_limits,
+                    false,
+                ),
+                (
+                    ModelMapColumn::Description,
+                    params.model_descriptions,
+                    false,
+                ),
+                (ModelMapColumn::Health, params.model_health, false),
+            ],
+            now,
+        )
+        .await?;
+
+        let id = sqlx::query_scalar("SELECT id FROM providers WHERE provider_id = ?")
+            .bind(&provider_id)
+            .fetch_one(&mut *transaction)
+            .await?;
+        transaction.commit().await?;
+
         Ok(Provider {
-            id: sqlx::query_scalar("SELECT id FROM providers WHERE provider_id = ?")
-                .bind(&provider_id)
-                .fetch_one(&self.pool)
-                .await?,
+            id,
             provider_id,
             platform: params.platform.to_string(),
             name: params.name.to_string(),
@@ -174,8 +504,20 @@ impl IProviderRepository for SqliteProviderRepository {
             .await?
             .ok_or_else(|| DbError::NotFound(format!("Provider '{id}' not found")))?;
 
+        // Capture dual-write inputs before params is consumed by the merge.
+        // `models: None` keeps membership; a map param of `None` keeps that
+        // column on existing rows; `Some(None)` clears the map (all rows
+        // reset to the column default); `Some(Some(json))` replaces it.
+        let models_json = params.models;
+        let replace_enabled = params.model_enabled.is_some();
+        let replace_protocols = params.model_protocols.is_some();
+        let replace_limits = params.model_context_limits.is_some();
+        let replace_descriptions = params.model_descriptions.is_some();
+        let replace_health = params.model_health.is_some();
+
         let merged = merge_update(existing, params);
 
+        let mut transaction = self.pool.begin().await?;
         sqlx::query(
             "UPDATE providers SET \
                 platform = ?, name = ?, base_url = ?, api_key_encrypted = ?, \
@@ -202,8 +544,48 @@ impl IProviderRepository for SqliteProviderRepository {
         .bind(merged.sort_order)
         .bind(merged.updated_at)
         .bind(id)
-        .execute(&self.pool)
+        .execute(&mut *transaction)
         .await?;
+
+        // Dual-write: sync provider_models in the same transaction. The
+        // effective (merged) map values seed mirrored columns for any newly
+        // inserted membership row; whole-map replacement runs only for map
+        // params the caller actually supplied.
+        sync_provider_models_tx(
+            &mut transaction,
+            id,
+            models_json,
+            [
+                (
+                    ModelMapColumn::Enabled,
+                    merged.model_enabled.as_deref(),
+                    replace_enabled,
+                ),
+                (
+                    ModelMapColumn::Protocol,
+                    merged.model_protocols.as_deref(),
+                    replace_protocols,
+                ),
+                (
+                    ModelMapColumn::ContextLimit,
+                    merged.model_context_limits.as_deref(),
+                    replace_limits,
+                ),
+                (
+                    ModelMapColumn::Description,
+                    merged.model_descriptions.as_deref(),
+                    replace_descriptions,
+                ),
+                (
+                    ModelMapColumn::Health,
+                    merged.model_health.as_deref(),
+                    replace_health,
+                ),
+            ],
+            merged.updated_at,
+        )
+        .await?;
+        transaction.commit().await?;
 
         Ok(merged)
     }
@@ -428,6 +810,16 @@ impl IProviderRepository for SqliteProviderRepository {
         }
 
         sqlx::query("DELETE FROM model_profiles WHERE provider_id = ?")
+            .bind(id)
+            .execute(&mut *transaction)
+            .await?;
+        // Dual-write rule 3: cascade the provider delete to the new catalog
+        // tables in the same transaction.
+        sqlx::query("DELETE FROM provider_models WHERE provider_id = ?")
+            .bind(id)
+            .execute(&mut *transaction)
+            .await?;
+        sqlx::query("DELETE FROM provider_connections WHERE provider_id = ?")
             .bind(id)
             .execute(&mut *transaction)
             .await?;
@@ -746,6 +1138,187 @@ mod tests {
         let (repo, _db) = setup().await;
         let err = repo.delete("no_id").await.unwrap_err();
         assert!(matches!(err, DbError::NotFound(_)));
+    }
+
+    #[tokio::test]
+    async fn create_syncs_provider_model_rows() {
+        let (repo, db) = setup().await;
+        let p = repo
+            .create(CreateProviderParams {
+                provider_id: None,
+                platform: "openai",
+                name: "P",
+                base_url: "https://x.test/v1",
+                api_key_encrypted: "enc",
+                models: r#"["a","b"]"#,
+                enabled: true,
+                capabilities: "[]",
+                model_context_limits: Some(r#"{"a":100}"#),
+                model_protocols: None,
+                model_descriptions: None,
+                model_enabled: Some(r#"{"b":false}"#),
+                model_health: None,
+                bedrock_config: None,
+                is_full_url: false,
+                sort_order: None,
+            })
+            .await
+            .unwrap();
+        let rows: Vec<(String, i64, Option<i64>)> = sqlx::query_as(
+            "SELECT model, enabled, context_limit FROM provider_models WHERE provider_id = ? ORDER BY sort_order",
+        )
+        .bind(&p.provider_id)
+        .fetch_all(db.pool())
+        .await
+        .unwrap();
+        assert_eq!(rows, vec![("a".into(), 1, Some(100)), ("b".into(), 0, None)]);
+    }
+
+    #[tokio::test]
+    async fn update_membership_adds_and_removes_rows_preserving_profiles() {
+        let (repo, db) = setup().await;
+        let p = repo
+            .create(CreateProviderParams {
+                provider_id: None,
+                platform: "openai",
+                name: "P",
+                base_url: "https://x.test/v1",
+                api_key_encrypted: "enc",
+                models: r#"["a","b"]"#,
+                enabled: true,
+                capabilities: "[]",
+                model_context_limits: None,
+                model_protocols: None,
+                model_descriptions: None,
+                model_enabled: None,
+                model_health: None,
+                bedrock_config: None,
+                is_full_url: false,
+                sort_order: None,
+            })
+            .await
+            .unwrap();
+        // Manually mark `a` with a user profile.
+        sqlx::query(
+            "UPDATE provider_models SET tasks='[\"chat\"]', source='user' WHERE provider_id=? AND model='a'",
+        )
+        .bind(&p.provider_id)
+        .execute(db.pool())
+        .await
+        .unwrap();
+        repo.update(
+            &p.provider_id,
+            UpdateProviderParams {
+                models: Some(r#"["a","c"]"#),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let rows: Vec<(String, String, String)> = sqlx::query_as(
+            "SELECT model, tasks, source FROM provider_models WHERE provider_id = ? ORDER BY sort_order",
+        )
+        .bind(&p.provider_id)
+        .fetch_all(db.pool())
+        .await
+        .unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(
+            rows[0],
+            ("a".into(), r#"["chat"]"#.into(), "user".into()),
+            "existing row's profile untouched"
+        );
+        assert_eq!(rows[1].0, "c");
+    }
+
+    #[tokio::test]
+    async fn update_map_param_is_whole_map_replacement_over_all_rows() {
+        let (repo, db) = setup().await;
+        let p = repo
+            .create(CreateProviderParams {
+                provider_id: None,
+                platform: "openai",
+                name: "P",
+                base_url: "https://x.test/v1",
+                api_key_encrypted: "enc",
+                models: r#"["a","b"]"#,
+                enabled: true,
+                capabilities: "[]",
+                model_context_limits: Some(r#"{"a":100,"b":200}"#),
+                model_protocols: Some(r#"{"a":"openai"}"#),
+                model_descriptions: None,
+                model_enabled: Some(r#"{"b":false}"#),
+                model_health: None,
+                bedrock_config: None,
+                is_full_url: false,
+                sort_order: None,
+            })
+            .await
+            .unwrap();
+
+        // Replace model_enabled with a map that only covers `a`; `b` must be
+        // reset to the enabled default (1). Explicitly clear the context
+        // limits map; both rows must be reset to NULL. Protocol map is not
+        // supplied, so protocol values stay put.
+        repo.update(
+            &p.provider_id,
+            UpdateProviderParams {
+                model_enabled: Some(Some(r#"{"a":false}"#)),
+                model_context_limits: Some(None),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+        let rows: Vec<(String, i64, Option<i64>, Option<String>)> = sqlx::query_as(
+            "SELECT model, enabled, context_limit, protocol FROM provider_models \
+             WHERE provider_id = ? ORDER BY sort_order",
+        )
+        .bind(&p.provider_id)
+        .fetch_all(db.pool())
+        .await
+        .unwrap();
+        assert_eq!(
+            rows,
+            vec![
+                ("a".into(), 0, None, Some("openai".into())),
+                ("b".into(), 1, None, None),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn delete_cascades_provider_models_and_connections() {
+        let (repo, db) = setup().await;
+        let p = repo
+            .create(CreateProviderParams {
+                models: r#"["a","b"]"#,
+                ..sample_params()
+            })
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO provider_connections \
+                (connection_id, provider_id, role, base_url, credentials_encrypted, created_at, updated_at) \
+             VALUES ('0190f5fe-7c00-7a00-8000-0000000000aa', ?, 'voice', 'https://voice.test', 'enc', 1, 1)",
+        )
+        .bind(&p.provider_id)
+        .execute(db.pool())
+        .await
+        .unwrap();
+
+        repo.delete(&p.provider_id).await.unwrap();
+
+        let models: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM provider_models")
+            .fetch_one(db.pool())
+            .await
+            .unwrap();
+        let connections: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM provider_connections")
+            .fetch_one(db.pool())
+            .await
+            .unwrap();
+        assert_eq!((models, connections), (0, 0));
     }
 
     #[tokio::test]
