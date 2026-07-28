@@ -9,11 +9,12 @@ use nomi_agent::output::OutputSink;
 use nomi_agent::output::null_sink::NullSink;
 use nomi_config::config::{CliArgs, Config};
 use nomifun_api_types::{
-    resolve_dispatch_target, HealthStatus, ModelTask, ProviderHealthCheckErrorKind,
-    ProviderHealthCheckRequest, ProviderHealthCheckResponse, RequestShape,
+    resolve_dispatch_target, HealthStatus, ModelHealthStatus, ModelTask,
+    ProviderHealthCheckErrorKind, ProviderHealthCheckRequest, ProviderHealthCheckResponse,
+    RequestShape,
 };
 use nomifun_common::{AppError, ProviderId};
-use nomifun_db::{IModelProfileRepository, IProviderRepository, models::Provider};
+use nomifun_db::{IProviderModelRepository, IProviderRepository, models::Provider};
 use regex::Regex;
 use tracing::{info, warn};
 
@@ -31,7 +32,7 @@ const HEALTH_CHECK_MSG_ID: &str = "provider-health-check";
 
 pub struct ProviderHealthCheckService {
     provider_repo: Arc<dyn IProviderRepository>,
-    model_profile_repo: Arc<dyn IModelProfileRepository>,
+    provider_model_repo: Arc<dyn IProviderModelRepository>,
     encryption_key: [u8; 32],
     data_dir: PathBuf,
 }
@@ -39,13 +40,13 @@ pub struct ProviderHealthCheckService {
 impl ProviderHealthCheckService {
     pub fn new(
         provider_repo: Arc<dyn IProviderRepository>,
-        model_profile_repo: Arc<dyn IModelProfileRepository>,
+        provider_model_repo: Arc<dyn IProviderModelRepository>,
         encryption_key: [u8; 32],
         data_dir: PathBuf,
     ) -> Self {
         Self {
             provider_repo,
-            model_profile_repo,
+            provider_model_repo,
             encryption_key,
             data_dir,
         }
@@ -81,7 +82,7 @@ impl ProviderHealthCheckService {
         // stored profile primary task > name/platform heuristic > Chat. This is
         // what makes image/tts/asr models probe their correct endpoint instead
         // of always hitting /chat/completions (the StepFun 404 root cause).
-        let profile = self.model_profile_repo.get(provider_id, model).await.ok().flatten();
+        let profile = self.provider_model_repo.get(provider_id, model).await.ok().flatten();
         let task = req
             .task
             .or_else(|| {
@@ -100,17 +101,20 @@ impl ProviderHealthCheckService {
 
         if task == ModelTask::Chat {
             let config = self.resolve_probe_config(&row, model)?;
-            if should_use_openai_model_probe(&row.platform, &config) {
-                return run_openai_model_probe(
+            let response = if should_use_openai_model_probe(&row.platform, &config) {
+                run_openai_model_probe(
                     persisted_provider_id,
                     row.platform,
                     model.to_owned(),
                     config.api_key,
                     config.base_url,
                 )
-                .await;
-            }
-            return run_probe(persisted_provider_id, row.platform, config).await;
+                .await?
+            } else {
+                run_probe(persisted_provider_id, row.platform, config).await?
+            };
+            persist_probe_outcome(self.provider_model_repo.as_ref(), &response).await;
+            return Ok(response);
         }
 
         // Non-chat task: probe the correct endpoint via the dispatch resolver.
@@ -119,7 +123,7 @@ impl ProviderHealthCheckService {
             .and_then(|p| serde_json::from_str(&p.params).ok())
             .unwrap_or_else(|| serde_json::json!({}));
         let api_key = nomifun_common::decrypt_string(&row.api_key_encrypted, &self.encryption_key)?;
-        run_modality_probe(
+        let response = run_modality_probe(
             persisted_provider_id,
             row.platform,
             model.to_owned(),
@@ -129,7 +133,9 @@ impl ProviderHealthCheckService {
             row.is_full_url,
             params,
         )
-        .await
+        .await?;
+        persist_probe_outcome(self.provider_model_repo.as_ref(), &response).await;
+        Ok(response)
     }
 
     fn resolve_probe_config(
@@ -183,6 +189,56 @@ impl ProviderHealthCheckService {
             allowed_tools: Vec::new(),
             write_root: None,
 })
+    }
+}
+
+/// Persist one probe outcome onto the model's authoritative catalog row.
+///
+/// Serializes the wire [`ModelHealthStatus`] shape (the same struct Task 4's
+/// row→response projection parses back out of `provider_models.health`) and
+/// writes it via `set_health`, which also stamps `health_checked_at = now`.
+/// Best-effort by design: a persistence failure (or a probe for a model that
+/// has no catalog row) logs a warning and never fails the health request.
+pub(crate) async fn persist_probe_outcome(
+    repo: &dyn IProviderModelRepository,
+    response: &ProviderHealthCheckResponse,
+) {
+    let health = ModelHealthStatus {
+        status: response.status,
+        // `health_checked_at` is authoritative for observation time; keep the
+        // wire struct's own `last_check` mirror populated for UI parity.
+        last_check: Some(nomifun_common::now_ms()),
+        latency: Some(i64::try_from(response.elapsed_ms).unwrap_or(i64::MAX)),
+        error: response.message.clone(),
+    };
+    let json = match serde_json::to_string(&health) {
+        Ok(json) => json,
+        Err(error) => {
+            warn!(
+                provider_id = %response.provider_id,
+                model = %response.model,
+                %error,
+                "could not serialize probe outcome; skipping health write-back"
+            );
+            return;
+        }
+    };
+    match repo
+        .set_health(&response.provider_id, &response.model, Some(&json))
+        .await
+    {
+        Ok(true) => {}
+        Ok(false) => warn!(
+            provider_id = %response.provider_id,
+            model = %response.model,
+            "probe outcome not persisted: model has no provider_models row"
+        ),
+        Err(error) => warn!(
+            provider_id = %response.provider_id,
+            model = %response.model,
+            %error,
+            "probe outcome health write-back failed"
+        ),
     }
 }
 
@@ -965,4 +1021,117 @@ mod tests {
         assert_eq!(body["text_mode"], true);
     }
 
+    // -- persist_probe_outcome --
+
+    const PROBE_PROVIDER: &str = "0190f5fe-7c00-7a00-8abc-012345678901";
+
+    async fn seed_provider_with_model(
+        db: &nomifun_db::Database,
+    ) -> nomifun_db::SqliteProviderModelRepository {
+        use nomifun_db::{CreateProviderParams, IProviderRepository, NewProviderModel};
+
+        nomifun_db::SqliteProviderRepository::new(db.pool().clone())
+            .create(CreateProviderParams {
+                provider_id: Some(PROBE_PROVIDER),
+                platform: "openai",
+                name: "P",
+                base_url: "https://x.test/v1",
+                api_key_encrypted: "enc",
+                models: "[]",
+                enabled: true,
+                capabilities: "[]",
+                model_context_limits: None,
+                model_protocols: None,
+                model_descriptions: None,
+                model_enabled: None,
+                model_health: None,
+                bedrock_config: None,
+                is_full_url: false,
+                sort_order: None,
+            })
+            .await
+            .unwrap();
+        let repo = nomifun_db::SqliteProviderModelRepository::new(db.pool().clone());
+        repo.create(
+            PROBE_PROVIDER,
+            &NewProviderModel {
+                model: "gpt-test",
+                enabled: true,
+                sort_order: 0,
+                tasks: r#"["chat"]"#,
+                traits: "[]",
+                params: "{}",
+                source: "inferred",
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        repo
+    }
+
+    #[tokio::test]
+    async fn persist_probe_outcome_stores_healthy_result() {
+        use nomifun_db::IProviderModelRepository;
+
+        let db = nomifun_db::init_database_memory().await.unwrap();
+        let repo = seed_provider_with_model(&db).await;
+        let response = ProviderHealthCheckResponse {
+            provider_id: PROBE_PROVIDER.to_owned(),
+            platform: "openai".to_owned(),
+            model: "gpt-test".to_owned(),
+            status: HealthStatus::Healthy,
+            elapsed_ms: 321,
+            message: None,
+            error_kind: None,
+            http_status: None,
+            timeout_stage: None,
+        };
+
+        persist_probe_outcome(&repo, &response).await;
+
+        let row = repo.get(PROBE_PROVIDER, "gpt-test").await.unwrap().unwrap();
+        assert!(row.health_checked_at.is_some(), "set_health stamps checked_at");
+        let health: ModelHealthStatus =
+            serde_json::from_str(row.health.as_deref().unwrap()).unwrap();
+        assert_eq!(health.status, HealthStatus::Healthy);
+        assert_eq!(health.latency, Some(321));
+        assert_eq!(health.error, None);
+        assert!(health.last_check.is_some());
+    }
+
+    #[tokio::test]
+    async fn persist_probe_outcome_stores_unhealthy_result_and_tolerates_missing_row() {
+        use nomifun_db::IProviderModelRepository;
+
+        let db = nomifun_db::init_database_memory().await.unwrap();
+        let repo = seed_provider_with_model(&db).await;
+        let response = unhealthy_response(
+            PROBE_PROVIDER.to_owned(),
+            "openai".to_owned(),
+            "gpt-test".to_owned(),
+            Duration::from_millis(45),
+            "Provider error: API error 429: Too Many Requests".to_owned(),
+            None,
+        );
+
+        persist_probe_outcome(&repo, &response).await;
+
+        let row = repo.get(PROBE_PROVIDER, "gpt-test").await.unwrap().unwrap();
+        let health: ModelHealthStatus =
+            serde_json::from_str(row.health.as_deref().unwrap()).unwrap();
+        assert_eq!(health.status, HealthStatus::Unhealthy);
+        assert_eq!(
+            health.error.as_deref(),
+            Some("Provider error: API error 429: Too Many Requests")
+        );
+
+        // A probe for an uncatalogued model must be a silent no-op, never an error.
+        let ghost = ProviderHealthCheckResponse {
+            model: "ghost-model".to_owned(),
+            ..response
+        };
+        persist_probe_outcome(&repo, &ghost).await;
+        assert!(repo.get(PROBE_PROVIDER, "ghost-model").await.unwrap().is_none());
+    }
 }

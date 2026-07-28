@@ -10,7 +10,7 @@ use serde_json::json;
 use tower::ServiceExt;
 
 use nomifun_db::{
-    SqliteClientPreferenceRepository, SqliteModelProfileRepository, SqliteProviderRepository,
+    SqliteClientPreferenceRepository, SqliteProviderModelRepository, SqliteProviderRepository,
     SqliteSettingsRepository, init_database_memory,
 };
 use nomifun_system::{
@@ -32,7 +32,7 @@ fn build_state(db: &nomifun_db::Database) -> SystemRouterState {
             TEST_KEY,
         ),
         model_fetch_service: ModelFetchService::new(provider_repo, TEST_KEY, http_client.clone()),
-        model_profile_service: ModelProfileService::new(Arc::new(SqliteModelProfileRepository::new(db.pool().clone()))),
+        model_profile_service: ModelProfileService::new(Arc::new(SqliteProviderModelRepository::new(db.pool().clone()))),
         managed_model_service: None,
         protocol_detection_service: ProtocolDetectionService::new(http_client.clone()),
         version_check_service: VersionCheckService::new(http_client, "0.1.0".to_owned()),

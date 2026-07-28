@@ -36,7 +36,6 @@ pub use models::{
     PresetTagBindingRow, PresetTagRow, PresetUserStateRow, PresetWriteParams,
     UpdatePresetTagParams, UpsertPresetStateParams,
 };
-pub use models::{ModelProfileRow, UpsertModelProfileParams};
 pub use models::{
     NewProviderModel, ProviderConnectionRow, ProviderModelRow, ProviderModelUpdate,
     UpsertProviderConnectionParams,
@@ -80,7 +79,7 @@ pub use repository::{
     IConversationRepository, ICronRepository, IIdmmInterventionRepository,
     IdmmActionReservationKey, IdmmActionReserveResult, IdmmActionSettleResult,
     IdmmActionSettlement, IdmmActionTurnIdentity, IKnowledgeRepository,
-    IMcpServerRepository, IModelProfileRepository, IOAuthTokenRepository,
+    IMcpServerRepository, IOAuthTokenRepository,
     IProviderConnectionRepository, IProviderModelRepository, IProviderRepository,
     IRemoteAgentRepository, IRequirementRepository, ISettingsRepository, ISkillTagRepository,
     ITagSettingRepository, ITerminalRepository, IUserRepository, IWebhookRepository,
@@ -94,7 +93,7 @@ pub use repository::{
     SqliteChannelRepository, SqliteClientPreferenceRepository, SqliteCompanionTokenRepository,
     SqliteConnectorCredentialRepository, SqliteConversationRepository, SqliteCronRepository,
     SqliteIdmmInterventionRepository, SqliteKnowledgeRepository, SqliteMcpServerRepository,
-    SqliteModelProfileRepository, SqliteOAuthTokenRepository,
+    SqliteOAuthTokenRepository,
     SqliteProviderConnectionRepository, SqliteProviderModelRepository, SqliteProviderRepository,
     SqliteRemoteAgentRepository, SqliteRequirementRepository, SqliteSettingsRepository,
     SqliteSkillTagRepository, SqliteTagSettingRepository, SqliteTerminalRepository,

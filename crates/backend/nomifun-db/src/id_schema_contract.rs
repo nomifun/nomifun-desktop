@@ -52,7 +52,6 @@ pub(crate) const PRODUCT_TABLES: &[&str] = &[
     "mcp_servers",
     "message_correlations",
     "messages",
-    "model_profiles",
     "oauth_tokens",
     "preset_agent_preferences",
     "preset_examples",
@@ -678,7 +677,6 @@ pub(crate) const LOGICAL_REFERENCES: &[LogicalReference] = &[
     // the projection exists, it must remain inside the same Conversation.
     text_ref!("message_correlations", "message_id" => "messages", "message_id", false, "idx_message_correlations_message_id", KeepHistory)
         .with_aggregate_scope("parent.conversation_id = child.conversation_id"),
-    text_ref!("model_profiles", "provider_id" => "providers", "provider_id", false, "idx_model_profiles_provider_id", Cascade),
     text_ref!("provider_connections", "provider_id" => "providers", "provider_id", false, "idx_provider_connections_provider_id", Cascade),
     text_ref!("provider_models", "provider_id" => "providers", "provider_id", false, "idx_provider_models_provider_id", Cascade),
     text_ref!("preset_agent_preferences", "preset_id" => "presets", "preset_id", false, "idx_preset_agent_preferences_preset_id", Cascade),

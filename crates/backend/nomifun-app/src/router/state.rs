@@ -440,7 +440,7 @@ pub async fn build_module_states(services: &AppServices) -> (ModuleStates, Chann
     let agent_service = AgentService::new(
         services.agent_registry.clone(),
         provider_repo,
-        services.model_profile_repo.clone(),
+        services.provider_model_repo.clone(),
         encryption_key,
         services.data_dir.clone(),
     );
@@ -571,7 +571,7 @@ pub fn build_system_state(services: &AppServices) -> SystemRouterState {
         .with_deletion_coordinator(deletion_coordinator),
         model_fetch_service: ModelFetchService::new_dynamic(provider_repo, encryption_key),
         model_profile_service: nomifun_system::ModelProfileService::new(
-            services.model_profile_repo.clone(),
+            services.provider_model_repo.clone(),
         ),
         managed_model_service: Some(services.managed_model_service.clone()),
         protocol_detection_service: ProtocolDetectionService::new_dynamic(),

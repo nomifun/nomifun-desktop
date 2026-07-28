@@ -82,7 +82,7 @@ async fn setup_with_work_and_cli_override(
         ),
         model_fetch_service: ModelFetchService::new(provider_repo, TEST_KEY, http_client.clone()),
         model_profile_service: nomifun_system::ModelProfileService::new(std::sync::Arc::new(
-            nomifun_db::SqliteModelProfileRepository::new(db.pool().clone()),
+            nomifun_db::SqliteProviderModelRepository::new(db.pool().clone()),
         )),
         managed_model_service: None,
         protocol_detection_service: ProtocolDetectionService::new(http_client.clone()),

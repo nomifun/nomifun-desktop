@@ -809,12 +809,8 @@ impl IProviderRepository for SqliteProviderRepository {
             }
         }
 
-        sqlx::query("DELETE FROM model_profiles WHERE provider_id = ?")
-            .bind(id)
-            .execute(&mut *transaction)
-            .await?;
-        // Dual-write rule 3: cascade the provider delete to the new catalog
-        // tables in the same transaction.
+        // Cascade the provider delete to the catalog tables in the same
+        // transaction.
         sqlx::query("DELETE FROM provider_models WHERE provider_id = ?")
             .bind(id)
             .execute(&mut *transaction)
