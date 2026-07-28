@@ -230,6 +230,10 @@ pub struct Capability {
     /// JSON Schema object for the tool's arguments (MCP `inputSchema`).
     pub input_schema: Map<String, Value>,
     pub handler: Handler,
+    /// Side-effect-free typed argument preflight. This is built from the same
+    /// request type `P` and `strip_confirm` path as the handler so transports
+    /// can validate before attaching any capability-scoped resources.
+    argument_validator: Arc<dyn Fn(Value) -> Result<(), serde_json::Error> + Send + Sync>,
     /// Optional streaming handler. `Some` for capabilities that can emit
     /// incremental progress; consumed by
     /// [`Registry::dispatch_stream`]. The buffered [`handler`](Self::handler) is
@@ -255,14 +259,16 @@ impl Capability {
             inject_confirm_property(&mut input_schema);
         }
         let f = Arc::new(f);
+        let argument_validator: Arc<
+            dyn Fn(Value) -> Result<(), serde_json::Error> + Send + Sync,
+        > = Arc::new(|args| deserialize_params::<P>(args).map(|_| ()));
         let handler: Handler = Arc::new(move |deps, ctx, args: Value| {
             let f = f.clone();
             Box::pin(async move {
                 // `confirm` is a cross-cutting gate field injected into the schema,
                 // not part of `P`; drop it before typed deserialization so an
                 // `deny_unknown_fields` request type would not choke on it.
-                let args = strip_confirm(args);
-                match serde_json::from_value::<P>(args) {
+                match deserialize_params::<P>(args) {
                     Ok(p) => f(deps, ctx, p).await,
                     Err(e) => invalid_arguments_error(e),
                 }
@@ -272,6 +278,7 @@ impl Capability {
             meta,
             input_schema,
             handler,
+            argument_validator,
             stream: None,
         }
     }
@@ -293,6 +300,9 @@ impl Capability {
             inject_confirm_property(&mut input_schema);
         }
         let f = Arc::new(f);
+        let argument_validator: Arc<
+            dyn Fn(Value) -> Result<(), serde_json::Error> + Send + Sync,
+        > = Arc::new(|args| deserialize_params::<P>(args).map(|_| ()));
 
         // Streaming path: deserialize P, run f feeding the caller's sink.
         let stream_f = f.clone();
@@ -300,8 +310,7 @@ impl Capability {
             Arc::new(move |deps, ctx, args: Value, sink: ProgressSink| {
                 let f = stream_f.clone();
                 Box::pin(async move {
-                    let args = strip_confirm(args);
-                    match serde_json::from_value::<P>(args) {
+                    match deserialize_params::<P>(args) {
                         Ok(p) => f(deps, ctx, p, sink).await,
                         Err(e) => invalid_arguments_error(e),
                     }
@@ -313,8 +322,7 @@ impl Capability {
         let handler: Handler = Arc::new(move |deps, ctx, args: Value| {
             let f = f.clone();
             Box::pin(async move {
-                let args = strip_confirm(args);
-                let p = match serde_json::from_value::<P>(args) {
+                let p = match deserialize_params::<P>(args) {
                     Ok(p) => p,
                     Err(e) => return invalid_arguments_error(e),
                 };
@@ -330,8 +338,16 @@ impl Capability {
             meta,
             input_schema,
             handler,
+            argument_validator,
             stream: Some(stream),
         }
+    }
+
+    /// Validate arguments without invoking the handler or performing any
+    /// capability-specific side effect.
+    pub fn validate_arguments(&self, args: &Value) -> Result<(), Value> {
+        (self.argument_validator)(args.clone())
+            .map_err(invalid_arguments_error)
     }
 }
 
@@ -351,14 +367,84 @@ fn schema_for_params<P: JsonSchema>() -> Map<String, Value> {
         .iter()
         .any(|keyword| map.contains_key(*keyword))
         || map.contains_key("$ref");
-    if !is_composed {
+    if is_composed {
+        project_composed_root_properties(&mut map);
+    } else {
         map.entry("additionalProperties")
             .or_insert_with(|| json!(false));
-        // Plain tools with no fields still need a `properties` object so clients
-        // render an empty-args form rather than rejecting the schema.
-        map.entry("properties").or_insert_with(|| json!({}));
     }
+    // Provider-facing clients require a root `properties` object. For composed
+    // schemas this is only a discoverability projection; the original
+    // oneOf/anyOf/allOf/$ref branches remain authoritative for validation.
+    map.entry("properties").or_insert_with(|| json!({}));
     map
+}
+
+/// Project fields reachable through a composed root into its root
+/// `properties` object without removing or weakening the original schema.
+fn project_composed_root_properties(schema: &mut Map<String, Value>) {
+    let root = Value::Object(schema.clone());
+    let mut object_paths = BTreeSet::new();
+    let mut visited_paths = BTreeSet::new();
+    collect_composed_object_paths(
+        &root,
+        &root,
+        "",
+        &mut object_paths,
+        &mut visited_paths,
+    );
+
+    let mut properties = schema
+        .get("properties")
+        .and_then(Value::as_object)
+        .cloned()
+        .unwrap_or_default();
+    for path in object_paths {
+        let Some(branch_properties) = root
+            .pointer(&path)
+            .and_then(Value::as_object)
+            .and_then(|branch| branch.get("properties"))
+            .and_then(Value::as_object)
+        else {
+            continue;
+        };
+        for (name, property) in branch_properties {
+            merge_projected_property(&mut properties, name, property);
+        }
+    }
+    schema.insert("properties".to_owned(), Value::Object(properties));
+}
+
+fn merge_projected_property(
+    properties: &mut Map<String, Value>,
+    name: &str,
+    incoming: &Value,
+) {
+    let Some(existing) = properties.get(name) else {
+        properties.insert(name.to_owned(), incoming.clone());
+        return;
+    };
+    if existing == incoming {
+        return;
+    }
+
+    let mut alternatives = Vec::new();
+    append_unique_schema_alternatives(&mut alternatives, existing);
+    append_unique_schema_alternatives(&mut alternatives, incoming);
+    properties.insert(name.to_owned(), json!({ "anyOf": alternatives }));
+}
+
+fn append_unique_schema_alternatives(alternatives: &mut Vec<Value>, schema: &Value) {
+    let candidates = schema
+        .get("anyOf")
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or_else(|| std::slice::from_ref(schema));
+    for candidate in candidates {
+        if !alternatives.contains(candidate) {
+            alternatives.push(candidate.clone());
+        }
+    }
 }
 
 /// Add the cross-cutting `confirm` argument to a confirm-gated tool's schema so
@@ -475,6 +561,12 @@ fn strip_confirm(mut args: Value) -> Value {
         m.remove("confirm");
     }
     args
+}
+
+/// Deserialize one capability's request using the exact path shared by
+/// handler dispatch and side-effect-free preflight.
+fn deserialize_params<P: DeserializeOwned>(args: Value) -> Result<P, serde_json::Error> {
+    serde_json::from_value::<P>(strip_confirm(args))
 }
 
 #[cfg(test)]
@@ -707,6 +799,53 @@ mod tests {
             }))
             .is_err()
         );
+    }
+
+    #[test]
+    fn capability_preflight_and_handler_deserialization_have_parity() {
+        let capability = Capability::new::<FixedShapeParams, _, _>(
+            CapabilityMeta::new(
+                "t_fixed_shape",
+                "test",
+                "typed test capability",
+                DangerTier::Read,
+            ),
+            |_deps, _ctx, _params| async { json!({"result": "ok"}) },
+        );
+
+        for args in [
+            json!({
+                "id": 8,
+                "limit": 50,
+                "wait_secs": 1.5,
+                "confirm": true,
+                "tasks": ["research"]
+            }),
+            json!({
+                "id": "8",
+                "limit": 50,
+                "wait_secs": 1.5,
+                "confirm": true,
+                "tasks": ["research"]
+            }),
+            json!({
+                "id": 8,
+                "limit": 50,
+                "wait_secs": 1.5,
+                "confirm": true,
+                "tasks": ["research"],
+                "legacy_id": "8"
+            }),
+            Value::Null,
+        ] {
+            let preflight_ok = capability.validate_arguments(&args).is_ok();
+            let handler_deserialization_ok =
+                deserialize_params::<FixedShapeParams>(strip_confirm(args)).is_ok();
+            assert_eq!(
+                preflight_ok, handler_deserialization_ok,
+                "preflight and handler must accept/reject the same arguments"
+            );
+        }
     }
 
     #[test]

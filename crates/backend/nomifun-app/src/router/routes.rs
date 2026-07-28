@@ -80,10 +80,31 @@ async fn forward_user_events(
             Ok(envelope) => ws_manager.broadcast_to_user(&envelope.user_id, envelope.event),
             Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
                 tracing::warn!(skipped, audience = "user", "realtime bridge lagged; continuing from newest event");
+                // Tokio's lag error does not expose the discarded envelopes,
+                // so their audiences cannot be reconstructed safely. The
+                // invalidation contains no inventory data: every connection
+                // can safely receive it and refresh its own authenticated
+                // snapshot. Sending directly avoids the already-lagged bus.
+                // Backward-compatible clients refresh on every inventory event;
+                // marker-aware clients explicitly classify this as a resync.
+                ws_manager.broadcast_all(browser_inventory_resync_event(skipped));
             }
             Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
         }
     }
+}
+
+fn browser_inventory_resync_event(
+    skipped: u64,
+) -> nomifun_api_types::WebSocketMessage<serde_json::Value> {
+    nomifun_api_types::WebSocketMessage::new(
+        "browser.inventory.changed",
+        serde_json::json!({
+            "change_kind": "resync_required",
+            "resync_required": true,
+            "skipped": skipped,
+        }),
+    )
 }
 
 /// Apply the two installation-control-plane gates in the only valid order:
@@ -198,22 +219,15 @@ pub async fn create_router(services: &AppServices) -> Router {
         agent_execution_engine: states.agent_execution.clone(),
         // Presets: same resolver singleton as `/api/presets` and companion apply.
         preset_service: states.preset.service.clone(),
-        // P3-GW1 (route A): per-companion browser tool registry, lives in this
-        // (main) process. Feature-gated — `None` would mean "browser tools not
-        // available", but when the feature is on we always wire it so remote
-        // master/companion agents can drive a browser. Uses the default browser
-        // config (headless is forced when no display is available anyway); each
-        // companion gets an isolated lazily-engined BrowserTool + a mutex (X5).
+        // Gateway is only an adapter to the one process-wide browser hub. An
+        // unsupported/degraded host leaves this as `None`; it never creates a
+        // fallback BrowserTool/Chromium owner inside the Gateway.
         #[cfg(feature = "browser-use")]
-        browser_registry: Some(
-            // P3-X2: pass the machine-bound encryption_key so each companion's
-            // gateway-driven BrowserTool loads its per-pet secret vault (secret:NAME
-            // resolves, firewall allowlist derived from registered allowed_origins, 裁决⑤).
-            // PKG-1: pass the bundled Chrome dir so packaged builds prefer it over download.
-            nomifun_gateway::browser_registry::BrowserRegistry::default_for_browser_use()
-                .with_secret_key(services.encryption_key)
-                .with_bundled_dir(crate::commands::bundled_chrome_dir()),
-        ),
+        browser_registry: services.browser_session_hub.as_ref().map(|hub| {
+            nomifun_gateway::browser_registry::BrowserRegistry::from_hub(
+                hub.as_ref().clone(),
+            )
+        }),
         // Computer-use: one shared desktop ComputerTool (no per-companion
         // isolation, no secret vault — the desktop is a single screen).
         #[cfg(feature = "computer-use")]
@@ -397,25 +411,61 @@ mod realtime_bridge_tests {
     }
 
     #[tokio::test]
-    async fn user_bridge_continues_after_lag_and_keeps_owner_scope() {
+    async fn user_bridge_emits_resync_after_lag_and_keeps_normal_events_scoped() {
+        // Keep only the newest envelope so every pre-existing event is
+        // deterministically discarded before the bridge resumes.  With a
+        // capacity of two, the middle event could survive the lag and be
+        // legitimately delivered to the other owner, making this test assert
+        // on scheduling rather than the resync contract.
         let bus = Arc::new(BroadcastEventBus::new(1));
         let receiver = bus.subscribe_user();
-        bus.send_to_user("owner-a", WebSocketMessage::new("dropped", json!({})));
+        // This first inventory event is observed before the later burst makes
+        // the receiver lag. It models an already-open browser page.
         bus.send_to_user(
             "owner-a",
-            WebSocketMessage::new("after-lag", json!({"seq": 2})),
+            WebSocketMessage::new("browser.inventory.changed", json!({"sequence": 1})),
         );
 
         let manager = Arc::new(WebSocketManager::new());
-        let (owner_tx, mut owner_rx) = mpsc::channel(4);
-        let (other_tx, mut other_rx) = mpsc::channel(4);
+        let (owner_tx, mut owner_rx) = mpsc::channel(8);
+        let (other_tx, mut other_rx) = mpsc::channel(8);
         manager.add_client("owner-a".into(), "token-a".into(), owner_tx);
         manager.add_client("owner-b".into(), "token-b".into(), other_tx);
         let task = tokio::spawn(forward_user_events(receiver, manager));
 
+        let initial = receive_event(&mut owner_rx).await;
+        assert_eq!(initial.name, "browser.inventory.changed");
+        assert!(other_rx.try_recv().is_err());
+
+        // Pause the task so a deterministic capacity overflow occurs after it
+        // has already consumed the initial inventory event.
+        task.abort();
+        let receiver = bus.subscribe_user();
+        bus.send_to_user("owner-a", WebSocketMessage::new("dropped-a", json!({})));
+        bus.send_to_user("owner-b", WebSocketMessage::new("dropped-b", json!({})));
+        bus.send_to_user(
+            "owner-a",
+            WebSocketMessage::new("after-lag", json!({"seq": 3})),
+        );
+        let manager = Arc::new(WebSocketManager::new());
+        let (owner_tx, mut owner_rx) = mpsc::channel(8);
+        let (other_tx, mut other_rx) = mpsc::channel(8);
+        manager.add_client("owner-a".into(), "token-a".into(), owner_tx);
+        manager.add_client("owner-b".into(), "token-b".into(), other_tx);
+        let task = tokio::spawn(forward_user_events(receiver, manager));
+
+        let owner_resync = receive_event(&mut owner_rx).await;
+        let other_resync = receive_event(&mut other_rx).await;
+        for resync in [&owner_resync, &other_resync] {
+            assert_eq!(resync.name, "browser.inventory.changed");
+            assert_eq!(resync.data["change_kind"], "resync_required");
+            assert_eq!(resync.data["resync_required"], true);
+            assert!(resync.data.get("sequence").is_none());
+        }
+
         let event = receive_event(&mut owner_rx).await;
         assert_eq!(event.name, "after-lag");
-        assert_eq!(event.data["seq"], 2);
+        assert_eq!(event.data["seq"], 3);
         assert!(other_rx.try_recv().is_err());
         task.abort();
     }
@@ -754,7 +804,7 @@ pub fn create_router_with_all_state(
     // double-submit) but still gets security response headers.
     let ws_routes = Router::new()
         .route("/ws", get(ws_upgrade_handler))
-        .with_state(ws_state);
+        .with_state(ws_state.clone());
     tracing::info!(
         elapsed_ms = boot.elapsed().as_millis(),
         "startup: route groups built"
@@ -765,9 +815,8 @@ pub fn create_router_with_all_state(
     #[cfg(feature = "browser-use")]
     let browser_login_authenticated = {
         let login_state = crate::router::browser_login::BrowserLoginState::new(
-            services.data_dir.clone(),
-            crate::commands::bundled_chrome_dir(),
-            services.encryption_key,
+            services.browser_session_hub.clone(),
+            services.authoritative_user_id.clone(),
         );
         protect_instance_owner(
             Router::new()
@@ -787,6 +836,31 @@ pub fn create_router_with_all_state(
             &auth_mw_state,
             &instance_owner_state,
         )
+    };
+
+    // Browser inventory and lifecycle management are projections over the
+    // process-wide Hub. Page execution remains Agent-only.
+    // The state may deliberately carry `None` while a browser-enabled host is
+    // degraded; handlers then return a stable 501 and never launch a private
+    // fallback engine.
+    #[cfg(feature = "browser-use")]
+    let (browser_management_user_authenticated, browser_management_owner_authenticated) = {
+        let state = crate::router::browser_management::BrowserManagementState::new(
+            services.browser_session_hub.clone(),
+            Arc::new(nomifun_db::SqliteClientPreferenceRepository::new(
+                services.database.pool().clone(),
+            )),
+            services.authoritative_user_id.clone(),
+        );
+        let user_routes =
+            crate::router::browser_management::browser_management_user_routes(state.clone())
+                .route_layer(from_fn_with_state(auth_mw_state.clone(), auth_middleware));
+        let owner_routes = protect_instance_owner(
+            crate::router::browser_management::browser_management_owner_routes(state),
+            &auth_mw_state,
+            &instance_owner_state,
+        );
+        (user_routes, owner_routes)
     };
 
     let router = Router::new()
@@ -828,7 +902,10 @@ pub fn create_router_with_all_state(
 
     // Phase 2b: mount the login-browser routes (browser-use builds only).
     #[cfg(feature = "browser-use")]
-    let router = router.merge(browser_login_authenticated);
+    let router = router
+        .merge(browser_management_user_authenticated)
+        .merge(browser_management_owner_authenticated)
+        .merge(browser_login_authenticated);
 
     // CSRF (Double Submit Cookie) protects cookie-authenticated (remote
     // browser) requests. It is skipped entirely under NoAuth, and skips
@@ -841,7 +918,8 @@ pub fn create_router_with_all_state(
             services.cookie_config.clone(),
             csrf_middleware,
         ))
-    }
+    };
+    let router = router
     .merge(ws_routes)
     .merge(office_proxy)
     .merge(public_assets)

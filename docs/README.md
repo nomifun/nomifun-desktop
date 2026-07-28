@@ -25,6 +25,7 @@ the current architecture or contributor standards.
 | Community expectations | [../CODE_OF_CONDUCT.md](../CODE_OF_CONDUCT.md) |
 | Report a security issue | [../SECURITY.md](../SECURITY.md) |
 | Release notes and release process | [../CHANGELOG.md](../CHANGELOG.md), [../RELEASING.md](../RELEASING.md) |
+| Continue Browser Platform release work | [continuity/07-browser-platform-handoff.zh.md](continuity/07-browser-platform-handoff.zh.md) |
 
 ## Current Documentation
 

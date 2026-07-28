@@ -65,7 +65,10 @@ pub(crate) fn inject_runtime_preset_context(
     if !should_inject {
         return content;
     }
-    let Some(context) = preset_context.map(str::trim).filter(|value| !value.is_empty()) else {
+    let Some(context) = preset_context
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
         return content;
     };
     format!(
@@ -162,17 +165,19 @@ pub struct NomiResolvedConfig {
     pub bedrock_config: Option<nomi_config::config::BedrockConfig>,
     /// Enable the Computer tool (screen/mouse/keyboard control).
     pub computer_use: bool,
-    /// Enable the Browser tool (CDP automation).
+    /// Enable Browser tools backed by a main-process `BrowserLaneClient`.
+    /// This runtime never owns Chromium or a browser profile.
     pub browser_use: bool,
-    /// **静默浏览器 LIVE 值**（「浏览器模式」的可见性维度）。`true` → 引擎 headless
-    /// （无可见窗口）；`false`（产品默认）→ 弹出可见窗口。工厂经 `read_bool_pref` LIVE 读
-    /// `agent.browserUse.silent`（host_default=**false**）。映射到 `config.tools.browser.headless`
-    /// （silent→headless），facade 由 `!headless` 得 headful。无显示器时引擎本就强制 headless。
+    /// Deprecated compatibility field retained for downstream config
+    /// constructors. Browser management is status-only and Primary always
+    /// uses the external managed window, so production code sets this to
+    /// `false` and the engine must not use it to select a private/headless Host.
     pub browser_silent: bool,
-    /// **浏览器来源 LIVE 值**（「浏览器模式」的来源维度，与 silent 正交）。`"managed"` =
-    /// 内置/下载 CfT；`"system"`（默认）= 系统 Chrome/Edge 本体优先（未探到回退 managed）。工厂经
-    /// `read_string_pref` LIVE 读 `agent.browserUse.source`（host_default=`"system"`）。映射到
-    /// `config.tools.browser.source`，facade 解析为 `ChromeSource`。红线不变：专属 user-data-dir。
+    /// **浏览器来源 LIVE 值**（Browser Host 可执行文件偏好，与 silent 正交）。`"managed"` =
+    /// 内置/下载 CfT；`"system"`（默认）= 系统 Chrome/Edge 本体优先（未探到回退 managed）。
+    /// 工厂经 `read_string_pref` LIVE 读 `agent.browserUse.source`（host_default=`"system"`）。
+    /// 主进程 `BrowserSessionHub` 仍是唯一 Host/profile owner：Primary 使用应用管理的稳定
+    /// profile，Crawl Host 使用临时 profile，runtime 不拥有独立 Chromium。
     pub browser_source: String,
     /// **F1-sec: browser-use evaluate「全权模式」LIVE 值**（裁决⑨，default-deny）。`true` 当且仅当
     /// 用户在 System Settings 显式 opt-in（`client_preferences` `agent.browserUse.fullPower`，工厂经
@@ -184,9 +189,10 @@ pub struct NomiResolvedConfig {
     /// `agent.browserUse.persistentLogin`（host_default=true）。`false` → 互斥不生效（evaluate 仅受
     /// full_power 开关控制）。代码级 Default = `false`（与 full_power 同范式 default-deny 基线）。
     pub browser_persistent_login: bool,
-    /// **P7A site-memory LIVE 值**（opt-in，隐私相关）。`true` → bootstrap 给 `BrowserTool` 注入文件型
-    /// `SiteMemorySink`（跨会话记住站点结构 + 向 observe 注入 hints）。工厂经 `read_bool_pref` 范式 LIVE
-    /// 读 `agent.browserUse.siteMemory`（host_default=**false**=OFF）。`false`（默认）→ 不挂 sink，零行为变化。
+    /// **P7A site-memory LIVE 值**（opt-in，隐私相关）。`true` → bootstrap 给 Hub-backed
+    /// Browser tool adapter 注入文件型 `SiteMemorySink`（跨会话记住站点结构 + 向 observe
+    /// 注入 hints）。工厂经 `read_bool_pref` 范式 LIVE 读 `agent.browserUse.siteMemory`
+    /// （host_default=**false**=OFF）。`false`（默认）→ 不挂 sink，零行为变化。
     pub browser_site_memory: bool,
     /// **Phase D takeover/审批 LIVE 值**（opt-in，安全）。`true` → 桌面会话构造期注入
     /// `DesktopApprovalGate`：不可逆动作（bypass 会话）+ 被门控跨域 POST（SD-5）浮给用户审批后
@@ -196,21 +202,23 @@ pub struct NomiResolvedConfig {
     /// Explicit Browser Use approval bypass. Default false. When true, Browser-specific
     /// irreversible and egress approval prompts approve immediately.
     pub browser_unrestricted_approval: bool,
-    /// **P7B visual-fallback LIVE 值**（opt-in，有 token 成本）。`true` → bootstrap 给 `BrowserTool`
-    /// 注入会话模型的 `VisualLocator`：DOM/aria 锚定失败（ref stale/detached）时截图交视觉模型按描述
-    /// 定位再点。工厂经 `read_bool_pref` 范式 LIVE 读 `agent.browserUse.visualFallback`
-    /// （host_default=**false**=OFF）。`false`（默认）→ 不注入 locator，facade 兜底保持 Unavailable（零行为变化）。
+    /// **P7B visual-fallback LIVE 值**（opt-in，有 token 成本）。`true` → bootstrap 给
+    /// Hub-backed Browser tool adapter 注入会话模型的 `VisualLocator`：DOM/aria 锚定失败
+    /// （ref stale/detached）时截图交视觉模型按描述定位再点。工厂经 `read_bool_pref` 范式
+    /// LIVE 读 `agent.browserUse.visualFallback`（host_default=**false**=OFF）。`false`
+    /// （默认）→ 不注入 locator，适配层保持 Unavailable（零行为变化）。
     pub browser_visual_fallback: bool,
     /// Opt-in goal-driven continuation (objective + auto-continuation cap).
     /// `None` (default) = normal one-shot turn behavior.
     pub goal: Option<nomi_agent::goal::runtime::GoalSpec>,
-    /// **P3-X2: per-pet browser secret vault descriptor** (vault file path +
-    /// machine-bound key). Threaded to the bootstrap so the native `BrowserTool`
-    /// loads the user-registered credentials (`secret:NAME`, origin-gated) and
-    /// derives the firewall domain allowlist from their `allowed_origins` (裁决⑤).
-    /// `None` (no companion / browser-use off / probe sessions) → empty store +
-    /// unrestricted egress (current behavior). The raw key is carried (not a
-    /// `nomi_browser` type) so this crate needs no `nomi-browser` dependency.
+    /// Shared browser secret-vault descriptor (vault path + machine-bound key).
+    /// Bootstrap passes it to the Hub-backed Browser tool policy so
+    /// user-registered `secret:NAME` values resolve under origin checks and
+    /// contribute their `allowed_origins` to the egress firewall. This is a
+    /// shared policy store, not a browser profile or per-runtime Chromium owner.
+    /// `None` (browser-use off / probe sessions) keeps the compatibility empty
+    /// store behavior. The raw key is carried without a `nomi_browser` type so
+    /// this crate needs no `nomi-browser` dependency.
     pub browser_secret_vault: Option<BrowserSecretVault>,
     /// Stable identity of the owning conversation instance (the conversation
     /// row's `created_at`, stringified). Persisted Nomi runtimes always provide
@@ -233,9 +241,12 @@ pub struct NomiResolvedConfig {
     pub write_root: Option<String>,
 }
 
-/// **P3-X2**: the shared browser secret vault location + its machine-bound key
-/// (去 per-pet 键化: browser identity globally shared — one vault for all companions).
-/// Debug redacts the key so it never lands in a `NomiResolvedConfig` log line.
+/// Shared browser secret-vault location plus its machine-bound key.
+///
+/// One application vault serves all callers. It contains policy-managed
+/// credentials, not the Primary identity profile; Chromium/profile ownership
+/// remains exclusively in the main-process `BrowserSessionHub`. Debug redacts
+/// the key so it never lands in a `NomiResolvedConfig` log line.
 #[derive(Clone)]
 pub struct BrowserSecretVault {
     /// The shared secret vault file path
@@ -257,6 +268,10 @@ impl std::fmt::Debug for BrowserSecretVault {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use nomifun_api_types::{
+        AcpBuildExtra, AcpModelInfo, NomiBuildExtra, OpenClawGatewayConfig, SlashCommandItem,
+    };
+    use serde_json::json;
 
     #[test]
     fn runtime_preset_context_is_injected_only_when_requested() {
@@ -282,8 +297,6 @@ mod tests {
             "plain"
         );
     }
-    use nomifun_api_types::{AcpBuildExtra, AcpModelInfo, NomiBuildExtra, OpenClawGatewayConfig, SlashCommandItem};
-    use serde_json::json;
 
     #[test]
     fn acp_build_extra_accepts_payload_without_skills() {
@@ -360,7 +373,10 @@ mod tests {
         assert_eq!(json["agent_type"], "acp");
         assert_eq!(json["user_id"], "0190f5fe-7c00-7a00-8000-000000000001");
         assert_eq!(json["workspace"], "/project");
-        assert_eq!(json["conversation_id"], "0190f5fe-7c00-7a00-8000-000000000001");
+        assert_eq!(
+            json["conversation_id"],
+            "0190f5fe-7c00-7a00-8000-000000000001"
+        );
         assert_eq!(json["delegation_policy"], "automatic");
     }
 

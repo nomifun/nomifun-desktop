@@ -17,12 +17,16 @@
 //! └────────────────────────────────────────────────────────────┘
 
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use std::sync::{Arc, Condvar, Mutex};
+use std::time::{Duration, Instant};
 
 use anyhow::Context;
 use clap::Parser;
-use nomifun_app::{DesktopServer, WebUiAsset, WebUiAssetSource, WebUiStatus};
+use nomifun_app::{
+    DesktopKeepAlive, DesktopServer, StartupCleanupDisposition, WebUiAsset, WebUiAssetSource,
+    WebUiStatus,
+};
 use tauri::menu::{Menu, MenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{Emitter, Manager};
@@ -272,6 +276,13 @@ fn should_resolve_filesystem_webui(
     !has_dev_frontend && (explicit_dist_override || !has_embedded_frontend)
 }
 
+/// Keep Tauri's generated context macro at one expansion site. Production Wry
+/// and the mock-runtime artifact test then consume the exact same generated
+/// assets without defining platform metadata symbols twice in one test binary.
+fn generated_tauri_context<R: tauri::Runtime>() -> tauri::Context<R> {
+    tauri::generate_context!()
+}
+
 /// Data root resolution, in priority order:
 ///
 /// 1. `NOMIFUN_DATA_DIR` env — explicit override; the shell appends `/Nomi`
@@ -304,6 +315,90 @@ async fn check_for_updates(app: tauri::AppHandle) -> Result<Option<String>, Stri
         Ok(None) => Ok(None),
         Err(e) => Err(e.to_string()),
     }
+}
+
+/// Install the exact update version selected by the renderer through a
+/// Rust-owned updater handle. The renderer may check/download for progress, but
+/// it is never allowed to invoke the plugin's raw install commands.
+#[tauri::command]
+async fn install_update(
+    app: tauri::AppHandle,
+    server: tauri::State<'_, Arc<DesktopServer>>,
+    version: String,
+) -> Result<(), String> {
+    use tauri_plugin_updater::UpdaterExt;
+
+    let requested_version = version.trim();
+    if requested_version.is_empty() {
+        return Err("update version must not be empty".to_owned());
+    }
+
+    let shutdown_server = server.inner().clone();
+    let cleanup_app = app.clone();
+    let updater = app
+        .updater_builder()
+        .on_before_exit(move || {
+            updater_before_exit_until_verified(
+                || shutdown_server.shutdown_all_blocking(),
+                || cleanup_app.cleanup_before_exit(),
+                |attempt, error| {
+                    tracing::error!(
+                        attempt,
+                        %error,
+                        "updater installer handoff blocked until desktop shutdown is verified"
+                    );
+                },
+                || std::thread::sleep(Duration::from_millis(250)),
+            );
+        })
+        .build()
+        .map_err(|error| error.to_string())?;
+    let update = updater
+        .check()
+        .await
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "no update is currently available".to_owned())?;
+    if update.version != requested_version {
+        return Err(format!(
+            "available update version changed from {requested_version} to {}",
+            update.version
+        ));
+    }
+
+    let bytes = update
+        .download(|_, _| {}, || {})
+        .await
+        .map_err(|error| error.to_string())?;
+    update.install(bytes).map_err(|error| error.to_string())
+}
+
+fn updater_before_exit_until_verified<S, C, E, W>(
+    mut shutdown: S,
+    cleanup_before_exit: C,
+    mut on_error: E,
+    mut wait_before_retry: W,
+) where
+    S: FnMut() -> anyhow::Result<()>,
+    C: FnOnce(),
+    E: FnMut(u64, &anyhow::Error),
+    W: FnMut(),
+{
+    let mut attempt = 0u64;
+    loop {
+        attempt = attempt.saturating_add(1);
+        match shutdown() {
+            Ok(()) => break,
+            Err(error) => {
+                on_error(attempt, &error);
+                wait_before_retry();
+            }
+        }
+    }
+
+    // `UpdaterExt::updater_builder()` installs this cleanup by default, but
+    // `on_before_exit` replaces that hook. Preserve it explicitly after the
+    // application-owned shutdown has been positively verified.
+    cleanup_before_exit();
 }
 
 /// Desired desktop-companion window, one per companion (multi-companion, spec §4.6).
@@ -460,6 +555,1075 @@ mod keep_awake_tests {
 /// intercepting; default close gestures leave it false and therefore hide to tray.
 struct QuitFlag(AtomicBool);
 
+const EXIT_PHASE_RUNNING: u8 = 0;
+const EXIT_PHASE_SHUTTING_DOWN: u8 = 1;
+const EXIT_PHASE_RESTARTING: u8 = 2;
+const EXIT_PHASE_COMPLETE: u8 = 3;
+const EXIT_PHASE_FATAL: u8 = 4;
+const EXIT_PHASE_CLEANUP_FAILED: u8 = 5;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RestartCleanupOutcome {
+    ContinueRestart,
+    AbortRestart,
+}
+
+fn restart_cleanup_outcome(result: &anyhow::Result<()>) -> RestartCleanupOutcome {
+    if result.is_ok() {
+        RestartCleanupOutcome::ContinueRestart
+    } else {
+        RestartCleanupOutcome::AbortRestart
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ShutdownMode {
+    Normal,
+    Restart,
+}
+
+enum BackendRegistration {
+    Starting,
+    Ready(Arc<DesktopServer>),
+    StoppedVerified,
+    FailedVerified,
+    FailedUnverified,
+    FailedRetained(Arc<DesktopServer>),
+}
+
+struct RetainedStartupCleanupAuthority {
+    keep_alive: Arc<DesktopKeepAlive>,
+    runtime: tokio::runtime::Runtime,
+    cleanup_gate: Mutex<()>,
+    cleanup_verified: AtomicBool,
+}
+
+impl RetainedStartupCleanupAuthority {
+    fn new(keep_alive: Arc<DesktopKeepAlive>, runtime: tokio::runtime::Runtime) -> Self {
+        Self {
+            keep_alive,
+            runtime,
+            cleanup_gate: Mutex::new(()),
+            cleanup_verified: AtomicBool::new(false),
+        }
+    }
+
+    fn cleanup(&self) -> anyhow::Result<()> {
+        if self.cleanup_verified.load(Ordering::Acquire) {
+            return Ok(());
+        }
+        let _gate = self
+            .cleanup_gate
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if self.cleanup_verified.load(Ordering::Acquire) {
+            return Ok(());
+        }
+        self.keep_alive
+            .shutdown_after_startup_failure_blocking(&self.runtime)?;
+        self.cleanup_verified.store(true, Ordering::Release);
+        Ok(())
+    }
+}
+
+#[derive(Clone)]
+enum StartupCleanup {
+    /// The backend thread has not entered `DesktopServer::start` yet.  This is
+    /// the only state in which the shell can prove that no backend-owned
+    /// resource exists.
+    NotStarted,
+    /// `DesktopServer::start` has been entered, but it has not returned the
+    /// authoritative server handle yet.  A failure in this window must not be
+    /// treated as an already-verified cleanup: the start routine may have
+    /// acquired services, listeners, or browser ownership before failing.
+    StartingUnverified,
+    /// `DesktopServer::start` returned a normal error after completing its
+    /// internal startup-failure cleanup. Unlike a panic, this is a positive
+    /// cleanup boundary: the shell may release the backend runtime and surface
+    /// the startup error.
+    FailedVerified,
+    /// Typed startup returned an unverified failure together with the exact
+    /// AppServices/environment authority needed to retry its cleanup.
+    RetainedKeepAlive(Arc<DesktopKeepAlive>),
+    /// Startup reached the point where the authoritative server owns cleanup.
+    Server(Arc<DesktopServer>),
+}
+
+impl StartupCleanup {
+    fn cleanup(&self, runtime: &tokio::runtime::Runtime) -> anyhow::Result<()> {
+        match self {
+            Self::NotStarted | Self::FailedVerified => Ok(()),
+            Self::StartingUnverified => Err(anyhow::anyhow!(
+                "embedded backend startup entered before a cleanup authority was published"
+            )),
+            Self::RetainedKeepAlive(keep_alive) => {
+                keep_alive.shutdown_after_startup_failure_blocking(runtime)
+            }
+            Self::Server(server) => server.shutdown_all_blocking(),
+        }
+    }
+
+    fn is_verified(&self) -> bool {
+        matches!(self, Self::NotStarted | Self::FailedVerified)
+    }
+
+    fn server(&self) -> Option<Arc<DesktopServer>> {
+        match self {
+            Self::NotStarted
+            | Self::StartingUnverified
+            | Self::FailedVerified
+            | Self::RetainedKeepAlive(_) => None,
+            Self::Server(server) => Some(server.clone()),
+        }
+    }
+
+    fn retained_keep_alive(&self) -> Option<Arc<DesktopKeepAlive>> {
+        match self {
+            Self::RetainedKeepAlive(keep_alive) => Some(keep_alive.clone()),
+            Self::NotStarted
+            | Self::StartingUnverified
+            | Self::FailedVerified
+            | Self::Server(_) => None,
+        }
+    }
+}
+
+fn mark_startup_cleanup_entered(cleanup: &Mutex<StartupCleanup>) {
+    *cleanup
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) =
+        StartupCleanup::StartingUnverified;
+}
+
+fn mark_startup_cleanup_failed_verified(cleanup: &Mutex<StartupCleanup>) {
+    *cleanup
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) =
+        StartupCleanup::FailedVerified;
+}
+
+fn mark_startup_cleanup_retained(
+    cleanup: &Mutex<StartupCleanup>,
+    keep_alive: Arc<DesktopKeepAlive>,
+) {
+    *cleanup
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) =
+        StartupCleanup::RetainedKeepAlive(keep_alive);
+}
+
+fn mark_startup_cleanup_server(
+    cleanup: &Mutex<StartupCleanup>,
+    server: Arc<DesktopServer>,
+) {
+    *cleanup
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) =
+        StartupCleanup::Server(server);
+}
+
+/// Cross-thread state machine for Tauri's exit requests.
+///
+/// `ExitRequested` is delivered on the Tauri event loop, while
+/// `DesktopServer::shutdown_all_async` invokes its callback on the backend
+/// runtime. Keeping the state here makes the two paths single-flight and lets
+/// a booting backend service an exit request that arrived before it was
+/// managed by Tauri.
+struct ExitCoordinator {
+    phase: AtomicU8,
+    restart_requested: AtomicBool,
+    shutdown_started: AtomicBool,
+    fatal_dialog_started: AtomicBool,
+    cleanup_verified: AtomicBool,
+    original_code: Mutex<Option<i32>>,
+    backend: Mutex<BackendRegistration>,
+    retained_backend_runtimes: Mutex<Vec<tokio::runtime::Runtime>>,
+    retained_startup_cleanup: Mutex<Option<Arc<RetainedStartupCleanupAuthority>>>,
+    backend_changed: Condvar,
+}
+
+impl Default for ExitCoordinator {
+    fn default() -> Self {
+        Self {
+            phase: AtomicU8::new(EXIT_PHASE_RUNNING),
+            restart_requested: AtomicBool::new(false),
+            shutdown_started: AtomicBool::new(false),
+            fatal_dialog_started: AtomicBool::new(false),
+            cleanup_verified: AtomicBool::new(false),
+            original_code: Mutex::new(None),
+            backend: Mutex::new(BackendRegistration::Starting),
+            retained_backend_runtimes: Mutex::new(Vec::new()),
+            retained_startup_cleanup: Mutex::new(None),
+            backend_changed: Condvar::new(),
+        }
+    }
+}
+
+impl ExitCoordinator {
+    fn request_normal_exit(&self, code: Option<i32>) -> bool {
+        if self.restart_requested.load(Ordering::Acquire) {
+            return false;
+        }
+        loop {
+            let phase = self.phase.load(Ordering::Acquire);
+            if !matches!(phase, EXIT_PHASE_RUNNING | EXIT_PHASE_CLEANUP_FAILED) {
+                return false;
+            }
+            if self
+                .phase
+                .compare_exchange(
+                    phase,
+                    EXIT_PHASE_SHUTTING_DOWN,
+                    Ordering::AcqRel,
+                    Ordering::Acquire,
+                )
+                .is_ok()
+            {
+                if let Ok(mut original_code) = self.original_code.lock() {
+                    *original_code = code;
+                }
+                return true;
+            }
+        }
+    }
+
+    fn request_restart(&self) -> bool {
+        self.restart_requested.store(true, Ordering::Release);
+        self.phase
+            .compare_exchange(
+                EXIT_PHASE_RUNNING,
+                EXIT_PHASE_RESTARTING,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
+            .is_ok()
+    }
+
+    fn shutdown_mode(&self) -> Option<ShutdownMode> {
+        match self.phase.load(Ordering::Acquire) {
+            EXIT_PHASE_SHUTTING_DOWN if self.restart_requested.load(Ordering::Acquire) => {
+                Some(ShutdownMode::Restart)
+            }
+            EXIT_PHASE_SHUTTING_DOWN => Some(ShutdownMode::Normal),
+            EXIT_PHASE_RESTARTING => Some(ShutdownMode::Restart),
+            _ => None,
+        }
+    }
+
+    fn claim_shutdown_start(&self) -> bool {
+        self.shutdown_mode().is_some()
+            && !self.shutdown_started.swap(true, Ordering::AcqRel)
+    }
+
+    fn mark_cleanup_verified(&self) {
+        self.cleanup_verified.store(true, Ordering::Release);
+        if self.phase.load(Ordering::Acquire) != EXIT_PHASE_FATAL {
+            self.phase.store(EXIT_PHASE_COMPLETE, Ordering::Release);
+        }
+    }
+
+    fn mark_cleanup_failed(&self) {
+        self.cleanup_verified.store(false, Ordering::Release);
+        if !matches!(
+            self.phase.load(Ordering::Acquire),
+            EXIT_PHASE_SHUTTING_DOWN | EXIT_PHASE_RESTARTING | EXIT_PHASE_FATAL
+        ) {
+            self.phase
+                .store(EXIT_PHASE_CLEANUP_FAILED, Ordering::Release);
+        }
+        self.shutdown_started.store(false, Ordering::Release);
+    }
+
+    fn claim_fatal_exit(&self) -> bool {
+        if self.restart_requested.load(Ordering::Acquire) {
+            return false;
+        }
+        if !self.cleanup_verified.load(Ordering::Acquire) {
+            return false;
+        }
+        if self.fatal_dialog_started.swap(true, Ordering::AcqRel) {
+            return false;
+        }
+        self.phase.store(EXIT_PHASE_FATAL, Ordering::Release);
+        true
+    }
+
+    fn is_exit_allowed(&self) -> bool {
+        self.cleanup_verified.load(Ordering::Acquire)
+            && matches!(
+                self.phase.load(Ordering::Acquire),
+                EXIT_PHASE_COMPLETE | EXIT_PHASE_FATAL
+            )
+    }
+
+    fn is_restart_requested(&self) -> bool {
+        self.restart_requested.load(Ordering::Acquire)
+    }
+
+    fn has_pending_shutdown(&self) -> bool {
+        self.shutdown_mode().is_some()
+            || self.phase.load(Ordering::Acquire) == EXIT_PHASE_CLEANUP_FAILED
+    }
+
+    fn original_code(&self) -> i32 {
+        self.original_code
+            .lock()
+            .ok()
+            .and_then(|code| *code)
+            .unwrap_or(0)
+    }
+
+    fn mark_no_cleanup_needed(&self) {
+        self.mark_cleanup_verified();
+    }
+
+    /// Record that the backend thread failed before it could ever enter
+    /// `DesktopServer::start`.  This is deliberately stronger than merely
+    /// marking the backend as failed: it also proves that no startup cleanup
+    /// authority was needed.
+    fn mark_backend_not_started(&self) {
+        self.mark_no_cleanup_needed();
+        self.mark_backend_failed_verified();
+    }
+
+    /// Hide a server from all exit/request observers before a potentially
+    /// blocking cleanup attempt begins.  Retain the handle separately in the
+    /// failed state so retries still have authoritative ownership.
+    fn mark_backend_cleanup_pending(&self, server: Arc<DesktopServer>) {
+        let mut backend = self
+            .backend
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if matches!(
+            *backend,
+            BackendRegistration::Starting | BackendRegistration::Ready(_)
+        ) {
+            *backend = BackendRegistration::FailedRetained(server);
+        }
+        self.backend_changed.notify_all();
+    }
+
+    fn register_backend(&self, server: Arc<DesktopServer>) -> bool {
+        let mut backend = self
+            .backend
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if matches!(*backend, BackendRegistration::Starting) {
+            *backend = BackendRegistration::Ready(server);
+            self.backend_changed.notify_all();
+            true
+        } else {
+            false
+        }
+    }
+
+    fn retain_backend_runtime(&self, runtime: tokio::runtime::Runtime) {
+        self.retained_backend_runtimes
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(runtime);
+    }
+
+    fn release_backend_runtimes(&self) {
+        let runtimes = {
+            let mut retained = self
+                .retained_backend_runtimes
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            std::mem::take(&mut *retained)
+        };
+        drop(runtimes);
+    }
+
+    fn retain_startup_cleanup_authority(
+        &self,
+        keep_alive: Arc<DesktopKeepAlive>,
+        runtime: tokio::runtime::Runtime,
+    ) -> Arc<RetainedStartupCleanupAuthority> {
+        let authority = Arc::new(RetainedStartupCleanupAuthority::new(keep_alive, runtime));
+        *self
+            .retained_startup_cleanup
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(authority.clone());
+        authority
+    }
+
+    fn retained_startup_cleanup_authority(&self) -> Option<Arc<RetainedStartupCleanupAuthority>> {
+        self.retained_startup_cleanup
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    fn release_startup_cleanup_authority(
+        &self,
+        authority: &Arc<RetainedStartupCleanupAuthority>,
+    ) {
+        let mut retained = self
+            .retained_startup_cleanup
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if retained
+            .as_ref()
+            .is_some_and(|current| Arc::ptr_eq(current, authority))
+        {
+            *retained = None;
+        }
+    }
+
+    fn mark_backend_stopped_verified(&self) {
+        let mut backend = self
+            .backend
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if matches!(
+            *backend,
+            BackendRegistration::Starting | BackendRegistration::Ready(_)
+        ) {
+            *backend = BackendRegistration::StoppedVerified;
+        }
+        self.backend_changed.notify_all();
+    }
+
+    fn mark_backend_failed_verified(&self) {
+        let mut backend = self
+            .backend
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !matches!(*backend, BackendRegistration::StoppedVerified) {
+            *backend = BackendRegistration::FailedVerified;
+        }
+        self.backend_changed.notify_all();
+    }
+
+    fn mark_backend_failed_retained(&self, server: Arc<DesktopServer>) {
+        let mut backend = self
+            .backend
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if matches!(
+            *backend,
+            BackendRegistration::Starting | BackendRegistration::Ready(_)
+        ) {
+            *backend = BackendRegistration::FailedRetained(server);
+        }
+        self.backend_changed.notify_all();
+    }
+
+    fn mark_backend_failed_unverified(&self) {
+        let mut backend = self
+            .backend
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if matches!(
+            *backend,
+            BackendRegistration::Starting | BackendRegistration::Ready(_)
+        ) {
+            *backend = BackendRegistration::FailedUnverified;
+        }
+        self.backend_changed.notify_all();
+    }
+
+    fn backend_server(&self) -> Option<Arc<DesktopServer>> {
+        let backend = self
+            .backend
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        match &*backend {
+            BackendRegistration::Ready(server) | BackendRegistration::FailedRetained(server) => {
+                Some(server.clone())
+            }
+            BackendRegistration::Starting
+            | BackendRegistration::StoppedVerified
+            | BackendRegistration::FailedVerified
+            | BackendRegistration::FailedUnverified => None,
+        }
+    }
+
+    fn wait_for_backend(&self, timeout: Duration) -> Option<Arc<DesktopServer>> {
+        let deadline = Instant::now() + timeout;
+        let mut backend = self
+            .backend
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        loop {
+            match &*backend {
+                BackendRegistration::Ready(server)
+                | BackendRegistration::FailedRetained(server) => return Some(server.clone()),
+                BackendRegistration::StoppedVerified
+                | BackendRegistration::FailedVerified
+                | BackendRegistration::FailedUnverified => return None,
+                BackendRegistration::Starting => {}
+            }
+
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return None;
+            }
+            let (next, wait_result) = self
+                .backend_changed
+                .wait_timeout(backend, remaining)
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            backend = next;
+            if wait_result.timed_out() && matches!(*backend, BackendRegistration::Starting) {
+                return None;
+            }
+        }
+    }
+}
+
+/// A restart request is a hard Tauri sentinel: unlike a normal exit it cannot
+/// be cancelled with `prevent_exit`. Therefore this path must not return to
+/// Tauri until the application-owned cleanup has been positively verified.
+/// Transient failures retain the `DesktopServer` and runtime authority and are
+/// retried synchronously. This intentionally favors safety over responsiveness
+/// when cleanup is persistently failing.
+fn cleanup_for_restart_until_verified(
+    server: Arc<DesktopServer>,
+    coordinator: &ExitCoordinator,
+) {
+    let mut attempt = 0u64;
+    loop {
+        attempt = attempt.saturating_add(1);
+        match server.shutdown_all_blocking() {
+            Ok(()) => {
+                coordinator.release_backend_runtimes();
+                coordinator.mark_cleanup_verified();
+                coordinator.mark_backend_stopped_verified();
+                tracing::info!(attempt, "desktop restart cleanup verified");
+                return;
+            }
+            Err(error) => {
+                coordinator.mark_cleanup_failed();
+                tracing::error!(
+                    attempt,
+                    %error,
+                    "desktop restart cleanup is not verified; retaining authority and retrying"
+                );
+                std::thread::sleep(Duration::from_millis(250));
+            }
+        }
+    }
+}
+
+fn cleanup_startup_for_restart_until_verified(
+    authority: Arc<RetainedStartupCleanupAuthority>,
+    coordinator: &ExitCoordinator,
+) {
+    let mut attempt = 0u64;
+    loop {
+        attempt = attempt.saturating_add(1);
+        match authority.cleanup() {
+            Ok(()) => {
+                coordinator.release_startup_cleanup_authority(&authority);
+                coordinator.mark_cleanup_verified();
+                coordinator.mark_backend_failed_verified();
+                tracing::info!(attempt, "desktop startup cleanup verified before restart");
+                return;
+            }
+            Err(error) => {
+                coordinator.mark_cleanup_failed();
+                tracing::error!(
+                    attempt,
+                    %error,
+                    "desktop startup cleanup is not verified; retaining authority and retrying before restart"
+                );
+                std::thread::sleep(Duration::from_millis(250));
+            }
+        }
+    }
+}
+
+/// A restart request is a non-cancellable Tauri sentinel.  If the first
+/// cleanup attempt fails, do not return to Tauri and do not call
+/// `process::exit`: retain either the published server or typed startup
+/// authority and retry until cleanup is verified. Only an actual authority
+/// loss falls back to the permanent fail-closed hold.
+fn abort_restart(
+    app: &tauri::AppHandle,
+    coordinator: &ExitCoordinator,
+    reason: impl std::fmt::Display,
+) {
+    coordinator.mark_cleanup_failed();
+    tracing::error!(%reason, "desktop restart cleanup is not verified; retrying before handoff");
+
+    let server = app
+        .try_state::<Arc<DesktopServer>>()
+        .map(|state| state.inner().clone())
+        .or_else(|| coordinator.backend_server())
+        .or_else(|| coordinator.wait_for_backend(Duration::from_secs(30)));
+
+    if let Some(server) = server {
+        cleanup_for_restart_until_verified(server, coordinator);
+    } else if let Some(authority) = coordinator.retained_startup_cleanup_authority() {
+        cleanup_startup_for_restart_until_verified(authority, coordinator);
+    } else {
+        hold_restart_without_cleanup_authority(coordinator);
+    }
+}
+
+fn hold_restart_without_cleanup_authority(coordinator: &ExitCoordinator) -> ! {
+    coordinator.mark_cleanup_failed();
+    tracing::error!(
+        "restart request is being held because desktop cleanup authority is unavailable"
+    );
+    loop {
+        std::thread::sleep(Duration::from_secs(1));
+    }
+}
+
+fn start_shutdown_if_needed(
+    app: &tauri::AppHandle,
+    server: Arc<DesktopServer>,
+    coordinator: Arc<ExitCoordinator>,
+) {
+    if !coordinator.claim_shutdown_start() {
+        return;
+    }
+
+    let app = app.clone();
+    let callback_coordinator = coordinator.clone();
+    server.clone().shutdown_all_async(move |result| {
+        match result {
+            Ok(()) => {
+                // Tauri's restart request already owns the process handoff. Calling
+                // `app.exit` here would replace its RESTART_EXIT_CODE with a normal
+                // exit, so only normal exits are completed by this callback.
+                let restart = callback_coordinator.is_restart_requested();
+                let original_code = callback_coordinator.original_code();
+                callback_coordinator.mark_cleanup_verified();
+                callback_coordinator.mark_backend_stopped_verified();
+                if !restart {
+                    app.exit(original_code);
+                }
+            }
+            Err(error) => {
+                tracing::error!(%error, "desktop backend exit cleanup failed");
+                let retry_server = server.clone();
+                let retry_app = app.clone();
+                let retry_coordinator = callback_coordinator.clone();
+                retry_server.clone().shutdown_all_async(move |retry_result| {
+                    match retry_result {
+                        Ok(()) => {
+                            let restart = retry_coordinator.is_restart_requested();
+                            retry_coordinator.mark_cleanup_verified();
+                            retry_coordinator.mark_backend_stopped_verified();
+                            if !restart {
+                                retry_app.exit(retry_coordinator.original_code());
+                            }
+                        }
+                        Err(retry_error) => {
+                            tracing::error!(
+                                first_error = %error,
+                                error = %retry_error,
+                                "desktop backend exit cleanup failed after retry"
+                            );
+                            retry_coordinator.mark_cleanup_failed();
+                            retry_coordinator.mark_backend_failed_retained(server.clone());
+                            tracing::error!(
+                                %retry_error,
+                                "cleanup authority is retained; refusing to report a successful exit"
+                            );
+                            retry_shutdown_until_verified(
+                                retry_app,
+                                server.clone(),
+                                retry_coordinator,
+                            );
+                        }
+                    }
+                });
+            }
+        }
+    });
+}
+
+fn retry_shutdown_until_verified(
+    app: tauri::AppHandle,
+    server: Arc<DesktopServer>,
+    coordinator: Arc<ExitCoordinator>,
+) {
+    std::thread::spawn(move || loop {
+        std::thread::sleep(Duration::from_secs(1));
+        match server.shutdown_all_blocking() {
+            Ok(()) => {
+                let restart = coordinator.is_restart_requested();
+                let code = coordinator.original_code();
+                coordinator.mark_cleanup_verified();
+                coordinator.mark_backend_failed_verified();
+                if !restart {
+                    app.exit(code);
+                }
+                coordinator.release_backend_runtimes();
+                return;
+            }
+            Err(error) => {
+                coordinator.mark_cleanup_failed();
+                tracing::error!(
+                    %error,
+                    "desktop cleanup retry is still not verified; retaining authority"
+                );
+            }
+        }
+    });
+}
+
+fn retry_startup_cleanup_until_verified(
+    app: tauri::AppHandle,
+    authority: Arc<RetainedStartupCleanupAuthority>,
+    coordinator: Arc<ExitCoordinator>,
+    message: String,
+) {
+    std::thread::spawn(move || loop {
+        std::thread::sleep(Duration::from_secs(1));
+        match authority.cleanup() {
+            Ok(()) => {
+                coordinator.release_startup_cleanup_authority(&authority);
+                coordinator.mark_cleanup_verified();
+                coordinator.mark_backend_failed_verified();
+                schedule_fatal_dialog(app, coordinator, message);
+                return;
+            }
+            Err(error) => {
+                coordinator.mark_cleanup_failed();
+                tracing::error!(
+                    %error,
+                    "desktop startup cleanup retry is still not verified; retaining authority"
+                );
+            }
+        }
+    });
+}
+
+fn show_fatal_dialog_on_main_thread(
+    app: tauri::AppHandle,
+    message: String,
+    coordinator: Arc<ExitCoordinator>,
+) {
+    if !coordinator.claim_fatal_exit() {
+        return;
+    }
+
+    use tauri_plugin_dialog::{DialogExt, MessageDialogKind};
+
+    let exit_app = app.clone();
+    let exit_coordinator = coordinator.clone();
+    app
+        .dialog()
+        .message(message)
+        .title("NomiFun backend unavailable")
+        .kind(MessageDialogKind::Error)
+        .show(move |_| {
+            if exit_coordinator.is_exit_allowed() {
+                exit_app.exit(1);
+            } else {
+                tracing::error!(
+                    "fatal dialog completed before cleanup verification; refusing to exit"
+                );
+            }
+        });
+}
+
+fn schedule_fatal_dialog(
+    app: tauri::AppHandle,
+    coordinator: Arc<ExitCoordinator>,
+    message: String,
+) {
+    let task_app = app.clone();
+    let task_coordinator = coordinator.clone();
+    if let Err(error) = app.run_on_main_thread(move || {
+        show_fatal_dialog_on_main_thread(task_app, message, task_coordinator);
+    }) {
+        tracing::error!(%error, "failed to dispatch backend failure dialog to the main thread");
+        tracing::error!(
+            "fatal dialog dispatch failed; cleanup remains fail-closed and the process is not exited"
+        );
+    }
+}
+
+fn shutdown_then_show_fatal(
+    app: tauri::AppHandle,
+    server: Arc<DesktopServer>,
+    coordinator: Arc<ExitCoordinator>,
+    message: String,
+) {
+    let cleanup_server = server.clone();
+    let retry_server = server.clone();
+    cleanup_server.cleanup_all_async(move |result| match result {
+        Ok(()) => {
+            coordinator.mark_cleanup_verified();
+            coordinator.mark_backend_failed_verified();
+            schedule_fatal_dialog(app, coordinator, message);
+        }
+        Err(error) => {
+            coordinator.mark_cleanup_failed();
+            coordinator.mark_backend_failed_retained(retry_server.clone());
+            tracing::error!(
+                %error,
+                "desktop backend cleanup after setup failure failed; retaining authority"
+            );
+            retry_cleanup_then_show_fatal(app, retry_server, coordinator, message);
+        }
+    });
+}
+
+fn retry_cleanup_then_show_fatal(
+    app: tauri::AppHandle,
+    server: Arc<DesktopServer>,
+    coordinator: Arc<ExitCoordinator>,
+    message: String,
+) {
+    std::thread::spawn(move || loop {
+        std::thread::sleep(Duration::from_secs(1));
+        match server.shutdown_all_blocking() {
+            Ok(()) => {
+                coordinator.mark_cleanup_verified();
+                coordinator.mark_backend_failed_verified();
+                coordinator.release_backend_runtimes();
+                schedule_fatal_dialog(app, coordinator, message);
+                return;
+            }
+            Err(error) => {
+                coordinator.mark_cleanup_failed();
+                coordinator.mark_backend_failed_retained(server.clone());
+                tracing::error!(
+                    %error,
+                    "setup-failure cleanup retry is still not verified; retaining authority"
+                );
+            }
+        }
+    });
+}
+
+struct BackendRuntimeFailure<R> {
+    error: String,
+    runtime: Option<R>,
+}
+
+fn backend_run_failure(
+    run: std::thread::Result<anyhow::Result<()>>,
+) -> Option<String> {
+    match run {
+        Ok(Ok(())) => return None,
+        Ok(Err(error)) => Some(format!("{error:#}")),
+        Err(panic) => panic
+            .downcast_ref::<&str>()
+            .map(|message| (*message).to_owned())
+            .or_else(|| panic.downcast_ref::<String>().cloned())
+            .or_else(|| Some("backend thread panicked".to_owned())),
+    }
+}
+
+fn finish_backend_runtime<R, F>(
+    run: std::thread::Result<anyhow::Result<()>>,
+    runtime: R,
+    cleanup: F,
+) -> Option<BackendRuntimeFailure<R>>
+where
+    F: FnOnce(&R) -> anyhow::Result<()>,
+{
+    let mut error = backend_run_failure(run)?;
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| cleanup(&runtime))) {
+        Ok(Ok(())) => {
+            drop(runtime);
+            Some(BackendRuntimeFailure {
+                error,
+                runtime: None,
+            })
+        }
+        Ok(Err(cleanup_error)) => {
+            error = format!("{error}; backend cleanup also failed: {cleanup_error:#}");
+            Some(BackendRuntimeFailure {
+                error,
+                runtime: Some(runtime),
+            })
+        }
+        Err(panic) => {
+            let panic_error = backend_run_failure(Err(panic))
+                .unwrap_or_else(|| "backend cleanup panicked".to_owned());
+            error = format!("{error}; backend cleanup panicked: {panic_error}");
+            Some(BackendRuntimeFailure {
+                error,
+                runtime: Some(runtime),
+            })
+        }
+    }
+}
+
+fn complete_main_thread_setup(
+    app: tauri::AppHandle,
+    server: Arc<DesktopServer>,
+    coordinator: Arc<ExitCoordinator>,
+) -> anyhow::Result<()> {
+    if let Some(error) = server.current_failure() {
+        return Err(anyhow::anyhow!("embedded backend failed before window setup: {error}"));
+    }
+
+    let loopback_port = server.loopback_port();
+
+    // Build the main window programmatically so we can inject the backend
+    // port + local-trust secret via an INITIALIZATION SCRIPT — it runs
+    // before any page script, so the renderer's first `getBaseUrl()` (and
+    // its trust-header attach) always see them. Race-free (unlike
+    // eval-after-load).
+    //
+    // Frameless on Windows/Linux: the React titlebar draws its own
+    // min/max/close (via @tauri-apps/api/window) on the same row as the
+    // app's nav buttons. macOS keeps native traffic-light buttons via the
+    // Overlay title-bar style, with content extending under the bar.
+    // resizable defaults to true, so edge-resize + Snap are retained even
+    // without decorations on Windows.
+    let init_script = webui_init_script(loopback_port, server.local_trust_secret());
+    if !app.manage(server.clone()) {
+        return Err(anyhow::anyhow!(
+            "desktop backend state was already registered"
+        ));
+    }
+    if coordinator.has_pending_shutdown() {
+        if coordinator.is_restart_requested() {
+            // Tauri deliberately ignores `prevent_exit` for the restart
+            // sentinel.  Complete cleanup before allowing the restart event
+            // to hand control back to Tauri.
+            let result = server.shutdown_all_blocking();
+            match restart_cleanup_outcome(&result) {
+                RestartCleanupOutcome::ContinueRestart => {
+                    coordinator.mark_cleanup_verified();
+                    coordinator.mark_backend_stopped_verified();
+                }
+                RestartCleanupOutcome::AbortRestart => {
+                    let error = result
+                        .err()
+                        .unwrap_or_else(|| anyhow::anyhow!("desktop restart cleanup failed"));
+                    abort_restart(
+                        &app,
+                        &coordinator,
+                        format!("desktop restart cleanup failed: {error:#}"),
+                    );
+                }
+            }
+        } else {
+            start_shutdown_if_needed(&app, server, coordinator);
+        }
+        return Ok(());
+    }
+    let win_builder =
+        tauri::WebviewWindowBuilder::new(&app, "main", tauri::WebviewUrl::App("index.html".into()))
+            .title("NomiFun")
+            .inner_size(1280.0, 832.0)
+            .min_inner_size(880.0, 600.0)
+            .initialization_script(&init_script);
+    // macOS: Overlay makes the titlebar transparent + extends content under
+    // it, but it does NOT hide the native title text. With the title still
+    // set to "NomiFun", AppKit draws that string next to the traffic lights,
+    // overlapping the React sidebar toggle. `hidden_title(true)` maps to
+    // `setTitleVisibility(Hidden)` so the OS keeps the title for menus /
+    // Mission Control while leaving the titlebar visually empty.
+    //
+    // Vertically center the traffic lights on the React toolbar's button
+    // line. The React titlebar (`.app-titlebar--mac`, height 45px in
+    // ui/.../titlebar.css) centers its 36px buttons at y≈22.5px from the
+    // window top, but AppKit's default places the 16px lights at center
+    // y≈16px — ~6.5px too high. tao's `inset_traffic_lights` (view.rs)
+    // makes `y` the height of the button *container* (16 + y) and
+    // bottom-anchors the lights in it with a ~10px margin, so the lights'
+    // center-from-top works out to (y - 2). To land the center at 22.5px:
+    // y = 24.5 (empirically verified via the Accessibility API).
+    //
+    // Horizontally, `x` is the left edge of the close button's frame
+    // (tao sets `rect.origin.x = x` per button). That frame is 14px
+    // wide with the visible 12px circle centered in it (1px each
+    // side), so the circle's left gap from the window edge is x + 1.
+    // Balance that gap with the vertical whitespace around the lights:
+    // (45 - 12) / 2 = 16.5px above/below the circle, hence
+    // x = 16.5 - 1 = 15.5. (AppKit's native ~8px inset assumes a 28px
+    // titlebar and looks glued to the corner in a 45px one; Apple's
+    // own apps use ~16-20px in tall toolbars.) The lights then span up
+    // to zoom's right edge at 15.5 + 2*20 + 14 = 69.5px, still clear
+    // of the React menu, which starts at 84px (8px titlebar padding +
+    // 76px margin-left in Titlebar/index.tsx).
+    // (`traffic_light_position` requires Overlay + decorations:true, both set.)
+    #[cfg(target_os = "macos")]
+    let win_builder = win_builder
+        .title_bar_style(tauri::TitleBarStyle::Overlay)
+        .hidden_title(true)
+        .traffic_light_position(tauri::LogicalPosition::new(15.5, 24.5));
+    #[cfg(not(target_os = "macos"))]
+    let win_builder = win_builder.decorations(false);
+    if let Some(error) = server.current_failure() {
+        return Err(anyhow::anyhow!(
+            "embedded backend failed during window setup: {error}"
+        ));
+    }
+    win_builder.build()?;
+
+    // System tray. Closing the main window HIDES it here instead of
+    // quitting (see the CloseRequested handler in on_window_event); the
+    // process truly exits only via the tray's "退出" item. Left-click the
+    // icon to bring the window back; right-click for the Show/Quit menu.
+    // Labels are English fallbacks, adopted from the renderer's locale via
+    // `set_tray_labels` once it mounts (the renderer always loads before
+    // the user can close, so the first menu open is already localized).
+    let tray_show = MenuItem::with_id(&app, "tray-show", "Show NomiFun", true, None::<&str>)?;
+    let tray_quit = MenuItem::with_id(&app, "tray-quit", "Quit", true, None::<&str>)?;
+    let tray_menu = Menu::with_items(&app, &[&tray_show, &tray_quit])?;
+    if !app.manage(TrayMenuItems {
+        show: tray_show.clone(),
+        quit: tray_quit.clone(),
+    }) {
+        return Err(anyhow::anyhow!(
+            "tray menu state was already registered"
+        ));
+    }
+    let mut tray_builder = TrayIconBuilder::with_id("nomi-tray")
+        .tooltip("NomiFun")
+        .menu(&tray_menu)
+        // Left-click is reserved for "surface the window"; the menu is
+        // right-click only (otherwise a left-click would both pop the menu
+        // AND try to show the window).
+        .show_menu_on_left_click(false)
+        .on_menu_event(|app, event| match event.id.as_ref() {
+            "tray-show" => show_main_window(app),
+            "tray-quit" => {
+                // Arm the quit guard FIRST, then exit — the CloseRequested
+                // handler checks this flag and stops hiding-to-tray.
+                app.state::<QuitFlag>().0.store(true, Ordering::SeqCst);
+                app.exit(0);
+            }
+            _ => {}
+        })
+        .on_tray_icon_event(|tray, event| {
+            if let TrayIconEvent::Click {
+                button: MouseButton::Left,
+                button_state: MouseButtonState::Up,
+                ..
+            } = event
+            {
+                show_main_window(tray.app_handle());
+            }
+        });
+    // Reuse the app's bundled window icon for the tray (no extra asset).
+    if let Some(icon) = app.default_window_icon() {
+        tray_builder = tray_builder.icon(icon.clone());
+    }
+    tray_builder.build(&app)?;
+
+    // Desktop-companion windows are NOT created here anymore. They are
+    // multi-companion and dynamic: the main window's useCompanionWindowsSync hook
+    // invokes `sync_companion_windows` (above) on boot and on companion
+    // created/deleted/config-updated events, reconciling one
+    // transparent always-on-top `companion-{companion_id}` window per enabled companion.
+
+    // Wire deep-link open-url events to a Tauri event the renderer can
+    // `listen()` to. `register_all()` is best-effort (some platforms / dev
+    // contexts need it; ignore the error if it fails).
+    let handle = app.clone();
+    let _ = app.deep_link().register_all();
+    app.deep_link().on_open_url(move |event| {
+        let urls: Vec<String> = event.urls().iter().map(|u| u.to_string()).collect();
+        let _ = handle.emit("deep-link://received", urls);
+    });
+    Ok(())
+}
+
 /// 托盘菜单两项的句柄,留存以便前端在 UI 语言就绪后本地化标签(见 `set_tray_labels`)。
 /// 创建时用英文兜底,确保渲染层挂载前托盘已可用。
 /// Handles to the two tray menu items so the renderer can localize their labels once the
@@ -485,15 +1649,70 @@ fn should_show_main_window_for_macos_reopen(_has_visible_windows: bool) -> bool 
 
 fn handle_run_event(app: &tauri::AppHandle, event: tauri::RunEvent) {
     match event {
-        // Real app exit: tray-quit's `app.exit(0)`, the `Destroyed`→`exit(0)`
-        // path, macOS Cmd-Q, and last-window-closed all surface here. Close-to-tray
-        // uses `api.prevent_close()` in the `CloseRequested` handler so the window
-        // is merely hidden and this event NEVER fires for it — which makes it safe
-        // to wipe every terminal session here (kill PTYs + delete rows) with no
-        // QuitFlag guard. Blocks briefly (≤3s) so the wipe finishes before exit.
-        tauri::RunEvent::ExitRequested { .. } => {
-            if let Some(server) = app.try_state::<Arc<DesktopServer>>() {
-                server.shutdown_terminals_blocking();
+        tauri::RunEvent::ExitRequested { code, api, .. } => {
+            let Some(coordinator) = app
+                .try_state::<Arc<ExitCoordinator>>()
+                .map(|state| state.inner().clone())
+            else {
+                return;
+            };
+
+            if code == Some(tauri::RESTART_EXIT_CODE) {
+                // Tauri documents that prevent_exit() is ignored for the
+                // restart sentinel. Mark the window as explicitly quitting
+                // and start cleanup immediately; the Tauri restart machinery
+                // retains ownership of the final process handoff.
+                app.state::<QuitFlag>().0.store(true, Ordering::SeqCst);
+                coordinator.request_restart();
+                if let Some(server) = app
+                    .try_state::<Arc<DesktopServer>>()
+                    .map(|state| state.inner().clone())
+                    .or_else(|| coordinator.backend_server())
+                    .or_else(|| coordinator.wait_for_backend(Duration::from_secs(30)))
+                {
+                    let result = server.shutdown_all_blocking();
+                    match restart_cleanup_outcome(&result) {
+                        RestartCleanupOutcome::ContinueRestart => {
+                            coordinator.mark_cleanup_verified();
+                            coordinator.mark_backend_stopped_verified();
+                        }
+                        RestartCleanupOutcome::AbortRestart => {
+                            let error = result.err().unwrap_or_else(|| {
+                                anyhow::anyhow!("desktop restart cleanup failed")
+                            });
+                            abort_restart(
+                                app,
+                                &coordinator,
+                                format!("desktop restart cleanup failed: {error:#}"),
+                            );
+                        }
+                    }
+                } else {
+                    abort_restart(
+                        app,
+                        &coordinator,
+                        "embedded backend did not become available within 30 seconds",
+                    );
+                }
+                return;
+            }
+
+            if coordinator.is_exit_allowed() {
+                return;
+            }
+
+            // Keep every normal request blocked until the async cleanup
+            // callback has requested the final exit. This is intentionally
+            // never the blocking shutdown_all_blocking path.
+            api.prevent_exit();
+            app.state::<QuitFlag>().0.store(true, Ordering::SeqCst);
+            coordinator.request_normal_exit(code);
+            if let Some(server) = app
+                .try_state::<Arc<DesktopServer>>()
+                .map(|state| state.inner().clone())
+                .or_else(|| coordinator.backend_server())
+            {
+                start_shutdown_if_needed(app, server, coordinator);
             }
         }
         #[cfg(target_os = "macos")]
@@ -673,13 +1892,6 @@ fn reconcile_companion_windows(
     Ok(())
 }
 
-/// Keep Tauri's generated context macro at one expansion site. Production Wry
-/// and the mock-runtime artifact test then consume the exact same generated
-/// assets without defining platform metadata symbols twice in one test binary.
-fn generated_tauri_context<R: tauri::Runtime>() -> tauri::Context<R> {
-    tauri::generate_context!()
-}
-
 fn main() -> std::process::ExitCode {
     // If an ACP agent CLI spawned this shell as an MCP stdio bridge
     // (`current_exe() mcp-requirement-stdio` etc.), run that helper and exit
@@ -743,16 +1955,18 @@ fn main() -> std::process::ExitCode {
         ))
         .plugin(tauri_plugin_deep_link::init())
         .setup(move |app| {
-            // In dev, the desktop webview loads the live vite dev server; serving
-            // the (stale) bundled `ui/dist` to remote browsers would desync them
-            // from the desktop. So in dev the LAN listener proxies the SPA to vite
-            // instead. In production this is None and embedded assets are served.
+            let app_handle = app.handle().clone();
+            let coordinator = app.state::<Arc<ExitCoordinator>>().inner().clone();
+
+            // In dev, the desktop webview loads the live Vite server; the LAN
+            // listener must proxy to the same source instead of stale assets.
+            // In production, the embedded assets below are canonical.
             let dev_frontend_url: Option<String> = if tauri::is_dev() {
                 app.config()
                     .build
                     .dev_url
                     .as_ref()
-                    .map(|u| u.to_string())
+                    .map(|url| url.to_string())
                     .or_else(|| Some("http://localhost:5173".to_string()))
             } else {
                 None
@@ -764,7 +1978,19 @@ fn main() -> std::process::ExitCode {
             // An explicit directory override keeps its historical precedence.
             let webui_asset_source =
                 if dev_frontend_url.is_none() && explicit_dist_override.is_none() {
-                    resolve_embedded_webui_assets(app)?
+                    match resolve_embedded_webui_assets(app) {
+                        Ok(source) => source,
+                        Err(error) => {
+                            coordinator.mark_no_cleanup_needed();
+                            coordinator.mark_backend_failed_verified();
+                            let message = format!(
+                                "NomiFun could not resolve its embedded WebUI assets: {error:#}"
+                            );
+                            tracing::error!(%error, "failed to resolve embedded desktop WebUI assets");
+                            schedule_fatal_dialog(app_handle, coordinator, message);
+                            return Ok(());
+                        }
+                    }
                 } else {
                     None
                 };
@@ -776,7 +2002,18 @@ fn main() -> std::process::ExitCode {
                 dev_frontend_url.is_some(),
                 webui_asset_source.is_some(),
             ) {
-                resolve_webui_spa_dir(app, explicit_dist_override.as_deref())?
+                match resolve_webui_spa_dir(app, explicit_dist_override.as_deref()) {
+                    Ok(spa_dir) => spa_dir,
+                    Err(error) => {
+                        coordinator.mark_no_cleanup_needed();
+                        coordinator.mark_backend_failed_verified();
+                        let message =
+                            format!("NomiFun could not resolve its bundled WebUI assets: {error:#}");
+                        tracing::error!(%error, "failed to resolve desktop WebUI assets");
+                        schedule_fatal_dialog(app_handle, coordinator, message);
+                        return Ok(());
+                    }
+                }
             } else {
                 None
             };
@@ -789,203 +2026,250 @@ fn main() -> std::process::ExitCode {
                 );
             }
 
-            // Hand the backend control handle (port + trust secret + LAN
-            // lifecycle) back to this thread once the loopback listener is bound.
-            let (boot_tx, boot_rx) = std::sync::mpsc::channel::<Arc<DesktopServer>>();
-            let backend_err_handle = app.handle().clone();
-            let status_emit_handle = app.handle().clone();
-            std::thread::Builder::new()
+            // Backend startup is intentionally asynchronous. Blocking this
+            // setup callback would block Tauri's event loop and prevent both
+            // startup-failure dialogs and exit requests from being processed.
+            let status_emit_handle = app_handle.clone();
+            let setup_app_handle = app_handle.clone();
+            let failure_app_handle = app_handle.clone();
+            let supervisor_coordinator = coordinator.clone();
+            let failure_coordinator = coordinator.clone();
+            let spawn_result = std::thread::Builder::new()
                 .name("nomifun-backend".into())
                 .spawn(move || {
-                    let run = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> anyhow::Result<()> {
-                        let rt = tokio::runtime::Builder::new_multi_thread()
-                            .enable_all()
-                            .build()
-                            .map_err(|e| anyhow::anyhow!("failed to build backend runtime: {e}"))?;
-                        rt.block_on(async move {
-                            let (server, _keep_alive) =
-                                DesktopServer::start(
+                    let startup_cleanup = Arc::new(Mutex::new(StartupCleanup::NotStarted));
+                    let startup_cleanup_for_run = Arc::clone(&startup_cleanup);
+                    let runtime = match tokio::runtime::Builder::new_multi_thread()
+                        .enable_all()
+                        .build()
+                    {
+                        Ok(runtime) => runtime,
+                        Err(error) => {
+                            failure_coordinator.mark_backend_not_started();
+                            let error = format!("failed to build backend runtime: {error}");
+                            tracing::error!(error = %error, "embedded backend exited with error");
+                            schedule_fatal_dialog(
+                                failure_app_handle,
+                                failure_coordinator,
+                                error,
+                            );
+                            return;
+                        }
+                    };
+                    mark_startup_cleanup_entered(&startup_cleanup);
+                    let run = std::panic::catch_unwind(std::panic::AssertUnwindSafe(
+                        || -> anyhow::Result<()> {
+                            runtime.block_on(async move {
+                                let (server, keep_alive) = match DesktopServer::start_with_outcome(
                                     &cli,
                                     &merged_path,
                                     spa_dir,
                                     dev_frontend_url,
                                     webui_asset_source,
                                 )
-                                .await?;
-                            // Unblock the main thread's window build.
-                            let _ = boot_tx.send(server.clone());
-                            // Forward LAN status changes to the renderer. Holding
-                            // `server` + `_keep_alive` here keeps the backend (and
-                            // this runtime) alive for the process lifetime.
-                            let mut rx = server.subscribe_status();
-                            while rx.changed().await.is_ok() {
-                                let status = rx.borrow().clone();
-                                let _ = status_emit_handle.emit("webui://status-changed", status);
+                                .await
+                                {
+                                    Ok(started) => started,
+                                    Err(mut error) => {
+                                        match error.cleanup_disposition() {
+                                            StartupCleanupDisposition::Verified => {
+                                                mark_startup_cleanup_failed_verified(
+                                                    &startup_cleanup_for_run,
+                                                );
+                                            }
+                                            StartupCleanupDisposition::Unverified => {
+                                                if let Some(keep_alive) =
+                                                    error.take_retained_keep_alive()
+                                                {
+                                                    mark_startup_cleanup_retained(
+                                                        &startup_cleanup_for_run,
+                                                        Arc::new(keep_alive),
+                                                    );
+                                                } else {
+                                                    tracing::error!(
+                                                        "desktop startup reported unverified cleanup without a retained authority"
+                                                    );
+                                                }
+                                            }
+                                        }
+                                        return Err(error.into_inner());
+                                    }
+                                };
+                                mark_startup_cleanup_server(
+                                    &startup_cleanup_for_run,
+                                    server.clone(),
+                                );
+                                let mut status_rx = server.subscribe_status();
+                                let mut failure_rx = server.subscribe_failure();
+                                let mut shutdown_rx = server.subscribe_shutdown();
+                                if let Some(error) = failure_rx.borrow_and_update().clone() {
+                                    return Err(anyhow::Error::msg(error));
+                                }
+                                if !supervisor_coordinator.register_backend(server.clone()) {
+                                    return Err(anyhow::anyhow!(
+                                        "embedded backend completed startup after its registration was already closed"
+                                    ));
+                                }
+
+                                let setup_app = setup_app_handle.clone();
+                                let setup_server = server.clone();
+                                let setup_coordinator = supervisor_coordinator.clone();
+                                if let Err(error) = setup_app_handle.run_on_main_thread(move || {
+                                    let setup_coordinator_for_failure = setup_coordinator.clone();
+                                    if let Err(error) = complete_main_thread_setup(
+                                        setup_app.clone(),
+                                        setup_server.clone(),
+                                        setup_coordinator,
+                                    ) {
+                                        tracing::error!(
+                                            error = %error,
+                                            "failed to complete desktop window setup"
+                                        );
+                                        shutdown_then_show_fatal(
+                                            setup_app,
+                                            setup_server,
+                                            setup_coordinator_for_failure,
+                                            format!(
+                                                "NomiFun could not initialize its desktop window: {error:#}"
+                                            ),
+                                        );
+                                    }
+                                }) {
+                                    shutdown_then_show_fatal(
+                                        setup_app_handle.clone(),
+                                        server.clone(),
+                                        supervisor_coordinator.clone(),
+                                        format!(
+                                            "NomiFun could not dispatch desktop window setup: {error}"
+                                        ),
+                                    );
+                                }
+
+                                if let Some(error) = failure_rx.borrow_and_update().clone() {
+                                    return Err(anyhow::Error::msg(error));
+                                }
+                                if *shutdown_rx.borrow_and_update() {
+                                    drop(keep_alive);
+                                    return Ok(());
+                                }
+                                loop {
+                                    tokio::select! {
+                                        biased;
+                                        changed = failure_rx.changed() => {
+                                            changed.context(
+                                                "desktop backend failure monitor closed unexpectedly",
+                                            )?;
+                                            if let Some(error) = failure_rx.borrow_and_update().clone() {
+                                                return Err(anyhow::Error::msg(error));
+                                            }
+                                        }
+                                        changed = shutdown_rx.changed() => {
+                                            changed.context(
+                                                "desktop backend shutdown monitor closed unexpectedly",
+                                            )?;
+                                            if *shutdown_rx.borrow_and_update() {
+                                                drop(keep_alive);
+                                                return Ok(());
+                                            }
+                                        }
+                                        changed = status_rx.changed() => {
+                                            changed.context(
+                                                "desktop backend status monitor closed unexpectedly",
+                                            )?;
+                                            let status = status_rx.borrow_and_update().clone();
+                                            let _ = status_emit_handle.emit(
+                                                "webui://status-changed",
+                                                status,
+                                            );
+                                        }
+                                    }
+                                }
+                            })
+                        },
+                    ));
+                    let startup_cleanup_snapshot = startup_cleanup
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .clone();
+                    let Some(failure) =
+                        finish_backend_runtime(run, runtime, |runtime| {
+                            if let Some(server) = startup_cleanup_snapshot.server() {
+                                failure_coordinator.mark_backend_cleanup_pending(server);
                             }
-                            drop(_keep_alive);
-                            Ok::<(), anyhow::Error>(())
+                            let result = startup_cleanup_snapshot.cleanup(runtime);
+                            if result.is_ok() {
+                                mark_startup_cleanup_failed_verified(&startup_cleanup);
+                            }
+                            result
                         })
-                    }));
-                    let error = match run {
-                        Ok(Ok(())) => return, // clean shutdown
-                        Ok(Err(e)) => format!("{e:#}"),
-                        Err(panic) => panic
-                            .downcast_ref::<&str>()
-                            .map(|s| (*s).to_owned())
-                            .or_else(|| panic.downcast_ref::<String>().cloned())
-                            .unwrap_or_else(|| "backend thread panicked".to_owned()),
+                    else {
+                        return;
                     };
-                    tracing::error!(error = %error, "embedded backend exited with error");
-                    use tauri_plugin_dialog::{DialogExt, MessageDialogKind};
-                    backend_err_handle
-                        .dialog()
-                        .message(error)
-                        .title("NomiFun backend failed to start")
-                        .kind(MessageDialogKind::Error)
-                        .blocking_show();
-                    backend_err_handle.exit(1);
-                })
-                .expect("failed to spawn backend thread");
-
-            // Wait for the backend to bind its loopback listener (or fail) before
-            // building the window — the init script needs the port + trust
-            // secret. A recv error means the backend failed; it has already shown
-            // a dialog and will exit, so we just stop building the window.
-            let Ok(server) = boot_rx.recv() else {
-                return Ok(());
-            };
-            let loopback_port = server.loopback_port();
-
-            // Build the main window programmatically so we can inject the backend
-            // port + local-trust secret via an INITIALIZATION SCRIPT — it runs
-            // before any page script, so the renderer's first `getBaseUrl()` (and
-            // its trust-header attach) always see them. Race-free (unlike
-            // eval-after-load).
-            //
-            // Frameless on Windows/Linux: the React titlebar draws its own
-            // min/max/close (via @tauri-apps/api/window) on the same row as the
-            // app's nav buttons. macOS keeps native traffic-light buttons via the
-            // Overlay title-bar style, with content extending under the bar.
-            // resizable defaults to true, so edge-resize + Snap are retained even
-            // without decorations on Windows.
-            let init_script = webui_init_script(loopback_port, server.local_trust_secret());
-            app.manage(server);
-            let win_builder =
-                tauri::WebviewWindowBuilder::new(app, "main", tauri::WebviewUrl::App("index.html".into()))
-                    .title("NomiFun")
-                    .inner_size(1280.0, 832.0)
-                    .min_inner_size(880.0, 600.0)
-                    .initialization_script(&init_script);
-            // macOS: Overlay makes the titlebar transparent + extends content under
-            // it, but it does NOT hide the native title text. With the title still
-            // set to "NomiFun", AppKit draws that string next to the traffic lights,
-            // overlapping the React sidebar toggle. `hidden_title(true)` maps to
-            // `setTitleVisibility(Hidden)` so the OS keeps the title for menus /
-            // Mission Control while leaving the titlebar visually empty.
-            //
-            // Vertically center the traffic lights on the React toolbar's button
-            // line. The React titlebar (`.app-titlebar--mac`, height 45px in
-            // ui/.../titlebar.css) centers its 36px buttons at y≈22.5px from the
-            // window top, but AppKit's default places the 16px lights at center
-            // y≈16px — ~6.5px too high. tao's `inset_traffic_lights` (view.rs)
-            // makes `y` the height of the button *container* (16 + y) and
-            // bottom-anchors the lights in it with a ~10px margin, so the lights'
-            // center-from-top works out to (y - 2). To land the center at 22.5px:
-            // y = 24.5 (empirically verified via the Accessibility API).
-            //
-            // Horizontally, `x` is the left edge of the close button's frame
-            // (tao sets `rect.origin.x = x` per button). That frame is 14px
-            // wide with the visible 12px circle centered in it (1px each
-            // side), so the circle's left gap from the window edge is x + 1.
-            // Balance that gap with the vertical whitespace around the lights:
-            // (45 - 12) / 2 = 16.5px above/below the circle, hence
-            // x = 16.5 - 1 = 15.5. (AppKit's native ~8px inset assumes a 28px
-            // titlebar and looks glued to the corner in a 45px one; Apple's
-            // own apps use ~16-20px in tall toolbars.) The lights then span up
-            // to zoom's right edge at 15.5 + 2*20 + 14 = 69.5px, still clear
-            // of the React menu, which starts at 84px (8px titlebar padding +
-            // 76px margin-left in Titlebar/index.tsx).
-            // (`traffic_light_position` requires Overlay + decorations:true, both set.)
-            #[cfg(target_os = "macos")]
-            let win_builder = win_builder
-                .title_bar_style(tauri::TitleBarStyle::Overlay)
-                .hidden_title(true)
-                .traffic_light_position(tauri::LogicalPosition::new(15.5, 24.5));
-            #[cfg(not(target_os = "macos"))]
-            let win_builder = win_builder.decorations(false);
-            win_builder.build()?;
-
-            // System tray. Closing the main window HIDES it here instead of
-            // quitting (see the CloseRequested handler in on_window_event); the
-            // process truly exits only via the tray's "退出" item. Left-click the
-            // icon to bring the window back; right-click for the Show/Quit menu.
-            // Labels are English fallbacks, adopted from the renderer's locale via
-            // `set_tray_labels` once it mounts (the renderer always loads before
-            // the user can close, so the first menu open is already localized).
-            let tray_show = MenuItem::with_id(app, "tray-show", "Show NomiFun", true, None::<&str>)?;
-            let tray_quit = MenuItem::with_id(app, "tray-quit", "Quit", true, None::<&str>)?;
-            let tray_menu = Menu::with_items(app, &[&tray_show, &tray_quit])?;
-            app.manage(TrayMenuItems {
-                show: tray_show.clone(),
-                quit: tray_quit.clone(),
-            });
-            let mut tray_builder = TrayIconBuilder::with_id("nomi-tray")
-                .tooltip("NomiFun")
-                .menu(&tray_menu)
-                // Left-click is reserved for "surface the window"; the menu is
-                // right-click only (otherwise a left-click would both pop the menu
-                // AND try to show the window).
-                .show_menu_on_left_click(false)
-                .on_menu_event(|app, event| match event.id.as_ref() {
-                    "tray-show" => show_main_window(app),
-                    "tray-quit" => {
-                        // Arm the quit guard FIRST, then exit — the CloseRequested
-                        // handler checks this flag and stops hiding-to-tray.
-                        app.state::<QuitFlag>().0.store(true, Ordering::SeqCst);
-                        app.exit(0);
-                    }
-                    _ => {}
-                })
-                .on_tray_icon_event(|tray, event| {
-                    if let TrayIconEvent::Click {
-                        button: MouseButton::Left,
-                        button_state: MouseButtonState::Up,
-                        ..
-                    } = event
-                    {
-                        show_main_window(tray.app_handle());
+                    let BackendRuntimeFailure { error, runtime } = failure;
+                    let startup_cleanup = startup_cleanup
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .clone();
+                    if let Some(runtime) = runtime {
+                        failure_coordinator.mark_cleanup_failed();
+                        tracing::error!(
+                            error = %error,
+                            "embedded backend cleanup is unverified; retaining runtime authority"
+                        );
+                        if let Some(server) = startup_cleanup.server() {
+                            failure_coordinator.mark_backend_failed_retained(server.clone());
+                            failure_coordinator.retain_backend_runtime(runtime);
+                            retry_shutdown_until_verified(
+                                failure_app_handle,
+                                server,
+                                failure_coordinator,
+                            );
+                        } else if let Some(keep_alive) = startup_cleanup.retained_keep_alive() {
+                            let authority = failure_coordinator
+                                .retain_startup_cleanup_authority(keep_alive, runtime);
+                            failure_coordinator.mark_backend_failed_unverified();
+                            retry_startup_cleanup_until_verified(
+                                failure_app_handle,
+                                authority,
+                                failure_coordinator,
+                                error,
+                            );
+                        } else {
+                            failure_coordinator.retain_backend_runtime(runtime);
+                            failure_coordinator.mark_backend_failed_unverified();
+                            hold_restart_without_cleanup_authority(&failure_coordinator);
+                        }
+                    } else {
+                        // The runtime is returned as `None` only when the
+                        // cleanup closure completed successfully. That result,
+                        // not the pre-cleanup enum variant, is the positive
+                        // teardown proof.
+                        failure_coordinator.mark_cleanup_verified();
+                        failure_coordinator.mark_backend_failed_verified();
+                        tracing::error!(error = %error, "embedded backend exited with error");
+                        schedule_fatal_dialog(failure_app_handle, failure_coordinator, error);
                     }
                 });
-            // Reuse the app's bundled window icon for the tray (no extra asset).
-            if let Some(icon) = app.default_window_icon() {
-                tray_builder = tray_builder.icon(icon.clone());
+            if let Err(error) = spawn_result {
+                coordinator.mark_backend_not_started();
+                tracing::error!(%error, "failed to spawn embedded backend thread");
+                schedule_fatal_dialog(
+                    app_handle,
+                    coordinator,
+                    format!("NomiFun could not start its embedded backend thread: {error}"),
+                );
             }
-            tray_builder.build(app)?;
-
-            // Desktop-companion windows are NOT created here anymore. They are
-            // multi-companion and dynamic: the main window's useCompanionWindowsSync hook
-            // invokes `sync_companion_windows` (above) on boot and on companion
-            // created/deleted/config-updated events, reconciling one
-            // transparent always-on-top `companion-{companion_id}` window per enabled companion.
-
-            // Wire deep-link open-url events to a Tauri event the renderer can
-            // `listen()` to. `register_all()` is best-effort (some platforms /
-            // dev contexts need it; ignore the error if it fails).
-            let handle = app.handle().clone();
-            let _ = app.deep_link().register_all();
-            app.deep_link().on_open_url(move |event| {
-                let urls: Vec<String> = event.urls().iter().map(|u| u.to_string()).collect();
-                let _ = handle.emit("deep-link://received", urls);
-            });
             Ok(())
         })
         // The ~38 OS-shell commands (window controls, tray, zoom, get-path,
         // feedback, auto-update status) register here as #[tauri::command]s (P3).
         .manage(AwakeState(Mutex::new(None)))
         .manage(QuitFlag(AtomicBool::new(false)))
+        .manage(Arc::new(ExitCoordinator::default()))
         .manage(memory_panel_window::MemoryPanelWindowState::default())
         .invoke_handler(tauri::generate_handler![
             check_for_updates,
+            install_update,
             companion_pointer::get_companion_local_pointer,
             updater_install_context::get_updater_install_context,
             sync_companion_windows,
@@ -1004,9 +2288,9 @@ fn main() -> std::process::ExitCode {
         // of quitting — the agent, scheduled tasks, and companions keep running in
         // the background. The process exits ONLY via the tray's "退出" item, which
         // arms QuitFlag and calls app.exit(0); with the flag set we let the close
-        // proceed and the Destroyed arm tears the process down (the always-on-top
-        // companion windows would otherwise keep it — and a floating companion —
-        // alive after the main window is gone).
+        // proceed. Process termination is coordinated exclusively by
+        // `ExitRequested`, so window destruction cannot overwrite a restart
+        // sentinel or bypass browser/backend cleanup.
         .on_window_event(|window, event| {
             if window.label() != "main" {
                 return;
@@ -1018,9 +2302,6 @@ fn main() -> std::process::ExitCode {
                         api.prevent_close();
                         let _ = window.hide();
                     }
-                }
-                tauri::WindowEvent::Destroyed => {
-                    window.app_handle().exit(0);
                 }
                 _ => {}
             }
@@ -1040,6 +2321,314 @@ mod tests {
     use super::*;
     use std::fs;
     use std::sync::{Arc, Mutex};
+
+    #[test]
+    fn updater_before_exit_retries_until_shutdown_is_verified_then_cleans_up_once() {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let attempts = Arc::new(AtomicU8::new(0));
+
+        let shutdown_events = events.clone();
+        let shutdown_attempts = attempts.clone();
+        let cleanup_events = events.clone();
+        let error_events = events.clone();
+        let wait_events = events.clone();
+
+        updater_before_exit_until_verified(
+            move || {
+                let attempt = shutdown_attempts.fetch_add(1, Ordering::SeqCst) + 1;
+                shutdown_events
+                    .lock()
+                    .unwrap()
+                    .push(format!("shutdown:{attempt}"));
+                if attempt < 3 {
+                    Err(anyhow::anyhow!("fixture shutdown failure {attempt}"))
+                } else {
+                    Ok(())
+                }
+            },
+            move || cleanup_events.lock().unwrap().push("cleanup".to_owned()),
+            move |attempt, _| {
+                error_events
+                    .lock()
+                    .unwrap()
+                    .push(format!("error:{attempt}"));
+            },
+            move || wait_events.lock().unwrap().push("wait".to_owned()),
+        );
+
+        assert_eq!(
+            *events.lock().unwrap(),
+            [
+                "shutdown:1",
+                "error:1",
+                "wait",
+                "shutdown:2",
+                "error:2",
+                "wait",
+                "shutdown:3",
+                "cleanup",
+            ]
+        );
+    }
+
+    #[test]
+    fn exit_coordinator_keeps_the_first_normal_exit_code_and_starts_once() {
+        let coordinator = ExitCoordinator::default();
+
+        assert!(coordinator.request_normal_exit(Some(23)));
+        assert!(!coordinator.request_normal_exit(Some(99)));
+        assert_eq!(coordinator.original_code(), 23);
+        assert_eq!(coordinator.shutdown_mode(), Some(ShutdownMode::Normal));
+        assert!(coordinator.claim_shutdown_start());
+        assert!(!coordinator.claim_shutdown_start());
+
+        coordinator.mark_cleanup_verified();
+        assert!(coordinator.is_exit_allowed());
+    }
+
+    #[test]
+    fn exit_coordinator_upgrades_an_inflight_normal_exit_to_restart() {
+        let coordinator = ExitCoordinator::default();
+
+        assert!(coordinator.request_normal_exit(Some(7)));
+        assert!(
+            !coordinator.request_restart(),
+            "the normal shutdown already owns the phase transition"
+        );
+        assert!(coordinator.is_restart_requested());
+        assert_eq!(coordinator.shutdown_mode(), Some(ShutdownMode::Restart));
+        assert_eq!(
+            coordinator.original_code(),
+            7,
+            "upgrading to restart must not overwrite the original normal exit code"
+        );
+    }
+
+    #[test]
+    fn restart_cleanup_failure_aborts_relaunch() {
+        let failed: anyhow::Result<()> = Err(anyhow::anyhow!("fixture cleanup failure"));
+        let succeeded: anyhow::Result<()> = Ok(());
+
+        assert_eq!(
+            restart_cleanup_outcome(&failed),
+            RestartCleanupOutcome::AbortRestart
+        );
+        assert_eq!(
+            restart_cleanup_outcome(&succeeded),
+            RestartCleanupOutcome::ContinueRestart
+        );
+    }
+
+    #[test]
+    fn exit_coordinator_reports_a_fatal_exit_only_once() {
+        let coordinator = ExitCoordinator::default();
+
+        coordinator.mark_no_cleanup_needed();
+        assert!(coordinator.claim_fatal_exit());
+        assert!(!coordinator.claim_fatal_exit());
+        coordinator.mark_cleanup_verified();
+        assert!(
+            coordinator.is_exit_allowed(),
+            "normal completion must not disarm an already-fatal exit"
+        );
+        assert!(!coordinator.request_normal_exit(Some(0)));
+    }
+
+    #[test]
+    fn exit_coordinator_unblocks_early_exit_when_backend_startup_fails() {
+        let coordinator = ExitCoordinator::default();
+
+        coordinator.mark_no_cleanup_needed();
+        coordinator.mark_backend_failed_verified();
+        assert!(coordinator.wait_for_backend(Duration::from_secs(1)).is_none());
+        assert!(coordinator.backend_server().is_none());
+    }
+
+    #[test]
+    fn startup_cleanup_not_started_is_verified_and_has_no_server() {
+        let cleanup = StartupCleanup::NotStarted;
+        let runtime = tokio::runtime::Runtime::new().expect("build test runtime");
+
+        assert!(cleanup.cleanup(&runtime).is_ok());
+        assert!(cleanup.is_verified());
+        assert!(cleanup.server().is_none());
+    }
+
+    #[test]
+    fn startup_cleanup_starting_is_fail_closed_and_unverified() {
+        let cleanup = StartupCleanup::StartingUnverified;
+        let runtime = tokio::runtime::Runtime::new().expect("build test runtime");
+
+        let error = cleanup
+            .cleanup(&runtime)
+            .expect_err("startup without published cleanup authority must fail closed");
+        assert!(format!("{error:#}").contains("cleanup authority"));
+        assert!(!cleanup.is_verified());
+        assert!(cleanup.server().is_none());
+    }
+
+    #[test]
+    fn startup_cleanup_normal_start_failure_is_verified_and_has_no_server() {
+        let cleanup = StartupCleanup::FailedVerified;
+        let runtime = tokio::runtime::Runtime::new().expect("build test runtime");
+
+        assert!(cleanup.cleanup(&runtime).is_ok());
+        assert!(cleanup.is_verified());
+        assert!(cleanup.server().is_none());
+    }
+
+    #[test]
+    fn startup_cleanup_entered_helper_transitions_shared_state() {
+        let cleanup = Mutex::new(StartupCleanup::NotStarted);
+
+        mark_startup_cleanup_entered(&cleanup);
+        assert!(matches!(
+            &*cleanup.lock().unwrap(),
+            StartupCleanup::StartingUnverified
+        ));
+    }
+
+    #[test]
+    fn startup_cleanup_failed_helper_only_verifies_a_returned_start_error() {
+        let cleanup = Mutex::new(StartupCleanup::NotStarted);
+
+        mark_startup_cleanup_entered(&cleanup);
+        mark_startup_cleanup_failed_verified(&cleanup);
+        assert!(matches!(
+            &*cleanup.lock().unwrap(),
+            StartupCleanup::FailedVerified
+        ));
+    }
+
+    #[test]
+    fn backend_run_error_without_a_started_server_is_preserved() {
+        let error = backend_run_failure(Ok(Err(anyhow::anyhow!("fixture backend error"))))
+            .expect("an error result must remain fatal");
+
+        assert!(error.contains("fixture backend error"));
+    }
+
+    #[test]
+    fn backend_run_panic_without_a_started_server_is_preserved() {
+        let panic = std::panic::catch_unwind(|| panic!("fixture backend panic"));
+        let error = backend_run_failure(panic.map(|_| Ok(())))
+            .expect("a panic result must remain fatal");
+
+        assert!(error.contains("fixture backend panic"));
+    }
+
+    #[test]
+    fn backend_run_success_needs_no_fatal_cleanup() {
+        assert!(backend_run_failure(Ok(Ok(()))).is_none());
+    }
+
+    #[test]
+    fn backend_failure_cleanup_runs_before_runtime_is_dropped() {
+        struct RuntimeDropProbe {
+            runtime: tokio::runtime::Runtime,
+            dropped: Arc<AtomicBool>,
+        }
+
+        impl Drop for RuntimeDropProbe {
+            fn drop(&mut self) {
+                self.dropped.store(true, Ordering::Release);
+            }
+        }
+
+        let runtime_dropped = Arc::new(AtomicBool::new(false));
+        let cleanup_called = Arc::new(AtomicBool::new(false));
+        let cleanup_called_for_fn = Arc::clone(&cleanup_called);
+        let runtime_dropped_for_fn = Arc::clone(&runtime_dropped);
+        let runtime = RuntimeDropProbe {
+            runtime: tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(1)
+                .enable_all()
+                .build()
+                .expect("build probe Tokio runtime"),
+            dropped: Arc::clone(&runtime_dropped),
+        };
+
+        let error = finish_backend_runtime(
+            Ok(Err(anyhow::anyhow!("fixture backend failure"))),
+            runtime,
+            move |runtime| {
+                assert!(
+                    !runtime_dropped_for_fn.load(Ordering::Acquire),
+                    "backend cleanup must run while its Tokio runtime is still alive"
+                );
+                let (tx, rx) = std::sync::mpsc::channel();
+                runtime.runtime.spawn(async move {
+                    tx.send(()).expect("send runtime probe completion");
+                });
+                rx.recv_timeout(Duration::from_secs(1))
+                    .expect("cleanup must run while the Tokio runtime is usable");
+                cleanup_called_for_fn.store(true, Ordering::Release);
+                Ok(())
+            },
+        )
+        .expect("backend failure must remain fatal");
+
+        assert!(error.error.contains("fixture backend failure"));
+        assert!(cleanup_called.load(Ordering::Acquire));
+        assert!(runtime_dropped.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn backend_panic_cleanup_runs_before_runtime_is_dropped() {
+        struct RuntimeDropProbe {
+            runtime: tokio::runtime::Runtime,
+            dropped: Arc<AtomicBool>,
+        }
+
+        impl Drop for RuntimeDropProbe {
+            fn drop(&mut self) {
+                self.dropped.store(true, Ordering::Release);
+            }
+        }
+
+        let panic = std::panic::catch_unwind(|| panic!("fixture backend panic"));
+        let runtime_dropped = Arc::new(AtomicBool::new(false));
+        let runtime_dropped_for_fn = Arc::clone(&runtime_dropped);
+        let runtime = RuntimeDropProbe {
+            runtime: tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(1)
+                .enable_all()
+                .build()
+                .expect("build probe Tokio runtime"),
+            dropped: Arc::clone(&runtime_dropped),
+        };
+
+        let error = finish_backend_runtime(panic.map(|_| Ok(())), runtime, move |runtime| {
+            assert!(
+                !runtime_dropped_for_fn.load(Ordering::Acquire),
+                "panic cleanup must run while its Tokio runtime is still alive"
+            );
+            let (tx, rx) = std::sync::mpsc::channel();
+            runtime.runtime.spawn(async move {
+                tx.send(()).expect("send runtime probe completion");
+            });
+            rx.recv_timeout(Duration::from_secs(1))
+                .expect("panic cleanup must run while the Tokio runtime is usable");
+            Ok(())
+        })
+        .expect("backend panic must remain fatal");
+
+        assert!(error.error.contains("fixture backend panic"));
+        assert!(runtime_dropped.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn backend_failure_preserves_shutdown_error_context() {
+        let error = finish_backend_runtime(
+            Ok(Err(anyhow::anyhow!("fixture backend failure"))),
+            (),
+            |_| Err(anyhow::anyhow!("fixture shutdown failure")),
+        )
+        .expect("backend failure must remain fatal");
+
+        assert!(error.error.contains("fixture backend failure"));
+        assert!(error.error.contains("fixture shutdown failure"));
+    }
 
     #[test]
     fn macos_reopen_surfaces_main_window_when_no_windows_are_visible() {
@@ -1102,8 +2691,7 @@ mod tests {
     fn generated_custom_protocol_context_contains_a_valid_embedded_webui_snapshot() {
         if tauri::is_dev() {
             // Normal desktop tests intentionally use Vite/no embedded assets.
-            // The three-platform generated-context gate sets the requirement
-            // variable and runs this test with:
+            // The generated-context gate sets the requirement variable and runs:
             //   cargo test -p nomifun-desktop --features tauri/custom-protocol \
             //     generated_custom_protocol_context_contains_a_valid_embedded_webui_snapshot
             assert!(

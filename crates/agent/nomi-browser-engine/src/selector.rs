@@ -72,7 +72,7 @@ mod tests {
     async fn generate_selector_returns_stable_selector() {
         use crate::injected::InjectionManager;
         use crate::launch::{launch_chrome, LaunchConfig};
-        use crate::transport::{Connection, ROOT_SESSION};
+        use crate::transport::ROOT_SESSION;
         use chromiumoxide::cdp::browser_protocol::page::{
             EnableParams as PageEnable, NavigateParams,
         };
@@ -95,10 +95,7 @@ mod tests {
             headful: false,
         };
         let launched = launch_chrome(&cfg, true).await.expect("launch chrome");
-        let _child = launched.child;
-        let conn = Connection::connect_launched(launched.transport)
-            .await
-            .expect("connect");
+        let (_process, conn) = launched.connect().await.expect("connect");
         let _attach_loop = conn.run_attach_loop();
         conn.enable_auto_attach().await.expect("auto attach");
 

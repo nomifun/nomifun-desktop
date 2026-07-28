@@ -5131,11 +5131,13 @@ dependencies = [
  "nomi-protocol",
  "nomi-tools",
  "nomi-types",
+ "nomifun-browser-platform",
  "nomifun-secret",
  "serde",
  "serde_json",
  "tempfile",
  "tokio",
+ "tokio-util",
  "tracing",
 ]
 
@@ -5148,6 +5150,7 @@ dependencies = [
  "chromiumoxide",
  "core-graphics",
  "dunce",
+ "fs2",
  "futures-util",
  "getrandom 0.2.17",
  "hex",
@@ -5161,6 +5164,7 @@ dependencies = [
  "regex",
  "serde",
  "serde_json",
+ "sysinfo",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
@@ -5469,7 +5473,6 @@ dependencies = [
  "libc",
  "nomi-agent",
  "nomi-browser",
- "nomi-browser-engine",
  "nomi-config",
  "nomi-mcp",
  "nomi-memory",
@@ -5481,6 +5484,7 @@ dependencies = [
  "nomi-types",
  "nomifun-api-types",
  "nomifun-auth",
+ "nomifun-browser-platform",
  "nomifun-common",
  "nomifun-db",
  "nomifun-extension",
@@ -5553,6 +5557,7 @@ dependencies = [
  "nomifun-api-types",
  "nomifun-assets",
  "nomifun-auth",
+ "nomifun-browser-platform",
  "nomifun-channel",
  "nomifun-common",
  "nomifun-companion",
@@ -5588,6 +5593,7 @@ dependencies = [
  "serde_json",
  "sha2 0.10.9",
  "sqlx",
+ "sysinfo",
  "tempfile",
  "tokio",
  "tokio-tungstenite 0.26.2",
@@ -5597,6 +5603,7 @@ dependencies = [
  "tracing",
  "tracing-appender",
  "tracing-subscriber",
+ "url",
  "uuid",
  "windows-sys 0.61.2",
  "wiremock",
@@ -5638,6 +5645,20 @@ dependencies = [
  "tokio",
  "tower",
  "tracing",
+]
+
+[[package]]
+name = "nomifun-browser-platform"
+version = "0.3.3"
+dependencies = [
+ "async-trait",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "uuid",
 ]
 
 [[package]]
@@ -5943,6 +5964,7 @@ dependencies = [
  "nomifun-agent-execution",
  "nomifun-ai-agent",
  "nomifun-api-types",
+ "nomifun-browser-platform",
  "nomifun-channel",
  "nomifun-common",
  "nomifun-companion",
@@ -5957,7 +5979,6 @@ dependencies = [
  "nomifun-mcp",
  "nomifun-preset",
  "nomifun-requirement",
- "nomifun-secret",
  "nomifun-shell",
  "nomifun-system",
  "nomifun-terminal",
@@ -6128,6 +6149,7 @@ dependencies = [
  "axum",
  "futures",
  "nomifun-auth",
+ "nomifun-browser-platform",
  "nomifun-common",
  "nomifun-gateway",
  "reqwest 0.12.28",
@@ -6135,6 +6157,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.10.9",
+ "thiserror 2.0.18",
  "tokio",
  "tower",
  "tracing",
@@ -6451,6 +6474,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "42b8cfee0e339a0337359f3c88165702ac6e600dc01c0cc9579a92d62b08477a"
 dependencies = [
  "bitflags 2.13.0",
+]
+
+[[package]]
+name = "ntapi"
+version = "0.4.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c3b335231dfd352ffb0f8017f3b6027a4917f7df785ea2143d8af2adc66980ae"
+dependencies = [
+ "winapi",
 ]
 
 [[package]]
@@ -9458,6 +9490,20 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8eab9a99a024a169fe8a903cf9d4a3b3601109bcc13bd9e3c6fff259138626c4"
 dependencies = [
  "libc",
+]
+
+[[package]]
+name = "sysinfo"
+version = "0.39.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d2071df9448915b71c4fe6d25deaf1c22f12bd234f01540b77312bb8e41361e6"
+dependencies = [
+ "libc",
+ "memchr",
+ "ntapi",
+ "objc2-core-foundation",
+ "objc2-io-kit",
+ "windows 0.62.2",
 ]
 
 [[package]]

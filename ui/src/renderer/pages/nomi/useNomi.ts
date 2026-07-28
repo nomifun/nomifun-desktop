@@ -34,6 +34,7 @@ const mergeProfile = (prev: ICompanionProfile, patch: ICompanionProfilePatch): I
   ...(patch.character !== undefined ? { character: patch.character } : {}),
   ...(patch.persona ? { persona: { ...prev.persona, ...patch.persona } } : {}),
   ...(patch.model !== undefined ? { model: patch.model } : {}),
+  ...(patch.skills ? { skills: { ...prev.skills, ...patch.skills } } : {}),
   ...(patch.appearance ? { appearance: { ...prev.appearance, ...patch.appearance } } : {}),
 });
 

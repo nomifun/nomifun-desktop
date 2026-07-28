@@ -635,6 +635,23 @@ async fn reconcile_running_attempt_receipt_tx(
         now,
     )
     .await?;
+    // A review-blocked attempt must never be scheduled again, but its
+    // process/runtime may still be alive after a pause, lease loss, or
+    // restart.  Retire only this exact attempt link so the durable cleanup
+    // outbox can cancel that Conversation/runtime.  Do not deactivate by
+    // conversation id: a replacement attempt may already own the same
+    // Conversation and must remain isolated from stale cleanup.
+    sqlx::query(
+        "UPDATE conversation_execution_links SET active = 0, updated_at = ? \
+         WHERE execution_id = ? AND step_id = ? AND attempt_id = ? \
+           AND relation = 'attempt' AND active = 1",
+    )
+    .bind(now)
+    .bind(execution_id)
+    .bind(step_id)
+    .bind(attempt_id)
+    .execute(&mut **tx)
+    .await?;
     let runtime_state = review_block_runtime_state(&operation_id, receipt_state, reason);
     let attempt = sqlx::query(
         "UPDATE agent_execution_attempts SET status = 'waiting_input', question = ?, error = ?, \
@@ -975,6 +992,46 @@ async fn bump_execution_version_tx(
     if result.rows_affected() != 1 {
         return Err(conflict("agent execution"));
     }
+    Ok(())
+}
+
+async fn terminate_unfinished_execution_children_tx(
+    tx: &mut Transaction<'_, Sqlite>,
+    execution_id: &str,
+    attempt_error: Option<&str>,
+    now: i64,
+) -> Result<(), DbError> {
+    sqlx::query(
+        "UPDATE agent_execution_steps SET status = 'cancelled', dispatch_after = NULL, \
+            version = version + 1, updated_at = ? \
+         WHERE execution_id = ? AND superseded_in_revision IS NULL \
+           AND status NOT IN ('completed', 'failed', 'skipped', 'cancelled')",
+    )
+    .bind(now)
+    .bind(execution_id)
+    .execute(&mut **tx)
+    .await?;
+    sqlx::query(
+        "UPDATE agent_execution_attempts SET \
+            status = 'cancelled', question = NULL, \
+            error = COALESCE(error, ?), finished_at = ?, \
+            version = version + 1, updated_at = ? \
+         WHERE execution_id = ? AND status IN ('queued', 'running', 'waiting_input')",
+    )
+    .bind(attempt_error)
+    .bind(now)
+    .bind(now)
+    .bind(execution_id)
+    .execute(&mut **tx)
+    .await?;
+    sqlx::query(
+        "UPDATE conversation_execution_links SET active = 0, updated_at = ? \
+         WHERE execution_id = ? AND relation = 'attempt' AND active = 1",
+    )
+    .bind(now)
+    .bind(execution_id)
+    .execute(&mut **tx)
+    .await?;
     Ok(())
 }
 
@@ -2021,7 +2078,14 @@ impl IAgentExecutionRepository for SqliteAgentExecutionRepository {
                 version = version + 1, lease_owner = NULL, lease_expires_at = NULL, \
                 updated_at = ? \
              WHERE execution_id = ? AND user_id = ? AND version = ? AND deleted_at IS NULL \
-               AND status = 'paused'",
+               AND status = 'paused' \
+               AND NOT EXISTS( \
+                   SELECT 1 FROM agent_execution_attempts attempt \
+                   WHERE attempt.execution_id = agent_executions.execution_id \
+                     AND attempt.status = 'waiting_input' \
+                     AND json_valid(attempt.runtime_state) \
+                     AND json_type(attempt.runtime_state, '$.review_blocked') IS NOT NULL \
+               )",
         )
         .bind(now)
         .bind(execution_id)
@@ -2070,39 +2134,60 @@ impl IAgentExecutionRepository for SqliteAgentExecutionRepository {
         if result.rows_affected() != 1 {
             return Err(conflict("agent execution"));
         }
-        sqlx::query(
-            "UPDATE agent_execution_steps SET status = 'cancelled', dispatch_after = NULL, \
-                version = version + 1, updated_at = ? \
-             WHERE execution_id = ? AND superseded_in_revision IS NULL \
-               AND status NOT IN ('completed', 'failed', 'skipped', 'cancelled')",
-        )
-        .bind(now)
-        .bind(execution_id)
-        .execute(&mut *tx)
-        .await?;
-        sqlx::query(
-            "UPDATE agent_execution_attempts SET \
-                status = 'cancelled', \
-                question = NULL, finished_at = ?, version = version + 1, updated_at = ? \
-             WHERE execution_id = ? AND status IN ('queued', 'running', 'waiting_input')",
-        )
-        .bind(now)
-        .bind(now)
-        .bind(execution_id)
-        .execute(&mut *tx)
-        .await?;
-        sqlx::query(
-            "UPDATE conversation_execution_links SET active = 0, updated_at = ? \
-             WHERE execution_id = ? AND relation = 'attempt' AND active = 1",
-        )
-        .bind(now)
-        .bind(execution_id)
-        .execute(&mut *tx)
-        .await?;
+        terminate_unfinished_execution_children_tx(&mut tx, execution_id, None, now).await?;
         append_event_tx(&mut tx, execution_id, event, now).await?;
         let detail = load_execution_detail_tx(&mut tx, user_id, execution_id)
             .await?
             .ok_or_else(|| conflict("agent execution"))?;
+        tx.commit().await?;
+        Ok(detail)
+    }
+
+    async fn fail_active_execution(
+        &self,
+        user_id: &str,
+        execution_id: &str,
+        expected_version: i64,
+        lease: &AgentExecutionLeaseToken,
+        reason: &str,
+        event: &NewAgentExecutionEvent,
+    ) -> Result<AgentExecutionDetailRows, DbError> {
+        if reason.trim().is_empty() {
+            return Err(DbError::Conflict(
+                "fatal Agent Execution failure requires a reason".to_owned(),
+            ));
+        }
+        let now = now_ms();
+        let mut tx = self.pool.begin().await?;
+        fence_scheduler_write_tx(&mut tx, execution_id, Some(lease), now).await?;
+        let result = sqlx::query(
+            "UPDATE agent_executions SET status = 'failed', summary = ?, \
+                version = version + 1, lease_owner = NULL, lease_expires_at = NULL, \
+                updated_at = ? \
+             WHERE execution_id = ? AND user_id = ? AND version = ? \
+               AND deleted_at IS NULL AND status IN ('running', 'waiting_input')",
+        )
+        .bind(reason)
+        .bind(now)
+        .bind(execution_id)
+        .bind(user_id)
+        .bind(expected_version)
+        .execute(&mut *tx)
+        .await?;
+        if result.rows_affected() != 1 {
+            return Err(conflict("active Agent Execution failure"));
+        }
+        terminate_unfinished_execution_children_tx(
+            &mut tx,
+            execution_id,
+            Some(reason),
+            now,
+        )
+        .await?;
+        append_event_tx(&mut tx, execution_id, event, now).await?;
+        let detail = load_execution_detail_tx(&mut tx, user_id, execution_id)
+            .await?
+            .ok_or_else(|| conflict("active Agent Execution failure"))?;
         tx.commit().await?;
         Ok(detail)
     }
@@ -4886,20 +4971,28 @@ impl IAgentExecutionRepository for SqliteAgentExecutionRepository {
         execution_id: Option<&str>,
         limit: i64,
     ) -> Result<Vec<PendingConversationCleanup>, DbError> {
-        Ok(sqlx::query_as::<_, (String, String, String)>(
-            "SELECT link.execution_id, execution.user_id, link.conversation_id \
-             FROM conversation_execution_links link \
+        Ok(sqlx::query_as::<_, (i64, String, String, String, String, String)>(
+            "WITH pending_conversations AS (\
+                 SELECT MIN(link.id) AS link_id, link.conversation_id \
+                 FROM conversation_execution_links link \
+                 JOIN agent_executions execution ON execution.execution_id = link.execution_id \
+                 JOIN conversations conversation ON conversation.conversation_id = link.conversation_id \
+                 WHERE link.relation = 'attempt' AND link.active = 0 \
+                   AND link.cleanup_completed_at IS NULL \
+                   AND (? IS NULL OR link.execution_id = ?) \
+                   AND conversation.user_id = execution.user_id \
+                   AND NOT EXISTS(\
+                       SELECT 1 FROM conversation_execution_links active_link \
+                       WHERE active_link.conversation_id = link.conversation_id \
+                         AND active_link.relation = 'attempt' AND active_link.active = 1\
+                   ) \
+                 GROUP BY link.conversation_id\
+             ) \
+             SELECT link.id, link.execution_id, execution.user_id, link.step_id, \
+                    link.attempt_id, link.conversation_id \
+             FROM pending_conversations pending \
+             JOIN conversation_execution_links link ON link.id = pending.link_id \
              JOIN agent_executions execution ON execution.execution_id = link.execution_id \
-             JOIN conversations conversation ON conversation.conversation_id = link.conversation_id \
-             WHERE link.relation = 'attempt' AND link.active = 0 \
-               AND link.cleanup_completed_at IS NULL \
-               AND (? IS NULL OR link.execution_id = ?) \
-               AND conversation.user_id = execution.user_id \
-               AND NOT EXISTS (\
-                   SELECT 1 FROM conversation_execution_links active_link \
-                   WHERE active_link.conversation_id = link.conversation_id \
-                     AND active_link.relation = 'attempt' AND active_link.active = 1\
-               ) \
              ORDER BY link.updated_at, link.id LIMIT ?",
         )
         .bind(execution_id)
@@ -4909,13 +5002,54 @@ impl IAgentExecutionRepository for SqliteAgentExecutionRepository {
         .await?
         .into_iter()
         .map(
-            |(execution_id, user_id, conversation_id)| PendingConversationCleanup {
+            |(link_id, execution_id, user_id, step_id, attempt_id, conversation_id)| PendingConversationCleanup {
+                link_id,
                 execution_id,
                 user_id,
+                step_id,
+                attempt_id,
                 conversation_id,
             },
         )
         .collect())
+    }
+
+    async fn validate_conversation_cleanup(
+        &self,
+        cleanup: &PendingConversationCleanup,
+    ) -> Result<bool, DbError> {
+        let mut tx = self.pool.begin().await?;
+        // Take SQLite's write lock so an active replacement cannot be inserted
+        // between this exact-generation proof and transaction completion.
+        let exact = sqlx::query(
+            "UPDATE conversation_execution_links SET updated_at = updated_at \
+             WHERE id = ? AND execution_id = ? AND step_id = ? AND attempt_id = ? \
+               AND conversation_id = ? AND relation = 'attempt' AND active = 0 \
+               AND cleanup_completed_at IS NULL \
+               AND EXISTS( \
+                   SELECT 1 FROM agent_executions execution \
+                   JOIN conversations conversation \
+                     ON conversation.conversation_id = conversation_execution_links.conversation_id \
+                   WHERE execution.execution_id = conversation_execution_links.execution_id \
+                     AND execution.user_id = ? AND conversation.user_id = ? \
+               ) \
+               AND NOT EXISTS( \
+                   SELECT 1 FROM conversation_execution_links active_link \
+                   WHERE active_link.conversation_id = conversation_execution_links.conversation_id \
+                     AND active_link.relation = 'attempt' AND active_link.active = 1 \
+               )",
+        )
+        .bind(cleanup.link_id)
+        .bind(&cleanup.execution_id)
+        .bind(&cleanup.step_id)
+        .bind(&cleanup.attempt_id)
+        .bind(&cleanup.conversation_id)
+        .bind(&cleanup.user_id)
+        .bind(&cleanup.user_id)
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(exact.rows_affected() == 1)
     }
 
     async fn mark_conversation_cleanup_completed(
@@ -4924,20 +5058,109 @@ impl IAgentExecutionRepository for SqliteAgentExecutionRepository {
         conversation_id: &str,
         completed_at: i64,
     ) -> Result<bool, DbError> {
+        let cleanup = PendingConversationCleanup {
+            link_id: sqlx::query_scalar(
+                "SELECT id FROM conversation_execution_links \
+                 WHERE execution_id = ? AND conversation_id = ? \
+                   AND relation = 'attempt' AND active = 0 \
+                   AND cleanup_completed_at IS NULL \
+                 ORDER BY updated_at, id LIMIT 1",
+            )
+            .bind(execution_id)
+            .bind(conversation_id)
+            .fetch_optional(&self.pool)
+            .await?
+            .unwrap_or_default(),
+            execution_id: execution_id.to_owned(),
+            user_id: sqlx::query_scalar(
+                "SELECT execution.user_id FROM agent_executions execution \
+                 WHERE execution.execution_id = ?",
+            )
+            .bind(execution_id)
+            .fetch_one(&self.pool)
+            .await?,
+            step_id: String::new(),
+            attempt_id: String::new(),
+            conversation_id: conversation_id.to_owned(),
+        };
+        // Keep the historical method useful for callers that only have the
+        // old identity tuple, while routing the actual acknowledgement
+        // through the exact-generation fence.
+        let exact = sqlx::query_as::<_, (String, String)>(
+            "SELECT step_id, attempt_id FROM conversation_execution_links \
+             WHERE id = ?",
+        )
+        .bind(cleanup.link_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        let Some((step_id, attempt_id)) = exact else {
+            return Ok(false);
+        };
+        let cleanup = PendingConversationCleanup {
+            step_id,
+            attempt_id,
+            ..cleanup
+        };
+        self.mark_conversation_cleanup_completed_exact(&cleanup, completed_at)
+            .await
+    }
+
+    async fn mark_conversation_cleanup_completed_exact(
+        &self,
+        cleanup: &PendingConversationCleanup,
+        completed_at: i64,
+    ) -> Result<bool, DbError> {
+        let mut tx = self.pool.begin().await?;
+        // Revalidate the exact generation again after external cancel. If a
+        // replacement appeared while cancel was in flight, leave every row
+        // pending rather than acknowledging stale work as successful.
+        let exact: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM conversation_execution_links link \
+             JOIN agent_executions execution ON execution.execution_id = link.execution_id \
+             JOIN conversations conversation ON conversation.conversation_id = link.conversation_id \
+             WHERE link.id = ? AND link.execution_id = ? AND link.step_id = ? \
+               AND link.attempt_id = ? AND link.conversation_id = ? \
+               AND link.relation = 'attempt' AND link.active = 0 \
+               AND link.cleanup_completed_at IS NULL \
+               AND execution.user_id = ? AND conversation.user_id = ? \
+               AND NOT EXISTS( \
+                   SELECT 1 FROM conversation_execution_links active_link \
+                   WHERE active_link.conversation_id = link.conversation_id \
+                     AND active_link.relation = 'attempt' AND active_link.active = 1 \
+               )",
+        )
+        .bind(cleanup.link_id)
+        .bind(&cleanup.execution_id)
+        .bind(&cleanup.step_id)
+        .bind(&cleanup.attempt_id)
+        .bind(&cleanup.conversation_id)
+        .bind(&cleanup.user_id)
+        .bind(&cleanup.user_id)
+        .fetch_one(&mut *tx)
+        .await?;
+        if exact != 1 {
+            tx.commit().await?;
+            return Ok(false);
+        }
         let result = sqlx::query(
             "UPDATE conversation_execution_links \
              SET cleanup_completed_at = ?, updated_at = ? \
-             WHERE execution_id = ? AND conversation_id = ? \
+             WHERE conversation_id = ? \
                AND relation = 'attempt' AND active = 0 \
-               AND cleanup_completed_at IS NULL",
+               AND cleanup_completed_at IS NULL \
+               AND NOT EXISTS( \
+                   SELECT 1 FROM conversation_execution_links active_link \
+                   WHERE active_link.conversation_id = conversation_execution_links.conversation_id \
+                     AND active_link.relation = 'attempt' AND active_link.active = 1 \
+               )",
         )
         .bind(completed_at)
         .bind(completed_at)
-        .bind(execution_id)
-        .bind(conversation_id)
-        .execute(&self.pool)
+        .bind(&cleanup.conversation_id)
+        .execute(&mut *tx)
         .await?;
-        Ok(result.rows_affected() == 1)
+        tx.commit().await?;
+        Ok(result.rows_affected() >= 1)
     }
 
     async fn append_event(

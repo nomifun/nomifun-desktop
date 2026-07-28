@@ -31,11 +31,8 @@
     "notification:allow-is-permission-granted",
     "notification:allow-request-permission",
     "deep-link:default",
-    "updater:default",
     "updater:allow-check",
     "updater:allow-download",
-    "updater:allow-install",
-    "updater:allow-download-and-install",
     "process:default",
     "autostart:default"
   ]

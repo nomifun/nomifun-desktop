@@ -275,6 +275,21 @@ impl Registry {
         })
     }
 
+    /// Run the registered capability's typed argument deserialization without
+    /// invoking its handler. `None` means the tool name is unknown.
+    ///
+    /// This is intentionally the same validator used by the capability
+    /// handler, including removal of the cross-cutting `confirm` field.
+    pub fn validate_arguments(
+        &self,
+        name: &str,
+        args: &Value,
+    ) -> Option<Result<(), Value>> {
+        self.by_name
+            .get(name)
+            .map(|capability| capability.validate_arguments(args))
+    }
+
     /// Dispatch a tool call if the registry owns the tool; `None` means "not a
     /// registered tool.
     pub async fn dispatch_opt(

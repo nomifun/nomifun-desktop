@@ -6,12 +6,13 @@ license.workspace = true
 repository.workspace = true
 
 [features]
-# P3-GW1 路线 A：网关浏览器工具（per-companion BrowserTool registry）。门控因为它拉入
-# `nomi-browser`（→ chromiumoxide CDP 栈 + 受管 Chromium）——无浏览器的 headless 宿主不应被迫依赖。
+# Gateway browser capabilities: a feature-gated adapter to the application-owned
+# BrowserSessionHub. `nomi-browser` remains only for the shared GW2 redline
+# classifier/sentinel; Gateway never constructs BrowserTool or Chromium.
 # 由 `nomifun-app` 的同名 feature 经 `nomifun-gateway/browser-use` 向下传导；关时网关不暴露
 # nomi_browser_* 工具（dispatch 走 unknown tool，schema 不注册）。依赖方向：gateway → nomi-browser
 # （nomi-browser 不反依赖 gateway，已核对无环）。
-browser-use = ["dep:nomi-browser", "dep:nomi-types", "dep:nomi-config", "dep:nomi-tools", "dep:nomifun-secret", "dep:futures"]
+browser-use = ["dep:nomi-browser", "dep:nomi-types", "dep:nomifun-browser-platform", "dep:futures"]
 # Gateway computer-use tools (single shared desktop ComputerTool). Forwarded by
 # `nomifun-app`'s `computer-use` feature via `nomifun-gateway/computer-use`; off
 # on headless/web hosts (which never pull the native screen/input/UIA stack).
@@ -52,15 +53,13 @@ nomifun-shell.workspace = true
 # MCP-server + extensions/hub/skills domain capabilities.
 nomifun-mcp.workspace = true
 nomifun-extension.workspace = true
-# P3-GW1: per-companion BrowserTool registry（路线 A）。optional + feature 门控，关时不拉浏览器栈。
+# Shared GW2 classifier only; BrowserRegistry does not construct BrowserTool.
 nomi-browser = { workspace = true, optional = true }
+nomifun-browser-platform = { workspace = true, optional = true }
 # Computer-use: shared desktop ComputerTool. optional + feature 门控，关时不拉 screen/input/UIA 栈。
 nomi-computer = { workspace = true, optional = true }
-# P3-X2: per-pet secret vault path resolver for gateway-driven secret:NAME (browser-use only).
-nomifun-secret = { workspace = true, optional = true }
 nomi-types = { workspace = true, optional = true }
 nomi-config = { workspace = true, optional = true }
-# `Tool` trait（execute/category）——facade BrowserTool 实现它，registry 经它驱动动作。
 nomi-tools = { workspace = true, optional = true }
 # CC: BrowserRegistry::execute_parallel 用 futures::future::join_all 并行多 key（异 key 真并发/同 key 串行）。
 futures = { workspace = true, optional = true }

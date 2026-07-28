@@ -22,6 +22,9 @@ use nomifun_common::{AgentKillReason, AgentType, AppError, Confirmation, Convers
 
 use common::{body_json, get_with_token, json_with_token, setup_and_login};
 
+const GEMINI_AGENT_ID: &str = "0190f5fe-7c00-7a00-8000-000000000103";
+const MESSAGE_ID: &str = "0190f5fe-7c00-7a00-8abc-012345678901";
+
 // ── Mock Agent ──────────────────────────────────────────────────
 
 struct MockAgent {
@@ -150,13 +153,14 @@ impl AgentRuntimeRegistry for MockAgentRuntimeRegistry {
     async fn get_or_create_runtime(
         &self,
         conversation_id: &str,
-        _options: AgentRuntimeBuildOptions,
+        options: AgentRuntimeBuildOptions,
     ) -> Result<AgentRuntimeHandle, AppError> {
         let mut agents = self.agents.lock().unwrap();
         if let Some(existing) = agents.get(conversation_id) {
             return Ok(existing.clone());
         }
-        let instance = AgentRuntimeHandle::Mock(Arc::new(MockAgent::new(conversation_id, "/mock-workspace")));
+        let instance =
+            AgentRuntimeHandle::Mock(Arc::new(MockAgent::new(conversation_id, &options.workspace)));
         agents.insert(conversation_id.to_owned(), instance.clone());
         Ok(instance)
     }
@@ -173,6 +177,15 @@ impl AgentRuntimeRegistry for MockAgentRuntimeRegistry {
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> {
         let _ = self.terminate(conversation_id, reason);
         Box::pin(std::future::ready(()))
+    }
+
+    fn terminate_and_wait_result(
+        &self,
+        conversation_id: &str,
+        reason: Option<AgentKillReason>,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), AppError>> + Send>> {
+        let result = self.terminate(conversation_id, reason);
+        Box::pin(std::future::ready(result))
     }
 
     fn terminate_all(&self) {
@@ -207,12 +220,23 @@ async fn create_conversation(app: &mut axum::Router, token: &str, csrf: &str, na
     let body = json!({
         "type": "acp",
         "name": name,
-        "extra": { "workspace": "/project" }
+        "extra": {
+            "agent_id": GEMINI_AGENT_ID
+        }
     });
     let req = common::json_with_token("POST", "/api/conversations", body, token, csrf);
     let resp = app.clone().oneshot(req).await.unwrap();
+    let status = resp.status();
     let json = common::body_json(resp).await;
-    json["data"]["conversation_id"].as_str().unwrap().to_owned()
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "mock-runtime conversation creation failed: {json}"
+    );
+    json["data"]["conversation_id"]
+        .as_str()
+        .expect("created conversation response must expose conversation_id")
+        .to_owned()
 }
 
 // ── Message flow with mock agent ────────────────────────────────
@@ -231,10 +255,14 @@ async fn send_message_with_mock_agent_returns_202() {
         &csrf,
     );
     let resp = app.oneshot(req).await.unwrap();
-    assert_eq!(resp.status(), StatusCode::ACCEPTED);
-
+    let status = resp.status();
     let json = body_json(resp).await;
-    assert_eq!(json["success"], true);
+    assert_eq!(status, StatusCode::ACCEPTED, "send message failed: {json}");
+    assert_eq!(
+        json["success"],
+        true,
+        "send message failed: {json}"
+    );
 }
 
 #[tokio::test]
@@ -252,10 +280,14 @@ async fn stop_stream_with_mock_agent() {
         &csrf,
     );
     let resp = app.oneshot(req).await.unwrap();
-    assert_eq!(resp.status(), StatusCode::OK);
-
+    let status = resp.status();
     let json = body_json(resp).await;
-    assert_eq!(json["success"], true);
+    assert_eq!(status, StatusCode::OK, "cancel failed: {json}");
+    assert_eq!(
+        json["success"],
+        true,
+        "cancel failed: {json}"
+    );
 }
 
 #[tokio::test]
@@ -272,7 +304,9 @@ async fn warmup_with_mock_agent() {
         &csrf,
     );
     let resp = app.oneshot(req).await.unwrap();
-    assert_eq!(resp.status(), StatusCode::OK);
+    let status = resp.status();
+    let json = body_json(resp).await;
+    assert_eq!(status, StatusCode::OK, "warmup failed: {json}");
 }
 
 // ── Confirmation system with mock agent ─────────────────────────
@@ -316,12 +350,14 @@ async fn confirm_and_check_approval() {
     let req = json_with_token(
         "POST",
         &format!("/api/conversations/{conv_id}/confirmations/call-42/confirm"),
-        json!({ "msg_id": "msg-1", "data": { "value": "allow" }, "always_allow": true }),
+        json!({ "msg_id": MESSAGE_ID, "data": { "value": "allow" }, "always_allow": true }),
         &token,
         &csrf,
     );
     let resp = app.clone().oneshot(req).await.unwrap();
-    assert_eq!(resp.status(), StatusCode::OK);
+    let status = resp.status();
+    let json = body_json(resp).await;
+    assert_eq!(status, StatusCode::OK, "confirm failed: {json}");
 
     // Check approval — should be approved for "test_action"
     let req = get_with_token(

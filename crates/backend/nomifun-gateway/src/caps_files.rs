@@ -101,11 +101,13 @@ struct RenameParams {
     new_name: String,
 }
 
-/// Open a URL in the default browser (http/https/mailto only).
+/// Open a mail-client link on the user's desktop (mailto only). Agent-facing
+/// web opens through the OS browser fail closed toward the managed Browser.
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct ShellOpenExternalParams {
-    /// URL to open (must be http://, https://, or mailto:).
+    /// URL to open (must be mailto:; http/https are handled by the managed
+    /// Browser tool instead).
     url: String,
 }
 
@@ -283,6 +285,20 @@ async fn shell_open_external(
     _ctx: CallerCtx,
     p: ShellOpenExternalParams,
 ) -> Value {
+    // Every Gateway caller is an Agent surface. An http/https open here would
+    // send web content to the operating-system browser, bypassing the managed
+    // Browser Hub's approval, egress and lifecycle policies — fail closed and
+    // steer the model to the Browser tool. The trusted UI link path
+    // (`POST /api/shell/open-external`) does not route through this
+    // capability and keeps its http/https support.
+    let lower = p.url.trim().to_ascii_lowercase();
+    if !lower.starts_with("mailto:") {
+        return json!({
+            "error": "opening web URLs through the operating-system browser is not available \
+                      to Agent tools. Use the managed Browser tool (browser navigate) to read \
+                      or interact with web pages; only mailto: links may be opened here."
+        });
+    }
     match deps.shell_service.open_external(&p.url).await {
         Ok(()) => ok(json!({ "opened": true, "url": p.url })),
         Err(e) => json!({ "error": e.to_string() }),
@@ -373,12 +389,13 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
         |deps, ctx, p| rename(deps, ctx, p),
     ));
 
-    // 8. Shell open external (Write, deny_on Channel)
+    // 8. Shell open external (Write, deny_on Channel). Mailto only: Agent web
+    //    opens fail closed toward the managed Browser tool.
     out.push(Capability::new::<ShellOpenExternalParams, _, _>(
         CapabilityMeta::new(
             "nomi_shell_open_external",
             "files",
-            "Open a URL in the default browser or mail client. Only http://, https://, and mailto: schemes are allowed.",
+            "Open a mailto: link in the user's default mail client. Web URLs (http/https) are rejected: read or interact with web pages through the managed Browser tool instead.",
             DangerTier::Write,
         )
         .deny_on(&[Surface::Channel]),

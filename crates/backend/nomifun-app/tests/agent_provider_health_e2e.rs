@@ -69,7 +69,11 @@ async fn provider_health_check_validates_required_fields() {
     assert!(
         json["error"]
             .as_str()
-            .is_some_and(|message| message.contains("invalid provider_id")),
+            .is_some_and(|message| {
+                message.contains("provider_id")
+                    && (message.contains("canonical lowercase hyphenated UUID")
+                        || message.contains("invalid provider_id"))
+            }),
         "expected canonical UUIDv7 provider_id contract error, got {json}"
     );
 }
