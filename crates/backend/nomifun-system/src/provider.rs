@@ -427,7 +427,8 @@ fn validate_sort_order(sort_order: Option<i64>) -> Result<(), AppError> {
     Ok(())
 }
 
-fn validate_base_url(url: &str) -> Result<(), AppError> {
+/// Shared base-url validation for provider-level and per-connection endpoints.
+pub(crate) fn validate_base_url(url: &str) -> Result<(), AppError> {
     if url.trim().is_empty() {
         return Err(AppError::BadRequest("baseUrl is required".into()));
     }

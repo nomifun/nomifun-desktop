@@ -565,10 +565,15 @@ pub fn build_system_state(services: &AppServices) -> SystemRouterState {
         client_pref_service: ClientPrefService::new(Arc::new(SqliteClientPreferenceRepository::new(pool.clone()))),
         provider_service: ProviderService::new(
             provider_repo.clone(),
-            Arc::new(nomifun_db::SqliteProviderModelRepository::new(pool)),
+            Arc::new(nomifun_db::SqliteProviderModelRepository::new(pool.clone())),
             encryption_key,
         )
         .with_deletion_coordinator(deletion_coordinator),
+        provider_connection_service: nomifun_system::ProviderConnectionService::new(
+            Arc::new(nomifun_db::SqliteProviderConnectionRepository::new(pool.clone())),
+            provider_repo.clone(),
+            encryption_key,
+        ),
         model_fetch_service: ModelFetchService::new_dynamic(provider_repo, encryption_key),
         model_profile_service: nomifun_system::ModelProfileService::new(
             services.provider_model_repo.clone(),

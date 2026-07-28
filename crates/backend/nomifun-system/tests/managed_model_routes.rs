@@ -42,6 +42,11 @@ async fn setup() -> (
             Arc::new(nomifun_db::SqliteProviderModelRepository::new(db.pool().clone())),
             TEST_KEY,
         ),
+        provider_connection_service: nomifun_system::ProviderConnectionService::new(
+            std::sync::Arc::new(nomifun_db::SqliteProviderConnectionRepository::new(db.pool().clone())),
+            provider_repo.clone(),
+            TEST_KEY,
+        ),
         model_fetch_service: ModelFetchService::new(
             provider_repo,
             TEST_KEY,

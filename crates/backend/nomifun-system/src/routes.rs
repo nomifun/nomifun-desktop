@@ -10,11 +10,12 @@ use nomifun_api_types::{
     FetchModelsAnonymousRequest, FetchModelsRequest, FetchModelsResponse, ManagedModel,
     ManagedModelHealthBatchResult,
     ManagedModelHealthResult, ManagedModelServiceStatus, ModelProfile, ModelProfileKeyRequest,
-    ModelProfileUpsertRequest, ProtocolDetectionResponse, ProviderResponse, ResolveModelsRequest,
+    ModelProfileUpsertRequest, ProtocolDetectionResponse, ProviderConnectionResponse,
+    ProviderResponse, ResolveModelsRequest,
     ResolveModelsResponse, SetManagedModelEnabledRequest,
     SetManagedModelServiceEnabledRequest, SystemInfoResponse, SystemSettingsResponse, UpdateCheckRequest,
     UpdateCheckResult, UpdateClientPreferencesRequest, UpdateProviderRequest, UpdateSettingsRequest,
-    UpdateWorkDirRequest,
+    UpdateWorkDirRequest, UpsertProviderConnectionRequest,
 };
 use nomifun_common::AppError;
 
@@ -24,6 +25,7 @@ use crate::model_fetcher::ModelFetchService;
 use crate::model_profile::ModelProfileService;
 use crate::protocol::ProtocolDetectionService;
 use crate::provider::ProviderService;
+use crate::provider_connection::ProviderConnectionService;
 use crate::settings::SettingsService;
 use crate::version::VersionCheckService;
 
@@ -33,6 +35,7 @@ pub struct SystemRouterState {
     pub settings_service: SettingsService,
     pub client_pref_service: ClientPrefService,
     pub provider_service: ProviderService,
+    pub provider_connection_service: ProviderConnectionService,
     pub model_fetch_service: ModelFetchService,
     pub model_profile_service: ModelProfileService,
     pub managed_model_service: Option<std::sync::Arc<ManagedModelService>>,
@@ -61,6 +64,9 @@ pub struct SystemRouterState {
 /// - `POST /api/providers`                   — create a provider
 /// - `PUT  /api/providers/:provider_id`      — update a provider
 /// - `DELETE /api/providers/:provider_id`    — delete a provider
+/// - `GET  /api/providers/:provider_id/connections` — list connection profiles
+/// - `POST /api/providers/:provider_id/connections` — upsert a connection profile
+/// - `DELETE /api/providers/:provider_id/connections/:role` — delete a connection profile
 /// - `POST /api/providers/:provider_id/models` — fetch models from remote API
 /// - `POST /api/providers/fetch-models`      — fetch models anonymously (pre-create preview)
 /// - `POST /api/providers/detect-protocol`   — detect API protocol
@@ -100,6 +106,14 @@ pub fn system_routes(state: SystemRouterState) -> Router {
         .route(
             "/api/providers/{provider_id}",
             delete(delete_provider).put(update_provider),
+        )
+        .route(
+            "/api/providers/{provider_id}/connections",
+            get(list_provider_connections).post(upsert_provider_connection),
+        )
+        .route(
+            "/api/providers/{provider_id}/connections/{role}",
+            delete(delete_provider_connection),
         )
         .route(
             "/api/providers/{provider_id}/models",
@@ -243,6 +257,42 @@ async fn detect_protocol(
     let Json(req) = body.map_err(|e| AppError::BadRequest(e.to_string()))?;
     let result = state.protocol_detection_service.detect_protocol(&req).await?;
     Ok(Json(ApiResponse::ok(result)))
+}
+
+// ===========================================================================
+// Provider connection handlers (non-default per-role connection profiles)
+// ===========================================================================
+
+async fn list_provider_connections(
+    State(state): State<SystemRouterState>,
+    Path(provider_id): Path<String>,
+) -> Result<Json<ApiResponse<Vec<ProviderConnectionResponse>>>, AppError> {
+    let connections = state.provider_connection_service.list(&provider_id).await?;
+    Ok(Json(ApiResponse::ok(connections)))
+}
+
+async fn upsert_provider_connection(
+    State(state): State<SystemRouterState>,
+    Path(provider_id): Path<String>,
+    body: Result<Json<UpsertProviderConnectionRequest>, JsonRejection>,
+) -> Result<Json<ApiResponse<ProviderConnectionResponse>>, AppError> {
+    let Json(req) = body.map_err(|e| AppError::BadRequest(e.to_string()))?;
+    let connection = state
+        .provider_connection_service
+        .upsert(&provider_id, req)
+        .await?;
+    Ok(Json(ApiResponse::ok(connection)))
+}
+
+async fn delete_provider_connection(
+    State(state): State<SystemRouterState>,
+    Path((provider_id, role)): Path<(String, String)>,
+) -> Result<Json<ApiResponse<()>>, AppError> {
+    state
+        .provider_connection_service
+        .delete(&provider_id, &role)
+        .await?;
+    Ok(Json(ApiResponse::success()))
 }
 
 // ===========================================================================
