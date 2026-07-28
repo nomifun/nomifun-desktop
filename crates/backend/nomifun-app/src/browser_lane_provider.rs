@@ -526,25 +526,11 @@ impl HubOwnerRevocation {
         flight
     }
 
-    async fn run_attempt(&self, retry_pending: bool) -> OwnerRevokeResult {
-        if retry_pending
-            && let Err(error) = self.hub.sweep().await
-        {
-            // `close_owner_lease` detaches a failed Lane into the Hub's
-            // pending-cleanup queue. There is intentionally no private browser
-            // or private retry queue here: sweep is the Hub's authoritative
-            // retry entry point. Do not return early, though: a process-wide
-            // sweep may also report an unrelated owner's failed cleanup.
-            // Exact-owner revoke still has to run so this owner cannot be held
-            // hostage by another retained target.
-            tracing::warn!(
-                code = ?error.code,
-                retryable = error.retryable,
-                owner_lease_id = %self.lease_id,
-                "browser lifecycle sweep reported pending cleanup before exact-owner revoke"
-            );
-        }
-
+    async fn run_attempt(&self, _retry_pending: bool) -> OwnerRevokeResult {
+        // The Hub retains owner attribution after a Lane leaves visible
+        // inventory. Repeating this exact-owner operation therefore retries
+        // only this lease's target/start/Host cleanup and cannot be held
+        // hostage by another owner's retained failure.
         self.hub
             .revoke_owner_lease(&self.lease_id)
             .await
@@ -681,6 +667,9 @@ mod tests {
         id: BrowserHostId,
         lane_closes: Arc<AtomicUsize>,
         close_failures_remaining: Arc<AtomicUsize>,
+        host_shutdowns: Arc<AtomicUsize>,
+        host_shutdown_failures_remaining: Arc<AtomicUsize>,
+        host_shutdown_finished: Arc<tokio::sync::Semaphore>,
         close_started: Arc<tokio::sync::Semaphore>,
         close_release: Arc<tokio::sync::Semaphore>,
         block_close: Arc<AtomicBool>,
@@ -718,6 +707,22 @@ mod tests {
         }
 
         async fn shutdown(&self) -> Result<(), BrowserPlatformError> {
+            self.host_shutdowns.fetch_add(1, Ordering::AcqRel);
+            let should_fail = self
+                .host_shutdown_failures_remaining
+                .fetch_update(Ordering::AcqRel, Ordering::Acquire, |remaining| {
+                    remaining.checked_sub(1)
+                })
+                .is_ok();
+            self.host_shutdown_finished.add_permits(1);
+            if should_fail {
+                return Err(BrowserPlatformError::new(
+                    nomifun_browser_platform::BrowserErrorCode::BrowserUnavailable,
+                    "Synthetic native Host shutdown failure.",
+                    true,
+                    "Retry exact-owner Host cleanup.",
+                ));
+            }
             Ok(())
         }
     }
@@ -727,6 +732,9 @@ mod tests {
         lane_closes: Arc<AtomicUsize>,
         host_ids: Mutex<Vec<BrowserHostId>>,
         close_failures_remaining: Arc<AtomicUsize>,
+        host_shutdowns: Arc<AtomicUsize>,
+        host_shutdown_failures_remaining: Arc<AtomicUsize>,
+        host_shutdown_finished: Arc<tokio::sync::Semaphore>,
         close_started: Arc<tokio::sync::Semaphore>,
         close_release: Arc<tokio::sync::Semaphore>,
         block_close: Arc<AtomicBool>,
@@ -740,6 +748,9 @@ mod tests {
                 lane_closes: Arc::new(AtomicUsize::new(0)),
                 host_ids: Mutex::new(Vec::new()),
                 close_failures_remaining: Arc::new(AtomicUsize::new(0)),
+                host_shutdowns: Arc::new(AtomicUsize::new(0)),
+                host_shutdown_failures_remaining: Arc::new(AtomicUsize::new(0)),
+                host_shutdown_finished: Arc::new(tokio::sync::Semaphore::new(0)),
                 close_started: Arc::new(tokio::sync::Semaphore::new(0)),
                 close_release: Arc::new(tokio::sync::Semaphore::new(0)),
                 block_close: Arc::new(AtomicBool::new(false)),
@@ -776,6 +787,11 @@ mod tests {
                 close_failures_remaining: Arc::clone(
                     &self.close_failures_remaining,
                 ),
+                host_shutdowns: Arc::clone(&self.host_shutdowns),
+                host_shutdown_failures_remaining: Arc::clone(
+                    &self.host_shutdown_failures_remaining,
+                ),
+                host_shutdown_finished: Arc::clone(&self.host_shutdown_finished),
                 close_started: Arc::clone(&self.close_started),
                 close_release: Arc::clone(&self.close_release),
                 block_close: Arc::clone(&self.block_close),
@@ -1235,6 +1251,9 @@ mod tests {
         factory
             .close_failures_remaining
             .store(1, Ordering::Release);
+        factory
+            .host_shutdown_failures_remaining
+            .store(1, Ordering::Release);
 
         clock.set(1_100);
         tokio::time::timeout(Duration::from_secs(2), async {
@@ -1250,6 +1269,7 @@ mod tests {
         .await
         .expect("renewal failure must retry retained exact-owner cleanup");
         assert_eq!(factory.lane_closes.load(Ordering::Acquire), 2);
+        assert_eq!(factory.host_shutdowns.load(Ordering::Acquire), 2);
         assert_eq!(factory.launches.load(Ordering::Acquire), 1);
 
         binding
@@ -1257,6 +1277,7 @@ mod tests {
             .await
             .expect("later lifecycle wait must observe successful renewal-failure cleanup");
         assert_eq!(factory.lane_closes.load(Ordering::Acquire), 2);
+        assert_eq!(factory.host_shutdowns.load(Ordering::Acquire), 2);
     }
 
     #[tokio::test]
@@ -1284,6 +1305,9 @@ mod tests {
         factory
             .close_failures_remaining
             .store(1, Ordering::Release);
+        factory
+            .host_shutdown_failures_remaining
+            .store(1, Ordering::Release);
 
         let first = binding.revoke_and_wait().await.unwrap_err();
         assert!(
@@ -1295,6 +1319,7 @@ mod tests {
         );
         assert!(hub.list_lanes().await.is_empty());
         assert_eq!(factory.lane_closes.load(Ordering::Acquire), 1);
+        assert_eq!(factory.host_shutdowns.load(Ordering::Acquire), 1);
         assert_eq!(
             factory.launches.load(Ordering::Acquire),
             1,
@@ -1306,6 +1331,7 @@ mod tests {
             .await
             .expect("a later exact-owner revoke must retry retained Hub cleanup");
         assert_eq!(factory.lane_closes.load(Ordering::Acquire), 2);
+        assert_eq!(factory.host_shutdowns.load(Ordering::Acquire), 2);
         assert_eq!(factory.launches.load(Ordering::Acquire), 1);
         assert!(
             hub.sweep().await.is_ok(),
@@ -1453,28 +1479,31 @@ mod tests {
         factory
             .close_failures_remaining
             .store(1, Ordering::Release);
+        factory
+            .host_shutdown_failures_remaining
+            .store(1, Ordering::Release);
         let lease_id = binding.client().caller().owner_lease_id.clone();
 
         drop(binding);
         factory.close_started.acquire().await.unwrap().forget();
+        factory
+            .host_shutdown_finished
+            .acquire()
+            .await
+            .unwrap()
+            .forget();
         assert!(
             hub.list_lanes().await.is_empty(),
             "final binding Drop must detach only its exact owner's Lane"
         );
         assert_eq!(factory.lane_closes.load(Ordering::Acquire), 1);
+        assert_eq!(factory.host_shutdowns.load(Ordering::Acquire), 1);
 
-        if hub.sweep().await.is_err() {
-            // The first sweep may still be joining Drop's just-finished failed
-            // cleanup flight. A later lifecycle pass must start the retained
-            // Hub retry without needing another Binding clone to stay alive.
-            hub.sweep()
-                .await
-                .expect("Hub lifecycle retry must retain cleanup authority after Drop");
-        }
         hub.revoke_owner_lease(&lease_id)
             .await
-            .expect("the exact owner remains idempotently revoked");
+            .expect("exact-owner retry must retain cleanup authority after Drop");
         assert_eq!(factory.lane_closes.load(Ordering::Acquire), 2);
+        assert_eq!(factory.host_shutdowns.load(Ordering::Acquire), 2);
         assert_eq!(factory.launches.load(Ordering::Acquire), 1);
     }
 
@@ -1563,23 +1592,34 @@ mod tests {
             .client()
             .open(
                 Some("unrelated-owner"),
-                BrowserIdentityMode::Primary,
+                BrowserIdentityMode::Anonymous,
                 None,
             )
             .await
             .unwrap();
         factory
             .close_failures_remaining
-            .store(3, Ordering::Release);
+            .store(1, Ordering::Release);
+        factory
+            .host_shutdown_failures_remaining
+            .store(1, Ordering::Release);
         unrelated
             .revoke_and_wait()
             .await
             .expect_err("the unrelated owner leaves one retained failing cleanup");
+        assert_eq!(factory.lane_closes.load(Ordering::Acquire), 1);
+        assert_eq!(factory.host_shutdowns.load(Ordering::Acquire), 1);
 
         let exact = provider
             .issue(context("runtime-exact-retry", "attempt-exact"))
             .await
             .unwrap();
+        factory
+            .close_failures_remaining
+            .store(1, Ordering::Release);
+        factory
+            .host_shutdown_failures_remaining
+            .store(1, Ordering::Release);
         exact
             .client()
             .open(
@@ -1594,6 +1634,7 @@ mod tests {
             .await
             .expect_err("the exact owner first close also fails");
         assert_eq!(factory.lane_closes.load(Ordering::Acquire), 2);
+        assert_eq!(factory.host_shutdowns.load(Ordering::Acquire), 2);
 
         exact
             .revoke_and_wait()
@@ -1603,15 +1644,17 @@ mod tests {
             );
         assert_eq!(
             factory.lane_closes.load(Ordering::Acquire),
-            5,
-            "Hub sweep retries retained targets before exact-owner revoke"
+            3,
+            "exact-owner retry must not drive another owner's retained target"
         );
+        assert_eq!(factory.host_shutdowns.load(Ordering::Acquire), 3);
 
         unrelated
             .revoke_and_wait()
             .await
             .expect("the unrelated retained cleanup remains independently retryable");
-        assert_eq!(factory.lane_closes.load(Ordering::Acquire), 5);
+        assert_eq!(factory.lane_closes.load(Ordering::Acquire), 4);
+        assert_eq!(factory.host_shutdowns.load(Ordering::Acquire), 4);
     }
 
     #[test]

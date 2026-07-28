@@ -645,12 +645,14 @@ impl BrowserRegistry {
                 return Ok(CloseResult {
                     closed: 0,
                     already_closed: true,
+                    ..Default::default()
                 });
             };
             if cached.authority != expected_authority {
                 return Ok(CloseResult {
                     closed: 0,
                     already_closed: true,
+                    ..Default::default()
                 });
             }
             cached.revocation_pending = true;
@@ -747,6 +749,7 @@ impl BrowserRegistry {
         Ok(CloseResult {
             closed,
             already_closed: already_closed && closed == 0,
+            ..Default::default()
         })
     }
 

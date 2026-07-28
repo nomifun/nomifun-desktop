@@ -4,6 +4,9 @@
     "counts": "{{running}} running, {{queued}} queued",
     "tooltip": "{{label}} · {{counts}}"
   },
+  "actions": {
+    "busy": "Another browser management change is still in progress. Wait for it to finish and try again."
+  },
   "page": {
     "title": "Browser management",
     "description": "Monitor lifecycle, capacity, queues, and identity for Agent browser lanes. Routine browsing stays headless until you explicitly open a running Primary lane.",
@@ -11,12 +14,14 @@
     "queuedCount": "{{count}} queued",
     "pressure": "{{state}} pressure",
     "refresh": "Refresh",
-    "closeAll": "Close all",
+    "closeAll": "Close all browser resources",
     "inventoryUnavailable": "Browser inventory is temporarily unavailable: {{error}}",
     "retry": "Retry",
     "capabilityUnavailable": "Browser management is not available in this runtime.",
     "loading": "Loading browser lanes…",
-    "empty": "Browser lanes appear here when an Agent first uses Browser Use.",
+    "empty": "No managed browser resources are running. Routine Browser search starts silently in headless mode when needed.",
+    "residualResources": "No browser lane is attached, but {{hosts}} managed Host(s) and {{cleanups}} pending cleanup(s) still exist. Use Close all to terminate them and confirm that every managed resource reached zero.",
+    "residualResourcesUser": "No browser lane is attached, but {{hosts}} managed Host(s) and {{cleanups}} cleanup(s) belonging to you are still pending. The lifecycle worker will continue retrying; an installation owner can use Close all if cleanup does not finish.",
     "inventoryAria": "Browser lane inventory",
     "selectLane": "Select a browser lane to inspect it."
   },
@@ -32,15 +37,16 @@
     "conversationContent_other": "{{count}} browser lanes will be closed and active browser operations will be cancelled. The conversation and executions remain alive.",
     "conversationAction": "Close lanes",
     "conversationSuccess": "Conversation browser lanes closed.",
-    "allTitle": "Close all managed browsers?",
-    "allContent": "Every queued and running browser lane will be closed. Conversations and Agent executions remain alive.",
-    "allAction": "Close all browsers",
+    "allTitle": "Close all managed browser resources?",
+    "allContent": "Every queued and running browser lane will be closed, pending cleanup will be drained, and managed Browser Hosts/processes will be terminated. Conversations and Agent executions remain alive. Success is reported only after the authoritative remaining counts for lanes, pending cleanup, and managed Hosts are all zero.",
+    "allAction": "Close all browser resources",
     "cancel": "Cancel",
-    "allSuccess": "All managed browser lanes closed.",
+    "allSuccess": "All managed browser resources are confirmed at zero: lanes, pending cleanup, and managed Hosts/processes.",
     "partialFailure": "Some browser lanes could not be closed.",
     "partialFailureWithDetails": "Some browser lanes could not be closed: {{details}}",
     "refreshFailed": "The close request finished, but the browser inventory could not be refreshed: {{error}}",
-    "unconfirmed": "The browser manager did not confirm the close. Review the inventory and try again."
+    "unconfirmed": "The browser manager did not confirm the close. Review the inventory and try again.",
+    "drainUnconfirmed": "Close all was not confirmed: the authoritative remaining counts for lanes, pending cleanup, and managed Hosts are not all zero. Review the inventory and try again."
   },
   "foreground": {
     "action": "Open browser in foreground",
@@ -48,6 +54,27 @@
     "unavailable": "Only a running Primary lane can be opened in the foreground.",
     "refreshFailed": "The browser was opened, but the browser inventory could not be refreshed: {{error}}",
     "unconfirmed": "The browser manager did not confirm that the lane opened in the foreground. Review its status and try again."
+  },
+  "background": {
+    "action": "Return to silent headless",
+    "success": "Browser returned to silent headless mode.",
+    "refreshFailed": "The browser returned to headless mode, but the browser inventory could not be refreshed: {{error}}",
+    "unconfirmed": "The browser manager did not confirm that the lane returned to silent headless mode. Review its status and try again."
+  },
+  "displayMode": {
+    "title": "Global browser visibility default",
+    "description": "Routine Browser search and knowledge lookup use silent headless Chromium by default. Choose a visible window only when you want every Primary browser launch to appear; this policy is applied immediately and can be changed here.",
+    "headless": "Silent headless (default)",
+    "external": "Visible window",
+    "headlessShort": "Silent headless",
+    "externalShort": "Foreground window",
+    "loading": "Loading browser visibility policy",
+    "unavailable": "The live browser visibility policy API is unavailable. The displayed fallback is read-only and no change has been claimed.",
+    "errorWithDetails": "The live browser visibility policy could not be loaded: {{error}}",
+    "saved": "Global browser visibility updated and applied.",
+    "saveFailed": "The browser visibility preference was not confirmed as saved: {{error}}",
+    "refreshFailed": "The visibility policy was applied, but the browser inventory could not be refreshed: {{error}}",
+    "unconfirmed": "The browser manager did not confirm the requested visibility policy."
   },
   "tree": {
     "noActivePage": "No active page",
@@ -71,8 +98,8 @@
   },
   "details": {
     "laneFallback": "Browser lane",
-    "statusOnly": "Status only",
-    "backgroundExecution": "Agent browsing runs headlessly with no visible window by default. A running Primary lane can be opened explicitly for inspection; this page remains status-only and provides no viewer, takeover, or page-input controls.",
+    "managed": "Managed",
+    "backgroundExecution": "Routine Agent browsing runs silently with no visible window by default. Use the visibility control to open a running Primary lane in the foreground or return it to silent headless mode. Page input remains Agent-controlled.",
     "closeLane": "Close lane",
     "waitingCapacity": "Waiting for browser capacity",
     "queuePositionInline": "queue position {{position}}",
@@ -134,11 +161,14 @@
       "identity": "Identity",
       "epoch": "Epoch",
       "lanes": "Lanes",
+      "visibility": "Actual visibility",
       "rss": "Chromium RSS",
       "hostId": "Host ID",
       "activeOperations": "Active operations",
       "queuedRequests": "Queued requests",
       "openLanes": "Open lanes",
+      "managedHosts": "Managed Hosts",
+      "pendingCleanup": "Pending cleanup",
       "recommendedConcurrency": "Recommended concurrency",
       "capacityReason": "Capacity reason",
       "updated": "Updated"

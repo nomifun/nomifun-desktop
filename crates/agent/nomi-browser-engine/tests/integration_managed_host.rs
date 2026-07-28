@@ -6,6 +6,7 @@ use std::time::{Duration, Instant};
 use nomi_browser_engine::{
     BrowserEngine, EngineConfig, FirewallConfig, LaneEngineConfig, ManagedBrowserHost,
 };
+use nomi_browser_engine::profile::OWNERSHIP_MARKER_FILE;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio::sync::{mpsc, oneshot};
@@ -372,6 +373,35 @@ async fn wait_for_processes_gone(pids: &[u32], deadline: Duration) -> Vec<u32> {
     }
 }
 
+async fn wait_for_runtime_artifacts_gone(
+    profile: &std::path::Path,
+    deadline: Duration,
+) -> bool {
+    let started = Instant::now();
+    loop {
+        if !profile.join(OWNERSHIP_MARKER_FILE).exists()
+            && !profile.join("DevToolsActivePort").exists()
+        {
+            return true;
+        }
+        if started.elapsed() >= deadline {
+            return false;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+fn ownership_marker_browser_pid(profile: &std::path::Path) -> u32 {
+    let marker: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(profile.join(OWNERSHIP_MARKER_FILE))
+            .expect("read browser ownership marker"),
+    )
+    .expect("parse browser ownership marker");
+    marker["browser"]["pid"]
+        .as_u64()
+        .expect("ownership marker contains browser pid") as u32
+}
+
 #[cfg(windows)]
 fn read_windows_debug_port(profile: &std::path::Path) -> u16 {
     let contents = std::fs::read_to_string(profile.join("DevToolsActivePort"))
@@ -398,6 +428,137 @@ async fn wait_for_debug_endpoint_closed(port: u16, deadline: Duration) -> bool {
             return false;
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+/// Real-Chromium acceptance for exact stable-profile cleanup on normal Host
+/// shutdown. The stable browsing state survives, while only the ownership
+/// marker and Windows debugging endpoint artifact are removed after the
+/// managed process tree is proven gone.
+#[tokio::test]
+#[ignore = "requires configured/bundled Chromium; set NOMIFUN_CHROME_BINARY and run with --ignored"]
+async fn managed_host_shutdown_clears_only_exact_runtime_profile_artifacts() {
+    let temp = tempfile::tempdir().unwrap();
+    let profile_name = "stable-shutdown-cleanup";
+    let profile = temp.path().join(profile_name);
+    let stable_state = profile.join("Default").join("stable-state.json");
+    std::fs::create_dir_all(stable_state.parent().unwrap()).unwrap();
+    std::fs::write(&stable_state, br#"{"keep":true}"#).unwrap();
+
+    let host = ManagedBrowserHost::launch(managed_config(
+        temp.path(),
+        profile_name,
+        false,
+    ))
+    .await
+    .expect("launch managed Host for shutdown cleanup");
+    let root_pid = host.process_id().expect("managed Host root pid");
+    let process_tree = sample_process_tree(&mut sysinfo::System::new(), root_pid);
+    assert!(
+        process_tree.pids.contains(&root_pid),
+        "process-tree sample must include the managed root"
+    );
+    assert!(profile.join(OWNERSHIP_MARKER_FILE).is_file());
+    #[cfg(windows)]
+    let debug_port = {
+        assert!(profile.join("DevToolsActivePort").is_file());
+        read_windows_debug_port(&profile)
+    };
+
+    host.shutdown()
+        .await
+        .expect("normal Host shutdown proves process and profile cleanup");
+
+    assert!(host.process_id().is_none());
+    assert!(!profile.join(OWNERSHIP_MARKER_FILE).exists());
+    assert!(!profile.join("DevToolsActivePort").exists());
+    assert_eq!(std::fs::read(&stable_state).unwrap(), br#"{"keep":true}"#);
+    #[cfg(windows)]
+    assert!(
+        wait_for_debug_endpoint_closed(debug_port, Duration::from_secs(5)).await,
+        "stable-profile debugging endpoint remained reachable after shutdown"
+    );
+    assert!(
+        wait_for_processes_gone(&process_tree.pids, Duration::from_secs(5))
+            .await
+            .is_empty(),
+        "a sampled Chromium descendant remained after exact shutdown"
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires configured/bundled Chromium; validates final Runtime Drop without explicit shutdown"]
+async fn managed_host_drop_reaps_full_tree_and_ephemeral_profile() {
+    let temp = tempfile::tempdir().unwrap();
+    let profile_name = "ephemeral-drop-cleanup";
+    let profile = temp.path().join(profile_name);
+    let host =
+        ManagedBrowserHost::launch(managed_config(temp.path(), profile_name, true))
+            .await
+            .expect("launch ephemeral managed Host");
+    let lane = host
+        .open_default_lane("drop-lane")
+        .await
+        .expect("open Lane retained by product caller");
+    let root_pid = host.process_id().expect("managed Host root pid");
+    assert_eq!(ownership_marker_browser_pid(&profile), root_pid);
+    let process_tree = sample_process_tree(&mut sysinfo::System::new(), root_pid);
+    assert!(process_tree.pids.contains(&root_pid));
+
+    // No explicit close_lane/shutdown: dropping the last Lane and Host must
+    // reach CdpHostRuntime's exact Drop relay.
+    drop(lane);
+    drop(host);
+
+    let residual = wait_for_processes_gone(&process_tree.pids, Duration::from_secs(10)).await;
+    assert!(
+        residual.is_empty(),
+        "sampled Chromium processes survived final Runtime Drop: {residual:?}"
+    );
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while profile.exists() {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("exact Drop cleanup removes the whole ephemeral profile");
+}
+
+#[tokio::test]
+#[ignore = "requires configured/bundled Chromium; validates create_engine's hidden Host Drop path"]
+async fn create_engine_drop_reaps_hidden_host_runtime_and_allows_stable_relaunch() {
+    let temp = tempfile::tempdir().unwrap();
+    let profile_name = "create-engine-stable-drop";
+    let profile = temp.path().join(profile_name);
+    let sentinel = profile.join("Default").join("stable-state.json");
+    std::fs::create_dir_all(sentinel.parent().unwrap()).unwrap();
+    std::fs::write(&sentinel, br#"{"keep":true}"#).unwrap();
+
+    for round in 0..2 {
+        let engine = nomi_browser_engine::create_engine(managed_config(
+            temp.path(),
+            profile_name,
+            false,
+        ))
+        .await
+        .expect("create_engine returns a Lane after dropping its local Host coordinator");
+        let root_pid = ownership_marker_browser_pid(&profile);
+        let process_tree = sample_process_tree(&mut sysinfo::System::new(), root_pid);
+        assert!(process_tree.pids.contains(&root_pid));
+
+        drop(engine);
+
+        let residual =
+            wait_for_processes_gone(&process_tree.pids, Duration::from_secs(10)).await;
+        assert!(
+            residual.is_empty(),
+            "create_engine round {round} left Chromium processes: {residual:?}"
+        );
+        assert!(
+            wait_for_runtime_artifacts_gone(&profile, Duration::from_secs(10)).await,
+            "create_engine round {round} left marker/port artifacts"
+        );
+        assert_eq!(std::fs::read(&sentinel).unwrap(), br#"{"keep":true}"#);
     }
 }
 

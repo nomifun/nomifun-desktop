@@ -41,6 +41,96 @@ describe('browserSession foreground request', () => {
       globalThis.fetch = realFetch;
     }
   });
+
+  test('posts the symmetric background route and requires backend confirmation', async () => {
+    let request: { url: string; method?: string; body?: BodyInit | null } | undefined;
+    try {
+      globalThis.fetch = ((input: RequestInfo | URL, init?: RequestInit) => {
+        request = { url: String(input), method: init?.method, body: init?.body };
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              success: true,
+              data: { backgrounded: true, lane_id: 'primary/lane 1' },
+            }),
+            { status: 200, headers: { 'Content-Type': 'application/json' } }
+          )
+        );
+      }) as typeof fetch;
+
+      const result = await browserSession.backgroundLane.invoke({
+        lane_id: 'primary/lane 1',
+      });
+      expect(result).toEqual({
+        backgrounded: true,
+        lane_id: 'primary/lane 1',
+      });
+      expect(request?.url.endsWith('/api/browser/lanes/primary%2Flane%201/background')).toBe(
+        true
+      );
+      expect(request?.method).toBe('POST');
+      expect(request?.body).toBeUndefined();
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+  });
+});
+
+describe('browserSession display-mode policy', () => {
+  test('loads and updates the owner policy through the typed live API', async () => {
+    const requests: Array<{ url: string; method?: string; body?: BodyInit | null }> = [];
+    try {
+      globalThis.fetch = ((input: RequestInfo | URL, init?: RequestInit) => {
+        requests.push({ url: String(input), method: init?.method, body: init?.body });
+        const displayMode = init?.method === 'PUT' ? 'external' : 'headless';
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({ success: true, data: { display_mode: displayMode } }),
+            { status: 200, headers: { 'Content-Type': 'application/json' } }
+          )
+        );
+      }) as typeof fetch;
+
+      expect(await browserSession.displayMode.get.invoke()).toEqual({
+        display_mode: 'headless',
+      });
+      expect(
+        await browserSession.displayMode.put.invoke({ display_mode: 'external' })
+      ).toEqual({ display_mode: 'external' });
+
+      expect(requests[0]?.url.endsWith('/api/browser/display-mode')).toBe(true);
+      expect(requests[0]?.method).toBe('GET');
+      expect(requests[1]?.method).toBe('PUT');
+      expect(JSON.parse(String(requests[1]?.body))).toEqual({
+        display_mode: 'external',
+      });
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+  });
+
+  test('rejects malformed policy responses instead of claiming a fallback succeeded', async () => {
+    try {
+      globalThis.fetch = (() =>
+        Promise.resolve(
+          new Response(
+            JSON.stringify({ success: true, data: { display_mode: 'embedded' } }),
+            { status: 200, headers: { 'Content-Type': 'application/json' } }
+          )
+        )) as typeof fetch;
+
+      let caught: unknown;
+      try {
+        await browserSession.displayMode.get.invoke();
+      } catch (error) {
+        caught = error;
+      }
+      expect(caught instanceof Error).toBe(true);
+      expect((caught as Error).message.includes('invalid display mode')).toBe(true);
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+  });
 });
 
 describe('normalizeBrowserLane tab projection', () => {
@@ -48,6 +138,7 @@ describe('normalizeBrowserLane tab projection', () => {
     const lane = normalizeBrowserLane({
       lane_id: 'lane-safe',
       lifecycle_state: 'running',
+      browser_epoch: 12,
       tabs: [
         {
           tab_id: 'tab-safe',
@@ -74,6 +165,7 @@ describe('normalizeBrowserLane tab projection', () => {
       },
     ]);
     expect(lane?.tabs[0] && 'target_id' in lane.tabs[0]).toBe(false);
+    expect(lane?.browser_epoch).toBe(12);
   });
 });
 
@@ -87,6 +179,7 @@ describe('normalizeBrowserOverview Host projection', () => {
           host_id: 'host-primary',
           state: 'running',
           epoch: 4,
+          headful: false,
           identity_mode: 'primary',
           lane_count: 2,
           rss_bytes: 32 * 1024 * 1024,
@@ -103,6 +196,7 @@ describe('normalizeBrowserOverview Host projection', () => {
         host_id: 'host-primary',
         state: 'running',
         epoch: 4,
+        headful: false,
         identity_mode: 'primary',
         lane_count: 2,
         rss_bytes: 32 * 1024 * 1024,
@@ -122,6 +216,7 @@ describe('normalizeBrowserOverview Host projection', () => {
           id: 'host-alias',
           lifecycle_state: 'restarting',
           browser_epoch: 9,
+          is_headful: true,
           mode: 'anonymous',
           lanes: 1,
           memory_rss_bytes: 4096,
@@ -137,6 +232,7 @@ describe('normalizeBrowserOverview Host projection', () => {
         host_id: 'host-alias',
         state: 'restarting',
         epoch: 9,
+        headful: true,
         identity_mode: 'anonymous',
         lane_count: 1,
         rss_bytes: 4096,

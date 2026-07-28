@@ -329,13 +329,7 @@ impl ManagedBrowserFacade {
             Err(error) => return platform_error_result("Resolving the browser Lane failed", error),
         };
         if lane.lifecycle_state != LaneLifecycleState::Running {
-            return ToolResult::text(pretty_json(&json!({
-                "ok": true,
-                "action": action,
-                "dispatched": false,
-                "lane": public_lane_json(&lane),
-                "next_action": lane_next_action(&lane),
-            })));
+            return lane_operation_not_dispatched_result(action, &lane);
         }
 
         let operation = BrowserOperation {
@@ -1630,12 +1624,84 @@ pub fn public_lane_json(lane: &BrowserLaneSnapshot) -> Value {
     })
 }
 
-fn lane_next_action(lane: &BrowserLaneSnapshot) -> &'static str {
+pub(crate) fn lane_operation_not_dispatched_result(
+    action: &str,
+    lane: &BrowserLaneSnapshot,
+) -> ToolResult {
+    let (code, message, retryable) = match lane.lifecycle_state {
+        LaneLifecycleState::Queued => (
+            json!("browser_capacity_queued"),
+            "The browser Lane is queued, so the page operation was not dispatched.",
+            true,
+        ),
+        LaneLifecycleState::Starting => (
+            json!("browser_unavailable"),
+            "The browser Lane is still starting, so the page operation was not dispatched.",
+            true,
+        ),
+        LaneLifecycleState::Frozen => (
+            json!("browser_unavailable"),
+            "The browser Lane is frozen by resource pressure, so the page operation was not dispatched.",
+            true,
+        ),
+        LaneLifecycleState::Stopping => (
+            json!("browser_unavailable"),
+            "The browser Lane is stopping, so the page operation was not dispatched.",
+            false,
+        ),
+        LaneLifecycleState::Failed => (
+            lane.error_code
+                .as_ref()
+                .map_or_else(|| json!("browser_unavailable"), |code| json!(code)),
+            lane.error_message
+                .as_deref()
+                .unwrap_or("The browser Lane failed before the page operation could run."),
+            lane.recoverable,
+        ),
+        LaneLifecycleState::Running => (
+            json!("browser_unavailable"),
+            "The browser Lane was not ready for the page operation.",
+            true,
+        ),
+    };
+    let next_action = lane_next_action(lane);
+    let retry_after_ms = lane.queue.as_ref().map(|queue| queue.retry_delay_ms);
+    let reason_code = lane
+        .queue
+        .as_ref()
+        .map(|queue| queue.reason_code.as_str());
+    ToolResult::error(pretty_json(&json!({
+        "ok": false,
+        "action": action,
+        "dispatched": false,
+        "error_code": code.clone(),
+        "retryable": retryable,
+        "retry_after_ms": retry_after_ms,
+        "lane": public_lane_json(lane),
+        "error": {
+            "code": code,
+            "message": message,
+            "retryable": retryable,
+            "retry_after_ms": retry_after_ms,
+            "next_action": next_action,
+            "metadata": {
+                "lifecycle_state": lane.lifecycle_state,
+                "reason_code": reason_code,
+                "retry_delay_ms": retry_after_ms,
+            },
+        },
+        "next_action": next_action,
+    })))
+}
+
+pub(crate) fn lane_next_action(lane: &BrowserLaneSnapshot) -> &'static str {
     match lane.lifecycle_state {
         LaneLifecycleState::Queued => {
-            "Wait for the Lane, reuse an existing Lane, or lower concurrency."
+            "After retry_delay_ms, call browser_status with this lane_id; do not use the page wait action while queued. Reuse a running Lane or lower concurrency."
         }
-        LaneLifecycleState::Starting => "Wait for the Lane to finish starting, then retry.",
+        LaneLifecycleState::Starting => {
+            "Call browser_status with this lane_id after a short delay; retry the page operation only after the Lane is running."
+        }
         LaneLifecycleState::Running => "Use the returned lane_id for browser operations.",
         LaneLifecycleState::Frozen => "Reuse an active Lane or wait for capacity to recover.",
         LaneLifecycleState::Stopping => "Open a replacement Lane only if more work is required.",
@@ -1949,6 +2015,7 @@ mod tests {
             Ok(CloseResult {
                 closed,
                 already_closed: closed == 0,
+                ..Default::default()
             })
         }
 
@@ -1959,6 +2026,7 @@ mod tests {
             Ok(CloseResult {
                 closed,
                 already_closed: closed == 0,
+                ..Default::default()
             })
         }
     }
@@ -1968,6 +2036,78 @@ mod tests {
             client,
             workspace_dir: None,
         }
+    }
+
+    fn queued_lane(client: &FakeLaneClient) -> BrowserLaneSnapshot {
+        let mut lane = client.snapshot("default", BrowserIdentityMode::Primary);
+        lane.lifecycle_state = LaneLifecycleState::Queued;
+        lane.browser_epoch = 0;
+        lane.queue = Some(nomifun_browser_platform::QueueMetadata {
+            request_id: nomifun_browser_platform::QueueRequestId::new(),
+            position: 1,
+            recommended_concurrency: 1,
+            owner_active: 0,
+            owner_queued: 1,
+            global_active: 0,
+            global_queued: 1,
+            retry_delay_ms: 1_000,
+            reason_code: "system_memory_pressure".to_owned(),
+        });
+        lane
+    }
+
+    #[tokio::test]
+    async fn queued_page_actions_are_errors_and_never_fake_dispatch() {
+        let client = Arc::new(FakeLaneClient::default());
+        let lane = queued_lane(&client);
+        let lane_id = lane.lane_id.clone();
+        client.lanes.lock().unwrap().push(lane);
+        let facade = facade(Arc::clone(&client));
+
+        for (action, input) in [
+            (
+                "navigate",
+                json!({
+                    "url": "https://example.test/",
+                }),
+            ),
+            (
+                "wait",
+                json!({
+                    "ms": 5_000,
+                }),
+            ),
+        ] {
+            let result = facade.execute(action, &input).await;
+            assert!(result.is_error, "{action} must not report success: {}", result.content);
+            let value: Value = serde_json::from_str(&result.content).unwrap();
+            assert_eq!(value["ok"], false);
+            assert_eq!(value["action"], action);
+            assert_eq!(value["dispatched"], false);
+            assert_eq!(value["lane"]["lane_id"], lane_id.as_str());
+            assert_eq!(value["error"]["code"], "browser_capacity_queued");
+            assert_eq!(
+                value["error"]["metadata"]["reason_code"],
+                "system_memory_pressure"
+            );
+            assert_eq!(value["retry_after_ms"], 1_000);
+            assert_eq!(
+                value["error"]["next_action"],
+                value["next_action"],
+                "top-level and structured retry guidance must remain identical"
+            );
+            assert!(
+                value["next_action"]
+                    .as_str()
+                    .is_some_and(|next| next.contains("browser_status")),
+                "{value}"
+            );
+        }
+
+        assert!(
+            client.operations.lock().unwrap().is_empty(),
+            "queued navigate/wait must never reach the browser engine"
+        );
     }
 
     #[test]

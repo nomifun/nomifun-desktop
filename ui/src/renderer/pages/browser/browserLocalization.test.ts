@@ -29,6 +29,7 @@ const flatten = (
 const componentSources = [
   new URL('./index.tsx', import.meta.url),
   new URL('./BrowserPageHeader.tsx', import.meta.url),
+  new URL('./BrowserDisplayModeControl.tsx', import.meta.url),
   new URL('./BrowserHostDiagnostics.tsx', import.meta.url),
   new URL('./BrowserInventoryTree.tsx', import.meta.url),
   new URL('./BrowserLaneDetails.tsx', import.meta.url),
@@ -62,6 +63,32 @@ describe('Browser UI localization', () => {
     for (const source of componentSources) {
       expect(source.includes('useTranslation')).toBe(true);
       expect(source.includes("t('browser.")).toBe(true);
+    }
+  });
+
+  test('defines close-all as draining and verifying every managed resource class', () => {
+    const enCopy = `${enBrowser.page.closeAll} ${enBrowser.close.allTitle} ${enBrowser.close.allContent} ${enBrowser.close.allSuccess} ${enBrowser.close.drainUnconfirmed}`;
+    for (const phrase of [
+      'browser resources',
+      'browser lane',
+      'pending cleanup',
+      'managed Browser Hosts/processes',
+      'authoritative remaining counts',
+      'all zero',
+    ]) {
+      expect(enCopy.includes(phrase)).toBe(true);
+    }
+
+    const zhCopy = `${zhBrowser.page.closeAll} ${zhBrowser.close.allTitle} ${zhBrowser.close.allContent} ${zhBrowser.close.allSuccess} ${zhBrowser.close.drainUnconfirmed}`;
+    for (const phrase of [
+      '浏览器资源',
+      '浏览器通道',
+      '待清理任务',
+      '受管浏览器主机及进程',
+      '权威剩余计数',
+      '全部归零',
+    ]) {
+      expect(zhCopy.includes(phrase)).toBe(true);
     }
   });
 

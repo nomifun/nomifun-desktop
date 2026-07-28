@@ -18,6 +18,7 @@ interface BrowserInventoryTreeProps {
   currentConversationId?: string | null;
   busyLaneId?: string | null;
   busyConversationId?: string | null;
+  managementDisabled?: boolean;
   onSelectLane: (lane: IBrowserLane) => void;
   onCloseLane: (lane: IBrowserLane) => void;
   onCloseConversation: (group: BrowserConversationGroup) => void;
@@ -62,6 +63,7 @@ const BrowserInventoryTree: React.FC<BrowserInventoryTreeProps> = ({
   currentConversationId,
   busyLaneId,
   busyConversationId,
+  managementDisabled = false,
   onSelectLane,
   onCloseLane,
   onCloseConversation,
@@ -128,6 +130,7 @@ const BrowserInventoryTree: React.FC<BrowserInventoryTreeProps> = ({
                   type='text'
                   size='mini'
                   status='danger'
+                  disabled={managementDisabled}
                   loading={busyConversationId === group.conversationId}
                   aria-label={t('browser.tree.closeConversationAria', { name: group.label })}
                   icon={<Delete theme='outline' size='13' />}
@@ -204,6 +207,7 @@ const BrowserInventoryTree: React.FC<BrowserInventoryTreeProps> = ({
                               type='text'
                               size='mini'
                               status='danger'
+                              disabled={managementDisabled}
                               className={
                                 active
                                   ? ''

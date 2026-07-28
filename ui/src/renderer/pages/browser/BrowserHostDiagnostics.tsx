@@ -152,6 +152,15 @@ const BrowserHostDiagnostics: React.FC<BrowserHostDiagnosticsProps> = ({ overvie
           {valueOrDash(host.lane_count)}
         </DiagnosticField>
         <DiagnosticField
+          label={t('browser.diagnostics.fields.visibility')}
+        >
+          {host.headful == null
+            ? '-'
+            : host.headful
+              ? t('browser.displayMode.externalShort')
+              : t('browser.displayMode.headlessShort')}
+        </DiagnosticField>
+        <DiagnosticField
           label={t('browser.diagnostics.fields.rss')}
         >
           {formatBytes(host.rss_bytes)}
@@ -186,7 +195,7 @@ const BrowserHostDiagnostics: React.FC<BrowserHostDiagnosticsProps> = ({ overvie
       </summary>
 
       <div className='border-t border-solid border-[color:color-mix(in_srgb,var(--color-border-2)_52%,transparent)] border-b-0 border-l-0 border-r-0 p-12px'>
-        <section className='mb-12px grid grid-cols-2 md:grid-cols-3 xl:grid-cols-6 gap-10px'>
+        <section className='mb-12px grid grid-cols-2 md:grid-cols-4 gap-10px'>
           <DiagnosticField label={t('browser.diagnostics.fields.activeOperations')}>
             {valueOrDash(capacity?.active)}
             {capacity?.max_active != null ? ` / ${capacity.max_active}` : null}
@@ -197,6 +206,12 @@ const BrowserHostDiagnostics: React.FC<BrowserHostDiagnosticsProps> = ({ overvie
           <DiagnosticField label={t('browser.diagnostics.fields.openLanes')}>
             {valueOrDash(overview.total_lanes)}
             {capacity?.max_open_lanes != null ? ` / ${capacity.max_open_lanes}` : null}
+          </DiagnosticField>
+          <DiagnosticField label={t('browser.diagnostics.fields.managedHosts')}>
+            {valueOrDash(overview.managed_host_count ?? hosts.length)}
+          </DiagnosticField>
+          <DiagnosticField label={t('browser.diagnostics.fields.pendingCleanup')}>
+            {valueOrDash(overview.pending_cleanup_count)}
           </DiagnosticField>
           <DiagnosticField label={t('browser.diagnostics.fields.recommendedConcurrency')}>
             {valueOrDash(capacity?.recommended_concurrency)}

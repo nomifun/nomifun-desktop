@@ -2013,6 +2013,8 @@ mod tests {
     use nomi_types::llm::{LlmEvent, LlmRequest};
     use nomi_types::message::{ContentBlock, Role, StopReason};
     use nomi_types::tool::ToolResult;
+    #[cfg(feature = "browser-use")]
+    use std::sync::atomic::AtomicBool;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     #[cfg(feature = "browser-use")]
@@ -2082,20 +2084,88 @@ mod tests {
     }
 
     #[cfg(feature = "browser-use")]
-    fn teardown_test_browser_binding(
-        lease: Arc<BlockingBrowserOwnerLease>,
-    ) -> crate::BrowserLaneBinding {
+    struct ControlledBrowserOwnerLease {
+        flight_started: AtomicBool,
+        flight_starts: AtomicUsize,
+        waiter_started: tokio::sync::Semaphore,
+        completion: std::sync::OnceLock<Option<&'static str>>,
+        completed: tokio::sync::Notify,
+    }
+
+    #[cfg(feature = "browser-use")]
+    impl ControlledBrowserOwnerLease {
+        fn new() -> Arc<Self> {
+            Arc::new(Self {
+                flight_started: AtomicBool::new(false),
+                flight_starts: AtomicUsize::new(0),
+                waiter_started: tokio::sync::Semaphore::new(0),
+                completion: std::sync::OnceLock::new(),
+                completed: tokio::sync::Notify::new(),
+            })
+        }
+
+        fn start_or_join(&self) {
+            if self
+                .flight_started
+                .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+            {
+                self.flight_starts.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        async fn wait_until_waiter_started(&self) {
+            self.waiter_started.acquire().await.unwrap().forget();
+        }
+
+        fn complete(&self, error: Option<&'static str>) {
+            self.completion
+                .set(error)
+                .expect("the controlled owner cleanup flight completes once");
+            self.completed.notify_waiters();
+        }
+    }
+
+    #[cfg(feature = "browser-use")]
+    #[async_trait::async_trait]
+    impl crate::BrowserOwnerLeaseGuard for ControlledBrowserOwnerLease {
+        fn revoke(&self) {
+            self.start_or_join();
+        }
+
+        async fn revoke_and_wait(&self) -> Result<(), AppError> {
+            self.start_or_join();
+            self.waiter_started.add_permits(1);
+            loop {
+                let completed = self.completed.notified();
+                if let Some(error) = self.completion.get() {
+                    return match error {
+                        Some(message) => Err(AppError::Internal((*message).to_owned())),
+                        None => Ok(()),
+                    };
+                }
+                completed.await;
+            }
+        }
+    }
+
+    #[cfg(feature = "browser-use")]
+    fn teardown_test_browser_binding<L>(lease: Arc<L>) -> crate::BrowserLaneBinding
+    where
+        L: crate::BrowserOwnerLeaseGuard + 'static,
+    {
         teardown_test_browser_binding_with_hub(lease).0
     }
 
     #[cfg(feature = "browser-use")]
-    fn teardown_test_browser_binding_with_hub(
-        lease: Arc<BlockingBrowserOwnerLease>,
-    ) -> (
+    fn teardown_test_browser_binding_with_hub<L>(lease: Arc<L>) -> (
         crate::BrowserLaneBinding,
         nomifun_browser_platform::BrowserSessionHub,
         nomifun_browser_platform::OwnerLeaseId,
-    ) {
+    )
+    where
+        L: crate::BrowserOwnerLeaseGuard + 'static,
+    {
         use std::collections::BTreeSet;
 
         let hub = nomifun_browser_platform::BrowserSessionHub::new(
@@ -2244,21 +2314,36 @@ mod tests {
 
     #[cfg(feature = "browser-use")]
     #[tokio::test]
-    async fn turn_boundary_close_treats_revoked_owner_lease_as_satisfied() {
-        // The kill() race: runtime kill revokes the owner lease while the turn
-        // is still unwinding. The Hub-owned revocation flight covers exactly
-        // these Lanes, so the turn boundary must treat the expired-lease
-        // refusal as satisfied-by-revocation instead of a cleanup failure.
-        let lease = BlockingBrowserOwnerLease::new(None);
-        let (binding, hub, lease_id) = teardown_test_browser_binding_with_hub(lease);
+    async fn turn_boundary_close_joins_in_flight_owner_revocation() {
+        // The kill() race: the exact-owner revocation flight has invalidated
+        // the lease, but its Chromium cleanup proof is still pending when the
+        // turn boundary attempts owner-scoped close_all.
+        let lease = ControlledBrowserOwnerLease::new();
+        let (binding, hub, lease_id) =
+            teardown_test_browser_binding_with_hub(Arc::clone(&lease));
+        binding.revoke();
         hub.close_owner_lease(&lease_id)
             .await
-            .expect("hub-owned owner revocation should close zero lanes");
+            .expect("the simulated revocation flight should invalidate the owner lease");
 
-        binding
-            .close_turn_lanes()
+        let mut close_turn_lanes = Box::pin(binding.close_turn_lanes());
+        tokio::select! {
+            biased;
+            result = &mut close_turn_lanes => {
+                panic!("turn cleanup returned before exact-owner revocation completed: {result:?}");
+            }
+            _ = lease.wait_until_waiter_started() => {}
+        }
+        assert_eq!(
+            lease.flight_starts.load(Ordering::SeqCst),
+            1,
+            "the expired-lease branch must join the existing exact-owner flight"
+        );
+
+        lease.complete(None);
+        close_turn_lanes
             .await
-            .expect("a lease revoked by the hub-owned flight must not fail the turn boundary");
+            .expect("the completed exact-owner cleanup proof should satisfy the turn boundary");
     }
 
     #[cfg(feature = "browser-use")]
@@ -2268,11 +2353,13 @@ mod tests {
         // close_turn_lanes hits the already-revoked owner lease must still
         // publish the terminal event and complete the teardown fence, because
         // the Hub-owned revocation flight is the cleanup authority.
-        let lease = BlockingBrowserOwnerLease::new(None);
-        let (binding, hub, lease_id) = teardown_test_browser_binding_with_hub(lease);
+        let lease = ControlledBrowserOwnerLease::new();
+        let (binding, hub, lease_id) =
+            teardown_test_browser_binding_with_hub(Arc::clone(&lease));
+        binding.revoke();
         hub.close_owner_lease(&lease_id)
             .await
-            .expect("hub-owned owner revocation should close zero lanes");
+            .expect("the simulated revocation flight should invalidate the owner lease");
 
         let rt = AgentRuntimeState::new("c-guard-kill-race", "/w", 16);
         let mut rx = rt.subscribe();
@@ -2297,6 +2384,12 @@ mod tests {
                 armed: true,
             };
         }
+        lease.wait_until_waiter_started().await;
+        assert!(
+            matches!(rx.try_recv(), Err(broadcast::error::TryRecvError::Empty)),
+            "the terminal must not be published while owner cleanup is pending"
+        );
+        lease.complete(None);
         let event = tokio::time::timeout(
             std::time::Duration::from_secs(5),
             rx.recv(),
@@ -2310,6 +2403,79 @@ mod tests {
         );
         assert_eq!(rt.status(), Some(ConversationStatus::Finished));
         assert!(active_turn.lock().unwrap().is_none());
+    }
+
+    #[cfg(feature = "browser-use")]
+    #[tokio::test]
+    async fn termination_guard_withholds_finish_when_expired_owner_cleanup_fails() {
+        let lease = ControlledBrowserOwnerLease::new();
+        let (binding, hub, lease_id) =
+            teardown_test_browser_binding_with_hub(Arc::clone(&lease));
+        binding.revoke();
+        hub.close_owner_lease(&lease_id)
+            .await
+            .expect("the simulated revocation flight should invalidate the owner lease");
+
+        let rt = AgentRuntimeState::new("c-guard-kill-race-failure", "/w", 16);
+        let mut rx = rt.subscribe();
+        let backend_output_sink = Arc::new(BackendOutputSink::new(rt.event_sender()));
+        let turn = rt.reset_for_new_turn(ConversationStatus::Running);
+        let active_turn = Arc::new(std::sync::Mutex::new(Some(turn)));
+        let mut guard = TurnTerminationGuard {
+            runtime: rt.clone(),
+            turn,
+            active_turn: Arc::clone(&active_turn),
+            lifecycle_gate: Arc::new(std::sync::Mutex::new(())),
+            steering_inbox: Arc::new(std::sync::Mutex::new(
+                std::collections::VecDeque::new(),
+            )),
+            backend_output_sink,
+            process_supervisor: None,
+            mcp_managers: Vec::new(),
+            turn_teardown_fence: Arc::new(TurnTeardownFence::new()),
+            browser_lane_binding: Some(binding),
+            armed: true,
+        };
+
+        let mut terminalize = Box::pin(guard.terminalize(|runtime, turn| {
+            runtime.emit_finish_for_turn(
+                turn,
+                None,
+                Some(TurnStopReason::Cancelled),
+            )
+        }));
+        tokio::select! {
+            biased;
+            result = &mut terminalize => {
+                panic!("terminalization returned before exact-owner revocation completed: {result:?}");
+            }
+            _ = lease.wait_until_waiter_started() => {}
+        }
+        assert!(
+            matches!(rx.try_recv(), Err(broadcast::error::TryRecvError::Empty)),
+            "the terminal must not be published while owner cleanup is pending"
+        );
+
+        lease.complete(Some("owner cleanup failed"));
+        let error = terminalize
+            .as_mut()
+            .await
+            .expect_err("failed exact-owner cleanup must fail terminalization");
+        assert!(
+            matches!(&error, AppError::Internal(message) if message == "owner cleanup failed"),
+            "the exact owner cleanup failure must be propagated: {error:?}"
+        );
+        assert!(
+            matches!(rx.try_recv(), Err(broadcast::error::TryRecvError::Empty)),
+            "a failed owner cleanup proof must withhold Finish"
+        );
+        assert_eq!(rt.status(), Some(ConversationStatus::Running));
+        assert_eq!(*active_turn.lock().unwrap(), Some(turn));
+
+        // The result-bearing path was exercised directly. Suppress the Drop
+        // backstop so it cannot schedule a second terminalization attempt.
+        drop(terminalize);
+        guard.armed = false;
     }
 
     #[cfg(feature = "browser-use")]

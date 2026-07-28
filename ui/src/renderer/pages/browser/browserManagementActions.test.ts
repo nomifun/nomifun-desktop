@@ -14,11 +14,13 @@ import {
   browserCloseResultIsUnconfirmed,
   canForegroundBrowserLane,
   browserLaneHasActiveWork,
+  createBrowserManagementMutationGate,
   requestBrowserCloseAll,
   requestBrowserConversationClose,
   requestBrowserLaneClose,
   runBrowserCloseAll,
   runBrowserConversationClose,
+  runBrowserLaneBackground,
   runBrowserLaneForeground,
   runBrowserLaneClose,
   type BrowserConfirmationRequest,
@@ -54,29 +56,90 @@ const confirmationCopy = {
 
 const browserPageSource = readFileSync(new URL('./index.tsx', import.meta.url), 'utf8');
 
+const deferred = <T>() => {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((resolvePromise) => {
+    resolve = resolvePromise;
+  });
+  return { promise, resolve };
+};
+
 describe('browser management actions', () => {
-  test('labels close-all as installation-wide instead of current-user scoped', () => {
+  test('atomically gates delayed confirmation callbacks and releases in finally', async () => {
+    const gate = createBrowserManagementMutationGate();
+    const first = deferred<void>();
+    const calls: string[] = [];
+    const running = gate.run(async () => {
+      calls.push('first:start');
+      await first.promise;
+      calls.push('first:end');
+    });
+    expect(gate.isBusy()).toBe(true);
+
+    expect(
+      await gate.run(
+        async () => {
+          calls.push('second:unexpected');
+        },
+        () => calls.push('second:busy')
+      )
+    ).toBe(false);
+    first.resolve(undefined);
+    expect(await running).toBe(true);
+    expect(gate.isBusy()).toBe(false);
+    expect(calls).toEqual(['first:start', 'second:busy', 'first:end']);
+
+    let caught = false;
+    try {
+      await gate.run(async () => {
+        throw new Error('operation failed');
+      });
+    } catch {
+      caught = true;
+    }
+    expect(caught).toBe(true);
+    expect(gate.isBusy()).toBe(false);
+  });
+
+  test('describes installation-wide close-all as a fully verified resource drain', () => {
     const en = browserInstallationWideCloseCopy('en-US');
     expect(en.title.includes('across this installation')).toBe(true);
     expect(en.warning.includes('installation-wide global')).toBe(true);
-    expect(en.warning.includes("every user's")).toBe(true);
+    expect(en.warning.includes("every user's browser lanes")).toBe(true);
+    expect(en.warning.includes('drains pending cleanup')).toBe(true);
+    expect(en.warning.includes('managed Browser Hosts/processes')).toBe(true);
+    expect(en.warning.includes('three authoritative remaining counts')).toBe(true);
+    expect(en.warning.includes('all zero')).toBe(true);
     expect(en.button.includes('globally')).toBe(true);
+    expect(en.success.includes('lanes, pending cleanup, and managed Hosts/processes')).toBe(
+      true
+    );
 
     const zh = browserInstallationWideCloseCopy('zh-CN');
     expect(zh.title.includes('整个安装')).toBe(true);
     expect(zh.warning.includes('全局')).toBe(true);
-    expect(zh.warning.includes('所有用户')).toBe(true);
+    expect(zh.warning.includes('所有用户的浏览器通道')).toBe(true);
+    expect(zh.warning.includes('排空待清理任务')).toBe(true);
+    expect(zh.warning.includes('受管浏览器主机及进程')).toBe(true);
+    expect(zh.warning.includes('三项权威剩余计数全部为 0')).toBe(true);
+    expect(zh.success.includes('浏览器通道、待清理任务和受管主机及进程全部归零')).toBe(
+      true
+    );
   });
 
   test('wires visible page controls to the tested management action layer', () => {
     expect(browserPageSource.includes('runBrowserLaneClose(lane, {')).toBe(true);
-    expect(browserPageSource.includes('requestBrowserLaneClose(lane, closeLane, confirmDanger')).toBe(
-      true
-    );
-    expect(browserPageSource.includes('requestBrowserConversationClose(group, closeConversation')).toBe(
-      true
-    );
-    expect(browserPageSource.includes('requestBrowserCloseAll(closeAll, confirmDanger')).toBe(true);
+    expect(
+      browserPageSource.includes(
+        'requestBrowserLaneClose(lane, closeLaneExclusively, confirmDanger'
+      )
+    ).toBe(true);
+    expect(
+      browserPageSource.includes('closeConversationExclusively')
+    ).toBe(true);
+    expect(
+      browserPageSource.includes('requestBrowserCloseAll(closeAllExclusively, confirmDanger')
+    ).toBe(true);
     expect(browserPageSource.includes('onCloseLane={handleCloseLane}')).toBe(true);
     expect(browserPageSource.includes('onCloseConversation={handleCloseConversation}')).toBe(true);
     expect(browserPageSource.includes('onCloseAll={handleCloseAll}')).toBe(true);
@@ -85,6 +148,11 @@ describe('browser management actions', () => {
       browserPageSource.includes('ipcBridge.browserSession.foregroundLane.invoke(request)')
     ).toBe(true);
     expect(browserPageSource.includes('onForeground={handleForegroundLane}')).toBe(true);
+    expect(browserPageSource.includes('runBrowserLaneBackground(lane, {')).toBe(true);
+    expect(
+      browserPageSource.includes('ipcBridge.browserSession.backgroundLane.invoke(request)')
+    ).toBe(true);
+    expect(browserPageSource.includes('onBackground={handleBackgroundLane}')).toBe(true);
   });
 
   test('foregrounds only running Primary lanes and reports success', async () => {
@@ -108,7 +176,7 @@ describe('browser management actions', () => {
       refresh: async () => {
         calls.push('refresh');
       },
-      setForegroundingLaneId: (value) => calls.push(`busy:${value}`),
+      setChangingVisibilityLaneId: (value) => calls.push(`busy:${value}`),
       notifySuccess: (message) => calls.push(`success:${message}`),
       notifyError: (message) => calls.push(`error:${message}`),
       successMessage: 'opened',
@@ -136,7 +204,7 @@ describe('browser management actions', () => {
           invoked = true;
         },
         refresh: async () => {},
-        setForegroundingLaneId: () => {
+        setChangingVisibilityLaneId: () => {
           busy = true;
         },
         notifySuccess: () => undefined,
@@ -157,7 +225,7 @@ describe('browser management actions', () => {
       refresh: async () => {
         calls.push('refresh');
       },
-      setForegroundingLaneId: (value) => calls.push(`busy:${value}`),
+      setChangingVisibilityLaneId: (value) => calls.push(`busy:${value}`),
       notifySuccess: (message) => calls.push(`success:${message}`),
       notifyError: (message) => calls.push(`error:${message}`),
       successMessage: 'opened',
@@ -167,6 +235,31 @@ describe('browser management actions', () => {
       'busy:lane-1',
       'refresh',
       'error:foreground failed',
+      'busy:null',
+    ]);
+  });
+
+  test('returns a foreground Primary lane to silent headless mode', async () => {
+    const calls: string[] = [];
+    await runBrowserLaneBackground(lane({ identity: { mode: 'primary' } }), {
+      invoke: async ({ lane_id }) => {
+        calls.push(`background:${lane_id}`);
+        return { backgrounded: true, lane_id };
+      },
+      refresh: async () => {
+        calls.push('refresh');
+      },
+      setChangingVisibilityLaneId: (value) => calls.push(`busy:${value}`),
+      notifySuccess: (message) => calls.push(`success:${message}`),
+      notifyError: (message) => calls.push(`error:${message}`),
+      successMessage: 'headless',
+    });
+
+    expect(calls).toEqual([
+      'busy:lane-1',
+      'background:lane-1',
+      'refresh',
+      'success:headless',
       'busy:null',
     ]);
   });
@@ -190,7 +283,7 @@ describe('browser management actions', () => {
       await runBrowserLaneForeground(lane({ identity: { mode: 'primary' } }), {
         invoke: scenario.invoke,
         refresh: scenario.refresh,
-        setForegroundingLaneId: (value) => calls.push(`busy:${value}`),
+        setChangingVisibilityLaneId: (value) => calls.push(`busy:${value}`),
         notifySuccess: (message) => calls.push(`success:${message}`),
         notifyError: (message) => calls.push(`error:${message}`),
         successMessage: 'opened',
@@ -438,7 +531,13 @@ describe('browser management actions', () => {
         runBrowserCloseAll({
           invoke: async () => {
             calls.push('close-all');
-            return { closed: 2, already_closed: false };
+            return {
+              closed: 2,
+              already_closed: false,
+              remaining_lane_count: 0,
+              remaining_cleanup_count: 0,
+              remaining_managed_host_count: 0,
+            };
           },
           refresh: async () => {
             throw new Error('refresh failed');
@@ -470,6 +569,56 @@ describe('browser management actions', () => {
     expect(browserCloseResultIsUnconfirmed({ closed: 0, already_closed: false })).toBe(true);
     expect(browserCloseResultIsUnconfirmed({})).toBe(true);
     expect(browserCloseResultIsUnconfirmed(undefined)).toBe(true);
+    expect(
+      browserCloseResultIsUnconfirmed(
+        {
+          closed: 1,
+          remaining_lane_count: 0,
+          remaining_cleanup_count: 0,
+          remaining_managed_host_count: 0,
+        },
+        { requireFullyDrained: true }
+      )
+    ).toBe(false);
+    expect(
+      browserCloseResultIsUnconfirmed(
+        {
+          closed: 0,
+          already_closed: false,
+          remaining_lane_count: 0,
+          remaining_cleanup_count: 0,
+          remaining_managed_host_count: 0,
+        },
+        { requireFullyDrained: true }
+      )
+    ).toBe(false);
+    for (const residual of [
+      {
+        closed: 1,
+        remaining_lane_count: 1,
+        remaining_cleanup_count: 0,
+        remaining_managed_host_count: 0,
+      },
+      {
+        closed: 1,
+        remaining_lane_count: 0,
+        remaining_cleanup_count: 1,
+        remaining_managed_host_count: 0,
+      },
+      {
+        closed: 1,
+        remaining_lane_count: 0,
+        remaining_cleanup_count: 0,
+        remaining_managed_host_count: 1,
+      },
+      { closed: 1 },
+    ]) {
+      expect(
+        browserCloseResultIsUnconfirmed(residual, {
+          requireFullyDrained: true,
+        })
+      ).toBe(true);
+    }
 
     const calls: string[] = [];
     await runBrowserCloseAll({
@@ -488,6 +637,34 @@ describe('browser management actions', () => {
       'loading:true',
       'refresh',
       'error:close unconfirmed',
+      'loading:false',
+    ]);
+  });
+
+  test('never reports close-all success until every remaining resource count is zero', async () => {
+    const calls: string[] = [];
+    await runBrowserCloseAll({
+      invoke: async () => ({
+        closed: 1,
+        already_closed: false,
+        remaining_lane_count: 0,
+        remaining_cleanup_count: 0,
+        remaining_managed_host_count: 1,
+      }),
+      refresh: async () => {
+        calls.push('refresh');
+      },
+      setClosingAll: (value) => calls.push(`loading:${value}`),
+      notifySuccess: (message) => calls.push(`success:${message}`),
+      notifyError: (message) => calls.push(`error:${message}`),
+      successMessage: 'all resources closed',
+      unconfirmedMessage: 'managed resources remain',
+    });
+
+    expect(calls).toEqual([
+      'loading:true',
+      'refresh',
+      'error:managed resources remain',
       'loading:false',
     ]);
   });

@@ -4,19 +4,25 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Alert, Button, Empty, Message, Modal, Spin } from '@arco-design/web-react';
 import { WebPage } from '@icon-park/react';
 import { useTranslation } from 'react-i18next';
 import { useLocation, useSearchParams } from 'react-router-dom';
 import { ipcBridge } from '@/common';
+import { isBackendHttpError } from '@/common/adapter/httpBridge';
+import { createBrowserDisplayModeController } from '@/common/browser/browserDisplayModeController';
 import {
   resolveBrowserOverviewCapabilities,
+  type BrowserDisplayMode,
   type IBrowserLane,
 } from '@/common/browser/browserTypes';
 import { useConversationHistoryContext } from '@/renderer/hooks/context/ConversationHistoryContext';
 import { useLayoutContext } from '@/renderer/hooks/context/LayoutContext';
 import BrowserInventoryTree from './BrowserInventoryTree';
+import BrowserDisplayModeControl, {
+  type BrowserDisplayModeControlStatus,
+} from './BrowserDisplayModeControl';
 import BrowserLaneDetails from './BrowserLaneDetails';
 import BrowserPageHeader from './BrowserPageHeader';
 import {
@@ -31,17 +37,25 @@ import {
   browserInstallationWideCloseCopy,
   browserClosePartialFailureMessage,
   canForegroundBrowserLane,
+  createBrowserManagementMutationGate,
   requestBrowserCloseAll,
   requestBrowserConversationClose,
   requestBrowserLaneClose,
   runBrowserCloseAll,
   runBrowserConversationClose,
+  runBrowserLaneBackground,
   runBrowserLaneForeground,
   runBrowserLaneClose,
   type BrowserConfirmationRequest,
 } from './browserManagementActions';
 import { useBrowserInventory } from './useBrowserInventory';
 import BrowserHostDiagnostics from './BrowserHostDiagnostics';
+
+const displayModeErrorMessage = (error: unknown): string =>
+  error instanceof Error ? error.message : String(error);
+
+const displayModeEndpointUnavailable = (error: unknown): boolean =>
+  isBackendHttpError(error) && (error.status === 404 || error.status === 501);
 
 const BrowserPage: React.FC = () => {
   const { t, i18n } = useTranslation();
@@ -52,9 +66,22 @@ const BrowserPage: React.FC = () => {
   const { lanes, overview, loading, refreshing, error, refresh } = useBrowserInventory();
   const [selectedLaneId, setSelectedLaneId] = useState<string | null>(null);
   const [busyLaneId, setBusyLaneId] = useState<string | null>(null);
-  const [foregroundingLaneId, setForegroundingLaneId] = useState<string | null>(null);
+  const [changingVisibilityLaneId, setChangingVisibilityLaneId] = useState<string | null>(null);
   const [busyConversationId, setBusyConversationId] = useState<string | null>(null);
   const [closingAll, setClosingAll] = useState(false);
+  const [displayMode, setDisplayMode] = useState<BrowserDisplayMode>('headless');
+  const [displayModeStatus, setDisplayModeStatus] =
+    useState<BrowserDisplayModeControlStatus>('loading');
+  const [displayModeSaving, setDisplayModeSaving] = useState(false);
+  const [displayModeError, setDisplayModeError] = useState<string | null>(null);
+  const mutationGateRef = useRef(createBrowserManagementMutationGate());
+  const displayModeControllerRef = useRef(
+    createBrowserDisplayModeController({
+      get: () => ipcBridge.browserSession.displayMode.get.invoke(),
+      put: (next) =>
+        ipcBridge.browserSession.displayMode.put.invoke({ display_mode: next }),
+    })
+  );
 
   const installationWideCloseCopy = browserInstallationWideCloseCopy(
     i18n.resolvedLanguage ?? i18n.language
@@ -107,7 +134,43 @@ const BrowserPage: React.FC = () => {
   const localCounts = useMemo(() => browserLaneCounts(lanes), [lanes]);
   const runningCount = overview?.running_lanes ?? localCounts.running;
   const queuedCount = overview?.queued_lanes ?? localCounts.queued;
-  const { canCloseAll } = resolveBrowserOverviewCapabilities(overview);
+  const { canCloseAll, canManageBrowserSettings } =
+    resolveBrowserOverviewCapabilities(overview);
+  const managedHostCount =
+    overview?.managed_host_count ?? overview?.hosts?.length ?? 0;
+  const pendingCleanupCount = overview?.pending_cleanup_count ?? 0;
+  const hasManagedResources =
+    lanes.length > 0 || managedHostCount > 0 || pendingCleanupCount > 0;
+  const hasResidualResources = lanes.length === 0 && hasManagedResources;
+  const selectedLaneHost = useMemo(() => {
+    if (
+      selectedLane?.browser_epoch == null ||
+      selectedLane.identity?.mode !== 'primary'
+    ) {
+      return null;
+    }
+    return (
+      overview?.hosts?.find(
+        (host) =>
+          host.epoch === selectedLane.browser_epoch &&
+          host.identity_mode === 'primary'
+      ) ?? null
+    );
+  }, [overview?.hosts, selectedLane]);
+  const managementMutationBusy =
+    busyLaneId != null ||
+    busyConversationId != null ||
+    changingVisibilityLaneId != null ||
+    closingAll ||
+    displayModeSaving;
+  const runManagementMutation = useCallback(
+    async (operation: () => Promise<void>): Promise<void> => {
+      await mutationGateRef.current.run(operation, () =>
+        Message.warning(t('browser.actions.busy'))
+      );
+    },
+    [t]
+  );
 
   useEffect(() => {
     const requestedGroup = currentConversationId
@@ -122,6 +185,44 @@ const BrowserPage: React.FC = () => {
     }
   }, [groups, lanes, currentConversationId, selectedLaneId]);
 
+  const loadDisplayMode = useCallback(async () => {
+    if (!canManageBrowserSettings) return;
+    setDisplayModeStatus('loading');
+    setDisplayModeError(null);
+    const result = await displayModeControllerRef.current.load();
+    if (result.kind === 'applied') {
+      setDisplayMode(result.displayMode);
+      setDisplayModeStatus('ready');
+    } else if (result.kind === 'error') {
+      setDisplayModeStatus(
+        displayModeEndpointUnavailable(result.error) ? 'unavailable' : 'error'
+      );
+      setDisplayModeError(
+        displayModeEndpointUnavailable(result.error)
+          ? null
+          : displayModeErrorMessage(result.error)
+      );
+    }
+  }, [canManageBrowserSettings]);
+
+  useEffect(() => {
+    if (canManageBrowserSettings) {
+      void loadDisplayMode();
+    }
+  }, [canManageBrowserSettings, loadDisplayMode]);
+
+  useEffect(
+    () => () => displayModeControllerRef.current.dispose(),
+    []
+  );
+
+  const refreshAll = useCallback(async () => {
+    await Promise.all([
+      refresh(),
+      canManageBrowserSettings ? loadDisplayMode() : Promise.resolve(),
+    ]);
+  }, [canManageBrowserSettings, loadDisplayMode, refresh]);
+
   const handleSelectLane = useCallback(
     (lane: IBrowserLane) => {
       setSelectedLaneId(lane.lane_id);
@@ -131,6 +232,76 @@ const BrowserPage: React.FC = () => {
       }
     },
     [searchParams, setSearchParams]
+  );
+
+  const handleDisplayModeChange = useCallback(
+    async (next: BrowserDisplayMode) => {
+      if (
+        !canManageBrowserSettings ||
+        displayModeStatus !== 'ready' ||
+        managementMutationBusy ||
+        mutationGateRef.current.isBusy() ||
+        next === displayMode
+      ) {
+        return;
+      }
+      await runManagementMutation(async () => {
+        setDisplayModeSaving(true);
+        setDisplayModeError(null);
+        try {
+          const result = await displayModeControllerRef.current.save(next);
+          if (result.kind === 'applied') {
+            setDisplayMode(result.displayMode);
+            setDisplayModeStatus('ready');
+            Message.success(t('browser.displayMode.saved'));
+            if (result.verificationError) {
+              Message.error(
+                t('browser.displayMode.refreshFailed', {
+                  error: displayModeErrorMessage(result.verificationError),
+                })
+              );
+            }
+          } else if (result.kind === 'rejected') {
+            const message = result.nonPersistent
+              ? displayModeErrorMessage(result.error)
+              : result.unconfirmed
+                ? t('browser.displayMode.unconfirmed')
+                : displayModeErrorMessage(result.error);
+            setDisplayMode(result.displayMode);
+            setDisplayModeStatus('ready');
+            setDisplayModeError(message);
+            Message.error(t('browser.displayMode.saveFailed', { error: message }));
+          } else if (result.kind === 'unknown') {
+            const message = displayModeErrorMessage(result.error);
+            setDisplayModeStatus('error');
+            setDisplayModeError(message);
+            Message.error(t('browser.displayMode.saveFailed', { error: message }));
+          }
+          if (result.kind === 'applied' || result.kind === 'rejected') {
+            try {
+              await refresh();
+            } catch (refreshError) {
+              Message.error(
+                t('browser.displayMode.refreshFailed', {
+                  error: displayModeErrorMessage(refreshError),
+                })
+              );
+            }
+          }
+        } finally {
+          setDisplayModeSaving(false);
+        }
+      });
+    },
+    [
+      canManageBrowserSettings,
+      displayMode,
+      displayModeStatus,
+      managementMutationBusy,
+      refresh,
+      runManagementMutation,
+      t,
+    ]
   );
 
   const confirmDanger = useCallback((request: BrowserConfirmationRequest) => {
@@ -161,17 +332,23 @@ const BrowserPage: React.FC = () => {
       }),
     [refresh, t]
   );
+  const closeLaneExclusively = useCallback(
+    (lane: IBrowserLane) =>
+      runManagementMutation(() => closeLane(lane)),
+    [closeLane, runManagementMutation]
+  );
 
   const handleCloseLane = useCallback(
     (lane: IBrowserLane) => {
-      void requestBrowserLaneClose(lane, closeLane, confirmDanger, {
+      if (managementMutationBusy) return;
+      void requestBrowserLaneClose(lane, closeLaneExclusively, confirmDanger, {
         title: t('browser.close.laneActiveTitle'),
         content: t('browser.close.laneActiveContent'),
         okText: t('browser.close.laneAction'),
         cancelText: t('browser.close.keepOpen'),
       });
     },
-    [closeLane, confirmDanger, t]
+    [closeLaneExclusively, confirmDanger, managementMutationBusy, t]
   );
 
   const foregroundLane = useCallback(
@@ -179,7 +356,7 @@ const BrowserPage: React.FC = () => {
       runBrowserLaneForeground(lane, {
         invoke: (request) => ipcBridge.browserSession.foregroundLane.invoke(request),
         refresh,
-        setForegroundingLaneId,
+        setChangingVisibilityLaneId,
         notifySuccess: Message.success,
         notifyError: Message.error,
         successMessage: t('browser.foreground.success'),
@@ -192,9 +369,34 @@ const BrowserPage: React.FC = () => {
 
   const handleForegroundLane = useCallback(
     (lane: IBrowserLane) => {
-      void foregroundLane(lane);
+      if (managementMutationBusy) return;
+      void runManagementMutation(() => foregroundLane(lane));
     },
-    [foregroundLane]
+    [foregroundLane, managementMutationBusy, runManagementMutation]
+  );
+
+  const backgroundLane = useCallback(
+    (lane: IBrowserLane) =>
+      runBrowserLaneBackground(lane, {
+        invoke: (request) => ipcBridge.browserSession.backgroundLane.invoke(request),
+        refresh,
+        setChangingVisibilityLaneId,
+        notifySuccess: Message.success,
+        notifyError: Message.error,
+        successMessage: t('browser.background.success'),
+        formatRefreshFailure: (message) =>
+          t('browser.background.refreshFailed', { error: message }),
+        unconfirmedMessage: t('browser.background.unconfirmed'),
+      }),
+    [refresh, t]
+  );
+
+  const handleBackgroundLane = useCallback(
+    (lane: IBrowserLane) => {
+      if (managementMutationBusy) return;
+      void runManagementMutation(() => backgroundLane(lane));
+    },
+    [backgroundLane, managementMutationBusy, runManagementMutation]
   );
 
   const closeConversation = useCallback(
@@ -218,17 +420,30 @@ const BrowserPage: React.FC = () => {
       }),
     [refresh, t]
   );
+  const closeConversationExclusively = useCallback(
+    (conversationId: string) =>
+      runManagementMutation(() => closeConversation(conversationId)),
+    [closeConversation, runManagementMutation]
+  );
 
   const handleCloseConversation = useCallback(
     (group: BrowserConversationGroup) => {
-      requestBrowserConversationClose(group, closeConversation, confirmDanger, {
-        title: t('browser.close.conversationTitle'),
-        content: t('browser.close.conversationContent', { count: group.lanes.length }),
-        okText: t('browser.close.conversationAction'),
-        cancelText: t('browser.close.keepOpen'),
-      });
+      if (managementMutationBusy) return;
+      requestBrowserConversationClose(
+        group,
+        closeConversationExclusively,
+        confirmDanger,
+        {
+          title: t('browser.close.conversationTitle'),
+          content: t('browser.close.conversationContent', {
+            count: group.lanes.length,
+          }),
+          okText: t('browser.close.conversationAction'),
+          cancelText: t('browser.close.keepOpen'),
+        }
+      );
     },
-    [closeConversation, confirmDanger, t]
+    [closeConversationExclusively, confirmDanger, managementMutationBusy, t]
   );
 
   const closeAll = useCallback(
@@ -248,19 +463,30 @@ const BrowserPage: React.FC = () => {
           }),
         formatRefreshFailure: (message) =>
           t('browser.close.refreshFailed', { error: message }),
-        unconfirmedMessage: t('browser.close.unconfirmed'),
+        unconfirmedMessage: t('browser.close.drainUnconfirmed'),
       }),
     [installationWideCloseCopy.success, refresh, t]
   );
+  const closeAllExclusively = useCallback(
+    () => runManagementMutation(closeAll),
+    [closeAll, runManagementMutation]
+  );
 
   const handleCloseAll = useCallback(() => {
-    requestBrowserCloseAll(closeAll, confirmDanger, {
+    if (managementMutationBusy) return;
+    requestBrowserCloseAll(closeAllExclusively, confirmDanger, {
       title: installationWideCloseCopy.title,
       content: `${installationWideCloseCopy.warning} ${t('browser.close.allContent')}`,
       okText: installationWideCloseCopy.action,
       cancelText: t('browser.close.cancel'),
     });
-  }, [closeAll, confirmDanger, installationWideCloseCopy, t]);
+  }, [
+    closeAllExclusively,
+    confirmDanger,
+    installationWideCloseCopy,
+    managementMutationBusy,
+    t,
+  ]);
 
   const capabilityUnavailable = overview?.supported === false || overview?.enabled === false;
 
@@ -272,10 +498,11 @@ const BrowserPage: React.FC = () => {
         pressureState={overview?.pressure_state}
         refreshing={refreshing}
         closingAll={closingAll}
-        hasLanes={lanes.length > 0}
+        hasManagedResources={hasManagedResources}
+        controlsDisabled={managementMutationBusy}
         canCloseAll={canCloseAll}
         closeAllLabel={installationWideCloseCopy.button}
-        onRefresh={() => void refresh()}
+        onRefresh={() => void refreshAll()}
         onCloseAll={handleCloseAll}
       />
 
@@ -286,10 +513,21 @@ const BrowserPage: React.FC = () => {
           className='mb-12px shrink-0'
           content={t('browser.page.inventoryUnavailable', { error })}
           action={
-            <Button size='mini' onClick={() => void refresh()}>
+            <Button size='mini' onClick={() => void refreshAll()}>
               {t('browser.page.retry')}
             </Button>
           }
+        />
+      )}
+
+      {canManageBrowserSettings && !capabilityUnavailable && (
+        <BrowserDisplayModeControl
+          displayMode={displayMode}
+          status={displayModeStatus}
+          saving={displayModeSaving}
+          disabled={managementMutationBusy && !displayModeSaving}
+          error={displayModeError}
+          onChange={(next) => void handleDisplayModeChange(next)}
         />
       )}
 
@@ -305,6 +543,22 @@ const BrowserPage: React.FC = () => {
       ) : loading ? (
         <div className='flex-1 min-h-0 flex items-center justify-center'>
           <Spin tip={t('browser.page.loading')} />
+        </div>
+      ) : hasResidualResources ? (
+        <div className='flex-1 min-h-0 flex items-center justify-center bg-bg-1 rd-12px border border-solid border-[var(--color-border-2)] p-20px'>
+          <Alert
+            type='warning'
+            showIcon
+            content={t(
+              canCloseAll
+                ? 'browser.page.residualResources'
+                : 'browser.page.residualResourcesUser',
+              {
+                hosts: managedHostCount,
+                cleanups: pendingCleanupCount,
+              }
+            )}
+          />
         </div>
       ) : lanes.length === 0 ? (
         <div className='flex-1 min-h-0 flex items-center justify-center bg-bg-1 rd-12px border border-solid border-[var(--color-border-2)]'>
@@ -335,6 +589,7 @@ const BrowserPage: React.FC = () => {
               currentConversationId={currentConversationId}
               busyLaneId={busyLaneId}
               busyConversationId={busyConversationId}
+              managementDisabled={managementMutationBusy}
               onSelectLane={handleSelectLane}
               onCloseLane={handleCloseLane}
               onCloseConversation={handleCloseConversation}
@@ -344,11 +599,22 @@ const BrowserPage: React.FC = () => {
             {selectedLane ? (
               <BrowserLaneDetails
                 lane={selectedLane}
-                closing={busyLaneId === selectedLane.lane_id}
-                foregrounding={foregroundingLaneId === selectedLane.lane_id}
-                canForeground={canForegroundBrowserLane(selectedLane)}
+                closing={busyLaneId === selectedLane.lane_id || closingAll}
+                visibilityChanging={
+                  changingVisibilityLaneId === selectedLane.lane_id
+                }
+                actionsDisabled={
+                  busyConversationId != null ||
+                  displayModeSaving ||
+                  (changingVisibilityLaneId != null &&
+                    changingVisibilityLaneId !== selectedLane.lane_id) ||
+                  (busyLaneId != null && busyLaneId !== selectedLane.lane_id)
+                }
+                hostHeadful={selectedLaneHost?.headful}
+                canChangeVisibility={canForegroundBrowserLane(selectedLane)}
                 onClose={handleCloseLane}
                 onForeground={handleForegroundLane}
+                onBackground={handleBackgroundLane}
               />
             ) : (
               <Empty description={t('browser.page.selectLane')} />

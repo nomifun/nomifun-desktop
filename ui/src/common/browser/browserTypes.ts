@@ -20,6 +20,7 @@ export type BrowserLaneLifecycleState = FutureValue<
 >;
 export type BrowserIdentityMode = FutureValue<'primary' | 'anonymous' | 'authenticated_replica' | 'isolated'>;
 export type BrowserResourcePressureState = FutureValue<'normal' | 'pressured' | 'critical'>;
+export type BrowserDisplayMode = 'headless' | 'external';
 
 export interface IBrowserLaneOwner {
   user_id?: string | null;
@@ -65,6 +66,8 @@ export interface IBrowserLane {
   lane_id: string;
   lane_name?: string | null;
   lifecycle_state: BrowserLaneLifecycleState;
+  /** Epoch of the managed Browser Host currently serving this Lane. */
+  browser_epoch?: number | null;
 
   conversation_id?: string | null;
   conversation_title?: string | null;
@@ -99,6 +102,17 @@ export interface IBrowserForegroundResult {
   lane_id?: string;
 }
 
+/** Result returned after returning a managed Primary Lane to silent headless mode. */
+export interface IBrowserBackgroundResult {
+  backgrounded: boolean;
+  lane_id?: string;
+}
+
+/** Installation-wide default visibility policy, owned and persisted by the backend. */
+export interface IBrowserDisplayModePolicy {
+  display_mode: BrowserDisplayMode;
+}
+
 export interface IBrowserCapacityOverview {
   active?: number | null;
   queued?: number | null;
@@ -122,6 +136,8 @@ export interface IBrowserHost {
   host_id: string;
   state: BrowserHostLifecycleState;
   epoch?: number | null;
+  /** Actual launch visibility of this Host, not merely the configured default. */
+  headful?: boolean | null;
   identity_mode?: BrowserIdentityMode | null;
   lane_count?: number | null;
   rss_bytes?: number | null;
@@ -137,6 +153,10 @@ export interface IBrowserOverview {
   pressure_state?: BrowserResourcePressureState | null;
   capacity?: IBrowserCapacityOverview | null;
   hosts?: IBrowserHost[];
+  /** Includes managed Hosts that currently have no attached Lane. */
+  managed_host_count?: number | null;
+  /** Lane/target cleanup work that has not yet reached a terminal state. */
+  pending_cleanup_count?: number | null;
   /** Privileged installation-wide actions require an explicit true. */
   can_close_all?: boolean;
   can_manage_browser_settings?: boolean;
@@ -184,4 +204,8 @@ export interface IBrowserInventoryChangedEvent {
 export type BrowserCloseResult = {
   closed?: number;
   already_closed?: boolean;
+  /** Authoritative post-close inventory counts. Close-all is confirmed only at zero. */
+  remaining_lane_count?: number;
+  remaining_cleanup_count?: number;
+  remaining_managed_host_count?: number;
 };

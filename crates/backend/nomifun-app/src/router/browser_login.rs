@@ -338,6 +338,8 @@ mod tests {
     }
     struct FakeHost {
         id: BrowserHostId,
+        epoch: u64,
+        headful: bool,
         probe: Arc<FakeProbe>,
     }
     struct FakeLane {
@@ -352,6 +354,8 @@ mod tests {
         ) -> Result<Arc<dyn BrowserHostDriver>, BrowserPlatformError> {
             Ok(Arc::new(FakeHost {
                 id: request.host_id,
+                epoch: request.browser_epoch,
+                headful: request.headful,
                 probe: Arc::clone(&self.probe),
             }))
         }
@@ -364,11 +368,15 @@ mod tests {
         }
 
         fn epoch(&self) -> u64 {
-            1
+            self.epoch
         }
 
         fn state(&self) -> HostLifecycleState {
             HostLifecycleState::Running
+        }
+
+        fn is_headful(&self) -> bool {
+            self.headful
         }
 
         async fn open_lane(

@@ -122,35 +122,42 @@ impl Default for BrowserStartupPreferences {
 /// The two supported values are user preferences, not Agent capabilities:
 /// `headless` (default) keeps routine Primary work invisible; `external` is a
 /// user's explicit choice to launch the Primary Host with a visible window.
-/// Migration mapping: an explicit valid choice is preserved without a
-/// rewrite; historical `embedded` (the removed viewer) and invalid values
-/// repair to `headless`; when `displayMode` is absent, legacy
-/// `silent=true` maps to `headless`, legacy `silent=false` maps to
-/// `external`, and a fresh install persists `headless`. The legacy `silent`
-/// key itself is read-only and never written back.
+/// Version 2 makes an external window an explicitly user-selected policy.
+/// Any pre-versioned value (including a historical `external` value inferred
+/// from the removed `silent=false` setting) is migrated once to `headless`.
+/// Once the v2 marker is present, either valid user choice is preserved.
+/// Missing or malformed v2 state fails closed to `headless` and is repaired.
 #[cfg(feature = "browser-use")]
 fn resolve_browser_display_mode(
     display_mode: Option<&str>,
-    legacy_silent: Option<&str>,
+    policy_version: Option<&str>,
 ) -> (&'static str, bool) {
-    if let Some(value) = display_mode {
-        return match value.trim().trim_matches('"') {
-            "headless" => ("headless", false),
-            "external" => ("external", false),
-            _ => ("headless", true),
-        };
+    let is_current_version = policy_version
+        .map(|value| value.trim().trim_matches('"') == BROWSER_DISPLAY_MODE_POLICY_VERSION)
+        .unwrap_or(false);
+    if !is_current_version {
+        return ("headless", true);
     }
 
-    match legacy_silent.map(|value| value.trim().trim_matches('"')) {
-        Some("false") => ("external", true),
+    match display_mode.map(|value| value.trim().trim_matches('"')) {
+        Some("headless") => ("headless", false),
+        Some("external") => ("external", false),
         _ => ("headless", true),
     }
 }
 
 #[cfg(feature = "browser-use")]
+pub(crate) const BROWSER_DISPLAY_MODE_PREF_KEY: &str = "agent.browserUse.displayMode";
+#[cfg(feature = "browser-use")]
+pub(crate) const BROWSER_DISPLAY_MODE_VERSION_PREF_KEY: &str =
+    "agent.browserUse.displayModeVersion";
+#[cfg(feature = "browser-use")]
+pub(crate) const BROWSER_DISPLAY_MODE_POLICY_VERSION: &str = "2";
+
+#[cfg(feature = "browser-use")]
 const BROWSER_STARTUP_PREFERENCE_KEYS: [&str; 5] = [
-    "agent.browserUse.displayMode",
-    "agent.browserUse.silent",
+    BROWSER_DISPLAY_MODE_PREF_KEY,
+    BROWSER_DISPLAY_MODE_VERSION_PREF_KEY,
     "agent.browserUse.source",
     "agent.browserUse.fullPower",
     "agent.browserUse.persistentLogin",
@@ -170,7 +177,7 @@ where
         Ok(preferences) => preferences,
         Err(error) => {
             // A read failure is not the same as a fresh install. Keep the
-            // fail-safe external runtime default, but do not persist while the
+            // fail-safe silent runtime default, but do not persist while the
             // authoritative preference store is unavailable.
             tracing::warn!(
                 %error,
@@ -187,18 +194,24 @@ where
             .map(|row| row.value.as_str())
     };
     let (display_mode, persist_display_mode) = resolve_browser_display_mode(
-        preference("agent.browserUse.displayMode"),
-        preference("agent.browserUse.silent"),
+        preference(BROWSER_DISPLAY_MODE_PREF_KEY),
+        preference(BROWSER_DISPLAY_MODE_VERSION_PREF_KEY),
     );
 
     if persist_display_mode {
-        // Persist only after a successful read. This covers fresh-install
-        // defaults and migration from the removed embedded/headless modes,
-        // while never rewriting the legacy `silent` key itself.
+        // Persist only after a successful read. Mode plus marker form one
+        // lineage boundary: a later explicit v2 choice is preserved, while
+        // pre-v2 state cannot silently re-enable an operating-system window.
         let serialized =
             serde_json::to_string(display_mode).expect("browser display mode is static JSON");
         if let Err(error) = preference_repo
-            .upsert_batch(&[("agent.browserUse.displayMode", serialized.as_str())])
+            .upsert_batch(&[
+                (BROWSER_DISPLAY_MODE_PREF_KEY, serialized.as_str()),
+                (
+                    BROWSER_DISPLAY_MODE_VERSION_PREF_KEY,
+                    BROWSER_DISPLAY_MODE_POLICY_VERSION,
+                ),
+            ])
             .await
         {
             tracing::warn!(
@@ -2086,8 +2099,9 @@ impl AppServices {
 
         // Preference migration is independent from Chromium orphan recovery.
         // Even when Host composition must remain disabled for this process, a
-        // successfully read legacy `silent` value is still migrated. A read
-        // failure remains fail-safe and never writes a replacement value.
+        // successfully read unversioned/legacy display policy is still
+        // migrated to the explicit v2 headless lineage. A read failure remains
+        // fail-safe and never writes a replacement value.
         #[cfg(feature = "browser-use")]
         let browser_startup_preferences = {
             let preference_repo =
@@ -3098,48 +3112,45 @@ mod tests {
     #[cfg(feature = "browser-use")]
     #[test]
     fn browser_display_mode_migration_is_authoritative_and_persistable() {
-        // Explicit valid user choices are preserved without a rewrite.
+        // Only a versioned explicit user choice is preserved.
         assert_eq!(
-            resolve_browser_display_mode(Some("headless"), Some("false")),
+            resolve_browser_display_mode(Some("headless"), Some("2")),
             ("headless", false)
         );
         assert_eq!(
-            resolve_browser_display_mode(Some("external"), Some("true")),
+            resolve_browser_display_mode(Some("external"), Some("\"2\"")),
             ("external", false)
         );
-        // Legacy `silent` is consulted only when the new key is absent:
-        // silent=true was the quiet default (headless); silent=false was an
-        // explicit visible preference (external).
+        // Every unversioned historical value converges once to the silent
+        // default, including the previous inferred external setting.
         assert_eq!(
-            resolve_browser_display_mode(None, Some("true")),
+            resolve_browser_display_mode(Some("external"), None),
             ("headless", true)
         );
         assert_eq!(
-            resolve_browser_display_mode(None, Some("false")),
-            ("external", true)
+            resolve_browser_display_mode(Some("headless"), Some("1")),
+            ("headless", true)
         );
-        // Fresh installs persist the silent default.
         assert_eq!(
             resolve_browser_display_mode(None, None),
             ("headless", true)
         );
-        // The removed embedded viewer and any invalid value repair to the
-        // silent default, regardless of the legacy silent value.
+        // Missing or invalid mode under the current marker is repaired.
         assert_eq!(
-            resolve_browser_display_mode(Some("embedded"), None),
+            resolve_browser_display_mode(Some("embedded"), Some("2")),
             ("headless", true)
         );
         assert_eq!(
-            resolve_browser_display_mode(Some("invalid"), None),
+            resolve_browser_display_mode(Some("invalid"), Some("2")),
             ("headless", true)
         );
         assert_eq!(
-            resolve_browser_display_mode(Some("invalid"), Some("false")),
+            resolve_browser_display_mode(None, Some("2")),
             ("headless", true),
-            "an invalid-but-present new value fails safe to silent headless"
+            "a marker without a valid mode fails safe to silent headless"
         );
         assert_eq!(
-            resolve_browser_display_mode(Some("  \"headless\"  "), Some("false")),
+            resolve_browser_display_mode(Some("  \"headless\"  "), Some("  \"2\"  ")),
             ("headless", false)
         );
         // Only the user's explicit external policy launches a visible
@@ -3166,43 +3177,46 @@ mod tests {
 
     #[cfg(feature = "browser-use")]
     #[tokio::test]
-    async fn browser_display_mode_migration_preserves_legacy_and_does_not_depend_on_hosts() {
+    async fn browser_display_mode_migrates_unversioned_external_to_headless_once() {
         let repo = BrowserPreferenceTestRepository::with_rows(&[
-            ("agent.browserUse.silent", "false"),
+            (BROWSER_DISPLAY_MODE_PREF_KEY, "\"external\""),
             ("agent.browserUse.source", "\"system\""),
         ]);
 
         let preferences = load_browser_startup_preferences(&repo).await;
         assert_eq!(
-            preferences.display_mode, "external",
-            "legacy silent=false is an explicit visible preference and must survive migration"
+            preferences.display_mode, "headless",
+            "unversioned external state must not keep opening an operating-system window"
         );
         assert_eq!(
             repo.writes(),
-            vec![(
-                "agent.browserUse.displayMode".to_owned(),
-                "\"external\"".to_owned()
-            )]
+            vec![
+                (
+                    BROWSER_DISPLAY_MODE_PREF_KEY.to_owned(),
+                    "\"headless\"".to_owned()
+                ),
+                (
+                    BROWSER_DISPLAY_MODE_VERSION_PREF_KEY.to_owned(),
+                    BROWSER_DISPLAY_MODE_POLICY_VERSION.to_owned()
+                ),
+            ]
         );
     }
 
     #[cfg(feature = "browser-use")]
     #[tokio::test]
-    async fn browser_display_mode_migrates_legacy_silent_true_to_headless() {
+    async fn browser_display_mode_preserves_versioned_explicit_external() {
         let repo = BrowserPreferenceTestRepository::with_rows(&[
-            ("agent.browserUse.silent", "true"),
+            (BROWSER_DISPLAY_MODE_PREF_KEY, "\"external\""),
+            (
+                BROWSER_DISPLAY_MODE_VERSION_PREF_KEY,
+                BROWSER_DISPLAY_MODE_POLICY_VERSION,
+            ),
         ]);
 
         let preferences = load_browser_startup_preferences(&repo).await;
-        assert_eq!(preferences.display_mode, "headless");
-        assert_eq!(
-            repo.writes(),
-            vec![(
-                "agent.browserUse.displayMode".to_owned(),
-                "\"headless\"".to_owned()
-            )],
-            "the migrated value must be persisted without rewriting the silent key"
-        );
+        assert_eq!(preferences.display_mode, "external");
+        assert!(repo.writes().is_empty());
     }
 
     #[cfg(feature = "browser-use")]
@@ -3214,10 +3228,16 @@ mod tests {
         assert_eq!(preferences.display_mode, "headless");
         assert_eq!(
             repo.writes(),
-            vec![(
-                "agent.browserUse.displayMode".to_owned(),
-                "\"headless\"".to_owned()
-            )]
+            vec![
+                (
+                    BROWSER_DISPLAY_MODE_PREF_KEY.to_owned(),
+                    "\"headless\"".to_owned()
+                ),
+                (
+                    BROWSER_DISPLAY_MODE_VERSION_PREF_KEY.to_owned(),
+                    BROWSER_DISPLAY_MODE_POLICY_VERSION.to_owned()
+                ),
+            ]
         );
     }
 
@@ -3225,18 +3245,27 @@ mod tests {
     #[tokio::test]
     async fn invalid_display_mode_is_repaired_to_headless() {
         let repo = BrowserPreferenceTestRepository::with_rows(&[
-            ("agent.browserUse.displayMode", "\"visible\""),
-            ("agent.browserUse.silent", "false"),
+            (BROWSER_DISPLAY_MODE_PREF_KEY, "\"visible\""),
+            (
+                BROWSER_DISPLAY_MODE_VERSION_PREF_KEY,
+                BROWSER_DISPLAY_MODE_POLICY_VERSION,
+            ),
         ]);
 
         let preferences = load_browser_startup_preferences(&repo).await;
         assert_eq!(preferences.display_mode, "headless");
         assert_eq!(
             repo.writes(),
-            vec![(
-                "agent.browserUse.displayMode".to_owned(),
-                "\"headless\"".to_owned()
-            )],
+            vec![
+                (
+                    BROWSER_DISPLAY_MODE_PREF_KEY.to_owned(),
+                    "\"headless\"".to_owned()
+                ),
+                (
+                    BROWSER_DISPLAY_MODE_VERSION_PREF_KEY.to_owned(),
+                    BROWSER_DISPLAY_MODE_POLICY_VERSION.to_owned()
+                ),
+            ],
             "malformed configuration must converge to the silent headless default"
         );
     }
@@ -3404,20 +3433,24 @@ mod tests {
         let (coordinator, probe, _hub) = shutdown_coordinator_fixture().await;
         probe
             .fail_shutdowns_remaining
-            .store(1, Ordering::Release);
+            .store(2, Ordering::Release);
 
         let first = coordinator.shutdown().await;
         assert!(first.is_err());
-        assert_eq!(probe.shutdown_calls.load(Ordering::Acquire), 1);
+        assert_eq!(
+            probe.shutdown_calls.load(Ordering::Acquire),
+            2,
+            "one Hub shutdown pass retries retained Host authority before returning its first error"
+        );
 
         assert!(coordinator.shutdown().await.is_ok());
         assert_eq!(
             probe.shutdown_calls.load(Ordering::Acquire),
-            2,
+            3,
             "failed flight must be cleared so retained Hub cleanup can retry"
         );
         assert!(coordinator.shutdown().await.is_ok());
-        assert_eq!(probe.shutdown_calls.load(Ordering::Acquire), 2);
+        assert_eq!(probe.shutdown_calls.load(Ordering::Acquire), 3);
     }
 
     #[cfg(feature = "browser-use")]
@@ -3426,26 +3459,26 @@ mod tests {
         let (coordinator, probe, _hub) = shutdown_coordinator_fixture().await;
         probe
             .fail_shutdowns_remaining
-            .store(1, Ordering::Release);
+            .store(2, Ordering::Release);
         probe.block_shutdown.store(true, Ordering::Release);
 
         let first = coordinator.current_or_start_flight().await;
         probe.wait_for_shutdown_calls(1).await;
         let follower = coordinator.current_or_start_flight().await;
         assert!(Arc::ptr_eq(&first, &follower));
-        probe.shutdown_release.add_permits(1);
+        probe.shutdown_release.add_permits(2);
 
         assert!(first.wait().await.is_err());
         assert!(follower.wait().await.is_err());
         assert_eq!(
             probe.shutdown_calls.load(Ordering::Acquire),
-            1,
+            2,
             "followers of the failed flight must receive that failure rather than silently starting a retry"
         );
 
         probe.block_shutdown.store(false, Ordering::Release);
         assert!(coordinator.shutdown().await.is_ok());
-        assert_eq!(probe.shutdown_calls.load(Ordering::Acquire), 2);
+        assert_eq!(probe.shutdown_calls.load(Ordering::Acquire), 3);
     }
 
     #[cfg(feature = "browser-use")]

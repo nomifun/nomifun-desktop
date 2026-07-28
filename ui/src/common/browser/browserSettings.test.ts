@@ -5,14 +5,24 @@
  */
 
 import { describe, expect, test } from 'bun:test';
+import type { ConfigKeyMap } from '@/common/config/configKeys';
 import {
   BROWSER_DISPLAY_MODES,
+  BROWSER_DISPLAY_MODE_POLICY_VERSION,
   isBrowserDisplayMode,
   migrateBrowserDisplayMode,
   normalizeBrowserResourcePolicy,
 } from './browserSettings';
 
 describe('migrateBrowserDisplayMode', () => {
+  test('keeps the renderer config schema on the backend v2 lineage marker', () => {
+    const configVersion: NonNullable<
+      ConfigKeyMap['agent.browserUse.displayModeVersion']
+    > = BROWSER_DISPLAY_MODE_POLICY_VERSION;
+
+    expect(configVersion).toBe(2);
+  });
+
   test('publishes headless and external as the two user policies', () => {
     expect(BROWSER_DISPLAY_MODES).toEqual(['headless', 'external']);
     expect(isBrowserDisplayMode('headless')).toBe(true);
@@ -20,41 +30,46 @@ describe('migrateBrowserDisplayMode', () => {
     expect(isBrowserDisplayMode('embedded')).toBe(false);
   });
 
-  test('preserves explicit user choices without a rewrite', () => {
-    expect(migrateBrowserDisplayMode({ displayMode: 'headless', silent: false })).toEqual({
+  test('preserves valid choices only across the v2 lineage boundary', () => {
+    expect(
+      migrateBrowserDisplayMode({
+        displayMode: 'headless',
+        displayModeVersion: BROWSER_DISPLAY_MODE_POLICY_VERSION,
+      })
+    ).toEqual({
       displayMode: 'headless',
       shouldPersist: false,
       source: 'displayMode',
     });
-    expect(migrateBrowserDisplayMode({ displayMode: 'external', silent: true })).toEqual({
+    expect(
+      migrateBrowserDisplayMode({
+        displayMode: 'external',
+        displayModeVersion: '  "2"  ',
+      })
+    ).toEqual({
       displayMode: 'external',
       shouldPersist: false,
       source: 'displayMode',
     });
   });
 
-  test('migrates the removed embedded viewer to headless', () => {
-    expect(migrateBrowserDisplayMode({ displayMode: 'embedded', silent: false })).toEqual({
-      displayMode: 'headless',
-      shouldPersist: true,
-      source: 'displayMode',
-    });
-  });
-
-  test('migrates silent=false to the explicit visible default', () => {
-    expect(migrateBrowserDisplayMode({ silent: false })).toEqual({
-      displayMode: 'external',
-      shouldPersist: true,
-      source: 'silent',
-    });
-  });
-
-  test('migrates silent=true to headless and requests persistence', () => {
-    expect(migrateBrowserDisplayMode({ silent: true })).toEqual({
-      displayMode: 'headless',
-      shouldPersist: true,
-      source: 'silent',
-    });
+  test('fails every unversioned or old-version value closed to headless', () => {
+    for (const input of [
+      { displayMode: 'external' },
+      { displayMode: 'headless' },
+      { displayMode: 'external', displayModeVersion: 1 },
+      { displayMode: 'external', displayModeVersion: '1' },
+      { displayMode: 'external', displayModeVersion: null },
+      { silent: false },
+      { silent: 'false' },
+      { silent: true },
+    ]) {
+      expect(migrateBrowserDisplayMode(input)).toEqual({
+        displayMode: 'headless',
+        shouldPersist: true,
+        source: 'lineage',
+      });
+    }
   });
 
   test('defaults a fresh install to headless and requests persistence', () => {
@@ -65,20 +80,20 @@ describe('migrateBrowserDisplayMode', () => {
     });
   });
 
-  test('repairs an invalid new mode to headless without consulting legacy silent', () => {
-    expect(migrateBrowserDisplayMode({ displayMode: 'visible', silent: false })).toEqual({
-      displayMode: 'headless',
-      shouldPersist: true,
-      source: 'displayMode',
-    });
-  });
-
-  test('treats an explicitly present null mode as malformed new configuration', () => {
-    expect(migrateBrowserDisplayMode({ displayMode: null, silent: false })).toEqual({
-      displayMode: 'headless',
-      shouldPersist: true,
-      source: 'displayMode',
-    });
+  test('repairs malformed v2 state to headless', () => {
+    for (const displayMode of ['embedded', 'visible', null, undefined]) {
+      expect(
+        migrateBrowserDisplayMode({
+          displayMode,
+          displayModeVersion: BROWSER_DISPLAY_MODE_POLICY_VERSION,
+          silent: false,
+        })
+      ).toEqual({
+        displayMode: 'headless',
+        shouldPersist: true,
+        source: 'lineage',
+      });
+    }
   });
 });
 

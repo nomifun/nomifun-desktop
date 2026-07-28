@@ -16,7 +16,8 @@ interface BrowserPageHeaderProps {
   pressureState?: BrowserResourcePressureState | null;
   refreshing: boolean;
   closingAll: boolean;
-  hasLanes: boolean;
+  hasManagedResources: boolean;
+  controlsDisabled?: boolean;
   canCloseAll: boolean;
   closeAllLabel?: string;
   onRefresh: () => void;
@@ -29,7 +30,8 @@ const BrowserPageHeader: React.FC<BrowserPageHeaderProps> = ({
   pressureState,
   refreshing,
   closingAll,
-  hasLanes,
+  hasManagedResources,
+  controlsDisabled = false,
   canCloseAll,
   closeAllLabel,
   onRefresh,
@@ -70,6 +72,7 @@ const BrowserPageHeader: React.FC<BrowserPageHeaderProps> = ({
       <Button
         type='outline'
         loading={refreshing}
+        disabled={controlsDisabled}
         icon={<Refresh theme='outline' size='14' />}
         onClick={onRefresh}
       >
@@ -79,7 +82,7 @@ const BrowserPageHeader: React.FC<BrowserPageHeaderProps> = ({
         <Button
           status='danger'
           type='outline'
-          disabled={!hasLanes}
+          disabled={!hasManagedResources || controlsDisabled}
           loading={closingAll}
           icon={<Delete theme='outline' size='14' />}
           onClick={onCloseAll}

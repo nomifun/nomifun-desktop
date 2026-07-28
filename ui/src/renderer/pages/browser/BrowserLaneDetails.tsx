@@ -13,10 +13,13 @@ import type { IBrowserLane } from '@/common/browser/browserTypes';
 interface BrowserLaneDetailsProps {
   lane: IBrowserLane;
   closing: boolean;
-  foregrounding: boolean;
-  canForeground: boolean;
+  visibilityChanging: boolean;
+  actionsDisabled?: boolean;
+  hostHeadful?: boolean | null;
+  canChangeVisibility: boolean;
   onClose: (lane: IBrowserLane) => void;
   onForeground: (lane: IBrowserLane) => void;
+  onBackground: (lane: IBrowserLane) => void;
 }
 
 const DASH = '—';
@@ -103,10 +106,13 @@ const StatusSection: React.FC<{
 const BrowserLaneDetails: React.FC<BrowserLaneDetailsProps> = ({
   lane,
   closing,
-  foregrounding,
-  canForeground,
+  visibilityChanging,
+  actionsDisabled = false,
+  hostHeadful,
+  canChangeVisibility,
   onClose,
   onForeground,
+  onBackground,
 }) => {
   const { t } = useTranslation();
   const activeTab =
@@ -166,7 +172,7 @@ const BrowserLaneDetails: React.FC<BrowserLaneDetailsProps> = ({
   return (
     <div
       className='min-w-0 flex flex-col gap-12px'
-      data-browser-lane-status-only
+      data-browser-lane-management
       data-browser-lane-id={lane.lane_id}
     >
       <header className='rd-14px border border-solid border-[color:color-mix(in_srgb,var(--color-border-2)_82%,transparent)] bg-bg-1 px-16px py-15px shadow-[0_7px_22px_rgba(15,23,42,0.03)]'>
@@ -182,7 +188,7 @@ const BrowserLaneDetails: React.FC<BrowserLaneDetailsProps> = ({
               <Tag color={lifecycleColor(lane.lifecycle_state)}>
                 {lifecycleLabel(lane.lifecycle_state)}
               </Tag>
-              <Tag color='gray'>{t('browser.details.statusOnly')}</Tag>
+              <Tag color='gray'>{t('browser.details.managed')}</Tag>
             </div>
             <div className='mt-4px text-12px font-500 leading-18px text-t-primary'>
               {valueOrDash(activeTitle)}
@@ -198,21 +204,27 @@ const BrowserLaneDetails: React.FC<BrowserLaneDetailsProps> = ({
             </div>
           </div>
           <div className='flex flex-wrap items-center justify-end gap-8px'>
-            {canForeground && (
+            {canChangeVisibility && hostHeadful != null && (
               <Button
                 type='primary'
-                loading={foregrounding}
+                loading={visibilityChanging}
+                disabled={closing || actionsDisabled}
                 icon={<BringToFront theme='outline' size='14' />}
-                onClick={() => onForeground(lane)}
-                data-browser-foreground-action
+                onClick={() =>
+                  hostHeadful ? onBackground(lane) : onForeground(lane)
+                }
+                data-browser-visibility-action={hostHeadful ? 'background' : 'foreground'}
               >
-                {t('browser.foreground.action')}
+                {hostHeadful
+                  ? t('browser.background.action')
+                  : t('browser.foreground.action')}
               </Button>
             )}
             <Button
               status='danger'
               type='outline'
               loading={closing}
+              disabled={visibilityChanging || actionsDisabled}
               icon={<Delete theme='outline' size='14' />}
               onClick={() => onClose(lane)}
             >

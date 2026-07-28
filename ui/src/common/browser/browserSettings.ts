@@ -9,18 +9,18 @@ import type { BrowserDisplayMode } from '@/common/config/configKeys';
 
 export type { BrowserDisplayMode } from '@/common/config/configKeys';
 
-// The browser management page is intentionally status-only. The two supported
-// display modes are trusted user preferences for the application-level default
-// visibility policy: `headless` (default) launches routine Primary work with
-// Chromium `--headless=new`; `external` is the user's explicit choice to make
-// the Primary Host default-visible. Neither restores the removed embedded
-// viewer, and Agent tool input can never select the mode.
+// The two supported display modes are trusted installation-level preferences:
+// `headless` (default) launches routine Primary work with Chromium
+// `--headless=new`; `external` is the user's explicit choice to make the
+// Primary Host default-visible. The live owner API applies the policy; Agent
+// tool input can never select the mode.
 export const BROWSER_DISPLAY_MODES = ['headless', 'external'] as const;
+export const BROWSER_DISPLAY_MODE_POLICY_VERSION = 2 as const;
 
 export type BrowserDisplayModeMigration = {
   displayMode: BrowserDisplayMode;
   shouldPersist: boolean;
-  source: 'displayMode' | 'silent' | 'default';
+  source: 'displayMode' | 'lineage' | 'default';
 };
 
 export function isBrowserDisplayMode(value: unknown): value is (typeof BROWSER_DISPLAY_MODES)[number] {
@@ -31,18 +31,29 @@ export function isBrowserDisplayMode(value: unknown): value is (typeof BROWSER_D
  * Resolve the current display mode without mutating configuration.
  *
  * The caller owns persistence so this helper remains deterministic and easy to
- * exercise without a renderer or backend. Mirrors the backend migration:
- * - explicit headless/external choices are preserved without a rewrite;
- * - the historical embedded viewer and malformed values repair to headless;
- * - legacy silent=true maps to headless, silent=false maps to external
- *   (consulted only when displayMode is absent; silent is never written back);
- * - a fresh install persists the silent headless default.
+ * exercise without a renderer or backend. This is only a fail-safe renderer
+ * fallback; the live owner API remains authoritative.
+ *
+ * Version 2 is the lineage boundary for an explicit user visibility choice.
+ * A valid mode is preserved only when the marker is exactly v2. Every
+ * unversioned, old-version, legacy-silent, missing, or malformed state fails
+ * closed to headless so an old inferred `external` value cannot reopen a
+ * foreground operating-system window.
  */
 export function migrateBrowserDisplayMode(input: {
   displayMode?: unknown;
+  displayModeVersion?: unknown;
   silent?: unknown;
 }): BrowserDisplayModeMigration {
-  if (isBrowserDisplayMode(input.displayMode)) {
+  const normalizedVersion =
+    typeof input.displayModeVersion === 'string'
+      ? input.displayModeVersion.trim().replace(/^"|"$/g, '')
+      : input.displayModeVersion;
+  const isCurrentVersion =
+    normalizedVersion === BROWSER_DISPLAY_MODE_POLICY_VERSION ||
+    normalizedVersion === String(BROWSER_DISPLAY_MODE_POLICY_VERSION);
+
+  if (isCurrentVersion && isBrowserDisplayMode(input.displayMode)) {
     return {
       displayMode: input.displayMode,
       shouldPersist: false,
@@ -50,30 +61,15 @@ export function migrateBrowserDisplayMode(input: {
     };
   }
 
-  // Any old or malformed value is deliberately normalized to headless. This
-  // prevents a stale embedded viewer preference from opening a JPEG stream
-  // and keeps routine Agent work silent unless the user explicitly opted into
-  // the external default. Persistence is requested so migration converges.
-  if (input.displayMode !== undefined) {
-    return {
-      displayMode: 'headless',
-      shouldPersist: true,
-      source: 'displayMode',
-    };
-  }
-
-  if (input.silent !== undefined) {
-    return {
-      displayMode: input.silent === false || input.silent === 'false' ? 'external' : 'headless',
-      shouldPersist: true,
-      source: 'silent',
-    };
-  }
-
   return {
     displayMode: 'headless',
     shouldPersist: true,
-    source: 'default',
+    source:
+      input.displayMode === undefined &&
+      input.displayModeVersion === undefined &&
+      input.silent === undefined
+        ? 'default'
+        : 'lineage',
   };
 }
 

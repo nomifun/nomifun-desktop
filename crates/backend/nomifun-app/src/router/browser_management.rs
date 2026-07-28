@@ -19,8 +19,8 @@ use nomifun_browser_platform::{
     BrowserCapacitySnapshot, BrowserErrorCode, BrowserHostId, BrowserIdentityMode,
     BrowserLaneId, BrowserLaneSnapshot, BrowserOverview, BrowserPlatformError,
     BrowserSessionHub, BrowserSurface, BrowserTabSnapshot, CloseResult,
-    HostLifecycleState, LaneLifecycleState, QueueMetadata, ResourcePolicy, ResourcePolicyPreset,
-    ResourcePressureState,
+    BrowserVisibility, HostLifecycleState, LaneLifecycleState, QueueMetadata,
+    ResourcePolicy, ResourcePolicyPreset, ResourcePressureState,
     MAX_ACTIVE_OPERATIONS, MAX_BROWSER_MEMORY_RATIO, MAX_GLOBAL_QUEUE, MAX_OPEN_LANES,
     MAX_OWNER_QUEUE, MAX_RESERVED_MEMORY_BYTES, MIN_BROWSER_MEMORY_RATIO,
     MIN_RESERVED_MEMORY_BYTES,
@@ -33,26 +33,32 @@ use serde_json::{Map, Value, json};
 pub(super) mod browser_url_projection;
 
 use browser_url_projection::project_renderer_url;
+use crate::services::{
+    BROWSER_DISPLAY_MODE_POLICY_VERSION, BROWSER_DISPLAY_MODE_PREF_KEY,
+    BROWSER_DISPLAY_MODE_VERSION_PREF_KEY,
+};
 
 const RESOURCE_POLICY_PREF_KEY: &str = "browser.resourcePolicy";
 
 #[derive(Clone)]
 pub struct BrowserManagementState {
     pub hub: Option<Arc<BrowserSessionHub>>,
-    pub resource_preferences: Arc<dyn IClientPreferenceRepository>,
+    pub preferences: Arc<dyn IClientPreferenceRepository>,
     installation_owner_user_id: Arc<str>,
+    display_mode_update_gate: Arc<tokio::sync::Mutex<()>>,
 }
 
 impl BrowserManagementState {
     pub fn new(
         hub: Option<Arc<BrowserSessionHub>>,
-        resource_preferences: Arc<dyn IClientPreferenceRepository>,
+        preferences: Arc<dyn IClientPreferenceRepository>,
         installation_owner_user_id: Arc<str>,
     ) -> Self {
         Self {
             hub,
-            resource_preferences,
+            preferences,
             installation_owner_user_id,
+            display_mode_update_gate: Arc::new(tokio::sync::Mutex::new(())),
         }
     }
 
@@ -80,6 +86,10 @@ pub fn browser_management_user_routes(state: BrowserManagementState) -> Router {
             post(foreground_lane),
         )
         .route(
+            "/api/browser/lanes/{lane_id}/background",
+            post(background_lane),
+        )
+        .route(
             "/api/browser/conversations/{conversation_id}/close",
             post(close_conversation),
         )
@@ -97,6 +107,10 @@ pub fn browser_management_owner_routes(state: BrowserManagementState) -> Router 
         .route(
             "/api/browser/resource-policy",
             get(get_resource_policy).put(put_resource_policy),
+        )
+        .route(
+            "/api/browser/display-mode",
+            get(get_display_mode).put(put_display_mode),
         )
         .with_state(state)
 }
@@ -177,6 +191,20 @@ impl BrowserApiError {
         }
     }
 
+    fn invalid_display_mode(message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::BAD_REQUEST,
+            body: BrowserApiErrorBody {
+                code: json!("invalid_browser_display_mode"),
+                message: message.into(),
+                retryable: false,
+                next_action: "Choose either headless or external display mode and retry.".to_owned(),
+                lane_id: None,
+                metadata: Value::Null,
+            },
+        }
+    }
+
     fn not_found() -> Self {
         let mut error = Self::from(BrowserPlatformError::lane_not_found(
             BrowserLaneId::parse("unknown").expect("static lane id is valid"),
@@ -194,6 +222,22 @@ impl BrowserApiError {
                 retryable: true,
                 next_action: "Retry the request. If it continues to fail, inspect application storage."
                     .to_owned(),
+                lane_id: None,
+                metadata: Value::Null,
+            },
+        }
+    }
+
+    fn display_mode_storage() -> Self {
+        Self {
+            status: StatusCode::INTERNAL_SERVER_ERROR,
+            body: BrowserApiErrorBody {
+                code: json!("browser_display_mode_storage_failed"),
+                message: "The browser display mode could not be saved.".to_owned(),
+                retryable: true,
+                next_action:
+                    "Retry the request. If it continues to fail, inspect application storage."
+                        .to_owned(),
                 lane_id: None,
                 metadata: Value::Null,
             },
@@ -475,6 +519,8 @@ struct BrowserOverviewDto {
     running_lanes: usize,
     queued_lanes: usize,
     total_lanes: usize,
+    managed_host_count: usize,
+    pending_cleanup_count: usize,
     pressure_state: ResourcePressureState,
     capacity: BrowserCapacityDto,
     hosts: Vec<BrowserHostDto>,
@@ -495,6 +541,8 @@ struct BrowserCapacityDto {
 struct BrowserHostDto {
     host_id: BrowserHostId,
     state: HostLifecycleState,
+    epoch: u64,
+    headful: bool,
     identity_mode: BrowserIdentityMode,
     lane_count: usize,
     rss_bytes: Option<u64>,
@@ -524,6 +572,11 @@ impl BrowserOverviewDto {
             running_lanes: value.running_lanes,
             queued_lanes: value.queued_lanes,
             total_lanes: value.total_lanes,
+            // The installation overview carries global authority counts;
+            // `overview_for_user` computes the same fields from that user's
+            // owned Hosts and retained cleanup records.
+            managed_host_count: value.managed_host_count,
+            pending_cleanup_count: value.pending_cleanup_count,
             pressure_state: value.pressure_state,
             capacity: value.capacity.into(),
             hosts: value
@@ -532,6 +585,8 @@ impl BrowserOverviewDto {
                 .map(|host| BrowserHostDto {
                     host_id: host.host_id,
                     state: host.state,
+                    epoch: host.epoch,
+                    headful: host.headful,
                     identity_mode: host.identity_mode,
                     lane_count: host.lane_count,
                     rss_bytes: host.rss_bytes,
@@ -547,6 +602,7 @@ struct BrowserLaneDto {
     lane_id: BrowserLaneId,
     lane_name: String,
     lifecycle_state: LaneLifecycleState,
+    browser_epoch: u64,
     user_id: String,
     conversation_id: Option<String>,
     runtime_instance_id: String,
@@ -665,6 +721,7 @@ impl From<BrowserLaneSnapshot> for BrowserLaneDto {
             lane_id: value.lane_id,
             lane_name: value.lane_key.lane_name,
             lifecycle_state: value.lifecycle_state,
+            browser_epoch: value.browser_epoch,
             user_id: caller.user_id,
             conversation_id: caller.conversation_id,
             runtime_instance_id: caller.runtime_instance_id,
@@ -693,6 +750,15 @@ impl From<BrowserLaneSnapshot> for BrowserLaneDto {
             recoverable: value.recoverable,
         }
     }
+}
+
+#[derive(Debug, Serialize)]
+struct BrowserScopedCloseResultDto {
+    closed: usize,
+    already_closed: bool,
+    remaining_lane_count: usize,
+    remaining_cleanup_count: usize,
+    remaining_managed_host_count: usize,
 }
 
 #[derive(Debug, Serialize)]
@@ -749,8 +815,13 @@ async fn get_overview(
 ) -> Result<Json<ApiResponse<BrowserOverviewDto>>, BrowserApiError> {
     let hub = state.require_hub()?;
     let can_manage_installation = state.is_installation_owner(&user);
+    let overview = if can_manage_installation {
+        hub.overview().await
+    } else {
+        hub.overview_for_user(user.id.as_str()).await
+    };
     Ok(Json(ApiResponse::ok(BrowserOverviewDto::from_overview(
-        hub.overview_for_user(user.id.as_str()).await,
+        overview,
         can_manage_installation,
     ))))
 }
@@ -774,16 +845,31 @@ async fn close_lane(
     State(state): State<BrowserManagementState>,
     Extension(user): Extension<CurrentUser>,
     Path(lane_id): Path<String>,
-) -> Result<Json<ApiResponse<CloseResult>>, BrowserApiError> {
+) -> Result<Json<ApiResponse<BrowserScopedCloseResultDto>>, BrowserApiError> {
     let hub = state.require_hub()?;
     let lane_id = parse_lane_id(lane_id)?;
     authorize_existing_lane(&hub, user.id.as_str(), &lane_id).await?;
-    Ok(Json(ApiResponse::ok(hub.close_lane(&lane_id).await?)))
+    let result = hub.close_lane(&lane_id).await?;
+    Ok(Json(ApiResponse::ok(
+        scoped_close_result(
+            &hub,
+            user.id.as_str(),
+            state.is_installation_owner(&user),
+            result,
+        )
+        .await,
+    )))
 }
 
 #[derive(Debug, Serialize)]
 struct BrowserForegroundResultDto {
     foregrounded: bool,
+    lane_id: BrowserLaneId,
+}
+
+#[derive(Debug, Serialize)]
+struct BrowserBackgroundResultDto {
+    backgrounded: bool,
     lane_id: BrowserLaneId,
 }
 
@@ -793,12 +879,32 @@ async fn foreground_lane(
     Path(lane_id): Path<String>,
 ) -> Result<Json<ApiResponse<BrowserForegroundResultDto>>, BrowserApiError> {
     let hub = state.require_hub()?;
-    let lane_id = parse_foreground_lane_id(lane_id)?;
+    let lane_id = parse_visibility_lane_id(lane_id)?;
     hub.foreground_lane_for_user(user.id.as_str(), &lane_id)
         .await
         .map_err(|error| foreground_api_error(error, &lane_id))?;
     Ok(Json(ApiResponse::ok(BrowserForegroundResultDto {
         foregrounded: true,
+        lane_id,
+    })))
+}
+
+async fn background_lane(
+    State(state): State<BrowserManagementState>,
+    Extension(user): Extension<CurrentUser>,
+    Path(lane_id): Path<String>,
+) -> Result<Json<ApiResponse<BrowserBackgroundResultDto>>, BrowserApiError> {
+    let hub = state.require_hub()?;
+    let lane_id = parse_visibility_lane_id(lane_id)?;
+    hub.set_lane_visibility_for_user(
+        user.id.as_str(),
+        &lane_id,
+        BrowserVisibility::Headless,
+    )
+    .await
+    .map_err(|error| foreground_api_error(error, &lane_id))?;
+    Ok(Json(ApiResponse::ok(BrowserBackgroundResultDto {
+        backgrounded: true,
         lane_id,
     })))
 }
@@ -859,6 +965,95 @@ async fn close_all(
     Ok(Json(ApiResponse::ok(hub.close_all().await?)))
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum BrowserDisplayModeValueDto {
+    Headless,
+    External,
+}
+
+impl BrowserDisplayModeValueDto {
+    fn from_visibility(visibility: BrowserVisibility) -> Self {
+        match visibility {
+            BrowserVisibility::Headless => Self::Headless,
+            BrowserVisibility::Headful => Self::External,
+        }
+    }
+
+    fn visibility(self) -> BrowserVisibility {
+        match self {
+            Self::Headless => BrowserVisibility::Headless,
+            Self::External => BrowserVisibility::Headful,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BrowserDisplayModeDto {
+    display_mode: BrowserDisplayModeValueDto,
+}
+
+async fn get_display_mode(
+    State(state): State<BrowserManagementState>,
+    Extension(_user): Extension<CurrentUser>,
+) -> Result<Json<ApiResponse<BrowserDisplayModeDto>>, BrowserApiError> {
+    // A read must not observe the transient live state between PUT applying a
+    // Host visibility change and either committing it or rolling it back after
+    // a storage failure.
+    let _update_guard = state.display_mode_update_gate.lock().await;
+    let hub = state.require_hub()?;
+    Ok(Json(ApiResponse::ok(BrowserDisplayModeDto {
+        display_mode: BrowserDisplayModeValueDto::from_visibility(
+            hub.primary_visibility().await,
+        ),
+    })))
+}
+
+async fn put_display_mode(
+    State(state): State<BrowserManagementState>,
+    Extension(_user): Extension<CurrentUser>,
+    body: Result<Json<BrowserDisplayModeDto>, JsonRejection>,
+) -> Result<Json<ApiResponse<BrowserDisplayModeDto>>, BrowserApiError> {
+    let Json(request) = body.map_err(|_| {
+        BrowserApiError::invalid_display_mode(
+            "The browser display mode body must contain only display_mode with value headless or external.",
+        )
+    })?;
+    let serialized_mode = serde_json::to_string(&request.display_mode)
+        .map_err(|_| BrowserApiError::display_mode_storage())?;
+    let _update_guard = state.display_mode_update_gate.lock().await;
+    let hub = state.require_hub()?;
+    let previous = hub.primary_visibility().await;
+    let requested = request.display_mode.visibility();
+    let applied = hub.set_primary_visibility(requested).await?;
+
+    if let Err(error) = state
+        .preferences
+        .upsert_batch(&[
+            (BROWSER_DISPLAY_MODE_PREF_KEY, serialized_mode.as_str()),
+            (
+                BROWSER_DISPLAY_MODE_VERSION_PREF_KEY,
+                BROWSER_DISPLAY_MODE_POLICY_VERSION,
+            ),
+        ])
+        .await
+    {
+        tracing::warn!(%error, "could not persist browser display mode");
+        if let Err(rollback_error) = hub.set_primary_visibility(previous).await {
+            tracing::error!(
+                %rollback_error,
+                "could not roll back live browser display mode after persistence failure"
+            );
+        }
+        return Err(BrowserApiError::display_mode_storage());
+    }
+
+    Ok(Json(ApiResponse::ok(BrowserDisplayModeDto {
+        display_mode: BrowserDisplayModeValueDto::from_visibility(applied),
+    })))
+}
+
 async fn get_resource_policy(
     State(state): State<BrowserManagementState>,
     Extension(_user): Extension<CurrentUser>,
@@ -890,7 +1085,7 @@ async fn put_resource_policy(
     let response = resource_policy_dto(&policy);
     let persisted = serde_json::to_string(&response).map_err(|_| BrowserApiError::storage())?;
     if let Err(error) = state
-        .resource_preferences
+        .preferences
         .upsert_batch(&[(RESOURCE_POLICY_PREF_KEY, persisted.as_str())])
         .await
     {
@@ -912,7 +1107,7 @@ fn parse_lane_id(value: String) -> Result<BrowserLaneId, BrowserApiError> {
     BrowserLaneId::parse(value).map_err(BrowserApiError::from)
 }
 
-fn parse_foreground_lane_id(value: String) -> Result<BrowserLaneId, BrowserApiError> {
+fn parse_visibility_lane_id(value: String) -> Result<BrowserLaneId, BrowserApiError> {
     BrowserLaneId::parse(value).map_err(|_| BrowserApiError::invalid_browser_lane_id())
 }
 
@@ -932,6 +1127,32 @@ async fn authorize_existing_lane(
         return Err(BrowserApiError::not_found());
     }
     Ok(())
+}
+
+async fn scoped_close_result(
+    hub: &BrowserSessionHub,
+    user_id: &str,
+    can_manage_installation: bool,
+    result: CloseResult,
+) -> BrowserScopedCloseResultDto {
+    if can_manage_installation {
+        return BrowserScopedCloseResultDto {
+            closed: result.closed,
+            already_closed: result.already_closed,
+            remaining_lane_count: result.remaining_lane_count,
+            remaining_cleanup_count: result.remaining_cleanup_count,
+            remaining_managed_host_count: result.remaining_managed_host_count,
+        };
+    }
+
+    let overview = hub.overview_for_user(user_id).await;
+    BrowserScopedCloseResultDto {
+        closed: result.closed,
+        already_closed: result.already_closed,
+        remaining_lane_count: overview.total_lanes,
+        remaining_cleanup_count: overview.pending_cleanup_count,
+        remaining_managed_host_count: overview.managed_host_count,
+    }
 }
 
 async fn close_lane_ids_best_effort(
@@ -1130,12 +1351,15 @@ fn apply_resource_policy(
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeSet;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Mutex as StdMutex};
+    use std::time::Duration;
 
     use async_trait::async_trait;
     use axum::body::Body;
     use axum::http::{Request, StatusCode};
     use axum::middleware;
+    use futures_util::FutureExt;
     use http_body_util::BodyExt;
     use nomifun_auth::{
         AuthState, CookieConfig, InstanceOwnerState, JwtService, auth_middleware, csrf_middleware,
@@ -1148,8 +1372,9 @@ mod tests {
         HostLifecycleState, HubConfig, LaneLaunchRequest,
     };
     use nomifun_db::{
-        IClientPreferenceRepository, IUserRepository, SqliteClientPreferenceRepository,
-        SqliteUserRepository,
+        DbError, IClientPreferenceRepository, IUserRepository,
+        SqliteClientPreferenceRepository, SqliteUserRepository,
+        models::ClientPreference,
     };
     use tower::ServiceExt;
 
@@ -1165,6 +1390,7 @@ mod tests {
 
     struct FakeHost {
         id: BrowserHostId,
+        headful: bool,
         close_failures: Arc<StdMutex<BTreeSet<BrowserLaneId>>>,
         close_attempts: Arc<StdMutex<Vec<BrowserLaneId>>>,
         foreground_attempts: Arc<StdMutex<Vec<BrowserLaneId>>>,
@@ -1187,6 +1413,7 @@ mod tests {
         ) -> Result<Arc<dyn BrowserHostDriver>, BrowserPlatformError> {
             Ok(Arc::new(FakeHost {
                 id: request.host_id,
+                headful: request.headful,
                 close_failures: Arc::clone(&self.close_failures),
                 close_attempts: Arc::clone(&self.close_attempts),
                 foreground_attempts: Arc::clone(&self.foreground_attempts),
@@ -1207,6 +1434,10 @@ mod tests {
 
         fn state(&self) -> HostLifecycleState {
             HostLifecycleState::Running
+        }
+
+        fn is_headful(&self) -> bool {
+            self.headful
         }
 
         fn process_id(&self) -> Option<u32> {
@@ -1294,8 +1525,83 @@ mod tests {
         }
     }
 
+    struct TestPreferenceRepository {
+        inner: SqliteClientPreferenceRepository,
+        fail_writes: AtomicBool,
+        block_writes: AtomicBool,
+        write_entered: tokio::sync::Semaphore,
+        write_release: tokio::sync::Semaphore,
+    }
+
+    impl TestPreferenceRepository {
+        fn new(inner: SqliteClientPreferenceRepository) -> Self {
+            Self {
+                inner,
+                fail_writes: AtomicBool::new(false),
+                block_writes: AtomicBool::new(false),
+                write_entered: tokio::sync::Semaphore::new(0),
+                write_release: tokio::sync::Semaphore::new(0),
+            }
+        }
+
+        fn set_fail_writes(&self, fail: bool) {
+            self.fail_writes.store(fail, Ordering::Release);
+        }
+
+        fn block_writes(&self) {
+            self.block_writes.store(true, Ordering::Release);
+        }
+
+        async fn wait_for_blocked_write(&self) {
+            self.write_entered
+                .acquire()
+                .await
+                .expect("test preference repository must remain open")
+                .forget();
+        }
+
+        fn release_blocked_write(&self) {
+            self.block_writes.store(false, Ordering::Release);
+            self.write_release.add_permits(1);
+        }
+    }
+
+    #[async_trait]
+    impl IClientPreferenceRepository for TestPreferenceRepository {
+        async fn get_all(&self) -> Result<Vec<ClientPreference>, DbError> {
+            self.inner.get_all().await
+        }
+
+        async fn get_by_keys(&self, keys: &[&str]) -> Result<Vec<ClientPreference>, DbError> {
+            self.inner.get_by_keys(keys).await
+        }
+
+        async fn upsert_batch(&self, entries: &[(&str, &str)]) -> Result<(), DbError> {
+            if self.block_writes.load(Ordering::Acquire) {
+                self.write_entered.add_permits(1);
+                self.write_release
+                    .acquire()
+                    .await
+                    .expect("test preference repository must remain open")
+                    .forget();
+            }
+            if self.fail_writes.load(Ordering::Acquire) {
+                return Err(DbError::Init(
+                    "synthetic browser preference write failure".to_owned(),
+                ));
+            }
+            self.inner.upsert_batch(entries).await
+        }
+
+        async fn delete_keys(&self, keys: &[&str]) -> Result<(), DbError> {
+            self.inner.delete_keys(keys).await
+        }
+    }
+
     struct TestApp {
         router: Router,
+        management_state: BrowserManagementState,
+        owner_user: CurrentUser,
         token: String,
         secondary_token: String,
         secondary_user_id: String,
@@ -1307,13 +1613,17 @@ mod tests {
         close_attempts: Arc<StdMutex<Vec<BrowserLaneId>>>,
         foreground_attempts: Arc<StdMutex<Vec<BrowserLaneId>>>,
         foreground_failure: Arc<StdMutex<Option<BrowserPlatformError>>>,
-        preferences: Arc<dyn IClientPreferenceRepository>,
+        preferences: Arc<TestPreferenceRepository>,
     }
 
     async fn test_app(with_hub: bool) -> TestApp {
         let database = nomifun_db::init_database_memory().await.unwrap();
         let user_repo_concrete = Arc::new(SqliteUserRepository::new(database.pool().clone()));
         let user = user_repo_concrete.get_system_user().await.unwrap().unwrap();
+        let owner_user = CurrentUser {
+            id: user.user_id.clone(),
+            username: user.username.clone(),
+        };
         let jwt = Arc::new(JwtService::new("browser-management-test-secret".to_owned()));
         let token = jwt.sign(user.user_id.as_str(), &user.username).unwrap();
         let non_owner = user_repo_concrete
@@ -1374,11 +1684,13 @@ mod tests {
             .lane_id
             .clone();
 
-        let preferences: Arc<dyn IClientPreferenceRepository> =
-            Arc::new(SqliteClientPreferenceRepository::new(database.pool().clone()));
+        let preferences = Arc::new(TestPreferenceRepository::new(
+            SqliteClientPreferenceRepository::new(database.pool().clone()),
+        ));
+        let management_preferences: Arc<dyn IClientPreferenceRepository> = preferences.clone();
         let state = BrowserManagementState::new(
             with_hub.then_some(Arc::clone(&hub)),
-            Arc::clone(&preferences),
+            management_preferences,
             Arc::from(user.user_id.as_str()),
         );
         let auth_state = AuthState {
@@ -1395,7 +1707,7 @@ mod tests {
                 auth_state.clone(),
                 auth_middleware,
             ));
-        let owner_router = browser_management_owner_routes(state)
+        let owner_router = browser_management_owner_routes(state.clone())
             .route_layer(middleware::from_fn_with_state(
                 owner_state,
                 require_instance_owner_middleware,
@@ -1407,6 +1719,8 @@ mod tests {
             .layer(middleware::from_fn_with_state(cookie, csrf_middleware));
         TestApp {
             router,
+            management_state: state,
+            owner_user,
             token,
             secondary_token,
             secondary_user_id,
@@ -1805,6 +2119,19 @@ mod tests {
                 .is_empty(),
             "CSRF rejection must happen before foreground dispatch"
         );
+
+        let background_without_csrf = app
+            .router
+            .clone()
+            .oneshot(authorized_request(
+                &app,
+                "POST",
+                format!("/api/browser/lanes/{}/background", app.lane_id),
+                false,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(background_without_csrf.status(), StatusCode::FORBIDDEN);
     }
 
     #[tokio::test]
@@ -1939,8 +2266,325 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn display_mode_owner_api_applies_live_and_persists_explicit_versioned_choice() {
+        let app = test_app(true).await;
+
+        let initial = app
+            .router
+            .clone()
+            .oneshot(authorized_request(
+                &app,
+                "GET",
+                "/api/browser/display-mode",
+                false,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(initial.status(), StatusCode::OK);
+        let initial = response_json(initial).await;
+        assert_eq!(initial["data"]["display_mode"], "headless");
+
+        let updated = app
+            .router
+            .clone()
+            .oneshot(authorized_json_request(
+                &app,
+                "PUT",
+                "/api/browser/display-mode",
+                json!({"display_mode": "external"}),
+            ))
+            .await
+            .unwrap();
+        let updated_status = updated.status();
+        let updated = response_json(updated).await;
+        assert_eq!(
+            updated_status,
+            StatusCode::OK,
+            "display mode update failed: {updated}"
+        );
+        assert_eq!(updated["data"]["display_mode"], "external");
+        assert_eq!(
+            app.hub.primary_visibility().await,
+            BrowserVisibility::Headful,
+            "the API response must represent the live Hub policy"
+        );
+        assert_eq!(
+            app.hub.overview().await.hosts[0].headful,
+            true,
+            "the running Primary Host must converge before the API reports success"
+        );
+
+        let persisted = app
+            .preferences
+            .get_by_keys(&[
+                BROWSER_DISPLAY_MODE_PREF_KEY,
+                BROWSER_DISPLAY_MODE_VERSION_PREF_KEY,
+            ])
+            .await
+            .unwrap();
+        let persisted: std::collections::BTreeMap<_, _> = persisted
+            .into_iter()
+            .map(|row| (row.key, row.value))
+            .collect();
+        assert_eq!(
+            persisted
+                .get(BROWSER_DISPLAY_MODE_PREF_KEY)
+                .map(String::as_str),
+            Some("\"external\"")
+        );
+        assert_eq!(
+            persisted
+                .get(BROWSER_DISPLAY_MODE_VERSION_PREF_KEY)
+                .map(String::as_str),
+            Some(BROWSER_DISPLAY_MODE_POLICY_VERSION)
+        );
+    }
+
+    #[tokio::test]
+    async fn display_mode_get_waits_until_a_successful_put_is_persisted() {
+        let app = test_app(true).await;
+        app.preferences.block_writes();
+
+        let put_router = app.router.clone();
+        let put_request = authorized_json_request(
+            &app,
+            "PUT",
+            "/api/browser/display-mode",
+            json!({"display_mode": "external"}),
+        );
+        let put_task =
+            tokio::spawn(async move { put_router.oneshot(put_request).await.unwrap() });
+        app.preferences.wait_for_blocked_write().await;
+        assert_eq!(
+            app.hub.primary_visibility().await,
+            BrowserVisibility::Headful,
+            "the fixture must pause after live apply and before persistence completes"
+        );
+
+        let get_state = app.management_state.clone();
+        let get_user = app.owner_user.clone();
+        let mut get_future =
+            Box::pin(get_display_mode(State(get_state), Extension(get_user)));
+        assert!(
+            get_future.as_mut().now_or_never().is_none(),
+            "GET must wait on the display update gate instead of exposing the uncommitted live state"
+        );
+
+        app.preferences.release_blocked_write();
+        let put_response = tokio::time::timeout(Duration::from_secs(5), put_task)
+            .await
+            .expect("persisted PUT must finish after storage is released")
+            .expect("PUT task must not panic");
+        assert_eq!(put_response.status(), StatusCode::OK);
+
+        let Json(get_response) = tokio::time::timeout(Duration::from_secs(5), get_future)
+            .await
+            .expect("GET must finish after the committed PUT releases the gate")
+            .expect("GET handler must return the committed display mode");
+        assert_eq!(
+            get_response
+                .data
+                .expect("GET response must contain display mode")
+                .display_mode,
+            BrowserDisplayModeValueDto::External
+        );
+    }
+
+    #[tokio::test]
+    async fn display_mode_put_strictly_rejects_unknown_values_and_fields() {
+        let app = test_app(true).await;
+        for body in [
+            json!({"display_mode": "embedded"}),
+            json!({"display_mode": "headless", "unexpected": true}),
+            json!({"mode": "headless"}),
+        ] {
+            let response = app
+                .router
+                .clone()
+                .oneshot(authorized_json_request(
+                    &app,
+                    "PUT",
+                    "/api/browser/display-mode",
+                    body,
+                ))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+            let response = response_json(response).await;
+            assert_eq!(response["code"], "invalid_browser_display_mode");
+        }
+        assert_eq!(
+            app.hub.primary_visibility().await,
+            BrowserVisibility::Headless
+        );
+    }
+
+    #[tokio::test]
+    async fn display_mode_storage_failure_rolls_back_the_live_policy() {
+        let app = test_app(true).await;
+        app.preferences.set_fail_writes(true);
+
+        let response = app
+            .router
+            .clone()
+            .oneshot(authorized_json_request(
+                &app,
+                "PUT",
+                "/api/browser/display-mode",
+                json!({"display_mode": "external"}),
+            ))
+            .await
+            .unwrap();
+        let response_status = response.status();
+        let response = response_json(response).await;
+        assert_eq!(
+            response_status,
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "display mode persistence failure returned the wrong error: {response}"
+        );
+        assert_eq!(response["code"], "browser_display_mode_storage_failed");
+        assert_eq!(
+            app.hub.primary_visibility().await,
+            BrowserVisibility::Headless,
+            "a failed write must restore the previously effective live policy"
+        );
+        assert_eq!(
+            app.hub.overview().await.hosts[0].headful,
+            false,
+            "rollback must restore the actual Primary Host visibility too"
+        );
+    }
+
+    #[tokio::test]
+    async fn display_mode_get_waits_until_a_failed_put_is_rolled_back() {
+        let app = test_app(true).await;
+        app.preferences.set_fail_writes(true);
+        app.preferences.block_writes();
+
+        let put_router = app.router.clone();
+        let put_request = authorized_json_request(
+            &app,
+            "PUT",
+            "/api/browser/display-mode",
+            json!({"display_mode": "external"}),
+        );
+        let put_task =
+            tokio::spawn(async move { put_router.oneshot(put_request).await.unwrap() });
+        app.preferences.wait_for_blocked_write().await;
+        assert_eq!(
+            app.hub.primary_visibility().await,
+            BrowserVisibility::Headful,
+            "the fixture must pause after live apply and before the failed write triggers rollback"
+        );
+
+        let get_state = app.management_state.clone();
+        let get_user = app.owner_user.clone();
+        let mut get_future =
+            Box::pin(get_display_mode(State(get_state), Extension(get_user)));
+        assert!(
+            get_future.as_mut().now_or_never().is_none(),
+            "GET must not expose a transient live state that the failed PUT will roll back"
+        );
+
+        app.preferences.release_blocked_write();
+        let put_response = tokio::time::timeout(Duration::from_secs(5), put_task)
+            .await
+            .expect("failed PUT must finish after storage is released")
+            .expect("PUT task must not panic");
+        assert_eq!(put_response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+
+        let Json(get_response) = tokio::time::timeout(Duration::from_secs(5), get_future)
+            .await
+            .expect("GET must finish after rollback releases the gate")
+            .expect("GET handler must return the rolled-back display mode");
+        assert_eq!(
+            get_response
+                .data
+                .expect("GET response must contain display mode")
+                .display_mode,
+            BrowserDisplayModeValueDto::Headless
+        );
+        assert_eq!(
+            app.hub.primary_visibility().await,
+            BrowserVisibility::Headless
+        );
+    }
+
+    #[tokio::test]
+    async fn background_route_returns_the_authenticated_primary_lane_to_headless() {
+        let app = test_app(true).await;
+        app.hub
+            .set_primary_visibility(BrowserVisibility::Headful)
+            .await
+            .unwrap();
+
+        let response = app
+            .router
+            .clone()
+            .oneshot(authorized_request(
+                &app,
+                "POST",
+                format!("/api/browser/lanes/{}/background", app.lane_id),
+                true,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let response = response_json(response).await;
+        assert_eq!(response["data"]["backgrounded"], true);
+        assert_eq!(response["data"]["lane_id"], app.lane_id.as_str());
+        assert_eq!(
+            app.hub.primary_visibility().await,
+            BrowserVisibility::Headful,
+            "a one-shot Lane visibility action must not rewrite the global default"
+        );
+        assert_eq!(
+            app.hub.overview().await.hosts[0].headful,
+            false,
+            "the live Primary Host must actually be replaced by a headless Host"
+        );
+    }
+
+    #[tokio::test]
+    async fn background_route_hides_another_users_lane() {
+        let app = test_app(true).await;
+        app.hub
+            .set_primary_visibility(BrowserVisibility::Headful)
+            .await
+            .unwrap();
+
+        let response = app
+            .router
+            .clone()
+            .oneshot(secondary_request(
+                &app,
+                "POST",
+                format!("/api/browser/lanes/{}/background", app.lane_id),
+                true,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        let response = response_json(response).await;
+        assert!(response.get("lane_id").is_none());
+        assert_eq!(
+            app.hub.primary_visibility().await,
+            BrowserVisibility::Headful,
+            "an unauthorized visibility request must not mutate the shared Host"
+        );
+    }
+
+    #[tokio::test]
     async fn overview_exposes_installation_owner_capabilities_for_current_user() {
         let app = test_app(true).await;
+        open_lane_for_user(
+            app.hub.as_ref(),
+            &app.secondary_user_id,
+            "conversation-secondary-overview",
+            "runtime-secondary-overview",
+            "secondary-overview",
+        )
+        .await;
 
         let owner = app
             .router
@@ -1958,6 +2602,10 @@ mod tests {
         assert_eq!(owner["data"]["can_close_all"], true);
         assert_eq!(owner["data"]["can_manage_browser_settings"], true);
         assert_eq!(owner["data"]["can_manage_primary_identity"], true);
+        assert_eq!(
+            owner["data"]["total_lanes"], 2,
+            "the installation owner overview must include every managed Lane"
+        );
 
         let non_owner = app
             .router
@@ -1975,6 +2623,92 @@ mod tests {
         assert_eq!(non_owner["data"]["can_close_all"], false);
         assert_eq!(non_owner["data"]["can_manage_browser_settings"], false);
         assert_eq!(non_owner["data"]["can_manage_primary_identity"], false);
+        assert_eq!(
+            non_owner["data"]["total_lanes"], 1,
+            "a non-owner overview must remain scoped to that authenticated user"
+        );
+    }
+
+    #[tokio::test]
+    async fn non_owner_overview_counts_own_pending_cleanup_but_hides_foreign_cleanup() {
+        let app = test_app(true).await;
+        let secondary_failed = open_lane_for_user(
+            app.hub.as_ref(),
+            &app.secondary_user_id,
+            "conversation-secondary-pending",
+            "runtime-secondary-pending",
+            "secondary-pending",
+        )
+        .await;
+        let _secondary_sibling = open_lane_for_user(
+            app.hub.as_ref(),
+            &app.secondary_user_id,
+            "conversation-secondary-sibling",
+            "runtime-secondary-sibling",
+            "secondary-sibling",
+        )
+        .await;
+        {
+            let mut failures = app
+                .close_failures
+                .lock()
+                .expect("close failure set must not be poisoned");
+            failures.insert(app.lane_id.clone());
+            failures.insert(secondary_failed.clone());
+        }
+
+        app.hub
+            .close_lane(&app.lane_id)
+            .await
+            .expect_err("foreign owner cleanup must remain pending beside live siblings");
+        let foreign_only = app
+            .router
+            .clone()
+            .oneshot(secondary_request(
+                &app,
+                "GET",
+                "/api/browser/overview",
+                false,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(foreign_only.status(), StatusCode::OK);
+        let foreign_only = response_json(foreign_only).await;
+        assert_eq!(
+            foreign_only["data"]["pending_cleanup_count"], 0,
+            "another user's retained cleanup must not leak through overview_for_user"
+        );
+
+        app.hub
+            .close_lane(&secondary_failed)
+            .await
+            .expect_err("the user's failed cleanup must remain pending beside its sibling");
+        let own_and_foreign = app
+            .router
+            .clone()
+            .oneshot(secondary_request(
+                &app,
+                "GET",
+                "/api/browser/overview",
+                false,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(own_and_foreign.status(), StatusCode::OK);
+        let own_and_foreign = response_json(own_and_foreign).await;
+        assert_eq!(
+            own_and_foreign["data"]["pending_cleanup_count"], 1,
+            "the user must see its own retained cleanup without seeing the foreign one"
+        );
+
+        app.close_failures
+            .lock()
+            .expect("close failure set must not be poisoned")
+            .clear();
+        app.hub
+            .close_all()
+            .await
+            .expect("test cleanup must drain retained Browser resources");
     }
 
     #[tokio::test]
@@ -2214,6 +2948,12 @@ mod tests {
         assert_eq!(close_own.status(), StatusCode::OK);
         let close_own = response_json(close_own).await;
         assert_eq!(close_own["data"]["closed"], 1);
+        assert_eq!(close_own["data"]["remaining_lane_count"], 0);
+        assert_eq!(close_own["data"]["remaining_managed_host_count"], 0);
+        assert_eq!(
+            close_own["data"]["remaining_cleanup_count"], 0,
+            "an ordinary user receives only its own retained cleanup count"
+        );
 
         assert!(
             app.hub
@@ -2233,6 +2973,8 @@ mod tests {
             ("POST", "/api/browser/close-all", true),
             ("GET", "/api/browser/resource-policy", false),
             ("PUT", "/api/browser/resource-policy", true),
+            ("GET", "/api/browser/display-mode", false),
+            ("PUT", "/api/browser/display-mode", true),
         ] {
             let response = app
                 .router
@@ -2341,6 +3083,11 @@ mod tests {
         assert!(encoded.contains("runtime-safe"));
         assert!(encoded.contains("conversation-safe"));
         assert!(encoded.contains("tab-safe"));
+        assert_eq!(
+            lanes["data"][0]["browser_epoch"],
+            1,
+            "the renderer needs the Lane epoch to associate it with the actual Host"
+        );
         assert!(!encoded.contains("raw-cdp-target-secret"));
         let tab = lanes["data"][0]["tabs"][0]
             .as_object()
@@ -2354,7 +3101,6 @@ mod tests {
             "capability_expires_at_ms",
             "allowed_operations",
             "remote_connection_id",
-            "browser_epoch",
             "active_frame_id",
             "ref_generation",
             "target_id",
@@ -2389,7 +3135,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn overview_exposes_per_host_rss_without_process_or_browser_epoch() {
+    async fn overview_exposes_actual_host_visibility_epoch_and_rss_without_process_id() {
         let app = test_app(true).await;
         app.hub
             .update_resource_telemetry(nomifun_browser_platform::ResourceTelemetry {
@@ -2415,9 +3161,10 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
         let body = response_json(response).await;
         assert_eq!(body["data"]["hosts"][0]["rss_bytes"], 2_048);
+        assert_eq!(body["data"]["hosts"][0]["epoch"], 1);
+        assert_eq!(body["data"]["hosts"][0]["headful"], false);
         let encoded = body.to_string();
         assert!(!encoded.contains("process_id"));
-        assert!(!encoded.contains("browser_epoch"));
         assert!(!encoded.contains("cdp"));
         assert!(!encoded.contains("profile"));
     }
