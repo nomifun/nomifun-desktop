@@ -592,6 +592,80 @@ async fn delete_provider_nonexistent() {
 }
 
 // ===========================================================================
+// POST /api/providers/{id}/clone
+// ===========================================================================
+
+fn post_request(uri: &str) -> Request<Body> {
+    Request::builder()
+        .method("POST")
+        .uri(uri)
+        .body(Body::empty())
+        .unwrap()
+}
+
+#[tokio::test]
+async fn clone_provider_returns_created_with_copy_name_and_lists_both() {
+    let (_app, db) = setup().await;
+
+    let create_body = json!({
+        "platform": "openai",
+        "name": "OpenAI",
+        "base_url": "https://api.openai.com",
+        "api_key": "sk-test",
+        "models": ["gpt-4", "gpt-3.5"],
+        "model_enabled": {"gpt-3.5": false}
+    });
+    let create_resp = system_routes(build_state(&db))
+        .oneshot(json_request("POST", "/api/providers", create_body))
+        .await
+        .unwrap();
+    assert_eq!(create_resp.status(), StatusCode::CREATED);
+    let created = body_json(create_resp).await;
+    let source_id = created["data"]["provider_id"].as_str().unwrap().to_string();
+
+    let clone_resp = system_routes(build_state(&db))
+        .oneshot(post_request(&format!("/api/providers/{source_id}/clone")))
+        .await
+        .unwrap();
+    assert_eq!(clone_resp.status(), StatusCode::CREATED);
+    let clone_json = body_json(clone_resp).await;
+    assert_eq!(clone_json["success"], true);
+    let clone = &clone_json["data"];
+    let clone_id = clone["provider_id"].as_str().unwrap().to_string();
+    assert_ne!(clone_id, source_id);
+    assert_eq!(clone["name"], "OpenAI copy");
+    assert_eq!(clone["api_key"], "sk-test");
+    assert_eq!(clone["models"], json!(["gpt-4", "gpt-3.5"]));
+    assert_eq!(clone["model_enabled"]["gpt-3.5"], false);
+    assert_eq!(clone["models_detail"].as_array().unwrap().len(), 2);
+
+    let list_resp = system_routes(build_state(&db))
+        .oneshot(get_request("/api/providers"))
+        .await
+        .unwrap();
+    let list_json = body_json(list_resp).await;
+    let providers = list_json["data"].as_array().unwrap();
+    assert_eq!(providers.len(), 2);
+    let ids: Vec<&str> = providers
+        .iter()
+        .map(|p| p["provider_id"].as_str().unwrap())
+        .collect();
+    assert!(ids.contains(&source_id.as_str()));
+    assert!(ids.contains(&clone_id.as_str()));
+}
+
+#[tokio::test]
+async fn clone_provider_nonexistent_returns_not_found() {
+    let (app, _db) = setup().await;
+    let provider_id = ProviderId::new().into_string();
+    let resp = app
+        .oneshot(post_request(&format!("/api/providers/{provider_id}/clone")))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}
+
+// ===========================================================================
 // Full CRUD flow
 // ===========================================================================
 

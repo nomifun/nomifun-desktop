@@ -9,8 +9,9 @@ use nomifun_common::{
     AppError, ProviderId, ProviderInUseDetails, decrypt_string, encrypt_string,
 };
 use nomifun_db::{
-    CreateProviderParams, IProviderModelRepository, IProviderRepository, ProviderModelRow,
-    UpdateProviderParams, models::Provider,
+    CreateProviderParams, IProviderConnectionRepository, IProviderModelRepository,
+    IProviderRepository, ProviderModelRow, ProviderModelUpdate, UpdateProviderParams,
+    UpsertProviderConnectionParams, models::Provider,
 };
 use serde::de::DeserializeOwned;
 
@@ -184,6 +185,152 @@ impl ProviderService {
         }
         self.repo.delete(id).await?;
         Ok(())
+    }
+
+    /// Server-side provider clone that preserves the full per-model profile
+    /// surface and connection profiles — unlike the legacy frontend clone,
+    /// which copies only the provider-level fields (per-model rows keyed by
+    /// the old provider_id were silently lost).
+    ///
+    /// - The new provider row copies platform/base_url/api_key ciphertext
+    ///   (same encryption key — the source bytes are reused verbatim, no
+    ///   decrypt/re-encrypt), models JSON, capabilities, legacy maps,
+    ///   bedrock_config, is_full_url and enabled; `name` gets a " copy"
+    ///   suffix; sort_order appends after the current max.
+    /// - `provider_models` rows are copied field-for-field from the source
+    ///   rows (tasks/traits/params/source/protocol/connection_role/
+    ///   context_limit/description/enabled/sort_order). `health` /
+    ///   `health_checked_at` are intentionally NOT copied: health is
+    ///   per-deployment probe state, not configuration.
+    /// - `provider_connections` rows are copied with the ciphertext as-is;
+    ///   the upsert mints a fresh `connection_id` per row.
+    pub async fn clone_provider(
+        &self,
+        id: &str,
+        connection_repo: &Arc<dyn IProviderConnectionRepository>,
+    ) -> Result<ProviderResponse, AppError> {
+        validate_id(id)?;
+        let source = self
+            .repo
+            .find_by_id(id)
+            .await?
+            .ok_or_else(|| AppError::NotFound(format!("Provider {id} not found")))?;
+        if is_managed_provider_platform(&source.platform) {
+            return Err(AppError::Forbidden(
+                "Managed model providers must be changed through their dedicated model-service API"
+                    .into(),
+            ));
+        }
+
+        let source_model_rows = self.provider_model_repo.list_for_provider(id).await?;
+        let source_connections = connection_repo.list_for_provider(id).await?;
+
+        let clone_name = format!("{} copy", source.name.trim_end());
+        let created = self
+            .repo
+            .create(CreateProviderParams {
+                provider_id: None,
+                platform: &source.platform,
+                name: &clone_name,
+                base_url: &source.base_url,
+                // Ciphertext copy: same encryption key, so re-encrypting would
+                // only mint a fresh nonce for identical plaintext.
+                api_key_encrypted: &source.api_key_encrypted,
+                models: &source.models,
+                enabled: source.enabled,
+                capabilities: &source.capabilities,
+                model_context_limits: source.model_context_limits.as_deref(),
+                model_protocols: source.model_protocols.as_deref(),
+                model_descriptions: source.model_descriptions.as_deref(),
+                model_enabled: source.model_enabled.as_deref(),
+                // Health is per-deployment state; keep it out of the clone's
+                // legacy column AND the dual-written rows.
+                model_health: None,
+                bedrock_config: source.bedrock_config.as_deref(),
+                is_full_url: source.is_full_url,
+                sort_order: None,
+            })
+            .await?;
+        let new_id = created.provider_id.clone();
+
+        // The repo create's dual-write materialized rows for every model in
+        // the legacy array — but with placeholder profiles (tasks/traits '[]',
+        // params '{}', source 'inferred'). Overwrite each from the
+        // authoritative source row; a source row absent from the legacy array
+        // (created via /api/provider-models, which does not write the legacy
+        // column back) is inserted instead.
+        for row in &source_model_rows {
+            let update = ProviderModelUpdate {
+                enabled: Some(row.enabled),
+                sort_order: Some(row.sort_order),
+                tasks: Some(&row.tasks),
+                traits: Some(&row.traits),
+                protocol: Some(row.protocol.as_deref()),
+                connection_role: Some(row.connection_role.as_deref()),
+                params: Some(&row.params),
+                context_limit: Some(row.context_limit),
+                description: Some(row.description.as_deref()),
+                source: Some(&row.source),
+            };
+            match self.provider_model_repo.update(&new_id, &row.model, &update).await {
+                Ok(_) => {}
+                Err(nomifun_db::DbError::NotFound(_)) => {
+                    self.provider_model_repo
+                        .create(
+                            &new_id,
+                            &nomifun_db::NewProviderModel {
+                                model: &row.model,
+                                enabled: row.enabled,
+                                sort_order: row.sort_order,
+                                tasks: &row.tasks,
+                                traits: &row.traits,
+                                protocol: row.protocol.as_deref(),
+                                params: &row.params,
+                                context_limit: row.context_limit,
+                                description: row.description.as_deref(),
+                                source: &row.source,
+                                health: None,
+                            },
+                        )
+                        .await?;
+                    if row.connection_role.is_some() {
+                        self.provider_model_repo
+                            .update(
+                                &new_id,
+                                &row.model,
+                                &ProviderModelUpdate {
+                                    connection_role: Some(row.connection_role.as_deref()),
+                                    ..Default::default()
+                                },
+                            )
+                            .await?;
+                    }
+                }
+                Err(error) => return Err(error.into()),
+            }
+        }
+
+        // Copy connection profiles; upsert mints a fresh connection_id per
+        // row and the credentials ciphertext crosses unchanged.
+        for connection in &source_connections {
+            connection_repo
+                .upsert(
+                    &new_id,
+                    &UpsertProviderConnectionParams {
+                        role: &connection.role,
+                        label: connection.label.as_deref(),
+                        base_url: &connection.base_url,
+                        auth_scheme: &connection.auth_scheme,
+                        credentials_encrypted: &connection.credentials_encrypted,
+                        is_full_url: connection.is_full_url,
+                        extra: &connection.extra,
+                    },
+                )
+                .await?;
+        }
+
+        let model_rows = self.provider_model_repo.list_for_provider(&new_id).await?;
+        self.row_to_response(created, model_rows)
     }
 
     // -----------------------------------------------------------------------
@@ -1215,6 +1362,292 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(err.status_code(), axum::http::StatusCode::NOT_FOUND);
+    }
+
+    // -- clone tests --
+
+    use nomifun_db::{
+        IProviderConnectionRepository, NewProviderModel, ProviderModelUpdate,
+        SqliteProviderConnectionRepository, UpsertProviderConnectionParams,
+    };
+
+    fn model_repo_for_pool(pool: &nomifun_db::SqlitePool) -> Arc<dyn IProviderModelRepository> {
+        Arc::new(SqliteProviderModelRepository::new(pool.clone()))
+    }
+
+    fn connection_repo_for_pool(
+        pool: &nomifun_db::SqlitePool,
+    ) -> Arc<dyn IProviderConnectionRepository> {
+        Arc::new(SqliteProviderConnectionRepository::new(pool.clone()))
+    }
+
+    #[tokio::test]
+    async fn clone_copies_model_rows_exactly_without_health() {
+        use std::collections::HashMap;
+        let (svc, pool) = setup_with_pool().await;
+        let model_repo = model_repo_for_pool(&pool);
+        let connection_repo = connection_repo_for_pool(&pool);
+
+        let created = svc
+            .create(CreateProviderRequest {
+                models: vec!["m1".into(), "m2".into()],
+                model_protocols: Some(HashMap::from([("m1".into(), "openai".into())])),
+                model_context_limits: Some(HashMap::from([("m1".into(), 32_000)])),
+                model_descriptions: Some(HashMap::from([("m2".into(), "描述".into())])),
+                model_enabled: Some(HashMap::from([("m2".into(), false)])),
+                ..sample_create_request()
+            })
+            .await
+            .unwrap();
+
+        // Enrich the authoritative rows with profile fields the legacy create
+        // params cannot express — exactly what the frontend clone loses.
+        model_repo
+            .update(
+                &created.provider_id,
+                "m1",
+                &ProviderModelUpdate {
+                    tasks: Some(r#"["chat"]"#),
+                    traits: Some(r#"["vision_input","function_calling"]"#),
+                    params: Some(r#"{"temperature":0.2}"#),
+                    source: Some("user"),
+                    connection_role: Some(Some("voice")),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        // Health present on the source must NOT be copied to the clone.
+        model_repo
+            .set_health(
+                &created.provider_id,
+                "m1",
+                Some(r#"{"status":"healthy","latency":22}"#),
+            )
+            .await
+            .unwrap();
+        // A row that exists only in provider_models (never written back to the
+        // legacy models column) must survive the clone too.
+        model_repo
+            .create(
+                &created.provider_id,
+                &NewProviderModel {
+                    model: "m3-row-only",
+                    enabled: true,
+                    sort_order: 7,
+                    tasks: r#"["embedding"]"#,
+                    traits: "[]",
+                    protocol: None,
+                    params: "{}",
+                    context_limit: Some(8_192),
+                    description: Some("row only"),
+                    source: "user",
+                    health: None,
+                },
+            )
+            .await
+            .unwrap();
+
+        let clone = svc
+            .clone_provider(&created.provider_id, &connection_repo)
+            .await
+            .unwrap();
+        assert_ne!(clone.provider_id, created.provider_id);
+        assert_eq!(clone.name, "Anthropic copy");
+        assert_eq!(clone.platform, "anthropic");
+        assert_eq!(clone.api_key, "sk-ant-api03-test1234");
+        assert_eq!(clone.models, vec!["m1", "m2", "m3-row-only"]);
+
+        let mut source_rows = model_repo.list_for_provider(&created.provider_id).await.unwrap();
+        let mut clone_rows = model_repo.list_for_provider(&clone.provider_id).await.unwrap();
+        source_rows.sort_by(|a, b| a.model.cmp(&b.model));
+        clone_rows.sort_by(|a, b| a.model.cmp(&b.model));
+        assert_eq!(source_rows.len(), 3);
+        assert_eq!(clone_rows.len(), 3);
+        for (source, cloned) in source_rows.iter().zip(&clone_rows) {
+            assert_eq!(cloned.provider_id, clone.provider_id);
+            assert_eq!(cloned.model, source.model);
+            assert_eq!(cloned.enabled, source.enabled);
+            assert_eq!(cloned.sort_order, source.sort_order);
+            assert_eq!(cloned.tasks, source.tasks);
+            assert_eq!(cloned.traits, source.traits);
+            assert_eq!(cloned.protocol, source.protocol);
+            assert_eq!(cloned.connection_role, source.connection_role);
+            assert_eq!(cloned.params, source.params);
+            assert_eq!(cloned.context_limit, source.context_limit);
+            assert_eq!(cloned.description, source.description);
+            assert_eq!(cloned.source, source.source);
+            assert!(
+                cloned.health.is_none(),
+                "health is per-deployment probe state and must not be cloned ({})",
+                cloned.model
+            );
+            assert!(cloned.health_checked_at.is_none());
+        }
+        // Sanity: the source m1 row really carried health, so the None above
+        // proves the clone dropped it rather than there being nothing to drop.
+        let source_m1 = source_rows.iter().find(|r| r.model == "m1").unwrap();
+        assert!(source_m1.health.is_some());
+    }
+
+    #[tokio::test]
+    async fn clone_copies_connections_with_new_ids_and_same_ciphertext() {
+        let (svc, pool) = setup_with_pool().await;
+        let connection_repo = connection_repo_for_pool(&pool);
+        let created = svc.create(sample_create_request()).await.unwrap();
+        connection_repo
+            .upsert(
+                &created.provider_id,
+                &UpsertProviderConnectionParams {
+                    role: "voice",
+                    label: Some("Voice endpoint"),
+                    base_url: "https://voice.example.com/v1",
+                    auth_scheme: "bearer",
+                    credentials_encrypted: "opaque-ciphertext-blob",
+                    is_full_url: true,
+                    extra: r#"{"region":"ap"}"#,
+                },
+            )
+            .await
+            .unwrap();
+
+        let clone = svc
+            .clone_provider(&created.provider_id, &connection_repo)
+            .await
+            .unwrap();
+
+        let source_connections = connection_repo
+            .list_for_provider(&created.provider_id)
+            .await
+            .unwrap();
+        let clone_connections = connection_repo
+            .list_for_provider(&clone.provider_id)
+            .await
+            .unwrap();
+        assert_eq!(source_connections.len(), 1);
+        assert_eq!(clone_connections.len(), 1);
+        let (source, cloned) = (&source_connections[0], &clone_connections[0]);
+        assert_ne!(cloned.connection_id, source.connection_id);
+        assert_eq!(cloned.role, source.role);
+        assert_eq!(cloned.label, source.label);
+        assert_eq!(cloned.base_url, source.base_url);
+        assert_eq!(cloned.auth_scheme, source.auth_scheme);
+        assert_eq!(cloned.is_full_url, source.is_full_url);
+        assert_eq!(cloned.extra, source.extra);
+
+        // Raw row assert: the credentials ciphertext is copied verbatim (same
+        // encryption key — no decrypt/re-encrypt, which would change the nonce).
+        let ciphertexts: Vec<String> = nomifun_db::sqlx::query_scalar(
+            "SELECT credentials_encrypted FROM provider_connections ORDER BY id",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(ciphertexts, vec!["opaque-ciphertext-blob"; 2]);
+    }
+
+    #[tokio::test]
+    async fn clone_copies_api_key_ciphertext_verbatim() {
+        let (svc, pool) = setup_with_pool().await;
+        let connection_repo = connection_repo_for_pool(&pool);
+        let created = svc.create(sample_create_request()).await.unwrap();
+        let clone = svc
+            .clone_provider(&created.provider_id, &connection_repo)
+            .await
+            .unwrap();
+
+        let fetch = |provider_id: String| {
+            let pool = pool.clone();
+            async move {
+                nomifun_db::sqlx::query_scalar::<_, String>(
+                    "SELECT api_key_encrypted FROM providers WHERE provider_id = ?",
+                )
+                .bind(provider_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap()
+            }
+        };
+        let source_ciphertext = fetch(created.provider_id.clone()).await;
+        let clone_ciphertext = fetch(clone.provider_id.clone()).await;
+        // Re-encrypting would mint a fresh nonce and change the ciphertext;
+        // the clone must carry the source bytes unchanged.
+        assert_eq!(clone_ciphertext, source_ciphertext);
+        assert_eq!(clone.api_key, "sk-ant-api03-test1234");
+    }
+
+    #[tokio::test]
+    async fn clone_appends_sort_order_and_keeps_enabled() {
+        let (svc, pool) = setup_with_pool().await;
+        let connection_repo = connection_repo_for_pool(&pool);
+        let created = svc
+            .create(CreateProviderRequest {
+                enabled: false,
+                sort_order: Some(3),
+                ..sample_create_request()
+            })
+            .await
+            .unwrap();
+        let clone = svc
+            .clone_provider(&created.provider_id, &connection_repo)
+            .await
+            .unwrap();
+        assert!(!clone.enabled, "enabled state follows the source");
+        assert!(clone.sort_order > created.sort_order, "clone appends after current max");
+    }
+
+    #[tokio::test]
+    async fn clone_managed_platform_is_forbidden() {
+        let db = init_database_memory().await.unwrap();
+        let pool = db.pool().clone();
+        std::mem::forget(db);
+        let repo = Arc::new(SqliteProviderRepository::new(pool.clone()));
+        let encrypted = encrypt_string("internal-loopback-token", &TEST_KEY).unwrap();
+        let provider_id = nomifun_common::ProviderId::new().into_string();
+        repo.create(CreateProviderParams {
+            provider_id: Some(&provider_id),
+            platform: crate::managed_model::FREE_MODEL_PLATFORM,
+            name: "Managed provider",
+            base_url: "http://127.0.0.1:12345/v1",
+            api_key_encrypted: &encrypted,
+            models: r#"["big-pickle"]"#,
+            enabled: true,
+            capabilities: "[]",
+            model_context_limits: None,
+            model_protocols: None,
+            model_descriptions: None,
+            model_enabled: None,
+            model_health: None,
+            bedrock_config: None,
+            is_full_url: false,
+            sort_order: None,
+        })
+        .await
+        .unwrap();
+
+        let svc = service_for_pool(&pool);
+        let connection_repo = connection_repo_for_pool(&pool);
+        assert!(matches!(
+            svc.clone_provider(&provider_id, &connection_repo).await,
+            Err(AppError::Forbidden(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn clone_missing_source_is_not_found() {
+        let (svc, pool) = setup_with_pool().await;
+        let connection_repo = connection_repo_for_pool(&pool);
+        let err = svc
+            .clone_provider("0190f5fe-7c00-7a00-8000-000000000099", &connection_repo)
+            .await
+            .unwrap_err();
+        assert_eq!(err.status_code(), axum::http::StatusCode::NOT_FOUND);
+
+        let err = svc
+            .clone_provider("not-a-provider-id", &connection_repo)
+            .await
+            .unwrap_err();
+        assert_eq!(err.status_code(), axum::http::StatusCode::BAD_REQUEST);
     }
 }
 
