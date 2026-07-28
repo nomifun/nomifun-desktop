@@ -192,7 +192,10 @@ pub use provider::{
     UpdateProviderRequest,
 };
 pub use provider_connection::{ProviderConnectionResponse, UpsertProviderConnectionRequest};
-pub use provider_model::ProviderModelResponse;
+pub use provider_model::{
+    CreateProviderModelRequest, ProviderModelKeyRequest, ProviderModelResponse,
+    UpdateProviderModelRequest,
+};
 pub use remote_agent::{
     CreateRemoteAgentRequest, HandshakeResponse, RemoteAgentListItem, RemoteAgentResponse,
     TestRemoteAgentConnectionRequest, UpdateRemoteAgentRequest,

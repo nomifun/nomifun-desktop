@@ -50,10 +50,14 @@ fn build_state(db: &nomifun_db::Database, version_check_service: VersionCheckSer
             provider_repo.clone(),
             TEST_KEY,
         ),
-        model_fetch_service: ModelFetchService::new(provider_repo, TEST_KEY, http_client.clone()),
+        model_fetch_service: ModelFetchService::new(provider_repo.clone(), TEST_KEY, http_client.clone()),
         model_profile_service: nomifun_system::ModelProfileService::new(std::sync::Arc::new(
             nomifun_db::SqliteProviderModelRepository::new(db.pool().clone()),
         )),
+        provider_model_service: nomifun_system::ProviderModelService::new(
+            std::sync::Arc::new(nomifun_db::SqliteProviderModelRepository::new(db.pool().clone())),
+            provider_repo.clone(),
+        ),
         managed_model_service: None,
         protocol_detection_service: ProtocolDetectionService::new(http_client),
         version_check_service,
