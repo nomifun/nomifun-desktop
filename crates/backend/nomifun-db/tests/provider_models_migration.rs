@@ -91,6 +91,34 @@ async fn backfill_merges_maps_and_profiles_and_drops_orphans() {
 }
 
 #[tokio::test]
+async fn migration_15_drops_model_profiles() {
+    let pool = SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect("sqlite::memory:")
+        .await
+        .unwrap();
+    migrate_to(&pool, 14).await;
+    // At the 014 point the superseded table must still exist (the backfill
+    // above reads from it).
+    let count: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM sqlite_schema WHERE type = 'table' AND name = 'model_profiles'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(count, 1, "model_profiles must still exist at migration 14");
+
+    migrate_to(&pool, 15).await;
+    let count: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM sqlite_schema WHERE name IN ('model_profiles', 'idx_model_profiles_provider_id')",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(count, 0, "migration 15 must drop model_profiles and its index");
+}
+
+#[tokio::test]
 async fn fresh_database_passes_schema_contract_with_new_tables() {
     // init_database_memory runs ALL migrations + the id schema contract.
     let db = nomifun_db::init_database_memory().await.unwrap();

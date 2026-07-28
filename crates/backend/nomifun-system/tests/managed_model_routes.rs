@@ -5,7 +5,7 @@ use axum::http::{Request, StatusCode};
 use http_body_util::BodyExt;
 use nomifun_common::ProviderId;
 use nomifun_db::{
-    SqliteClientPreferenceRepository, SqliteModelProfileRepository,
+    SqliteClientPreferenceRepository, SqliteProviderModelRepository,
     SqliteProviderRepository, SqliteSettingsRepository, init_database_memory,
 };
 use nomifun_system::{
@@ -48,7 +48,7 @@ async fn setup() -> (
             http.clone(),
         ),
         model_profile_service: ModelProfileService::new(Arc::new(
-            SqliteModelProfileRepository::new(db.pool().clone()),
+            SqliteProviderModelRepository::new(db.pool().clone()),
         )),
         managed_model_service: Some(managed),
         protocol_detection_service: ProtocolDetectionService::new(http.clone()),
