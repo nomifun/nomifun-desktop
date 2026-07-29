@@ -145,9 +145,9 @@ impl CreationError {
 /// - `Timeout` → `timeout`;
 /// - `Config` / `MissingConnection` → `config` (local wiring / catalog);
 /// - `NoAdapter` → `adapter_unavailable` (matches the old routing semantic);
-/// - everything upstream-shaped (`Auth`/`ProviderError`/`Network`/`ParseError`/
-///   `RateLimited`/`QuotaExhausted`/`ContentPolicy`/`NotPollable`) →
-///   `provider_error`.
+/// - everything upstream-shaped (`Auth`/`ProviderError`/`JobFailed`/`Network`/
+///   `ParseError`/`RateLimited`/`QuotaExhausted`/`ContentPolicy`/`NotPollable`)
+///   → `provider_error`.
 ///
 /// `http_status` is transferred verbatim so 4xx/5xx classification survives.
 impl From<nomifun_model_invoke::InvokeError> for CreationError {
@@ -161,6 +161,7 @@ impl From<nomifun_model_invoke::InvokeError> for CreationError {
             K::NoAdapter => "adapter_unavailable",
             K::Auth
             | K::ProviderError
+            | K::JobFailed
             | K::Network
             | K::ParseError
             | K::RateLimited

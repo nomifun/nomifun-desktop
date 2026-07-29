@@ -26,7 +26,7 @@ use nomifun_db::{
     ListCreationTasksParams, UpdateCreationTaskParams,
 };
 use nomifun_model_invoke::{
-    ChatTextRequest, ImageEditRequest, ImageGenRequest, InputAsset, JobHandle,
+    ChatTextRequest, ImageEditRequest, ImageGenRequest, InputAsset, InvokeErrorKind, JobHandle,
     MAX_ARTIFACT_BYTES, ModelInvokeService, ModelRef, ProducedAsset, ProducedData, TaskOutcome,
     TaskRequest, TaskResult, TtsRequest, VideoGenRequest, error_from_response, net_err,
     read_body_capped,
@@ -130,6 +130,25 @@ fn param_str(params: &Value, key: &str) -> Option<String> {
         .map(str::to_string)
 }
 
+/// `params.seconds` for video generation: absent → `None`; a JSON number or a
+/// numeric string (both accepted by the retired openai_video adapter) →
+/// `Some(u32)`; anything else present-but-unparseable is a typed local
+/// `invalid_params` (the old code forwarded garbage to the provider; failing
+/// locally is the honest replacement).
+fn param_seconds(params: &Value) -> Result<Option<u32>, CreationError> {
+    let Some(value) = params.get("seconds") else {
+        return Ok(None);
+    };
+    value
+        .as_u64()
+        .or_else(|| value.as_str().and_then(|s| s.trim().parse().ok()))
+        .and_then(|v| u32::try_from(v).ok())
+        .map(Some)
+        .ok_or_else(|| {
+            CreationError::new("invalid_params", "params.seconds must be a non-negative integer")
+        })
+}
+
 /// Map a creation capability + opaque params + loaded inputs onto the invoke
 /// layer's typed [`TaskRequest`]. The full params object rides along as
 /// `extra` so protocol-specific knobs (`max_tokens`, `steps`, …) stay
@@ -156,11 +175,7 @@ fn cap_to_task_request(
         }),
         MediaCapability::T2v | MediaCapability::I2v => TaskRequest::VideoGeneration(VideoGenRequest {
             prompt: param_prompt(params),
-            // Tolerate both a JSON number and a numeric string (the retired
-            // openai_video adapter accepted either form).
-            seconds: params.get("seconds").and_then(|v| {
-                v.as_u64().or_else(|| v.as_str().and_then(|s| s.trim().parse().ok()))
-            }).and_then(|v| u32::try_from(v).ok()),
+            seconds: param_seconds(params)?,
             size: param_size(params),
             inputs,
             extra: params.clone(),
@@ -1030,9 +1045,22 @@ impl CreationService {
                 }
                 Ok(TaskOutcome::Done(result)) => return self.persist_or_fail(job, result).await,
                 Err(e) => {
-                    // 4xx is terminal (bad job id / auth); 5xx / network is
+                    // Terminal: an upstream 4xx (bad job id / auth), a
+                    // JobFailed (the remote job reached a terminal failure
+                    // state — the old PollResult::Failed leg), or a catalog
+                    // kind (provider/model deleted or retagged mid-poll must
+                    // not spin until the deadline). 5xx / network / parse is
                     // transient — keep polling until the deadline.
-                    if e.http_status.is_some_and(|s| (400..500).contains(&s)) {
+                    if e.http_status.is_some_and(|s| (400..500).contains(&s))
+                        || matches!(
+                            e.kind,
+                            InvokeErrorKind::JobFailed
+                                | InvokeErrorKind::Config
+                                | InvokeErrorKind::NoAdapter
+                                | InvokeErrorKind::UnsupportedTask
+                                | InvokeErrorKind::MissingConnection
+                        )
+                    {
                         return ExecOutcome::Failed(e.into());
                     }
                     tracing::warn!(id = %job.creation_task_id, error = %e.message, "creation poll transient error; retrying");
@@ -3011,6 +3039,15 @@ mod tests {
             TaskRequest::VideoGeneration(r) => assert_eq!(r.seconds, Some(8)),
             _ => unreachable!(),
         }
+        // Present-but-unparseable seconds is a typed local error, not a
+        // silent drop (the old code forwarded garbage to the provider).
+        for bad in [json!({"seconds": "soon"}), json!({"seconds": -1}), json!({"seconds": 1.5})] {
+            let Err(err) = cap_to_task_request(MediaCapability::T2v, &bad, vec![]) else {
+                panic!("unparseable seconds must be rejected: {bad}");
+            };
+            assert_eq!(err.kind, "invalid_params");
+            assert!(err.message.contains("seconds"), "message: {}", err.message);
+        }
         match cap_to_task_request(MediaCapability::Tts, &params, vec![]).unwrap() {
             TaskRequest::SpeechSynthesis(r) => {
                 assert_eq!(r.text, "a cat");
@@ -3069,6 +3106,7 @@ mod tests {
             (K::NoAdapter, "adapter_unavailable"),
             (K::Auth, "provider_error"),
             (K::ProviderError, "provider_error"),
+            (K::JobFailed, "provider_error"),
             (K::Network, "provider_error"),
             (K::ParseError, "provider_error"),
             (K::RateLimited, "provider_error"),
@@ -3481,6 +3519,52 @@ mod http_e2e_tests {
     }
 
     #[tokio::test]
+    async fn openai_video_remote_failed_status_fails_task_without_spinning() {
+        // A remote job reaching a terminal "failed" status must fail the task
+        // on the FIRST poll (the old PollResult::Failed leg), preserving the
+        // provider's failure reason — not spin as transient until the
+        // deadline. The expect(1) counts prove no re-poll; no /content mock
+        // is mounted, so a content fetch would 404 the poll chain.
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/videos"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"id": "v1", "status": "queued"})))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/v1/videos/v1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "id": "v1", "status": "failed", "error": {"message": "moderation blocked"}
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let (svc, provider_id, sink, _db) = build(&server.uri()).await;
+        let task = NewCreationTask {
+            canvas_id: None,
+            node_id: None,
+            provider_id: provider_id.clone(),
+            model: "sora-2".into(),
+            capability: "t2v".into(),
+            params: json!({"prompt": "a wave", "seconds": 4}),
+            inputs: vec![],
+        };
+        let created = svc.create_task(task).await.unwrap();
+        let done = wait_terminal(&svc, &created.creation_task_id).await;
+        assert_eq!(done.status, "failed");
+        let err = done.error.as_ref().unwrap();
+        assert_eq!(err["kind"], "provider_error");
+        assert!(
+            err["message"].as_str().is_some_and(|m| m.contains("moderation blocked")),
+            "provider failure reason must survive: {err}"
+        );
+        assert!(done.result_asset_ids.is_empty());
+        assert_eq!(sink.count.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
     async fn openai_chat_text_end_to_end() {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
@@ -3514,8 +3598,8 @@ mod http_e2e_tests {
     #[tokio::test]
     async fn gemini_text_end_to_end() {
         let server = MockServer::start().await;
-        // A `gemini`-named model routes to the gemini_text adapter regardless of
-        // the seeded platform (routing keys off the model-name substring too).
+        // The seeded provider_models row pins protocol "gemini.generate_text"
+        // (invoke routing is platform-keyed; this provider row is "openai").
         Mock::given(method("POST"))
             .and(path("/v1beta/models/gemini-2.5-flash:generateContent"))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({
