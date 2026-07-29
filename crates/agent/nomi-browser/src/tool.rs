@@ -1146,6 +1146,14 @@ impl BrowserTool {
         t
     }
 
+    /// **F6 test seam**: inject a pre-populated [`SecretStore`] into an already
+    /// constructed (e.g. managed) facade so sibling-module tests can exercise
+    /// the origin/egress gates without going through a vault file on disk.
+    #[cfg(test)]
+    pub(crate) fn inject_secret_store_for_tests(&self, store: SecretStore) {
+        *self.secret_store.lock().expect("secret_store poisoned") = Some(store);
+    }
+
     /// **P3-X2: lazily load the per-pet secret store + derive the firewall config**
     /// (called once on the engine slow path, before constructing `EngineConfig`).
     ///
@@ -1892,6 +1900,16 @@ impl BrowserTool {
             .and_then(|s| s.url.clone())
     }
 
+    /// **F6 recovery guidance** for the managed secret egress-allowlist gate,
+    /// embedded verbatim in the rejection produced by
+    /// [`Self::resolve_type_input`]. The platform adapter's `execute_act`
+    /// matches on this exact sentence to recognize the rejection class and
+    /// surface the actionable recovery path instead of its generic
+    /// managed-policy hint — keep producer and consumer using this one const.
+    pub(crate) const SECRET_EGRESS_ALLOWLIST_RECOVERY: &'static str =
+        "Close all browser lanes (browser_close_all) or restart the app so the \
+         browser relaunches with the updated allowlist, then retry.";
+
     /// **F1: resolve a `type`/`set_value` text into a [`TypeInput`]**, intercepting
     /// `secret:NAME` references (裁决⑦, the security-critical path).
     ///
@@ -1940,9 +1958,8 @@ impl BrowserTool {
                         "Secret {name:?} cannot be injected: the shared browser is not \
                          enforcing an egress allowlist that covers {origin:?} (it started \
                          before this credential's domain was registered). The value was NOT \
-                         typed (fail-closed). Close all browser lanes (browser_close_all) or \
-                         restart the app so the browser relaunches with the updated \
-                         allowlist, then retry."
+                         typed (fail-closed). {}",
+                        Self::SECRET_EGRESS_ALLOWLIST_RECOVERY
                     )));
                 }
                 // SECURITY: the plaintext is carried only inside TypeInput::Secret
