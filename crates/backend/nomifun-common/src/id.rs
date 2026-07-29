@@ -336,19 +336,8 @@ define_entity_id!(
     FigureId
 );
 define_entity_id!(
-    /// Globally unique public-agent audit-entry identifier.
-    ///
-    /// Audit entries are durable JSONL records and may be paged or exported
-    /// independently of the public-agent profile that owns them.
-    PublicAgentAuditEntryId
-);
-define_entity_id!(
     /// Globally unique companion evolution-feedback identifier.
     CompanionEvolutionFeedbackId
-);
-define_entity_id!(
-    /// Globally unique public-agent identifier.
-    PublicAgentId
 );
 define_entity_id!(
     /// Globally unique workshop-canvas identifier.

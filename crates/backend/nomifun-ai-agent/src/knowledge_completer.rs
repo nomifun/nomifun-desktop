@@ -112,9 +112,7 @@ pub(crate) fn first_enabled_model(models_json: &str, model_enabled_json: Option<
 /// Resolve the app's DEFAULT `(provider_id, model)`: the first enabled provider
 /// (creation order) and its first enabled model. `None` when no enabled
 /// provider/model is configured. The shared "what model would the app use by
-/// default" resolution — reused wherever a caller has no explicit model (e.g. a
-/// public agent whose own model field is unset, so it answers as soon as ANY
-/// provider is configured, no per-agent setup required).
+/// default" resolution — reused wherever a caller has no explicit model.
 pub async fn resolve_default_model(
     provider_repo: &std::sync::Arc<dyn IProviderRepository>,
 ) -> Option<(String, String)> {
@@ -219,7 +217,7 @@ mod tests {
             provider("p2", true, r#"["m1","m2"]"#, Some(r#"{"m1":false}"#)),
         ]));
         assert_eq!(resolve_default_model(&repo).await, Some(("p2".to_owned(), "m2".to_owned())));
-        // No enabled provider/model → None (a public agent then truthfully reports
+        // No enabled provider/model → None (the caller then truthfully reports
         // no model rather than pretending one exists).
         let none: Arc<dyn IProviderRepository> =
             Arc::new(ListOnlyRepo(vec![provider("p", false, r#"["m"]"#, None)]));

@@ -818,7 +818,7 @@ mod tests {
 
     /// The `apply_handshake` path still backfills NULL `agent_capabilities`
     /// on first handshake after the old Team metadata was removed from the
-    /// public agent shape.
+    /// published agent shape.
     #[tokio::test]
     async fn handshake_backfills_capabilities() {
         let reg = registry().await;

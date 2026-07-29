@@ -104,8 +104,6 @@ fn strip_server_owned_runtime_fields(extra: &mut serde_json::Value) {
             "companion",
             "companion_id",
             "channel_platform",
-            "public_agent_id",
-            "exposure",
             "cron_job_id",
             "mcp_server_ids",
             "mcp_servers",

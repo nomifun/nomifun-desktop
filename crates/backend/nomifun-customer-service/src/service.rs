@@ -243,6 +243,32 @@ impl CustomerServiceService {
             .map(|row| row.cs_agent_id))
     }
 
+    /// Every customer-service agent whose configured model rides
+    /// `provider_id` — the provider-deletion guard's friendly usage listing.
+    /// Best-effort: a repo error degrades to an empty list (the repository's
+    /// own transactional guards remain the deletion authority).
+    pub async fn providers_in_use(
+        &self,
+        provider_id: &str,
+    ) -> Vec<nomifun_common::ProviderUsage> {
+        let agents = match self.repo.list_agents().await {
+            Ok(agents) => agents,
+            Err(error) => {
+                tracing::warn!(%error, "customer-service provider-usage scan failed");
+                return Vec::new();
+            }
+        };
+        agents
+            .into_iter()
+            .filter(|agent| agent.provider_id.as_deref() == Some(provider_id))
+            .map(|agent| nomifun_common::ProviderUsage {
+                feature: nomifun_common::ProviderUsageFeature::CustomerService,
+                label: agent.name,
+                target_id: Some(agent.cs_agent_id),
+            })
+            .collect()
+    }
+
     // ── notes ────────────────────────────────────────────────────────
 
     pub async fn create_note(&self, input: CreateCsNoteInput) -> Result<CsNoteRow, AppError> {

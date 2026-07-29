@@ -720,7 +720,7 @@ pub async fn init_data_layer(config: &AppConfig) -> Result<Database> {
 /// product-owned side store has initialized successfully.
 ///
 /// Keeping this separate from [`init_data_layer`] is deliberate: the main
-/// SQLite schema alone is not proof that companion/public-agent/workshop and
+/// SQLite schema alone is not proof that companion/workshop and
 /// the other service-owned stores completed their v3 bootstrap. If service
 /// assembly fails, the pending reset plan remains durable and the next boot
 /// resumes instead of accepting a half-initialized dataset.

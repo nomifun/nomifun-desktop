@@ -556,7 +556,7 @@ pub fn build_system_state(services: &AppServices) -> SystemRouterState {
     let deletion_coordinator = Arc::new(crate::provider_deletion::AppProviderDeletionCoordinator {
         provider_lifecycle: services.provider_lifecycle.clone(),
         companion: services.companion_service.clone(),
-        public_agent: services.public_agent_service.clone(),
+        customer_service: services.customer_service_service.clone(),
         workshop: services.workshop_service.clone(),
         client_prefs: client_pref_repo,
         execution_repo,

@@ -1,5 +1,5 @@
 //! Atomic temp+rename writes for the workshop domain's on-disk artifacts
-//! (canvas docs + asset binaries). Mirrors `nomifun-public-agent::fsio` but is
+//! (canvas docs + asset binaries). Atomic write helpers,
 //! async (asset payloads can be tens of MB, so blocking the runtime on a sync
 //! write is unacceptable) and byte-oriented (docs/binaries, not typed configs).
 

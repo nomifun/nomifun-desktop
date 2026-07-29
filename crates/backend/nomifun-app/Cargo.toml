@@ -228,7 +228,6 @@ nomifun-idmm.workspace = true
 nomifun-knowledge.workspace = true
 nomifun-agent-execution.workspace = true
 nomifun-companion.workspace = true
-nomifun-public-agent.workspace = true
 nomifun-customer-service.workspace = true
 nomifun-workshop.workspace = true
 nomifun-creation.workspace = true

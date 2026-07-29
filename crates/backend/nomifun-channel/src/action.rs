@@ -1171,7 +1171,7 @@ mod action_tests {
     }
 
     /// Read-only pref repo seeded with fixed `(key, value)` rows — lets the
-    /// pairing-bypass tests stand up a platform bound to a public agent (or a
+    /// pairing-bypass tests stand up a bot bound to a customer-service agent (or a
     /// companion) without a real DB.
     struct SeededPrefRepo {
         data: Vec<(String, String)>,
@@ -1234,7 +1234,7 @@ mod action_tests {
     }
 
     /// Like `setup()` but with the settings service backed by seeded preference
-    /// rows (used to bind a platform to a public agent / companion).
+    /// rows (used to bind a platform to a companion).
     fn setup_with_prefs(entries: &[(&str, &str)]) -> (ActionExecutor, Arc<MockRepo>) {
         let repo = Arc::new(MockRepo::new());
         let broadcaster = Arc::new(MockBroadcaster);
