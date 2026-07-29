@@ -544,39 +544,92 @@ async fn handle_dispatched(
         && let Some(pending) = msg_svc.pending_decisions().peek(cid)
     {
         match parse_choice(text, pending.options.len()) {
-            Some(idx) => {
-                let option = &pending.options[idx];
-                match msg_svc.submit_decision(cid, &pending.call_id, &option.option_id).await {
-                    Ok(()) => {
-                        msg_svc.pending_decisions().take(cid);
-                        info!(conversation_id = %cid, option_id = %option.option_id, "channel decision resolved");
-                        let _ = sender
-                            .send_message(
-                                plugin_id,
-                                chat_id,
-                                plain_text_message(format!("\u{2705} 已选择：{}", option.label)),
-                            )
-                            .await;
-                    }
-                    Err(e) => {
-                        // The decision can no longer be submitted — most often it
-                        // was already answered from the desktop UI, or the turn
-                        // ended. Clear the stale entry so the user's next message
-                        // dispatches normally instead of being trapped on it.
-                        msg_svc.pending_decisions().take(cid);
-                        error!(error = %e, conversation_id = %cid, "channel decision submit failed; cleared stale pending");
-                        let _ = sender
-                            .send_message(
-                                plugin_id,
-                                chat_id,
-                                plain_text_message(format!(
-                                    "\u{274c} 该决策已无法提交（可能已在桌面处理）：{e}。已清除等待，请重新发送你的指令。"
-                                )),
-                            )
-                            .await;
+            Some(idx) => match &pending.kind {
+                // Channel-owned remote-stop confirmation (batch-1 handover
+                // gap): "确认停止" cancels the target as owner via the same
+                // safe service path as the desktop stop button; "取消" just
+                // clears the entry. Never routed through `confirm` — there is
+                // no agent call waiting on this decision.
+                crate::pending_decision::PendingDecisionKind::StopConversation {
+                    target_conversation_id,
+                } => {
+                    msg_svc.pending_decisions().take(cid);
+                    let reply = if idx == 0 {
+                        // The stop worker is detached inside the service, so a
+                        // bounded wait only caps the ACK latency — dropping
+                        // this future never aborts the stop itself.
+                        match tokio::time::timeout(
+                            std::time::Duration::from_secs(10),
+                            msg_svc.stop_conversation(target_conversation_id),
+                        )
+                        .await
+                        {
+                            Ok(Ok(())) => {
+                                info!(
+                                    target = %target_conversation_id,
+                                    "channel-confirmed remote stop executed"
+                                );
+                                format!(
+                                    "\u{2705} 已停止会话 {target_conversation_id} 的当前任务。"
+                                )
+                            }
+                            Ok(Err(e)) => {
+                                error!(error = %e, target = %target_conversation_id, "channel remote stop failed");
+                                format!(
+                                    "\u{274c} 停止会话 {target_conversation_id} 失败：{e}"
+                                )
+                            }
+                            Err(_elapsed) => {
+                                info!(
+                                    target = %target_conversation_id,
+                                    "channel remote stop is still finalizing; ack sent early"
+                                );
+                                format!(
+                                    "\u{23f9} 停止指令已发出，会话 {target_conversation_id} 正在停止中。"
+                                )
+                            }
+                        }
+                    } else {
+                        "已取消，不停止该会话。".to_owned()
+                    };
+                    let _ = sender
+                        .send_message(plugin_id, chat_id, plain_text_message(reply))
+                        .await;
+                }
+                crate::pending_decision::PendingDecisionKind::AgentConfirm => {
+                    let option = &pending.options[idx];
+                    match msg_svc.submit_decision(cid, &pending.call_id, &option.option_id).await {
+                        Ok(()) => {
+                            msg_svc.pending_decisions().take(cid);
+                            info!(conversation_id = %cid, option_id = %option.option_id, "channel decision resolved");
+                            let _ = sender
+                                .send_message(
+                                    plugin_id,
+                                    chat_id,
+                                    plain_text_message(format!("\u{2705} 已选择：{}", option.label)),
+                                )
+                                .await;
+                        }
+                        Err(e) => {
+                            // The decision can no longer be submitted — most often it
+                            // was already answered from the desktop UI, or the turn
+                            // ended. Clear the stale entry so the user's next message
+                            // dispatches normally instead of being trapped on it.
+                            msg_svc.pending_decisions().take(cid);
+                            error!(error = %e, conversation_id = %cid, "channel decision submit failed; cleared stale pending");
+                            let _ = sender
+                                .send_message(
+                                    plugin_id,
+                                    chat_id,
+                                    plain_text_message(format!(
+                                        "\u{274c} 该决策已无法提交（可能已在桌面处理）：{e}。已清除等待，请重新发送你的指令。"
+                                    )),
+                                )
+                                .await;
+                        }
                     }
                 }
-            }
+            },
             None => {
                 // Non-numeric / out-of-range reply: re-show the numbered list
                 // (do not dispatch it as a new prompt).
