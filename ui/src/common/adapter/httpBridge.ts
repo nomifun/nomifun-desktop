@@ -735,6 +735,7 @@ const wsListeners = new Map<string, Set<WsCallback>>();
 let ws: WebSocket | null = null;
 let wsReconnectTimer: ReturnType<typeof setTimeout> | null = null;
 let wsReconnectAttempt = 0;
+let wsLastActivityAtMs: number | null = null;
 
 function ensureWs(): void {
   if (typeof window === 'undefined') {
@@ -766,6 +767,7 @@ function ensureWs(): void {
 
   current.addEventListener('open', () => {
     console.debug('[ensureWs] CONNECTED');
+    wsLastActivityAtMs = Date.now();
     // A non-zero attempt counter means we got here by reconnecting (the socket
     // had dropped and `scheduleWsReconnect` ran). Notify local listeners so a
     // live view can resync: the server only does a live fan-out with no replay,
@@ -800,6 +802,10 @@ function ensureWs(): void {
   });
 
   current.addEventListener('message', (event: MessageEvent) => {
+    // Any inbound frame — server heartbeat pings included — proves the peer
+    // is still delivering data. Recorded before parsing so even a malformed
+    // frame counts as socket liveness.
+    wsLastActivityAtMs = Date.now();
     try {
       const msg = JSON.parse(event.data as string) as {
         name?: string;
@@ -853,13 +859,26 @@ function scheduleWsReconnect(): void {
 }
 
 /**
- * Whether the shared realtime WebSocket is currently OPEN. Consumers use this
- * to gate fallback snapshot polling on realtime health; it says nothing about
- * a half-open socket the OS has not surfaced yet, which is exactly the case
- * the fallback poll exists for.
+ * Whether the shared realtime WebSocket is currently OPEN. This is nominal
+ * socket state only: a half-open socket the OS has not surfaced yet still
+ * reports OPEN here. Consumers gating fallback polling on realtime health
+ * must combine this with `wsLastActivityAt` — readyState alone would disable
+ * the poll in exactly the wedged case it exists for.
  */
 export function isWsConnected(): boolean {
   return ws != null && ws.readyState === WebSocket.OPEN;
+}
+
+/**
+ * Timestamp of the most recent inbound frame (server heartbeat pings
+ * included) or successful open on the shared realtime WebSocket; `null`
+ * before the first connection. The backend heartbeats every active
+ * connection at least every 30s, so unlike `readyState` this only keeps
+ * advancing while the peer is actually delivering data — a wedged half-open
+ * socket goes silent here long before the OS reports the close.
+ */
+export function wsLastActivityAt(): number | null {
+  return wsLastActivityAtMs;
 }
 
 // ---------------------------------------------------------------------------
