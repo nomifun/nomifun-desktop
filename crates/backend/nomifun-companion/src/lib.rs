@@ -36,6 +36,7 @@ pub mod service;
 pub mod skill_sink;
 pub mod state;
 pub mod store;
+pub mod summon_support;
 mod skill_io;
 
 pub use events::CompanionEventEmitter;
@@ -52,6 +53,10 @@ pub use routes::{companion_public_routes, companion_routes};
 pub use service::CompanionService;
 pub use state::CompanionRouterState;
 pub use store::CompanionStore;
+pub use summon_support::{
+    SUMMON_CONTEXT_BUDGET, SUMMON_MEMORY_SUGGESTION_KIND, SummonContextResolver, SummonMemorySink,
+    SummonSuggestionSink, resolve_summon_context,
+};
 
 /// Shared multi-companion artifacts (under the backend data dir): shared
 /// `config.json`, `events/*.jsonl`, `memory.db`.

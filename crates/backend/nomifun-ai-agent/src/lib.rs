@@ -32,6 +32,7 @@ pub mod types;
 // become the single integration surface (see docs/specs/agent-extraction-checklist.md).
 pub use nomi_agent::companion_tools::CompanionMemorySink;
 pub use nomi_agent::companion_tools::{CompanionSkillSink, SkillListing};
+pub use nomi_agent::summon_tools::{SummonContextSink, SummonProposalSink};
 pub use nomi_agent::cron_tools::{CronJobSummary, CronSink};
 pub use nomi_agent::requirement_tools::RequirementSink;
 pub use nomi_config;
