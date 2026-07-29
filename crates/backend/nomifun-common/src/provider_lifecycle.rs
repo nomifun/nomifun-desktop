@@ -1,5 +1,5 @@
 //! Process-local coordination for logical Provider references stored outside
-//! SQLite, such as companion and public-agent JSON side stores.
+//! SQLite, such as the companion JSON side stores.
 //!
 //! A read guard covers a side-store write plus its Provider existence check.
 //! A write guard covers the complete Provider deletion scan and database

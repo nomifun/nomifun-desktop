@@ -5466,6 +5466,7 @@ dependencies = [
  "dirs 6.0.0",
  "ed25519-dalek",
  "flate2",
+ "futures",
  "futures-util",
  "getrandom 0.2.17",
  "hex",
@@ -5564,6 +5565,7 @@ dependencies = [
  "nomifun-conversation",
  "nomifun-creation",
  "nomifun-cron",
+ "nomifun-customer-service",
  "nomifun-db",
  "nomifun-extension",
  "nomifun-file",
@@ -5575,7 +5577,6 @@ dependencies = [
  "nomifun-office",
  "nomifun-preset",
  "nomifun-public",
- "nomifun-public-agent",
  "nomifun-realtime",
  "nomifun-requirement",
  "nomifun-runtime",
@@ -5833,6 +5834,28 @@ dependencies = [
  "sqlx",
  "tempfile",
  "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "nomifun-customer-service"
+version = "0.3.3"
+dependencies = [
+ "async-trait",
+ "axum",
+ "dashmap",
+ "futures",
+ "nomifun-ai-agent",
+ "nomifun-api-types",
+ "nomifun-auth",
+ "nomifun-common",
+ "nomifun-db",
+ "nomifun-knowledge",
+ "nomifun-realtime",
+ "serde",
+ "serde_json",
+ "tempfile",
  "tokio",
  "tracing",
 ]
@@ -6162,25 +6185,6 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tower",
- "tracing",
-]
-
-[[package]]
-name = "nomifun-public-agent"
-version = "0.3.3"
-dependencies = [
- "async-trait",
- "axum",
- "nomifun-ai-agent",
- "nomifun-api-types",
- "nomifun-auth",
- "nomifun-common",
- "nomifun-db",
- "nomifun-preset",
- "serde",
- "serde_json",
- "tempfile",
- "tokio",
  "tracing",
 ]
 

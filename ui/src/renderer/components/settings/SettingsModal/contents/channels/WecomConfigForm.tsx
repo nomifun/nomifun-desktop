@@ -168,7 +168,7 @@ const WecomConfigForm: React.FC<WecomConfigFormProps> = ({
       };
       const result = await channel.enablePlugin.invoke(
         channelTarget
-          ? { plugin_id: channelTarget.channelPluginId, plugin_type: 'wecom', ...(channelTarget.publicAgentId ? { public_agent_id: channelTarget.publicAgentId } : { companion_id: channelTarget.companionId }), config }
+          ? { plugin_id: channelTarget.channelPluginId, plugin_type: 'wecom', ...(channelTarget.companionId ? { companion_id: channelTarget.companionId } : {}), config }
           : { plugin_type: 'wecom', config }
       );
       if (!result.success) {

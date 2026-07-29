@@ -77,7 +77,7 @@ const NostrConfigForm: React.FC<NostrConfigFormProps> = ({ pluginStatus, channel
 
   const handleAutoEnable = async () => {
     const config = { credentials: { nostr_private_key: privateKey.trim(), nostr_relays: relays.trim() } };
-    const result = await channel.enablePlugin.invoke(channelTarget ? { plugin_id: channelTarget.channelPluginId, plugin_type: 'nostr', ...(channelTarget.publicAgentId ? { public_agent_id: channelTarget.publicAgentId } : { companion_id: channelTarget.companionId }), config } : { plugin_type: 'nostr', config });
+    const result = await channel.enablePlugin.invoke(channelTarget ? { plugin_id: channelTarget.channelPluginId, plugin_type: 'nostr', ...(channelTarget.companionId ? { companion_id: channelTarget.companionId } : {}), config } : { plugin_type: 'nostr', config });
     if (!result.success) {
       throw new Error(result.error || t('nomi.settings.remoteEnableFailed', { defaultValue: 'Failed to enable channel' }));
     }

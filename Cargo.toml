@@ -38,7 +38,7 @@ nomifun-agent-execution = { path = "crates/backend/nomifun-agent-execution" }
 nomifun-terminal = { path = "crates/backend/nomifun-terminal" }
 nomifun-preset = { path = "crates/backend/nomifun-preset" }
 nomifun-secret = { path = "crates/backend/nomifun-secret" }
-nomifun-public-agent = { path = "crates/backend/nomifun-public-agent" }
+nomifun-customer-service = { path = "crates/backend/nomifun-customer-service" }
 nomifun-workshop = { path = "crates/backend/nomifun-workshop" }
 nomifun-creation = { path = "crates/backend/nomifun-creation" }
 nomifun-app = { path = "crates/backend/nomifun-app" }

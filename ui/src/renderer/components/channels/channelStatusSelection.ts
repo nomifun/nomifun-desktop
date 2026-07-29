@@ -5,21 +5,19 @@
  */
 
 import type { IChannelPluginStatus } from '@/common/types/channel/channel';
-import type { ChannelPluginId, CompanionId, PublicAgentId } from '@/common/types/ids';
+import type { ChannelPluginId, CompanionId } from '@/common/types/ids';
 import type { ChannelPlatform } from '@/renderer/components/settings/SettingsModal/contents/channels/channelTarget';
 
 export interface EnabledChannelStatusQuery {
   platform: ChannelPlatform;
   enabledPluginId?: ChannelPluginId;
   companionId?: CompanionId;
-  publicAgentId?: PublicAgentId;
 }
 
 export type ChannelConfigTarget = { platform: ChannelPlatform; channelPluginId?: ChannelPluginId } | null;
 
 export interface ChannelOwnerQuery {
   companionId?: CompanionId;
-  publicAgentId?: PublicAgentId;
 }
 
 const nonEmptyOwnerId = <T extends string>(value: T | null | undefined): T | undefined =>
@@ -36,11 +34,9 @@ export function findEnabledChannelStatus(
   }
 
   const companionId = nonEmptyOwnerId(query.companionId);
-  const publicAgentId = nonEmptyOwnerId(query.publicAgentId);
   return (
     statuses.find((status) => {
       if (status.type !== query.platform) return false;
-      if (publicAgentId) return nonEmptyOwnerId(status.publicAgentId) === publicAgentId;
       if (companionId) return nonEmptyOwnerId(status.companionId) === companionId;
       return false;
     }) ?? null
@@ -66,13 +62,11 @@ export function retargetConfigAfterStatus(
 /** Trimmed owner check: does this row currently belong to the given owner? */
 export function statusOwnedBy(status: IChannelPluginStatus, owner: ChannelOwnerQuery): boolean {
   const companionId = nonEmptyOwnerId(owner.companionId);
-  const publicAgentId = nonEmptyOwnerId(owner.publicAgentId);
-  if (publicAgentId) return nonEmptyOwnerId(status.publicAgentId) === publicAgentId;
   if (companionId) return nonEmptyOwnerId(status.companionId) === companionId;
   return false;
 }
 
-/** A row with no companion and no public-agent owner (a free, bindable bot). */
+/** A row with no companion owner (a free, bindable bot). */
 export function statusIsUnbound(status: IChannelPluginStatus): boolean {
-  return !nonEmptyOwnerId(status.companionId) && !nonEmptyOwnerId(status.publicAgentId);
+  return !nonEmptyOwnerId(status.companionId);
 }

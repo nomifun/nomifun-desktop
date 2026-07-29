@@ -49,7 +49,6 @@ use nomifun_office::{
 };
 use nomifun_agent_execution::{AgentExecutionEngine, AgentExecutionEngineConfig};
 use nomifun_companion::CompanionRouterState;
-use nomifun_public_agent::PublicAgentRouterState;
 use nomifun_workshop::WorkshopRouterState;
 use nomifun_creation::CreationRouterState;
 use nomifun_realtime::{NoopMessageRouter, WsHandlerState};
@@ -88,7 +87,8 @@ pub struct ModuleStates {
     pub idmm: IdmmRouterState,
     pub knowledge: KnowledgeRouterState,
     pub companion: CompanionRouterState,
-    pub public_agent: PublicAgentRouterState,
+    /// 客服独立域 (customer-service domain).
+    pub customer_service: nomifun_customer_service::CustomerServiceRouterState,
     /// 创意工坊 (Creative Workshop) canvas/asset domain.
     pub workshop: WorkshopRouterState,
     /// 生成引擎 (creation) media task queue.
@@ -485,8 +485,12 @@ pub async fn build_module_states(services: &AppServices) -> (ModuleStates, Chann
         idmm: idmm_state,
         knowledge: KnowledgeRouterState::new(services.knowledge_service.clone()),
         companion: companion_state,
-        public_agent: PublicAgentRouterState::new(services.public_agent_service.clone())
-            .with_preset_service(preset.service.clone()),
+        customer_service: nomifun_customer_service::CustomerServiceRouterState {
+            service: services.customer_service_service.clone(),
+            channel_repo: Arc::new(nomifun_db::SqliteChannelRepository::new(
+                services.database.pool().clone(),
+            )),
+        },
         workshop: build_workshop_state(services),
         creation: build_creation_state(services),
         webhook: build_webhook_state(services),
@@ -552,7 +556,7 @@ pub fn build_system_state(services: &AppServices) -> SystemRouterState {
     let deletion_coordinator = Arc::new(crate::provider_deletion::AppProviderDeletionCoordinator {
         provider_lifecycle: services.provider_lifecycle.clone(),
         companion: services.companion_service.clone(),
-        public_agent: services.public_agent_service.clone(),
+        customer_service: services.customer_service_service.clone(),
         workshop: services.workshop_service.clone(),
         client_prefs: client_pref_repo,
         execution_repo,
@@ -728,7 +732,7 @@ pub fn build_mcp_state(services: &AppServices) -> McpRouterState {
     }
 }
 
-/// Adapter exposing companions and public agents to channel conversations.
+/// Adapter exposing companions to channel conversations.
 ///
 /// The channel layer resolves a session's companion via the channel row's own
 /// `companion_id` first; this profile supplies the legacy per-platform binding
@@ -737,19 +741,9 @@ pub fn build_mcp_state(services: &AppServices) -> McpRouterState {
 /// Channel sessions with no per-platform model fall back to the bound
 /// companion's configured model, so its model choice travels with it to remote
 /// sessions.
-///
-/// It ALSO backs the 对外伙伴 (public agent) side of the same trait: a platform
-/// bound to a public agent (mutually exclusive with a companion binding) resolves
-/// its live/enabled state + model here so the channel layer can serve strangers
-/// via a `PublicService`-clamped per-chat session.
 struct CompanionChannelAgentProfile {
     companion_service: Arc<nomifun_companion::CompanionService>,
     channel_settings: Arc<nomifun_channel::channel_settings::ChannelSettingsService>,
-    public_agent_service: Arc<nomifun_public_agent::PublicAgentService>,
-    /// Provider catalog, used to resolve the app's DEFAULT model when a public
-    /// agent has no model of its own —so it answers as soon as ANY provider is
-    /// configured (no per-agent model setup required).
-    provider_repo: Arc<dyn IProviderRepository>,
 }
 
 #[async_trait::async_trait]
@@ -809,70 +803,41 @@ impl nomifun_channel::message_service::ChannelAgentProfile for CompanionChannelA
             }
         }
     }
+}
 
-    async fn public_agent_servable(&self, public_agent_id: &str) -> bool {
-        // Servable = the public agent exists AND is enabled. A deleted agent or a
-        // disabled/paused one is NOT servable, so the channel layer refuses the
-        // turn rather than serving a dead agent. The bot→agent binding itself is
-        // per-bot (the channel row's `public_agent_id`); this is a pure by-id
-        // liveness check.
-        matches!(
-            self.public_agent_service.get(public_agent_id).await,
-            Ok(cfg) if cfg.enabled
-        )
-    }
+/// 客服域接缝适配器: exposes the customer-service binding lookup and the
+/// stateless dialogue engine to the channel layer through the [`CsRouting`]
+/// trait. `Ok("")` from `handle_visitor_message` means "merged into another
+/// in-flight batch — send nothing" (the engine's `Ok(None)`).
+struct AppCsRouting {
+    service: Arc<nomifun_customer_service::CustomerServiceService>,
+    engine: Arc<nomifun_customer_service::CsDialogueEngine>,
+}
 
-    async fn public_agent_exists(&self, public_agent_id: &str) -> bool {
-        self.public_agent_service.exists(public_agent_id).await
-    }
-
-    async fn public_agent_name(&self, public_agent_id: &str) -> Option<String> {
-        self.public_agent_service
-            .get(public_agent_id)
-            .await
-            .ok()
-            .map(|a| a.name)
-            .filter(|n| !n.trim().is_empty())
-    }
-
-    async fn public_agent_model(
-        &self,
-        public_agent_id: &str,
-    ) -> Option<nomifun_common::ProviderWithModel> {
-        // The agent's OWN configured model wins.
-        if let Ok(cfg) = self.public_agent_service.get(public_agent_id).await {
-            if let Some(model) = cfg.model {
-                return Some(nomifun_common::ProviderWithModel {
-                    provider_id: model.provider_id.into_string(),
-                    model: model.model.clone(),
-                    use_model: Some(model.model),
-                });
+#[async_trait::async_trait]
+impl nomifun_channel::message_service::CsRouting for AppCsRouting {
+    async fn binding_for(&self, channel_plugin_id: &str) -> Option<String> {
+        match self.service.binding_for_plugin(channel_plugin_id).await {
+            Ok(binding) => binding,
+            Err(error) => {
+                tracing::warn!(%error, channel_plugin_id, "customer-service binding lookup failed");
+                None
             }
         }
-        // Otherwise fall back to the app's DEFAULT model (first enabled provider +
-        // model). This is what makes a public agent "just work" the moment any
-        // provider (e.g. StepFun) is configured, without per-agent model setup —
-        // the owner can still pin a specific model in the console. `None` only
-        // when the machine has NO enabled provider/model at all.
-        let (provider_id, model) = nomifun_ai_agent::resolve_default_model(&self.provider_repo).await?;
-        Some(nomifun_common::ProviderWithModel {
-            provider_id,
-            model: model.clone(),
-            use_model: Some(model),
-        })
     }
 
-    async fn record_public_agent_turn(
+    async fn handle_visitor_message(
         &self,
-        public_agent_id: &str,
-        platform: &str,
+        cs_agent_id: &str,
+        channel_plugin_id: &str,
+        channel_user_id: &str,
+        chat_id: &str,
         text: &str,
-    ) {
-        // Best-effort audit into the public agent's own day-partitioned log
-        // (never fails the turn).
-        self.public_agent_service
-            .record_turn(public_agent_id, "channel", Some(platform), text)
-            .await;
+    ) -> Result<String, String> {
+        self.engine
+            .handle_visitor_message(cs_agent_id, channel_plugin_id, channel_user_id, chat_id, text)
+            .await
+            .map(|reply| reply.unwrap_or_default())
     }
 }
 
@@ -930,6 +895,13 @@ pub async fn build_channel_state(
     // Build message-loop dependencies. The fallback agent type for the
     // `agent.select` action mirrors `ChannelSettingsService`'s default
     // ("nomi") so the two resolution paths cannot drift apart.
+    // 客服域接缝: one adapter instance shared by the message service (turn
+    // routing) and the action executor (stranger auto-serve gate).
+    let cs_routing: Arc<dyn nomifun_channel::message_service::CsRouting> =
+        Arc::new(AppCsRouting {
+            service: services.customer_service_service.clone(),
+            engine: services.cs_dialogue_engine.clone(),
+        });
     let action_executor = Arc::new(
         nomifun_channel::action::ActionExecutor::new(
             Arc::clone(&pairing_service),
@@ -944,7 +916,10 @@ pub async fn build_channel_state(
             nomifun_requirement::RequirementServiceSink::creator_arc(
                 services.requirement_service.clone(),
             ),
-        )),
+        ))
+        // 客服自动接待: a stranger on a cs-bound bot bypasses the pairing gate
+        // (the one-shot session's read-only tool whitelist is the boundary).
+        .with_cs_routing(Some(Arc::clone(&cs_routing))),
     );
 
     let conv_repo: Arc<dyn nomifun_db::IConversationRepository> = Arc::new(
@@ -999,16 +974,12 @@ pub async fn build_channel_state(
     }
 
     // Channel Agent profile: per-platform companion binding + model resolution
-    // and companion-id validation for the binding write
-    // route, PLUS the 对外伙伴 (public agent) resolution/validation/audit for the
-    // symmetric public-agent binding. One instance shared by the message service
-    // and the router state.
+    // and companion-id validation for the binding write route. One instance
+    // shared by the message service and the router state.
     let channel_agent_profile: Arc<dyn nomifun_channel::message_service::ChannelAgentProfile> =
         Arc::new(CompanionChannelAgentProfile {
             companion_service: services.companion_service.clone(),
             channel_settings: Arc::clone(&channel_settings),
-            public_agent_service: services.public_agent_service.clone(),
-            provider_repo: services.provider_repo.clone(),
         });
 
     let message_service = Arc::new(
@@ -1023,6 +994,9 @@ pub async fn build_channel_state(
         // resolution falls back to the bound companion when the
         // platform has no config of its own.
         .with_channel_agent_profile(Arc::clone(&channel_agent_profile))
+        // 客服域接缝: cs-bound bots route their whole inbound turn to the
+        // customer-service domain instead of any Conversation.
+        .with_cs_routing(Arc::clone(&cs_routing))
         // Outbound media: resolve bare Workshop asset UUIDv7 values to bytes so
         // channel replies can send AI-generated images/files.
         .with_asset_resolver(Arc::new(crate::channel_asset_resolver::ChannelAssetResolver::new(

@@ -24,12 +24,12 @@ import {
   SiderPresetEntry,
   SiderSkillsEntry,
   SiderConversationEntry,
+  SiderCustomerServiceEntry,
   SiderKnowledgeEntry,
   SiderMcpEntry,
   SiderModelHubEntry,
   SiderNomiEntry,
   SiderOpenCapabilitiesEntry,
-  SiderPublicServiceEntry,
   SiderRequirementsEntry,
   SiderScheduledEntry,
   SiderSectionHeader,
@@ -52,8 +52,8 @@ interface SiderProps {
  * content-area secondary sidebar (`ConversationShell` / `ContentSider`),
  * reached via the "会话" entry. The rail holds top-level destinations grouped
  * by small-text section headers (`SiderSectionHeader`): 常用 (会话 / 桌面伙伴),
- * 对外服务 (对外伙伴), 数据空间 (知识库), 自动化 (定时任务 / 需求平台),
- * 增强工具 (设定 / Skill / MCP), and a bottom-pinned 设置 group
+ * 数据空间 (知识库), 自动化 (定时任务 / 需求平台),
+ * 增强工具 (设定 / Skill / MCP), 服务 (客服), and a bottom-pinned 设置 group
  * (浏览器管理 + 模型管理 + the footer). Execution engines live as an
  * independent tab inside Settings rather than being mixed into model
  * management.
@@ -122,7 +122,7 @@ const Sider: React.FC<SiderProps> = ({ onSessionClick, collapsed = false }) => {
   const handleAssetLibraryClick = () => navTo('/assets');
   const handleNomiClick = () => navTo('/nomi');
   const handleWorkshopClick = () => navTo('/workshop');
-  const handlePublicServiceClick = () => navTo('/public-companions');
+  const handleCustomerServiceClick = () => navTo('/customer-service');
   const handlePresetClick = () => navTo('/presets');
   const handleSkillsClick = () => navTo('/skills');
   const handleMcpClick = () => navTo('/mcp');
@@ -223,16 +223,6 @@ const Sider: React.FC<SiderProps> = ({ onSessionClick, collapsed = false }) => {
               siderTooltipProps={siderTooltipProps}
               onClick={handleWorkshopClick}
             />
-            {/* 对外服务 — public-facing customer-service agents (对外伙伴), a domain
-                fully separate from the desktop-companion group above. */}
-            <SiderSectionHeader label={t('common.siderSection.publicService')} collapsed={collapsed} />
-            <SiderPublicServiceEntry
-              isMobile={isMobile}
-              isActive={pathname.startsWith('/public-companions')}
-              collapsed={collapsed}
-              siderTooltipProps={siderTooltipProps}
-              onClick={handlePublicServiceClick}
-            />
             {/* 数据空间 — data & storage (文件管理 reserved for later) */}
             <SiderSectionHeader label={t('common.siderSection.data')} collapsed={collapsed} />
             {/* Knowledge base */}
@@ -294,6 +284,16 @@ const Sider: React.FC<SiderProps> = ({ onSessionClick, collapsed = false }) => {
               collapsed={collapsed}
               siderTooltipProps={siderTooltipProps}
               onClick={handleMcpClick}
+            />
+            {/* 服务 — public-facing services (客服), a domain fully separate
+                from the desktop-companion group above. */}
+            <SiderSectionHeader label={t('common.siderSection.services')} collapsed={collapsed} />
+            <SiderCustomerServiceEntry
+              isMobile={isMobile}
+              isActive={pathname.startsWith('/customer-service')}
+              collapsed={collapsed}
+              siderTooltipProps={siderTooltipProps}
+              onClick={handleCustomerServiceClick}
             />
           </div>
         )}

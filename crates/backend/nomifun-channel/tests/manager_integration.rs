@@ -26,7 +26,6 @@ fn platform_spec(plugin_type: &str) -> EnableChannelSpec {
         plugin_id: None,
         plugin_type: Some(plugin_type.to_owned()),
         companion_id: None,
-        public_agent_id: None,
     }
 }
 
@@ -35,7 +34,6 @@ fn existing_spec(channel_plugin_id: &str, plugin_type: &str) -> EnableChannelSpe
         plugin_id: Some(channel_plugin_id.to_owned()),
         plugin_type: Some(plugin_type.to_owned()),
         companion_id: None,
-        public_agent_id: None,
     }
 }
 

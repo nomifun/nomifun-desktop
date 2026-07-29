@@ -6,19 +6,19 @@
 
 import { describe, expect, test } from 'bun:test';
 import { featureRoute, groupUsagesByFeature, parseProviderInUseDetails, type ProviderUsage } from './providerInUse';
-import { parseCompanionId, parseConversationId, parseExecutionId, parsePublicAgentId } from '@/common/types/ids';
+import { parseCompanionId, parseConversationId, parseCsAgentId, parseExecutionId } from '@/common/types/ids';
 
 const COMPANION_1 = parseCompanionId('0190f5fe-7c00-7a00-8000-000000000001');
 const COMPANION_2 = parseCompanionId('0190f5fe-7c00-7a00-8000-000000000002');
-const PUBLIC_AGENT = parsePublicAgentId('0190f5fe-7c00-7a00-8000-000000000001');
+const CS_AGENT = parseCsAgentId('0190f5fe-7c00-7a00-8000-000000000001');
 const CONVERSATION = parseConversationId('0190f5fe-7c00-7a00-8000-000000000001');
 const EXECUTION = parseExecutionId('0190f5fe-7c00-7a00-8000-000000000001');
 
 describe('providerInUse helpers', () => {
   test('featureRoute maps each feature', () => {
     expect(featureRoute('desktopCompanion')).toBe('/nomi');
-    expect(featureRoute('publicCompanion', PUBLIC_AGENT)).toBe(`/public-companions/${PUBLIC_AGENT}`);
-    expect(featureRoute('publicCompanion')).toBe('/public-companions');
+    expect(featureRoute('customerService', CS_AGENT)).toBe(`/customer-service/`);
+    expect(featureRoute('customerService')).toBe('/customer-service');
     expect(featureRoute('smartDecision')).toBe('/models?section=global');
     expect(featureRoute('conversation', CONVERSATION)).toBe(`/conversation/${CONVERSATION}`);
     expect(featureRoute('conversation')).toBe('/guid');

@@ -94,9 +94,7 @@ const QQBotConfigForm: React.FC<QQBotConfigFormProps> = ({
         ? {
             plugin_id: channelTarget.channelPluginId,
             plugin_type: 'qqbot',
-            ...(channelTarget.publicAgentId
-              ? { public_agent_id: channelTarget.publicAgentId }
-              : { companion_id: channelTarget.companionId }),
+            ...(channelTarget.companionId ? { companion_id: channelTarget.companionId } : {}),
             config,
           }
         : { plugin_type: 'qqbot', config }
@@ -116,7 +114,6 @@ const QQBotConfigForm: React.FC<QQBotConfigFormProps> = ({
         platform: 'qqbot',
         enabledPluginId: result.plugin_id,
         companionId: channelTarget?.companionId,
-        publicAgentId: channelTarget?.publicAgentId,
       });
       // Only report a resolved plugin — feeding the parent `null` would skip its
       // optimistic merge + retarget (the adopt effect + next refresh still heal).
