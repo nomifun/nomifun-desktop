@@ -1,0 +1,198 @@
+{
+  "sider": {
+    "label": "浏览器",
+    "counts": "{{running}} 个运行中，{{queued}} 个排队中",
+    "tooltip": "{{label}} · {{counts}}"
+  },
+  "actions": {
+    "busy": "另一个浏览器管理操作仍在进行中。请等待它完成后重试。"
+  },
+  "page": {
+    "title": "浏览器管理",
+    "description": "管理 Agent 浏览器通道的生命周期、容量、队列与身份状态。日常浏览默认无头静默运行，只有显式操作时才前台打开运行中的主身份通道。",
+    "runningCount": "{{count}} 个运行中",
+    "queuedCount": "{{count}} 个排队中",
+    "pressure": "{{state}}负载",
+    "refresh": "刷新",
+    "closeAll": "关闭所有浏览器资源",
+    "inventoryUnavailable": "暂时无法获取浏览器清单：{{error}}",
+    "retry": "重试",
+    "capabilityUnavailable": "当前运行时不支持浏览器管理。",
+    "loading": "正在加载浏览器通道…",
+    "empty": "当前没有运行中的受管浏览器资源。普通 Browser 搜索会在需要时以无头模式静默启动。",
+    "residualResources": "当前没有附着的浏览器通道，但仍有 {{hosts}} 个受管主机和 {{cleanups}} 个待清理任务。请使用“全部关闭”终止它们，并确认所有受管资源都归零。",
+    "residualResourcesUser": "当前没有附着的浏览器通道，但属于你的 {{hosts}} 个受管主机和 {{cleanups}} 个清理任务仍未结束。生命周期任务会继续重试；若始终无法完成，安装所有者可以使用“全部关闭”。",
+    "inventoryAria": "浏览器通道清单",
+    "selectLane": "选择一个浏览器通道以查看详情。"
+  },
+  "close": {
+    "laneSuccess": "浏览器通道已关闭，对话和执行仍可继续使用。",
+    "laneActiveTitle": "关闭仍有活动任务的浏览器通道？",
+    "laneActiveContent": "这会取消该通道中排队和正在进行的浏览器任务。对话和 Agent 执行仍会保持运行。",
+    "laneAction": "关闭通道",
+    "keepOpen": "保持打开",
+    "conversationTitle": "关闭此对话的所有浏览器通道？",
+    "conversationContent": "将关闭 {{count}} 个浏览器通道，并取消其中正在进行的浏览器操作。对话和执行仍会保持运行。",
+    "conversationContent_one": "将关闭 {{count}} 个浏览器通道，并取消其中正在进行的浏览器操作。对话和执行仍会保持运行。",
+    "conversationContent_other": "将关闭 {{count}} 个浏览器通道，并取消其中正在进行的浏览器操作。对话和执行仍会保持运行。",
+    "conversationAction": "关闭通道",
+    "conversationSuccess": "此对话的浏览器通道已关闭。",
+    "allTitle": "关闭所有受管浏览器资源？",
+    "allContent": "所有排队和运行中的浏览器通道都会关闭，待清理任务会被排空，受管浏览器主机及进程会被终止。对话和 Agent 执行仍会保持运行。只有通道、待清理任务和受管主机三项权威剩余计数全部为 0 时才会报告成功。",
+    "allAction": "关闭所有浏览器资源",
+    "cancel": "取消",
+    "allSuccess": "已确认所有受管浏览器资源全部归零：浏览器通道、待清理任务以及受管主机及进程均为 0。",
+    "partialFailure": "部分浏览器通道未能关闭。",
+    "partialFailureWithDetails": "部分浏览器通道未能关闭：{{details}}",
+    "refreshFailed": "关闭请求已完成，但无法刷新浏览器清单：{{error}}",
+    "unconfirmed": "浏览器管理器未确认关闭结果，请检查清单后重试。",
+    "drainUnconfirmed": "“全部关闭”尚未得到确认：通道、待清理任务和受管主机三项权威剩余计数尚未全部归零。请检查清单后重试。"
+  },
+  "foreground": {
+    "action": "前台打开浏览器",
+    "success": "已在前台打开浏览器。",
+    "unavailable": "仅运行中的主身份通道可在前台打开。",
+    "refreshFailed": "浏览器已前台打开，但无法刷新浏览器清单：{{error}}",
+    "unconfirmed": "浏览器管理器未确认此通道已在前台打开，请检查状态后重试。"
+  },
+  "background": {
+    "action": "转回静默无头",
+    "success": "浏览器已转回静默无头模式。",
+    "refreshFailed": "浏览器已转回无头模式，但无法刷新浏览器清单：{{error}}",
+    "unconfirmed": "浏览器管理器未确认此通道已转回静默无头模式，请检查状态后重试。"
+  },
+  "displayMode": {
+    "title": "全局浏览器可见性默认策略",
+    "description": "普通 Browser 搜索和知识检索默认使用无头 Chromium 静默执行。只有希望每次主身份浏览器启动都显示窗口时才选择“前台可见”；策略会立即应用，也可以随时在这里调整。",
+    "headless": "静默无头（默认）",
+    "external": "前台可见",
+    "headlessShort": "静默无头",
+    "externalShort": "前台窗口",
+    "loading": "正在加载浏览器可见性策略",
+    "unavailable": "实时浏览器可见性策略接口不可用。当前仅显示只读回退值，系统不会宣称更改成功。",
+    "errorWithDetails": "无法加载实时浏览器可见性策略：{{error}}",
+    "saved": "全局浏览器可见性已更新并实时应用。",
+    "saveFailed": "浏览器可见性偏好未确认保存：{{error}}",
+    "refreshFailed": "可见性策略已应用，但无法刷新浏览器清单：{{error}}",
+    "unconfirmed": "浏览器管理器未确认所请求的可见性策略。"
+  },
+  "tree": {
+    "noActivePage": "没有活动页面",
+    "current": "当前",
+    "summary": "{{running}} 个运行中 · {{queued}} 个排队中",
+    "closeConversationAria": "关闭 {{name}} 的所有浏览器通道",
+    "laneFallback": "浏览器通道",
+    "queuePosition": "队列第 {{position}} 位",
+    "crashed": "已崩溃",
+    "closeLaneAria": "关闭 {{name}}"
+  },
+  "fallback": {
+    "clusterNode": "集群节点 {{id}}",
+    "attempt": "尝试 {{id}}",
+    "runtime": "运行时 {{id}}",
+    "execution": "执行 {{id}}",
+    "owner": "所有者",
+    "laneOwner": "通道所有者",
+    "conversation": "对话 {{id}}",
+    "unassigned": "未分配"
+  },
+  "details": {
+    "laneFallback": "浏览器通道",
+    "managed": "受管",
+    "backgroundExecution": "普通 Agent 浏览默认静默执行，不显示窗口。你可以将运行中的主身份通道前台打开，也可以转回静默无头模式；页面输入仍由 Agent 控制。",
+    "closeLane": "关闭通道",
+    "waitingCapacity": "正在等待浏览器容量",
+    "queuePositionInline": "队列第 {{position}} 位",
+    "recommendedConcurrency": "建议并发数 {{count}}",
+    "retryDelay": "{{delay}} 后重试",
+    "capacityCounts": "{{active}} 个活动 · {{queued}} 个排队",
+    "errorRecoverable": "此错误可恢复，浏览器管理器可能会重试该通道。",
+    "errorTerminal": "此错误不可恢复，请查看错误后关闭该通道。",
+    "sharedLiveIdentity": "共享实时身份",
+    "queueState": {
+      "queued": "排队中",
+      "notQueued": "未排队"
+    },
+    "sections": {
+      "current": "当前状态",
+      "currentDescription": "来自浏览器管理器的只读生命周期与活动页面元数据。",
+      "identityOwner": "身份与所有者",
+      "identityOwnerDescription": "持有此通道的身份域与 Agent 执行。",
+      "queueResources": "队列与资源",
+      "queueResourcesDescription": "容量调度、重试时间与通道资源估算。"
+    },
+    "fields": {
+      "identity": "身份",
+      "identityGeneration": "身份代次",
+      "lifecycle": "生命周期",
+      "activeOperations": "活动操作",
+      "queueState": "队列状态",
+      "queuePosition": "队列位置",
+      "capacityReason": "容量原因",
+      "retryDelay": "重试延迟",
+      "recommendedConcurrency": "建议并发数",
+      "ownerCapacity": "所有者容量",
+      "globalCapacity": "全局容量",
+      "resourceEstimate": "资源估算",
+      "activePageTitle": "活动页面标题",
+      "activeUrl": "活动网址",
+      "lastActivity": "最近活动",
+      "created": "创建时间",
+      "owner": "所有者",
+      "runtime": "运行时",
+      "execution": "执行",
+      "attempt": "尝试",
+      "clusterNode": "集群节点",
+      "tabs": "标签页"
+    }
+  },
+  "diagnostics": {
+    "title": "主机诊断",
+    "host": "浏览器主机",
+    "hostCount": "{{count}} 个主机",
+    "hostCount_one": "{{count}} 个主机",
+    "hostCount_other": "{{count}} 个主机",
+    "noHosts": "当前没有活动的浏览器主机上报诊断信息。",
+    "hostState": {
+      "stopped": "已停止",
+      "restarting": "正在重启"
+    },
+    "fields": {
+      "identity": "身份",
+      "epoch": "版本",
+      "lanes": "通道数",
+      "visibility": "实际可见性",
+      "rss": "Chromium 内存",
+      "hostId": "主机 ID",
+      "activeOperations": "活动操作",
+      "queuedRequests": "排队请求",
+      "openLanes": "已打开通道",
+      "managedHosts": "受管主机",
+      "pendingCleanup": "待清理任务",
+      "recommendedConcurrency": "建议并发数",
+      "capacityReason": "容量原因",
+      "updated": "更新时间"
+    }
+  },
+  "state": {
+    "lifecycle": {
+      "queued": "排队中",
+      "starting": "启动中",
+      "running": "运行中",
+      "frozen": "已冻结",
+      "stopping": "停止中",
+      "failed": "失败"
+    },
+    "identity": {
+      "primary": "主身份",
+      "anonymous": "匿名",
+      "authenticatedReplica": "已认证副本",
+      "isolated": "隔离身份"
+    },
+    "pressure": {
+      "normal": "正常",
+      "pressured": "紧张",
+      "critical": "严重"
+    }
+  }
+}

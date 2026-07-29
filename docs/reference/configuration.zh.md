@@ -57,7 +57,7 @@ NomiFun 交付的是**一个**统一的 Rust 后端（`nomifun-app`，二进制
 | `mcp-gateway-stdio` | 平台 Gateway 工具的内部 stdio 传输；只接受宿主签发、带作用域、有效期和签名的能力声明。 |
 | `mcp-open-stdio` | 暴露可靠 OS `open` 工具的 MCP stdio server。 |
 | `mcp-computer-stdio` | 暴露 desktop computer-use 工具的 MCP stdio server。 |
-| `mcp-browser-stdio` | 暴露 browser-use 工具的 MCP stdio server。 |
+| `mcp-browser-stdio` | browser-use 的带作用域 MCP stdio 代理；转发到主进程 `BrowserSessionHub`，不创建私有 Chromium 或 profile。 |
 | `terminal-hook --event <kind>` | 一次性 terminal 生命周期 hook relay。 |
 | `doctor` | 自检：填充智能体注册表，逐个探测 `$PATH` 上的每个 CLI，并打印一张按智能体维度的可用性表格。 |
 | `tools` | 以 JSON 列出 Remote 能力名称与描述。 |

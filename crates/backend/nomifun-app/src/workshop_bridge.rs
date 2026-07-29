@@ -903,7 +903,10 @@ fn ext_for_mime(mime: &str) -> Option<&'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nomifun_db::{SqliteWorkshopRepository, init_database_memory};
+    use nomifun_db::{
+        CreateCreationTaskParams, ICreationTaskRepository, SqliteCreationTaskRepository,
+        SqliteWorkshopRepository, init_database_memory,
+    };
     use serde_json::json;
 
     fn png_with_pixel(pixel: [u8; 4]) -> Vec<u8> {
@@ -989,6 +992,36 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let bridge = WorkshopAssetBridge::new(dir.path().to_path_buf(), repo);
         (bridge, dir, db)
+    }
+
+    async fn create_test_creation_task(
+        db: &nomifun_db::Database,
+        creation_task_id: &str,
+    ) {
+        let provider_id = generate_id();
+        nomifun_db::sqlx::query(
+            "INSERT INTO providers \
+             (provider_id, platform, name, base_url, api_key_encrypted, models, enabled, capabilities, created_at, updated_at) \
+             VALUES (?, 'test', 'workshop fixture provider', 'https://example.invalid', '', '[]', 1, '[]', 1, 1)",
+        )
+        .bind(&provider_id)
+        .execute(db.pool())
+        .await
+        .unwrap();
+        let repo = SqliteCreationTaskRepository::new(db.pool().clone());
+        repo.create_task(CreateCreationTaskParams {
+            creation_task_id,
+            canvas_id: None,
+            node_id: None,
+            provider_id: &provider_id,
+            model: "fixture",
+            capability: "image",
+            params: "{}",
+            status: "succeeded",
+            submitted_at: 1,
+        })
+        .await
+        .unwrap();
     }
 
     #[cfg(unix)]
@@ -1232,8 +1265,9 @@ mod tests {
 
     #[tokio::test]
     async fn committed_audit_rejects_same_size_valid_payload_replacement() {
-        let (bridge, dir, _db) = bridge().await;
+        let (bridge, dir, db) = bridge().await;
         let creation_task_id = generate_id();
+        create_test_creation_task(&db, &creation_task_id).await;
         let original = valid_png();
         let replacement = png_with_pixel([200, 100, 50, 255]);
         assert_eq!(replacement.len(), original.len(), "fixture must exercise same-size replacement");
@@ -1321,11 +1355,19 @@ mod tests {
 
     #[tokio::test]
     async fn complete_inventory_preserves_only_valid_committed_assets_and_is_idempotent() {
-        let (bridge, dir, _db) = bridge().await;
+        let (bridge, dir, db) = bridge().await;
         let committed_task = generate_id();
         let canceled_task = generate_id();
         let empty_success_task = generate_id();
         let missing_file_task = generate_id();
+        for task_id in [
+            &committed_task,
+            &canceled_task,
+            &empty_success_task,
+            &missing_file_task,
+        ] {
+            create_test_creation_task(&db, task_id).await;
+        }
         let committed = bridge
             .persist(PersistAsset {
                 bytes: valid_png(),
@@ -1363,6 +1405,7 @@ mod tests {
             .await
             .unwrap();
         let orphan_task = generate_id();
+        create_test_creation_task(&db, &orphan_task).await;
         let orphan = bridge
             .persist(PersistAsset {
                 bytes: b"missing task".to_vec(),
@@ -1370,6 +1413,11 @@ mod tests {
                 in_library: true,
                 origin: json!({"creation_task_id": orphan_task}),
             })
+            .await
+            .unwrap();
+        nomifun_db::sqlx::query("DELETE FROM creation_tasks WHERE creation_task_id = ?")
+            .bind(&orphan_task)
+            .execute(db.pool())
             .await
             .unwrap();
         let missing_file = bridge

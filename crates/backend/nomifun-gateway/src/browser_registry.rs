@@ -1,800 +1,3673 @@
-//! P3-GW1 (route A): a per-companion [`BrowserTool`] registry that lives in the
-//! **main process** [`crate::deps::GatewayDeps`].
+//! Gateway adapter for the main-process browser session hub.
 //!
-//! ## Why a registry here (the route-A architecture)
+//! The gateway is deliberately not a browser owner. It never constructs a
+//! `BrowserTool`, browser engine, Chromium process, profile, or operation mutex.
+//! Instead, the application injects the one shared [`BrowserSessionHub`] and a
+//! trusted identity resolver. The hub owns lane allocation, per-lane
+//! serialization, resource admission, and browser lifecycle.
 //!
-//! `GatewayDeps` is constructed in the main backend process; the bootstrap that
-//! builds a session's `BrowserTool` runs in a *separate* agent/session process.
-//! Route A does NOT migrate the engine across processes — it relies on the fact
-//! that [`BrowserTool`] is **fully self-contained**:
-//!
-//! - `BrowserTool::with_data_dir(data_dir, headful).workspace(ws)` constructs the
-//!   facade WITHOUT launching anything (the engine is built lazily inside the
-//!   facade's own `Mutex` on the first action, and a launch failure is cached).
-//! - so the gateway can simply OWN one `BrowserTool` per companion in the main
-//!   process. Each companion's tool spins up its own in-process CDP engine on its
-//!   first action — the same lazy mechanism the session bootstrap uses, just
-//!   anchored in the gateway instead of a session.
-//!
-//! No cross-process engine handle, no engine-ownership migration: the registry is
-//! the engine's owner for gateway-driven browsing.
-//!
-//! ## Per-companion engine slot + serialization (X5); shared browser IDENTITY
-//!
-//! [`BrowserTool::is_concurrency_safe`] is `false` — observe ⊥ act and per-target
-//! actions must be serialized. The registry gives each companion key its own
-//! [`tokio::sync::Mutex`]; [`BrowserRegistry::execute`] holds that mutex for the
-//! whole tool call, so the same companion's `observe`/`act`/`navigate` never run
-//! concurrently. Different companion keys hold different mutexes AND — crucially —
-//! different Chrome processes with **distinct `--user-data-dir`s**: each slot's
-//! `BrowserTool` self-allocates a process-unique profile dir
-//! (`<data_dir>/profiles/<token>`, see `BrowserTool::profile_dir`), so two keys
-//! browsing concurrently never share one user-data-dir and never hit Chromium's
-//! process singleton (the old code passed only a per-key *workspace* — which the
-//! engine used solely for downloads — while every slot's profile collapsed onto one
-//! shared `<data_dir>/profile`, so concurrent keys collided; that is fixed).
-//!
-//! **Idle eviction (资源上界)**: the slot map was insert-only, so a finished
-//! `conversation:<id>` kept a live Chrome forever and nothing bounded the number of
-//! concurrent Chromes (Chromium's singleton used to be the accidental bound; once
-//! profiles are per-instance that bound is gone). [`BrowserRegistry::sweep_idle`],
-//! run opportunistically on every [`BrowserRegistry::slot`] access, evicts slots idle
-//! past [`SLOT_IDLE_TTL_MS`] — dropping the `BrowserTool` kills its Chrome and cleans
-//! its ephemeral profile dir.
-//!
-//! **User decision (去 per-pet 隔离): browser IDENTITY is globally shared.** The
-//! per-companion *engine slot* (separate Chrome process + serialization mutex + a
-//! per-instance profile dir) is kept — collapsing to one engine would turn
-//! per-companion serialization into a global one, a behavior change we avoid. But
-//! every slot points at the **same shared credential vault**
-//! (`nomifun_secret::shared_vault_path` routes to
-//! `{data_dir}/browser-secrets/shared`), so `secret:NAME` / login / domain policy are
-//! SHARED across companions and sessions (consistent with the unified-memory model).
-//! Per-companion slots isolate the live Chrome process + its ephemeral profile, not
-//! the persisted identity (login state flows through the shared encrypted vault).
-//!
-//! ## Workspace layout (默认 ④)
-//!
-//! Each key gets `{data_dir}/browser-profiles/{key}` as its workspace dir, so
-//! gateway downloads (E4) land in a per-companion sandbox, never the user's real
-//! Downloads. The key is the companion id when the caller carries one, else a
-//! `conversation:<id>` fallback (a master/IM session driving a browser without a
-//! companion binding still gets its own isolated tool).
-//!
-//! ## GW2 hook (left for the next task)
-//!
-//! Out-of-band approval of irreversible actions is GW2. GW1 wires the tool
-//! exposure + execution path; the dispatch layer marks where an
-//! `ApprovalTier::Irreversible` hit would be routed to the confirm channel. The
-//! gateway-driven `BrowserTool` is constructed as a **non-bypassing** session
-//! (`session_bypasses_approval = false`), so its own fail-closed redline gate does
-//! NOT hard-deny — irreversible actions flow through to the engine today and will
-//! be intercepted by the GW2 confirm hook once that task lands.
+//! A lane is keyed by `(CallerIdentity.runtime_instance_id, lane_name)`. A
+//! companion is attribution context only; it is never an ownership or lane key.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use nomi_browser::{BrowserSecretSource, BrowserTool, OUT_OF_BAND_CONFIRMED_KEY};
-use nomi_config::config::BrowserConfig;
-use nomi_tools::Tool;
+use nomi_browser::{
+    ActionContext, ApprovalTier, ManagedBrowserFacade, classify_action,
+};
 use nomi_types::tool::ToolResult;
-use nomifun_common::{CompanionId, ConversationId};
+use nomifun_browser_platform::{
+    BrowserErrorCode, BrowserIdentityMode, BrowserLaneClient, BrowserLaneId,
+    BrowserLaneSnapshot,
+    BrowserOperation, BrowserOperationKind, BrowserOperationResult,
+    BrowserPlatformError, BrowserSessionHub, BrowserSurface, CallerIdentity,
+    CloseResult, LaneKey, OpenLaneOutcome, OwnerLeaseId, normalize_lane_name,
+};
 use serde_json::{Value, json};
 use tokio::sync::Mutex as AsyncMutex;
 
-struct GatewayAutoApprovalGate;
+use crate::deps::CallerCtx;
 
-#[async_trait::async_trait]
-impl nomi_browser::BrowserApprovalGate for GatewayAutoApprovalGate {
-    async fn request_approval(&self, _ask: nomi_browser::ApprovalAsk) -> nomi_browser::ApprovalDecision {
-        nomi_browser::ApprovalDecision::Approve
+/// Server-side authority that created one cached Gateway browser attachment.
+///
+/// Signed child attachments are reconciled against the process-local loopback
+/// issuer. Remote MCP attachments instead live and die with rmcp's logical
+/// session manager and must never be interpreted as signed-child lease ids.
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
+pub enum BrowserAttachmentAuthority {
+    SignedChild,
+    RemoteMcpSession,
+}
+
+/// Complete server-defined browser operation scope.
+///
+/// Callers may pass a narrower set to [`BrowserRegistry::attach_trusted_identity_scoped`];
+/// browser tool JSON never contributes to this authority.
+pub fn all_browser_operations() -> BTreeSet<BrowserOperationKind> {
+    BTreeSet::from([
+        BrowserOperationKind::Navigate,
+        BrowserOperationKind::Observe,
+        BrowserOperationKind::Act,
+        BrowserOperationKind::Crawl,
+        BrowserOperationKind::Screenshot,
+        BrowserOperationKind::Tabs,
+        BrowserOperationKind::Download,
+        BrowserOperationKind::Debug,
+        BrowserOperationKind::Manage,
+    ])
+}
+
+#[derive(Clone, Debug)]
+struct CachedBrowserIdentity {
+    authority: BrowserAttachmentAuthority,
+    identity: CallerIdentity,
+    /// A failed Hub cleanup leaves this record authoritative and retryable.
+    revocation_pending: bool,
+    /// Owner leases superseded after an expired renewal remain here until
+    /// their lane cleanup succeeds.
+    pending_owner_cleanup: Vec<OwnerLeaseId>,
+}
+
+/// Safe shutdown postcondition for one attachment authority.
+///
+/// An attachment remains authoritative until every exact owner lease associated
+/// with it has been handed back to the Hub. The Hub may retain lower-level Lane
+/// or Host cleanup after that point; its own shutdown authority is responsible
+/// for those retained resources.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct BrowserCleanupStatus {
+    pub pending_attachments: usize,
+    pub pending_owner_leases: usize,
+    pub revocation_pending_attachments: usize,
+}
+
+impl BrowserCleanupStatus {
+    pub fn is_empty(self) -> bool {
+        self.pending_attachments == 0
+            && self.pending_owner_leases == 0
+            && self.revocation_pending_attachments == 0
     }
 }
 
-/// One companion's browser slot: a lazily-engined [`BrowserTool`] plus the mutex
-/// that serializes that companion's tool calls (X5).
-struct CompanionBrowser {
-    tool: Arc<BrowserTool>,
-    /// Per-companion serialization gate. Held for the duration of a single
-    /// `execute` so observe/act/navigate for the SAME companion never overlap
-    /// (the facade engine is `is_concurrency_safe = false`).
-    lock: AsyncMutex<()>,
-    /// **Slot idle tracking (并发/资源上界)**: wall-clock ms of the last `execute` on
-    /// this slot. [`BrowserRegistry::sweep_idle`] evicts slots idle past
-    /// [`SLOT_IDLE_TTL_MS`] so a finished `conversation:<id>` no longer keeps a live
-    /// Chrome forever (the map was insert-only). Initialized to now on creation so a
-    /// just-built slot is never swept before its first use.
-    last_used_ms: std::sync::atomic::AtomicU64,
+/// One runtime-scoped lifecycle slot.
+///
+/// Attach/revoke transitions for the same trusted runtime must be atomic, but
+/// unrelated runtimes must not wait behind a slow Hub cleanup. The slot removes
+/// itself once the final holder finishes, so long-lived gateways do not retain
+/// one mutex per runtime forever.
+struct RuntimeLifecycleSlot {
+    runtime_instance_id: String,
+    slots: Arc<
+        std::sync::Mutex<
+            HashMap<String, Arc<AsyncMutex<()>>>,
+        >,
+    >,
+    gate: Arc<AsyncMutex<()>>,
 }
 
-/// **P3-GW2**: a browser action held awaiting out-of-band approval. Stashed by the
-/// dispatch layer when an action classifies as `ApprovalTier::Irreversible` in this
-/// (auto-approving) gateway session, keyed by a synthetic `call_id` the phone/front-end
-/// confirms. On approval, the registry re-issues `input` with the
-/// [`OUT_OF_BAND_CONFIRMED_KEY`] sentinel injected so the facade's redline gate
-/// releases it.
+impl Drop for RuntimeLifecycleSlot {
+    fn drop(&mut self) {
+        let mut slots = self
+            .slots
+            .lock()
+            .expect("gateway browser lifecycle slot store poisoned");
+        let can_remove = slots
+            .get(&self.runtime_instance_id)
+            .is_some_and(|current| {
+                Arc::ptr_eq(current, &self.gate)
+                    && Arc::strong_count(&self.gate) == 2
+            });
+        if can_remove {
+            slots.remove(&self.runtime_instance_id);
+        }
+    }
+}
+
+/// Resolves the browser capability that the main process attached to a
+/// validated Gateway caller.
+///
+/// Implementations must never derive identity from model arguments. The normal
+/// implementation reads [`CallerCtx::browser_identity`], which is populated
+/// only by the authenticated app ingress.
+pub trait TrustedBrowserIdentityResolver: Send + Sync {
+    fn resolve(
+        &self,
+        caller: &CallerCtx,
+    ) -> Result<CallerIdentity, BrowserPlatformError>;
+}
+
+impl<F> TrustedBrowserIdentityResolver for F
+where
+    F: Fn(&CallerCtx) -> Result<CallerIdentity, BrowserPlatformError>
+        + Send
+        + Sync,
+{
+    fn resolve(
+        &self,
+        caller: &CallerCtx,
+    ) -> Result<CallerIdentity, BrowserPlatformError> {
+        self(caller)
+    }
+}
+
+/// Default resolver for the authenticated application path.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct CallerCtxBrowserIdentityResolver;
+
+impl TrustedBrowserIdentityResolver for CallerCtxBrowserIdentityResolver {
+    fn resolve(
+        &self,
+        caller: &CallerCtx,
+    ) -> Result<CallerIdentity, BrowserPlatformError> {
+        caller.browser_identity.clone().ok_or_else(missing_identity_error)
+    }
+}
+
+/// The immutable ownership key stored with a pending out-of-band approval.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct PendingOwner {
+    user_id: String,
+    lane_key: LaneKey,
+    owner_lease_id: OwnerLeaseId,
+}
+
+/// A browser action held awaiting out-of-band approval.
 #[derive(Clone, Debug)]
 pub struct PendingBrowserAction {
-    /// The registry key (companion / conversation) the action belongs to — the
-    /// engine it must run against once approved.
-    pub key: String,
-    /// The original, already-sanitized facade input (`{"action": "...", ...}`)
-    /// WITHOUT any out-of-band sentinel (the caller-supplied one is stripped before
-    /// stashing; the trusted one is injected only at resolve time).
+    pub input: Value,
+    pub lane_name: String,
+    runtime_instance_id: String,
+    owner_lease_id: OwnerLeaseId,
+    user_id: String,
+}
+
+impl PendingBrowserAction {
+    fn owner(&self) -> PendingOwner {
+        PendingOwner {
+            user_id: self.user_id.clone(),
+            lane_key: LaneKey {
+                runtime_instance_id: self.runtime_instance_id.clone(),
+                lane_name: self.lane_name.clone(),
+            },
+            owner_lease_id: self.owner_lease_id.clone(),
+        }
+    }
+}
+
+/// One gateway browser call used by [`BrowserRegistry::execute_parallel`].
+#[derive(Clone, Debug)]
+pub struct GatewayBrowserCall {
+    pub caller: CallerCtx,
+    pub lane_name: String,
     pub input: Value,
 }
 
-/// **P3-GW2**: cap on actions awaiting out-of-band approval across all keys. A
-/// driving agent that keeps triggering irreversible actions without the user ever
-/// approving must not be able to grow the store without bound; past this, the
-/// dispatch layer fails closed (denies + tells the model to retry after the queue
-/// drains) rather than stashing.
 const MAX_PENDING: usize = 64;
+const MODEL_IDENTITY_INPUT_FIELDS: &[&str] = &[
+    "identity",
+    "identity_mode",
+    "authenticated",
+    "auth_identity",
+    "profile",
+    "account",
+];
+const TRUSTED_CALLER_FIELDS: &[&str] = &[
+    "caller",
+    "caller_identity",
+    "user_id",
+    "conversation_id",
+    "runtime_instance_id",
+    "agent_id",
+    "companion_id",
+    "execution_id",
+    "step_id",
+    "attempt_id",
+    "remote_connection_id",
+    "owner_lease_id",
+    "capability_expires_at_ms",
+    "allowed_operations",
+    "surface",
+    "browser_surface",
+    "identity_generation",
+    "browser_epoch",
+    "target_id",
+    "frame_id",
+    "ref_generation",
+    "cancellation_id",
+    "workspace_hint",
+    "lane_key",
+];
 
-/// The per-companion [`BrowserTool`] registry held by [`crate::deps::GatewayDeps`]
-/// (route A). Clone-cheap: the inner map is behind an `Arc`.
+/// Clone-cheap bridge to the application-owned browser hub.
 #[derive(Clone)]
 pub struct BrowserRegistry {
-    /// Application data dir; per-companion workspaces hang under
-    /// `{data_dir}/browser-profiles/{key}`.
-    data_dir: PathBuf,
-    /// Whether to request a visible (headful) window. The engine forces headless
-    /// when no display is available regardless.
-    headful: bool,
-    /// PKG-1: bundled Chrome resource dir (Tauri resource dir). When `Some`, each
-    /// lazily-built slot tool prefers `<bundled_dir>/chrome-<platform>/...` over the
-    /// network download fallback. `None` (default / non-packaged) → unchanged
-    /// behavior (env > data_dir > download).
-    bundled_dir: Option<PathBuf>,
-    /// companion-key → slot. A `std::sync::Mutex` guards only the (fast) map
-    /// lookup/insert; the per-companion `AsyncMutex` inside the slot is what's
-    /// held across an await-bound tool call.
-    slots: Arc<std::sync::Mutex<HashMap<String, Arc<CompanionBrowser>>>>,
-    /// **P3-GW2**: actions awaiting out-of-band approval, keyed by the synthetic
-    /// `call_id` the phone/front-end confirms. An irreversible action in this
-    /// auto-approving gateway session is stashed here (instead of forwarded) until
-    /// the user approves it via `nomi_browser_confirm`. Bounded-ish: capped per the
-    /// `MAX_PENDING` guard so a misbehaving agent cannot grow it without bound.
+    hub: Option<BrowserSessionHub>,
+    identity_resolver: Arc<dyn TrustedBrowserIdentityResolver>,
     pending: Arc<std::sync::Mutex<HashMap<String, PendingBrowserAction>>>,
-    /// **P3-X2: machine-bound `encryption_key`** for loading the **shared** secret
-    /// vault (`{data_dir}/browser-secrets/shared/secrets.json` — user decision: 去
-    /// per-pet 键化, browser identity globally shared). When `Some`, each lazily-built
-    /// slot tool gets a [`BrowserSecretSource`] pointing at that one shared vault so
-    /// gateway-driven `secret:NAME` resolves (origin-gated) and the firewall domain
-    /// allowlist is derived from the registered `allowed_origins` (裁决⑤) — shared
-    /// across companions. `None` (the `default_for_browser_use` convenience ctor) →
-    /// no secret source (empty store → `secret:NAME` fails closed, current behavior).
-    secret_key: Option<[u8; 32]>,
+    /// Stable owner capability per server-validated runtime attachment.
+    identities: Arc<std::sync::Mutex<HashMap<String, CachedBrowserIdentity>>>,
+    /// Runtime ids are never reusable after an authoritative revoke. Keeping
+    /// an authority-aware tombstone prevents an attach racing with session
+    /// close from resurrecting a revoked Browser owner while ensuring an
+    /// unrelated authority cannot tombstone the runtime.
+    revoked_runtime_ids: Arc<
+        std::sync::Mutex<
+            HashMap<String, HashSet<BrowserAttachmentAuthority>>,
+        >,
+    >,
+    /// Runtime-scoped attachment/revocation gates. Same-runtime transitions
+    /// serialize; unrelated runtimes can attach and clean up concurrently.
+    runtime_lifecycle_slots: Arc<
+        std::sync::Mutex<
+            HashMap<String, Arc<AsyncMutex<()>>>,
+        >,
+    >,
+    /// Last observation text per lane. This keeps the existing GW2 semantic-name
+    /// check without owning a BrowserTool. Browser execution state remains in
+    /// the hub/driver.
+    observations: Arc<std::sync::Mutex<HashMap<LaneKey, String>>>,
 }
 
 impl BrowserRegistry {
-    /// Build the registry from the browser config. Reads `headless` (inverted to
-    /// `headful`) and the app data dir (same derivation as `BrowserTool::new`),
-    /// under which each companion gets an isolated `browser-profiles/{key}`
-    /// workspace. Constructs NO tools and launches NO browser — slots are created
-    /// lazily on first use per companion.
-    pub fn new(config: &BrowserConfig) -> Self {
-        let data_dir = nomi_config::config::app_data_dir();
+    /// Inject the shared main-process hub and trusted identity resolver.
+    pub fn new(
+        hub: BrowserSessionHub,
+        identity_resolver: Arc<dyn TrustedBrowserIdentityResolver>,
+    ) -> Self {
         Self {
-            data_dir,
-            headful: !config.headless,
-            bundled_dir: None,
-            slots: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            hub: Some(hub),
+            identity_resolver,
             pending: Arc::new(std::sync::Mutex::new(HashMap::new())),
-            secret_key: None,
+            identities: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            revoked_runtime_ids: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            runtime_lifecycle_slots: Arc::new(std::sync::Mutex::new(
+                HashMap::new(),
+            )),
+            observations: Arc::new(std::sync::Mutex::new(HashMap::new())),
         }
     }
 
-    /// **P3-X2**: set the machine-bound `encryption_key` so each companion's slot tool
-    /// loads the **shared** secret vault (`{data_dir}/browser-secrets/shared/secrets.json`
-    /// — 去 per-pet 键化, browser identity globally shared) — gateway-driven `secret:NAME`
-    /// then resolves (origin-gated) and the firewall `allow_etld1` is derived from the
-    /// registered `allowed_origins` (裁决⑤), shared across companions. Must be the app's
-    /// `encryption_key` (the same one the registration endpoint encrypted with).
-    pub fn with_secret_key(mut self, key: [u8; 32]) -> Self {
-        self.secret_key = Some(key);
-        self
+    /// Inject a hub and use the app-populated identity on [`CallerCtx`].
+    pub fn from_hub(hub: BrowserSessionHub) -> Self {
+        Self::new(hub, Arc::new(CallerCtxBrowserIdentityResolver))
     }
 
-    /// **PKG-1**: set the bundled Chrome-for-Testing resource dir so each
-    /// lazily-built companion slot tool prefers bundled chrome over the network
-    /// download fallback. `None` → unchanged (env > data_dir > download).
-    pub fn with_bundled_dir(mut self, dir: Option<PathBuf>) -> Self {
-        self.bundled_dir = dir;
-        self
-    }
-
-    /// Convenience constructor for `nomifun-app`'s gateway wiring: build the
-    /// registry with the default browser config so the app does not need a direct
-    /// `nomi-config` dependency (the gateway already has one behind this feature).
-    /// The engine forces headless when no display is available regardless, so the
-    /// default (headful-requesting) config is the right gateway default.
+    /// Compatibility constructor for callers that have not yet injected the
+    /// application hub. It is intentionally fail-closed and launches nothing.
+    ///
+    /// New application wiring must use [`Self::from_hub`] or [`Self::new`].
     pub fn default_for_browser_use() -> Self {
-        Self::new(&BrowserConfig::default())
-    }
-
-    /// Resolve the registry key for a caller. A companion binding scopes the
-    /// browser to that companion (multi-companion isolation); a session without
-    /// one (e.g. an IM Channel Agent) gets a `conversation:<id>` key so it still
-    /// has its own isolated tool. A caller without either identity cannot own a
-    /// browser session and is rejected.
-    pub fn key_for(
-        companion_id: Option<&CompanionId>,
-        conversation_id: Option<&ConversationId>,
-    ) -> Result<String, &'static str> {
-        if let Some(companion_id) = companion_id {
-            return Ok(companion_id.as_str().to_owned());
+        Self {
+            hub: None,
+            identity_resolver: Arc::new(CallerCtxBrowserIdentityResolver),
+            pending: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            identities: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            revoked_runtime_ids: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            runtime_lifecycle_slots: Arc::new(std::sync::Mutex::new(
+                HashMap::new(),
+            )),
+            observations: Arc::new(std::sync::Mutex::new(HashMap::new())),
         }
-        conversation_id
-            .map(|conversation_id| format!("conversation:{}", conversation_id.as_str()))
-            .ok_or("browser caller requires a companion_id or conversation_id")
     }
 
-    /// The per-companion workspace dir (`{data_dir}/browser-profiles/{key}`).
-    /// Pure path join — no I/O (the engine materializes `downloads/` on demand).
-    /// The key is **injectively** encoded (percent-encode of path separators/`:`) so a
-    /// `conversation:<id>` (or any caller-influenced id) can never escape the profiles
-    /// root AND two distinct keys never collapse onto one workspace (a lossy `:`→`_`
-    /// map would let `conversation:5` and a literal `conversation_5` mix downloads).
-    pub fn workspace_for(&self, key: &str) -> PathBuf {
-        self.data_dir.join("browser-profiles").join(sanitize_key(key))
+    /// Compatibility no-op. Secret/profile ownership moved to the shared host.
+    pub fn with_secret_key(self, _key: [u8; 32]) -> Self {
+        self
     }
 
-    /// Get (or lazily create) the slot for a key. The `BrowserTool` is constructed
-    /// but its engine is NOT launched (that happens lazily inside the facade on the
-    /// first action). The gateway-driven tool is a **non-bypassing** session
-    /// (`session_bypasses_approval = false`, `evaluate_full_power = false`): its own
-    /// fail-closed redline gate does not hard-deny, leaving irreversible actions for
-    /// the GW2 confirm hook (TODO at the dispatch layer).
-    fn slot(&self, key: &str) -> Arc<CompanionBrowser> {
-        let mut map = self.slots.lock().expect("browser registry slots poisoned");
-        // 资源上界：顺手驱逐空闲过久的 slot（其 BrowserTool drop → 杀 Chrome + 清 ephemeral profile），
-        // 使存活 Chrome 收敛到「近期活跃」的 key，绝不像旧的 insert-only 那样让已结束会话永久占一个 Chrome。
-        let now = now_ms();
-        map.retain(|_, s| !is_idle(s.last_used_ms.load(std::sync::atomic::Ordering::Relaxed), now, SLOT_IDLE_TTL_MS));
-        if let Some(existing) = map.get(key) {
-            return existing.clone();
+    /// Compatibility no-op. Chromium discovery moved to the shared host.
+    pub fn with_bundled_dir(self, _dir: Option<PathBuf>) -> Self {
+        self
+    }
+
+    /// Attach a browser identity after the Gateway server validates signed
+    /// child capability claims.
+    ///
+    /// `runtime_instance_id` must come from the signed child lease, never from
+    /// tool arguments. Access-token renewals reuse one owner lease; a new
+    /// child/attempt lease receives a distinct runtime and therefore a distinct
+    /// default lane.
+    pub async fn attach_trusted_identity(
+        &self,
+        caller: &mut CallerCtx,
+        runtime_instance_id: &str,
+        attempt_id: Option<&str>,
+        capability_expires_at_ms: u64,
+    ) -> Result<(), BrowserPlatformError> {
+        self.attach_trusted_identity_with_authority(
+            caller,
+            runtime_instance_id,
+            attempt_id,
+            capability_expires_at_ms,
+            BrowserAttachmentAuthority::SignedChild,
+        )
+        .await
+    }
+
+    /// Attach a browser identity whose runtime and lifecycle authority were
+    /// derived by a trusted server ingress.
+    ///
+    /// `allowed_operations` is supplied by that ingress after it resolves the
+    /// advertised tool scope. It is never read from browser tool arguments.
+    pub async fn attach_trusted_identity_with_authority(
+        &self,
+        caller: &mut CallerCtx,
+        runtime_instance_id: &str,
+        attempt_id: Option<&str>,
+        capability_expires_at_ms: u64,
+        authority: BrowserAttachmentAuthority,
+    ) -> Result<(), BrowserPlatformError> {
+        self.attach_trusted_identity_scoped(
+            caller,
+            runtime_instance_id,
+            attempt_id,
+            capability_expires_at_ms,
+            authority,
+            all_browser_operations(),
+        )
+        .await
+    }
+
+    /// Scoped form of [`Self::attach_trusted_identity_with_authority`].
+    pub async fn attach_trusted_identity_scoped(
+        &self,
+        caller: &mut CallerCtx,
+        runtime_instance_id: &str,
+        attempt_id: Option<&str>,
+        capability_expires_at_ms: u64,
+        authority: BrowserAttachmentAuthority,
+        allowed_operations: BTreeSet<BrowserOperationKind>,
+    ) -> Result<(), BrowserPlatformError> {
+        let lifecycle = self.runtime_lifecycle_slot(runtime_instance_id);
+        let _lifecycle_guard = lifecycle.gate.lock().await;
+        self.attach_trusted_identity_scoped_locked(
+            caller,
+            runtime_instance_id,
+            attempt_id,
+            capability_expires_at_ms,
+            authority,
+            allowed_operations,
+        )
+        .await
+    }
+
+    async fn attach_trusted_identity_scoped_locked(
+        &self,
+        caller: &mut CallerCtx,
+        runtime_instance_id: &str,
+        attempt_id: Option<&str>,
+        capability_expires_at_ms: u64,
+        authority: BrowserAttachmentAuthority,
+        allowed_operations: BTreeSet<BrowserOperationKind>,
+    ) -> Result<(), BrowserPlatformError> {
+        let hub = self.hub.clone().ok_or_else(|| {
+            BrowserPlatformError::new(
+                BrowserErrorCode::BrowserUnavailable,
+                "The browser hub was not injected into the gateway.",
+                true,
+                "Start browser support in the main application and retry.",
+            )
+        })?;
+        if runtime_instance_id.is_empty()
+            || runtime_instance_id.trim() != runtime_instance_id
+            || runtime_instance_id.len() > 128
+        {
+            return Err(missing_identity_error());
         }
-        let workspace = self.workspace_for(key);
-        let mut tool =
-            BrowserTool::with_data_dir(self.data_dir.join("browser-data"), self.headful)
-                .persistent_data_dir(self.data_dir.clone())
-            .workspace(workspace)
-            .bundled_dir(self.bundled_dir.clone())
-            .with_approval_gate(Arc::new(GatewayAutoApprovalGate));
-        // P3-X2: give the slot tool the SHARED secret vault source so gateway-driven
-        // `secret:NAME` resolves and the firewall allowlist is derived from the
-        // registered allowed_origins (裁决⑤). Every slot uses the one shared vault
-        // `{data_dir}/browser-secrets/shared`, so credentials/login/domain policy
-        // are shared across all companions — the same shared vault the registration
-        // endpoint and the session factory write to/read from.
-        if let Some(secret_key) = self.secret_key {
-            let vault_path = nomifun_secret::shared_vault_path(&self.data_dir);
-            tool = tool.secret_source(BrowserSecretSource { vault_path, key: secret_key });
+        if allowed_operations.is_empty() {
+            return Err(BrowserPlatformError::new(
+                BrowserErrorCode::OperationNotAllowed,
+                "The server-derived browser capability scope is empty.",
+                false,
+                "Request a Remote MCP profile that includes browser operations.",
+            ));
         }
-        let slot = Arc::new(CompanionBrowser {
-            tool: Arc::new(tool),
-            lock: AsyncMutex::new(()),
-            // 初始化为 now，使刚建的 slot 不会在首次使用前被上面的 sweep 误删。
-            last_used_ms: std::sync::atomic::AtomicU64::new(now),
-        });
-        map.insert(key.to_string(), slot.clone());
-        slot
-    }
 
-    /// **资源上界：驱逐空闲过久的 slot**（`now - last_used >= SLOT_IDLE_TTL_MS`）。被驱逐 slot 的
-    /// [`CompanionBrowser`] 从 map 移除；当其最后一个 `Arc` 释放（无在途调用持有）时，`BrowserTool`
-    /// drop → 引擎 drop → 杀 Chrome + 清 ephemeral profile。在途调用因持有 slot `Arc` 保活到调用结束，
-    /// 故驱逐对并发调用安全。由 [`Self::slot`] 在每次访问时顺带调用；也供测试直接调用。
-    pub fn sweep_idle(&self, now_ms: u64) {
-        let mut map = self.slots.lock().expect("browser registry slots poisoned");
-        map.retain(|_, s| {
-            !is_idle(s.last_used_ms.load(std::sync::atomic::Ordering::Relaxed), now_ms, SLOT_IDLE_TTL_MS)
-        });
-    }
-
-    /// Drive a browser tool call for `key`, serialized against that companion's
-    /// other calls (X5: observe ⊥ act, per-target serial). `input` is the
-    /// `BrowserTool` action object (`{"action": "...", ...}`). Returns the facade's
-    /// [`ToolResult`] for the caller to render to JSON.
-    pub async fn execute(&self, key: &str, input: Value) -> ToolResult {
-        let slot = self.slot(key);
-        // 记录活跃时刻（防被 sweep_idle 驱逐；见 CompanionBrowser::last_used_ms）。
-        slot.last_used_ms.store(now_ms(), std::sync::atomic::Ordering::Relaxed);
-        // Hold the per-companion mutex for the whole call so the same companion's
-        // observe/act/navigate never run concurrently against one engine.
-        let _guard = slot.lock.lock().await;
-        slot.tool.execute(input).await
-    }
-
-    /// **并行浏览（DESIGN §26 P7 / §22 per-BrowserContext 可并发）**。批量跑 `(key, input)` 浏览器调用：
-    /// **异 key** 并发（各 key 自有 Chrome 引擎 + 序列化锁,相互独立——浏览器**身份**仍经唯一共享 vault
-    /// 全局共享,只有活进程 per-key）；**同 key** 仍经该 key 的 [`CompanionBrowser`] `lock` 串行
-    /// （observe⊥act 成立）。结果**按输入序**返回（`join_all` 保序），调用方可一一对应。单个调用的错误作为
-    /// 其 [`ToolResult`] 返回（引擎不可用 / 被拒），绝不中断整批。
-    pub async fn execute_parallel(&self, calls: Vec<(String, Value)>) -> Vec<ToolResult> {
-        // 复用串行 `execute`：异 key 持不同 `CompanionBrowser` 锁 → 真并发；同 key 第二个 future 在该锁上
-        // 等第一个 → 串行,无交错。`join_all` 在当前任务上并发驱动所有 future 并**保输入序**返回。
-        let futs = calls
-            .into_iter()
-            .map(|(key, input)| async move { self.execute(&key, input).await });
-        futures::future::join_all(futs).await
-    }
-
-    /// **P3-GW2: classify an action's approval tier using the per-key facade's full
-    /// runtime context** (its cached observe snapshot resolves a dangerous accname by
-    /// `ref`). This is the AUTHORITATIVE classification the dispatch layer routes on —
-    /// it sees the submit/Pay/删除 button signals a bare `classify_action` (without the
-    /// snapshot) cannot. Pure read (no browser launch); creates the slot lazily if the
-    /// caller classifies before its first execute (the tool, not the engine, is built).
-    pub fn classify(&self, key: &str, action: &str, input: &Value) -> nomi_browser::ApprovalTier {
-        self.slot(key).tool.classify_action_tier(action, input)
-    }
-
-    /// **P3-GW2**: stash an irreversible action awaiting out-of-band approval and
-    /// return the synthetic `call_id` the phone/front-end will confirm. The `input`
-    /// MUST already be sanitized of any caller-supplied out-of-band sentinel (the
-    /// dispatch layer strips it before classifying). Returns `None` (so the caller
-    /// fails closed and denies) when the pending store is at capacity — a
-    /// misbehaving agent cannot grow it without bound.
-    pub fn stash_pending(&self, key: &str, input: Value) -> Option<String> {
-        let call_id = nomifun_common::generate_id();
-        let mut map = self.pending.lock().expect("browser registry pending poisoned");
-        if map.len() >= MAX_PENDING {
-            return None;
+        if self
+            .revoked_runtime_ids
+            .lock()
+            .expect("gateway browser revoked-runtime store poisoned")
+            .get(runtime_instance_id)
+            .is_some_and(|authorities| authorities.contains(&authority))
+        {
+            return Err(revoked_runtime_error());
         }
-        map.insert(
-            call_id.clone(),
-            PendingBrowserAction {
-                key: key.to_string(),
-                input,
-            },
+
+        let (identity, pending_owner_cleanup, replaced_owner_lease_id) = {
+            let mut identities = self
+                .identities
+                .lock()
+                .expect("gateway browser identity cache poisoned");
+            if let Some(existing) = identities.get(runtime_instance_id) {
+                if existing.revocation_pending {
+                    return Err(revoked_runtime_error());
+                }
+                if existing.authority != authority {
+                    return Err(BrowserPlatformError::new(
+                        BrowserErrorCode::InvalidCallerIdentity,
+                        "The browser runtime is already bound to another authority.",
+                        false,
+                        "Request a fresh authenticated browser runtime.",
+                    ));
+                }
+                validate_identity_binding(caller, &existing.identity)?;
+
+                // A logical attachment may be re-presented by more than one
+                // request while its Hub owner is renewed or replaced. Keep the
+                // cached, server-established surface and make operation scope
+                // monotonic: a later request may narrow it, but it may never
+                // broaden the replacement owner.
+                let effective_allowed_operations = existing
+                    .identity
+                    .allowed_operations
+                    .intersection(&allowed_operations)
+                    .copied()
+                    .collect::<BTreeSet<_>>();
+                if effective_allowed_operations.is_empty() {
+                    return Err(BrowserPlatformError::new(
+                        BrowserErrorCode::OperationNotAllowed,
+                        "The renewed browser capability has no operations in common with the established owner policy.",
+                        false,
+                        "Request a fresh browser runtime for a different capability scope.",
+                    ));
+                }
+
+                let mut pending_owner_cleanup =
+                    existing.pending_owner_cleanup.clone();
+                let (lease, owner_replaced) = match hub
+                    .renew_owner_lease(&existing.identity.owner_lease_id)
+                {
+                    Ok(lease) => (lease, false),
+                    Err(error)
+                        if error.code == BrowserErrorCode::OwnerLeaseExpired =>
+                    {
+                        // A live logical runtime may outlast the Hub's
+                        // renewable owner TTL. Replace only this exact stale
+                        // lease and retain it for authoritative cleanup.
+                        let old_owner_lease_id =
+                            existing.identity.owner_lease_id.clone();
+                        if !pending_owner_cleanup
+                            .iter()
+                            .any(|id| id == &old_owner_lease_id)
+                        {
+                            pending_owner_cleanup.push(old_owner_lease_id);
+                        }
+                        hub.issue_owner_lease(
+                            existing.identity.user_id.clone(),
+                            existing.identity.conversation_id.clone(),
+                            existing.identity.runtime_instance_id.clone(),
+                        )
+                        .map(|lease| (lease, true))?
+                    }
+                    Err(error) => return Err(error),
+                };
+                let mut identity = existing.identity.clone();
+                let replaced_owner_lease_id =
+                    owner_replaced.then(|| existing.identity.owner_lease_id.clone());
+                identity.owner_lease_id = lease.lease_id;
+                identity.capability_expires_at_ms =
+                    capability_expires_at_ms.min(lease.expires_at_ms);
+                identity.attempt_id = attempt_id.map(str::to_owned);
+                identity.allowed_operations = effective_allowed_operations;
+                identities.insert(
+                    runtime_instance_id.to_owned(),
+                    CachedBrowserIdentity {
+                        authority,
+                        identity: identity.clone(),
+                        revocation_pending: false,
+                        pending_owner_cleanup: pending_owner_cleanup.clone(),
+                    },
+                );
+                (identity, pending_owner_cleanup, replaced_owner_lease_id)
+            } else {
+                let conversation_id = caller
+                    .conversation_id
+                    .as_ref()
+                    .map(|id| id.as_str().to_owned());
+                let owner = hub.issue_owner_lease(
+                    caller.user_id.as_str(),
+                    conversation_id.clone(),
+                    runtime_instance_id,
+                )?;
+                let identity = CallerIdentity {
+                    user_id: caller.user_id.as_str().to_owned(),
+                    conversation_id,
+                    runtime_instance_id: runtime_instance_id.to_owned(),
+                    agent_id: None,
+                    companion_id: caller
+                        .companion_id
+                        .as_ref()
+                        .map(|id| id.as_str().to_owned()),
+                    execution_id: None,
+                    step_id: None,
+                    attempt_id: attempt_id.map(str::to_owned),
+                    remote_connection_id: None,
+                    surface: if caller.remote {
+                        BrowserSurface::Remote
+                    } else {
+                        BrowserSurface::Gateway
+                    },
+                    owner_lease_id: owner.lease_id,
+                    capability_expires_at_ms: capability_expires_at_ms
+                        .min(owner.expires_at_ms),
+                    allowed_operations,
+                };
+                identities.insert(
+                    runtime_instance_id.to_owned(),
+                    CachedBrowserIdentity {
+                        authority,
+                        identity: identity.clone(),
+                        revocation_pending: false,
+                        pending_owner_cleanup: Vec::new(),
+                    },
+                );
+                (identity, Vec::new(), None)
+            }
+        };
+
+        if let Some(replaced_owner_lease_id) = replaced_owner_lease_id {
+            self.clear_owner_lease_caches(&replaced_owner_lease_id);
+        }
+        if let Err(error) = self
+            .retry_owner_cleanup(
+                runtime_instance_id,
+                &identity.owner_lease_id,
+                pending_owner_cleanup,
+                &hub,
+            )
+            .await
+        {
+            tracing::warn!(
+                runtime_id = %runtime_instance_id,
+                code = ?error.code,
+                "Gateway browser replacement published with superseded-owner cleanup pending"
+            );
+        }
+        caller.browser_identity = Some(identity);
+        Ok(())
+    }
+
+    /// Revoke one exact trusted attachment regardless of its ingress source.
+    ///
+    /// The runtime id comes from signed claims or rmcp's server-generated
+    /// session id. Repeated lifecycle callbacks are successful no-ops.
+    pub async fn revoke_trusted_identity(
+        &self,
+        runtime_instance_id: &str,
+    ) -> Result<CloseResult, BrowserPlatformError> {
+        self.revoke_identity_for_authority(
+            runtime_instance_id,
+            BrowserAttachmentAuthority::RemoteMcpSession,
+        )
+        .await
+    }
+
+    async fn revoke_identity_for_authority(
+        &self,
+        runtime_instance_id: &str,
+        expected_authority: BrowserAttachmentAuthority,
+    ) -> Result<CloseResult, BrowserPlatformError> {
+        let lifecycle = self.runtime_lifecycle_slot(runtime_instance_id);
+        let _lifecycle_guard = lifecycle.gate.lock().await;
+        self.revoke_identity_for_authority_locked(
+            runtime_instance_id,
+            expected_authority,
+        )
+        .await
+    }
+
+    /// Revoke one cached identity while the attachment lifecycle gate is held.
+    ///
+    /// The current owner lease and every lease retained after an expired
+    /// renewal are cleaned independently. A failed cleanup keeps the cached
+    /// authority marked pending so the next sweep can retry it rather than
+    /// silently losing the old lease.
+    async fn revoke_identity_for_authority_locked(
+        &self,
+        runtime_instance_id: &str,
+        expected_authority: BrowserAttachmentAuthority,
+    ) -> Result<CloseResult, BrowserPlatformError> {
+        let (owner_lease_id, effective_runtime_id, authority, pending_owner_cleanup) = {
+            let mut identities = self
+                .identities
+                .lock()
+                .expect("gateway browser identity cache poisoned");
+            let Some(cached) = identities.get_mut(runtime_instance_id) else {
+                let mut revoked_runtime_ids = self
+                    .revoked_runtime_ids
+                    .lock()
+                    .expect("gateway browser revoked-runtime store poisoned");
+                revoked_runtime_ids
+                    .entry(runtime_instance_id.to_owned())
+                    .or_default()
+                    .insert(expected_authority);
+                return Ok(CloseResult {
+                    closed: 0,
+                    already_closed: true,
+                    ..Default::default()
+                });
+            };
+            if cached.authority != expected_authority {
+                return Ok(CloseResult {
+                    closed: 0,
+                    already_closed: true,
+                    ..Default::default()
+                });
+            }
+            cached.revocation_pending = true;
+            (
+                cached.identity.owner_lease_id.clone(),
+                cached.identity.runtime_instance_id.clone(),
+                cached.authority,
+                cached.pending_owner_cleanup.clone(),
+            )
+        };
+
+        self.revoked_runtime_ids
+            .lock()
+            .expect("gateway browser revoked-runtime store poisoned")
+            .entry(effective_runtime_id.clone())
+            .or_default()
+            .insert(authority);
+        self.clear_runtime_caches(
+            &effective_runtime_id,
+            Some(&owner_lease_id),
         );
-        Some(call_id)
+
+        let hub = self.hub.clone().ok_or_else(|| {
+            BrowserPlatformError::new(
+                BrowserErrorCode::BrowserUnavailable,
+                "The browser hub was not injected into the gateway.",
+                true,
+                "Start browser support in the main application and retry.",
+            )
+        })?;
+        let mut closed = 0usize;
+        let mut already_closed = true;
+        let mut first_error = None;
+        let mut remaining_pending = Vec::new();
+
+        // Always attempt the current lease first, then every superseded lease.
+        // A later retry repeats successful revocations idempotently, which is
+        // important when one of the independent lane cleanups fails.
+        let mut lease_ids = Vec::with_capacity(1 + pending_owner_cleanup.len());
+        lease_ids.push((true, owner_lease_id.clone()));
+        lease_ids.extend(
+            pending_owner_cleanup
+                .into_iter()
+                .filter(|lease_id| lease_id != &owner_lease_id)
+                .map(|lease_id| (false, lease_id)),
+        );
+        for (is_current, lease_id) in lease_ids {
+            match hub.revoke_owner_lease(&lease_id).await {
+                Ok(result) => {
+                    closed = closed.saturating_add(result.closed);
+                    already_closed &= result.already_closed;
+                }
+                Err(error) => {
+                    if !is_current {
+                        remaining_pending.push(lease_id);
+                    }
+                    if first_error.is_none() {
+                        first_error = Some(error);
+                    }
+                }
+            }
+        }
+
+        if let Some(error) = first_error {
+            let mut identities = self
+                .identities
+                .lock()
+                .expect("gateway browser identity cache poisoned");
+            if let Some(cached) = identities.get_mut(runtime_instance_id)
+                && cached.revocation_pending
+                && cached.identity.owner_lease_id == owner_lease_id
+            {
+                // The current lease remains in the identity field even when
+                // its cleanup failed; superseded leases are retained here.
+                // The next retry will attempt the current lease again.
+                cached.pending_owner_cleanup = remaining_pending;
+            }
+            return Err(error);
+        }
+
+        let mut identities = self
+            .identities
+            .lock()
+            .expect("gateway browser identity cache poisoned");
+        if identities
+            .get(runtime_instance_id)
+            .is_some_and(|cached| {
+                cached.revocation_pending
+                    && cached.identity.owner_lease_id == owner_lease_id
+            })
+        {
+            identities.remove(runtime_instance_id);
+        }
+        Ok(CloseResult {
+            closed,
+            already_closed: already_closed && closed == 0,
+            ..Default::default()
+        })
     }
 
-    /// **P3-GW2**: remove and return a pending action by its `call_id`. `None` when
-    /// the id is unknown (already resolved / never existed / expired). The caller
-    /// (resolve path) treats `None` as "no such pending decision".
-    pub fn take_pending(&self, call_id: &str) -> Option<PendingBrowserAction> {
+    fn clear_runtime_caches(
+        &self,
+        runtime_instance_id: &str,
+        owner_lease_id: Option<&OwnerLeaseId>,
+    ) {
         self.pending
             .lock()
-            .expect("browser registry pending poisoned")
-            .remove(call_id)
+            .expect("gateway browser pending store poisoned")
+            .retain(|_, pending| {
+                pending.runtime_instance_id != runtime_instance_id
+                    && owner_lease_id
+                        .is_none_or(|lease_id| &pending.owner_lease_id != lease_id)
+            });
+        self.observations
+            .lock()
+            .expect("gateway browser observation cache poisoned")
+            .retain(|lane_key, _| {
+                lane_key.runtime_instance_id != runtime_instance_id
+            });
     }
 
-    /// **P3-GW2**: how many actions are currently awaiting approval (diagnostics /
-    /// the `MAX_PENDING` guard; also used by tests).
+    fn clear_owner_lease_caches(&self, owner_lease_id: &OwnerLeaseId) {
+        self.pending
+            .lock()
+            .expect("gateway browser pending store poisoned")
+            .retain(|_, pending| &pending.owner_lease_id != owner_lease_id);
+    }
+
+    async fn retry_owner_cleanup(
+        &self,
+        runtime_instance_id: &str,
+        current_owner_lease_id: &OwnerLeaseId,
+        mut pending_owner_cleanup: Vec<OwnerLeaseId>,
+        hub: &BrowserSessionHub,
+    ) -> Result<(), BrowserPlatformError> {
+        let mut first_error = None;
+        let mut remaining = Vec::new();
+        for owner_lease_id in pending_owner_cleanup.drain(..) {
+            match hub.revoke_owner_lease(&owner_lease_id).await {
+                Ok(_) => {}
+                Err(error) => {
+                    if first_error.is_none() {
+                        first_error = Some(error);
+                    }
+                    remaining.push(owner_lease_id);
+                }
+            }
+        }
+        let mut identities = self
+            .identities
+            .lock()
+            .expect("gateway browser identity cache poisoned");
+        if let Some(cached) = identities.get_mut(runtime_instance_id)
+            && cached.identity.owner_lease_id == *current_owner_lease_id
+        {
+            cached.pending_owner_cleanup = remaining;
+        }
+        if let Some(error) = first_error {
+            return Err(error);
+        }
+        Ok(())
+    }
+
+    fn runtime_lifecycle_slot(
+        &self,
+        runtime_instance_id: &str,
+    ) -> RuntimeLifecycleSlot {
+        let gate = {
+            let mut slots = self
+                .runtime_lifecycle_slots
+                .lock()
+                .expect("gateway browser lifecycle slot store poisoned");
+            Arc::clone(
+                slots
+                    .entry(runtime_instance_id.to_owned())
+                    .or_insert_with(|| Arc::new(AsyncMutex::new(()))),
+            )
+        };
+        RuntimeLifecycleSlot {
+            runtime_instance_id: runtime_instance_id.to_owned(),
+            slots: Arc::clone(&self.runtime_lifecycle_slots),
+            gate,
+        }
+    }
+
+    async fn retry_owner_cleanup_serialized(
+        &self,
+        runtime_instance_id: &str,
+        current_owner_lease_id: &OwnerLeaseId,
+        pending_owner_cleanup: Vec<OwnerLeaseId>,
+        hub: &BrowserSessionHub,
+    ) -> Result<(), BrowserPlatformError> {
+        let lifecycle = self.runtime_lifecycle_slot(runtime_instance_id);
+        let _lifecycle_guard = lifecycle.gate.lock().await;
+        self.retry_owner_cleanup(
+            runtime_instance_id,
+            current_owner_lease_id,
+            pending_owner_cleanup,
+            hub,
+        )
+        .await
+    }
+
+    /// Retry all browser attachment cleanups that previously failed.
+    ///
+    /// This covers both signed-child and Remote MCP authorities. It is called
+    /// from the Gateway lifecycle sweep because Remote MCP sessions are not
+    /// represented by the signed-child capability issuer.
+    pub async fn retry_pending_browser_cleanups(&self) {
+        let Some(hub) = self.hub.clone() else {
+            return;
+        };
+
+        let pending = self
+            .identities
+            .lock()
+            .expect("gateway browser identity cache poisoned")
+            .iter()
+            .filter_map(|(runtime_id, cached)| {
+                if cached.revocation_pending || !cached.pending_owner_cleanup.is_empty() {
+                    Some((
+                        runtime_id.clone(),
+                        cached.authority,
+                        cached.revocation_pending,
+                        cached.identity.owner_lease_id.clone(),
+                        cached.pending_owner_cleanup.clone(),
+                    ))
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>();
+
+        futures::future::join_all(pending.into_iter().map(
+            |(
+                runtime_id,
+                authority,
+                revocation_pending,
+                current_owner,
+                pending_owner_cleanup,
+            )| {
+                let hub = hub.clone();
+                async move {
+                    if revocation_pending {
+                        if let Err(error) = self
+                            .revoke_identity_for_authority(
+                                &runtime_id,
+                                authority,
+                            )
+                            .await
+                        {
+                            tracing::warn!(
+                                runtime_id = %runtime_id,
+                                code = ?error.code,
+                                "Gateway browser attachment cleanup retry failed"
+                            );
+                        }
+                    } else if let Err(error) = self
+                        .retry_owner_cleanup_serialized(
+                            &runtime_id,
+                            &current_owner,
+                            pending_owner_cleanup,
+                            &hub,
+                        )
+                        .await
+                    {
+                        tracing::warn!(
+                            runtime_id = %runtime_id,
+                            code = ?error.code,
+                            "Gateway browser superseded-owner cleanup retry failed"
+                        );
+                    }
+                }
+            },
+        ))
+        .await;
+    }
+
+    /// Return the exact-owner cleanup still attributed to signed Gateway child
+    /// runtimes.
+    ///
+    /// Every remaining signed-child attachment counts as pending during final
+    /// Gateway shutdown, even if its first revoke has not started yet. This
+    /// makes the status a postcondition rather than an observation of only the
+    /// last failed call.
+    pub fn signed_child_cleanup_status(&self) -> BrowserCleanupStatus {
+        self.identities
+            .lock()
+            .expect("gateway browser identity cache poisoned")
+            .values()
+            .filter(|cached| {
+                cached.authority == BrowserAttachmentAuthority::SignedChild
+            })
+            .fold(BrowserCleanupStatus::default(), |mut status, cached| {
+                status.pending_attachments =
+                    status.pending_attachments.saturating_add(1);
+                status.pending_owner_leases = status
+                    .pending_owner_leases
+                    .saturating_add(1 + cached.pending_owner_cleanup.len());
+                if cached.revocation_pending {
+                    status.revocation_pending_attachments = status
+                        .revocation_pending_attachments
+                        .saturating_add(1);
+                }
+                status
+            })
+    }
+
+    /// Run one authoritative final-drain attempt for every signed Gateway
+    /// child and verify the exact-owner postcondition.
+    ///
+    /// Failed records remain in `identities` with their owner lease ids intact,
+    /// so callers may retry this method without reconstructing authority. A
+    /// successful return means no signed-child attachment can later publish a
+    /// forgotten owner cleanup.
+    pub async fn drain_signed_child_browser_owners_once(
+        &self,
+    ) -> Result<(), BrowserPlatformError> {
+        let runtime_ids = self
+            .identities
+            .lock()
+            .expect("gateway browser identity cache poisoned")
+            .iter()
+            .filter(|(_, cached)| {
+                cached.authority == BrowserAttachmentAuthority::SignedChild
+            })
+            .map(|(runtime_id, _)| runtime_id.clone())
+            .collect::<Vec<_>>();
+
+        let outcomes = futures::future::join_all(runtime_ids.into_iter().map(
+            |runtime_id| async move {
+                self.revoke_signed_child_lease(&runtime_id).await
+            },
+        ))
+        .await;
+        let mut first_retryable_error = None;
+        let mut first_terminal_error = None;
+        for outcome in outcomes {
+            if let Err(error) = outcome {
+                if error.retryable {
+                    if first_retryable_error.is_none() {
+                        first_retryable_error = Some(error);
+                    }
+                } else if first_terminal_error.is_none() {
+                    first_terminal_error = Some(error);
+                }
+            }
+        }
+
+        let status = self.signed_child_cleanup_status();
+        if status.is_empty() {
+            return Ok(());
+        }
+
+        let mut error = first_terminal_error
+            .or(first_retryable_error)
+            .unwrap_or_else(|| {
+                BrowserPlatformError::new(
+                    BrowserErrorCode::BrowserUnavailable,
+                    "Gateway browser owner cleanup remains pending.",
+                    true,
+                    "Retry the authoritative Gateway shutdown barrier.",
+                )
+            });
+        error.metadata = json!({
+            "pending_attachments": status.pending_attachments,
+            "pending_owner_leases": status.pending_owner_leases,
+            "revocation_pending_attachments": status.revocation_pending_attachments,
+        });
+        Err(error)
+    }
+
+    /// Revoke the Hub owner capability associated with one successfully
+    /// revoked, signed Gateway child lease.
+    ///
+    /// Cached identity, approvals, and observations are removed before this
+    /// returns. A repeated revoke is a successful no-op and never affects
+    /// another child runtime.
+    pub async fn revoke_signed_child_lease(
+        &self,
+        signed_child_lease_id: &str,
+    ) -> Result<CloseResult, BrowserPlatformError> {
+        self.revoke_identity_for_authority(
+            signed_child_lease_id,
+            BrowserAttachmentAuthority::SignedChild,
+        )
+        .await
+    }
+
+    /// Reconcile cached browser owners with the process-local signed
+    /// capability registry.
+    ///
+    /// The final in-process `LoopbackCapabilityLease` guard can revoke an
+    /// issuer lease without an HTTP revoke request (for example when an ACP
+    /// child crashes or its runtime is dropped). The Gateway server calls this
+    /// periodically so those owners and their Lane state do not wait for the
+    /// longer Hub owner-lease TTL.
+    pub async fn cleanup_inactive_signed_child_leases(
+        &self,
+        mut is_active: impl FnMut(&str) -> bool,
+    ) {
+        let inactive = self
+            .identities
+            .lock()
+            .expect("gateway browser identity cache poisoned")
+            .iter()
+            .filter(|(runtime_id, cached)| {
+                cached.authority == BrowserAttachmentAuthority::SignedChild
+                    && !is_active(runtime_id)
+            })
+            .map(|(runtime_id, _)| runtime_id.clone())
+            .collect::<Vec<_>>();
+        for lease_id in inactive {
+            if let Err(error) = self.revoke_signed_child_lease(&lease_id).await {
+                tracing::warn!(
+                    lease_id,
+                    code = ?error.code,
+                    "Gateway browser owner cleanup for an inactive signed capability failed"
+                );
+            }
+        }
+    }
+
+    /// Open (or recover) a lane. Repeating this call with the same trusted
+    /// runtime and lane name returns the same lane; another attempt/runtime gets
+    /// a distinct lane even if the companion and conversation are identical.
+    pub async fn open(
+        &self,
+        caller: &CallerCtx,
+        lane_name: Option<&str>,
+    ) -> Result<BrowserLaneSnapshot, BrowserPlatformError> {
+        let resolved = self.resolve(caller, lane_name)?;
+        let outcome = resolved
+            .client
+            .open(
+                Some(&resolved.owner.lane_key.lane_name),
+                BrowserIdentityMode::Primary,
+                None,
+            )
+            .await?;
+        match outcome {
+            OpenLaneOutcome::Running { lane } => Ok(lane),
+            OpenLaneOutcome::Queued { lane } => {
+                let queue = lane
+                    .queue
+                    .as_ref()
+                    .and_then(|queue| serde_json::to_value(queue).ok())
+                    .unwrap_or(Value::Null);
+                Err(BrowserPlatformError::new(
+                    BrowserErrorCode::BrowserCapacityQueued,
+                    "The browser lane is queued for capacity.",
+                    true,
+                    "Retry after the reported queue delay.",
+                )
+                .for_lane(lane.lane_id)
+                .with_metadata(json!({ "queue": queue })))
+            }
+        }
+    }
+
+    /// Execute through the shared hub. Same-lane serialization and cross-lane
+    /// concurrency are enforced by the hub, not by a gateway-global mutex.
+    pub async fn execute(
+        &self,
+        caller: &CallerCtx,
+        lane_name: Option<&str>,
+        input: Value,
+    ) -> Result<BrowserOperationResult, BrowserPlatformError> {
+        reject_untrusted_caller_fields(&input)?;
+        let lane = self.open(caller, lane_name).await?;
+        let resolved = self.resolve(caller, Some(&lane.lane_key.lane_name))?;
+        let operation = operation_from_input(&input)?;
+        let kind = operation.kind;
+        let result = resolved.client.execute(&lane.lane_id, operation).await?;
+        if kind == BrowserOperationKind::Observe
+            && let Some(text) = result_text(&result.output)
+        {
+            self.observations
+                .lock()
+                .expect("gateway browser observation cache poisoned")
+                .insert(resolved.owner.lane_key, text.to_owned());
+        }
+        Ok(result)
+    }
+
+    /// Validate the semantic browser selectors without attaching or renewing
+    /// any browser capability.
+    ///
+    /// Transport adapters must call this after their typed serde preflight and
+    /// before [`Self::attach_trusted_identity_scoped`]. A lane selector is
+    /// model-visible input, while the caller identity and owner lease remain
+    /// trusted ingress state.
+    pub async fn validate_managed_request(
+        &self,
+        caller: &CallerCtx,
+        tool_name: &str,
+        input: &Value,
+    ) -> Result<(), BrowserPlatformError> {
+        reject_untrusted_caller_fields(input)?;
+
+        let Some(object) = input.as_object() else {
+            return Err(BrowserPlatformError::new(
+                BrowserErrorCode::OperationNotAllowed,
+                format!("Browser tool `{tool_name}` arguments must be an object."),
+                false,
+                "Send the browser tool arguments as a JSON object.",
+            ));
+        };
+
+        let lane = selector_string(object, "lane")?;
+        let lane_name = selector_string(object, "lane_name")?;
+        let lane_id = selector_string(object, "lane_id")?;
+
+        let lane = lane
+            .as_deref()
+            .map(normalize_lane_name)
+            .transpose()?;
+        let lane_name = lane_name
+            .as_deref()
+            .map(normalize_lane_name)
+            .transpose()?;
+        let lane_id = lane_id.map(BrowserLaneId::parse).transpose()?;
+
+        if lane.is_some() && lane_name.is_some() {
+            return Err(lane_selector_conflict_error(
+                "Use either `lane` or `lane_name`, not both.",
+            ));
+        }
+        if (lane.is_some() || lane_name.is_some()) && lane_id.is_some() {
+            return Err(lane_selector_conflict_error(
+                "Use either a logical lane name or `lane_id`, not both.",
+            ));
+        }
+
+        let Some(lane_id) = lane_id else {
+            return Ok(());
+        };
+
+        // A first attachment has no trusted owner identity yet. Do not let a
+        // caller use an arbitrary lane handle to influence which owner gets
+        // attached; only an already-bound client may perform the owner check.
+        if caller.browser_identity.is_none() {
+            return Err(missing_identity_error());
+        }
+
+        let resolved = self.resolve(caller, None)?;
+        resolved.client.status(&lane_id).await.map(|_| ())
+    }
+
+    /// Dispatch the shared managed Browser contract without constructing a
+    /// `BrowserTool` or browser engine. `lane_id` is an owner-scoped selector;
+    /// a legacy logical `lane` remains supported by resolving it through this
+    /// caller's trusted runtime before dispatch.
+    pub async fn dispatch_managed(
+        &self,
+        caller: &CallerCtx,
+        legacy_lane_name: Option<&str>,
+        mut input: Value,
+    ) -> Result<ToolResult, BrowserPlatformError> {
+        reject_untrusted_caller_fields(&input)?;
+        if legacy_lane_name.is_some() && input.get("lane_id").is_some_and(|v| !v.is_null()) {
+            return Err(BrowserPlatformError::new(
+                BrowserErrorCode::OperationNotAllowed,
+                "Use either legacy `lane` or `lane_id`, not both.",
+                false,
+                "Keep lane_id and remove the legacy lane name.",
+            ));
+        }
+        if let Some(lane_name) = legacy_lane_name {
+            let lane = self.open(caller, Some(lane_name)).await?;
+            input["lane_id"] = Value::String(lane.lane_id.to_string());
+        }
+        let action = input
+            .get("action")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|action| !action.is_empty())
+            .ok_or_else(|| {
+                BrowserPlatformError::new(
+                    BrowserErrorCode::OperationNotAllowed,
+                    "The browser action is missing.",
+                    false,
+                    "Provide a registered Browser action.",
+                )
+            })?
+            .to_owned();
+        let resolved = self.resolve(caller, None)?;
+        Ok(
+            ManagedBrowserFacade::new(resolved.client, None)
+                .execute(&action, &input)
+                .await,
+        )
+    }
+
+    /// Resolve a caller-provided selector to this trusted runtime's logical
+    /// Lane name for GW2 approval ownership. An unowned lane_id fails at the
+    /// bound Hub authorization check.
+    pub async fn resolve_lane_selector(
+        &self,
+        caller: &CallerCtx,
+        legacy_lane_name: Option<&str>,
+        lane_id: Option<&str>,
+    ) -> Result<String, BrowserPlatformError> {
+        if legacy_lane_name.is_some() && lane_id.is_some() {
+            return Err(BrowserPlatformError::new(
+                BrowserErrorCode::OperationNotAllowed,
+                "Use either legacy `lane` or `lane_id`, not both.",
+                false,
+                "Keep lane_id and remove the legacy lane name.",
+            ));
+        }
+        if let Some(lane_id) = lane_id {
+            let lane_id = BrowserLaneId::parse(lane_id.to_owned())?;
+            let resolved = self.resolve(caller, None)?;
+            return resolved
+                .client
+                .status(&lane_id)
+                .await
+                .map(|lane| lane.lane_key.lane_name);
+        }
+        Ok(self
+            .resolve(caller, legacy_lane_name)?
+            .owner
+            .lane_key
+            .lane_name)
+    }
+
+    /// Run multiple calls concurrently while preserving input order. The hub
+    /// serializes calls that resolve to one lane and permits different lanes to
+    /// overlap subject to its global resource semaphore.
+    pub async fn execute_parallel(
+        &self,
+        calls: Vec<GatewayBrowserCall>,
+    ) -> Vec<Result<BrowserOperationResult, BrowserPlatformError>> {
+        let futures = calls.into_iter().map(|call| async move {
+            self.execute(
+                &call.caller,
+                Some(&call.lane_name),
+                call.input,
+            )
+            .await
+        });
+        futures::future::join_all(futures).await
+    }
+
+    /// Classify for GW2 without creating an engine. Runtime semantics from the
+    /// last observation are reconstructed from the hub result text.
+    pub fn classify(
+        &self,
+        caller: &CallerCtx,
+        lane_name: Option<&str>,
+        action: &str,
+        input: &Value,
+    ) -> Result<ApprovalTier, BrowserPlatformError> {
+        reject_untrusted_caller_fields(input)?;
+        let resolved = self.resolve(caller, lane_name)?;
+        let observation = self
+            .observations
+            .lock()
+            .expect("gateway browser observation cache poisoned")
+            .get(&resolved.owner.lane_key)
+            .cloned();
+        Ok(classify_with_observation(action, input, observation.as_deref()))
+    }
+
+    /// Stash a sanitized irreversible action. Ownership is the trusted runtime,
+    /// lane, user, and lease — never a companion id.
+    pub fn stash_pending(
+        &self,
+        caller: &CallerCtx,
+        lane_name: Option<&str>,
+        input: Value,
+    ) -> Result<Option<String>, BrowserPlatformError> {
+        reject_untrusted_caller_fields(&input)?;
+        let resolved = self.resolve(caller, lane_name)?;
+        let call_id = nomifun_common::generate_id();
+        let mut pending = self
+            .pending
+            .lock()
+            .expect("gateway browser pending store poisoned");
+        if pending.len() >= MAX_PENDING {
+            return Ok(None);
+        }
+        pending.insert(
+            call_id.clone(),
+            PendingBrowserAction {
+                input,
+                lane_name: resolved.owner.lane_key.lane_name,
+                runtime_instance_id: resolved.owner.lane_key.runtime_instance_id,
+                owner_lease_id: resolved.owner.owner_lease_id,
+                user_id: resolved.owner.user_id,
+            },
+        );
+        Ok(Some(call_id))
+    }
+
+    /// Atomically consume a pending decision only if the current trusted caller
+    /// owns it. A mismatched caller cannot consume another runtime's decision.
+    pub fn take_pending_for(
+        &self,
+        caller: &CallerCtx,
+        call_id: &str,
+    ) -> Result<Option<PendingBrowserAction>, BrowserPlatformError> {
+        let pending = {
+            self.pending
+                .lock()
+                .expect("gateway browser pending store poisoned")
+                .get(call_id)
+                .cloned()
+        };
+        let Some(pending) = pending else {
+            return Ok(None);
+        };
+        let resolved = self.resolve(caller, Some(&pending.lane_name))?;
+        if resolved.owner != pending.owner() {
+            return Err(BrowserPlatformError::new(
+                BrowserErrorCode::OperationNotAllowed,
+                "This browser approval belongs to another runtime.",
+                false,
+                "Resolve it from the runtime that requested the action.",
+            ));
+        }
+        Ok(self
+            .pending
+            .lock()
+            .expect("gateway browser pending store poisoned")
+            .remove(call_id))
+    }
+
     pub fn pending_count(&self) -> usize {
         self.pending
             .lock()
-            .expect("browser registry pending poisoned")
+            .expect("gateway browser pending store poisoned")
             .len()
     }
 
-    /// **P3-GW2**: execute an out-of-band-APPROVED action — inject the trusted
-    /// [`OUT_OF_BAND_CONFIRMED_KEY`] sentinel into the (sanitized) input so the
-    /// facade's redline gate releases the irreversible action, then forward through
-    /// the normal serialized `execute`. The sentinel is injected HERE (past the
-    /// gateway trust boundary), never copied from caller input.
-    pub async fn execute_confirmed(&self, key: &str, input: Value) -> ToolResult {
-        self.execute(key, inject_out_of_band(input)).await
-    }
-}
-
-/// **P3-GW2 [pure]: inject the trusted out-of-band sentinel** into a (sanitized)
-/// action input so the facade's redline gate releases the irreversible action.
-/// Called only by [`BrowserRegistry::execute_confirmed`] — past the gateway trust
-/// boundary, after a real user approval. Pure (no I/O) so the injection is unit
-/// testable without launching a browser.
-fn inject_out_of_band(mut input: Value) -> Value {
-    if let Some(obj) = input.as_object_mut() {
-        obj.insert(OUT_OF_BAND_CONFIRMED_KEY.to_string(), Value::Bool(true));
-    }
-    input
-}
-
-/// Slot idle time-to-live (ms): a companion/conversation slot untouched this long is
-/// evicted on the next registry access — its `BrowserTool` drops, killing the Chrome
-/// process and (ephemeral) profile dir. Bounds live Chromes to *recently active* keys
-/// (the map was previously insert-only → a finished `conversation:<id>` kept a live
-/// Chrome forever). Generous so a single long browser op is never evicted mid-call.
-const SLOT_IDLE_TTL_MS: u64 = 10 * 60 * 1000;
-
-/// Wall-clock milliseconds since the Unix epoch. A backwards clock only makes a slot
-/// look *younger*, never falsely idle. Used for slot idle tracking.
-fn now_ms() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0)
-}
-
-/// **[pure] Is a slot idle (evictable)?** `now - last_used >= ttl`. Saturating so a
-/// backwards clock (last_used in the "future") reads as fresh, never falsely idle.
-fn is_idle(last_used_ms: u64, now_ms: u64, ttl_ms: u64) -> bool {
-    now_ms.saturating_sub(last_used_ms) >= ttl_ms
-}
-
-/// **[pure] Injectively encode a registry key into a filesystem-safe dir segment.**
-/// Percent-encodes `%` (first, so the escape is unambiguous) and the path separators
-/// `/ \ :`. Injective: distinct keys always map to distinct segments (no lossy
-/// `:`→`_` collapse that would let `conversation:5` and a literal `conversation_5`
-/// share a downloads dir), and neutralizes separators so a key can't escape the root.
-fn sanitize_key(key: &str) -> String {
-    let mut out = String::with_capacity(key.len());
-    for c in key.chars() {
-        match c {
-            '%' => out.push_str("%25"),
-            '/' => out.push_str("%2F"),
-            '\\' => out.push_str("%5C"),
-            ':' => out.push_str("%3A"),
-            _ => out.push(c),
+    /// Execute an approved action through the Hub's Rust-only confirmation
+    /// seam. No confirmation bit is ever copied from model JSON.
+    pub async fn execute_confirmed(
+        &self,
+        caller: &CallerCtx,
+        pending: PendingBrowserAction,
+    ) -> Result<BrowserOperationResult, BrowserPlatformError> {
+        let resolved = self.resolve(caller, Some(&pending.lane_name))?;
+        if resolved.owner != pending.owner() {
+            return Err(BrowserPlatformError::new(
+                BrowserErrorCode::OperationNotAllowed,
+                "This browser approval belongs to another runtime.",
+                false,
+                "Resolve it from the runtime that requested the action.",
+            ));
         }
+        reject_untrusted_caller_fields(&pending.input)?;
+        let lane = self
+            .open(caller, Some(&pending.lane_name))
+            .await?;
+        let resolved = self.resolve(caller, Some(&pending.lane_name))?;
+        let operation = operation_from_input(&pending.input)?;
+        resolved
+            .client
+            .execute_confirmed(&lane.lane_id, operation)
+            .await
     }
-    out
+
+    fn resolve(
+        &self,
+        caller: &CallerCtx,
+        lane_name: Option<&str>,
+    ) -> Result<ResolvedBrowserCaller, BrowserPlatformError> {
+        let hub = self.hub.as_ref().ok_or_else(|| {
+            BrowserPlatformError::new(
+                BrowserErrorCode::BrowserUnavailable,
+                "The browser hub was not injected into the gateway.",
+                true,
+                "Start browser support in the main application and retry.",
+            )
+        })?;
+        let identity = self.identity_resolver.resolve(caller)?;
+        validate_identity_binding(caller, &identity)?;
+        let lane_key = LaneKey::new(
+            identity.runtime_instance_id.clone(),
+            lane_name,
+        )?;
+        let owner = PendingOwner {
+            user_id: identity.user_id.clone(),
+            lane_key,
+            owner_lease_id: identity.owner_lease_id.clone(),
+        };
+        let client = hub.bind(identity)?;
+        Ok(ResolvedBrowserCaller { client, owner })
+    }
 }
 
-/// Render a facade [`ToolResult`] into the gateway's JSON envelope. An error
-/// result becomes `{"error": ...}`; a success result carries the text and any
-/// images (base64 PNG) so a remote Agent can relay/inspect them.
+struct ResolvedBrowserCaller {
+    client: BrowserLaneClient,
+    owner: PendingOwner,
+}
+
+fn validate_identity_binding(
+    caller: &CallerCtx,
+    identity: &CallerIdentity,
+) -> Result<(), BrowserPlatformError> {
+    let conversation_matches = match (
+        caller.conversation_id.as_ref(),
+        identity.conversation_id.as_deref(),
+    ) {
+        (Some(expected), Some(actual)) => expected.as_str() == actual,
+        (None, _) => true,
+        (Some(_), None) => false,
+    };
+    let companion_matches = match (
+        caller.companion_id.as_ref(),
+        identity.companion_id.as_deref(),
+    ) {
+        (Some(expected), Some(actual)) => expected.as_str() == actual,
+        (None, _) => true,
+        (Some(_), None) => false,
+    };
+    if identity.user_id != caller.user_id.as_str()
+        || !conversation_matches
+        || !companion_matches
+    {
+        return Err(BrowserPlatformError::new(
+            BrowserErrorCode::InvalidCallerIdentity,
+            "The trusted browser identity does not match the Gateway caller.",
+            false,
+            "Request a fresh authenticated browser capability.",
+        ));
+    }
+    Ok(())
+}
+
+fn missing_identity_error() -> BrowserPlatformError {
+    BrowserPlatformError::new(
+        BrowserErrorCode::InvalidCallerIdentity,
+        "The Gateway caller has no trusted browser identity.",
+        false,
+        "Request a fresh authenticated browser capability.",
+    )
+}
+
+fn revoked_runtime_error() -> BrowserPlatformError {
+    BrowserPlatformError::new(
+        BrowserErrorCode::OwnerLeaseExpired,
+        "The browser runtime owner has been revoked.",
+        false,
+        "Request a fresh authenticated browser runtime.",
+    )
+}
+
+fn selector_string(
+    object: &serde_json::Map<String, Value>,
+    field: &str,
+) -> Result<Option<String>, BrowserPlatformError> {
+    match object.get(field) {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(value)) => Ok(Some(value.clone())),
+        Some(_) => Err(BrowserPlatformError::new(
+            BrowserErrorCode::OperationNotAllowed,
+            format!("Browser selector `{field}` must be a string or null."),
+            false,
+            format!("Remove `{field}` or provide a valid string value."),
+        )),
+    }
+}
+
+fn lane_selector_conflict_error(message: &'static str) -> BrowserPlatformError {
+    BrowserPlatformError::new(
+        BrowserErrorCode::OperationNotAllowed,
+        message,
+        false,
+        "Keep exactly one browser lane selector.",
+    )
+}
+
+fn reject_untrusted_caller_fields(
+    input: &Value,
+) -> Result<(), BrowserPlatformError> {
+    let Some(object) = input.as_object() else {
+        return Ok(());
+    };
+    if let Some(field) = TRUSTED_CALLER_FIELDS
+        .iter()
+        .find(|field| object.contains_key(**field))
+    {
+        return Err(BrowserPlatformError::new(
+            BrowserErrorCode::InvalidCallerIdentity,
+            format!(
+                "Browser caller field `{field}` is main-process managed."
+            ),
+            false,
+            "Remove caller identity fields from browser tool arguments.",
+        ));
+    }
+    if let Some(field) = MODEL_IDENTITY_INPUT_FIELDS
+        .iter()
+        .find(|field| object.contains_key(**field))
+    {
+        return Err(BrowserPlatformError::new(
+            BrowserErrorCode::InvalidCallerIdentity,
+            format!(
+                "Browser identity field `{field}` is selected by trusted host policy."
+            ),
+            false,
+            "Remove identity-selection fields from browser tool arguments.",
+        ));
+    }
+    Ok(())
+}
+
+fn operation_from_input(
+    input: &Value,
+) -> Result<BrowserOperation, BrowserPlatformError> {
+    reject_untrusted_caller_fields(input)?;
+    let action = input
+        .get("action")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|action| !action.is_empty())
+        .ok_or_else(|| {
+            BrowserPlatformError::new(
+                BrowserErrorCode::OperationNotAllowed,
+                "The browser action is missing.",
+                false,
+                "Provide a valid browser action.",
+            )
+        })?
+        .to_owned();
+    if action == "bring_to_front" {
+        return Err(BrowserPlatformError::new(
+            BrowserErrorCode::OperationNotAllowed,
+            "Foregrounding the managed browser is not an Agent browser operation.",
+            false,
+            "Use the authenticated Browser management page to open a running Primary lane in the foreground.",
+        ));
+    }
+    let kind = operation_kind(&action);
+    let mut sanitized = input.as_object().cloned().unwrap_or_default();
+    sanitized.remove("lane_id");
+    sanitized.remove("lane");
+    sanitized.remove("lane_name");
+    sanitized.remove("expected_browser_epoch");
+    for field in TRUSTED_CALLER_FIELDS {
+        sanitized.remove(*field);
+    }
+    Ok(BrowserOperation {
+        kind,
+        action: action.clone(),
+        input: Value::Object(sanitized),
+        expected_browser_epoch: input
+            .get("expected_browser_epoch")
+            .or_else(|| input.get("browser_epoch"))
+            .and_then(Value::as_u64),
+        target_id: input
+            .get("target_id")
+            .or_else(|| input.get("tab_id"))
+            .and_then(Value::as_str)
+            .map(str::to_owned),
+        frame_id: input
+            .get("frame_id")
+            .and_then(Value::as_str)
+            .map(str::to_owned),
+        ref_generation: input
+            .get("ref_generation")
+            .and_then(Value::as_u64),
+        may_modify_identity: may_modify_identity(&action, input),
+    })
+}
+
+fn operation_kind(action: &str) -> BrowserOperationKind {
+    match action {
+        "navigate" | "back" | "forward" | "reload" => BrowserOperationKind::Navigate,
+        "observe" => BrowserOperationKind::Observe,
+        "screenshot" => BrowserOperationKind::Screenshot,
+        "tabs" | "switch_tab" | "close_tab" | "open_link_new_tab" => {
+            BrowserOperationKind::Tabs
+        }
+        "download" | "save_as_pdf" => BrowserOperationKind::Download,
+        "get_console_logs" | "get_page_errors" | "get_network_log"
+        | "rendered_html" => BrowserOperationKind::Debug,
+        "capabilities" | "device_pixel_ratio" => {
+            BrowserOperationKind::Manage
+        }
+        "crawl" | "crawl_many" => BrowserOperationKind::Crawl,
+        _ => BrowserOperationKind::Act,
+    }
+}
+
+fn may_modify_identity(action: &str, input: &Value) -> bool {
+    match action {
+        "navigate" | "back" | "forward" | "reload" | "open_link_new_tab"
+        | "crawl" | "crawl_many" => input_declares_stateful_request(input),
+        "click"
+        | "type"
+        | "set_value"
+        | "select_option"
+        | "press_key"
+        | "upload_file"
+        | "evaluate"
+        | "clear_cookies"
+        | "set_cookie"
+        | "clear_storage"
+        | "login"
+        | "logout"
+        | "switch_account"
+        | "account_switch"
+        | "submit"
+        | "submit_form" => true,
+        "observe"
+        | "screenshot"
+        | "tabs"
+        | "switch_tab"
+        | "close_tab"
+        | "get_console_logs"
+        | "get_page_errors"
+        | "get_network_log"
+        | "rendered_html"
+        | "capabilities"
+        | "device_pixel_ratio"
+        | "hover"
+        | "scroll"
+        | "scroll_to_text"
+        | "wait"
+        | "wait_for"
+        | "extract"
+        | "switch_frame"
+        | "download"
+        | "save_as_pdf" => false,
+        // Gateway accepts a compatibility action string before the driver
+        // validates it. Unknown future actions therefore fail closed.
+        _ => true,
+    }
+}
+
+fn input_declares_stateful_request(input: &Value) -> bool {
+    input
+        .get("method")
+        .and_then(Value::as_str)
+        .is_some_and(|method| {
+            !method.eq_ignore_ascii_case("get") && !method.eq_ignore_ascii_case("head")
+        })
+        || input
+            .get("submits_form")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+}
+
+fn classify_with_observation(
+    action: &str,
+    input: &Value,
+    observation: Option<&str>,
+) -> ApprovalTier {
+    let mut context = ActionContext::default();
+    if input
+        .get("method")
+        .and_then(Value::as_str)
+        .is_some_and(|method| method.eq_ignore_ascii_case("post"))
+    {
+        context.is_cross_origin_post = true;
+    }
+    if action == "press_key"
+        && input
+            .get("keys")
+            .or_else(|| input.get("key"))
+            .and_then(Value::as_str)
+            .is_some_and(|keys| {
+                keys.split('+')
+                    .any(|key| key.trim().eq_ignore_ascii_case("enter"))
+            })
+    {
+        // The gateway cannot synchronously inspect focus. Holding Enter for
+        // explicit approval is the safe compatibility behavior.
+        context.enter_submits_form = true;
+    }
+    if action == "click"
+        && let Some(reference) = input.get("ref").and_then(Value::as_str)
+        && let Some(line) = observation.and_then(|text| observation_line(text, reference))
+    {
+        context.element_accname = Some(line.to_owned());
+        let lower = line.to_ascii_lowercase();
+        context.is_submit_control = lower.contains("submit")
+            && (lower.contains("button") || lower.contains("input"));
+    }
+    classify_action(action, &context)
+}
+
+fn observation_line<'a>(text: &'a str, reference: &str) -> Option<&'a str> {
+    let marker = format!("[ref={reference}]");
+    text.lines().find(|line| line.contains(&marker))
+}
+
+fn result_text(output: &Value) -> Option<&str> {
+    output
+        .as_str()
+        .or_else(|| output.get("text").and_then(Value::as_str))
+        .or_else(|| output.get("yaml").and_then(Value::as_str))
+        .or_else(|| output.get("message").and_then(Value::as_str))
+        .or_else(|| output.pointer("/result/text").and_then(Value::as_str))
+        .or_else(|| output.get("content").and_then(Value::as_str))
+}
+
+/// Render a platform operation result into the Gateway's established envelope.
+pub fn browser_result_to_value(
+    result: Result<BrowserOperationResult, BrowserPlatformError>,
+) -> Value {
+    match result {
+        Ok(result) => {
+            let mut payload = if result.output.is_string() {
+                json!({ "text": result.output })
+            } else if result.output.is_null() {
+                json!({})
+            } else {
+                result.output
+            };
+            if let Some(object) = payload.as_object_mut() {
+                if !object.contains_key("text") {
+                    let text = object
+                        .get("yaml")
+                        .and_then(Value::as_str)
+                        .map(str::to_owned)
+                        .or_else(|| {
+                            object
+                                .get("message")
+                                .and_then(Value::as_str)
+                                .map(str::to_owned)
+                        })
+                        .or_else(|| {
+                            object
+                                .get("final_url")
+                                .and_then(Value::as_str)
+                                .map(|url| format!("Navigated to {url}"))
+                        })
+                        .or_else(|| {
+                            object
+                                .get("media_type")
+                                .and_then(Value::as_str)
+                                .map(|_| "Screenshot captured.".to_owned())
+                        });
+                    if let Some(text) = text {
+                        object.insert("text".to_owned(), Value::String(text));
+                    }
+                }
+                if let (Some(media_type), Some(data)) = (
+                    object
+                        .get("media_type")
+                        .and_then(Value::as_str)
+                        .map(str::to_owned),
+                    object
+                        .get("data")
+                        .and_then(Value::as_str)
+                        .map(str::to_owned),
+                ) {
+                    object.insert(
+                        "images".to_owned(),
+                        json!([{ "media_type": media_type, "data": data }]),
+                    );
+                }
+            }
+            json!({ "result": payload })
+        }
+        Err(error) => platform_error_to_value(error),
+    }
+}
+
+/// Stable error envelope used by capability handlers.
+pub fn platform_error_to_value(error: BrowserPlatformError) -> Value {
+    let code = serde_json::to_value(error.code)
+        .unwrap_or_else(|_| Value::String("browser_unavailable".to_owned()));
+    json!({
+        "error": error.message,
+        "code": code,
+        "retryable": error.retryable,
+        "next_action": error.next_action,
+        "lane_id": error.lane_id,
+        "metadata": error.metadata,
+    })
+}
+
+/// Compatibility converter retained for non-browser Gateway callers/tests.
 pub fn tool_result_to_value(result: ToolResult) -> Value {
     if result.is_error {
-        return json!({"error": result.content});
+        return json!({ "error": result.content });
     }
-    let mut payload = json!({"text": result.content});
+    let mut payload = json!({ "text": result.content });
     if !result.images.is_empty() {
-        let imgs: Vec<Value> = result
-            .images
-            .iter()
-            .map(|img| json!({"media_type": img.media_type, "data": img.data}))
-            .collect();
-        payload["images"] = Value::Array(imgs);
+        payload["images"] = Value::Array(
+            result
+                .images
+                .iter()
+                .map(|image| {
+                    json!({
+                        "media_type": image.media_type,
+                        "data": image.data,
+                    })
+                })
+                .collect(),
+        );
     }
-    json!({"result": payload})
+    json!({ "result": payload })
 }
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
+    use std::sync::atomic::{
+        AtomicBool, AtomicUsize, Ordering,
+    };
+    use std::time::Duration;
+
+    use async_trait::async_trait;
+    use nomifun_browser_platform::{
+        BrowserHostDriver, BrowserHostFactory, BrowserHostId,
+        BrowserLaneDriver, BrowserLaneId, DriverOperationContext, HostLaunchRequest,
+        HostLifecycleState, HubConfig, LaneLaunchRequest,
+    };
+    use tokio::sync::{Notify, Semaphore};
+
     use super::*;
 
-    fn registry() -> BrowserRegistry {
-        BrowserRegistry::new(&BrowserConfig::default())
+    struct Probe {
+        active: AtomicUsize,
+        maximum: AtomicUsize,
+        entered: AtomicUsize,
+        confirmed: AtomicUsize,
+        lane_closes: AtomicUsize,
+        lane_close_failures_remaining: AtomicUsize,
+        block_lane_close: AtomicBool,
+        lane_close_notify: Notify,
+        lane_close_releases: Semaphore,
+        notify: Notify,
+        releases: Semaphore,
     }
 
-    #[test]
-    fn is_idle_flags_slots_past_ttl() {
-        // now - last_used >= ttl → idle。
-        assert!(is_idle(1_000, 5_000, 3_000), "4s idle with 3s ttl → evictable");
-        assert!(!is_idle(1_000, 3_000, 3_000) || is_idle(1_000, 4_000, 3_000)); // 边界附近
-        assert!(!is_idle(4_000, 5_000, 3_000), "1s idle with 3s ttl → not evictable");
-        // 时钟回拨（last_used 在未来）→ 饱和减为 0 → 视为新，不误删。
-        assert!(!is_idle(9_000, 5_000, 3_000), "future last_used reads as fresh");
+    impl Probe {
+        fn new() -> Arc<Self> {
+            Arc::new(Self {
+                active: AtomicUsize::new(0),
+                maximum: AtomicUsize::new(0),
+                entered: AtomicUsize::new(0),
+                confirmed: AtomicUsize::new(0),
+                lane_closes: AtomicUsize::new(0),
+                lane_close_failures_remaining: AtomicUsize::new(0),
+                block_lane_close: AtomicBool::new(false),
+                lane_close_notify: Notify::new(),
+                lane_close_releases: Semaphore::new(0),
+                notify: Notify::new(),
+                releases: Semaphore::new(0),
+            })
+        }
+
+        async fn wait_for_active(&self, expected: usize) {
+            loop {
+                if self.active.load(Ordering::Acquire) >= expected {
+                    return;
+                }
+                self.notify.notified().await;
+            }
+        }
+
+        async fn wait_for_lane_closes(&self, expected: usize) {
+            loop {
+                if self.lane_closes.load(Ordering::Acquire) >= expected {
+                    return;
+                }
+                self.lane_close_notify.notified().await;
+            }
+        }
     }
 
-    #[test]
-    fn sweep_idle_evicts_stale_slots_keeps_fresh() {
-        use std::sync::atomic::Ordering;
-        let r = registry();
-        // 建两个 slot（不启动 Chrome——slot() 只懒构 tool）。
-        let stale = r.slot("companion_stale");
-        let _fresh = r.slot("companion_fresh");
-        // 把 stale 的 last_used 设到很久以前 → 应被 sweep 驱逐；fresh 保持 now。
-        stale.last_used_ms.store(0, Ordering::Relaxed);
-        r.sweep_idle(now_ms());
-        let map = r.slots.lock().unwrap();
-        assert!(!map.contains_key("companion_stale"), "stale slot must be evicted");
-        assert!(map.contains_key("companion_fresh"), "fresh slot must survive");
+    struct FakeLane {
+        lane_id: BrowserLaneId,
+        probe: Arc<Probe>,
     }
 
-    #[test]
-    fn key_prefers_companion_then_conversation_and_rejects_missing_identity() {
-        let companion = CompanionId::parse(
+    #[async_trait]
+    impl BrowserLaneDriver for FakeLane {
+        async fn execute(
+            &self,
+            operation: BrowserOperation,
+            context: DriverOperationContext,
+        ) -> Result<BrowserOperationResult, BrowserPlatformError> {
+            if context.trusted_out_of_band_confirmation {
+                self.probe.confirmed.fetch_add(1, Ordering::AcqRel);
+            }
+            let active = self.probe.active.fetch_add(1, Ordering::AcqRel) + 1;
+            self.probe.maximum.fetch_max(active, Ordering::AcqRel);
+            self.probe.entered.fetch_add(1, Ordering::AcqRel);
+            self.probe.notify.notify_waiters();
+            if operation
+                .input
+                .get("block")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+            {
+                self.probe
+                    .releases
+                    .acquire()
+                    .await
+                    .expect("test release semaphore closed")
+                    .forget();
+            }
+            self.probe.active.fetch_sub(1, Ordering::AcqRel);
+            Ok(BrowserOperationResult {
+                output: json!({
+                    "text": format!(
+                        "{}:{}",
+                        self.lane_id,
+                        operation.action
+                    )
+                }),
+                ..Default::default()
+            })
+        }
+
+        async fn close(&self) -> Result<(), BrowserPlatformError> {
+            self.probe.lane_closes.fetch_add(1, Ordering::AcqRel);
+            self.probe.lane_close_notify.notify_waiters();
+            if self.probe.block_lane_close.load(Ordering::Acquire) {
+                self.probe
+                    .lane_close_releases
+                    .acquire()
+                    .await
+                    .expect("test lane-close release semaphore closed")
+                    .forget();
+            }
+            if self
+                .probe
+                .lane_close_failures_remaining
+                .fetch_update(Ordering::AcqRel, Ordering::Acquire, |remaining| {
+                    if remaining == 0 {
+                        None
+                    } else {
+                        Some(remaining.saturating_sub(1))
+                    }
+                })
+                .is_ok()
+            {
+                return Err(BrowserPlatformError::new(
+                    BrowserErrorCode::BrowserUnavailable,
+                    "Synthetic lane cleanup failure.",
+                    true,
+                    "Retry the authoritative cleanup.",
+                ));
+            }
+            Ok(())
+        }
+    }
+
+    struct FakeHost {
+        id: BrowserHostId,
+        probe: Arc<Probe>,
+    }
+
+    #[async_trait]
+    impl BrowserHostDriver for FakeHost {
+        fn host_id(&self) -> BrowserHostId {
+            self.id.clone()
+        }
+
+        fn epoch(&self) -> u64 {
+            1
+        }
+
+        fn state(&self) -> HostLifecycleState {
+            HostLifecycleState::Running
+        }
+
+        async fn open_lane(
+            &self,
+            request: LaneLaunchRequest,
+        ) -> Result<Arc<dyn BrowserLaneDriver>, BrowserPlatformError> {
+            Ok(Arc::new(FakeLane {
+                lane_id: request.lane_id,
+                probe: Arc::clone(&self.probe),
+            }))
+        }
+
+        async fn shutdown(&self) -> Result<(), BrowserPlatformError> {
+            Ok(())
+        }
+    }
+
+    struct FakeFactory {
+        launches: AtomicUsize,
+        probe: Arc<Probe>,
+    }
+
+    #[async_trait]
+    impl BrowserHostFactory for FakeFactory {
+        async fn launch(
+            &self,
+            request: HostLaunchRequest,
+        ) -> Result<Arc<dyn BrowserHostDriver>, BrowserPlatformError> {
+            self.launches.fetch_add(1, Ordering::AcqRel);
+            Ok(Arc::new(FakeHost {
+                id: request.host_id,
+                probe: Arc::clone(&self.probe),
+            }))
+        }
+    }
+
+    struct Harness {
+        hub: BrowserSessionHub,
+        registry: BrowserRegistry,
+        factory: Arc<FakeFactory>,
+        probe: Arc<Probe>,
+    }
+
+    fn harness() -> Harness {
+        harness_with_owner_ttl(HubConfig::default().owner_lease_ttl_ms)
+    }
+
+    fn harness_with_owner_ttl(owner_lease_ttl_ms: u64) -> Harness {
+        let probe = Probe::new();
+        let factory = Arc::new(FakeFactory {
+            launches: AtomicUsize::new(0),
+            probe: Arc::clone(&probe),
+        });
+        let mut config = HubConfig::default();
+        config.owner_lease_ttl_ms = owner_lease_ttl_ms;
+        let hub = BrowserSessionHub::new(factory.clone(), config);
+        let registry = BrowserRegistry::from_hub(hub.clone());
+        Harness {
+            hub,
+            registry,
+            factory,
+            probe,
+        }
+    }
+
+    fn caller(
+        hub: &BrowserSessionHub,
+        runtime: &str,
+        attempt: &str,
+    ) -> CallerCtx {
+        let user_id =
+            nomifun_common::UserId::parse("0190f5fe-7c00-7a00-8000-000000000001")
+                .unwrap();
+        let conversation_id = nomifun_common::ConversationId::parse(
             "0190f5fe-7c00-7a00-8abc-012345678901",
         )
         .unwrap();
-        let conversation = ConversationId::parse(
+        let companion_id = nomifun_common::CompanionId::parse(
             "0190f5fe-7c00-7a00-8abc-012345678902",
         )
         .unwrap();
-        assert_eq!(
-            BrowserRegistry::key_for(Some(&companion), Some(&conversation)).unwrap(),
-            companion.as_str()
-        );
-        assert_eq!(
-            BrowserRegistry::key_for(None, Some(&conversation)).unwrap(),
-            format!("conversation:{}", conversation.as_str())
-        );
-        assert!(BrowserRegistry::key_for(None, None).is_err());
+        let lease = hub
+            .issue_owner_lease(
+                user_id.as_str(),
+                Some(conversation_id.as_str().to_owned()),
+                runtime,
+            )
+            .unwrap();
+        CallerCtx {
+            conversation_id: Some(conversation_id.clone()),
+            user_id: user_id.clone(),
+            companion_id: Some(companion_id.clone()),
+            browser_identity: Some(CallerIdentity {
+                user_id: user_id.as_str().to_owned(),
+                conversation_id: Some(
+                    conversation_id.as_str().to_owned(),
+                ),
+                runtime_instance_id: runtime.to_owned(),
+                agent_id: Some("agent-1".to_owned()),
+                companion_id: Some(companion_id.as_str().to_owned()),
+                execution_id: Some("execution-1".to_owned()),
+                step_id: Some("step-1".to_owned()),
+                attempt_id: Some(attempt.to_owned()),
+                remote_connection_id: None,
+                surface: nomifun_browser_platform::BrowserSurface::Gateway,
+                owner_lease_id: lease.lease_id,
+                capability_expires_at_ms: u64::MAX,
+                allowed_operations: BTreeSet::from([
+                    BrowserOperationKind::Manage,
+                    BrowserOperationKind::Navigate,
+                    BrowserOperationKind::Observe,
+                    BrowserOperationKind::Act,
+                ]),
+            }),
+            ..Default::default()
+        }
     }
 
-    #[test]
-    fn workspace_is_per_key_and_sanitized() {
-        let r = registry();
-        let a = r.workspace_for("companion_a");
-        let b = r.workspace_for("companion_b");
-        assert_ne!(a, b, "different companions must get different workspaces");
-        assert!(a.ends_with(PathBuf::from("browser-profiles").join("companion_a")));
-        // 键消毒是**单射**（percent-encode）：`conversation:5` 与字面 `conversation_5` 绝不塌成同一目录
-        //（旧的 `:`→`_` 有损映射会塌，导致两会话下载/截图互相混淆）。
-        let conv = r.workspace_for("conversation:5");
+    fn gateway_caller_without_browser_identity() -> CallerCtx {
+        CallerCtx {
+            conversation_id: Some(
+                nomifun_common::ConversationId::parse(
+                    "0190f5fe-7c00-7a00-8abc-012345678901",
+                )
+                .unwrap(),
+            ),
+            user_id: nomifun_common::UserId::parse(
+                "0190f5fe-7c00-7a00-8000-000000000001",
+            )
+            .unwrap(),
+            companion_id: Some(
+                nomifun_common::CompanionId::parse(
+                    "0190f5fe-7c00-7a00-8abc-012345678902",
+                )
+                .unwrap(),
+            ),
+            ..Default::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn different_attempt_runtimes_get_distinct_lanes_even_for_same_companion() {
+        let harness = harness();
+        let first = caller(&harness.hub, "runtime-attempt-1", "attempt-1");
+        let second = caller(&harness.hub, "runtime-attempt-2", "attempt-2");
+        let lane_a = harness.registry.open(&first, None).await.unwrap();
+        let lane_b = harness.registry.open(&second, None).await.unwrap();
+        assert_ne!(lane_a.lane_id, lane_b.lane_id);
+        assert_ne!(lane_a.lane_key, lane_b.lane_key);
+        assert_eq!(
+            lane_a.caller.companion_id,
+            lane_b.caller.companion_id,
+            "companion is attribution, not the lane key"
+        );
+    }
+
+    #[tokio::test]
+    async fn same_runtime_default_lane_is_stable() {
+        let harness = harness();
+        let caller = caller(&harness.hub, "runtime-stable", "attempt-1");
+        let first = harness.registry.open(&caller, None).await.unwrap();
+        let second = harness
+            .registry
+            .open(&caller, Some("default"))
+            .await
+            .unwrap();
+        assert_eq!(first.lane_id, second.lane_id);
+        assert_eq!(first.lane_key.lane_name, "default");
+        assert_eq!(harness.factory.launches.load(Ordering::Acquire), 1);
+    }
+
+    #[tokio::test]
+    async fn managed_contract_accepts_owned_lane_id_and_rejects_sibling_handle() {
+        let harness = harness();
+        let first = caller(&harness.hub, "runtime-contract-a", "attempt-a");
+        let sibling = caller(&harness.hub, "runtime-contract-b", "attempt-b");
+        let opened = harness
+            .registry
+            .dispatch_managed(
+                &first,
+                None,
+                json!({
+                    "action": "browser_open",
+                    "lane_name": "research",
+                }),
+            )
+            .await
+            .unwrap();
+        assert!(!opened.is_error, "{}", opened.content);
+        let opened: Value = serde_json::from_str(&opened.content).unwrap();
+        let lane_id = opened
+            .pointer("/lane/lane_id")
+            .and_then(Value::as_str)
+            .unwrap()
+            .to_owned();
+
+        let navigated = harness
+            .registry
+            .dispatch_managed(
+                &first,
+                None,
+                json!({
+                    "action": "navigate",
+                    "url": "https://example.test/research",
+                    "lane_id": lane_id,
+                }),
+            )
+            .await
+            .unwrap();
+        assert!(!navigated.is_error, "{}", navigated.content);
+        let navigated: Value = serde_json::from_str(&navigated.content).unwrap();
+        assert_eq!(
+            navigated.get("lane_id").and_then(Value::as_str),
+            Some(lane_id.as_str())
+        );
         assert!(
-            conv.ends_with(PathBuf::from("browser-profiles").join("conversation%3A5")),
-            "got {conv:?}"
+            navigated.get("text").and_then(Value::as_str).is_some(),
+            "legacy action output remains available at the established top level"
+        );
+
+        let crossed = harness
+            .registry
+            .dispatch_managed(
+                &sibling,
+                None,
+                json!({"action": "browser_status", "lane_id": lane_id}),
+            )
+            .await
+            .unwrap();
+        assert!(crossed.is_error, "an unowned Lane handle must fail closed");
+        assert_eq!(harness.hub.list_lanes().await.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn managed_crawl_many_preserves_url_order_and_cleans_hub_lanes() {
+        let harness = harness();
+        let caller = caller(&harness.hub, "runtime-crawl", "attempt-crawl");
+        let crawled = harness
+            .registry
+            .dispatch_managed(
+                &caller,
+                None,
+                json!({
+                    "action": "browser_crawl_many",
+                    "urls": [
+                        "https://example.test/a",
+                        "https://example.test/b",
+                        "https://example.test/c"
+                    ],
+                    "concurrency": 2,
+                }),
+            )
+            .await
+            .unwrap();
+        assert!(!crawled.is_error, "{}", crawled.content);
+        let crawled: Value = serde_json::from_str(&crawled.content).unwrap();
+        let results = crawled["results"].as_array().unwrap();
+        assert_eq!(results.len(), 3);
+        for (index, suffix) in ["a", "b", "c"].into_iter().enumerate() {
+            assert_eq!(
+                results[index]["url"],
+                format!("https://example.test/{suffix}")
+            );
+            for field in [
+                "lane_id",
+                "lifecycle_state",
+                "identity_mode",
+                "browser_epoch",
+                "recommended_concurrency",
+                "capacity_or_recovery_hint",
+            ] {
+                assert!(
+                    results[index].get(field).is_some(),
+                    "crawl result {index} is missing {field}: {}",
+                    results[index]
+                );
+            }
+        }
+        assert!(
+            harness.hub.list_lanes().await.is_empty(),
+            "crawl worker Lanes must be closed through the Hub"
+        );
+    }
+
+    #[tokio::test]
+    async fn signed_runtime_attachment_reuses_one_lease_and_separates_new_attempts() {
+        let harness = harness();
+        let mut first = gateway_caller_without_browser_identity();
+        harness
+            .registry
+            .attach_trusted_identity(
+                &mut first,
+                "signed-child-lease-a",
+                Some("attempt-a"),
+                u64::MAX,
+            )
+            .await
+            .unwrap();
+        let first_identity = first.browser_identity.clone().unwrap();
+
+        let mut renewed = gateway_caller_without_browser_identity();
+        harness
+            .registry
+            .attach_trusted_identity(
+                &mut renewed,
+                "signed-child-lease-a",
+                Some("attempt-a"),
+                u64::MAX,
+            )
+            .await
+            .unwrap();
+        let renewed_identity = renewed.browser_identity.unwrap();
+        assert_eq!(
+            first_identity.owner_lease_id,
+            renewed_identity.owner_lease_id
+        );
+        assert_eq!(
+            first_identity.runtime_instance_id,
+            renewed_identity.runtime_instance_id
+        );
+
+        let mut next_attempt = gateway_caller_without_browser_identity();
+        harness
+            .registry
+            .attach_trusted_identity(
+                &mut next_attempt,
+                "signed-child-lease-b",
+                Some("attempt-b"),
+                u64::MAX,
+            )
+            .await
+            .unwrap();
+        let next_identity = next_attempt.browser_identity.unwrap();
+        assert_ne!(
+            first_identity.owner_lease_id,
+            next_identity.owner_lease_id
         );
         assert_ne!(
-            r.workspace_for("conversation:5"),
-            r.workspace_for("conversation_5"),
-            "key sanitization must be injective (distinct keys → distinct dirs)"
+            first_identity.runtime_instance_id,
+            next_identity.runtime_instance_id
         );
-        // 路径分隔符被中和（无 traversal），且仍单射。
-        let evil = r.workspace_for("../../etc");
+    }
+
+    #[tokio::test]
+    async fn expired_cached_owner_is_reissued_for_the_same_live_runtime() {
+        let harness = harness_with_owner_ttl(10);
+        let mut first = gateway_caller_without_browser_identity();
+        harness
+            .registry
+            .attach_trusted_identity_with_authority(
+                &mut first,
+                "remote-session-live",
+                None,
+                u64::MAX,
+                BrowserAttachmentAuthority::RemoteMcpSession,
+            )
+            .await
+            .unwrap();
+        let old_owner = first
+            .browser_identity
+            .as_ref()
+            .unwrap()
+            .owner_lease_id
+            .clone();
+        let stale_lane = harness.registry.open(&first, None).await.unwrap();
+
+        tokio::time::sleep(Duration::from_millis(20)).await;
+
+        let mut resumed = gateway_caller_without_browser_identity();
+        harness
+            .registry
+            .attach_trusted_identity_with_authority(
+                &mut resumed,
+                "remote-session-live",
+                None,
+                u64::MAX,
+                BrowserAttachmentAuthority::RemoteMcpSession,
+            )
+            .await
+            .unwrap();
+        let new_owner = resumed
+            .browser_identity
+            .as_ref()
+            .unwrap()
+            .owner_lease_id
+            .clone();
+        assert_ne!(
+            old_owner, new_owner,
+            "an expired cached owner must be replaced, not returned as stale authority"
+        );
+        let replacement_lane = harness.registry.open(&resumed, None).await.unwrap();
+        assert_ne!(stale_lane.lane_id, replacement_lane.lane_id);
+
+        harness.hub.sweep().await.unwrap();
+        let lanes = harness.hub.list_lanes().await;
+        assert_eq!(lanes.len(), 1);
+        assert_eq!(lanes[0].lane_id, replacement_lane.lane_id);
+        assert_eq!(lanes[0].caller.owner_lease_id, new_owner);
+    }
+
+    #[tokio::test]
+    async fn expired_owner_replacement_cannot_broaden_scope_or_inherit_pending_approval() {
+        let harness = harness_with_owner_ttl(10);
+        let mut first = gateway_caller_without_browser_identity();
+        first.remote = true;
+        harness
+            .registry
+            .attach_trusted_identity_scoped(
+                &mut first,
+                "remote-session-narrow-replacement",
+                None,
+                u64::MAX,
+                BrowserAttachmentAuthority::RemoteMcpSession,
+                BTreeSet::from([
+                    BrowserOperationKind::Manage,
+                    BrowserOperationKind::Observe,
+                ]),
+            )
+            .await
+            .unwrap();
+        let old_identity = first.browser_identity.clone().unwrap();
+        let old_lane = harness.registry.open(&first, None).await.unwrap();
+        let call_id = harness
+            .registry
+            .stash_pending(
+                &first,
+                None,
+                json!({ "action": "press_key", "keys": "Enter" }),
+            )
+            .unwrap()
+            .unwrap();
+
+        tokio::time::sleep(Duration::from_millis(20)).await;
+
+        let mut replacement = gateway_caller_without_browser_identity();
+        replacement.remote = true;
+        harness
+            .registry
+            .attach_trusted_identity_scoped(
+                &mut replacement,
+                "remote-session-narrow-replacement",
+                None,
+                u64::MAX,
+                BrowserAttachmentAuthority::RemoteMcpSession,
+                BTreeSet::from([
+                    BrowserOperationKind::Manage,
+                    BrowserOperationKind::Observe,
+                    BrowserOperationKind::Act,
+                ]),
+            )
+            .await
+            .unwrap();
+        let replacement_identity = replacement.browser_identity.clone().unwrap();
+
+        assert_eq!(replacement_identity.surface, BrowserSurface::Remote);
+        assert_eq!(
+            replacement_identity.allowed_operations,
+            BTreeSet::from([
+                BrowserOperationKind::Manage,
+                BrowserOperationKind::Observe,
+            ])
+        );
+        assert_ne!(
+            replacement_identity.owner_lease_id,
+            old_identity.owner_lease_id
+        );
+        assert_eq!(
+            harness.registry.pending_count(),
+            0,
+            "pending approval from the superseded owner lease must be discarded"
+        );
         assert!(
-            evil.ends_with(PathBuf::from("browser-profiles").join("..%2F..%2Fetc")),
-            "path separators in a key must be neutralized: {evil:?}"
+            harness
+                .registry
+                .take_pending_for(&replacement, &call_id)
+                .unwrap()
+                .is_none()
+        );
+        let replacement_lane = harness.registry.open(&replacement, None).await.unwrap();
+        assert_ne!(replacement_lane.lane_id, old_lane.lane_id);
+        let error = harness
+            .registry
+            .open(&first, None)
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, BrowserErrorCode::OwnerLeaseExpired);
+    }
+
+    #[tokio::test]
+    async fn live_owner_renewal_persists_scope_narrowing() {
+        let harness = harness();
+        let mut broad = gateway_caller_without_browser_identity();
+        broad.remote = true;
+        harness
+            .registry
+            .attach_trusted_identity_scoped(
+                &mut broad,
+                "remote-session-live-narrowing",
+                None,
+                u64::MAX,
+                BrowserAttachmentAuthority::RemoteMcpSession,
+                BTreeSet::from([
+                    BrowserOperationKind::Manage,
+                    BrowserOperationKind::Observe,
+                    BrowserOperationKind::Act,
+                ]),
+            )
+            .await
+            .unwrap();
+        let owner_lease_id = broad
+            .browser_identity
+            .as_ref()
+            .unwrap()
+            .owner_lease_id
+            .clone();
+
+        let mut narrow = gateway_caller_without_browser_identity();
+        narrow.remote = true;
+        harness
+            .registry
+            .attach_trusted_identity_scoped(
+                &mut narrow,
+                "remote-session-live-narrowing",
+                None,
+                u64::MAX,
+                BrowserAttachmentAuthority::RemoteMcpSession,
+                BTreeSet::from([
+                    BrowserOperationKind::Manage,
+                    BrowserOperationKind::Observe,
+                ]),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            narrow
+                .browser_identity
+                .as_ref()
+                .unwrap()
+                .owner_lease_id,
+            owner_lease_id
+        );
+
+        let mut attempted_broaden = gateway_caller_without_browser_identity();
+        attempted_broaden.remote = true;
+        harness
+            .registry
+            .attach_trusted_identity_scoped(
+                &mut attempted_broaden,
+                "remote-session-live-narrowing",
+                None,
+                u64::MAX,
+                BrowserAttachmentAuthority::RemoteMcpSession,
+                BTreeSet::from([
+                    BrowserOperationKind::Manage,
+                    BrowserOperationKind::Observe,
+                    BrowserOperationKind::Act,
+                ]),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            attempted_broaden
+                .browser_identity
+                .unwrap()
+                .allowed_operations,
+            BTreeSet::from([
+                BrowserOperationKind::Manage,
+                BrowserOperationKind::Observe,
+            ])
         );
     }
 
-    #[test]
-    fn slot_is_stable_per_key_and_distinct_across_keys() {
-        let r = registry();
-        let a1 = r.slot("companion_a");
-        let a2 = r.slot("companion_a");
-        let b = r.slot("companion_b");
-        // Same key → same slot (so the engine + its mutex are reused, not rebuilt).
-        assert!(Arc::ptr_eq(&a1, &a2), "same key must reuse the same slot");
-        // Different key → different slot (live Chrome process / mutex isolated per
-        // companion; the persisted IDENTITY is still shared — see secret vault below).
-        assert!(!Arc::ptr_eq(&a1, &b), "different keys must get isolated engine slots");
-    }
+    #[tokio::test]
+    async fn signed_child_reconciliation_ignores_remote_mcp_attachments() {
+        let harness = harness();
+        let mut signed = gateway_caller_without_browser_identity();
+        harness
+            .registry
+            .attach_trusted_identity(
+                &mut signed,
+                "signed-child-inactive",
+                Some("attempt-inactive"),
+                u64::MAX,
+            )
+            .await
+            .unwrap();
+        let mut remote = gateway_caller_without_browser_identity();
+        remote.remote = true;
+        harness
+            .registry
+            .attach_trusted_identity_with_authority(
+                &mut remote,
+                "remote-session-active",
+                None,
+                u64::MAX,
+                BrowserAttachmentAuthority::RemoteMcpSession,
+            )
+            .await
+            .unwrap();
 
-    #[test]
-    fn all_companions_resolve_the_same_shared_secret_vault() {
-        // User decision (去 per-pet 键化): every companion key routes to the ONE shared
-        // secret vault, so a secret registered for one companion is usable by every
-        // companion's gateway-driven browser (shared browser identity).
-        let r = registry();
-        let shared_tail = std::path::Path::new("browser-secrets").join("shared").join("secrets.json");
-        let path = nomifun_secret::shared_vault_path(&r.data_dir);
-        assert!(path.ends_with(&shared_tail), "shared secret vault must use the singleton path: {path:?}");
-    }
+        harness.registry.open(&signed, None).await.unwrap();
+        let remote_lane = harness.registry.open(&remote, None).await.unwrap();
+        harness
+            .registry
+            .cleanup_inactive_signed_child_leases(|_| false)
+            .await;
 
-    #[test]
-    fn new_constructs_no_slots() {
-        let r = registry();
-        assert!(
-            r.slots.lock().unwrap().is_empty(),
-            "registry must not pre-create any companion slot (lazy per companion)"
+        let lanes = harness.hub.list_lanes().await;
+        assert_eq!(lanes.len(), 1);
+        assert_eq!(lanes[0].lane_id, remote_lane.lane_id);
+        let identities = harness
+            .registry
+            .identities
+            .lock()
+            .expect("gateway browser identity cache poisoned");
+        assert!(!identities.contains_key("signed-child-inactive"));
+        assert!(identities.contains_key("remote-session-active"));
+        assert_eq!(
+            identities["remote-session-active"].authority,
+            BrowserAttachmentAuthority::RemoteMcpSession
         );
-        assert_eq!(r.pending_count(), 0, "registry must start with no pending approvals");
     }
 
-    #[test]
-    fn gateway_browser_slot_installs_auto_approval_gate_for_egress() {
-        let r = registry();
-        let slot = r.slot("conversation:yolo");
+    #[tokio::test]
+    async fn final_signed_child_drain_reports_pending_exact_owner_cleanup() {
+        let harness = harness();
+        let mut signed = gateway_caller_without_browser_identity();
+        harness
+            .registry
+            .attach_trusted_identity(
+                &mut signed,
+                "signed-child-final-pending",
+                Some("attempt-final-pending"),
+                u64::MAX,
+            )
+            .await
+            .unwrap();
+        harness.registry.open(&signed, None).await.unwrap();
+        harness
+            .probe
+            .lane_close_failures_remaining
+            .store(1, Ordering::Release);
 
-        assert!(
-            slot.tool.takeover_controller().enabled,
-            "gateway browser slots need an approval gate so engine egress can approve without UI"
+        let error = harness
+            .registry
+            .drain_signed_child_browser_owners_once()
+            .await
+            .expect_err("a retained exact owner may not be reported as drained");
+        assert_eq!(error.code, BrowserErrorCode::BrowserUnavailable);
+        assert_eq!(
+            error
+                .metadata
+                .get("pending_attachments")
+                .and_then(Value::as_u64),
+            Some(1)
         );
-    }
-
-    // ── P3-GW2: pending out-of-band approval store ───────────────────────────
-
-    #[test]
-    fn stash_then_take_round_trips_the_pending_action() {
-        let r = registry();
-        let input = json!({"action": "click", "ref": "f0e3"});
-        let call_id = r.stash_pending("companion_a", input.clone()).expect("under cap");
-        assert!(
-            nomifun_common::validate_uuidv7(&call_id).is_ok(),
-            "synthetic call_id must be a bare UUIDv7: {call_id}"
+        assert_eq!(
+            error
+                .metadata
+                .get("pending_owner_leases")
+                .and_then(Value::as_u64),
+            Some(1)
         );
-        assert_eq!(r.pending_count(), 1);
+        assert_eq!(
+            harness.registry.signed_child_cleanup_status(),
+            BrowserCleanupStatus {
+                pending_attachments: 1,
+                pending_owner_leases: 1,
+                revocation_pending_attachments: 1,
+            }
+        );
 
-        let pending = r.take_pending(&call_id).expect("the just-stashed action");
-        assert_eq!(pending.key, "companion_a");
-        assert_eq!(pending.input, input);
-        // Taken once → gone (a second take is None; a confirm cannot be replayed).
-        assert!(r.take_pending(&call_id).is_none(), "take must be single-shot");
-        assert_eq!(r.pending_count(), 0);
+        harness
+            .registry
+            .drain_signed_child_browser_owners_once()
+            .await
+            .expect("retry must consume the retained exact-owner authority");
+        assert!(harness.registry.signed_child_cleanup_status().is_empty());
     }
 
-    #[test]
-    fn take_unknown_call_id_is_none() {
-        let r = registry();
-        assert!(r.take_pending("019f6672-ed10-7193-8a86-7981f6c6feae").is_none());
+    #[tokio::test]
+    async fn final_signed_child_drain_does_not_consume_remote_authority() {
+        let harness = harness();
+        let mut remote = gateway_caller_without_browser_identity();
+        remote.remote = true;
+        harness
+            .registry
+            .attach_trusted_identity_with_authority(
+                &mut remote,
+                "remote-session-survives-gateway-drain",
+                None,
+                u64::MAX,
+                BrowserAttachmentAuthority::RemoteMcpSession,
+            )
+            .await
+            .unwrap();
+        let remote_lane = harness.registry.open(&remote, None).await.unwrap();
+
+        harness
+            .registry
+            .drain_signed_child_browser_owners_once()
+            .await
+            .expect("an empty signed-child postcondition must succeed");
+        assert!(harness.registry.signed_child_cleanup_status().is_empty());
+        let lanes = harness.hub.list_lanes().await;
+        assert_eq!(lanes.len(), 1);
+        assert_eq!(lanes[0].lane_id, remote_lane.lane_id);
     }
 
-    #[test]
-    fn stash_keys_are_unique_per_action() {
-        let r = registry();
-        let a = r.stash_pending("k", json!({"action": "click"})).unwrap();
-        let b = r.stash_pending("k", json!({"action": "click"})).unwrap();
-        assert_ne!(a, b, "each stashed action must get its own call_id");
-        assert_eq!(r.pending_count(), 2);
+    #[tokio::test]
+    async fn remote_mcp_revoke_is_exact_and_idempotent() {
+        let harness = harness();
+        let mut remote = gateway_caller_without_browser_identity();
+        remote.remote = true;
+        harness
+            .registry
+            .attach_trusted_identity_with_authority(
+                &mut remote,
+                "remote-session-close",
+                None,
+                u64::MAX,
+                BrowserAttachmentAuthority::RemoteMcpSession,
+            )
+            .await
+            .unwrap();
+        harness.registry.open(&remote, None).await.unwrap();
+
+        let first = harness
+            .registry
+            .revoke_trusted_identity("remote-session-close")
+            .await
+            .unwrap();
+        assert_eq!(first.closed, 1);
+        assert!(!first.already_closed);
+        assert!(harness.hub.list_lanes().await.is_empty());
+
+        let repeated = harness
+            .registry
+            .revoke_trusted_identity("remote-session-close")
+            .await
+            .unwrap();
+        assert_eq!(repeated.closed, 0);
+        assert!(repeated.already_closed);
     }
 
-    #[test]
-    fn stash_fails_closed_at_capacity() {
-        let r = registry();
-        for _ in 0..MAX_PENDING {
-            assert!(r.stash_pending("k", json!({"action": "click"})).is_some());
+    #[tokio::test]
+    async fn failed_remote_mcp_revoke_remains_authoritative_until_retry() {
+        let harness = harness();
+        let mut remote = gateway_caller_without_browser_identity();
+        remote.remote = true;
+        harness
+            .registry
+            .attach_trusted_identity_with_authority(
+                &mut remote,
+                "remote-session-retry",
+                None,
+                u64::MAX,
+                BrowserAttachmentAuthority::RemoteMcpSession,
+            )
+            .await
+            .unwrap();
+        harness.registry.open(&remote, None).await.unwrap();
+        harness
+            .probe
+            .lane_close_failures_remaining
+            .store(1, Ordering::Release);
+
+        let error = harness
+            .registry
+            .revoke_trusted_identity("remote-session-retry")
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, BrowserErrorCode::BrowserUnavailable);
+        assert!(harness.hub.list_lanes().await.is_empty());
+        {
+            let identities = harness
+                .registry
+                .identities
+                .lock()
+                .expect("gateway browser identity cache poisoned");
+            let cached = identities
+                .get("remote-session-retry")
+                .expect("failed cleanup must retain its authority");
+            assert!(cached.revocation_pending);
         }
-        // At cap → None (the dispatch layer denies rather than growing unbounded).
+
+        harness.registry.retry_pending_browser_cleanups().await;
         assert!(
-            r.stash_pending("k", json!({"action": "click"})).is_none(),
-            "stash must fail closed at MAX_PENDING"
+            !harness
+                .registry
+                .identities
+                .lock()
+                .expect("gateway browser identity cache poisoned")
+                .contains_key("remote-session-retry")
         );
-        assert_eq!(r.pending_count(), MAX_PENDING);
+
+        // The Hub retains the detached driver after the first close failure.
+        // Its own lifecycle sweep completes that lower-level cleanup.
+        harness.hub.sweep().await.unwrap();
+        assert_eq!(harness.probe.lane_closes.load(Ordering::Acquire), 2);
+    }
+
+    #[tokio::test]
+    async fn final_revoke_cleans_replacement_without_losing_superseded_owner() {
+        let harness = harness_with_owner_ttl(10);
+        let mut first = gateway_caller_without_browser_identity();
+        first.remote = true;
+        harness
+            .registry
+            .attach_trusted_identity_with_authority(
+                &mut first,
+                "remote-session-superseded",
+                None,
+                u64::MAX,
+                BrowserAttachmentAuthority::RemoteMcpSession,
+            )
+            .await
+            .unwrap();
+        let old_owner = first
+            .browser_identity
+            .as_ref()
+            .unwrap()
+            .owner_lease_id
+            .clone();
+        harness.registry.open(&first, None).await.unwrap();
+
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        harness
+            .probe
+            .lane_close_failures_remaining
+            .store(1, Ordering::Release);
+
+        let mut replacement = gateway_caller_without_browser_identity();
+        replacement.remote = true;
+        harness
+            .registry
+            .attach_trusted_identity_with_authority(
+                &mut replacement,
+                "remote-session-superseded",
+                None,
+                u64::MAX,
+                BrowserAttachmentAuthority::RemoteMcpSession,
+            )
+            .await
+            .expect(
+                "replacement succeeds once the new identity is published; old cleanup remains retryable",
+            );
+
+        let replacement_identity = {
+            let identities = harness
+                .registry
+                .identities
+                .lock()
+                .expect("gateway browser identity cache poisoned");
+            let cached = identities
+                .get("remote-session-superseded")
+                .expect("replacement authority must survive old-owner cleanup failure");
+            assert_eq!(cached.pending_owner_cleanup, vec![old_owner.clone()]);
+            assert_ne!(cached.identity.owner_lease_id, old_owner);
+            cached.identity.clone()
+        };
+        assert_eq!(
+            replacement
+                .browser_identity
+                .as_ref()
+                .expect("successful replacement must publish the new identity")
+                .owner_lease_id,
+            replacement_identity.owner_lease_id
+        );
+        let replacement_lane = harness.registry.open(&replacement, None).await.unwrap();
+
+        let result = harness
+            .registry
+            .revoke_trusted_identity("remote-session-superseded")
+            .await
+            .unwrap();
+        assert_eq!(result.closed, 1);
+        assert!(
+            harness
+                .hub
+                .list_lanes()
+                .await
+                .iter()
+                .all(|lane| lane.lane_id != replacement_lane.lane_id)
+        );
+        assert!(
+            !harness
+                .registry
+                .identities
+                .lock()
+                .expect("gateway browser identity cache poisoned")
+                .contains_key("remote-session-superseded")
+        );
+
+        harness.hub.sweep().await.unwrap();
+        assert_eq!(harness.probe.lane_closes.load(Ordering::Acquire), 3);
+    }
+
+    #[tokio::test]
+    async fn unrelated_runtime_revokes_do_not_share_a_lifecycle_gate() {
+        let harness = harness();
+        let mut first = gateway_caller_without_browser_identity();
+        harness
+            .registry
+            .attach_trusted_identity(
+                &mut first,
+                "runtime-slow-cleanup",
+                Some("attempt-slow"),
+                u64::MAX,
+            )
+            .await
+            .unwrap();
+        let mut second = gateway_caller_without_browser_identity();
+        harness
+            .registry
+            .attach_trusted_identity(
+                &mut second,
+                "runtime-fast-cleanup",
+                Some("attempt-fast"),
+                u64::MAX,
+            )
+            .await
+            .unwrap();
+        harness.registry.open(&first, None).await.unwrap();
+        harness.registry.open(&second, None).await.unwrap();
+
+        harness
+            .probe
+            .block_lane_close
+            .store(true, Ordering::Release);
+        let slow_registry = harness.registry.clone();
+        let slow = tokio::spawn(async move {
+            slow_registry
+                .revoke_signed_child_lease("runtime-slow-cleanup")
+                .await
+        });
+        tokio::time::timeout(
+            Duration::from_secs(2),
+            harness.probe.wait_for_lane_closes(1),
+        )
+        .await
+        .expect("slow runtime cleanup should reach its Lane close");
+
+        // Keep the first runtime blocked while allowing the second runtime's
+        // close to finish. A gateway-global lifecycle gate would make this
+        // timeout instead of progressing independently.
+        harness
+            .probe
+            .block_lane_close
+            .store(false, Ordering::Release);
+        let fast = tokio::time::timeout(
+            Duration::from_secs(1),
+            harness
+                .registry
+                .revoke_signed_child_lease("runtime-fast-cleanup"),
+        )
+        .await
+        .expect("an unrelated runtime must not wait for slow cleanup")
+        .unwrap();
+        assert_eq!(fast.closed, 1);
+
+        harness.probe.lane_close_releases.add_permits(1);
+        let slow = slow.await.unwrap().unwrap();
+        assert_eq!(slow.closed, 1);
+    }
+
+    #[tokio::test]
+    async fn server_derived_operation_scope_cannot_be_widened_by_tool_input() {
+        let harness = harness();
+        let mut caller = gateway_caller_without_browser_identity();
+        caller.remote = true;
+        harness
+            .registry
+            .attach_trusted_identity_scoped(
+                &mut caller,
+                "remote-session-observe-only",
+                None,
+                u64::MAX,
+                BrowserAttachmentAuthority::RemoteMcpSession,
+                BTreeSet::from([BrowserOperationKind::Observe]),
+            )
+            .await
+            .unwrap();
+        let identity = caller.browser_identity.unwrap();
+        assert_eq!(
+            identity.allowed_operations,
+            BTreeSet::from([BrowserOperationKind::Observe])
+        );
+        assert!(
+            reject_untrusted_caller_fields(&json!({
+                "action": "navigate",
+                "url": "https://example.test",
+                "allowed_operations": ["navigate", "act"],
+            }))
+            .is_err(),
+            "model input cannot widen the server-derived operation scope"
+        );
+    }
+
+    #[tokio::test]
+    async fn explicit_child_revoke_closes_only_its_lanes_and_is_idempotent() {
+        let harness = harness();
+        let mut first = gateway_caller_without_browser_identity();
+        harness
+            .registry
+            .attach_trusted_identity(
+                &mut first,
+                "signed-child-lease-a",
+                Some("attempt-a"),
+                u64::MAX,
+            )
+            .await
+            .unwrap();
+        let mut second = gateway_caller_without_browser_identity();
+        harness
+            .registry
+            .attach_trusted_identity(
+                &mut second,
+                "signed-child-lease-b",
+                Some("attempt-b"),
+                u64::MAX,
+            )
+            .await
+            .unwrap();
+
+        harness.registry.open(&first, None).await.unwrap();
+        harness
+            .registry
+            .open(&first, Some("secondary"))
+            .await
+            .unwrap();
+        let surviving_lane =
+            harness.registry.open(&second, None).await.unwrap();
+        harness
+            .registry
+            .execute(&first, None, json!({ "action": "observe" }))
+            .await
+            .unwrap();
+        harness
+            .registry
+            .execute(&second, None, json!({ "action": "observe" }))
+            .await
+            .unwrap();
+        harness
+            .registry
+            .stash_pending(
+                &first,
+                None,
+                json!({ "action": "press_key", "keys": "Enter" }),
+            )
+            .unwrap()
+            .unwrap();
+        harness
+            .registry
+            .stash_pending(
+                &second,
+                None,
+                json!({ "action": "press_key", "keys": "Enter" }),
+            )
+            .unwrap()
+            .unwrap();
+
+        let revoked = harness
+            .registry
+            .revoke_signed_child_lease("signed-child-lease-a")
+            .await
+            .unwrap();
+        assert_eq!(revoked.closed, 2);
+        assert!(!revoked.already_closed);
+
+        let lanes = harness.hub.list_lanes().await;
+        assert_eq!(lanes.len(), 1);
+        assert_eq!(lanes[0].lane_id, surviving_lane.lane_id);
+        assert_eq!(
+            lanes[0].caller.runtime_instance_id,
+            "signed-child-lease-b"
+        );
+        let identities = harness
+            .registry
+            .identities
+            .lock()
+            .expect("gateway browser identity cache poisoned");
+        assert!(!identities.contains_key("signed-child-lease-a"));
+        assert!(identities.contains_key("signed-child-lease-b"));
+        drop(identities);
+        let pending = harness
+            .registry
+            .pending
+            .lock()
+            .expect("gateway browser pending store poisoned");
+        assert_eq!(pending.len(), 1);
+        assert!(pending
+            .values()
+            .all(|action| action.runtime_instance_id == "signed-child-lease-b"));
+        drop(pending);
+        let observations = harness
+            .registry
+            .observations
+            .lock()
+            .expect("gateway browser observation cache poisoned");
+        assert_eq!(observations.len(), 1);
+        assert!(observations
+            .keys()
+            .all(|key| key.runtime_instance_id == "signed-child-lease-b"));
+        drop(observations);
+
+        let repeated = harness
+            .registry
+            .revoke_signed_child_lease("signed-child-lease-a")
+            .await
+            .unwrap();
+        assert_eq!(repeated.closed, 0);
+        assert!(repeated.already_closed);
+        let lanes = harness.hub.list_lanes().await;
+        assert_eq!(lanes.len(), 1);
+        assert_eq!(lanes[0].lane_id, surviving_lane.lane_id);
+    }
+
+    #[tokio::test]
+    async fn inactive_child_reconciliation_closes_only_revoked_owner() {
+        let harness = harness();
+        let mut first = gateway_caller_without_browser_identity();
+        harness
+            .registry
+            .attach_trusted_identity(
+                &mut first,
+                "signed-child-inactive",
+                Some("attempt-inactive"),
+                u64::MAX,
+            )
+            .await
+            .unwrap();
+        let mut second = gateway_caller_without_browser_identity();
+        harness
+            .registry
+            .attach_trusted_identity(
+                &mut second,
+                "signed-child-active",
+                Some("attempt-active"),
+                u64::MAX,
+            )
+            .await
+            .unwrap();
+
+        let inactive_lane = harness.registry.open(&first, None).await.unwrap();
+        let active_lane = harness.registry.open(&second, None).await.unwrap();
+        harness
+            .registry
+            .cleanup_inactive_signed_child_leases(|lease_id| {
+                lease_id == "signed-child-active"
+            })
+            .await;
+
+        let lanes = harness.hub.list_lanes().await;
+        assert_eq!(lanes.len(), 1);
+        assert_eq!(lanes[0].lane_id, active_lane.lane_id);
+        assert_ne!(lanes[0].lane_id, inactive_lane.lane_id);
+        let identities = harness
+            .registry
+            .identities
+            .lock()
+            .expect("gateway browser identity cache poisoned");
+        assert!(!identities.contains_key("signed-child-inactive"));
+        assert!(identities.contains_key("signed-child-active"));
+    }
+
+    #[tokio::test]
+    async fn different_lanes_are_not_serialized_by_the_gateway() {
+        let harness = harness();
+        let caller = caller(&harness.hub, "runtime-parallel", "attempt-1");
+        harness
+            .registry
+            .open(&caller, Some("one"))
+            .await
+            .unwrap();
+        harness
+            .registry
+            .open(&caller, Some("two"))
+            .await
+            .unwrap();
+
+        let first_registry = harness.registry.clone();
+        let first_caller = caller.clone();
+        let first = tokio::spawn(async move {
+            first_registry
+                .execute(
+                    &first_caller,
+                    Some("one"),
+                    json!({
+                        "action": "navigate",
+                        "url": "https://example.test/one",
+                        "block": true,
+                    }),
+                )
+                .await
+        });
+        harness.probe.wait_for_active(1).await;
+
+        let second_registry = harness.registry.clone();
+        let second = tokio::spawn(async move {
+            second_registry
+                .execute(
+                    &caller,
+                    Some("two"),
+                    json!({
+                        "action": "navigate",
+                        "url": "https://example.test/two",
+                        "block": true,
+                    }),
+                )
+                .await
+        });
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            harness.probe.wait_for_active(2),
+        )
+        .await
+        .expect("different lanes were globally serialized");
+        assert_eq!(harness.probe.maximum.load(Ordering::Acquire), 2);
+        harness.probe.releases.add_permits(2);
+        first.await.unwrap().unwrap();
+        second.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn missing_trusted_identity_fails_closed_before_host_launch() {
+        let harness = harness();
+        let error = harness
+            .registry
+            .open(&CallerCtx::default(), None)
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, BrowserErrorCode::InvalidCallerIdentity);
+        assert_eq!(harness.factory.launches.load(Ordering::Acquire), 0);
+    }
+
+    #[tokio::test]
+    async fn managed_identity_fields_fail_closed_before_facade_or_host_launch() {
+        let harness = harness();
+        let caller = caller(&harness.hub, "runtime-identity-policy", "attempt-a");
+        for field in MODEL_IDENTITY_INPUT_FIELDS {
+            let error = harness
+                .registry
+                .dispatch_managed(
+                    &caller,
+                    None,
+                    json!({
+                        "action": "browser_open",
+                        "lane_name": "research",
+                        (*field): "model-controlled",
+                    }),
+                )
+                .await
+                .unwrap_err();
+            assert_eq!(
+                error.code,
+                BrowserErrorCode::InvalidCallerIdentity,
+                "{field} must fail at the BrowserRegistry boundary"
+            );
+        }
+        assert_eq!(harness.factory.launches.load(Ordering::Acquire), 0);
+        assert!(
+            harness.hub.list_lanes().await.is_empty(),
+            "identity-policy input must not reach facade dispatch or Host launch"
+        );
+    }
+
+    #[tokio::test]
+    async fn semantic_preflight_rejects_invalid_first_request_without_attachment() {
+        let harness = harness();
+        let caller = gateway_caller_without_browser_identity();
+
+        let error = harness
+            .registry
+            .validate_managed_request(
+                &caller,
+                "nomi_browser_act",
+                &json!({
+                    "action": "click",
+                    "runtime_instance_id": "model-controlled",
+                }),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, BrowserErrorCode::InvalidCallerIdentity);
+        assert_eq!(
+            harness.registry.signed_child_cleanup_status(),
+            BrowserCleanupStatus::default(),
+            "semantic rejection must not create an owner attachment"
+        );
+
+        let error = harness
+            .registry
+            .validate_managed_request(
+                &caller,
+                "nomi_browser_open",
+                &json!({
+                    "lane": "default",
+                    "lane_name": "research",
+                }),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, BrowserErrorCode::OperationNotAllowed);
+        assert_eq!(
+            harness.registry.signed_child_cleanup_status(),
+            BrowserCleanupStatus::default(),
+            "selector conflict must not create an owner attachment"
+        );
+    }
+
+    #[tokio::test]
+    async fn semantic_preflight_rejects_invalid_renewal_without_renewing_owner() {
+        let harness = harness();
+        let mut caller = gateway_caller_without_browser_identity();
+        harness
+            .registry
+            .attach_trusted_identity(
+                &mut caller,
+                "semantic-renewal",
+                None,
+                u64::MAX,
+            )
+            .await
+            .unwrap();
+        let before = harness
+            .registry
+            .identities
+            .lock()
+            .expect("identity cache")
+            .get("semantic-renewal")
+            .expect("cached attachment")
+            .identity
+            .clone();
+
+        let error = harness
+            .registry
+            .validate_managed_request(
+                &caller,
+                "nomi_browser_act",
+                &json!({
+                    "action": "click",
+                    "identity_mode": "isolated",
+                }),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, BrowserErrorCode::InvalidCallerIdentity);
+        let after = harness
+            .registry
+            .identities
+            .lock()
+            .expect("identity cache")
+            .get("semantic-renewal")
+            .expect("cached attachment")
+            .identity
+            .clone();
+        assert_eq!(
+            after, before,
+            "semantic rejection must not mutate or renew the cached owner"
+        );
+    }
+
+    #[tokio::test]
+    async fn semantic_preflight_rejects_cross_owner_lane_without_renewing() {
+        let harness = harness();
+        let mut first = gateway_caller_without_browser_identity();
+        harness
+            .registry
+            .attach_trusted_identity(
+                &mut first,
+                "semantic-owner-a",
+                None,
+                u64::MAX,
+            )
+            .await
+            .unwrap();
+        let lane = harness.registry.open(&first, None).await.unwrap();
+
+        let mut second = gateway_caller_without_browser_identity();
+        harness
+            .registry
+            .attach_trusted_identity(
+                &mut second,
+                "semantic-owner-b",
+                None,
+                u64::MAX,
+            )
+            .await
+            .unwrap();
+        let before = harness
+            .registry
+            .identities
+            .lock()
+            .expect("identity cache")
+            .get("semantic-owner-b")
+            .expect("second cached attachment")
+            .identity
+            .clone();
+
+        let error = harness
+            .registry
+            .validate_managed_request(
+                &second,
+                "nomi_browser_status",
+                &json!({
+                    "lane_id": lane.lane_id,
+                }),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, BrowserErrorCode::OperationNotAllowed);
+        let after = harness
+            .registry
+            .identities
+            .lock()
+            .expect("identity cache")
+            .get("semantic-owner-b")
+            .expect("second cached attachment")
+            .identity
+            .clone();
+        assert_eq!(
+            after, before,
+            "cross-owner selector rejection must not mutate or renew the caller owner"
+        );
     }
 
     #[test]
-    fn inject_out_of_band_sets_the_trusted_sentinel() {
-        // execute_confirmed's pure core: the sentinel is injected here (past the trust
-        // boundary), so the facade's out_of_band_confirmed reads true and the redline
-        // gate releases the held irreversible action.
-        let injected = inject_out_of_band(json!({"action": "click", "ref": "f0e3"}));
-        assert_eq!(injected.get(OUT_OF_BAND_CONFIRMED_KEY).and_then(Value::as_bool), Some(true));
-        assert_eq!(injected.get("action").and_then(Value::as_str), Some("click"));
-        // Overwrites any pre-existing value to a strict bool true (never trusts input).
-        let over = inject_out_of_band(json!({"action": "click", OUT_OF_BAND_CONFIRMED_KEY: "nope"}));
-        assert_eq!(over.get(OUT_OF_BAND_CONFIRMED_KEY).and_then(Value::as_bool), Some(true));
+    fn pending_approval_is_bound_to_runtime_not_companion() {
+        let harness = harness();
+        let first = caller(&harness.hub, "runtime-owner-a", "attempt-a");
+        let second = caller(&harness.hub, "runtime-owner-b", "attempt-b");
+        let call_id = harness
+            .registry
+            .stash_pending(
+                &first,
+                None,
+                json!({ "action": "press_key", "keys": "Enter" }),
+            )
+            .unwrap()
+            .unwrap();
+        let error = harness
+            .registry
+            .take_pending_for(&second, &call_id)
+            .unwrap_err();
+        assert_eq!(error.code, BrowserErrorCode::OperationNotAllowed);
+        assert_eq!(harness.registry.pending_count(), 1);
+        assert!(harness
+            .registry
+            .take_pending_for(&first, &call_id)
+            .unwrap()
+            .is_some());
+    }
+
+    #[tokio::test]
+    async fn approved_action_uses_only_the_hub_trusted_confirmation_seam() {
+        let harness = harness();
+        let caller = caller(&harness.hub, "runtime-confirmed", "attempt-a");
+        let call_id = harness
+            .registry
+            .stash_pending(
+                &caller,
+                None,
+                json!({ "action": "press_key", "keys": "Enter" }),
+            )
+            .unwrap()
+            .unwrap();
+        let pending = harness
+            .registry
+            .take_pending_for(&caller, &call_id)
+            .unwrap()
+            .unwrap();
+        harness
+            .registry
+            .execute_confirmed(&caller, pending)
+            .await
+            .unwrap();
+        assert_eq!(harness.probe.confirmed.load(Ordering::Acquire), 1);
     }
 
     #[test]
-    fn classify_builds_slot_and_returns_a_tier_without_launching() {
-        // The dispatch layer's authoritative routing read: classify a benign read-only
-        // action against a fresh key. The slot (tool) is built lazily but NO engine is
-        // launched (pure read of the not-yet-existing snapshot → conservative tier).
-        let r = registry();
-        use nomi_browser::ApprovalTier;
+    fn classifier_preserves_enter_and_observed_dangerous_ref_behavior() {
         assert_eq!(
-            r.classify("companion_c", "observe", &json!({"action": "observe"})),
-            ApprovalTier::Info,
-            "observe is read-only (Info)"
+            classify_with_observation(
+                "press_key",
+                &json!({ "keys": "Enter" }),
+                None,
+            ),
+            ApprovalTier::Irreversible
         );
-        // A bare click with no cached snapshot → Exec (no accname to upgrade on).
+        let observation = "- button \"Pay now\" [ref=f0e7]";
+        assert!(nomi_browser::accname_is_irreversible(observation));
         assert_eq!(
-            r.classify("companion_c", "click", &json!({"action": "click", "ref": "f0e1"})),
-            ApprovalTier::Exec
-        );
-        // press_key bare Enter → Irreversible even without a snapshot (args-derivable).
-        assert_eq!(
-            r.classify("companion_c", "press_key", &json!({"action": "press_key", "keys": "Enter"})),
+            classify_with_observation(
+                "click",
+                &json!({ "ref": "f0e7" }),
+                Some(observation),
+            ),
             ApprovalTier::Irreversible
         );
     }
 
     #[test]
-    fn error_result_maps_to_error_envelope() {
-        let v = tool_result_to_value(ToolResult::error("boom"));
-        assert_eq!(v.get("error").and_then(Value::as_str), Some("boom"));
-        assert!(v.get("result").is_none());
+    fn model_input_cannot_supply_trusted_caller_fields() {
+        let error = reject_untrusted_caller_fields(&json!({
+            "action": "navigate",
+            "url": "https://example.test",
+            "runtime_instance_id": "model-chosen-runtime",
+        }))
+        .unwrap_err();
+        assert_eq!(error.code, BrowserErrorCode::InvalidCallerIdentity);
+        assert!(reject_untrusted_caller_fields(&json!({
+            "action": "navigate",
+            "url": "https://example.test",
+        }))
+        .is_ok());
+        for field in ["surface", "target_id", "browser_epoch", "lane_key"] {
+            let error = reject_untrusted_caller_fields(&json!({
+                "action": "navigate",
+                (field): "model-controlled",
+            }))
+            .unwrap_err();
+            assert_eq!(
+                error.code,
+                BrowserErrorCode::InvalidCallerIdentity,
+                "{field} must remain main-process managed"
+            );
+        }
+        for field in MODEL_IDENTITY_INPUT_FIELDS {
+            let error = reject_untrusted_caller_fields(&json!({
+                "action": "browser_open",
+                (*field): "model-controlled",
+            }))
+            .unwrap_err();
+            assert_eq!(
+                error.code,
+                BrowserErrorCode::InvalidCallerIdentity,
+                "{field} must remain trusted host policy"
+            );
+        }
+        assert!(
+            reject_untrusted_caller_fields(&json!({
+                "action": "observe",
+                "lane_id": "owner-scoped-handle",
+            }))
+            .is_ok(),
+            "lane_id is an owner-scoped selector authorized by the bound client"
+        );
     }
 
     #[test]
-    fn text_result_maps_to_result_envelope() {
-        let v = tool_result_to_value(ToolResult::text("Navigated to https://example.com"));
+    fn model_cannot_downgrade_identity_modifying_actions() {
+        for action in [
+            "evaluate",
+            "click",
+            "type",
+            "set_value",
+            "select_option",
+            "press_key",
+            "upload_file",
+            "clear_cookies",
+            "set_cookie",
+            "clear_storage",
+            "login",
+            "logout",
+            "switch_account",
+            "submit_form",
+        ] {
+            let operation = operation_from_input(&json!({
+                "action": action,
+                "may_modify_identity": false,
+            }))
+            .unwrap();
+            assert!(
+                operation.may_modify_identity,
+                "{action} must remain identity-modifying despite a model-supplied false"
+            );
+        }
+
+        for action in [
+            "navigate",
+            "back",
+            "forward",
+            "reload",
+            "crawl",
+            "crawl_many",
+            "close_tab",
+            "open_link_new_tab",
+            "observe",
+            "screenshot",
+            "tabs",
+            "switch_tab",
+            "get_console_logs",
+            "get_page_errors",
+            "get_network_log",
+            "rendered_html",
+            "capabilities",
+            "device_pixel_ratio",
+            "hover",
+            "scroll",
+            "wait",
+            "extract",
+        ] {
+            let benign = operation_from_input(&json!({
+                "action": action,
+                "may_modify_identity": true,
+            }))
+            .unwrap();
+            assert!(
+                !benign.may_modify_identity,
+                "{action} must use the server classifier rather than model input"
+            );
+        }
+        assert!(
+            operation_from_input(&json!({
+                "action": "navigate",
+                "method": "POST",
+                "may_modify_identity": false,
+            }))
+            .unwrap()
+            .may_modify_identity
+        );
+        assert!(
+            operation_from_input(&json!({
+                "action": "future_gateway_action",
+                "may_modify_identity": false,
+            }))
+            .unwrap()
+            .may_modify_identity
+        );
+    }
+
+    #[test]
+    fn model_cannot_foreground_the_managed_browser_through_gateway_json() {
+        let error = operation_from_input(&json!({
+            "action": "bring_to_front",
+        }))
+        .unwrap_err();
+
+        assert_eq!(error.code, BrowserErrorCode::OperationNotAllowed);
+        assert!(!error.retryable);
+        assert_eq!(operation_kind("bring_to_front"), BrowserOperationKind::Act);
+    }
+
+    #[test]
+    fn tool_result_compatibility_envelope_is_unchanged() {
+        let value = tool_result_to_value(ToolResult::text("ok"));
         assert_eq!(
-            v.pointer("/result/text").and_then(Value::as_str),
-            Some("Navigated to https://example.com")
+            value.pointer("/result/text").and_then(Value::as_str),
+            Some("ok")
         );
-        assert_eq!(v.get("error"), None);
-    }
-
-    #[test]
-    fn image_result_carries_base64_png() {
-        let img = nomi_types::tool::ToolImage {
-            media_type: "image/png".into(),
-            data: "QUJD".into(), // base64("ABC")
-        };
-        let v = tool_result_to_value(ToolResult::text("Screenshot captured.").with_images(vec![img]));
-        let arr = v.pointer("/result/images").and_then(Value::as_array).expect("images array");
-        assert_eq!(arr.len(), 1);
-        assert_eq!(arr[0].get("media_type").and_then(Value::as_str), Some("image/png"));
-        assert_eq!(arr[0].get("data").and_then(Value::as_str), Some("QUJD"));
-    }
-
-    // ── real-device end-to-end (needs a local/bundled chrome) ────────────────
-    // GW1 round-trip through the registry: a gateway-driven navigate → observe
-    // against a real Chromium, plus per-companion isolation (two keys → two
-    // engines / user-data-dirs, distinct slots). Set NOMIFUN_CHROME_BINARY then:
-    //   set NOMIFUN_CHROME_BINARY=C:\Program Files\Google\Chrome\Application\chrome.exe
-    //   cargo nextest run -p nomifun-gateway --features browser-use --run-ignored all -E 'test(gateway_browser)'
-    // Asserts the navigate result is non-error and the observe surfaces the
-    // generation header + a frame-local `[ref=f0e…]` ref — i.e. a remote master
-    // agent can drive a browser scoped to its companion. Clean up: no residual
-    // chrome (the facade's engine Drop releases; the Builder kill_on_drop reaps).
-    #[tokio::test]
-    #[ignore = "需本机/打包 chrome：set NOMIFUN_CHROME_BINARY 后 --run-ignored all -E 'test(gateway_browser)'"]
-    async fn gateway_browser_navigate_then_observe_round_trip() {
-        let r = registry();
-        let companion = CompanionId::parse(
-            "0190f5fe-7c00-7a00-8abc-012345678911",
-        )
-        .unwrap();
-        let key = BrowserRegistry::key_for(Some(&companion), None).unwrap();
-
-        let nav = tool_result_to_value(
-            r.execute(&key, json!({"action": "navigate", "url": "https://example.com"}))
-                .await,
-        );
-        assert!(nav.get("error").is_none(), "navigate should succeed: {nav}");
-        assert!(
-            nav.pointer("/result/text").and_then(Value::as_str).is_some(),
-            "navigate result should carry text: {nav}"
-        );
-
-        let obs = tool_result_to_value(r.execute(&key, json!({"action": "observe"})).await);
-        let text = obs
-            .pointer("/result/text")
-            .and_then(Value::as_str)
-            .unwrap_or_else(|| panic!("observe should carry text: {obs}"));
-        assert!(text.contains("[browser observation"), "missing generation header: {text}");
-        assert!(text.contains("[ref=f0e"), "missing a frame-local ref: {text}");
-
-        // Isolation: a second companion gets a distinct slot (separate engine /
-        // user-data-dir) — gateway-driven browsing is per-companion.
-        let other_companion = CompanionId::parse(
-            "0190f5fe-7c00-7a00-8abc-012345678912",
-        )
-        .unwrap();
-        let other = BrowserRegistry::key_for(Some(&other_companion), None).unwrap();
-        assert!(
-            !Arc::ptr_eq(&r.slot(&key), &r.slot(&other)),
-            "different companions must get isolated browser slots"
-        );
-    }
-
-    // ── P3-GW2 real-device: held-then-confirmed irreversible action round-trip ──
-    // Drives the full out-of-band approval state machine against a real Chromium:
-    // an irreversible action is stashed (NOT run), then the held action is approved
-    // and runs via execute_confirmed (the trusted sentinel makes the facade release
-    // it). Mirrors what `tools_browser::act` → `tools_browser::confirm` do, minus the
-    // GatewayDeps wiring (which the #[ignore] gateway integration covers separately).
-    //   set NOMIFUN_CHROME_BINARY=C:\Program Files\Google\Chrome\Application\chrome.exe
-    //   cargo nextest run -p nomifun-gateway --features browser-use --run-ignored all -E 'test(gw2_confirmed)'
-    #[tokio::test]
-    #[ignore = "需本机/打包 chrome：set NOMIFUN_CHROME_BINARY 后 --run-ignored all -E 'test(gw2_confirmed)'"]
-    async fn gw2_confirmed_action_runs_held_then_approved() {
-        let r = registry();
-        let companion = CompanionId::parse(
-            "0190f5fe-7c00-7a00-8abc-012345678913",
-        )
-        .unwrap();
-        let key = BrowserRegistry::key_for(Some(&companion), None).unwrap();
-
-        // A data: URL with a real <form> whose submit button navigates on click.
-        let page = "data:text/html,<form action='https://example.com/' method='get'>\
-                    <button type='submit' id='go'>Pay now</button></form>";
-        let nav = tool_result_to_value(r.execute(&key, json!({"action": "navigate", "url": page})).await);
-        assert!(nav.get("error").is_none(), "navigate should succeed: {nav}");
-        let obs = tool_result_to_value(r.execute(&key, json!({"action": "observe"})).await);
-        let text = obs.pointer("/result/text").and_then(Value::as_str).unwrap_or("");
-        // Find the submit button's ref from the snapshot.
-        let r#ref = text
-            .split("[ref=")
-            .find(|seg| seg.to_lowercase().contains("pay") || seg.contains("button"))
-            .and_then(|seg| seg.split(']').next())
-            .unwrap_or("f0e1")
-            .to_string();
-
-        // GW2 gate decision: clicking a submit/Pay button is irreversible → stash it.
-        let action = json!({"action": "click", "ref": r#ref});
-        let call_id = r.stash_pending(&key, action.clone()).expect("under cap");
-        assert_eq!(r.pending_count(), 1, "the irreversible click must be HELD, not run");
-
-        // Approve: take the held action and run it confirmed (sentinel injected).
-        let pending = r.take_pending(&call_id).expect("the held action");
-        assert_eq!(pending.key, key);
-        let result = tool_result_to_value(r.execute_confirmed(&key, pending.input).await);
-        assert!(
-            result.get("error").is_none(),
-            "an approved (out-of-band-confirmed) irreversible action must RUN, not be Blocked: {result}"
-        );
-        assert_eq!(r.pending_count(), 0, "the pending action is consumed once resolved");
     }
 }

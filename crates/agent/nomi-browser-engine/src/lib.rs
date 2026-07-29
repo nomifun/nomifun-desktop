@@ -19,6 +19,7 @@ pub mod engine;
 pub mod errmap;
 pub mod evaluate;
 pub mod firewall;
+pub mod host;
 pub mod injected;
 pub mod input;
 pub mod launch;
@@ -38,8 +39,8 @@ pub mod vault;
 /// 公共 API 再导出：调用方用 `nomi_browser_engine::{BrowserEngine, Capabilities, …}`，
 /// 无需知晓子模块布局（返回类型 `Arc<dyn BrowserEngine>` 的 trait 与配套类型即此公开面）。
 pub use engine::{
-    BrowserEngine, BrowserError, Capabilities, CssRect, DetachKind, ElementEntry, LoadState,
-    NavPhase, NavResult, Observation, ObserveOpts, SnapshotGen,
+    BrowserEngine, BrowserError, BrowserTabInfo, Capabilities, CssRect, DetachKind, ElementEntry,
+    LoadState, NavPhase, NavResult, Observation, ObserveOpts, SnapshotGen,
 };
 pub use actions::{
     ActResult, ActSpec, Effect, ScrollDir, ScrollTarget, TypeInput, WaitCondition,
@@ -67,12 +68,16 @@ pub use vault::{
 /// **浏览器来源**（「浏览器模式」的来源维度，与 headless 正交）：托管 CfT vs 系统 Chrome/Edge。
 /// 见 [`acquire::ChromeSource`]。经 [`EngineConfig::chrome_source`] 注入 → `create_engine` 解析二进制。
 pub use acquire::ChromeSource;
+pub use launch::{BrowserHostLaunchMode, build_chrome_args_for_mode};
+pub use host::{
+    LaneEngineConfig, LaneId, ManagedBrowserHost, ManagedBrowserHostReplacement, TargetOwnership,
+    TargetRoute,
+};
 
 use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use crate::backend::cdp::build_backend;
 
 /// Session-scoped registry of the agent's own resolved secret plaintext values (from the
 /// facade's `secret:NAME` → vault resolution). Used **solely** for deterministic exact-blackout
@@ -89,7 +94,6 @@ use crate::backend::cdp::build_backend;
 /// The facade (BrowserTool) owns the canonical Arc and populates it on each successful
 /// `secret:NAME` resolution; the engine holds a clone and reads it during serialization.
 pub type KnownSecretValues = Arc<std::sync::Mutex<HashSet<String>>>;
-use crate::launch::LaunchConfig;
 
 /// 创建引擎的配置。`Default` 给出合理本机默认（临时数据目录、无打包目录、headless）。
 #[derive(Clone)]
@@ -174,23 +178,68 @@ pub struct EngineConfig {
 
 impl std::fmt::Debug for EngineConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        // `egress_approver` 是 trait 对象（无 Debug），手写 Debug 只标其有无（不打实现细节）。
-        // `known_secret_values` prints count only (never the values themselves).
+        struct StorageStateSummary<'a>(&'a Option<serde_json::Value>);
+
+        impl std::fmt::Debug for StorageStateSummary<'_> {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                let Some(value) = self.0.as_ref() else {
+                    return f.write_str("Absent");
+                };
+                let (cookie_count, origin_count, local_storage_item_count, indexed_db_origin_count) =
+                    crate::StorageState::from_json(value.clone())
+                        .map(|state| {
+                            (
+                                state.cookies.len(),
+                                state.local_storage.len(),
+                                state
+                                    .local_storage
+                                    .iter()
+                                    .map(|origin| origin.local_storage.len())
+                                    .sum::<usize>(),
+                                state
+                                    .local_storage
+                                    .iter()
+                                    .filter(|origin| origin.index_db.is_some())
+                                    .count(),
+                            )
+                        })
+                        .unwrap_or_default();
+                f.debug_struct("Present")
+                    .field("cookie_count", &cookie_count)
+                    .field("origin_count", &origin_count)
+                    .field("local_storage_item_count", &local_storage_item_count)
+                    .field("indexed_db_origin_count", &indexed_db_origin_count)
+                    .finish()
+            }
+        }
+
         let secret_count = self.known_secret_values.lock().map(|s| s.len()).unwrap_or(0);
         f.debug_struct("EngineConfig")
-            .field("data_dir", &self.data_dir)
-            .field("user_data_dir", &self.user_data_dir)
+            .field("data_dir_configured", &true)
+            .field("user_data_dir_configured", &self.user_data_dir.is_some())
             .field("ephemeral_profile", &self.ephemeral_profile)
-            .field("bundled_dir", &self.bundled_dir)
+            .field("bundled_dir_configured", &self.bundled_dir.is_some())
             .field("headful", &self.headful)
             .field("chrome_source", &self.chrome_source)
-            .field("workspace_dir", &self.workspace_dir)
+            .field("workspace_dir_configured", &self.workspace_dir.is_some())
             .field("evaluate_full_power", &self.evaluate_full_power)
             .field("evaluate_persistent_login", &self.evaluate_persistent_login)
-            .field("firewall", &self.firewall)
-            .field("storage_state", &self.storage_state)
-            .field("egress_approver", &self.egress_approver.as_ref().map(|_| "<approver>"))
-            .field("known_secret_values", &format!("<{secret_count} values>"))
+            .field("firewall_block_private_ips", &self.firewall.block_private_ips)
+            .field(
+                "firewall_gate_cross_origin_post",
+                &self.firewall.gate_cross_origin_post,
+            )
+            .field(
+                "firewall_allow_etld1_count",
+                &self.firewall.allow_etld1.len(),
+            )
+            .field(
+                "firewall_deny_etld1_count",
+                &self.firewall.deny_etld1.len(),
+            )
+            .field("storage_state", &StorageStateSummary(&self.storage_state))
+            .field("egress_approver_configured", &self.egress_approver.is_some())
+            .field("known_secret_value_count", &secret_count)
             .finish()
     }
 }
@@ -271,66 +320,8 @@ fn launch_semaphore() -> &'static tokio::sync::Semaphore {
 /// 数据目录布局：chrome 下到 `<data_dir>/nomifun-browser/<version>/...`；专属
 /// user-data-dir = `<data_dir>/profile`（红线：**绝不**指向用户真实 profile）。
 pub async fn create_engine(config: EngineConfig) -> Result<Arc<dyn BrowserEngine>, BrowserError> {
-    // 1) resolve chrome 可执行（env > 打包 > 数据目录 > 下载兜底；顺序由 chrome_source 编排）。
-    let chrome_path = crate::acquire::resolve_chrome_path_with_source(
-        &config.data_dir,
-        config.bundled_dir.as_deref(),
-        config.chrome_source,
-    )
-    .await?;
-
-    // 2) 专属 user-data-dir（红线：非用户 profile；放在我们自己的 data_dir 下）。
-    //    并发隔离基石：上层为每个存活实例注入唯一目录（`config.user_data_dir=Some(..)`），使
-    //    Chromium 进程单例碰撞在结构上不可能；`None` 回退旧行为 `<data_dir>/profile`。
-    let user_data_dir = resolve_user_data_dir(&config);
-
-    let launch_config = LaunchConfig {
-        chrome_path,
-        user_data_dir,
-        headful: config.headful,
-    };
-
-    // E4 下载沙箱落点：per-pet workspace/downloads（有 workspace 上下文）或兜底 <data_dir>/downloads。
-    // 二者都是**我们自己的隔离目录**——绝不落用户真实 Downloads（裁决⑩）。best-effort mkdir。
-    let workspace = config
-        .workspace_dir
-        .clone()
-        .unwrap_or_else(|| config.data_dir.clone());
-    let download_dir = crate::download::ensure_download_dir(&workspace);
-
-    // 并发冷启限流：仅在 launch+connect+attach 期间持 permit（建好即释放），把**同时冷启**的 Chrome
-    // 数压在上限内——移除共享 profile 单例后编排扇出可能一次拉起很多引擎，此闸排队而非失败。
-    let _launch_permit = launch_semaphore()
-        .acquire()
-        .await
-        .expect("browser launch semaphore is never closed");
-
-    // 3) launch（headless 由 display 决策）+ connect + attach + page session + setDownloadBehavior 沙箱。
-    // P3-G1：把注入的 firewall 配置一路透传到 spawn_fetch_firewall_loop（不再硬编码 default）。
-    // P3-D2：把注入的出口审批通道（egress_approver）透传到防火墙循环——被门控请求悬挂等其裁决
-    //   （None → fail-closed）。
-    // W4d：把 storage_state 透传——Some（上层从 vault load_storage_state 解出的登录态）→
-    //   from_launched 在 page 建好后 restore_cookies + restore_local_storage 灌登录态（持久登录）；
-    //   None（默认）→ 不灌（现行为零回归）。
-    let mut backend = build_backend(
-        &launch_config,
-        Some(download_dir),
-        config.workspace_dir.clone(),
-        config.evaluate_full_power,
-        config.evaluate_persistent_login,
-        config.firewall,
-        config.egress_approver,
-        config.storage_state,
-        config.known_secret_values,
-    )
-    .await?;
-    // 并发隔离：per-instance 唯一目录（`ephemeral_profile=true`）→ 标记引擎 Drop 时清理该目录
-    //（用完即弃，避免磁盘无界增长；孤儿由 profile::gc_stale_profiles 启动兜底）。共享兜底 / 登录窗
-    // 稳定目录（`ephemeral_profile=false`）→ 不清理，保留。
-    if config.ephemeral_profile {
-        backend.mark_ephemeral(launch_config.user_data_dir.clone());
-    }
-    Ok(Arc::new(backend))
+    let host = ManagedBrowserHost::launch(config).await?;
+    host.open_default_lane("default").await
 }
 
 #[cfg(test)]
@@ -410,6 +401,66 @@ mod tests {
         // storage_state 默认 None（不灌登录态 = 现行为）。
         let c = EngineConfig::default();
         assert!(c.storage_state.is_none());
+    }
+
+    #[test]
+    fn engine_config_debug_redacts_paths_storage_and_secret_values() {
+        let sentinels = [
+            "ENGINE-DATA-PATH-SENTINEL",
+            "ENGINE-PROFILE-PATH-SENTINEL",
+            "ENGINE-BUNDLED-PATH-SENTINEL",
+            "ENGINE-WORKSPACE-PATH-SENTINEL",
+            "COOKIE-TOKEN-SENTINEL",
+            "LOCAL-STORAGE-TOKEN-SENTINEL",
+            "KNOWN-SECRET-SENTINEL",
+            "allow-secret.example",
+            "deny-secret.example",
+        ];
+        let mut known_secrets = HashSet::new();
+        known_secrets.insert(sentinels[6].to_string());
+        let config = EngineConfig {
+            data_dir: PathBuf::from(sentinels[0]),
+            user_data_dir: Some(PathBuf::from(sentinels[1])),
+            bundled_dir: Some(PathBuf::from(sentinels[2])),
+            workspace_dir: Some(PathBuf::from(sentinels[3])),
+            firewall: crate::firewall::FirewallConfig {
+                allow_etld1: vec![sentinels[7].to_string()],
+                deny_etld1: vec![sentinels[8].to_string()],
+                ..Default::default()
+            },
+            storage_state: Some(serde_json::json!({
+                "cookies": [{
+                    "name": "session",
+                    "value": sentinels[4],
+                    "domain": "private.example",
+                    "path": "/",
+                    "expires": 0.0,
+                    "httpOnly": true,
+                    "secure": true,
+                    "sameSite": "Lax"
+                }],
+                "localStorage": [{
+                    "origin": "https://private.example",
+                    "localStorage": [{
+                        "name": "token",
+                        "value": sentinels[5]
+                    }]
+                }]
+            })),
+            known_secret_values: Arc::new(std::sync::Mutex::new(known_secrets)),
+            ..Default::default()
+        };
+
+        let debug = format!("{config:?}");
+        for sentinel in sentinels {
+            assert!(
+                !debug.contains(sentinel),
+                "EngineConfig Debug leaked sentinel {sentinel}: {debug}"
+            );
+        }
+        assert!(debug.contains("data_dir_configured"));
+        assert!(debug.contains("cookie_count"));
+        assert!(debug.contains("known_secret_value_count"));
     }
 
     #[test]

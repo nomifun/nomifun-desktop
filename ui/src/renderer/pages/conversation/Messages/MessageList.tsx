@@ -60,6 +60,13 @@ import {
   type TurnDisclosureOutputItem,
 } from './turnDisclosureModel';
 import { getProcessItemState } from './turnProcessState';
+import {
+  collectTurnDeliverables,
+  type TurnDeliverableCandidate,
+  type TurnDeliverableItem,
+  type TurnGateInfo,
+} from './turnDeliverablesModel';
+import TurnDeliverablesCard from './components/TurnDeliverablesCard';
 import { isSupersededPlanToolFailure } from './planToolVisibility';
 import type { MessageId } from '@/common/types/ids';
 import { ExplicitToolRetryReceiptIndex } from './toolRetryReceiptModel';
@@ -116,7 +123,15 @@ type IProcessReceiptVO = {
   defaultExpanded: boolean;
   hasDetail?: boolean;
 };
-type IProcessedItem = IRenderableItem | ITurnProcessDisclosureVO | IProcessReceiptVO;
+type ITurnDeliverablesVO = {
+  type: 'turn_deliverables';
+  id: string;
+  turn_id: MessageId;
+  items: TurnDeliverableItem[];
+  sourceMessageIds: SourceMessageId[];
+  created_at: number;
+};
+type IProcessedItem = IRenderableItem | ITurnProcessDisclosureVO | IProcessReceiptVO | ITurnDeliverablesVO;
 
 type ConversationLocationState = {
   targetMessageId?: MessageId;
@@ -124,7 +139,10 @@ type ConversationLocationState = {
 };
 
 const getProcessedItemSourceMessageIds = (item: IProcessedItem): SourceMessageId[] => {
-  if ('type' in item && (item.type === 'turn_process_disclosure' || item.type === 'process_receipt')) {
+  if (
+    'type' in item &&
+    (item.type === 'turn_process_disclosure' || item.type === 'process_receipt' || item.type === 'turn_deliverables')
+  ) {
     return item.sourceMessageIds;
   }
   if ('type' in item && item.type === 'artifact') return [];
@@ -957,7 +975,72 @@ const MessageList: React.FC<{
       })
       .filter((item): item is IProcessedItem => Boolean(item));
 
-    return disclosureItems;
+    // ── Turn deliverables: aggregate each successfully closed turn's verified
+    // file artifacts and surface them as one card below that turn's last item
+    // (its final assistant reply, when one exists). ──
+    const turnGates = new Map<string, TurnGateInfo>();
+    for (const entry of disclosureItems) {
+      if ('type' in entry && entry.type === 'turn_process_disclosure') {
+        turnGates.set(entry.msg_id, { running: entry.running, state: entry.state });
+      }
+    }
+
+    const candidates: TurnDeliverableCandidate[] = [];
+    for (const entry of modelInput) {
+      const item = itemById.get(entry.id);
+      if (!item) continue;
+      const candidate: TurnDeliverableCandidate = {
+        turnId: entry.turnId,
+        role: entry.role,
+        processState: entry.processState ?? 'completed',
+      };
+      if ('type' in item && item.type === 'tool_summary') {
+        candidate.toolMessages = item.messages;
+      } else if ('type' in item && item.type === 'file_summary') {
+        candidate.fileDiffs = item.diffs;
+        candidate.fileDiffSourceMessageIds = item.sourceMessageIds;
+      }
+      candidates.push(candidate);
+    }
+
+    const deliverablesByTurn = collectTurnDeliverables(candidates, { workspaceRoots, turnGates });
+    if (deliverablesByTurn.size === 0) return disclosureItems;
+
+    const turnIdByAnchorId = new Map<string, MessageId | undefined>();
+    for (const entry of modelInput) turnIdByAnchorId.set(entry.id, entry.turnId);
+    const getDisplayItemTurnId = (entry: IProcessedItem): MessageId | undefined => {
+      if ('type' in entry && entry.type === 'turn_process_disclosure') return entry.msg_id;
+      if ('type' in entry && entry.type === 'process_receipt') return undefined;
+      if ('type' in entry && entry.type === 'turn_deliverables') return entry.turn_id;
+      return turnIdByAnchorId.get(getProcessedItemAnchorId(entry));
+    };
+
+    const lastIndexByTurn = new Map<MessageId, number>();
+    disclosureItems.forEach((entry, index) => {
+      const turnId = getDisplayItemTurnId(entry);
+      if (turnId && deliverablesByTurn.has(turnId)) lastIndexByTurn.set(turnId, index);
+    });
+
+    const withDeliverables: IProcessedItem[] = [];
+    disclosureItems.forEach((entry, index) => {
+      withDeliverables.push(entry);
+      const turnId = getDisplayItemTurnId(entry);
+      if (!turnId || lastIndexByTurn.get(turnId) !== index) return;
+      const items = deliverablesByTurn.get(turnId);
+      if (!items) return;
+      withDeliverables.push({
+        type: 'turn_deliverables',
+        id: `turn-deliverables-${turnId}`,
+        turn_id: turnId,
+        items,
+        sourceMessageIds: Array.from(
+          new Set(items.flatMap((item) => item.sources.flatMap((source) => source.sourceMessageIds)))
+        ),
+        created_at: getProcessedItemCreatedAt(entry),
+      });
+    });
+
+    return withDeliverables;
   }, [
     conversationContext?.activeRequestMessageId,
     conversationContext?.activeTurnId,
@@ -1206,6 +1289,19 @@ const MessageList: React.FC<{
           ) : (
             <MessageSkillSuggest artifact={item.artifact} />
           )}
+        </div>
+      );
+    }
+    if ('type' in item && item.type === 'turn_deliverables') {
+      return (
+        <div
+          key={item.id}
+          id={`message-${getProcessedItemAnchorId(item)}`}
+          data-testid='turn-deliverables'
+          className='min-w-0 message-item px-8px m-t-10px max-w-full md:max-w-780px mx-auto turn_deliverables'
+          style={highlighted ? highlightStyle : undefined}
+        >
+          <TurnDeliverablesCard items={item.items} workspace={conversationContext?.workspace} />
         </div>
       );
     }

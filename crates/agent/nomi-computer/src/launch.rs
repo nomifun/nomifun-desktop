@@ -26,8 +26,84 @@ pub fn validate_launch_target(target: &str) -> Result<(), String> {
     }
     if t.chars().all(|c| c == '\\' || c == '/') {
         return Err(format!(
-            "launch target {target:?} is just path separators — give a URL (https://…), a file or \
+            "launch target {target:?} is just path separators — give a file or \
              folder path, or an application name"
+        ));
+    }
+    Ok(())
+}
+
+/// Fail closed on Agent-initiated web-page opens through the operating-system
+/// browser. Every caller of [`launch`] is an Agent surface (the in-process
+/// Computer tool, the computer/open MCP servers, and Gateway capabilities), so
+/// an `http`/`https` target here would bypass the managed Browser Hub's
+/// approval, egress and lifecycle policies and could open a visible window the
+/// user never asked for. Matching is on the scheme prefix (`http:`/`https:`)
+/// rather than `://`, because browsers normalize scheme-only forms such as
+/// `https:example.com` back to a real web navigation, and the substring check
+/// also catches wrapper protocols such as `microsoft-edge:https://…`. Trusted
+/// user surfaces (the Browser management page's foreground action and
+/// UI-clicked links) do not route through this function.
+pub fn validate_agent_web_target(target: &str) -> Result<(), String> {
+    let lower = target.to_ascii_lowercase();
+    if lower.contains("http:") || lower.contains("https:") {
+        return Err(format!(
+            "opening web URLs through the operating-system browser is not available to \
+             Agent tools ({target:?}). Use the managed Browser tool (browser navigate) to \
+             read or interact with web pages; the user can foreground a running Primary \
+             browser lane from the Browser management page when a visible window is needed."
+        ));
+    }
+    Ok(())
+}
+
+/// Browser and generic URL-opener executables that must not be selected as the
+/// `app` to open a target WITH: `open::with_detached("example.com", "msedge")`
+/// is the same OS-browser bypass as an http target, because every mainstream
+/// browser resolves a bare-domain argument to a web navigation.
+const AGENT_BLOCKED_OPENER_APPS: &[&str] = &[
+    "xdg-open",
+    "open",
+    "gio",
+    "kde-open",
+    "kde-open5",
+    "gnome-open",
+    "sensible-browser",
+    "x-www-browser",
+    "explorer",
+    "rundll32",
+    "google-chrome",
+    "google-chrome-stable",
+    "chrome",
+    "chromium",
+    "chromium-browser",
+    "firefox",
+    "msedge",
+    "microsoft-edge",
+    "edge",
+    "brave",
+    "brave-browser",
+    "opera",
+    "vivaldi",
+    "safari",
+];
+
+/// Reject browser/opener executables as the `app` parameter for Agent
+/// launches. Matching is on the lowercased executable basename (path prefix
+/// and a trailing `.exe` are stripped).
+pub fn validate_agent_launch_app(app: &str) -> Result<(), String> {
+    let base = app
+        .trim()
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or(app)
+        .to_ascii_lowercase();
+    let base = base.strip_suffix(".exe").unwrap_or(&base);
+    if AGENT_BLOCKED_OPENER_APPS.contains(&base) {
+        return Err(format!(
+            "opening a target with the {app:?} browser/opener is not available to Agent \
+             tools; it would hand agent-chosen content to a visible operating-system \
+             browser. Use the managed Browser tool (browser navigate) for web pages."
         ));
     }
     Ok(())
@@ -50,11 +126,15 @@ fn is_url(target: &str) -> bool {
     }
 }
 
-/// Launch `target` (a URL, file/folder path, or application name) reliably via
-/// the OS shell, optionally opening it WITH a specific `app`. Detached. Returns
-/// a human-readable success message.
+/// Launch `target` (a file/folder path or application name — Agent-facing web
+/// URLs are rejected) reliably via the OS shell, optionally opening it WITH a
+/// specific `app`. Detached. Returns a human-readable success message.
 pub async fn launch(target: &str, app: Option<&str>) -> Result<String, String> {
     validate_launch_target(target)?;
+    validate_agent_web_target(target)?;
+    if let Some(app) = app {
+        validate_agent_launch_app(app)?;
+    }
     let target = target.to_string();
     let app = app.map(|s| s.to_string());
     tokio::task::spawn_blocking(move || launch_blocking(&target, app.as_deref()))
@@ -310,11 +390,50 @@ mod tests {
     }
 
     #[test]
-    fn accepts_url_path_and_app_name() {
-        assert!(validate_launch_target("https://www.example.com").is_ok());
+    fn accepts_path_and_app_name() {
         assert!(validate_launch_target("C:\\Windows\\notepad.exe").is_ok());
         assert!(validate_launch_target("msedge").is_ok());
         assert!(validate_launch_target("/home/user/file.txt").is_ok());
+    }
+
+    #[test]
+    fn agent_web_targets_fail_closed_toward_the_managed_browser() {
+        assert!(validate_agent_web_target("https://www.example.com").is_err());
+        assert!(validate_agent_web_target("http://example.com").is_err());
+        assert!(validate_agent_web_target("HTTPS://EXAMPLE.COM").is_err());
+        // Scheme-only forms are normalized back to web navigations by every
+        // mainstream browser, so they are the same bypass.
+        assert!(validate_agent_web_target("https:example.com").is_err());
+        assert!(validate_agent_web_target("http:example.com").is_err());
+        assert!(validate_agent_web_target("https:\\\\example.com").is_err());
+        // Wrapper protocols forwarding to a web URL are the same bypass.
+        assert!(validate_agent_web_target("microsoft-edge:https://example.com").is_err());
+        assert!(validate_agent_web_target("microsoft-edge:https:example.com").is_err());
+        let error = validate_agent_web_target("https://example.com").unwrap_err();
+        assert!(error.contains("browser navigate"), "must steer to the managed Browser: {error}");
+        // Apps, files, folders and non-web protocols remain launchable.
+        assert!(validate_agent_web_target("C:\\Windows\\notepad.exe").is_ok());
+        assert!(validate_agent_web_target("QQ音乐").is_ok());
+        assert!(validate_agent_web_target("/home/user/file.txt").is_ok());
+        assert!(validate_agent_web_target("mailto:redacted@example.invalid").is_ok());
+    }
+
+    #[test]
+    fn agent_launch_app_rejects_browsers_and_openers() {
+        // Selecting a browser as the opening app is the same OS-browser
+        // bypass as a web target: browsers navigate bare-domain arguments.
+        assert!(validate_agent_launch_app("msedge").is_err());
+        assert!(validate_agent_launch_app("chrome").is_err());
+        assert!(validate_agent_launch_app("Firefox").is_err());
+        assert!(validate_agent_launch_app("xdg-open").is_err());
+        assert!(validate_agent_launch_app("/usr/bin/google-chrome").is_err());
+        assert!(validate_agent_launch_app("C:\\Program Files\\MSEdge.EXE").is_err());
+        let error = validate_agent_launch_app("msedge").unwrap_err();
+        assert!(error.contains("browser navigate"), "must steer to the managed Browser: {error}");
+        // Ordinary applications remain usable as the opener.
+        assert!(validate_agent_launch_app("notepad").is_ok());
+        assert!(validate_agent_launch_app("acrobat").is_ok());
+        assert!(validate_agent_launch_app("vlc").is_ok());
     }
 
     #[test]

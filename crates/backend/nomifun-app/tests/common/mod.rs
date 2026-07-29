@@ -14,10 +14,40 @@ use nomifun_file::FileService;
 use nomifun_system::VersionCheckService;
 
 pub async fn build_app() -> (axum::Router, AppServices) {
+    let root = tempfile::Builder::new()
+        .prefix("nomifun-app-e2e-")
+        .tempdir()
+        .unwrap()
+        .keep();
     let db = nomifun_db::init_database_memory().await.unwrap();
-    let services = AppServices::from_config(db, &AppConfig::default()).await.unwrap();
+    let services = AppServices::from_config(
+        db,
+        &AppConfig {
+            data_dir: root.join("data"),
+            work_dir: root.join("work"),
+            ..AppConfig::default()
+        },
+    )
+    .await
+    .unwrap();
     let router = create_router(&services).await;
     (router, services)
+}
+
+pub const CLAUDE_AGENT_ID: &str = "0190f5fe-7c00-7a00-8000-000000000101";
+pub const GEMINI_AGENT_ID: &str = "0190f5fe-7c00-7a00-8000-000000000103";
+
+pub fn acp_extra() -> serde_json::Value {
+    serde_json::json!({
+        "agent_id": GEMINI_AGENT_ID,
+    })
+}
+
+pub fn acp_extra_with_workspace(workspace: impl Into<String>) -> serde_json::Value {
+    serde_json::json!({
+        "agent_id": GEMINI_AGENT_ID,
+        "workspace": workspace.into(),
+    })
 }
 
 /// Build an app whose skill router reads from the given temp directories.

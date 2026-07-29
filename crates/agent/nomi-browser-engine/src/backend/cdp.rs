@@ -16,9 +16,10 @@
 //! 错误映射（Task B 故意把 `TransportError` 与 `BrowserError` 解耦，留在此处映射）：
 //! 见 [`map_transport_err`]。绝不 panic。
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Arc, Weak};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -44,22 +45,27 @@ use chromiumoxide::cdp::browser_protocol::storage::{
     GetCookiesParams as StorageGetCookiesParams, SetCookiesParams as StorageSetCookiesParams,
 };
 use chromiumoxide::cdp::browser_protocol::target::{
-    CreateTargetParams, EventAttachedToTarget,
+    CreateTargetParams, EventAttachedToTarget, EventDetachedFromTarget, EventTargetCrashed,
+    EventTargetDestroyed, GetTargetsParams,
 };
 use chromiumoxide::cdp::js_protocol::runtime::{
     CallArgument, CallFunctionOnParams, EvaluateParams, ExecutionContextId, RemoteObjectId,
 };
-use tokio::process::Child;
 use tokio::sync::Mutex as AsyncMutex;
+use tokio_util::sync::CancellationToken;
 
 use crate::aria_ref::{frame_prefix, RefRecord, RefTable};
 use crate::actions::{ActResult, Effect};
 use crate::engine::{
-    BrowserEngine, BrowserError, Capabilities, ElementEntry, LoadState, NavResult, Observation,
-    ObserveOpts,
+    BrowserEngine, BrowserError, BrowserTabInfo, Capabilities, ElementEntry, LoadState, NavResult,
+    Observation, ObserveOpts,
 };
 use crate::injected::{InjectError, InjectionManager};
-use crate::launch::{launch_chrome, LaunchConfig, Launched};
+use crate::launch::{
+    BrowserHostLaunchMode, LaunchConfig, Launched, launch_chrome,
+    launch_chrome_with_cleanup_profile,
+    terminate_launched_process_tree_and_cleanup_profile,
+};
 use crate::nav::{
     self, InflightCounter, LifecycleSignal, NavSettleState, NETWORK_IDLE_CAP, NETWORK_IDLE_QUIET,
     SETTLE_QUIET, SPA_SETTLE_TIMEOUT,
@@ -69,19 +75,43 @@ use crate::progress::{AbortReason, Progress};
 use crate::redact;
 use crate::tabs::{OopifEntry, TabHandles, TabRecord};
 use crate::transport::{Connection, TransportError, ROOT_SESSION};
+use crate::host::LaneOperationGate;
+use crate::{EngineConfig, LaneEngineConfig, LaneId, TargetOwnership, TargetRoute};
 
 /// 拿到新 page 的 `attachedToTarget` 事件的上限（flatten auto-attach 通常 <1s）。
 const PAGE_ATTACH_TIMEOUT: Duration = Duration::from_secs(10);
+/// Must exceed transport::DEFAULT_COMMAND_TIMEOUT (30s). An unknown-id
+/// cancellation may not use inventory absence until the create command future
+/// has reached its own terminal response/timeout.
+const PENDING_PAGE_CREATE_RECOVERY_TIMEOUT: Duration = Duration::from_secs(40);
+/// Cleanup pressure is deliberately bounded. One cleanup is active and at
+/// most this many wait behind it. Saturation poisons the Host and escalates to
+/// whole-process cleanup, which is the only safe way to subsume an additional
+/// target without retaining another unbounded cleanup intent.
+const TARGET_CLEANUP_QUEUE_CAPACITY: usize = 32;
+/// A single permanently failing close/finalizer must not keep a Host and its
+/// sole worker alive forever. Exhaustion escalates to whole-Host teardown.
+const TARGET_CLEANUP_JOB_BUDGET: Duration = Duration::from_secs(5);
+/// Whole-process cleanup is attempted synchronously only for a bounded period;
+/// on failure its exact authority is transferred to the launch module's
+/// durable process relay/startup quarantine.
+const TARGET_PROCESS_CLEANUP_ATTEMPTS: usize = 3;
+const TARGET_PROCESS_CLEANUP_ATTEMPT_BUDGET: Duration = Duration::from_secs(5);
 
 /// observe 时等主帧 utility-world context 物化的上限（fresh navigate 后 world 创建有延迟；
 /// 通常 <500ms）。超时 → `NavFailed{kind:"context"}`（调用方可短重试）。
 const OBSERVE_CONTEXT_READY_TIMEOUT: Duration = Duration::from_secs(5);
+/// Upper bound for enqueueing and acknowledging a Host router ordering fence.
+/// A wedged handler or a permanently busy mailbox must surface a retryable
+/// cleanup failure instead of hanging Lane shutdown forever.
+const HOST_ROUTER_BARRIER_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// 把传输/会话层错误映射到引擎错误。**绝不 panic**；让模型读到可路由的语义。
 ///
 /// - `Timeout` → `NavFailed`（多见于 navigate/load 等不来；语义是「这次操作没完成」）。
-/// - `Closed` / `SessionClosed` → `SessionLost{recoverable:false}`（连接/页面没了）。
-/// - `SessionCrashed` → `SessionLost{recoverable:true}`（标签崩了，可重开新 target 恢复）。
+/// - `Closed` → `SessionLost{recoverable:false}`（整个 Host/CDP 连接没了）。
+/// - `SessionClosed` → `TargetClosed`（仅该 target/page 已关闭）。
+/// - `SessionCrashed` → `TargetCrashed`（仅该 target 崩溃，可选其它 tab 或新建 target）。
 /// - `Cdp{code,message}` → `Other`（浏览器侧拒绝；带上 code/message 供诊断）。
 /// - `Protocol` → `Other`（我方序列化/路由不变量问题）。
 pub fn map_transport_err(e: TransportError) -> BrowserError {
@@ -89,10 +119,9 @@ pub fn map_transport_err(e: TransportError) -> BrowserError {
         TransportError::Timeout => BrowserError::NavFailed {
             kind: "cdp command timed out".into(),
         },
-        TransportError::Closed | TransportError::SessionClosed => {
-            BrowserError::SessionLost { recoverable: false }
-        }
-        TransportError::SessionCrashed => BrowserError::SessionLost { recoverable: true },
+        TransportError::Closed => BrowserError::SessionLost { recoverable: false },
+        TransportError::SessionClosed => BrowserError::TargetClosed,
+        TransportError::SessionCrashed => BrowserError::TargetCrashed,
         TransportError::Cdp { code, message } => {
             BrowserError::Other(format!("cdp error {code}: {message}"))
         }
@@ -120,6 +149,2585 @@ pub(crate) fn map_inject_err(e: InjectError) -> BrowserError {
     }
 }
 
+#[derive(Clone, Debug)]
+struct ValidatedTargetInfo {
+    target_id: String,
+    target_type: String,
+    opener_id: Option<String>,
+}
+
+/// Parse the root target inventory used by cleanup proofs.
+///
+/// Cleanup must fail closed: a malformed entry cannot be skipped because
+/// doing so could turn an unknown live target into a false absence proof.
+fn validated_target_inventory(
+    result: &serde_json::Value,
+) -> Result<Vec<ValidatedTargetInfo>, &'static str> {
+    let target_infos = result
+        .get("targetInfos")
+        .and_then(serde_json::Value::as_array)
+        .ok_or("Target.getTargets response is missing targetInfos")?;
+    target_infos
+        .iter()
+        .map(|target_info| {
+            let target_id = target_info
+                .get("targetId")
+                .and_then(serde_json::Value::as_str)
+                .ok_or("Target.getTargets targetInfo is missing a string targetId")?;
+            let target_type = target_info
+                .get("type")
+                .and_then(serde_json::Value::as_str)
+                .ok_or("Target.getTargets targetInfo is missing a string type")?;
+            let opener_id = match target_info.get("openerId") {
+                Some(value) => Some(
+                    value
+                        .as_str()
+                        .ok_or("Target.getTargets targetInfo has a non-string openerId")?,
+                ),
+                None => None,
+            };
+            Ok(ValidatedTargetInfo {
+                target_id: target_id.to_string(),
+                target_type: target_type.to_string(),
+                opener_id: opener_id.map(str::to_string),
+            })
+        })
+        .collect()
+}
+
+async fn target_is_absent_from_browser(
+    conn: &Connection,
+    target_id: &str,
+) -> Result<bool, TransportError> {
+    let result = conn
+        .send::<GetTargetsParams>(ROOT_SESSION, &GetTargetsParams::default())
+        .await?;
+    let target_infos = validated_target_inventory(&result)
+        .map_err(|message| TransportError::Protocol(message.into()))?;
+    for target_info in target_infos {
+        if target_info.target_id == target_id {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+/// Close a top-level target, treating any non-authoritative close response as
+/// idempotent success only after the root target inventory proves absence.
+async fn close_target_or_confirm_absent(
+    conn: &Connection,
+    target_id: &str,
+) -> Result<(), BrowserError> {
+    use chromiumoxide::cdp::browser_protocol::target::CloseTargetParams;
+
+    let original_error = match conn
+        .send::<CloseTargetParams>(
+            ROOT_SESSION,
+            &CloseTargetParams::new(target_id.to_string()),
+        )
+        .await
+    {
+        Ok(result)
+            if result.get("success").and_then(serde_json::Value::as_bool) == Some(true) =>
+        {
+            return Ok(());
+        }
+        Ok(result)
+            if result.get("success").and_then(serde_json::Value::as_bool) == Some(false) =>
+        {
+            BrowserError::Other("Target.closeTarget returned success=false".into())
+        }
+        Ok(_) => BrowserError::Other(
+            "Target.closeTarget response did not contain boolean success=true".into(),
+        ),
+        Err(error) => map_transport_err(error),
+    };
+
+    match target_is_absent_from_browser(conn, target_id).await {
+        Ok(true) => Ok(()),
+        Ok(false) | Err(_) => Err(original_error),
+    }
+}
+
+#[derive(Clone)]
+struct PendingPage {
+    target_id: String,
+    session_id: String,
+    opener_target_id: Option<String>,
+}
+
+struct LaneRoute {
+    registration_id: LaneRegistrationId,
+    tabs: Weak<AsyncMutex<HashMap<String, TabRecord>>>,
+    active_target: Weak<AsyncMutex<String>>,
+    active_frame: Weak<AsyncMutex<Option<(String, String)>>>,
+    closing: Arc<AtomicBool>,
+    download_dir: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct LaneRegistrationId(u64);
+
+static NEXT_LANE_REGISTRATION_ID: AtomicU64 = AtomicU64::new(1);
+
+impl LaneRegistrationId {
+    fn next() -> Self {
+        Self(NEXT_LANE_REGISTRATION_ID.fetch_add(1, Ordering::Relaxed))
+    }
+}
+
+struct PendingDownload {
+    lane_id: LaneId,
+    download_dir: String,
+    suggested_filename: String,
+}
+
+struct HostRouteState {
+    ownership: TargetOwnership,
+    /// Host-epoch cleanup-only ownership for lanes that already unregistered.
+    /// Target ids are never reused within a Chromium epoch, so retaining these
+    /// opener tombstones prevents a queued/late popup from escaping after the
+    /// Lane's final empty inventory response.
+    retired_target_owner: HashMap<String, LaneId>,
+    lanes: HashMap<LaneId, LaneRoute>,
+    quarantined: HashMap<String, PendingPage>,
+    cleanup_inflight: HashSet<String>,
+    session_targets: HashMap<String, String>,
+    lost_targets: HashSet<String>,
+    frame_owner: HashMap<String, LaneId>,
+    downloads: HashMap<String, PendingDownload>,
+}
+
+impl Default for HostRouteState {
+    fn default() -> Self {
+        Self {
+            ownership: TargetOwnership::default(),
+            retired_target_owner: HashMap::new(),
+            lanes: HashMap::new(),
+            quarantined: HashMap::new(),
+            cleanup_inflight: HashSet::new(),
+            session_targets: HashMap::new(),
+            lost_targets: HashSet::new(),
+            frame_owner: HashMap::new(),
+            downloads: HashMap::new(),
+        }
+    }
+}
+
+/// Host-global target router.  It is the sole top-level page discovery loop:
+/// explicit target claims win, popups inherit their opener's lane, and targets
+/// with neither are retained in quarantine instead of being adopted.
+struct HostTargetRouter {
+    conn: Connection,
+    cleanup_executor: Arc<TargetCleanupExecutor>,
+    state: AsyncMutex<HostRouteState>,
+    barrier_tx: tokio::sync::mpsc::Sender<tokio::sync::oneshot::Sender<()>>,
+    barrier_rx: std::sync::Mutex<
+        Option<tokio::sync::mpsc::Receiver<tokio::sync::oneshot::Sender<()>>>,
+    >,
+    cleanup_changed: tokio::sync::Notify,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum TopLevelTargetLoss {
+    Detached,
+    Destroyed,
+    Crashed,
+}
+
+enum AttachedPageRoute {
+    Routed(TargetRoute),
+    CleanupOnly {
+        lane_id: LaneId,
+        start_worker: bool,
+    },
+}
+
+enum ProspectiveTargetOwner {
+    Active(LaneId),
+    Retired(LaneId),
+}
+
+impl TopLevelTargetLoss {
+    fn event_name(self) -> &'static str {
+        match self {
+            Self::Detached => "detached",
+            Self::Destroyed => "destroyed",
+            Self::Crashed => "crashed",
+        }
+    }
+}
+
+impl HostTargetRouter {
+    fn try_new(
+        conn: Connection,
+        process_cleanup: Option<Arc<DurableProcessCleanup>>,
+    ) -> Result<Arc<Self>, BrowserError> {
+        let (barrier_tx, barrier_rx) = tokio::sync::mpsc::channel(16);
+        let cleanup_executor =
+            TargetCleanupExecutor::new(conn.clone(), process_cleanup)?;
+        Ok(Arc::new(Self {
+            conn,
+            cleanup_executor,
+            state: AsyncMutex::new(HostRouteState::default()),
+            barrier_tx,
+            barrier_rx: std::sync::Mutex::new(Some(barrier_rx)),
+            cleanup_changed: tokio::sync::Notify::new(),
+        }))
+    }
+
+    #[cfg(test)]
+    fn new(conn: Connection) -> Arc<Self> {
+        Self::try_new(conn, None).expect("test target cleanup executor starts")
+    }
+
+    async fn register_lane(
+        &self,
+        lane_id: LaneId,
+        tabs: &Arc<AsyncMutex<HashMap<String, TabRecord>>>,
+        active_target: &Arc<AsyncMutex<String>>,
+        active_frame: &Arc<AsyncMutex<Option<(String, String)>>>,
+        closing: Arc<AtomicBool>,
+        download_dir: Option<String>,
+    ) -> Option<LaneRegistrationId> {
+        let registration_id = LaneRegistrationId::next();
+        let mut state = self.state.lock().await;
+        if state.lanes.contains_key(&lane_id) {
+            return None;
+        }
+        state.lanes.insert(
+            lane_id,
+            LaneRoute {
+                registration_id,
+                tabs: Arc::downgrade(tabs),
+                active_target: Arc::downgrade(active_target),
+                active_frame: Arc::downgrade(active_frame),
+                closing,
+                download_dir,
+            },
+        );
+        Some(registration_id)
+    }
+
+    /// Claim a target for one Lane. Returns `false` when the target already
+    /// crashed or belongs to another Lane.
+    async fn claim_target(&self, lane_id: &str, target_id: &str) -> bool {
+        let pending_pages = {
+            let mut state = self.state.lock().await;
+            if state.lost_targets.contains(target_id) {
+                return false;
+            }
+            let Some(route) = state.lanes.get(lane_id) else {
+                return false;
+            };
+            if route.closing.load(Ordering::Acquire) {
+                return false;
+            }
+            if let Err(owner) = state.ownership.claim(lane_id, target_id) {
+                tracing::warn!(
+                    target: "nomi_browser_engine::host",
+                    target_id_suffix = %cdp_id_suffix(target_id),
+                    requested_lane = %lane_id,
+                    established_lane = %owner,
+                    "refused to transfer an owned target between lanes"
+                );
+                return false;
+            }
+            let mut pages = Vec::new();
+            let mut inherited_from = vec![target_id.to_string()];
+            if let Some(page) = state.quarantined.remove(target_id) {
+                pages.push(page);
+            }
+            while let Some(opener_id) = inherited_from.pop() {
+                let children = state
+                    .quarantined
+                    .iter()
+                    .filter_map(|(id, page)| {
+                        (page.opener_target_id.as_deref() == Some(opener_id.as_str()))
+                            .then_some(id.clone())
+                    })
+                    .collect::<Vec<_>>();
+                for child_id in children {
+                    if state.ownership.claim(lane_id, &child_id).is_ok()
+                        && let Some(page) = state.quarantined.remove(&child_id)
+                    {
+                        inherited_from.push(child_id);
+                        pages.push(page);
+                    }
+                }
+            }
+            pages
+        };
+        for pending in pending_pages {
+            self.arm_owned_page(lane_id.to_string(), pending).await;
+        }
+        true
+    }
+
+    async fn is_target_lost(&self, target_id: &str) -> bool {
+        self.state.lock().await.lost_targets.contains(target_id)
+    }
+
+    async fn owned_targets(&self, lane_id: &str) -> Vec<String> {
+        self.state.lock().await.ownership.targets_for_lane(lane_id)
+    }
+
+    async fn is_current_registration(
+        &self,
+        lane_id: &str,
+        registration_id: LaneRegistrationId,
+    ) -> bool {
+        self.state
+            .lock()
+            .await
+            .lanes
+            .get(lane_id)
+            .is_some_and(|route| route.registration_id == registration_id)
+    }
+
+    /// Discover live top-level descendants of a closing Lane directly from the
+    /// root target inventory and claim them into that Lane's cleanup set.
+    ///
+    /// This is a pre-unregister drain, not an event-ordering barrier: targets
+    /// already visible in Chromium are claimed here, while the Host-epoch
+    /// `retired_target_owner` fence handles attaches materialized or delivered
+    /// only after the Lane unregisters.
+    async fn claim_live_targets_for_closing_lane(
+        &self,
+        lane_id: &str,
+    ) -> Result<Vec<String>, BrowserError> {
+        let seed_targets = {
+            let state = self.state.lock().await;
+            let Some(lane) = state.lanes.get(lane_id) else {
+                return Err(BrowserError::Other(
+                    "closing Lane disappeared before target drain".into(),
+                ));
+            };
+            if !lane.closing.load(Ordering::Acquire) {
+                return Err(BrowserError::Other(
+                    "target drain requires a closing Lane".into(),
+                ));
+            }
+            state.ownership.targets_for_lane(lane_id)
+        };
+        let result = self
+            .conn
+            .send::<GetTargetsParams>(ROOT_SESSION, &GetTargetsParams::default())
+            .await
+            .map_err(map_transport_err)?;
+        let target_infos = validated_target_inventory(&result)
+            .map_err(|message| BrowserError::Other(message.into()))?;
+
+        let mut lineage = seed_targets.into_iter().collect::<HashSet<_>>();
+        loop {
+            let mut changed = false;
+            for target_info in &target_infos {
+                if target_info.target_type != "page" {
+                    continue;
+                }
+                let Some(opener_id) = target_info.opener_id.as_deref() else {
+                    continue;
+                };
+                if lineage.contains(opener_id) && lineage.insert(target_info.target_id.clone()) {
+                    changed = true;
+                }
+            }
+            if !changed {
+                break;
+            }
+        }
+
+        let live_targets = target_infos
+            .iter()
+            .filter_map(|target_info| {
+                lineage
+                    .contains(&target_info.target_id)
+                    .then(|| target_info.target_id.clone())
+            })
+            .collect::<Vec<_>>();
+
+        let mut state = self.state.lock().await;
+        for target_id in &live_targets {
+            if let Err(established_lane) =
+                state.ownership.claim(lane_id.to_string(), target_id.clone())
+                && established_lane != lane_id
+            {
+                return Err(BrowserError::Other(
+                    "live target lineage conflicts with another Lane owner".into(),
+                ));
+            }
+        }
+        Ok(live_targets)
+    }
+
+    async fn unregister_lane_if_current(
+        &self,
+        lane_id: &str,
+        registration_id: LaneRegistrationId,
+    ) -> bool {
+        let mut state = self.state.lock().await;
+        if state
+            .lanes
+            .get(lane_id)
+            .is_none_or(|route| route.registration_id != registration_id)
+        {
+            return false;
+        }
+        state.lanes.remove(lane_id);
+        let released = state.ownership.release_lane(lane_id);
+        for target_id in released {
+            state
+                .retired_target_owner
+                .insert(target_id.clone(), lane_id.to_string());
+            state.lost_targets.remove(&target_id);
+            state
+                .session_targets
+                .retain(|_, mapped_target| mapped_target != &target_id);
+        }
+        state.frame_owner.retain(|_, owner| owner != lane_id);
+        state.downloads.retain(|_, route| route.lane_id != lane_id);
+        true
+    }
+
+    #[cfg(test)]
+    async fn unregister_lane(&self, lane_id: &str) {
+        let registration_id = self
+            .state
+            .lock()
+            .await
+            .lanes
+            .get(lane_id)
+            .map(|route| route.registration_id);
+        if let Some(registration_id) = registration_id {
+            let _ = self
+                .unregister_lane_if_current(lane_id, registration_id)
+                .await;
+        }
+    }
+
+    /// Forget router bookkeeping for a target which was created for a Lane
+    /// launch but was closed before that Lane could be registered.
+    ///
+    /// The exact target id comes from the nonce-correlated create/attach
+    /// transaction. Never scrub a target which another Lane managed to claim.
+    async fn scrub_unowned_pending_target(&self, target_id: &str, session_id: Option<&str>) {
+        let mut state = self.state.lock().await;
+        if state.ownership.owner(target_id).is_some()
+            || state.retired_target_owner.contains_key(target_id)
+        {
+            return;
+        }
+        state.quarantined.remove(target_id);
+        state.cleanup_inflight.remove(target_id);
+        state.lost_targets.remove(target_id);
+        state
+            .session_targets
+            .retain(|session, mapped_target| {
+                mapped_target != target_id && session_id != Some(session.as_str())
+            });
+        self.cleanup_changed.notify_waiters();
+    }
+
+    /// Remove exact residual records after a cancelled Lane launch has proved
+    /// its target absent. Generation matching is handled by
+    /// `unregister_lane_if_current`; this exact scrub therefore cannot remove a
+    /// later same-id Lane registration.
+    async fn scrub_cancelled_lane_target(
+        &self,
+        lane_id: &str,
+        target_id: &str,
+        session_id: &str,
+        frame_id: &str,
+    ) {
+        let mut state = self.state.lock().await;
+        state.quarantined.remove(target_id);
+        state.cleanup_inflight.remove(target_id);
+        state.lost_targets.remove(target_id);
+        state
+            .session_targets
+            .retain(|session, mapped_target| {
+                mapped_target != target_id && session != session_id
+            });
+        if state.frame_owner.get(frame_id).map(String::as_str) == Some(lane_id) {
+            state.frame_owner.remove(frame_id);
+        }
+        self.cleanup_changed.notify_waiters();
+    }
+
+    async fn release_target(&self, target_id: &str) {
+        let mut state = self.state.lock().await;
+        // Keep the target owner as an epoch-local tombstone until lane close.
+        // A popup attach can race just behind its opener's close event; target
+        // ids are not reused within a Chromium epoch, so retaining ownership is
+        // both safe and necessary for deterministic opener inheritance.
+        state.frame_owner.remove(target_id);
+    }
+
+    async fn claim_frame(&self, lane_id: &str, frame_id: &str) {
+        let mut state = self.state.lock().await;
+        match state.frame_owner.get(frame_id) {
+            Some(owner) if owner != lane_id => {
+                tracing::warn!(
+                    %frame_id,
+                    requested_lane = %lane_id,
+                    established_lane = %owner,
+                    "refused to transfer a frame between browser lanes"
+                );
+            }
+            _ => {
+                state
+                    .frame_owner
+                    .insert(frame_id.to_string(), lane_id.to_string());
+            }
+        }
+    }
+
+    async fn begin_download(
+        &self,
+        frame_id: &str,
+        guid: &str,
+        suggested_filename: &str,
+    ) {
+        let mut state = self.state.lock().await;
+        let lane_id = state
+            .frame_owner
+            .get(frame_id)
+            .cloned()
+            .or_else(|| state.ownership.owner(frame_id).map(str::to_string));
+        let Some(lane_id) = lane_id else {
+            tracing::warn!(
+                %guid,
+                %frame_id,
+                "download has no owned frame; leaving it quarantined in host staging"
+            );
+            return;
+        };
+        let download_dir = state
+            .lanes
+            .get(&lane_id)
+            .and_then(|route| route.download_dir.clone());
+        let Some(download_dir) = download_dir else {
+            return;
+        };
+        state.downloads.insert(
+            guid.to_string(),
+            PendingDownload {
+                lane_id,
+                download_dir,
+                suggested_filename: suggested_filename.to_string(),
+            },
+        );
+    }
+
+    async fn finish_download(&self, guid: &str, source: &std::path::Path) -> bool {
+        let route = self.state.lock().await.downloads.remove(guid);
+        let Some(route) = route else {
+            return false;
+        };
+        let filename = std::path::Path::new(&route.suggested_filename)
+            .file_name()
+            .and_then(|name| name.to_str())
+            .filter(|name| !name.is_empty())
+            .unwrap_or(guid);
+        let mut destination = std::path::Path::new(&route.download_dir).join(filename);
+        if destination.exists() {
+            destination =
+                std::path::Path::new(&route.download_dir).join(format!("{guid}-{filename}"));
+        }
+        if source != destination && let Err(rename_error) = std::fs::rename(source, &destination) {
+            // Workspaces can live on another Windows volume. Fall back to
+            // copy+remove when an atomic cross-volume rename is unavailable.
+            if let Err(copy_error) = std::fs::copy(source, &destination) {
+                tracing::warn!(
+                    %guid,
+                    lane_id = %route.lane_id,
+                    from = %source.display(),
+                    to = %destination.display(),
+                    %rename_error,
+                    %copy_error,
+                    "failed to route completed download to its owning lane"
+                );
+                return false;
+            }
+            if let Err(error) = std::fs::remove_file(source) {
+                tracing::debug!(
+                    %guid,
+                    file = %source.display(),
+                    %error,
+                    "routed download copied successfully but staging cleanup was deferred"
+                );
+            }
+        }
+        if let Err(error) = crate::download::write_motw(&destination) {
+            tracing::debug!(
+                %error,
+                file = %destination.display(),
+                "MOTW write failed after lane download routing"
+            );
+        }
+        true
+    }
+
+    async fn handle_attached(self: &Arc<Self>, pending: PendingPage) {
+        let route = {
+            let mut state = self.state.lock().await;
+            if state.lost_targets.contains(&pending.target_id) {
+                return;
+            }
+            state
+                .session_targets
+                .insert(pending.session_id.clone(), pending.target_id.clone());
+            let prospective_owner = state
+                .ownership
+                .owner(&pending.target_id)
+                .map(str::to_owned)
+                .map(ProspectiveTargetOwner::Active)
+                .or_else(|| {
+                    state
+                        .retired_target_owner
+                        .get(&pending.target_id)
+                        .cloned()
+                        .map(ProspectiveTargetOwner::Retired)
+                })
+                .or_else(|| {
+                    pending
+                        .opener_target_id
+                        .as_deref()
+                        .and_then(|opener_id| state.ownership.owner(opener_id))
+                        .map(str::to_owned)
+                        .map(ProspectiveTargetOwner::Active)
+                })
+                .or_else(|| {
+                    pending
+                        .opener_target_id
+                        .as_deref()
+                        .and_then(|opener_id| state.retired_target_owner.get(opener_id))
+                        .cloned()
+                        .map(ProspectiveTargetOwner::Retired)
+                });
+            let cleanup_owner = match prospective_owner {
+                Some(ProspectiveTargetOwner::Active(lane_id))
+                    if state
+                        .lanes
+                        .get(&lane_id)
+                        .is_some_and(|lane| lane.closing.load(Ordering::Acquire)) =>
+                {
+                    Some((lane_id, false))
+                }
+                Some(ProspectiveTargetOwner::Retired(lane_id)) => Some((lane_id, true)),
+                _ => None,
+            };
+            if let Some((lane_id, retired)) = cleanup_owner {
+                if retired {
+                    state
+                        .retired_target_owner
+                        .insert(pending.target_id.clone(), lane_id.clone());
+                }
+                if !retired {
+                    if let Err(established_lane) = state
+                        .ownership
+                        .claim(lane_id.clone(), pending.target_id.clone())
+                        && established_lane != lane_id
+                    {
+                        tracing::warn!(
+                            target: "nomi_browser_engine::host",
+                            target_id_suffix = %cdp_id_suffix(&pending.target_id),
+                            requested_lane = %lane_id,
+                            established_lane = %established_lane,
+                            "late target cleanup ownership conflicts with another Lane"
+                        );
+                        state
+                            .quarantined
+                            .insert(pending.target_id.clone(), pending.clone());
+                        return;
+                    }
+                }
+                state
+                    .quarantined
+                    .insert(pending.target_id.clone(), pending.clone());
+                let start_worker = state.cleanup_inflight.insert(pending.target_id.clone());
+                AttachedPageRoute::CleanupOnly {
+                    lane_id,
+                    start_worker,
+                }
+            } else {
+                let route = state.ownership.route_attached(
+                    &pending.target_id,
+                    pending.opener_target_id.as_deref(),
+                );
+                if route == TargetRoute::Quarantined {
+                    state
+                        .quarantined
+                        .insert(pending.target_id.clone(), pending.clone());
+                }
+                AttachedPageRoute::Routed(route)
+            }
+        };
+        match route {
+            AttachedPageRoute::Routed(
+                TargetRoute::Owned(lane_id) | TargetRoute::Inherited { lane_id, .. },
+            ) => {
+                self.arm_owned_page(lane_id, pending).await;
+            }
+            AttachedPageRoute::Routed(TargetRoute::Quarantined) => {
+                tracing::debug!(
+                    target: "nomi_browser_engine::host",
+                    target_id_suffix = %cdp_id_suffix(&pending.target_id),
+                    opener_target_id_suffix = ?pending
+                        .opener_target_id
+                        .as_deref()
+                        .map(cdp_id_suffix),
+                    "top-level target quarantined until an owning lane claims it"
+                );
+            }
+            AttachedPageRoute::CleanupOnly {
+                lane_id,
+                start_worker,
+            } => {
+                tracing::debug!(
+                    target: "nomi_browser_engine::host",
+                    lane_id = %lane_id,
+                    target_id_suffix = %cdp_id_suffix(&pending.target_id),
+                    "late top-level target retained behind a Lane cleanup-only fence"
+                );
+                if start_worker {
+                    self.cleanup_executor.submit(TargetCleanupJob::RouterTarget {
+                        router: Arc::clone(self),
+                        lane_id,
+                        target_id: pending.target_id,
+                    });
+                }
+            }
+        }
+    }
+
+    async fn retry_cleanup_only_target(&self, lane_id: LaneId, target_id: String) {
+        let mut attempt = 0usize;
+        loop {
+            attempt += 1;
+            match close_target_or_confirm_absent(&self.conn, &target_id).await {
+                Ok(()) => {
+                    let mut state = self.state.lock().await;
+                    if state.ownership.owner(&target_id) == Some(lane_id.as_str())
+                        && state.lanes.contains_key(&lane_id)
+                    {
+                        state.lost_targets.insert(target_id.clone());
+                    }
+                    state.quarantined.remove(&target_id);
+                    state.cleanup_inflight.remove(&target_id);
+                    state
+                        .session_targets
+                        .retain(|_, mapped_target| mapped_target != &target_id);
+                    drop(state);
+                    self.cleanup_changed.notify_waiters();
+                    return;
+                }
+                Err(error) if self.conn.registry().is_connection_closed() => {
+                    let mut state = self.state.lock().await;
+                    state.cleanup_inflight.remove(&target_id);
+                    state.quarantined.remove(&target_id);
+                    state
+                        .session_targets
+                        .retain(|_, mapped_target| mapped_target != &target_id);
+                    drop(state);
+                    self.cleanup_changed.notify_waiters();
+                    tracing::warn!(
+                        target: "nomi_browser_engine::host",
+                        lane_id = %lane_id,
+                        target_id_suffix = %cdp_id_suffix(&target_id),
+                        %error,
+                        attempts = attempt,
+                        "late target cleanup handed to authoritative Host shutdown"
+                    );
+                    return;
+                }
+                Err(error) => {
+                    if attempt == 20 || attempt % 60 == 0 {
+                        tracing::warn!(
+                            target: "nomi_browser_engine::host",
+                            lane_id = %lane_id,
+                            target_id_suffix = %cdp_id_suffix(&target_id),
+                            %error,
+                            attempts = attempt,
+                            "late target cleanup is still retrying under retained Host-epoch ownership"
+                        );
+                    }
+                    tokio::time::sleep(Duration::from_millis(250)).await;
+                }
+            }
+        }
+    }
+
+    async fn event_barrier(&self) -> Result<(), BrowserError> {
+        self.event_barrier_with_timeout(HOST_ROUTER_BARRIER_TIMEOUT)
+            .await
+    }
+
+    async fn event_barrier_with_timeout(&self, timeout: Duration) -> Result<(), BrowserError> {
+        tokio::time::timeout(timeout, async {
+            let (ack_tx, ack_rx) = tokio::sync::oneshot::channel();
+            self.barrier_tx
+                .send(ack_tx)
+                .await
+                .map_err(|_| BrowserError::SessionLost { recoverable: false })?;
+            ack_rx
+                .await
+                .map_err(|_| BrowserError::SessionLost { recoverable: false })
+        })
+        .await
+        .map_err(|_| {
+            BrowserError::Other(
+                "Host target router event barrier timed out during Lane cleanup".into(),
+            )
+        })?
+    }
+
+    async fn claim_live_retired_targets(
+        self: &Arc<Self>,
+        lane_id: &str,
+    ) -> Result<Vec<String>, BrowserError> {
+        let seed_targets = {
+            let state = self.state.lock().await;
+            state
+                .retired_target_owner
+                .iter()
+                .filter_map(|(target_id, owner)| {
+                    (owner == lane_id).then_some(target_id.clone())
+                })
+                .collect::<HashSet<_>>()
+        };
+        let result = self
+            .conn
+            .send::<GetTargetsParams>(ROOT_SESSION, &GetTargetsParams::default())
+            .await
+            .map_err(map_transport_err)?;
+        let target_infos = validated_target_inventory(&result)
+            .map_err(|message| BrowserError::Other(message.into()))?;
+
+        let mut lineage = seed_targets;
+        loop {
+            let mut changed = false;
+            for target_info in &target_infos {
+                if target_info.target_type != "page" {
+                    continue;
+                }
+                let Some(opener_id) = target_info.opener_id.as_deref() else {
+                    continue;
+                };
+                if lineage.contains(opener_id) && lineage.insert(target_info.target_id.clone()) {
+                    changed = true;
+                }
+            }
+            if !changed {
+                break;
+            }
+        }
+
+        let live_targets = target_infos
+            .iter()
+            .filter_map(|target_info| {
+                lineage
+                    .contains(&target_info.target_id)
+                    .then(|| target_info.target_id.clone())
+            })
+            .collect::<Vec<_>>();
+        let workers = {
+            let mut state = self.state.lock().await;
+            let mut workers = Vec::new();
+            for target_id in &live_targets {
+                if let Some(active_owner) = state.ownership.owner(target_id)
+                    && active_owner != lane_id
+                {
+                    return Err(BrowserError::Other(
+                        "retired target lineage conflicts with an active sibling Lane".into(),
+                    ));
+                }
+                state
+                    .retired_target_owner
+                    .insert(target_id.clone(), lane_id.to_string());
+                if state.cleanup_inflight.insert(target_id.clone()) {
+                    workers.push(target_id.clone());
+                }
+            }
+            workers
+        };
+        for target_id in workers {
+            self.cleanup_executor.submit(TargetCleanupJob::RouterTarget {
+                router: Arc::clone(self),
+                lane_id: lane_id.to_string(),
+                target_id,
+            });
+        }
+        Ok(live_targets)
+    }
+
+    async fn wait_retired_cleanup_idle(
+        &self,
+        lane_id: &str,
+        timeout: Duration,
+    ) -> Result<(), BrowserError> {
+        let deadline = tokio::time::Instant::now() + timeout;
+        loop {
+            let notified = self.cleanup_changed.notified();
+            let pending = {
+                let state = self.state.lock().await;
+                state.cleanup_inflight.iter().any(|target_id| {
+                    state
+                        .retired_target_owner
+                        .get(target_id)
+                        .is_some_and(|owner| owner == lane_id)
+                })
+            };
+            if !pending {
+                return Ok(());
+            }
+            if tokio::time::timeout_at(deadline, notified).await.is_err() {
+                return Err(BrowserError::Other(
+                    "retired Lane target cleanup did not reach an absent proof".into(),
+                ));
+            }
+        }
+    }
+
+    async fn finalize_retired_lane(self: &Arc<Self>, lane_id: &str) -> Result<(), BrowserError> {
+        const MAX_FINALIZE_PASSES: usize = 8;
+        const CLEANUP_WAIT: Duration = Duration::from_secs(5);
+
+        let mut consecutive_empty = 0usize;
+        for _ in 0..MAX_FINALIZE_PASSES {
+            let live_targets = self.claim_live_retired_targets(lane_id).await?;
+            // Target.getTargets response establishes the transport ordering
+            // point. The biased router mailbox barrier then drains every
+            // target event already delivered before that response.
+            self.event_barrier().await?;
+            self.wait_retired_cleanup_idle(lane_id, CLEANUP_WAIT)
+                .await?;
+            if live_targets.is_empty() {
+                consecutive_empty += 1;
+                if consecutive_empty == 2 {
+                    return Ok(());
+                }
+            } else {
+                consecutive_empty = 0;
+            }
+        }
+        Err(BrowserError::Other(
+            "retired Lane target inventory did not stabilize empty".into(),
+        ))
+    }
+
+    async fn arm_owned_page(&self, lane_id: LaneId, pending: PendingPage) {
+        let route = {
+            let state = self.state.lock().await;
+            if state.lost_targets.contains(&pending.target_id) {
+                return;
+            }
+            state
+                .lanes
+                .get(&lane_id)
+                .map(|route| (route.tabs.clone(), route.closing.clone()))
+        };
+        let Some((tabs, closing)) = route else {
+            return;
+        };
+        if closing.load(Ordering::Acquire) {
+            return;
+        }
+        let Some(tabs) = tabs.upgrade() else {
+            return;
+        };
+        if tabs.lock().await.contains_key(&pending.target_id) {
+            return;
+        }
+
+        let deadline = tokio::time::Instant::now() + OOPIF_SESSION_REGISTER_TIMEOUT;
+        while !self.conn.registry().has_session(&pending.session_id) {
+            if closing.load(Ordering::Acquire) || tokio::time::Instant::now() >= deadline {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        match arm_tab(&self.conn, &pending.target_id, &pending.session_id).await {
+            Ok(record) => {
+                // Serialize the final insert with crash marking. If the target
+                // crashed while `arm_tab` awaited CDP, the crash path wins and
+                // this dead record is never published into the Lane.
+                let state = self.state.lock().await;
+                if state.lost_targets.contains(&pending.target_id) {
+                    abort_tab_record(&record);
+                    return;
+                }
+                let mut tabs = tabs.lock().await;
+                if closing.load(Ordering::Acquire) || tabs.contains_key(&pending.target_id) {
+                    abort_tab_record(&record);
+                    return;
+                }
+                let main_frame_id = record.main_frame_id.clone();
+                tabs.insert(pending.target_id.clone(), record);
+                drop(tabs);
+                drop(state);
+                self.claim_frame(&lane_id, &main_frame_id).await;
+                tracing::info!(
+                    target: "nomi_browser_engine::host",
+                    lane_id = %lane_id,
+                    target_id_suffix = %cdp_id_suffix(&pending.target_id),
+                    "top-level target assigned to browser lane"
+                );
+            }
+            Err(error) => {
+                tracing::warn!(
+                    target: "nomi_browser_engine::host",
+                    lane_id = %lane_id,
+                    target_id_suffix = %cdp_id_suffix(&pending.target_id),
+                    %error,
+                    "failed to arm lane-owned target"
+                );
+            }
+        }
+    }
+
+    /// Remove exactly one lost top-level target from its owning Lane.
+    ///
+    /// Ownership is resolved before touching Lane state, so a renderer crash
+    /// or detach can never fan out into another Lane. The target id remains an
+    /// epoch-local tombstone in `TargetOwnership` so a late popup attach cannot
+    /// escape its original owner. Only sessions recorded by this router are
+    /// eligible for session-based loss, which excludes worker and OOPIF
+    /// sessions from the top-level Lane registry.
+    async fn handle_top_level_target_loss(
+        &self,
+        target_id: Option<String>,
+        session_id: Option<String>,
+        loss: TopLevelTargetLoss,
+    ) {
+        let route = {
+            let mut state = self.state.lock().await;
+            let target_id = target_id.or_else(|| {
+                session_id
+                    .as_deref()
+                    .and_then(|session_id| state.session_targets.get(session_id).cloned())
+            });
+            let Some(target_id) = target_id else {
+                return;
+            };
+            let active_owner = state.ownership.owner(&target_id).map(str::to_owned);
+            let tracked_top_level = active_owner.is_some()
+                || state.retired_target_owner.contains_key(&target_id)
+                || state.quarantined.contains_key(&target_id)
+                || state
+                    .session_targets
+                    .values()
+                    .any(|mapped_target| mapped_target == &target_id);
+            if !tracked_top_level {
+                return;
+            }
+            if active_owner.is_some() && !state.lost_targets.insert(target_id.clone()) {
+                return;
+            }
+            state.quarantined.remove(&target_id);
+            if state.cleanup_inflight.remove(&target_id) {
+                self.cleanup_changed.notify_waiters();
+            }
+            state
+                .session_targets
+                .retain(|_, mapped_target| mapped_target != &target_id);
+            let Some(lane_id) = active_owner else {
+                return;
+            };
+            let Some(lane) = state.lanes.get(&lane_id) else {
+                return;
+            };
+            (
+                target_id,
+                lane_id,
+                lane.tabs.clone(),
+                lane.active_target.clone(),
+                lane.active_frame.clone(),
+            )
+        };
+
+        let (target_id, lane_id, tabs, active_target, active_frame) = route;
+        let (Some(tabs), Some(active_target), Some(active_frame)) = (
+            tabs.upgrade(),
+            active_target.upgrade(),
+            active_frame.upgrade(),
+        ) else {
+            return;
+        };
+
+        let removed = tabs.lock().await.remove(&target_id);
+        if let Some(record) = removed {
+            let main_frame_id = record.main_frame_id.clone();
+            abort_tab_record(&record);
+            self.state.lock().await.frame_owner.remove(&main_frame_id);
+        }
+
+        let was_active = active_target.lock().await.as_str() == target_id;
+        let survivor = if was_active {
+            deterministic_survivor(
+                tabs.lock().await.keys().map(String::as_str),
+                &target_id,
+            )
+        } else {
+            None
+        };
+        if was_active {
+            *active_target.lock().await = survivor.clone().unwrap_or_default();
+            *active_frame.lock().await = None;
+        }
+
+        tracing::warn!(
+            target: "nomi_browser_engine::host",
+            lane_id = %lane_id,
+            target_id_suffix = %cdp_id_suffix(&target_id),
+            survivor_target_id_suffix = ?survivor.as_deref().map(cdp_id_suffix),
+            loss = loss.event_name(),
+            "top-level target was lost; only its owning browser lane was updated"
+        );
+    }
+
+    fn spawn(self: &Arc<Self>) -> tokio::task::JoinHandle<()> {
+        let router = self.clone();
+        let mut barrier_rx = self
+            .barrier_rx
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take()
+            .expect("Host target router is spawned exactly once");
+        let mut attached_rx = router
+            .conn
+            .subscribe_reliable(EventAttachedToTarget::IDENTIFIER, None);
+        let mut detached_rx = router
+            .conn
+            .subscribe_reliable(EventDetachedFromTarget::IDENTIFIER, None);
+        let mut destroyed_rx = router
+            .conn
+            .subscribe_reliable(EventTargetDestroyed::IDENTIFIER, None);
+        let mut crashed_rx = router
+            .conn
+            .subscribe_reliable(EventTargetCrashed::IDENTIFIER, None);
+        tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    biased;
+                    event = attached_rx.recv() => {
+                        let Some(event) = event else {
+                            break;
+                        };
+                        let Ok(attached) =
+                            serde_json::from_value::<EventAttachedToTarget>(event.params)
+                        else {
+                            continue;
+                        };
+                        if attached.target_info.r#type == "page" {
+                            router
+                                .handle_attached(PendingPage {
+                                    target_id: String::from(attached.target_info.target_id),
+                                    session_id: String::from(attached.session_id),
+                                    opener_target_id: attached
+                                        .target_info
+                                        .opener_id
+                                        .map(String::from),
+                                })
+                                .await;
+                        }
+                    }
+                    event = detached_rx.recv() => {
+                        let Some(event) = event else {
+                            break;
+                        };
+                        let Ok(detached) =
+                            serde_json::from_value::<EventDetachedFromTarget>(event.params)
+                        else {
+                            continue;
+                        };
+                        router
+                            .handle_top_level_target_loss(
+                                None,
+                                Some(String::from(detached.session_id)),
+                                TopLevelTargetLoss::Detached,
+                            )
+                            .await;
+                    }
+                    event = destroyed_rx.recv() => {
+                        let Some(event) = event else {
+                            break;
+                        };
+                        let Ok(destroyed) =
+                            serde_json::from_value::<EventTargetDestroyed>(event.params)
+                        else {
+                            continue;
+                        };
+                        router
+                            .handle_top_level_target_loss(
+                                Some(String::from(destroyed.target_id)),
+                                None,
+                                TopLevelTargetLoss::Destroyed,
+                            )
+                            .await;
+                    }
+                    event = crashed_rx.recv() => {
+                        let Some(event) = event else {
+                            break;
+                        };
+                        let Ok(crashed) =
+                            serde_json::from_value::<EventTargetCrashed>(event.params)
+                        else {
+                            continue;
+                        };
+                        router
+                            .handle_top_level_target_loss(
+                                Some(String::from(crashed.target_id)),
+                                None,
+                                TopLevelTargetLoss::Crashed,
+                            )
+                            .await;
+                    }
+                    barrier = barrier_rx.recv() => {
+                        let Some(barrier) = barrier else {
+                            break;
+                        };
+                        let _ = barrier.send(());
+                    }
+                }
+            }
+        })
+    }
+}
+
+fn abort_tab_record(record: &TabRecord) {
+    record._inject_loop.abort();
+    record._oopif_loop.abort();
+    record._debug_loop.abort();
+}
+
+/// Return a short diagnostic suffix without ever emitting a short CDP id in full.
+///
+/// Real Chromium target/session ids are long, so their final four characters
+/// preserve useful correlation while avoiding persistence of the complete id.
+/// The fallback is deliberately fixed for malformed or unusually short ids.
+fn cdp_id_suffix(id: &str) -> String {
+    let suffix = crate::tabs::last4(id);
+    if suffix.chars().count() == id.chars().count() {
+        "[redacted]".to_string()
+    } else {
+        suffix
+    }
+}
+
+#[cfg(test)]
+mod cdp_id_suffix_tests {
+    use super::cdp_id_suffix;
+
+    #[test]
+    fn keeps_only_the_last_four_characters_of_a_long_id() {
+        assert_eq!(cdp_id_suffix("0123456789abcdef"), "cdef");
+    }
+
+    #[test]
+    fn redacts_short_ids_instead_of_logging_them_in_full() {
+        assert_eq!(cdp_id_suffix("abcd"), "[redacted]");
+        assert_eq!(cdp_id_suffix("x"), "[redacted]");
+        assert_eq!(cdp_id_suffix(""), "[redacted]");
+    }
+
+    #[test]
+    fn uses_character_boundaries_for_non_ascii_ids() {
+        assert_eq!(cdp_id_suffix("target-一二三四五"), "二三四五");
+        assert_eq!(cdp_id_suffix("一二三四"), "[redacted]");
+    }
+}
+
+/// Choose the next active target without depending on `HashMap` iteration
+/// order. The crashed target is filtered defensively even though callers
+/// normally remove it before selecting a survivor.
+fn deterministic_survivor<'a>(
+    target_ids: impl IntoIterator<Item = &'a str>,
+    crashed_target_id: &str,
+) -> Option<String> {
+    target_ids
+        .into_iter()
+        .filter(|target_id| *target_id != crashed_target_id)
+        .min()
+        .map(str::to_owned)
+}
+
+fn tab_handles(record: &TabRecord) -> TabHandles {
+    TabHandles {
+        target_id: record.target_id.clone(),
+        session_id: record.session_id.clone(),
+        injection: record.injection.clone(),
+        main_frame_id: record.main_frame_id.clone(),
+        oopif_managers: record.oopif_managers.clone(),
+        ref_table: record.ref_table.clone(),
+        debug: record.debug.clone(),
+    }
+}
+
+/// Process/transport lifetime shared by all lanes on one managed host.
+pub(crate) struct CdpHostRuntime {
+    conn: Connection,
+    /// Single exact process/profile cleanup authority. Explicit shutdown uses
+    /// it synchronously; dropping the final Lane hands the same authority to a
+    /// background worker, so product paths that return only a Lane cannot leak
+    /// Chromium or its profile artifacts.
+    cleanup: Arc<DurableProcessCleanup>,
+    /// Read-only root Chromium pid captured before the child handle is moved.
+    /// It is process-local telemetry only and never enters browser APIs,
+    /// capability payloads, CDP routing, or profile metadata.
+    root_process_id: Option<u32>,
+    attach_loop: tokio::task::JoinHandle<()>,
+    target_router_loop: tokio::task::JoinHandle<()>,
+    download_loop: Option<tokio::task::JoinHandle<()>>,
+    firewall_loop: tokio::task::JoinHandle<()>,
+    router: Arc<HostTargetRouter>,
+    download_dir: Option<String>,
+    firewall_config: crate::firewall::FirewallConfig,
+    approved_domains: crate::firewall::ApprovedDomains,
+    storage_state: Option<serde_json::Value>,
+    headful: bool,
+    display_available: bool,
+    shutdown: AtomicBool,
+    stopped: AtomicBool,
+    shutdown_gate: AsyncMutex<()>,
+}
+
+impl CdpHostRuntime {
+    pub(crate) async fn launch_in_mode(
+        mut config: EngineConfig,
+        requested_mode: BrowserHostLaunchMode,
+    ) -> Result<Arc<Self>, BrowserError> {
+        config.headful = requested_mode.is_headful();
+        let chrome_path = crate::acquire::resolve_chrome_path_with_source(
+            &config.data_dir,
+            config.bundled_dir.as_deref(),
+            config.chrome_source,
+        )
+        .await?;
+        let user_data_dir = crate::resolve_user_data_dir(&config);
+        let launch_config = LaunchConfig {
+            chrome_path,
+            user_data_dir: user_data_dir.clone(),
+            headful: config.headful,
+        };
+        let workspace = config
+            .workspace_dir
+            .clone()
+            .unwrap_or_else(|| config.data_dir.clone());
+        let download_dir = Some(crate::download::ensure_download_dir(&workspace));
+        let _launch_permit = crate::launch_semaphore()
+            .acquire()
+            .await
+            .expect("browser launch semaphore is never closed");
+        let display_available = crate::display::display_available();
+        let effective_mode = if display_available {
+            requested_mode
+        } else {
+            BrowserHostLaunchMode::Headless
+        };
+        let headful = effective_mode.is_headful();
+        let cleanup_user_data_dir =
+            config.ephemeral_profile.then_some(user_data_dir.clone());
+        let launched = launch_chrome_with_cleanup_profile(
+            &launch_config,
+            effective_mode == BrowserHostLaunchMode::Headless,
+            cleanup_user_data_dir,
+        )
+        .await?;
+        // `Launched` now carries the only profile-cleanup authority. Do not
+        // pass `user_data_dir` separately: doing so would let a stable launch
+        // be upgraded into whole-profile deletion during Host construction.
+        Self::from_launched(
+            launched,
+            headful,
+            display_available,
+            download_dir,
+            config.firewall,
+            config.egress_approver,
+            config.storage_state,
+            None,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn from_launched(
+        launched: Launched,
+        headful: bool,
+        display_available: bool,
+        download_dir: Option<String>,
+        firewall: crate::firewall::FirewallConfig,
+        egress_approver: Option<Arc<dyn crate::firewall::EgressApprover>>,
+        storage_state: Option<serde_json::Value>,
+        dns_resolver: Option<Arc<dyn crate::firewall::HostResolver>>,
+    ) -> Result<Arc<Self>, BrowserError> {
+        let (
+            process,
+            transport,
+            ownership_token,
+            launched_cleanup_user_data_dir,
+        ) = launched.into_managed();
+        let cleanup = Arc::new(DurableProcessCleanup::new(
+            process,
+            LaunchedProfileCleanupAuthority::new(launched_cleanup_user_data_dir),
+            ownership_token.clone(),
+        ));
+        let root_process_id = cleanup.process_id();
+        let conn = match Connection::connect_launched(transport).await {
+            Ok(conn) => conn,
+            Err(error) => {
+                let primary = map_transport_err(error);
+                return Err(cleanup_failed_host_launch(primary, cleanup).await);
+            }
+        };
+        let attach_loop = conn.run_attach_loop();
+        if let Err(error) = conn.enable_auto_attach().await {
+            attach_loop.abort();
+            conn.shutdown().await;
+            let primary = map_transport_err(error);
+            return Err(cleanup_failed_host_launch(primary, cleanup).await);
+        }
+        let router =
+            match HostTargetRouter::try_new(conn.clone(), Some(Arc::clone(&cleanup))) {
+            Ok(router) => router,
+            Err(error) => {
+                attach_loop.abort();
+                conn.shutdown().await;
+                return Err(cleanup_failed_host_launch(error, cleanup).await);
+            }
+        };
+
+        let download_loop = if let Some(ref dir) = download_dir {
+            let handle = spawn_download_loop(conn.clone(), Some(router.clone()));
+            if let Err(error) = set_download_behavior_sandbox(&conn, dir).await {
+                tracing::warn!(%error, dir = %dir, "shared host download sandbox setup failed");
+            }
+            Some(handle)
+        } else {
+            None
+        };
+
+        let firewall_config = firewall.clone();
+        let approved_domains = crate::firewall::ApprovedDomains::new();
+        let dns_resolver = dns_resolver
+            .unwrap_or_else(|| Arc::new(crate::firewall::TokioResolver::default()));
+        let firewall_loop = spawn_fetch_firewall_loop(
+            conn.clone(),
+            firewall,
+            egress_approver,
+            approved_domains.clone(),
+            dns_resolver,
+            crate::firewall::DnsResolverCache::default(),
+        );
+        if let Err(error) = enable_fetch_on_session(&conn, ROOT_SESSION).await {
+            tracing::warn!(%error, "Fetch.enable on shared browser session failed");
+        }
+
+        let target_router_loop = router.spawn();
+        Ok(Arc::new(Self {
+            conn,
+            cleanup,
+            root_process_id,
+            attach_loop,
+            target_router_loop,
+            download_loop,
+            firewall_loop,
+            router,
+            download_dir,
+            firewall_config,
+            approved_domains,
+            storage_state,
+            headful,
+            display_available,
+            shutdown: AtomicBool::new(false),
+            stopped: AtomicBool::new(false),
+            shutdown_gate: AsyncMutex::new(()),
+        }))
+    }
+
+    pub(crate) fn is_stopped(&self) -> bool {
+        self.stopped.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn process_id(&self) -> Option<u32> {
+        if self.is_stopped() {
+            None
+        } else {
+            self.root_process_id
+        }
+    }
+
+    pub(crate) fn is_headful(&self) -> bool {
+        self.headful && self.display_available
+    }
+
+    pub(crate) async fn shutdown(&self) -> Result<(), BrowserError> {
+        let _shutdown = self.shutdown_gate.lock().await;
+        if self.stopped.load(Ordering::Acquire) {
+            return Ok(());
+        }
+        self.shutdown.store(true, Ordering::Release);
+        self.target_router_loop.abort();
+        self.firewall_loop.abort();
+        self.attach_loop.abort();
+        if let Some(loop_handle) = &self.download_loop {
+            loop_handle.abort();
+        }
+        use chromiumoxide::cdp::browser_protocol::browser::CloseParams;
+        let _ = tokio::time::timeout(
+            Duration::from_secs(2),
+            self.conn.send::<CloseParams>(ROOT_SESSION, &CloseParams::default()),
+        )
+        .await;
+        self.conn.shutdown().await;
+        self.cleanup.finish().await?;
+        self.stopped.store(true, Ordering::Release);
+        Ok(())
+    }
+}
+
+async fn cleanup_failed_host_launch(
+    primary: BrowserError,
+    cleanup: Arc<DurableProcessCleanup>,
+) -> BrowserError {
+    match cleanup.finish().await {
+        Ok(()) => primary,
+        Err(_) => BrowserError::Other(
+            "browser host initialization failed and process-tree cleanup could not be proven"
+                .into(),
+        ),
+    }
+}
+
+/// Profile-deletion authority carried by the indivisible [`Launched`] value.
+///
+/// Host constructors deliberately have no separate profile-path parameter:
+/// stable launches (`None`) cannot be upgraded into whole-profile deletion,
+/// and ephemeral launches retain exactly the path authorized at launch time.
+struct LaunchedProfileCleanupAuthority(Option<PathBuf>);
+
+impl LaunchedProfileCleanupAuthority {
+    fn new(profile_dir: Option<PathBuf>) -> Self {
+        Self(profile_dir)
+    }
+
+    fn into_profile_dir(self) -> Option<PathBuf> {
+        self.0
+    }
+}
+
+struct DurableProcessCleanup {
+    /// `Some` means this object still owns exact process authority. `hand_off`
+    /// takes the Arc out, so launch.rs/nomi-process-runtime really receives
+    /// the final authority even if this wrapper remains reachable through a
+    /// poisoned Host.
+    process: std::sync::Mutex<
+        Option<Arc<AsyncMutex<nomi_process_runtime::ManagedChildProcess>>>,
+    >,
+    handoff_ticket:
+        tokio::sync::watch::Sender<Option<crate::launch::DroppedBrowserCleanupTicket>>,
+    /// Serialize every explicit cleanup attempt. Host shutdown and poisoned
+    /// target cleanup can race with one another; without this gate, one
+    /// finisher can observe `process == None` before another finisher publishes
+    /// sticky state `2`, then wait forever for a handoff ticket which a racing
+    /// direct finisher made unnecessary.
+    finish_gate: AsyncMutex<()>,
+    state: AtomicU64,
+    cleanup_user_data_dir: Option<PathBuf>,
+    ownership_token: crate::profile::BrowserOwnershipToken,
+    #[cfg(test)]
+    test_hooks: Option<Arc<DurableProcessCleanupTestHooks>>,
+}
+
+#[cfg(test)]
+#[derive(Default)]
+struct DurableProcessCleanupTestHooks {
+    finish_calls: AtomicUsize,
+    finish_gate_entries: AtomicUsize,
+    handoff_claimed: Option<Arc<std::sync::Barrier>>,
+    handoff_release: Option<Arc<std::sync::Barrier>>,
+}
+
+impl DurableProcessCleanup {
+    fn new(
+        process: nomi_process_runtime::ManagedChildProcess,
+        cleanup_authority: LaunchedProfileCleanupAuthority,
+        ownership_token: crate::profile::BrowserOwnershipToken,
+    ) -> Self {
+        let (handoff_ticket, _) = tokio::sync::watch::channel(None);
+        Self {
+            process: std::sync::Mutex::new(Some(Arc::new(AsyncMutex::new(process)))),
+            handoff_ticket,
+            finish_gate: AsyncMutex::new(()),
+            state: AtomicU64::new(0),
+            cleanup_user_data_dir: cleanup_authority.into_profile_dir(),
+            ownership_token,
+            #[cfg(test)]
+            test_hooks: None,
+        }
+    }
+
+    fn process_id(&self) -> Option<u32> {
+        let process = self
+            .process
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+            .cloned()?;
+        process
+            .try_lock()
+            .ok()
+            .and_then(|process| process.id())
+    }
+
+    fn hand_off(&self) {
+        if self
+            .state
+            .compare_exchange(0, 1, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return;
+        }
+        #[cfg(test)]
+        if let Some(hooks) = self.test_hooks.as_ref()
+            && let (Some(claimed), Some(release)) = (
+                hooks.handoff_claimed.as_ref(),
+                hooks.handoff_release.as_ref(),
+            )
+        {
+            claimed.wait();
+            release.wait();
+        }
+        let process = self
+            .process
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+        let Some(process) = process else {
+            return;
+        };
+        let ticket = crate::launch::hand_off_dropped_browser_cleanup(
+            process,
+            self.ownership_token.clone(),
+            self.cleanup_user_data_dir.clone(),
+        );
+        self.handoff_ticket.send_replace(Some(ticket));
+    }
+
+    async fn finish(&self) -> Result<(), BrowserError> {
+        #[cfg(test)]
+        if let Some(hooks) = self.test_hooks.as_ref() {
+            hooks.finish_calls.fetch_add(1, Ordering::AcqRel);
+        }
+        let _finish = self.finish_gate.lock().await;
+        #[cfg(test)]
+        if let Some(hooks) = self.test_hooks.as_ref() {
+            hooks.finish_gate_entries.fetch_add(1, Ordering::AcqRel);
+        }
+        if self.state.load(Ordering::Acquire) == 2 {
+            return Ok(());
+        }
+        let process = self
+            .process
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+            .cloned();
+        let Some(process) = process else {
+            // A racing direct finisher may have published sticky completion
+            // and removed the process between the first state load and this
+            // snapshot. Never wait for a handoff ticket in that completed
+            // state: a handoff which lost the process race correctly has no
+            // ticket to publish.
+            if self.state.load(Ordering::Acquire) == 2 {
+                return Ok(());
+            }
+            let mut ticket_rx = self.handoff_ticket.subscribe();
+            let ticket = loop {
+                if self.state.load(Ordering::Acquire) == 2 {
+                    return Ok(());
+                }
+                if let Some(ticket) = ticket_rx.borrow().clone() {
+                    break ticket;
+                }
+                ticket_rx.changed().await.map_err(|_| {
+                    BrowserError::Other(
+                        "browser process cleanup relay completion channel closed".into(),
+                    )
+                })?;
+            };
+            return match ticket.wait_or_retry().await {
+                crate::launch::DroppedBrowserCleanupCompletion::Complete => {
+                    self.state.store(2, Ordering::Release);
+                    Ok(())
+                }
+                crate::launch::DroppedBrowserCleanupCompletion::RetryPending => {
+                    Err(BrowserError::Other(
+                        "browser process/profile cleanup remains pending with retained retry authority".into(),
+                    ))
+                }
+            };
+        };
+        let result = {
+            let mut process = process.lock().await;
+            terminate_launched_process_tree_and_cleanup_profile(
+                &mut process,
+                &self.ownership_token,
+                self.cleanup_user_data_dir.as_deref(),
+            )
+            .await
+        };
+        if result.is_ok() {
+            self.state.store(2, Ordering::Release);
+            self.process
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .take();
+        }
+        result
+    }
+}
+
+impl Drop for DurableProcessCleanup {
+    fn drop(&mut self) {
+        if self.state.load(Ordering::Acquire) != 0 {
+            return;
+        }
+        self.hand_off();
+    }
+}
+
+impl Drop for CdpHostRuntime {
+    fn drop(&mut self) {
+        self.target_router_loop.abort();
+        self.firewall_loop.abort();
+        self.attach_loop.abort();
+        if let Some(loop_handle) = &self.download_loop {
+            loop_handle.abort();
+        }
+        // The bounded cleanup executor can still be retained by a queued
+        // target authority. Explicit handoff prevents that bounded cycle from
+        // postponing whole-tree teardown after the Host itself is gone.
+        self.cleanup.hand_off();
+    }
+}
+
+#[derive(Clone)]
+enum TargetCleanupJob {
+    PendingPage(Arc<PendingCreatedPageCleanup>),
+    Lane(Arc<LaneCleanupAuthority>),
+    RouterTarget {
+        router: Arc<HostTargetRouter>,
+        lane_id: LaneId,
+        target_id: String,
+    },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TargetCleanupOutcome {
+    Finished,
+    EscalateHost,
+}
+
+impl TargetCleanupJob {
+    async fn run(self) -> TargetCleanupOutcome {
+        if let Self::PendingPage(cleanup) = &self
+            && cleanup.target_id.is_none()
+        {
+            tracing::error!(
+                pending_url = ?cleanup.pending_url,
+                "pending create has no exact target identity; escalating instead of accepting a transient empty inventory"
+            );
+            return TargetCleanupOutcome::EscalateHost;
+        }
+        let conn = match &self {
+            Self::PendingPage(cleanup) => cleanup.conn.clone(),
+            Self::Lane(cleanup) => cleanup.conn.clone(),
+            Self::RouterTarget { router, .. } => router.conn.clone(),
+        };
+        match tokio::time::timeout(TARGET_CLEANUP_JOB_BUDGET, async {
+            match self {
+                Self::PendingPage(cleanup) => cleanup.finish().await,
+                Self::Lane(cleanup) => cleanup.finish().await,
+                Self::RouterTarget {
+                    router,
+                    lane_id,
+                    target_id,
+                } => {
+                    router
+                        .retry_cleanup_only_target(lane_id, target_id)
+                        .await;
+                }
+            }
+        })
+        .await
+        {
+            Ok(()) if conn.registry().is_connection_closed() => {
+                // A dead CDP transport is not proof that Chromium exited.
+                TargetCleanupOutcome::EscalateHost
+            }
+            Ok(()) => TargetCleanupOutcome::Finished,
+            Err(_) => TargetCleanupOutcome::EscalateHost,
+        }
+    }
+
+    /// State `3` means that exact-target cleanup has been subsumed by an
+    /// authoritative whole-Host teardown. It is terminal for this individual
+    /// worker (no duplicate target job may be submitted), while the executor
+    /// retains the first overflow intent until process exit is proven.
+    fn mark_host_escalated(&self) {
+        match self {
+            Self::PendingPage(cleanup) => {
+                let _ = cleanup.state.compare_exchange(
+                    1,
+                    3,
+                    Ordering::AcqRel,
+                    Ordering::Acquire,
+                );
+            }
+            Self::Lane(cleanup) => {
+                cleanup.lane_closing.store(true, Ordering::Release);
+                let _ = cleanup.state.compare_exchange(
+                    1,
+                    3,
+                    Ordering::AcqRel,
+                    Ordering::Acquire,
+                );
+            }
+            Self::RouterTarget { .. } => {}
+        }
+    }
+
+    fn mark_host_cleanup_finished(&self) {
+        match self {
+            Self::PendingPage(cleanup) => cleanup.state.store(2, Ordering::Release),
+            Self::Lane(cleanup) => cleanup.state.store(2, Ordering::Release),
+            Self::RouterTarget { .. } => {}
+        }
+    }
+}
+
+/// One bounded cleanup executor per Host (and one per standalone backend).
+///
+/// Exactly one target-cleanup future runs at a time and the mailbox has a hard
+/// capacity. If it saturates, or if its sole worker disappears, the executor
+/// becomes permanently poisoned and escalates to whole-browser process
+/// teardown. That preserves a finite memory/CDP bound without dropping cleanup
+/// authority for the target which did not fit in the mailbox.
+struct TargetCleanupExecutor {
+    sender: tokio::sync::mpsc::Sender<TargetCleanupJob>,
+    conn: Connection,
+    process_cleanup: Option<Arc<DurableProcessCleanup>>,
+    poisoned: Arc<AtomicBool>,
+    escalation: Arc<tokio::sync::Notify>,
+    overflow_job: Arc<std::sync::Mutex<Option<TargetCleanupJob>>>,
+    #[allow(dead_code)]
+    worker_count: Arc<AtomicUsize>,
+    #[allow(dead_code)]
+    active_jobs: Arc<AtomicUsize>,
+    #[allow(dead_code)]
+    max_active_jobs: Arc<AtomicUsize>,
+    #[allow(dead_code)]
+    queued_jobs: Arc<AtomicUsize>,
+    #[allow(dead_code)]
+    max_queued_jobs: Arc<AtomicUsize>,
+}
+
+impl TargetCleanupExecutor {
+    fn new(
+        conn: Connection,
+        process_cleanup: Option<Arc<DurableProcessCleanup>>,
+    ) -> Result<Arc<Self>, BrowserError> {
+        #[cfg(test)]
+        if TARGET_CLEANUP_EXECUTOR_START_FAILURE.with(std::cell::Cell::take) {
+            return Err(BrowserError::Other(
+                "injected target cleanup executor start failure".into(),
+            ));
+        }
+        let (sender, mut receiver) =
+            tokio::sync::mpsc::channel::<TargetCleanupJob>(TARGET_CLEANUP_QUEUE_CAPACITY);
+        let poisoned = Arc::new(AtomicBool::new(false));
+        let escalation = Arc::new(tokio::sync::Notify::new());
+        let overflow_job = Arc::new(std::sync::Mutex::new(None));
+        let worker_count = Arc::new(AtomicUsize::new(0));
+        let active_jobs = Arc::new(AtomicUsize::new(0));
+        let max_active_jobs = Arc::new(AtomicUsize::new(0));
+        let queued_jobs = Arc::new(AtomicUsize::new(0));
+        let max_queued_jobs = Arc::new(AtomicUsize::new(0));
+
+        let conn_for_thread = conn.clone();
+        let process_cleanup_for_thread = process_cleanup.clone();
+        let poisoned_for_thread = Arc::clone(&poisoned);
+        let escalation_for_thread = Arc::clone(&escalation);
+        let overflow_job_for_thread = Arc::clone(&overflow_job);
+        let worker_count_for_thread = Arc::clone(&worker_count);
+        let active_jobs_for_thread = Arc::clone(&active_jobs);
+        let max_active_jobs_for_thread = Arc::clone(&max_active_jobs);
+        let queued_jobs_for_thread = Arc::clone(&queued_jobs);
+        let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel(1);
+        std::thread::Builder::new()
+            .name("nomi-target-cleanup".into())
+            .spawn(move || {
+                let runtime = match tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                {
+                    Ok(runtime) => {
+                        worker_count_for_thread.fetch_add(1, Ordering::AcqRel);
+                        runtime
+                    }
+                    Err(error) => {
+                        let _ = ready_tx.send(Err(error.to_string()));
+                        tracing::error!(
+                            %error,
+                            "target cleanup executor runtime creation failed"
+                        );
+                        return;
+                    }
+                };
+                let _exit_guard = TargetCleanupWorkerExitGuard {
+                    poisoned: Arc::clone(&poisoned_for_thread),
+                    process_cleanup: process_cleanup_for_thread.clone(),
+                };
+                let _ = ready_tx.send(Ok(()));
+                runtime.block_on(async move {
+                    loop {
+                        if poisoned_for_thread.load(Ordering::Acquire) {
+                            finish_poisoned_target_cleanup_host(
+                                &conn_for_thread,
+                                process_cleanup_for_thread.as_ref(),
+                                None,
+                                &mut receiver,
+                                &overflow_job_for_thread,
+                                &queued_jobs_for_thread,
+                            )
+                            .await;
+                            break;
+                        }
+                        let job = tokio::select! {
+                            biased;
+                            _ = escalation_for_thread.notified() => {
+                                finish_poisoned_target_cleanup_host(
+                                    &conn_for_thread,
+                                    process_cleanup_for_thread.as_ref(),
+                                    None,
+                                    &mut receiver,
+                                    &overflow_job_for_thread,
+                                    &queued_jobs_for_thread,
+                                )
+                                .await;
+                                break;
+                            }
+                            job = receiver.recv() => match job {
+                                Some(job) => job,
+                                None => break,
+                            },
+                        };
+                        queued_jobs_for_thread.fetch_sub(1, Ordering::AcqRel);
+                        let active = active_jobs_for_thread.fetch_add(1, Ordering::AcqRel) + 1;
+                        max_active_jobs_for_thread.fetch_max(active, Ordering::AcqRel);
+                        let active_job = job.clone();
+                        let outcome = tokio::select! {
+                            biased;
+                            _ = escalation_for_thread.notified() => {
+                                TargetCleanupOutcome::EscalateHost
+                            },
+                            outcome = job.run() => outcome,
+                        };
+                        active_jobs_for_thread.fetch_sub(1, Ordering::AcqRel);
+                        if outcome == TargetCleanupOutcome::EscalateHost
+                            || poisoned_for_thread.load(Ordering::Acquire)
+                        {
+                            poisoned_for_thread.store(true, Ordering::Release);
+                            finish_poisoned_target_cleanup_host(
+                                &conn_for_thread,
+                                process_cleanup_for_thread.as_ref(),
+                                Some(active_job),
+                                &mut receiver,
+                                &overflow_job_for_thread,
+                                &queued_jobs_for_thread,
+                            )
+                            .await;
+                            break;
+                        }
+                    }
+                });
+                worker_count_for_thread.fetch_sub(1, Ordering::AcqRel);
+            })
+            .map_err(|error| {
+                BrowserError::Other(format!(
+                    "could not create the bounded target cleanup executor: {error}"
+                ))
+            })?;
+        match ready_rx.recv() {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => {
+                return Err(BrowserError::Other(format!(
+                    "could not initialize the bounded target cleanup executor: {error}"
+                )));
+            }
+            Err(error) => {
+                return Err(BrowserError::Other(format!(
+                    "target cleanup executor exited before initialization: {error}"
+                )));
+            }
+        }
+        Ok(Arc::new(Self {
+            sender,
+            conn,
+            process_cleanup,
+            poisoned,
+            escalation,
+            overflow_job,
+            worker_count,
+            active_jobs,
+            max_active_jobs,
+            queued_jobs,
+            max_queued_jobs,
+        }))
+    }
+
+    fn ensure_accepting(&self) -> Result<(), BrowserError> {
+        if self.poisoned.load(Ordering::Acquire) {
+            return Err(BrowserError::SessionLost { recoverable: false });
+        }
+        if self.conn.registry().is_connection_closed() {
+            self.poison(None, true);
+            return Err(BrowserError::SessionLost { recoverable: false });
+        }
+        Ok(())
+    }
+
+    fn submit(&self, job: TargetCleanupJob) {
+        if self.poisoned.load(Ordering::Acquire) {
+            job.mark_host_escalated();
+            if let Some(cleanup) = self.process_cleanup.as_ref() {
+                cleanup.hand_off();
+            }
+            return;
+        }
+        if self.conn.registry().is_connection_closed() {
+            self.poison(Some(job), true);
+            return;
+        }
+
+        let queued = self.queued_jobs.fetch_add(1, Ordering::AcqRel) + 1;
+        match self.sender.try_send(job) {
+            Ok(()) => {
+                self.max_queued_jobs.fetch_max(queued, Ordering::AcqRel);
+            }
+            Err(tokio::sync::mpsc::error::TrySendError::Full(job)) => {
+                self.queued_jobs.fetch_sub(1, Ordering::AcqRel);
+                self.poison(Some(job), false);
+            }
+            Err(tokio::sync::mpsc::error::TrySendError::Closed(job)) => {
+                self.queued_jobs.fetch_sub(1, Ordering::AcqRel);
+                self.poison(Some(job), true);
+            }
+        }
+    }
+
+    fn poison(&self, job: Option<TargetCleanupJob>, worker_unavailable: bool) {
+        if let Some(job) = job.as_ref() {
+            job.mark_host_escalated();
+        }
+        let first = !self.poisoned.swap(true, Ordering::AcqRel);
+        if first {
+            if let Some(job) = job {
+                *self
+                    .overflow_job
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(job);
+            }
+            self.escalation.notify_one();
+        }
+        if worker_unavailable {
+            if let Some(cleanup) = self.process_cleanup.as_ref() {
+                // The worker cannot perform Browser.close/Connection::shutdown;
+                // exact process-tree authority is the fail-closed fallback.
+                cleanup.hand_off();
+            }
+        }
+    }
+
+    #[cfg(test)]
+    fn is_poisoned(&self) -> bool {
+        self.poisoned.load(Ordering::Acquire)
+    }
+
+    #[cfg(test)]
+    fn worker_count(&self) -> usize {
+        self.worker_count.load(Ordering::Acquire)
+    }
+
+    #[cfg(test)]
+    fn max_active_jobs(&self) -> usize {
+        self.max_active_jobs.load(Ordering::Acquire)
+    }
+
+    #[cfg(test)]
+    fn max_queued_jobs(&self) -> usize {
+        self.max_queued_jobs.load(Ordering::Acquire)
+    }
+}
+
+/// Unexpected worker exit cannot strand a live Chromium process. The same
+/// exact process/profile authority is deduplicated by DurableProcessCleanup.
+struct TargetCleanupWorkerExitGuard {
+    poisoned: Arc<AtomicBool>,
+    process_cleanup: Option<Arc<DurableProcessCleanup>>,
+}
+
+impl Drop for TargetCleanupWorkerExitGuard {
+    fn drop(&mut self) {
+        self.poisoned.store(true, Ordering::Release);
+        if let Some(cleanup) = self.process_cleanup.as_ref() {
+            cleanup.hand_off();
+        }
+    }
+}
+
+async fn finish_poisoned_target_cleanup_host(
+    conn: &Connection,
+    process_cleanup: Option<&Arc<DurableProcessCleanup>>,
+    active_job: Option<TargetCleanupJob>,
+    receiver: &mut tokio::sync::mpsc::Receiver<TargetCleanupJob>,
+    overflow_job: &std::sync::Mutex<Option<TargetCleanupJob>>,
+    queued_jobs: &AtomicUsize,
+) {
+    let mut subsumed = Vec::with_capacity(TARGET_CLEANUP_QUEUE_CAPACITY + 2);
+    if let Some(job) = active_job {
+        job.mark_host_escalated();
+        subsumed.push(job);
+    }
+    if let Some(job) = overflow_job
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .take()
+    {
+        job.mark_host_escalated();
+        subsumed.push(job);
+    }
+    while let Ok(job) = receiver.try_recv() {
+        queued_jobs.fetch_sub(1, Ordering::AcqRel);
+        job.mark_host_escalated();
+        subsumed.push(job);
+    }
+
+    if !conn.registry().is_connection_closed() {
+        use chromiumoxide::cdp::browser_protocol::browser::CloseParams;
+        let _ = tokio::time::timeout(
+            Duration::from_secs(2),
+            conn.send::<CloseParams>(ROOT_SESSION, &CloseParams::default()),
+        )
+        .await;
+    }
+    conn.shutdown().await;
+
+    let process_exit_proven = if let Some(cleanup) = process_cleanup {
+        let mut proven = false;
+        for attempt in 1..=TARGET_PROCESS_CLEANUP_ATTEMPTS {
+            match tokio::time::timeout(
+                TARGET_PROCESS_CLEANUP_ATTEMPT_BUDGET,
+                cleanup.finish(),
+            )
+            .await
+            {
+                Ok(Ok(())) => {
+                    proven = true;
+                    break;
+                }
+                Ok(Err(error)) => {
+                    tracing::error!(
+                        %error,
+                        attempt,
+                        "bounded target cleanup is retrying authoritative Host teardown"
+                    );
+                }
+                Err(_) => tracing::error!(
+                    attempt,
+                    "authoritative Host teardown exceeded its bounded attempt budget"
+                ),
+            }
+            tokio::time::sleep(Duration::from_millis(250)).await;
+        }
+        if !proven {
+            // This is an authority transfer, not abandonment: launch.rs hands
+            // the exact process/token/profile bundle to its process-local
+            // relay and leaves the marker for startup quarantine if needed.
+            cleanup.hand_off();
+        }
+        proven
+    } else {
+        // Test-only routers have no Chromium process authority; the closed
+        // Connection is their terminal lifecycle boundary.
+        true
+    };
+    if process_exit_proven {
+        for job in subsumed {
+            job.mark_host_cleanup_finished();
+        }
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    static TARGET_CLEANUP_EXECUTOR_START_FAILURE: std::cell::Cell<bool> =
+        const { std::cell::Cell::new(false) };
+}
+
+/// Exact cleanup authority for a target whose create command has completed
+/// (or whose nonce-correlated attach was observed) but which has not yet been
+/// transferred into a registered Lane.
+struct PendingCreatedPageCleanup {
+    conn: Connection,
+    executor: Arc<TargetCleanupExecutor>,
+    router: Option<Arc<HostTargetRouter>>,
+    target_id: Option<String>,
+    session_id: Option<String>,
+    pending_url: Option<String>,
+    state: AtomicU64,
+}
+
+impl PendingCreatedPageCleanup {
+    fn new(
+        conn: Connection,
+        executor: Arc<TargetCleanupExecutor>,
+        router: Option<Arc<HostTargetRouter>>,
+        target_id: Option<String>,
+        session_id: Option<String>,
+        pending_url: Option<String>,
+    ) -> Arc<Self> {
+        Arc::new(Self {
+            conn,
+            executor,
+            router,
+            target_id,
+            session_id,
+            pending_url,
+            state: AtomicU64::new(0),
+        })
+    }
+
+    fn hand_off(self: &Arc<Self>) {
+        if self
+            .state
+            .compare_exchange(0, 1, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return;
+        }
+        self.executor
+            .submit(TargetCleanupJob::PendingPage(Arc::clone(self)));
+    }
+
+    async fn finish(self: Arc<Self>) {
+        let target_id = match self.target_id.clone() {
+            Some(target_id) => target_id,
+            None => {
+                // TargetCleanupJob::run classifies this as immediate Host
+                // escalation. Never manufacture an absence proof here.
+                return;
+            }
+        };
+        loop {
+            match close_target_or_confirm_absent(&self.conn, &target_id).await {
+                Ok(()) => break,
+                Err(error) if self.conn.registry().is_connection_closed() => {
+                    tracing::debug!(
+                        target_id_suffix = %cdp_id_suffix(&target_id),
+                        %error,
+                        "pending-page cleanup delegated to closed Host transport"
+                    );
+                    break;
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        target_id_suffix = %cdp_id_suffix(&target_id),
+                        %error,
+                        "pending-page cleanup is retrying exact target close"
+                    );
+                    tokio::time::sleep(Duration::from_millis(250)).await;
+                }
+            }
+        }
+        if let Some(router) = self.router.as_ref() {
+            router
+                .scrub_unowned_pending_target(&target_id, self.session_id.as_deref())
+                .await;
+        }
+        self.state.store(2, Ordering::Release);
+    }
+}
+
+struct PendingCreatedPage {
+    target_id: String,
+    session_id: String,
+    cleanup: Arc<PendingCreatedPageCleanup>,
+    transferred: bool,
+}
+
+impl PendingCreatedPage {
+    fn transfer_to_lane(mut self) -> (String, String) {
+        self.transferred = true;
+        (self.target_id.clone(), self.session_id.clone())
+    }
+}
+
+impl Drop for PendingCreatedPage {
+    fn drop(&mut self) {
+        if !self.transferred {
+            self.cleanup.hand_off();
+        }
+    }
+}
+
+struct PendingPageCreateWaitGuard {
+    cancellation: CancellationToken,
+    completed: bool,
+}
+
+impl PendingPageCreateWaitGuard {
+    fn new() -> Self {
+        Self {
+            cancellation: CancellationToken::new(),
+            completed: false,
+        }
+    }
+
+    fn token(&self) -> CancellationToken {
+        self.cancellation.clone()
+    }
+
+    fn complete(&mut self) {
+        self.completed = true;
+    }
+}
+
+impl Drop for PendingPageCreateWaitGuard {
+    fn drop(&mut self) {
+        if !self.completed {
+            self.cancellation.cancel();
+        }
+    }
+}
+
+async fn create_pending_page_session_owned(
+    conn: Connection,
+    executor: Arc<TargetCleanupExecutor>,
+    router: Option<Arc<HostTargetRouter>>,
+    background: bool,
+) -> Result<PendingCreatedPage, BrowserError> {
+    executor.ensure_accepting()?;
+    let mut wait_guard = PendingPageCreateWaitGuard::new();
+    let caller_cancelled = wait_guard.token();
+    let result = tokio::spawn(async move {
+        create_pending_lane_page_session(conn, executor, router, background, caller_cancelled).await
+    })
+    .await
+    .map_err(|error| {
+        BrowserError::Other(format!("owned browser page launch task failed: {error}"))
+    })?;
+    wait_guard.complete();
+    result
+}
+
+/// Shared final-Drop authority for a Lane which has not completed explicit
+/// shutdown. The pending launch guard and the returned backend share this
+/// object, so cancellation both before and after `from_host` returns is
+/// covered without letting two cleanup workers race.
+struct LaneCleanupAuthority {
+    conn: Connection,
+    executor: Arc<TargetCleanupExecutor>,
+    router: Arc<HostTargetRouter>,
+    lane_id: LaneId,
+    registration_id: AtomicU64,
+    lane_closing: Arc<AtomicBool>,
+    tabs: Arc<AsyncMutex<HashMap<String, TabRecord>>>,
+    target_id: String,
+    session_id: String,
+    frame_id: String,
+    state: AtomicU64,
+}
+
+impl LaneCleanupAuthority {
+    fn new(
+        conn: Connection,
+        executor: Arc<TargetCleanupExecutor>,
+        router: Arc<HostTargetRouter>,
+        lane_id: LaneId,
+        lane_closing: Arc<AtomicBool>,
+        tabs: Arc<AsyncMutex<HashMap<String, TabRecord>>>,
+        target_id: String,
+        session_id: String,
+        frame_id: String,
+    ) -> Arc<Self> {
+        Arc::new(Self {
+            conn,
+            executor,
+            router,
+            lane_id,
+            registration_id: AtomicU64::new(0),
+            lane_closing,
+            tabs,
+            target_id,
+            session_id,
+            frame_id,
+            state: AtomicU64::new(0),
+        })
+    }
+
+    fn set_registration(&self, registration_id: LaneRegistrationId) {
+        let previous = self
+            .registration_id
+            .compare_exchange(
+                0,
+                registration_id.0,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
+            .expect("a pending Lane is registered at most once");
+        debug_assert_eq!(previous, 0);
+    }
+
+    fn registration(&self) -> Option<LaneRegistrationId> {
+        match self.registration_id.load(Ordering::Acquire) {
+            0 => None,
+            registration_id => Some(LaneRegistrationId(registration_id)),
+        }
+    }
+
+    fn mark_finished(&self) {
+        self.state.store(2, Ordering::Release);
+    }
+
+    fn hand_off(self: &Arc<Self>) {
+        if self
+            .state
+            .compare_exchange(0, 1, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return;
+        }
+        self.lane_closing.store(true, Ordering::Release);
+        self.executor
+            .submit(TargetCleanupJob::Lane(Arc::clone(self)));
+    }
+
+    async fn finish(self: Arc<Self>) {
+        let registration = self.registration();
+        let is_current = match registration {
+            Some(registration_id) => {
+                self.router
+                    .is_current_registration(&self.lane_id, registration_id)
+                    .await
+            }
+            None => false,
+        };
+        let mut target_ids = vec![self.target_id.clone()];
+        if is_current {
+            target_ids.extend(self.router.owned_targets(&self.lane_id).await);
+            target_ids.extend(self.tabs.lock().await.keys().cloned());
+        }
+        target_ids.sort();
+        target_ids.dedup();
+
+        for target_id in target_ids {
+            loop {
+                match close_target_or_confirm_absent(&self.conn, &target_id).await {
+                    Ok(()) => break,
+                    Err(error) if self.conn.registry().is_connection_closed() => {
+                        tracing::debug!(
+                            lane_id = %self.lane_id,
+                            target_id_suffix = %cdp_id_suffix(&target_id),
+                            %error,
+                            "pending-Lane target cleanup delegated to closed Host transport"
+                        );
+                        break;
+                    }
+                    Err(error) => {
+                        tracing::warn!(
+                            lane_id = %self.lane_id,
+                            target_id_suffix = %cdp_id_suffix(&target_id),
+                            %error,
+                            "pending-Lane cleanup is retrying exact target close"
+                        );
+                        tokio::time::sleep(Duration::from_millis(250)).await;
+                    }
+                }
+            }
+        }
+
+        let unregistered = match registration {
+            Some(registration_id) => {
+                self.router
+                    .unregister_lane_if_current(&self.lane_id, registration_id)
+                    .await
+            }
+            None => false,
+        };
+        if unregistered && !self.conn.registry().is_connection_closed() {
+            loop {
+                match self.router.finalize_retired_lane(&self.lane_id).await {
+                    Ok(()) => break,
+                    Err(_error) if self.conn.registry().is_connection_closed() => break,
+                    Err(error) => {
+                        tracing::warn!(
+                            lane_id = %self.lane_id,
+                            %error,
+                            "pending-Lane retired finalizer is retrying"
+                        );
+                        tokio::time::sleep(Duration::from_millis(250)).await;
+                    }
+                }
+            }
+        }
+
+        let records = {
+            let mut tabs = self.tabs.lock().await;
+            std::mem::take(&mut *tabs)
+        };
+        for record in records.values() {
+            abort_tab_record(record);
+        }
+        self.router
+            .scrub_cancelled_lane_target(
+                &self.lane_id,
+                &self.target_id,
+                &self.session_id,
+                &self.frame_id,
+            )
+            .await;
+        self.state.store(2, Ordering::Release);
+    }
+}
+
+struct PendingLaneLaunchGuard {
+    cleanup: Arc<LaneCleanupAuthority>,
+    committed: bool,
+}
+
+impl PendingLaneLaunchGuard {
+    fn new(cleanup: Arc<LaneCleanupAuthority>) -> Self {
+        Self {
+            cleanup,
+            committed: false,
+        }
+    }
+
+    fn commit(mut self) {
+        self.committed = true;
+    }
+}
+
+impl Drop for PendingLaneLaunchGuard {
+    fn drop(&mut self) {
+        if !self.committed {
+            self.cleanup.hand_off();
+        }
+    }
+}
+
 /// P0 浏览器后端：自建 transport 发裸 CDP 命令（无 chromiumoxide 高层）。
 ///
 /// **P2 D1 结构改造（DESIGN §13 裁决⑥）**：原先「单 tab 的 per-tab 字段直挂」改为 tab 注册表 +
@@ -132,6 +2740,35 @@ pub(crate) fn map_inject_err(e: InjectError) -> BrowserError {
 /// 改造前完全一致。
 pub struct CdpBackend {
     conn: Connection,
+    /// Shared process/transport owner. A lane never owns the Chromium child.
+    host: Option<Arc<CdpHostRuntime>>,
+    /// Unit-test seam for exercising Lane retirement without constructing a
+    /// real managed Chromium process. Production always routes through `host`.
+    #[cfg(test)]
+    test_router: Option<Arc<HostTargetRouter>>,
+    lane_id: LaneId,
+    /// Final-Drop cleanup fallback for a shared Host Lane. This remains armed
+    /// across the `from_host` -> coordinator publication gap.
+    lane_cleanup: Option<Arc<LaneCleanupAuthority>>,
+    /// Bounded target cleanup executor shared by every target in this backend.
+    cleanup_executor: Arc<TargetCleanupExecutor>,
+    /// Lane closure is two-phase for cancellation safety: `shutdown_lane`
+    /// sets `lane_closing` immediately to fence new work, but `lane_closed`
+    /// is published only after every target/session cleanup step completes.
+    /// If the close future is cancelled midway, the next authoritative retry
+    /// can continue instead of returning a false idempotent success.
+    lane_closing: Arc<AtomicBool>,
+    lane_closed: Arc<AtomicBool>,
+    /// The active target-drain phase completed and retirement is committed.
+    ///
+    /// This is published immediately before the idempotent router unregister
+    /// call. A cancelled unregister/finalize attempt therefore retries the
+    /// retired phase directly instead of consulting a Lane route that may
+    /// already have been removed.
+    lane_retired: AtomicBool,
+    lane_shutdown_gate: AsyncMutex<()>,
+    lane_close_confirmed: AsyncMutex<HashSet<String>>,
+    lane_cancel: CancellationToken,
     /// **tab 注册表**：targetId → [`TabRecord`]（吸收原 per-tab 字段）。短暂锁、克隆句柄、立即释放
     /// （绝不跨 await 持有；见 [`crate::tabs`]）。**D3**：`Arc` 包裹——tab 发现循环（`'static` 后台任务）
     /// 持一份克隆，发现新顶层 page 时锁它插入新 [`TabRecord`]（与 observe/act 的短临界区共存，互不跨
@@ -151,14 +2788,15 @@ pub struct CdpBackend {
     /// 证并发/连续动作的句柄组互不串味、各自 `releaseObjectGroup` 不误伤他组。`Relaxed` 足够——只
     /// 需单调唯一，不依赖与其它内存操作的顺序。**保留在 backend（全局即可，非 per-tab）**。
     act_seq: std::sync::atomic::AtomicU64,
-    /// 托管的 chrome 进程句柄——保活，Drop 即清理。`AsyncMutex` 仅为内部可变（取 child 杀进程）；
-    /// 正常路径靠 kill_on_drop。
-    _child: AsyncMutex<Child>,
+    /// Standalone backend's single exact process/profile cleanup authority.
+    /// Shared-host lanes leave this empty because [`CdpHostRuntime`] owns the
+    /// same durable authority. Drop hands cleanup to a retrying worker.
+    _process: Option<Arc<DurableProcessCleanup>>,
     /// attach 处理循环句柄——保活，让 flatten 自动附着的子 session 持续被登记。
-    _attach_loop: tokio::task::JoinHandle<()>,
+    _attach_loop: Option<tokio::task::JoinHandle<()>>,
     /// **tab 发现后台循环句柄**（D3）——保活。订阅新顶层 page 的 `Target.attachedToTarget`，arm 成
     /// [`TabRecord`] 入 `tabs`（不抢焦点）。backend Drop 即连带 abort（连接随之关闭，循环也会自然退出）。
-    _tab_discovery_loop: tokio::task::JoinHandle<()>,
+    _tab_discovery_loop: Option<tokio::task::JoinHandle<()>>,
     /// **下载事件后台循环句柄**（E4）——保活。仅当 `setDownloadBehavior` 沙箱已挂（`download_dir`
     /// 为 `Some`）时存在。订阅 `Browser.downloadProgress`，对完成（`state=="completed"`）的下载在其
     /// `filePath` 上打 Win MOTW（`Zone.Identifier` ADS）。mac/linux 为空实现。**绝不**自动打开文件。
@@ -182,7 +2820,7 @@ pub struct CdpBackend {
     /// [`crate::firewall::decide`] 判定后 `continueRequest` 放行 / `failRequest` 阻断（IP 封禁硬阻）/
     /// （F1）升审批（跨域 POST-body）。**SW 必须也拦**（裁决⑪/不变量⑬）——P0 保持 SW attach，本循环
     /// 对其 session 也 Fetch.enable。backend Drop 即连带 abort。
-    _firewall_loop: tokio::task::JoinHandle<()>,
+    _firewall_loop: Option<tokio::task::JoinHandle<()>>,
     /// **P3-G1：注入的出口防火墙配置快照**（裁决①）。= `EngineConfig.firewall`（经 build_backend →
     /// from_launched 透传），**与 `_firewall_loop` 持有的同一份配置**。仅供测试 accessor
     /// [`Self::firewall_config_for_test`] 读回断言「注入值真的到达引擎」（loop 在另一线程内消费，
@@ -212,57 +2850,38 @@ pub struct CdpBackend {
     /// （`is_concurrency_safe==false` → tool executor partition + 网关 `CompanionBrowser::lock`）；现在
     /// **引擎自身**保证——并发调用方也无法交错 observe/act。公平 `tokio::sync::Mutex`，只在单次已被
     /// 截止时间界定的操作内持有（每 CDP 命令超时 + `Progress` 截止 / `ACT_TIMEOUT`），绝不跨无界等待 → 不死锁。
-    /// **作用域 per-engine**（= per Chrome 进程）：DESIGN §22「per-BrowserContext 可并发」由上层实现——
-    /// 不同引擎（网关 per-companion 各自 Chrome 进程）持不同 op_mutex 并行（`BrowserRegistry::execute_parallel`），
-    /// 此锁绝不跨引擎。重入安全：`navigate`/`screenshot`/`observe`/`act` 体内均只调 `*_impl`/`*_on_session`
+    /// **作用域 per-Lane**（≠ per Chrome 进程）：共享 Host 的每个 lane adapter 都持不同 gate，因此
+    /// 不同 Lane 可在同一 Connection 上并行；此锁绝不跨 Lane。重入安全：
+    /// `navigate`/`screenshot`/`observe`/`act` 体内均只调 `*_impl`/`*_on_session`
     /// 助手、绝不回调这四个 trait 方法（已对抗式 grep 校验），故非重入锁不会自死锁。
-    op_mutex: AsyncMutex<()>,
+    op_mutex: LaneOperationGate,
+    /// Serializes lazy target replacement after the final tab crashes.
+    /// Keeping recovery in its own short-lived gate guarantees one replacement
+    /// target per Lane without introducing a Host-global lock.
+    target_recovery_gate: AsyncMutex<()>,
     /// Known-secret exact-blackout registry (shared with facade via `Arc`). Debug serializers
     /// read this set and `String::replace` each value with `[KNOWN_SECRET_REDACTED]` before
     /// heuristic redaction passes. See [`crate::KnownSecretValues`] doc for invariants.
     known_secret_values: crate::KnownSecretValues,
-    /// **并发隔离：本引擎实例专属临时 user-data-dir 的清理目标**（`Some` → ephemeral）。
-    /// `create_engine` 对每实例唯一目录（`<data_dir>/profiles/<token>`）经 [`Self::mark_ephemeral`]
-    /// 设成 `Some(dir)`；引擎关闭（[`Drop`]）时 best-effort 删除它（用完即弃，避免磁盘无界增长）。
-    /// `None`（默认）→ 不删（共享兜底 `<data_dir>/profile` / 登录窗稳定目录 / 测试固定目录需保留）。
-    /// 未删掉的孤儿（app 硬退出/崩溃）由 [`crate::profile::gc_stale_profiles`] 启动时兜底回收。
-    cleanup_user_data_dir: Option<PathBuf>,
 }
 
 impl Drop for CdpBackend {
-    /// **并发隔离：引擎关闭时 best-effort 清理本实例专属的临时 user-data-dir**（`ephemeral`=Some）。
-    ///
-    /// 时序：Drop::drop 体先跑、字段（含 `_child` 的 `kill_on_drop`）随后 drop——即此刻 chrome 尚在被杀、
-    /// Windows 上文件句柄释放有延迟。故派一个 **detached 线程**：先小睡让 chrome 退出/句柄释放，再重试
-    /// `remove_dir_all`（指数退避几次）。删不掉不致命（[`crate::profile::gc_stale_profiles`] 启动时兜底）。
     fn drop(&mut self) {
-        let Some(dir) = self.cleanup_user_data_dir.take() else {
-            return; // 非 ephemeral（共享兜底 / 登录窗稳定目录 / 测试）→ 不清理
-        };
-        std::thread::spawn(move || {
-            for attempt in 0..10u32 {
-                std::thread::sleep(std::time::Duration::from_millis(200 * u64::from(attempt + 1)));
-                if !dir.exists() || std::fs::remove_dir_all(&dir).is_ok() {
-                    return;
-                }
-            }
-            tracing::debug!(
-                target: "nomi_browser_engine::profile",
-                dir = %dir.display(),
-                "ephemeral profile dir cleanup gave up after retries (startup GC will reclaim it)"
-            );
-        });
+        if let Some(cleanup) = self.lane_cleanup.as_ref()
+            && !self.lane_closed.load(Ordering::Acquire)
+        {
+            cleanup.hand_off();
+        }
+        if let Some(process) = self._process.as_ref() {
+            // The bounded target-cleanup worker retains the same process
+            // authority. Hand it off explicitly so that a worker/job cycle
+            // cannot postpone standalone Chromium teardown.
+            process.hand_off();
+        }
     }
 }
 
 impl CdpBackend {
-    /// **并发隔离：把本引擎的 user-data-dir 标记为 ephemeral（Drop 时清理）**。`create_engine` 对每实例
-    /// 唯一目录（`<data_dir>/profiles/<token>`）调用它，使该目录随引擎关闭 best-effort 删除（用完即弃）。
-    /// 共享兜底目录 / 登录窗稳定目录 / 测试不调用它 → 保留（默认 `None`）。见 [`Self::cleanup_user_data_dir`]。
-    pub fn mark_ephemeral(&mut self, user_data_dir: PathBuf) {
-        self.cleanup_user_data_dir = Some(user_data_dir);
-    }
-
     /// 用一次成功的 [`launch_chrome`] 产物建后端：connect → 起 attach loop →
     /// enable_auto_attach → 取一个 page session。
     ///
@@ -290,20 +2909,59 @@ impl CdpBackend {
         // 私网域先于 approver 被 SSRF 守卫 Block」这一关键交互(seam 此前硬编码,测试无从覆盖)。
         dns_resolver: Option<Arc<dyn crate::firewall::HostResolver>>,
     ) -> Result<Self, BrowserError> {
-        let Launched { child, transport } = launched;
+        let (
+            process,
+            transport,
+            ownership_token,
+            cleanup_user_data_dir,
+        ) = launched.into_managed();
+        let cleanup = Arc::new(DurableProcessCleanup::new(
+            process,
+            LaunchedProfileCleanupAuthority::new(cleanup_user_data_dir),
+            ownership_token,
+        ));
 
-        let conn = Connection::connect_launched(transport)
-            .await
-            .map_err(map_transport_err)?;
+        let conn = match Connection::connect_launched(transport).await {
+            Ok(conn) => conn,
+            Err(error) => {
+                let primary = map_transport_err(error);
+                return Err(cleanup_failed_host_launch(primary, cleanup).await);
+            }
+        };
 
         // 先装 attach loop（订阅在循环内部），再放行自动附着。顺序勿换。
         let attach_loop = conn.run_attach_loop();
-        conn.enable_auto_attach().await.map_err(map_transport_err)?;
+        if let Err(error) = conn.enable_auto_attach().await {
+            attach_loop.abort();
+            conn.shutdown().await;
+            let primary = map_transport_err(error);
+            return Err(cleanup_failed_host_launch(primary, cleanup).await);
+        }
+        let cleanup_executor = match TargetCleanupExecutor::new(
+            conn.clone(),
+            Some(Arc::clone(&cleanup)),
+        ) {
+            Ok(executor) => executor,
+            Err(error) => {
+                attach_loop.abort();
+                conn.shutdown().await;
+                return Err(cleanup_failed_host_launch(error, cleanup).await);
+            }
+        };
 
         // 取一个 page session（createTarget + 等其 attachedToTarget）。D1：需要 targetId（tabs 的 key
         // + active_target 指针），故 create_page_session 返 (target_id, session_id)。
+        let initial_target_background =
+            page_target_should_start_in_background(headful, display_available);
         let (page_target_id, page_session) =
-            create_page_session(&conn).await?;
+            match create_page_session(&conn, initial_target_background).await {
+            Ok(page) => page,
+            Err(error) => {
+                attach_loop.abort();
+                conn.shutdown().await;
+                return Err(cleanup_failed_host_launch(error, cleanup).await);
+            }
+        };
 
         // E4 下载沙箱：在**根 browser session** 挂 setDownloadBehavior（browser-level，作用全 context）
         // + 起下载事件循环（完成后打 MOTW）。仅当传入了隔离 download_dir。先订阅事件再放行行为不是
@@ -311,7 +2969,7 @@ impl CdpBackend {
         // 之前 spawn，确保不漏首个下载事件。失败 best-effort（warn 不致命）——沙箱缺失只降级到无 MOTW，
         // 不应阻断引擎创建；但若上层要求严格隔离，缺失即风险，故 warn 留痕。
         let download_loop = if let Some(ref dir) = download_dir {
-            let h = spawn_download_loop(conn.clone());
+            let h = spawn_download_loop(conn.clone(), None);
             if let Err(e) = set_download_behavior_sandbox(&conn, dir).await {
                 tracing::warn!(error = %e, dir = %dir, "setDownloadBehavior sandbox failed; downloads may fall back to chrome default");
             }
@@ -327,8 +2985,17 @@ impl CdpBackend {
 
         // D3：把「为一个 (target_id, session_id) arm injection + inject loop + oopif loop + 建 TabRecord」
         // 抽成可复用的 arm_tab helper。初始 tab 与发现循环里的新 tab 都用它（同一套 arm 逻辑，零分叉）。
-        let initial_tab =
-            arm_tab(&conn, &page_target_id, &page_session).await?;
+        let initial_tab = match arm_tab(&conn, &page_target_id, &page_session).await {
+            Ok(tab) => tab,
+            Err(error) => {
+                if let Some(loop_handle) = &download_loop {
+                    loop_handle.abort();
+                }
+                attach_loop.abort();
+                conn.shutdown().await;
+                return Err(cleanup_failed_host_launch(error, cleanup).await);
+            }
+        };
 
         // D1/D3：把初始 page 作为**唯一一个 TabRecord** 插入 tabs，active_target 指向它。
         // 单 tab 场景：tabs 永远只 1 项、active 指向它——行为与改造前完全一致。
@@ -401,20 +3068,32 @@ impl CdpBackend {
 
         let backend = Self {
             conn,
+            host: None,
+            #[cfg(test)]
+            test_router: None,
+            lane_id: "standalone".to_string(),
+            lane_cleanup: None,
+            cleanup_executor,
+            lane_closing: Arc::new(AtomicBool::new(false)),
+            lane_closed: Arc::new(AtomicBool::new(false)),
+            lane_retired: AtomicBool::new(false),
+            lane_shutdown_gate: AsyncMutex::new(()),
+            lane_close_confirmed: AsyncMutex::new(HashSet::new()),
+            lane_cancel: CancellationToken::new(),
             tabs,
             active_target,
             active_frame: Arc::new(AsyncMutex::new(None)),
             act_seq: std::sync::atomic::AtomicU64::new(0),
-            _child: AsyncMutex::new(child),
-            _attach_loop: attach_loop,
-            _tab_discovery_loop: tab_discovery_loop,
+            _process: Some(cleanup),
+            _attach_loop: Some(attach_loop),
+            _tab_discovery_loop: Some(tab_discovery_loop),
             _download_loop: download_loop,
             // F-actions：保留隔离下载目录绝对路径，供 download（触发落点验证）/ save_as_pdf（printToPDF
             // 写入）复用 E4 沙箱的同一目录。与 _download_loop 同生（仅当沙箱已挂）。
             download_dir,
             // SD-2：上传路径沙箱根（per-pet workspace）。act_upload_file 逐路径 canonicalize + 包含判定。
             workspace_dir,
-            _firewall_loop: firewall_loop,
+            _firewall_loop: Some(firewall_loop),
             // P3-G1：保留注入的 firewall 快照（与 loop 同值）供测试读回断言注入生效。
             firewall_config,
             // P3-D2：保留 always_allow 已批准域集合（与 loop 同 Arc）。
@@ -429,12 +3108,10 @@ impl CdpBackend {
             headful,
             display_available,
             // 引擎级 observe⊥act 串行门（见字段 doc）。每引擎一把,初始空闲。
-            op_mutex: AsyncMutex::new(()),
+            op_mutex: LaneOperationGate::default(),
+            target_recovery_gate: AsyncMutex::new(()),
             // Known-secret blackout: store the shared Arc for debug serializers to read.
             known_secret_values,
-            // 并发隔离：临时 user-data-dir 清理目标。默认 None（不清理——共享兜底 / 登录窗稳定目录 /
-            // 测试）；`create_engine` 对 per-instance 唯一目录调 `mark_ephemeral` 设成 Some → Drop 时清理。
-            cleanup_user_data_dir: None,
         };
 
         // ── W4d 持久登录：启动注入 storage_state（灌登录态）──────────────────────────
@@ -483,40 +3160,455 @@ impl CdpBackend {
 }
 
 impl CdpBackend {
+    /// Build one lane-scoped engine over an already connected shared host.
+    pub(crate) async fn from_host(
+        host: Arc<CdpHostRuntime>,
+        lane_id: LaneId,
+        config: LaneEngineConfig,
+    ) -> Result<Self, BrowserError> {
+        if host.shutdown.load(Ordering::Acquire) {
+            return Err(BrowserError::SessionLost { recoverable: false });
+        }
+        host.router.cleanup_executor.ensure_accepting()?;
+        let conn = host.conn.clone();
+        let initial_target_background =
+            page_target_should_start_in_background(host.headful, host.display_available);
+        // The CDP command and its nonce-correlated attach live in their own
+        // task. Dropping this `from_host` future detaches that task; its output
+        // still owns exact target cleanup and is closed when the task finishes.
+        let pending_page = create_pending_page_session_owned(
+            conn.clone(),
+            Arc::clone(&host.router.cleanup_executor),
+            Some(Arc::clone(&host.router)),
+            initial_target_background,
+        )
+        .await?;
+        let page_target_id = pending_page.target_id.clone();
+        let page_session = pending_page.session_id.clone();
+        let initial_tab = arm_tab(&conn, &page_target_id, &page_session).await?;
+        let initial_frame_id = initial_tab.main_frame_id.clone();
+        let download_dir = config
+            .workspace_dir
+            .as_deref()
+            .map(crate::download::ensure_download_dir)
+            .or_else(|| host.download_dir.clone());
+        let mut tabs_map = HashMap::new();
+        tabs_map.insert(page_target_id.clone(), initial_tab);
+        let tabs = Arc::new(AsyncMutex::new(tabs_map));
+        let active_target = Arc::new(AsyncMutex::new(page_target_id.clone()));
+        let active_frame = Arc::new(AsyncMutex::new(None));
+        let lane_closing = Arc::new(AtomicBool::new(false));
+        let lane_closed = Arc::new(AtomicBool::new(false));
+        let lane_cleanup = LaneCleanupAuthority::new(
+            conn.clone(),
+            Arc::clone(&host.router.cleanup_executor),
+            Arc::clone(&host.router),
+            lane_id.clone(),
+            Arc::clone(&lane_closing),
+            Arc::clone(&tabs),
+            page_target_id.clone(),
+            page_session.clone(),
+            initial_frame_id.clone(),
+        );
+        let launch_guard = PendingLaneLaunchGuard::new(Arc::clone(&lane_cleanup));
+        // From this synchronous transfer onward the Lane guard/backend is the
+        // sole exact target cleanup authority.
+        let _ = pending_page.transfer_to_lane();
+
+        let registration_id = host
+            .router
+            .register_lane(
+                lane_id.clone(),
+                &tabs,
+                &active_target,
+                &active_frame,
+                lane_closing.clone(),
+                download_dir.clone(),
+            )
+            .await
+            .ok_or_else(|| {
+                BrowserError::Other(format!(
+                    "browser Lane {lane_id} is already registered or still cleaning up"
+                ))
+            })?;
+        lane_cleanup.set_registration(registration_id);
+        if !host.router.claim_target(&lane_id, &page_target_id).await {
+            return Err(BrowserError::Other(format!(
+                "new target could not be claimed for browser Lane {lane_id}"
+            )));
+        }
+        host.router.claim_frame(&lane_id, &initial_frame_id).await;
+        if let Err(error) = enable_fetch_on_session(&conn, &page_session).await {
+            tracing::warn!(
+                lane_id = %lane_id,
+                session_id = %page_session,
+                %error,
+                "Fetch.enable on initial lane page failed"
+            );
+        }
+
+        let known_secret_values = config.known_secret_values.unwrap_or_default();
+        let backend = Self {
+            conn,
+            host: Some(host.clone()),
+            #[cfg(test)]
+            test_router: None,
+            lane_id,
+            lane_cleanup: Some(lane_cleanup),
+            cleanup_executor: Arc::clone(&host.router.cleanup_executor),
+            lane_closing,
+            lane_closed,
+            lane_retired: AtomicBool::new(false),
+            lane_shutdown_gate: AsyncMutex::new(()),
+            lane_close_confirmed: AsyncMutex::new(HashSet::new()),
+            lane_cancel: CancellationToken::new(),
+            tabs,
+            active_target,
+            active_frame,
+            act_seq: std::sync::atomic::AtomicU64::new(0),
+            _process: None,
+            _attach_loop: None,
+            _tab_discovery_loop: None,
+            _download_loop: None,
+            download_dir,
+            workspace_dir: config.workspace_dir,
+            _firewall_loop: None,
+            firewall_config: host.firewall_config.clone(),
+            approved_domains: host.approved_domains.clone(),
+            evaluate_gate: AsyncMutex::new(crate::evaluate::EvaluateGate {
+                full_power: config.evaluate_full_power,
+                persistent_login: config.evaluate_persistent_login,
+            }),
+            headful: host.headful,
+            display_available: host.display_available,
+            op_mutex: LaneOperationGate::default(),
+            target_recovery_gate: AsyncMutex::new(()),
+            known_secret_values,
+        };
+
+        if let Some(value) = host.storage_state.clone() {
+            match crate::storage_state::StorageState::from_json(value) {
+                Ok(state) => {
+                    if let Err(error) = backend.restore_cookies(&state).await {
+                        tracing::warn!(%error, "shared-host cookie restore failed");
+                    }
+                    if let Err(error) = backend.restore_local_storage(&state).await {
+                        tracing::warn!(%error, "shared-host localStorage restore failed");
+                    }
+                }
+                Err(error) => {
+                    tracing::warn!(%error, "shared-host storage state is invalid");
+                }
+            }
+        }
+        // The returned backend retains the same final-Drop authority. This
+        // commit therefore does not open a gap before coordinator publication.
+        launch_guard.commit();
+        Ok(backend)
+    }
+
+    fn target_router(&self) -> Option<&Arc<HostTargetRouter>> {
+        if let Some(host) = self.host.as_ref() {
+            return Some(&host.router);
+        }
+        #[cfg(test)]
+        {
+            return self.test_router.as_ref();
+        }
+        #[cfg(not(test))]
+        {
+            None
+        }
+    }
+
+    /// Cancel in-flight work and close only this lane's targets.  This method
+    /// deliberately bypasses `op_mutex`, so a hung lane operation cannot block
+    /// authoritative cleanup.
+    pub(crate) async fn shutdown_lane(&self) -> Result<(), BrowserError> {
+        let _shutdown = self.lane_shutdown_gate.lock().await;
+        if self.lane_closed.load(Ordering::Acquire) {
+            return Ok(());
+        }
+        self.lane_closing.store(true, Ordering::Release);
+        self.lane_cancel.cancel();
+        if !self.lane_retired.load(Ordering::Acquire) {
+            let mut drain_passes = 0usize;
+            loop {
+                let mut target_ids = {
+                    let tabs = self.tabs.lock().await;
+                    tabs.keys().cloned().collect::<Vec<_>>()
+                };
+                if let Some(router) = self.target_router() {
+                    target_ids.extend(router.owned_targets(&self.lane_id).await);
+                }
+                target_ids.sort();
+                target_ids.dedup();
+                let pending_targets = {
+                    let confirmed = self.lane_close_confirmed.lock().await;
+                    target_ids
+                        .into_iter()
+                        .filter(|target_id| !confirmed.contains(target_id))
+                        .collect::<Vec<_>>()
+                };
+                for target_id in pending_targets {
+                    if let Err(error) =
+                        close_target_or_confirm_absent(&self.conn, &target_id).await
+                    {
+                        tracing::debug!(
+                            lane_id = %self.lane_id,
+                            target_id_suffix = %cdp_id_suffix(&target_id),
+                            %error,
+                            "closing lane target failed; preserving lane state for retry"
+                        );
+                        return Err(error);
+                    }
+                    self.lane_close_confirmed
+                        .lock()
+                        .await
+                        .insert(target_id.clone());
+                    if let Some(record) = self.tabs.lock().await.get(&target_id) {
+                        abort_tab_record(record);
+                    }
+                }
+
+                let Some(router) = self.target_router() else {
+                    break;
+                };
+                let live_targets = router
+                    .claim_live_targets_for_closing_lane(&self.lane_id)
+                    .await?;
+                if live_targets.is_empty() {
+                    break;
+                }
+                drain_passes += 1;
+                if drain_passes >= LATE_TARGET_DRAIN_MAX_PASSES {
+                    return Err(BrowserError::Other(
+                        "closing Lane still has live top-level targets after bounded drain".into(),
+                    ));
+                }
+                let mut confirmed = self.lane_close_confirmed.lock().await;
+                for target_id in live_targets {
+                    confirmed.remove(&target_id);
+                }
+                drop(confirmed);
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            // Retirement is a durable phase transition. `unregister_lane` is
+            // idempotent, so cancellation at any later await can safely retry
+            // it without re-entering the active-Lane inventory drain.
+            self.lane_retired.store(true, Ordering::Release);
+        }
+        if let Some(router) = self.target_router() {
+            if let Some(registration_id) = self
+                .lane_cleanup
+                .as_ref()
+                .and_then(|cleanup| cleanup.registration())
+            {
+                let _ = router
+                    .unregister_lane_if_current(&self.lane_id, registration_id)
+                    .await;
+            } else {
+                #[cfg(test)]
+                router.unregister_lane(&self.lane_id).await;
+            }
+            router.finalize_retired_lane(&self.lane_id).await?;
+        }
+        let records = {
+            let mut tabs = self.tabs.lock().await;
+            std::mem::take(&mut *tabs)
+        };
+        for record in records.values() {
+            abort_tab_record(record);
+        }
+        self.lane_close_confirmed.lock().await.clear();
+        self.lane_closed.store(true, Ordering::Release);
+        if let Some(cleanup) = self.lane_cleanup.as_ref() {
+            cleanup.mark_finished();
+        }
+        Ok(())
+    }
+
     /// **active tab 句柄快照**（D1 锁模式核心；DESIGN §13 裁决⑥ + [`crate::tabs`] 锁设计）：短暂锁
     /// `active_target` + `tabs`，从 active [`TabRecord`] **克隆出**所有可独立持有的句柄
     /// （[`TabHandles`]），**立即释放两把锁**后返回。observe/act/navigate 全程用克隆出的句柄操作——
     /// **绝不**跨 await 持 `tabs` 锁（否则阻塞 D3 tab 发现循环 + observe 内嵌套锁 ref_table 死锁）。
     ///
-    /// `active_target` 指向的 tab 不在 `tabs` 里（D3 close 后的竞态 / 内部不变量破坏）→ 返
-    /// [`BrowserError::SessionLost`]`{recoverable:false}`（绝不 panic）。**单 tab 场景**：tabs 恒 1 项、
-    /// active 指向它，必命中。
+    /// `active_target` 指向的 tab 已崩溃/不在 `tabs` 时，先剔除崩溃记录并按 target id
+    /// 确定性选择仍存活的 tab；没有 survivor 时按需创建 replacement target。整条恢复链由
+    /// lane-local gate 串行化，因此并发访问只会发布一个 replacement。
     pub(crate) async fn active_tab_handles(&self) -> Result<TabHandles, BrowserError> {
-        // 先锁 active_target 取指针（短临界区，clone 出 String 即放）。
-        let target_id = self.active_target.lock().await.clone();
-        // 再锁 tabs 取 active 记录、克隆句柄、立即释放（不跨任何 await 持 tabs 锁）。
-        let guard = self.tabs.lock().await;
-        let tab = guard.get(&target_id).ok_or(BrowserError::SessionLost {
-            recoverable: false,
-        })?;
-        Ok(TabHandles {
-            target_id: tab.target_id.clone(),
-            session_id: tab.session_id.clone(),
-            // InjectionManager: Clone（共享 Arc 缓存，不复制后台循环）。
-            injection: tab.injection.clone(),
-            main_frame_id: tab.main_frame_id.clone(),
-            // Arc clone：锁外独立锁这两个（observe 跨多 await 不持 tabs 锁）。
-            oopif_managers: tab.oopif_managers.clone(),
-            ref_table: tab.ref_table.clone(),
-            debug: tab.debug.clone(),
-        })
-        // guard 在此 drop（释放 tabs 锁）。
+        if self.lane_closing.load(Ordering::Acquire) {
+            return Err(BrowserError::TargetClosed);
+        }
+
+        // Agent operations are already serialized by `op_mutex`; this
+        // additional Lane-local gate makes final-tab replacement single-flight.
+        let _recovery = self.target_recovery_gate.lock().await;
+        if self.lane_closing.load(Ordering::Acquire) {
+            return Err(BrowserError::TargetClosed);
+        }
+        if let Some(handles) = self.select_live_active_tab().await {
+            return Ok(handles);
+        }
+        self.create_replacement_target().await
+    }
+
+    /// Resolve the current active target, pruning sticky-crashed records and
+    /// deterministically selecting another Lane-owned tab when available.
+    async fn select_live_active_tab(&self) -> Option<TabHandles> {
+        let previous_active = self.active_target.lock().await.clone();
+        let (selected, removed) = {
+            let mut tabs = self.tabs.lock().await;
+            let crashed = tabs
+                .iter()
+                .filter_map(|(target_id, record)| {
+                    self.conn
+                        .registry()
+                        .is_session_crashed(&record.session_id)
+                        .then(|| target_id.clone())
+                })
+                .collect::<Vec<_>>();
+            let mut removed = Vec::with_capacity(crashed.len());
+            for target_id in crashed {
+                if let Some(record) = tabs.remove(&target_id) {
+                    removed.push(record);
+                }
+            }
+
+            let selected_id = tabs
+                .contains_key(&previous_active)
+                .then(|| previous_active.clone())
+                .or_else(|| deterministic_survivor(tabs.keys().map(String::as_str), ""));
+            let selected = selected_id
+                .as_ref()
+                .and_then(|target_id| tabs.get(target_id))
+                .map(tab_handles);
+            (selected, removed)
+        };
+        for record in removed {
+            abort_tab_record(&record);
+        }
+
+        if let Some(handles) = selected {
+            if handles.target_id != previous_active {
+                *self.active_target.lock().await = handles.target_id.clone();
+                *self.active_frame.lock().await = None;
+            }
+            Some(handles)
+        } else {
+            None
+        }
+    }
+
+    /// Lazily create the replacement required after a Lane loses its final
+    /// target. The recovery gate held by [`Self::active_tab_handles`] ensures
+    /// concurrent callers create at most one target.
+    async fn create_replacement_target(&self) -> Result<TabHandles, BrowserError> {
+        if self.conn.registry().is_connection_closed() {
+            return Err(BrowserError::SessionLost { recoverable: false });
+        }
+
+        let replacement_target_background =
+            page_target_should_start_in_background(self.headful, self.display_available);
+        let pending_page = create_pending_page_session_owned(
+            self.conn.clone(),
+            Arc::clone(&self.cleanup_executor),
+            self.target_router().cloned(),
+            replacement_target_background,
+        )
+        .await?;
+        let target_id = pending_page.target_id.clone();
+        let session_id = pending_page.session_id.clone();
+        if let Some(host) = &self.host
+            && !host.router.claim_target(&self.lane_id, &target_id).await
+        {
+            return Err(BrowserError::TargetCrashed);
+        }
+
+        // The router or standalone discovery loop may have armed the target
+        // while `claim_target` awaited a quarantined attach.
+        if let Some(handles) = self
+            .tabs
+            .lock()
+            .await
+            .get(&target_id)
+            .map(tab_handles)
+        {
+            let _ = pending_page.transfer_to_lane();
+            *self.active_target.lock().await = target_id;
+            *self.active_frame.lock().await = None;
+            return Ok(handles);
+        }
+
+        let record = arm_tab(&self.conn, &target_id, &session_id).await?;
+        let main_frame_id = record.main_frame_id.clone();
+        let handles = tab_handles(&record);
+
+        if self.conn.registry().is_session_crashed(&session_id) {
+            abort_tab_record(&record);
+            return Err(BrowserError::TargetCrashed);
+        }
+        if let Some(host) = &self.host
+            && host.router.is_target_lost(&target_id).await
+        {
+            abort_tab_record(&record);
+            return Err(BrowserError::TargetCrashed);
+        }
+
+        let mut pending_record = Some(record);
+        let survivor = {
+            let mut tabs = self.tabs.lock().await;
+            let survivor =
+                deterministic_survivor(tabs.keys().map(String::as_str), &target_id);
+            if survivor.is_none() {
+                if let Some(record) = pending_record.take() {
+                    tabs.insert(target_id.clone(), record);
+                }
+            }
+            survivor
+        };
+
+        if let Some(survivor) = survivor {
+            if let Some(record) = pending_record.as_ref() {
+                abort_tab_record(record);
+            }
+            close_target_or_confirm_absent(&self.conn, &target_id).await?;
+            let _ = pending_page.transfer_to_lane();
+            *self.active_target.lock().await = survivor;
+            *self.active_frame.lock().await = None;
+            return self
+                .select_live_active_tab()
+                .await
+                .ok_or(BrowserError::TargetClosed);
+        }
+
+        let _ = pending_page.transfer_to_lane();
+        *self.active_target.lock().await = target_id.clone();
+        *self.active_frame.lock().await = None;
+        if let Some(host) = &self.host {
+            host.router.claim_frame(&self.lane_id, &main_frame_id).await;
+        }
+        if let Err(error) = enable_fetch_on_session(&self.conn, &session_id).await {
+            tracing::warn!(
+                lane_id = %self.lane_id,
+                target_id_suffix = %cdp_id_suffix(&target_id),
+                %error,
+                "Fetch.enable on replacement Lane target failed"
+            );
+        }
+        tracing::info!(
+            target: "nomi_browser_engine::host",
+            lane_id = %self.lane_id,
+            target_id_suffix = %cdp_id_suffix(&target_id),
+            "created replacement target after the Lane lost its final tab"
+        );
+        Ok(handles)
     }
 
     /// **Takeover seam: bring the headful browser window to the foreground.**
     ///
-    /// - Headful + display available → sends `Page.bringToFront` (CDP) on the active
-    ///   page session + `Target.activateTarget` on the browser session. Returns `Ok(())`.
+    /// - Headful + display available → resolves the active target's real browser window,
+    ///   restores it to `normal`, then activates the active target/tab. Returns `Ok(())`.
     /// - Headless or no display → returns `Err(BrowserError::Unsupported)` with
     ///   capability="takeover" so the caller can map it to [`TakeoverResolution::Unavailable`].
     ///
@@ -531,28 +3623,53 @@ impl CdpBackend {
             });
         }
 
-        // Get the active page session.
+        // Resolve both handles before issuing any window-management command. The
+        // target id is required because this command runs on the browser session.
         let handles = self.active_tab_handles().await?;
-        let session = handles.session_id.as_str();
+        use chromiumoxide::cdp::browser_protocol::browser::{
+            Bounds, GetWindowForTargetParams, GetWindowForTargetReturns, SetWindowBoundsParams,
+            WindowState,
+        };
+        use chromiumoxide::cdp::browser_protocol::target::ActivateTargetParams;
 
-        // Page.bringToFront — brings the page to front (activates the tab in the window
-        // and focuses the window). This is the primary CDP command for foregrounding.
-        use chromiumoxide::cdp::browser_protocol::page::BringToFrontParams;
+        // Ask Chromium for the native window which owns this target and
+        // normalize it before activation. Headful Hosts are created only by an
+        // explicit trusted presentation transition; this is not a mechanism
+        // for simulating headless work with a minimized window.
+        let window = self
+            .conn
+            .send::<GetWindowForTargetParams>(
+                ROOT_SESSION,
+                &GetWindowForTargetParams::builder()
+                    .target_id(handles.target_id.clone())
+                    .build(),
+            )
+            .await
+            .map_err(map_transport_err)?;
+        let window: GetWindowForTargetReturns = serde_json::from_value(window)
+            .map_err(|_| BrowserError::Other("invalid Browser.getWindowForTarget response".into()))?;
+        let restore = SetWindowBoundsParams::new(
+            window.window_id,
+            Bounds::builder().window_state(WindowState::Normal).build(),
+        );
         let _ = self
             .conn
-            .send::<BringToFrontParams>(session, &BringToFrontParams::default())
+            .send::<SetWindowBoundsParams>(ROOT_SESSION, &restore)
             .await
             .map_err(map_transport_err)?;
 
-        // Also activate the target at the browser level (best-effort, like switch_tab).
-        use chromiumoxide::cdp::browser_protocol::target::ActivateTargetParams;
+        // Activate only after the native window has been restored so Chromium can
+        // select the requested tab in a visible window. Unlike switch_tab's
+        // cosmetic best-effort activation, this trusted foreground seam reports a
+        // failure if activation itself fails.
         let _ = self
             .conn
             .send::<ActivateTargetParams>(
                 ROOT_SESSION,
                 &ActivateTargetParams::new(handles.target_id.clone()),
             )
-            .await;
+            .await
+            .map_err(map_transport_err)?;
 
         Ok(())
     }
@@ -668,7 +3785,8 @@ fn spawn_tab_discovery_loop(
                     if !registry.has_session(&sid) {
                         tracing::warn!(
                             target: "nomi_browser_engine::backend::cdp",
-                            session_id = %sid, target_id = %tid,
+                            session_id = %sid,
+                            target_id_suffix = %cdp_id_suffix(&tid),
                             "new page child session never registered; skip arm"
                         );
                         continue;
@@ -686,20 +3804,20 @@ fn spawn_tab_discovery_loop(
                                 record._oopif_loop.abort();
                                 continue;
                             }
-                            let last4 = crate::tabs::last4(&tid);
+                            let target_id_suffix = cdp_id_suffix(&tid);
                             guard.insert(tid.clone(), record);
                             drop(guard);
                             // **不抢焦点、不改 active**：只记日志（LLM 经 tabs/switch_tab 显式切换）。
                             tracing::info!(
                                 target: "nomi_browser_engine::backend::cdp",
-                                target_id = %tid, last4 = %last4,
-                                "新标签已打开[{last4}]（未抢焦点；observe/act 仍在原标签，需显式 switch_tab）"
+                                target_id_suffix = %target_id_suffix,
+                                "新标签已打开[{target_id_suffix}]（未抢焦点；observe/act 仍在原标签，需显式 switch_tab）"
                             );
                         }
                         Err(e) => {
                             tracing::warn!(
                                 target: "nomi_browser_engine::backend::cdp",
-                                target_id = %tid, error = %e,
+                                target_id_suffix = %cdp_id_suffix(&tid), error = %e,
                                 "arm discovered tab failed (non-fatal)"
                             );
                         }
@@ -722,14 +3840,260 @@ fn spawn_tab_discovery_loop(
 /// **D1**：返回 `(target_id, session_id)`——targetId 是 tabs 注册表的 key + active_target 指针
 /// （`createTarget` 回包已给 targetId，attach 事件的 `target_info.target_id` 与之一致；二者择一即可，
 /// 这里直接复用 createTarget 拿到的 `target_id`）。
+const fn page_target_should_start_in_background(
+    headful: bool,
+    display_available: bool,
+) -> bool {
+    !(headful && display_available)
+}
+
+fn initial_page_target_params(background: bool) -> CreateTargetParams {
+    let mut params = CreateTargetParams::new("about:blank");
+    params.background = Some(background);
+    params
+}
+
+static NEXT_PENDING_PAGE_NONCE: AtomicU64 = AtomicU64::new(1);
+
+fn pending_page_url() -> String {
+    let nonce = NEXT_PENDING_PAGE_NONCE.fetch_add(1, Ordering::Relaxed);
+    format!(
+        "about:blank#nomifun-pending-{}-{nonce}",
+        std::process::id()
+    )
+}
+
+fn pending_page_target_params(url: &str, background: bool) -> CreateTargetParams {
+    let mut params = CreateTargetParams::new(url);
+    params.background = Some(background);
+    params
+}
+
+fn pending_page_from_attach(
+    event: &crate::transport::CdpEvent,
+    pending_url: &str,
+    response_target_id: Option<&str>,
+) -> Option<(String, String)> {
+    let attached = serde_json::from_value::<EventAttachedToTarget>(event.params.clone()).ok()?;
+    if attached.target_info.r#type != "page" {
+        return None;
+    }
+    let target_id: String = attached.target_info.target_id.into();
+    let url_matches = attached.target_info.url == pending_url;
+    if !url_matches && response_target_id != Some(target_id.as_str()) {
+        return None;
+    }
+    Some((target_id, attached.session_id.into()))
+}
+
+async fn hand_off_pending_page_error(
+    conn: &Connection,
+    executor: &Arc<TargetCleanupExecutor>,
+    router: &Option<Arc<HostTargetRouter>>,
+    identity: Option<(String, Option<String>)>,
+    pending_url: &str,
+    error: BrowserError,
+) -> BrowserError {
+    // An absent inventory after a timed-out create command is not an ordering
+    // proof: Chromium may execute the command later. Preserve the unknown
+    // nonce as a cleanup intent; the bounded executor escalates it directly to
+    // whole-Host teardown rather than accepting two short empty snapshots.
+    if let Some((target_id, session_id)) = identity {
+        PendingCreatedPageCleanup::new(
+            conn.clone(),
+            Arc::clone(executor),
+            router.clone(),
+            Some(target_id),
+            session_id,
+            Some(pending_url.to_string()),
+        )
+        .hand_off();
+    } else {
+        PendingCreatedPageCleanup::new(
+            conn.clone(),
+            Arc::clone(executor),
+            router.clone(),
+            None,
+            None,
+            Some(pending_url.to_string()),
+        )
+        .hand_off();
+    }
+    error
+}
+
+/// Cancellation-safe shared-Lane page creation.
+///
+/// The caller executes this future in an owned task and supplies a token which
+/// is cancelled when the waiting `from_host` future is dropped. A unique inert
+/// URL correlates `attachedToTarget` even when Chromium executes
+/// `Target.createTarget` but its response is withheld or lost.
+async fn create_pending_lane_page_session(
+    conn: Connection,
+    executor: Arc<TargetCleanupExecutor>,
+    router: Option<Arc<HostTargetRouter>>,
+    background: bool,
+    caller_cancelled: CancellationToken,
+) -> Result<PendingCreatedPage, BrowserError> {
+    let pending_url = pending_page_url();
+    let mut attached_rx = conn.subscribe(EventAttachedToTarget::IDENTIFIER, None);
+    let params = pending_page_target_params(&pending_url, background);
+    let create = conn.send::<CreateTargetParams>(ROOT_SESSION, &params);
+    tokio::pin!(create);
+
+    let deadline = tokio::time::Instant::now() + PENDING_PAGE_CREATE_RECOVERY_TIMEOUT;
+    let mut response_target_id: Option<String> = None;
+    let mut response_error: Option<BrowserError> = None;
+    let mut attached_identity: Option<(String, String)> = None;
+    let mut caller_is_cancelled = false;
+    let mut attached_closed = false;
+
+    loop {
+        if let Some((target_id, session_id)) = attached_identity.as_ref()
+            && (response_target_id.as_deref() == Some(target_id.as_str())
+                || response_error.is_some()
+                || caller_is_cancelled)
+        {
+            if caller_is_cancelled || response_error.is_some() {
+                let error = response_error.take().unwrap_or(BrowserError::Other(
+                    "shared Host Lane page launch was cancelled".into(),
+                ));
+                return Err(
+                    hand_off_pending_page_error(
+                        &conn,
+                        &executor,
+                        &router,
+                        Some((target_id.clone(), Some(session_id.clone()))),
+                        &pending_url,
+                        error,
+                    )
+                    .await,
+                );
+            }
+            let cleanup = PendingCreatedPageCleanup::new(
+                conn.clone(),
+                Arc::clone(&executor),
+                router.clone(),
+                Some(target_id.clone()),
+                Some(session_id.clone()),
+                Some(pending_url.clone()),
+            );
+            return Ok(PendingCreatedPage {
+                target_id: target_id.clone(),
+                session_id: session_id.clone(),
+                cleanup,
+                transferred: false,
+            });
+        }
+        if attached_identity.is_none()
+            && (response_error.is_some()
+                || (caller_is_cancelled && response_target_id.is_some()))
+        {
+            let error = response_error.take().unwrap_or(BrowserError::Other(
+                "shared Host Lane page launch was cancelled".into(),
+            ));
+            let identity = response_target_id
+                .take()
+                .map(|target_id| (target_id, None));
+            return Err(
+                hand_off_pending_page_error(
+                    &conn,
+                    &executor,
+                    &router,
+                    identity,
+                    &pending_url,
+                    error,
+                )
+                .await,
+            );
+        }
+
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            let identity = attached_identity
+                .take()
+                .map(|(target_id, session_id)| (target_id, Some(session_id)))
+                .or_else(|| {
+                    response_target_id
+                        .take()
+                        .map(|target_id| (target_id, None))
+                });
+            let error = response_error.take().unwrap_or_else(|| {
+                BrowserError::Other(format!(
+                    "timed out creating or attaching pending Lane page {pending_url}"
+                ))
+            });
+            return Err(
+                hand_off_pending_page_error(
+                    &conn,
+                    &executor,
+                    &router,
+                    identity,
+                    &pending_url,
+                    error,
+                )
+                .await,
+            );
+        }
+
+        tokio::select! {
+            response = &mut create, if response_target_id.is_none() && response_error.is_none() => {
+                match response {
+                    Ok(result) => {
+                        response_target_id = result
+                            .get("targetId")
+                            .and_then(serde_json::Value::as_str)
+                            .map(str::to_owned);
+                        if response_target_id.is_none() {
+                            response_error = Some(BrowserError::Other(
+                                "createTarget response missing targetId".into(),
+                            ));
+                        }
+                    }
+                    Err(error) => response_error = Some(map_transport_err(error)),
+                }
+            }
+            event = attached_rx.recv(), if !attached_closed => {
+                match event {
+                    Ok(event) => {
+                        if let Some(identity) = pending_page_from_attach(
+                            &event,
+                            &pending_url,
+                            response_target_id.as_deref(),
+                        ) {
+                            attached_identity = Some(identity);
+                        }
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                        attached_closed = true;
+                        response_error.get_or_insert(BrowserError::SessionLost {
+                            recoverable: false,
+                        });
+                    }
+                }
+            }
+            _ = caller_cancelled.cancelled(), if !caller_is_cancelled => {
+                caller_is_cancelled = true;
+            }
+            _ = tokio::time::sleep(remaining) => {}
+        }
+    }
+}
+
 async fn create_page_session(
     conn: &Connection,
+    background: bool,
 ) -> Result<(String, String), BrowserError> {
     // 1) 先订阅 attach 事件（在 createTarget 之前，避免错过）。
     let mut attached_rx = conn.subscribe(EventAttachedToTarget::IDENTIFIER, None);
 
-    // 2) 在根 session 上建 page target（默认 browser context）。
-    let params = CreateTargetParams::new("about:blank");
+    // 2) 在根 session 上建 page target（默认 browser context）。普通 Agent Lane
+    // 运行在真正的 Headless Host，仍显式要求后台 target。受信任的 external
+    // 展示入口会启动有效的 Headful Host；它的首个或最终标签恢复 target 必须前台
+    // 创建，否则 `--no-startup-window` 后 Chromium 可能只有一个后台 target，用户
+    // 看不到 Browser Use 实际工作的窗口。
+    let params = initial_page_target_params(background);
     let result = conn
         .send::<CreateTargetParams>(ROOT_SESSION, &params)
         .await
@@ -781,6 +4145,7 @@ async fn create_page_session(
 /// OOPIF 子 session 等子 session 已登记的轮询上限（`run_attach_loop` 先登记再放行，但两路
 /// 订阅者的调度顺序非确定，故 arm 前轮询确认子 session 已在注册表）。
 const OOPIF_SESSION_REGISTER_TIMEOUT: Duration = Duration::from_secs(5);
+const LATE_TARGET_DRAIN_MAX_PASSES: usize = 4;
 
 /// **OOPIF arm 后台循环（接线骨架）**：订阅 `Target.attachedToTarget`（全 session 通配），
 /// 对类型为 **`iframe`** 且**非本 page session** 的子 session arm 一个 [`InjectionManager`]
@@ -807,6 +4172,7 @@ fn spawn_oopif_arm_loop(
         loop {
             match rx.recv().await {
                 Ok(ev) => {
+                    let event_parent_session = ev.session_id.clone();
                     let Ok(att) =
                         serde_json::from_value::<EventAttachedToTarget>(ev.params.clone())
                     else {
@@ -820,7 +4186,13 @@ fn spawn_oopif_arm_loop(
                     // [`crate::tabs::should_arm_as_oopif`]（与 should_arm_as_page 严格互补）。
                     let is_own_page_session = sid == page_session;
                     let already_armed = oopif_managers.lock().await.contains_key(&sid);
-                    if !crate::tabs::should_arm_as_oopif(&ttype, is_own_page_session, already_armed) {
+                    if !crate::tabs::should_arm_as_oopif_for_parent(
+                        &ttype,
+                        &event_parent_session,
+                        &page_session,
+                        is_own_page_session,
+                        already_armed,
+                    ) {
                         continue;
                     }
                     // 等子 session 在注册表登记（run_attach_loop 的 handle_attached 负责登记）。
@@ -1044,29 +4416,39 @@ impl BrowserEngine for CdpBackend {
 
     async fn navigate(&self, url: &str, _new_tab: bool) -> Result<NavResult, BrowserError> {
         // observe⊥act：整段导航持引擎 op_mutex（DESIGN §22），不与在途 observe/act 在本引擎交错。
-        let _op = self.op_mutex.lock().await;
+        let _op = tokio::select! {
+            guard = self.op_mutex.lock() => guard,
+            _ = self.lane_cancel.cancelled() => return Err(BrowserError::TargetClosed),
+        };
         // D1/D2：在 active tab 的 page session 上原地导航（多 tab 路由 / new_tab 由 D3 实现）。短暂
         // 锁 tabs 克隆出 active 句柄后立即释放（不跨 await 持 tabs 锁）。
         let handles = self.active_tab_handles().await?;
         let session = handles.session_id.as_str();
         let main_frame_id = handles.main_frame_id.clone();
-        self.navigate_on_session(session, &main_frame_id, url).await
+        tokio::select! {
+            result = self.navigate_on_session(session, &main_frame_id, url) => result,
+            _ = self.lane_cancel.cancelled() => Err(BrowserError::TargetClosed),
+        }
     }
 
     async fn screenshot(&self) -> Result<Vec<u8>, BrowserError> {
         // observe⊥act：持 op_mutex（DESIGN §22），截图不与在途 act 改 DOM 交错。
-        let _op = self.op_mutex.lock().await;
+        let _op = tokio::select! {
+            guard = self.op_mutex.lock() => guard,
+            _ = self.lane_cancel.cancelled() => return Err(BrowserError::TargetClosed),
+        };
         // D1：截 active tab。
         let session = self.active_tab_handles().await?.session_id;
         let params = CaptureScreenshotParams::builder()
             .format(CaptureScreenshotFormat::Png)
             .build();
 
-        let result = self
-            .conn
-            .send::<CaptureScreenshotParams>(&session, &params)
-            .await
-            .map_err(map_transport_err)?;
+        let result = tokio::select! {
+            result = self.conn.send::<CaptureScreenshotParams>(&session, &params) => {
+                result.map_err(map_transport_err)?
+            }
+            _ = self.lane_cancel.cancelled() => return Err(BrowserError::TargetClosed),
+        };
 
         let shot: CaptureScreenshotReturns = serde_json::from_value(result.clone()).map_err(|e| {
             BrowserError::Other(format!("parse captureScreenshot response: {e}"))
@@ -1080,8 +4462,14 @@ impl BrowserEngine for CdpBackend {
 
     async fn observe(&self, opts: &ObserveOpts) -> Result<Observation, BrowserError> {
         // observe⊥act：整段快照持 op_mutex，动作不可在序列化中途改 DOM（否则交回模型陈旧 ref）。
-        let _op = self.op_mutex.lock().await;
-        self.observe_impl(opts).await
+        let _op = tokio::select! {
+            guard = self.op_mutex.lock() => guard,
+            _ = self.lane_cancel.cancelled() => return Err(BrowserError::TargetClosed),
+        };
+        tokio::select! {
+            result = self.observe_impl(opts) => result,
+            _ = self.lane_cancel.cancelled() => Err(BrowserError::TargetClosed),
+        }
     }
 
     async fn rendered_html(&self) -> Result<String, BrowserError> {
@@ -1106,9 +4494,15 @@ impl BrowserEngine for CdpBackend {
         progress: &crate::progress::Progress,
     ) -> Result<crate::actions::ActResult, BrowserError> {
         // observe⊥act + per-target act 串行：一引擎一次一动作。受 progress 截止时间界定,op_mutex 不无界持有。
-        let _op = self.op_mutex.lock().await;
+        let _op = tokio::select! {
+            guard = self.op_mutex.lock() => guard,
+            _ = self.lane_cancel.cancelled() => return Err(BrowserError::TargetClosed),
+        };
         // C1：Click/Type/SetValue 经 act_impl 串 B2-B6 执行；其它 ActSpec 仍 Unsupported（C2/C3/D/E/F）。
-        self.act_impl(spec, progress).await
+        tokio::select! {
+            result = self.act_impl(spec, progress) => result,
+            _ = self.lane_cancel.cancelled() => Err(BrowserError::TargetClosed),
+        }
     }
 
     async fn debug_snapshot(
@@ -1126,6 +4520,10 @@ impl BrowserEngine for CdpBackend {
         &self,
     ) -> Result<crate::storage_state::StorageState, BrowserError> {
         CdpBackend::capture_storage_state(self).await
+    }
+
+    async fn tabs(&self) -> Result<Vec<BrowserTabInfo>, BrowserError> {
+        self.structured_tab_inventory().await
     }
 
     async fn click_at_css_point(&self, x: f64, y: f64) -> Result<(), BrowserError> {
@@ -1166,26 +4564,31 @@ impl CdpBackend {
     /// 1. 据传入的 `parent`（动作的总 deadline/取消上下文）派生一个**子** [`Progress`]（共享 timeout +
     ///    token 层级：parent 取消 → 子立即取消）。动作跑在返回的子 Progress 上。
     /// 2. spawn 一个监听任务，select 三路事件订阅；命中即对子 Progress `abort`：
-    ///    - `Target.detachedFromTarget` / `Target.targetCrashed`（params.sessionId == 本 page session）
-    ///      → `abort(PageClosed)`（target 没了/崩了 → 上层经 errmap 成 `TargetClosed`）；
+    ///    - `Target.detachedFromTarget`（params.sessionId == 本 page session）
+    ///      → `abort(PageClosed)`；
+    ///    - `Target.targetCrashed`（params.targetId == 本 page target）
+    ///      → `abort(TargetCrashed)`；
     ///    - `Page.frameDetached`（params.frameId == `frame_id`，即动作所在帧）→ `abort(FrameDetached)`。
     /// 3. 返回 `(child, guard)`：动作在 `child` 上跑；`guard` 持监听任务句柄，**Drop 即取消监听**
     ///    （动作结束——成功/失败均然——guard 离开作用域，临时订阅随之收摊）。
     ///
     /// **绝不 panic**：监听任务里所有解析失败 best-effort（continue）；订阅通道关闭/落后按 broadcast
-    /// 语义处理（closed→退出、lagged→继续）。crash 与 close 的恢复语义一致（重开 target），故都映射到
-    /// `PageClosed`（`AbortReason` 不含独立 crash 变体；这是本任务约定的最小接线，dedicated crash
-    /// reason 留待需要时扩 progress.rs/errmap.rs）。
+    /// 语义处理（closed→退出、lagged→继续）。close 与 crash 保留不同的 typed error，同时都允许
+    /// 后续操作走 active-tab survivor/replacement 恢复。
     ///
-    /// **D1：async**——内部短暂锁 tabs 取 active tab 的 page session（订阅 Page.frameDetached 限定它 +
-    /// 比对 detach/crash 事件的 sessionId）后立即释放。active tab 缺失 → Err（绝不 panic）。
+    /// **D1：async**——内部短暂锁 tabs 取 active tab 的 page session/target（订阅
+    /// Page.frameDetached 限定它 + 分别比对 detach sessionId / crash targetId）后立即释放。
+    /// active tab 缺失时会先走 survivor/replacement 恢复；失败返 Err（绝不 panic）。
     pub async fn arm_act_abort(
         &self,
         parent: &Progress,
         frame_id: &str,
     ) -> Result<(Arc<Progress>, ActAbortGuard), BrowserError> {
-        // D1：取 active tab 的 page session（detach/crash 订阅 + sessionId 比对锚定它）。
-        let page_session = self.active_tab_handles().await?.session_id;
+        // D1：同时取 page session 和 target id。detachedFromTarget 按
+        // sessionId 路由；targetCrashed 的 CDP payload 只有 targetId。
+        let page = self.active_tab_handles().await?;
+        let page_session = page.session_id;
+        let page_target = page.target_id;
 
         // 子 Progress：共享 parent 的剩余 deadline（保守用 parent 当下剩余预算的近似——这里直接复用
         // parent 的 token 层级，timeout 取一个不短于 parent 的值；act 的真实 deadline 由调用方在 parent
@@ -1193,8 +4596,12 @@ impl CdpBackend {
         let child = Arc::new(Progress::child(parent.timeout(), parent.token()));
 
         // 三路临时订阅（act 期间有效，guard drop 后监听任务被 abort，订阅 Receiver 随任务 drop 收摊）。
-        let mut detached_rx = self.conn.subscribe("Target.detachedFromTarget", None);
-        let mut crashed_rx = self.conn.subscribe("Target.targetCrashed", None);
+        let mut detached_rx = self
+            .conn
+            .subscribe_reliable("Target.detachedFromTarget", None);
+        let mut crashed_rx = self
+            .conn
+            .subscribe_reliable("Target.targetCrashed", None);
         let mut frame_detached_rx = self
             .conn
             .subscribe("Page.frameDetached", Some(&page_session));
@@ -1203,30 +4610,27 @@ impl CdpBackend {
         let child_for_task = Arc::clone(&child);
 
         let handle = tokio::spawn(async move {
-            use tokio::sync::broadcast::error::RecvError;
             loop {
                 tokio::select! {
                     // page target detach（tab 关闭）：params.sessionId == 本 page session → PageClosed。
                     ev = detached_rx.recv() => match ev {
-                        Ok(ev) => {
+                        Some(ev) => {
                             if event_session_matches(&ev.params, &page_session) {
                                 child_for_task.abort(AbortReason::PageClosed);
                                 break;
                             }
                         }
-                        Err(RecvError::Lagged(_)) => continue,
-                        Err(RecvError::Closed) => break,
+                        None => break,
                     },
-                    // page target crash：同样按 sessionId 命中 → PageClosed（恢复语义同 close）。
+                    // targetCrashed 是 root event，按 targetId 命中并保留 crash taxonomy。
                     ev = crashed_rx.recv() => match ev {
-                        Ok(ev) => {
-                            if event_session_matches(&ev.params, &page_session) {
-                                child_for_task.abort(AbortReason::PageClosed);
+                        Some(ev) => {
+                            if event_target_matches(&ev.params, &page_target) {
+                                child_for_task.abort(AbortReason::TargetCrashed);
                                 break;
                             }
                         }
-                        Err(RecvError::Lagged(_)) => continue,
-                        Err(RecvError::Closed) => break,
+                        None => break,
                     },
                     // 动作所在帧 detach：params.frameId == watch_frame → FrameDetached。
                     ev = frame_detached_rx.recv() => match ev {
@@ -1236,8 +4640,8 @@ impl CdpBackend {
                                 break;
                             }
                         }
-                        Err(RecvError::Lagged(_)) => continue,
-                        Err(RecvError::Closed) => break,
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                     },
                 }
             }
@@ -2981,54 +6385,91 @@ impl CdpBackend {
         }
     }
 
-    /// **tabs 列表动作**（D3，DESIGN §13，Info 级只读）：枚举当前所有纳管标签 → (last4, url, title,
-    /// is_active) → 渲染成对 LLM 文案。url/title 经 `Target.getTargets`（一次取全量 targetInfo），按本
-    /// 注册表的 tab key 过滤（只列我们纳管的 page，不含 OOPIF/SW/其它 browser target）。
-    pub async fn act_tabs(&self) -> Result<ActResult, BrowserError> {
-        use crate::tabs::{last4, render_tab_list, TabListItem};
+    /// Structured top-level tab inventory used by non-LLM platform callers.
+    /// Registry ownership is authoritative; `Target.getTargets` contributes
+    /// only display metadata.
+    async fn structured_tab_inventory(&self) -> Result<Vec<BrowserTabInfo>, BrowserError> {
+        use crate::tabs::last4;
         use chromiumoxide::cdp::browser_protocol::target::GetTargetsParams;
 
-        // 注册表里的 tab 集合 + 当前 active（短临界区取后释放锁）。
-        let (managed, active): (Vec<String>, String) = {
+        let (managed, active): (Vec<(String, String)>, String) = {
             let tabs = self.tabs.lock().await;
-            let managed = tabs.keys().cloned().collect();
+            let managed = tabs
+                .iter()
+                .map(|(target_id, record)| {
+                    (target_id.clone(), record.session_id.clone())
+                })
+                .collect();
             let active = self.active_target.lock().await.clone();
             (managed, active)
         };
 
-        // getTargets 取 url/title（发到根 browser session）。失败 → best-effort 空 info（url/title 留空）。
-        let mut info: HashMap<String, (String, String)> = HashMap::new();
+        let mut display: HashMap<String, (String, String)> = HashMap::new();
         if let Ok(raw) = self
             .conn
             .send::<GetTargetsParams>(ROOT_SESSION, &GetTargetsParams { filter: None })
             .await
-            && let Some(arr) = raw.get("targetInfos").and_then(|v| v.as_array())
+            && let Some(targets) = raw.get("targetInfos").and_then(|value| value.as_array())
         {
-            for ti in arr {
-                let Some(tid) = ti.get("targetId").and_then(|v| v.as_str()) else {
+            for target in targets {
+                let Some(target_id) = target.get("targetId").and_then(|value| value.as_str())
+                else {
                     continue;
                 };
-                let url = ti.get("url").and_then(|v| v.as_str()).unwrap_or("").to_string();
-                let title = ti.get("title").and_then(|v| v.as_str()).unwrap_or("").to_string();
-                info.insert(tid.to_string(), (url, title));
+                let url = target
+                    .get("url")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or_default()
+                    .to_owned();
+                let title = target
+                    .get("title")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or_default()
+                    .to_owned();
+                display.insert(target_id.to_owned(), (url, title));
             }
         }
 
-        // 只列我们纳管的 tab（注册表 key），按 last4 排序保稳定输出。
-        let mut items: Vec<TabListItem> = managed
-            .iter()
-            .map(|tid| {
-                let (url, title) = info.get(tid).cloned().unwrap_or_default();
-                TabListItem {
-                    last4: last4(tid),
-                    target_id: tid.clone(),
-                    url,
-                    title,
-                    is_active: *tid == active,
+        let mut tabs = managed
+            .into_iter()
+            .map(|(target_id, session_id)| {
+                let (url, title) = display.get(&target_id).cloned().unwrap_or_default();
+                BrowserTabInfo {
+                    tab_id: last4(&target_id),
+                    active: target_id == active,
+                    crashed: self.conn.registry().is_session_crashed(&session_id),
+                    target_id,
+                    title: (!title.is_empty()).then_some(title),
+                    url: (!url.is_empty()).then_some(url),
                 }
             })
+            .collect::<Vec<_>>();
+        tabs.sort_by(|left, right| {
+            left.tab_id
+                .cmp(&right.tab_id)
+                .then_with(|| left.target_id.cmp(&right.target_id))
+        });
+        Ok(tabs)
+    }
+
+    /// **tabs 列表动作**（D3，DESIGN §13，Info 级只读）：枚举当前所有纳管标签 → (last4, url, title,
+    /// is_active) → 渲染成对 LLM 文案。url/title 经 `Target.getTargets`（一次取全量 targetInfo），按本
+    /// 注册表的 tab key 过滤（只列我们纳管的 page，不含 OOPIF/SW/其它 browser target）。
+    pub async fn act_tabs(&self) -> Result<ActResult, BrowserError> {
+        use crate::tabs::{TabListItem, render_tab_list};
+
+        let items: Vec<TabListItem> = self
+            .structured_tab_inventory()
+            .await?
+            .into_iter()
+            .map(|tab| TabListItem {
+                last4: tab.tab_id,
+                target_id: tab.target_id,
+                url: tab.url.unwrap_or_default(),
+                title: tab.title.unwrap_or_default(),
+                is_active: tab.active,
+            })
             .collect();
-        items.sort_by(|a, b| a.last4.cmp(&b.last4));
 
         Ok(ActResult {
             message: render_tab_list(&items),
@@ -3165,6 +6606,9 @@ impl CdpBackend {
                 reselected = None;
             }
         }
+        if let Some(host) = &self.host {
+            host.router.release_target(&target_id).await;
+        }
 
         if was_active {
             // 关 active：对进行中操作（绑该 tab 的 act）发 abort(PageClosed)——立即取消而非白等。
@@ -3209,20 +6653,42 @@ impl CdpBackend {
     pub async fn act_open_link_new_tab(&self, url: &str) -> Result<ActResult, BrowserError> {
         use crate::tabs::last4;
 
-        // createTarget{url, background:true}（不抢焦点）。
-        // 建在默认 browser context（browser identity 全局共享）。
-        let mut params = CreateTargetParams::new(url);
-        params.background = Some(true);
-        let raw = self
-            .conn
-            .send::<CreateTargetParams>(ROOT_SESSION, &params)
+        // Create an inert nonce-correlated page first. This makes cancellation
+        // and a lost createTarget response exactly recoverable; only after the
+        // target is lane-owned/armed do we navigate it to the requested URL.
+        let pending_page = create_pending_page_session_owned(
+            self.conn.clone(),
+            Arc::clone(&self.cleanup_executor),
+            self.target_router().cloned(),
+            true,
+        )
+        .await?;
+        let new_tid = pending_page.target_id.clone();
+        let new_session = pending_page.session_id.clone();
+        if let Some(host) = &self.host {
+            if !host.router.claim_target(&self.lane_id, &new_tid).await {
+                return Err(BrowserError::TargetCrashed);
+            }
+        }
+        if !self.tabs.lock().await.contains_key(&new_tid) {
+            let record = arm_tab(&self.conn, &new_tid, &new_session).await?;
+            let main_frame_id = record.main_frame_id.clone();
+            let mut tabs = self.tabs.lock().await;
+            if !tabs.contains_key(&new_tid) {
+                tabs.insert(new_tid.clone(), record);
+            } else {
+                abort_tab_record(&record);
+            }
+            drop(tabs);
+            if let Some(host) = &self.host {
+                host.router.claim_frame(&self.lane_id, &main_frame_id).await;
+            }
+        }
+        self.conn
+            .send::<NavigateParams>(&new_session, &NavigateParams::new(url))
             .await
             .map_err(map_transport_err)?;
-        let new_tid = raw
-            .get("targetId")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| BrowserError::Other("createTarget response missing targetId".into()))?
-            .to_string();
+        let _ = pending_page.transfer_to_lane();
         let l4 = last4(&new_tid);
 
         Ok(ActResult {
@@ -3812,15 +7278,24 @@ impl Drop for ActAbortGuard {
     }
 }
 
-/// **[纯逻辑] 事件 params 的 `sessionId` 是否匹配目标 session**（detach/crash 接线判定）。
-/// `Target.detachedFromTarget` / `Target.targetCrashed` 的 params 带 `sessionId`（标识哪个 target
-/// 没了/崩了）；与本 page session 比对，命中即「本动作所在 page 没了」。抽纯函数便于单测形状解析。
+/// **[纯逻辑] 事件 params 的 `sessionId` 是否匹配目标 session**（detach 接线判定）。
+/// `Target.detachedFromTarget` 的 params 带 `sessionId`；与本 page session 比对，命中即
+/// 「本动作所在 page 没了」。抽纯函数便于单测形状解析。
 fn event_session_matches(params: &serde_json::Value, target_session: &str) -> bool {
     params
         .get("sessionId")
         .and_then(|v| v.as_str())
         .map(|s| s == target_session)
         .unwrap_or(false)
+}
+
+/// `Target.targetCrashed` is emitted on the root session and identifies the
+/// renderer by `targetId` (not `sessionId`).
+fn event_target_matches(params: &serde_json::Value, target_id: &str) -> bool {
+    params
+        .get("targetId")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|event_target| event_target == target_id)
 }
 
 /// **[纯逻辑] 事件 params 的 `frameId` 是否匹配目标帧**（frame detach 接线判定）。
@@ -4153,7 +7628,10 @@ async fn set_download_behavior_sandbox(
 ///
 /// best-effort + 绝不 panic：解析失败 / cancel 失败 / MOTW 写失败只 `warn`/`debug`，不致命。连接关闭
 /// （`RecvError::Closed`）→ 退出循环（backend Drop 关连接即触发）。
-fn spawn_download_loop(conn: Connection) -> tokio::task::JoinHandle<()> {
+fn spawn_download_loop(
+    conn: Connection,
+    router: Option<Arc<HostTargetRouter>>,
+) -> tokio::task::JoinHandle<()> {
     let mut begin_rx = conn.subscribe(EventDownloadWillBegin::IDENTIFIER, None);
     let mut progress_rx = conn.subscribe(EventDownloadProgress::IDENTIFIER, None);
     tokio::spawn(async move {
@@ -4199,6 +7677,14 @@ fn spawn_download_loop(conn: Connection) -> tokio::task::JoinHandle<()> {
                                         "cancelDownload for a blocked download failed; the file may still land in the isolated downloads dir (block already logged)"
                                     );
                                 }
+                            } else if let Some(router) = &router {
+                                router
+                                    .begin_download(
+                                        b.frame_id.as_ref(),
+                                        &b.guid,
+                                        &b.suggested_filename,
+                                    )
+                                    .await;
                             }
                         }
                         Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
@@ -4221,6 +7707,11 @@ fn spawn_download_loop(conn: Connection) -> tokio::task::JoinHandle<()> {
                                 continue;
                             };
                             let path = std::path::Path::new(file_path);
+                            if let Some(router) = &router
+                                && router.finish_download(&p.guid, path).await
+                            {
+                                continue;
+                            }
                             match crate::download::write_motw(path) {
                                 Ok(()) => {
                                     tracing::debug!(file = %file_path, "download completed; MOTW applied (Windows)");
@@ -4278,15 +7769,15 @@ fn spawn_fetch_firewall_loop(
     dns_resolver: Arc<dyn crate::firewall::HostResolver>,
     dns_cache: crate::firewall::DnsResolverCache,
 ) -> tokio::task::JoinHandle<()> {
-    let mut attached_rx = conn.subscribe(EventAttachedToTarget::IDENTIFIER, None);
-    let mut paused_rx = conn.subscribe(EventRequestPaused::IDENTIFIER, None);
+    let mut attached_rx = conn.subscribe_reliable(EventAttachedToTarget::IDENTIFIER, None);
+    let mut paused_rx = conn.subscribe_reliable(EventRequestPaused::IDENTIFIER, None);
     tokio::spawn(async move {
         loop {
             tokio::select! {
                 // ① 新 session（含 SW）→ 挂 Fetch.enable。
                 ev = attached_rx.recv() => {
                     match ev {
-                        Ok(ev) => {
+                        Some(ev) => {
                             let Ok(att) = serde_json::from_value::<EventAttachedToTarget>(ev.params.clone())
                             else { continue };
                             let sid: String = att.session_id.clone().into();
@@ -4307,14 +7798,13 @@ fn spawn_fetch_firewall_loop(
                                 );
                             }
                         }
-                        Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
-                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                        None => break,
                     }
                 }
                 // ② 被拦请求 → 判定 → continue/fail/（D2）悬挂等审批。
                 ev = paused_rx.recv() => {
                     match ev {
-                        Ok(ev) => {
+                        Some(ev) => {
                             let session_id = ev.session_id.clone();
                             let Ok(paused) = serde_json::from_value::<EventRequestPaused>(ev.params.clone())
                             else {
@@ -4335,8 +7825,7 @@ fn spawn_fetch_firewall_loop(
                             )
                             .await;
                         }
-                        Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
-                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                        None => break,
                     }
                 }
             }
@@ -4658,11 +8147,2422 @@ pub async fn build_backend(
 mod tests {
     use super::*;
 
+    #[cfg(any(windows, unix))]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn concurrent_direct_finishes_and_handoff_publish_one_sticky_completion() {
+        let claimed = Arc::new(std::sync::Barrier::new(2));
+        let release = Arc::new(std::sync::Barrier::new(2));
+        let hooks = Arc::new(DurableProcessCleanupTestHooks {
+            handoff_claimed: Some(Arc::clone(&claimed)),
+            handoff_release: Some(Arc::clone(&release)),
+            ..DurableProcessCleanupTestHooks::default()
+        });
+        let (_temp, profile, cleanup, pid) =
+            durable_process_cleanup_fixture("finish-handoff-race", Some(Arc::clone(&hooks)))
+                .await;
+        let process = cleanup
+            .process
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+            .cloned()
+            .expect("fixture starts with exact process authority");
+        let process_references_before_finish = Arc::strong_count(&process);
+        let held_process = process.lock().await;
+
+        let first_cleanup = Arc::clone(&cleanup);
+        let first_finish = tokio::spawn(async move { first_cleanup.finish().await });
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while hooks.finish_gate_entries.load(Ordering::Acquire) != 1
+                || Arc::strong_count(&process) <= process_references_before_finish
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("first finish owns the gate and snapshots process authority");
+
+        let handoff_cleanup = Arc::clone(&cleanup);
+        let handoff = std::thread::spawn(move || handoff_cleanup.hand_off());
+        claimed.wait();
+        assert_eq!(
+            cleanup.state.load(Ordering::Acquire),
+            1,
+            "handoff claims relay state before direct cleanup publishes completion"
+        );
+
+        let second_cleanup = Arc::clone(&cleanup);
+        let second_finish = tokio::spawn(async move { second_cleanup.finish().await });
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while hooks.finish_calls.load(Ordering::Acquire) != 2 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("second finish reaches the per-cleanup serialization gate");
+        assert_eq!(
+            hooks.finish_gate_entries.load(Ordering::Acquire),
+            1,
+            "a second finisher cannot observe pre-completion process/ticket state"
+        );
+        assert!(
+            !second_finish.is_finished(),
+            "the concurrent finisher remains behind the first finisher"
+        );
+
+        drop(held_process);
+        assert!(
+            tokio::time::timeout(Duration::from_secs(10), first_finish)
+                .await
+                .expect("first direct finish cannot hang")
+                .expect("first direct finish task joins")
+                .is_ok(),
+            "first direct finish proves exact cleanup"
+        );
+        assert!(
+            tokio::time::timeout(Duration::from_secs(2), second_finish)
+                .await
+                .expect("serialized second finish cannot lose completion")
+                .expect("second direct finish task joins")
+                .is_ok(),
+            "second direct finish observes sticky success"
+        );
+        assert_eq!(cleanup.state.load(Ordering::Acquire), 2);
+        assert!(
+            cleanup
+                .process
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .is_none(),
+            "successful direct finish removes local process authority"
+        );
+
+        // Recreate the former lost-wake tail exactly: handoff has already won
+        // state 0->1, but resumes only after direct finish took the process.
+        // It therefore has no process and publishes no ticket.
+        release.wait();
+        handoff.join().expect("racing handoff thread joins");
+        assert!(
+            cleanup.handoff_ticket.borrow().is_none(),
+            "handoff which loses the process race has no relay ticket to publish"
+        );
+        assert!(
+            tokio::time::timeout(Duration::from_secs(1), cleanup.finish())
+                .await
+                .expect("completion-before-wait returns immediately")
+                .is_ok(),
+            "late finish observes sticky direct completion without a ticket"
+        );
+
+        wait_for_durable_cleanup_process_exit(pid).await;
+        assert!(
+            !profile.exists(),
+            "exact direct cleanup removes marker, port file, and ephemeral profile"
+        );
+    }
+
+    #[cfg(any(windows, unix))]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn finish_after_handoff_waits_for_or_takes_over_exact_cleanup() {
+        let (_temp, profile, cleanup, pid) =
+            durable_process_cleanup_fixture("finish-after-handoff", None).await;
+
+        cleanup.hand_off();
+        assert_eq!(
+            cleanup.state.load(Ordering::Acquire),
+            1,
+            "handoff owns the exact cleanup relay before finish starts"
+        );
+        assert!(
+            cleanup
+                .process
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .is_none(),
+            "handoff transfers rather than duplicates local process authority"
+        );
+
+        let first = {
+            let cleanup = Arc::clone(&cleanup);
+            tokio::spawn(async move { cleanup.finish().await })
+        };
+        let second = {
+            let cleanup = Arc::clone(&cleanup);
+            tokio::spawn(async move { cleanup.finish().await })
+        };
+        let (first, second) = tokio::time::timeout(Duration::from_secs(10), async {
+            tokio::join!(first, second)
+        })
+        .await
+        .expect("two finish calls after handoff cannot hang");
+        assert!(
+            first.expect("first post-handoff finish joins").is_ok(),
+            "first post-handoff finish proves exact cleanup"
+        );
+        assert!(
+            second.expect("second post-handoff finish joins").is_ok(),
+            "second post-handoff finish observes the same sticky completion"
+        );
+        assert_eq!(cleanup.state.load(Ordering::Acquire), 2);
+        assert!(
+            tokio::time::timeout(Duration::from_secs(1), cleanup.finish())
+                .await
+                .expect("late post-handoff finish returns immediately")
+                .is_ok()
+        );
+
+        wait_for_durable_cleanup_process_exit(pid).await;
+        assert!(
+            !profile.exists(),
+            "handoff cleanup removes the exact ephemeral profile"
+        );
+    }
+
+    #[cfg(any(windows, unix))]
+    async fn durable_process_cleanup_fixture(
+        name: &str,
+        test_hooks: Option<Arc<DurableProcessCleanupTestHooks>>,
+    ) -> (
+        tempfile::TempDir,
+        PathBuf,
+        Arc<DurableProcessCleanup>,
+        u32,
+    ) {
+        let temp = tempfile::tempdir().expect("create durable cleanup fixture root");
+        let profile = temp.path().join(name);
+        std::fs::create_dir_all(&profile).expect("create durable cleanup fixture profile");
+        let claim = crate::profile::prepare_ownership_marker_for_launch(&profile)
+            .expect("claim durable cleanup fixture profile");
+        let (process, executable) = spawn_durable_cleanup_process_fixture();
+        let token = crate::profile::write_browser_ownership_marker(
+            &claim,
+            &profile,
+            &executable,
+            process.child(),
+            None,
+        )
+        .await
+        .expect("commit durable cleanup fixture ownership");
+        let pid = process.id().expect("durable cleanup fixture pid");
+        std::fs::write(
+            profile.join("DevToolsActivePort"),
+            b"9222\n/devtools/browser/durable-cleanup\n",
+        )
+        .expect("write durable cleanup port artifact");
+        drop(claim);
+
+        let mut cleanup = DurableProcessCleanup::new(
+            process,
+            LaunchedProfileCleanupAuthority::new(Some(profile.clone())),
+            token,
+        );
+        cleanup.test_hooks = test_hooks;
+        (temp, profile, Arc::new(cleanup), pid)
+    }
+
+    #[cfg(any(windows, unix))]
+    fn spawn_durable_cleanup_process_fixture(
+    ) -> (
+        nomi_process_runtime::ManagedChildProcess,
+        PathBuf,
+    ) {
+        #[cfg(windows)]
+        {
+            let shell = PathBuf::from(
+                std::env::var_os("COMSPEC").expect("Windows COMSPEC identifies cmd.exe"),
+            );
+            let mut builder = nomi_process_runtime::ChildProcessBuilder::new(&shell);
+            builder
+                .args(["/D", "/S", "/C", "ping -n 60 127.0.0.1 >NUL"])
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null());
+            return (
+                builder.spawn_managed().expect("spawn Windows cleanup fixture"),
+                shell,
+            );
+        }
+
+        #[cfg(unix)]
+        {
+            let shell = PathBuf::from("/bin/sh");
+            let mut builder = nomi_process_runtime::ChildProcessBuilder::new(&shell);
+            builder
+                .args(["-c", "sleep 60"])
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null());
+            (
+                builder.spawn_managed().expect("spawn Unix cleanup fixture"),
+                shell,
+            )
+        }
+    }
+
+    #[cfg(any(windows, unix))]
+    async fn wait_for_durable_cleanup_process_exit(pid: u32) {
+        tokio::time::timeout(Duration::from_secs(10), async move {
+            loop {
+                use sysinfo::{ProcessRefreshKind, ProcessesToUpdate};
+                let mut system = sysinfo::System::new();
+                system.refresh_processes_specifics(
+                    ProcessesToUpdate::All,
+                    true,
+                    ProcessRefreshKind::nothing(),
+                );
+                if system.process(sysinfo::Pid::from_u32(pid)).is_none() {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        })
+        .await
+        .expect("durable cleanup fixture process exits within deadline");
+    }
+
+    #[tokio::test]
+    async fn cleanup_executor_start_failure_is_fail_closed_before_host_publication() {
+        let (connection, server) = close_target_fake_connection(Vec::new()).await;
+        TARGET_CLEANUP_EXECUTOR_START_FAILURE.with(|failure| failure.set(true));
+        assert!(
+            TargetCleanupExecutor::new(connection.clone(), None).is_err(),
+            "a Host without its bounded cleanup executor must not be constructed"
+        );
+        let executor = TargetCleanupExecutor::new(connection.clone(), None)
+            .expect("the scoped one-shot failure must not leak");
+        assert_eq!(executor.worker_count(), 1);
+        drop(executor);
+        connection.shutdown().await;
+        server.abort();
+        let _ = server.await;
+    }
+
+    #[test]
+    fn initial_page_target_is_foreground_only_for_effective_headful_mode() {
+        assert!(
+            !page_target_should_start_in_background(true, true),
+            "an explicitly headful Host with a live display must publish a visible target"
+        );
+        assert!(page_target_should_start_in_background(false, true));
+        assert!(page_target_should_start_in_background(true, false));
+        assert!(page_target_should_start_in_background(false, false));
+    }
+
+    #[test]
+    fn initial_page_target_params_preserve_foreground_request_on_the_cdp_wire() {
+        let foreground =
+            serde_json::to_value(initial_page_target_params(false)).expect("serialize params");
+        let background =
+            serde_json::to_value(initial_page_target_params(true)).expect("serialize params");
+
+        assert_eq!(foreground["url"], "about:blank");
+        assert_eq!(foreground["background"], false);
+        assert_eq!(background["background"], true);
+    }
+
+    #[test]
+    fn managed_host_constructor_cannot_accept_external_profile_cleanup_authority() {
+        fn assert_signature<F, Fut>(_: F)
+        where
+            F: FnOnce(
+                Launched,
+                bool,
+                bool,
+                Option<String>,
+                crate::firewall::FirewallConfig,
+                Option<Arc<dyn crate::firewall::EgressApprover>>,
+                Option<serde_json::Value>,
+                Option<Arc<dyn crate::firewall::HostResolver>>,
+            ) -> Fut,
+        {
+        }
+
+        // This compile-time signature assertion intentionally has no profile
+        // path argument. A stable Launched(None) therefore cannot be paired
+        // with an injected Some(path), and a mismatched path is inexpressible.
+        assert_signature(CdpHostRuntime::from_launched);
+    }
+
+    #[test]
+    fn launched_profile_cleanup_authority_preserves_stable_and_exact_modes() {
+        assert!(
+            LaunchedProfileCleanupAuthority::new(None)
+                .into_profile_dir()
+                .is_none(),
+            "stable launch authority must remain marker-only cleanup"
+        );
+
+        let exact_profile = PathBuf::from("exact-ephemeral-profile");
+        assert_eq!(
+            LaunchedProfileCleanupAuthority::new(Some(exact_profile.clone()))
+                .into_profile_dir(),
+            Some(exact_profile),
+            "ephemeral cleanup must preserve the exact launch-authorized path"
+        );
+    }
+
+    #[test]
+    fn cleanup_inventory_validation_rejects_every_malformed_target_info_shape() {
+        let malformed = [
+            serde_json::json!({}),
+            serde_json::json!({"targetId": 7, "type": "page"}),
+            serde_json::json!({"targetId": "target-a"}),
+            serde_json::json!({"targetId": "target-a", "type": null}),
+            serde_json::json!({"targetId": "target-a", "type": "page", "openerId": null}),
+            serde_json::json!({"targetId": "target-a", "type": "page", "openerId": 9}),
+        ];
+        for target_info in malformed {
+            let result =
+                validated_target_inventory(&serde_json::json!({"targetInfos": [target_info]}));
+            assert!(
+                result.is_err(),
+                "malformed TargetInfo must never contribute to an absence proof"
+            );
+        }
+        assert!(
+            validated_target_inventory(&serde_json::json!({
+                "targetInfos": [{
+                    "targetId": "target-a",
+                    "type": "page",
+                    "openerId": "target-parent"
+                }]
+            }))
+            .is_ok()
+        );
+    }
+
+    async fn router_test_connection() -> (Connection, tokio::task::JoinHandle<()>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind router test websocket");
+        let address = listener.local_addr().expect("read router test address");
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("accept router test client");
+            let _websocket = tokio_tungstenite::accept_async(stream)
+                .await
+                .expect("complete router test websocket handshake");
+            std::future::pending::<()>().await;
+        });
+        let connection = Connection::connect(&format!("ws://{address}"))
+            .await
+            .expect("connect router test websocket");
+        (connection, server)
+    }
+
+    async fn withheld_create_response_fake_connection(
+        send_attach: bool,
+        delayed_inventory_visibility: bool,
+    ) -> (
+        Connection,
+        tokio::sync::mpsc::UnboundedReceiver<String>,
+        Arc<AtomicBool>,
+        tokio::task::JoinHandle<Vec<String>>,
+    ) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind pending-create fake websocket");
+        let address = listener.local_addr().expect("read fake websocket address");
+        let (method_tx, method_rx) = tokio::sync::mpsc::unbounded_channel();
+        let target_live = Arc::new(AtomicBool::new(false));
+        let server_target_live = Arc::clone(&target_live);
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("accept fake client");
+            let mut websocket = tokio_tungstenite::accept_async(stream)
+                .await
+                .expect("complete fake websocket handshake");
+            let mut methods = Vec::new();
+            let mut pending_url = None::<String>;
+            let mut inventory_calls = 0usize;
+            while let Some(message) = futures_util::StreamExt::next(&mut websocket).await {
+                let Ok(tokio_tungstenite::tungstenite::Message::Text(text)) = message else {
+                    break;
+                };
+                let request: serde_json::Value =
+                    serde_json::from_str(&text).expect("fake received valid json");
+                let id = request["id"].as_u64().expect("fake request has id");
+                let method = request["method"]
+                    .as_str()
+                    .expect("fake request has method")
+                    .to_string();
+                methods.push(method.clone());
+                let _ = method_tx.send(method.clone());
+                match method.as_str() {
+                    "Target.createTarget" => {
+                        let url = request["params"]["url"]
+                            .as_str()
+                            .expect("createTarget carries nonce url")
+                            .to_string();
+                        pending_url = Some(url.clone());
+                        server_target_live.store(true, Ordering::Release);
+                        if send_attach {
+                            futures_util::SinkExt::send(
+                                &mut websocket,
+                                tokio_tungstenite::tungstenite::Message::Text(
+                                    serde_json::json!({
+                                        "method": "Target.attachedToTarget",
+                                        "params": {
+                                            "sessionId": "pending-session",
+                                            "targetInfo": {
+                                                "targetId": "pending-target",
+                                                "type": "page",
+                                                "title": "",
+                                                "url": url,
+                                                "attached": true,
+                                                "canAccessOpener": false
+                                            },
+                                            "waitingForDebugger": false
+                                        }
+                                    })
+                                    .to_string()
+                                    .into(),
+                                ),
+                            )
+                            .await
+                            .expect("fake sends nonce-correlated attach");
+                        }
+                        if delayed_inventory_visibility {
+                            futures_util::SinkExt::send(
+                                &mut websocket,
+                                tokio_tungstenite::tungstenite::Message::Text(
+                                    serde_json::json!({
+                                        "id": id,
+                                        "error": {
+                                            "code": -32001,
+                                            "message": "create response lost after execution"
+                                        }
+                                    })
+                                    .to_string()
+                                    .into(),
+                                ),
+                            )
+                            .await
+                            .expect("fake terminates unknown create command");
+                        }
+                        // Otherwise deliberately withhold the response: the
+                        // nonce-correlated attach remains exact authority.
+                    }
+                    "Target.closeTarget" => {
+                        assert_eq!(request["params"]["targetId"], "pending-target");
+                        server_target_live.store(false, Ordering::Release);
+                        futures_util::SinkExt::send(
+                            &mut websocket,
+                            tokio_tungstenite::tungstenite::Message::Text(
+                                serde_json::json!({
+                                    "id": id,
+                                    "result": { "success": true }
+                                })
+                                .to_string()
+                                .into(),
+                            ),
+                        )
+                        .await
+                        .expect("fake confirms pending target close");
+                    }
+                    "Browser.close" => {
+                        server_target_live.store(false, Ordering::Release);
+                        futures_util::SinkExt::send(
+                            &mut websocket,
+                            tokio_tungstenite::tungstenite::Message::Text(
+                                serde_json::json!({
+                                    "id": id,
+                                    "result": {}
+                                })
+                                .to_string()
+                                .into(),
+                            ),
+                        )
+                        .await
+                        .expect("fake confirms whole-browser close");
+                    }
+                    "Target.getTargets" => {
+                        inventory_calls += 1;
+                        if delayed_inventory_visibility && inventory_calls == 1 {
+                            futures_util::SinkExt::send(
+                                &mut websocket,
+                                tokio_tungstenite::tungstenite::Message::Text(
+                                    serde_json::json!({
+                                        "id": id,
+                                        "error": {
+                                            "code": -32000,
+                                            "message": "transient inventory failure"
+                                        }
+                                    })
+                                    .to_string()
+                                    .into(),
+                                ),
+                            )
+                            .await
+                            .expect("fake sends transient inventory failure");
+                            continue;
+                        }
+                        let target_infos = if server_target_live.load(Ordering::Acquire) {
+                            if delayed_inventory_visibility && inventory_calls == 2 {
+                                Vec::new()
+                            } else {
+                                vec![serde_json::json!({
+                                    "targetId": "pending-target",
+                                    "type": "page",
+                                    "title": "",
+                                    "url": pending_url.as_deref().expect("create url recorded")
+                                })]
+                            }
+                        } else {
+                            Vec::new()
+                        };
+                        futures_util::SinkExt::send(
+                            &mut websocket,
+                            tokio_tungstenite::tungstenite::Message::Text(
+                                serde_json::json!({
+                                    "id": id,
+                                    "result": { "targetInfos": target_infos }
+                                })
+                                .to_string()
+                                .into(),
+                            ),
+                        )
+                        .await
+                        .expect("fake returns target inventory");
+                    }
+                    other => panic!("unexpected pending-create fake CDP method {other}"),
+                }
+            }
+            methods
+        });
+        let connection = Connection::connect(&format!("ws://{address}"))
+            .await
+            .expect("connect pending-create fake websocket");
+        (connection, method_rx, target_live, server)
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn cancelled_withheld_create_response_closes_nonce_correlated_target_and_scrubs_router() {
+        let (connection, mut methods, target_live, server) =
+            withheld_create_response_fake_connection(true, false).await;
+        let router = HostTargetRouter::new(connection.clone());
+        let router_loop = router.spawn();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while router.cleanup_executor.worker_count() != 1 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("one bounded Host cleanup worker starts");
+        let launch = {
+            let connection = connection.clone();
+            let router = Arc::clone(&router);
+            let executor = Arc::clone(&router.cleanup_executor);
+            tokio::spawn(async move {
+                create_pending_page_session_owned(connection, executor, Some(router), true).await
+            })
+        };
+
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(2), methods.recv())
+                .await
+                .expect("createTarget reaches fake server"),
+            Some("Target.createTarget".into())
+        );
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if router
+                    .state
+                    .lock()
+                    .await
+                    .quarantined
+                    .contains_key("pending-target")
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("nonce target is quarantined before caller cancellation");
+
+        launch.abort();
+        let _ = launch.await;
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(5), methods.recv())
+                .await
+                .expect("independent cleanup closes target"),
+            Some("Target.closeTarget".into())
+        );
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let state = router.state.lock().await;
+                let scrubbed = !state.quarantined.contains_key("pending-target")
+                    && !state
+                        .session_targets
+                        .values()
+                        .any(|target| target == "pending-target");
+                drop(state);
+                if scrubbed && !target_live.load(Ordering::Acquire) {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("closed nonce target and router quarantine are absent");
+
+        connection.shutdown().await;
+        router_loop.abort();
+        server.abort();
+        let _ = server.await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn unknown_create_response_escalates_host_without_accepting_empty_inventory() {
+        let (connection, mut methods, target_live, server) =
+            withheld_create_response_fake_connection(false, true).await;
+        let router = HostTargetRouter::new(connection.clone());
+        let launch = {
+            let connection = connection.clone();
+            let router = Arc::clone(&router);
+            let executor = Arc::clone(&router.cleanup_executor);
+            tokio::spawn(async move {
+                create_pending_page_session_owned(connection, executor, Some(router), true).await
+            })
+        };
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(2), methods.recv())
+                .await
+                .expect("createTarget reaches fake server"),
+            Some("Target.createTarget".into())
+        );
+        assert!(
+            launch
+                .await
+                .expect("owned create task joins")
+                .is_err(),
+            "the fake create response is terminally lost"
+        );
+
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(2), methods.recv())
+                .await
+                .expect("unknown identity triggers authoritative shutdown"),
+            Some("Browser.close".into()),
+            "a transient empty inventory must never complete an unknown create cleanup"
+        );
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while target_live.load(Ordering::Acquire) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("whole-Host shutdown subsumes the delayed nonce target");
+
+        connection.shutdown().await;
+        server.abort();
+        let _ = server.await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn unpublished_backend_drop_is_generation_safe_and_duplicate_registration_fails_closed()
+    {
+        let (connection, server) = scripted_close_target_fake_connection(
+            vec![FakeCloseReply::Success(true)],
+            vec![Vec::new(), Vec::new()],
+        )
+        .await;
+        let router = HostTargetRouter::new(connection.clone());
+        let router_loop = router.spawn();
+        let tabs = Arc::new(AsyncMutex::new(HashMap::new()));
+        let active_target = Arc::new(AsyncMutex::new("old-target".to_string()));
+        let active_frame = Arc::new(AsyncMutex::new(None));
+        let lane_closing = Arc::new(AtomicBool::new(false));
+        let old_registration = router
+            .register_lane(
+                "same-lane".into(),
+                &tabs,
+                &active_target,
+                &active_frame,
+                Arc::clone(&lane_closing),
+                None,
+            )
+            .await
+            .expect("first generation registers");
+
+        let replacement_tabs = Arc::new(AsyncMutex::new(HashMap::new()));
+        let replacement_active = Arc::new(AsyncMutex::new("new-target".to_string()));
+        let replacement_frame = Arc::new(AsyncMutex::new(None));
+        assert!(
+            router
+                .register_lane(
+                    "same-lane".into(),
+                    &replacement_tabs,
+                    &replacement_active,
+                    &replacement_frame,
+                    Arc::new(AtomicBool::new(false)),
+                    None,
+                )
+                .await
+                .is_none(),
+            "a same-id reopen must never overwrite a cleaning generation"
+        );
+        assert!(
+            router
+                .is_current_registration("same-lane", old_registration)
+                .await
+        );
+        assert!(router.claim_target("same-lane", "old-target").await);
+        router.claim_frame("same-lane", "old-frame").await;
+
+        let cleanup = LaneCleanupAuthority::new(
+            connection.clone(),
+            Arc::clone(&router.cleanup_executor),
+            Arc::clone(&router),
+            "same-lane".into(),
+            Arc::clone(&lane_closing),
+            Arc::clone(&tabs),
+            "old-target".into(),
+            "old-session".into(),
+            "old-frame".into(),
+        );
+        cleanup.set_registration(old_registration);
+        let mut unpublished_backend = test_backend_with_tabs(connection.clone(), &[]);
+        unpublished_backend.test_router = Some(Arc::clone(&router));
+        unpublished_backend.lane_id = "same-lane".into();
+        unpublished_backend.lane_cleanup = Some(Arc::clone(&cleanup));
+        unpublished_backend.lane_closing = Arc::clone(&lane_closing);
+        unpublished_backend.lane_closed = Arc::new(AtomicBool::new(false));
+        unpublished_backend.tabs = Arc::clone(&tabs);
+        unpublished_backend.active_target = Arc::clone(&active_target);
+        unpublished_backend.active_frame = Arc::clone(&active_frame);
+        PendingLaneLaunchGuard::new(Arc::clone(&cleanup)).commit();
+        // Models cancellation in HostLaneCoordinator::insert_if_open after
+        // from_host returned but before the backend was published.
+        drop(unpublished_backend);
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while cleanup.state.load(Ordering::Acquire) != 2 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("old generation cleanup completes");
+
+        {
+            let state = router.state.lock().await;
+            assert!(!state.lanes.contains_key("same-lane"));
+            assert_eq!(state.ownership.owner("old-target"), None);
+            assert!(!state.quarantined.contains_key("old-target"));
+            assert!(!state
+                .session_targets
+                .values()
+                .any(|target| target == "old-target"));
+            assert_eq!(state.frame_owner.get("old-frame"), None);
+        }
+
+        let new_registration = router
+            .register_lane(
+                "same-lane".into(),
+                &replacement_tabs,
+                &replacement_active,
+                &replacement_frame,
+                Arc::new(AtomicBool::new(false)),
+                None,
+            )
+            .await
+            .expect("same id may register only after exact old cleanup");
+        cleanup.hand_off();
+        tokio::time::sleep(Duration::from_millis(25)).await;
+        assert_eq!(
+            router.cleanup_executor.worker_count(),
+            1,
+            "repeated cleanup handoff must not create another OS worker"
+        );
+        assert!(
+            router
+                .is_current_registration("same-lane", new_registration)
+                .await,
+            "completed old cleanup must not remove the new generation"
+        );
+        assert!(
+            !router
+                .unregister_lane_if_current("same-lane", old_registration)
+                .await,
+            "an old registration token cannot unregister the new generation"
+        );
+        assert!(
+            router
+                .unregister_lane_if_current("same-lane", new_registration)
+                .await
+        );
+
+        connection.shutdown().await;
+        router_loop.abort();
+        server.abort();
+        let _ = server.await;
+    }
+
+    async fn saturated_cleanup_fake_connection() -> (
+        Connection,
+        tokio::sync::mpsc::UnboundedReceiver<String>,
+        tokio::task::JoinHandle<Vec<String>>,
+    ) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind saturated-cleanup fake websocket");
+        let address = listener.local_addr().expect("read fake websocket address");
+        let (method_tx, method_rx) = tokio::sync::mpsc::unbounded_channel();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("accept fake client");
+            let mut websocket = tokio_tungstenite::accept_async(stream)
+                .await
+                .expect("complete fake websocket handshake");
+            let mut methods = Vec::new();
+            while let Some(message) = futures_util::StreamExt::next(&mut websocket).await {
+                let Ok(tokio_tungstenite::tungstenite::Message::Text(text)) = message else {
+                    break;
+                };
+                let request: serde_json::Value =
+                    serde_json::from_str(&text).expect("fake received valid json");
+                let id = request["id"].as_u64().expect("fake request has id");
+                let method = request["method"]
+                    .as_str()
+                    .expect("fake request has method")
+                    .to_string();
+                methods.push(method.clone());
+                let _ = method_tx.send(method.clone());
+                match method.as_str() {
+                    // Permanently withhold the first exact-target close. The
+                    // executor must not spawn another cleanup future around it.
+                    "Target.closeTarget" => {}
+                    "Browser.close" => {
+                        futures_util::SinkExt::send(
+                            &mut websocket,
+                            tokio_tungstenite::tungstenite::Message::Text(
+                                serde_json::json!({ "id": id, "result": {} })
+                                    .to_string()
+                                    .into(),
+                            ),
+                        )
+                        .await
+                        .expect("fake acknowledges authoritative browser close");
+                    }
+                    other => panic!("unexpected saturated-cleanup CDP method {other}"),
+                }
+            }
+            methods
+        });
+        let connection = Connection::connect(&format!("ws://{address}"))
+            .await
+            .expect("connect saturated-cleanup fake websocket");
+        (connection, method_rx, server)
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn single_permanent_cleanup_failure_exhausts_budget_and_closes_host() {
+        let (connection, mut methods, server) = saturated_cleanup_fake_connection().await;
+        let executor = TargetCleanupExecutor::new(connection.clone(), None)
+            .expect("bounded cleanup executor starts");
+        let cleanup = PendingCreatedPageCleanup::new(
+            connection.clone(),
+            Arc::clone(&executor),
+            None,
+            Some("only-stuck-target".into()),
+            Some("only-stuck-session".into()),
+            None,
+        );
+        cleanup.hand_off();
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(2), methods.recv())
+                .await
+                .expect("single cleanup command reaches fake server"),
+            Some("Target.closeTarget".into())
+        );
+        assert_eq!(
+            tokio::time::timeout(
+                TARGET_CLEANUP_JOB_BUDGET + Duration::from_secs(2),
+                methods.recv()
+            )
+            .await
+            .expect("single stuck cleanup escalates after its budget"),
+            Some("Browser.close".into())
+        );
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while cleanup.state.load(Ordering::Acquire) != 2 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("Host-close proof completes the single exact intent");
+        assert!(executor.is_poisoned());
+        assert_eq!(executor.max_active_jobs(), 1);
+        assert!(executor.max_queued_jobs() <= 1);
+        assert!(executor.ensure_accepting().is_err());
+
+        drop(executor);
+        connection.shutdown().await;
+        let methods = server.await.expect("single stuck-cleanup fake joins");
+        assert_eq!(methods, vec!["Target.closeTarget", "Browser.close"]);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn cleanup_only_router_target_uses_same_budget_and_never_spawns_an_unbounded_task() {
+        let (connection, mut methods, server) = saturated_cleanup_fake_connection().await;
+        let router = HostTargetRouter::new(connection.clone());
+        router
+            .cleanup_executor
+            .submit(TargetCleanupJob::RouterTarget {
+                router: Arc::clone(&router),
+                lane_id: "retired-lane".into(),
+                target_id: "late-popup".into(),
+            });
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(2), methods.recv())
+                .await
+                .expect("cleanup-only close reaches fake server"),
+            Some("Target.closeTarget".into())
+        );
+        assert_eq!(
+            tokio::time::timeout(
+                TARGET_CLEANUP_JOB_BUDGET + Duration::from_secs(2),
+                methods.recv()
+            )
+            .await
+            .expect("cleanup-only target exhausts the common budget"),
+            Some("Browser.close".into())
+        );
+        assert!(router.cleanup_executor.is_poisoned());
+        assert_eq!(router.cleanup_executor.max_active_jobs(), 1);
+        assert!(router.cleanup_executor.max_queued_jobs() <= 1);
+
+        connection.shutdown().await;
+        drop(router);
+        let methods = server.await.expect("cleanup-only fake joins");
+        assert_eq!(methods, vec!["Target.closeTarget", "Browser.close"]);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn permanent_cleanup_failure_has_bounded_queue_and_escalates_overflow_to_host_close() {
+        let (connection, mut methods, server) = saturated_cleanup_fake_connection().await;
+        let executor = TargetCleanupExecutor::new(connection.clone(), None)
+            .expect("bounded cleanup executor starts");
+        let mut cleanups = Vec::with_capacity(TARGET_CLEANUP_QUEUE_CAPACITY + 2);
+
+        let active = PendingCreatedPageCleanup::new(
+            connection.clone(),
+            Arc::clone(&executor),
+            None,
+            Some("stuck-target".into()),
+            Some("stuck-session".into()),
+            None,
+        );
+        active.hand_off();
+        cleanups.push(active);
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(2), methods.recv())
+                .await
+                .expect("first cleanup command reaches fake server"),
+            Some("Target.closeTarget".into())
+        );
+
+        // The active close never resolves. Exactly CAPACITY jobs may wait;
+        // one additional cleanup is the deterministic overflow authority.
+        for index in 0..=TARGET_CLEANUP_QUEUE_CAPACITY {
+            let cleanup = PendingCreatedPageCleanup::new(
+                connection.clone(),
+                Arc::clone(&executor),
+                None,
+                Some(format!("queued-target-{index}")),
+                Some(format!("queued-session-{index}")),
+                None,
+            );
+            cleanup.hand_off();
+            cleanups.push(cleanup);
+        }
+
+        tokio::time::timeout(Duration::from_secs(3), async {
+            while !executor.is_poisoned()
+                || cleanups
+                    .iter()
+                    .any(|cleanup| cleanup.state.load(Ordering::Acquire) != 2)
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("overflow is retained until Host-close authority completes");
+
+        assert_eq!(
+            executor.max_active_jobs(),
+            1,
+            "permanent failure may occupy only the sole cleanup future"
+        );
+        assert_eq!(
+            executor.max_queued_jobs(),
+            TARGET_CLEANUP_QUEUE_CAPACITY,
+            "the cleanup mailbox must never grow beyond its hard capacity"
+        );
+        assert!(
+            executor.ensure_accepting().is_err(),
+            "a poisoned Host must reject every later target/Lane create"
+        );
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(2), methods.recv())
+                .await
+                .expect("overflow reaches browser-wide shutdown"),
+            Some("Browser.close".into())
+        );
+        assert!(
+            matches!(
+                tokio::time::timeout(Duration::from_millis(100), methods.recv()).await,
+                Err(_) | Ok(None)
+            ),
+            "no second target cleanup command may run concurrently"
+        );
+
+        drop(executor);
+        connection.shutdown().await;
+        let methods = server.await.expect("saturated-cleanup fake joins");
+        assert_eq!(
+            methods,
+            vec!["Target.closeTarget", "Browser.close"],
+            "overflow must replace unbounded retry/concurrency with one Host close"
+        );
+    }
+
+    async fn close_target_fake_connection(
+        outcomes: Vec<Result<(), TransportError>>,
+    ) -> (Connection, tokio::task::JoinHandle<Vec<String>>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind close-target fake websocket");
+        let address = listener.local_addr().expect("read fake websocket address");
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("accept fake client");
+            let mut websocket = tokio_tungstenite::accept_async(stream)
+                .await
+                .expect("complete fake websocket handshake");
+            let mut outcomes = outcomes.into_iter();
+            let mut closed_targets = Vec::new();
+            while let Some(message) = futures_util::StreamExt::next(&mut websocket).await {
+                let Ok(tokio_tungstenite::tungstenite::Message::Text(text)) = message else {
+                    break;
+                };
+                let request: serde_json::Value =
+                    serde_json::from_str(&text).expect("fake received valid json");
+                let id = request
+                    .get("id")
+                    .and_then(serde_json::Value::as_u64)
+                    .expect("fake request has id");
+                if request.get("method").and_then(serde_json::Value::as_str)
+                    == Some("Target.closeTarget")
+                {
+                    if let Some(target_id) = request
+                        .get("params")
+                        .and_then(|params| params.get("targetId"))
+                        .and_then(serde_json::Value::as_str)
+                    {
+                        closed_targets.push(target_id.to_string());
+                    }
+                    match outcomes.next().unwrap_or(Ok(())) {
+                        Ok(()) => {
+                            futures_util::SinkExt::send(
+                                &mut websocket,
+                                tokio_tungstenite::tungstenite::Message::Text(
+                                    serde_json::json!({
+                                        "id": id,
+                                        "result": { "success": true }
+                                    })
+                                    .to_string()
+                                    .into(),
+                                ),
+                            )
+                            .await
+                            .expect("fake sends closeTarget success");
+                        }
+                        Err(TransportError::Cdp { code, message }) => {
+                            futures_util::SinkExt::send(
+                                &mut websocket,
+                                tokio_tungstenite::tungstenite::Message::Text(
+                                    serde_json::json!({
+                                        "id": id,
+                                        "error": { "code": code, "message": message }
+                                    })
+                                    .to_string()
+                                    .into(),
+                                ),
+                            )
+                            .await
+                            .expect("fake sends closeTarget cdp error");
+                        }
+                        Err(other) => panic!("fake closeTarget supports only Cdp errors, got {other:?}"),
+                    }
+                } else {
+                    futures_util::SinkExt::send(
+                        &mut websocket,
+                        tokio_tungstenite::tungstenite::Message::Text(
+                            serde_json::json!({ "id": id, "result": {} })
+                                .to_string()
+                                .into(),
+                        ),
+                    )
+                    .await
+                    .expect("fake sends generic success");
+                }
+            }
+            closed_targets
+        });
+        let connection = Connection::connect(&format!("ws://{address}"))
+            .await
+            .expect("connect close-target fake websocket");
+        (connection, server)
+    }
+
+    enum FakeCloseReply {
+        Success(bool),
+        Raw(serde_json::Value),
+        Error(TransportError),
+    }
+
+    async fn close_target_inventory_fake_connection(
+        close_result: FakeCloseReply,
+        visible_targets: Vec<&str>,
+    ) -> (Connection, tokio::task::JoinHandle<Vec<String>>) {
+        close_target_inventory_fake_connection_with_infos(
+            close_result,
+            visible_targets
+                .into_iter()
+                .map(|target_id| serde_json::json!({ "targetId": target_id }))
+                .collect(),
+        )
+        .await
+    }
+
+    async fn close_target_inventory_fake_connection_with_infos(
+        close_result: FakeCloseReply,
+        target_infos: Vec<serde_json::Value>,
+    ) -> (Connection, tokio::task::JoinHandle<Vec<String>>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind close-target inventory fake websocket");
+        let address = listener.local_addr().expect("read fake websocket address");
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("accept fake client");
+            let mut websocket = tokio_tungstenite::accept_async(stream)
+                .await
+                .expect("complete fake websocket handshake");
+            let mut methods = Vec::new();
+            while let Some(message) = futures_util::StreamExt::next(&mut websocket).await {
+                let Ok(tokio_tungstenite::tungstenite::Message::Text(text)) = message else {
+                    break;
+                };
+                let request: serde_json::Value =
+                    serde_json::from_str(&text).expect("fake received valid json");
+                let id = request
+                    .get("id")
+                    .and_then(serde_json::Value::as_u64)
+                    .expect("fake request has id");
+                let method = request
+                    .get("method")
+                    .and_then(serde_json::Value::as_str)
+                    .expect("fake request has method")
+                    .to_string();
+                methods.push(method.clone());
+                let response = match method.as_str() {
+                    "Target.closeTarget" => match &close_result {
+                        FakeCloseReply::Success(success) => serde_json::json!({
+                            "id": id,
+                            "result": { "success": success }
+                        }),
+                        FakeCloseReply::Raw(result) => serde_json::json!({
+                            "id": id,
+                            "result": result
+                        }),
+                        FakeCloseReply::Error(TransportError::Cdp { code, message }) => serde_json::json!({
+                            "id": id,
+                            "error": { "code": code, "message": message }
+                        }),
+                        FakeCloseReply::Error(other) => {
+                            panic!("inventory fake supports only Cdp errors, got {other:?}")
+                        }
+                    },
+                    "Target.getTargets" => serde_json::json!({
+                        "id": id,
+                        "result": {
+                            "targetInfos": target_infos.clone()
+                        }
+                    }),
+                    other => panic!("unexpected fake CDP method {other}"),
+                };
+                futures_util::SinkExt::send(
+                    &mut websocket,
+                    tokio_tungstenite::tungstenite::Message::Text(
+                        response.to_string().into(),
+                    ),
+                )
+                .await
+                .expect("fake sends response");
+            }
+            methods
+        });
+        let connection = Connection::connect(&format!("ws://{address}"))
+            .await
+            .expect("connect close-target inventory fake websocket");
+        (connection, server)
+    }
+
+    async fn scripted_close_target_fake_connection(
+        close_replies: Vec<FakeCloseReply>,
+        inventories: Vec<Vec<serde_json::Value>>,
+    ) -> (Connection, tokio::task::JoinHandle<Vec<String>>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind scripted close-target fake websocket");
+        let address = listener.local_addr().expect("read fake websocket address");
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("accept fake client");
+            let mut websocket = tokio_tungstenite::accept_async(stream)
+                .await
+                .expect("complete fake websocket handshake");
+            let mut close_replies = std::collections::VecDeque::from(close_replies);
+            let mut inventories = std::collections::VecDeque::from(inventories);
+            let mut methods = Vec::new();
+            while let Some(message) = futures_util::StreamExt::next(&mut websocket).await {
+                let Ok(tokio_tungstenite::tungstenite::Message::Text(text)) = message else {
+                    break;
+                };
+                let request: serde_json::Value =
+                    serde_json::from_str(&text).expect("fake received valid json");
+                let id = request["id"].as_u64().expect("fake request has id");
+                let method = request["method"]
+                    .as_str()
+                    .expect("fake request has method")
+                    .to_string();
+                methods.push(method.clone());
+                let response = match method.as_str() {
+                    "Target.closeTarget" => match close_replies
+                        .pop_front()
+                        .expect("script provides every close reply")
+                    {
+                        FakeCloseReply::Success(success) => serde_json::json!({
+                            "id": id,
+                            "result": { "success": success }
+                        }),
+                        FakeCloseReply::Raw(result) => {
+                            serde_json::json!({ "id": id, "result": result })
+                        }
+                        FakeCloseReply::Error(TransportError::Cdp { code, message }) => {
+                            serde_json::json!({
+                                "id": id,
+                                "error": { "code": code, "message": message }
+                            })
+                        }
+                        FakeCloseReply::Error(other) => {
+                            panic!("scripted fake supports only Cdp errors, got {other:?}")
+                        }
+                    },
+                    "Target.getTargets" => serde_json::json!({
+                        "id": id,
+                        "result": {
+                            "targetInfos": inventories
+                                .pop_front()
+                                .expect("script provides every inventory")
+                        }
+                    }),
+                    other => panic!("unexpected scripted fake CDP method {other}"),
+                };
+                futures_util::SinkExt::send(
+                    &mut websocket,
+                    tokio_tungstenite::tungstenite::Message::Text(
+                        response.to_string().into(),
+                    ),
+                )
+                .await
+                .expect("fake sends response");
+            }
+            methods
+        });
+        let connection = Connection::connect(&format!("ws://{address}"))
+            .await
+            .expect("connect scripted close-target fake websocket");
+        (connection, server)
+    }
+
+    async fn foreground_fake_connection() -> (
+        Connection,
+        tokio::task::JoinHandle<Vec<serde_json::Value>>,
+    ) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind foreground fake websocket");
+        let address = listener.local_addr().expect("read fake websocket address");
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("accept fake client");
+            let mut websocket = tokio_tungstenite::accept_async(stream)
+                .await
+                .expect("complete fake websocket handshake");
+            let mut requests = Vec::new();
+            while requests.len() < 3 {
+                let Some(Ok(tokio_tungstenite::tungstenite::Message::Text(text))) =
+                    futures_util::StreamExt::next(&mut websocket).await
+                else {
+                    break;
+                };
+                let request: serde_json::Value =
+                    serde_json::from_str(&text).expect("fake received valid json");
+                let id = request
+                    .get("id")
+                    .and_then(serde_json::Value::as_u64)
+                    .expect("fake request has id");
+                let method = request
+                    .get("method")
+                    .and_then(serde_json::Value::as_str)
+                    .expect("fake request has method");
+                let result = if method == "Browser.getWindowForTarget" {
+                    serde_json::json!({
+                        "windowId": 73,
+                        "bounds": {
+                            "left": 80,
+                            "top": 80,
+                            "width": 1280,
+                            "height": 800,
+                            "windowState": "minimized"
+                        }
+                    })
+                } else {
+                    serde_json::json!({})
+                };
+                requests.push(request);
+                futures_util::SinkExt::send(
+                    &mut websocket,
+                    tokio_tungstenite::tungstenite::Message::Text(
+                        serde_json::json!({ "id": id, "result": result })
+                            .to_string()
+                            .into(),
+                    ),
+                )
+                .await
+                .expect("fake sends foreground response");
+            }
+            requests
+        });
+        let connection = Connection::connect(&format!("ws://{address}"))
+            .await
+            .expect("connect foreground fake websocket");
+        (connection, server)
+    }
+
+    fn inert_loop() -> tokio::task::JoinHandle<()> {
+        tokio::spawn(std::future::pending::<()>())
+    }
+
+    fn test_tab_record(conn: &Connection, target_id: &str, session_id: &str) -> TabRecord {
+        TabRecord {
+            target_id: target_id.to_string(),
+            session_id: session_id.to_string(),
+            injection: InjectionManager::new(conn.clone(), session_id.to_string()),
+            _inject_loop: inert_loop(),
+            main_frame_id: target_id.to_string(),
+            oopif_managers: Arc::new(AsyncMutex::new(HashMap::new())),
+            _oopif_loop: inert_loop(),
+            ref_table: Arc::new(AsyncMutex::new(None)),
+            debug: Arc::new(std::sync::Mutex::new(
+                crate::debug_capture::DebugBuffers::default(),
+            )),
+            _debug_loop: inert_loop(),
+        }
+    }
+
+    fn test_backend_with_tabs(conn: Connection, target_ids: &[&str]) -> CdpBackend {
+        let tabs = target_ids
+            .iter()
+            .map(|target_id| {
+                (
+                    (*target_id).to_string(),
+                    test_tab_record(&conn, target_id, &format!("session-{target_id}")),
+                )
+            })
+            .collect::<HashMap<_, _>>();
+        let cleanup_executor = TargetCleanupExecutor::new(conn.clone(), None)
+            .expect("test target cleanup executor starts");
+        CdpBackend {
+            conn,
+            host: None,
+            test_router: None,
+            lane_id: "test-lane".to_string(),
+            lane_cleanup: None,
+            cleanup_executor,
+            lane_closing: Arc::new(AtomicBool::new(false)),
+            lane_closed: Arc::new(AtomicBool::new(false)),
+            lane_retired: AtomicBool::new(false),
+            lane_shutdown_gate: AsyncMutex::new(()),
+            lane_close_confirmed: AsyncMutex::new(HashSet::new()),
+            lane_cancel: CancellationToken::new(),
+            tabs: Arc::new(AsyncMutex::new(tabs)),
+            active_target: Arc::new(AsyncMutex::new(
+                target_ids.first().copied().unwrap_or_default().to_string(),
+            )),
+            active_frame: Arc::new(AsyncMutex::new(None)),
+            act_seq: AtomicU64::new(0),
+            _process: None,
+            _attach_loop: None,
+            _tab_discovery_loop: None,
+            _download_loop: None,
+            download_dir: None,
+            workspace_dir: None,
+            _firewall_loop: None,
+            firewall_config: crate::firewall::FirewallConfig::default(),
+            approved_domains: crate::firewall::ApprovedDomains::new(),
+            evaluate_gate: AsyncMutex::new(crate::evaluate::EvaluateGate::default()),
+            headful: false,
+            display_available: false,
+            op_mutex: LaneOperationGate::default(),
+            target_recovery_gate: AsyncMutex::new(()),
+            known_secret_values: crate::KnownSecretValues::default(),
+        }
+    }
+
+    #[tokio::test]
+    async fn bring_to_front_restores_real_window_before_activating_target() {
+        let (connection, server) = foreground_fake_connection().await;
+        let mut backend = test_backend_with_tabs(connection.clone(), &["target-active"]);
+        backend.headful = true;
+        backend.display_available = true;
+
+        backend
+            .bring_to_front()
+            .await
+            .expect("foreground command sequence succeeds");
+
+        drop(backend);
+        connection.shutdown().await;
+        let requests = server.await.expect("fake server joins");
+        let methods = requests
+            .iter()
+            .map(|request| request["method"].as_str().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            methods,
+            vec![
+                "Browser.getWindowForTarget",
+                "Browser.setWindowBounds",
+                "Target.activateTarget",
+            ],
+            "the native window must be restored before target activation"
+        );
+        assert_eq!(requests[0]["params"]["targetId"], "target-active");
+        assert_eq!(requests[1]["params"]["windowId"], 73);
+        assert_eq!(requests[1]["params"]["bounds"]["windowState"], "normal");
+        assert_eq!(requests[2]["params"]["targetId"], "target-active");
+        assert!(
+            requests.iter().all(|request| request.get("sessionId").is_none()),
+            "Browser and Target window commands must use the root session"
+        );
+    }
+
+    #[tokio::test]
+    async fn shutdown_lane_propagates_close_target_error_and_preserves_state() {
+        let (connection, server) = close_target_fake_connection(vec![Err(TransportError::Cdp {
+            code: -32000,
+            message: "close denied".into(),
+        })])
+        .await;
+        let backend = test_backend_with_tabs(connection.clone(), &["target-a"]);
+
+        let error = backend.shutdown_lane().await.unwrap_err();
+        match error {
+            BrowserError::Other(message) => assert!(message.contains("close denied"), "{message}"),
+            other => panic!("expected propagated CDP error, got {other:?}"),
+        }
+        assert!(
+            backend.lane_closing.load(Ordering::Acquire),
+            "failed cleanup still fences new lane work"
+        );
+        assert!(
+            !backend.lane_closed.load(Ordering::Acquire),
+            "lane must not publish closed after closeTarget failure"
+        );
+        assert!(
+            backend.tabs.lock().await.contains_key("target-a"),
+            "target state must remain for retry"
+        );
+        assert!(
+            backend.lane_close_confirmed.lock().await.is_empty(),
+            "failed target must not be marked confirmed"
+        );
+
+        drop(backend);
+        connection.shutdown().await;
+        let closed_targets = server.await.expect("fake server joins");
+        assert_eq!(closed_targets, vec!["target-a"]);
+    }
+
+    #[tokio::test]
+    async fn shutdown_lane_retries_only_unconfirmed_targets_after_partial_success() {
+        let (connection, server) = close_target_fake_connection(vec![
+            Ok(()),
+            Err(TransportError::Cdp {
+                code: -32000,
+                message: "transient close failure".into(),
+            }),
+            Ok(()),
+        ])
+        .await;
+        let backend = test_backend_with_tabs(connection.clone(), &["target-a", "target-b"]);
+
+        assert!(
+            backend.shutdown_lane().await.is_err(),
+            "first cleanup should surface the failing second target"
+        );
+        assert_eq!(
+            backend
+                .lane_close_confirmed
+                .lock()
+                .await
+                .iter()
+                .cloned()
+                .collect::<Vec<_>>(),
+            vec!["target-a".to_string()],
+            "successful target is remembered so retry is idempotent"
+        );
+        assert!(
+            backend.tabs.lock().await.contains_key("target-a")
+                && backend.tabs.lock().await.contains_key("target-b"),
+            "tabs remain authoritative until the whole lane closes"
+        );
+
+        backend
+            .shutdown_lane()
+            .await
+            .expect("retry closes only the remaining target");
+        assert!(backend.lane_closed.load(Ordering::Acquire));
+        assert!(backend.tabs.lock().await.is_empty());
+        assert!(backend.lane_close_confirmed.lock().await.is_empty());
+
+        drop(backend);
+        connection.shutdown().await;
+        let closed_targets = server.await.expect("fake server joins");
+        assert_eq!(
+            closed_targets,
+            vec![
+                "target-a".to_string(),
+                "target-b".to_string(),
+                "target-b".to_string()
+            ],
+            "retry must not send closeTarget again for the already-confirmed target"
+        );
+    }
+
+    #[tokio::test]
+    async fn shutdown_lane_retries_retired_finalizer_without_reentering_active_drain() {
+        let (connection, server) = scripted_close_target_fake_connection(
+            vec![FakeCloseReply::Success(true)],
+            vec![
+                vec![],
+                vec![serde_json::json!({"targetId": "malformed-without-type"})],
+                vec![],
+                vec![],
+            ],
+        )
+        .await;
+        let router = HostTargetRouter::new(connection.clone());
+        let router_loop = router.spawn();
+        let mut backend = test_backend_with_tabs(connection.clone(), &["target-a"]);
+        router
+            .register_lane(
+                backend.lane_id.clone(),
+                &backend.tabs,
+                &backend.active_target,
+                &backend.active_frame,
+                backend.lane_closing.clone(),
+                None,
+            )
+            .await;
+        assert!(router.claim_target(&backend.lane_id, "target-a").await);
+        backend.test_router = Some(router.clone());
+
+        let first_error = backend
+            .shutdown_lane()
+            .await
+            .expect_err("malformed first retired inventory must fail closed");
+        assert!(
+            first_error.to_string().contains("string type"),
+            "{first_error}"
+        );
+        assert!(
+            backend.lane_retired.load(Ordering::Acquire),
+            "active drain completion must survive retired-finalizer failure"
+        );
+        assert!(!backend.lane_closed.load(Ordering::Acquire));
+        assert!(
+            !router
+                .state
+                .lock()
+                .await
+                .lanes
+                .contains_key(&backend.lane_id),
+            "first attempt has already unregistered the active Lane route"
+        );
+
+        backend
+            .shutdown_lane()
+            .await
+            .expect("second shutdown retries the retired finalizer directly");
+        assert!(backend.lane_closed.load(Ordering::Acquire));
+
+        drop(backend);
+        router_loop.abort();
+        let _ = router_loop.await;
+        connection.shutdown().await;
+        let methods = server.await.expect("scripted fake server joins");
+        assert_eq!(
+            methods,
+            vec![
+                "Target.closeTarget",
+                "Target.getTargets",
+                "Target.getTargets",
+                "Target.getTargets",
+                "Target.getTargets",
+            ],
+            "retry must not issue another close or consult the removed active Lane"
+        );
+    }
+
+    #[tokio::test]
+    async fn shutdown_lane_accepts_close_error_only_when_inventory_proves_absence() {
+        let (connection, server) = close_target_inventory_fake_connection(
+            FakeCloseReply::Error(TransportError::Cdp {
+                code: -32000,
+                message: "No target with given id".into(),
+            }),
+            Vec::new(),
+        )
+        .await;
+        let backend = test_backend_with_tabs(connection.clone(), &["target-a"]);
+
+        backend
+            .shutdown_lane()
+            .await
+            .expect("an absent target makes close failure idempotent");
+        assert!(backend.lane_closed.load(Ordering::Acquire));
+        assert!(backend.tabs.lock().await.is_empty());
+
+        drop(backend);
+        connection.shutdown().await;
+        let methods = server.await.expect("fake server joins");
+        assert_eq!(
+            methods,
+            vec!["Target.closeTarget", "Target.getTargets"],
+            "absence must be proven by a root target inventory"
+        );
+    }
+
+    #[tokio::test]
+    async fn shutdown_lane_accepts_success_false_only_when_inventory_proves_absence() {
+        let (connection, server) =
+            close_target_inventory_fake_connection(FakeCloseReply::Success(false), Vec::new())
+                .await;
+        let backend = test_backend_with_tabs(connection.clone(), &["target-a"]);
+
+        backend
+            .shutdown_lane()
+            .await
+            .expect("success=false is idempotent only for an absent target");
+        assert!(backend.lane_closed.load(Ordering::Acquire));
+
+        drop(backend);
+        connection.shutdown().await;
+        let methods = server.await.expect("fake server joins");
+        assert_eq!(methods, vec!["Target.closeTarget", "Target.getTargets"]);
+    }
+
+    #[tokio::test]
+    async fn shutdown_lane_rejects_success_false_when_target_is_still_present() {
+        let (connection, server) =
+            close_target_inventory_fake_connection(
+                FakeCloseReply::Success(false),
+                vec!["target-a"],
+            )
+            .await;
+        let backend = test_backend_with_tabs(connection.clone(), &["target-a"]);
+
+        let error = backend.shutdown_lane().await.unwrap_err();
+        match error {
+            BrowserError::Other(message) => {
+                assert!(message.contains("success=false"), "{message}")
+            }
+            other => panic!("expected raw closeTarget failure, got {other:?}"),
+        }
+        assert!(!backend.lane_closed.load(Ordering::Acquire));
+        assert!(backend.tabs.lock().await.contains_key("target-a"));
+
+        drop(backend);
+        connection.shutdown().await;
+        let methods = server.await.expect("fake server joins");
+        assert_eq!(methods, vec!["Target.closeTarget", "Target.getTargets"]);
+    }
+
+    #[tokio::test]
+    async fn shutdown_lane_rejects_missing_close_success_when_target_is_present() {
+        let (connection, server) = close_target_inventory_fake_connection(
+            FakeCloseReply::Raw(serde_json::json!({})),
+            vec!["target-a"],
+        )
+        .await;
+        let backend = test_backend_with_tabs(connection.clone(), &["target-a"]);
+
+        let error = backend.shutdown_lane().await.unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("did not contain boolean success=true"),
+            "{error}"
+        );
+        assert!(!backend.lane_closed.load(Ordering::Acquire));
+
+        drop(backend);
+        connection.shutdown().await;
+        assert_eq!(
+            server.await.expect("fake server joins"),
+            vec!["Target.closeTarget", "Target.getTargets"]
+        );
+    }
+
+    #[tokio::test]
+    async fn shutdown_lane_rejects_non_boolean_close_success_when_target_is_present() {
+        let (connection, server) = close_target_inventory_fake_connection(
+            FakeCloseReply::Raw(serde_json::json!({ "success": "yes" })),
+            vec!["target-a"],
+        )
+        .await;
+        let backend = test_backend_with_tabs(connection.clone(), &["target-a"]);
+
+        let error = backend.shutdown_lane().await.unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("did not contain boolean success=true"),
+            "{error}"
+        );
+        assert!(!backend.lane_closed.load(Ordering::Acquire));
+
+        drop(backend);
+        connection.shutdown().await;
+        assert_eq!(
+            server.await.expect("fake server joins"),
+            vec!["Target.closeTarget", "Target.getTargets"]
+        );
+    }
+
+    #[tokio::test]
+    async fn shutdown_lane_accepts_malformed_close_only_after_valid_absence_inventory() {
+        let (connection, server) = close_target_inventory_fake_connection(
+            FakeCloseReply::Raw(serde_json::json!({})),
+            Vec::new(),
+        )
+        .await;
+        let backend = test_backend_with_tabs(connection.clone(), &["target-a"]);
+
+        backend
+            .shutdown_lane()
+            .await
+            .expect("valid empty inventory proves target absence");
+
+        drop(backend);
+        connection.shutdown().await;
+        assert_eq!(
+            server.await.expect("fake server joins"),
+            vec!["Target.closeTarget", "Target.getTargets"]
+        );
+    }
+
+    #[tokio::test]
+    async fn shutdown_lane_rejects_malformed_target_inventory() {
+        let (connection, server) = close_target_inventory_fake_connection_with_infos(
+            FakeCloseReply::Raw(serde_json::json!({})),
+            vec![serde_json::json!({})],
+        )
+        .await;
+        let backend = test_backend_with_tabs(connection.clone(), &["target-a"]);
+
+        let error = backend.shutdown_lane().await.unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("did not contain boolean success=true"),
+            "the original close failure must remain authoritative: {error}"
+        );
+        assert!(!backend.lane_closed.load(Ordering::Acquire));
+
+        drop(backend);
+        connection.shutdown().await;
+        assert_eq!(
+            server.await.expect("fake server joins"),
+            vec!["Target.closeTarget", "Target.getTargets"]
+        );
+    }
+
+    #[tokio::test]
+    async fn shutdown_lane_retains_original_close_error_when_target_is_present() {
+        let (connection, server) = close_target_inventory_fake_connection(
+            FakeCloseReply::Error(TransportError::Cdp {
+                code: -32000,
+                message: "close denied by policy".into(),
+            }),
+            vec!["target-a"],
+        )
+        .await;
+        let backend = test_backend_with_tabs(connection.clone(), &["target-a"]);
+
+        let error = backend.shutdown_lane().await.unwrap_err();
+        match error {
+            BrowserError::Other(message) => {
+                assert!(message.contains("close denied by policy"), "{message}")
+            }
+            other => panic!("expected original CDP error, got {other:?}"),
+        }
+        assert!(!backend.lane_closed.load(Ordering::Acquire));
+        assert!(backend.tabs.lock().await.contains_key("target-a"));
+        assert!(backend.lane_close_confirmed.lock().await.is_empty());
+
+        drop(backend);
+        connection.shutdown().await;
+        let methods = server.await.expect("fake server joins");
+        assert_eq!(methods, vec!["Target.closeTarget", "Target.getTargets"]);
+    }
+
+    #[tokio::test]
+    async fn lane_closing_fences_popup_attach_before_lane_closed() {
+        let (connection, server) = router_test_connection().await;
+        let router = HostTargetRouter::new(connection.clone());
+        let tabs = Arc::new(AsyncMutex::new(HashMap::new()));
+        let active_target = Arc::new(AsyncMutex::new("opener".to_string()));
+        let active_frame = Arc::new(AsyncMutex::new(None));
+        let lane_closing = Arc::new(AtomicBool::new(false));
+        let lane_closed = Arc::new(AtomicBool::new(false));
+
+        router
+            .register_lane(
+                "lane-a".to_string(),
+                &tabs,
+                &active_target,
+                &active_frame,
+                lane_closing.clone(),
+                None,
+            )
+            .await;
+        assert!(router.claim_target("lane-a", "opener").await);
+
+        let attach_router = router.clone();
+        let attach = tokio::spawn(async move {
+            attach_router
+                .handle_attached(PendingPage {
+                    target_id: "popup".to_string(),
+                    session_id: "popup-session".to_string(),
+                    opener_target_id: Some("opener".to_string()),
+                })
+                .await;
+        });
+
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if router.state.lock().await.ownership.owner("popup") == Some("lane-a") {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("popup attach must enter the router before close starts");
+
+        lane_closing.store(true, Ordering::Release);
+        assert!(
+            !lane_closed.load(Ordering::Acquire),
+            "the router fence must engage before final lane_closed publication"
+        );
+        tokio::time::timeout(Duration::from_millis(250), attach)
+            .await
+            .expect("closing must promptly stop an in-flight popup attach")
+            .expect("popup attach task must not panic");
+
+        assert!(
+            tabs.lock().await.is_empty(),
+            "a popup must not enter the Lane after lane_closing is published"
+        );
+        assert!(
+            !router.claim_target("lane-a", "explicit-after-close").await,
+            "explicit target claims must also fail once Lane closing begins"
+        );
+        assert_eq!(
+            router
+                .state
+                .lock()
+                .await
+                .ownership
+                .owner("explicit-after-close"),
+            None
+        );
+
+        server.abort();
+        let _ = server.await;
+        connection.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn event_barrier_times_out_when_router_never_acknowledges() {
+        let (connection, server) = router_test_connection().await;
+        let router = HostTargetRouter::new(connection.clone());
+
+        let started = tokio::time::Instant::now();
+        let error = router
+            .event_barrier_with_timeout(Duration::from_millis(50))
+            .await
+            .expect_err("an unspawned router cannot acknowledge its mailbox barrier");
+        assert!(error.to_string().contains("barrier timed out"), "{error}");
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "barrier acknowledgement must have a hard upper bound"
+        );
+
+        server.abort();
+        let _ = server.await;
+        connection.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn event_barrier_times_out_when_router_mailbox_is_full() {
+        let (connection, server) = router_test_connection().await;
+        let router = HostTargetRouter::new(connection.clone());
+        for _ in 0..16 {
+            let (ack_tx, _ack_rx) = tokio::sync::oneshot::channel();
+            router
+                .barrier_tx
+                .try_send(ack_tx)
+                .expect("test fills the exact mailbox capacity");
+        }
+
+        let started = tokio::time::Instant::now();
+        let error = router
+            .event_barrier_with_timeout(Duration::from_millis(50))
+            .await
+            .expect_err("a full mailbox must not block Lane cleanup forever");
+        assert!(error.to_string().contains("barrier timed out"), "{error}");
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "barrier enqueue must share the same hard deadline as acknowledgement"
+        );
+
+        server.abort();
+        let _ = server.await;
+        connection.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn retired_lane_fence_closes_popup_attached_after_unregister_and_preserves_sibling() {
+        let (connection, server) = scripted_close_target_fake_connection(
+            vec![
+                FakeCloseReply::Error(TransportError::Cdp {
+                    code: -32000,
+                    message: "transient close race".into(),
+                }),
+                FakeCloseReply::Success(true),
+            ],
+            vec![vec![serde_json::json!({
+                "targetId": "late-popup",
+                "type": "page",
+                "openerId": "retired-opener"
+            })]],
+        )
+        .await;
+        let router = HostTargetRouter::new(connection.clone());
+        let tabs_a = Arc::new(AsyncMutex::new(HashMap::new()));
+        let tabs_b = Arc::new(AsyncMutex::new(HashMap::from([(
+            "sibling-target".to_string(),
+            test_tab_record(&connection, "sibling-target", "sibling-session"),
+        )])));
+        let active_a = Arc::new(AsyncMutex::new("retired-opener".to_string()));
+        let active_b = Arc::new(AsyncMutex::new("sibling-target".to_string()));
+        let frame_a = Arc::new(AsyncMutex::new(None));
+        let frame_b = Arc::new(AsyncMutex::new(None));
+        let closing_a = Arc::new(AtomicBool::new(true));
+        router
+            .register_lane(
+                "lane-a".into(),
+                &tabs_a,
+                &active_a,
+                &frame_a,
+                closing_a,
+                None,
+            )
+            .await;
+        router
+            .register_lane(
+                "lane-b".into(),
+                &tabs_b,
+                &active_b,
+                &frame_b,
+                Arc::new(AtomicBool::new(false)),
+                None,
+            )
+            .await;
+        {
+            let mut state = router.state.lock().await;
+            state
+                .ownership
+                .claim("lane-a", "retired-opener")
+                .unwrap();
+            state
+                .ownership
+                .claim("lane-b", "sibling-target")
+                .unwrap();
+        }
+
+        // Models the causal gap after a final empty Target.getTargets result:
+        // the Lane is already unregistered when its queued popup attach arrives.
+        router.unregister_lane("lane-a").await;
+        router
+            .handle_attached(PendingPage {
+                target_id: "late-popup".into(),
+                session_id: "late-popup-session".into(),
+                opener_target_id: Some("retired-opener".into()),
+            })
+            .await;
+
+        tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                let state = router.state.lock().await;
+                let cleaned = !state.quarantined.contains_key("late-popup")
+                    && !state.cleanup_inflight.contains("late-popup")
+                    && !state
+                        .session_targets
+                        .values()
+                        .any(|target| target == "late-popup");
+                drop(state);
+                if cleaned {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("retired popup cleanup retries until close succeeds");
+
+        {
+            let state = router.state.lock().await;
+            assert_eq!(
+                state.retired_target_owner.get("retired-opener"),
+                Some(&"lane-a".to_string())
+            );
+            assert_eq!(
+                state.retired_target_owner.get("late-popup"),
+                Some(&"lane-a".to_string())
+            );
+            assert_eq!(state.ownership.owner("late-popup"), None);
+            assert_eq!(state.ownership.owner("sibling-target"), Some("lane-b"));
+            assert!(!state.lost_targets.contains("late-popup"));
+        }
+        assert!(tabs_b.lock().await.contains_key("sibling-target"));
+        assert_eq!(active_b.lock().await.as_str(), "sibling-target");
+
+        connection.shutdown().await;
+        assert_eq!(
+            server.await.expect("scripted fake server joins"),
+            vec![
+                "Target.closeTarget",
+                "Target.getTargets",
+                "Target.closeTarget"
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn retired_lane_finalize_waits_for_inflight_close_and_ordered_empty_inventories() {
+        let present = || {
+            vec![serde_json::json!({
+                "targetId": "late-popup",
+                "type": "page",
+                "openerId": "retired-opener"
+            })]
+        };
+        let (connection, server) = scripted_close_target_fake_connection(
+            vec![
+                FakeCloseReply::Error(TransportError::Cdp {
+                    code: -32000,
+                    message: "transient close race".into(),
+                }),
+                FakeCloseReply::Success(true),
+            ],
+            vec![present(), present(), Vec::new(), Vec::new()],
+        )
+        .await;
+        let router = HostTargetRouter::new(connection.clone());
+        let router_loop = router.spawn();
+        let tabs_a = Arc::new(AsyncMutex::new(HashMap::new()));
+        let tabs_b = Arc::new(AsyncMutex::new(HashMap::new()));
+        let active_a = Arc::new(AsyncMutex::new("retired-opener".to_string()));
+        let active_b = Arc::new(AsyncMutex::new("sibling-target".to_string()));
+        let frame_a = Arc::new(AsyncMutex::new(None));
+        let frame_b = Arc::new(AsyncMutex::new(None));
+        router
+            .register_lane(
+                "lane-a".into(),
+                &tabs_a,
+                &active_a,
+                &frame_a,
+                Arc::new(AtomicBool::new(true)),
+                None,
+            )
+            .await;
+        router
+            .register_lane(
+                "lane-b".into(),
+                &tabs_b,
+                &active_b,
+                &frame_b,
+                Arc::new(AtomicBool::new(false)),
+                None,
+            )
+            .await;
+        {
+            let mut state = router.state.lock().await;
+            state
+                .ownership
+                .claim("lane-a", "retired-opener")
+                .unwrap();
+            state
+                .ownership
+                .claim("lane-b", "sibling-target")
+                .unwrap();
+        }
+        router.unregister_lane("lane-a").await;
+        router
+            .handle_attached(PendingPage {
+                target_id: "late-popup".into(),
+                session_id: "late-popup-session".into(),
+                opener_target_id: Some("retired-opener".into()),
+            })
+            .await;
+
+        let finalize_router = Arc::clone(&router);
+        let finalize = tokio::spawn(async move {
+            finalize_router.finalize_retired_lane("lane-a").await
+        });
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(
+            !finalize.is_finished(),
+            "Lane finalization must not return while its first close retry is in flight"
+        );
+        tokio::time::timeout(Duration::from_secs(3), finalize)
+            .await
+            .expect("finalization completes after cleanup succeeds")
+            .expect("finalization task does not panic")
+            .expect("ordered inventories prove the retired Lane empty");
+        {
+            let state = router.state.lock().await;
+            assert!(!state.cleanup_inflight.contains("late-popup"));
+            assert_eq!(state.ownership.owner("sibling-target"), Some("lane-b"));
+        }
+
+        router_loop.abort();
+        let _ = router_loop.await;
+        connection.shutdown().await;
+        let methods = server.await.expect("scripted fake server joins");
+        assert_eq!(
+            methods
+                .iter()
+                .filter(|method| method.as_str() == "Target.closeTarget")
+                .count(),
+            2
+        );
+        assert_eq!(
+            methods
+                .iter()
+                .filter(|method| method.as_str() == "Target.getTargets")
+                .count(),
+            4
+        );
+    }
+
+    #[tokio::test]
+    async fn active_lane_loss_tombstones_are_reclaimed_on_every_unregister() {
+        let (connection, server) = router_test_connection().await;
+        let router = HostTargetRouter::new(connection.clone());
+
+        for round in 0..8 {
+            let lane_id = format!("lane-{round}");
+            let target_id = format!("target-{round}");
+            let tabs = Arc::new(AsyncMutex::new(HashMap::new()));
+            let active = Arc::new(AsyncMutex::new(target_id.clone()));
+            let frame = Arc::new(AsyncMutex::new(None));
+            router
+                .register_lane(
+                    lane_id.clone(),
+                    &tabs,
+                    &active,
+                    &frame,
+                    Arc::new(AtomicBool::new(false)),
+                    None,
+                )
+                .await;
+            assert!(router.claim_target(&lane_id, &target_id).await);
+            router
+                .handle_top_level_target_loss(
+                    Some(target_id.clone()),
+                    None,
+                    TopLevelTargetLoss::Destroyed,
+                )
+                .await;
+            assert!(router.state.lock().await.lost_targets.contains(&target_id));
+            router.unregister_lane(&lane_id).await;
+            assert!(
+                router.state.lock().await.lost_targets.is_empty(),
+                "active Lane tombstones must not accumulate across close rounds"
+            );
+        }
+
+        server.abort();
+        let _ = server.await;
+        connection.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn top_level_detach_and_destroy_update_only_the_owning_lane() {
+        let (connection, server) = router_test_connection().await;
+        let router = HostTargetRouter::new(connection.clone());
+        let tabs_a = Arc::new(AsyncMutex::new(HashMap::from([(
+            "target-a".to_string(),
+            test_tab_record(&connection, "target-a", "page-session-a"),
+        )])));
+        let tabs_b = Arc::new(AsyncMutex::new(HashMap::from([(
+            "target-b".to_string(),
+            test_tab_record(&connection, "target-b", "page-session-b"),
+        )])));
+        let active_a = Arc::new(AsyncMutex::new("target-a".to_string()));
+        let active_b = Arc::new(AsyncMutex::new("target-b".to_string()));
+        let frame_a = Arc::new(AsyncMutex::new(Some((
+            "target-a".to_string(),
+            "frame-a".to_string(),
+        ))));
+        let frame_b = Arc::new(AsyncMutex::new(Some((
+            "target-b".to_string(),
+            "frame-b".to_string(),
+        ))));
+        router
+            .register_lane(
+                "lane-a".into(),
+                &tabs_a,
+                &active_a,
+                &frame_a,
+                Arc::new(AtomicBool::new(false)),
+                None,
+            )
+            .await;
+        router
+            .register_lane(
+                "lane-b".into(),
+                &tabs_b,
+                &active_b,
+                &frame_b,
+                Arc::new(AtomicBool::new(false)),
+                None,
+            )
+            .await;
+        assert!(router.claim_target("lane-a", "target-a").await);
+        assert!(router.claim_target("lane-b", "target-b").await);
+        {
+            let mut state = router.state.lock().await;
+            state
+                .session_targets
+                .insert("page-session-a".into(), "target-a".into());
+            state
+                .session_targets
+                .insert("page-session-b".into(), "target-b".into());
+        }
+
+        router
+            .handle_top_level_target_loss(
+                None,
+                Some("page-session-a".into()),
+                TopLevelTargetLoss::Detached,
+            )
+            .await;
+        assert!(tabs_a.lock().await.is_empty());
+        assert_eq!(active_a.lock().await.as_str(), "");
+        assert!(frame_a.lock().await.is_none());
+        assert!(tabs_b.lock().await.contains_key("target-b"));
+        assert_eq!(active_b.lock().await.as_str(), "target-b");
+        assert!(
+            router.state.lock().await.ownership.owner("target-a") == Some("lane-a"),
+            "lost target ownership remains a cleanup tombstone"
+        );
+
+        router
+            .handle_top_level_target_loss(
+                Some("target-b".into()),
+                None,
+                TopLevelTargetLoss::Destroyed,
+            )
+            .await;
+        assert!(tabs_b.lock().await.is_empty());
+        assert_eq!(active_b.lock().await.as_str(), "");
+        assert!(frame_b.lock().await.is_none());
+
+        server.abort();
+        let _ = server.await;
+        connection.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn worker_and_oopif_loss_cannot_remove_top_level_lane_tabs() {
+        let (connection, server) = router_test_connection().await;
+        let router = HostTargetRouter::new(connection.clone());
+        let tabs = Arc::new(AsyncMutex::new(HashMap::from([(
+            "page-target".to_string(),
+            test_tab_record(&connection, "page-target", "page-session"),
+        )])));
+        let active = Arc::new(AsyncMutex::new("page-target".to_string()));
+        let frame = Arc::new(AsyncMutex::new(None));
+        router
+            .register_lane(
+                "lane-a".into(),
+                &tabs,
+                &active,
+                &frame,
+                Arc::new(AtomicBool::new(false)),
+                None,
+            )
+            .await;
+        assert!(router.claim_target("lane-a", "page-target").await);
+        router
+            .state
+            .lock()
+            .await
+            .session_targets
+            .insert("page-session".into(), "page-target".into());
+
+        router
+            .handle_top_level_target_loss(
+                None,
+                Some("worker-session".into()),
+                TopLevelTargetLoss::Detached,
+            )
+            .await;
+        router
+            .handle_top_level_target_loss(
+                Some("oopif-target".into()),
+                None,
+                TopLevelTargetLoss::Destroyed,
+            )
+            .await;
+
+        assert!(tabs.lock().await.contains_key("page-target"));
+        assert_eq!(active.lock().await.as_str(), "page-target");
+        assert!(!router.is_target_lost("oopif-target").await);
+
+        server.abort();
+        let _ = server.await;
+        connection.shutdown().await;
+    }
+
     // ── B6 detach/crash 事件源接线：事件 params 形状判定（[纯逻辑]，喂构造 Value，无浏览器）──
 
     #[test]
     fn event_session_matches_by_session_id() {
-        // Target.detachedFromTarget / targetCrashed 的 params.sessionId 命中本 page session → true。
+        // Target.detachedFromTarget 的 params.sessionId 命中本 page session → true。
         let p = serde_json::json!({"sessionId": "PAGE_SID", "targetId": "T1"});
         assert!(event_session_matches(&p, "PAGE_SID"));
         // 不同 session（其它 target 没了）→ false（不误 abort 本动作）。
@@ -4673,6 +10573,41 @@ mod tests {
         // sessionId 非字符串（坏形状）→ false。
         let p3 = serde_json::json!({"sessionId": 7});
         assert!(!event_session_matches(&p3, "PAGE_SID"));
+    }
+
+    #[test]
+    fn target_crash_matches_target_id_not_root_session() {
+        let crash = serde_json::json!({
+            "targetId": "TARGET_A",
+            "status": "crashed",
+            "errorCode": 1
+        });
+        assert!(event_target_matches(&crash, "TARGET_A"));
+        assert!(!event_target_matches(&crash, "TARGET_B"));
+        assert!(
+            !event_session_matches(&crash, "PAGE_SESSION"),
+            "root targetCrashed has no child sessionId"
+        );
+        assert!(!event_target_matches(
+            &serde_json::json!({"sessionId": "PAGE_SESSION"}),
+            "TARGET_A"
+        ));
+    }
+
+    #[test]
+    fn crashed_active_target_selects_a_deterministic_survivor() {
+        let first = ["target-z", "target-a", "target-m"];
+        let second = ["target-m", "target-z", "target-a"];
+        assert_eq!(
+            deterministic_survivor(first, "target-z").as_deref(),
+            Some("target-a")
+        );
+        assert_eq!(
+            deterministic_survivor(second, "target-z").as_deref(),
+            Some("target-a"),
+            "HashMap/event order must not change survivor selection"
+        );
+        assert_eq!(deterministic_survivor(["only"], "only"), None);
     }
 
     #[test]
@@ -4697,22 +10632,26 @@ mod tests {
     }
 
     #[test]
-    fn transport_closed_maps_to_session_lost_unrecoverable() {
+    fn transport_connection_closed_maps_to_host_session_lost() {
         assert!(matches!(
             map_transport_err(TransportError::Closed),
-            BrowserError::SessionLost { recoverable: false }
-        ));
-        assert!(matches!(
-            map_transport_err(TransportError::SessionClosed),
             BrowserError::SessionLost { recoverable: false }
         ));
     }
 
     #[test]
-    fn transport_crashed_maps_to_session_lost_recoverable() {
+    fn transport_session_closed_stays_target_local() {
+        assert!(matches!(
+            map_transport_err(TransportError::SessionClosed),
+            BrowserError::TargetClosed
+        ));
+    }
+
+    #[test]
+    fn transport_session_crashed_stays_target_local() {
         assert!(matches!(
             map_transport_err(TransportError::SessionCrashed),
-            BrowserError::SessionLost { recoverable: true }
+            BrowserError::TargetCrashed
         ));
     }
 
@@ -5056,4 +10995,3 @@ mod op_mutex_tests {
         );
     }
 }
-

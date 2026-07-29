@@ -1,8 +1,10 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use axum::Router;
+use axum::http::{HeaderValue, header};
 use axum::routing::get;
 use futures_util::{SinkExt, StreamExt};
 use nomifun_api_types::WebSocketMessage;
@@ -46,6 +48,82 @@ fn default_state() -> (WsHandlerState, Arc<WebSocketManager>) {
         }),
     };
     (state, manager)
+}
+
+fn all_auth_sources_state() -> (WsHandlerState, Arc<WebSocketManager>) {
+    let manager = Arc::new(WebSocketManager::new());
+    let state = WsHandlerState {
+        manager: manager.clone(),
+        router: Arc::new(NoopMessageRouter),
+        token_authenticator: Arc::new(|token| {
+            matches!(token, "valid-token" | "local-trust-token").then(|| "user".to_owned())
+        }),
+        token_extractor: Arc::new(|headers| {
+            headers
+                .get(header::AUTHORIZATION)
+                .and_then(|value| value.to_str().ok())
+                .and_then(|value| value.strip_prefix("Bearer "))
+                .map(str::to_owned)
+                .or_else(|| {
+                    headers
+                        .get(header::COOKIE)
+                        .and_then(|value| value.to_str().ok())
+                        .and_then(|cookies| {
+                            cookies.split(';').find_map(|cookie| {
+                                let (name, value) = cookie.trim().split_once('=')?;
+                                (name == "nomifun-session" && !value.is_empty()).then(|| value.to_owned())
+                            })
+                        })
+                })
+                .or_else(|| {
+                    headers
+                        .get(header::SEC_WEBSOCKET_PROTOCOL)
+                        .and_then(|value| value.to_str().ok())
+                        .and_then(|protocols| protocols.split(',').next())
+                        .map(str::trim)
+                        .filter(|protocol| !protocol.is_empty())
+                        .map(str::to_owned)
+                })
+        }),
+    };
+    (state, manager)
+}
+
+fn no_auth_state() -> (WsHandlerState, Arc<WebSocketManager>) {
+    let manager = Arc::new(WebSocketManager::new());
+    let state = WsHandlerState {
+        manager: manager.clone(),
+        router: Arc::new(NoopMessageRouter),
+        token_authenticator: Arc::new(|_| Some("user".to_owned())),
+        token_extractor: Arc::new(|_| Some("local".to_owned())),
+    };
+    (state, manager)
+}
+
+fn upgrade_request(addr: SocketAddr) -> tungstenite::http::Request<()> {
+    tungstenite::http::Request::builder()
+        .uri(format!("ws://{addr}/ws"))
+        .header(header::HOST.as_str(), addr.to_string())
+        .header(header::CONNECTION.as_str(), "Upgrade")
+        .header(header::UPGRADE.as_str(), "websocket")
+        .header(header::SEC_WEBSOCKET_VERSION.as_str(), "13")
+        .header(
+            header::SEC_WEBSOCKET_KEY.as_str(),
+            tungstenite::handshake::client::generate_key(),
+        )
+        .body(())
+        .unwrap()
+}
+
+async fn rejected_status(request: tungstenite::http::Request<()>) -> u16 {
+    match tokio_tungstenite::connect_async(request).await {
+        Err(tungstenite::Error::Http(response)) => response.status().as_u16(),
+        Ok((mut socket, _)) => {
+            let _ = socket.close(None).await;
+            panic!("websocket handshake unexpectedly succeeded")
+        }
+        Err(error) => panic!("expected an HTTP handshake rejection, got {error}"),
+    }
 }
 
 /// Connect with an Authorization header.
@@ -146,7 +224,7 @@ fn send_json(text: &str) -> tungstenite::Message {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn valid_token_connects_successfully() {
+async fn non_browser_bearer_without_origin_connects_successfully() {
     let (state, manager) = default_state();
     let addr = start_server(state).await;
 
@@ -155,6 +233,146 @@ async fn valid_token_connects_successfully() {
     // Allow connection to register
     tokio::time::sleep(Duration::from_millis(50)).await;
     assert_eq!(manager.client_count(), 1);
+}
+
+#[tokio::test]
+async fn same_origin_browser_cookie_connects_successfully() {
+    let (state, manager) = all_auth_sources_state();
+    let addr = start_server(state).await;
+    let mut request = upgrade_request(addr);
+    request.headers_mut().insert(
+        header::ORIGIN,
+        HeaderValue::from_str(&format!("http://{addr}")).unwrap(),
+    );
+    request.headers_mut().insert(
+        header::COOKIE,
+        HeaderValue::from_static("nomifun-session=valid-token"),
+    );
+
+    let (_socket, response) = tokio_tungstenite::connect_async(request).await.unwrap();
+    assert_eq!(response.status().as_u16(), 101);
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert_eq!(manager.client_count(), 1);
+}
+
+#[tokio::test]
+async fn untrusted_browser_origin_is_rejected_before_cookie_or_bearer_authentication() {
+    let manager = Arc::new(WebSocketManager::new());
+    let extractor_calls = Arc::new(AtomicUsize::new(0));
+    let authenticator_calls = Arc::new(AtomicUsize::new(0));
+    let state = WsHandlerState {
+        manager: manager.clone(),
+        router: Arc::new(NoopMessageRouter),
+        token_authenticator: {
+            let calls = authenticator_calls.clone();
+            Arc::new(move |_| {
+                calls.fetch_add(1, Ordering::Relaxed);
+                Some("user".to_owned())
+            })
+        },
+        token_extractor: {
+            let calls = extractor_calls.clone();
+            Arc::new(move |_| {
+                calls.fetch_add(1, Ordering::Relaxed);
+                Some("valid-token".to_owned())
+            })
+        },
+    };
+    let addr = start_server(state).await;
+
+    for (header_name, header_value) in [
+        (header::COOKIE, "nomifun-session=valid-token"),
+        (header::AUTHORIZATION, "Bearer valid-token"),
+        (header::SEC_WEBSOCKET_PROTOCOL, "valid-token"),
+    ] {
+        let mut request = upgrade_request(addr);
+        request.headers_mut().insert(
+            header::ORIGIN,
+            HeaderValue::from_static("https://attacker.example"),
+        );
+        request
+            .headers_mut()
+            .insert(header_name, HeaderValue::from_static(header_value));
+        assert_eq!(rejected_status(request).await, 403);
+    }
+
+    assert_eq!(extractor_calls.load(Ordering::Relaxed), 0);
+    assert_eq!(authenticator_calls.load(Ordering::Relaxed), 0);
+    assert_eq!(manager.client_count(), 0);
+}
+
+#[tokio::test]
+async fn local_desktop_origin_requires_and_accepts_protocol_bound_authentication() {
+    let (state, manager) = all_auth_sources_state();
+    let addr = start_server(state).await;
+
+    let mut ambient_cookie_request = upgrade_request(addr);
+    ambient_cookie_request.headers_mut().insert(
+        header::ORIGIN,
+        HeaderValue::from_static("http://tauri.localhost"),
+    );
+    ambient_cookie_request.headers_mut().insert(
+        header::COOKIE,
+        HeaderValue::from_static("nomifun-session=valid-token"),
+    );
+    assert_eq!(rejected_status(ambient_cookie_request).await, 403);
+
+    let mut explicit_request = upgrade_request(addr);
+    explicit_request.headers_mut().insert(
+        header::ORIGIN,
+        HeaderValue::from_static("http://tauri.localhost"),
+    );
+    explicit_request.headers_mut().insert(
+        header::COOKIE,
+        HeaderValue::from_static("nomifun-session=valid-token"),
+    );
+    explicit_request.headers_mut().insert(
+        header::SEC_WEBSOCKET_PROTOCOL,
+        HeaderValue::from_static("local-trust-token"),
+    );
+    let (_socket, response) = tokio_tungstenite::connect_async(explicit_request).await.unwrap();
+    assert_eq!(response.status().as_u16(), 101);
+    assert_eq!(
+        response
+            .headers()
+            .get(header::SEC_WEBSOCKET_PROTOCOL)
+            .and_then(|value| value.to_str().ok()),
+        Some("local-trust-token")
+    );
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert_eq!(manager.client_count(), 1);
+}
+
+#[tokio::test]
+async fn local_vite_origin_without_credentials_remains_available_in_no_auth_mode() {
+    let (state, manager) = no_auth_state();
+    let addr = start_server(state).await;
+    let mut request = upgrade_request(addr);
+    request.headers_mut().insert(
+        header::ORIGIN,
+        HeaderValue::from_static("http://localhost:5173"),
+    );
+
+    let (_socket, response) = tokio_tungstenite::connect_async(request).await.unwrap();
+    assert_eq!(response.status().as_u16(), 101);
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert_eq!(manager.client_count(), 1);
+}
+
+#[tokio::test]
+async fn local_origin_does_not_fall_back_to_ambient_credentials_when_protocol_is_missing() {
+    let (state, _manager) = all_auth_sources_state();
+    let addr = start_server(state).await;
+    let mut request = upgrade_request(addr);
+    request.headers_mut().insert(
+        header::ORIGIN,
+        HeaderValue::from_static("http://localhost:5173"),
+    );
+    request.headers_mut().insert(
+        header::AUTHORIZATION,
+        HeaderValue::from_static("Bearer valid-token"),
+    );
+    assert_eq!(rejected_status(request).await, 403);
 }
 
 #[tokio::test]

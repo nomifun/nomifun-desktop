@@ -3,8 +3,8 @@
 //! Requirement, knowledge, and Gateway bridges use a two-stage contract: an
 //! opaque, non-serializable issuer config stays in the backend process, while
 //! each child receives only a short-lived signed capability. Stateless bridge
-//! configs (`OpenMcpConfig`, `ComputerMcpConfig`, `BrowserMcpConfig`) live here
-//! too so downstream crates
+//! configs (`OpenMcpConfig`, `ComputerMcpConfig`) and the process-private
+//! browser issuer config live here too so downstream crates
 //! (`nomifun-ai-agent` deserializing `AcpBuildExtra`, etc.) can reference the
 //! same shape from a leaf crate.
 
@@ -16,6 +16,7 @@ use nomifun_common::{
     LoopbackCapabilityAccess, LoopbackCapabilityClaims, LoopbackCapabilityError,
     LoopbackCapabilityIssuer, LoopbackCapabilityLease,
     LoopbackCapabilityRenewalRequest, LoopbackSessionBinding, LoopbackSessionKind, TerminalId,
+    generate_id, validate_uuidv7,
 };
 use serde::{Deserialize, Serialize};
 
@@ -33,6 +34,7 @@ pub const KNOWLEDGE_CAPABILITY_DOMAIN: &str = "nomifun-knowledge-mcp-v2";
 /// the contract version in the signed scope makes pre-token capabilities fail
 /// closed.
 pub const REQUIREMENT_EXACT_CLAIM_CONTRACT_VERSION: u8 = 2;
+pub const BROWSER_CAPABILITY_DOMAIN: &str = "nomifun-browser-mcp-v1";
 
 pub const REQUIREMENT_COMPLETE_TOOL: &str = "requirement_complete";
 pub const REQUIREMENT_UPDATE_STATUS_TOOL: &str = "requirement_update_status";
@@ -710,35 +712,271 @@ impl ComputerMcpConfig {
     pub const SERVER_NAME: &'static str = "nomifun-computer";
 }
 
-/// Connection config for the browser-use discrete-tool MCP stdio bridge.
+/// Audience of a browser child capability.
 ///
-/// Passed through `AcpBuildExtra::browser_mcp_config` by the factory on every
-/// desktop OS when the host binary was built with the `browser-use` feature
-/// (P4-2 wiring). The session assembler injects `nomicore mcp-browser-stdio` —
-/// an MCP server exposing the browser-use capability as discrete tools
-/// (navigate / observe / click / type / …), a thin facade over the in-tree
-/// `BrowserTool`, so codex/ACP get the same self-hosted-CDP automation the nomi
-/// engine has.
+/// The first bridge is intentionally ACP-only. Keeping the audience in the
+/// signed immutable scope prevents replay by a Gateway, renderer, or remote
+/// adapter.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BrowserCapabilitySurface {
+    Acp,
+}
+
+/// Browser operation families authorized for one child runtime.
 ///
-/// Like the open/computer bridges this is STATELESS at the protocol level (no
-/// HTTP callback): it drives a private Chromium directly, so it needs only the
-/// `nomicore` binary path to re-spawn the subcommand.
-///
-/// R2 (no per-pet context): the bridge carries NO env-borne session context —
-/// it constructs `BrowserTool::new(&BrowserConfig::default())`, so `secret:NAME`
-/// fails closed (empty store) and downloads land in the data-dir sandbox. Per-pet
-/// credentials / workspace / persistent-login stay on the nomi engine path. See
-/// `browser_stdio.rs` and the P4 plan decision D2.
+/// These values mirror the platform taxonomy without making this leaf contract
+/// crate depend on the browser implementation crate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BrowserCapabilityOperation {
+    Manage,
+    Navigate,
+    Observe,
+    Act,
+    Screenshot,
+    Tabs,
+    Download,
+    Debug,
+    Crawl,
+}
+
+/// Server-authoritative ACP browser scope. The runtime id is generated at
+/// issuance time, never accepted from model/tool arguments, and changes on
+/// every ACP runtime rebuild.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BrowserCapabilityScope {
+    pub runtime_instance_id: String,
+    pub agent_id: Option<String>,
+    pub surface: BrowserCapabilitySurface,
+    pub allowed_operations: Vec<BrowserCapabilityOperation>,
+}
+
+impl BrowserCapabilityScope {
+    pub fn validate(
+        &self,
+        session: &LoopbackSessionBinding,
+    ) -> Result<(), LoopbackCapabilityError> {
+        if session.kind != LoopbackSessionKind::Conversation
+            || session.conversation_id.as_deref() != Some(session.session_id.as_str())
+            || validate_uuidv7(&self.runtime_instance_id).is_err()
+            || self.agent_id.as_deref().is_some_and(|agent_id| {
+                agent_id.is_empty() || agent_id.trim() != agent_id || agent_id.len() > 128
+            })
+            || self.allowed_operations.is_empty()
+            || self
+                .allowed_operations
+                .windows(2)
+                .any(|pair| pair[0] >= pair[1])
+        {
+            return Err(LoopbackCapabilityError::InvalidIdentity);
+        }
+        Ok(())
+    }
+
+    pub fn allows(&self, operation: BrowserCapabilityOperation) -> bool {
+        self.allowed_operations.binary_search(&operation).is_ok()
+    }
+}
+
+pub type BrowserCapabilityClaims = LoopbackCapabilityClaims<BrowserCapabilityScope>;
+pub type BrowserMcpChildConfig = ScopedMcpChildConfig<BrowserCapabilityClaims>;
+
+/// Every discrete tool implemented by the stdio facade. `evaluate` remains in
+/// the router for protocol compatibility but is not granted by the default ACP
+/// capability because arbitrary page script execution is outside the
+/// least-privilege surface.
+pub const BROWSER_MCP_TOOL_NAMES: &[&str] = &[
+    "back",
+    "browser_close",
+    "browser_close_all",
+    "browser_crawl_many",
+    "browser_fork",
+    "browser_list",
+    "browser_open",
+    "browser_status",
+    "capabilities",
+    "click",
+    "close_tab",
+    "cursor",
+    "download",
+    "evaluate",
+    "extract",
+    "find_elements",
+    "forward",
+    "get_console_logs",
+    "get_dropdown_options",
+    "get_network_log",
+    "get_page_errors",
+    "get_page_text",
+    "hover",
+    "navigate",
+    "observe",
+    "open_link_new_tab",
+    "press_key",
+    "reload",
+    "save_as_pdf",
+    "screenshot",
+    "scroll",
+    "scroll_to_text",
+    "search_page",
+    "select_option",
+    "set_value",
+    "switch_frame",
+    "switch_tab",
+    "tabs",
+    "type",
+    "upload_file",
+    "wait",
+    "wait_for",
+];
+
+pub fn browser_tool_operation(tool: &str) -> Option<BrowserCapabilityOperation> {
+    let operation = match tool {
+        "browser_open"
+        | "browser_fork"
+        | "browser_list"
+        | "browser_status"
+        | "browser_close"
+        | "browser_close_all"
+        | "capabilities" => BrowserCapabilityOperation::Manage,
+        "browser_crawl_many" => BrowserCapabilityOperation::Crawl,
+        "navigate" | "back" | "forward" | "reload" => BrowserCapabilityOperation::Navigate,
+        "observe"
+        | "get_page_text"
+        | "search_page"
+        | "find_elements"
+        | "get_dropdown_options"
+        | "cursor" => BrowserCapabilityOperation::Observe,
+        "screenshot" => BrowserCapabilityOperation::Screenshot,
+        "tabs" | "switch_tab" | "close_tab" | "open_link_new_tab" => {
+            BrowserCapabilityOperation::Tabs
+        }
+        "download" | "save_as_pdf" => BrowserCapabilityOperation::Download,
+        "evaluate" | "get_console_logs" | "get_page_errors" | "get_network_log" => {
+            BrowserCapabilityOperation::Debug
+        }
+        "click"
+        | "extract"
+        | "hover"
+        | "press_key"
+        | "scroll"
+        | "scroll_to_text"
+        | "select_option"
+        | "set_value"
+        | "switch_frame"
+        | "type"
+        | "upload_file"
+        | "wait"
+        | "wait_for" => BrowserCapabilityOperation::Act,
+        _ => return None,
+    };
+    Some(operation)
+}
+
+/// Process-private issuer configuration for the browser stdio proxy.
+///
+/// The child receives only one renewable, audience-bound bootstrap. It never
+/// receives a Chromium debugging port, CDP endpoint, profile path, cookie, or
+/// storage value.
+#[derive(Clone)]
 pub struct BrowserMcpConfig {
+    port: u16,
+    issuer: Arc<LoopbackCapabilityIssuer>,
     pub binary_path: String,
 }
 
+impl fmt::Debug for BrowserMcpConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("BrowserMcpConfig")
+            .field("port", &self.port)
+            .field("issuer", &"[REDACTED]")
+            .field("binary_path", &self.binary_path)
+            .finish()
+    }
+}
+
 impl BrowserMcpConfig {
+    pub fn from_issuer(
+        port: u16,
+        issuer: Arc<LoopbackCapabilityIssuer>,
+        binary_path: String,
+    ) -> Self {
+        Self {
+            port,
+            issuer,
+            binary_path,
+        }
+    }
+
+    pub const fn port(&self) -> u16 {
+        self.port
+    }
+
     /// Wire-level MCP server name. Kept short so the longest wire-level tool name
     /// `mcp__nomifun-browser__get_dropdown_options` (42 chars) stays within
     /// Anthropic's 64-char tool-name limit.
     pub const SERVER_NAME: &'static str = "nomifun-browser";
+    pub const ENV_CAPABILITY: &'static str = "NOMI_BROWSER_MCP_CAPABILITY";
+
+    pub fn issue_for_conversation(
+        &self,
+        user_id: &str,
+        conversation_id: &str,
+        agent_id: Option<&str>,
+    ) -> Result<BrowserMcpChildConfig, LoopbackCapabilityError> {
+        let scope = BrowserCapabilityScope {
+            runtime_instance_id: generate_id(),
+            agent_id: agent_id.map(str::to_owned),
+            surface: BrowserCapabilitySurface::Acp,
+            allowed_operations: vec![
+                BrowserCapabilityOperation::Manage,
+                BrowserCapabilityOperation::Navigate,
+                BrowserCapabilityOperation::Observe,
+                BrowserCapabilityOperation::Act,
+                BrowserCapabilityOperation::Screenshot,
+                BrowserCapabilityOperation::Tabs,
+                BrowserCapabilityOperation::Download,
+                BrowserCapabilityOperation::Debug,
+                BrowserCapabilityOperation::Crawl,
+            ],
+        };
+        let session = LoopbackSessionBinding::conversation(conversation_id);
+        scope.validate(&session)?;
+        let claims = BrowserCapabilityClaims::issue(
+            user_id,
+            session,
+            BROWSER_MCP_TOOL_NAMES
+                .iter()
+                .copied()
+                .filter(|tool| *tool != "evaluate"),
+            scope,
+        )?;
+        // Multiple ACP runtimes (including cluster attempts) may legitimately
+        // share a conversation. Their fresh runtime ids keep Lane ownership
+        // distinct, so issuing one must not revoke its siblings.
+        let (token, renewal_proof) = self
+            .issuer
+            .activate_concurrent(BROWSER_CAPABILITY_DOMAIN, &claims)?;
+        let lease = LoopbackCapabilityLease::new(
+            self.issuer.clone(),
+            BROWSER_CAPABILITY_DOMAIN,
+            claims.lease_id.clone(),
+        );
+        Ok(ScopedMcpChildConfig {
+            bootstrap: ScopedMcpChildBootstrap {
+                port: self.port,
+                renewal: LoopbackCapabilityRenewalRequest {
+                    lease_id: claims.lease_id.clone(),
+                    renewal_proof,
+                },
+                access: LoopbackCapabilityAccess { token, claims },
+            },
+            binary_path: self.binary_path.clone(),
+            lease,
+        })
+    }
 }
 
 #[cfg(test)]
@@ -1193,13 +1431,175 @@ mod tests {
     }
 
     #[test]
-    fn browser_mcp_config_json_roundtrip() {
-        let cfg = BrowserMcpConfig {
-            binary_path: "/usr/bin/nomicore".into(),
+    fn browser_mcp_config_issues_scoped_acp_capability() {
+        let cfg = BrowserMcpConfig::from_issuer(
+            41_000,
+            test_issuer(),
+            "/usr/bin/nomicore".into(),
+        );
+        let child = cfg
+            .issue_for_conversation(TEST_USER_ID, OTHER_USER_ID, Some("agent-1"))
+            .unwrap();
+        assert_eq!(child.bootstrap.port, 41_000);
+        assert_eq!(
+            child.bootstrap.access.claims.scope.surface,
+            BrowserCapabilitySurface::Acp
+        );
+        assert!(
+            child
+                .bootstrap
+                .access
+                .claims
+                .scope
+                .allows(BrowserCapabilityOperation::Navigate)
+        );
+        assert!(
+            !child.bootstrap.access.claims.allows("evaluate"),
+            "arbitrary page script execution is not in the default ACP scope"
+        );
+        for tool in ["get_console_logs", "get_page_errors", "get_network_log"] {
+            assert!(
+                child.bootstrap.access.claims.allows(tool),
+                "read-only ACP debug capability must include {tool}"
+            );
+        }
+        for tool in [
+            "browser_open",
+            "browser_fork",
+            "browser_list",
+            "browser_status",
+            "browser_close",
+            "browser_close_all",
+            "browser_crawl_many",
+        ] {
+            assert!(
+                child.bootstrap.access.claims.allows(tool),
+                "default ACP browser capability must include {tool}"
+            );
+        }
+        assert!(
+            child
+                .bootstrap
+                .access
+                .claims
+                .scope
+                .allows(BrowserCapabilityOperation::Crawl)
+        );
+        assert!(
+            child
+                .bootstrap
+                .access
+                .claims
+                .scope
+                .allows(BrowserCapabilityOperation::Debug)
+        );
+        assert!(validate_uuidv7(
+            &child
+                .bootstrap
+                .access
+                .claims
+                .scope
+                .runtime_instance_id
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn browser_mcp_config_keeps_sibling_runtimes_in_one_conversation_active() {
+        let cfg = BrowserMcpConfig::from_issuer(
+            41_000,
+            test_issuer(),
+            "/usr/bin/nomicore".into(),
+        );
+        let first = cfg
+            .issue_for_conversation(TEST_USER_ID, OTHER_USER_ID, Some("agent-1"))
+            .unwrap();
+        let second = cfg
+            .issue_for_conversation(TEST_USER_ID, OTHER_USER_ID, Some("agent-2"))
+            .unwrap();
+        assert_ne!(
+            first.bootstrap.access.claims.scope.runtime_instance_id,
+            second.bootstrap.access.claims.scope.runtime_instance_id
+        );
+        assert!(
+            cfg.issuer
+                .verify_access(
+                    BROWSER_CAPABILITY_DOMAIN,
+                    &first.bootstrap.access.claims,
+                    &first.bootstrap.access.token,
+                )
+                .is_ok(),
+            "a sibling ACP runtime must not revoke an existing runtime"
+        );
+        assert!(
+            cfg.issuer
+                .verify_access(
+                    BROWSER_CAPABILITY_DOMAIN,
+                    &second.bootstrap.access.claims,
+                    &second.bootstrap.access.token,
+                )
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn browser_capability_scope_rejects_duplicate_operations_and_wrong_session_kind() {
+        let mut scope = BrowserCapabilityScope {
+            runtime_instance_id: generate_id(),
+            agent_id: None,
+            surface: BrowserCapabilitySurface::Acp,
+            allowed_operations: vec![
+                BrowserCapabilityOperation::Manage,
+                BrowserCapabilityOperation::Navigate,
+            ],
         };
-        let json = serde_json::to_string(&cfg).unwrap();
-        let parsed: BrowserMcpConfig = serde_json::from_str(&json).unwrap();
-        assert_eq!(cfg, parsed);
+        let conversation = LoopbackSessionBinding::conversation(OTHER_USER_ID);
+        assert!(scope.validate(&conversation).is_ok());
+
+        scope
+            .allowed_operations
+            .push(BrowserCapabilityOperation::Navigate);
+        assert_eq!(
+            scope.validate(&conversation),
+            Err(LoopbackCapabilityError::InvalidIdentity)
+        );
+        scope.allowed_operations.pop();
+        assert_eq!(
+            scope.validate(&LoopbackSessionBinding::terminal(OTHER_USER_ID)),
+            Err(LoopbackCapabilityError::InvalidIdentity)
+        );
+    }
+
+    #[test]
+    fn browser_management_tools_have_one_shared_operation_contract() {
+        for tool in [
+            "browser_open",
+            "browser_fork",
+            "browser_list",
+            "browser_status",
+            "browser_close",
+            "browser_close_all",
+        ] {
+            assert_eq!(
+                browser_tool_operation(tool),
+                Some(BrowserCapabilityOperation::Manage),
+                "{tool}"
+            );
+            assert!(BROWSER_MCP_TOOL_NAMES.contains(&tool));
+        }
+        assert_eq!(
+            browser_tool_operation("browser_crawl_many"),
+            Some(BrowserCapabilityOperation::Crawl)
+        );
+        assert!(BROWSER_MCP_TOOL_NAMES.contains(&"browser_crawl_many"));
+        for tool in ["get_console_logs", "get_page_errors", "get_network_log"] {
+            assert_eq!(
+                browser_tool_operation(tool),
+                Some(BrowserCapabilityOperation::Debug),
+                "{tool}"
+            );
+            assert!(BROWSER_MCP_TOOL_NAMES.contains(&tool));
+        }
     }
 
     /// The browser bridge's longest discrete tool name (`get_dropdown_options`)

@@ -150,6 +150,12 @@ export async function tauriGetUpdaterInstallContext(): Promise<UpdaterInstallCon
   return invoke<UpdaterInstallContext>('get_updater_install_context');
 }
 
+/** Install a checked update through the Rust-owned fail-closed updater path. */
+export async function tauriInstallUpdate(version: string): Promise<void> {
+  const { invoke } = await import('@tauri-apps/api/core');
+  await invoke('install_update', { version });
+}
+
 /** Electron-style OpenDialog options accepted by call sites. */
 export interface ShellOpenDialogOptions {
   properties?: Array<'openFile' | 'openDirectory' | 'multiSelections' | 'createDirectory' | 'showHiddenFiles'>;

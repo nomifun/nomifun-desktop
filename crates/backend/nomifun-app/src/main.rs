@@ -71,7 +71,9 @@ async fn async_main(merged_path: String, cli: Cli) -> Result<ExitCode> {
                     &env.config,
                 )
                 .await?;
-            bootstrap::finalize_data_layer(&env.config)?;
+            if let Err(error) = bootstrap::finalize_data_layer(&env.config) {
+                return Err(services.cleanup_after_startup_failure(error).await);
+            }
             commands::run_server(env, services).await
         }
     }

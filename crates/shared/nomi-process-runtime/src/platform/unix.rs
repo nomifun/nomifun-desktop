@@ -348,20 +348,49 @@ pub(super) async fn spawn_pipe(
 #[derive(Clone)]
 pub(crate) struct ChildProcessCleanup {
     pgid: Option<libc::pid_t>,
-    completion: Option<Arc<ChildProcessWatchdogCompletion>>,
+    watchdog: Option<Arc<ChildProcessWatchdog>>,
 }
 
 impl ChildProcessCleanup {
-    pub(crate) async fn wait(self) -> io::Result<()> {
-        let (Some(pgid), Some(completion)) = (self.pgid, self.completion) else {
+    pub(crate) async fn wait(&self) -> io::Result<()> {
+        let (Some(pgid), Some(watchdog)) = (self.pgid, self.watchdog.as_ref()) else {
             return Err(io::Error::new(
                 io::ErrorKind::Unsupported,
                 "handed-off child process has no host-owned Unix tree-cleanup proof",
             ));
         };
-        completion
+        watchdog
+            .completion()
             .wait(Instant::now() + Duration::from_secs(5))
             .await?;
+        prove_group_absent(pgid)
+    }
+
+    pub(crate) async fn shutdown(
+        &self,
+        child: &mut tokio::process::Child,
+    ) -> io::Result<()> {
+        let (Some(pgid), Some(watchdog)) = (self.pgid, self.watchdog.as_ref()) else {
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "handed-off child process has no host-owned Unix tree-cleanup authority",
+            ));
+        };
+        if let Err(error) = watchdog.signal_group(libc::SIGKILL) {
+            if error.kind() != io::ErrorKind::NotFound {
+                return Err(error);
+            }
+            // The watchdog's closed signal gate is a benign second shutdown
+            // after it has already sealed the exact group. Keep waiting for
+            // its completion proof; do not turn that race into cleanup loss.
+        }
+        let child_result = child.wait().await.map(|_| ());
+        let cleanup_result = watchdog
+            .completion()
+            .wait(Instant::now() + Duration::from_secs(5))
+            .await;
+        child_result?;
+        cleanup_result?;
         prove_group_absent(pgid)
     }
 }
@@ -376,7 +405,7 @@ pub(crate) fn spawn_child_process(
                 child,
                 ChildProcessCleanup {
                     pgid: None,
-                    completion: None,
+                    watchdog: None,
                 },
             )
         });
@@ -461,7 +490,7 @@ pub(crate) fn spawn_child_process(
         child,
         ChildProcessCleanup {
             pgid: Some(pid as libc::pid_t),
-            completion: Some(watchdog.completion()),
+            watchdog: Some(watchdog),
         },
     ))
 }

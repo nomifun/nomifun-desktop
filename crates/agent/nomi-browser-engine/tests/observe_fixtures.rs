@@ -30,7 +30,6 @@ use chromiumoxide::cdp::js_protocol::runtime::{
 
 use nomi_browser_engine::injected::InjectionManager;
 use nomi_browser_engine::launch::{launch_chrome, LaunchConfig};
-use nomi_browser_engine::transport::Connection;
 
 mod common;
 
@@ -64,10 +63,7 @@ async fn observe_inject_contract_iframe() {
     let launched = launch_chrome(&cfg, true).await.expect("launch chrome");
 
     // 2) connect + 先 run_attach_loop 后 enable_auto_attach（顺序铁律，否则首批 attach 事件丢）。
-    let _child = launched.child; // 保活 chrome（drop 即清理）。
-    let conn = Connection::connect_launched(launched.transport)
-        .await
-        .expect("connect");
+    let (_process, conn) = launched.connect().await.expect("connect");
     let _attach_loop = conn.run_attach_loop();
     conn.enable_auto_attach().await.expect("auto attach");
 
@@ -324,4 +320,3 @@ async fn observe_redacts_secrets() {
         obs.yaml
     );
 }
-
