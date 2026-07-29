@@ -27,7 +27,6 @@
 //! 必须在 chrome **未运行**时改（launch 前，本引擎专属 dir 同一时刻只一个 chrome）。
 
 use std::collections::HashMap;
-#[cfg(windows)]
 use std::collections::HashSet;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -331,6 +330,12 @@ const OWNERSHIP_MARKER_VERSION: u32 = 1;
 /// bound is an explicit incomplete scan and every destructive caller fails
 /// closed; directories are never silently truncated by depth.
 const MAX_MARKER_SCAN_ENTRIES: usize = 100_000;
+/// Unix marker scans hold one directory fd per *ancestor*, so this bound is
+/// also the exact ceiling of concurrently open scan fds; it must stay far
+/// below the default macOS RLIMIT_NOFILE soft limit of 256. Exceeding it is
+/// an explicit incomplete scan and every destructive caller fails closed.
+#[cfg(unix)]
+const MAX_MARKER_SCAN_DEPTH: usize = 64;
 const MAX_EPHEMERAL_DELETE_DEPTH: usize = 256;
 #[cfg(not(windows))]
 const PROCESS_DISCOVERY_RETRIES: usize = 40;
@@ -338,6 +343,10 @@ const PROCESS_DISCOVERY_RETRIES: usize = 40;
 const PROCESS_DISCOVERY_INTERVAL: Duration = Duration::from_millis(25);
 const PROCESS_TREE_CONFIRM_TIMEOUT: Duration = Duration::from_secs(5);
 const PROCESS_TREE_CONFIRM_INTERVAL: Duration = Duration::from_millis(25);
+/// Coarse re-probe interval while a tree is still observably present. The
+/// absence loop can run on an async caller's thread, so it must sleep rather
+/// than busy-poll process inventory.
+const PROCESS_TREE_RETRY_INTERVAL: Duration = Duration::from_millis(250);
 const PROCESS_TREE_ABSENCE_CONFIRMATIONS: usize = 2;
 const PROFILE_OPERATION_LOCK_PREFIX: &str = ".nomifun-browser-operation";
 
@@ -583,6 +592,12 @@ trait ProcessControl {
     fn current_process(&mut self) -> Result<ProcessIdentity, String>;
     fn lookup(&mut self, pid: u32) -> ProcessLookup;
     fn confirm_tree_absent(&mut self, expected: &ProcessIdentity) -> Result<bool, String>;
+    /// Terminate the exact verified process tree anchored at `expected`.
+    ///
+    /// Unix-only: Windows startup recovery never signals marker-derived
+    /// processes; its Job Object already guarantees tree exit.
+    #[cfg(unix)]
+    fn terminate_tree(&mut self, expected: &ProcessIdentity) -> Result<(), String>;
 }
 
 struct SystemProcessControl;
@@ -838,6 +853,57 @@ impl ProcessControl for SystemProcessControl {
 
     fn confirm_tree_absent(&mut self, expected: &ProcessIdentity) -> Result<bool, String> {
         confirm_process_tree_absent(expected)
+    }
+
+    #[cfg(unix)]
+    fn terminate_tree(&mut self, expected: &ProcessIdentity) -> Result<(), String> {
+        let Some(pgid) = expected.process_group_id else {
+            return Err("browser marker has no process group".into());
+        };
+        // `ChildProcessBuilder` makes the managed Chromium root its own
+        // process-group leader; anything else is not a tree this recovery may
+        // ever signal.
+        if pgid == 0 || pgid != expected.pid {
+            return Err(
+                "browser marker is not its expected process-group leader".into(),
+            );
+        }
+        // SAFETY: getpgrp only reads the current process-group id.
+        let app_group = unsafe { libc::getpgrp() };
+        if app_group <= 0 || pgid == app_group as u32 {
+            return Err(
+                "browser process group overlaps the current application group".into(),
+            );
+        }
+        // Re-verify the exact creation identity immediately before signalling
+        // so a PID recycled between inventory and termination is never killed.
+        match self.lookup(expected.pid) {
+            ProcessLookup::Found(observed) if same_process(expected, &observed) => {}
+            ProcessLookup::Missing => return Ok(()),
+            ProcessLookup::Found(_) => {
+                return Err(
+                    "browser PID was reused by a different identity before termination"
+                        .into(),
+                );
+            }
+            ProcessLookup::Unverified(error) => {
+                return Err(format!(
+                    "orphan browser identity could not be re-verified before termination: {error}"
+                ));
+            }
+        }
+        // SAFETY: killpg signals only the verified, application-isolated
+        // browser process group.
+        if unsafe { libc::killpg(pgid as libc::pid_t, libc::SIGKILL) } != 0 {
+            let error = std::io::Error::last_os_error();
+            if error.raw_os_error() == Some(libc::ESRCH) {
+                return Ok(());
+            }
+            return Err(format!(
+                "terminate orphan browser process group: {error}"
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -3644,81 +3710,108 @@ fn collect_marker_paths(
     let mut markers: Vec<PathBuf> = Vec::new();
     let mut errors = Vec::new();
     let mut identities = HashMap::new();
-    let mut pending = vec![(root_directory, root.to_path_buf())];
+    // Depth-first with one open fd per *ancestor* only. A frontier of sibling
+    // fds over a wide Chromium profile tree could exhaust the default macOS
+    // RLIMIT_NOFILE of 256 and turn every cleanup fail-closed.
+    struct ScanFrame {
+        directory: UnixDirectory,
+        display_path: PathBuf,
+        entries: Vec<std::ffi::OsString>,
+        next: usize,
+    }
+    let root_entries = match root_directory.entries() {
+        Ok(entries) => entries,
+        Err(error) => return (markers, vec![error], identities),
+    };
+    let mut stack = vec![ScanFrame {
+        directory: root_directory,
+        display_path: root.to_path_buf(),
+        entries: root_entries,
+        next: 0,
+    }];
     let mut scanned_entries = 0_usize;
-    while let Some((directory, display_path)) = pending.pop() {
-        let entries = match directory.entries() {
-            Ok(entries) => entries,
+    while let Some(frame) = stack.last_mut() {
+        if frame.next >= frame.entries.len() {
+            stack.pop();
+            continue;
+        }
+        let name = std::mem::take(&mut frame.entries[frame.next]);
+        frame.next += 1;
+        scanned_entries = scanned_entries.saturating_add(1);
+        if scanned_entries > MAX_MARKER_SCAN_ENTRIES {
+            errors.push(format!(
+                "browser profile marker scan exceeded {MAX_MARKER_SCAN_ENTRIES} entries"
+            ));
+            markers.sort_by_key(|path| {
+                std::cmp::Reverse(path.components().count())
+            });
+            return (markers, errors, identities);
+        }
+        let stat = match unix_entry_stat(&frame.directory, &name) {
+            Ok(stat) => stat,
             Err(error) => {
                 errors.push(error);
                 continue;
             }
         };
-        for name in entries {
-            scanned_entries = scanned_entries.saturating_add(1);
-            if scanned_entries > MAX_MARKER_SCAN_ENTRIES {
-                errors.push(format!(
-                    "browser profile marker scan exceeded {MAX_MARKER_SCAN_ENTRIES} entries"
-                ));
-                markers.sort_by_key(|path| {
-                    std::cmp::Reverse(path.components().count())
-                });
-                return (markers, errors, identities);
+        let path = frame.display_path.join(&name);
+        let kind = stat.st_mode & libc::S_IFMT;
+        if is_ownership_record_name(&name) {
+            if kind == libc::S_IFREG {
+                markers.push(path);
+                identities
+                    .entry(frame.display_path.clone())
+                    .or_insert(frame.directory.identity());
+            } else {
+                errors.push(
+                    "ownership record name is occupied by a non-regular file".into(),
+                );
             }
-            let stat = match unix_entry_stat(&directory, &name) {
-                Ok(stat) => stat,
-                Err(error) => {
-                    errors.push(error);
-                    continue;
+            continue;
+        }
+        if kind != libc::S_IFDIR {
+            continue;
+        }
+        if stack.len() >= MAX_MARKER_SCAN_DEPTH {
+            errors.push(format!(
+                "browser profile marker scan exceeded depth {MAX_MARKER_SCAN_DEPTH}"
+            ));
+            continue;
+        }
+        let frame_directory = &stack
+            .last()
+            .expect("scan frame stays on the stack while its entry is processed")
+            .directory;
+        match frame_directory.open_child(&name) {
+            Ok(child)
+                if child.device == root_device
+                    && child.mount_key == root_mount_key
+                    && {
+                        #[cfg(target_os = "linux")]
+                        {
+                            child.mount_id == root_mount_id
+                        }
+                        #[cfg(not(target_os = "linux"))]
+                        {
+                            true
+                        }
+                    } =>
+            {
+                match child.entries() {
+                    Ok(entries) => stack.push(ScanFrame {
+                        directory: child,
+                        display_path: path,
+                        entries,
+                        next: 0,
+                    }),
+                    Err(error) => errors.push(error),
                 }
-            };
-            let path = display_path.join(&name);
-            let kind = stat.st_mode & libc::S_IFMT;
-            if is_ownership_record_name(&name) {
-                if kind == libc::S_IFREG {
-                    markers.push(path);
-                    identities
-                        .entry(display_path.clone())
-                        .or_insert(ProfileDirectoryIdentity {
-                            device: directory.device,
-                            inode: directory.inode,
-                            mount_key: directory.mount_key,
-                            #[cfg(target_os = "linux")]
-                            mount_id: directory.mount_id,
-                        });
-                } else {
-                    errors.push(
-                        "ownership record name is occupied by a non-regular file".into(),
-                    );
-                }
-                continue;
             }
-            if kind != libc::S_IFDIR {
-                continue;
-            }
-            match directory.open_child(&name) {
-                Ok(child)
-                    if child.device == root_device
-                        && child.mount_key == root_mount_key
-                        && {
-                            #[cfg(target_os = "linux")]
-                            {
-                                child.mount_id == root_mount_id
-                            }
-                            #[cfg(not(target_os = "linux"))]
-                            {
-                                true
-                            }
-                        } =>
-                {
-                    pending.push((child, path));
-                }
-                Ok(_) | Err(_) => {
-                    errors.push(
-                        "browser profile scan refused a mount boundary or changed directory"
-                            .into(),
-                    );
-                }
+            Ok(_) | Err(_) => {
+                errors.push(
+                    "browser profile scan refused a mount boundary or changed directory"
+                        .into(),
+                );
             }
         }
     }
@@ -3929,21 +4022,63 @@ fn recover_provisional_profile(
 ) {
     #[cfg(not(windows))]
     {
-        let _ = (
+        if mode != ProfileRecoveryMode::DeleteEphemeralProfile {
+            report.failures += 1;
+            report.profiles_preserved += 1;
+            tracing::warn!(
+                target: "nomi_browser_engine::profile",
+                reason = "provisional_stable_profile_preserved",
+                "provisional ownership can never authorize stable profile deletion"
+            );
+            return;
+        }
+        if operation_claim.validates(profile_dir).is_err() {
+            report.failures += 1;
+            report.profiles_preserved += 1;
+            return;
+        }
+        // Unix has no pinned authority handles; re-resolve the records under
+        // the held claim and fail closed on any change.
+        match read_ownership_record_set(profile_dir) {
+            Ok(records) if records.active == *marker => {}
+            Ok(_) | Err(_) => {
+                report.failures += 1;
+                report.profiles_preserved += 1;
+                return;
+            }
+        }
+        // Recheck after acquiring the profile claim. A Missing -> Found race,
+        // PID reuse, or unverifiable snapshot always preserves the profile.
+        match control.lookup(marker.owner_app.pid) {
+            ProcessLookup::Missing => {}
+            ProcessLookup::Found(_) | ProcessLookup::Unverified(_) => {
+                report.failures += 1;
+                report.profiles_preserved += 1;
+                return;
+            }
+        }
+        match control.confirm_tree_absent(&marker.owner_app) {
+            Ok(true) => {}
+            Ok(false) | Err(_) => {
+                report.failures += 1;
+                report.profiles_preserved += 1;
+                return;
+            }
+        }
+        // Cleanup re-resolves the exact record set under the still-claimed
+        // profile directory and fails closed on change.
+        match cleanup_recovered_profile(
             recovery_root,
-            profile_dir,
-            marker,
             operation_claim,
-            mode,
-            control,
-        );
-        report.failures += 1;
-        report.profiles_preserved += 1;
-        tracing::warn!(
-            target: "nomi_browser_engine::profile",
-            reason = "provisional_cleanup_unsupported",
-            "provisional browser profile cleanup lacks a safe application-tree absence proof on this platform; profile preserved"
-        );
+            ProfileRecoveryMode::DeleteEphemeralProfile,
+            marker,
+        ) {
+            Ok(()) => report.ephemeral_profiles_removed += 1,
+            Err(_) => {
+                report.failures += 1;
+                report.profiles_preserved += 1;
+            }
+        }
     }
 
     #[cfg(windows)]
@@ -4012,32 +4147,289 @@ fn recover_owned_profiles_with(
     control: &mut dyn ProcessControl,
 ) -> ProfileRecoveryReport {
     let mut report = ProfileRecoveryReport::default();
-    let _ = (mode, control);
-    let (markers, scan_errors, _) = collect_marker_paths(recovery_root);
+    let canonical_recovery_root = match std::fs::canonicalize(recovery_root) {
+        Ok(root) => root,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return report,
+        Err(_) => {
+            report.failures += 1;
+            return report;
+        }
+    };
+    let (markers, scan_errors, scanned_profile_identities) =
+        collect_marker_paths(recovery_root);
     report.markers_scanned = markers.len();
-    if markers.is_empty() && scan_errors.is_empty() {
-        return report;
+    for error in scan_errors {
+        report.failures += 1;
+        tracing::warn!(
+            target: "nomi_browser_engine::profile",
+            reason = "recovery_scan_incomplete",
+            "browser orphan recovery scan was incomplete; affected profiles were preserved"
+        );
+        let _ = error;
     }
-    // Unix managed launches use an inherited debugging pipe/process-group
-    // relay for parent-death cleanup. Startup orphan recovery is disabled
-    // after fd-relative, no-cross-mount inventory. We deliberately do not read
-    // record payloads or call ProcessControl here. An empty, completely scanned
-    // root is safe and must not disable the browser on the next normal launch;
-    // any record or incomplete scan degrades fail closed.
-    report.failures = scan_errors.len() + usize::from(!markers.is_empty());
-    report.profiles_preserved = markers
-        .iter()
-        .filter_map(|path| path.parent())
-        .collect::<std::collections::HashSet<_>>()
-        .len()
-        .max(usize::from(!scan_errors.is_empty()));
-    tracing::warn!(
-        target: "nomi_browser_engine::profile",
-        reason = "unix_startup_recovery_fail_closed",
-        marker_records = markers.len(),
-        scan_failures = scan_errors.len(),
-        "Unix startup browser-profile recovery found unresolved state; profile data preserved without process actions"
-    );
+
+    let mut processed_profiles = HashSet::new();
+    for marker_path in markers {
+        let Some(profile_dir) = marker_path.parent() else {
+            report.failures += 1;
+            report.profiles_preserved += 1;
+            continue;
+        };
+        if !processed_profiles.insert(profile_dir.to_path_buf()) {
+            continue;
+        }
+        let Some(scanned_profile_identity) =
+            scanned_profile_identities.get(profile_dir).copied()
+        else {
+            report.failures += 1;
+            report.profiles_preserved += 1;
+            continue;
+        };
+        let operation_claim = match ProfileOperationClaim::acquire(profile_dir) {
+            Ok(claim) => claim,
+            Err(error) => {
+                report.failures += 1;
+                report.profiles_preserved += 1;
+                let _ = error;
+                continue;
+            }
+        };
+        if operation_claim.profile_dir == canonical_recovery_root
+            || !operation_claim
+                .profile_dir
+                .starts_with(&canonical_recovery_root)
+        {
+            report.failures += 1;
+            report.profiles_preserved += 1;
+            continue;
+        }
+        let claimed_profile_dir = operation_claim.profile_dir.clone();
+        // The fd-relative scan identity must match the claimed directory:
+        // a directory swapped since traversal never authorizes any process
+        // action or cleanup.
+        if operation_claim.directory_identity().ok()
+            != Some(scanned_profile_identity)
+        {
+            report.failures += 1;
+            report.profiles_preserved += 1;
+            continue;
+        }
+        let records = match read_ownership_record_set(&claimed_profile_dir) {
+            Ok(records) => records,
+            Err(error) => {
+                report.failures += 1;
+                report.profiles_preserved += 1;
+                tracing::warn!(
+                    target: "nomi_browser_engine::profile",
+                    reason = "invalid_ownership_marker",
+                    "invalid browser ownership marker; profile preserved"
+                );
+                let _ = error;
+                continue;
+            }
+        };
+        if operation_claim.validates(&claimed_profile_dir).is_err() {
+            report.failures += 1;
+            report.profiles_preserved += 1;
+            continue;
+        }
+        let marker = records.active.clone();
+
+        let owner_was_missing = match control.lookup(marker.owner_app.pid) {
+            ProcessLookup::Found(observed) if same_process(&marker.owner_app, &observed) => {
+                report.live_owners_preserved += 1;
+                tracing::info!(
+                    target: "nomi_browser_engine::profile",
+                    owner_pid = marker.owner_app.pid,
+                    reason = "live_verified_owner",
+                    "browser profile belongs to a live verified app instance; recovery skipped"
+                );
+                continue;
+            }
+            ProcessLookup::Unverified(error) => {
+                report.failures += 1;
+                report.profiles_preserved += 1;
+                tracing::warn!(
+                    target: "nomi_browser_engine::profile",
+                    owner_pid = marker.owner_app.pid,
+                    reason = "owner_identity_unverified",
+                    "browser owner identity could not be verified; profile preserved"
+                );
+                let _ = error;
+                continue;
+            }
+            ProcessLookup::Missing => true,
+            ProcessLookup::Found(_) => {
+                report.failures += 1;
+                report.profiles_preserved += 1;
+                tracing::warn!(
+                    target: "nomi_browser_engine::profile",
+                    reason = "owner_pid_reused",
+                    "browser owner PID was reused by a different identity; profile preserved"
+                );
+                continue;
+            }
+        };
+        if marker.phase == BrowserOwnershipPhase::Provisional {
+            if owner_was_missing {
+                recover_provisional_profile(
+                    &canonical_recovery_root,
+                    &claimed_profile_dir,
+                    &marker,
+                    &operation_claim,
+                    mode,
+                    control,
+                    &mut report,
+                );
+            } else {
+                unreachable!("only a missing owner reaches provisional recovery");
+            }
+            continue;
+        }
+
+        let tree_absent = match control.lookup(marker.browser.pid) {
+            ProcessLookup::Found(observed) if same_process(&marker.browser, &observed) => {
+                // The verified owner is dead but its exact managed browser
+                // tree survived. Unix has no Job Object tree-exit guarantee,
+                // so startup recovery terminates the verified process group
+                // and then requires the standard absence proof.
+                match control
+                    .terminate_tree(&marker.browser)
+                    .and_then(|()| control.confirm_tree_absent(&marker.browser))
+                {
+                    Ok(true) => {
+                        report.process_trees_terminated += 1;
+                        tracing::info!(
+                            target: "nomi_browser_engine::profile",
+                            browser_pid = marker.browser.pid,
+                            reason = "dead_owner_tree_terminated",
+                            "terminated a verified orphan browser tree whose owning app instance is gone"
+                        );
+                        true
+                    }
+                    Ok(false) => {
+                        report.failures += 1;
+                        report.profiles_preserved += 1;
+                        tracing::warn!(
+                            target: "nomi_browser_engine::profile",
+                            browser_pid = marker.browser.pid,
+                            reason = "terminated_tree_absence_unconfirmed",
+                            "orphan browser tree was signalled but its exit is not proven; profile preserved"
+                        );
+                        false
+                    }
+                    Err(error) => {
+                        report.failures += 1;
+                        report.profiles_preserved += 1;
+                        tracing::warn!(
+                            target: "nomi_browser_engine::profile",
+                            browser_pid = marker.browser.pid,
+                            reason = "orphan_tree_termination_failed",
+                            "orphan browser tree could not be terminated safely; profile preserved"
+                        );
+                        let _ = error;
+                        false
+                    }
+                }
+            }
+            ProcessLookup::Found(_) => {
+                report.failures += 1;
+                report.profiles_preserved += 1;
+                tracing::warn!(
+                    target: "nomi_browser_engine::profile",
+                    browser_pid = marker.browser.pid,
+                    reason = "browser_pid_reused",
+                    "browser PID was reused by a different process identity; startup recovery preserved the profile"
+                );
+                false
+            }
+            ProcessLookup::Missing => {
+                match control.confirm_tree_absent(&marker.browser) {
+                    Ok(true) => true,
+                    Ok(false) => {
+                        report.failures += 1;
+                        report.profiles_preserved += 1;
+                        tracing::warn!(
+                            target: "nomi_browser_engine::profile",
+                            browser_pid = marker.browser.pid,
+                            reason = "tree_absence_unconfirmed",
+                            "browser root changed or disappeared but its tree is not proven absent; profile preserved"
+                        );
+                        false
+                    }
+                    Err(error) => {
+                        report.failures += 1;
+                        report.profiles_preserved += 1;
+                        tracing::warn!(
+                            target: "nomi_browser_engine::profile",
+                            browser_pid = marker.browser.pid,
+                            reason = "tree_absence_check_failed",
+                            "browser tree absence could not be verified; profile preserved"
+                        );
+                        let _ = error;
+                        false
+                    }
+                }
+            }
+            ProcessLookup::Unverified(error) => {
+                report.failures += 1;
+                report.profiles_preserved += 1;
+                tracing::warn!(
+                    target: "nomi_browser_engine::profile",
+                    browser_pid = marker.browser.pid,
+                    reason = "browser_identity_unverified",
+                    "orphan browser identity could not be verified; profile preserved"
+                );
+                let _ = error;
+                false
+            }
+        };
+        if !tree_absent {
+            continue;
+        }
+
+        // Unix has no deny-write record handles; re-resolve the exact record
+        // set after every process action instead and fail closed on change.
+        match read_ownership_record_set(&claimed_profile_dir) {
+            Ok(current)
+                if current.active == marker
+                    && current.active_path == records.active_path
+                    && current.provisional_predecessor
+                        == records.provisional_predecessor => {}
+            Ok(_) | Err(_) => {
+                report.failures += 1;
+                report.profiles_preserved += 1;
+                continue;
+            }
+        }
+
+        if let Err(error) = cleanup_recovered_profile(
+            &canonical_recovery_root,
+            &operation_claim,
+            mode,
+            &marker,
+        )
+        {
+            report.failures += 1;
+            report.profiles_preserved += 1;
+            tracing::warn!(
+                target: "nomi_browser_engine::profile",
+                recovery_mode = ?mode,
+                reason = "profile_cleanup_failed",
+                "browser process tree is absent but profile cleanup failed; profile preserved"
+            );
+            let _ = error;
+            continue;
+        }
+        match mode {
+            ProfileRecoveryMode::DeleteEphemeralProfile => {
+                report.ephemeral_profiles_removed += 1;
+            }
+            ProfileRecoveryMode::PreserveStableProfile => {
+                report.stable_markers_cleared += 1;
+            }
+        }
+    }
     report
 }
 
@@ -4321,34 +4713,6 @@ fn has_verified_descendant(
     Ok(false)
 }
 
-#[cfg(unix)]
-fn snapshot_process_group(
-    system: &sysinfo::System,
-    process_group_id: u32,
-) -> Result<Vec<ProcessIdentity>, String> {
-    if process_group_id == 0 {
-        return Err("cannot inspect process group 0".into());
-    }
-    let mut members = Vec::new();
-    for process in system.processes().values() {
-        let pid = process.pid().as_u32();
-        // SAFETY: getpgid is a read-only query for a PID from this fresh
-        // snapshot.
-        let observed_group = unsafe { libc::getpgid(pid as libc::pid_t) };
-        if observed_group < 0 {
-            let error = std::io::Error::last_os_error();
-            if error.raw_os_error() == Some(libc::ESRCH) {
-                continue;
-            }
-            return Err(format!("query process group for PID {pid}: {error}"));
-        }
-        if observed_group as u32 == process_group_id {
-            members.push(process_identity(process)?);
-        }
-    }
-    Ok(members)
-}
-
 #[cfg(windows)]
 fn one_process_tree_absence_check(expected: &ProcessIdentity) -> Result<bool, String> {
     let system = fresh_process_snapshot()?;
@@ -4377,8 +4741,20 @@ fn one_process_tree_absence_check(expected: &ProcessIdentity) -> Result<bool, St
     if app_group <= 0 || pgid == app_group as u32 {
         return Err("browser process group overlaps the current application group".into());
     }
-    let system = fresh_process_snapshot()?;
-    Ok(snapshot_process_group(&system, pgid)?.is_empty())
+    // Signal 0 probes group membership without a full process-table snapshot
+    // (the snapshot blocked async callers for hundreds of milliseconds).
+    // ESRCH proves the group is empty; success or EPERM means at least one
+    // member is still alive, so absence is not proven.
+    // SAFETY: killpg with signal 0 performs existence/permission checks only.
+    if unsafe { libc::killpg(pgid as libc::pid_t, 0) } == 0 {
+        return Ok(false);
+    }
+    let error = std::io::Error::last_os_error();
+    match error.raw_os_error() {
+        Some(libc::ESRCH) => Ok(true),
+        Some(libc::EPERM) => Ok(false),
+        _ => Err(format!("probe browser process group: {error}")),
+    }
 }
 
 fn confirm_process_tree_absent(expected: &ProcessIdentity) -> Result<bool, String> {
@@ -4393,7 +4769,15 @@ fn confirm_process_tree_absent(expected: &ProcessIdentity) -> Result<bool, Strin
         } else {
             confirmations = 0;
         }
-        std::thread::sleep(PROCESS_TREE_CONFIRM_INTERVAL);
+        // Confirmations poll tightly; a not-yet-absent tree is re-probed on
+        // the coarse interval so a blocked synchronous caller mostly sleeps
+        // instead of hammering process inventory until the deadline.
+        let interval = if confirmations > 0 {
+            PROCESS_TREE_CONFIRM_INTERVAL
+        } else {
+            PROCESS_TREE_RETRY_INTERVAL
+        };
+        std::thread::sleep(interval);
     }
     Ok(false)
 }
@@ -4423,6 +4807,8 @@ mod tests {
         current: ProcessIdentity,
         processes: HashMap<u32, ProcessLookup>,
         absence_result: Result<bool, String>,
+        #[cfg(unix)]
+        terminate_result: Result<(), String>,
         terminate_calls: usize,
         absence_calls: usize,
         terminate_identities: Vec<ProcessIdentity>,
@@ -4445,6 +4831,18 @@ mod tests {
             self.absence_calls += 1;
             self.absence_identities.push(expected.clone());
             self.absence_result.clone()
+        }
+
+        #[cfg(unix)]
+        fn terminate_tree(&mut self, expected: &ProcessIdentity) -> Result<(), String> {
+            self.terminate_calls += 1;
+            self.terminate_identities.push(expected.clone());
+            if self.terminate_result.is_ok() {
+                // A successfully terminated tree disappears from later lookups
+                // and absence probes, mirroring the real SIGKILL.
+                self.processes.remove(&expected.pid);
+            }
+            self.terminate_result.clone()
         }
     }
 
@@ -4480,6 +4878,13 @@ mod tests {
                 );
             }
             self.absence_result.clone()
+        }
+
+        #[cfg(unix)]
+        fn terminate_tree(&mut self, expected: &ProcessIdentity) -> Result<(), String> {
+            self.terminate_calls += 1;
+            self.terminate_identities.push(expected.clone());
+            Ok(())
         }
     }
 
@@ -4625,6 +5030,8 @@ mod tests {
             current,
             processes,
             absence_result: Ok(true),
+            #[cfg(unix)]
+            terminate_result: Ok(()),
             terminate_calls: 0,
             absence_calls: 0,
             terminate_identities: Vec::new(),
@@ -4655,15 +5062,128 @@ mod tests {
 
     #[cfg(not(windows))]
     #[test]
-    fn unix_startup_recovery_degrades_on_inventory_without_process_actions() {
+    fn unix_dead_owner_live_browser_tree_is_terminated_and_profile_removed() {
         let tmp = tempfile::TempDir::new().unwrap();
         let root = tmp.path().join("ephemeral");
-        let profile = root.join("unresolved");
-        write_test_marker(
-            &profile,
-            identity(101, "nomifun-gone"),
-            identity(201, "chrome-gone"),
+        let profile = root.join("dead-owner-live-browser");
+        let browser = identity(201, "chrome-survivor");
+        write_test_marker(&profile, identity(101, "nomifun-gone"), browser.clone());
+        std::fs::write(profile.join("cache.bin"), b"ephemeral").unwrap();
+        let mut control = fake_control(
+            identity(999, "current"),
+            HashMap::from([(browser.pid, ProcessLookup::Found(browser.clone()))]),
         );
+
+        let report = recover_owned_profiles_with(
+            &root,
+            ProfileRecoveryMode::DeleteEphemeralProfile,
+            &mut control,
+        );
+
+        assert!(!profile.exists());
+        assert_eq!(report.markers_scanned, 1);
+        assert_eq!(report.failures, 0);
+        assert_eq!(report.profiles_preserved, 0);
+        assert_eq!(report.process_trees_terminated, 1);
+        assert_eq!(report.ephemeral_profiles_removed, 1);
+        assert_eq!(control.terminate_calls, 1);
+        assert_eq!(control.terminate_identities, vec![browser.clone()]);
+        assert_eq!(control.absence_identities, vec![browser]);
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn unix_dead_owner_stable_profile_clears_marker_after_terminating_browser() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path().join("primary");
+        let profile = root.join("generation-3");
+        let browser = identity(202, "chrome-survivor");
+        write_test_marker(&profile, identity(102, "nomifun-gone"), browser.clone());
+        std::fs::write(profile.join("Cookies"), b"persistent-login").unwrap();
+        let mut control = fake_control(
+            identity(999, "current"),
+            HashMap::from([(browser.pid, ProcessLookup::Found(browser.clone()))]),
+        );
+
+        let report = recover_owned_profiles_with(
+            &root,
+            ProfileRecoveryMode::PreserveStableProfile,
+            &mut control,
+        );
+
+        assert!(profile.join("Cookies").exists());
+        assert!(!ownership_marker_path(&profile).exists());
+        assert_eq!(report.failures, 0);
+        assert_eq!(report.process_trees_terminated, 1);
+        assert_eq!(report.stable_markers_cleared, 1);
+        assert_eq!(control.terminate_identities, vec![browser]);
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn unix_termination_failure_fails_closed_and_preserves_profile() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path().join("ephemeral");
+        let profile = root.join("terminate-failed");
+        let browser = identity(203, "chrome-stuck");
+        write_test_marker(&profile, identity(103, "nomifun-gone"), browser.clone());
+        let mut control = fake_control(
+            identity(999, "current"),
+            HashMap::from([(browser.pid, ProcessLookup::Found(browser.clone()))]),
+        );
+        control.terminate_result = Err("signal refused".into());
+
+        let report = recover_owned_profiles_with(
+            &root,
+            ProfileRecoveryMode::DeleteEphemeralProfile,
+            &mut control,
+        );
+
+        assert!(profile.exists());
+        assert!(report.failures > 0);
+        assert_eq!(report.profiles_preserved, 1);
+        assert_eq!(report.process_trees_terminated, 0);
+        assert_eq!(report.ephemeral_profiles_removed, 0);
+        assert_eq!(control.terminate_calls, 1);
+        assert_eq!(control.absence_calls, 0);
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn unix_terminated_tree_without_absence_proof_is_preserved() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path().join("ephemeral");
+        let profile = root.join("terminate-unproven");
+        let browser = identity(204, "chrome-lingering");
+        write_test_marker(&profile, identity(104, "nomifun-gone"), browser.clone());
+        let mut control = fake_control(
+            identity(999, "current"),
+            HashMap::from([(browser.pid, ProcessLookup::Found(browser.clone()))]),
+        );
+        control.absence_result = Ok(false);
+
+        let report = recover_owned_profiles_with(
+            &root,
+            ProfileRecoveryMode::DeleteEphemeralProfile,
+            &mut control,
+        );
+
+        assert!(profile.exists());
+        assert!(report.failures > 0);
+        assert_eq!(report.profiles_preserved, 1);
+        assert_eq!(report.process_trees_terminated, 0);
+        assert_eq!(report.ephemeral_profiles_removed, 0);
+        assert_eq!(control.terminate_calls, 1);
+        assert_eq!(control.absence_calls, 1);
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn unix_genuine_scan_error_still_fails_closed() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path().join("ephemeral");
+        let profile = root.join("occupied-marker-name");
+        std::fs::create_dir_all(profile.join(OWNERSHIP_MARKER_FILE)).unwrap();
         let mut control = fake_control(identity(999, "current"), HashMap::new());
 
         let report = recover_owned_profiles_with(
@@ -4672,15 +5192,88 @@ mod tests {
             &mut control,
         );
 
-        assert_eq!(report.markers_scanned, 1);
+        assert!(profile.exists());
+        assert_eq!(report.markers_scanned, 0);
         assert!(report.failures > 0);
-        assert_eq!(report.profiles_preserved, 1);
         assert_eq!(control.terminate_calls, 0);
         assert_eq!(control.absence_calls, 0);
-        assert!(profile.exists());
     }
 
-    #[cfg(windows)]
+    #[cfg(not(windows))]
+    #[test]
+    fn unix_provisional_marker_replaced_during_absence_proof_fails_closed() {
+        // Unlike Windows there is no deny-write authority handle: a marker
+        // rewritten during the absence proof must preserve the profile.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path().join("ephemeral");
+        let profile = root.join("provisional-proof-race");
+        let original =
+            write_provisional_test_marker(&profile, identity(109, "nomifun-gone"));
+        let replacement = BrowserOwnershipMarker {
+            version: OWNERSHIP_MARKER_VERSION,
+            phase: BrowserOwnershipPhase::Committed,
+            app_instance_id: nomifun_common::generate_id(),
+            owner_app: identity(110, "replacement-owner"),
+            browser: identity(111, "replacement-browser"),
+            profile_id: original.profile_id.clone(),
+        };
+        let state = profile.join("Default").join("Cookies");
+        std::fs::create_dir_all(state.parent().unwrap()).unwrap();
+        std::fs::write(&state, b"preserve").unwrap();
+        let mut control = SequencedLookupControl {
+            current: identity(999, "current"),
+            lookups: std::collections::VecDeque::from([
+                ProcessLookup::Missing,
+                ProcessLookup::Missing,
+            ]),
+            terminate_calls: 0,
+            absence_calls: 0,
+            terminate_identities: Vec::new(),
+            absence_identities: Vec::new(),
+            absence_result: Ok(true),
+            replace_marker_on_absence: Some((profile.clone(), replacement)),
+        };
+
+        let report = recover_owned_profiles_with(
+            &root,
+            ProfileRecoveryMode::DeleteEphemeralProfile,
+            &mut control,
+        );
+
+        assert!(state.exists());
+        assert!(report.failures > 0);
+        assert_eq!(report.profiles_preserved, 1);
+        assert_eq!(report.ephemeral_profiles_removed, 0);
+        assert_eq!(control.terminate_calls, 0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unix_marker_scan_depth_overflow_fails_closed() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path().join("ephemeral");
+        let profile = root.join("too-deep");
+        let browser = identity(206, "chrome-gone");
+        write_test_marker(&profile, identity(106, "nomifun-gone"), browser);
+        let mut deep = profile.clone();
+        for level in 0..MAX_MARKER_SCAN_DEPTH {
+            deep = deep.join(format!("d{level}"));
+        }
+        std::fs::create_dir_all(&deep).unwrap();
+        std::fs::write(deep.join("entry.bin"), b"beyond-depth").unwrap();
+        let mut control = fake_control(identity(999, "current"), HashMap::new());
+
+        let report = recover_owned_profiles_with(
+            &root,
+            ProfileRecoveryMode::DeleteEphemeralProfile,
+            &mut control,
+        );
+
+        assert!(profile.exists(), "an incompletely scanned profile is preserved");
+        assert!(report.failures > 0);
+        assert_eq!(report.ephemeral_profiles_removed, 0);
+    }
+
     #[test]
     fn live_verified_owner_is_never_taken_over() {
         let tmp = tempfile::TempDir::new().unwrap();
@@ -4709,7 +5302,6 @@ mod tests {
         assert_eq!(control.absence_calls, 0);
     }
 
-    #[cfg(windows)]
     #[test]
     fn live_provisional_owner_is_preserved_without_process_tree_actions() {
         let tmp = tempfile::TempDir::new().unwrap();
@@ -4734,7 +5326,6 @@ mod tests {
         assert_eq!(control.absence_calls, 0);
     }
 
-    #[cfg(windows)]
     #[test]
     fn missing_provisional_owner_is_rechecked_and_then_marker_last_removed() {
         let tmp = tempfile::TempDir::new().unwrap();
@@ -4771,7 +5362,6 @@ mod tests {
         assert_eq!(control.absence_identities, vec![owner]);
     }
 
-    #[cfg(windows)]
     #[test]
     fn provisional_missing_to_found_race_never_signals_the_application_identity() {
         let tmp = tempfile::TempDir::new().unwrap();
@@ -4854,7 +5444,6 @@ mod tests {
         );
     }
 
-    #[cfg(windows)]
     #[test]
     fn provisional_pid_reuse_and_unverified_owner_are_fail_closed() {
         for (name, lookup) in [
@@ -4890,7 +5479,6 @@ mod tests {
         }
     }
 
-    #[cfg(windows)]
     #[test]
     fn provisional_marker_never_authorizes_stable_profile_deletion() {
         let tmp = tempfile::TempDir::new().unwrap();
@@ -4912,7 +5500,6 @@ mod tests {
         assert_eq!(control.absence_calls, 0);
     }
 
-    #[cfg(windows)]
     #[test]
     fn malformed_committed_owner_alias_is_preserved_without_process_actions() {
         let tmp = tempfile::TempDir::new().unwrap();
@@ -4940,7 +5527,6 @@ mod tests {
         assert_eq!(control.absence_calls, 0);
     }
 
-    #[cfg(windows)]
     #[test]
     fn pid_reuse_or_browser_identity_mismatch_preserves_without_kill() {
         let tmp = tempfile::TempDir::new().unwrap();
@@ -4969,7 +5555,6 @@ mod tests {
         assert_eq!(report.profiles_preserved, 1);
     }
 
-    #[cfg(windows)]
     #[test]
     fn owner_executable_only_mismatch_preserves_without_process_actions() {
         let tmp = tempfile::TempDir::new().unwrap();
@@ -5002,7 +5587,6 @@ mod tests {
         assert!(control.absence_identities.is_empty());
     }
 
-    #[cfg(windows)]
     #[test]
     fn browser_executable_only_mismatch_preserves_without_process_actions() {
         let tmp = tempfile::TempDir::new().unwrap();
@@ -5066,7 +5650,6 @@ mod tests {
         assert_eq!(report.profiles_preserved, 1);
     }
 
-    #[cfg(windows)]
     #[test]
     fn outer_ephemeral_marker_never_deletes_a_preserved_nested_profile() {
         let tmp = tempfile::TempDir::new().unwrap();
@@ -5107,7 +5690,6 @@ mod tests {
         assert_eq!(report.failures, 1);
     }
 
-    #[cfg(windows)]
     #[test]
     fn deeply_nested_ownership_marker_is_found_and_preserved() {
         let tmp = tempfile::TempDir::new().unwrap();
@@ -5146,7 +5728,6 @@ mod tests {
         assert_eq!(report.ephemeral_profiles_removed, 0);
     }
 
-    #[cfg(windows)]
     #[test]
     fn deep_profile_without_nested_marker_remains_cleanable() {
         let tmp = tempfile::TempDir::new().unwrap();
@@ -5172,7 +5753,6 @@ mod tests {
         assert_eq!(report.ephemeral_profiles_removed, 1);
     }
 
-    #[cfg(windows)]
     #[test]
     fn marker_named_directory_makes_recursive_cleanup_fail_closed() {
         let tmp = tempfile::TempDir::new().unwrap();
@@ -5252,7 +5832,6 @@ mod tests {
         assert_eq!(report.failures, 0);
     }
 
-    #[cfg(windows)]
     #[test]
     fn already_absent_tree_can_release_ephemeral_profile() {
         let tmp = tempfile::TempDir::new().unwrap();
@@ -5280,7 +5859,6 @@ mod tests {
         assert_eq!(report.ephemeral_profiles_removed, 1);
     }
 
-    #[cfg(windows)]
     #[test]
     fn stable_primary_clears_absent_orphan_artifacts_but_keeps_profile_data() {
         let tmp = tempfile::TempDir::new().unwrap();
@@ -5316,7 +5894,6 @@ mod tests {
         assert_eq!(report.ephemeral_profiles_removed, 0);
     }
 
-    #[cfg(windows)]
     #[test]
     fn stable_recovery_preserves_marker_when_port_artifact_is_unsafe() {
         let tmp = tempfile::TempDir::new().unwrap();
@@ -5339,7 +5916,6 @@ mod tests {
         assert_eq!(report.failures, 1);
     }
 
-    #[cfg(windows)]
     #[test]
     fn malformed_and_unmarked_profiles_are_never_removed() {
         let tmp = tempfile::TempDir::new().unwrap();
