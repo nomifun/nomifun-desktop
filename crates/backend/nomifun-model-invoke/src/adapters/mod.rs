@@ -8,14 +8,23 @@
 //! - [`openai_chat_text`] — sync non-streaming `/chat/completions`
 //!   (`"openai.chat_text"`).
 //! - [`openai_embeddings`] — sync `/embeddings` (`"openai.embeddings"`).
+//! - [`openai_audio`] — sync multipart `/audio/transcriptions`
+//!   (`"openai.audio_transcriptions"`, ported from `nomifun-shell/stt_openai`).
 //!
-//! Later tasks append the gemini / deepgram / ark / volc adapters to
-//! [`default_adapters`].
+//! Platform-specific protocols:
+//! - [`gemini`] — Google `:generateContent` (`"gemini.generate_content"` for
+//!   images, `"gemini.generate_text"` for chat).
+//! - [`deepgram`] — Deepgram pre-recorded `/v1/listen` (`"deepgram.listen"`).
+//!
+//! Later tasks append the ark / volc adapters to [`default_adapters`].
 
 use std::sync::Arc;
 
 use crate::adapter::ProtocolAdapter;
 
+pub mod deepgram;
+pub mod gemini;
+pub mod openai_audio;
 pub mod openai_chat_text;
 pub mod openai_embeddings;
 pub mod openai_images;
@@ -30,6 +39,10 @@ pub fn default_adapters() -> Vec<Arc<dyn ProtocolAdapter>> {
         Arc::new(openai_videos::OpenAiVideosAdapter),
         Arc::new(openai_chat_text::OpenAiChatTextAdapter),
         Arc::new(openai_embeddings::OpenAiEmbeddingsAdapter),
+        Arc::new(openai_audio::OpenAiAudioTranscriptionsAdapter),
+        Arc::new(gemini::GeminiGenerateContentAdapter),
+        Arc::new(gemini::GeminiGenerateTextAdapter),
+        Arc::new(deepgram::DeepgramListenAdapter),
     ]
 }
 
@@ -82,6 +95,11 @@ mod tests {
             ("openai.videos", ModelTask::VideoGeneration),
             ("openai.chat_text", ModelTask::Chat),
             ("openai.embeddings", ModelTask::Embedding),
+            ("openai.audio_transcriptions", ModelTask::SpeechRecognition),
+            ("gemini.generate_content", ModelTask::ImageGeneration),
+            ("gemini.generate_content", ModelTask::ImageEdit),
+            ("gemini.generate_text", ModelTask::Chat),
+            ("deepgram.listen", ModelTask::SpeechRecognition),
         ] {
             let adapter = registry.get(protocol, task).expect("registered + supported");
             assert_eq!(adapter.id(), protocol);
@@ -91,5 +109,9 @@ mod tests {
         assert!(registry.get("openai.videos", ModelTask::ImageGeneration).is_err());
         assert!(registry.get("openai.chat_text", ModelTask::Embedding).is_err());
         assert!(registry.get("openai.embeddings", ModelTask::Chat).is_err());
+        assert!(registry.get("openai.audio_transcriptions", ModelTask::Chat).is_err());
+        assert!(registry.get("gemini.generate_content", ModelTask::Chat).is_err());
+        assert!(registry.get("gemini.generate_text", ModelTask::ImageGeneration).is_err());
+        assert!(registry.get("deepgram.listen", ModelTask::SpeechSynthesis).is_err());
     }
 }
