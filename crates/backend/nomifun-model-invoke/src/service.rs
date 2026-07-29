@@ -256,9 +256,10 @@ mod tests {
     use nomifun_api_types::ModelTask;
     use nomifun_common::encrypt_string;
     use nomifun_db::{
-        CreateProviderParams, IProviderModelRepository, IProviderRepository, NewProviderModel,
-        SqliteProviderConnectionRepository, SqliteProviderModelRepository, SqliteProviderRepository,
-        SqlitePool, init_database_memory,
+        CreateProviderParams, IProviderConnectionRepository, IProviderModelRepository,
+        IProviderRepository, NewProviderModel, SqliteProviderConnectionRepository,
+        SqliteProviderModelRepository, SqliteProviderRepository, SqlitePool,
+        UpsertProviderConnectionParams, init_database_memory,
     };
     use serde_json::json;
     use wiremock::matchers::{body_partial_json, header, method, path};
@@ -294,11 +295,16 @@ mod tests {
     /// Seed an enabled openai-platform provider whose base_url is the mock
     /// server (key decrypts to `sk-test` → `Authorization: Bearer sk-test`).
     async fn seed_provider(pool: &SqlitePool, base_url: &str) -> String {
+        seed_provider_on(pool, "openai", base_url).await
+    }
+
+    /// Platform-aware provider seeder (same key material as [`seed_provider`]).
+    async fn seed_provider_on(pool: &SqlitePool, platform: &str, base_url: &str) -> String {
         let repo = SqliteProviderRepository::new(pool.clone());
         let encrypted = encrypt_string("sk-test", &TEST_KEY).unwrap();
         repo.create(CreateProviderParams {
             provider_id: None,
-            platform: "openai",
+            platform,
             name: "Wiremock Provider",
             base_url,
             api_key_encrypted: &encrypted,
@@ -668,5 +674,110 @@ mod tests {
         let err = svc.poll(&mref(&pid, "sora-2"), video_request(), &job).await.unwrap_err();
         assert_eq!(err.kind, InvokeErrorKind::NoAdapter);
         assert!(err.message.contains("ghost.videos"), "message: {}", err.message);
+    }
+
+    // -- multi-connection profiles (the P1 architecture's acceptance test) ----
+
+    fn asr_request() -> TaskRequest {
+        TaskRequest::SpeechRecognition(AsrRequest {
+            audio: InputAsset { id: None, role: "audio".into(), bytes: b"RIFFdata".to_vec(), mime: "audio/wav".into() },
+            language: None,
+            prompt: None,
+            extra: json!({}),
+        })
+    }
+
+    #[tokio::test]
+    async fn volc_asr_rides_voice_connection_not_default_end_to_end() {
+        // THE multi-connection acceptance test: one provider, two domains, two
+        // credential sets. The Ark default connection points at wiremock A;
+        // the "voice" connection profile points at wiremock B with its own
+        // volc_voice credentials. SpeechRecognition must ride B exclusively —
+        // wiremock A never sees a single request.
+        let ark_server = MockServer::start().await; // A — default connection
+        let voice_server = MockServer::start().await; // B — "voice" profile
+
+        Mock::given(method("POST"))
+            .and(path("/api/v3/auc/bigmodel/submit"))
+            .and(header("X-Api-App-Key", "voice-app"))
+            .and(header("X-Api-Access-Key", "voice-ak"))
+            .and(header("X-Api-Resource-Id", "volc.bigasr.auc"))
+            .respond_with(ResponseTemplate::new(200).insert_header("X-Api-Status-Code", "20000000"))
+            .expect(1)
+            .mount(&voice_server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/v3/auc/bigmodel/query"))
+            .and(header("X-Api-App-Key", "voice-app"))
+            .and(header("X-Api-Access-Key", "voice-ak"))
+            .and(header("X-Api-Resource-Id", "volc.bigasr.auc"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("X-Api-Status-Code", "20000000")
+                    .set_body_json(json!({"result": {"text": "hello volc"}})),
+            )
+            .expect(1)
+            .mount(&voice_server)
+            .await;
+
+        let (svc, pool) = setup().await;
+        let pid = seed_provider_on(&pool, "ark", &ark_server.uri()).await;
+        // Model row leaves protocol/connection_role NULL: the platform route
+        // table alone sends (ark, SpeechRecognition) to volc.asr_file@voice.
+        seed_model(&pool, &pid, "bigmodel-asr", r#"["speech_recognition"]"#, "{}", true).await;
+        let conn_repo = SqliteProviderConnectionRepository::new(pool.clone());
+        let creds = r#"{"app_key":"voice-app","access_key":"voice-ak","resource_id":"volc.bigasr.auc"}"#;
+        conn_repo
+            .upsert(
+                &pid,
+                &UpsertProviderConnectionParams {
+                    role: "voice",
+                    label: Some("Voice"),
+                    base_url: &voice_server.uri(),
+                    auth_scheme: "volc_voice",
+                    credentials_encrypted: &encrypt_string(creds, &TEST_KEY).unwrap(),
+                    is_full_url: false,
+                    extra: "{}",
+                },
+            )
+            .await
+            .unwrap();
+
+        // 1) invoke → submit hits wiremock B and returns the pending handle.
+        let out = svc.invoke(&mref(&pid, "bigmodel-asr"), asr_request()).await.unwrap();
+        let TaskOutcome::Pending(handle) = out else { panic!("expected Pending from volc submit") };
+        assert_eq!(handle.adapter_id, "volc.asr_file");
+        assert_eq!(handle.poll_state, json!({"request_id": handle.remote_id}));
+
+        // 2) poll with that handle → query hits B, same X-Api-Request-Id value
+        //    as the submit, and yields the transcript.
+        let out = svc.poll(&mref(&pid, "bigmodel-asr"), asr_request(), &handle).await.unwrap();
+        let TaskOutcome::Done(TaskResult::Transcript { text, model, .. }) = out else {
+            panic!("expected Done(Transcript)")
+        };
+        assert_eq!(text, "hello volc");
+        assert_eq!(model.as_deref(), Some("bigmodel-asr"));
+
+        let voice_requests = voice_server.received_requests().await.unwrap();
+        assert_eq!(voice_requests.len(), 2, "submit + query, both on the voice domain");
+        let ids: Vec<&str> = voice_requests
+            .iter()
+            .map(|r| r.headers.get("X-Api-Request-Id").expect("request id header").to_str().unwrap())
+            .collect();
+        assert_eq!(ids[0], handle.remote_id, "submit carries the client-generated id");
+        assert_eq!(ids[0], ids[1], "query reuses the submit request id verbatim");
+
+        // 3) Delete the voice profile → the same call is now MissingConnection.
+        assert!(conn_repo.delete(&pid, "voice").await.unwrap());
+        let err = svc.invoke(&mref(&pid, "bigmodel-asr"), asr_request()).await.unwrap_err();
+        assert_eq!(err.kind, InvokeErrorKind::MissingConnection);
+        assert!(err.message.contains("voice"), "message: {}", err.message);
+
+        // 4) Per-task connection isolation: the default (Ark) connection was
+        //    never touched by any of the above.
+        assert!(
+            ark_server.received_requests().await.unwrap().is_empty(),
+            "voice traffic must never leak onto the default Ark connection"
+        );
     }
 }
