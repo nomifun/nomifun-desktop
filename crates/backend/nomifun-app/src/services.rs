@@ -2311,29 +2311,37 @@ impl AppServices {
                  to replace it: {error}"
             );
         }
-        // The generation engine resolves provider rows (endpoint + decrypted key,
-        // same machine-bound AES key the provider column uses), runs the media
-        // adapters over a proxy-aware HTTP client, and reads/writes canvas assets
-        // through the workshop bridge (AssetSource/AssetSink — no crate cycle).
-        // `reconcile_on_boot` (running-with-remote resume / else fail-interrupted)
-        // is driven from `build_creation_state` at router assembly.
+        // The generation engine delegates model execution to the unified
+        // invoke layer (provider/model/protocol resolution + adapters live
+        // there), runs over a proxy-aware HTTP client, and reads/writes canvas
+        // assets through the workshop bridge (AssetSource/AssetSink — no crate
+        // cycle). `reconcile_on_boot` (running-with-remote resume / else
+        // fail-interrupted) is driven from `build_creation_state` at router
+        // assembly.
         let creation_http = nomifun_net::http_client();
+        // Unified multimodal invoke layer (P1): one process-wide singleton over
+        // the catalog repos + the same proxy-aware HTTP client. The creation
+        // engine and `/api/tts` consume it; later tasks (health probes) reuse
+        // this exact instance.
+        let model_invoke_service = Arc::new(nomifun_model_invoke::ModelInvokeService::new(
+            Arc::new(nomifun_db::SqliteProviderRepository::new(database.pool().clone())),
+            Arc::new(nomifun_db::SqliteProviderModelRepository::new(database.pool().clone())),
+            Arc::new(nomifun_db::SqliteProviderConnectionRepository::new(database.pool().clone())),
+            encryption_key,
+            creation_http.clone(),
+            nomifun_model_invoke::AdapterRegistry::new(nomifun_model_invoke::default_adapters()),
+        ));
         let creation_asset_bridge = Arc::new(crate::workshop_bridge::WorkshopAssetBridge::new(
             data_dir.clone(),
             Arc::new(nomifun_db::SqliteWorkshopRepository::new(database.pool().clone())),
         ));
-        let creation_adapters = nomifun_creation::default_adapters(creation_http.clone());
         let creation_service = nomifun_creation::CreationService::builder(Arc::new(
             nomifun_db::SqliteCreationTaskRepository::new(database.pool().clone()),
         ))
         .with_http(creation_http.clone())
-        .with_provider_repo(
-            Arc::new(nomifun_db::SqliteProviderRepository::new(database.pool().clone())),
-            encryption_key,
-        )
+        .with_invoke(model_invoke_service.clone())
         .with_asset_source(creation_asset_bridge.clone())
         .with_asset_sink(creation_asset_bridge)
-        .with_providers(creation_adapters)
         .build();
         // Complete task/asset reconciliation before AppServices is published.
         // Running this synchronously closes the race where a newly-created task
@@ -2354,19 +2362,6 @@ impl AppServices {
                     "creation startup reconciliation failed without changing dataset lineage: {error}"
                 )
             })?;
-
-        // Unified multimodal invoke layer (P1): one process-wide singleton over
-        // the catalog repos + the same proxy-aware HTTP client the creation
-        // adapters ride. `/api/tts` consumes it now; later tasks (media task
-        // rewiring, health probes) reuse this exact instance.
-        let model_invoke_service = Arc::new(nomifun_model_invoke::ModelInvokeService::new(
-            Arc::new(nomifun_db::SqliteProviderRepository::new(database.pool().clone())),
-            Arc::new(nomifun_db::SqliteProviderModelRepository::new(database.pool().clone())),
-            Arc::new(nomifun_db::SqliteProviderConnectionRepository::new(database.pool().clone())),
-            encryption_key,
-            creation_http.clone(),
-            nomifun_model_invoke::AdapterRegistry::new(nomifun_model_invoke::default_adapters()),
-        ));
 
         // Headless seed: bind a Remote access token to the default companion so an
         // operator can configure the front door via env on a headless server.

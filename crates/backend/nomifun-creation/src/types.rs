@@ -137,3 +137,37 @@ impl CreationError {
         Self::new("timeout", message)
     }
 }
+
+/// Map the invoke layer's typed error onto the creation task error vocabulary
+/// (the `error.kind` strings persisted on failed task rows):
+/// - `UnsupportedTask` → `unsupported_capability` (untagged model / task gate);
+/// - `InvalidParams` → `invalid_params`;
+/// - `Timeout` → `timeout`;
+/// - `Config` / `MissingConnection` → `config` (local wiring / catalog);
+/// - `NoAdapter` → `adapter_unavailable` (matches the old routing semantic);
+/// - everything upstream-shaped (`Auth`/`ProviderError`/`Network`/`ParseError`/
+///   `RateLimited`/`QuotaExhausted`/`ContentPolicy`/`NotPollable`) →
+///   `provider_error`.
+///
+/// `http_status` is transferred verbatim so 4xx/5xx classification survives.
+impl From<nomifun_model_invoke::InvokeError> for CreationError {
+    fn from(e: nomifun_model_invoke::InvokeError) -> Self {
+        use nomifun_model_invoke::InvokeErrorKind as K;
+        let kind = match e.kind {
+            K::UnsupportedTask => "unsupported_capability",
+            K::InvalidParams => "invalid_params",
+            K::Timeout => "timeout",
+            K::Config | K::MissingConnection => "config",
+            K::NoAdapter => "adapter_unavailable",
+            K::Auth
+            | K::ProviderError
+            | K::Network
+            | K::ParseError
+            | K::RateLimited
+            | K::QuotaExhausted
+            | K::ContentPolicy
+            | K::NotPollable => "provider_error",
+        };
+        Self { kind: kind.to_string(), message: e.message, http_status: e.http_status }
+    }
+}
