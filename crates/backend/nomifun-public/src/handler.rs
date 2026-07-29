@@ -127,13 +127,23 @@ async fn preflight_and_attach_remote_browser_identity(
         .validate_managed_request(&caller, tool_name, args)
         .await
         .map_err(nomifun_gateway::browser_registry::platform_error_to_value)?;
-    attach_remote_browser_identity(
-        registry,
+    let caller = attach_remote_browser_identity(
+        registry.clone(),
         caller,
         session_id,
         allowed_operations,
     )
-    .await
+    .await?;
+    // The owner-scoped lane_id check needs the trusted identity, which only
+    // exists after attachment (the pre-attach validation above deliberately
+    // defers it). Re-validate so an unowned handle — e.g. a lane_id forked by
+    // a different Remote MCP session — fails here rather than surfacing later
+    // from the bound Hub dispatch, mirroring the inward gateway transport.
+    registry
+        .validate_managed_request(&caller, tool_name, args)
+        .await
+        .map_err(nomifun_gateway::browser_registry::platform_error_to_value)?;
+    Ok(caller)
 }
 
 #[cfg(feature = "browser-use")]
@@ -352,8 +362,10 @@ mod tests {
 
     #[cfg(feature = "browser-use")]
     use nomifun_browser_platform::{
-        BrowserHostDriver, BrowserHostFactory, BrowserPlatformError,
-        BrowserSessionHub, HostLaunchRequest, HubConfig, ManualClock,
+        BrowserHostDriver, BrowserHostFactory, BrowserHostId, BrowserLaneDriver,
+        BrowserOperation, BrowserOperationResult, BrowserPlatformError, BrowserSessionHub,
+        DriverOperationContext, HostLaunchRequest, HostLifecycleState, HubConfig,
+        LaneLaunchRequest, ManualClock,
     };
 
     #[cfg(feature = "browser-use")]
@@ -386,6 +398,129 @@ mod tests {
                     false,
                     "test",
                 ))
+            })
+        }
+    }
+
+    /// A minimal working browser stack (the crate has no `async-trait` dev
+    /// dependency, so the trait impls are written in desugared form). Used by
+    /// the post-attach lane-ownership re-validation test, which needs a real
+    /// owner-scoped Lane handle.
+    #[cfg(feature = "browser-use")]
+    struct WorkingBrowserLane;
+
+    #[cfg(feature = "browser-use")]
+    impl BrowserLaneDriver for WorkingBrowserLane {
+        fn execute<'a, 'async_trait>(
+            &'a self,
+            _operation: BrowserOperation,
+            _context: DriverOperationContext,
+        ) -> Pin<
+            Box<
+                dyn Future<Output = Result<BrowserOperationResult, BrowserPlatformError>>
+                    + Send
+                    + 'async_trait,
+            >,
+        >
+        where
+            'a: 'async_trait,
+            Self: 'async_trait,
+        {
+            Box::pin(async { Ok(BrowserOperationResult::default()) })
+        }
+
+        fn close<'a, 'async_trait>(
+            &'a self,
+        ) -> Pin<
+            Box<dyn Future<Output = Result<(), BrowserPlatformError>> + Send + 'async_trait>,
+        >
+        where
+            'a: 'async_trait,
+            Self: 'async_trait,
+        {
+            Box::pin(async { Ok(()) })
+        }
+    }
+
+    #[cfg(feature = "browser-use")]
+    struct WorkingBrowserHost {
+        id: BrowserHostId,
+        epoch: u64,
+    }
+
+    #[cfg(feature = "browser-use")]
+    impl BrowserHostDriver for WorkingBrowserHost {
+        fn host_id(&self) -> BrowserHostId {
+            self.id.clone()
+        }
+
+        fn epoch(&self) -> u64 {
+            self.epoch
+        }
+
+        fn state(&self) -> HostLifecycleState {
+            HostLifecycleState::Running
+        }
+
+        fn open_lane<'a, 'async_trait>(
+            &'a self,
+            _request: LaneLaunchRequest,
+        ) -> Pin<
+            Box<
+                dyn Future<
+                        Output = Result<Arc<dyn BrowserLaneDriver>, BrowserPlatformError>,
+                    > + Send
+                    + 'async_trait,
+            >,
+        >
+        where
+            'a: 'async_trait,
+            Self: 'async_trait,
+        {
+            Box::pin(async { Ok(Arc::new(WorkingBrowserLane) as Arc<dyn BrowserLaneDriver>) })
+        }
+
+        fn shutdown<'a, 'async_trait>(
+            &'a self,
+        ) -> Pin<
+            Box<dyn Future<Output = Result<(), BrowserPlatformError>> + Send + 'async_trait>,
+        >
+        where
+            'a: 'async_trait,
+            Self: 'async_trait,
+        {
+            Box::pin(async { Ok(()) })
+        }
+    }
+
+    #[cfg(feature = "browser-use")]
+    struct WorkingBrowserFactory;
+
+    #[cfg(feature = "browser-use")]
+    impl BrowserHostFactory for WorkingBrowserFactory {
+        fn launch<'a, 'async_trait>(
+            &'a self,
+            request: HostLaunchRequest,
+        ) -> Pin<
+            Box<
+                dyn Future<
+                        Output = Result<
+                            Arc<dyn BrowserHostDriver>,
+                            BrowserPlatformError,
+                        >,
+                    > + Send
+                    + 'async_trait,
+            >,
+        >
+        where
+            'a: 'async_trait,
+            Self: 'async_trait,
+        {
+            Box::pin(async move {
+                Ok(Arc::new(WorkingBrowserHost {
+                    id: request.host_id,
+                    epoch: request.browser_epoch,
+                }) as Arc<dyn BrowserHostDriver>)
             })
         }
     }
@@ -527,6 +662,80 @@ mod tests {
                 .owner_lease_id,
             first_lease_id,
             "invalid args must not renew the existing Remote MCP owner lease"
+        );
+    }
+
+    /// Task4 gave the inward gateway transport a post-attach re-validation:
+    /// the owner-scoped `lane_id` check needs the trusted identity, which
+    /// only exists after attachment. The Remote MCP transport must enforce
+    /// the same boundary — without it, a `lane_id` forked by one session
+    /// passed the (identity-less, owner-check-deferred) preflight for EVERY
+    /// other authenticated session and only failed deep inside dispatch, if
+    /// at all.
+    #[cfg(feature = "browser-use")]
+    #[tokio::test]
+    async fn remote_preflight_rejects_a_forked_lane_id_from_a_sibling_session() {
+        let hub = BrowserSessionHub::new(
+            Arc::new(WorkingBrowserFactory),
+            HubConfig::default(),
+        );
+        let registry = nomifun_gateway::browser_registry::BrowserRegistry::from_hub(hub);
+        let caller = CallerCtx::try_remote(
+            "0190f5fe-7c00-7a00-8000-000000000001",
+            "0190f5fe-7c00-7a00-8000-000000000002",
+        )
+        .expect("test Remote caller identity");
+        let allowed_operations =
+            nomifun_gateway::browser_registry::all_browser_operations();
+
+        // The owner session opens a Lane and holds its owner-scoped handle.
+        let attached = preflight_and_attach_remote_browser_identity(
+            registry.clone(),
+            caller.clone(),
+            "nomi_browser_open",
+            &serde_json::json!({"lane_name": "research"}),
+            "remote-lane-owner".to_owned(),
+            allowed_operations.clone(),
+        )
+        .await
+        .expect("valid browser args must attach the owning Remote MCP session");
+        let lane_id = registry
+            .open(&attached, Some("research"))
+            .await
+            .expect("open the research lane for the owning session")
+            .lane_id
+            .to_string();
+
+        // A follow-up request from the OWNING session starts from a fresh
+        // per-request CallerCtx; its own handle must keep working.
+        preflight_and_attach_remote_browser_identity(
+            registry.clone(),
+            caller.clone(),
+            "nomi_browser_status",
+            &serde_json::json!({"lane_id": lane_id}),
+            "remote-lane-owner".to_owned(),
+            allowed_operations.clone(),
+        )
+        .await
+        .expect("the owning session must be able to target its own lane_id");
+
+        // A different Remote MCP session is a different trusted runtime: the
+        // same handle must fail closed AFTER identity attachment, at the
+        // transport preflight, not later inside the bound Hub dispatch.
+        let error = preflight_and_attach_remote_browser_identity(
+            registry.clone(),
+            caller,
+            "nomi_browser_status",
+            &serde_json::json!({"lane_id": lane_id}),
+            "remote-lane-sibling".to_owned(),
+            allowed_operations,
+        )
+        .await
+        .expect_err("an unowned lane handle must be rejected at the remote preflight");
+        assert_eq!(
+            error.get("code").and_then(serde_json::Value::as_str),
+            Some("operation_not_allowed"),
+            "{error}"
         );
     }
 
