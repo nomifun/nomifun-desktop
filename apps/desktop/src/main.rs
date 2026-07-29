@@ -2017,6 +2017,27 @@ fn main() -> std::process::ExitCode {
         }
     }
 
+    // F48: publish Tauri's authoritative resource-dir resolution for the
+    // backend's bundled Chrome-for-Testing discovery. macOS .app bundles place
+    // resources in Contents/Resources while the executable lives in
+    // Contents/MacOS, so the backend's exe-relative fallback alone can never
+    // see a packaged Chrome there. The backend crate has no Tauri dependency;
+    // this env var is the seam (see nomifun_app::browser_resource).
+    let tauri_context = generated_tauri_context();
+    if let Ok(resource_dir) = tauri::utils::platform::resource_dir(
+        tauri_context.package_info(),
+        &tauri::Env::default(),
+    ) {
+        // SAFETY: same single-threaded window as `enhance_process_path`
+        // above — Tauri's runtime threads are only created by `.run()`.
+        unsafe {
+            std::env::set_var(
+                nomifun_app::browser_resource::BUNDLED_CHROME_DIR_ENV,
+                resource_dir.join("chrome-for-testing"),
+            );
+        }
+    }
+
     let app = tauri::Builder::default()
         // single-instance MUST be the first plugin. With its `deep-link` feature
         // enabled (see Cargo.toml), it forwards a second instance's argv into the
@@ -2390,7 +2411,7 @@ fn main() -> std::process::ExitCode {
                 _ => {}
             }
         })
-        .build(generated_tauri_context())
+        .build(tauri_context)
         .expect("error while building tauri application");
 
     // `Builder::run(context)` installs an empty app-level event callback. Build
