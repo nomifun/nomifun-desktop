@@ -498,7 +498,7 @@ pub struct CompanionThreads {
 /// - `materialize_skills_for_agent` itself errors;
 /// - a non-empty configuration resolves to nothing (source tree transiently
 ///   unreadable — resolve failures are silently skipped per name upstream).
-async fn effective_skill_names(
+pub(crate) async fn effective_skill_names(
     skill_paths: &nomifun_extension::SkillPaths,
     profile: &CompanionProfileConfig,
 ) -> Result<Vec<String>, AppError> {
@@ -533,6 +533,89 @@ async fn effective_skill_names(
     Ok(names)
 }
 
+/// Materialize + link `skill_names` into `workspace/.nomi/skills` under
+/// manifest ownership (`managed-companion-skills.json`): entries the manifest
+/// owns but that are no longer desired are removed (only when ownership is
+/// proven — user-created skills are never touched), missing desired skills are
+/// linked and recorded. Best-effort: failures log and degrade. Shared by
+/// companion threads and the in-session summon track (`skill_names = []`
+/// unloads every manifest-owned entry, e.g. after 解除召唤). Returns the
+/// resolved desired skill names.
+pub(crate) async fn sync_managed_workspace_skills(
+    skill_paths: &nomifun_extension::SkillPaths,
+    conversation_id: &str,
+    workspace: &Path,
+    skill_names: &[String],
+) -> Vec<String> {
+    let nomi_dir = workspace.join(".nomi");
+    let skills_dir = nomi_dir.join("skills");
+    // Cleanup fast-path: nothing desired and nothing managed → leave the
+    // workspace untouched (never create `.nomi`/manifest files in ordinary
+    // work workspaces that were never summoned).
+    if skill_names.is_empty() && load_manifest(&nomi_dir).managed.is_empty() {
+        return Vec::new();
+    }
+    let resolved = match nomifun_extension::materialize_skills_for_agent(
+        skill_paths,
+        conversation_id,
+        skill_names,
+    )
+    .await
+    {
+        Ok(resolved) => resolved,
+        Err(error) => {
+            tracing::warn!(error = %error, conversation_id, "resolve companion workspace skills failed");
+            return Vec::new();
+        }
+    };
+
+    let old_manifest = load_manifest(&nomi_dir);
+    let desired: std::collections::HashSet<&str> = resolved
+        .iter()
+        .filter(|skill| {
+            old_manifest
+                .managed
+                .get(&skill.name)
+                .is_none_or(|record| record_source_matches(record, &skill.source_path))
+        })
+        .map(|skill| skill.name.as_str())
+        .collect();
+    let mut manifest = remove_stale_managed_entries(&skills_dir, &old_manifest, &desired);
+    let to_link: Vec<_> = resolved
+        .iter()
+        .filter(|skill| !skills_dir.join(&skill.name).exists())
+        .cloned()
+        .collect();
+    if let Err(error) = nomifun_extension::link_workspace_skills(
+        workspace,
+        &[".nomi/skills"],
+        &to_link,
+    )
+    .await
+    {
+        tracing::warn!(error = %error, conversation_id, "link companion workspace skills failed");
+    }
+    for skill in &to_link {
+        let target = skills_dir.join(&skill.name);
+        match record_managed_entry(&target, &skill.source_path) {
+            Ok(Some(record)) => {
+                manifest.managed.insert(skill.name.clone(), record);
+            }
+            Ok(None) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => tracing::warn!(
+                error = %error,
+                target = %target.display(),
+                "record managed companion skill failed"
+            ),
+        }
+    }
+    if let Err(error) = save_manifest(&nomi_dir, &manifest) {
+        tracing::warn!(error = %error, manifest = %nomi_dir.display(), "save companion skill manifest failed");
+    }
+    resolved.into_iter().map(|skill| skill.name).collect()
+}
+
 impl CompanionThreads {
     async fn builtin_auto_skill_names(&self) -> Vec<String> {
         match nomifun_extension::list_builtin_auto_skills(&self.skill_paths).await {
@@ -550,65 +633,8 @@ impl CompanionThreads {
         workspace: &Path,
         skill_names: &[String],
     ) {
-        let nomi_dir = workspace.join(".nomi");
-        let skills_dir = nomi_dir.join("skills");
-        let resolved = match nomifun_extension::materialize_skills_for_agent(
-            &self.skill_paths,
-            conversation_id,
-            skill_names,
-        )
-        .await
-        {
-            Ok(resolved) => resolved,
-            Err(error) => {
-                tracing::warn!(error = %error, conversation_id, "resolve companion workspace skills failed");
-                return;
-            }
-        };
-
-        let old_manifest = load_manifest(&nomi_dir);
-        let desired: std::collections::HashSet<&str> = resolved
-            .iter()
-            .filter(|skill| {
-                old_manifest
-                    .managed
-                    .get(&skill.name)
-                    .is_none_or(|record| record_source_matches(record, &skill.source_path))
-            })
-            .map(|skill| skill.name.as_str())
-            .collect();
-        let mut manifest = remove_stale_managed_entries(&skills_dir, &old_manifest, &desired);
-        let to_link: Vec<_> = resolved
-            .into_iter()
-            .filter(|skill| !skills_dir.join(&skill.name).exists())
-            .collect();
-        if let Err(error) = nomifun_extension::link_workspace_skills(
-            workspace,
-            &[".nomi/skills"],
-            &to_link,
-        )
-        .await
-        {
-            tracing::warn!(error = %error, conversation_id, "link companion workspace skills failed");
-        }
-        for skill in &to_link {
-            let target = skills_dir.join(&skill.name);
-            match record_managed_entry(&target, &skill.source_path) {
-                Ok(Some(record)) => {
-                    manifest.managed.insert(skill.name.clone(), record);
-                }
-                Ok(None) => {}
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                Err(error) => tracing::warn!(
-                    error = %error,
-                    target = %target.display(),
-                    "record managed companion skill failed"
-                ),
-            }
-        }
-        if let Err(error) = save_manifest(&nomi_dir, &manifest) {
-            tracing::warn!(error = %error, manifest = %nomi_dir.display(), "save companion skill manifest failed");
-        }
+        sync_managed_workspace_skills(&self.skill_paths, conversation_id, workspace, skill_names)
+            .await;
     }
 
     /// Reconcile the workspace links and immutable conversation skill snapshot

@@ -20,7 +20,7 @@ use crate::runtime_handle::AgentRuntimeHandle;
 use crate::factory::AgentFactoryDeps;
 use crate::factory::context::FactoryContext;
 use crate::manager::nomi::{
-    NomiAgentManager, NomiHostWiring, sanitize_session_messages,
+    NomiAgentManager, NomiHostWiring, NomiSummonWiring, sanitize_session_messages,
 };
 use crate::types::{AgentRuntimeBuildOptions, NomiCompatOverrides, NomiResolvedConfig};
 
@@ -47,6 +47,8 @@ fn apply_model_only_ceiling(overrides: &mut NomiBuildExtra) {
     overrides.max_turns = Some(1);
     overrides.goal = None;
     overrides.delegation_policy = DelegationPolicy::Disabled;
+    // Summon loads local companion memories/skills — installation-owner only.
+    overrides.summon = None;
 }
 
 fn retarget_resumed_session(session: &mut Session, provider: &str, model: &str) -> bool {
@@ -186,6 +188,101 @@ pub(super) async fn build(
             Some(existing) if !existing.trim().is_empty() => format!("{persona}\n\n{existing}"),
             _ => persona,
         });
+    }
+
+    // In-session companion summon (spec §设计 B2/B3): only owner-authority,
+    // non-companion, non-public work sessions. The persona is never taken
+    // over — the system prompt gains exactly one loading notice; memories are
+    // injected per turn by a ContextContributor and stay read-only.
+    let summon_config = if is_instance_owner && !overrides.companion && public_agent_id.is_none() {
+        overrides.summon.clone()
+    } else {
+        None
+    };
+    let mut summon_wiring: Option<NomiSummonWiring> = None;
+    if let Some(provider) = deps.companion_summon.as_ref() {
+        match summon_config.as_ref() {
+            Some(summon) => {
+                // Skill materialization (workspace is resolved by now). Manifest
+                // ownership makes this idempotent and prunes stale entries when
+                // exclusions change. Best-effort: a skill failure degrades the
+                // session, it must not block chatting.
+                match provider
+                    .sync_summon_workspace_skills(
+                        &ctx.conversation_id,
+                        std::path::Path::new(&ctx.workspace),
+                        &summon.companion_id,
+                        &summon.skill_exclusions,
+                    )
+                    .await
+                {
+                    Ok(linked) => debug!(
+                        conversation_id = %ctx.conversation_id,
+                        skills = linked.len(),
+                        "summon: companion skills materialized into workspace"
+                    ),
+                    Err(error) => warn!(
+                        conversation_id = %ctx.conversation_id,
+                        error = %error,
+                        "summon: companion skill materialization failed; continuing without them"
+                    ),
+                }
+                let name = provider.companion_name(&summon.companion_id).await;
+                let notice = format!(
+                    "本会话已装载伙伴「{}」的技能与所选记忆（只读）。伙伴人格不接管本会话。\
+                     需要补查伙伴记忆用 recall_memories；发现长期有价值的新事实用 \
+                     propose_companion_memory 提议（主人确认后才写入伙伴记忆），宁缺毋滥。",
+                    name.as_deref().unwrap_or("（已不存在）")
+                );
+                overrides.system_prompt = Some(match overrides.system_prompt.take() {
+                    Some(existing) if !existing.trim().is_empty() => {
+                        format!("{existing}\n\n{notice}")
+                    }
+                    _ => notice,
+                });
+                match (
+                    provider.summon_memory_sink(&summon.companion_id),
+                    provider.summon_proposal_sink(&summon.companion_id),
+                    provider.summon_context_sink(summon),
+                ) {
+                    (Ok(memory_sink), Ok(proposal_sink), Ok(context_sink)) => {
+                        summon_wiring = Some(NomiSummonWiring {
+                            memory_sink,
+                            proposal_sink,
+                            context_sink,
+                        });
+                    }
+                    (memory, proposal, context) => {
+                        warn!(
+                            conversation_id = %ctx.conversation_id,
+                            memory_sink_err = ?memory.err().map(|e| e.to_string()),
+                            proposal_sink_err = ?proposal.err().map(|e| e.to_string()),
+                            context_sink_err = ?context.err().map(|e| e.to_string()),
+                            "summon: sink construction failed; session continues without summon tools"
+                        );
+                    }
+                }
+            }
+            None if is_instance_owner && !overrides.companion => {
+                // A cleared (or never-set) summon unloads its manifest-owned
+                // skills on the next build. No-op without a manifest; companion
+                // threads manage their own manifest and are excluded above.
+                if let Err(error) = provider
+                    .clear_summon_workspace_skills(
+                        &ctx.conversation_id,
+                        std::path::Path::new(&ctx.workspace),
+                    )
+                    .await
+                {
+                    warn!(
+                        conversation_id = %ctx.conversation_id,
+                        error = %error,
+                        "summon: workspace skill cleanup failed"
+                    );
+                }
+            }
+            None => {}
+        }
     }
 
     // A process-owned configuration object is the capability. There is no
@@ -738,6 +835,7 @@ pub(super) async fn build(
         } else {
             None
         },
+        summon_wiring,
         host_wiring,
     )
     .await?;
@@ -1630,6 +1728,12 @@ mod tests {
             }],
             knowledge_writeback: true,
             knowledge_channel_write_enabled: true,
+            summon: Some(nomifun_api_types::SummonConfig {
+                companion_id: "0190f5fe-7c00-7a00-8abc-012345678969".into(),
+                memory_ids: vec![],
+                skill_exclusions: vec![],
+                summoned_at: 1,
+            }),
             ..Default::default()
         };
 
@@ -1645,6 +1749,10 @@ mod tests {
         assert!(overrides.knowledge_mounts.is_empty());
         assert!(!overrides.knowledge_writeback);
         assert!(!overrides.knowledge_channel_write_enabled);
+        assert!(
+            overrides.summon.is_none(),
+            "summon loads local companion memories/skills — owner only"
+        );
         assert_eq!(overrides.allowed_tools, vec!["update_plan"]);
         assert_eq!(overrides.session_mode.as_deref(), Some("default"));
         assert_eq!(overrides.max_turns, Some(1));
