@@ -72,6 +72,14 @@ async fn submit_generations(
     if let Some(quality) = &req.quality {
         body["quality"] = Value::String(quality.clone());
     }
+    // SD-style OpenAI-compatible gateways (e.g. SiliconFlow) require/accept
+    // these generation knobs in the JSON body; whitelisted passthrough from
+    // `extra` mirrors the legacy prober's minimal_json_body fidelity.
+    for key in ["steps", "cfg_scale", "text_mode"] {
+        if let Some(v) = req.extra.get(key) {
+            body[key] = v.clone();
+        }
+    }
 
     let rb = http.post(&url).timeout(REQUEST_TIMEOUT).json(&body);
     let resp = call.connection.auth.apply(rb)?.send().await.map_err(net_err)?;
