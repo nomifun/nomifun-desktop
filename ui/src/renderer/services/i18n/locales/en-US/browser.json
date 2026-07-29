@@ -108,6 +108,7 @@
     "capacityCounts": "{{active}} active · {{queued}} queued",
     "errorRecoverable": "Recoverable. The browser manager may retry this lane.",
     "errorTerminal": "Not recoverable. Close this lane after reviewing the error.",
+    "restartedNotice": "The managed browser restarted and the lane recovered automatically. No action is needed.",
     "sharedLiveIdentity": "shared live identity",
     "queueState": {
       "queued": "Queued",
@@ -181,7 +182,8 @@
       "running": "Running",
       "frozen": "Frozen",
       "stopping": "Stopping",
-      "failed": "Failed"
+      "failed": "Failed",
+      "unknown": "Unknown"
     },
     "identity": {
       "primary": "Primary",

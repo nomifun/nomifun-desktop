@@ -61,6 +61,14 @@ impl AgentRuntimeRegistry for NoopAgentRuntimeRegistry {
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> {
         Box::pin(std::future::ready(()))
     }
+    fn terminate_and_wait_result(
+        &self,
+        _: &str,
+        _: Option<AgentKillReason>,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), AppError>> + Send>> {
+        // This registry never spawns a process, so teardown is trivially proven.
+        Box::pin(std::future::ready(Ok(())))
+    }
     fn terminate_all(&self) {}
     fn active_runtime_count(&self) -> usize {
         0
@@ -264,6 +272,12 @@ async fn t1_2_create_each_agent_type() {
                 "type": type_str,
                 "model": { "provider_id": "0190f5fe-7c00-7a00-8000-000000000001", "model": "m1" },
                 "extra": {}
+            })
+        } else if type_str == "acp" {
+            // ACP identity is explicit: extra.agent_id is required at create.
+            json!({
+                "type": type_str,
+                "extra": { "agent_id": TEST_ACP_AGENT_ID }
             })
         } else {
             json!({

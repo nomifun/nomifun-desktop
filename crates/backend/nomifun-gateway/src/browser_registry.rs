@@ -9,12 +9,13 @@
 //! A lane is keyed by `(CallerIdentity.runtime_instance_id, lane_name)`. A
 //! companion is attribution context only; it is never an ownership or lane key.
 
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use nomi_browser::{
-    ActionContext, ApprovalTier, ManagedBrowserFacade, classify_action,
+    ActionContext, ApprovalTier, ManagedBrowserFacade, TRUSTED_OWNER_INPUT_FIELDS,
+    classify_action,
 };
 use nomi_types::tool::ToolResult;
 use nomifun_browser_platform::{
@@ -204,6 +205,11 @@ pub struct GatewayBrowserCall {
 }
 
 const MAX_PENDING: usize = 64;
+/// Upper bound on retained revoked-runtime tombstones. Lease/session ids are
+/// never legitimately reused, so the tombstone only has to outlive the short
+/// attach-vs-close race window; the oldest entries are evicted in insertion
+/// order once this many distinct runtimes have been revoked.
+const REVOKED_RUNTIME_TOMBSTONE_CAPACITY: usize = 4096;
 const MODEL_IDENTITY_INPUT_FIELDS: &[&str] = &[
     "identity",
     "identity_mode",
@@ -212,32 +218,58 @@ const MODEL_IDENTITY_INPUT_FIELDS: &[&str] = &[
     "profile",
     "account",
 ];
-const TRUSTED_CALLER_FIELDS: &[&str] = &[
-    "caller",
-    "caller_identity",
-    "user_id",
-    "conversation_id",
-    "runtime_instance_id",
-    "agent_id",
-    "companion_id",
-    "execution_id",
-    "step_id",
-    "attempt_id",
-    "remote_connection_id",
-    "owner_lease_id",
-    "capability_expires_at_ms",
-    "allowed_operations",
-    "surface",
-    "browser_surface",
-    "identity_generation",
-    "browser_epoch",
-    "target_id",
-    "frame_id",
-    "ref_generation",
-    "cancellation_id",
-    "workspace_hint",
-    "lane_key",
-];
+// Trusted-owner caller fields are NOT gateway-local: every managed browser
+// surface rejects/strips the ONE shared
+// [`nomi_browser::TRUSTED_OWNER_INPUT_FIELDS`] list (F23), so identical
+// requests behave identically across surfaces.
+
+/// Bounded authority-aware revoked-runtime tombstones (F62).
+///
+/// Ids are tracked in insertion order; once the capacity is reached the oldest
+/// tombstone is evicted, keeping the anti-resurrection authority for recent
+/// revocations without growing per revoked session forever.
+#[derive(Default)]
+struct RevokedRuntimeTombstones {
+    entries: HashMap<String, HashSet<BrowserAttachmentAuthority>>,
+    insertion_order: VecDeque<String>,
+}
+
+impl RevokedRuntimeTombstones {
+    fn insert(
+        &mut self,
+        runtime_instance_id: &str,
+        authority: BrowserAttachmentAuthority,
+    ) {
+        match self.entries.get_mut(runtime_instance_id) {
+            Some(authorities) => {
+                authorities.insert(authority);
+            }
+            None => {
+                self.entries.insert(
+                    runtime_instance_id.to_owned(),
+                    HashSet::from([authority]),
+                );
+                self.insertion_order.push_back(runtime_instance_id.to_owned());
+                while self.insertion_order.len() > REVOKED_RUNTIME_TOMBSTONE_CAPACITY {
+                    let Some(evicted) = self.insertion_order.pop_front() else {
+                        break;
+                    };
+                    self.entries.remove(&evicted);
+                }
+            }
+        }
+    }
+
+    fn contains(
+        &self,
+        runtime_instance_id: &str,
+        authority: BrowserAttachmentAuthority,
+    ) -> bool {
+        self.entries
+            .get(runtime_instance_id)
+            .is_some_and(|authorities| authorities.contains(&authority))
+    }
+}
 
 /// Clone-cheap bridge to the application-owned browser hub.
 #[derive(Clone)]
@@ -251,11 +283,7 @@ pub struct BrowserRegistry {
     /// an authority-aware tombstone prevents an attach racing with session
     /// close from resurrecting a revoked Browser owner while ensuring an
     /// unrelated authority cannot tombstone the runtime.
-    revoked_runtime_ids: Arc<
-        std::sync::Mutex<
-            HashMap<String, HashSet<BrowserAttachmentAuthority>>,
-        >,
-    >,
+    revoked_runtime_ids: Arc<std::sync::Mutex<RevokedRuntimeTombstones>>,
     /// Runtime-scoped attachment/revocation gates. Same-runtime transitions
     /// serialize; unrelated runtimes can attach and clean up concurrently.
     runtime_lifecycle_slots: Arc<
@@ -280,7 +308,9 @@ impl BrowserRegistry {
             identity_resolver,
             pending: Arc::new(std::sync::Mutex::new(HashMap::new())),
             identities: Arc::new(std::sync::Mutex::new(HashMap::new())),
-            revoked_runtime_ids: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            revoked_runtime_ids: Arc::new(std::sync::Mutex::new(
+                RevokedRuntimeTombstones::default(),
+            )),
             runtime_lifecycle_slots: Arc::new(std::sync::Mutex::new(
                 HashMap::new(),
             )),
@@ -303,7 +333,9 @@ impl BrowserRegistry {
             identity_resolver: Arc::new(CallerCtxBrowserIdentityResolver),
             pending: Arc::new(std::sync::Mutex::new(HashMap::new())),
             identities: Arc::new(std::sync::Mutex::new(HashMap::new())),
-            revoked_runtime_ids: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            revoked_runtime_ids: Arc::new(std::sync::Mutex::new(
+                RevokedRuntimeTombstones::default(),
+            )),
             runtime_lifecycle_slots: Arc::new(std::sync::Mutex::new(
                 HashMap::new(),
             )),
@@ -428,8 +460,7 @@ impl BrowserRegistry {
             .revoked_runtime_ids
             .lock()
             .expect("gateway browser revoked-runtime store poisoned")
-            .get(runtime_instance_id)
-            .is_some_and(|authorities| authorities.contains(&authority))
+            .contains(runtime_instance_id, authority)
         {
             return Err(revoked_runtime_error());
         }
@@ -634,14 +665,10 @@ impl BrowserRegistry {
                 .lock()
                 .expect("gateway browser identity cache poisoned");
             let Some(cached) = identities.get_mut(runtime_instance_id) else {
-                let mut revoked_runtime_ids = self
-                    .revoked_runtime_ids
+                self.revoked_runtime_ids
                     .lock()
-                    .expect("gateway browser revoked-runtime store poisoned");
-                revoked_runtime_ids
-                    .entry(runtime_instance_id.to_owned())
-                    .or_default()
-                    .insert(expected_authority);
+                    .expect("gateway browser revoked-runtime store poisoned")
+                    .insert(runtime_instance_id, expected_authority);
                 return Ok(CloseResult {
                     closed: 0,
                     already_closed: true,
@@ -667,9 +694,7 @@ impl BrowserRegistry {
         self.revoked_runtime_ids
             .lock()
             .expect("gateway browser revoked-runtime store poisoned")
-            .entry(effective_runtime_id.clone())
-            .or_default()
-            .insert(authority);
+            .insert(&effective_runtime_id, authority);
         self.clear_runtime_caches(
             &effective_runtime_id,
             Some(&owner_lease_id),
@@ -1191,11 +1216,14 @@ impl BrowserRegistry {
             return Ok(());
         };
 
-        // A first attachment has no trusted owner identity yet. Do not let a
-        // caller use an arbitrary lane handle to influence which owner gets
-        // attached; only an already-bound client may perform the owner check.
+        // Both transports run this semantic preflight on a per-request caller
+        // whose trusted identity has not been attached yet. Defer the owner
+        // check instead of failing closed so the owner-scoped handle returned
+        // by browser_fork stays usable: the handle never influences which
+        // owner gets attached, and an unowned handle still fails at the
+        // attached re-validation and at the bound Hub authorization check.
         if caller.browser_identity.is_none() {
-            return Err(missing_identity_error());
+            return Ok(());
         }
 
         let resolved = self.resolve(caller, None)?;
@@ -1240,11 +1268,58 @@ impl BrowserRegistry {
             })?
             .to_owned();
         let resolved = self.resolve(caller, None)?;
-        Ok(
-            ManagedBrowserFacade::new(resolved.client, None)
-                .execute(&action, &input)
-                .await,
-        )
+        let result = ManagedBrowserFacade::new(resolved.client, None)
+            .execute(&action, &input)
+            .await;
+        if action == "observe" && !result.is_error {
+            self.cache_managed_observation(caller, legacy_lane_name, &input, &result);
+        }
+        Ok(result)
+    }
+
+    /// Populate the GW2 observation cache from the shared managed dispatch
+    /// path so [`Self::classify`] resolves submit-control accnames against the
+    /// same snapshot the model received. Best-effort: a snapshot that cannot
+    /// be attributed to an exact owned lane is dropped, never mis-filed.
+    fn cache_managed_observation(
+        &self,
+        caller: &CallerCtx,
+        legacy_lane_name: Option<&str>,
+        input: &Value,
+        result: &ToolResult,
+    ) {
+        let Ok(envelope) = serde_json::from_str::<Value>(&result.content) else {
+            return;
+        };
+        let Some(text) = envelope
+            .get("output")
+            .and_then(result_text)
+            .or_else(|| result_text(&envelope))
+        else {
+            return;
+        };
+        let lane_name = match envelope
+            .pointer("/lane/lane_name")
+            .and_then(Value::as_str)
+            .or(legacy_lane_name)
+        {
+            Some(lane_name) => Some(lane_name),
+            // Without an authoritative lane name a lane_id-addressed snapshot
+            // must not be attributed to the default lane.
+            None if input.get("lane_id").is_some_and(|v| !v.is_null()) => return,
+            None => None,
+        };
+        let Ok(identity) = self.identity_resolver.resolve(caller) else {
+            return;
+        };
+        let Ok(lane_key) = LaneKey::new(identity.runtime_instance_id, lane_name)
+        else {
+            return;
+        };
+        self.observations
+            .lock()
+            .expect("gateway browser observation cache poisoned")
+            .insert(lane_key, text.to_owned());
     }
 
     /// Resolve a caller-provided selector to this trusted runtime's logical
@@ -1534,7 +1609,7 @@ fn reject_untrusted_caller_fields(
     let Some(object) = input.as_object() else {
         return Ok(());
     };
-    if let Some(field) = TRUSTED_CALLER_FIELDS
+    if let Some(field) = TRUSTED_OWNER_INPUT_FIELDS
         .iter()
         .find(|field| object.contains_key(**field))
     {
@@ -1595,7 +1670,7 @@ fn operation_from_input(
     sanitized.remove("lane");
     sanitized.remove("lane_name");
     sanitized.remove("expected_browser_epoch");
-    for field in TRUSTED_CALLER_FIELDS {
+    for field in TRUSTED_OWNER_INPUT_FIELDS {
         sanitized.remove(*field);
     }
     Ok(BrowserOperation {
@@ -1955,14 +2030,16 @@ mod tests {
                     .forget();
             }
             self.probe.active.fetch_sub(1, Ordering::AcqRel);
+            let text = if operation.action == "observe" {
+                format!(
+                    "{}:{}\n- button \"Pay now\" [ref=f0e7]\n- link \"Docs\" [ref=f0a1]",
+                    self.lane_id, operation.action
+                )
+            } else {
+                format!("{}:{}", self.lane_id, operation.action)
+            };
             Ok(BrowserOperationResult {
-                output: json!({
-                    "text": format!(
-                        "{}:{}",
-                        self.lane_id,
-                        operation.action
-                    )
-                }),
+                output: json!({ "text": text }),
                 ..Default::default()
             })
         }
@@ -2643,7 +2720,54 @@ mod tests {
 
     #[tokio::test]
     async fn final_signed_child_drain_reports_pending_exact_owner_cleanup() {
+        // A terminal lane-cleanup failure on a host with no surviving lanes is
+        // resolved by authoritative host retirement, so the drain
+        // postcondition is already met on the first attempt.
         let harness = harness();
+        let mut signed = gateway_caller_without_browser_identity();
+        harness
+            .registry
+            .attach_trusted_identity(
+                &mut signed,
+                "signed-child-final-retired",
+                Some("attempt-final-retired"),
+                u64::MAX,
+            )
+            .await
+            .unwrap();
+        harness.registry.open(&signed, None).await.unwrap();
+        harness
+            .probe
+            .lane_close_failures_remaining
+            .store(1, Ordering::Release);
+        harness
+            .registry
+            .drain_signed_child_browser_owners_once()
+            .await
+            .expect("host retirement resolves the terminal lane-cleanup failure");
+        assert!(harness.registry.signed_child_cleanup_status().is_empty());
+        assert!(harness.hub.list_lanes().await.is_empty());
+        // Retirement resolved the failure through the Host process shutdown;
+        // no second lane close was needed.
+        assert_eq!(harness.probe.lane_closes.load(Ordering::Acquire), 1);
+
+        // A sibling lane on the shared Primary host makes retirement
+        // impossible, so the retained exact owner stays pending until retry.
+        let harness = self::harness();
+        let mut remote = gateway_caller_without_browser_identity();
+        remote.remote = true;
+        harness
+            .registry
+            .attach_trusted_identity_with_authority(
+                &mut remote,
+                "remote-session-final-sibling",
+                None,
+                u64::MAX,
+                BrowserAttachmentAuthority::RemoteMcpSession,
+            )
+            .await
+            .unwrap();
+        let remote_lane = harness.registry.open(&remote, None).await.unwrap();
         let mut signed = gateway_caller_without_browser_identity();
         harness
             .registry
@@ -2696,6 +2820,9 @@ mod tests {
             .await
             .expect("retry must consume the retained exact-owner authority");
         assert!(harness.registry.signed_child_cleanup_status().is_empty());
+        let lanes = harness.hub.list_lanes().await;
+        assert_eq!(lanes.len(), 1);
+        assert_eq!(lanes[0].lane_id, remote_lane.lane_id);
     }
 
     #[tokio::test]
@@ -2765,7 +2892,48 @@ mod tests {
 
     #[tokio::test]
     async fn failed_remote_mcp_revoke_remains_authoritative_until_retry() {
+        // A terminal lane-cleanup failure on a host with no surviving lanes is
+        // resolved by authoritative host retirement: the revoke succeeds on
+        // its first attempt and no retained authority survives.
         let harness = harness();
+        let mut remote = gateway_caller_without_browser_identity();
+        remote.remote = true;
+        harness
+            .registry
+            .attach_trusted_identity_with_authority(
+                &mut remote,
+                "remote-session-retired",
+                None,
+                u64::MAX,
+                BrowserAttachmentAuthority::RemoteMcpSession,
+            )
+            .await
+            .unwrap();
+        harness.registry.open(&remote, None).await.unwrap();
+        harness
+            .probe
+            .lane_close_failures_remaining
+            .store(1, Ordering::Release);
+        let result = harness
+            .registry
+            .revoke_trusted_identity("remote-session-retired")
+            .await
+            .expect("host retirement resolves the terminal lane-cleanup failure");
+        assert_eq!(result.closed, 1);
+        assert!(harness.hub.list_lanes().await.is_empty());
+        assert!(
+            !harness
+                .registry
+                .identities
+                .lock()
+                .expect("gateway browser identity cache poisoned")
+                .contains_key("remote-session-retired")
+        );
+        assert_eq!(harness.probe.lane_closes.load(Ordering::Acquire), 1);
+
+        // A sibling lane on the shared Primary host makes retirement
+        // impossible, so the failed cleanup retains its authority until retry.
+        let harness = self::harness();
         let mut remote = gateway_caller_without_browser_identity();
         remote.remote = true;
         harness
@@ -2780,6 +2948,20 @@ mod tests {
             .await
             .unwrap();
         harness.registry.open(&remote, None).await.unwrap();
+        let mut sibling = gateway_caller_without_browser_identity();
+        sibling.remote = true;
+        harness
+            .registry
+            .attach_trusted_identity_with_authority(
+                &mut sibling,
+                "remote-session-retry-sibling",
+                None,
+                u64::MAX,
+                BrowserAttachmentAuthority::RemoteMcpSession,
+            )
+            .await
+            .unwrap();
+        let sibling_lane = harness.registry.open(&sibling, None).await.unwrap();
         harness
             .probe
             .lane_close_failures_remaining
@@ -2791,7 +2973,6 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(error.code, BrowserErrorCode::BrowserUnavailable);
-        assert!(harness.hub.list_lanes().await.is_empty());
         {
             let identities = harness
                 .registry
@@ -2813,15 +2994,82 @@ mod tests {
                 .expect("gateway browser identity cache poisoned")
                 .contains_key("remote-session-retry")
         );
+        assert_eq!(harness.probe.lane_closes.load(Ordering::Acquire), 2);
 
-        // The Hub retains the detached driver after the first close failure.
-        // Its own lifecycle sweep completes that lower-level cleanup.
+        // The sibling attachment and its lane survive the scoped retry, and no
+        // lower-level cleanup remains for the lifecycle sweep.
         harness.hub.sweep().await.unwrap();
         assert_eq!(harness.probe.lane_closes.load(Ordering::Acquire), 2);
+        let lanes = harness.hub.list_lanes().await;
+        assert_eq!(lanes.len(), 1);
+        assert_eq!(lanes[0].lane_id, sibling_lane.lane_id);
     }
 
     #[tokio::test]
     async fn final_revoke_cleans_replacement_without_losing_superseded_owner() {
+        // A terminal lane-cleanup failure on a host with no surviving lanes is
+        // resolved by authoritative host retirement, so the replacement attach
+        // consumes the superseded owner immediately.
+        let harness = harness_with_owner_ttl(10);
+        let mut first = gateway_caller_without_browser_identity();
+        first.remote = true;
+        harness
+            .registry
+            .attach_trusted_identity_with_authority(
+                &mut first,
+                "remote-session-retired-owner",
+                None,
+                u64::MAX,
+                BrowserAttachmentAuthority::RemoteMcpSession,
+            )
+            .await
+            .unwrap();
+        let old_owner = first
+            .browser_identity
+            .as_ref()
+            .unwrap()
+            .owner_lease_id
+            .clone();
+        harness.registry.open(&first, None).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        harness
+            .probe
+            .lane_close_failures_remaining
+            .store(1, Ordering::Release);
+        let mut replacement = gateway_caller_without_browser_identity();
+        replacement.remote = true;
+        harness
+            .registry
+            .attach_trusted_identity_with_authority(
+                &mut replacement,
+                "remote-session-retired-owner",
+                None,
+                u64::MAX,
+                BrowserAttachmentAuthority::RemoteMcpSession,
+            )
+            .await
+            .unwrap();
+        {
+            let identities = harness
+                .registry
+                .identities
+                .lock()
+                .expect("gateway browser identity cache poisoned");
+            let cached = identities
+                .get("remote-session-retired-owner")
+                .expect("replacement authority must be published");
+            assert!(
+                cached.pending_owner_cleanup.is_empty(),
+                "host retirement resolves the superseded-owner cleanup failure"
+            );
+            assert_ne!(cached.identity.owner_lease_id, old_owner);
+        }
+        assert!(harness.hub.list_lanes().await.is_empty());
+        assert_eq!(harness.probe.lane_closes.load(Ordering::Acquire), 1);
+
+        // A sibling lane on the shared Primary host makes retirement
+        // impossible, so the superseded owner is retained for retry without
+        // losing the replacement.
         let harness = harness_with_owner_ttl(10);
         let mut first = gateway_caller_without_browser_identity();
         first.remote = true;
@@ -2845,6 +3093,20 @@ mod tests {
         harness.registry.open(&first, None).await.unwrap();
 
         tokio::time::sleep(Duration::from_millis(20)).await;
+        let mut sibling = gateway_caller_without_browser_identity();
+        sibling.remote = true;
+        harness
+            .registry
+            .attach_trusted_identity_with_authority(
+                &mut sibling,
+                "remote-session-superseded-sibling",
+                None,
+                u64::MAX,
+                BrowserAttachmentAuthority::RemoteMcpSession,
+            )
+            .await
+            .unwrap();
+        let sibling_lane = harness.registry.open(&sibling, None).await.unwrap();
         harness
             .probe
             .lane_close_failures_remaining
@@ -2896,14 +3158,6 @@ mod tests {
             .unwrap();
         assert_eq!(result.closed, 1);
         assert!(
-            harness
-                .hub
-                .list_lanes()
-                .await
-                .iter()
-                .all(|lane| lane.lane_id != replacement_lane.lane_id)
-        );
-        assert!(
             !harness
                 .registry
                 .identities
@@ -2912,8 +3166,17 @@ mod tests {
                 .contains_key("remote-session-superseded")
         );
 
-        harness.hub.sweep().await.unwrap();
+        // The final revoke consumed both the replacement lane and the retained
+        // superseded-owner cleanup; only the sibling lane survives.
         assert_eq!(harness.probe.lane_closes.load(Ordering::Acquire), 3);
+        let lanes = harness.hub.list_lanes().await;
+        assert_eq!(lanes.len(), 1);
+        assert_eq!(lanes[0].lane_id, sibling_lane.lane_id);
+        assert!(
+            lanes
+                .iter()
+                .all(|lane| lane.lane_id != replacement_lane.lane_id)
+        );
     }
 
     #[tokio::test]
@@ -3382,6 +3645,160 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn semantic_preflight_defers_lane_id_owner_check_until_identity_attachment() {
+        let harness = harness();
+        let mut owner = gateway_caller_without_browser_identity();
+        harness
+            .registry
+            .attach_trusted_identity(
+                &mut owner,
+                "signed-lane-id-owner",
+                None,
+                u64::MAX,
+            )
+            .await
+            .unwrap();
+        let forked = harness
+            .registry
+            .dispatch_managed(
+                &owner,
+                None,
+                json!({ "action": "browser_fork", "lane_name": "research" }),
+            )
+            .await
+            .unwrap();
+        assert!(!forked.is_error, "{}", forked.content);
+        let forked: Value = serde_json::from_str(&forked.content).unwrap();
+        let lane_id = forked
+            .pointer("/lane/lane_id")
+            .and_then(Value::as_str)
+            .unwrap()
+            .to_owned();
+
+        // Both transports validate on a per-request caller that has no
+        // browser identity yet; an owner-scoped lane_id must not be rejected
+        // before the trusted identity is attached.
+        let unattached = gateway_caller_without_browser_identity();
+        harness
+            .registry
+            .validate_managed_request(
+                &unattached,
+                "nomi_browser_status",
+                &json!({ "lane_id": lane_id }),
+            )
+            .await
+            .expect(
+                "a lane_id carried by a not-yet-attached request must defer \
+                 the owner check instead of failing closed",
+            );
+
+        // Re-validation after attachment performs the definitive owner check.
+        harness
+            .registry
+            .validate_managed_request(
+                &owner,
+                "nomi_browser_status",
+                &json!({ "lane_id": lane_id }),
+            )
+            .await
+            .expect("the owning identity must pass the lane_id owner check");
+
+        let mut sibling = gateway_caller_without_browser_identity();
+        harness
+            .registry
+            .attach_trusted_identity(
+                &mut sibling,
+                "signed-lane-id-sibling",
+                None,
+                u64::MAX,
+            )
+            .await
+            .unwrap();
+        let error = harness
+            .registry
+            .validate_managed_request(
+                &sibling,
+                "nomi_browser_status",
+                &json!({ "lane_id": lane_id }),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, BrowserErrorCode::OperationNotAllowed);
+    }
+
+    #[tokio::test]
+    async fn managed_observe_feeds_gw2_classification_for_submit_clicks() {
+        let harness = harness();
+        let caller = caller(&harness.hub, "runtime-observe-cache", "attempt-a");
+        let observed = harness
+            .registry
+            .dispatch_managed(&caller, None, json!({ "action": "observe" }))
+            .await
+            .unwrap();
+        assert!(!observed.is_error, "{}", observed.content);
+
+        let dangerous = harness
+            .registry
+            .classify(&caller, None, "click", &json!({ "ref": "f0e7" }))
+            .unwrap();
+        assert_eq!(
+            dangerous,
+            ApprovalTier::Irreversible,
+            "a click on an observed Pay button must be held for approval"
+        );
+        let benign = harness
+            .registry
+            .classify(&caller, None, "click", &json!({ "ref": "f0a1" }))
+            .unwrap();
+        assert_ne!(benign, ApprovalTier::Irreversible);
+    }
+
+    #[tokio::test]
+    async fn revoked_runtime_tombstones_are_bounded_with_insertion_order_eviction() {
+        let harness = harness();
+        for index in 0..=REVOKED_RUNTIME_TOMBSTONE_CAPACITY {
+            harness
+                .registry
+                .revoke_trusted_identity(&format!("remote-tombstone-{index}"))
+                .await
+                .unwrap();
+        }
+
+        // Recent revocations keep their anti-resurrection authority.
+        let mut newest = gateway_caller_without_browser_identity();
+        newest.remote = true;
+        let error = harness
+            .registry
+            .attach_trusted_identity_with_authority(
+                &mut newest,
+                &format!(
+                    "remote-tombstone-{REVOKED_RUNTIME_TOMBSTONE_CAPACITY}"
+                ),
+                None,
+                u64::MAX,
+                BrowserAttachmentAuthority::RemoteMcpSession,
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, BrowserErrorCode::OwnerLeaseExpired);
+
+        // The oldest tombstone is evicted instead of retained forever.
+        let mut oldest = gateway_caller_without_browser_identity();
+        oldest.remote = true;
+        harness
+            .registry
+            .attach_trusted_identity_with_authority(
+                &mut oldest,
+                "remote-tombstone-0",
+                None,
+                u64::MAX,
+                BrowserAttachmentAuthority::RemoteMcpSession,
+            )
+            .await
+            .expect("evicted tombstones must not grow the store unbounded");
+    }
+
+    #[tokio::test]
     async fn semantic_preflight_rejects_cross_owner_lane_without_renewing() {
         let harness = harness();
         let mut first = gateway_caller_without_browser_identity();
@@ -3566,6 +3983,85 @@ mod tests {
             .is_ok(),
             "lane_id is an owner-scoped selector authorized by the bound client"
         );
+    }
+
+    #[tokio::test]
+    async fn unattributable_lane_id_observation_is_dropped_not_misfiled() {
+        let harness = harness();
+        let caller = caller(&harness.hub, "runtime-observe-guard", "attempt-guard");
+        // An observe result that lost its authoritative lane attribution,
+        // e.g. because the post-operation status refresh failed and the
+        // facade serialized `"lane": null`.
+        let orphaned = ToolResult::text(
+            json!({
+                "ok": true,
+                "action": "observe",
+                "lane_id": "lane-unattributable",
+                "lane": null,
+                "output": { "text": "- button \"Pay now\" [ref=f0e7]" },
+            })
+            .to_string(),
+        );
+
+        harness.registry.cache_managed_observation(
+            &caller,
+            None,
+            &json!({ "action": "observe", "lane_id": "lane-unattributable" }),
+            &orphaned,
+        );
+        {
+            let observations = harness
+                .registry
+                .observations
+                .lock()
+                .expect("gateway browser observation cache poisoned");
+            assert!(
+                observations.is_empty(),
+                "a lane_id-addressed snapshot without authoritative lane \
+                 attribution must be dropped, not filed under another lane"
+            );
+        }
+
+        // Control: without the caller-supplied lane_id the identical result
+        // legitimately attributes to the default lane, so the drop above is
+        // the mis-attribution guard and not an unrelated parse failure.
+        harness.registry.cache_managed_observation(
+            &caller,
+            None,
+            &json!({ "action": "observe" }),
+            &orphaned,
+        );
+        let observations = harness
+            .registry
+            .observations
+            .lock()
+            .expect("gateway browser observation cache poisoned");
+        let default_lane = LaneKey::new("runtime-observe-guard", None).unwrap();
+        assert_eq!(observations.len(), 1);
+        assert_eq!(
+            observations.get(&default_lane).map(String::as_str),
+            Some("- button \"Pay now\" [ref=f0e7]")
+        );
+    }
+
+    #[test]
+    fn gateway_rejects_every_shared_trusted_owner_field() {
+        // F23: the gateway must enforce the ONE shared trusted-owner field
+        // list (`nomi_browser::TRUSTED_OWNER_INPUT_FIELDS`). A divergent
+        // gateway-local list would make identical requests behave differently
+        // across supposedly-equivalent managed browser surfaces.
+        for field in nomi_browser::TRUSTED_OWNER_INPUT_FIELDS {
+            let error = reject_untrusted_caller_fields(&json!({
+                "action": "navigate",
+                (*field): "model-controlled",
+            }))
+            .unwrap_err();
+            assert_eq!(
+                error.code,
+                BrowserErrorCode::InvalidCallerIdentity,
+                "shared trusted-owner field `{field}` must be rejected by the gateway"
+            );
+        }
     }
 
     #[test]

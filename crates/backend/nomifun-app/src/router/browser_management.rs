@@ -782,6 +782,10 @@ enum ResourcePolicyPresetDto {
     Automatic,
     ResourceSaving,
     HighConcurrency,
+    /// The user's explicit advanced values are authoritative. The scheduler
+    /// honors a Custom `reserved_memory_bytes` exactly instead of raising it
+    /// to the machine-size floor that protects the derived presets.
+    Custom,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -1191,11 +1195,13 @@ async fn close_lane_ids_best_effort(
 fn resource_policy_dto(policy: &ResourcePolicy) -> ResourcePolicyDto {
     ResourcePolicyDto {
         preset: match policy.preset {
-            ResourcePolicyPreset::Automatic | ResourcePolicyPreset::Custom => {
-                ResourcePolicyPresetDto::Automatic
-            }
+            ResourcePolicyPreset::Automatic => ResourcePolicyPresetDto::Automatic,
             ResourcePolicyPreset::ResourceSaving => ResourcePolicyPresetDto::ResourceSaving,
             ResourcePolicyPreset::HighConcurrency => ResourcePolicyPresetDto::HighConcurrency,
+            // Round-tripping Custom is what keeps an explicit reserve honored
+            // across GET reloads, persistence, and startup restore. Collapsing
+            // it to Automatic would silently re-enable the 20%-of-total floor.
+            ResourcePolicyPreset::Custom => ResourcePolicyPresetDto::Custom,
         },
         advanced: Some(ResourcePolicyAdvancedDto {
             max_memory_ratio: Some(policy.max_browser_memory_ratio),
@@ -1255,6 +1261,7 @@ fn apply_resource_policy(
         ResourcePolicyPresetDto::Automatic => ResourcePolicyPreset::Automatic,
         ResourcePolicyPresetDto::ResourceSaving => ResourcePolicyPreset::ResourceSaving,
         ResourcePolicyPresetDto::HighConcurrency => ResourcePolicyPreset::HighConcurrency,
+        ResourcePolicyPresetDto::Custom => ResourcePolicyPreset::Custom,
     };
     if policy.preset != requested_preset {
         let current_active = policy.max_active_operations.max(1);
@@ -1278,7 +1285,10 @@ fn apply_resource_policy(
                 policy.max_active_operations = current_active.saturating_mul(2).min(64);
                 policy.max_open_lanes = policy.max_active_operations.saturating_mul(4).min(128);
             }
-            ResourcePolicyPreset::Custom => unreachable!("the HTTP DTO has no custom preset"),
+            // Custom keeps every current value: the user takes over from the
+            // preset transition deltas, and the advanced overrides below are
+            // the only intended changes.
+            ResourcePolicyPreset::Custom => {}
         }
         policy.preset = requested_preset;
     }
@@ -3267,6 +3277,51 @@ mod tests {
         let restored =
             restore_persisted_resource_policy(app.preferences.as_ref(), fallback.clone()).await;
         assert_eq!(restored, fallback);
+    }
+
+    #[tokio::test]
+    async fn custom_preset_preserves_the_exact_explicit_reserve_end_to_end() {
+        let app = test_app(true).await;
+        // An explicitly configured reserve below the automatic 20%-of-total
+        // floor. The scheduler honors it only while the policy carries the
+        // Custom preset, so the whole HTTP -> domain -> persistence chain must
+        // keep that tag and the exact byte value.
+        let explicit_reserve = 2_u64 * 1024 * 1024 * 1024;
+        let response = app
+            .router
+            .clone()
+            .oneshot(authorized_json_request(
+                &app,
+                "PUT",
+                "/api/browser/resource-policy",
+                json!({
+                    "preset": "custom",
+                    "advanced": {"reserved_memory_bytes": explicit_reserve}
+                }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await;
+        assert_eq!(body["data"]["preset"], "custom");
+        assert_eq!(
+            body["data"]["advanced"]["reserved_memory_bytes"],
+            explicit_reserve
+        );
+
+        let live = app.hub.resource_policy().await;
+        assert_eq!(live.preset, ResourcePolicyPreset::Custom);
+        assert_eq!(live.reserved_memory_bytes, explicit_reserve);
+
+        // A restart restores the same Custom preset and exact reserve, so the
+        // scheduler keeps honoring the user's value instead of re-flooring it.
+        let restored = restore_persisted_resource_policy(
+            app.preferences.as_ref(),
+            ResourcePolicy::default(),
+        )
+        .await;
+        assert_eq!(restored.preset, ResourcePolicyPreset::Custom);
+        assert_eq!(restored.reserved_memory_bytes, explicit_reserve);
     }
 
     #[tokio::test]

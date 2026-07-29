@@ -12,11 +12,15 @@ import type {
   IBrowserOverview,
 } from '@/common/browser/browserTypes';
 import {
+  BROWSER_INVENTORY_EVENT_COALESCE_MS,
+  BROWSER_INVENTORY_POLL_INTERVAL_MS,
+  BROWSER_REALTIME_LIVENESS_TIMEOUT_MS,
   BROWSER_RETRY_BASE_DELAY_MS,
   BROWSER_RETRY_MAX_DELAY_MS,
   createBrowserInventoryRealtimeHandler,
   createBrowserInventoryRecoveryController,
   createBrowserOverviewRecoveryController,
+  startBrowserInventoryFallbackPoll,
   subscribeBrowserInventoryRealtime,
   type BrowserInventoryState,
   type BrowserInventoryRealtimeRefreshReason,
@@ -144,6 +148,185 @@ describe('browser inventory recovery', () => {
       'stop:lifecycle',
       'stop:reconnected',
     ]);
+  });
+
+  test('suppresses the duplicate dual-channel delivery of the same sequence', () => {
+    const reasons: BrowserInventoryRealtimeRefreshReason[] = [];
+    const realtime = createBrowserInventoryRealtimeHandler((reason) => {
+      reasons.push(reason);
+    });
+
+    realtime.connected();
+    // The backend forwards lifecycle-kind payloads on BOTH
+    // browser.inventory.changed and browser.lifecycle.changed; the second
+    // delivery carries the identical sequence and must not refresh again.
+    realtime.browserEvent({ sequence: 10 });
+    realtime.browserEvent({ sequence: 10 });
+    realtime.browserEvent({ sequence: 11 });
+    realtime.browserEvent({ sequence: 11 });
+    // Events without a sequence can never be proven duplicates: refresh.
+    realtime.browserEvent({});
+    realtime.browserEvent({});
+    // An explicit resync marker always wins, even on a repeated sequence.
+    realtime.browserEvent({ sequence: 11, resync_required: true });
+
+    expect(reasons).toEqual([
+      'connected',
+      'event',
+      'event',
+      'event',
+      'event',
+      'resync',
+    ]);
+  });
+
+  test('coalesces realtime event bursts into a leading and one trailing refresh', () => {
+    timers.useFakeTimers();
+    try {
+      const order: string[] = [];
+      let inventory:
+        | ((event: { sequence?: number; change_kind?: string }) => void)
+        | undefined;
+      const stop = subscribeBrowserInventoryRealtime({
+        refresh: (reason) => order.push(`refresh:${reason}`),
+        subscribeInventory: (listener) => {
+          inventory = listener;
+          return () => undefined;
+        },
+        subscribeLifecycle: () => () => undefined,
+        subscribeReconnected: () => () => undefined,
+      });
+      expect(order).toEqual(['refresh:connected']);
+
+      inventory?.({ sequence: 1 });
+      inventory?.({ sequence: 2 });
+      inventory?.({ sequence: 3 });
+      inventory?.({ sequence: 4 });
+      // Leading edge fires immediately; the burst coalesces behind it.
+      expect(order).toEqual(['refresh:connected', 'refresh:event']);
+
+      timers.advanceTimersByTime(BROWSER_INVENTORY_EVENT_COALESCE_MS);
+      expect(order).toEqual([
+        'refresh:connected',
+        'refresh:event',
+        'refresh:event',
+      ]);
+
+      // Quiet period: a single event outside a burst refreshes immediately.
+      timers.advanceTimersByTime(BROWSER_INVENTORY_EVENT_COALESCE_MS);
+      inventory?.({ sequence: 5 });
+      expect(order.at(-1)).toBe('refresh:event');
+      expect(order).toHaveLength(4);
+
+      // Urgent reasons bypass and clear any pending coalesced refresh.
+      inventory?.({ sequence: 6 });
+      inventory?.({ sequence: 9 });
+      expect(order.at(-1)).toBe('refresh:sequence-gap');
+      const lengthAfterGap = order.length;
+      timers.advanceTimersByTime(BROWSER_INVENTORY_EVENT_COALESCE_MS * 4);
+      expect(order).toHaveLength(lengthAfterGap);
+
+      stop();
+    } finally {
+      timers.clearAllTimers();
+      timers.useRealTimers();
+    }
+  });
+
+  test('polls the snapshot fallback while the socket is down and stays quiet while realtime is alive', () => {
+    timers.useFakeTimers();
+    try {
+      let connected = true;
+      let lastActivityAt: number | null = null;
+      let polls = 0;
+      const stop = startBrowserInventoryFallbackPoll({
+        poll: () => {
+          polls += 1;
+        },
+        isSocketConnected: () => connected,
+        lastRealtimeActivityAt: () => lastActivityAt,
+      });
+
+      // Fail safe: a nominally OPEN socket with no recorded activity has
+      // never proven the realtime channel works, so the fallback polls.
+      timers.advanceTimersByTime(BROWSER_INVENTORY_POLL_INTERVAL_MS);
+      expect(polls).toBe(1);
+
+      // Healthy: heartbeats keep arriving between ticks; never poll.
+      for (let index = 0; index < 3; index += 1) {
+        lastActivityAt = Date.now();
+        timers.advanceTimersByTime(BROWSER_INVENTORY_POLL_INTERVAL_MS);
+      }
+      expect(polls).toBe(1);
+
+      // A visibly closed socket polls immediately, regardless of how recent
+      // the last delivered frame was.
+      connected = false;
+      lastActivityAt = Date.now();
+      timers.advanceTimersByTime(BROWSER_INVENTORY_POLL_INTERVAL_MS * 2);
+      expect(polls).toBe(3);
+
+      connected = true;
+      lastActivityAt = Date.now();
+      timers.advanceTimersByTime(BROWSER_INVENTORY_POLL_INTERVAL_MS);
+      expect(polls).toBe(3);
+
+      stop();
+      connected = false;
+      timers.advanceTimersByTime(BROWSER_INVENTORY_POLL_INTERVAL_MS * 2);
+      expect(polls).toBe(3);
+    } finally {
+      timers.clearAllTimers();
+      timers.useRealTimers();
+    }
+  });
+
+  test('restores bounded polling when the socket is wedged half-open (OPEN but silent)', () => {
+    timers.useFakeTimers();
+    try {
+      // The socket never reports a close: a half-open connection after
+      // sleep/resume keeps readyState OPEN while nothing arrives anymore.
+      const connected = true;
+      let lastActivityAt: number | null = null;
+      let polls = 0;
+      const stop = startBrowserInventoryFallbackPoll({
+        poll: () => {
+          polls += 1;
+        },
+        isSocketConnected: () => connected,
+        lastRealtimeActivityAt: () => lastActivityAt,
+      });
+
+      // Healthy phase: server heartbeats land between poll ticks.
+      for (let index = 0; index < 3; index += 1) {
+        lastActivityAt = Date.now();
+        timers.advanceTimersByTime(BROWSER_INVENTORY_POLL_INTERVAL_MS);
+      }
+      expect(polls).toBe(0);
+
+      // Wedge: frames stop arriving after one final heartbeat. Silence within
+      // the liveness window is still tolerated (a heartbeat may simply be in
+      // flight).
+      lastActivityAt = Date.now();
+      timers.advanceTimersByTime(BROWSER_REALTIME_LIVENESS_TIMEOUT_MS);
+      expect(polls).toBe(0);
+
+      // Past the liveness window the channel is treated as dead even though
+      // the socket still claims OPEN: staleness stays bounded by the poll.
+      timers.advanceTimersByTime(BROWSER_INVENTORY_POLL_INTERVAL_MS * 2);
+      expect(polls).toBe(2);
+
+      // Frames resume (e.g. the OS finally surfaced the failure and the
+      // bridge reconnected): polling stops again.
+      lastActivityAt = Date.now();
+      timers.advanceTimersByTime(BROWSER_INVENTORY_POLL_INTERVAL_MS * 2);
+      expect(polls).toBe(2);
+
+      stop();
+    } finally {
+      timers.clearAllTimers();
+      timers.useRealTimers();
+    }
   });
 
   test('recovers a direct /browser load after an initial transient failure', async () => {

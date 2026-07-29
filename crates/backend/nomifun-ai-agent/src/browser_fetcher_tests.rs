@@ -381,7 +381,41 @@ async fn lease_is_renewed_then_reissued_after_expiry() {
 }
 
 #[tokio::test]
-async fn capacity_queue_is_cancelled_and_reported_without_private_fallback() {
+async fn queued_fetch_waits_for_promotion_and_completes() {
+    let mut config = HubConfig::default();
+    config.resource_policy.max_open_lanes = 1;
+    let harness = Harness::new(config);
+    let blocker = bind_test_client(&harness.hub, "installation-owner", "blocker-runtime");
+    let blocker_lane = blocker
+        .open(Some("blocker"), BrowserIdentityMode::Anonymous, None)
+        .await
+        .expect("open blocker");
+    assert!(matches!(blocker_lane, OpenLaneOutcome::Running { .. }));
+
+    // F40: while the knowledge Lane is queued for capacity, the fetch must
+    // wait for scheduler promotion instead of failing the knowledge source.
+    let fetcher = Arc::new(harness.fetcher());
+    let fetch_fetcher = Arc::clone(&fetcher);
+    let fetch = tokio::spawn(async move {
+        fetch_fetcher
+            .fetch_page("https://spa.example.test/queued-then-promoted")
+            .await
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    assert!(!fetch.is_finished(), "fetch must wait while queued");
+
+    blocker.close_all().await.expect("close blocker");
+    let page = tokio::time::timeout(std::time::Duration::from_secs(10), fetch)
+        .await
+        .expect("queued fetch must complete after promotion")
+        .expect("fetch task")
+        .expect("promoted fetch succeeds");
+    assert_eq!(page.final_url, "https://spa.example.test/queued-then-promoted");
+    fetcher.shutdown().await.expect("shutdown fetcher");
+}
+
+#[tokio::test]
+async fn exhausted_queue_wait_is_cancelled_and_reported_without_private_fallback() {
     let mut config = HubConfig::default();
     config.resource_policy.max_open_lanes = 1;
     let harness = Harness::new(config);
@@ -396,11 +430,12 @@ async fn capacity_queue_is_cancelled_and_reported_without_private_fallback() {
         .expect("open blocker");
     assert!(matches!(blocker_lane, OpenLaneOutcome::Running { .. }));
 
-    let fetcher = harness.fetcher();
+    let mut fetcher = harness.fetcher();
+    fetcher.set_queue_wait_timeout(std::time::Duration::from_millis(300));
     let error = fetcher
         .fetch_page("https://spa.example.test/queued")
         .await
-        .expect_err("capacity must queue the knowledge Lane");
+        .expect_err("an exhausted queue wait must surface the capacity error");
     let message = match error {
         AppError::BadGateway(message) => message,
         other => panic!("unexpected error: {other:?}"),
@@ -506,11 +541,18 @@ fn drop_without_tokio_runtime_revokes_exact_owner() {
     drop(runtime);
     drop(fetcher);
 
-    assert_eq!(
-        harness.probe.lane_closes.load(Ordering::Acquire),
-        1,
-        "runtime-free Drop must synchronously execute exact-owner cleanup"
-    );
+    // F49: Drop itself is non-blocking — it hands the bounded revoke to a
+    // detached cleanup thread rather than block_on-driving Hub teardown from
+    // whatever thread happens to run Drop. Wait for that thread's effect.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while harness.probe.lane_closes.load(Ordering::Acquire) == 0 {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "detached Drop cleanup never revoked the exact owner"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    assert_eq!(harness.probe.lane_closes.load(Ordering::Acquire), 1);
     let verifier = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()

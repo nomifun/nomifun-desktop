@@ -61,6 +61,14 @@ const lifecycleColor = (state: string): string => {
   return 'gray';
 };
 
+/**
+ * A recoverable managed-browser restart is expected lifecycle churn (the Hub
+ * relaunches the Host), not a terminal failure: present it as information so
+ * users are not pushed to close a healthy lane. Every other error stays red.
+ */
+const isInformationalLaneError = (lane: IBrowserLane): boolean =>
+  lane.error_code === 'browser_restarted' && lane.recoverable === true;
+
 const Field: React.FC<{
   label: string;
   children: React.ReactNode;
@@ -149,6 +157,8 @@ const BrowserLaneDetails: React.FC<BrowserLaneDetailsProps> = ({
         return t('browser.state.lifecycle.stopping');
       case 'failed':
         return t('browser.state.lifecycle.failed');
+      case 'unknown':
+        return t('browser.state.lifecycle.unknown');
       default:
         return state;
     }
@@ -262,27 +272,44 @@ const BrowserLaneDetails: React.FC<BrowserLaneDetailsProps> = ({
         />
       )}
 
-      {(lane.error_code || lane.error_message) && (
-        <Alert
-          type='error'
-          showIcon
-          content={
-            <div>
-              <div className='font-500'>
-                {lane.error_code ? `${lane.error_code}: ` : ''}
-                {lane.error_message || DASH}
-              </div>
-              {lane.recoverable != null && (
-                <div className='mt-2px text-11px'>
-                  {lane.recoverable
-                    ? t('browser.details.errorRecoverable')
-                    : t('browser.details.errorTerminal')}
+      {(lane.error_code || lane.error_message) &&
+        (isInformationalLaneError(lane) ? (
+          <Alert
+            type='info'
+            showIcon
+            content={
+              <div>
+                <div className='font-500'>
+                  {lane.error_code ? `${lane.error_code}: ` : ''}
+                  {lane.error_message || DASH}
                 </div>
-              )}
-            </div>
-          }
-        />
-      )}
+                <div className='mt-2px text-11px'>
+                  {t('browser.details.restartedNotice')}
+                </div>
+              </div>
+            }
+          />
+        ) : (
+          <Alert
+            type='error'
+            showIcon
+            content={
+              <div>
+                <div className='font-500'>
+                  {lane.error_code ? `${lane.error_code}: ` : ''}
+                  {lane.error_message || DASH}
+                </div>
+                {lane.recoverable != null && (
+                  <div className='mt-2px text-11px'>
+                    {lane.recoverable
+                      ? t('browser.details.errorRecoverable')
+                      : t('browser.details.errorTerminal')}
+                  </div>
+                )}
+              </div>
+            }
+          />
+        ))}
 
       <StatusSection
         id='current'

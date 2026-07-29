@@ -2266,9 +2266,14 @@ mod tests {
         ] {
             let services = source
                 .find("AppServices::from_config")
+                .or_else(|| source.find("AppServices::try_from_config"))
                 .expect("production host must construct AppServices");
             let authority = source[services..]
                 .find(".with_boot_reconciliation_authority(")
+                .or_else(|| {
+                    source[services..]
+                        .find(".try_with_boot_reconciliation_authority(")
+                })
                 .expect("production host must retain exact server-lock authority");
             let router = source[services..]
                 .find("create_router")

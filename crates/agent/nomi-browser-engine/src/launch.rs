@@ -113,6 +113,12 @@ impl Launched {
     /// Connect a low-level test/diagnostic caller while retaining exact process
     /// and profile cleanup authority. Production runtimes normally consume the
     /// launch through `CdpBackend`/`CdpHostRuntime` instead.
+    ///
+    /// This path spawns no egress-firewall loop, so `handle_attached` does NOT
+    /// arm `Fetch.enable` on attached targets (the arming gate requires a live
+    /// `Fetch.requestPaused` subscriber): networking stays CDP-default and
+    /// un-intercepted. Diagnostic callers must not treat this connection as
+    /// firewall-enforced.
     pub async fn connect(
         self,
     ) -> Result<
@@ -1033,6 +1039,11 @@ fn safe_chromium_spawn_error() -> BrowserError {
     BrowserError::Other("browser launch could not start Chromium".into())
 }
 
+// The DevToolsActivePort polling machinery is Windows-only (Unix connects over
+// --remote-debugging-pipe and never waits for the port file), so this error is
+// unreachable on Unix production builds; `test` keeps the cross-platform
+// privacy assertion in launch_boundary_errors_do_not_echo_private_paths_or_endpoints.
+#[cfg(any(windows, test))]
 fn safe_devtools_timeout_error() -> BrowserError {
     BrowserError::Other("browser launch timed out waiting for DevToolsActivePort".into())
 }
@@ -1582,16 +1593,19 @@ mod tests {
 
         #[cfg(unix)]
         {
-            let shell = PathBuf::from("/bin/sh");
-            let mut builder = nomi_process_runtime::ChildProcessBuilder::new(&shell);
+            // Spawn the sleeper directly: a `/bin/sh -c` wrapper may exec into
+            // sleep, so the committed ownership marker would name a different
+            // executable than the live process image (darwin rejects that).
+            let executable = PathBuf::from("/bin/sleep");
+            let mut builder = nomi_process_runtime::ChildProcessBuilder::new(&executable);
             builder
-                .args(["-c", "sleep 60"])
+                .arg("60")
                 .stdin(std::process::Stdio::null())
                 .stdout(std::process::Stdio::null())
                 .stderr(std::process::Stdio::null());
             (
                 builder.spawn_managed().expect("spawn Unix process fixture"),
-                shell,
+                executable,
             )
         }
     }

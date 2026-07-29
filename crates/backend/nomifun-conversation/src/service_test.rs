@@ -15180,7 +15180,9 @@ async fn update_rejects_extra_skills() {
         .unwrap_err();
 
     match err {
-        AppError::BadRequest(msg) => assert!(msg.contains("skills"), "msg = {msg:?}"),
+        // Current contract: skill snapshots are immutable post-creation and
+        // share one rejection message with preset/MCP lineage fields.
+        AppError::BadRequest(msg) => assert!(msg.contains("skill"), "msg = {msg:?}"),
         other => panic!("expected BadRequest, got {other:?}"),
     }
 }

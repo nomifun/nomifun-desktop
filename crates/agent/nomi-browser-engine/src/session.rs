@@ -276,6 +276,10 @@ impl SessionRegistry {
 
     /// 订阅某 method（可选限定 session）的事件流。返回 broadcast 接收端。
     /// `session=None` 订阅任意 session 的该事件。
+    ///
+    /// 连接已关（`fail_connection` 已清空订阅表）→ 返回一个**已关闭**的接收端
+    /// （首次 `recv()` 即 `RecvError::Closed`），而不是把新 sender 插回已死的
+    /// 注册表——那个 sender 永不 fire 也永不 drop，等待方会无限悬挂。
     pub fn subscribe(
         &self,
         method: impl Into<String>,
@@ -283,6 +287,11 @@ impl SessionRegistry {
     ) -> broadcast::Receiver<CdpEvent> {
         let key: SubKey = (method.into(), session_id.map(|s| s.to_string()));
         let mut g = self.inner.lock().unwrap();
+        if g.connection_closed {
+            let (tx, rx) = broadcast::channel(1);
+            drop(tx);
+            return rx;
+        }
         let tx = g
             .subscriptions
             .entry(key)
@@ -305,6 +314,22 @@ impl SessionRegistry {
             g.reliable_subscriptions.entry(key).or_default().push(tx);
         }
         rx
+    }
+
+    /// Whether a live lossless subscriber exists for `method` (exact-session
+    /// or wildcard). The transport uses this as the `Fetch.enable` arming gate
+    /// in `handle_attached`: interception must never be switched on before a
+    /// `Fetch.requestPaused` consumer is registered, because a paused request
+    /// whose event found no subscriber is silently dropped and CDP never
+    /// re-emits it — that session's network would be wedged forever.
+    pub fn has_reliable_subscriber(&self, method: &str) -> bool {
+        let g = self.inner.lock().unwrap();
+        g.reliable_subscriptions
+            .iter()
+            .any(|((subscribed_method, _), senders)| {
+                subscribed_method == method
+                    && senders.iter().any(|sender| !sender.is_closed())
+            })
     }
 
     /// 在某 session 上登记一个进行中的命令回调。返回等待结果的 `oneshot::Receiver`。
@@ -611,6 +636,58 @@ mod tests {
             Err(broadcast::error::RecvError::Closed)
         ));
         assert!(reliable.recv().await.is_none());
+    }
+
+    /// **F17**：`fail_connection` 之后再 `subscribe` 的迟到订阅者绝不能拿到一个
+    /// 「永不 fire 也永不 close」的接收端——必须立即观察到 `Closed`，且不得把新
+    /// sender 插回已清空的注册表（否则等待方无限悬挂 + sender 永久泄漏）。
+    #[tokio::test]
+    async fn subscribe_after_connection_failure_yields_closed_receiver() {
+        let reg = SessionRegistry::new();
+        reg.fail_connection();
+
+        let mut late = reg.subscribe("Page.lifecycleEvent", Some("S1"));
+        assert!(matches!(
+            late.recv().await,
+            Err(broadcast::error::RecvError::Closed)
+        ));
+
+        let mut late_wildcard = reg.subscribe("Page.lifecycleEvent", None);
+        assert!(matches!(
+            late_wildcard.recv().await,
+            Err(broadcast::error::RecvError::Closed)
+        ));
+
+        // 死注册表保持空：迟到订阅不得复活它。
+        assert!(reg.inner.lock().unwrap().subscriptions.is_empty());
+    }
+
+    /// **F1**：`has_reliable_subscriber` 是 `Fetch.enable` 的 arming gate——只有
+    /// 存在**活的** requestPaused 可靠订阅者时才为 true（订阅前 false / drop 后
+    /// false / 连接失败清空后 false）。
+    #[test]
+    fn has_reliable_subscriber_tracks_live_receivers() {
+        let reg = SessionRegistry::new();
+        assert!(!reg.has_reliable_subscriber("Fetch.requestPaused"));
+
+        let rx = reg.subscribe_reliable("Fetch.requestPaused", None);
+        assert!(reg.has_reliable_subscriber("Fetch.requestPaused"));
+        // 不同 method 不串。
+        assert!(!reg.has_reliable_subscriber("Target.attachedToTarget"));
+
+        drop(rx);
+        assert!(!reg.has_reliable_subscriber("Fetch.requestPaused"));
+
+        let _rx = reg.subscribe_reliable("Fetch.requestPaused", Some("S1"));
+        assert!(
+            reg.has_reliable_subscriber("Fetch.requestPaused"),
+            "an exact-session subscriber also satisfies the arming gate"
+        );
+
+        let reg2 = SessionRegistry::new();
+        let _held = reg2.subscribe_reliable("Fetch.requestPaused", None);
+        reg2.fail_connection();
+        assert!(!reg2.has_reliable_subscriber("Fetch.requestPaused"));
     }
 
     #[tokio::test]

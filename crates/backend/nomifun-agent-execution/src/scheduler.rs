@@ -1,6 +1,7 @@
 //! Private bounded-parallel scheduler used only by `AgentExecutionEngine`.
 
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::future::Future;
 use std::hash::Hash;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -54,6 +55,42 @@ enum CleanupValidation {
     Current,
     Stale,
     Retry,
+}
+
+/// F50: fence the conversation-scoped cancel to the validated link generation
+/// as tightly as the effect API allows. `cancel_attempt` targets
+/// (user, conversation) — it carries no attempt-generation parameter — so a
+/// replacement active attempt admitted between the batch's validation and the
+/// cancel dispatch would have its live turn killed by stale cleanup.
+/// Revalidate the exact inactive generation in its own transaction
+/// immediately before dispatch and SKIP the cancel when a replacement already
+/// owns the Conversation; the row stays pending and reconciliation retries
+/// once the replacement's link retires. A replacement that starts while the
+/// cancel is already in flight remains exposed for up to
+/// `CLEANUP_EFFECT_TIMEOUT`; the exact acknowledgement then refuses to retire
+/// the row (see `mark_conversation_cleanup_completed_exact`).
+async fn cancel_with_generation_fence<E, V, C>(revalidate: V, cancel: C) -> bool
+where
+    E: std::fmt::Display,
+    V: Future<Output = Result<bool, E>>,
+    C: AsyncFnOnce() -> bool,
+{
+    match revalidate.await {
+        Ok(true) => cancel().await,
+        Ok(false) => {
+            tracing::debug!(
+                "skipping Agent conversation cleanup cancel; a replacement attempt claimed the conversation after validation"
+            );
+            false
+        }
+        Err(error) => {
+            tracing::warn!(
+                %error,
+                "could not refence Agent conversation cleanup before cancel; leaving it pending"
+            );
+            false
+        }
+    }
 }
 
 async fn reconcile_cleanup_batch<T, K, KeyFn, ValidateFn, CancelFn, AcknowledgeFn>(
@@ -353,6 +390,7 @@ impl ExecutionScheduler {
         }
         let batch_is_full = pending.len() == 100;
         let validate_repository = self.inner.deps.repository.clone();
+        let cancel_repository = self.inner.deps.repository.clone();
         let acknowledge_repository = self.inner.deps.repository.clone();
         let conversation_effects = self.inner.deps.conversation_effects.clone();
         let completed = reconcile_cleanup_batch(
@@ -391,41 +429,48 @@ impl ExecutionScheduler {
                 })
             },
             move |cleanup| {
+                let repository = cancel_repository.clone();
                 let conversation_effects = conversation_effects.clone();
                 let cleanup = cleanup.clone();
                 Box::pin(async move {
-                    let cancelled = tokio::time::timeout(
-                        CLEANUP_EFFECT_TIMEOUT,
-                        conversation_effects
-                            .cancel_attempt(&cleanup.user_id, &cleanup.conversation_id),
+                    cancel_with_generation_fence(
+                        repository.validate_conversation_cleanup(&cleanup),
+                        async || {
+                            let cancelled = tokio::time::timeout(
+                                CLEANUP_EFFECT_TIMEOUT,
+                                conversation_effects
+                                    .cancel_attempt(&cleanup.user_id, &cleanup.conversation_id),
+                            )
+                            .await;
+                            match cancelled {
+                                Ok(Ok(())) => true,
+                                Ok(Err(error)) => {
+                                    tracing::warn!(
+                                        link_id = cleanup.link_id,
+                                        execution_id = %cleanup.execution_id,
+                                        step_id = %cleanup.step_id,
+                                        attempt_id = %cleanup.attempt_id,
+                                        conversation_id = cleanup.conversation_id,
+                                        %error,
+                                        "Agent conversation cleanup remains pending"
+                                    );
+                                    false
+                                }
+                                Err(_) => {
+                                    tracing::warn!(
+                                        link_id = cleanup.link_id,
+                                        execution_id = %cleanup.execution_id,
+                                        step_id = %cleanup.step_id,
+                                        attempt_id = %cleanup.attempt_id,
+                                        conversation_id = cleanup.conversation_id,
+                                        "Agent conversation cleanup timed out and remains pending"
+                                    );
+                                    false
+                                }
+                            }
+                        },
                     )
-                    .await;
-                    match cancelled {
-                        Ok(Ok(())) => true,
-                        Ok(Err(error)) => {
-                            tracing::warn!(
-                                link_id = cleanup.link_id,
-                                execution_id = %cleanup.execution_id,
-                                step_id = %cleanup.step_id,
-                                attempt_id = %cleanup.attempt_id,
-                                conversation_id = cleanup.conversation_id,
-                                %error,
-                                "Agent conversation cleanup remains pending"
-                            );
-                            false
-                        }
-                        Err(_) => {
-                            tracing::warn!(
-                                link_id = cleanup.link_id,
-                                execution_id = %cleanup.execution_id,
-                                step_id = %cleanup.step_id,
-                                attempt_id = %cleanup.attempt_id,
-                                conversation_id = cleanup.conversation_id,
-                                "Agent conversation cleanup timed out and remains pending"
-                            );
-                            false
-                        }
-                    }
+                    .await
                 })
             },
             move |cleanup| {
@@ -2752,6 +2797,49 @@ mod tests {
             vec![("user-1".to_owned(), "conversation-1".to_owned())]
         );
         assert_eq!(*acknowledged.lock().unwrap(), vec![2]);
+    }
+
+    #[tokio::test]
+    async fn generation_fence_dispatches_cancel_only_while_the_link_is_still_current() {
+        let cancelled = Arc::new(Mutex::new(0_u32));
+
+        // Still current at dispatch time: the cancel effect runs.
+        let fence_cancelled = cancelled.clone();
+        assert!(
+            cancel_with_generation_fence(async { Ok::<bool, AppError>(true) }, async || {
+                *fence_cancelled.lock().unwrap() += 1;
+                true
+            })
+            .await
+        );
+        assert_eq!(*cancelled.lock().unwrap(), 1);
+
+        // A replacement claimed the Conversation after batch validation: the
+        // conversation-scoped cancel must be skipped, not delivered into the
+        // replacement's live turn.
+        let fence_cancelled = cancelled.clone();
+        assert!(
+            !cancel_with_generation_fence(async { Ok::<bool, AppError>(false) }, async || {
+                *fence_cancelled.lock().unwrap() += 1;
+                true
+            })
+            .await
+        );
+        assert_eq!(*cancelled.lock().unwrap(), 1);
+
+        // Revalidation failure leaves the row pending without dispatching.
+        let fence_cancelled = cancelled.clone();
+        assert!(
+            !cancel_with_generation_fence(
+                async { Err::<bool, AppError>(AppError::Internal("fixture".to_owned())) },
+                async || {
+                    *fence_cancelled.lock().unwrap() += 1;
+                    true
+                },
+            )
+            .await
+        );
+        assert_eq!(*cancelled.lock().unwrap(), 1);
     }
 
     #[test]

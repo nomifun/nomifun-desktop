@@ -18,8 +18,8 @@ function run(command, args, env = process.env) {
   if (result.status !== 0) process.exit(result.status ?? 1);
 }
 
-if (!['crate', 'core', 'desktop'].includes(mode)) {
-  console.error('usage: bun scripts/test-rust.mjs <crate|core|desktop> [crate] [cargo test args]');
+if (!['crate', 'core', 'desktop', 'browser'].includes(mode)) {
+  console.error('usage: bun scripts/test-rust.mjs <crate|core|desktop|browser> [crate] [cargo test args]');
   process.exit(2);
 }
 
@@ -32,6 +32,18 @@ if (mode === 'crate') {
     process.exit(2);
   }
   run('cargo', ['test', '-p', packageName, ...cargoArgs]);
+} else if (mode === 'browser') {
+  // `browser-use` is not a default feature anywhere in the workspace, so the
+  // focused lanes (crate/core) compile the feature-gated browser tests OUT and
+  // silently skip them. This lane turns the feature on for every crate that
+  // gates browser tests behind it, plus the ungated browser platform hub.
+  // Integration-test-heavy crates are restricted to --lib: their gated
+  // browser tests all live in the library, and this keeps the lane focused.
+  run('cargo', ['test', '-p', 'nomifun-browser-platform', ...inputArgs]);
+  run('cargo', ['test', '-p', 'nomifun-gateway', '--features', 'browser-use', ...inputArgs]);
+  run('cargo', ['test', '-p', 'nomifun-ai-agent', '--features', 'browser-use', '--lib', ...inputArgs]);
+  run('cargo', ['test', '-p', 'nomi-agent', '--features', 'browser-use', '--lib', ...inputArgs]);
+  run('cargo', ['test', '-p', 'nomifun-app', '--features', 'browser-use', '--lib', ...inputArgs]);
 } else if (mode === 'core') {
   run('cargo', ['test', '--workspace', '--exclude', 'nomifun-desktop', ...inputArgs]);
 } else {

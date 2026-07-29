@@ -834,22 +834,21 @@ impl DesktopServer {
         });
     }
 
+    /// Wait until the listener publishes a terminal state and return it.
+    ///
+    /// `UnexpectedExit` is returned as `Ok`: it is an immutable terminal state
+    /// proving the listener is already stopped, so a shutdown waiter must
+    /// never treat it as "still needs stopping" — that would make every later
+    /// `shutdown_all` fail forever against a state that cannot change (F15).
+    /// Callers decide how loudly to report it.
     async fn wait_for_listener_completion(
         mut completion: watch::Receiver<ListenerCompletion>,
         component: &'static str,
     ) -> anyhow::Result<ListenerCompletion> {
         loop {
             let state = completion.borrow().clone();
-            match state {
-                ListenerCompletion::Running | ListenerCompletion::StopRequested => {}
-                ListenerCompletion::RequestedStop => {
-                    return Ok(ListenerCompletion::RequestedStop);
-                }
-                ListenerCompletion::UnexpectedExit(error) => {
-                    return Err(anyhow::anyhow!(
-                        "{component} listener exited unexpectedly: {error}"
-                    ));
-                }
+            if state.is_terminal() {
+                return Ok(state);
             }
 
             completion.changed().await.map_err(|_| {
@@ -888,27 +887,38 @@ impl DesktopServer {
                 if let Some(completion) = lan_completion {
                     Self::wait_for_listener_completion(completion, "LAN")
                         .await
-                        .map(|_| ())
+                        .map(Some)
                 } else {
-                    Ok(())
+                    Ok(None)
                 }
             };
-            tokio::try_join!(loopback_wait, lan_wait).map(|_| ())
+            tokio::try_join!(loopback_wait, lan_wait)
         };
         match tokio::time::timeout(std::time::Duration::from_secs(5), wait).await {
-            Ok(Ok(())) => {
+            Ok(Ok((loopback_state, lan_state))) => {
+                // A listener pinned in UnexpectedExit is by definition already
+                // stopped: there is nothing left to stop, so shutdown proceeds
+                // loudly instead of failing forever (which would leave the
+                // database open and the app unable to ever exit).
+                if let ListenerCompletion::UnexpectedExit(error) = &loopback_state {
+                    tracing::error!(
+                        %error,
+                        "loopback listener had already exited unexpectedly; continuing shutdown"
+                    );
+                }
+                if let Some(ListenerCompletion::UnexpectedExit(error)) = &lan_state {
+                    tracing::error!(
+                        %error,
+                        "LAN listener had already exited unexpectedly; continuing shutdown"
+                    );
+                }
                 // Remove the LAN inventory only after the listener completion
-                // future itself returned `Ok(())`; an outer timeout success
-                // carrying an inner error is not sufficient.
+                // future itself returned a confirmed terminal state; an outer
+                // timeout success carrying an inner error is not sufficient.
                 let mut lan = self.lan.lock().await;
                 if lan
                     .as_ref()
-                    .is_some_and(|listener| {
-                        matches!(
-                            listener.termination.snapshot(),
-                            ListenerCompletion::RequestedStop
-                        )
-                    })
+                    .is_some_and(|listener| listener.termination.snapshot().is_terminal())
                 {
                     lan.take();
                 }
@@ -1008,8 +1018,20 @@ impl DesktopServer {
     /// backend runtime regardless of which runtime drives this call.
     pub async fn start_lan(self: &Arc<Self>) -> WebUiStatus {
         let mut lan = self.lan.lock().await;
-        if lan.is_some() {
-            return self.status();
+        if let Some(listener) = lan.as_ref() {
+            if listener.termination.snapshot().is_terminal() {
+                // A listener pinned in a terminal state (an unexpected exit
+                // that fatal cleanup has not collected yet) is a corpse, not a
+                // running server. Never let it permanently block re-enabling
+                // LAN sharing: drop the dead entry and bind a fresh listener.
+                tracing::warn!(
+                    port = listener.port,
+                    "removing dead LAN listener entry before starting a fresh one"
+                );
+                lan.take();
+            } else {
+                return self.status();
+            }
         }
 
         if self.spa_dir.is_none()
@@ -1192,38 +1214,47 @@ impl DesktopServer {
         let stop_result = if let Some((port, termination, completion)) = stopped_listener {
             let wait = Self::wait_for_listener_completion(completion, "LAN");
             match tokio::time::timeout(std::time::Duration::from_secs(5), wait).await {
-                Ok(Ok(ListenerCompletion::RequestedStop)) => {
+                Ok(Ok(completion_state)) => {
+                    // Both terminal states prove the listener is stopped, so
+                    // the inventory entry is removed either way — a dead
+                    // (UnexpectedExit) entry must never block a later
+                    // start_lan. Only the reported status differs.
                     let mut lan = self.lan.lock().await;
                     if lan
                         .as_ref()
                         .is_some_and(|listener| {
                             listener.termination.same_listener(&termination)
-                                && matches!(
-                                    listener.termination.snapshot(),
-                                    ListenerCompletion::RequestedStop
-                                )
+                                && listener.termination.snapshot().is_terminal()
                         })
                     {
                         lan.take();
                     }
-                    Ok(())
+                    drop(lan);
+                    match completion_state {
+                        ListenerCompletion::UnexpectedExit(error) => {
+                            tracing::warn!(
+                                port,
+                                %error,
+                                "LAN listener had already exited unexpectedly; entry removed so it can be restarted"
+                            );
+                            LanStopOutcome::StoppedAfterUnexpectedExit(error)
+                        }
+                        _ => LanStopOutcome::Stopped,
+                    }
                 }
-                Ok(Ok(completion)) => Err(anyhow::anyhow!(
-                    "LAN listener completed with unexpected terminal state: {completion:?}"
-                )),
                 Ok(Err(error)) => {
                     tracing::warn!(port, %error, "desktop LAN listener shutdown was not confirmed");
-                    Err(error)
+                    LanStopOutcome::Failed(error)
                 }
                 Err(_) => {
                     let error =
                         anyhow::anyhow!("desktop LAN listener shutdown timed out after 5 seconds");
                     tracing::warn!(port, %error);
-                    Err(error)
+                    LanStopOutcome::Failed(error)
                 }
             }
         } else {
-            Ok(())
+            LanStopOutcome::Stopped
         };
         // Carry the persisted admin identity into the stopped status so the UI
         // keeps showing the real username / password-set state after stopping.
@@ -1418,21 +1449,42 @@ fn merge_listener_failure_with_cleanup(
     }
 }
 
+/// Result of one `stop_lan` request. Both `Stopped*` variants prove the
+/// listener is down and its inventory entry was removed (restart possible);
+/// `Failed` means stopping was not confirmed and the entry is retained.
+enum LanStopOutcome {
+    Stopped,
+    StoppedAfterUnexpectedExit(String),
+    Failed(anyhow::Error),
+}
+
 fn stop_lan_status(
     previous_status: WebUiStatus,
     admin_username: String,
     password_set: bool,
-    stop_result: anyhow::Result<()>,
+    stop_result: LanStopOutcome,
 ) -> WebUiStatus {
     match stop_result {
-        Ok(()) => WebUiStatus {
+        LanStopOutcome::Stopped => WebUiStatus {
             running: false,
             local_url: previous_status.local_url,
             admin_username,
             password_set,
             ..Default::default()
         },
-        Err(error) => WebUiStatus {
+        // The listener is positively down (it died on its own); report a
+        // stopped-with-error status instead of pretending it is still serving.
+        LanStopOutcome::StoppedAfterUnexpectedExit(error) => WebUiStatus {
+            running: false,
+            local_url: previous_status.local_url,
+            admin_username,
+            password_set,
+            error: Some(format!(
+                "LAN listener had exited unexpectedly before it was stopped: {error}"
+            )),
+            ..Default::default()
+        },
+        LanStopOutcome::Failed(error) => WebUiStatus {
             admin_username,
             password_set,
             initial_password: None,
@@ -1798,15 +1850,34 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn listener_wait_preserves_unexpected_exit() {
+    async fn listener_wait_reports_unexpected_exit_as_terminal_complete() {
         let termination = ListenerTermination::new();
         let completion = termination.subscribe();
         termination.complete(Err("fixture listener failure".to_owned()));
 
-        let error = DesktopServer::wait_for_listener_completion(completion, "LAN")
+        // F15: the immutable UnexpectedExit state proves the listener is
+        // already stopped. The waiter must resolve (letting shutdown_all
+        // proceed and close the database) instead of failing forever.
+        let state = DesktopServer::wait_for_listener_completion(completion, "LAN")
             .await
-            .expect_err("unexpected exit must fail the waiter");
-        assert!(error.to_string().contains("fixture listener failure"));
+            .expect("a terminal state must resolve the waiter");
+        assert_eq!(
+            state,
+            ListenerCompletion::UnexpectedExit("fixture listener failure".to_owned())
+        );
+    }
+
+    #[tokio::test]
+    async fn listener_wait_resolves_requested_stop() {
+        let termination = ListenerTermination::new();
+        let completion = termination.subscribe();
+        termination.request_stop();
+        termination.complete(Ok(()));
+
+        let state = DesktopServer::wait_for_listener_completion(completion, "LAN")
+            .await
+            .expect("requested stop must resolve the waiter");
+        assert_eq!(state, ListenerCompletion::RequestedStop);
     }
 
     #[test]
@@ -1847,7 +1918,7 @@ mod tests {
             previous,
             "admin".to_owned(),
             true,
-            Err(anyhow::anyhow!("fixture listener timeout")),
+            LanStopOutcome::Failed(anyhow::anyhow!("fixture listener timeout")),
         );
 
         assert!(status.running);
@@ -1878,7 +1949,7 @@ mod tests {
             ..Default::default()
         };
 
-        let status = stop_lan_status(previous, "admin".to_owned(), true, Ok(()));
+        let status = stop_lan_status(previous, "admin".to_owned(), true, LanStopOutcome::Stopped);
 
         assert!(!status.running);
         assert_eq!(status.port, 0);
@@ -1887,6 +1958,37 @@ mod tests {
         assert_eq!(status.admin_username, "admin");
         assert!(status.password_set);
         assert!(status.error.is_none());
+    }
+
+    #[test]
+    fn lan_stop_after_unexpected_exit_reports_stopped_with_error() {
+        let previous = WebUiStatus {
+            running: true,
+            port: 25808,
+            allow_remote: true,
+            local_url: "http://localhost:12345".to_owned(),
+            ..Default::default()
+        };
+
+        let status = stop_lan_status(
+            previous,
+            "admin".to_owned(),
+            true,
+            LanStopOutcome::StoppedAfterUnexpectedExit("fixture accept failure".to_owned()),
+        );
+
+        // F31: the listener is positively down — never report "still serving",
+        // and never retain state that would block a later start_lan.
+        assert!(!status.running);
+        assert_eq!(status.port, 0);
+        assert!(!status.allow_remote);
+        assert_eq!(status.local_url, "http://localhost:12345");
+        assert!(
+            status
+                .error
+                .as_deref()
+                .is_some_and(|error| error.contains("fixture accept failure"))
+        );
     }
 
     #[tokio::test]

@@ -6,7 +6,17 @@ use nomifun_db::IClientPreferenceRepository;
 
 /// Maximum allowed key length for client preferences.
 const MAX_KEY_LENGTH: usize = 255;
-const SYSTEM_RESERVED_PREFIXES: &[&str] = &["managedModel."];
+/// Key prefixes only system-owned write paths may touch. The generic
+/// PUT /api/settings/client endpoint rejects them so a client cannot forge
+/// system-managed state:
+/// - `managedModel.`: refresh bookkeeping owned by the model manager.
+/// - `agent.browserUse.displayMode`: covers both the display-mode value and
+///   its `…Version` lineage marker. The browser display-mode owner API
+///   (`/api/browser/display-mode`, see nomifun-app browser_management) is the
+///   sole trusted write path; a raw preference write could otherwise forge the
+///   v2 lineage and make the next boot launch the Primary Chromium host with a
+///   visible window the user never chose.
+const SYSTEM_RESERVED_PREFIXES: &[&str] = &["managedModel.", "agent.browserUse.displayMode"];
 
 /// Business logic for client preferences (generic key-value store).
 #[derive(Clone)]
@@ -124,6 +134,36 @@ mod tests {
         req.insert("managedModel.free.lastRefresh".into(), json!(1));
         let err = svc.update_preferences(req).await.unwrap_err();
         assert_eq!(err.status_code(), axum::http::StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn update_rejects_browser_display_mode_lineage_keys() {
+        let svc = setup().await;
+        for (key, value) in [
+            ("agent.browserUse.displayMode", json!("external")),
+            ("agent.browserUse.displayModeVersion", json!(2)),
+        ] {
+            let mut req = UpdateClientPreferencesRequest::new();
+            req.insert(key.into(), value);
+            let err = svc.update_preferences(req).await.unwrap_err();
+            assert_eq!(
+                err.status_code(),
+                axum::http::StatusCode::FORBIDDEN,
+                "{key} must only be writable through the display-mode owner API"
+            );
+        }
+        // Deleting through the generic endpoint is the same forged-lineage
+        // write (a removed marker migrates the mode back to headless).
+        let mut req = UpdateClientPreferencesRequest::new();
+        req.insert("agent.browserUse.displayModeVersion".into(), json!(null));
+        assert_eq!(
+            svc.update_preferences(req).await.unwrap_err().status_code(),
+            axum::http::StatusCode::FORBIDDEN
+        );
+        // Sibling browser-use preferences remain client-writable.
+        let mut req = UpdateClientPreferencesRequest::new();
+        req.insert("agent.browserUse.source".into(), json!("managed"));
+        svc.update_preferences(req).await.unwrap();
     }
 
     #[tokio::test]
