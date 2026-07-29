@@ -6,7 +6,11 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { ipcBridge } from '@/common';
-import { isBackendHttpError, isWsConnected } from '@/common/adapter/httpBridge';
+import {
+  isBackendHttpError,
+  isWsConnected,
+  wsLastActivityAt,
+} from '@/common/adapter/httpBridge';
 import type {
   IBrowserInventoryChangedEvent,
   IBrowserLane,
@@ -199,25 +203,50 @@ export const subscribeBrowserInventoryRealtime = ({
 
 export const BROWSER_INVENTORY_POLL_INTERVAL_MS = 30_000;
 
+/**
+ * The realtime backend emits an application-level `ping` at least every 30s
+ * (nomifun-realtime HEARTBEAT_INTERVAL), so a working socket is never silent
+ * for long. A socket that has delivered nothing for three heartbeat periods
+ * is treated as wedged — a half-open connection after sleep/resume keeps
+ * `readyState === OPEN` while every frame is silently lost — and the fallback
+ * poll takes over until frames flow again.
+ */
+export const BROWSER_REALTIME_LIVENESS_TIMEOUT_MS = 90_000;
+
 interface BrowserInventoryFallbackPollOptions {
   poll: () => void;
-  isRealtimeHealthy: () => boolean;
+  isSocketConnected: () => boolean;
+  /** Last inbound realtime frame (server heartbeats included), or null. */
+  lastRealtimeActivityAt: () => number | null;
   intervalMs?: number;
+  livenessTimeoutMs?: number;
+  now?: () => number;
 }
 
 /**
  * Snapshot polling is a fallback for a wedged realtime channel (half-open
  * socket after sleep/resume, dead backend forwarder), not a supplement to a
  * healthy one: connect, reconnect, sequence-gap, and resync_required already
- * cover every event-visible failure. Only poll while the socket is down.
+ * cover every event-visible failure. Liveness is judged by actually delivered
+ * frames, never by nominal socket state — a half-open socket still reports
+ * OPEN, which is exactly the failure this poll exists to bound. Worst-case
+ * inventory staleness is therefore livenessTimeoutMs plus one poll interval.
  */
 export const startBrowserInventoryFallbackPoll = ({
   poll,
-  isRealtimeHealthy,
+  isSocketConnected,
+  lastRealtimeActivityAt,
   intervalMs = BROWSER_INVENTORY_POLL_INTERVAL_MS,
+  livenessTimeoutMs = BROWSER_REALTIME_LIVENESS_TIMEOUT_MS,
+  now = Date.now,
 }: BrowserInventoryFallbackPollOptions): (() => void) => {
   const timer = setInterval(() => {
-    if (!isRealtimeHealthy()) poll();
+    const lastActivityAt = lastRealtimeActivityAt();
+    const realtimeAlive =
+      isSocketConnected() &&
+      lastActivityAt != null &&
+      now() - lastActivityAt <= livenessTimeoutMs;
+    if (!realtimeAlive) poll();
   }, intervalMs);
   return () => clearInterval(timer);
 };
@@ -401,7 +430,8 @@ export const useBrowserInventory = (): BrowserInventoryState => {
     });
     const stopFallbackPoll = startBrowserInventoryFallbackPoll({
       poll: () => void controller.poll(),
-      isRealtimeHealthy: isWsConnected,
+      isSocketConnected: isWsConnected,
+      lastRealtimeActivityAt: wsLastActivityAt,
     });
 
     return () => {

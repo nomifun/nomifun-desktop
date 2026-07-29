@@ -14,6 +14,7 @@ import type {
 import {
   BROWSER_INVENTORY_EVENT_COALESCE_MS,
   BROWSER_INVENTORY_POLL_INTERVAL_MS,
+  BROWSER_REALTIME_LIVENESS_TIMEOUT_MS,
   BROWSER_RETRY_BASE_DELAY_MS,
   BROWSER_RETRY_MAX_DELAY_MS,
   createBrowserInventoryRealtimeHandler,
@@ -232,33 +233,96 @@ describe('browser inventory recovery', () => {
     }
   });
 
-  test('polls the snapshot fallback only while the realtime channel is unhealthy', () => {
+  test('polls the snapshot fallback while the socket is down and stays quiet while realtime is alive', () => {
     timers.useFakeTimers();
     try {
-      let healthy = true;
+      let connected = true;
+      let lastActivityAt: number | null = null;
       let polls = 0;
       const stop = startBrowserInventoryFallbackPoll({
         poll: () => {
           polls += 1;
         },
-        isRealtimeHealthy: () => healthy,
+        isSocketConnected: () => connected,
+        lastRealtimeActivityAt: () => lastActivityAt,
       });
 
-      timers.advanceTimersByTime(BROWSER_INVENTORY_POLL_INTERVAL_MS * 3);
+      // Fail safe: a nominally OPEN socket with no recorded activity has
+      // never proven the realtime channel works, so the fallback polls.
+      timers.advanceTimersByTime(BROWSER_INVENTORY_POLL_INTERVAL_MS);
+      expect(polls).toBe(1);
+
+      // Healthy: heartbeats keep arriving between ticks; never poll.
+      for (let index = 0; index < 3; index += 1) {
+        lastActivityAt = Date.now();
+        timers.advanceTimersByTime(BROWSER_INVENTORY_POLL_INTERVAL_MS);
+      }
+      expect(polls).toBe(1);
+
+      // A visibly closed socket polls immediately, regardless of how recent
+      // the last delivered frame was.
+      connected = false;
+      lastActivityAt = Date.now();
+      timers.advanceTimersByTime(BROWSER_INVENTORY_POLL_INTERVAL_MS * 2);
+      expect(polls).toBe(3);
+
+      connected = true;
+      lastActivityAt = Date.now();
+      timers.advanceTimersByTime(BROWSER_INVENTORY_POLL_INTERVAL_MS);
+      expect(polls).toBe(3);
+
+      stop();
+      connected = false;
+      timers.advanceTimersByTime(BROWSER_INVENTORY_POLL_INTERVAL_MS * 2);
+      expect(polls).toBe(3);
+    } finally {
+      timers.clearAllTimers();
+      timers.useRealTimers();
+    }
+  });
+
+  test('restores bounded polling when the socket is wedged half-open (OPEN but silent)', () => {
+    timers.useFakeTimers();
+    try {
+      // The socket never reports a close: a half-open connection after
+      // sleep/resume keeps readyState OPEN while nothing arrives anymore.
+      const connected = true;
+      let lastActivityAt: number | null = null;
+      let polls = 0;
+      const stop = startBrowserInventoryFallbackPoll({
+        poll: () => {
+          polls += 1;
+        },
+        isSocketConnected: () => connected,
+        lastRealtimeActivityAt: () => lastActivityAt,
+      });
+
+      // Healthy phase: server heartbeats land between poll ticks.
+      for (let index = 0; index < 3; index += 1) {
+        lastActivityAt = Date.now();
+        timers.advanceTimersByTime(BROWSER_INVENTORY_POLL_INTERVAL_MS);
+      }
       expect(polls).toBe(0);
 
-      healthy = false;
+      // Wedge: frames stop arriving after one final heartbeat. Silence within
+      // the liveness window is still tolerated (a heartbeat may simply be in
+      // flight).
+      lastActivityAt = Date.now();
+      timers.advanceTimersByTime(BROWSER_REALTIME_LIVENESS_TIMEOUT_MS);
+      expect(polls).toBe(0);
+
+      // Past the liveness window the channel is treated as dead even though
+      // the socket still claims OPEN: staleness stays bounded by the poll.
       timers.advanceTimersByTime(BROWSER_INVENTORY_POLL_INTERVAL_MS * 2);
       expect(polls).toBe(2);
 
-      healthy = true;
+      // Frames resume (e.g. the OS finally surfaced the failure and the
+      // bridge reconnected): polling stops again.
+      lastActivityAt = Date.now();
       timers.advanceTimersByTime(BROWSER_INVENTORY_POLL_INTERVAL_MS * 2);
       expect(polls).toBe(2);
 
       stop();
-      healthy = false;
-      timers.advanceTimersByTime(BROWSER_INVENTORY_POLL_INTERVAL_MS * 2);
-      expect(polls).toBe(2);
     } finally {
       timers.clearAllTimers();
       timers.useRealTimers();
