@@ -350,13 +350,14 @@ impl BrowserLaneScheduler {
     /// Releases an active permit and returns the next promoted request.
     ///
     /// Releasing an unknown or already released lane is idempotent and cannot
-    /// consume another queue entry.
+    /// consume another queue entry. Promotion respects the currently installed
+    /// [`PromotionPolicy`]; resource-pressure denials therefore survive this
+    /// public entry point instead of being clobbered by allow-all.
     pub fn release(&self, lane_id: &BrowserLaneId) -> Option<QueueRequest> {
         let now_ms = self.inner.clock.now_ms();
         let mut state = self.state();
         state.active.remove(lane_id)?;
-        let policy = PromotionPolicy::allow_all();
-        state.promotion_policy = policy.clone();
+        let policy = state.promotion_policy.clone();
         promote_one_locked(&mut state, now_ms, &policy)
     }
 
@@ -447,7 +448,8 @@ impl BrowserLaneScheduler {
     }
 
     /// Removes all of an owner's active and queued requests, then fills every
-    /// newly available permit. The return value contains only promoted work.
+    /// newly available permit under the currently installed promotion policy.
+    /// The return value contains only promoted work.
     pub fn release_owner(&self, owner_id: &str) -> Vec<QueueRequest> {
         let now_ms = self.inner.clock.now_ms();
         let mut state = self.state();
@@ -458,16 +460,16 @@ impl BrowserLaneScheduler {
             .queued
             .retain(|request| request.owner_id != owner_id);
         prune_owner_ring(&mut state);
-        let policy = PromotionPolicy::allow_all();
-        state.promotion_policy = policy.clone();
+        let policy = state.promotion_policy.clone();
         promote_available_locked(&mut state, now_ms, &policy)
     }
 
+    /// Promotes every available request the currently installed promotion
+    /// policy admits.
     pub fn promote_available(&self) -> Vec<QueueRequest> {
         let now_ms = self.inner.clock.now_ms();
         let mut state = self.state();
-        let policy = PromotionPolicy::allow_all();
-        state.promotion_policy = policy.clone();
+        let policy = state.promotion_policy.clone();
         promote_available_locked(&mut state, now_ms, &policy)
     }
 
@@ -480,7 +482,8 @@ impl BrowserLaneScheduler {
     }
 
     /// Updates the dynamic resource-policy limit. Existing active lanes are
-    /// never evicted here; increasing the limit returns newly promoted work.
+    /// never evicted here; increasing the limit returns work newly promoted
+    /// under the currently installed promotion policy.
     pub fn update_capacity(
         &self,
         max_open_lanes: usize,
@@ -490,14 +493,14 @@ impl BrowserLaneScheduler {
         let mut state = self.state();
         state.config.max_open_lanes = max_open_lanes;
         state.config.recommended_concurrency = recommended_concurrency;
-        let policy = PromotionPolicy::allow_all();
-        state.promotion_policy = policy.clone();
+        let policy = state.promotion_policy.clone();
         promote_available_locked(&mut state, now_ms, &policy)
     }
 
     /// Applies all mutable resource-policy limits. Existing queued requests are
     /// retained when a cap is lowered; the tighter caps apply to subsequent
-    /// admissions, while active lanes are never preempted.
+    /// admissions, while active lanes are never preempted. Promotion respects
+    /// the currently installed promotion policy.
     pub fn update_policy_limits(
         &self,
         max_open_lanes: usize,
@@ -511,8 +514,7 @@ impl BrowserLaneScheduler {
         state.config.max_global_queue = max_global_queue;
         state.config.max_owner_queue = max_owner_queue;
         state.config.recommended_concurrency = recommended_concurrency;
-        let policy = PromotionPolicy::allow_all();
-        state.promotion_policy = policy.clone();
+        let policy = state.promotion_policy.clone();
         promote_available_locked(&mut state, now_ms, &policy)
     }
 
@@ -1560,6 +1562,55 @@ mod tests {
         );
         assert_eq!(scheduler.active_count(), 1);
         assert_eq!(scheduler.queued_count(), 1);
+    }
+
+    #[test]
+    fn release_and_capacity_updates_respect_the_installed_promotion_policy() {
+        let (scheduler, _) = scheduler(SchedulerConfig {
+            max_open_lanes: 1,
+            ..SchedulerConfig::default()
+        });
+        let active = admit_ready(&scheduler, request("seed", "active", true));
+        let expansion = queued_request(
+            scheduler
+                .admit_request(request("owner-a", "expansion", false))
+                .unwrap(),
+        );
+        // Install a pressure policy that denies expansion promotion.
+        let pressure = PromotionPolicy::new(
+            true,
+            false,
+            "system_memory_pressure",
+            "browser_resource_pressure",
+        );
+        assert!(scheduler.promote_one_with_policy(&pressure).is_none());
+
+        // None of the public release/update entry points may clobber the
+        // installed policy with allow-all and start the denied expansion lane.
+        assert!(
+            scheduler.release(&active).is_none(),
+            "release must not promote an expansion lane denied by pressure"
+        );
+        assert!(scheduler.promote_available().is_empty());
+        assert!(scheduler.release_owner("seed").is_empty());
+        assert!(scheduler.update_capacity(2, 2).is_empty());
+        assert!(scheduler.update_policy_limits(2, 128, 16, 2).is_empty());
+        assert_eq!(scheduler.active_count(), 0);
+        assert_eq!(scheduler.queued_count(), 1);
+        assert_eq!(
+            scheduler
+                .metadata(&expansion.request_id)
+                .unwrap()
+                .reason_code,
+            "browser_resource_pressure",
+            "the pressure reason must survive release/update calls"
+        );
+
+        // Recovery still promotes once the policy admits expansion again.
+        let promoted = scheduler
+            .promote_one_with_policy(&PromotionPolicy::allow_all())
+            .unwrap();
+        assert_eq!(promoted.request_id, expansion.request_id);
     }
 
     #[test]
