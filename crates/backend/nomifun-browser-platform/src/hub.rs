@@ -6032,15 +6032,14 @@ fn replica_operation_requires_primary(operation: &BrowserOperation) -> bool {
     match operation.kind {
         // Ordinary GET-style navigation is the supported authenticated crawl
         // path. Explicitly state-changing request shapes remain Primary-only.
-        // `reload` is deliberately never treated as safe: the current
+        // `reload` is deliberately absent from the safe list: the current
         // history entry may have been produced by a POST, and an empty reload
         // input cannot prove that replaying it is side-effect free.
         BrowserOperationKind::Navigate => {
             !matches!(
                 operation.action.as_str(),
-                "navigate" | "back" | "forward" | "reload"
-            ) || operation.action == "reload"
-                || operation_declares_stateful_request(&operation.input)
+                "navigate" | "back" | "forward"
+            ) || operation_declares_stateful_request(&operation.input)
         }
         BrowserOperationKind::Crawl => {
             !matches!(
