@@ -216,6 +216,60 @@ impl ChannelMessageService {
         )
     }
 
+    // ── Busy-time pending prompt queue (spec D1) ─────────────────────
+
+    /// Persist a prompt that arrived while its conversation was busy. The
+    /// queue drain delivers it FIFO once the running turn completes.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn enqueue_busy_prompt(
+        &self,
+        channel_plugin_id: &str,
+        chat_id: &str,
+        channel_session_id: &str,
+        conversation_id: &str,
+        text: &str,
+        idempotency_key: &str,
+    ) -> Result<nomifun_db::PendingPromptEnqueue, ChannelError> {
+        let row = nomifun_db::models::NewChannelPendingPromptRow {
+            channel_plugin_id: channel_plugin_id.to_owned(),
+            chat_id: chat_id.to_owned(),
+            channel_session_id: channel_session_id.to_owned(),
+            conversation_id: conversation_id.to_owned(),
+            text: text.to_owned(),
+            idempotency_key: idempotency_key.to_owned(),
+        };
+        Ok(self
+            .repo
+            .enqueue_pending_prompt(&row, nomifun_common::now_ms())
+            .await?)
+    }
+
+    /// Clear every queued prompt of one `(plugin, chat)` scope (the IM
+    /// 「取消排队」 command). Returns how many prompts were cancelled.
+    pub async fn cancel_chat_queue(
+        &self,
+        channel_plugin_id: &str,
+        chat_id: &str,
+    ) -> Result<u64, ChannelError> {
+        Ok(self
+            .repo
+            .cancel_chat_queue(channel_plugin_id, chat_id, nomifun_common::now_ms())
+            .await?)
+    }
+
+    /// Read-only durable outcome of one keyed public turn — the drain's
+    /// retryable-failure classifier (spec D4 fields from batch 1).
+    pub async fn turn_outcome(
+        &self,
+        conversation_id: &str,
+        idempotency_key: &str,
+    ) -> Result<nomifun_conversation::PublicTurnDeliveryState, ChannelError> {
+        self.conversation_svc
+            .public_turn_delivery_state(&self.owner_user_id, conversation_id, idempotency_key)
+            .await
+            .map_err(|e| ChannelError::MessageSendFailed(e.to_string()))
+    }
+
     /// Submits a numbered-decision choice back through the confirm chain.
     ///
     /// `option_id` is sent as the bare `data` string accepted by
@@ -395,7 +449,7 @@ impl ChannelMessageService {
             // processed" loop.
             Err(error @ nomifun_common::AppError::Conflict(_)) => {
                 if self.is_conversation_busy(&conversation_id).await {
-                    return Err(ChannelError::ConversationBusy);
+                    return Err(ChannelError::ConversationBusy(conversation_id));
                 }
                 return Err(ChannelError::MessageSendFailed(error.to_string()));
             }
