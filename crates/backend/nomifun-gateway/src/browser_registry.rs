@@ -14,7 +14,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use nomi_browser::{
-    ActionContext, ApprovalTier, ManagedBrowserFacade, classify_action,
+    ActionContext, ApprovalTier, ManagedBrowserFacade, TRUSTED_OWNER_INPUT_FIELDS,
+    classify_action,
 };
 use nomi_types::tool::ToolResult;
 use nomifun_browser_platform::{
@@ -217,32 +218,10 @@ const MODEL_IDENTITY_INPUT_FIELDS: &[&str] = &[
     "profile",
     "account",
 ];
-const TRUSTED_CALLER_FIELDS: &[&str] = &[
-    "caller",
-    "caller_identity",
-    "user_id",
-    "conversation_id",
-    "runtime_instance_id",
-    "agent_id",
-    "companion_id",
-    "execution_id",
-    "step_id",
-    "attempt_id",
-    "remote_connection_id",
-    "owner_lease_id",
-    "capability_expires_at_ms",
-    "allowed_operations",
-    "surface",
-    "browser_surface",
-    "identity_generation",
-    "browser_epoch",
-    "target_id",
-    "frame_id",
-    "ref_generation",
-    "cancellation_id",
-    "workspace_hint",
-    "lane_key",
-];
+// Trusted-owner caller fields are NOT gateway-local: every managed browser
+// surface rejects/strips the ONE shared
+// [`nomi_browser::TRUSTED_OWNER_INPUT_FIELDS`] list (F23), so identical
+// requests behave identically across surfaces.
 
 /// Bounded authority-aware revoked-runtime tombstones (F62).
 ///
@@ -1630,7 +1609,7 @@ fn reject_untrusted_caller_fields(
     let Some(object) = input.as_object() else {
         return Ok(());
     };
-    if let Some(field) = TRUSTED_CALLER_FIELDS
+    if let Some(field) = TRUSTED_OWNER_INPUT_FIELDS
         .iter()
         .find(|field| object.contains_key(**field))
     {
@@ -1691,7 +1670,7 @@ fn operation_from_input(
     sanitized.remove("lane");
     sanitized.remove("lane_name");
     sanitized.remove("expected_browser_epoch");
-    for field in TRUSTED_CALLER_FIELDS {
+    for field in TRUSTED_OWNER_INPUT_FIELDS {
         sanitized.remove(*field);
     }
     Ok(BrowserOperation {
@@ -4004,6 +3983,26 @@ mod tests {
             .is_ok(),
             "lane_id is an owner-scoped selector authorized by the bound client"
         );
+    }
+
+    #[test]
+    fn gateway_rejects_every_shared_trusted_owner_field() {
+        // F23: the gateway must enforce the ONE shared trusted-owner field
+        // list (`nomi_browser::TRUSTED_OWNER_INPUT_FIELDS`). A divergent
+        // gateway-local list would make identical requests behave differently
+        // across supposedly-equivalent managed browser surfaces.
+        for field in nomi_browser::TRUSTED_OWNER_INPUT_FIELDS {
+            let error = reject_untrusted_caller_fields(&json!({
+                "action": "navigate",
+                (*field): "model-controlled",
+            }))
+            .unwrap_err();
+            assert_eq!(
+                error.code,
+                BrowserErrorCode::InvalidCallerIdentity,
+                "shared trusted-owner field `{field}` must be rejected by the gateway"
+            );
+        }
     }
 
     #[test]
