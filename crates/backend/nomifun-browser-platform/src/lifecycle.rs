@@ -730,10 +730,10 @@ where
     /// split across two gate instances.
     pub async fn evict_settled(&self, key: &K) {
         let mut gates = self.gates.lock().await;
-        if let Some(gate) = gates.get(key) {
-            if gate.inner.state.lock().await.in_flight.is_some() {
-                return;
-            }
+        if let Some(gate) = gates.get(key)
+            && gate.inner.state.lock().await.in_flight.is_some()
+        {
+            return;
         }
         gates.remove(key);
     }
