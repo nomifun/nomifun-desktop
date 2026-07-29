@@ -457,6 +457,11 @@ impl CompanionService {
         })
     }
 
+    fn parse_summon_companion_id(companion_id: &str) -> Result<nomifun_common::CompanionId, AppError> {
+        nomifun_common::CompanionId::try_from(companion_id)
+            .map_err(|error| AppError::BadRequest(format!("invalid summon companion id: {error}")))
+    }
+
     fn companion(&self) -> Result<&CompanionThreads, AppError> {
         self.companion
             .get()
@@ -1464,6 +1469,16 @@ impl CompanionService {
                     }
                 }
             }
+            // Summon write-back (spec §B3 确认式回写): a memory proposed from a
+            // summoned work session only enters companion_memories on accept.
+            // Inside the `newly` gate → re-accept never duplicates the memory.
+            if decided.kind == crate::summon_support::SUMMON_MEMORY_SUGGESTION_KIND {
+                if let Some(action) = &decided.action {
+                    if let Err(e) = self.materialize_proposed_memory(action).await {
+                        tracing::warn!(error = %e, suggestion_id, "failed to materialize accepted memory proposal");
+                    }
+                }
+            }
         }
         // Rejecting a create_skill suggestion records correction feedback so the
         // originating mined pattern is suppressed from re-proposal (纠偏回流), and
@@ -1512,6 +1527,44 @@ impl CompanionService {
         )
         .await
         .map(|_| ())
+    }
+
+    /// Materialize an accepted summon memory proposal (spec §B3): parse the
+    /// suggestion card's action payload and insert the memory as the summoned
+    /// companion's PRIVATE memory (`source="summon"`). Store-level insert
+    /// redacts secrets and dedup is checked first so a re-proposed accepted
+    /// fact never duplicates. Caller gates this inside the `newly` branch.
+    async fn materialize_proposed_memory(&self, action: &serde_json::Value) -> Result<(), AppError> {
+        let Some(kind) = action
+            .get("memory_kind")
+            .and_then(|v| v.as_str())
+            .filter(|kind| crate::store::MEMORY_KINDS.contains(kind))
+        else {
+            return Ok(());
+        };
+        let Some(content) = action
+            .get("content")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|content| !content.is_empty())
+        else {
+            return Ok(());
+        };
+        let scope = action
+            .get("companion_id")
+            .and_then(|v| v.as_str())
+            .and_then(|id| CompanionId::try_from(id).ok())
+            .map(|id| crate::store::MemoryScope::Companion(id.into_string()))
+            .unwrap_or(crate::store::MemoryScope::Shared);
+        if self.store.find_similar_active(kind, content).await?.is_some() {
+            return Ok(());
+        }
+        let memory = self
+            .store
+            .insert_memory_scoped(kind, content, &[], 0.8, "summon", scope)
+            .await?;
+        self.emitter.emit_memory_created(&memory);
+        Ok(())
     }
 
     /// Rejecting a create_skill suggestion → delegate to the single idempotent skill-decide
@@ -1912,6 +1965,91 @@ impl nomifun_ai_agent::CompanionPromptProvider for CompanionService {
         let profile = self.registry.get(companion_id.as_str()).await?;
         let smart = self.config.read().await.smart_collaboration;
         Some(crate::companion::build_companion_system_prompt(&self.store, &profile, channel_platform, smart).await)
+    }
+}
+
+/// In-session companion summon provider (spec §设计 B): the nomi factory's
+/// seam into the companion domain for `extra.summon` sessions — read-only
+/// sinks over the store, the per-turn snapshot resolver, and manifest-owned
+/// workspace skill materialization/unload.
+#[async_trait::async_trait]
+impl nomifun_ai_agent::CompanionSummonProvider for CompanionService {
+    async fn companion_name(&self, companion_id: &str) -> Option<String> {
+        self.registry.get(companion_id).await.map(|profile| profile.name)
+    }
+
+    fn summon_memory_sink(
+        &self,
+        companion_id: &str,
+    ) -> Result<Arc<dyn nomifun_ai_agent::CompanionMemorySink>, AppError> {
+        Ok(Arc::new(crate::summon_support::SummonMemorySink::new(
+            self.store.clone(),
+            Self::parse_summon_companion_id(companion_id)?,
+        )))
+    }
+
+    fn summon_proposal_sink(
+        &self,
+        companion_id: &str,
+    ) -> Result<Arc<dyn nomifun_ai_agent::SummonProposalSink>, AppError> {
+        Ok(Arc::new(crate::summon_support::SummonSuggestionSink::new(
+            self.store.clone(),
+            self.emitter.clone(),
+            Self::parse_summon_companion_id(companion_id)?,
+        )))
+    }
+
+    fn summon_context_sink(
+        &self,
+        config: &nomifun_api_types::SummonConfig,
+    ) -> Result<Arc<dyn nomifun_ai_agent::SummonContextSink>, AppError> {
+        Self::parse_summon_companion_id(&config.companion_id)?;
+        Ok(Arc::new(crate::summon_support::SummonContextResolver::new(
+            self.store.clone(),
+            config.clone(),
+        )))
+    }
+
+    async fn sync_summon_workspace_skills(
+        &self,
+        conversation_id: &str,
+        workspace: &std::path::Path,
+        companion_id: &str,
+        skill_exclusions: &[String],
+    ) -> Result<Vec<String>, AppError> {
+        let profile = self
+            .registry
+            .get(companion_id)
+            .await
+            .ok_or_else(|| AppError::NotFound(format!("companion '{companion_id}' not found")))?;
+        let names: Vec<String> =
+            crate::companion::effective_skill_names(&self.skill_paths, &profile)
+                .await?
+                .into_iter()
+                .filter(|name| !skill_exclusions.iter().any(|excluded| excluded == name))
+                .collect();
+        Ok(crate::companion::sync_managed_workspace_skills(
+            &self.skill_paths,
+            conversation_id,
+            workspace,
+            &names,
+        )
+        .await)
+    }
+
+    async fn clear_summon_workspace_skills(
+        &self,
+        conversation_id: &str,
+        workspace: &std::path::Path,
+    ) -> Result<(), AppError> {
+        crate::companion::sync_managed_workspace_skills(
+            &self.skill_paths,
+            conversation_id,
+            workspace,
+            &[],
+        )
+        .await;
+        Ok(())
     }
 }
 
@@ -2616,6 +2754,47 @@ mod tests {
             .unwrap();
         svc.decide_suggestion(&s2.suggestion_id, false).await.unwrap();
         assert_eq!(svc.store.get_companion_state_i64(&a.companion_id, "xp").await.unwrap(), 20);
+    }
+
+    #[tokio::test]
+    async fn accepting_memory_proposal_materializes_private_memory() {
+        let dir = tempfile::tempdir().unwrap();
+        let svc = service(dir.path()).await;
+        let companion = svc.create_companion("甲", "ink").await.unwrap();
+
+        let sink = crate::summon_support::SummonSuggestionSink::new(
+            svc.store.clone(),
+            svc.emitter.clone(),
+            nomifun_common::CompanionId::try_from(companion.companion_id.as_str()).unwrap(),
+        );
+        use nomifun_ai_agent::SummonProposalSink as _;
+        sink.propose(&conversation_fixture(9), "preference", "主人喜欢 TDD 流程", "多次强调")
+            .await
+            .unwrap();
+        // Proposal alone must not create the memory.
+        assert_eq!(svc.store.count_memories("active").await.unwrap(), 0);
+
+        let card = &svc.store.list_suggestions(Some("new"), 10).await.unwrap()[0];
+        let decided = svc.decide_suggestion(&card.suggestion_id, true).await.unwrap();
+        assert_eq!(decided.status, "accepted");
+        let memories = svc.store.list_memories(&crate::store::MemoryFilter::default()).await.unwrap();
+        assert_eq!(memories.len(), 1);
+        assert_eq!(memories[0].content, "主人喜欢 TDD 流程");
+        assert_eq!(memories[0].source, "summon");
+        assert_eq!(memories[0].scope_kind, "companion");
+        assert_eq!(memories[0].scope_companion_id.as_deref(), Some(companion.companion_id.as_str()));
+
+        // Idempotent: re-accepting must not duplicate.
+        svc.decide_suggestion(&card.suggestion_id, true).await.unwrap();
+        assert_eq!(svc.store.count_memories("active").await.unwrap(), 1);
+
+        // Dismissal of a second proposal never materializes.
+        sink.propose(&conversation_fixture(9), "task", "帮主人调研咖啡豆", "任务线索")
+            .await
+            .unwrap();
+        let card2 = &svc.store.list_suggestions(Some("new"), 10).await.unwrap()[0];
+        svc.decide_suggestion(&card2.suggestion_id, false).await.unwrap();
+        assert_eq!(svc.store.count_memories("active").await.unwrap(), 1);
     }
 
     #[tokio::test]

@@ -68,6 +68,9 @@ use nomifun_knowledge::{
 #[path = "service_test/acp_error_recovery_test.rs"]
 mod acp_error_recovery_test;
 
+#[path = "service_test/summon_test.rs"]
+mod summon_test;
+
 const SQLITE_TEST_OWNER: &str = "0190f5fe-7c00-7a00-8000-000000000001";
 const TEST_USER_1: &str = "0190f5fe-7c00-7a00-8000-000000000011";
 const TEST_USER_2: &str = "0190f5fe-7c00-7a00-8000-000000000012";

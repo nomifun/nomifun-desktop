@@ -2479,6 +2479,12 @@ impl AppServices {
             companion_prompt: Some(
                 companion_service.clone() as Arc<dyn nomifun_ai_agent::CompanionPromptProvider>
             ),
+            // In-session companion summon (spec §设计 B): skills + selected
+            // memories of one companion loaded read-only into work sessions
+            // whose `extra.summon` is present (factory gates authority).
+            companion_summon: Some(
+                companion_service.clone() as Arc<dyn nomifun_ai_agent::CompanionSummonProvider>
+            ),
         });
 
         // Agent factory is now wired. Future extension/custom agents

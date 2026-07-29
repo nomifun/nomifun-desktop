@@ -97,6 +97,9 @@ nomifun-api-types.workspace = true
 # nomi-tools' Tool trait. Both are workspace crates not pulled by [dependencies].
 nomifun-realtime.workspace = true
 nomi-tools.workspace = true
+# Summon factory integration test implements the CompanionSummonProvider /
+# sink traits directly (async fns in traits).
+async-trait.workspace = true
 wiremock.workspace = true
 # Used by the acp_session_sync test setup to seed the conversations FK parent
 # directly on the in-memory pool (mirrors nomifun-db's own acp_session tests).

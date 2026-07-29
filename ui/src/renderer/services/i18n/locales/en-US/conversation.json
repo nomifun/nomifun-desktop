@@ -569,6 +569,31 @@
   "stop": {
     "failed": "Failed to stop the current task. Please try again."
   },
+  "summon": {
+    "button": "Summon",
+    "buttonTooltip": "Summon a companion: load its skills and selected memories (read-only) into this session",
+    "badgeTooltip": "Companion {{name}} is summoned into this session (skills + selected memories, read-only)",
+    "title": "Summon a companion",
+    "stepCompanion": "1. Pick a companion",
+    "stepSkills": "2. Skills (all active loaded by default; uncheck to exclude)",
+    "stepMemories": "3. Pick memories (injected live each turn, read-only)",
+    "noCompanions": "No companions yet — create one on the Nomi page first",
+    "noSkills": "This companion has no loadable skills",
+    "noMemories": "No matching memories",
+    "searchMemories": "Search memories (full-text)...",
+    "budget": "Snapshot budget: {{used}} / {{budget}} chars",
+    "budgetOverflow": "over budget — extra entries will be truncated",
+    "selectedCount": "{{count}} memories selected",
+    "apply": "Summon",
+    "update": "Update summon",
+    "release": "Release",
+    "applied": "Companion summoned. Takes effect on the next message.",
+    "released": "Summon released. Skills unload on the next run.",
+    "busy": "The conversation is running — adjust the summon when it is idle.",
+    "unknownCompanion": "(deleted companion)",
+    "archived": "archived",
+    "sidebarBadge": "Companion summoned (skills + selected memories, read-only)"
+  },
   "editMessage": {
     "action": "Edit",
     "banner": "Editing message — sending will re-run from here"

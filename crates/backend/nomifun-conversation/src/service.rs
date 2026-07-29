@@ -53,6 +53,11 @@ use tokio::sync::{broadcast, oneshot};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 
+/// In-session companion summon lifecycle (child module so it can reach the
+/// service's private repos; file kept separate to protect service.rs size).
+#[path = "summon.rs"]
+pub mod summon;
+
 use crate::convert::{
     TOOL_CONTENT_COMPACT_THRESHOLD_BYTES, message_needs_artifact_history_audit,
     parse_provider_with_model, project_historical_artifact_integrity,
