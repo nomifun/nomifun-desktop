@@ -566,6 +566,9 @@
     "button": "Send now (interject into the running reply)",
     "fallbackQueued": "This engine can't interject mid-reply — added to the queue instead."
   },
+  "stop": {
+    "failed": "Failed to stop the current task. Please try again."
+  },
   "editMessage": {
     "action": "Edit",
     "banner": "Editing message — sending will re-run from here"

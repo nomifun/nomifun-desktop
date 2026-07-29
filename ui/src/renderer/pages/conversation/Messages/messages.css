@@ -304,6 +304,29 @@
   color: var(--color-text-1);
 }
 
+.message-error-note__actions {
+  gap: 8px;
+}
+
+.message-error-note__retry {
+  box-sizing: border-box;
+  height: 28px;
+  border: 1px solid var(--color-border-2, #e5e6eb);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--color-text-2, #4e5969);
+  cursor: pointer;
+  font: inherit;
+  font-size: 12px;
+  line-height: 18px;
+  padding: 0 10px;
+}
+
+.message-error-note__retry:hover {
+  color: var(--color-text-1, #1d2129);
+  border-color: var(--color-text-4, #c9cdd4);
+}
+
 /* Mobile typography tuning: conversation readability */
 @media (max-width: 767px) {
   .message-error-note {

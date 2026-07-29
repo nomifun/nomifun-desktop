@@ -994,6 +994,7 @@ export type I18nKey =
   | 'conversation.slashCommands.compact.description'
   | 'conversation.steer.button'
   | 'conversation.steer.fallbackQueued'
+  | 'conversation.stop.failed'
   | 'conversation.thinking.complete'
   | 'conversation.thinking.label'
   | 'conversation.welcome.clearWorkspace'
