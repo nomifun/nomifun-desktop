@@ -27,6 +27,20 @@ use std::sync::Arc;
 
 use crate::adapter::ProtocolAdapter;
 
+/// Whether the per-model params carry a non-empty `endpoint` override.
+///
+/// Adapters that compose their own URLs (non-`/v1` conventions: ark, gemini,
+/// deepgram) consult this so an explicit `params.endpoint` still wins — routed
+/// through [`crate::call::ResolvedCall::dispatch_target`], the single dispatch
+/// authority (its rule 1, the zero-code escape hatch).
+pub(crate) fn has_endpoint_override(params: &serde_json::Value) -> bool {
+    params
+        .get("endpoint")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .is_some_and(|s| !s.is_empty())
+}
+
 pub mod ark;
 pub mod deepgram;
 pub mod gemini;

@@ -4,7 +4,9 @@
 //!
 //! Both adapters `POST {root}/v1beta/models/{model}:generateContent` (a
 //! trailing `/v1beta` on the configured base is tolerated; `is_full_url`
-//! bases are used verbatim). Auth is applied declaratively via
+//! bases are used verbatim; an explicit `params.endpoint` override wins over
+//! both, routed through [`crate::call::ResolvedCall::dispatch_target`]). Auth
+//! is applied declaratively via
 //! [`crate::auth::AuthMaterial::apply`] — the resolver rewrites gemini
 //! default connections to `header_key:x-goog-api-key`, so no header is
 //! hardcoded here.
@@ -31,6 +33,7 @@ use nomifun_api_types::ModelTask;
 use serde_json::{Value, json};
 
 use crate::adapter::ProtocolAdapter;
+use crate::adapters::has_endpoint_override;
 use crate::call::{ResolvedCall, ResolvedConnection};
 use crate::error::{InvokeError, InvokeErrorKind};
 use crate::transport::{decode_b64, encode_b64, error_from_response, net_err};
@@ -53,6 +56,18 @@ fn generate_content_url(conn: &ResolvedConnection, model: &str) -> String {
     }
     let root = base.strip_suffix("/v1beta").unwrap_or(base);
     format!("{root}/v1beta/models/{model}:generateContent")
+}
+
+/// The `:generateContent` URL for this call: an explicit `params.endpoint`
+/// override wins (resolved verbatim by the single dispatch authority);
+/// otherwise the conventional `/v1beta/models/{model}` path via
+/// [`generate_content_url`].
+fn call_url(call: &ResolvedCall) -> String {
+    if has_endpoint_override(&call.model_params) {
+        call.dispatch_target().url
+    } else {
+        generate_content_url(&call.connection, &call.model)
+    }
 }
 
 /// Fire one `:generateContent` request and return the parsed response JSON.
@@ -111,7 +126,9 @@ impl ProtocolAdapter for GeminiGenerateContentAdapter {
                 ));
             }
         };
-        let url = generate_content_url(&call.connection, &call.model);
+        // One URL for the whole call (the count>1 loop reuses it): an
+        // explicit `params.endpoint` override wins over convention.
+        let url = call_url(call);
         let body = build_generate_content_body(prompt, inputs);
 
         // Gemini has no `n` parameter: count > 1 loops the request
@@ -196,7 +213,7 @@ impl ProtocolAdapter for GeminiGenerateTextAdapter {
                 format!("gemini.generate_text cannot serve task {:?}", call.request.task()),
             ));
         };
-        let url = generate_content_url(&call.connection, &call.model);
+        let url = call_url(call);
         let body = build_generate_text_body(req);
         let value = post_generate_content(http, call, &url, &body).await?;
         Ok(TaskOutcome::Done(TaskResult::Text(parse_gemini_text(&value)?)))
@@ -464,6 +481,49 @@ mod tests {
         let out = GeminiGenerateContentAdapter.submit(&reqwest::Client::new(), &call).await.unwrap();
         let TaskOutcome::Done(TaskResult::Assets(assets)) = out else { panic!("expected Done(Assets)") };
         assert_eq!(assets.len(), 2, "count=2 must aggregate one asset per request");
+    }
+
+    #[tokio::test]
+    async fn generate_content_params_endpoint_override_wins() {
+        // Whole-branch review Finding 1: params.endpoint (dispatch rule 1)
+        // must win over the /v1beta convention. The custom path is the only
+        // mounted mock; count=2 proves the loop rides the override too.
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/custom/gemini"))
+            .and(header("x-goog-api-key", "g-key"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "candidates": [{"content": {"parts": [
+                    {"inlineData": {"mimeType": "image/png", "data": "aGk="}}
+                ]}}]
+            })))
+            .expect(2)
+            .mount(&server)
+            .await;
+
+        let mut call = gemini_call(&server.uri(), false, "gemini-2.5-flash-image", gen_request(2));
+        call.model_params = json!({"endpoint": "/custom/gemini"});
+        let out = GeminiGenerateContentAdapter.submit(&reqwest::Client::new(), &call).await.unwrap();
+        assert!(matches!(out, TaskOutcome::Done(TaskResult::Assets(a)) if a.len() == 2));
+    }
+
+    #[tokio::test]
+    async fn generate_text_params_endpoint_override_wins() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/custom/gemini-text"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "candidates": [{"content": {"parts": [{"text": "custom hi"}]}}]
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let request = TaskRequest::ChatText(ChatTextRequest { prompt: "hi".into(), system: None, extra: json!({}) });
+        let mut call = gemini_call(&server.uri(), false, "gemini-2.5-flash", request);
+        call.model_params = json!({"endpoint": "/custom/gemini-text"});
+        let out = GeminiGenerateTextAdapter.submit(&reqwest::Client::new(), &call).await.unwrap();
+        assert!(matches!(out, TaskOutcome::Done(TaskResult::Text(t)) if t == "custom hi"));
     }
 
     #[tokio::test]
