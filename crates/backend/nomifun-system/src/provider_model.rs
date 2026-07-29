@@ -85,6 +85,9 @@ impl ProviderModelService {
         if model.is_empty() {
             return Err(AppError::BadRequest("model is required".into()));
         }
+        if let Some(role) = req.connection_role.as_deref() {
+            crate::provider_connection::validate_role(role)?;
+        }
         let provider = self
             .provider_repo
             .find_by_id(&provider_id)
@@ -167,6 +170,11 @@ impl ProviderModelService {
         let provider_id = ProviderId::parse(req.provider_id)
             .map_err(|error| AppError::BadRequest(format!("invalid provider_id: {error}")))?
             .into_string();
+        // Double-Option: Some(Some(role)) sets and must satisfy the same role
+        // grammar as the connections API; Some(None) clears without validation.
+        if let Some(Some(role)) = req.connection_role.as_ref() {
+            crate::provider_connection::validate_role(role)?;
+        }
 
         let tasks_json = req
             .tasks
@@ -616,6 +624,93 @@ mod tests {
             "deleted row disappears from ProviderService::list()'s models projection"
         );
         assert!(provider.models_detail.is_empty());
+    }
+
+    #[tokio::test]
+    async fn create_rejects_invalid_connection_role_before_writing() {
+        let (service, _, provider_id, _db) = setup("openai").await;
+        let err = service
+            .create(CreateProviderModelRequest {
+                connection_role: Some("Bad Role!".into()),
+                ..create_req(&provider_id, "gpt-4o")
+            })
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(
+                err,
+                AppError::BadRequest(ref message)
+                    if message == "role must match ^[a-z][a-z0-9_-]{0,31}$"
+            ),
+            "unexpected error: {err:?}"
+        );
+        assert!(
+            service.list(Some(&provider_id)).await.unwrap().is_empty(),
+            "validation must run before any write; no half-created row may remain"
+        );
+    }
+
+    #[tokio::test]
+    async fn create_rejects_reserved_default_connection_role() {
+        let (service, _, provider_id, _db) = setup("openai").await;
+        let err = service
+            .create(CreateProviderModelRequest {
+                connection_role: Some("default".into()),
+                ..create_req(&provider_id, "gpt-4o")
+            })
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(
+                err,
+                AppError::BadRequest(ref message)
+                    if message
+                        == "role 'default' is reserved: the provider's own base_url/api_key is the default connection"
+            ),
+            "unexpected error: {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn update_validates_connection_role_set_but_not_clear() {
+        let (service, _, provider_id, _db) = setup("openai").await;
+        service.create(create_req(&provider_id, "gpt-4o")).await.unwrap();
+
+        let err = service
+            .update(UpdateProviderModelRequest {
+                connection_role: Some(Some("bad!".into())),
+                ..update_req(&provider_id, "gpt-4o")
+            })
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(
+                err,
+                AppError::BadRequest(ref message)
+                    if message == "role must match ^[a-z][a-z0-9_-]{0,31}$"
+            ),
+            "unexpected error: {err:?}"
+        );
+
+        // A valid role is accepted (Some(Some(valid))).
+        let resp = service
+            .update(UpdateProviderModelRequest {
+                connection_role: Some(Some("voice".into())),
+                ..update_req(&provider_id, "gpt-4o")
+            })
+            .await
+            .unwrap();
+        assert_eq!(resp.connection_role.as_deref(), Some("voice"));
+
+        // Clearing with Some(None) must not run role validation.
+        let resp = service
+            .update(UpdateProviderModelRequest {
+                connection_role: Some(None),
+                ..update_req(&provider_id, "gpt-4o")
+            })
+            .await
+            .unwrap();
+        assert_eq!(resp.connection_role, None, "Some(None) clears the column");
     }
 
     #[tokio::test]
