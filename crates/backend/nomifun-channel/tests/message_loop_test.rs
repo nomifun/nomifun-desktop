@@ -492,9 +492,12 @@ async fn wait_until_idle(svc: &Arc<ConversationService>, conversation_id: &str) 
 }
 
 /// Drains the recorder until a send containing `needle` shows up.
+///
+/// The 15s budget covers owner-path conversation cancel, whose cleanup
+/// linearization can take up to CANCEL_TEARDOWN_GRACE (7s) before the ack.
 async fn wait_for_send_containing(recorder: &Arc<MessageRecorder>, needle: &str) -> UnifiedOutgoingMessage {
     let mut seen: Vec<UnifiedOutgoingMessage> = Vec::new();
-    for _ in 0..500 {
+    for _ in 0..1500 {
         seen.extend(recorder.take_sends());
         if let Some(found) = seen
             .iter()
@@ -759,7 +762,7 @@ async fn chat_regenerate_without_history_replies_with_notice() {
 // Bug 1, Case A: relayed decision → numbered reply interception
 // ═════════════════════════════════════════════════════════════════════════
 
-use nomifun_channel::pending_decision::PendingDecision;
+use nomifun_channel::pending_decision::{PendingDecision, PendingDecisionKind};
 use nomifun_channel::types::DecisionOption;
 
 /// Seeds a two-option pending decision for `conversation_id`.
@@ -767,6 +770,7 @@ fn seed_decision(harness: &Harness, conversation_id: &str) {
     harness.pending_decisions.put(PendingDecision {
         conversation_id: conversation_id.to_owned(),
         call_id: "call-dec".into(),
+        kind: PendingDecisionKind::AgentConfirm,
         prompt: "Proceed?".into(),
         options: vec![
             DecisionOption {
@@ -776,6 +780,29 @@ fn seed_decision(harness: &Harness, conversation_id: &str) {
             DecisionOption {
                 option_id: "reject".into(),
                 label: "Reject".into(),
+            },
+        ],
+    });
+}
+
+/// Seeds the channel-owned remote-stop confirmation (batch-1 handover gap),
+/// exactly the entry the relay records when nomi_stop_conversation is denied.
+fn seed_stop_decision(harness: &Harness, conversation_id: &str, target: &str) {
+    harness.pending_decisions.put(PendingDecision {
+        conversation_id: conversation_id.to_owned(),
+        call_id: format!("channel-stop:{target}"),
+        kind: PendingDecisionKind::StopConversation {
+            target_conversation_id: target.to_owned(),
+        },
+        prompt: format!("确认停止会话 {target} 的当前任务？"),
+        options: vec![
+            DecisionOption {
+                option_id: "confirm-stop".into(),
+                label: "确认停止".into(),
+            },
+            DecisionOption {
+                option_id: "cancel".into(),
+                label: "取消".into(),
             },
         ],
     });
@@ -871,6 +898,97 @@ async fn decision_non_numeric_reply_reshows_list_and_does_not_dispatch() {
     assert!(harness.pending_decisions.peek(&cid).is_some(), "pending decision must survive a bad reply");
 
     // No new user message dispatched.
+    let messages = user_messages(
+        &harness.conversation_svc,
+        &harness.installation_owner,
+        &cid,
+    )
+    .await;
+    assert_eq!(messages, vec!["hello world".to_string()]);
+}
+
+// =====================================================================
+// Batch-1 handover gap: channel-owned remote-stop confirmation
+// =====================================================================
+
+/// Replying "1" (确认停止) to the stop confirmation cancels the target
+/// conversation as owner and acknowledges; the entry is consumed and the
+/// reply is never dispatched as a prompt.
+#[tokio::test]
+async fn stop_confirmation_confirm_cancels_target_as_owner() {
+    let harness = build_harness().await;
+
+    harness
+        .message_tx
+        .send(incoming(
+            &harness.channel_plugin_id,
+            make_text_message("tg_42", "chat_1", "hello world"),
+        ))
+        .await
+        .unwrap();
+    let cid = wait_for_bound_conversation(&harness.channel_repo, &harness.recorder).await;
+    wait_until_idle(&harness.conversation_svc, &cid).await;
+
+    // The relay recorded a denied nomi_stop_conversation as a stop decision
+    // targeting this conversation.
+    seed_stop_decision(&harness, &cid, &cid);
+
+    harness
+        .message_tx
+        .send(incoming(
+            &harness.channel_plugin_id,
+            make_text_message("tg_42", "chat_1", "1"),
+        ))
+        .await
+        .unwrap();
+
+    // Any stop-acknowledgement form names the target conversation: executed
+    // ("已停止"), still finalizing ("正在停止中"), or a surfaced failure.
+    let ack = wait_for_send_containing(&harness.recorder, &format!("会话 {cid}")).await;
+    let ack_text = ack.text.unwrap();
+    assert!(ack_text.contains("停止"), "stop ack expected, got: {ack_text}");
+    assert!(harness.pending_decisions.peek(&cid).is_none(), "stop decision consumed");
+
+    // The numeric reply was consumed by the confirmation, not dispatched.
+    let messages = user_messages(
+        &harness.conversation_svc,
+        &harness.installation_owner,
+        &cid,
+    )
+    .await;
+    assert_eq!(messages, vec!["hello world".to_string()]);
+}
+
+/// Replying "2" (取消) clears the stop confirmation without touching the
+/// target conversation.
+#[tokio::test]
+async fn stop_confirmation_cancel_choice_only_clears_entry() {
+    let harness = build_harness().await;
+
+    harness
+        .message_tx
+        .send(incoming(
+            &harness.channel_plugin_id,
+            make_text_message("tg_42", "chat_1", "hello world"),
+        ))
+        .await
+        .unwrap();
+    let cid = wait_for_bound_conversation(&harness.channel_repo, &harness.recorder).await;
+    wait_until_idle(&harness.conversation_svc, &cid).await;
+
+    seed_stop_decision(&harness, &cid, &cid);
+
+    harness
+        .message_tx
+        .send(incoming(
+            &harness.channel_plugin_id,
+            make_text_message("tg_42", "chat_1", "2"),
+        ))
+        .await
+        .unwrap();
+
+    wait_for_send_containing(&harness.recorder, "已取消，不停止该会话").await;
+    assert!(harness.pending_decisions.peek(&cid).is_none(), "stop decision consumed");
     let messages = user_messages(
         &harness.conversation_svc,
         &harness.installation_owner,
