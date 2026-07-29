@@ -2960,6 +2960,30 @@ impl ConversationService {
             .summary_from_parts(conversation_id, runtime_status, has_runtime, pending_confirmations)
     }
 
+    /// The most recent completed `turn` receipt for one owned Conversation.
+    ///
+    /// Read-only diagnostics for the gateway status surface (spec D4): the
+    /// receipt's structured `result_error_code` names the last terminal
+    /// failure. Returns `None` when no turn has ever completed.
+    pub async fn latest_completed_turn_receipt(
+        &self,
+        user_id: &str,
+        conversation_id: &str,
+    ) -> Result<Option<nomifun_db::models::ConversationDeliveryReceiptRow>, AppError> {
+        let conversation_key = parse_conv_id(conversation_id)?;
+        self.conversation_repo
+            .get(conversation_key)
+            .await?
+            .filter(|row| row.user_id == user_id)
+            .ok_or_else(|| {
+                AppError::NotFound(format!("Conversation {conversation_id} not found"))
+            })?;
+        Ok(self
+            .conversation_repo
+            .latest_completed_turn_receipt(user_id, conversation_key)
+            .await?)
+    }
+
     pub fn begin_runtime_build(&self, conversation_id: &str) -> Result<RuntimeBuildLease, AppError> {
         self.runtime_state.begin_runtime_build(conversation_id)
     }

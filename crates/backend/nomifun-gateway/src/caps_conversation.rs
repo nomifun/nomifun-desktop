@@ -225,6 +225,25 @@ async fn list(deps: Arc<GatewayDeps>, ctx: CallerCtx, p: ListConversationsParams
     ok(json!({ "total": resp.total, "conversations": items }))
 }
 
+/// Restart-isolation ("stuck") assessment for one conversation (spec D3).
+///
+/// A conversation is stuck when its durable status is still `running` but no
+/// live runtime exists in this process: after a backend restart the running
+/// authority is fail-closed quarantined and nothing will finish it without an
+/// explicit stop. Returns the flag plus the remote-facing unlock hint.
+fn stuck_assessment(
+    is_persisted_running: bool,
+    has_runtime: bool,
+) -> (bool, Option<&'static str>) {
+    let stuck = is_persisted_running && !has_runtime;
+    (
+        stuck,
+        stuck.then_some(
+            "该会话因后端重启被保护性挂起，可用 nomi_stop_conversation 解除后重试",
+        ),
+    )
+}
+
 async fn status(deps: Arc<GatewayDeps>, ctx: CallerCtx, p: ConversationStatusParams) -> Value {
     let user_id = match require_user(&ctx) {
         Ok(u) => u,
@@ -236,6 +255,18 @@ async fn status(deps: Arc<GatewayDeps>, ctx: CallerCtx, p: ConversationStatusPar
         Err(e) => return error_value(e),
     };
     let runtime = deps.conversation_service.runtime_summary_for(id).await;
+    let (stuck, stuck_hint) = stuck_assessment(
+        conv.status == nomifun_common::ConversationStatus::Running,
+        runtime.has_runtime,
+    );
+    let last_receipt = match deps
+        .conversation_service
+        .latest_completed_turn_receipt(user_id, id)
+        .await
+    {
+        Ok(receipt) => receipt,
+        Err(e) => return error_value(e),
+    };
     let message_limit = p.message_limit.unwrap_or(DEFAULT_MESSAGE_LIMIT).clamp(1, 50);
     let messages = match deps
         .conversation_service
@@ -265,6 +296,11 @@ async fn status(deps: Arc<GatewayDeps>, ctx: CallerCtx, p: ConversationStatusPar
         "agent_type": conv.r#type,
         "status": conv.status,
         "runtime": runtime,
+        "stuck": stuck,
+        "stuck_hint": stuck_hint,
+        "last_result_error_code": last_receipt
+            .as_ref()
+            .and_then(|receipt| receipt.result_error_code.clone()),
         "recent_messages": messages_json,
     }))
 }
@@ -584,6 +620,24 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
 mod tests {
     use super::*;
     use nomifun_common::UserId;
+
+    #[test]
+    fn stuck_assessment_flags_only_durable_running_without_runtime() {
+        let (stuck, hint) = stuck_assessment(true, false);
+        assert!(stuck, "durable running with no live runtime is the restart-isolated state");
+        assert_eq!(
+            hint,
+            Some("该会话因后端重启被保护性挂起，可用 nomi_stop_conversation 解除后重试"),
+        );
+
+        for (is_persisted_running, has_runtime) in [(true, true), (false, false), (false, true)] {
+            let (stuck, hint) = stuck_assessment(is_persisted_running, has_runtime);
+            assert!(
+                !stuck && hint.is_none(),
+                "({is_persisted_running}, {has_runtime}) must not be reported stuck"
+            );
+        }
+    }
 
     #[test]
     fn truncate_caps_long_content_strings() {
