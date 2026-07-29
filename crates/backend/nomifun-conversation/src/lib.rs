@@ -33,8 +33,9 @@ pub use execution_conversation_boundary::{
 pub use routes::conversation_routes;
 pub use routes_aux::conversation_ops_routes;
 pub use service::{
-    ConversationService, ConversationSupervisionHook, IdempotentMessageDelivery, IdmmTurnScope,
-    PublicTurnDeliveryState,
+    ConversationService, ConversationSupervisionHook, DELIVERY_NOTIFY_ORIGIN,
+    DeliveryNotifyRegistration, IdempotentMessageDelivery, IdmmTurnScope,
+    PublicTurnDeliveryState, TurnCompletionObserver,
 };
 pub use state::ConversationRouterState;
 
