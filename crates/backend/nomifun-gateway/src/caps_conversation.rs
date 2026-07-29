@@ -119,6 +119,15 @@ struct DeleteConversationParams {
 
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
+struct StopConversationParams {
+    /// The id of the conversation whose current turn should be stopped
+    /// (from nomi_list_conversations / nomi_conversation_status).
+    #[schemars(schema_with = "crate::id_schema::canonical_uuid_v7_schema")]
+    conversation_id: ConversationId,
+}
+
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 struct WhoamiParams {}
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
@@ -516,6 +525,47 @@ async fn delete(deps: Arc<GatewayDeps>, ctx: CallerCtx, p: DeleteConversationPar
     }
 }
 
+/// Map the pre-stop persisted status onto the tool's `{stopped, previous_status}`
+/// contract: only a conversation that was durably `running` counts as stopped.
+fn stop_outcome(previous_status: &str) -> (bool, &str) {
+    (previous_status == "running", previous_status)
+}
+
+async fn stop(deps: Arc<GatewayDeps>, ctx: CallerCtx, p: StopConversationParams) -> Value {
+    let user_id = match require_user(&ctx) {
+        Ok(u) => u.to_owned(),
+        Err(e) => return e,
+    };
+    let id = p.conversation_id.into_string();
+    if ctx.conversation_id.as_ref().is_some_and(|caller| id == caller.as_str()) {
+        return json!({ "error": "self_stop_forbidden: stopping your own conversation would cancel the turn you are answering from; ask the owner to stop it from the desktop" });
+    }
+    let conv = match deps.conversation_service.get(&user_id, &id).await {
+        Ok(c) => c,
+        Err(e) => return error_value(e),
+    };
+    let previous_status = match serde_json::to_value(conv.status) {
+        Ok(Value::String(status)) => status,
+        _ => return json!({ "error": "conversation status could not be serialized" }),
+    };
+    // Same safe service path as the desktop stop button (POST
+    // /api/conversations/{id}/cancel): the stop tombstone, exact-generation
+    // teardown, and durable finalization all stay owned by the service. This
+    // tool never mutates receipts or lifecycle rows directly.
+    if let Err(e) = deps
+        .conversation_service
+        .cancel(&user_id, &id, &deps.runtime_registry)
+        .await
+    {
+        return error_value(e);
+    }
+    let (stopped, previous_status) = stop_outcome(&previous_status);
+    ok(json!({
+        "stopped": stopped,
+        "previous_status": previous_status,
+    }))
+}
+
 /// Cap every `content` string inside the serialized message list so a long
 /// transcript cannot flood the calling agent.
 fn truncate_message_contents(mut value: Value) -> Value {
@@ -605,6 +655,15 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
         .deny_on(&[Surface::Channel]),
         delete,
     ));
+    out.push(Capability::new::<StopConversationParams, _, _>(
+        CapabilityMeta::new(
+            "nomi_stop_conversation",
+            "conversation",
+            "Stop a conversation's current turn — including one left protectively suspended (stuck) by a backend restart. Same safe path as the desktop stop button.",
+            DangerTier::Destructive,
+        ),
+        stop,
+    ));
     out.push(Capability::new::<WhoamiParams, _, _>(
         CapabilityMeta::new(
             "nomi_whoami",
@@ -620,6 +679,80 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
 mod tests {
     use super::*;
     use nomifun_common::UserId;
+
+    #[test]
+    fn stop_conversation_is_a_registered_destructive_capability() {
+        let mut caps = Vec::new();
+        register(&mut caps);
+        let cap = caps
+            .iter()
+            .find(|cap| cap.meta.name == "nomi_stop_conversation")
+            .expect("nomi_stop_conversation must be registered");
+        assert_eq!(cap.meta.domain, "conversation");
+        assert_eq!(cap.meta.danger, DangerTier::Destructive);
+        let properties = cap.input_schema["properties"].as_object().unwrap();
+        assert!(properties.contains_key("conversation_id"));
+        assert!(
+            properties.contains_key("confirm"),
+            "a Destructive capability must expose the confirm gate field"
+        );
+        assert_eq!(
+            cap.input_schema.get("additionalProperties"),
+            Some(&json!(false))
+        );
+    }
+
+    #[test]
+    fn stop_conversation_requires_confirm_on_remote_surface() {
+        let mut caps = Vec::new();
+        register(&mut caps);
+        let cap = caps
+            .iter()
+            .find(|cap| cap.meta.name == "nomi_stop_conversation")
+            .expect("nomi_stop_conversation must be registered");
+        assert_eq!(
+            crate::registry::decide(&cap.meta, Surface::Remote, false),
+            crate::registry::Decision::Confirm,
+            "Remote surface without confirm must be refused"
+        );
+        assert_eq!(
+            crate::registry::decide(&cap.meta, Surface::Remote, true),
+            crate::registry::Decision::Allow,
+        );
+    }
+
+    #[test]
+    fn stop_conversation_params_require_a_canonical_conversation_id() {
+        let params: StopConversationParams = serde_json::from_value(json!({
+            "conversation_id": "0190f5fe-7c00-7a00-8abc-012345678901"
+        }))
+        .unwrap();
+        assert_eq!(
+            params.conversation_id.as_str(),
+            "0190f5fe-7c00-7a00-8abc-012345678901"
+        );
+        assert!(
+            serde_json::from_value::<StopConversationParams>(
+                json!({"conversation_id": "conversation-1"})
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn stop_outcome_maps_previous_status_to_stopped_flag() {
+        assert_eq!(
+            stop_outcome("running"),
+            (true, "running"),
+            "stopping a running conversation reports stopped=true"
+        );
+        assert_eq!(
+            stop_outcome("finished"),
+            (false, "finished"),
+            "an idle conversation reports stopped=false with its previous status"
+        );
+        assert_eq!(stop_outcome("pending"), (false, "pending"));
+    }
 
     #[test]
     fn stuck_assessment_flags_only_durable_running_without_runtime() {
