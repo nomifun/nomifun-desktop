@@ -37,11 +37,9 @@ import { useTranslation } from 'react-i18next';
 import { findEnabledChannelStatus } from './channelStatusSelection';
 
 /**
- * Shared channel-config machinery for the multi-bot flows. Both the desktop
- * companion's 「远程连接」 (RemoteConnectSection) and the 对外伙伴 console's
- * ChannelsSection render this body inside their own NomiModal — the only
- * difference is who the bot is bound to (`channelTarget.companionId` vs
- * `channelTarget.publicAgentId`).
+ * Shared channel-config machinery for the multi-bot flows. The desktop
+ * companion's 「远程连接」 (RemoteConnectSection) renders this body inside its
+ * NomiModal; the bot is bound to `channelTarget.companionId`.
  */
 
 /** Builtin IM platforms supported by the channel Agent integration. */
@@ -115,8 +113,7 @@ export const PLUGIN_DISABLED_KEY: Record<ChannelPlatform, string> = {
  *
  * `channelTarget` addresses one channel plugin entity (multi-bot model). When
  * `channelTarget.channelPluginId` is missing the form runs in create mode: the
- * first enable creates a new entity bound to `channelTarget.companionId` OR
- * `channelTarget.publicAgentId` (whichever is set — mutually exclusive).
+ * first enable creates a new entity bound to `channelTarget.companionId`.
  */
 export const PlatformConfigBody: React.FC<{
   platform: ChannelPlatform;
@@ -181,9 +178,7 @@ export const PlatformConfigBody: React.FC<{
             ? {
                 plugin_id: channelTarget.channelPluginId,
                 plugin_type: platform,
-                ...(channelTarget.publicAgentId
-                  ? { public_agent_id: channelTarget.publicAgentId }
-                  : { companion_id: channelTarget.companionId }),
+                ...(channelTarget.companionId ? { companion_id: channelTarget.companionId } : {}),
                 config,
               }
             : { plugin_type: platform, config }
@@ -200,7 +195,6 @@ export const PlatformConfigBody: React.FC<{
               platform,
               enabledPluginId: result.plugin_id,
               companionId: channelTarget?.companionId,
-              publicAgentId: channelTarget?.publicAgentId,
             })
           : null;
         if (enabledStatus) {
@@ -240,11 +234,7 @@ export const PlatformConfigBody: React.FC<{
 
       {/* 模型跟随绑定对象的对话模型 / Model follows the bound owner's chat model */}
       <div className='text-12px text-t-tertiary bg-fill-2 rd-10px px-14px py-10px'>
-        {channelTarget?.publicAgentId
-          ? t('publicCompanion.channels.modelFollowsAgent', {
-              defaultValue: '机器人使用该对外伙伴的对话模型,在「概览」页配置',
-            })
-          : '机器人使用该伙伴的对话模型,在「对话」页配置'}
+        {'机器人使用该伙伴的对话模型,在「对话」页配置'}
       </div>
 
       {platform === 'telegram' && (

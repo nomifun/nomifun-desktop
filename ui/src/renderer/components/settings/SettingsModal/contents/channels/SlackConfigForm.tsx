@@ -78,7 +78,7 @@ const SlackConfigForm: React.FC<SlackConfigFormProps> = ({ pluginStatus, channel
 
   const handleAutoEnable = async () => {
     const config = { credentials: { token: botToken.trim(), app_token: appToken.trim() } };
-    const result = await channel.enablePlugin.invoke(channelTarget ? { plugin_id: channelTarget.channelPluginId, plugin_type: 'slack', ...(channelTarget.publicAgentId ? { public_agent_id: channelTarget.publicAgentId } : { companion_id: channelTarget.companionId }), config } : { plugin_type: 'slack', config });
+    const result = await channel.enablePlugin.invoke(channelTarget ? { plugin_id: channelTarget.channelPluginId, plugin_type: 'slack', ...(channelTarget.companionId ? { companion_id: channelTarget.companionId } : {}), config } : { plugin_type: 'slack', config });
     if (!result.success) {
       throw new Error(result.error || t('nomi.settings.remoteEnableFailed', { defaultValue: 'Failed to enable channel' }));
     }

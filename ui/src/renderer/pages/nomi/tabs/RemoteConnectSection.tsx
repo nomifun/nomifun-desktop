@@ -212,7 +212,7 @@ const RemoteConnectSection: React.FC<{ companionId: CompanionId; companionName: 
   // channel's old sessions server-side).
   const confirmMove = useCallback(
     (row: IChannelPluginStatus) => {
-      const fromName = companionNameOf(row.companionId) ?? row.companionId ?? row.publicAgentId ?? '';
+      const fromName = companionNameOf(row.companionId) ?? row.companionId ?? '';
       Modal.confirm({
         title: t('nomi.settings.remoteMoveHere'),
         content: t('nomi.settings.remoteMoveConfirm', { from: fromName, to: companionName }),

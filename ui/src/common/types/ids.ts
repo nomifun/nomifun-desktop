@@ -46,9 +46,11 @@ export type EntityKind =
   | 'companion-session-window'
   | 'skill-pattern'
   | 'figure'
-  | 'public-agent-audit-entry'
   | 'companion-evolution-feedback'
-  | 'public-agent'
+  | 'cs-agent'
+  | 'cs-dialogue'
+  | 'cs-message'
+  | 'cs-note'
   | 'channel-plugin'
   | 'channel-user'
   | 'channel-session'
@@ -98,9 +100,11 @@ export type CompanionLearnRunId = EntityId<'companion-learn-run'>;
 export type CompanionSessionWindowId = EntityId<'companion-session-window'>;
 export type SkillPatternId = EntityId<'skill-pattern'>;
 export type FigureId = EntityId<'figure'>;
-export type PublicAgentAuditEntryId = EntityId<'public-agent-audit-entry'>;
 export type CompanionEvolutionFeedbackId = EntityId<'companion-evolution-feedback'>;
-export type PublicAgentId = EntityId<'public-agent'>;
+export type CsAgentId = EntityId<'cs-agent'>;
+export type CsDialogueId = EntityId<'cs-dialogue'>;
+export type CsMessageId = EntityId<'cs-message'>;
+export type CsNoteId = EntityId<'cs-note'>;
 export type ChannelPluginId = EntityId<'channel-plugin'>;
 export type ChannelUserId = EntityId<'channel-user'>;
 export type ChannelSessionId = EntityId<'channel-session'>;
@@ -214,13 +218,17 @@ export const parseCompanionSessionWindowId = (value: unknown): CompanionSessionW
 export const parseSkillPatternId = (value: unknown): SkillPatternId =>
   parseEntityId('skill-pattern', value);
 export const parseFigureId = (value: unknown): FigureId => parseEntityId('figure', value);
-export const parsePublicAgentAuditEntryId = (value: unknown): PublicAgentAuditEntryId =>
-  parseEntityId('public-agent-audit-entry', value);
 export const parseCompanionEvolutionFeedbackId = (
   value: unknown
 ): CompanionEvolutionFeedbackId => parseEntityId('companion-evolution-feedback', value);
-export const parsePublicAgentId = (value: unknown): PublicAgentId =>
-  parseEntityId('public-agent', value);
+export const parseCsAgentId = (value: unknown): CsAgentId =>
+  parseEntityId('cs-agent', value);
+export const parseCsDialogueId = (value: unknown): CsDialogueId =>
+  parseEntityId('cs-dialogue', value);
+export const parseCsMessageId = (value: unknown): CsMessageId =>
+  parseEntityId('cs-message', value);
+export const parseCsNoteId = (value: unknown): CsNoteId =>
+  parseEntityId('cs-note', value);
 export const parseChannelPluginId = (value: unknown): ChannelPluginId =>
   parseEntityId('channel-plugin', value);
 export const parseChannelUserId = (value: unknown): ChannelUserId =>

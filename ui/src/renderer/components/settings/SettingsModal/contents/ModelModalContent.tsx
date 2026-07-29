@@ -539,7 +539,7 @@ const ModelModalContent: React.FC = () => {
           const groups = groupUsagesByFeature(parseProviderInUseDetails(error.details));
           const featureName: Record<ProviderUsageFeature, string> = {
             desktopCompanion: t('settings.providerInUse.desktopCompanion'),
-            publicCompanion: t('settings.providerInUse.publicCompanion'),
+            customerService: t('settings.providerInUse.customerService'),
             smartDecision: t('settings.providerInUse.smartDecision'),
             conversation: t('settings.providerInUse.conversation'),
             agentExecution: t('settings.providerInUse.agentExecution'),

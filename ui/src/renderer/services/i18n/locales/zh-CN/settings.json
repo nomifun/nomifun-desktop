@@ -168,7 +168,6 @@
   "presetTargetConversation": "Agent 会话",
   "presetTargetExecutionStep": "协作任务",
   "presetTargetCompanion": "伙伴",
-  "presetTargetPublicCompanion": "对外伙伴",
   "presetTargetCron": "定时任务",
   "presetAllowFallback": "偏好不可用时允许回退",
   "presetAutoSelectable": "允许协作任务自动选择",
@@ -958,7 +957,7 @@
     "desc": "以下功能仍在使用该供应商，请先前往解绑或更换模型后再删除：",
     "goto": "前往处理",
     "desktopCompanion": "桌面伙伴",
-    "publicCompanion": "对外伙伴",
+    "customerService": "客服",
     "smartDecision": "智能决策",
     "conversation": "会话主模型",
     "agentExecution": "协作任务"

@@ -28,8 +28,8 @@ const SourcesPage = React.lazy(() => import('@renderer/pages/requirements/Source
 const TerminalSessionPage = React.lazy(() => import('@renderer/pages/terminal/TerminalSessionPage'));
 const TerminalCreatePage = React.lazy(() => import('@renderer/pages/terminal/TerminalCreatePage'));
 const NomiConfigPage = React.lazy(() => import('@renderer/pages/nomi'));
-const PublicCompanionRosterPage = React.lazy(() => import('@renderer/pages/publicCompanion'));
-const PublicAgentDetailPage = React.lazy(() => import('@renderer/pages/publicCompanion/PublicAgentDetailPage'));
+const CustomerServiceRosterPage = React.lazy(() => import('@renderer/pages/customerService'));
+const CustomerServiceDetailPage = React.lazy(() => import('@renderer/pages/customerService/CsAgentDetailPage'));
 const KnowledgeListPage = React.lazy(() => import('@renderer/pages/knowledge/KnowledgeListPage'));
 const KnowledgeDetailPage = React.lazy(() => import('@renderer/pages/knowledge/KnowledgeDetailPage'));
 const WorkshopListPage = React.lazy(() => import('@renderer/pages/workshop'));
@@ -246,9 +246,9 @@ const PanelRoute: React.FC<{ layout: React.ReactElement }> = ({ layout }) => {
           {/* Webhook config relocated into 扩展能力 */}
           <Route path='/other' element={<Navigate to='/requirements/extensions?tab=notify' replace />} />
           <Route path='/nomi' element={withRouteFallback(NomiConfigPage)} />
-          {/* 对外伙伴 (Public Companion) — a first-class domain separate from desktop companions. */}
-          <Route path='/public-companions' element={withRouteFallback(PublicCompanionRosterPage)} />
-          <Route path='/public-companions/:public_agent_id' element={withRouteFallback(PublicAgentDetailPage)} />
+          {/* 客服 (Customer Service) — a first-class domain separate from desktop companions. */}
+          <Route path='/customer-service' element={withRouteFallback(CustomerServiceRosterPage)} />
+          <Route path='/customer-service/:cs_agent_id' element={withRouteFallback(CustomerServiceDetailPage)} />
           <Route path='/knowledge' element={withRouteFallback(KnowledgeListPage)} />
           <Route path='/knowledge/:id' element={withRouteFallback(KnowledgeDetailPage)} />
           {/* 资产库 (Asset Library) — platform-level management of workshop assets. */}

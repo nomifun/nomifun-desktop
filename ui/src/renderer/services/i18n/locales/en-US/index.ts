@@ -28,7 +28,7 @@ import webhook from './webhook.json';
 import autowork from './autowork.json';
 import nomi from './nomi.json';
 import knowledge from './knowledge.json';
-import publicCompanion from './publicCompanion.json';
+import customerService from './customerService.json';
 import assetLibrary from './assetLibrary.json';
 import sessionList from './sessionList.json';
 import modelFailover from './modelFailover.json';
@@ -68,7 +68,7 @@ export default {
   autowork,
   nomi,
   knowledge,
-  publicCompanion,
+  customerService,
   assetLibrary,
   sessionList,
   modelFailover,
