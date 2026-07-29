@@ -516,6 +516,10 @@ struct BrowserSessionHubInner {
     host_cleanup_retry_gate: Mutex<()>,
     cleanup_sequence: AtomicU64,
     host_epoch_sequence: AtomicU64,
+    // Last pressure state broadcast by the telemetry sampler, encoded for the
+    // idle-sample suppression in `update_resource_telemetry`.
+    // 0 = never sampled, 1 = Normal, 2 = Pressured, 3 = Critical.
+    last_sampled_pressure_state: AtomicU64,
     host_restarts: PerKeyHostRestartSingleFlight<HostKey>,
     host_circuits: Mutex<HashMap<HostKey, Arc<HostCircuitBreaker>>>,
     // Primary process visibility is a Host-wide property. Serialize explicit
@@ -723,6 +727,7 @@ impl BrowserSessionHub {
                 host_cleanup_retry_gate: Mutex::new(()),
                 cleanup_sequence: AtomicU64::new(0),
                 host_epoch_sequence: AtomicU64::new(0),
+                last_sampled_pressure_state: AtomicU64::new(0),
                 host_restarts: PerKeyHostRestartSingleFlight::default(),
                 host_circuits: Mutex::new(HashMap::new()),
                 primary_visibility_gate: Mutex::new(()),
@@ -5401,7 +5406,23 @@ impl BrowserSessionHub {
         self.apply_operation_weight_limit(decision.operation_weight_limit)
             .await;
         self.promote_released_capacity().await;
-        self.emit("resource_pressure_sampled", None);
+        // Every sample drives a client-visible inventory event, and clients
+        // refresh on each one. With zero lanes and an unchanged pressure
+        // state there is nothing actionable in the sample; suppress the
+        // broadcast so an idle installation does not poll itself forever.
+        let encoded_state = match decision.state {
+            ResourcePressureState::Normal => 1,
+            ResourcePressureState::Pressured => 2,
+            ResourcePressureState::Critical => 3,
+        };
+        let previous = self
+            .inner
+            .last_sampled_pressure_state
+            .swap(encoded_state, Ordering::AcqRel);
+        let has_lanes = !self.inner.lanes.read().await.is_empty();
+        if has_lanes || previous != encoded_state {
+            self.emit("resource_pressure_sampled", None);
+        }
     }
 
     async fn refresh_lane_resource_estimates(&self, telemetry: &ResourceTelemetry) {
@@ -11867,6 +11888,59 @@ mod tests {
             "the retry must launch a fresh slot/epoch instead of reusing the timed-out slot"
         );
         assert_eq!(harness.factory.launches.load(Ordering::Acquire), 2);
+    }
+
+    #[tokio::test]
+    async fn idle_telemetry_samples_do_not_broadcast_without_change_or_lanes() {
+        let harness = harness();
+        let mut events = harness.hub.subscribe();
+        let normal = ResourceTelemetry {
+            total_memory_bytes: 16 * crate::resource::GIB,
+            available_memory_bytes: 12 * crate::resource::GIB,
+            logical_cpus: 8,
+            ..Default::default()
+        };
+
+        // The first sample establishes the pressure state and is broadcast.
+        harness.hub.update_resource_telemetry(normal.clone()).await;
+        assert_eq!(
+            events.recv().await.unwrap().change_kind,
+            "resource_pressure_sampled"
+        );
+
+        // An idle repeat (zero lanes, unchanged state) must not push a
+        // client-visible event every sample period forever.
+        harness.hub.update_resource_telemetry(normal.clone()).await;
+        harness.hub.update_resource_telemetry(normal.clone()).await;
+        assert!(
+            matches!(
+                events.try_recv(),
+                Err(tokio::sync::broadcast::error::TryRecvError::Empty)
+            ),
+            "idle unchanged samples must be suppressed"
+        );
+
+        // A pressure-state transition is actionable and is broadcast.
+        let pressured = ResourceTelemetry {
+            available_memory_bytes: 3 * crate::resource::GIB,
+            ..normal.clone()
+        };
+        harness.hub.update_resource_telemetry(pressured.clone()).await;
+        assert_eq!(
+            events.recv().await.unwrap().change_kind,
+            "resource_pressure_sampled"
+        );
+
+        // With live lanes every sample is broadcast so lane resource
+        // estimates stay fresh in the management surface.
+        let lane_id = open(&harness.client, "telemetry-live").await;
+        assert!(harness.client.status(&lane_id).await.is_ok());
+        while events.try_recv().is_ok() {}
+        harness.hub.update_resource_telemetry(pressured).await;
+        assert_eq!(
+            events.recv().await.unwrap().change_kind,
+            "resource_pressure_sampled"
+        );
     }
 
     #[tokio::test]
