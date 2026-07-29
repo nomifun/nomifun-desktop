@@ -457,6 +457,11 @@ impl CompanionService {
         })
     }
 
+    fn parse_summon_companion_id(companion_id: &str) -> Result<nomifun_common::CompanionId, AppError> {
+        nomifun_common::CompanionId::try_from(companion_id)
+            .map_err(|error| AppError::BadRequest(format!("invalid summon companion id: {error}")))
+    }
+
     fn companion(&self) -> Result<&CompanionThreads, AppError> {
         self.companion
             .get()
@@ -1960,6 +1965,91 @@ impl nomifun_ai_agent::CompanionPromptProvider for CompanionService {
         let profile = self.registry.get(companion_id.as_str()).await?;
         let smart = self.config.read().await.smart_collaboration;
         Some(crate::companion::build_companion_system_prompt(&self.store, &profile, channel_platform, smart).await)
+    }
+}
+
+/// In-session companion summon provider (spec §设计 B): the nomi factory's
+/// seam into the companion domain for `extra.summon` sessions — read-only
+/// sinks over the store, the per-turn snapshot resolver, and manifest-owned
+/// workspace skill materialization/unload.
+#[async_trait::async_trait]
+impl nomifun_ai_agent::CompanionSummonProvider for CompanionService {
+    async fn companion_name(&self, companion_id: &str) -> Option<String> {
+        self.registry.get(companion_id).await.map(|profile| profile.name)
+    }
+
+    fn summon_memory_sink(
+        &self,
+        companion_id: &str,
+    ) -> Result<Arc<dyn nomifun_ai_agent::CompanionMemorySink>, AppError> {
+        Ok(Arc::new(crate::summon_support::SummonMemorySink::new(
+            self.store.clone(),
+            Self::parse_summon_companion_id(companion_id)?,
+        )))
+    }
+
+    fn summon_proposal_sink(
+        &self,
+        companion_id: &str,
+    ) -> Result<Arc<dyn nomifun_ai_agent::SummonProposalSink>, AppError> {
+        Ok(Arc::new(crate::summon_support::SummonSuggestionSink::new(
+            self.store.clone(),
+            self.emitter.clone(),
+            Self::parse_summon_companion_id(companion_id)?,
+        )))
+    }
+
+    fn summon_context_sink(
+        &self,
+        config: &nomifun_api_types::SummonConfig,
+    ) -> Result<Arc<dyn nomifun_ai_agent::SummonContextSink>, AppError> {
+        Self::parse_summon_companion_id(&config.companion_id)?;
+        Ok(Arc::new(crate::summon_support::SummonContextResolver::new(
+            self.store.clone(),
+            config.clone(),
+        )))
+    }
+
+    async fn sync_summon_workspace_skills(
+        &self,
+        conversation_id: &str,
+        workspace: &std::path::Path,
+        companion_id: &str,
+        skill_exclusions: &[String],
+    ) -> Result<Vec<String>, AppError> {
+        let profile = self
+            .registry
+            .get(companion_id)
+            .await
+            .ok_or_else(|| AppError::NotFound(format!("companion '{companion_id}' not found")))?;
+        let names: Vec<String> =
+            crate::companion::effective_skill_names(&self.skill_paths, &profile)
+                .await?
+                .into_iter()
+                .filter(|name| !skill_exclusions.iter().any(|excluded| excluded == name))
+                .collect();
+        Ok(crate::companion::sync_managed_workspace_skills(
+            &self.skill_paths,
+            conversation_id,
+            workspace,
+            &names,
+        )
+        .await)
+    }
+
+    async fn clear_summon_workspace_skills(
+        &self,
+        conversation_id: &str,
+        workspace: &std::path::Path,
+    ) -> Result<(), AppError> {
+        crate::companion::sync_managed_workspace_skills(
+            &self.skill_paths,
+            conversation_id,
+            workspace,
+            &[],
+        )
+        .await;
+        Ok(())
     }
 }
 

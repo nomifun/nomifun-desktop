@@ -54,8 +54,8 @@ pub use factory::provider_config::{
     streaming_completion_text_or_reasoning, user_message, DeltaKind,
 };
 pub use factory::{
-    AgentFactoryDeps, CompanionPromptProvider, PublicAgentProvider, PublicAgentRuntime,
-    build_agent_factory,
+    AgentFactoryDeps, CompanionPromptProvider, CompanionSummonProvider, PublicAgentProvider,
+    PublicAgentRuntime, build_agent_factory,
 };
 #[cfg(feature = "browser-use")]
 pub use factory::browser_lane::{
