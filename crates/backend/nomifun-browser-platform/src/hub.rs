@@ -2376,7 +2376,18 @@ impl BrowserSessionHub {
     ) -> Result<HostRestartTransition, BrowserPlatformError> {
         let hub = self.clone();
         let restart_key = key.clone();
-        let restart_identity_mode = key.identity_mode;
+        // LOCK ORDER: primary_visibility_gate is always acquired BEFORE
+        // joining or leading a per-key restart flight. The visibility paths
+        // (set_primary_visibility_once / set_lane_visibility_and_maybe_focus
+        // -> transition_primary_visibility_locked) hold the gate and then
+        // enter host_restarts.run_bounded; acquiring the gate inside the
+        // flight's leader closure instead would deadlock those callers
+        // against crash recovery until the attempt timeout aborts the leader.
+        let _primary_visibility_guard = if key.identity_mode == BrowserIdentityMode::Primary {
+            Some(self.inner.primary_visibility_gate.lock().await)
+        } else {
+            None
+        };
         let flight = self
             .inner
             .host_restarts
@@ -2385,12 +2396,6 @@ impl BrowserSessionHub {
                 observed_epoch,
                 HOST_RESTART_ATTEMPT_TIMEOUT,
                 move || async move {
-                    let _primary_visibility_guard =
-                        if restart_identity_mode == BrowserIdentityMode::Primary {
-                            Some(hub.inner.primary_visibility_gate.lock().await)
-                        } else {
-                            None
-                        };
                     hub.mark_host_restarting(&restart_key, observed_epoch)
                         .await;
                     let result = hub
@@ -3419,6 +3424,12 @@ impl BrowserSessionHub {
         Ok(snapshot)
     }
 
+    /// Replaces the live Primary Host with the requested visibility.
+    ///
+    /// LOCK ORDER: the caller must already hold `primary_visibility_gate`
+    /// before this method enters the per-key restart single-flight. Crash
+    /// recovery (`recover_host_failure`) follows the same order — gate first,
+    /// flight second — so the two can never wait on each other.
     async fn transition_primary_visibility_locked(
         &self,
         host_key: &HostKey,
@@ -7564,6 +7575,55 @@ mod tests {
         assert_eq!(overview.hosts.len(), 1);
         assert!(!overview.hosts[0].headful);
         assert!(harness.client.status(&lane_id).await.is_ok());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn crash_recovery_and_visibility_gate_holder_never_deadlock() {
+        // Lock-order regression test: crash recovery must acquire
+        // primary_visibility_gate BEFORE entering the restart single-flight.
+        // If it registered its flight first and acquired the gate inside the
+        // leader closure, the gate-holding transition below would join that
+        // flight and both sides would wait on each other until the 75s
+        // attempt timeout.
+        let harness = harness();
+        let lane_id = open(&harness.client, "gate-order").await;
+        let before = harness.client.status(&lane_id).await.unwrap();
+
+        // Simulate the visibility caller's critical section.
+        let gate = harness.hub.inner.primary_visibility_gate.lock().await;
+        harness
+            .probe
+            .host_fatal_executions_remaining
+            .store(1, Ordering::Release);
+        let client = harness.client.clone();
+        let op_lane = lane_id.clone();
+        let recovery =
+            tokio::spawn(async move { client.execute(&op_lane, navigate()).await });
+        for _ in 0..32 {
+            tokio::task::yield_now().await;
+        }
+
+        let key = HostKey {
+            identity_mode: BrowserIdentityMode::Primary,
+            identity_generation: 0,
+            isolation_lane_id: None,
+        };
+        harness
+            .hub
+            .transition_primary_visibility_locked(&key, before.browser_epoch, true)
+            .await
+            .expect("the gate holder's transition must not deadlock against crash recovery");
+        drop(gate);
+
+        let error = tokio::time::timeout(Duration::from_secs(5), recovery)
+            .await
+            .expect("crash recovery did not settle after the gate was released")
+            .unwrap()
+            .unwrap_err();
+        assert_eq!(error.code, BrowserErrorCode::BrowserRestarted);
+        let current = harness.client.status(&lane_id).await.unwrap();
+        assert_ne!(current.browser_epoch, before.browser_epoch);
+        assert!(harness.hub.overview().await.hosts[0].headful);
     }
 
     #[tokio::test]
