@@ -92,7 +92,7 @@ async fn forward_user_events(
                 // Coalesced (F61): a sustained burst of unrelated events (
                 // terminal scrollback, agent step updates) produces repeated
                 // lag errors; without coalescing every one became another
-                // fleet-wide browser-inventory refetch. At most one resync per
+                // all-clients browser-inventory refetch. At most one resync per
                 // interval is broadcast, with a guaranteed trailing resync
                 // covering the last suppressed lag.
                 resync.on_lag(skipped);
@@ -102,7 +102,7 @@ async fn forward_user_events(
     }
 }
 
-/// Minimum spacing between fleet-wide lag-resync invalidations (F61).
+/// Minimum spacing between all-clients lag-resync invalidations (F61).
 const RESYNC_COALESCE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(2);
 
 /// Rate-limits `browser.inventory.changed` resync broadcasts.
