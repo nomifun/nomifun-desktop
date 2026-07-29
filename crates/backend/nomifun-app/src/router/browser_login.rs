@@ -169,6 +169,36 @@ pub(crate) struct LoginStatus {
     source: Option<String>,
 }
 
+/// How an open request must treat the Lane of an already-tracked login
+/// session, based on its current Hub lifecycle state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReopenDisposition {
+    /// Genuinely pending (queued for capacity, or its start is in flight):
+    /// keep the session and report `queued` — the open-time watcher
+    /// foregrounds the window once the Lane runs (F29).
+    ReportQueued,
+    /// Running: reveal the existing managed window.
+    Foreground,
+    /// Dead or dying. A Failed/Frozen/Stopping Lane will never be promoted to
+    /// Running, so reporting it `queued` would livelock the login feature
+    /// forever (the queued watcher has already given up on these states).
+    /// Close the dead Lane with its owner lease and open a fresh one instead
+    /// (the pre-F29 self-heal).
+    ReplaceDeadLane,
+}
+
+fn reopen_disposition(state: LaneLifecycleState) -> ReopenDisposition {
+    match state {
+        LaneLifecycleState::Queued | LaneLifecycleState::Starting => {
+            ReopenDisposition::ReportQueued
+        }
+        LaneLifecycleState::Running => ReopenDisposition::Foreground,
+        LaneLifecycleState::Frozen
+        | LaneLifecycleState::Stopping
+        | LaneLifecycleState::Failed => ReopenDisposition::ReplaceDeadLane,
+    }
+}
+
 pub(crate) async fn open_browser_login(
     State(state): State<BrowserLoginState>,
     Json(_body): Json<OpenLoginBody>,
@@ -188,44 +218,52 @@ pub(crate) async fn open_browser_login(
         if let Some(snapshot) = existing_snapshot
             && hub.renew_owner_lease(&existing.owner_lease_id).is_ok()
         {
-            // A Lane that is still queued (or starting) cannot be
-            // foregrounded — the Hub only foregrounds Running lanes — and a
-            // failed foreground here used to revoke the pending login (F29).
-            // Report the queue state instead; the watcher spawned at open
-            // time foregrounds the window once the Lane runs.
-            if snapshot.lifecycle_state != LaneLifecycleState::Running {
-                return login_response(
-                    true,
-                    "queued",
-                    false,
-                    Some(existing.lane_id.clone()),
-                    source,
-                );
-            }
-            if hub
-                .foreground_lane_for_user(state.inner.user_id.as_ref(), &existing.lane_id)
-                .await
-                .is_err()
-            {
-                if let Some(stale) = session.take() {
-                    stale.renewal_task.abort();
-                    let _ = hub.revoke_owner_lease(&stale.owner_lease_id).await;
+            match reopen_disposition(snapshot.lifecycle_state) {
+                // A Lane that is still queued (or starting) cannot be
+                // foregrounded — the Hub only foregrounds Running lanes — and
+                // a failed foreground here used to revoke the pending login
+                // (F29). Report the queue state instead; the watcher spawned
+                // at open time foregrounds the window once the Lane runs.
+                ReopenDisposition::ReportQueued => {
+                    return login_response(
+                        true,
+                        "queued",
+                        false,
+                        Some(existing.lane_id.clone()),
+                        source,
+                    );
                 }
-                return login_response(
-                    false,
-                    "launch_failed:browser_unavailable",
-                    false,
-                    None,
-                    source,
-                );
+                ReopenDisposition::Foreground => {
+                    if hub
+                        .foreground_lane_for_user(state.inner.user_id.as_ref(), &existing.lane_id)
+                        .await
+                        .is_err()
+                    {
+                        if let Some(stale) = session.take() {
+                            stale.renewal_task.abort();
+                            let _ = hub.revoke_owner_lease(&stale.owner_lease_id).await;
+                        }
+                        return login_response(
+                            false,
+                            "launch_failed:browser_unavailable",
+                            false,
+                            None,
+                            source,
+                        );
+                    }
+                    return login_response(
+                        true,
+                        "already_open",
+                        false,
+                        Some(existing.lane_id.clone()),
+                        source,
+                    );
+                }
+                // Fall through to the stale-session cleanup below: revoking
+                // the owner lease closes the dead Lane, and a fresh Lane is
+                // opened in this same request (pre-F29 self-heal).
+                ReopenDisposition::ReplaceDeadLane => {}
             }
-            return login_response(
-                true,
-                "already_open",
-                false,
-                Some(existing.lane_id.clone()),
-                source,
-            );
         }
     }
     if let Some(stale) = session.take() {
@@ -533,6 +571,10 @@ mod tests {
     struct FakeProbe {
         foregrounds: AtomicUsize,
         fail_foreground: AtomicBool,
+        /// While set, `open_lane` fails on the fake Host: a QUEUED login Lane
+        /// promoted by the scheduler then transitions to `Failed` (the Hub
+        /// marks a failed start instead of discarding the Lane).
+        fail_open_lane: AtomicBool,
     }
 
     struct FakeFactory {
@@ -585,6 +627,14 @@ mod tests {
             &self,
             _request: LaneLaunchRequest,
         ) -> Result<Arc<dyn BrowserLaneDriver>, BrowserPlatformError> {
+            if self.probe.fail_open_lane.load(Ordering::Acquire) {
+                return Err(BrowserPlatformError::new(
+                    nomifun_browser_platform::BrowserErrorCode::BrowserUnavailable,
+                    "Synthetic login lane start failure.",
+                    true,
+                    "Retry the login request.",
+                ));
+            }
             Ok(Arc::new(FakeLane {
                 probe: Arc::clone(&self.probe),
             }))
@@ -1045,6 +1095,133 @@ mod tests {
         })
         .await
         .expect("promoted login lane was never foregrounded");
+
+        let _ = close_browser_login(State(state)).await;
+        hub.shutdown().await.expect("shutdown fake browser Hub");
+    }
+
+    /// The livelock regression behind the reopen self-heal: the reopen path
+    /// must never classify a dead/dying Lane as pending. The old code
+    /// reported EVERY non-Running lifecycle state as "queued", so a
+    /// Failed/Frozen Lane was reported pending forever and the login feature
+    /// never recovered (the open-time watcher gives up on exactly these
+    /// states and can never foreground them).
+    #[test]
+    fn reopen_disposition_never_reports_a_dead_lane_as_queued() {
+        assert_eq!(
+            reopen_disposition(LaneLifecycleState::Queued),
+            ReopenDisposition::ReportQueued,
+            "a queued login must survive a repeat click (F29)"
+        );
+        assert_eq!(
+            reopen_disposition(LaneLifecycleState::Starting),
+            ReopenDisposition::ReportQueued,
+            "an in-flight start is genuinely pending"
+        );
+        assert_eq!(
+            reopen_disposition(LaneLifecycleState::Running),
+            ReopenDisposition::Foreground
+        );
+        for dead in [
+            LaneLifecycleState::Failed,
+            LaneLifecycleState::Frozen,
+            LaneLifecycleState::Stopping,
+        ] {
+            assert_eq!(
+                reopen_disposition(dead),
+                ReopenDisposition::ReplaceDeadLane,
+                "{dead:?} can never reach Running; reporting it queued livelocks the login"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn login_lane_that_failed_to_start_recovers_with_a_fresh_lane_on_reopen() {
+        let mut config = HubConfig::default();
+        config.resource_policy.max_open_lanes = 1;
+        let (hub, probe) = login_hub(config);
+
+        // Fill capacity so the login Lane is admitted Queued.
+        let blocker_lease = hub
+            .issue_owner_lease("user-1", None, "blocker-runtime")
+            .expect("issue blocker lease");
+        let blocker = hub
+            .bind(CallerIdentity {
+                user_id: "user-1".to_owned(),
+                conversation_id: None,
+                runtime_instance_id: "blocker-runtime".to_owned(),
+                agent_id: None,
+                companion_id: None,
+                execution_id: None,
+                step_id: None,
+                attempt_id: None,
+                remote_connection_id: None,
+                surface: BrowserSurface::System,
+                owner_lease_id: blocker_lease.lease_id.clone(),
+                capability_expires_at_ms: blocker_lease.expires_at_ms,
+                allowed_operations: BTreeSet::from([
+                    BrowserOperationKind::Crawl,
+                    BrowserOperationKind::Manage,
+                ]),
+            })
+            .expect("bind blocker");
+        assert!(matches!(
+            blocker
+                .open(Some("blocker"), BrowserIdentityMode::Anonymous, None)
+                .await
+                .expect("open blocker"),
+            OpenLaneOutcome::Running { .. }
+        ));
+
+        let state = login_state(&hub);
+        probe.fail_open_lane.store(true, Ordering::Release);
+        let Json(first) = open_browser_login(State(state.clone()), Json(open_body())).await;
+        let first = first.data.expect("first login response");
+        assert!(first.active);
+        assert_eq!(first.message.as_deref(), Some("queued"));
+        let failed_lane_id = first.lane_id.expect("queued login Lane");
+
+        // Capacity frees -> the scheduler promotes the login Lane -> its
+        // start fails -> the Hub discards the dead Lane.
+        blocker.close_all().await.expect("close blocker");
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let gone = hub
+                    .list_lanes()
+                    .await
+                    .iter()
+                    .all(|lane| lane.lane_id != failed_lane_id);
+                if gone {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+        })
+        .await
+        .expect("failed login lane start was never discarded");
+
+        // The reopen must self-heal within ONE request: clean the stale
+        // session, then open (and foreground) a fresh Running Lane — never
+        // report the dead login as still pending.
+        probe.fail_open_lane.store(false, Ordering::Release);
+        let Json(second) = open_browser_login(State(state.clone()), Json(open_body())).await;
+        let second = second.data.expect("second login response");
+        assert!(second.active, "self-heal must produce a usable login lane");
+        assert_eq!(second.message.as_deref(), Some("opened"));
+        let fresh_lane_id = second.lane_id.expect("fresh login Lane");
+        assert_ne!(
+            fresh_lane_id, failed_lane_id,
+            "the dead lane must be replaced, not re-reported"
+        );
+        assert!(
+            hub.list_lanes()
+                .await
+                .iter()
+                .any(|lane| lane.lane_id == fresh_lane_id
+                    && lane.lifecycle_state == LaneLifecycleState::Running),
+            "the replacement login lane must be Running"
+        );
+        assert!(probe.foregrounds.load(Ordering::Acquire) >= 1);
 
         let _ = close_browser_login(State(state)).await;
         hub.shutdown().await.expect("shutdown fake browser Hub");
