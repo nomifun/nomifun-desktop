@@ -225,9 +225,9 @@ pub struct NomiResolvedConfig {
     /// it; probe-only runtimes may leave it absent because they do not resume a
     /// conversation session.
     pub owner_token: Option<String>,
-    /// Backend-authoritative host composition switch. Platform Gateway,
-    /// secondary-user, and PublicService sessions leave embedded AgentExecution
-    /// uninstalled; trusted no-gateway standalone sessions install it. This is
+    /// Backend-authoritative host composition switch. Platform Gateway and
+    /// secondary-user sessions leave embedded AgentExecution uninstalled;
+    /// trusted no-gateway standalone sessions install it. This is
     /// internal runtime state and is never serialized as user configuration.
     pub install_embedded_agent_execution: bool,
     /// Per-session 工具白名单（空 = 不限制），源自 `NomiBuildExtra.allowed_tools`，

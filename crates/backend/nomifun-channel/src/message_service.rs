@@ -168,7 +168,7 @@ impl ChannelMessageService {
             .await
     }
 
-    /// Wire the profile that resolves a channel's companion and public-agent owner.
+    /// Wire the profile that resolves a channel's companion owner.
     /// Without it, channel conversations still receive their base Agent context,
     /// but owner-specific model and persona resolution are unavailable.
     pub fn with_channel_agent_profile(mut self, profile: Arc<dyn ChannelAgentProfile>) -> Self {

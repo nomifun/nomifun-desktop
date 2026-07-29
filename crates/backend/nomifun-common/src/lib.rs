@@ -58,7 +58,7 @@ pub use id::{
     EntityId, FigureId,
     IdmmInterventionId, KnowledgeBaseId, KnowledgeBindingId, McpServerId, MessageId,
     PersistedArtifactId, PresetId, PresetTagId, PreviewSnapshotId, ProviderId,
-    PublicAgentAuditEntryId, PublicAgentId, RemoteAgentId, TerminalId, UUID_STRING_LEN,
+    RemoteAgentId, TerminalId, UUID_STRING_LEN,
     RequirementId, UserId, UuidV7Error, WebhookId,
     WorkshopAssetId, WorkshopCanvasId, WorkshopEdgeId, WorkshopNodeId, generate_id,
     validate_uuidv7,

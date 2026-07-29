@@ -967,7 +967,7 @@ pub struct AppServices {
     pub(crate) _boot_reconciliation_authority:
         Option<crate::bootstrap::BootServerLockAuthority>,
     /// Process-local barrier covering Provider lifecycle operations that span
-    /// SQLite and JSON side stores (companions/public agents).
+    /// SQLite and JSON side stores (companions).
     pub provider_lifecycle: nomifun_common::SharedProviderLifecycleBarrier,
     /// Canonical owner of every installation-scoped resource. Resolved once
     /// through `installation_identity` at boot; usernames are mutable display
@@ -1058,10 +1058,6 @@ pub struct AppServices {
     /// factory so the factory can register the companion memory tools for
     /// companion_session conversations; the router reuses this same instance.
     pub companion_service: Arc<nomifun_companion::CompanionService>,
-    /// Singleton public-companion (对外伙伴) service — the enterprise external-
-    /// service domain, entirely separate from `companion_service`. Owns its own
-    /// `public-agents/` store, roster, and day-partitioned audit.
-    pub public_agent_service: Arc<nomifun_public_agent::PublicAgentService>,
     /// 客服独立域 CRUD service (agents / notes / bindings).
     pub customer_service_service: Arc<nomifun_customer_service::CustomerServiceService>,
     /// 客服无状态并发回合执行器 (channel seam target).
@@ -2289,16 +2285,6 @@ impl AppServices {
         .await
         .map_err(|e| anyhow::anyhow!("companion service start failed: {e}"))?;
 
-        // Public-companion (对外伙伴) domain — its own store under public-agents/.
-        // No completer / event bus / memory: it is a controlled enterprise service
-        // agent, not a growing personal companion.
-        let public_agent_service =
-            nomifun_public_agent::PublicAgentService::start_with_provider_lifecycle(
-                &data_dir,
-                Some(provider_repo.clone() as Arc<dyn nomifun_db::IProviderRepository>),
-                Some(provider_lifecycle.clone()),
-            );
-
         // 客服独立域 (customer-service domain): agents/notes/bindings CRUD
         // service + the stateless concurrent dialogue engine. The engine's
         // LLM turns go through the generic one-shot entry whose tool table is
@@ -2493,9 +2479,6 @@ impl AppServices {
             companion_prompt: Some(
                 companion_service.clone() as Arc<dyn nomifun_ai_agent::CompanionPromptProvider>
             ),
-            public_agent_provider: Some(
-                public_agent_service.clone() as Arc<dyn nomifun_ai_agent::PublicAgentProvider>
-            ),
         });
 
         // Agent factory is now wired. Future extension/custom agents
@@ -2551,7 +2534,6 @@ impl AppServices {
             _gateway_mcp_server: gateway_mcp_server,
             _knowledge_mcp_server: knowledge_mcp_server,
             companion_service,
-            public_agent_service,
             customer_service_service,
             cs_dialogue_engine,
             workshop_service,

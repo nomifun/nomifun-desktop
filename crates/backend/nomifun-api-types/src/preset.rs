@@ -10,7 +10,7 @@ pub enum PresetSource { Builtin, User, Extension }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "snake_case")]
-pub enum PresetTarget { Conversation, ExecutionStep, Companion, PublicCompanion, Cron }
+pub enum PresetTarget { Conversation, ExecutionStep, Companion, Cron }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]

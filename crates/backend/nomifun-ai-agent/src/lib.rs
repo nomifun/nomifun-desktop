@@ -55,7 +55,7 @@ pub use factory::provider_config::{
 };
 pub use one_shot::{OneShotDeps, OneShotTool, OneShotTurnRequest, one_shot_handler, run_one_shot_turn};
 pub use factory::{
-    AgentFactoryDeps, CompanionPromptProvider, PublicAgentProvider, PublicAgentRuntime,
+    AgentFactoryDeps, CompanionPromptProvider,
     build_agent_factory,
 };
 #[cfg(feature = "browser-use")]

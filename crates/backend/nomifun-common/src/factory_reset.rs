@@ -108,6 +108,7 @@ const RELEASED_V1_MANAGED_ROOTS: &[(&str, ManagedRootKind)] = &[
     ("companion", ManagedRootKind::Directory),
     ("cron", ManagedRootKind::Directory),
     ("workshop", ManagedRootKind::Directory),
+    // Legacy root of the retired public-agent domain (cleanup only).
     ("public-agents", ManagedRootKind::Directory),
     ("preview-history", ManagedRootKind::Directory),
     ("nomi-sessions", ManagedRootKind::Directory),

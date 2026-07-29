@@ -288,7 +288,7 @@ impl ChannelManager {
         let config = self.plugin_config_from_request(config_value, existing.as_ref())?;
 
         // One bot, one live binding: the same bot identity on another row would
-        // let a second companion/public agent answer for it. A row that failed
+        // let a second companion answer for it. A row that failed
         // before its first successful connection is only a stale draft; reuse it
         // instead of reporting a false "already connected" conflict.
         let bot_key = bot_key_for(plugin_type, &config.credentials);

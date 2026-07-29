@@ -5577,7 +5577,6 @@ dependencies = [
  "nomifun-office",
  "nomifun-preset",
  "nomifun-public",
- "nomifun-public-agent",
  "nomifun-realtime",
  "nomifun-requirement",
  "nomifun-runtime",
@@ -6184,25 +6183,6 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tower",
- "tracing",
-]
-
-[[package]]
-name = "nomifun-public-agent"
-version = "0.3.3"
-dependencies = [
- "async-trait",
- "axum",
- "nomifun-ai-agent",
- "nomifun-api-types",
- "nomifun-auth",
- "nomifun-common",
- "nomifun-db",
- "nomifun-preset",
- "serde",
- "serde_json",
- "tempfile",
- "tokio",
  "tracing",
 ]
 
