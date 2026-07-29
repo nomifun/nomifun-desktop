@@ -7604,6 +7604,64 @@ mod tests {
         assert!(harness.client.status(&lane_id).await.is_ok());
     }
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn lane_created_is_emitted_before_the_start_task_is_spawned() {
+        // Ordering regression pin: `open_lane` must publish `lane_created`
+        // synchronously BEFORE spawning the start task. If the emit moves back
+        // after the spawn, a start task scheduled on another worker can publish
+        // `lane_running` first, so inventory subscribers would observe a lane
+        // running before it was ever created. Blocking the Host launch parks
+        // the start task at its earliest observable step; by that point the
+        // creation event must already be in the channel.
+        let harness = harness();
+        let mut events = harness.hub.subscribe();
+        harness
+            .probe
+            .block_host_launch
+            .store(true, Ordering::Release);
+
+        let client = harness.client.clone();
+        let opener = tokio::spawn(async move {
+            client
+                .open(
+                    Some("created-before-start"),
+                    BrowserIdentityMode::Primary,
+                    None,
+                )
+                .await
+        });
+
+        // The start task has been spawned and is parked inside the blocked
+        // launch; `lane_created` must already be observable and no start
+        // progress may have been published ahead of it.
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            harness.probe.wait_for_host_launches(1),
+        )
+        .await
+        .expect("the lane start task never reached the Host launch");
+        assert_eq!(
+            events
+                .try_recv()
+                .expect("lane_created must be published before the start task runs")
+                .change_kind,
+            "lane_created"
+        );
+
+        harness
+            .probe
+            .block_host_launch
+            .store(false, Ordering::Release);
+        harness.probe.host_launch_release.add_permits(1);
+        let outcome = opener.await.unwrap().unwrap();
+        assert!(matches!(outcome, OpenLaneOutcome::Running { .. }));
+        assert_eq!(
+            events.recv().await.unwrap().change_kind,
+            "lane_running",
+            "lane_running must strictly follow lane_created"
+        );
+    }
+
     #[tokio::test(start_paused = true)]
     async fn crash_recovery_and_visibility_gate_holder_never_deadlock() {
         // Lock-order regression test: crash recovery must acquire
