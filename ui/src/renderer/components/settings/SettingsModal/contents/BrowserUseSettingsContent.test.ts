@@ -881,16 +881,26 @@ describe('browser login promotion watch singleton', () => {
 
   const installFakeWindow = () => {
     const listeners = new Map<string, Set<(event: unknown) => void>>();
-    (globalThis as { window?: unknown }).window = {
-      addEventListener: (type: string, listener: (event: unknown) => void) => {
-        const set = listeners.get(type) ?? new Set();
-        set.add(listener);
-        listeners.set(type, set);
+    // defineProperty instead of plain assignment: other test files restore
+    // `window` as a non-writable property, which makes strict-mode assignment
+    // throw depending on file order.
+    Object.defineProperty(globalThis, 'window', {
+      configurable: true,
+      writable: true,
+      value: {
+        addEventListener: (type: string, listener: (event: unknown) => void) => {
+          const set = listeners.get(type) ?? new Set();
+          set.add(listener);
+          listeners.set(type, set);
+        },
+        removeEventListener: (
+          type: string,
+          listener: (event: unknown) => void,
+        ) => {
+          listeners.get(type)?.delete(listener);
+        },
       },
-      removeEventListener: (type: string, listener: (event: unknown) => void) => {
-        listeners.get(type)?.delete(listener);
-      },
-    };
+    });
     return {
       emit: (type: string) => {
         for (const listener of [...(listeners.get(type) ?? [])]) listener({ type });
@@ -901,9 +911,13 @@ describe('browser login promotion watch singleton', () => {
 
   const restoreWindow = () => {
     if (realWindow === undefined) {
-      delete (globalThis as { window?: unknown }).window;
+      Reflect.deleteProperty(globalThis, 'window');
     } else {
-      (globalThis as { window?: unknown }).window = realWindow;
+      Object.defineProperty(globalThis, 'window', {
+        configurable: true,
+        writable: true,
+        value: realWindow,
+      });
     }
   };
 
