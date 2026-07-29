@@ -66,6 +66,11 @@ pub struct ConversationDeliveryReceiptRow {
     pub result_ok: Option<bool>,
     pub result_text: Option<String>,
     pub result_error: Option<String>,
+    /// Stable snake_case terminal error token (spec D4). `None` for success
+    /// or legacy receipts completed before migration 014.
+    pub result_error_code: Option<String>,
+    /// Whether the terminal failure is safe to retry automatically.
+    pub result_error_retryable: Option<bool>,
     pub created_at: TimestampMs,
     pub updated_at: TimestampMs,
     pub completed_at: Option<TimestampMs>,

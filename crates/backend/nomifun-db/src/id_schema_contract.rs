@@ -862,6 +862,22 @@ pub async fn validate_id_schema_contract(pool: &SqlitePool) -> Result<(), DbErro
     require_column(pool, "conversations", "admission_epoch", "INTEGER", true).await?;
     require_column(
         pool,
+        "conversation_delivery_receipts",
+        "result_error_code",
+        "TEXT",
+        false,
+    )
+    .await?;
+    require_column(
+        pool,
+        "conversation_delivery_receipts",
+        "result_error_retryable",
+        "INTEGER",
+        false,
+    )
+    .await?;
+    require_column(
+        pool,
         "conversations",
         "active_turn_operation_id",
         "TEXT",
@@ -1182,6 +1198,8 @@ async fn validate_no_triggers(pool: &SqlitePool) -> Result<(), DbError> {
                 "NEW.RESULT_OK IS NOT NULL",
                 "NEW.RESULT_TEXT IS NOT NULL",
                 "NEW.RESULT_ERROR IS NOT NULL",
+                "NEW.RESULT_ERROR_CODE IS NOT NULL",
+                "NEW.RESULT_ERROR_RETRYABLE IS NOT NULL",
                 "NEW.COMPLETED_AT IS NOT NULL",
                 "NEW.STATUS = 'COMPLETED'",
                 "TYPEOF(NEW.COMPLETED_AT) <> 'INTEGER'",
@@ -1194,12 +1212,14 @@ async fn validate_no_triggers(pool: &SqlitePool) -> Result<(), DbError> {
         (
             "trg_conversation_delivery_receipts_lifecycle_update_guard",
             &[
-                "BEFORE UPDATE OF STATUS, RESULT_OK, RESULT_TEXT, RESULT_ERROR, COMPLETED_AT ON CONVERSATION_DELIVERY_RECEIPTS",
+                "BEFORE UPDATE OF STATUS, RESULT_OK, RESULT_TEXT, RESULT_ERROR, RESULT_ERROR_CODE, RESULT_ERROR_RETRYABLE, COMPLETED_AT ON CONVERSATION_DELIVERY_RECEIPTS",
                 "OLD.STATUS = 'COMPLETED'",
                 "NEW.STATUS IS NOT OLD.STATUS",
                 "NEW.RESULT_OK IS NOT OLD.RESULT_OK",
                 "NEW.RESULT_TEXT IS NOT OLD.RESULT_TEXT",
                 "NEW.RESULT_ERROR IS NOT OLD.RESULT_ERROR",
+                "NEW.RESULT_ERROR_CODE IS NOT OLD.RESULT_ERROR_CODE",
+                "NEW.RESULT_ERROR_RETRYABLE IS NOT OLD.RESULT_ERROR_RETRYABLE",
                 "NEW.COMPLETED_AT IS NOT OLD.COMPLETED_AT",
                 "NEW.STATUS = 'ACCEPTED'",
                 "NEW.STATUS = 'COMPLETED'",
@@ -2210,6 +2230,57 @@ mod tests {
                 .expect("orphan audit")
                 .is_empty()
         );
+    }
+
+    #[tokio::test]
+    async fn delivery_receipt_structured_error_columns_are_nullable_and_guarded() {
+        let database = init_database_memory().await.expect("database");
+        let pool = database.pool();
+        for (column, expected_type) in [
+            ("result_error_code", "TEXT"),
+            ("result_error_retryable", "INTEGER"),
+        ] {
+            let row = sqlx::query(
+                "SELECT type, \"notnull\" FROM pragma_table_info('conversation_delivery_receipts') \
+                 WHERE name = ?",
+            )
+            .bind(column)
+            .fetch_one(pool)
+            .await
+            .unwrap_or_else(|_| {
+                panic!("conversation_delivery_receipts.{column} must exist")
+            });
+            assert_eq!(
+                row.get::<String, _>("type").to_ascii_uppercase(),
+                expected_type,
+                "conversation_delivery_receipts.{column} type"
+            );
+            assert_eq!(
+                row.get::<i64, _>("notnull"),
+                0,
+                "conversation_delivery_receipts.{column} must stay nullable"
+            );
+        }
+
+        // The rebuilt lifecycle update guard must treat the new columns as
+        // part of the immutable terminal outcome.
+        let update_guard: String = sqlx::query_scalar(
+            "SELECT sql FROM sqlite_schema WHERE type = 'trigger' \
+             AND name = 'trg_conversation_delivery_receipts_lifecycle_update_guard'",
+        )
+        .fetch_one(pool)
+        .await
+        .expect("lifecycle update guard");
+        let normalized = normalize_sql(&update_guard);
+        for fragment in [
+            "NEW.RESULT_ERROR_CODE IS NOT OLD.RESULT_ERROR_CODE",
+            "NEW.RESULT_ERROR_RETRYABLE IS NOT OLD.RESULT_ERROR_RETRYABLE",
+        ] {
+            assert!(
+                normalized.contains(fragment),
+                "update guard must cover structured error columns: missing {fragment}"
+            );
+        }
     }
 
     #[test]
