@@ -338,7 +338,7 @@ async fn install_update(
     let updater = app
         .updater_builder()
         .on_before_exit(move || {
-            updater_before_exit_until_verified(
+            let verified = updater_before_exit_until_verified(
                 || shutdown_server.shutdown_all_blocking(),
                 || cleanup_app.cleanup_before_exit(),
                 |attempt, error| {
@@ -349,7 +349,15 @@ async fn install_update(
                     );
                 },
                 || std::thread::sleep(Duration::from_millis(250)),
+                UPDATER_SHUTDOWN_MAX_ATTEMPTS,
             );
+            if !verified {
+                tracing::error!(
+                    attempts = UPDATER_SHUTDOWN_MAX_ATTEMPTS,
+                    "proceeding with the updater installer handoff after exhausting bounded \
+                     shutdown attempts; desktop shutdown is NOT verified"
+                );
+            }
         })
         .build()
         .map_err(|error| error.to_string())?;
@@ -372,33 +380,51 @@ async fn install_update(
     update.install(bytes).map_err(|error| error.to_string())
 }
 
+/// Bounded shutdown attempts before the updater installer handoff proceeds
+/// anyway (F32). Each attempt is itself bounded (shutdown_all_blocking runs
+/// two ≤31s tries), so a persistently failing cleanup stage can no longer
+/// hang the update install forever with zero user-visible progress. The
+/// preflight semantics stay: shutdown is always attempted, and only after
+/// exhausting these attempts does the handoff continue with a loud error.
+const UPDATER_SHUTDOWN_MAX_ATTEMPTS: u64 = 4;
+
+/// Returns whether the desktop shutdown was positively verified before the
+/// preserved plugin cleanup ran. Callers must log loudly on `false`.
 fn updater_before_exit_until_verified<S, C, E, W>(
     mut shutdown: S,
     cleanup_before_exit: C,
     mut on_error: E,
     mut wait_before_retry: W,
-) where
+    max_attempts: u64,
+) -> bool
+where
     S: FnMut() -> anyhow::Result<()>,
     C: FnOnce(),
     E: FnMut(u64, &anyhow::Error),
     W: FnMut(),
 {
-    let mut attempt = 0u64;
-    loop {
-        attempt = attempt.saturating_add(1);
+    let mut verified = false;
+    for attempt in 1..=max_attempts.max(1) {
         match shutdown() {
-            Ok(()) => break,
+            Ok(()) => {
+                verified = true;
+                break;
+            }
             Err(error) => {
                 on_error(attempt, &error);
-                wait_before_retry();
+                if attempt < max_attempts {
+                    wait_before_retry();
+                }
             }
         }
     }
 
     // `UpdaterExt::updater_builder()` installs this cleanup by default, but
-    // `on_before_exit` replaces that hook. Preserve it explicitly after the
-    // application-owned shutdown has been positively verified.
+    // `on_before_exit` replaces that hook. Preserve it explicitly whether or
+    // not the application-owned shutdown was verified — a hung install with
+    // no escape hatch is strictly worse than an unverified handoff.
     cleanup_before_exit();
+    verified
 }
 
 /// Desired desktop-companion window, one per companion (multi-companion, spec §4.6).
@@ -735,6 +761,9 @@ struct ExitCoordinator {
     shutdown_started: AtomicBool,
     fatal_dialog_started: AtomicBool,
     cleanup_verified: AtomicBool,
+    /// Single-flight guard for the F42 deferred exit waiter (repeated Cmd-Q
+    /// while the backend is still Starting must not stack waiter threads).
+    deferred_exit_wait_started: AtomicBool,
     original_code: Mutex<Option<i32>>,
     backend: Mutex<BackendRegistration>,
     retained_backend_runtimes: Mutex<Vec<tokio::runtime::Runtime>>,
@@ -750,6 +779,7 @@ impl Default for ExitCoordinator {
             shutdown_started: AtomicBool::new(false),
             fatal_dialog_started: AtomicBool::new(false),
             cleanup_verified: AtomicBool::new(false),
+            deferred_exit_wait_started: AtomicBool::new(false),
             original_code: Mutex::new(None),
             backend: Mutex::new(BackendRegistration::Starting),
             retained_backend_runtimes: Mutex::new(Vec::new()),
@@ -1170,6 +1200,53 @@ fn hold_restart_without_cleanup_authority(coordinator: &ExitCoordinator) -> ! {
     loop {
         std::thread::sleep(Duration::from_secs(1));
     }
+}
+
+/// How long a stranded normal-exit request waits for the backend to leave the
+/// `Starting` registration before it forces the exit (matches the restart
+/// path's `wait_for_backend` bound).
+const DEFERRED_EXIT_BACKEND_WAIT: Duration = Duration::from_secs(30);
+
+/// F42: complete a normal exit whose backend was unavailable when
+/// `ExitRequested` fired. Runs off the Tauri event loop. If the backend
+/// becomes available the ordinary verified shutdown runs; if it never does
+/// (stuck in `DesktopServer::start`, or already stopped/failed), the exit
+/// proceeds with a loud error — an unkillable app that silently swallows
+/// every quit gesture is strictly worse than an unclean close (the data
+/// layer is crash-safe), and there is no cleanup authority this path could
+/// have used anyway.
+fn spawn_deferred_exit_shutdown(app: tauri::AppHandle, coordinator: Arc<ExitCoordinator>) {
+    if coordinator
+        .deferred_exit_wait_started
+        .swap(true, Ordering::AcqRel)
+    {
+        return;
+    }
+    std::thread::spawn(move || {
+        if let Some(server) = coordinator.wait_for_backend(DEFERRED_EXIT_BACKEND_WAIT) {
+            start_shutdown_if_needed(&app, server, coordinator);
+            return;
+        }
+        if coordinator.is_exit_allowed() {
+            app.exit(coordinator.original_code());
+            return;
+        }
+        tracing::error!(
+            wait_secs = DEFERRED_EXIT_BACKEND_WAIT.as_secs(),
+            "embedded backend never became available for exit cleanup; forcing exit without \
+             backend cleanup"
+        );
+        let code = allow_exit_without_backend_cleanup(&coordinator);
+        app.exit(code);
+    });
+}
+
+/// Mark the exit as allowed even though no backend cleanup could run, and
+/// return the exit code to use. Only the deferred-exit path may call this,
+/// and only after positively establishing that no cleanup authority exists.
+fn allow_exit_without_backend_cleanup(coordinator: &ExitCoordinator) -> i32 {
+    coordinator.mark_cleanup_verified();
+    coordinator.original_code()
 }
 
 fn start_shutdown_if_needed(
@@ -1713,6 +1790,13 @@ fn handle_run_event(app: &tauri::AppHandle, event: tauri::RunEvent) {
                 .or_else(|| coordinator.backend_server())
             {
                 start_shutdown_if_needed(app, server, coordinator);
+            } else {
+                // F42: the backend may be wedged inside DesktopServer::start
+                // (registration stuck at Starting), and prevent_exit above has
+                // already swallowed this quit gesture. Never strand it: wait
+                // for the backend off the event loop, then either run the
+                // normal shutdown or force the exit with a loud error.
+                spawn_deferred_exit_shutdown(app.clone(), coordinator);
             }
         }
         #[cfg(target_os = "macos")]
@@ -2333,7 +2417,7 @@ mod tests {
         let error_events = events.clone();
         let wait_events = events.clone();
 
-        updater_before_exit_until_verified(
+        let verified = updater_before_exit_until_verified(
             move || {
                 let attempt = shutdown_attempts.fetch_add(1, Ordering::SeqCst) + 1;
                 shutdown_events
@@ -2354,8 +2438,10 @@ mod tests {
                     .push(format!("error:{attempt}"));
             },
             move || wait_events.lock().unwrap().push("wait".to_owned()),
+            UPDATER_SHUTDOWN_MAX_ATTEMPTS,
         );
 
+        assert!(verified);
         assert_eq!(
             *events.lock().unwrap(),
             [
@@ -2369,6 +2455,57 @@ mod tests {
                 "cleanup",
             ]
         );
+    }
+
+    #[test]
+    fn updater_before_exit_is_bounded_and_still_cleans_up_when_shutdown_never_verifies() {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let shutdown_events = events.clone();
+        let cleanup_events = events.clone();
+        let error_events = events.clone();
+        let wait_events = events.clone();
+
+        // F32: a persistently failing cleanup stage must not hang the update
+        // install forever — the loop stops at the cap, preserves the plugin
+        // cleanup exactly once, and reports the unverified shutdown.
+        let verified = updater_before_exit_until_verified(
+            move || {
+                shutdown_events.lock().unwrap().push("shutdown".to_owned());
+                Err(anyhow::anyhow!("fixture shutdown failure"))
+            },
+            move || cleanup_events.lock().unwrap().push("cleanup".to_owned()),
+            move |attempt, _| {
+                error_events
+                    .lock()
+                    .unwrap()
+                    .push(format!("error:{attempt}"));
+            },
+            move || wait_events.lock().unwrap().push("wait".to_owned()),
+            3,
+        );
+
+        assert!(!verified);
+        assert_eq!(
+            *events.lock().unwrap(),
+            [
+                "shutdown", "error:1", "wait", "shutdown", "error:2", "wait", "shutdown",
+                "error:3", "cleanup",
+            ]
+        );
+    }
+
+    #[test]
+    fn deferred_exit_without_backend_cleanup_allows_the_exit_with_original_code() {
+        let coordinator = ExitCoordinator::default();
+        assert!(coordinator.request_normal_exit(Some(5)));
+        assert!(!coordinator.is_exit_allowed());
+
+        // F42: with no backend ever becoming available, the stranded quit
+        // gesture must still complete instead of being dropped forever.
+        let code = allow_exit_without_backend_cleanup(&coordinator);
+
+        assert_eq!(code, 5);
+        assert!(coordinator.is_exit_allowed());
     }
 
     #[test]
