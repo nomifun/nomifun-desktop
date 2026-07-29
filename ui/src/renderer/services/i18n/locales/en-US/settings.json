@@ -168,7 +168,6 @@
   "presetTargetConversation": "Agent conversation",
   "presetTargetExecutionStep": "Collaborative task",
   "presetTargetCompanion": "Companion",
-  "presetTargetPublicCompanion": "Public companion",
   "presetTargetCron": "Scheduled task",
   "presetAllowFallback": "Allow fallback when a preference is unavailable",
   "presetAutoSelectable": "Allow collaborative tasks to select automatically",
@@ -958,7 +957,7 @@
     "desc": "The following features still use this provider. Unbind or switch models first, then delete:",
     "goto": "Go fix it",
     "desktopCompanion": "Desktop companion",
-    "publicCompanion": "Public companion",
+    "customerService": "Customer service",
     "smartDecision": "Smart decision",
     "conversation": "Conversation lead model",
     "agentExecution": "Collaborative task"

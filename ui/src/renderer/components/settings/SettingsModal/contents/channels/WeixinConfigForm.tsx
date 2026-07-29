@@ -289,9 +289,7 @@ const WeixinConfigForm: React.FC<WeixinConfigFormProps> = ({
         ? {
             plugin_id: channelTarget.channelPluginId,
             plugin_type: 'weixin',
-            ...(channelTarget.publicAgentId
-              ? { public_agent_id: channelTarget.publicAgentId }
-              : { companion_id: channelTarget.companionId }),
+            ...(channelTarget.companionId ? { companion_id: channelTarget.companionId } : {}),
             config,
           }
         : { plugin_type: 'weixin', config }

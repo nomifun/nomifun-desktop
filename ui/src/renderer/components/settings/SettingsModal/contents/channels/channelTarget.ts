@@ -14,19 +14,18 @@
  *   the form's platform bound to its owner (backend rejects with 409 when the
  *   same bot is already bound to another owner).
  *
- * The bind owner is EITHER a desktop companion (`companionId`) OR a public
- * agent (`publicAgentId`) — exactly one is set; they are mutually exclusive
- * (a channel bot serves a single object). The enable call forwards whichever
- * one is present as `companion_id` / `public_agent_id`.
+ * The bind owner is a desktop companion (`companionId`); the enable call
+ * forwards it as `companion_id`. (Customer-service bindings are owned by the
+ * customer-service domain — PUT /api/customer-service/agents/{id}/bindings —
+ * and never ride the enable call.)
  *
  * Forms that receive no `channelTarget` create an unbound row by platform.
  */
-import type { ChannelPluginId, CompanionId, PublicAgentId } from '@/common/types/ids';
+import type { ChannelPluginId, CompanionId } from '@/common/types/ids';
 
 export interface ChannelTarget {
   channelPluginId?: ChannelPluginId;
   companionId?: CompanionId;
-  publicAgentId?: PublicAgentId;
 }
 
 /** Builtin IM platforms a companion can connect (the channel config forms cover this set). */

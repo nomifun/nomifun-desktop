@@ -1,0 +1,83 @@
+{
+  "siderTitle": "Customer Service",
+  "title": "Customer Service",
+  "subtitle": "Customer-service agents for strangers — they answer only from knowledge bases and service notes; dangerous capabilities are never registered.",
+  "status": {
+    "enabled": "Serving",
+    "disabled": "Disabled"
+  },
+  "trust": {
+    "readonly": "Only three read-only tools: knowledge search / knowledge read / service notes",
+    "locked": "Terminal / files / computer / browser capabilities are never registered"
+  },
+  "card": {
+    "noModel": "No model configured",
+    "kbCount": "{{count}} knowledge bases"
+  },
+  "create": {
+    "action": "Create agent",
+    "title": "Create customer-service agent",
+    "done": "Agent created"
+  },
+  "empty": {
+    "title": "No customer-service agents yet",
+    "desc": "Create an agent, bind knowledge bases and a service policy, then bind channel bots so it can safely serve visitors.",
+    "action": "Create the first agent"
+  },
+  "fields": {
+    "name": "Name",
+    "namePlaceholder": "e.g. Support Assistant",
+    "nameRequired": "Please enter a name",
+    "provider": "Model provider",
+    "providerPlaceholder": "Select a provider",
+    "model": "Chat model",
+    "modelPlaceholder": "Select a model",
+    "knowledgeBases": "Knowledge bases",
+    "knowledgeBasesPlaceholder": "Select searchable knowledge bases",
+    "greeting": "Greeting",
+    "greetingPlaceholder": "Opening line when a visitor says hello",
+    "persona": "Persona",
+    "personaPlaceholder": "Tone and persona, e.g. patient, concise, factual",
+    "servicePolicy": "Service policy",
+    "servicePolicyPlaceholder": "Business scope / off-limits topics / compliance phrasing",
+    "maxConcurrent": "Concurrency limit"
+  },
+  "detail": {
+    "back": "Back to roster",
+    "enabled": "Enabled",
+    "delete": "Delete",
+    "deleteConfirm": "Delete this agent? Its bindings, dialogues and private notes will be removed.",
+    "deleted": "Agent deleted",
+    "save": "Save",
+    "saved": "Saved",
+    "notFound": "Agent not found or deleted"
+  },
+  "sections": {
+    "identity": "Identity & voice",
+    "modelKnowledge": "Model & knowledge",
+    "bindings": "Channel bot bindings",
+    "notes": "Service notes"
+  },
+  "bindings": {
+    "saved": "Bindings updated",
+    "noBots": "No channel bots yet. Connect one under Desktop Companion → Remote Connect or channel settings first.",
+    "companionBound": "Bound to a companion",
+    "hint": "Once bound, every inbound message on that bot is served by this agent (strangers need no pairing code)."
+  },
+  "notes": {
+    "add": "Add note",
+    "empty": "No notes yet — put FAQs / scripts / business facts here; agents reference them read-only.",
+    "kind": "Kind",
+    "kindFaq": "FAQ",
+    "kindScript": "Script",
+    "kindFact": "Business fact",
+    "content": "Content",
+    "contentPlaceholder": "Write an FAQ / script / business fact…",
+    "scope": "Scope",
+    "private": "Private",
+    "shared": "Shared",
+    "sharedHint": "Share with every agent (unchecked = this agent only)",
+    "enabled": "Enabled",
+    "deleteConfirm": "Delete this note?"
+  }
+}

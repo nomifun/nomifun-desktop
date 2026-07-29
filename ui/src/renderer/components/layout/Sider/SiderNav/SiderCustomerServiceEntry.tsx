@@ -11,7 +11,7 @@ import { Headset } from '@icon-park/react';
 import classNames from 'classnames';
 import type { SiderTooltipProps } from '@renderer/utils/ui/siderTooltip';
 
-interface SiderPublicServiceEntryProps {
+interface SiderCustomerServiceEntryProps {
   isMobile: boolean;
   isActive: boolean;
   collapsed: boolean;
@@ -19,8 +19,8 @@ interface SiderPublicServiceEntryProps {
   onClick: () => void;
 }
 
-/** 对外伙伴 (Public Companion) — top-level rail entry under the 对外服务 group. Mirrors SiderNomiEntry. */
-const SiderPublicServiceEntry: React.FC<SiderPublicServiceEntryProps> = ({
+/** 客服 (Customer Service) — top-level rail entry under the 服务 group. Mirrors SiderNomiEntry. */
+const SiderCustomerServiceEntry: React.FC<SiderCustomerServiceEntryProps> = ({
   isMobile,
   isActive,
   collapsed,
@@ -28,7 +28,7 @@ const SiderPublicServiceEntry: React.FC<SiderPublicServiceEntryProps> = ({
   onClick,
 }) => {
   const { t } = useTranslation();
-  const title = t('publicCompanion.siderTitle', { defaultValue: '对外伙伴' });
+  const title = t('customerService.siderTitle', { defaultValue: '客服' });
 
   if (collapsed) {
     return (
@@ -71,4 +71,4 @@ const SiderPublicServiceEntry: React.FC<SiderPublicServiceEntryProps> = ({
   );
 };
 
-export default SiderPublicServiceEntry;
+export default SiderCustomerServiceEntry;
