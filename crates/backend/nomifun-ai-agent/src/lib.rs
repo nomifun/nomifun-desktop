@@ -16,6 +16,7 @@ pub mod knowledge_retrieval;
 pub mod knowledge_writeback;
 pub mod manager;
 pub mod nomi_session_persistence;
+pub mod one_shot;
 pub(crate) mod persistence;
 pub mod protocol;
 pub mod registry;
@@ -52,6 +53,7 @@ pub use factory::provider_config::{
     one_shot_completion, resolve_provider_config, streaming_completion, streaming_completion_kinded,
     streaming_completion_text_or_reasoning, user_message, DeltaKind,
 };
+pub use one_shot::{OneShotDeps, OneShotTool, OneShotTurnRequest, one_shot_handler, run_one_shot_turn};
 pub use factory::{
     AgentFactoryDeps, CompanionPromptProvider, PublicAgentProvider, PublicAgentRuntime,
     build_agent_factory,
