@@ -1032,7 +1032,12 @@ impl BrowserSessionHub {
         let result = self
             .close_matching(|lane| &lane.caller.owner_lease_id == lease_id)
             .await?;
-        self.finish_owner_cleanup(lease_id).await?;
+        // A pending owner-cleanup error must not discard the accurate close
+        // count: sweep and management callers read `detached_closed` to credit
+        // the lanes that did close in this call.
+        if let Err(error) = self.finish_owner_cleanup(lease_id).await {
+            return Err(Self::scoped_cleanup_error(error, result.closed));
+        }
         Ok(result)
     }
 
@@ -8024,6 +8029,66 @@ mod tests {
         assert_eq!(overview.total_lanes, 0);
         assert_eq!(overview.pending_cleanup_count, 0);
         assert_eq!(overview.managed_host_count, 0);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn owner_close_pending_cleanup_error_reports_accurate_detached_count() {
+        let harness = harness();
+        let (client, lease_id) =
+            client_for_runtime_with_lease(&harness, "runtime-owner-close-count");
+        let stuck_lane = open(&client, "owner-count-stuck").await;
+        harness
+            .probe
+            .block_lane_close
+            .store(true, Ordering::Release);
+
+        // A slow target close times out for its caller and retains cleanup
+        // authority while the driver close keeps running.
+        let hub = harness.hub.clone();
+        let closing = stuck_lane.clone();
+        let stuck_close = tokio::spawn(async move { hub.close_lane(&closing).await });
+        harness.probe.wait_for_lane_closes(1).await;
+        tokio::time::advance(LANE_CLEANUP_WAITER_TIMEOUT).await;
+        tokio::task::yield_now().await;
+        let stuck_error = stuck_close
+            .await
+            .expect("close task panicked")
+            .expect_err("blocked cleanup must time out for its caller");
+        assert_eq!(stuck_error.metadata["cleanup_pending"], true);
+
+        // Two more owner lanes close successfully in the same owner call, but
+        // the retained cleanup keeps finish_owner_cleanup pending. The error
+        // must still credit both lanes that actually closed.
+        harness
+            .probe
+            .block_lane_close
+            .store(false, Ordering::Release);
+        open(&client, "owner-count-a").await;
+        open(&client, "owner-count-b").await;
+        let error = harness
+            .hub
+            .close_owner_lanes(&lease_id)
+            .await
+            .expect_err("retained cleanup must keep the owner call pending");
+        assert_eq!(error.metadata["cleanup_pending"], true);
+        assert_eq!(
+            error.metadata["detached_closed"], 2,
+            "the pending owner-cleanup error must not discard the accurate close count"
+        );
+
+        // Convergence: releasing the blocked driver lets the exact owner
+        // finish its retained Host obligation.
+        harness.probe.lane_close_release.add_permits(1);
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            harness.probe.wait_for_lane_close_completions(3),
+        )
+        .await
+        .expect("the blocked driver close did not finish after release");
+        let converged = harness.hub.revoke_owner_lease(&lease_id).await.unwrap();
+        assert_eq!(converged.closed, 0);
+        assert!(converged.already_closed);
+        assert_eq!(harness.hub.remaining_resources().await, RemainingResources::default());
     }
 
     #[tokio::test]
