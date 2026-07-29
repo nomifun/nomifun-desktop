@@ -160,6 +160,13 @@ pub struct SendMessageResponse {
     pub result_text: Option<String>,
     #[serde(default)]
     pub result_error: Option<String>,
+    /// Stable snake_case terminal error token (spec D4). Absent on success,
+    /// while in flight, and for receipts settled before migration 014.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result_error_code: Option<String>,
+    /// Whether the terminal failure is safe to retry automatically.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result_error_retryable: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

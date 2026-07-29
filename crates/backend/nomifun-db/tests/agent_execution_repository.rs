@@ -641,6 +641,8 @@ async fn recovery_adopts_completed_initial_turn_receipt_without_rescheduling() {
             true,
             Some("durable result"),
             None,
+            None,
+            None,
             nomifun_common::now_ms(),
         )
         .await
