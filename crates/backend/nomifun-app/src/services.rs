@@ -1064,6 +1064,10 @@ pub struct AppServices {
     /// Singleton 生成引擎 (creation) service — the media generation task queue
     /// behind the workshop canvas. Shared by the `/api/creation/*` routes.
     pub creation_service: Arc<nomifun_creation::CreationService>,
+    /// Singleton unified multimodal invoke layer (P1 redesign): catalog
+    /// resolution + protocol adapters over the shared proxy-aware HTTP client.
+    /// Shared by `/api/tts` today; later tasks (media/probe rewiring) reuse it.
+    pub model_invoke_service: Arc<nomifun_model_invoke::ModelInvokeService>,
     /// Singleton knowledge service (knowledge base platform). Shared between
     /// the `/api/knowledge/*` routes and the `ConversationService`, which
     /// mounts bound bases into session workspaces at task start.
@@ -2351,6 +2355,19 @@ impl AppServices {
                 )
             })?;
 
+        // Unified multimodal invoke layer (P1): one process-wide singleton over
+        // the catalog repos + the same proxy-aware HTTP client the creation
+        // adapters ride. `/api/tts` consumes it now; later tasks (media task
+        // rewiring, health probes) reuse this exact instance.
+        let model_invoke_service = Arc::new(nomifun_model_invoke::ModelInvokeService::new(
+            Arc::new(nomifun_db::SqliteProviderRepository::new(database.pool().clone())),
+            Arc::new(nomifun_db::SqliteProviderModelRepository::new(database.pool().clone())),
+            Arc::new(nomifun_db::SqliteProviderConnectionRepository::new(database.pool().clone())),
+            encryption_key,
+            creation_http.clone(),
+            nomifun_model_invoke::AdapterRegistry::new(nomifun_model_invoke::default_adapters()),
+        ));
+
         // Headless seed: bind a Remote access token to the default companion so an
         // operator can configure the front door via env on a headless server.
         // (Desktop mints per-companion tokens via /api/webui/companions/{id}/access-token.)
@@ -2520,6 +2537,7 @@ impl AppServices {
             public_agent_service,
             workshop_service,
             creation_service,
+            model_invoke_service,
             knowledge_service,
             #[cfg(feature = "browser-use")]
             browser_session_hub: None,

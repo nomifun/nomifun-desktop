@@ -49,6 +49,27 @@ pub struct OpenFolderWithRequest {
 }
 
 // ---------------------------------------------------------------------------
+// Text-to-speech types
+// ---------------------------------------------------------------------------
+
+/// `POST /api/tts` request: synthesize `text` on `(provider_id, model)`.
+/// `voice`/`format` are optional passthroughs to the provider (the adapter
+/// applies its own defaults).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TtsApiRequest {
+    #[serde(deserialize_with = "crate::serde_util::deserialize_provider_id")]
+    pub provider_id: String,
+    #[serde(deserialize_with = "crate::serde_util::deserialize_model_name")]
+    pub model: String,
+    pub text: String,
+    #[serde(default)]
+    pub voice: Option<String>,
+    #[serde(default)]
+    pub format: Option<String>,
+}
+
+// ---------------------------------------------------------------------------
 // Speech-to-text types
 // ---------------------------------------------------------------------------
 
@@ -244,6 +265,77 @@ mod tests {
         let req: OpenFolderWithRequest = serde_json::from_value(raw).unwrap();
         assert_eq!(req.folder_path, "/tmp");
         assert_eq!(req.tool, ToolType::Terminal);
+    }
+
+    // -- TtsApiRequest --
+
+    #[test]
+    fn tts_request_full_parses() {
+        let raw = json!({
+            "provider_id": "018f0000-0000-7000-8000-000000000001",
+            "model": "tts-1",
+            "text": "hello",
+            "voice": "nova",
+            "format": "wav"
+        });
+        let req: TtsApiRequest = serde_json::from_value(raw).unwrap();
+        assert_eq!(req.provider_id, "018f0000-0000-7000-8000-000000000001");
+        assert_eq!(req.model, "tts-1");
+        assert_eq!(req.text, "hello");
+        assert_eq!(req.voice.as_deref(), Some("nova"));
+        assert_eq!(req.format.as_deref(), Some("wav"));
+    }
+
+    #[test]
+    fn tts_request_minimal_defaults_optionals() {
+        let raw = json!({
+            "provider_id": "018f0000-0000-7000-8000-000000000001",
+            "model": "tts-1",
+            "text": "hi"
+        });
+        let req: TtsApiRequest = serde_json::from_value(raw).unwrap();
+        assert!(req.voice.is_none());
+        assert!(req.format.is_none());
+    }
+
+    #[test]
+    fn tts_request_rejects_invalid_provider_id() {
+        let raw = json!({
+            "provider_id": "not-a-uuid",
+            "model": "tts-1",
+            "text": "hi"
+        });
+        assert!(serde_json::from_value::<TtsApiRequest>(raw).is_err());
+    }
+
+    #[test]
+    fn tts_request_rejects_untrimmed_model() {
+        let raw = json!({
+            "provider_id": "018f0000-0000-7000-8000-000000000001",
+            "model": " tts-1 ",
+            "text": "hi"
+        });
+        assert!(serde_json::from_value::<TtsApiRequest>(raw).is_err());
+    }
+
+    #[test]
+    fn tts_request_rejects_unknown_fields() {
+        let raw = json!({
+            "provider_id": "018f0000-0000-7000-8000-000000000001",
+            "model": "tts-1",
+            "text": "hi",
+            "speed": 1.5
+        });
+        assert!(serde_json::from_value::<TtsApiRequest>(raw).is_err());
+    }
+
+    #[test]
+    fn tts_request_missing_text_is_error() {
+        let raw = json!({
+            "provider_id": "018f0000-0000-7000-8000-000000000001",
+            "model": "tts-1"
+        });
+        assert!(serde_json::from_value::<TtsApiRequest>(raw).is_err());
     }
 
     // -- SpeechToTextProvider --
