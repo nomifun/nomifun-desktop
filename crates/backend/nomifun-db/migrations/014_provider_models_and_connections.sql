@@ -54,6 +54,10 @@ CREATE INDEX idx_provider_connections_provider_id ON provider_connections(provid
 -- from the providers row's JSON map columns. Orphan model_profiles rows (their
 -- model no longer in providers.models) are intentionally NOT migrated — that
 -- is the orphan cleanup. Idempotency guard keeps this statement re-runnable.
+-- The legacy API never deduplicated providers.models, so a duplicated name is
+-- reachable: ON CONFLICT DO NOTHING keeps the first array occurrence (same
+-- "first index wins" semantics as the dual-write). Corrupt (non-JSON) legacy
+-- model_health values degrade to NULL instead of aborting the migration.
 INSERT INTO provider_models (
     provider_id, model, enabled, sort_order, tasks, traits, protocol, params,
     context_limit, description, source, health, created_at, updated_at
@@ -70,7 +74,7 @@ SELECT
     (SELECT e.value FROM json_each(COALESCE(p.model_context_limits, '{}')) e WHERE e.key = je.value),
     (SELECT e.value FROM json_each(COALESCE(p.model_descriptions, '{}')) e WHERE e.key = je.value),
     COALESCE(mp.source, 'inferred'),
-    (SELECT json(e.value) FROM json_each(COALESCE(p.model_health, '{}')) e WHERE e.key = je.value),
+    (SELECT CASE WHEN json_valid(e.value) THEN json(e.value) END FROM json_each(COALESCE(p.model_health, '{}')) e WHERE e.key = je.value),
     CAST(strftime('%s', 'now') AS INTEGER) * 1000,
     COALESCE(mp.updated_at, CAST(strftime('%s', 'now') AS INTEGER) * 1000)
 FROM providers p
@@ -80,4 +84,5 @@ LEFT JOIN model_profiles mp
 WHERE NOT EXISTS (
     SELECT 1 FROM provider_models pm
     WHERE pm.provider_id = p.provider_id AND pm.model = je.value
-);
+)
+ON CONFLICT (provider_id, model) DO NOTHING;
