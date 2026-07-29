@@ -57,6 +57,10 @@ describe('turn process disclosure content layout', () => {
     expect(enMessages.turnCanceled).toBe('You stopped after {{duration}}');
   });
 
+  test('routes the user stop notice from the nomi runtime into the disclosure model', () => {
+    expect(messageListSource.includes('stopNotice: conversationContext?.stopNotice ?? undefined')).toBe(true);
+  });
+
   test('keeps execution duration in processed and canceled header copy', () => {
     expect(zhMessages.turnProcessed.includes('{{duration}}')).toBe(true);
     expect(zhMessages.turnCanceled.includes('{{duration}}')).toBe(true);

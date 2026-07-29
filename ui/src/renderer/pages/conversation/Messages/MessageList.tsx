@@ -958,6 +958,7 @@ const MessageList: React.FC<{
     const disclosureItems = buildTurnDisclosureItems(modelInput, {
       tailClosed: conversationContext?.isProcessing !== true,
       activeTurnId: conversationContext?.activeTurnId,
+      stopNotice: conversationContext?.stopNotice ?? undefined,
     })
       .map<IProcessedItem | undefined>((entry: TurnDisclosureOutputItem) => {
         if (entry.type === 'item') {
@@ -1096,6 +1097,7 @@ const MessageList: React.FC<{
     conversationContext?.activeRequestMessageId,
     conversationContext?.activeTurnId,
     conversationContext?.isProcessing,
+    conversationContext?.stopNotice,
     processedList,
     t,
     workspaceRoots,

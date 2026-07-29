@@ -93,6 +93,7 @@ const NomiChat: React.FC<{
       hideSendBox,
       readOnly,
       isProcessing: resolvedIsProcessing,
+      stopNotice: turnActivity.stopNotice,
       loadedSkills,
       loadedMcpStatuses,
     };
@@ -103,6 +104,7 @@ const NomiChat: React.FC<{
     hideSendBox,
     readOnly,
     resolvedIsProcessing,
+    turnActivity.stopNotice,
     loadedSkills,
     loadedMcpStatuses,
   ]);
