@@ -660,13 +660,29 @@ impl ManagedEngineLaneDriver {
                 context.trusted_out_of_band_confirmation,
             )
             .await
-            .map_err(|_| {
-                BrowserPlatformError::new(
-                    BrowserErrorCode::OperationNotAllowed,
-                    "The browser action was rejected by the managed browser policy.",
-                    false,
-                    "Review the action parameters or request explicit user control.",
-                )
+            .map_err(|rejection| {
+                // F6: the secret egress-allowlist rejection carries an
+                // actionable recovery path (close all lanes / restart so the
+                // browser relaunches with the updated allowlist). Surface that
+                // rejection verbatim — collapsing it into the generic hint
+                // below would leave the caller with no way to recover. Every
+                // other policy rejection stays deliberately generic so managed
+                // errors never echo browser internals.
+                if rejection.contains(BrowserTool::SECRET_EGRESS_ALLOWLIST_RECOVERY) {
+                    BrowserPlatformError::new(
+                        BrowserErrorCode::OperationNotAllowed,
+                        rejection,
+                        false,
+                        BrowserTool::SECRET_EGRESS_ALLOWLIST_RECOVERY,
+                    )
+                } else {
+                    BrowserPlatformError::new(
+                        BrowserErrorCode::OperationNotAllowed,
+                        "The browser action was rejected by the managed browser policy.",
+                        false,
+                        "Review the action parameters or request explicit user control.",
+                    )
+                }
             })?;
         let progress = operation_progress(input, context);
         let result = self
@@ -1600,6 +1616,111 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(error.code, BrowserErrorCode::OperationNotAllowed);
+        assert_eq!(engine.act_calls.load(Ordering::SeqCst), 0);
+    }
+
+    /// **F6 (final review)**: the production managed path must not collapse the
+    /// secret egress-allowlist rejection into the generic policy hint — the
+    /// actionable recovery guidance (close all lanes / restart so the browser
+    /// relaunches with the updated allowlist) has to survive `execute_act`.
+    #[tokio::test]
+    async fn secret_egress_allowlist_rejection_keeps_f6_recovery_guidance() {
+        let engine = Arc::new(FakeEngine::new());
+        let mut driver = test_driver(engine.clone());
+        // The shared host launched BEFORE this credential's domain was
+        // registered: the enforced allowlist misses the page origin even
+        // though the vault itself resolves the secret for it.
+        driver.policy.managed_enforced_allow_etld1 = Some(Vec::new());
+        let mut store = nomifun_secret::SecretStore::ephemeral().expect("ephemeral store");
+        store
+            .register("pw", "hunter2-PLAINTEXT", vec!["example.com".to_string()])
+            .unwrap();
+        driver.policy.inject_secret_store_for_tests(store);
+        driver.policy.cache_managed_observation(Observation {
+            generation: SnapshotGen(1),
+            yaml: "<data></data>".to_string(),
+            entries: vec![ElementEntry {
+                r#ref: "f0e1".to_string(),
+                role: "textbox".to_string(),
+                name: "Password".to_string(),
+                frame_seq: 0,
+            }],
+            url: Some("https://shop.example.com/login".to_string()),
+            truncated: false,
+            current_page_is_post: false,
+            boxes: HashMap::new(),
+        });
+
+        let error = driver
+            .execute(
+                operation(
+                    BrowserOperationKind::Act,
+                    "type",
+                    json!({"ref": "f0e1", "text": "secret:pw"}),
+                ),
+                context(),
+            )
+            .await
+            .unwrap_err();
+
+        assert_eq!(error.code, BrowserErrorCode::OperationNotAllowed);
+        assert!(
+            error.message.contains("egress allowlist"),
+            "the specific enforcement-gap explanation must survive: {}",
+            error.message
+        );
+        assert!(
+            error.next_action.contains("browser_close_all")
+                && error.next_action.contains("restart"),
+            "the actionable recovery path must survive: {}",
+            error.next_action
+        );
+        assert!(
+            !format!("{error:?}").contains("hunter2-PLAINTEXT"),
+            "the platform error must never leak the plaintext"
+        );
+        assert_eq!(
+            engine.act_calls.load(Ordering::SeqCst),
+            0,
+            "the rejection happens before any engine dispatch"
+        );
+    }
+
+    /// A policy rejection that is NOT the secret-egress class keeps the
+    /// deliberately generic managed-policy message (no internal details).
+    #[tokio::test]
+    async fn other_policy_rejections_keep_the_generic_managed_hint() {
+        let engine = Arc::new(FakeEngine::new());
+        let driver = test_driver(engine.clone());
+        driver
+            .execute(
+                operation(
+                    BrowserOperationKind::Observe,
+                    "observe",
+                    Value::Object(Map::new()),
+                ),
+                context(),
+            )
+            .await
+            .unwrap();
+
+        let error = driver
+            .execute(
+                operation(
+                    BrowserOperationKind::Act,
+                    "click",
+                    json!({"ref": "f0e1", OUT_OF_BAND_CONFIRMED_KEY: true}),
+                ),
+                context(),
+            )
+            .await
+            .unwrap_err();
+
+        assert_eq!(error.code, BrowserErrorCode::OperationNotAllowed);
+        assert_eq!(
+            error.message,
+            "The browser action was rejected by the managed browser policy."
+        );
         assert_eq!(engine.act_calls.load(Ordering::SeqCst), 0);
     }
 
