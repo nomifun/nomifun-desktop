@@ -654,6 +654,36 @@
   margin-bottom: 0;
 }
 
+/* ── Live current-step strip under the latest streaming reply ── */
+
+.turn-live-step .turn-process-receipt__label {
+  animation: turn-live-step-breathing 1.8s ease-in-out infinite;
+}
+
+.turn-live-step .turn-process-receipt--waiting {
+  color: var(--color-warning-6, #ff7d00);
+}
+
+.turn-live-step .turn-process-receipt--waiting .turn-process-receipt__label {
+  animation: none;
+}
+
+@keyframes turn-live-step-breathing {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.55;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .turn-live-step .turn-process-receipt__label {
+    animation: none;
+  }
+}
+
 .turn-process-trace {
   display: flex;
   min-width: 0;
