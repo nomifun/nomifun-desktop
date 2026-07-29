@@ -1582,16 +1582,19 @@ mod tests {
 
         #[cfg(unix)]
         {
-            let shell = PathBuf::from("/bin/sh");
-            let mut builder = nomi_process_runtime::ChildProcessBuilder::new(&shell);
+            // Spawn the sleeper directly: a `/bin/sh -c` wrapper may exec into
+            // sleep, so the committed ownership marker would name a different
+            // executable than the live process image (darwin rejects that).
+            let executable = PathBuf::from("/bin/sleep");
+            let mut builder = nomi_process_runtime::ChildProcessBuilder::new(&executable);
             builder
-                .args(["-c", "sleep 60"])
+                .arg("60")
                 .stdin(std::process::Stdio::null())
                 .stdout(std::process::Stdio::null())
                 .stderr(std::process::Stdio::null());
             (
                 builder.spawn_managed().expect("spawn Unix process fixture"),
-                shell,
+                executable,
             )
         }
     }

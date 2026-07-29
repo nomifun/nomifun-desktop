@@ -2741,7 +2741,54 @@ mod tests {
 
     #[tokio::test]
     async fn final_signed_child_drain_reports_pending_exact_owner_cleanup() {
+        // A terminal lane-cleanup failure on a host with no surviving lanes is
+        // resolved by authoritative host retirement, so the drain
+        // postcondition is already met on the first attempt.
         let harness = harness();
+        let mut signed = gateway_caller_without_browser_identity();
+        harness
+            .registry
+            .attach_trusted_identity(
+                &mut signed,
+                "signed-child-final-retired",
+                Some("attempt-final-retired"),
+                u64::MAX,
+            )
+            .await
+            .unwrap();
+        harness.registry.open(&signed, None).await.unwrap();
+        harness
+            .probe
+            .lane_close_failures_remaining
+            .store(1, Ordering::Release);
+        harness
+            .registry
+            .drain_signed_child_browser_owners_once()
+            .await
+            .expect("host retirement resolves the terminal lane-cleanup failure");
+        assert!(harness.registry.signed_child_cleanup_status().is_empty());
+        assert!(harness.hub.list_lanes().await.is_empty());
+        // Retirement resolved the failure through the Host process shutdown;
+        // no second lane close was needed.
+        assert_eq!(harness.probe.lane_closes.load(Ordering::Acquire), 1);
+
+        // A sibling lane on the shared Primary host makes retirement
+        // impossible, so the retained exact owner stays pending until retry.
+        let harness = self::harness();
+        let mut remote = gateway_caller_without_browser_identity();
+        remote.remote = true;
+        harness
+            .registry
+            .attach_trusted_identity_with_authority(
+                &mut remote,
+                "remote-session-final-sibling",
+                None,
+                u64::MAX,
+                BrowserAttachmentAuthority::RemoteMcpSession,
+            )
+            .await
+            .unwrap();
+        let remote_lane = harness.registry.open(&remote, None).await.unwrap();
         let mut signed = gateway_caller_without_browser_identity();
         harness
             .registry
@@ -2794,6 +2841,9 @@ mod tests {
             .await
             .expect("retry must consume the retained exact-owner authority");
         assert!(harness.registry.signed_child_cleanup_status().is_empty());
+        let lanes = harness.hub.list_lanes().await;
+        assert_eq!(lanes.len(), 1);
+        assert_eq!(lanes[0].lane_id, remote_lane.lane_id);
     }
 
     #[tokio::test]
@@ -2863,7 +2913,48 @@ mod tests {
 
     #[tokio::test]
     async fn failed_remote_mcp_revoke_remains_authoritative_until_retry() {
+        // A terminal lane-cleanup failure on a host with no surviving lanes is
+        // resolved by authoritative host retirement: the revoke succeeds on
+        // its first attempt and no retained authority survives.
         let harness = harness();
+        let mut remote = gateway_caller_without_browser_identity();
+        remote.remote = true;
+        harness
+            .registry
+            .attach_trusted_identity_with_authority(
+                &mut remote,
+                "remote-session-retired",
+                None,
+                u64::MAX,
+                BrowserAttachmentAuthority::RemoteMcpSession,
+            )
+            .await
+            .unwrap();
+        harness.registry.open(&remote, None).await.unwrap();
+        harness
+            .probe
+            .lane_close_failures_remaining
+            .store(1, Ordering::Release);
+        let result = harness
+            .registry
+            .revoke_trusted_identity("remote-session-retired")
+            .await
+            .expect("host retirement resolves the terminal lane-cleanup failure");
+        assert_eq!(result.closed, 1);
+        assert!(harness.hub.list_lanes().await.is_empty());
+        assert!(
+            !harness
+                .registry
+                .identities
+                .lock()
+                .expect("gateway browser identity cache poisoned")
+                .contains_key("remote-session-retired")
+        );
+        assert_eq!(harness.probe.lane_closes.load(Ordering::Acquire), 1);
+
+        // A sibling lane on the shared Primary host makes retirement
+        // impossible, so the failed cleanup retains its authority until retry.
+        let harness = self::harness();
         let mut remote = gateway_caller_without_browser_identity();
         remote.remote = true;
         harness
@@ -2878,6 +2969,20 @@ mod tests {
             .await
             .unwrap();
         harness.registry.open(&remote, None).await.unwrap();
+        let mut sibling = gateway_caller_without_browser_identity();
+        sibling.remote = true;
+        harness
+            .registry
+            .attach_trusted_identity_with_authority(
+                &mut sibling,
+                "remote-session-retry-sibling",
+                None,
+                u64::MAX,
+                BrowserAttachmentAuthority::RemoteMcpSession,
+            )
+            .await
+            .unwrap();
+        let sibling_lane = harness.registry.open(&sibling, None).await.unwrap();
         harness
             .probe
             .lane_close_failures_remaining
@@ -2889,7 +2994,6 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(error.code, BrowserErrorCode::BrowserUnavailable);
-        assert!(harness.hub.list_lanes().await.is_empty());
         {
             let identities = harness
                 .registry
@@ -2911,15 +3015,82 @@ mod tests {
                 .expect("gateway browser identity cache poisoned")
                 .contains_key("remote-session-retry")
         );
+        assert_eq!(harness.probe.lane_closes.load(Ordering::Acquire), 2);
 
-        // The Hub retains the detached driver after the first close failure.
-        // Its own lifecycle sweep completes that lower-level cleanup.
+        // The sibling attachment and its lane survive the scoped retry, and no
+        // lower-level cleanup remains for the lifecycle sweep.
         harness.hub.sweep().await.unwrap();
         assert_eq!(harness.probe.lane_closes.load(Ordering::Acquire), 2);
+        let lanes = harness.hub.list_lanes().await;
+        assert_eq!(lanes.len(), 1);
+        assert_eq!(lanes[0].lane_id, sibling_lane.lane_id);
     }
 
     #[tokio::test]
     async fn final_revoke_cleans_replacement_without_losing_superseded_owner() {
+        // A terminal lane-cleanup failure on a host with no surviving lanes is
+        // resolved by authoritative host retirement, so the replacement attach
+        // consumes the superseded owner immediately.
+        let harness = harness_with_owner_ttl(10);
+        let mut first = gateway_caller_without_browser_identity();
+        first.remote = true;
+        harness
+            .registry
+            .attach_trusted_identity_with_authority(
+                &mut first,
+                "remote-session-retired-owner",
+                None,
+                u64::MAX,
+                BrowserAttachmentAuthority::RemoteMcpSession,
+            )
+            .await
+            .unwrap();
+        let old_owner = first
+            .browser_identity
+            .as_ref()
+            .unwrap()
+            .owner_lease_id
+            .clone();
+        harness.registry.open(&first, None).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        harness
+            .probe
+            .lane_close_failures_remaining
+            .store(1, Ordering::Release);
+        let mut replacement = gateway_caller_without_browser_identity();
+        replacement.remote = true;
+        harness
+            .registry
+            .attach_trusted_identity_with_authority(
+                &mut replacement,
+                "remote-session-retired-owner",
+                None,
+                u64::MAX,
+                BrowserAttachmentAuthority::RemoteMcpSession,
+            )
+            .await
+            .unwrap();
+        {
+            let identities = harness
+                .registry
+                .identities
+                .lock()
+                .expect("gateway browser identity cache poisoned");
+            let cached = identities
+                .get("remote-session-retired-owner")
+                .expect("replacement authority must be published");
+            assert!(
+                cached.pending_owner_cleanup.is_empty(),
+                "host retirement resolves the superseded-owner cleanup failure"
+            );
+            assert_ne!(cached.identity.owner_lease_id, old_owner);
+        }
+        assert!(harness.hub.list_lanes().await.is_empty());
+        assert_eq!(harness.probe.lane_closes.load(Ordering::Acquire), 1);
+
+        // A sibling lane on the shared Primary host makes retirement
+        // impossible, so the superseded owner is retained for retry without
+        // losing the replacement.
         let harness = harness_with_owner_ttl(10);
         let mut first = gateway_caller_without_browser_identity();
         first.remote = true;
@@ -2943,6 +3114,20 @@ mod tests {
         harness.registry.open(&first, None).await.unwrap();
 
         tokio::time::sleep(Duration::from_millis(20)).await;
+        let mut sibling = gateway_caller_without_browser_identity();
+        sibling.remote = true;
+        harness
+            .registry
+            .attach_trusted_identity_with_authority(
+                &mut sibling,
+                "remote-session-superseded-sibling",
+                None,
+                u64::MAX,
+                BrowserAttachmentAuthority::RemoteMcpSession,
+            )
+            .await
+            .unwrap();
+        let sibling_lane = harness.registry.open(&sibling, None).await.unwrap();
         harness
             .probe
             .lane_close_failures_remaining
@@ -2994,14 +3179,6 @@ mod tests {
             .unwrap();
         assert_eq!(result.closed, 1);
         assert!(
-            harness
-                .hub
-                .list_lanes()
-                .await
-                .iter()
-                .all(|lane| lane.lane_id != replacement_lane.lane_id)
-        );
-        assert!(
             !harness
                 .registry
                 .identities
@@ -3010,8 +3187,17 @@ mod tests {
                 .contains_key("remote-session-superseded")
         );
 
-        harness.hub.sweep().await.unwrap();
+        // The final revoke consumed both the replacement lane and the retained
+        // superseded-owner cleanup; only the sibling lane survives.
         assert_eq!(harness.probe.lane_closes.load(Ordering::Acquire), 3);
+        let lanes = harness.hub.list_lanes().await;
+        assert_eq!(lanes.len(), 1);
+        assert_eq!(lanes[0].lane_id, sibling_lane.lane_id);
+        assert!(
+            lanes
+                .iter()
+                .all(|lane| lane.lane_id != replacement_lane.lane_id)
+        );
     }
 
     #[tokio::test]
