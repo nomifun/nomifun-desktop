@@ -149,9 +149,11 @@ local instance owner, the Agent factory injects a scoped, expiring claim signed
 by a process-private root.
 
 The obsolete per-platform on/off preference has been removed; there is no
-legacy off-state. A bot bound to a public agent follows the public-agent policy
-instead: it uses an isolated per-chat Conversation and never receives the
-platform Gateway claim; the factory's public-agent clamp fails closed.
+legacy off-state. A bot bound to a customer-service agent follows the
+customer-service policy instead: every inbound message is handed to the
+customer-service domain (no Conversation at all) and answered by a disposable
+one-shot engine session whose tool table is fixed at construction to three
+read-only tools — it never receives the platform Gateway claim.
 
 What the gateway tools (all prefixed `nomi_*`, 32 of them today) let the
 remote agent do on your behalf:
@@ -217,8 +219,8 @@ owner cleanly.
 credentials and owner bindings; they do not introduce another Agent or model
 picker. A companion-bound Nomi bot uses the companion profile's model as the
 authoritative value, with a provisioned `channels.<platform>.defaultModel` only
-as fallback. A public-agent bot uses that public agent's resolved model under
-the public capability clamp. An unbound channel defaults to Nomi; deployments
+as fallback. A customer-service-bound bot uses that agent's own configured
+provider/model from the customer-service console. An unbound channel defaults to Nomi; deployments
 that explicitly provision `channels.<platform>.agent` can select another engine,
 and ACP continues to consume its provisioned backend/model configuration.
 After changing a platform-level provisioning preference, calling
