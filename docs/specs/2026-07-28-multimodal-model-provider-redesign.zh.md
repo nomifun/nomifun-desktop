@@ -1,7 +1,7 @@
 # 多供应商 · 多模态模型管理与协议适配重构设计（v2）
 
 - 日期：2026-07-28（v2 修订）
-- 状态：设计定稿；P0 已实施（分支 dev/model-catalog-p0-20260728，见 §6 P0 实施偏差记录与 docs/handoffs/2026-07-28-model-catalog-p0.md）
+- 状态：设计定稿；P0 已实施（分支 dev/model-catalog-p0-20260728，见 §6 P0 实施偏差记录与 docs/handoffs/2026-07-28-model-catalog-p0.md）；P1 已实施（分支 dev/model-catalog-p1-20260729，见 §6 P1 实施偏差记录与 docs/handoffs/2026-07-29-model-invoke-p1.md）
 - 范围：供应商/模型配置与管理、模型能力打标、各模态调用链、外部协议适配层、前端模型选择交互
 - 调研方式：四路并行代码审查（配置数据模型 / 对话链路协议抽象 / 前端管理与选择 UI / 多模态调用链路）+ 10 家供应商 × 6 模态的真实协议差异调研（附录 C）+ 适配层抽取的 crate 依赖摸底。关键结论均带 `file:line` 或来源 URL。
 
@@ -426,6 +426,19 @@ pub enum JobStatus { Pending, Running, Succeeded, Failed, Canceled }  // 词表�
 5. TTS 适配器（openai.audio_speech）+ `/api/tts` 入口。
 
 验收：StepFun 图像、火山图像/视频/语音（双连接）、Deepgram ASR、OpenRouter 上 gemini 命名模型全部真实调用成功；探针结果与真实调用一致。
+
+#### P1 实施偏差记录（2026-07-29，分支 dev/model-catalog-p1-20260729）
+
+与上文设计的八处有意偏差（来源：计划 Self-Review、SDD ledger 与各任务报告），除注明者外计划在 P2 及后续阶段消化：
+
+1. **chat 路径特判表化推迟 P2**：`map_nomi_provider`/`resolve_nomi_url_and_compat` 的散落平台特判未动，`nomi-providers` 不变。P1 的平台路由表（`routes_table.rs`）只服务非 chat 任务；chat 是本设计的非目标（§1.3），表化统一作为风险控制推迟到 P2。
+2. **bedrock 不经 invoke 层**：`platform=="bedrock"` 且走 default 连接时，解析器返回 typed `Config` 错误（"bedrock is not supported by the invoke layer yet"），而非尝试 SigV4。AwsSigV4 鉴权方案未实现。
+3. **多 key 轮换保持"取第一个"**：default 连接的凭证由 providers 行加密串按逗号/换行分割后取第一个非空 key（`AuthMaterial::primary_secret` 取 `api_keys[0]`），与现状一致；基座级 key 轮换与 per-key 健康推迟（§8-2）。
+4. **STT legacy 内嵌 key 模式退役**（wire 行为变化）：`/api/stt` 偏好中无 provider_id、直填 openai/deepgram config 的旧形态，现在返回 500（STT_UNKNOWN，消息引导用户在设置中重选供应商）。执行前 grep 确认前端 UI 早已只写 provider_id 模式，故按计划 T7 的二选一裁决直接退役；存量旧偏好的一次性迁移列为后续改进。
+5. **V2v 错误码改为 `unsupported_capability`**：创意工坊 V2v capability 原返回 `adapter_unavailable`，现统一为 `unsupported_capability`（与 invoke 层 UnsupportedTask 语义对齐，任务简报裁定）。
+6. **gemini 命名模型在非 gemini 平台行上需要行级 protocol 覆盖**：名字嗅探路由（"模型名含 gemini"）已铲除；OpenRouter 等聚合平台上的 gemini 命名模型若需走 gemini 原生协议，逃生舱 = `provider_models.protocol` 行级覆盖（设计内行为，此处记录以对照 P1 验收中"OpenRouter 上 gemini 命名模型"一项的达成方式）。
+7. **rerank 任务有路由无适配器**：路由表已声明 `openai.rerank`，但适配器未实现——调用得到诚实的 `NoAdapter` typed 错误（原设计矩阵中 rerank 属 P2 dashscope 批次）。
+8. **`volc.tts_v3` 路由已声明、适配器未实现**：路由表 volcengine/ark 平台的 SpeechSynthesis 已指向 `volc.tts_v3`@voice 连接，但适配器未落地（P1 验证件选择了 `volc.asr_file`，满足"至少一个"要求）——同样得到 `NoAdapter`。按需在 P2+ 补齐。
 
 ### P2 前端统一（修复"选错模型"）
 选择器统一走 resolve（含 task 过滤接入默认模型/IDMM/故障转移）；管理页连接档案区 + 模型实体行 + Inferred 确认；ts-rs 契约；发送链路 vision 守门；dashscope 系适配器。
