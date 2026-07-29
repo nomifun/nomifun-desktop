@@ -42,6 +42,12 @@ pub(crate) const PRODUCT_TABLES: &[&str] = &[
     "cron_job_runs",
     "cron_run_reservations",
     "cron_jobs",
+    "cs_agents",
+    "cs_audit_events",
+    "cs_channel_bindings",
+    "cs_dialogues",
+    "cs_messages",
+    "cs_notes",
     "idmm_action_reservations",
     "idmm_interventions",
     "installation_identity",
@@ -107,6 +113,10 @@ const UUIDV7_BUSINESS_COLUMNS: &[(&str, &str)] = &[
     ("cron_job_runs", "cron_job_run_id"),
     ("cron_run_reservations", "cron_job_run_id"),
     ("cron_jobs", "cron_job_id"),
+    ("cs_agents", "cs_agent_id"),
+    ("cs_dialogues", "cs_dialogue_id"),
+    ("cs_messages", "cs_message_id"),
+    ("cs_notes", "cs_note_id"),
     ("idmm_action_reservations", "reservation_id"),
     ("idmm_interventions", "intervention_id"),
     ("knowledge_bases", "knowledge_base_id"),
@@ -173,6 +183,11 @@ const NON_REFERENCE_ID_COLUMNS: &[(&str, &str)] = &[
     ("creation_tasks", "creation_task_id"),
     ("creation_tasks", "node_id"),
     ("creation_tasks", "remote_task_id"),
+    ("cs_agents", "cs_agent_id"),
+    ("cs_dialogues", "cs_dialogue_id"),
+    ("cs_dialogues", "chat_id"),
+    ("cs_messages", "cs_message_id"),
+    ("cs_notes", "cs_note_id"),
     ("idmm_action_reservations", "reservation_id"),
     ("idmm_interventions", "intervention_id"),
     ("knowledge_bases", "knowledge_base_id"),
@@ -602,8 +617,22 @@ pub(crate) const LOGICAL_REFERENCES: &[LogicalReference] = &[
     text_ref!("cron_run_reservations", "cron_job_id" => "cron_jobs", "cron_job_id", false, "idx_cron_run_reservations_cron_job_id", Cascade),
     text_ref!("cron_run_reservations", "conversation_id" => "conversations", "conversation_id", true, "idx_cron_run_reservations_conversation_id", SetNull),
     external_ref!("channel_plugins", "companion_id", Text, true, CanonicalUuidV7, "idx_channel_plugins_companion_id", SetNull),
-    external_ref!("channel_plugins", "public_agent_id", Text, true, CanonicalUuidV7, "idx_channel_plugins_public_agent_id", SetNull),
     text_ref!("channel_users", "channel_plugin_id" => "channel_plugins", "channel_plugin_id", true, "idx_channel_users_channel_plugin_id", Cascade),
+    // ── customer-service domain (015) ────────────────────────────────
+    // Provider/KB references keep history on parent deletion: the runtime
+    // resolves them per turn and degrades gracefully to "model/KB missing".
+    text_ref!("cs_agents", "provider_id" => "providers", "provider_id", true, "idx_cs_agents_provider_id", KeepHistory),
+    text_ref!("cs_channel_bindings", "cs_agent_id" => "cs_agents", "cs_agent_id", false, "idx_cs_channel_bindings_agent", Cascade),
+    text_ref!("cs_channel_bindings", "channel_plugin_id" => "channel_plugins", "channel_plugin_id", false, "idx_cs_channel_bindings_plugin", Cascade),
+    text_ref!("cs_dialogues", "cs_agent_id" => "cs_agents", "cs_agent_id", false, "idx_cs_dialogues_agent", Cascade),
+    // A dialogue transcript survives bot/visitor deletion as history.
+    text_ref!("cs_dialogues", "channel_plugin_id" => "channel_plugins", "channel_plugin_id", false, "idx_cs_dialogues_identity", KeepHistory),
+    text_ref!("cs_dialogues", "channel_user_id" => "channel_users", "channel_user_id", false, "idx_cs_dialogues_channel_user", KeepHistory),
+    text_ref!("cs_messages", "cs_dialogue_id" => "cs_dialogues", "cs_dialogue_id", false, "idx_cs_messages_dialogue", Cascade),
+    text_ref!("cs_notes", "cs_agent_id" => "cs_agents", "cs_agent_id", true, "idx_cs_notes_agent", Cascade),
+    // Audit events are retained after the agent is deleted; retention-days
+    // cleanup is the only pruning authority.
+    text_ref!("cs_audit_events", "cs_agent_id" => "cs_agents", "cs_agent_id", false, "idx_cs_audit_agent_time", KeepHistory),
     text_ref!("creation_tasks", "canvas_id" => "workshop_canvases", "canvas_id", true, "idx_creation_tasks_canvas_id", SetNull),
     text_ref!("creation_tasks", "provider_id" => "providers", "provider_id", false, "idx_creation_tasks_provider_id", Restrict),
     text_ref!("idmm_action_reservations", "user_id" => "users", "user_id", false, "idx_idmm_action_reservations_user_id", Cascade),
@@ -814,10 +843,12 @@ pub(crate) const JSON_LOGICAL_REFERENCES: &[JsonLogicalReference] = &[
         "SELECT json_extract(extra, '$.companion_id') AS value FROM conversations",
         "idx_conversations_extra_companion_id", KeepHistory
     ),
-    json_external_ref!(
-        "conversations", "extra", "$.public_agent_id",
-        "SELECT json_extract(extra, '$.public_agent_id') AS value FROM conversations",
-        "idx_conversations_extra_public_agent_id", KeepHistory
+    // Customer-service agents mount knowledge bases by ID; a deleted base
+    // simply stops contributing hits, so history is allowed to keep the value.
+    json_text_ref!(
+        "cs_agents", "knowledge_base_ids", "$[]",
+        "SELECT item.value AS value FROM cs_agents, json_each(cs_agents.knowledge_base_ids) item" =>
+        "knowledge_bases", "knowledge_base_id", "idx_cs_agents_knowledge_base_ids_json", KeepHistory, AllowMissingHistoricalParent
     ),
 ];
 

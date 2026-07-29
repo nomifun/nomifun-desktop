@@ -10,6 +10,7 @@ mod connector_credential;
 mod conversation;
 mod conversation_artifact;
 mod cron_job;
+mod customer_service;
 mod cron_job_run;
 mod idmm_intervention;
 mod knowledge;
@@ -47,6 +48,10 @@ pub use conversation::{ConversationDeliveryReceiptRow, ConversationRow};
 pub use conversation_artifact::ConversationArtifactRow;
 pub use cron_job::CronJobRow;
 pub use cron_job_run::{CronJobRunRow, CronRunReservationRow};
+pub use customer_service::{
+    CsAgentRow, CsAuditEventRow, CsChannelBindingRow, CsDialogueRow, CsMessageRow, CsNoteRow,
+    NewCsAgentRow,
+};
 pub use idmm_intervention::{
     IdmmActionReservationRow, IdmmInterventionRow, NewIdmmInterventionRow,
 };

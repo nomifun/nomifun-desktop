@@ -37,7 +37,15 @@ pub use models::{
     UpdatePresetTagParams, UpsertPresetStateParams,
 };
 pub use models::{ModelProfileRow, UpsertModelProfileParams};
+pub use models::{
+    CsAgentRow, CsAuditEventRow, CsChannelBindingRow, CsDialogueRow, CsMessageRow, CsNoteRow,
+    NewCsAgentRow,
+};
 pub use repository::channel::UpdatePluginStatusParams;
+pub use repository::customer_service::{
+    CsDialogueKey, ICustomerServiceRepository, UpdateCsAgentParams,
+};
+pub use repository::SqliteCustomerServiceRepository;
 pub use repository::conversation::{
     ConversationDeliveryReceiptClaim, ConversationFilters, ConversationMessageProjection,
     ConversationTurnAdmissionState,
