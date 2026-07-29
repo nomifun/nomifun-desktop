@@ -9,7 +9,8 @@
 //!   (`"openai.chat_text"`).
 //! - [`openai_embeddings`] — sync `/embeddings` (`"openai.embeddings"`).
 //! - [`openai_audio`] — sync multipart `/audio/transcriptions`
-//!   (`"openai.audio_transcriptions"`, ported from `nomifun-shell/stt_openai`).
+//!   (`"openai.audio_transcriptions"`, ported from `nomifun-shell/stt_openai`)
+//!   and sync JSON→binary `/audio/speech` (`"openai.audio_speech"`).
 //!
 //! Platform-specific protocols:
 //! - [`gemini`] — Google `:generateContent` (`"gemini.generate_content"` for
@@ -40,6 +41,7 @@ pub fn default_adapters() -> Vec<Arc<dyn ProtocolAdapter>> {
         Arc::new(openai_chat_text::OpenAiChatTextAdapter),
         Arc::new(openai_embeddings::OpenAiEmbeddingsAdapter),
         Arc::new(openai_audio::OpenAiAudioTranscriptionsAdapter),
+        Arc::new(openai_audio::OpenAiAudioSpeechAdapter),
         Arc::new(gemini::GeminiGenerateContentAdapter),
         Arc::new(gemini::GeminiGenerateTextAdapter),
         Arc::new(deepgram::DeepgramListenAdapter),
@@ -96,6 +98,7 @@ mod tests {
             ("openai.chat_text", ModelTask::Chat),
             ("openai.embeddings", ModelTask::Embedding),
             ("openai.audio_transcriptions", ModelTask::SpeechRecognition),
+            ("openai.audio_speech", ModelTask::SpeechSynthesis),
             ("gemini.generate_content", ModelTask::ImageGeneration),
             ("gemini.generate_content", ModelTask::ImageEdit),
             ("gemini.generate_text", ModelTask::Chat),
@@ -110,6 +113,7 @@ mod tests {
         assert!(registry.get("openai.chat_text", ModelTask::Embedding).is_err());
         assert!(registry.get("openai.embeddings", ModelTask::Chat).is_err());
         assert!(registry.get("openai.audio_transcriptions", ModelTask::Chat).is_err());
+        assert!(registry.get("openai.audio_speech", ModelTask::SpeechRecognition).is_err());
         assert!(registry.get("gemini.generate_content", ModelTask::Chat).is_err());
         assert!(registry.get("gemini.generate_text", ModelTask::ImageGeneration).is_err());
         assert!(registry.get("deepgram.listen", ModelTask::SpeechSynthesis).is_err());

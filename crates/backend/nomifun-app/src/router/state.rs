@@ -1905,6 +1905,9 @@ pub fn build_shell_state(services: &AppServices) -> ShellRouterState {
             provider_model_repo,
             services.encryption_key,
         )),
+        // The process-wide invoke singleton (assembled in AppServices next to
+        // the creation service) backs `/api/tts`.
+        model_invoke_service: Some(services.model_invoke_service.clone()),
     }
 }
 
