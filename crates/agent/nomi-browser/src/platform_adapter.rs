@@ -35,7 +35,12 @@ use crate::tool::BrowserSecretSource;
 
 const DEFAULT_ACTION_TIMEOUT: Duration = Duration::from_secs(45);
 const MAX_ACTION_TIMEOUT: Duration = Duration::from_secs(120);
-const MAX_OBSERVATION_GENERATION_ADVANCE: u64 = 65_536;
+/// F22: per-operation bound on generation catch-up observations. Each catch-up
+/// step is a full engine observation (multi-frame CDP AX snapshot) holding the
+/// lane's operation gate, so one operation must never storm thousands of them
+/// back-to-back. The consumed generations are kept by the engine, so a fence
+/// beyond this bound fails retryable and every retry makes monotonic progress.
+const MAX_OBSERVATION_GENERATION_CATCH_UP: u64 = 32;
 
 /// Synchronous, side-effect-free resolver used immediately before launching a
 /// host.  Applications which load an authenticated replica from a vault can
@@ -558,19 +563,33 @@ impl ManagedEngineLaneDriver {
         // reset generations until the real observation reaches that Hub fence.
         // Never synthesize or rewrite the generation: the value returned to
         // the Hub remains exactly `Observation::generation`.
+        //
+        // F54: always attempt the first observe before judging the fence — the
+        // bound below caps the catch-up DELTA, never the absolute canonical
+        // generation, so a long-lived in-sync lane keeps observing forever.
         let required = context.operation.ref_generation.max(1);
-        if required > MAX_OBSERVATION_GENERATION_ADVANCE {
-            return Err(observation_generation_exhausted());
+        let observation = self
+            .engine
+            .observe(options)
+            .await
+            .map_err(map_engine_error)?;
+        if observation.generation.0 >= required {
+            return Ok(observation);
         }
 
-        for _ in 0..required {
+        // F22: keep the catch-up burst small. Beyond the bound, fail with the
+        // retryable exhaustion error instead of storming full observations for
+        // minutes on one serialized operation; the generations consumed here
+        // are kept by the engine, so each retry resumes closer to the fence.
+        let catch_up = (required - observation.generation.0)
+            .min(MAX_OBSERVATION_GENERATION_CATCH_UP);
+        for _ in 0..catch_up {
             let observation = self
                 .engine
                 .observe(options)
                 .await
                 .map_err(map_engine_error)?;
-            let generation = observation.generation.0;
-            if generation >= required {
+            if observation.generation.0 >= required {
                 return Ok(observation);
             }
         }
@@ -1629,6 +1648,84 @@ mod tests {
             replacement_engine.observe_calls.load(Ordering::SeqCst),
             8,
             "the adapter should consume reset generations until it reaches the Hub fence"
+        );
+    }
+
+    #[tokio::test]
+    async fn long_lived_lane_observe_is_never_bricked_by_absolute_generation() {
+        // F54: the cap bounds the catch-up delta, not the absolute canonical
+        // generation. A lane that legitimately accumulated far more than the
+        // old 65,536 cap — while staying in sync with its engine — must still
+        // observe with a single engine call.
+        let engine = Arc::new(FakeEngine::with_observation_generation(70_000));
+        let driver = test_driver(engine.clone());
+        let mut long_lived = context();
+        long_lived.operation.ref_generation = 70_000;
+
+        let observed = driver
+            .execute(
+                operation(
+                    BrowserOperationKind::Observe,
+                    "observe",
+                    Value::Object(Map::new()),
+                ),
+                long_lived,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(observed.ref_generation, Some(70_000));
+        assert_eq!(engine.observe_calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn generation_catch_up_is_bounded_and_retries_make_progress() {
+        // F22: a huge fence gap (host crash after a long-lived lane) must not
+        // storm thousands of back-to-back observations inside one operation.
+        // The bounded attempt fails retryable, and because the engine keeps the
+        // consumed generations, each retry resumes closer to the fence.
+        let engine = Arc::new(FakeEngine::with_observation_generation(1));
+        let driver = test_driver(engine.clone());
+        let mut stale = context();
+        stale.operation.ref_generation = 10_000;
+
+        let error = driver
+            .execute(
+                operation(
+                    BrowserOperationKind::Observe,
+                    "observe",
+                    Value::Object(Map::new()),
+                ),
+                stale.clone(),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, BrowserErrorCode::BrowserUnavailable);
+        assert!(error.retryable, "bounded catch-up must stay recoverable");
+        let first_attempt = engine.observe_calls.load(Ordering::SeqCst);
+        assert_eq!(
+            first_attempt as u64,
+            1 + MAX_OBSERVATION_GENERATION_CATCH_UP,
+            "one operation performs at most 1 + cap observations"
+        );
+
+        let retry_error = driver
+            .execute(
+                operation(
+                    BrowserOperationKind::Observe,
+                    "observe",
+                    Value::Object(Map::new()),
+                ),
+                stale,
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(retry_error.code, BrowserErrorCode::BrowserUnavailable);
+        let second_attempt = engine.observe_calls.load(Ordering::SeqCst) - first_attempt;
+        assert_eq!(
+            second_attempt as u64,
+            1 + MAX_OBSERVATION_GENERATION_CATCH_UP,
+            "a retry is bounded identically and resumes from the kept generations"
         );
     }
 
