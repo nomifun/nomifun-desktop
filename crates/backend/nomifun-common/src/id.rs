@@ -355,6 +355,22 @@ define_entity_id!(
     WorkshopCanvasId
 );
 define_entity_id!(
+    /// Globally unique customer-service agent (客服员工) identifier.
+    CsAgentId
+);
+define_entity_id!(
+    /// Globally unique customer-service dialogue (访客对话) identifier.
+    CsDialogueId
+);
+define_entity_id!(
+    /// Globally unique customer-service message identifier.
+    CsMessageId
+);
+define_entity_id!(
+    /// Globally unique customer-service note (客服笔记) identifier.
+    CsNoteId
+);
+define_entity_id!(
     /// Globally unique workshop-asset identifier.
     WorkshopAssetId
 );

@@ -5836,6 +5836,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "nomifun-customer-service"
+version = "0.3.3"
+dependencies = [
+ "async-trait",
+ "axum",
+ "dashmap",
+ "futures",
+ "nomifun-ai-agent",
+ "nomifun-api-types",
+ "nomifun-common",
+ "nomifun-db",
+ "nomifun-knowledge",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "nomifun-db"
 version = "0.3.3"
 dependencies = [

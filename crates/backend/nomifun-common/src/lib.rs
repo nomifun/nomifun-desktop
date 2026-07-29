@@ -54,6 +54,7 @@ pub use id::{
     CompanionMemoryId, CompanionSessionWindowId, CompanionSkillId, CompanionSkillPatternId,
     CompanionSuggestionId, ConnectorCredentialId,
     ConversationArtifactId, ConversationId, CreationTaskId, CronJobId, CronJobRunId,
+    CsAgentId, CsDialogueId, CsMessageId, CsNoteId,
     EntityId, FigureId,
     IdmmInterventionId, KnowledgeBaseId, KnowledgeBindingId, McpServerId, MessageId,
     PersistedArtifactId, PresetId, PresetTagId, PreviewSnapshotId, ProviderId,
