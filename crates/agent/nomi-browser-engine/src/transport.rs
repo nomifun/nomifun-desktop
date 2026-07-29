@@ -21,7 +21,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use chromiumoxide::cdp::js_protocol::runtime::RunIfWaitingForDebuggerParams;
-use chromiumoxide::cdp::browser_protocol::fetch::EnableParams as FetchEnableParams;
+use chromiumoxide::cdp::browser_protocol::fetch::{
+    EnableParams as FetchEnableParams, EventRequestPaused,
+};
 use chromiumoxide::cdp::browser_protocol::target::{
     EventAttachedToTarget, SetAutoAttachParams,
 };
@@ -357,10 +359,23 @@ impl Connection {
         // 1) 先登记子 session（先装好路由，再放行）。
         self.inner.registry.register_session(&sid, &ttype);
 
-        // 2) 在放行 target 前安装出口防火墙。若 Fetch.enable 失败，保持
-        // waiting-for-debugger 状态即为 fail-closed，绝不能让首批请求绕过策略。
-        let fetch = FetchEnableParams::default();
-        self.send::<FetchEnableParams>(&sid, &fetch).await?;
+        // 2) 在放行 target 前安装出口防火墙——**但仅当 Fetch.requestPaused 已有可靠
+        //    订阅者**（F1）。无订阅者时的事件被静默丢弃且 CDP 不会重发 requestPaused，
+        //    此时挂 Fetch.enable 会把该 session 的全部网络请求永久卡死（比无防火墙更糟
+        //    且不可恢复）。生产构造器（CdpBackend/CdpHostRuntime::from_launched）在
+        //    attach loop 启动**之前**就注册防火墙的可靠订阅，故此 gate 在生产恒为
+        //    true；低层诊断路径（Launched::connect）无防火墙循环，保持 CDP 默认
+        //    （不拦截）网络——与引入 Fetch.enable 前的行为一致。
+        //    若 Fetch.enable 失败，保持 waiting-for-debugger 状态即为 fail-closed，
+        //    绝不能让首批请求绕过策略。
+        if self
+            .inner
+            .registry
+            .has_reliable_subscriber(EventRequestPaused::IDENTIFIER)
+        {
+            let fetch = FetchEnableParams::default();
+            self.send::<FetchEnableParams>(&sid, &fetch).await?;
+        }
 
         // 3) **级联 setAutoAttach 到 page/iframe 子 session**：OOPIF（跨进程 iframe）只在其**所属帧的
         //    session**上设了 setAutoAttach 才会自动 attach——browser-root 级 setAutoAttach 只覆盖顶层
@@ -497,6 +512,119 @@ impl Connection {
 mod tests {
     use super::*;
     use chromiumoxide::cdp::browser_protocol::target::EventAttachedToTarget;
+
+    /// 迷你 CDP fake：单客户端 WS server，对**每条**命令回 `{"id":id,"result":{}}`
+    /// 并按序记录请求原文。客户端 shutdown 后 join 拿全部请求做断言。
+    async fn recording_fake_ws_server() -> (
+        String,
+        tokio::task::JoinHandle<Vec<serde_json::Value>>,
+    ) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind transport fake websocket");
+        let address = listener.local_addr().expect("read fake websocket address");
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("accept fake client");
+            let mut websocket = tokio_tungstenite::accept_async(stream)
+                .await
+                .expect("complete fake websocket handshake");
+            let mut requests = Vec::new();
+            while let Some(Ok(message)) = websocket.next().await {
+                let WsMessage::Text(text) = message else {
+                    break;
+                };
+                let request: serde_json::Value =
+                    serde_json::from_str(&text).expect("fake received valid json");
+                let id = request["id"].as_u64().expect("fake request has id");
+                // 回包须回显 sessionId，否则子 session 命令的回调路由不到。
+                let mut response = serde_json::json!({ "id": id, "result": {} });
+                if let Some(session_id) = request.get("sessionId") {
+                    response["sessionId"] = session_id.clone();
+                }
+                requests.push(request);
+                websocket
+                    .send(WsMessage::Text(response.to_string().into()))
+                    .await
+                    .expect("fake sends generic success");
+            }
+            requests
+        });
+        (format!("ws://{address}"), server)
+    }
+
+    fn page_attach_event(session_id: &str) -> EventAttachedToTarget {
+        let event_json = format!(
+            r#"{{"sessionId":"{session_id}","targetInfo":{{"targetId":"T-{session_id}","type":"page","title":"","url":"","attached":true,"canAccessOpener":false}},"waitingForDebugger":true}}"#
+        );
+        serde_json::from_str(&event_json).expect("valid attach event")
+    }
+
+    /// **F18 回归**：无任何 `Fetch.requestPaused` 可靠订阅者（`Launched::connect`
+    /// 诊断路径的形态）时，`handle_attached` **绝不能**发 `Fetch.enable`——否则
+    /// 被拦请求的事件无人消费即被丢弃，该 target 的网络永久卡死。
+    #[tokio::test]
+    async fn handle_attached_without_paused_consumer_does_not_arm_fetch() {
+        let (ws_url, server) = recording_fake_ws_server().await;
+        let conn = Connection::connect(&ws_url).await.expect("connect fake");
+
+        conn.handle_attached(&page_attach_event("S1"))
+            .await
+            .expect("handle_attached succeeds");
+        assert!(conn.registry().has_session("S1"));
+
+        conn.shutdown().await;
+        let requests = server.await.expect("fake server joins");
+        let methods: Vec<&str> = requests
+            .iter()
+            .map(|request| request["method"].as_str().unwrap())
+            .collect();
+        assert!(
+            !methods.contains(&"Fetch.enable"),
+            "no requestPaused consumer exists, so Fetch.enable must not be issued: {methods:?}"
+        );
+        assert!(
+            methods.contains(&"Runtime.runIfWaitingForDebugger"),
+            "the target must still be released: {methods:?}"
+        );
+    }
+
+    /// **F1 不变量**：存在 `Fetch.requestPaused` 可靠订阅者（生产防火墙形态——
+    /// 构造器在 attach loop 之前注册）时，`handle_attached` 在放行
+    /// （runIfWaitingForDebugger）**之前**发 `Fetch.enable`（fail-closed 顺序）。
+    #[tokio::test]
+    async fn handle_attached_arms_fetch_before_release_when_firewall_subscribed() {
+        let (ws_url, server) = recording_fake_ws_server().await;
+        let conn = Connection::connect(&ws_url).await.expect("connect fake");
+        // 模拟生产编排：防火墙的可靠订阅先于 attach 处理注册。
+        let _paused_rx = conn.subscribe_reliable(EventRequestPaused::IDENTIFIER, None);
+
+        conn.handle_attached(&page_attach_event("S2"))
+            .await
+            .expect("handle_attached succeeds");
+
+        conn.shutdown().await;
+        let requests = server.await.expect("fake server joins");
+        let methods: Vec<&str> = requests
+            .iter()
+            .map(|request| request["method"].as_str().unwrap())
+            .collect();
+        let fetch_at = methods
+            .iter()
+            .position(|method| *method == "Fetch.enable")
+            .expect("Fetch.enable must be issued when a paused consumer exists");
+        let release_at = methods
+            .iter()
+            .position(|method| *method == "Runtime.runIfWaitingForDebugger")
+            .expect("target release must follow");
+        assert!(
+            fetch_at < release_at,
+            "firewall must be armed before the target is released: {methods:?}"
+        );
+        assert_eq!(
+            requests[fetch_at]["sessionId"], "S2",
+            "Fetch.enable must target the attached child session"
+        );
+    }
 
     /// MethodCall wire 形态：根 session 不带 sessionId 字段，method/id/params 正确。
     /// 这验证我们发出去的 JSON 与 CDP 期望一致（不需真 WS）。

@@ -113,6 +113,12 @@ impl Launched {
     /// Connect a low-level test/diagnostic caller while retaining exact process
     /// and profile cleanup authority. Production runtimes normally consume the
     /// launch through `CdpBackend`/`CdpHostRuntime` instead.
+    ///
+    /// This path spawns no egress-firewall loop, so `handle_attached` does NOT
+    /// arm `Fetch.enable` on attached targets (the arming gate requires a live
+    /// `Fetch.requestPaused` subscriber): networking stays CDP-default and
+    /// un-intercepted. Diagnostic callers must not treat this connection as
+    /// firewall-enforced.
     pub async fn connect(
         self,
     ) -> Result<
