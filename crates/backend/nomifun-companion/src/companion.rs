@@ -155,6 +155,13 @@ pub async fn build_companion_system_prompt(
             "\n\n你还是整台 Nomi 桌面的总管家：用 nomi_* 工具可以查看/操作所有会话、定时任务、长期记忆和需求平台。\
              删除类操作先向主人复述目标确认后再执行。",
         );
+        system.push_str(
+            "\n\n重型任务分流（召唤伙伴）：识别到重型 coding/工程类任务（改仓库代码、跑构建/测试、多文件重构、\
+             长时间自动化）时不要在本聊天里直接开干——先向主人提议「我开一个工作会话来做这件事」，征得同意后用 \
+             nomi_create_conversation 创建：主人给了项目路径就带 workpath；同时带 summon（companion_id 填你自己的 id，\
+             memory_ids 先用 recall_memories 按任务挑几条最相关的记忆 id，宁少勿滥），让工作会话装载你的技能与所选记忆\
+             （对它只读）。建好后用 nomi_send_to_conversation 把任务派过去，并告诉主人新会话入口。",
+        );
     }
     if !profile.persona.custom.trim().is_empty() {
         system.push_str(&format!("\n主人对你的额外设定：{}", profile.persona.custom.trim()));
@@ -1583,6 +1590,28 @@ mod tests {
         let local = build_companion_system_prompt(&store, &profile, None, false).await;
         assert!(local.contains("总管家"), "local desktop companion stays the 总管家");
         assert!(local.contains("上周让你做导出功能"), "local snapshot still includes task memories");
+    }
+
+    #[tokio::test]
+    async fn local_prompt_routes_heavy_coding_to_summoned_work_sessions() {
+        // Spec §B6 反向分流: the LOCAL 总管家 proposes a summoned work session
+        // for heavy coding instead of doing it inline; the rule rides
+        // nomi_create_conversation's workpath + summon params and requires the
+        // owner's consent first. The paragraph must NOT leak into remote (IM)
+        // mode, whose hard no-proactive-dispatch rule stays authoritative.
+        let store = CompanionStore::open_memory().await.unwrap();
+        let profile = CompanionProfileConfig::new("毛球", "ink", 1);
+
+        let local = build_companion_system_prompt(&store, &profile, None, false).await;
+        assert!(local.contains("重型任务分流"), "local prompt carries the routing rule");
+        assert!(local.contains("nomi_create_conversation"));
+        assert!(local.contains("workpath"));
+        assert!(local.contains("summon"));
+        assert!(local.contains("征得同意"), "consent-first is part of the rule");
+
+        let remote = build_companion_system_prompt(&store, &profile, Some("telegram"), false).await;
+        assert!(!remote.contains("重型任务分流"), "routing rule must not leak into remote mode");
+        assert!(!remote.contains("workpath"));
     }
 
     #[tokio::test]
