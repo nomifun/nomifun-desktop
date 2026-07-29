@@ -2404,8 +2404,14 @@ impl BrowserSessionHub {
                     ));
                 }
                 let transition = HostRestartTransition::new(observed_epoch, current.epoch)?;
-                self.rebind_host_lanes(&key, observed_epoch, transition, host)
-                    .await?;
+                self.rebind_host_lanes(
+                    &key,
+                    observed_epoch,
+                    transition,
+                    host,
+                    requested_headful.is_some(),
+                )
+                .await?;
                 return Ok(transition);
             }
         }
@@ -2541,8 +2547,14 @@ impl BrowserSessionHub {
             }
         };
         let transition = HostRestartTransition::new(observed_epoch, new_epoch)?;
-        self.rebind_host_lanes(&key, observed_epoch, transition, host)
-            .await?;
+        self.rebind_host_lanes(
+            &key,
+            observed_epoch,
+            transition,
+            host,
+            requested_headful.is_some(),
+        )
+        .await?;
         // Close the remaining race window: an explicit close may have emptied
         // this key between the live-lane check above and the slot insert.
         // `finalize_empty_host` re-validates under `open_gate` and retires the
@@ -2569,6 +2581,7 @@ impl BrowserSessionHub {
         observed_epoch: u64,
         transition: HostRestartTransition,
         host: Arc<dyn BrowserHostDriver>,
+        intentional_visibility_transition: bool,
     ) -> Result<(), BrowserPlatformError> {
         let mut prepared = Vec::new();
         for lane in self.lanes_for_host_key(key).await {
@@ -2680,9 +2693,20 @@ impl BrowserSessionHub {
                 snapshot.tabs.clear();
                 snapshot.active_tab_id = None;
                 snapshot.active_frame_id = None;
-                snapshot.error_code = Some(BrowserErrorCode::BrowserRestarted);
-                snapshot.error_message =
-                    Some("The managed browser restarted; a fresh observe is required.".to_owned());
+                if intentional_visibility_transition {
+                    // A user-requested visibility replacement is not a
+                    // failure. The stale-epoch fence stays armed through
+                    // `fresh_observe_required`, but the Lane must not carry a
+                    // persistent restart error that nothing will ever clear
+                    // (login lanes may never observe again).
+                    snapshot.error_code = None;
+                    snapshot.error_message = None;
+                } else {
+                    snapshot.error_code = Some(BrowserErrorCode::BrowserRestarted);
+                    snapshot.error_message = Some(
+                        "The managed browser restarted; a fresh observe is required.".to_owned(),
+                    );
+                }
                 snapshot.recoverable = true;
                 snapshot.clone()
             };
@@ -3304,7 +3328,8 @@ impl BrowserSessionHub {
             .cloned()
             .ok_or_else(|| foreground_lane_not_ready_error(lane_id.clone()))?;
         let desired_headful = visibility.is_headful();
-        if slot.is_headful() != desired_headful {
+        let transitioned = slot.is_headful() != desired_headful;
+        if transitioned {
             self.transition_primary_visibility_locked(
                 &host_key,
                 authorized_epoch,
@@ -3339,6 +3364,15 @@ impl BrowserSessionHub {
                 return Err(foreground_lane_not_ready_error(lane_id.clone()));
             }
             snapshot.last_active_at_ms = self.inner.clock.now_ms();
+            // The intentional replacement above completed for this exact Lane.
+            // Its restart marker is not an error the user can act on; clearing
+            // it keeps the requesting Lane usable while
+            // `fresh_observe_required` still fences stale page state. A pure
+            // focus without a transition must not clear a genuine crash marker.
+            if transitioned {
+                snapshot.error_code = None;
+                snapshot.error_message = None;
+            }
             snapshot.clone()
         };
         if focus {
@@ -7262,9 +7296,24 @@ mod tests {
             "the process replacement must advance the browser epoch"
         );
         assert_eq!(
-            foregrounded.error_code,
-            Some(BrowserErrorCode::BrowserRestarted),
-            "old refs must be invalidated and a fresh observe required"
+            foregrounded.error_code, None,
+            "the lane that requested the visibility transition must not be left errored"
+        );
+        assert_eq!(foregrounded.error_message, None);
+        let refreshed = harness.client.status(&lane_id).await.unwrap();
+        assert_eq!(
+            refreshed.error_code, None,
+            "the requesting lane must not surface a persistent restart banner"
+        );
+        let fence = harness
+            .client
+            .execute(&lane_id, navigate())
+            .await
+            .unwrap_err();
+        assert_eq!(
+            fence.code,
+            BrowserErrorCode::BrowserRestarted,
+            "old refs must be invalidated and a fresh observe still required"
         );
         assert_eq!(foregrounded.last_active_at_ms, before.last_active_at_ms + 25);
         assert_eq!(
@@ -7298,8 +7347,8 @@ mod tests {
         assert_ne!(headful_first.browser_epoch, initial_first.browser_epoch);
         assert_eq!(headful_first.browser_epoch, headful_second.browser_epoch);
         assert_eq!(
-            headful_first.error_code,
-            Some(BrowserErrorCode::BrowserRestarted)
+            headful_first.error_code, None,
+            "an intentional visibility change must not surface a restart error"
         );
         assert_eq!(
             harness.hub.primary_visibility().await,
@@ -7511,8 +7560,8 @@ mod tests {
         let current = harness.client.status(&opened.lane_id).await.unwrap();
         assert_ne!(current.browser_epoch, opened.browser_epoch);
         assert_eq!(
-            current.error_code,
-            Some(BrowserErrorCode::BrowserRestarted)
+            current.error_code, None,
+            "an intentional visibility change must not surface a restart error"
         );
         assert_eq!(harness.factory.launches.load(Ordering::Acquire), 2);
         assert!(harness.hub.overview().await.hosts[0].headful);
