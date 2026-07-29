@@ -127,8 +127,9 @@ impl ProviderConnectionService {
 }
 
 /// Enforce `^[a-z][a-z0-9_-]{0,31}$` and reserve `default` for the providers
-/// row itself.
-fn validate_role(role: &str) -> Result<(), AppError> {
+/// row itself. Shared with `ProviderModelService`, so a stored
+/// `provider_models.connection_role` can always resolve to a connection role.
+pub(crate) fn validate_role(role: &str) -> Result<(), AppError> {
     let mut bytes = role.bytes();
     let starts_lowercase = bytes.next().is_some_and(|b| b.is_ascii_lowercase());
     let tail_ok = bytes.all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_' || b == b'-');
