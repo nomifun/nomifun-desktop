@@ -7629,19 +7629,22 @@ async fn set_download_behavior_sandbox(
 ///    `Browser.cancelDownload{guid}` **取消**该下载（fail-closed，**红线**——yolo/companion 也取消，
 ///    因为这道判定**不看 session_mode**：denylist 命中即拒，无放行参数，见 `reject_executable_download`
 ///    的红线语义）。这正是「可执行下载在红线会话也拒」的真实 enforcement（在落盘之前拦下）。
+///    **F5：本红线事件走 `subscribe_reliable`（无损）**——lossy broadcast 在事件突发（>容量）时
+///    静默丢事件，等于用时序就能绕过红线；控制事件绝不能丢。
 /// 2. **`Browser.downloadProgress`**：对**完成**（`state=="completed"`）的下载在其落盘文件打 Win MOTW
 ///    （`Zone.Identifier` ADS，Windows 真写 / mac-linux 空实现）。**绝不**自动打开/启动文件。
+///    仍走 lossy broadcast（MOTW/落盘路由是 best-effort 纵深层，非红线控制事件）。
 ///
 /// 二者互补：`downloadWillBegin` 在**发起**侧拦可执行（早于落盘）；`downloadProgress` 在**完成**侧对
 /// 放行的非可执行下载打 MOTW。被取消的可执行下载不会走到 completed，故不打 MOTW（也无需）。
 ///
 /// best-effort + 绝不 panic：解析失败 / cancel 失败 / MOTW 写失败只 `warn`/`debug`，不致命。连接关闭
-/// （`RecvError::Closed`）→ 退出循环（backend Drop 关连接即触发）。
+/// （可靠通道 `None` / `RecvError::Closed`）→ 退出循环（backend Drop 关连接即触发）。
 fn spawn_download_loop(
     conn: Connection,
     router: Option<Arc<HostTargetRouter>>,
 ) -> tokio::task::JoinHandle<()> {
-    let mut begin_rx = conn.subscribe(EventDownloadWillBegin::IDENTIFIER, None);
+    let mut begin_rx = conn.subscribe_reliable(EventDownloadWillBegin::IDENTIFIER, None);
     let mut progress_rx = conn.subscribe(EventDownloadProgress::IDENTIFIER, None);
     tokio::spawn(async move {
         loop {
@@ -7649,7 +7652,7 @@ fn spawn_download_loop(
                 // ① 下载发起 → 可执行 denylist 红线（命中即 cancelDownload，fail-closed/yolo 也取消）。
                 ev = begin_rx.recv() => {
                     match ev {
-                        Ok(ev) => {
+                        Some(ev) => {
                             let Ok(b) = serde_json::from_value::<EventDownloadWillBegin>(ev.params.clone())
                             else { continue };
                             // SD-3: Two complementary checks — filename extension denylist OR
@@ -7668,7 +7671,7 @@ fn spawn_download_loop(
                                 tracing::warn!(
                                     target: "nomi_browser_engine::backend::cdp",
                                     guid = %b.guid, suggested = %b.suggested_filename,
-                                    url_scheme = %if b.url.starts_with("data:") { "data:" } else { &b.url[..b.url.find(':').unwrap_or(0).min(10) + 1] },
+                                    url_scheme = %blocked_download_url_scheme(&b.url),
                                     reason = %reason,
                                     "download blocked (red-line, denied even under yolo/companion); cancelling"
                                 );
@@ -7696,8 +7699,7 @@ fn spawn_download_loop(
                                     .await;
                             }
                         }
-                        Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
-                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                        None => break,
                     }
                 }
                 // ② 下载完成 → 对放行的非可执行下载打 MOTW（被取消的可执行不会到这里）。
@@ -7737,6 +7739,23 @@ fn spawn_download_loop(
             }
         }
     })
+}
+
+/// 取 URL 的 scheme（含冒号，如 `"https:"`）供**阻断日志**使用。**绝不 panic**（F46）：
+/// 旧实现 `&url[..url.find(':').unwrap_or(0).min(10) + 1]` 对空 URL 越界、对冒号前含
+/// 多字节字符的非常规 URL 可能切在 char 边界内——panic 会杀死整条下载红线循环，之后
+/// 可执行下载不再被取消。空串/无冒号 → `"[no-scheme]"`；冒号位置 >10 字节（非常规
+/// scheme）→ 不切片，返回 `"[odd-scheme]"`。
+fn blocked_download_url_scheme(url: &str) -> &str {
+    if url.starts_with("data:") {
+        return "data:";
+    }
+    match url.find(':') {
+        // ':' 是单字节 ASCII，`..=pos` 的右边界紧跟其后，恒为合法 char 边界。
+        Some(pos) if pos <= 10 => &url[..=pos],
+        Some(_) => "[odd-scheme]",
+        None => "[no-scheme]",
+    }
 }
 
 /// **E5 出口防火墙：对单个 session 挂 `Fetch.enable`**（全流量拦截）。
@@ -8683,6 +8702,73 @@ mod tests {
         connection.shutdown().await;
         server.abort();
         let _ = server.await;
+    }
+
+    /// **F5 回归**：可执行下载红线走无损订阅——一次 >broadcast 容量（256）的
+    /// `downloadWillBegin` 突发，**每一条**被阻断的下载都必须发出 cancelDownload。
+    /// 旧实现（lossy `subscribe` + `Lagged → continue`）在突发下静默丢事件，
+    /// 丢掉的 .exe 下载不再被取消——红线被时序绕过。
+    #[tokio::test]
+    async fn executable_download_burst_never_drops_red_line_cancels() {
+        const BURST: usize = 600; // > EVENT_CHANNEL_CAPACITY (256)
+
+        let (connection, mut requests, server) = generic_recording_fake_connection().await;
+        let download_loop = spawn_download_loop(connection.clone(), None);
+
+        // 紧凑同步派发（无 await 点）：当前线程 runtime 下循环任务无机会消费，
+        // lossy broadcast 必然溢出丢事件；可靠通道则全量缓存。
+        for index in 0..BURST {
+            connection
+                .registry()
+                .dispatch_message(&format!(
+                    r#"{{"method":"Browser.downloadWillBegin","params":{{"frameId":"F1","guid":"guid-{index}","url":"https://example.com/evil.exe","suggestedFilename":"evil-{index}.exe"}}}}"#
+                ))
+                .expect("dispatch downloadWillBegin");
+        }
+
+        let mut cancelled = HashSet::new();
+        tokio::time::timeout(Duration::from_secs(30), async {
+            while cancelled.len() < BURST {
+                let request = requests.recv().await.expect("fake server stays alive");
+                if request["method"] == "Browser.cancelDownload" {
+                    cancelled.insert(
+                        request["params"]["guid"].as_str().unwrap().to_string(),
+                    );
+                }
+            }
+        })
+        .await
+        .expect("every blocked executable download must be cancelled");
+        for index in 0..BURST {
+            assert!(
+                cancelled.contains(&format!("guid-{index}")),
+                "cancelDownload for guid-{index} must not be dropped under burst"
+            );
+        }
+
+        download_loop.abort();
+        connection.shutdown().await;
+        server.abort();
+        let _ = server.await;
+    }
+
+    /// **F46 回归**：阻断日志的 url scheme 提取绝不 panic——空 URL、无冒号、冒号
+    /// 过深、冒号前多字节字符统统安全（旧裸切片对空串越界 panic，杀死下载循环）。
+    #[test]
+    fn blocked_download_url_scheme_never_panics() {
+        assert_eq!(blocked_download_url_scheme(""), "[no-scheme]");
+        assert_eq!(blocked_download_url_scheme("no-colon-here"), "[no-scheme]");
+        assert_eq!(blocked_download_url_scheme("https://x/evil.exe"), "https:");
+        assert_eq!(blocked_download_url_scheme("data:app/x;base64,TVo="), "data:");
+        assert_eq!(blocked_download_url_scheme("blob:https://x"), "blob:");
+        // 冒号正好在第 10 字节（旧实现的钳制边界）。
+        assert_eq!(blocked_download_url_scheme("abcdefghij:x"), "abcdefghij:");
+        // 冒号 >10 字节：不切片（旧实现会切进 scheme 中部）。
+        assert_eq!(blocked_download_url_scheme("verylongscheme:x"), "[odd-scheme]");
+        // 冒号前多字节字符（旧实现可能切在 char 边界内 panic）。
+        assert_eq!(blocked_download_url_scheme("приложение:x"), "[odd-scheme]");
+        // 多字节但冒号 ≤10 字节：切片边界紧跟单字节 ':' 之后，恒安全。
+        assert_eq!(blocked_download_url_scheme("网页:x"), "网页:");
     }
 
     async fn withheld_create_response_fake_connection(
