@@ -410,12 +410,13 @@ pub enum JobStatus { Pending, Running, Succeeded, Failed, Canceled }  // 词表�
 
 #### P0 实施偏差记录（2026-07-28，分支 dev/model-catalog-p0-20260728，迁移 014/015）
 
-与上文设计的四处有意偏差，均计划在 P2 收缩期消化：
+与上文设计的五处有意偏差，均计划在 P2 收缩期消化：
 
 1. **default 连接不迁入 `provider_connections`**：providers 行自身继续充当 default 连接（base_url/api_key 等仍在 providers 表），`provider_connections` 只存附加角色（如 volc 型多域名/多凭证档案）。增量式演进，避免 P0 触碰所有现有读写方；P2 再决定是否完全档案化。
 2. **旧 6 个 map 列物理保留并被双写**：读路径已切到 provider_models 行投影（`ProviderResponse` 不再读 map 列），但 create/update 仍同步写旧列，防止仓内直接读写方漂移；P2 收缩期物理删除。
 3. **`DELETE /api/model-profiles` 语义放宽**：model_profiles 表已删（迁移 015），该端点现在删除的是 provider_models 目录行（原先仅删 profile 覆盖层）。无存量调用方受影响，wire 形状不变。
 4. **health 行字段成为服务端权威**：探针结果由服务端直接持久化到 provider_models.health；客户端 PUT model_health map 的旧写路径仍接受（wire 兼容），但行数据为权威，P2 切换 UI 后关闭旧写路径。
+5. **克隆修复仅服务端交付**：`POST /api/providers/{id}/clone` 已上线，被调用时完整保留模型行与连接档案，但设置页 UI 仍使用遗留客户端克隆（`ui/src/renderer/utils/model/providerClone.ts`，将模型重建为无 profile 行）——"克隆后标签保留"的验收在 P2 前端切换到该端点之前仅服务端满足，克隆丢标签的用户可见症状届时才消除。
 
 ### P1 invoke crate 成型 + 适配器迁移（修复"必失败"）
 1. 新建 `crates/backend/nomifun-model-invoke`（glob member 自动登记）：搬迁 `provider.rs`+`adapters/*`+共享 HTTP 助手与格式校验（creation 侧改 5 组 use，`service.rs:32-41`）；平台注册表替换 `map_nomi_provider`/`resolve_nomi_url_and_compat` 散落特判（行为快照测试保护）；
