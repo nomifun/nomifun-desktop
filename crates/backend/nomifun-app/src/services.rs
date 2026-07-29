@@ -2591,6 +2591,11 @@ impl AppServices {
                     nomi_browser_engine::shared_storage_state_path(&services.data_dir),
                     services.encryption_key,
                 )
+                // F6 (裁决⑤): the same vault also feeds the HOST egress
+                // allowlist, so managed lanes enforce the allow_etld1 the
+                // standalone path enforces (and secret injection stays gated
+                // on that enforced list).
+                .with_secret_source(secret_source.clone())
                 .with_lane_policy(Arc::new(move |tool| {
                     tool.secret_source(secret_source.clone())
                 }));
