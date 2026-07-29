@@ -30,6 +30,9 @@ pub enum InvokeErrorKind {
     ContentPolicy,
     /// Provider-side failure (5xx or unclassified non-2xx).
     ProviderError,
+    /// A remote async job reached a terminal failure state (reported by the
+    /// provider's job-status endpoint, not an HTTP-level error).
+    JobFailed,
     /// Transport-level failure (DNS/connect/TLS/read).
     Network,
     /// The request timed out.
@@ -100,6 +103,8 @@ impl From<InvokeError> for nomifun_common::AppError {
             Auth => AppError::BadGateway(msg),
             // The provider itself failed (5xx / unclassified non-2xx).
             ProviderError => AppError::BadGateway(msg),
+            // The remote async job reached a terminal failure state.
+            JobFailed => AppError::BadGateway(msg),
             // Transport-level failure reaching the provider.
             Network => AppError::BadGateway(msg),
             // Upstream account quota exhausted — not the client's request, not retryable now.
@@ -179,6 +184,7 @@ mod tests {
             (InvokeErrorKind::InvalidParams, "\"invalid_params\""),
             (InvokeErrorKind::ContentPolicy, "\"content_policy\""),
             (InvokeErrorKind::ProviderError, "\"provider_error\""),
+            (InvokeErrorKind::JobFailed, "\"job_failed\""),
             (InvokeErrorKind::Network, "\"network\""),
             (InvokeErrorKind::Timeout, "\"timeout\""),
             (InvokeErrorKind::ParseError, "\"parse_error\""),
@@ -196,6 +202,7 @@ mod tests {
         let cases: Vec<(InvokeErrorKind, Check)> = vec![
             (Auth, |a| matches!(a, AppError::BadGateway(_))),
             (ProviderError, |a| matches!(a, AppError::BadGateway(_))),
+            (JobFailed, |a| matches!(a, AppError::BadGateway(_))),
             (Network, |a| matches!(a, AppError::BadGateway(_))),
             (QuotaExhausted, |a| matches!(a, AppError::BadGateway(_))),
             (ParseError, |a| matches!(a, AppError::BadGateway(_))),

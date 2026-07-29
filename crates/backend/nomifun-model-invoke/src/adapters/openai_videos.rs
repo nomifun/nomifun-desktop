@@ -8,7 +8,8 @@
 //! - poll → `GET {video_base}/{id}` where `video_base` is the submit URL with
 //!   any query string stripped; on a completed status, fetch the bytes from
 //!   `GET {video_base}/{id}/content` → [`TaskOutcome::Done`]; on a failed
-//!   status → [`InvokeErrorKind::ProviderError`].
+//!   status → [`InvokeErrorKind::JobFailed`] (a terminal remote state, not a
+//!   transient transport error).
 
 use std::time::Duration;
 
@@ -96,7 +97,7 @@ impl ProtocolAdapter for OpenAiVideosAdapter {
                 remote_id: job.remote_id.clone(),
                 poll_state: json!({}),
             })),
-            VideoStatus::Failed(msg) => Err(InvokeError::new(InvokeErrorKind::ProviderError, msg)),
+            VideoStatus::Failed(msg) => Err(InvokeError::new(InvokeErrorKind::JobFailed, msg)),
             VideoStatus::Completed => {
                 let content_url = format!("{base}/{}/content", job.remote_id);
                 let rb = http.get(&content_url).timeout(CONTENT_TIMEOUT);
@@ -324,7 +325,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn poll_failed_status_is_provider_error_with_message() {
+    async fn poll_failed_status_is_job_failed_with_message() {
         let server = MockServer::start().await;
         Mock::given(method("GET"))
             .and(path("/v1/videos/vid_2"))
@@ -336,7 +337,7 @@ mod tests {
 
         let call = call(&server.uri(), "sora-2", video_request(vec![]));
         let err = OpenAiVideosAdapter.poll(&reqwest::Client::new(), &call, &job("vid_2")).await.unwrap_err();
-        assert_eq!(err.kind, InvokeErrorKind::ProviderError);
+        assert_eq!(err.kind, InvokeErrorKind::JobFailed);
         assert_eq!(err.message, "moderation blocked");
     }
 
