@@ -73,7 +73,14 @@ export function migrateBrowserDisplayMode(input: {
   };
 }
 
-export type BrowserResourcePolicyPreset = 'automatic' | 'resource_saving' | 'high_concurrency';
+// 'custom' marks the user's explicit advanced values as authoritative: the
+// backend scheduler honors a custom reserved_memory_bytes exactly, while the
+// named presets keep the 20%-of-total safety floor for derived reserves.
+export type BrowserResourcePolicyPreset =
+  | 'automatic'
+  | 'resource_saving'
+  | 'high_concurrency'
+  | 'custom';
 
 export type BrowserResourcePolicyAdvanced = {
   max_memory_ratio?: number;
@@ -102,6 +109,7 @@ const BROWSER_RESOURCE_POLICY_PRESETS = [
   'automatic',
   'resource_saving',
   'high_concurrency',
+  'custom',
 ] as const satisfies readonly BrowserResourcePolicyPreset[];
 
 const RESOURCE_POLICY_PATH = '/api/browser/resource-policy';
@@ -184,6 +192,24 @@ export function buildBrowserResourcePolicyPresetRequest(
     return { preset: nextPreset };
   }
   return { preset: nextPreset, advanced: current.advanced };
+}
+
+/**
+ * Build the PUT body for an advanced-values save. Under a named preset the
+ * backend re-floors reserved_memory_bytes to 20% of total memory, so an
+ * explicitly configured reserve would silently not take effect. User-edited
+ * advanced values therefore resolve the preset to `custom`, which the
+ * scheduler treats as authoritative. Values that merely echo the persisted
+ * state keep the current preset: an unchanged save must stay a no-op.
+ */
+export function buildBrowserResourcePolicyAdvancedSaveRequest(
+  current: BrowserResourcePolicy,
+  persisted: BrowserResourcePolicy
+): BrowserResourcePolicy {
+  if (advancedFieldsEqual(current.advanced, persisted.advanced)) {
+    return { preset: current.preset, advanced: current.advanced };
+  }
+  return { preset: 'custom', advanced: current.advanced };
 }
 
 export const browserResourcePolicyApi = {

@@ -9,6 +9,7 @@ import { configService } from '@/common/config/configService';
 import {
   BROWSER_DISPLAY_MODE_POLICY_VERSION,
   browserResourcePolicyApi,
+  buildBrowserResourcePolicyAdvancedSaveRequest,
   buildBrowserResourcePolicyPresetRequest,
   isBrowserResourcePolicyUnavailableError,
   migrateBrowserDisplayMode,
@@ -950,12 +951,19 @@ const BrowserUseSettingsContent: React.FC = () => {
   );
 
   const handleSaveResourcePolicyAdvanced = useCallback(() => {
-    const validationError = validateBrowserResourcePolicy(resourcePolicy, persistedResourcePolicy);
+    // Edited advanced values resolve the preset to 'custom': only then does
+    // the backend honor an explicit reserved_memory_bytes instead of raising
+    // it to the 20%-of-total floor that protects the named presets.
+    const request = buildBrowserResourcePolicyAdvancedSaveRequest(
+      resourcePolicy,
+      persistedResourcePolicy
+    );
+    const validationError = validateBrowserResourcePolicy(request, persistedResourcePolicy);
     if (validationError) {
       Message.error(validationError.message);
       return;
     }
-    void persistResourcePolicy(resourcePolicy);
+    void persistResourcePolicy(request);
   }, [persistResourcePolicy, persistedResourcePolicy, resourcePolicy]);
 
   const persistSecuritySettings = useCallback(

@@ -748,6 +748,22 @@ describe('Browser Use settings contract', () => {
     expect(handler.includes('persistResourcePolicy(next')).toBe(false);
   });
 
+  test('saves user-edited advanced values under the custom preset', () => {
+    const source = readSource(new URL('./BrowserUseSettingsContent.tsx', import.meta.url));
+    const handlerStart = source.indexOf('const handleSaveResourcePolicyAdvanced');
+    const handlerEnd = source.indexOf('const persistSecuritySettings');
+    expect(handlerStart).toBeGreaterThan(-1);
+    expect(handlerEnd).toBeGreaterThan(handlerStart);
+    const handler = source.slice(handlerStart, handlerEnd);
+    // A named preset re-floors reserved_memory_bytes to 20% of total memory;
+    // only preset=custom makes the explicitly configured reserve take effect.
+    // The save handler therefore builds its body through the helper that
+    // resolves edited advanced values to custom.
+    expect(handler.includes('buildBrowserResourcePolicyAdvancedSaveRequest(')).toBe(true);
+    expect(handler.includes('persistResourcePolicy(request')).toBe(true);
+    expect(handler.includes('persistResourcePolicy(resourcePolicy)')).toBe(false);
+  });
+
   test('keeps the source-change network write outside the setState updater', () => {
     const source = readSource(new URL('./BrowserUseSettingsContent.tsx', import.meta.url));
     const handlerStart = source.indexOf('const handleSourceChange');
