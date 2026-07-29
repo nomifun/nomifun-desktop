@@ -688,12 +688,22 @@ impl HostTargetRouter {
         guid: &str,
         suggested_filename: &str,
     ) {
-        let mut state = self.state.lock().await;
-        let lane_id = state
-            .frame_owner
-            .get(frame_id)
-            .cloned()
-            .or_else(|| state.ownership.owner(frame_id).map(str::to_string));
+        let lane_id = {
+            let state = self.state.lock().await;
+            state
+                .frame_owner
+                .get(frame_id)
+                .cloned()
+                .or_else(|| state.ownership.owner(frame_id).map(str::to_string))
+        };
+        // F21：frame_owner/ownership 只登记主帧 id（== page target id）；iframe
+        //（同进程或 OOPIF）内发起的下载带的是**子帧** frameId，两张表恒查不到。
+        // 未命中时按各 lane 活 tab 的 frame tree 解析归属（CDP roundtrip 仅在
+        // 子帧下载这一低频路径发生）。
+        let lane_id = match lane_id {
+            Some(lane_id) => Some(lane_id),
+            None => self.resolve_subframe_download_owner(frame_id).await,
+        };
         let Some(lane_id) = lane_id else {
             tracing::warn!(
                 %guid,
@@ -702,6 +712,7 @@ impl HostTargetRouter {
             );
             return;
         };
+        let mut state = self.state.lock().await;
         let download_dir = state
             .lanes
             .get(&lane_id)
@@ -717,6 +728,50 @@ impl HostTargetRouter {
                 suggested_filename: suggested_filename.to_string(),
             },
         );
+    }
+
+    /// F21：把子帧 frameId 解析到其所属 lane。遍历各 lane 的活 [`TabRecord`]，查
+    /// page session 的 frameTree（同进程 iframe）与 OOPIF 子 session 的 frameTree
+    /// （跨进程 iframe，其根 frame id 即 downloadWillBegin 携带的子帧 id）。
+    ///
+    /// 锁纪律：短锁克隆句柄（lane 表 → tabs 表 → oopif 表逐层克隆后立即放锁），
+    /// CDP I/O（`frame_ids`）全在锁外。单帧树查询失败（session 已关竞态）跳过——
+    /// 解析不到即维持隔离检疫（fail-closed：文件留在 Host staging，绝不误配 lane）。
+    async fn resolve_subframe_download_owner(&self, frame_id: &str) -> Option<LaneId> {
+        let lanes: Vec<(LaneId, Arc<AsyncMutex<HashMap<String, TabRecord>>>)> = {
+            let state = self.state.lock().await;
+            state
+                .lanes
+                .iter()
+                .filter_map(|(lane_id, route)| {
+                    route.tabs.upgrade().map(|tabs| (lane_id.clone(), tabs))
+                })
+                .collect()
+        };
+        for (lane_id, tabs) in lanes {
+            let (mut managers, oopif_tables) = {
+                let tabs = tabs.lock().await;
+                let mut managers = Vec::new();
+                let mut oopif_tables = Vec::new();
+                for record in tabs.values() {
+                    managers.push(record.injection.clone());
+                    oopif_tables.push(Arc::clone(&record.oopif_managers));
+                }
+                (managers, oopif_tables)
+            };
+            for table in oopif_tables {
+                let table = table.lock().await;
+                managers.extend(table.values().map(|entry| entry.manager.clone()));
+            }
+            for manager in managers {
+                if let Ok(frame_ids) = manager.frame_ids().await
+                    && frame_ids.iter().any(|candidate| candidate == frame_id)
+                {
+                    return Some(lane_id);
+                }
+            }
+        }
+        None
     }
 
     async fn finish_download(&self, guid: &str, source: &std::path::Path) -> bool {
@@ -2671,7 +2726,15 @@ impl LaneCleanupAuthority {
             }
             None => false,
         };
-        if unregistered && !self.conn.registry().is_connection_closed() {
+        // F20: the retired finalizer must run whenever this Lane was ever
+        // registered — not only when THIS call performed the unregister. An
+        // explicit shutdown_lane may already have unregistered (moving owned
+        // targets into retired tombstones) and then failed inside
+        // finalize_retired_lane; this Drop/hand_off path is the last cleanup
+        // authority for those still-live retired targets. finalize is
+        // idempotent and cheap when nothing is retired. A never-registered
+        // Lane has no retired inventory and skips it entirely.
+        if registration.is_some() && !self.conn.registry().is_connection_closed() {
             loop {
                 match self.router.finalize_retired_lane(&self.lane_id).await {
                     Ok(()) => break,
@@ -2679,6 +2742,7 @@ impl LaneCleanupAuthority {
                     Err(error) => {
                         tracing::warn!(
                             lane_id = %self.lane_id,
+                            unregistered_by_this_call = unregistered,
                             %error,
                             "pending-Lane retired finalizer is retrying"
                         );
@@ -3617,7 +3681,8 @@ impl CdpBackend {
     /// **Takeover seam: bring the headful browser window to the foreground.**
     ///
     /// - Headful + display available → resolves the active target's real browser window,
-    ///   restores it to `normal`, then activates the active target/tab. Returns `Ok(())`.
+    ///   restores it to `normal`, activates the active target/tab, then delivers
+    ///   renderer/document focus via `Page.bringToFront`. Returns `Ok(())`.
     /// - Headless or no display → returns `Err(BrowserError::Unsupported)` with
     ///   capability="takeover" so the caller can map it to [`TakeoverResolution::Unavailable`].
     ///
@@ -3677,6 +3742,19 @@ impl CdpBackend {
                 ROOT_SESSION,
                 &ActivateTargetParams::new(handles.target_id.clone()),
             )
+            .await
+            .map_err(map_transport_err)?;
+
+        // F37: Page.bringToFront is the one command which delivers renderer/
+        // document focus (WebContents Activate()+Focus()); Target.activateTarget
+        // alone only selects the tab, so document.hasFocus() stays false and
+        // focus-gated widgets (OTP/clipboard/login) never react. Issue it last,
+        // on the page session, once the window is restored and the tab selected
+        // — this was the old implementation's primary foreground command.
+        use chromiumoxide::cdp::browser_protocol::page::BringToFrontParams;
+        let _ = self
+            .conn
+            .send::<BringToFrontParams>(&handles.session_id, &BringToFrontParams::default())
             .await
             .map_err(map_transport_err)?;
 
@@ -3807,10 +3885,10 @@ fn spawn_tab_discovery_loop(
                             // 再次确认未被并发插入（双查，避免两条 attach 事件窗口竞态重 arm）。
                             let mut guard = tabs.lock().await;
                             if guard.contains_key(&tid) {
-                                // 已被插入：丢弃本次 record（其 loop handle 随 drop 是 detach，但本 record
-                                // 的注入管线没被任何 tab 用，下面显式 abort 它的两个 loop 防泄漏）。
-                                record._inject_loop.abort();
-                                record._oopif_loop.abort();
+                                // 已被插入：丢弃本次 record，经共享 helper 全量 abort 其
+                                // **三个**后台循环（F52：此前漏 abort `_debug_loop`，泄漏一条
+                                // 长驻订阅 Runtime/Log/Network 事件的调试捕获任务）。
+                                abort_tab_record(&record);
                                 continue;
                             }
                             let target_id_suffix = cdp_id_suffix(&tid);
@@ -6693,10 +6771,24 @@ impl CdpBackend {
                 host.router.claim_frame(&self.lane_id, &main_frame_id).await;
             }
         }
-        self.conn
+        if let Err(error) = self
+            .conn
             .send::<NavigateParams>(&new_session, &NavigateParams::new(url))
             .await
-            .map_err(map_transport_err)?;
+        {
+            // F53：standalone（无 router）后端没有 target-loss 事件路径来移除刚 arm
+            // 的 TabRecord——navigate 失败时 PendingCreatedPage 的清理会关掉 target，
+            // 但 tabs 里的记录会残留成永久幽灵 tab（tabs 恒列出、switch 后一切操作
+            // TargetClosed）。此处主动剔除并 abort 其后台循环。host 模式保留原
+            // loss 事件路径（detach → handle_top_level_target_loss 同步移除记录并
+            // 清 frame_owner），不在此双改。
+            if self.target_router().is_none() {
+                if let Some(record) = self.tabs.lock().await.remove(&new_tid) {
+                    abort_tab_record(&record);
+                }
+            }
+            return Err(map_transport_err(error));
+        }
         let _ = pending_page.transfer_to_lane();
         let l4 = last4(&new_tid);
 
@@ -8771,6 +8863,370 @@ mod tests {
         assert_eq!(blocked_download_url_scheme("网页:x"), "网页:");
     }
 
+    /// 清理/下载路由测试用 fake：`Target.closeTarget` → `success:true`；
+    /// `Target.getTargets` → 依次弹 `inventories`（耗尽后恒空）；`Page.getFrameTree` →
+    /// `frame_tree`（`None` → `{}`）；其它 → `{}`。所有回包回显 sessionId；每条请求
+    /// 推给测试侧供断言。
+    async fn cleanup_routing_fake_connection(
+        inventories: Vec<Vec<serde_json::Value>>,
+        frame_tree: Option<serde_json::Value>,
+    ) -> (
+        Connection,
+        tokio::sync::mpsc::UnboundedReceiver<serde_json::Value>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind cleanup-routing fake websocket");
+        let address = listener.local_addr().expect("read fake websocket address");
+        let (request_tx, request_rx) = tokio::sync::mpsc::unbounded_channel();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("accept fake client");
+            let mut websocket = tokio_tungstenite::accept_async(stream)
+                .await
+                .expect("complete fake websocket handshake");
+            let mut inventories = std::collections::VecDeque::from(inventories);
+            while let Some(Ok(message)) = futures_util::StreamExt::next(&mut websocket).await {
+                let tokio_tungstenite::tungstenite::Message::Text(text) = message else {
+                    break;
+                };
+                let request: serde_json::Value =
+                    serde_json::from_str(&text).expect("fake received valid json");
+                let id = request["id"].as_u64().expect("fake request has id");
+                let method = request["method"].as_str().unwrap_or_default();
+                let result = match method {
+                    "Target.closeTarget" => serde_json::json!({ "success": true }),
+                    "Target.getTargets" => serde_json::json!({
+                        "targetInfos": inventories.pop_front().unwrap_or_default()
+                    }),
+                    "Page.getFrameTree" => frame_tree
+                        .clone()
+                        .map(|tree| serde_json::json!({ "frameTree": tree }))
+                        .unwrap_or_else(|| serde_json::json!({})),
+                    _ => serde_json::json!({}),
+                };
+                let mut response = serde_json::json!({ "id": id, "result": result });
+                if let Some(session_id) = request.get("sessionId") {
+                    response["sessionId"] = session_id.clone();
+                }
+                let _ = request_tx.send(request);
+                futures_util::SinkExt::send(
+                    &mut websocket,
+                    tokio_tungstenite::tungstenite::Message::Text(
+                        response.to_string().into(),
+                    ),
+                )
+                .await
+                .expect("fake sends response");
+            }
+        });
+        let connection = Connection::connect(&format!("ws://{address}"))
+            .await
+            .expect("connect cleanup-routing fake websocket");
+        (connection, request_rx, server)
+    }
+
+    /// **F20 回归**：显式 shutdown 已推进到 unregister（owned targets 已成 retired
+    /// tombstones）但 finalize 失败后，调用方 drop 了 backend——Drop/hand_off 兜底
+    /// 路径的 `finish` 必须**重驱** finalize，关掉仍存活的 retired 目标；旧实现
+    /// `if unregistered && …` 在「本次调用没做 unregister」时直接跳过，泄漏目标。
+    #[tokio::test]
+    async fn drop_path_finalizes_a_previously_unregistered_lane_with_live_retired_targets() {
+        let (connection, mut requests, server) = cleanup_routing_fake_connection(
+            vec![vec![serde_json::json!({ "targetId": "leaked-popup", "type": "page" })]],
+            None,
+        )
+        .await;
+        let router = HostTargetRouter::new(connection.clone());
+        let router_loop = router.spawn();
+
+        let tabs = Arc::new(AsyncMutex::new(HashMap::new()));
+        let active_target = Arc::new(AsyncMutex::new("old-target".to_string()));
+        let active_frame = Arc::new(AsyncMutex::new(None));
+        let lane_closing = Arc::new(AtomicBool::new(false));
+        let registration = router
+            .register_lane(
+                "retired-lane".into(),
+                &tabs,
+                &active_target,
+                &active_frame,
+                Arc::clone(&lane_closing),
+                None,
+            )
+            .await
+            .expect("lane registers");
+        assert!(router.claim_target("retired-lane", "old-target").await);
+        assert!(router.claim_target("retired-lane", "leaked-popup").await);
+        // 显式 shutdown 已 unregister（tombstones 建立）但 finalize 失败的残局形态。
+        assert!(
+            router
+                .unregister_lane_if_current("retired-lane", registration)
+                .await
+        );
+
+        let cleanup = LaneCleanupAuthority::new(
+            connection.clone(),
+            Arc::clone(&router.cleanup_executor),
+            Arc::clone(&router),
+            "retired-lane".into(),
+            lane_closing,
+            Arc::clone(&tabs),
+            "old-target".into(),
+            "old-session".into(),
+            "old-frame".into(),
+        );
+        cleanup.set_registration(registration);
+
+        tokio::time::timeout(Duration::from_secs(20), Arc::clone(&cleanup).finish())
+            .await
+            .expect("drop-path finish completes");
+        assert_eq!(cleanup.state.load(Ordering::Acquire), 2);
+
+        let mut closed_targets = Vec::new();
+        while let Ok(request) = requests.try_recv() {
+            if request["method"] == "Target.closeTarget" {
+                closed_targets
+                    .push(request["params"]["targetId"].as_str().unwrap().to_string());
+            }
+        }
+        assert!(closed_targets.contains(&"old-target".to_string()));
+        assert!(
+            closed_targets.contains(&"leaked-popup".to_string()),
+            "the still-live retired popup must be closed by the Drop/hand_off fallback: {closed_targets:?}"
+        );
+
+        router_loop.abort();
+        connection.shutdown().await;
+        server.abort();
+        let _ = server.await;
+    }
+
+    /// **F21 回归**：iframe 子帧发起的下载（downloadWillBegin 带子帧 frameId，
+    /// frame_owner/ownership 恒查不到）必须经 frame-tree 解析归属其 lane 并被
+    /// finish_download 路由到 lane 工作区；旧实现直接检疫在 Host staging，
+    /// act_download 永远等不到文件。
+    #[tokio::test]
+    async fn subframe_download_routes_to_its_owning_lane() {
+        let temp = tempfile::tempdir().expect("create download routing root");
+        let staging = temp.path().join("host-staging");
+        let lane_dir = temp.path().join("lane-downloads");
+        std::fs::create_dir_all(&staging).expect("create staging dir");
+        std::fs::create_dir_all(&lane_dir).expect("create lane downloads dir");
+
+        let (connection, _requests, server) = cleanup_routing_fake_connection(
+            Vec::new(),
+            Some(serde_json::json!({
+                "frame": { "id": "tab-1" },
+                "childFrames": [{ "frame": { "id": "sub-frame-9" } }]
+            })),
+        )
+        .await;
+        connection.registry().register_session("session-tab-1", "page");
+
+        let router = HostTargetRouter::new(connection.clone());
+        let tabs = Arc::new(AsyncMutex::new(HashMap::new()));
+        tabs.lock().await.insert(
+            "tab-1".to_string(),
+            test_tab_record(&connection, "tab-1", "session-tab-1"),
+        );
+        let active_target = Arc::new(AsyncMutex::new("tab-1".to_string()));
+        let active_frame = Arc::new(AsyncMutex::new(None));
+        router
+            .register_lane(
+                "lane-a".into(),
+                &tabs,
+                &active_target,
+                &active_frame,
+                Arc::new(AtomicBool::new(false)),
+                Some(lane_dir.to_string_lossy().into_owned()),
+            )
+            .await
+            .expect("lane registers");
+        assert!(router.claim_target("lane-a", "tab-1").await);
+        router.claim_frame("lane-a", "tab-1").await;
+
+        // 子帧下载：frameId 是 iframe 的，不在 frame_owner（主帧表）/ownership（target 表）。
+        router
+            .begin_download("sub-frame-9", "guid-sub", "report.pdf")
+            .await;
+
+        let staged = staging.join("guid-sub");
+        std::fs::write(&staged, b"pdf-bytes").expect("stage downloaded file");
+        assert!(
+            router.finish_download("guid-sub", &staged).await,
+            "a subframe-initiated download must be routed to its owning lane"
+        );
+        assert_eq!(
+            std::fs::read(lane_dir.join("report.pdf")).expect("routed file exists"),
+            b"pdf-bytes"
+        );
+
+        // 真正不属于任何 lane 的帧仍然检疫（fail-closed 不误配）。
+        router
+            .begin_download("frame-of-no-lane", "guid-alien", "alien.bin")
+            .await;
+        let alien = staging.join("guid-alien");
+        std::fs::write(&alien, b"alien").expect("stage alien file");
+        assert!(
+            !router.finish_download("guid-alien", &alien).await,
+            "an unowned frame's download must stay quarantined in host staging"
+        );
+
+        connection.shutdown().await;
+        server.abort();
+        let _ = server.await;
+    }
+
+    /// **F52**：`abort_tab_record` 契约——三个后台循环（inject/oopif/**debug**）
+    /// 全部被 abort（tab 发现循环的重复插入丢弃路径此前漏掉 `_debug_loop`，
+    /// 现已统一走本 helper）。
+    #[tokio::test]
+    async fn abort_tab_record_aborts_all_three_tab_loops() {
+        let (connection, server) = router_test_connection().await;
+        let record = test_tab_record(&connection, "tab-x", "session-x");
+
+        abort_tab_record(&record);
+
+        let TabRecord {
+            _inject_loop,
+            _oopif_loop,
+            _debug_loop,
+            ..
+        } = record;
+        for (name, handle) in [
+            ("inject", _inject_loop),
+            ("oopif", _oopif_loop),
+            ("debug", _debug_loop),
+        ] {
+            let error = tokio::time::timeout(Duration::from_secs(2), handle)
+                .await
+                .expect("aborted loop settles promptly")
+                .expect_err("loop task must not complete normally");
+            assert!(error.is_cancelled(), "{name} loop must be aborted, not leaked");
+        }
+
+        connection.shutdown().await;
+        server.abort();
+        let _ = server.await;
+    }
+
+    /// F53 专用 fake：`createTarget` → 先回 nonce 关联的 attach 事件再回 targetId；
+    /// `Page.getFrameTree` → 单帧树；`Page.navigate` → CDP error（模拟导航失败）；
+    /// `closeTarget` → success:true；`getTargets` → 空；其它 → {}（回显 sessionId）。
+    async fn navigate_failure_open_link_fake_connection() -> (
+        Connection,
+        tokio::task::JoinHandle<()>,
+    ) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind navigate-failure fake websocket");
+        let address = listener.local_addr().expect("read fake websocket address");
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("accept fake client");
+            let mut websocket = tokio_tungstenite::accept_async(stream)
+                .await
+                .expect("complete fake websocket handshake");
+            while let Some(Ok(message)) = futures_util::StreamExt::next(&mut websocket).await {
+                let tokio_tungstenite::tungstenite::Message::Text(text) = message else {
+                    break;
+                };
+                let request: serde_json::Value =
+                    serde_json::from_str(&text).expect("fake received valid json");
+                let id = request["id"].as_u64().expect("fake request has id");
+                let method = request["method"].as_str().unwrap_or_default();
+                let response = match method {
+                    "Target.createTarget" => {
+                        let url = request["params"]["url"].as_str().unwrap_or_default();
+                        // flatten auto-attach 模拟：先发 nonce 关联 attach 事件。
+                        futures_util::SinkExt::send(
+                            &mut websocket,
+                            tokio_tungstenite::tungstenite::Message::Text(
+                                serde_json::json!({
+                                    "method": "Target.attachedToTarget",
+                                    "params": {
+                                        "sessionId": "pending-session",
+                                        "targetInfo": {
+                                            "targetId": "pending-target",
+                                            "type": "page",
+                                            "title": "",
+                                            "url": url,
+                                            "attached": true,
+                                            "canAccessOpener": false
+                                        },
+                                        "waitingForDebugger": false
+                                    }
+                                })
+                                .to_string()
+                                .into(),
+                            ),
+                        )
+                        .await
+                        .expect("fake sends nonce-correlated attach");
+                        serde_json::json!({ "id": id, "result": { "targetId": "pending-target" } })
+                    }
+                    "Page.getFrameTree" => serde_json::json!({
+                        "id": id,
+                        "result": { "frameTree": { "frame": { "id": "pending-target" } } }
+                    }),
+                    "Page.navigate" => serde_json::json!({
+                        "id": id,
+                        "error": { "code": -32000, "message": "net::ERR_FAILED (fake)" }
+                    }),
+                    "Target.closeTarget" => serde_json::json!({
+                        "id": id,
+                        "result": { "success": true }
+                    }),
+                    "Target.getTargets" => serde_json::json!({
+                        "id": id,
+                        "result": { "targetInfos": [] }
+                    }),
+                    _ => serde_json::json!({ "id": id, "result": {} }),
+                };
+                let mut response = response;
+                if let Some(session_id) = request.get("sessionId") {
+                    response["sessionId"] = session_id.clone();
+                }
+                futures_util::SinkExt::send(
+                    &mut websocket,
+                    tokio_tungstenite::tungstenite::Message::Text(
+                        response.to_string().into(),
+                    ),
+                )
+                .await
+                .expect("fake sends response");
+            }
+        });
+        let connection = Connection::connect(&format!("ws://{address}"))
+            .await
+            .expect("connect navigate-failure fake websocket");
+        (connection, server)
+    }
+
+    /// **F53 回归**：standalone 后端（无 router loss 事件路径）的
+    /// `open_link_new_tab` 在 navigate 失败时不得留下幽灵 TabRecord——
+    /// PendingCreatedPage 清理会关掉 target，tabs 里的残留记录会让 tabs 永远列出
+    /// 一个死 tab、switch 过去后一切操作 TargetClosed。
+    #[tokio::test]
+    async fn standalone_open_link_navigate_failure_leaves_no_ghost_tab() {
+        let (connection, server) = navigate_failure_open_link_fake_connection().await;
+        let backend = test_backend_with_tabs(connection.clone(), &["tab-main"]);
+
+        backend
+            .act_open_link_new_tab("https://example.com/next")
+            .await
+            .expect_err("navigate failure must surface to the caller");
+
+        assert!(
+            !backend.tabs.lock().await.contains_key("pending-target"),
+            "the armed record must be scrubbed on navigate failure (no ghost tab)"
+        );
+
+        drop(backend);
+        connection.shutdown().await;
+        server.abort();
+        let _ = server.await;
+    }
+
     async fn withheld_create_response_fake_connection(
         send_attach: bool,
         delayed_inventory_visibility: bool,
@@ -9718,7 +10174,7 @@ mod tests {
                 .await
                 .expect("complete fake websocket handshake");
             let mut requests = Vec::new();
-            while requests.len() < 3 {
+            while requests.len() < 4 {
                 let Some(Ok(tokio_tungstenite::tungstenite::Message::Text(text))) =
                     futures_util::StreamExt::next(&mut websocket).await
                 else {
@@ -9748,13 +10204,15 @@ mod tests {
                 } else {
                     serde_json::json!({})
                 };
+                let mut response = serde_json::json!({ "id": id, "result": result });
+                if let Some(session_id) = request.get("sessionId") {
+                    response["sessionId"] = session_id.clone();
+                }
                 requests.push(request);
                 futures_util::SinkExt::send(
                     &mut websocket,
                     tokio_tungstenite::tungstenite::Message::Text(
-                        serde_json::json!({ "id": id, "result": result })
-                            .to_string()
-                            .into(),
+                        response.to_string().into(),
                     ),
                 )
                 .await
@@ -9844,6 +10302,10 @@ mod tests {
         let mut backend = test_backend_with_tabs(connection.clone(), &["target-active"]);
         backend.headful = true;
         backend.display_available = true;
+        // Page.bringToFront 发到 page session——先在注册表登记它（生产由 attach 事件登记）。
+        connection
+            .registry()
+            .register_session("session-target-active", "page");
 
         backend
             .bring_to_front()
@@ -9863,17 +10325,22 @@ mod tests {
                 "Browser.getWindowForTarget",
                 "Browser.setWindowBounds",
                 "Target.activateTarget",
+                "Page.bringToFront",
             ],
-            "the native window must be restored before target activation"
+            "restore window, select tab, then deliver document focus (F37)"
         );
         assert_eq!(requests[0]["params"]["targetId"], "target-active");
         assert_eq!(requests[1]["params"]["windowId"], 73);
         assert_eq!(requests[1]["params"]["bounds"]["windowState"], "normal");
         assert_eq!(requests[2]["params"]["targetId"], "target-active");
         assert!(
-            requests.iter().all(|request| request.get("sessionId").is_none()),
+            requests[..3]
+                .iter()
+                .all(|request| request.get("sessionId").is_none()),
             "Browser and Target window commands must use the root session"
         );
+        // F37：Page.bringToFront 必须发在 page session 上（文档焦点属于 renderer）。
+        assert_eq!(requests[3]["sessionId"], "session-target-active");
     }
 
     #[tokio::test]
