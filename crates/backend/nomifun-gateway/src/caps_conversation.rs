@@ -65,6 +65,22 @@ struct SendToConversationParams {
 
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
+struct CreateSummonParams {
+    /// The companion to summon — normally your own id (from nomi_whoami).
+    #[schemars(schema_with = "crate::id_schema::canonical_uuid_v7_schema")]
+    companion_id: CompanionId,
+    /// Hand-picked memory ids to load read-only (pre-select with
+    /// recall_memories; the owner can trim them later in the summon panel).
+    #[serde(default)]
+    memory_ids: Vec<String>,
+    /// Active skills to EXCLUDE from materialization (default: none — the
+    /// full active skill set loads).
+    #[serde(default)]
+    skill_exclusions: Vec<String>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 struct CreateConversationParams {
     /// Optional display name for the new conversation.
     #[serde(default)]
@@ -89,6 +105,17 @@ struct CreateConversationParams {
     #[serde(default)]
     #[schemars(schema_with = "crate::id_schema::optional_canonical_uuid_v7_schema")]
     remote_agent_id: Option<RemoteAgentId>,
+    /// Absolute project path the user gave you. Sets the conversation's
+    /// workspace ("project session", grouped under that workpath in the
+    /// sidebar). Omit for an auto-provisioned workspace. Not valid for
+    /// agent_type "remote".
+    #[serde(default)]
+    workpath: Option<String>,
+    /// Summon a companion into the new work session (spec 召唤伙伴): loads its
+    /// skills plus the selected memories read-only. Only valid for agent_type
+    /// "nomi". The server stamps summoned_at.
+    #[serde(default)]
+    summon: Option<CreateSummonParams>,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -363,11 +390,46 @@ async fn send(deps: Arc<GatewayDeps>, ctx: CallerCtx, p: SendToConversationParam
     }
 }
 
+/// Normalize the `workpath` create param (spec §B6 反向召唤入口 1).
+fn normalized_workpath(raw: &str) -> Result<String, String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err("workpath must be a non-empty project path".into());
+    }
+    Ok(trimmed.to_owned())
+}
+
+/// Compose the server-stamped `extra.summon` value from the create param
+/// (spec §B6 反向召唤入口 2). Memory ids are validated + deduped; the caller
+/// never controls `summoned_at`.
+fn summon_extra_value(summon: &CreateSummonParams, summoned_at: i64) -> Result<Value, String> {
+    let mut memory_ids: Vec<String> = Vec::with_capacity(summon.memory_ids.len());
+    for id in &summon.memory_ids {
+        nomifun_common::CompanionMemoryId::parse(id.as_str())
+            .map_err(|error| format!("invalid summon memory id '{id}': {error}"))?;
+        if !memory_ids.contains(id) {
+            memory_ids.push(id.clone());
+        }
+    }
+    let mut skill_exclusions: Vec<String> = Vec::with_capacity(summon.skill_exclusions.len());
+    for name in &summon.skill_exclusions {
+        let name = name.trim().to_owned();
+        if !name.is_empty() && !skill_exclusions.contains(&name) {
+            skill_exclusions.push(name);
+        }
+    }
+    Ok(json!({
+        "companion_id": summon.companion_id,
+        "memory_ids": memory_ids,
+        "skill_exclusions": skill_exclusions,
+        "summoned_at": summoned_at,
+    }))
+}
+
 async fn create(deps: Arc<GatewayDeps>, ctx: CallerCtx, p: CreateConversationParams) -> Value {
     if let Err(error) = require_companion_creator(&ctx) {
         return error;
-    }
-    let user_id = match require_user(&ctx) {
+    }    let user_id = match require_user(&ctx) {
         Ok(u) => u.to_owned(),
         Err(e) => return e,
     };
@@ -409,6 +471,32 @@ async fn create(deps: Arc<GatewayDeps>, ctx: CallerCtx, p: CreateConversationPar
     }
     if let Some(backend) = p.backend {
         extra["backend"] = json!(backend);
+    }
+    // Project session (spec §B6): a user-given path becomes the workspace —
+    // the sidebar groups it under that workpath drawer; `custom_workspace` is
+    // derived client-side from a non-empty non-temporary workspace.
+    if let Some(workpath) = p.workpath.as_deref() {
+        if agent_type == AgentType::Remote {
+            return json!({ "error": "workpath is not valid for remote conversations" });
+        }
+        match normalized_workpath(workpath) {
+            Ok(path) => extra["workspace"] = json!(path),
+            Err(e) => return json!({ "error": e }),
+        }
+    }
+    // Reverse summon (spec §B6): create the work session already carrying the
+    // companion's capability pack; the owner can trim it later in the summon
+    // panel. First wave is nomi-native only.
+    if let Some(summon) = p.summon.as_ref() {
+        if agent_type != AgentType::Nomi {
+            return json!({
+                "error": "summon is only supported for nomi conversations in this version"
+            });
+        }
+        match summon_extra_value(summon, nomifun_common::now_ms()) {
+            Ok(value) => extra["summon"] = value,
+            Err(e) => return json!({ "error": e }),
+        }
     }
     let mut model = None;
     let mut model_source = None;
@@ -631,7 +719,7 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
         CapabilityMeta::new(
             "nomi_create_conversation",
             "conversation",
-            "Open a fresh desktop session on behalf of the calling companion (nomi, acp, or remote OpenClaw). For ACP sessions pass agent_id from nomi_agent_list; for remote sessions pass remote_agent_id from nomi_remote_agent_list. For multi-Agent work inside the current conversation, use nomi_delegate.",
+            "Open a fresh desktop session on behalf of the calling companion (nomi, acp, or remote OpenClaw). For ACP sessions pass agent_id from nomi_agent_list; for remote sessions pass remote_agent_id from nomi_remote_agent_list. Pass workpath when the user gave a project path (creates a project session in that directory), and summon to load your own skills + hand-picked memories (read-only) into the new session — pre-select memory_ids with recall_memories. For multi-Agent work inside the current conversation, use nomi_delegate.",
             DangerTier::Write,
         ),
         create,
@@ -679,6 +767,85 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
 mod tests {
     use super::*;
     use nomifun_common::UserId;
+
+    const TEST_COMPANION_ID: &str = "0190f5fe-7c00-7a00-8abc-000000000001";
+    const TEST_MEMORY_ID: &str = "0190f5fe-7c00-7a00-8abc-000000000101";
+
+    #[test]
+    fn create_conversation_schema_exposes_workpath_and_summon() {
+        let mut caps = Vec::new();
+        register(&mut caps);
+        let cap = caps
+            .iter()
+            .find(|cap| cap.meta.name == "nomi_create_conversation")
+            .expect("nomi_create_conversation must be registered");
+        let properties = cap.input_schema["properties"].as_object().unwrap();
+        assert!(properties.contains_key("workpath"));
+        assert!(properties.contains_key("summon"));
+        assert_eq!(
+            cap.input_schema.get("additionalProperties"),
+            Some(&json!(false))
+        );
+    }
+
+    #[test]
+    fn create_conversation_params_parse_workpath_and_summon() {
+        let parsed: CreateConversationParams = serde_json::from_value(json!({
+            "name": "重构任务",
+            "workpath": "C:/code/project",
+            "summon": {
+                "companion_id": TEST_COMPANION_ID,
+                "memory_ids": [TEST_MEMORY_ID],
+                "skill_exclusions": ["heavy-refactor"],
+            },
+        }))
+        .unwrap();
+        assert_eq!(parsed.workpath.as_deref(), Some("C:/code/project"));
+        let summon = parsed.summon.unwrap();
+        assert_eq!(summon.companion_id.as_str(), TEST_COMPANION_ID);
+        assert_eq!(summon.memory_ids, vec![TEST_MEMORY_ID]);
+
+        // The summon sub-object is a closed contract: clients can never stamp
+        // summoned_at (server-owned) or smuggle unknown fields.
+        for invalid in [
+            json!({ "summon": { "companion_id": TEST_COMPANION_ID, "summoned_at": 1 } }),
+            json!({ "summon": { "companion_id": "not-an-id" } }),
+            json!({ "summon": {} }),
+        ] {
+            assert!(
+                serde_json::from_value::<CreateConversationParams>(invalid.clone()).is_err(),
+                "must reject {invalid}"
+            );
+        }
+    }
+
+    #[test]
+    fn summon_extra_value_stamps_validates_and_dedups() {
+        let summon: CreateSummonParams = serde_json::from_value(json!({
+            "companion_id": TEST_COMPANION_ID,
+            "memory_ids": [TEST_MEMORY_ID, TEST_MEMORY_ID],
+            "skill_exclusions": [" heavy-refactor ", "heavy-refactor", "  "],
+        }))
+        .unwrap();
+        let value = summon_extra_value(&summon, 42).unwrap();
+        assert_eq!(value["companion_id"], TEST_COMPANION_ID);
+        assert_eq!(value["memory_ids"], json!([TEST_MEMORY_ID]));
+        assert_eq!(value["skill_exclusions"], json!(["heavy-refactor"]));
+        assert_eq!(value["summoned_at"], 42, "server stamp wins");
+
+        let bad: CreateSummonParams = serde_json::from_value(json!({
+            "companion_id": TEST_COMPANION_ID,
+            "memory_ids": ["not-a-memory-id"],
+        }))
+        .unwrap();
+        assert!(summon_extra_value(&bad, 42).is_err());
+    }
+
+    #[test]
+    fn workpath_normalization_rejects_blank() {
+        assert_eq!(normalized_workpath("  C:/code/x  ").unwrap(), "C:/code/x");
+        assert!(normalized_workpath("   ").is_err());
+    }
 
     #[test]
     fn stop_conversation_is_a_registered_destructive_capability() {
