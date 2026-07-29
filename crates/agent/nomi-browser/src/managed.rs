@@ -21,6 +21,11 @@ use nomifun_browser_platform::{
 use serde_json::{Value, json};
 
 use crate::OUT_OF_BAND_CONFIRMED_KEY;
+/// Fields whose authority belongs to the main process.  A caller may select an
+/// owner-scoped `lane_id`, but it may never construct or override identity,
+/// target ownership, epochs, cancellation, or resource routing. ONE shared
+/// list for every managed surface — see [`crate::TRUSTED_OWNER_INPUT_FIELDS`].
+use crate::TRUSTED_OWNER_INPUT_FIELDS;
 
 const MAX_CRAWL_CONCURRENCY: usize = 8;
 const MAX_CRAWL_URLS: usize = 64;
@@ -39,36 +44,6 @@ const MODEL_IDENTITY_INPUT_FIELDS: &[&str] = &[
     "auth_identity",
     "profile",
     "account",
-];
-
-/// Fields whose authority belongs to the main process.  A caller may select an
-/// owner-scoped `lane_id`, but it may never construct or override identity,
-/// target ownership, epochs, cancellation, or resource routing.
-const TRUSTED_OWNER_INPUT_FIELDS: &[&str] = &[
-    "caller",
-    "caller_identity",
-    "user_id",
-    "conversation_id",
-    "runtime_instance_id",
-    "agent_id",
-    "companion_id",
-    "execution_id",
-    "step_id",
-    "attempt_id",
-    "remote_connection_id",
-    "owner_lease_id",
-    "capability_expires_at_ms",
-    "allowed_operations",
-    "identity_generation",
-    "browser_epoch",
-    "target_id",
-    "frame_id",
-    "ref_generation",
-    "cancellation_id",
-    "workspace_hint",
-    "surface",
-    "browser_surface",
-    "lane_key",
 ];
 
 #[async_trait]
