@@ -110,6 +110,7 @@ impl ProviderService {
         };
 
         let row = self.repo.create(params).await?;
+        self.seed_inferred_profiles_best_effort(&row.provider_id, &row.platform).await;
         let model_rows = self.provider_model_repo.list_for_provider(&row.provider_id).await?;
         self.row_to_response(row, model_rows)
     }
@@ -154,6 +155,7 @@ impl ProviderService {
         };
 
         let row = self.repo.update(id, params).await?;
+        self.seed_inferred_profiles_best_effort(&row.provider_id, &row.platform).await;
         let model_rows = self.provider_model_repo.list_for_provider(&row.provider_id).await?;
         self.row_to_response(row, model_rows)
     }
@@ -347,6 +349,38 @@ impl ProviderService {
             ));
         }
         Ok(())
+    }
+
+    /// Backfill inferred tasks/traits for the provider's unprofiled
+    /// dual-write rows (`tasks == '[]'`, `source == 'inferred'`) right after
+    /// a successful create/update, so a provider added mid-session gets
+    /// usable profiles immediately instead of waiting for the boot
+    /// reconcile. Runs before the response is projected so `models_detail`
+    /// reflects the seeded rows.
+    ///
+    /// Best-effort by design: the provider write already committed, so a
+    /// seeding failure must not turn the whole request into an error — the
+    /// boot reconcile will repair any rows left unprofiled here.
+    async fn seed_inferred_profiles_best_effort(&self, provider_id: &str, platform: &str) {
+        match crate::model_profile::seed_inferred_provider_models(
+            self.provider_model_repo.as_ref(),
+            provider_id,
+            platform,
+        )
+        .await
+        {
+            Ok(seeded) if seeded > 0 => tracing::debug!(
+                provider_id,
+                seeded,
+                "seeded inferred model profiles after provider write"
+            ),
+            Ok(_) => {}
+            Err(error) => tracing::warn!(
+                provider_id,
+                %error,
+                "failed to seed inferred model profiles after provider write"
+            ),
+        }
     }
 
     /// Convert a DB row into the v3 response DTO with the plaintext API key
@@ -1362,6 +1396,137 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(err.status_code(), axum::http::StatusCode::NOT_FOUND);
+    }
+
+    // -- inferred-profile seeding on create/update (播种闭环) --
+
+    #[tokio::test]
+    async fn create_seeds_inferred_tasks_for_new_models() {
+        use nomifun_api_types::{ModelTask, ProfileSource};
+        let svc = setup().await;
+        let created = svc
+            .create(CreateProviderRequest {
+                platform: "openai".into(),
+                models: vec!["step-asr".into(), "gpt-4o".into()],
+                ..sample_create_request()
+            })
+            .await
+            .unwrap();
+
+        // The response must reflect the seeded rows, not the '[]' placeholder
+        // the membership dual-write inserts.
+        let asr = created
+            .models_detail
+            .iter()
+            .find(|d| d.model == "step-asr")
+            .unwrap();
+        assert!(
+            asr.tasks.contains(&ModelTask::SpeechRecognition),
+            "step-asr hits the ASR substring table; got {:?}",
+            asr.tasks
+        );
+        assert_eq!(asr.source, ProfileSource::Inferred);
+        let gpt = created
+            .models_detail
+            .iter()
+            .find(|d| d.model == "gpt-4o")
+            .unwrap();
+        assert!(gpt.tasks.contains(&ModelTask::Chat), "got {:?}", gpt.tasks);
+        assert_eq!(gpt.source, ProfileSource::Inferred);
+
+        // And the seeding is persisted, not response-only.
+        let listed = svc.list().await.unwrap().remove(0);
+        let asr = listed
+            .models_detail
+            .iter()
+            .find(|d| d.model == "step-asr")
+            .unwrap();
+        assert!(asr.tasks.contains(&ModelTask::SpeechRecognition));
+    }
+
+    #[tokio::test]
+    async fn update_seeds_inferred_tasks_for_added_models() {
+        use nomifun_api_types::ModelTask;
+        let svc = setup().await;
+        let created = svc
+            .create(CreateProviderRequest {
+                platform: "openai".into(),
+                models: vec!["gpt-4o".into()],
+                ..sample_create_request()
+            })
+            .await
+            .unwrap();
+
+        // Adding a model mid-session must backfill its inferred profile
+        // immediately — no restart / boot reconcile required.
+        let updated = svc
+            .update(
+                &created.provider_id,
+                UpdateProviderRequest {
+                    models: Some(vec!["gpt-4o".into(), "step-asr".into()]),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        let asr = updated
+            .models_detail
+            .iter()
+            .find(|d| d.model == "step-asr")
+            .unwrap();
+        assert!(
+            asr.tasks.contains(&ModelTask::SpeechRecognition),
+            "update response must carry the backfilled tasks; got {:?}",
+            asr.tasks
+        );
+    }
+
+    #[tokio::test]
+    async fn seeding_never_touches_user_sourced_rows() {
+        use nomifun_api_types::ProfileSource;
+        let (svc, pool) = setup_with_pool().await;
+        let model_repo = model_repo_for_pool(&pool);
+        let created = svc
+            .create(CreateProviderRequest {
+                platform: "openai".into(),
+                models: vec!["gpt-4o".into()],
+                ..sample_create_request()
+            })
+            .await
+            .unwrap();
+
+        // A user-sourced row — even one with empty tasks — is authoritative
+        // and must never be re-derived by the post-update seeding pass.
+        model_repo
+            .update(
+                &created.provider_id,
+                "gpt-4o",
+                &ProviderModelUpdate {
+                    tasks: Some("[]"),
+                    source: Some("user"),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+
+        let updated = svc
+            .update(
+                &created.provider_id,
+                UpdateProviderRequest {
+                    name: Some("renamed".into()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        let gpt = updated
+            .models_detail
+            .iter()
+            .find(|d| d.model == "gpt-4o")
+            .unwrap();
+        assert!(gpt.tasks.is_empty(), "user profile untouched; got {:?}", gpt.tasks);
+        assert_eq!(gpt.source, ProfileSource::User);
     }
 
     // -- clone tests --
