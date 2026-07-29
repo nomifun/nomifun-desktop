@@ -167,6 +167,23 @@ describe('normalizeBrowserLane tab projection', () => {
     expect(lane?.tabs[0] && 'target_id' in lane.tabs[0]).toBe(false);
     expect(lane?.browser_epoch).toBe(12);
   });
+
+  test('does not surface a lane-level host_id: no backend serializes one', () => {
+    // BrowserLaneDto (router/browser_management.rs) links a lane to its Host
+    // exclusively through browser_epoch. Parsing a host_id here would create
+    // a preferred-matching branch no payload can ever exercise.
+    const lane = normalizeBrowserLane({
+      lane_id: 'lane-host-link',
+      lifecycle_state: 'running',
+      browser_epoch: 7,
+      host_id: 'host-x',
+      browser_host_id: 'host-y',
+    });
+
+    expect(lane?.browser_epoch).toBe(7);
+    expect(lane && 'host_id' in lane).toBe(false);
+    expect(lane && 'browser_host_id' in lane).toBe(false);
+  });
 });
 
 describe('normalizeBrowserLane lifecycle fallback', () => {

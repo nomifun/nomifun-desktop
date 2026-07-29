@@ -214,17 +214,9 @@ describe('matchBrowserLaneHost', () => {
   const primaryLane = (overrides: Partial<IBrowserLane>): IBrowserLane =>
     lane({ identity: { mode: 'primary' }, browser_epoch: 4, ...overrides });
 
-  test('prefers a stable host_id match over the epoch', () => {
-    const hosts = [
-      host({ host_id: 'host-old', epoch: 4, headful: false }),
-      host({ host_id: 'host-new', epoch: 5, headful: true }),
-    ];
-    expect(
-      matchBrowserLaneHost(primaryLane({ host_id: 'host-new' }), hosts)?.host_id
-    ).toBe('host-new');
-  });
-
-  test('falls back to the epoch when no host_id is available', () => {
+  test('matches the serving host by browser epoch', () => {
+    // Lane payloads carry no host_id (BrowserLaneDto serializes only
+    // browser_epoch), so the epoch is the sole direct host linkage.
     const hosts = [
       host({ host_id: 'host-a', epoch: 3 }),
       host({ host_id: 'host-b', epoch: 4 }),

@@ -168,7 +168,6 @@ export const normalizeBrowserLane = (raw: unknown): IBrowserLane | null => {
     lane_name: nullableString(value, 'lane_name', 'name'),
     lifecycle_state: lifecycle as BrowserLaneLifecycleState,
     browser_epoch: nonNegativeNumber(value, 'browser_epoch', 'epoch'),
-    host_id: nullableString(value, 'host_id', 'browser_host_id'),
     conversation_id:
       nullableString(value, 'conversation_id') ?? owner?.conversation_id,
     conversation_title: nullableString(value, 'conversation_title'),
