@@ -16,13 +16,16 @@
 //! - [`gemini`] — Google `:generateContent` (`"gemini.generate_content"` for
 //!   images, `"gemini.generate_text"` for chat).
 //! - [`deepgram`] — Deepgram pre-recorded `/v1/listen` (`"deepgram.listen"`).
+//! - [`ark`] — Volcengine Ark `/api/v3` image generation (`"ark.images"`) and
+//!   async video tasks (`"ark.video_jobs"`).
 //!
-//! Later tasks append the ark / volc adapters to [`default_adapters`].
+//! Later tasks append the volc voice adapters to [`default_adapters`].
 
 use std::sync::Arc;
 
 use crate::adapter::ProtocolAdapter;
 
+pub mod ark;
 pub mod deepgram;
 pub mod gemini;
 pub mod openai_audio;
@@ -45,6 +48,8 @@ pub fn default_adapters() -> Vec<Arc<dyn ProtocolAdapter>> {
         Arc::new(gemini::GeminiGenerateContentAdapter),
         Arc::new(gemini::GeminiGenerateTextAdapter),
         Arc::new(deepgram::DeepgramListenAdapter),
+        Arc::new(ark::ArkImagesAdapter),
+        Arc::new(ark::ArkVideoJobsAdapter),
     ]
 }
 
@@ -103,6 +108,8 @@ mod tests {
             ("gemini.generate_content", ModelTask::ImageEdit),
             ("gemini.generate_text", ModelTask::Chat),
             ("deepgram.listen", ModelTask::SpeechRecognition),
+            ("ark.images", ModelTask::ImageGeneration),
+            ("ark.video_jobs", ModelTask::VideoGeneration),
         ] {
             let adapter = registry.get(protocol, task).expect("registered + supported");
             assert_eq!(adapter.id(), protocol);
@@ -117,5 +124,8 @@ mod tests {
         assert!(registry.get("gemini.generate_content", ModelTask::Chat).is_err());
         assert!(registry.get("gemini.generate_text", ModelTask::ImageGeneration).is_err());
         assert!(registry.get("deepgram.listen", ModelTask::SpeechSynthesis).is_err());
+        // ark.images serves ImageGeneration only (ImageEdit stays on openai.images).
+        assert!(registry.get("ark.images", ModelTask::ImageEdit).is_err());
+        assert!(registry.get("ark.video_jobs", ModelTask::ImageGeneration).is_err());
     }
 }
