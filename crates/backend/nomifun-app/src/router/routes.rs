@@ -328,6 +328,15 @@ pub async fn create_router(services: &AppServices) -> Router {
             .message_loop
             .run(channel_components.message_rx, channel_components.confirm_rx),
     );
+    // Start the busy-time queue drain (spec D1): it consumes `turn.completed`
+    // envelopes from the same in-process bus the conversation service
+    // publishes through, recovers persisted queued prompts on startup, and
+    // expires stale ones.
+    tokio::spawn(
+        channel_components
+            .queue_drain
+            .run(services.event_bus.subscribe_user()),
+    );
     tracing::info!(
         elapsed_ms = boot.elapsed().as_millis(),
         "startup: channel message loop spawned"

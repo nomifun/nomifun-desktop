@@ -12,6 +12,7 @@ pub mod pairing;
 pub mod pending_decision;
 pub mod plugin;
 pub mod plugins;
+pub mod queue_drain;
 pub mod routes;
 pub mod session;
 pub mod stream_relay;
