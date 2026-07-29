@@ -187,11 +187,11 @@ const DeliverableRow: React.FC<{
       data-deliverable-path={item.relativePath}
       className='group flex items-center justify-between gap-8px px-16px py-10px hover:bg-3 transition-colors'
     >
-      <div className='flex items-center gap-8px min-w-0'>
+      <div className='flex flex-1 items-center gap-8px min-w-0'>
         <span className='shrink-0 flex items-center' style={{ lineHeight: 0 }}>
           <DeliverableIcon fileName={item.fileName} />
         </span>
-        <span className='text-14px text-t-primary truncate shrink-0 max-w-40%' title={item.fileName}>
+        <span className='min-w-0 max-w-60% truncate text-14px text-t-primary' title={item.fileName}>
           {item.fileName}
         </span>
         {secondaryPath && (

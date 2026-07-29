@@ -36,6 +36,12 @@ describe('TurnDeliverablesCard structure', () => {
     expect(cardSource.includes('messages.turnDeliverables.showLess')).toBe(true);
   });
 
+  test('gives the filename a wider share of the available row space', () => {
+    expect(cardSource.includes("className='flex flex-1 items-center gap-8px min-w-0'")).toBe(true);
+    expect(cardSource.includes('min-w-0 max-w-60% truncate text-14px text-t-primary')).toBe(true);
+    expect(cardSource.includes('shrink-0 max-w-40%')).toBe(false);
+  });
+
   test('message list mounts the card once per turn behind the deliverables model', () => {
     expect(listSource.includes('collectTurnDeliverables')).toBe(true);
     expect(listSource.includes("type: 'turn_deliverables'")).toBe(true);
@@ -45,5 +51,15 @@ describe('TurnDeliverablesCard structure', () => {
     expect(listSource.includes('turnGates.set(entry.msg_id, { running: entry.running, state: entry.state })')).toBe(
       true
     );
+  });
+
+  test('places the final assistant actions after the turn deliverables card', () => {
+    expect(listSource.includes("type: 'turn_actions'")).toBe(true);
+    expect(listSource.includes('`turn-actions-${turnId}`')).toBe(true);
+    expect(listSource.indexOf("type: 'turn_deliverables'")).toBeLessThan(
+      listSource.lastIndexOf("type: 'turn_actions'")
+    );
+    expect(listSource.includes('<MessageText message={item.message} actionsOnly />')).toBe(true);
+    expect(listSource.includes('movedActionMessageIds.has((item as TMessage).id)')).toBe(true);
   });
 });
