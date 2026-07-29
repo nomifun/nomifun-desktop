@@ -2804,10 +2804,16 @@ impl IConversationRepository for SqliteConversationRepository {
         }
 
         if receipt.status == "accepted" {
+            // Same extended-column write pattern as `complete_delivery_receipt`
+            // (spec D4): a dropped admission is a structured, retryable
+            // terminal outcome, not just free text.
             let settled = sqlx::query(
                 "UPDATE conversation_delivery_receipts \
                  SET status = 'completed', result_ok = 0, result_text = NULL, \
-                     result_error = ?, completed_at = MAX(created_at, updated_at, ?), \
+                     result_error = ?, \
+                     result_error_code = 'admission_abandoned', \
+                     result_error_retryable = 1, \
+                     completed_at = MAX(created_at, updated_at, ?), \
                      updated_at = MAX(created_at, updated_at, ?) \
                  WHERE operation_id = ? AND message_id = ? \
                    AND conversation_id = ? AND user_id = ? \

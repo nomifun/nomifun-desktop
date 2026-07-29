@@ -5004,6 +5004,10 @@ async fn abandoned_candidate_owned_turn_is_settled_with_its_exact_generation() {
     assert_eq!(receipt.status, "completed");
     assert_eq!(receipt.result_ok, Some(false));
     assert_eq!(receipt.result_error.as_deref(), Some("request future dropped"));
+    // Spec D4 gap: the dropped-admission settlement must carry the structured
+    // terminal code so channel/gateway consumers can classify it as retryable.
+    assert_eq!(receipt.result_error_code.as_deref(), Some("admission_abandoned"));
+    assert_eq!(receipt.result_error_retryable, Some(true));
     let (status, epoch, active): (String, i64, Option<String>) = sqlx::query_as(
         "SELECT status, admission_epoch, active_turn_operation_id \
          FROM conversations WHERE conversation_id = ?",
