@@ -976,6 +976,13 @@ pub async fn build_channel_state(
     conversation_svc.with_mcp_server_repo(Arc::new(nomifun_db::SqliteMcpServerRepository::new(
         services.database.pool().clone(),
     )));
+    // Channel turns on knowledge-bound conversations (companion or workpath)
+    // must resolve the same mount plan and binding signature as every other
+    // entry point. Without this injection `apply_knowledge_mounts` falls back
+    // to unbound workspace authority, whose lease conflicts with the bound
+    // lease held by a desktop-built runtime of the same conversation — the IM
+    // user then gets a permanent "still being processed" busy reply.
+    conversation_svc.with_knowledge_service(services.knowledge_service.clone());
     // Channel turns run the same Nomi send loop as other conversations.
     conversation_svc.with_failover_deps(
         Arc::new(SqliteProviderRepository::new(services.database.pool().clone())),
@@ -1127,6 +1134,12 @@ pub fn build_requirement_state(services: &AppServices) -> (RequirementRouterStat
         services.execution_conversation_boundary.clone(),
     )
     .with_runtime_state(services.conversation_runtime_state.clone());
+    // AutoWork-driven turns must resolve knowledge mounts exactly like the
+    // main conversation assembly (and build_cron_state): a knowledge-less
+    // instance would attach unbound workspace authority whose lease conflicts
+    // with the bound lease of a knowledge-wired runtime on the same
+    // conversation.
+    conv_service.with_knowledge_service(services.knowledge_service.clone());
     // Phase 3: AutoWork-driven nomi turns run the send loop, and IDMM fault
     // supervision (Task 3) reuses `perform_model_failover` —wire the deps here too.
     conv_service.with_failover_deps(
@@ -2043,6 +2056,22 @@ mod tests {
             );
             remaining = &remaining[end..];
         }
+
+        // Every production ConversationService must also inject the shared
+        // KnowledgeService. A constructor without it makes
+        // `apply_knowledge_mounts` fall back to unbound workspace authority,
+        // whose lease signature conflicts with the bound lease held by a
+        // knowledge-wired runtime of the same conversation — surfaced to IM
+        // users as a permanent "still being processed" reply. 5
+        // ConversationService instances + the companion state builder + the
+        // terminal service all take the same injection.
+        let knowledge_injections = production_source
+            .matches(".with_knowledge_service(services.knowledge_service.clone())")
+            .count();
+        assert_eq!(
+            knowledge_injections, constructors + 2,
+            "audit every production knowledge-service injection"
+        );
 
         let cron_executor_start = production_source
             .find("nomifun_cron::executor::JobExecutor::new(")
