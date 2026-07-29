@@ -49,7 +49,7 @@ pub use acp::{
 pub use agent_build_extra::{
     AcpBuildExtra, AcpModelInfo, NomiBuildExtra, NomiGoalSpec, OpenClawBuildExtra,
     OpenClawGatewayConfig, RemoteBuildExtra, SessionMcpServer, SessionMcpTransport,
-    SlashCommandItem,
+    SlashCommandItem, SummonConfig,
 };
 pub use agent_discovery::{
     AgentEnvEntry, AgentHandshake, AgentMetadata, AgentSource, AgentSourceInfo, BehaviorPolicy,

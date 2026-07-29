@@ -155,6 +155,13 @@ pub async fn build_companion_system_prompt(
             "\n\n你还是整台 Nomi 桌面的总管家：用 nomi_* 工具可以查看/操作所有会话、定时任务、长期记忆和需求平台。\
              删除类操作先向主人复述目标确认后再执行。",
         );
+        system.push_str(
+            "\n\n重型任务分流（召唤伙伴）：识别到重型 coding/工程类任务（改仓库代码、跑构建/测试、多文件重构、\
+             长时间自动化）时不要在本聊天里直接开干——先向主人提议「我开一个工作会话来做这件事」，征得同意后用 \
+             nomi_create_conversation 创建：主人给了项目路径就带 workpath；同时带 summon（companion_id 填你自己的 id，\
+             memory_ids 先用 recall_memories 按任务挑几条最相关的记忆 id，宁少勿滥），让工作会话装载你的技能与所选记忆\
+             （对它只读）。建好后用 nomi_send_to_conversation 把任务派过去，并告诉主人新会话入口。",
+        );
     }
     if !profile.persona.custom.trim().is_empty() {
         system.push_str(&format!("\n主人对你的额外设定：{}", profile.persona.custom.trim()));
@@ -498,7 +505,7 @@ pub struct CompanionThreads {
 /// - `materialize_skills_for_agent` itself errors;
 /// - a non-empty configuration resolves to nothing (source tree transiently
 ///   unreadable — resolve failures are silently skipped per name upstream).
-async fn effective_skill_names(
+pub(crate) async fn effective_skill_names(
     skill_paths: &nomifun_extension::SkillPaths,
     profile: &CompanionProfileConfig,
 ) -> Result<Vec<String>, AppError> {
@@ -533,6 +540,89 @@ async fn effective_skill_names(
     Ok(names)
 }
 
+/// Materialize + link `skill_names` into `workspace/.nomi/skills` under
+/// manifest ownership (`managed-companion-skills.json`): entries the manifest
+/// owns but that are no longer desired are removed (only when ownership is
+/// proven — user-created skills are never touched), missing desired skills are
+/// linked and recorded. Best-effort: failures log and degrade. Shared by
+/// companion threads and the in-session summon track (`skill_names = []`
+/// unloads every manifest-owned entry, e.g. after 解除召唤). Returns the
+/// resolved desired skill names.
+pub(crate) async fn sync_managed_workspace_skills(
+    skill_paths: &nomifun_extension::SkillPaths,
+    conversation_id: &str,
+    workspace: &Path,
+    skill_names: &[String],
+) -> Vec<String> {
+    let nomi_dir = workspace.join(".nomi");
+    let skills_dir = nomi_dir.join("skills");
+    // Cleanup fast-path: nothing desired and nothing managed → leave the
+    // workspace untouched (never create `.nomi`/manifest files in ordinary
+    // work workspaces that were never summoned).
+    if skill_names.is_empty() && load_manifest(&nomi_dir).managed.is_empty() {
+        return Vec::new();
+    }
+    let resolved = match nomifun_extension::materialize_skills_for_agent(
+        skill_paths,
+        conversation_id,
+        skill_names,
+    )
+    .await
+    {
+        Ok(resolved) => resolved,
+        Err(error) => {
+            tracing::warn!(error = %error, conversation_id, "resolve companion workspace skills failed");
+            return Vec::new();
+        }
+    };
+
+    let old_manifest = load_manifest(&nomi_dir);
+    let desired: std::collections::HashSet<&str> = resolved
+        .iter()
+        .filter(|skill| {
+            old_manifest
+                .managed
+                .get(&skill.name)
+                .is_none_or(|record| record_source_matches(record, &skill.source_path))
+        })
+        .map(|skill| skill.name.as_str())
+        .collect();
+    let mut manifest = remove_stale_managed_entries(&skills_dir, &old_manifest, &desired);
+    let to_link: Vec<_> = resolved
+        .iter()
+        .filter(|skill| !skills_dir.join(&skill.name).exists())
+        .cloned()
+        .collect();
+    if let Err(error) = nomifun_extension::link_workspace_skills(
+        workspace,
+        &[".nomi/skills"],
+        &to_link,
+    )
+    .await
+    {
+        tracing::warn!(error = %error, conversation_id, "link companion workspace skills failed");
+    }
+    for skill in &to_link {
+        let target = skills_dir.join(&skill.name);
+        match record_managed_entry(&target, &skill.source_path) {
+            Ok(Some(record)) => {
+                manifest.managed.insert(skill.name.clone(), record);
+            }
+            Ok(None) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => tracing::warn!(
+                error = %error,
+                target = %target.display(),
+                "record managed companion skill failed"
+            ),
+        }
+    }
+    if let Err(error) = save_manifest(&nomi_dir, &manifest) {
+        tracing::warn!(error = %error, manifest = %nomi_dir.display(), "save companion skill manifest failed");
+    }
+    resolved.into_iter().map(|skill| skill.name).collect()
+}
+
 impl CompanionThreads {
     async fn builtin_auto_skill_names(&self) -> Vec<String> {
         match nomifun_extension::list_builtin_auto_skills(&self.skill_paths).await {
@@ -550,65 +640,8 @@ impl CompanionThreads {
         workspace: &Path,
         skill_names: &[String],
     ) {
-        let nomi_dir = workspace.join(".nomi");
-        let skills_dir = nomi_dir.join("skills");
-        let resolved = match nomifun_extension::materialize_skills_for_agent(
-            &self.skill_paths,
-            conversation_id,
-            skill_names,
-        )
-        .await
-        {
-            Ok(resolved) => resolved,
-            Err(error) => {
-                tracing::warn!(error = %error, conversation_id, "resolve companion workspace skills failed");
-                return;
-            }
-        };
-
-        let old_manifest = load_manifest(&nomi_dir);
-        let desired: std::collections::HashSet<&str> = resolved
-            .iter()
-            .filter(|skill| {
-                old_manifest
-                    .managed
-                    .get(&skill.name)
-                    .is_none_or(|record| record_source_matches(record, &skill.source_path))
-            })
-            .map(|skill| skill.name.as_str())
-            .collect();
-        let mut manifest = remove_stale_managed_entries(&skills_dir, &old_manifest, &desired);
-        let to_link: Vec<_> = resolved
-            .into_iter()
-            .filter(|skill| !skills_dir.join(&skill.name).exists())
-            .collect();
-        if let Err(error) = nomifun_extension::link_workspace_skills(
-            workspace,
-            &[".nomi/skills"],
-            &to_link,
-        )
-        .await
-        {
-            tracing::warn!(error = %error, conversation_id, "link companion workspace skills failed");
-        }
-        for skill in &to_link {
-            let target = skills_dir.join(&skill.name);
-            match record_managed_entry(&target, &skill.source_path) {
-                Ok(Some(record)) => {
-                    manifest.managed.insert(skill.name.clone(), record);
-                }
-                Ok(None) => {}
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                Err(error) => tracing::warn!(
-                    error = %error,
-                    target = %target.display(),
-                    "record managed companion skill failed"
-                ),
-            }
-        }
-        if let Err(error) = save_manifest(&nomi_dir, &manifest) {
-            tracing::warn!(error = %error, manifest = %nomi_dir.display(), "save companion skill manifest failed");
-        }
+        sync_managed_workspace_skills(&self.skill_paths, conversation_id, workspace, skill_names)
+            .await;
     }
 
     /// Reconcile the workspace links and immutable conversation skill snapshot
@@ -1557,6 +1590,28 @@ mod tests {
         let local = build_companion_system_prompt(&store, &profile, None, false).await;
         assert!(local.contains("总管家"), "local desktop companion stays the 总管家");
         assert!(local.contains("上周让你做导出功能"), "local snapshot still includes task memories");
+    }
+
+    #[tokio::test]
+    async fn local_prompt_routes_heavy_coding_to_summoned_work_sessions() {
+        // Spec §B6 反向分流: the LOCAL 总管家 proposes a summoned work session
+        // for heavy coding instead of doing it inline; the rule rides
+        // nomi_create_conversation's workpath + summon params and requires the
+        // owner's consent first. The paragraph must NOT leak into remote (IM)
+        // mode, whose hard no-proactive-dispatch rule stays authoritative.
+        let store = CompanionStore::open_memory().await.unwrap();
+        let profile = CompanionProfileConfig::new("毛球", "ink", 1);
+
+        let local = build_companion_system_prompt(&store, &profile, None, false).await;
+        assert!(local.contains("重型任务分流"), "local prompt carries the routing rule");
+        assert!(local.contains("nomi_create_conversation"));
+        assert!(local.contains("workpath"));
+        assert!(local.contains("summon"));
+        assert!(local.contains("征得同意"), "consent-first is part of the rule");
+
+        let remote = build_companion_system_prompt(&store, &profile, Some("telegram"), false).await;
+        assert!(!remote.contains("重型任务分流"), "routing rule must not leak into remote mode");
+        assert!(!remote.contains("workpath"));
     }
 
     #[tokio::test]

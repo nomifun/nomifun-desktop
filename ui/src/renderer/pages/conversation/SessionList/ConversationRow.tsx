@@ -59,9 +59,11 @@ const ConversationRow: React.FC<ConversationRowProps> = (props) => {
   const siderTooltipProps = getSiderTooltipProps(tooltipEnabled);
   const ageLabel = formatSessionAgeLabel(t, conversation.created_at);
 
-  // Session-level capability markers (trailing group): 定时任务 → 自动工作 →
-  // 智能决策, shared builder with TerminalRow.
-  const capabilityItems = buildSessionCapabilityItems(t, { cronStatus, autoworkState, idmmState });
+  // Session-level capability markers (trailing group): 召唤伙伴 → 定时任务 →
+  // 自动工作 → 智能决策, shared builder with TerminalRow. The summon marker
+  // reads straight off the synced conversation extra (设计 B5).
+  const summoned = Boolean((conversation.extra as { summon?: unknown } | undefined)?.summon);
+  const capabilityItems = buildSessionCapabilityItems(t, { cronStatus, autoworkState, idmmState, summoned });
 
   const renderLeadingIcon = () => {
     // When the row is pinned, hovering reveals a pushpin marker that overlays

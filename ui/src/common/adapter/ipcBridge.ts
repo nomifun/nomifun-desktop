@@ -543,6 +543,22 @@ export const fromApiTurnCompletedEvent = (raw: unknown): IConversationTurnComple
   };
 };
 
+/** In-session companion summon marker persisted at `extra.summon`（设计 B）。 */
+export interface ISummonConfig {
+  companion_id: CompanionId;
+  memory_ids: CompanionMemoryId[];
+  skill_exclusions: string[];
+  /** Server-stamped epoch ms — clients never set it. */
+  summoned_at: number;
+}
+
+export interface ISetSummonParams {
+  conversation_id: ConversationId;
+  companion_id: CompanionId;
+  memory_ids?: CompanionMemoryId[];
+  skill_exclusions?: string[];
+}
+
 export const conversation = {
   create: withResponseMap(
     httpPost<unknown, ICreateConversationParams>('/api/conversations', (p) => {
@@ -634,6 +650,20 @@ export const conversation = {
    *  伙伴专属会话「清空上下文」按钮调用。 */
   clearMessages: httpPost<boolean, { conversation_id: ConversationId }>(
     (p) => `/api/conversations/${p.conversation_id}/clear-messages`
+  ),
+  /** 召唤伙伴（设计 B）：把一位伙伴的技能与勾选记忆（只读）装进这条工作会话。
+   *  服务端盖 summoned_at 并回收运行时，下一条消息生效；会话非空闲返回 409。 */
+  setSummon: httpPut<ISummonConfig, ISetSummonParams>(
+    (p) => `/api/conversations/${p.conversation_id}/summon`,
+    (p) => ({
+      companion_id: p.companion_id,
+      memory_ids: p.memory_ids,
+      skill_exclusions: p.skill_exclusions,
+    })
+  ),
+  /** 解除召唤（幂等）；非空闲 409。技能目录在下一次运行时构建时按 manifest 卸载。 */
+  clearSummon: httpDelete<void, { conversation_id: ConversationId }>(
+    (p) => `/api/conversations/${p.conversation_id}/summon`
   ),
   retryKnowledgeWriteback: httpPost<
     void,

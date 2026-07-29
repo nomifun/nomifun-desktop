@@ -397,6 +397,17 @@ export type TChatConversation =
         /** IM-channel platform when a companion turn originated from an external
          * channel (telegram/lark/…). Present on channel-sourced companion turns. */
         channel_platform?: string;
+        /** In-session companion summon marker（设计 B）: the summoned companion's
+         * id + hand-picked memory ids + excluded skills, `summoned_at`
+         * server-stamped. Written only through PUT
+         * /api/conversations/{id}/summon or trusted backend creators; drives
+         * the sendbox summon control and the header/sidebar badges. */
+        summon?: {
+          companion_id: CompanionId;
+          memory_ids: string[];
+          skill_exclusions: string[];
+          summoned_at: number;
+        };
       }
     >;
 
