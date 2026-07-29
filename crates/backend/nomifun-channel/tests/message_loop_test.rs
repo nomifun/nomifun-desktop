@@ -616,10 +616,23 @@ async fn busy_conversation_replies_with_processing_notice() {
         .await
         .unwrap();
 
-    wait_for_send_containing(&harness.recorder, "still being processed").await;
+    // Spec D1: the busy prompt is QUEUED (not dropped) and the user learns
+    // its FIFO position.
+    wait_for_send_containing(&harness.recorder, "已排队（第 1 位）").await;
+
+    // A further message while still busy takes position 2.
+    harness
+        .message_tx
+        .send(incoming(
+            &harness.channel_plugin_id,
+            make_text_message("tg_42", "chat_1", "third message"),
+        ))
+        .await
+        .unwrap();
+    wait_for_send_containing(&harness.recorder, "已排队（第 2 位）").await;
 
     // The guard fired before send_to_agent: no second user message was
-    // persisted into the conversation.
+    // persisted into the conversation…
     let messages = user_messages(
         &harness.conversation_svc,
         &harness.installation_owner,
@@ -627,6 +640,27 @@ async fn busy_conversation_replies_with_processing_notice() {
     )
     .await;
     assert_eq!(messages, vec!["hello world".to_string()]);
+
+    // …but the prompts were durably queued, oldest first.
+    let head = harness
+        .channel_repo
+        .peek_next_queued(&cid)
+        .await
+        .unwrap()
+        .expect("busy prompts must be queued, not dropped");
+    assert_eq!(head.text, "second message");
+
+    // 「取消排队」clears this chat's queue and reports the count.
+    harness
+        .message_tx
+        .send(incoming(
+            &harness.channel_plugin_id,
+            make_text_message("tg_42", "chat_1", "取消排队"),
+        ))
+        .await
+        .unwrap();
+    wait_for_send_containing(&harness.recorder, "已取消排队中的 2 条消息").await;
+    assert!(harness.channel_repo.peek_next_queued(&cid).await.unwrap().is_none());
 }
 
 /// Fix 3: chat.continue dispatches the fixed continue prompt as a user turn

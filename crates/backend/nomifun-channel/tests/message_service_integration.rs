@@ -530,8 +530,78 @@ async fn active_turn_conflict_still_maps_to_busy() {
         .unwrap_err();
 
     assert!(
-        matches!(error, ChannelError::ConversationBusy),
-        "a concurrent-turn Conflict must keep the busy notice, got: {error:?}"
+        matches!(error, ChannelError::ConversationBusy(ref cid) if cid == &sent.conversation_id),
+        "a concurrent-turn Conflict must keep the busy signal and carry the resolved conversation, got: {error:?}"
+    );
+}
+
+// ── Busy-time prompt queue (spec D1, Task 2) ─────────────────────────
+
+/// Busy-time prompts are persisted (not dropped) with correct FIFO positions,
+/// and the 「取消排队」 command clears exactly this chat's scope.
+#[tokio::test]
+async fn busy_prompts_enqueue_with_positions_and_cancel_clears_chat() {
+    use nomifun_db::PendingPromptEnqueue;
+
+    let db = init_database_memory().await.unwrap();
+    let stack = build_stack(db.pool().clone()).await;
+    let channel_plugin_id = create_plain_channel(&stack.channel_repo).await;
+    let conversation_id = nomifun_common::ConversationId::new().into_string();
+
+    let first = stack
+        .message_svc
+        .enqueue_busy_prompt(
+            &channel_plugin_id,
+            "chat-1",
+            SESSION_A,
+            &conversation_id,
+            "queued one",
+            "test:queue:first",
+        )
+        .await
+        .unwrap();
+    assert!(matches!(first, PendingPromptEnqueue::Queued { position: 1, .. }));
+
+    let second = stack
+        .message_svc
+        .enqueue_busy_prompt(
+            &channel_plugin_id,
+            "chat-1",
+            SESSION_A,
+            &conversation_id,
+            "queued two",
+            "test:queue:second",
+        )
+        .await
+        .unwrap();
+    assert!(matches!(second, PendingPromptEnqueue::Queued { position: 2, .. }));
+
+    // Nothing was lost: the FIFO head is the first prompt.
+    use nomifun_db::IChannelRepository;
+    let head = stack
+        .channel_repo
+        .peek_next_queued(&conversation_id)
+        .await
+        .unwrap()
+        .expect("queued rows must survive");
+    assert_eq!(head.text, "queued one");
+
+    // Cancel clears this chat's queue and reports the count.
+    assert_eq!(
+        stack
+            .message_svc
+            .cancel_chat_queue(&channel_plugin_id, "chat-1")
+            .await
+            .unwrap(),
+        2
+    );
+    assert!(
+        stack
+            .channel_repo
+            .peek_next_queued(&conversation_id)
+            .await
+            .unwrap()
+            .is_none()
     );
 }
 

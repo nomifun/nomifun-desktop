@@ -21,6 +21,13 @@ use crate::types::{
 const BUSY_NOTICE: &str =
     "\u{23f3} Your previous message is still being processed \u{2014} please wait for it to finish.";
 
+/// IM command clearing this chat's busy-time prompt queue (spec D1).
+const CANCEL_QUEUE_COMMAND: &str = "取消排队";
+
+/// Reply when the conversation's queue already holds the maximum number of
+/// pending prompts (spec D1: 10 per conversation).
+const QUEUE_FULL_NOTICE: &str = "\u{23f8} 排队已满，请稍后再发。";
+
 /// Reply for `chat.regenerate` when there is no user message to resend.
 const NOTHING_TO_REGENERATE: &str =
     "\u{2139}\u{fe0f} There is no previous message to regenerate \u{2014} send a new message first.";
@@ -509,6 +516,25 @@ async fn handle_dispatched(
         return None;
     }
 
+    // D1: the queue-cancel command clears this chat's pending prompts. It runs
+    // right after the customer-service seam (cs-bound bots are unaffected) and
+    // BEFORE decision interception / busy guards, so a chat waiting on a
+    // decision or a long turn can always empty its queue.
+    if text.trim() == CANCEL_QUEUE_COMMAND {
+        let reply = match msg_svc.cancel_chat_queue(plugin_id, chat_id).await {
+            Ok(0) => "\u{2139}\u{fe0f} 当前没有排队中的消息。".to_owned(),
+            Ok(count) => format!("\u{1f9f9} 已取消排队中的 {count} 条消息。"),
+            Err(error) => {
+                error!(error = %error, chat_id = %chat_id, "channel queue cancel failed");
+                format!("\u{274c} 取消排队失败：{error}")
+            }
+        };
+        let _ = sender
+            .send_message(plugin_id, chat_id, plain_text_message(reply))
+            .await;
+        return None;
+    }
+
     // Decision interception (Bug 1, Case A): when the bound conversation is
     // waiting on a relayed numbered decision, a reply is the user's *answer*,
     // not a new prompt. Map a valid number onto an option and resolve it via
@@ -563,13 +589,24 @@ async fn handle_dispatched(
 
     // Per-chat concurrency guard: when the bound conversation is already
     // working on a turn, don't race a second prompt into it (turn admission
-    // would reject it with an opaque error anyway) — tell the user instead.
+    // would reject it with an opaque error anyway) — enqueue it instead
+    // (spec D1) and tell the user its FIFO position.
     if let Some(cid) = conversation_id
         && msg_svc.is_conversation_busy(cid).await
     {
-        info!(conversation_id = %cid, chat_id = %chat_id, "message rejected: conversation busy");
+        info!(conversation_id = %cid, chat_id = %chat_id, "conversation busy: queueing prompt");
+        let reply = queue_busy_prompt_reply(
+            msg_svc,
+            plugin_id,
+            chat_id,
+            session_id,
+            cid,
+            text,
+            idempotency_key,
+        )
+        .await;
         let _ = sender
-            .send_message(plugin_id, chat_id, plain_text_message(BUSY_NOTICE.into()))
+            .send_message(plugin_id, chat_id, plain_text_message(reply))
             .await;
         return None;
     }
@@ -591,13 +628,23 @@ async fn handle_dispatched(
         .await
     {
         Ok(r) => r,
-        // The (now shared) companion session is already running a turn — answer
-        // with the same friendly notice the per-chat busy guard uses. Covers the
+        // The (now shared) companion session is already running a turn — queue
+        // the prompt against the RESOLVED conversation (spec D1). Covers the
         // first-turn race the guard above can't see (it checks the pre-bind id).
-        Err(ChannelError::ConversationBusy) => {
-            info!(chat_id = %chat_id, "message rejected: companion session busy");
+        Err(ChannelError::ConversationBusy(cid)) => {
+            info!(conversation_id = %cid, chat_id = %chat_id, "companion session busy: queueing prompt");
+            let reply = queue_busy_prompt_reply(
+                msg_svc,
+                plugin_id,
+                chat_id,
+                session_id,
+                &cid,
+                text,
+                idempotency_key,
+            )
+            .await;
             let _ = sender
-                .send_message(plugin_id, chat_id, plain_text_message(BUSY_NOTICE.into()))
+                .send_message(plugin_id, chat_id, plain_text_message(reply))
                 .await;
             return None;
         }
@@ -711,6 +758,55 @@ async fn handle_regenerate(
                 .await;
             None
         }
+    }
+}
+
+/// Enqueue a busy-time prompt (spec D1) and render the user-facing reply.
+///
+/// Falls back to the plain busy notice when the queue write itself fails —
+/// the user is still told the conversation is working, and the error is
+/// logged for diagnostics.
+#[allow(clippy::too_many_arguments)]
+async fn queue_busy_prompt_reply(
+    msg_svc: &Arc<ChannelMessageService>,
+    plugin_id: &str,
+    chat_id: &str,
+    channel_session_id: &str,
+    conversation_id: &str,
+    text: &str,
+    idempotency_key: &str,
+) -> String {
+    match msg_svc
+        .enqueue_busy_prompt(
+            plugin_id,
+            chat_id,
+            channel_session_id,
+            conversation_id,
+            text,
+            idempotency_key,
+        )
+        .await
+    {
+        Ok(outcome) => busy_queue_reply(&outcome),
+        Err(error) => {
+            error!(
+                error = %error,
+                conversation_id = %conversation_id,
+                chat_id = %chat_id,
+                "busy prompt could not be queued; falling back to plain busy notice"
+            );
+            BUSY_NOTICE.to_owned()
+        }
+    }
+}
+
+/// The reply text for one enqueue outcome (spec D1 wording).
+fn busy_queue_reply(outcome: &nomifun_db::PendingPromptEnqueue) -> String {
+    match outcome {
+        nomifun_db::PendingPromptEnqueue::Queued { position, .. } => format!(
+            "\u{23f3} 会话正忙，已排队（第 {position} 位），完成后自动处理。回复「取消排队」可清空。"
+        ),
+        nomifun_db::PendingPromptEnqueue::QueueFull => QUEUE_FULL_NOTICE.to_owned(),
     }
 }
 
@@ -927,5 +1023,37 @@ mod tests {
         assert_eq!(parse_choice("1.5", 2), None);
         assert_eq!(parse_choice("-1", 2), None);
         assert_eq!(parse_choice("1 2", 2), None, "two numbers is not a single choice");
+    }
+
+    // ── busy queue replies (spec D1) ───────────────────────────────────
+
+    #[test]
+    fn busy_queue_reply_reports_fifo_position_and_cancel_hint() {
+        let row = nomifun_db::models::ChannelPendingPromptRow {
+            prompt_id: nomifun_common::ChannelPendingPromptId::new().into_string(),
+            channel_plugin_id: nomifun_common::ChannelPluginId::new().into_string(),
+            chat_id: "chat-1".into(),
+            channel_session_id: nomifun_common::ChannelSessionId::new().into_string(),
+            conversation_id: nomifun_common::ConversationId::new().into_string(),
+            text: "hello".into(),
+            idempotency_key: "key".into(),
+            state: "queued".into(),
+            attempts: 0,
+            queued_at: 1,
+            settled_at: None,
+        };
+        let reply = busy_queue_reply(&nomifun_db::PendingPromptEnqueue::Queued {
+            row,
+            position: 3,
+        });
+        assert!(reply.contains("已排队"), "{reply}");
+        assert!(reply.contains("第 3 位"), "{reply}");
+        assert!(reply.contains("取消排队"), "cancel hint present: {reply}");
+    }
+
+    #[test]
+    fn busy_queue_reply_full_queue_asks_to_retry_later() {
+        let reply = busy_queue_reply(&nomifun_db::PendingPromptEnqueue::QueueFull);
+        assert!(reply.contains("排队已满"), "{reply}");
     }
 }
