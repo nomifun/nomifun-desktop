@@ -66,6 +66,7 @@ import {
   type TurnDisclosureOutputItem,
 } from './turnDisclosureModel';
 import { getProcessItemState } from './turnProcessState';
+import { planTurnLiveStep } from './turnLiveStepModel';
 import {
   collectTurnDeliverables,
   type TurnDeliverableCandidate,
@@ -145,12 +146,23 @@ type ITurnActionsVO = {
   sourceMessageIds: SourceMessageId[];
   created_at: number;
 };
+type ITurnLiveStepVO = {
+  type: 'turn_live_step';
+  id: string;
+  msg_id: MessageId;
+  label: string;
+  state: 'running' | 'waiting';
+  icon: TurnProcessReceiptIcon;
+  sourceMessageIds: SourceMessageId[];
+  created_at: number;
+};
 type IProcessedItem =
   | IRenderableItem
   | ITurnProcessDisclosureVO
   | IProcessReceiptVO
   | ITurnDeliverablesVO
-  | ITurnActionsVO;
+  | ITurnActionsVO
+  | ITurnLiveStepVO;
 
 type ConversationLocationState = {
   targetMessageId?: MessageId;
@@ -163,7 +175,8 @@ const getProcessedItemSourceMessageIds = (item: IProcessedItem): SourceMessageId
     (item.type === 'turn_process_disclosure' ||
       item.type === 'process_receipt' ||
       item.type === 'turn_deliverables' ||
-      item.type === 'turn_actions')
+      item.type === 'turn_actions' ||
+      item.type === 'turn_live_step')
   ) {
     return item.sourceMessageIds;
   }
@@ -204,6 +217,7 @@ const getProcessedItemCreatedAt = (item: IProcessedItem): number => {
       'process_receipt',
       'turn_deliverables',
       'turn_actions',
+      'turn_live_step',
     ].includes(item.type)
   ) {
     // `includes` doesn't narrow the union, so `created_at` is still typed
@@ -1006,6 +1020,75 @@ const MessageList: React.FC<{
       })
       .filter((item): item is IProcessedItem => Boolean(item));
 
+    // ── Live current-step strip: while the tail turn is still producing
+    // output, append one synthetic row after the newest content so the user
+    // can tell the task is running (the header reads "processed" throughout
+    // the lifecycle). It disappears as soon as the turn settles. ──
+    const isStreamingReplyText = (entry: IProcessedItem | undefined): boolean =>
+      !!entry && 'type' in entry && entry.type === 'text' && (entry as IMessageText).position === 'left';
+
+    const buildTurnLiveStep = (items: IProcessedItem[]): ITurnLiveStepVO | undefined => {
+      if (conversationContext?.isProcessing !== true) return undefined;
+      const tailDisclosure = items.findLast(
+        (entry): entry is ITurnProcessDisclosureVO => 'type' in entry && entry.type === 'turn_process_disclosure'
+      );
+      if (!tailDisclosure) return undefined;
+      const plan = planTurnLiveStep({
+        isProcessing: true,
+        disclosure: {
+          running: tailDisclosure.running,
+          processItems: tailDisclosure.processItems.map((processItem) => {
+            const anchorId = getProcessedItemAnchorId(processItem);
+            return {
+              id: anchorId,
+              state: tailDisclosure.processItemStates[anchorId] ?? getProcessItemState(processItem),
+            };
+          }),
+        },
+        hasStreamingReplyText: isStreamingReplyText(items.at(-1)),
+      });
+      if (!plan) return undefined;
+
+      let label: string;
+      let icon: TurnProcessReceiptIcon;
+      if (plan.kind === 'item') {
+        const processItem = tailDisclosure.processItems.find(
+          (candidate) => getProcessedItemAnchorId(candidate) === plan.itemId
+        );
+        if (processItem && 'type' in processItem && processItem.type === 'thinking') {
+          label = t('messages.processReceipt.thinkingRunning', { defaultValue: 'Thinking' });
+          icon = 'thinking';
+        } else if (processItem) {
+          const summary = buildProcessReceiptSummary(processItem, plan.state, t, workspaceRoots);
+          label = summary.label;
+          icon = summary.icon;
+        } else {
+          label = t('messages.processReceipt.preparingAction', { defaultValue: 'Preparing next action' });
+          icon = 'status';
+        }
+      } else if (plan.kind === 'composing') {
+        label = t('messages.turnLiveStep.composing', { defaultValue: 'Composing the reply' });
+        icon = 'status';
+      } else if (plan.kind === 'analyzing') {
+        label = t('messages.turnLiveStep.analyzing', { defaultValue: 'Analyzing the request' });
+        icon = 'thinking';
+      } else {
+        label = t('messages.processReceipt.preparingAction', { defaultValue: 'Preparing next action' });
+        icon = 'status';
+      }
+
+      return {
+        type: 'turn_live_step',
+        id: `turn-live-step-${tailDisclosure.msg_id}`,
+        msg_id: tailDisclosure.msg_id,
+        label,
+        state: plan.state,
+        icon,
+        sourceMessageIds: [],
+        created_at: tailDisclosure.endAt,
+      };
+    };
+
     // ── Turn deliverables: aggregate each successfully closed turn's verified
     // file artifacts and surface them as one card below that turn's last item
     // (its final assistant reply, when one exists). ──
@@ -1035,7 +1118,10 @@ const MessageList: React.FC<{
     }
 
     const deliverablesByTurn = collectTurnDeliverables(candidates, { workspaceRoots, turnGates });
-    if (deliverablesByTurn.size === 0) return disclosureItems;
+    const liveStepForDisclosures = buildTurnLiveStep(disclosureItems);
+    if (deliverablesByTurn.size === 0) {
+      return liveStepForDisclosures ? [...disclosureItems, liveStepForDisclosures] : disclosureItems;
+    }
 
     const turnIdByAnchorId = new Map<string, MessageId | undefined>();
     for (const entry of modelInput) turnIdByAnchorId.set(entry.id, entry.turnId);
@@ -1092,7 +1178,8 @@ const MessageList: React.FC<{
       }
     });
 
-    return withDeliverables;
+    const liveStep = buildTurnLiveStep(withDeliverables);
+    return liveStep ? [...withDeliverables, liveStep] : withDeliverables;
   }, [
     conversationContext?.activeRequestMessageId,
     conversationContext?.activeTurnId,
@@ -1106,7 +1193,9 @@ const MessageList: React.FC<{
   const lastUserTextIndex = useMemo(
     () =>
       displayList.findLastIndex(
-        (item) => !('type' in item && ['turn_process_disclosure', 'process_receipt', 'artifact'].includes(item.type)) &&
+        (item) =>
+          !('type' in item &&
+            ['turn_process_disclosure', 'process_receipt', 'artifact', 'turn_live_step'].includes(item.type)) &&
           (item as TMessage).type === 'text' &&
           (item as TMessage).position === 'right'
       ),
@@ -1117,7 +1206,8 @@ const MessageList: React.FC<{
     (item: IProcessedItem, index: number): boolean =>
       conversationContext?.isProcessing === true &&
       index > lastUserTextIndex &&
-      !('type' in item && ['turn_process_disclosure', 'process_receipt', 'artifact'].includes(item.type)) &&
+      !('type' in item &&
+        ['turn_process_disclosure', 'process_receipt', 'artifact', 'turn_live_step'].includes(item.type)) &&
       (item as TMessage).type === 'text' &&
       (item as TMessage).position === 'left',
     [conversationContext?.isProcessing, lastUserTextIndex]
@@ -1377,6 +1467,31 @@ const MessageList: React.FC<{
           style={highlighted ? highlightStyle : undefined}
         >
           <MessageText message={item.message} actionsOnly />
+        </div>
+      );
+    }
+    if ('type' in item && item.type === 'turn_live_step') {
+      return (
+        <div
+          key={item.id}
+          id={`message-${getProcessedItemAnchorId(item)}`}
+          data-testid='turn-live-step'
+          className='min-w-0 message-item px-8px m-t-10px max-w-full md:max-w-780px mx-auto turn_live_step'
+        >
+          <div className='turn-live-step'>
+            <TurnProcessReceipt
+              receipt={{
+                id: item.id,
+                item,
+                label: item.label,
+                state: item.state,
+                icon: item.icon,
+                defaultExpanded: false,
+                hasDetail: false,
+              }}
+              renderProcessItem={() => null}
+            />
+          </div>
         </div>
       );
     }

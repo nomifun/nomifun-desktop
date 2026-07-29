@@ -59,6 +59,10 @@
     "expandAllThinkingProcess": "Expand all thinking process",
     "collapseAllThinkingProcess": "Collapse all thinking process"
   },
+  "turnLiveStep": {
+    "analyzing": "Analyzing the request",
+    "composing": "Composing the reply"
+  },
   "knowledgeWriteback": {
     "started": "Preparing knowledge write-back",
     "extracting": "Extracting reusable knowledge",

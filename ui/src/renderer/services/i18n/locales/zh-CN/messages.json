@@ -59,6 +59,10 @@
     "expandAllThinkingProcess": "展开全部思考过程",
     "collapseAllThinkingProcess": "收起全部思考过程"
   },
+  "turnLiveStep": {
+    "analyzing": "正在分析需求",
+    "composing": "正在整理回复"
+  },
   "knowledgeWriteback": {
     "started": "正在准备回写知识库",
     "extracting": "正在提取可沉淀知识",

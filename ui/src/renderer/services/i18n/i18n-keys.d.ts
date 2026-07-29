@@ -2088,6 +2088,8 @@ export type I18nKey =
   | 'messages.turnDeliverables.title'
   | 'messages.turnDeliverables.verified'
   | 'messages.turnDeliverables.viewDiff'
+  | 'messages.turnLiveStep.analyzing'
+  | 'messages.turnLiveStep.composing'
   | 'messages.turnProcess.collapseAllThinkingProcess'
   | 'messages.turnProcess.expandAllThinkingProcess'
   | 'messages.turnProcessed'
