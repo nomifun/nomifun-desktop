@@ -436,6 +436,7 @@ fails on the webkit2gtk link — build on the target architecture's machine/cont
 | `bun run test:crate` | 运行单个 Rust crate：bun run test:crate <crate> [cargo 参数] |
 | `bun run test:core` | 运行不含 desktop-only feature 的 Rust workspace |
 | `bun run test:desktop` | 运行桌面壳测试，不监听或打包 ui/dist 资源 |
+| `bun run test:browser` | 运行 browser-use 门控的 Rust 测试（browser-platform 全量 + gateway/ai-agent/nomi-agent/app 开启 --features browser-use；crate/core 车道会静默跳过这些） |
 | `bun run test:ui` | 运行前端单元测试（bun test，收集 ui/src 下全部 *.test.ts/tsx） |
 | **静态检查 / 门禁** | |
 | `bun run check:process-runtime-boundary` | Enforce the supervised process runtime boundary and exact hand-off allowlist. |
