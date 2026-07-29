@@ -6782,10 +6782,10 @@ impl CdpBackend {
             // TargetClosed）。此处主动剔除并 abort 其后台循环。host 模式保留原
             // loss 事件路径（detach → handle_top_level_target_loss 同步移除记录并
             // 清 frame_owner），不在此双改。
-            if self.target_router().is_none() {
-                if let Some(record) = self.tabs.lock().await.remove(&new_tid) {
-                    abort_tab_record(&record);
-                }
+            if self.target_router().is_none()
+                && let Some(record) = self.tabs.lock().await.remove(&new_tid)
+            {
+                abort_tab_record(&record);
             }
             return Err(map_transport_err(error));
         }
