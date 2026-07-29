@@ -6,6 +6,9 @@
 //! engine session whose tool registry is fixed at construction time to three
 //! read-only tools.
 
+pub mod dialogue;
 pub mod service;
+pub mod tools;
 
+pub use dialogue::{CsDialogueEngine, LiveTurnRunner, TurnRunner};
 pub use service::CustomerServiceService;

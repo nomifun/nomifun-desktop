@@ -5849,6 +5849,7 @@ dependencies = [
  "nomifun-common",
  "nomifun-db",
  "nomifun-knowledge",
+ "nomifun-realtime",
  "serde",
  "serde_json",
  "tempfile",
