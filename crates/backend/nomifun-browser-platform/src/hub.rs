@@ -1667,6 +1667,9 @@ impl BrowserSessionHub {
         ));
         self.inner.lanes.write().await.insert(lane_id.clone(), Arc::clone(&lane));
         self.inner.lane_keys.write().await.insert(lane_key, lane_id.clone());
+        // The creation event precedes the start task so subscribers can never
+        // observe lane_running before lane_created.
+        self.emit("lane_created", Some(&snapshot));
         // Register the creating caller's start waiter while `open_gate` is
         // still held. `abandon_unclaimed_lane_start` serializes its
         // zero-waiter decision only with registrations performed under this
@@ -1686,13 +1689,10 @@ impl BrowserSessionHub {
                 ))
             }
             Admission::Queued(_) => {
-                OpenLaneAction::Return(OpenLaneOutcome::Queued {
-                    lane: snapshot.clone(),
-                })
+                OpenLaneAction::Return(OpenLaneOutcome::Queued { lane: snapshot })
             }
         };
         drop(_open_guard);
-        self.emit("lane_created", Some(&snapshot));
         self.finish_open_action(action).await
     }
 
