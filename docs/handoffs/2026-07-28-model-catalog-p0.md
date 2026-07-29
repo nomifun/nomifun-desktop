@@ -21,7 +21,7 @@
 - 健康探针结果由服务端直接持久化到 `provider_models.health`（行为权威）。
 - 播种闭环：provider create/update 时立即推断播种 tasks（原先仅 boot 时）。
 
-**修复的三个数据 bug**：克隆丢标签（改服务端克隆）、孤儿 profile（回填清理 + 删除级联）、health 仅客户端写（服务端持久化）。
+**修复的三个数据 bug**：孤儿 profile（回填清理 + 删除级联）与 health 仅客户端写（服务端持久化）已彻底修复；克隆丢标签**部分交付**——服务端克隆端点 `POST /api/providers/{id}/clone` 已上线，**被调用时**完整保留模型行与连接档案，但设置页 UI 仍走遗留客户端克隆（`ui/src/renderer/utils/model/providerClone.ts`，把模型重建为无 profile 行），**用户可见症状在 P2 前端切换到该端点之前仍然存在**。
 
 ## Wire / API 变化
 
@@ -31,21 +31,24 @@
 | `GET/POST /api/providers/{id}/connections` | 列出 / upsert 连接档案；credentials 只写、加密存储、永不回显 |
 | `DELETE /api/providers/{id}/connections/{role}` | 删除指定角色档案 |
 | `GET/POST /api/provider-models`、`POST /api/provider-models/update`、`POST /api/provider-models/delete` | 行级模型目录 CRUD；update 用 double-Option 语义做部分更新 |
-| `POST /api/providers/{id}/clone` | 服务端克隆，保留模型行与连接档案（修复前端克隆丢标签） |
+| `POST /api/providers/{id}/clone` | 服务端克隆，保留模型行与连接档案；被调用时修复克隆丢数据，但 UI 尚未切换到此端点（仍走遗留客户端克隆，见 P1/P2 入口第 6 项） |
 | `DELETE /api/model-profiles` | **语义放宽**：现在删除的是 provider_models 目录行（原先只删 profile 覆盖层）；无存量调用方，wire 形状不变 |
 | `PUT` model_health map | 旧客户端写路径仍接受（wire 兼容），但行上的 health 为服务端权威；P2 切 UI 后关闭 |
+
+投影行为变化（T4）：旧 map 列中不属于目录（无对应 provider_models 行）的模型条目不再回显进 `ProviderResponse`（legacy 会原样回显）；`model_enabled` 只输出显式 false 条目（缺省 = 启用，与旧读方 `!= false` 语义一致）。
 
 ## 旧列冻结状态
 
 providers 的 6 个 JSON map 列**物理保留、继续被双写、不再被读**（读路径已切行投影）。P2 收缩期物理删除。
 
-## P1 入口（见设计文档 §6 P1）
+## P1/P2 入口（见设计文档 §6 P1）
 
 1. 新建 `crates/backend/nomifun-model-invoke` crate，搬迁 creation 的 provider.rs + adapters + 共享 HTTP 助手；
 2. `AdapterRegistry` + `InvokeError` + 鉴权方案基座，删除 `is_gemini` 等名字路由启发式；
 3. 探针改走 `probe()` 同管线（与真实调用统一）；
 4. `ark.images`/`ark.video_jobs`、`volc.tts_v3` 或 `volc.asr_file` 落地（多连接档案端到端验证件）；
 5. TTS 适配器 + `/api/tts`。
+6. （P2 前端项）设置页克隆切换为调用 `POST /api/providers/{id}/clone`，替换 `ui/src/renderer/utils/model/providerClone.ts` 的遗留客户端克隆——在此之前克隆丢标签的用户可见症状仍存在。
 
 ## 验证记录（2026-07-28）
 
