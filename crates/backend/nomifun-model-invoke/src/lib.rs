@@ -9,10 +9,12 @@
 //! call value ([`call`]) and the catalog resolution pipeline
 //! ([`service`]/[`resolve`]).
 //!
-//! This crate deliberately contains no concrete protocol adapters yet (they
-//! arrive in later tasks).
+//! Concrete protocol adapters live in [`adapters`]; the OpenAI-compatible
+//! family is in, the remaining platforms (gemini / deepgram / ark / volc)
+//! arrive in later tasks and are appended to [`adapters::default_adapters`].
 
 pub mod adapter;
+pub mod adapters;
 pub mod auth;
 pub mod call;
 pub mod error;
@@ -23,6 +25,7 @@ pub mod transport;
 pub mod types;
 
 pub use adapter::{AdapterRegistry, ProtocolAdapter};
+pub use adapters::default_adapters;
 pub use auth::{AuthMaterial, AuthScheme};
 pub use call::{ResolvedCall, ResolvedConnection};
 pub use error::{InvokeError, InvokeErrorKind};
