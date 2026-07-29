@@ -1390,7 +1390,10 @@ impl BrowserSessionHub {
 
     async fn resource_workload(&self, lane_cold_start_bytes: u64) -> ResourceWorkload {
         let active_requests = self.inner.scheduler.active_requests();
-        let queued_requests = self.inner.scheduler.queued_requests();
+        // Workload accounting is order-independent; the unordered snapshot
+        // avoids running the O(queue^2) promotion simulation under the
+        // scheduler mutex on every admission/release decision.
+        let queued_requests = self.inner.scheduler.queued_requests_unordered();
         let records = self.inner.lanes.read().await.clone();
         let mut workload = ResourceWorkload {
             active_lanes: active_requests.len(),
