@@ -7,7 +7,6 @@ use nomifun_common::AppError;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ChannelOwner {
     Companion(String),
-    PublicAgent(String),
     Channel(i64),
 }
 
@@ -15,7 +14,6 @@ impl std::fmt::Display for ChannelOwner {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             ChannelOwner::Companion(id) => write!(f, "companion '{id}'"),
-            ChannelOwner::PublicAgent(id) => write!(f, "public agent '{id}'"),
             ChannelOwner::Channel(id) => write!(f, "channel '{id}'"),
         }
     }

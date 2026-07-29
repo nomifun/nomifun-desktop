@@ -421,7 +421,6 @@ mod tests {
                 status: row.status.clone(),
                 last_connected: row.last_connected,
                 companion_id: row.companion_id.clone(),
-                public_agent_id: row.public_agent_id.clone(),
                 bot_key: row.bot_key.clone(),
                 created_at: row.created_at,
                 updated_at: row.updated_at,
@@ -441,13 +440,6 @@ mod tests {
             &self,
             _channel_plugin_id: &str,
             _companion_id: Option<&str>,
-        ) -> Result<(), DbError> {
-            Ok(())
-        }
-        async fn update_plugin_public_agent(
-            &self,
-            _channel_plugin_id: &str,
-            _public_agent_id: Option<&str>,
         ) -> Result<(), DbError> {
             Ok(())
         }
