@@ -421,7 +421,7 @@ impl ProviderService {
             .map_err(|e| AppError::Internal(format!("Failed to parse capabilities JSON: {e}")))?;
         let bedrock_config = deserialize_opt(&row.bedrock_config, "bedrock_config")?;
 
-        model_rows.sort_by(|a, b| (a.sort_order, a.id).cmp(&(b.sort_order, b.id)));
+        model_rows.sort_by_key(|a| (a.sort_order, a.id));
 
         let models: Vec<String> = model_rows.iter().map(|m| m.model.clone()).collect();
         let mut model_enabled: HashMap<String, bool> = HashMap::new();
