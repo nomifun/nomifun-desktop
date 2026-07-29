@@ -817,6 +817,12 @@ pub fn create_router_with_all_state(
         let login_state = crate::router::browser_login::BrowserLoginState::new(
             services.browser_session_hub.clone(),
             services.authoritative_user_id.clone(),
+            // Boot-time snapshot source for the effective-source echo (F67);
+            // the same store the composition root froze into the Hub's engine
+            // template at startup.
+            Some(Arc::new(nomifun_db::SqliteClientPreferenceRepository::new(
+                services.database.pool().clone(),
+            ))),
         );
         protect_instance_owner(
             Router::new()
