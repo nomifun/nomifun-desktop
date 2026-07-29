@@ -1580,6 +1580,10 @@ impl CdpHostRuntime {
                 return Err(cleanup_failed_host_launch(primary, cleanup).await);
             }
         };
+        // F1：防火墙的可靠订阅必须在 attach loop 之前注册——handle_attached 的
+        // Fetch.enable arming gate 依赖它；早于防火墙循环 spawn 的事件在 unbounded
+        // 通道里缓存不丢。
+        let firewall_subscriptions = FetchFirewallSubscriptions::subscribe(&conn);
         let attach_loop = conn.run_attach_loop();
         if let Err(error) = conn.enable_auto_attach().await {
             attach_loop.abort();
@@ -1613,6 +1617,7 @@ impl CdpHostRuntime {
             .unwrap_or_else(|| Arc::new(crate::firewall::TokioResolver::default()));
         let firewall_loop = spawn_fetch_firewall_loop(
             conn.clone(),
+            firewall_subscriptions,
             firewall,
             egress_approver,
             approved_domains.clone(),
@@ -2929,6 +2934,10 @@ impl CdpBackend {
             }
         };
 
+        // F1：防火墙的可靠订阅必须在 attach loop 之前注册——handle_attached 的
+        // Fetch.enable arming gate 依赖它；早于防火墙循环 spawn 的事件在 unbounded
+        // 通道里缓存不丢。
+        let firewall_subscriptions = FetchFirewallSubscriptions::subscribe(&conn);
         // 先装 attach loop（订阅在循环内部），再放行自动附着。顺序勿换。
         let attach_loop = conn.run_attach_loop();
         if let Err(error) = conn.enable_auto_attach().await {
@@ -3034,6 +3043,7 @@ impl CdpBackend {
         let dns_cache = crate::firewall::DnsResolverCache::default();
         let firewall_loop = spawn_fetch_firewall_loop(
             conn.clone(),
+            firewall_subscriptions,
             firewall,
             egress_approver,
             approved_domains.clone(),
@@ -3047,11 +3057,10 @@ impl CdpBackend {
         if let Err(e) = enable_fetch_on_session(&conn, &page_session).await {
             tracing::warn!(error = %e, "Fetch.enable on initial page session failed; egress firewall degraded");
         }
-        // F1-sec (I1 启动竞态收口)：防火墙循环在 `enable_auto_attach` **之后**才 subscribe
-        // `attachedToTarget`，故启动瞬间已 attach 的 **service_worker** 的 attach 事件可能早于订阅丢失
-        // → 那个 SW 漏挂 Fetch.enable，其出口请求绕过防火墙（裁决⑪/不变量⑬：SW 必须也拦）。但更早启动的
-        // attach loop 已把这些 SW session 登记进注册表（P0 保持 SW attach 不 detach），故据 target_type
-        // 枚举已存在的 service_worker session 补挂 Fetch.enable（与上面对根/page 的补挂同理，收口竞态）。
+        // F1-sec (I1 启动竞态收口)：历史上防火墙循环在 `enable_auto_attach` **之后**才 subscribe
+        // `attachedToTarget`，启动瞬间已 attach 的 **service_worker** 可能漏挂 Fetch.enable。F1 重构后
+        // 可靠订阅已提前到 attach loop 之前（结构上无窗口），本补挂保留为 belt-and-braces：据
+        // target_type 枚举已登记的 service_worker session 补挂 Fetch.enable（幂等，绝不多余拦截）。
         for sw_session in conn.registry().session_ids_of_type("service_worker") {
             if let Err(e) = enable_fetch_on_session(&conn, &sw_session).await {
                 tracing::warn!(
@@ -7744,12 +7753,37 @@ async fn enable_fetch_on_session(conn: &Connection, session_id: &str) -> Result<
         .await
 }
 
-/// **E5 出口防火墙后台循环**：①订阅 `Target.attachedToTarget`（全 session 通配）→ 对每个新 session
-/// （page / OOPIF / **service_worker**）挂 `Fetch.enable`；②订阅 `Fetch.requestPaused`（全 session
+/// **F1：防火墙循环的可靠订阅，必须在 attach loop 启动之前注册。**
+///
+/// `Connection::handle_attached` 只在存在 `Fetch.requestPaused` 可靠订阅者时才对
+/// attach 的 session 挂 `Fetch.enable`（无消费者的 requestPaused 事件被静默丢弃且
+/// CDP 不重发——请求会永久卡死）。构造器先建本订阅（unbounded，事件在循环 spawn 前
+/// 缓存不丢）、再 `run_attach_loop()`、最后把它交给 [`spawn_fetch_firewall_loop`]，
+/// 保证「先有消费者、后开拦截」在结构上恒成立。
+struct FetchFirewallSubscriptions {
+    attached_rx: tokio::sync::mpsc::UnboundedReceiver<crate::transport::CdpEvent>,
+    paused_rx: tokio::sync::mpsc::UnboundedReceiver<crate::transport::CdpEvent>,
+}
+
+impl FetchFirewallSubscriptions {
+    fn subscribe(conn: &Connection) -> Self {
+        Self {
+            attached_rx: conn.subscribe_reliable(EventAttachedToTarget::IDENTIFIER, None),
+            paused_rx: conn.subscribe_reliable(EventRequestPaused::IDENTIFIER, None),
+        }
+    }
+}
+
+/// **E5 出口防火墙后台循环**：①消费 `Target.attachedToTarget`（全 session 通配）→ 对每个新 session
+/// （page / OOPIF / **service_worker**）挂 `Fetch.enable`；②消费 `Fetch.requestPaused`（全 session
 /// 通配）→ 对每条被拦请求经 [`crate::firewall::decide`] 判定 → 在**事件自身的 sessionId** 上发
 /// `Fetch.continueRequest`（放行）/ `Fetch.failRequest{BlockedByClient}`（阻断）。
 ///
-/// **SW 链路（裁决⑪/不变量⑬）**：本循环订阅的 `attachedToTarget` 含 service_worker（P0 保持其
+/// **订阅先于循环（F1）**：两路可靠订阅由调用方经 [`FetchFirewallSubscriptions::subscribe`]
+/// 在 attach loop 启动**之前**注册后传入——`handle_attached` 的 Fetch.enable arming gate
+/// 依赖该订阅已存在；订阅与循环 spawn 之间的事件在 unbounded 通道里缓存，循环启动后补处理。
+///
+/// **SW 链路（裁决⑪/不变量⑬）**：本循环消费的 `attachedToTarget` 含 service_worker（P0 保持其
 /// attach、不 detach），故 SW session 同样被挂 `Fetch.enable`、其出口请求同样经本循环判定——SW 无法
 /// 绕过防火墙。
 ///
@@ -7760,17 +7794,20 @@ async fn enable_fetch_on_session(conn: &Connection, session_id: &str) -> Result<
 ///
 /// 所有错误 best-effort：单条请求判定/dispatch 失败只 `debug`/`warn`，**绝不 panic**，且**绝不**让一条
 /// 请求悬挂（任何分支都对它 continue 或 fail——否则 Fetch.enable 下未应答的请求会卡住页面）。连接关闭
-/// （`RecvError::Closed`）→ 退出循环（backend Drop 关连接即触发）。
+/// （可靠通道 `None`）→ 退出循环（backend Drop 关连接即触发）。
 fn spawn_fetch_firewall_loop(
     conn: Connection,
+    subscriptions: FetchFirewallSubscriptions,
     config: crate::firewall::FirewallConfig,
     egress_approver: Option<Arc<dyn crate::firewall::EgressApprover>>,
     approved_domains: crate::firewall::ApprovedDomains,
     dns_resolver: Arc<dyn crate::firewall::HostResolver>,
     dns_cache: crate::firewall::DnsResolverCache,
 ) -> tokio::task::JoinHandle<()> {
-    let mut attached_rx = conn.subscribe_reliable(EventAttachedToTarget::IDENTIFIER, None);
-    let mut paused_rx = conn.subscribe_reliable(EventRequestPaused::IDENTIFIER, None);
+    let FetchFirewallSubscriptions {
+        mut attached_rx,
+        mut paused_rx,
+    } = subscriptions;
     tokio::spawn(async move {
         loop {
             tokio::select! {
@@ -8550,6 +8587,102 @@ mod tests {
             .await
             .expect("connect router test websocket");
         (connection, server)
+    }
+
+    /// 通用 CDP fake：对每条命令回 `{"id":id,"result":{}}` 并把请求原文推给测试侧
+    /// （unbounded channel），供断言方法名/参数与到达顺序。
+    async fn generic_recording_fake_connection() -> (
+        Connection,
+        tokio::sync::mpsc::UnboundedReceiver<serde_json::Value>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind generic recording fake websocket");
+        let address = listener.local_addr().expect("read fake websocket address");
+        let (request_tx, request_rx) = tokio::sync::mpsc::unbounded_channel();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("accept fake client");
+            let mut websocket = tokio_tungstenite::accept_async(stream)
+                .await
+                .expect("complete fake websocket handshake");
+            while let Some(Ok(message)) = futures_util::StreamExt::next(&mut websocket).await {
+                let tokio_tungstenite::tungstenite::Message::Text(text) = message else {
+                    break;
+                };
+                let request: serde_json::Value =
+                    serde_json::from_str(&text).expect("fake received valid json");
+                let id = request["id"].as_u64().expect("fake request has id");
+                // 回包须回显 sessionId，否则子 session 命令的回调路由不到。
+                let mut response = serde_json::json!({ "id": id, "result": {} });
+                if let Some(session_id) = request.get("sessionId") {
+                    response["sessionId"] = session_id.clone();
+                }
+                let _ = request_tx.send(request);
+                futures_util::SinkExt::send(
+                    &mut websocket,
+                    tokio_tungstenite::tungstenite::Message::Text(
+                        response.to_string().into(),
+                    ),
+                )
+                .await
+                .expect("fake sends generic success");
+            }
+        });
+        let connection = Connection::connect(&format!("ws://{address}"))
+            .await
+            .expect("connect generic recording fake websocket");
+        (connection, request_rx, server)
+    }
+
+    /// **F1 回归**：在防火墙循环 spawn **之前**到达的 `Fetch.requestPaused`（早期
+    /// attach 的 target 的首批被拦请求）必须在循环启动后被补处理（continue/fail），
+    /// 绝不能因「事件到达时无订阅者」而被丢弃、把请求永久卡死。旧编排（循环内部才
+    /// subscribe）下本测试失败：事件在 spawn 前无人订阅即被丢弃。
+    #[tokio::test]
+    async fn early_paused_request_is_released_once_firewall_loop_starts() {
+        let (connection, mut requests, server) = generic_recording_fake_connection().await;
+
+        // 生产编排：订阅先于 attach loop / 防火墙循环。
+        let subscriptions = FetchFirewallSubscriptions::subscribe(&connection);
+        connection.registry().register_session("S-early", "page");
+
+        // 防火墙循环尚未 spawn 时，一条被拦请求已经到达（早 attach target 的首批请求）。
+        connection
+            .registry()
+            .dispatch_message(
+                r#"{"method":"Fetch.requestPaused","sessionId":"S-early","params":{"requestId":"REQ-early","request":{"url":"https://example.com/","method":"GET","headers":{},"initialPriority":"High","referrerPolicy":"no-referrer"},"frameId":"F-early","resourceType":"Document"}}"#,
+            )
+            .expect("dispatch early paused event");
+
+        let firewall_loop = spawn_fetch_firewall_loop(
+            connection.clone(),
+            subscriptions,
+            crate::firewall::FirewallConfig::default(),
+            None,
+            crate::firewall::ApprovedDomains::new(),
+            Arc::new(crate::firewall::TokioResolver::default()),
+            crate::firewall::DnsResolverCache::default(),
+        );
+
+        let released = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let request = requests.recv().await.expect("fake server stays alive");
+                let method = request["method"].as_str().unwrap_or_default();
+                if method == "Fetch.continueRequest" || method == "Fetch.failRequest" {
+                    break request;
+                }
+            }
+        })
+        .await
+        .expect("the buffered paused request must be continued or failed after loop start");
+        assert_eq!(released["params"]["requestId"], "REQ-early");
+        assert_eq!(released["sessionId"], "S-early");
+
+        firewall_loop.abort();
+        connection.shutdown().await;
+        server.abort();
+        let _ = server.await;
     }
 
     async fn withheld_create_response_fake_connection(
