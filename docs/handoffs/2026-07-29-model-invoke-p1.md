@@ -49,7 +49,7 @@
 | 变化 | 说明 |
 |---|---|
 | `POST /api/tts` | **新增**：`{provider_id, model, text, voice?, format?}` → 音频字节直接回（Content-Type 按 format/响应头推断，非 ApiResponse 包络）；文本上限 4096 字符；未打标模型 → 400 |
-| `POST /api/stt` legacy 内嵌 key 模式 | **退役**（wire 行为变化）：无 provider_id、直填 openai/deepgram config 的旧偏好 → 500 STT_UNKNOWN + 可行动消息引导重选供应商。前端 UI 早已只写 provider_id 模式，存量旧偏好的一次性迁移列为后续改进 |
+| `POST /api/stt` legacy 内嵌 key 模式 | **退役**（wire 行为变化）：无 provider_id、且内嵌 openai/deepgram config 携带**非空 api_key** 的旧偏好 → 500 STT_UNKNOWN + 可行动消息引导重选供应商；内嵌块为空壳（api_key 为空）则不触发守卫，照旧回落 NOT_CONFIGURED 400 族（commit 4b13ece7 钉测双边界）。前端 UI 早已只写 provider_id 模式，存量旧偏好的一次性迁移列为后续改进 |
 | `POST /api/agents/provider-health-check` | 内部改道 `invoke.probe()`，wire 不变（200 + healthy/unhealthy 报告，latency/message 字段照旧） |
 | `POST /api/creation/tasks` | wire 形状不变；错误 kind 细化：V2v → `unsupported_capability`（原 `adapter_unavailable`）；远端异步任务失败 → `provider_error` 携带真实原因（原先可能降级为假 `timeout`） |
 

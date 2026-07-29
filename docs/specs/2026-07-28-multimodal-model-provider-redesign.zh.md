@@ -434,7 +434,7 @@ pub enum JobStatus { Pending, Running, Succeeded, Failed, Canceled }  // 词表�
 1. **chat 路径特判表化推迟 P2**：`map_nomi_provider`/`resolve_nomi_url_and_compat` 的散落平台特判未动，`nomi-providers` 不变。P1 的平台路由表（`routes_table.rs`）只服务非 chat 任务；chat 是本设计的非目标（§1.3），表化统一作为风险控制推迟到 P2。
 2. **bedrock 不经 invoke 层**：`platform=="bedrock"` 且走 default 连接时，解析器返回 typed `Config` 错误（"bedrock is not supported by the invoke layer yet"），而非尝试 SigV4。AwsSigV4 鉴权方案未实现。
 3. **多 key 轮换保持"取第一个"**：default 连接的凭证由 providers 行加密串按逗号/换行分割后取第一个非空 key（`AuthMaterial::primary_secret` 取 `api_keys[0]`），与现状一致；基座级 key 轮换与 per-key 健康推迟（§8-2）。
-4. **STT legacy 内嵌 key 模式退役**（wire 行为变化）：`/api/stt` 偏好中无 provider_id、直填 openai/deepgram config 的旧形态，现在返回 500（STT_UNKNOWN，消息引导用户在设置中重选供应商）。执行前 grep 确认前端 UI 早已只写 provider_id 模式，故按计划 T7 的二选一裁决直接退役；存量旧偏好的一次性迁移列为后续改进。
+4. **STT legacy 内嵌 key 模式退役**（wire 行为变化）：`/api/stt` 偏好中无 provider_id、且 openai/deepgram 内嵌 config 携带**非空 api_key** 的旧形态，现在返回 500（STT_UNKNOWN，消息引导用户在设置中重选供应商）；无 provider_id 且内嵌块为空壳（api_key 为空——前端历史上会为未配置的供应商持久化空 key 壳）的形态**不触发退役守卫**，照旧回落 STT_OPENAI/DEEPGRAM_NOT_CONFIGURED 的 400 族（边界钉测于 nomifun-shell/tests/stt_integration.rs 与 app e2e st5/st6，commit 4b13ece7）。执行前 grep 确认前端 UI 早已只写 provider_id 模式，故按计划 T7 的二选一裁决直接退役；存量旧偏好的一次性迁移列为后续改进。
 5. **V2v 错误码改为 `unsupported_capability`**：创意工坊 V2v capability 原返回 `adapter_unavailable`，现统一为 `unsupported_capability`（与 invoke 层 UnsupportedTask 语义对齐，任务简报裁定）。
 6. **gemini 命名模型在非 gemini 平台行上需要行级 protocol 覆盖**：名字嗅探路由（"模型名含 gemini"）已铲除；OpenRouter 等聚合平台上的 gemini 命名模型若需走 gemini 原生协议，逃生舱 = `provider_models.protocol` 行级覆盖（设计内行为，此处记录以对照 P1 验收中"OpenRouter 上 gemini 命名模型"一项的达成方式）。
 7. **rerank 任务有路由无适配器**：路由表已声明 `openai.rerank`，但适配器未实现——调用得到诚实的 `NoAdapter` typed 错误（原设计矩阵中 rerank 属 P2 dashscope 批次）。

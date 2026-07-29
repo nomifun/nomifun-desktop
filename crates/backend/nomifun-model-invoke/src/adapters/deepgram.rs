@@ -2,7 +2,10 @@
 //! `nomifun-shell/src/stt_deepgram.rs`).
 //!
 //! `POST {base}/v1/listen` (base from the connection, `'/'`-trimmed; an
-//! `is_full_url` base is used verbatim) with the raw audio bytes as the body
+//! `is_full_url` base is used verbatim; an explicit `params.endpoint`
+//! override wins over both, routed through
+//! [`crate::call::ResolvedCall::dispatch_target`]) with the raw audio bytes
+//! as the body
 //! and `Content-Type` set to the audio MIME. Options ride the query string:
 //! `model` always; `language` when the request carries one, else
 //! `detect_language=true`; `punctuate=true` / `smart_format=true` default on
@@ -23,6 +26,7 @@ use nomifun_api_types::ModelTask;
 use serde_json::Value;
 
 use crate::adapter::ProtocolAdapter;
+use crate::adapters::has_endpoint_override;
 use crate::call::ResolvedCall;
 use crate::error::{InvokeError, InvokeErrorKind};
 use crate::transport::{error_from_response, net_err};
@@ -51,8 +55,15 @@ impl ProtocolAdapter for DeepgramListenAdapter {
             ));
         };
 
-        let base = call.connection.base_url.trim().trim_end_matches('/');
-        let url = if call.connection.is_full_url { base.to_string() } else { format!("{base}/v1/listen") };
+        // An explicit `params.endpoint` override wins (resolved verbatim by
+        // the single dispatch authority); otherwise the conventional
+        // `/v1/listen` path. Query params ride via `.query()` either way.
+        let url = if has_endpoint_override(&call.model_params) {
+            call.dispatch_target().url
+        } else {
+            let base = call.connection.base_url.trim().trim_end_matches('/');
+            if call.connection.is_full_url { base.to_string() } else { format!("{base}/v1/listen") }
+        };
 
         // Query string: model always; language when given, else detect it;
         // punctuate/smart_format default on, overridable via extra booleans.
@@ -296,6 +307,30 @@ mod tests {
         let mut call = deepgram_call(&format!("{}/custom/listen", server.uri()), "nova-2", asr(None, json!({})));
         call.connection.is_full_url = true;
         DeepgramListenAdapter.submit(&reqwest::Client::new(), &call).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn listen_params_endpoint_override_wins() {
+        // Whole-branch review Finding 1: params.endpoint (dispatch rule 1)
+        // must win over the /v1/listen convention; the query string still
+        // rides via .query() on the overridden URL.
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/custom/asr"))
+            .and(query_param("model", "nova-2"))
+            .and(query_param("detect_language", "true"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(transcript_body()))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let mut call = deepgram_call(&server.uri(), "nova-2", asr(None, json!({})));
+        call.model_params = json!({"endpoint": "/custom/asr"});
+        let out = DeepgramListenAdapter.submit(&reqwest::Client::new(), &call).await.unwrap();
+        let TaskOutcome::Done(TaskResult::Transcript { text, .. }) = out else {
+            panic!("expected Done(Transcript)")
+        };
+        assert_eq!(text, "hello");
     }
 
     #[tokio::test]

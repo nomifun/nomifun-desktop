@@ -37,6 +37,7 @@ use crate::types::{
     JobHandle, ProducedAsset, ProducedData, TaskOutcome, TaskRequest, TaskResult, VideoGenRequest,
 };
 
+use super::has_endpoint_override;
 use super::openai_images::parse_images_response;
 
 /// Generous ceiling for image generation / video-task submission.
@@ -56,15 +57,6 @@ fn ark_v3_url(conn: &ResolvedConnection, path: &str) -> String {
     }
     let root = base.strip_suffix("/api/v3").unwrap_or(base);
     format!("{root}/api/v3{path}")
-}
-
-/// Whether the per-model params carry a non-empty `endpoint` override.
-fn has_endpoint_override(params: &Value) -> bool {
-    params
-        .get("endpoint")
-        .and_then(|v| v.as_str())
-        .map(str::trim)
-        .is_some_and(|s| !s.is_empty())
 }
 
 // ---------------------------------------------------------------------------
