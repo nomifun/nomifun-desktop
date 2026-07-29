@@ -178,30 +178,9 @@ pub const OUT_OF_BAND_CONFIRMED_KEY: &str = "__out_of_band_confirmed";
 const ACT_TIMEOUT: Duration = Duration::from_secs(45);
 
 /// Fields whose authority belongs to the main-process runtime registry. They
-/// are never forwarded from model input to the Browser Platform.
-const TRUSTED_OWNER_INPUT_FIELDS: &[&str] = &[
-    "caller",
-    "caller_identity",
-    "user_id",
-    "conversation_id",
-    "runtime_instance_id",
-    "agent_id",
-    "companion_id",
-    "execution_id",
-    "step_id",
-    "attempt_id",
-    "remote_connection_id",
-    "owner_lease_id",
-    "capability_expires_at_ms",
-    "allowed_operations",
-    "identity_generation",
-    "browser_epoch",
-    "target_id",
-    "frame_id",
-    "ref_generation",
-    "cancellation_id",
-    "workspace_hint",
-];
+/// are never forwarded from model input to the Browser Platform. ONE shared
+/// list for every managed surface — see [`crate::TRUSTED_OWNER_INPUT_FIELDS`].
+use crate::TRUSTED_OWNER_INPUT_FIELDS;
 
 /// Identity selection belongs to the trusted host/crawl planner.  These
 /// fields are deliberately rejected (rather than silently stripped) at the
@@ -4193,18 +4172,32 @@ pub(crate) mod tests {
     async fn managed_tool_rejects_trusted_owner_fields_without_dispatch() {
         let client = Arc::new(FakeLaneClient::default());
         let tool = managed_tool(Arc::clone(&client));
-        let result = tool
-            .execute(json!({
-                "action": "navigate",
-                "url": "https://example.test/",
-                "user_id": "model-chosen-owner",
-            }))
-            .await;
+        // F23: the native surface must reject the SAME trusted-owner set the
+        // shared ManagedBrowserFacade rejects — including the surface/routing
+        // fields that used to be accepted only here (contract drift).
+        for (field, value) in [
+            ("user_id", json!("model-chosen-owner")),
+            ("surface", json!("gateway")),
+            ("browser_surface", json!("gateway")),
+            ("lane_key", json!("other-runtime/default")),
+        ] {
+            let result = tool
+                .execute(json!({
+                    "action": "navigate",
+                    "url": "https://example.test/",
+                    field: value,
+                }))
+                .await;
 
-        assert!(result.is_error);
-        assert!(result.content.contains("trusted host metadata"));
-        assert!(client.opens.lock().unwrap().is_empty());
-        assert!(client.operations.lock().unwrap().is_empty());
+            assert!(result.is_error, "`{field}` must be rejected");
+            assert!(
+                result.content.contains("trusted host metadata"),
+                "`{field}` rejection should explain the trust boundary: {}",
+                result.content
+            );
+            assert!(client.opens.lock().unwrap().is_empty());
+            assert!(client.operations.lock().unwrap().is_empty());
+        }
     }
 
     #[tokio::test]
