@@ -21,6 +21,23 @@ use crate::types::{
 /// `provider_health` modality probe.
 const PROBE_TIMEOUT: Duration = Duration::from_secs(60);
 
+/// A minimal valid 1x1 RGBA PNG (67 bytes) used as the ImageEdit probe's stub
+/// input: `openai.images` rejects an input-less edit locally (never reaching
+/// the wire), so the probe must carry a real decodable image for the request
+/// to exercise endpoint + auth + model.
+const PROBE_PNG: &[u8] = &[
+    0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A, // PNG signature
+    0x00, 0x00, 0x00, 0x0D, b'I', b'H', b'D', b'R', // IHDR (13 bytes)
+    0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, // 1x1
+    0x08, 0x06, 0x00, 0x00, 0x00, 0x1F, 0x15, 0xC4, // 8-bit RGBA + CRC
+    0x89, //
+    0x00, 0x00, 0x00, 0x0A, b'I', b'D', b'A', b'T', // IDAT (10 bytes)
+    0x78, 0x9C, 0x63, 0x00, 0x01, 0x00, 0x00, 0x05, // zlib: one transparent px
+    0x00, 0x01, 0x0D, 0x0A, 0x2D, 0xB4, // data end + CRC
+    0x00, 0x00, 0x00, 0x00, b'I', b'E', b'N', b'D', // IEND
+    0xAE, 0x42, 0x60, 0x82, // CRC
+];
+
 /// Outcome of a health probe. Upstream failures never surface as `Err` — they
 /// fold into `healthy = false` + `message`; `Err` is reserved for calls the
 /// probe path does not serve at all (chat rides the agent engine).
@@ -128,12 +145,16 @@ impl ModelInvokeService {
             Ok(Ok(TaskOutcome::Done(_) | TaskOutcome::Pending(_))) => {
                 ProbeReport { healthy: true, latency_ms, message: None }
             }
-            // Reachable-only tolerance for the file-based tasks: the probe
-            // sends no usable file, so a missing-file 400 (InvalidParams)
-            // still proves endpoint + auth + model are reachable.
+            // Reachable-only tolerance for the file-based tasks: the probe's
+            // stub file is not usable content, so an UPSTREAM InvalidParams
+            // (4xx — http_status set) still proves endpoint + auth + model
+            // are reachable. A LOCAL InvalidParams (http_status None, e.g. an
+            // adapter pre-flight rejection) never touched the wire and proves
+            // nothing — that stays unhealthy.
             Ok(Err(e))
                 if matches!(task, ModelTask::ImageEdit | ModelTask::SpeechRecognition)
-                    && e.kind == InvokeErrorKind::InvalidParams =>
+                    && e.kind == InvokeErrorKind::InvalidParams
+                    && e.http_status.is_some() =>
             {
                 ProbeReport { healthy: true, latency_ms, message: None }
             }
@@ -175,8 +196,16 @@ fn probe_request(task: ModelTask, params: &serde_json::Value) -> TaskRequest {
             prompt: "health check".into(),
             count: 1,
             size: None,
-            // No file — reachable-only: a missing-file 400 counts as healthy.
-            inputs: vec![],
+            // A real (minimal) PNG: openai.images rejects an input-less edit
+            // locally, and a probe that never reaches the wire is vacuous.
+            // The stub is not meaningful content — an upstream 4xx still
+            // counts as healthy (reachable-only rule above).
+            inputs: vec![InputAsset {
+                id: None,
+                role: "reference".into(),
+                bytes: PROBE_PNG.to_vec(),
+                mime: "image/png".into(),
+            }],
             extra: json!({}),
         }),
         ModelTask::VideoGeneration => TaskRequest::VideoGeneration(VideoGenRequest {
@@ -401,6 +430,54 @@ mod tests {
         assert_eq!(report.message, None);
     }
 
+    #[test]
+    fn probe_png_stub_is_a_png() {
+        // The ImageEdit probe's stub input must be a decodable PNG so the
+        // multipart request survives adapter pre-flight and reaches the wire.
+        assert_eq!(&PROBE_PNG[..8], &[0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A]);
+        assert_eq!(PROBE_PNG.len(), 67);
+        assert_eq!(&PROBE_PNG[PROBE_PNG.len() - 8..PROBE_PNG.len() - 4], b"IEND");
+    }
+
+    #[tokio::test]
+    async fn probe_image_edit_upstream_400_is_healthy_and_reaches_the_wire() {
+        // The stub PNG carries the edit probe past openai.images' local
+        // input-check onto the wire; the upstream missing/invalid-image 400
+        // (http_status set) is the reachable-only healthy signal.
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/images/edits"))
+            .and(header("authorization", "Bearer sk-test"))
+            .respond_with(ResponseTemplate::new(400).set_body_json(
+                json!({"error": {"message": "image is invalid", "type": "invalid_request_error"}}),
+            ))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let (svc, pool) = setup().await;
+        let pid = seed_provider(&pool, &server.uri()).await;
+        seed_model(&pool, &pid, "gpt-image-1", r#"["image_edit"]"#, "{}", true).await;
+
+        let report = svc.probe(&mref(&pid, "gpt-image-1"), ModelTask::ImageEdit).await.unwrap();
+        assert!(report.healthy, "message: {:?}", report.message);
+        let requests = server.received_requests().await.unwrap();
+        assert_eq!(requests.len(), 1, "the edit probe must actually reach the wire");
+    }
+
+    #[tokio::test]
+    async fn probe_image_edit_unreachable_endpoint_is_unhealthy() {
+        // A dead endpoint must NOT be classified healthy: the local/transport
+        // failure has no http_status, so the tolerance arm does not fire.
+        let (svc, pool) = setup().await;
+        let pid = seed_provider(&pool, "http://127.0.0.1:1").await;
+        seed_model(&pool, &pid, "gpt-image-1", r#"["image_edit"]"#, "{}", true).await;
+
+        let report = svc.probe(&mref(&pid, "gpt-image-1"), ModelTask::ImageEdit).await.unwrap();
+        assert!(!report.healthy, "a connection-refused probe must be unhealthy");
+        assert!(report.message.is_some());
+    }
+
     #[tokio::test]
     async fn probe_500_is_unhealthy_with_message() {
         let server = MockServer::start().await;
@@ -467,8 +544,9 @@ mod tests {
 
     #[tokio::test]
     async fn probe_overlays_catalog_params_like_minimal_json_body() {
-        // minimal_json_body mirror: catalog params (size/quality) ride the
-        // minimal "health check" request so providers requiring them validate.
+        // minimal_json_body mirror: catalog params (size/quality directly,
+        // steps via the whitelisted extra passthrough) ride the minimal
+        // "health check" request so providers requiring them validate.
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/v1/images/generations"))
@@ -477,6 +555,7 @@ mod tests {
                 "n": 1,
                 "size": "512x512",
                 "quality": "high",
+                "steps": 20,
             })))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data": [{"b64_json": "aGk="}]})))
             .expect(1)
