@@ -1,7 +1,7 @@
 # 多供应商 · 多模态模型管理与协议适配重构设计（v2）
 
 - 日期：2026-07-28（v2 修订）
-- 状态：设计定稿（未实施）
+- 状态：设计定稿；P0 已实施（分支 dev/model-catalog-p0-20260728，见 §6 P0 实施偏差记录与 docs/handoffs/2026-07-28-model-catalog-p0.md）
 - 范围：供应商/模型配置与管理、模型能力打标、各模态调用链、外部协议适配层、前端模型选择交互
 - 调研方式：四路并行代码审查（配置数据模型 / 对话链路协议抽象 / 前端管理与选择 UI / 多模态调用链路）+ 10 家供应商 × 6 模态的真实协议差异调研（附录 C）+ 适配层抽取的 crate 依赖摸底。关键结论均带 `file:line` 或来源 URL。
 
@@ -407,6 +407,15 @@ pub enum JobStatus { Pending, Running, Succeeded, Failed, Canceled }  // 词表�
 3. 修三个数据 bug（克隆丢标签/孤儿 profile/health 客户端写）；provider 变更时同步播种 profile。
 
 验收：旧前端不感知；数据 100% 迁入；克隆后标签保留。
+
+#### P0 实施偏差记录（2026-07-28，分支 dev/model-catalog-p0-20260728，迁移 014/015）
+
+与上文设计的四处有意偏差，均计划在 P2 收缩期消化：
+
+1. **default 连接不迁入 `provider_connections`**：providers 行自身继续充当 default 连接（base_url/api_key 等仍在 providers 表），`provider_connections` 只存附加角色（如 volc 型多域名/多凭证档案）。增量式演进，避免 P0 触碰所有现有读写方；P2 再决定是否完全档案化。
+2. **旧 6 个 map 列物理保留并被双写**：读路径已切到 provider_models 行投影（`ProviderResponse` 不再读 map 列），但 create/update 仍同步写旧列，防止仓内直接读写方漂移；P2 收缩期物理删除。
+3. **`DELETE /api/model-profiles` 语义放宽**：model_profiles 表已删（迁移 015），该端点现在删除的是 provider_models 目录行（原先仅删 profile 覆盖层）。无存量调用方受影响，wire 形状不变。
+4. **health 行字段成为服务端权威**：探针结果由服务端直接持久化到 provider_models.health；客户端 PUT model_health map 的旧写路径仍接受（wire 兼容），但行数据为权威，P2 切换 UI 后关闭旧写路径。
 
 ### P1 invoke crate 成型 + 适配器迁移（修复"必失败"）
 1. 新建 `crates/backend/nomifun-model-invoke`（glob member 自动登记）：搬迁 `provider.rs`+`adapters/*`+共享 HTTP 助手与格式校验（creation 侧改 5 组 use，`service.rs:32-41`）；平台注册表替换 `map_nomi_provider`/`resolve_nomi_url_and_compat` 散落特判（行为快照测试保护）；
