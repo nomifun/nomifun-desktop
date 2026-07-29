@@ -5,7 +5,13 @@
  */
 
 import type { IConversationArtifact } from '@/common/adapter/ipcBridge';
-import type { IMessageAcpToolCall, IMessageToolCall, IMessageToolGroup, TMessage } from '@/common/chat/chatLib';
+import type {
+  IMessageAcpToolCall,
+  IMessageText,
+  IMessageToolCall,
+  IMessageToolGroup,
+  TMessage,
+} from '@/common/chat/chatLib';
 import { normalizeToolMessages } from '@/common/chat/normalizeToolCall';
 import { useConversationContextSafe } from '@/renderer/hooks/context/ConversationContext';
 import { iconColors } from '@/renderer/styles/colors';
@@ -131,7 +137,20 @@ type ITurnDeliverablesVO = {
   sourceMessageIds: SourceMessageId[];
   created_at: number;
 };
-type IProcessedItem = IRenderableItem | ITurnProcessDisclosureVO | IProcessReceiptVO | ITurnDeliverablesVO;
+type ITurnActionsVO = {
+  type: 'turn_actions';
+  id: string;
+  turn_id: MessageId;
+  message: IMessageText;
+  sourceMessageIds: SourceMessageId[];
+  created_at: number;
+};
+type IProcessedItem =
+  | IRenderableItem
+  | ITurnProcessDisclosureVO
+  | IProcessReceiptVO
+  | ITurnDeliverablesVO
+  | ITurnActionsVO;
 
 type ConversationLocationState = {
   targetMessageId?: MessageId;
@@ -141,7 +160,10 @@ type ConversationLocationState = {
 const getProcessedItemSourceMessageIds = (item: IProcessedItem): SourceMessageId[] => {
   if (
     'type' in item &&
-    (item.type === 'turn_process_disclosure' || item.type === 'process_receipt' || item.type === 'turn_deliverables')
+    (item.type === 'turn_process_disclosure' ||
+      item.type === 'process_receipt' ||
+      item.type === 'turn_deliverables' ||
+      item.type === 'turn_actions')
   ) {
     return item.sourceMessageIds;
   }
@@ -174,7 +196,15 @@ const getProcessedItemAnchorId = (item: IProcessedItem): string => {
 const getProcessedItemCreatedAt = (item: IProcessedItem): number => {
   if (
     'type' in item &&
-    ['file_summary', 'tool_summary', 'artifact', 'turn_process_disclosure', 'process_receipt'].includes(item.type)
+    [
+      'file_summary',
+      'tool_summary',
+      'artifact',
+      'turn_process_disclosure',
+      'process_receipt',
+      'turn_deliverables',
+      'turn_actions',
+    ].includes(item.type)
   ) {
     // `includes` doesn't narrow the union, so `created_at` is still typed
     // `number | undefined`; the synthetic VO types always carry a number, so
@@ -1008,10 +1038,19 @@ const MessageList: React.FC<{
 
     const turnIdByAnchorId = new Map<string, MessageId | undefined>();
     for (const entry of modelInput) turnIdByAnchorId.set(entry.id, entry.turnId);
+    const finalAssistantTextByTurn = new Map<MessageId, IMessageText>();
+    for (const entry of modelInput) {
+      if (!entry.turnId || entry.role !== 'assistant') continue;
+      const item = itemById.get(entry.id);
+      if (item?.type === 'text' && item.position === 'left') {
+        finalAssistantTextByTurn.set(entry.turnId, item);
+      }
+    }
     const getDisplayItemTurnId = (entry: IProcessedItem): MessageId | undefined => {
       if ('type' in entry && entry.type === 'turn_process_disclosure') return entry.msg_id;
       if ('type' in entry && entry.type === 'process_receipt') return undefined;
       if ('type' in entry && entry.type === 'turn_deliverables') return entry.turn_id;
+      if ('type' in entry && entry.type === 'turn_actions') return entry.turn_id;
       return turnIdByAnchorId.get(getProcessedItemAnchorId(entry));
     };
 
@@ -1038,6 +1077,18 @@ const MessageList: React.FC<{
         ),
         created_at: getProcessedItemCreatedAt(entry),
       });
+      const actionMessage = finalAssistantTextByTurn.get(turnId);
+      const actionMessageId = actionMessage ? getMessageBusinessIdentity(actionMessage) : undefined;
+      if (actionMessage) {
+        withDeliverables.push({
+          type: 'turn_actions',
+          id: `turn-actions-${turnId}`,
+          turn_id: turnId,
+          message: actionMessage,
+          sourceMessageIds: actionMessageId ? [actionMessageId] : [],
+          created_at: actionMessage.created_at ?? getProcessedItemCreatedAt(entry),
+        });
+      }
     });
 
     return withDeliverables;
@@ -1068,6 +1119,15 @@ const MessageList: React.FC<{
       (item as TMessage).type === 'text' &&
       (item as TMessage).position === 'left',
     [conversationContext?.isProcessing, lastUserTextIndex]
+  );
+  const movedActionMessageIds = useMemo(
+    () =>
+      new Set(
+        displayList
+          .filter((item): item is ITurnActionsVO => 'type' in item && item.type === 'turn_actions')
+          .map((item) => item.message.id)
+      ),
+    [displayList]
   );
 
   // Use auto-scroll hook
@@ -1305,6 +1365,19 @@ const MessageList: React.FC<{
         </div>
       );
     }
+    if ('type' in item && item.type === 'turn_actions') {
+      return (
+        <div
+          key={item.id}
+          id={`message-${getProcessedItemAnchorId(item)}`}
+          data-testid='turn-actions'
+          className='min-w-0 message-item px-8px max-w-full md:max-w-780px mx-auto turn_actions'
+          style={highlighted ? highlightStyle : undefined}
+        >
+          <MessageText message={item.message} actionsOnly />
+        </div>
+      );
+    }
     if ('type' in item && ['file_summary', 'tool_summary'].includes(item.type)) {
       return (
         <div
@@ -1322,7 +1395,10 @@ const MessageList: React.FC<{
         message={item as TMessage}
         key={(item as TMessage).id}
         highlighted={highlighted}
-        hideActions={isActiveProcessTextItem(item, _index)}
+        hideActions={
+          isActiveProcessTextItem(item, _index) ||
+          movedActionMessageIds.has((item as TMessage).id)
+        }
       ></MessageItem>
     );
   };
