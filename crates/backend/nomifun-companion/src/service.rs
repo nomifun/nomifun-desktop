@@ -20,10 +20,15 @@ use crate::events::CompanionEventEmitter;
 use crate::evolution::{EvolutionEngine, NoopTranscriptSource};
 use crate::gamify::level_for_xp;
 use crate::learner::{Learner, CompanionCompleter};
+use crate::memory_search::{MemorySearchQuery, MemoryStatusFilter};
 use crate::profile::{CompanionProfileConfig, SharedCompanionConfig};
 use crate::registry::{CompanionRegistry, json_merge_patch};
 use crate::skill_sink::CompanionSkillStoreSink;
-use crate::store::{CompanionThread, MemoryFilter, MemoryPage, MemoryScope, CompanionLearnRun, CompanionMemory, CompanionSkill, CompanionStore, CompanionSuggestion, SuggestionPage};
+use crate::store::{
+    CompanionThread, MemoryBatchAction, MemoryFilter, MemoryListSort, MemoryPage, MemoryScope,
+    CompanionLearnRun, CompanionMemory, CompanionSkill, CompanionStore, CompanionSuggestion,
+    SuggestionPage, memory_contents_similar,
+};
 use nomifun_extension::skill_service::{self, SkillPaths, SkillScope};
 use nomifun_extension::constants::SKILL_MANIFEST_FILE;
 
@@ -115,6 +120,61 @@ pub struct SourceStats {
     pub total: u64,
 }
 
+/// One suspected-duplicate cluster for the merge assistant: active memories of
+/// one kind + one scope whose contents are normalized-similar. v1 carries no
+/// LLM-drafted merged text (YAGNI) — the UI pre-fills from the members and the
+/// user edits before confirming.
+#[derive(Debug, Clone, Serialize)]
+pub struct MemoryMergeGroup {
+    pub memories: Vec<CompanionMemory>,
+}
+
+/// One row of the REST memory list: the memory plus FTS extras (highlight
+/// snippet + fused rank) when the page came from a full-text query.
+#[derive(Debug, Clone, Serialize)]
+pub struct MemoryListItem {
+    #[serde(flatten)]
+    pub memory: CompanionMemory,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub snippet: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rank: Option<f64>,
+}
+
+/// The REST memory-list page (superset of the legacy `MemoryPage` wire shape).
+#[derive(Debug, Clone, Serialize)]
+pub struct MemoryListPage {
+    pub items: Vec<MemoryListItem>,
+    pub total: i64,
+}
+
+/// Cluster active memories into suspected-duplicate groups (same kind + same
+/// scope, contents pairwise similar to an existing member). Groups of one are
+/// dropped — there is nothing to merge.
+fn group_similar_memories(memories: Vec<CompanionMemory>) -> Vec<MemoryMergeGroup> {
+    let mut groups: Vec<Vec<CompanionMemory>> = Vec::new();
+    for memory in memories {
+        let slot = groups.iter_mut().find(|group| {
+            let head = &group[0];
+            head.kind == memory.kind
+                && head.scope_kind == memory.scope_kind
+                && head.scope_companion_id == memory.scope_companion_id
+                && group
+                    .iter()
+                    .any(|member| memory_contents_similar(&member.content, &memory.content))
+        });
+        match slot {
+            Some(group) => group.push(memory),
+            None => groups.push(vec![memory]),
+        }
+    }
+    groups
+        .into_iter()
+        .filter(|group| group.len() >= 2)
+        .map(|memories| MemoryMergeGroup { memories })
+        .collect()
+}
+
 /// Post-delete cascade hook for companion removal. Registered by the app assembly
 /// (e.g. knowledge-binding cleanup wrapping `KnowledgeService`) so this crate
 /// stays free of those dependencies. Implementations must swallow their own
@@ -148,7 +208,7 @@ pub struct CompanionService {
     figures_lock: Mutex<()>,
     config: SharedConfig,
     registry: Arc<CompanionRegistry>,
-    store: CompanionStore,
+    pub(crate) store: CompanionStore,
     emitter: CompanionEventEmitter,
     learner: Arc<Learner>,
     /// Skill-evolution engine; held so on-demand drafting (learn-by-demonstration) can
@@ -1168,6 +1228,111 @@ impl CompanionService {
 
     pub async fn list_memory_page(&self, filter: &MemoryFilter) -> Result<MemoryPage, AppError> {
         self.store.list_memory_page(filter).await
+    }
+
+    /// Non-FTS list with an explicit sort (the REST `sort` param without `q`).
+    pub async fn list_memory_page_sorted(&self, filter: &MemoryFilter, sort: MemoryListSort) -> Result<MemoryPage, AppError> {
+        self.store.list_memory_page_sorted(filter, sort).await
+    }
+
+    /// FTS-backed memory list page (`q` present): full-text hits with snippet +
+    /// rank, re-sorted per `sort` ('relevance' keeps the fused-rank order),
+    /// paginated in memory over a capped hit set.
+    pub async fn search_memory_page(
+        &self,
+        q: &str,
+        kind: Option<String>,
+        status: MemoryStatusFilter,
+        scope_companion_id: Option<String>,
+        sort: &str,
+        limit: i64,
+        offset: i64,
+    ) -> Result<MemoryListPage, AppError> {
+        let companion_id = scope_companion_id
+            .as_deref()
+            .map(|id| {
+                CompanionId::try_from(id).map_err(|error| {
+                    AppError::BadRequest(format!("invalid scope_companion_id: {error}"))
+                })
+            })
+            .transpose()?;
+        let query = MemorySearchQuery {
+            queries: vec![q.to_owned()],
+            kind,
+            scope: None,
+            status,
+            companion_id,
+            limit: 500,
+        };
+        let mut hits = self.store.search_memories(query).await?;
+        match sort {
+            "time" => hits.sort_by(|a, b| b.memory.updated_at.cmp(&a.memory.updated_at)),
+            "importance" => hits.sort_by(|a, b| {
+                (b.memory.pinned as i64)
+                    .cmp(&(a.memory.pinned as i64))
+                    .then_with(|| {
+                        b.memory
+                            .importance
+                            .partial_cmp(&a.memory.importance)
+                            .unwrap_or(std::cmp::Ordering::Equal)
+                    })
+                    .then_with(|| b.memory.updated_at.cmp(&a.memory.updated_at))
+            }),
+            _ => {} // relevance: keep the search ranking
+        }
+        let total = hits.len() as i64;
+        let limit = if limit <= 0 { 100 } else { limit.min(500) } as usize;
+        let offset = offset.max(0) as usize;
+        let items = hits
+            .into_iter()
+            .skip(offset)
+            .take(limit)
+            .map(|hit| MemoryListItem {
+                memory: hit.memory,
+                snippet: hit.snippet,
+                rank: Some(hit.rank),
+            })
+            .collect();
+        Ok(MemoryListPage { items, total })
+    }
+
+    /// Atomic batch memory operation + live per-row surface refresh events.
+    pub async fn batch_memories(&self, ids: &[String], action: &MemoryBatchAction) -> Result<(), AppError> {
+        self.store.batch_update_memories(ids, action).await?;
+        for id in ids {
+            match self.store.get_memory(id).await {
+                Ok(Some(updated)) => self.emitter.emit_memory_updated(&updated),
+                Ok(None) => self.emitter.emit_memory_deleted(id),
+                Err(_) => {}
+            }
+        }
+        Ok(())
+    }
+
+    /// Merge-assistant dry run: suspected-duplicate groups over the ACTIVE
+    /// layer (per kind + scope, normalized-similarity clustering).
+    pub async fn memory_merge_suggestions(&self) -> Result<Vec<MemoryMergeGroup>, AppError> {
+        let active: Vec<CompanionMemory> = self
+            .store
+            .dump_memories_all()
+            .await?
+            .into_iter()
+            .filter(|memory| memory.status == "active")
+            .collect();
+        Ok(group_similar_memories(active))
+    }
+
+    /// Merge-assistant confirm: persist the merged memory, archive the source
+    /// group (audit-tagged `superseded_by:{id}`), and notify open surfaces.
+    pub async fn merge_memories(&self, group: &[String], merged_content: &str, kind: &str) -> Result<CompanionMemory, AppError> {
+        let merged = self.store.merge_memories(group, merged_content, kind).await?;
+        self.emitter.emit_memory_created(&merged);
+        for id in group {
+            if let Ok(Some(archived)) = self.store.get_memory(id).await {
+                self.emitter.emit_memory_updated(&archived);
+            }
+        }
+        Ok(merged)
     }
 
     // ----- session-window day digests (伙伴会话归档回看) -----

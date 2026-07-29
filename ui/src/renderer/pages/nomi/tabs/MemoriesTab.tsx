@@ -6,11 +6,18 @@
 
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { Button, Dropdown, Empty, Input, Menu, Message, Modal, Pagination, Radio, Select, Spin, Tag, Tooltip } from '@arco-design/web-react';
+import { Button, Checkbox, Drawer, Dropdown, Empty, Input, Menu, Message, Modal, Pagination, Radio, Select, Spin, Tag, Tooltip } from '@arco-design/web-react';
 import { More, Pin } from '@icon-park/react';
 import { ipcBridge } from '@/common';
-import type { ICompanionMemory } from '@/common/adapter/ipcBridge';
-import type { CompanionId } from '@/common/types/ids';
+import type {
+  ICompanionMemory,
+  ICompanionMemoryBatchAction,
+  ICompanionMemoryKind,
+  ICompanionMemoryMergeGroup,
+  ICompanionMemorySort,
+} from '@/common/adapter/ipcBridge';
+import type { CompanionId, CompanionMemoryId } from '@/common/types/ids';
+import { parseSnippetSegments } from './memorySnippet';
 
 const KINDS = ['profile', 'preference', 'knowledge', 'episode', 'task', 'affective'] as const;
 
@@ -30,6 +37,13 @@ interface CompanionRef {
   name: string;
 }
 
+/** Per-group editable state of the merge assistant drawer. */
+interface MergeDraft {
+  ids: CompanionMemoryId[];
+  content: string;
+  kind: ICompanionMemoryKind;
+}
+
 interface MemoriesTabProps {
   /** The companion currently selected on the nomi page; scopes the default view. */
   companionId?: CompanionId | null;
@@ -43,13 +57,23 @@ const MemoriesTab: React.FC<MemoriesTabProps> = ({ companionId = null, companion
   const [loading, setLoading] = useState(true);
   const [kind, setKind] = useState<string>('');
   const [q, setQ] = useState('');
-  const [memStatus, setMemStatus] = useState('active');
+  const [memStatus, setMemStatus] = useState<'active' | 'archived'>('active');
+  const [sort, setSort] = useState<ICompanionMemorySort>('relevance');
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(10);
   const [total, setTotal] = useState(0);
   // 'self' = shared + this companion's private (default when a companion is
   // selected); 'all' = every companion's memories (cross-companion view).
   const [scopeMode, setScopeMode] = useState<'self' | 'all'>(companionId ? 'self' : 'all');
+
+  const [selected, setSelected] = useState<CompanionMemoryId[]>([]);
+  const [reclassifyVisible, setReclassifyVisible] = useState(false);
+  const [reclassifyKind, setReclassifyKind] = useState<ICompanionMemoryKind>('knowledge');
+
+  const [mergeVisible, setMergeVisible] = useState(false);
+  const [mergeLoading, setMergeLoading] = useState(false);
+  const [mergeGroups, setMergeGroups] = useState<ICompanionMemoryMergeGroup[]>([]);
+  const [mergeDrafts, setMergeDrafts] = useState<MergeDraft[]>([]);
 
   const [addVisible, setAddVisible] = useState(false);
   const [addKind, setAddKind] = useState<string>('knowledge');
@@ -81,6 +105,7 @@ const MemoriesTab: React.FC<MemoriesTabProps> = ({ companionId = null, companion
         // 'self' scopes to shared + selected companion's private; 'all' omits
         // the filter so every companion's memories show.
         scope_companion_id: scopeMode === 'self' && companionId ? companionId : undefined,
+        sort,
         limit: pageSize,
         offset: (page - 1) * pageSize,
       });
@@ -102,7 +127,7 @@ const MemoriesTab: React.FC<MemoriesTabProps> = ({ companionId = null, companion
     } finally {
       if (seq === refreshSeq.current) setLoading(false);
     }
-  }, [kind, q, memStatus, scopeMode, companionId, page, pageSize]);
+  }, [kind, q, memStatus, sort, scopeMode, companionId, page, pageSize]);
 
   // Debounce refetches slightly so typing does not create overlapping requests.
   useEffect(() => {
@@ -114,7 +139,12 @@ const MemoriesTab: React.FC<MemoriesTabProps> = ({ companionId = null, companion
   // changes only `page`, so it keeps the current filters intact.
   useEffect(() => {
     setPage(1);
-  }, [kind, q, memStatus, scopeMode, companionId, pageSize]);
+  }, [kind, q, memStatus, sort, scopeMode, companionId, pageSize]);
+
+  // Selection is per result set: filter or page changes drop it.
+  useEffect(() => {
+    setSelected([]);
+  }, [kind, q, memStatus, sort, scopeMode, companionId, page, pageSize]);
 
   // nomi can save/edit/delete memories mid-chat or from another surface —
   // reflect them live.
@@ -159,6 +189,105 @@ const MemoriesTab: React.FC<MemoriesTabProps> = ({ companionId = null, companion
     await remove(deleteTarget);
     setDeleteTarget(null);
   }, [deleteTarget, remove]);
+
+  // ── batch operations ──
+
+  const toggleSelected = useCallback((id: CompanionMemoryId) => {
+    setSelected((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
+  }, []);
+
+  const pageIds = memories.map((m) => m.memory_id);
+  const allSelected = pageIds.length > 0 && pageIds.every((id) => selected.includes(id));
+
+  const toggleSelectAll = useCallback(() => {
+    setSelected(allSelected ? [] : memories.map((m) => m.memory_id));
+  }, [allSelected, memories]);
+
+  const runBatch = useCallback(
+    async (action: ICompanionMemoryBatchAction, batchKind?: ICompanionMemoryKind) => {
+      try {
+        await ipcBridge.companion.batchMemories.invoke({ ids: selected, action, kind: batchKind });
+        Message.success(t('nomi.memories.batchDone'));
+        setSelected([]);
+        void refresh();
+      } catch (e) {
+        Message.error(String(e));
+      }
+    },
+    [selected, refresh, t]
+  );
+
+  const confirmBatch = useCallback(
+    (action: 'archive' | 'restore' | 'delete') => {
+      const title =
+        action === 'archive'
+          ? t('nomi.memories.batchArchiveConfirm', { count: selected.length })
+          : action === 'restore'
+            ? t('nomi.memories.batchRestoreConfirm', { count: selected.length })
+            : t('nomi.memories.batchDeleteConfirm', { count: selected.length });
+      Modal.confirm({
+        title,
+        okButtonProps: action === 'delete' ? { status: 'danger' } : undefined,
+        onOk: () => void runBatch(action),
+      });
+    },
+    [runBatch, selected.length, t]
+  );
+
+  const submitReclassify = useCallback(async () => {
+    await runBatch('reclassify', reclassifyKind);
+    setReclassifyVisible(false);
+  }, [runBatch, reclassifyKind]);
+
+  // ── merge assistant ──
+
+  const openMerge = useCallback(async () => {
+    setMergeVisible(true);
+    setMergeLoading(true);
+    try {
+      const groups = await ipcBridge.companion.memoryMergeSuggestions.invoke();
+      setMergeGroups(groups);
+      setMergeDrafts(
+        groups.map((group) => ({
+          ids: group.memories.map((m) => m.memory_id),
+          // Pre-fill with the longest member; the user edits before confirming.
+          content: group.memories.reduce((best, m) => (m.content.length > best.length ? m.content : best), ''),
+          kind: group.memories[0]?.kind ?? 'knowledge',
+        }))
+      );
+    } catch (e) {
+      Message.error(String(e));
+    } finally {
+      setMergeLoading(false);
+    }
+  }, []);
+
+  const patchDraft = useCallback((index: number, patch: Partial<MergeDraft>) => {
+    setMergeDrafts((drafts) => drafts.map((draft, i) => (i === index ? { ...draft, ...patch } : draft)));
+  }, []);
+
+  const submitMerge = useCallback(
+    async (index: number) => {
+      const draft = mergeDrafts[index];
+      if (!draft || draft.ids.length < 2 || !draft.content.trim()) return;
+      try {
+        await ipcBridge.companion.mergeMemories.invoke({
+          group: draft.ids,
+          merged_content: draft.content.trim(),
+          kind: draft.kind,
+        });
+        Message.success(t('nomi.memories.merged'));
+        setMergeGroups((groups) => groups.filter((_, i) => i !== index));
+        setMergeDrafts((drafts) => drafts.filter((_, i) => i !== index));
+        void refresh();
+      } catch (e) {
+        Message.error(String(e));
+      }
+    },
+    [mergeDrafts, refresh, t]
+  );
+
+  // ── add / edit ──
 
   const openAdd = useCallback(() => {
     setAddKind('knowledge');
@@ -260,6 +389,24 @@ const MemoriesTab: React.FC<MemoriesTabProps> = ({ companionId = null, companion
       <Tag bordered>{t('nomi.memories.scopeShared')}</Tag>
     );
 
+  /** Memory content with FTS hit highlighting (whitelist `<b>` parsing only). */
+  const memoryContent = (m: ICompanionMemory) =>
+    m.snippet ? (
+      <>
+        {parseSnippetSegments(m.snippet).map((segment, index) =>
+          segment.hit ? (
+            <b key={index} className='text-[rgb(var(--primary-6))] font-semibold'>
+              {segment.text}
+            </b>
+          ) : (
+            <React.Fragment key={index}>{segment.text}</React.Fragment>
+          )
+        )}
+      </>
+    ) : (
+      m.content
+    );
+
   const memoryActionMenu = (m: ICompanionMemory) => (
     <Menu
       onClickMenuItem={(key) => {
@@ -296,6 +443,10 @@ const MemoriesTab: React.FC<MemoriesTabProps> = ({ companionId = null, companion
   return (
     <div className='flex flex-col gap-12px py-8px'>
       <div className='flex gap-8px flex-wrap items-center'>
+        <Radio.Group type='button' value={memStatus} onChange={(v: 'active' | 'archived') => setMemStatus(v)}>
+          <Radio value='active'>{t('nomi.memories.statusActive')}</Radio>
+          <Radio value='archived'>{t('nomi.memories.statusArchived')}</Radio>
+        </Radio.Group>
         <Select style={{ width: 140 }} value={kind} onChange={setKind} placeholder={t('nomi.memories.kindAll')}>
           <Select.Option value=''>{t('nomi.memories.kindAll')}</Select.Option>
           {KINDS.map((k) => (
@@ -303,10 +454,6 @@ const MemoriesTab: React.FC<MemoriesTabProps> = ({ companionId = null, companion
               {t(`nomi.kinds.${k}`)}
             </Select.Option>
           ))}
-        </Select>
-        <Select style={{ width: 110 }} value={memStatus} onChange={setMemStatus}>
-          <Select.Option value='active'>{t('nomi.memories.statusActive')}</Select.Option>
-          <Select.Option value='archived'>{t('nomi.memories.statusArchived')}</Select.Option>
         </Select>
         {companionId && (
           <Radio.Group type='button' size='small' value={scopeMode} onChange={(v: 'self' | 'all') => setScopeMode(v)}>
@@ -321,10 +468,50 @@ const MemoriesTab: React.FC<MemoriesTabProps> = ({ companionId = null, companion
           onChange={setQ}
           allowClear
         />
+        <Select style={{ width: 120 }} value={sort} onChange={(v: ICompanionMemorySort) => setSort(v)}>
+          <Select.Option value='relevance'>{t('nomi.memories.sortRelevance')}</Select.Option>
+          <Select.Option value='time'>{t('nomi.memories.sortTime')}</Select.Option>
+          <Select.Option value='importance'>{t('nomi.memories.sortImportance')}</Select.Option>
+        </Select>
+        <Button onClick={() => void openMerge()}>{t('nomi.memories.merge')}</Button>
         <Button type='primary' onClick={openAdd}>
           {t('nomi.memories.add')}
         </Button>
       </div>
+
+      {memories.length > 0 && (
+        <div className='flex items-center gap-10px flex-wrap rounded-8px bg-fill-1 px-10px py-6px'>
+          <Checkbox checked={allSelected} onChange={toggleSelectAll}>
+            {t('nomi.memories.selectAll')}
+          </Checkbox>
+          {selected.length > 0 && (
+            <>
+              <span className='text-12px text-t-secondary tabular-nums'>
+                {t('nomi.memories.selectedCount', { count: selected.length })}
+              </span>
+              {memStatus === 'active' ? (
+                <Button size='mini' onClick={() => confirmBatch('archive')}>
+                  {t('nomi.memories.batchArchive')}
+                </Button>
+              ) : (
+                <Button size='mini' onClick={() => confirmBatch('restore')}>
+                  {t('nomi.memories.batchRestore')}
+                </Button>
+              )}
+              <Button size='mini' onClick={() => setReclassifyVisible(true)}>
+                {t('nomi.memories.batchReclassify')}
+              </Button>
+              <Button size='mini' status='danger' onClick={() => confirmBatch('delete')}>
+                {t('nomi.memories.batchDelete')}
+              </Button>
+              <Button size='mini' type='text' onClick={() => setSelected([])}>
+                {t('nomi.memories.clearSelection')}
+              </Button>
+            </>
+          )}
+        </div>
+      )}
+
       {initialLoading ? (
         <div className='flex justify-center py-40px'>
           <Spin />
@@ -338,9 +525,14 @@ const MemoriesTab: React.FC<MemoriesTabProps> = ({ companionId = null, companion
               key={m.memory_id}
               className='group flex items-start gap-10px rounded-12px border border-solid border-[var(--color-border-2)] bg-[var(--color-bg-2)] px-12px py-10px transition-colors hover:bg-fill-2'
             >
+              <Checkbox
+                className='mt-2px'
+                checked={selected.includes(m.memory_id)}
+                onChange={() => toggleSelected(m.memory_id)}
+              />
               <Tag color={KIND_COLORS[m.kind]}>{t(`nomi.kinds.${m.kind}`)}</Tag>
               <div className='flex-1 min-w-0'>
-                <div className='line-clamp-2 text-13px leading-20px text-t-primary break-words'>{m.content}</div>
+                <div className='line-clamp-2 text-13px leading-20px text-t-primary break-words'>{memoryContent(m)}</div>
                 <div className='mt-5px flex flex-wrap items-center gap-x-10px gap-y-4px text-11px text-t-tertiary'>
                   {scopeBadge(m)}
                   <span>
@@ -351,6 +543,11 @@ const MemoriesTab: React.FC<MemoriesTabProps> = ({ companionId = null, companion
                 </div>
               </div>
               <div className='flex items-center gap-4px shrink-0'>
+                {m.status === 'archived' && (
+                  <Button size='mini' onClick={() => void toggleArchive(m)}>
+                    {t('nomi.memories.restore')}
+                  </Button>
+                )}
                 <Tooltip content={m.pinned ? t('nomi.memories.unpin') : t('nomi.memories.pin')}>
                   <Button
                     size='mini'
@@ -385,6 +582,92 @@ const MemoriesTab: React.FC<MemoriesTabProps> = ({ companionId = null, companion
           />
         </div>
       )}
+
+      <Modal
+        title={t('nomi.memories.reclassifyTitle')}
+        visible={reclassifyVisible}
+        onOk={() => void submitReclassify()}
+        onCancel={() => setReclassifyVisible(false)}
+      >
+        <div className='flex flex-col gap-12px'>
+          <div className='text-13px text-t-secondary'>{t('nomi.memories.reclassifyPick', { count: selected.length })}</div>
+          <Select value={reclassifyKind} onChange={(v: ICompanionMemoryKind) => setReclassifyKind(v)}>
+            {KINDS.map((k) => (
+              <Select.Option key={k} value={k}>
+                {t(`nomi.kinds.${k}`)}
+              </Select.Option>
+            ))}
+          </Select>
+        </div>
+      </Modal>
+
+      <Drawer
+        width={520}
+        title={t('nomi.memories.mergeTitle')}
+        visible={mergeVisible}
+        onCancel={() => setMergeVisible(false)}
+        footer={null}
+      >
+        {mergeLoading ? (
+          <div className='flex justify-center py-40px'>
+            <Spin />
+          </div>
+        ) : mergeGroups.length === 0 ? (
+          <Empty description={t('nomi.memories.mergeEmpty')} />
+        ) : (
+          <div className='flex flex-col gap-16px'>
+            <div className='text-12px text-t-tertiary'>{t('nomi.memories.mergeHint')}</div>
+            {mergeGroups.map((group, index) => {
+              const draft = mergeDrafts[index];
+              if (!draft) return null;
+              const mergeInvalid = draft.ids.length < 2 || !draft.content.trim();
+              return (
+                <div
+                  key={group.memories[0]?.memory_id ?? index}
+                  className='flex flex-col gap-8px rounded-12px border border-solid border-[var(--color-border-2)] p-12px'
+                >
+                  {group.memories.map((m) => (
+                    <Checkbox
+                      key={m.memory_id}
+                      checked={draft.ids.includes(m.memory_id)}
+                      onChange={() =>
+                        patchDraft(index, {
+                          ids: draft.ids.includes(m.memory_id)
+                            ? draft.ids.filter((id) => id !== m.memory_id)
+                            : [...draft.ids, m.memory_id],
+                        })
+                      }
+                    >
+                      <span className='text-13px break-words'>{m.content}</span>
+                    </Checkbox>
+                  ))}
+                  <div className='flex items-center gap-8px'>
+                    <Select
+                      size='small'
+                      style={{ width: 140 }}
+                      value={draft.kind}
+                      onChange={(v: ICompanionMemoryKind) => patchDraft(index, { kind: v })}
+                    >
+                      {KINDS.map((k) => (
+                        <Select.Option key={k} value={k}>
+                          {t(`nomi.kinds.${k}`)}
+                        </Select.Option>
+                      ))}
+                    </Select>
+                    <span className='text-12px text-t-tertiary'>{t('nomi.memories.mergeContentLabel')}</span>
+                  </div>
+                  <Input.TextArea rows={3} value={draft.content} onChange={(v: string) => patchDraft(index, { content: v })} />
+                  <div className='flex justify-end'>
+                    <Button size='small' type='primary' disabled={mergeInvalid} onClick={() => void submitMerge(index)}>
+                      {t('nomi.memories.mergeSubmit')}
+                    </Button>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </Drawer>
 
       <Modal
         title={t('nomi.memories.add')}

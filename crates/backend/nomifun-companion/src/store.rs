@@ -220,6 +220,17 @@ pub struct MemoryPage {
     pub total: i64,
 }
 
+/// Sort order for the paged memory list (non-FTS path).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MemoryListSort {
+    /// Legacy default: pinned first, then strength, then recency.
+    Default,
+    /// Pure recency (`updated_at DESC`).
+    Time,
+    /// Pinned first, then importance.
+    Importance,
+}
+
 fn memory_filter_clause(filter: &MemoryFilter) -> String {
     let mut sql = String::from(" WHERE 1=1");
     if filter.kind.is_some() {
@@ -236,6 +247,36 @@ fn memory_filter_clause(filter: &MemoryFilter) -> String {
         sql.push_str(" AND (scope_kind = 'user' OR scope_companion_id = ?)");
     }
     sql
+}
+
+/// The normalized-similarity predicate shared by the write-path dedup guard
+/// (`find_similar_active`) and the merge-assistant grouping: equal after
+/// trim+lowercase, or containment in either direction when the two are close
+/// in length (≥ 0.6 short/long char ratio).
+pub(crate) fn memory_contents_similar(a: &str, b: &str) -> bool {
+    const CONTAINMENT_MIN_RATIO: f64 = 0.6;
+    let norm_a = a.trim().to_lowercase();
+    let norm_b = b.trim().to_lowercase();
+    if norm_a == norm_b {
+        return true;
+    }
+    let (short_len, long_len) = {
+        let la = norm_a.chars().count();
+        let lb = norm_b.chars().count();
+        (la.min(lb), la.max(lb))
+    };
+    let close_in_length = long_len > 0 && (short_len as f64 / long_len as f64) >= CONTAINMENT_MIN_RATIO;
+    close_in_length && (norm_a.contains(&norm_b) || norm_b.contains(&norm_a))
+}
+
+/// One batched memory operation, applied atomically to a set of ids.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MemoryBatchAction {
+    Archive,
+    Restore,
+    Delete,
+    /// Move the memories to another of the six kinds.
+    Reclassify { kind: String },
 }
 
 #[derive(Clone)]
@@ -332,18 +373,10 @@ impl CompanionStore {
                 .fetch_all(&mut *tx)
                 .await
                 .map_err(db_err)?;
-                let normalized = memory.content.trim().to_lowercase();
+                let normalized = memory.content.clone();
                 let duplicate = similar.into_iter().any(|row| {
                     let existing_content: String = row.get("content");
-                    let existing_normalized = existing_content.trim().to_lowercase();
-                    if existing_normalized == normalized {
-                        return true;
-                    }
-                    let short_len = normalized.chars().count().min(existing_normalized.chars().count());
-                    let long_len = normalized.chars().count().max(existing_normalized.chars().count());
-                    long_len > 0
-                        && (short_len as f64 / long_len as f64) >= 0.6
-                        && (existing_normalized.contains(&normalized) || normalized.contains(&existing_normalized))
+                    memory_contents_similar(&normalized, &existing_content)
                 });
                 if duplicate {
                     skipped_duplicates += 1;
@@ -351,9 +384,10 @@ impl CompanionStore {
                 }
             }
 
-            sqlx::query(
+            let row = sqlx::query(
                 "INSERT INTO companion_memories(memory_id, kind, content, tags, importance, strength, pinned, source, status, created_at, updated_at, last_reinforced_at, scope_kind, scope_companion_id)
-                 VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                 VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                 RETURNING id",
             )
             .bind(&memory.memory_id)
             .bind(&memory.kind)
@@ -371,9 +405,10 @@ impl CompanionStore {
             .bind(memory.last_reinforced_at)
             .bind(&memory.scope_kind)
             .bind(&memory.scope_companion_id)
-            .execute(&mut *tx)
+            .fetch_one(&mut *tx)
             .await
             .map_err(db_err)?;
+            fts_index_insert(&mut *tx, row.get("id"), &memory.content).await?;
             imported += 1;
         }
 
@@ -468,6 +503,8 @@ CREATE TABLE IF NOT EXISTS companion_memories (
       AND replace(scope_companion_id, '-', '') NOT GLOB '*[^0-9a-f]*'
     )
   ),
+  embedding BLOB,
+  embedding_model TEXT,
   CHECK((scope_kind = 'user' AND scope_companion_id IS NULL) OR
         (scope_kind = 'companion' AND scope_companion_id IS NOT NULL))
 );
@@ -675,8 +712,61 @@ CREATE INDEX IF NOT EXISTS idx_csw_companion_day ON companion_session_windows(co
 CREATE INDEX IF NOT EXISTS idx_csw_status ON companion_session_windows(companion_id, status, last_activity_at);
 "#;
 
-fn db_err(e: sqlx::Error) -> AppError {
+/// External-content FTS5 index over `companion_memories.content` (trigram
+/// tokenizer → CJK substring search). Kept out of `SCHEMA` so the legacy-layout
+/// upgrade tests can express "current schema minus the FTS stanza" precisely.
+/// The write paths below maintain the index in code (v3 forbids triggers).
+const FTS_SCHEMA: &str = r#"
+CREATE VIRTUAL TABLE IF NOT EXISTS companion_memories_fts USING fts5(
+  content, content='companion_memories', content_rowid='id', tokenize='trigram'
+);
+"#;
+
+/// The FTS virtual table plus the shadow tables SQLite materializes for it.
+/// They belong to the v3 baseline table set but carry no per-table contract of
+/// their own (their shape is owned by SQLite).
+const FTS_TABLE: &str = "companion_memories_fts";
+const FTS_SHADOW_TABLES: &[&str] = &[
+    "companion_memories_fts_data",
+    "companion_memories_fts_idx",
+    "companion_memories_fts_docsize",
+    "companion_memories_fts_config",
+];
+
+pub(crate) fn db_err(e: sqlx::Error) -> AppError {
     AppError::Internal(format!("companion store: {e}"))
+}
+
+/// External-content FTS5 maintenance: index one `companion_memories` row.
+/// (v3 forbids triggers, so every write path calls these in code.)
+async fn fts_index_insert<'e, E>(executor: E, rowid: i64, content: &str) -> Result<(), AppError>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Sqlite>,
+{
+    sqlx::query("INSERT INTO companion_memories_fts(rowid, content) VALUES(?, ?)")
+        .bind(rowid)
+        .bind(content)
+        .execute(executor)
+        .await
+        .map_err(db_err)?;
+    Ok(())
+}
+
+/// External-content FTS5 maintenance: drop one row from the index. The OLD
+/// content must match what was indexed (the fts5 'delete' command contract).
+async fn fts_index_delete<'e, E>(executor: E, rowid: i64, content: &str) -> Result<(), AppError>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Sqlite>,
+{
+    sqlx::query(
+        "INSERT INTO companion_memories_fts(companion_memories_fts, rowid, content) VALUES('delete', ?, ?)",
+    )
+    .bind(rowid)
+    .bind(content)
+    .execute(executor)
+    .await
+    .map_err(db_err)?;
+    Ok(())
 }
 
 fn validate_companion_id(value: &str, field: &str) -> Result<(), AppError> {
@@ -761,6 +851,8 @@ const BASELINE_TABLES: &[TableContract] = &[
             ColumnContract { name: "last_reinforced_at", declared_type: "INTEGER", not_null: true, primary_key_position: 0 },
             ColumnContract { name: "scope_kind", declared_type: "TEXT", not_null: true, primary_key_position: 0 },
             ColumnContract { name: "scope_companion_id", declared_type: "TEXT", not_null: false, primary_key_position: 0 },
+            ColumnContract { name: "embedding", declared_type: "BLOB", not_null: false, primary_key_position: 0 },
+            ColumnContract { name: "embedding_model", declared_type: "TEXT", not_null: false, primary_key_position: 0 },
         ],
         uuidv7_columns: &["memory_id", "scope_companion_id"],
         unique_indexes: &[UniqueIndexContract { columns: &["memory_id"], origin: "u", partial: false }],
@@ -1292,6 +1384,33 @@ async fn validate_named_indexes(pool: &SqlitePool) -> Result<(), AppError> {
     Ok(())
 }
 
+async fn validate_fts_contract(pool: &SqlitePool) -> Result<(), AppError> {
+    let sql: Option<String> = sqlx::query_scalar(
+        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?",
+    )
+    .bind(FTS_TABLE)
+    .fetch_optional(pool)
+    .await
+    .map_err(db_err)?;
+    let sql = sql.ok_or_else(|| {
+        AppError::Internal(format!("companion store missing FTS index table {FTS_TABLE}"))
+    })?;
+    let normalized = normalized_schema_sql(&sql);
+    for fragment in [
+        "usingfts5",
+        "content='companion_memories'",
+        "content_rowid='id'",
+        "tokenize='trigram'",
+    ] {
+        if !normalized.contains(fragment) {
+            return Err(AppError::Internal(format!(
+                "companion store FTS table {FTS_TABLE} is missing required definition fragment {fragment}"
+            )));
+        }
+    }
+    Ok(())
+}
+
 async fn validate_baseline_schema(pool: &SqlitePool) -> Result<(), AppError> {
     let version: i64 = sqlx::query_scalar("PRAGMA user_version")
         .fetch_one(pool)
@@ -1313,6 +1432,7 @@ async fn validate_baseline_schema(pool: &SqlitePool) -> Result<(), AppError> {
         .ok_or_else(|| AppError::Internal(format!("companion store missing table {}", table.name)))?;
         validate_table_contract(pool, table, &sql).await?;
     }
+    validate_fts_contract(pool).await?;
     validate_named_indexes(pool).await?;
     let trigger_count: i64 =
         sqlx::query_scalar("SELECT COUNT(*) FROM sqlite_master WHERE type = 'trigger'")
@@ -1331,8 +1451,12 @@ async fn validate_baseline_schema(pool: &SqlitePool) -> Result<(), AppError> {
     .fetch_all(pool)
     .await
     .map_err(db_err)?;
-    let expected: std::collections::BTreeSet<&str> =
-        BASELINE_TABLES.iter().map(|table| table.name).collect();
+    let expected: std::collections::BTreeSet<&str> = BASELINE_TABLES
+        .iter()
+        .map(|table| table.name)
+        .chain(std::iter::once(FTS_TABLE))
+        .chain(FTS_SHADOW_TABLES.iter().copied())
+        .collect();
     let actual: std::collections::BTreeSet<&str> =
         user_tables.iter().map(String::as_str).collect();
     if actual != expected {
@@ -1345,6 +1469,7 @@ async fn validate_baseline_schema(pool: &SqlitePool) -> Result<(), AppError> {
 
 async fn create_baseline_schema(pool: &SqlitePool) -> Result<(), AppError> {
     sqlx::raw_sql(SCHEMA).execute(pool).await.map_err(db_err)?;
+    sqlx::raw_sql(FTS_SCHEMA).execute(pool).await.map_err(db_err)?;
     sqlx::raw_sql(&format!("PRAGMA user_version = {STORE_VERSION}"))
         .execute(pool)
         .await
@@ -1352,7 +1477,79 @@ async fn create_baseline_schema(pool: &SqlitePool) -> Result<(), AppError> {
     validate_baseline_schema(pool).await
 }
 
-fn row_to_memory(row: &sqlx::sqlite::SqliteRow) -> Result<CompanionMemory, AppError> {
+/// Idempotent in-place upgrade of an existing v3 store to the current v3
+/// baseline: add the nullable embedding columns and the external-content FTS5
+/// index when missing, and rebuild the index when its row count desyncs from
+/// the main table (crash between a main-table write and its index write).
+/// Never rewrites rows — user memories are preserved verbatim. Non-v3 stores
+/// are left untouched for `validate_baseline_schema` to reject.
+async fn upgrade_schema_in_place(pool: &SqlitePool) -> Result<(), AppError> {
+    let version: i64 = sqlx::query_scalar("PRAGMA user_version")
+        .fetch_one(pool)
+        .await
+        .map_err(db_err)?;
+    if version != STORE_VERSION {
+        return Ok(());
+    }
+    let columns: Vec<String> =
+        sqlx::query_scalar("SELECT name FROM pragma_table_xinfo('companion_memories')")
+            .fetch_all(pool)
+            .await
+            .map_err(db_err)?;
+    if columns.is_empty() {
+        // No companion_memories table at all — not a v3 layout; leave it to validation.
+        return Ok(());
+    }
+    for (column, definition) in [
+        ("embedding", "ALTER TABLE companion_memories ADD COLUMN embedding BLOB"),
+        ("embedding_model", "ALTER TABLE companion_memories ADD COLUMN embedding_model TEXT"),
+    ] {
+        if !columns.iter().any(|name| name == column) {
+            sqlx::raw_sql(definition).execute(pool).await.map_err(db_err)?;
+        }
+    }
+
+    let fts_sql: Option<String> = sqlx::query_scalar(
+        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?",
+    )
+    .bind(FTS_TABLE)
+    .fetch_optional(pool)
+    .await
+    .map_err(db_err)?;
+    let mut rebuild = match fts_sql {
+        None => {
+            sqlx::raw_sql(FTS_SCHEMA).execute(pool).await.map_err(db_err)?;
+            true
+        }
+        Some(_) => false,
+    };
+    if !rebuild {
+        let main_rows: i64 = sqlx::query_scalar("SELECT count(*) FROM companion_memories")
+            .fetch_one(pool)
+            .await
+            .map_err(db_err)?;
+        // count(*) on an external-content fts5 table mirrors the CONTENT table,
+        // not the index — the docsize shadow table (one row per indexed doc) is
+        // the authoritative index row count.
+        let fts_rows: i64 =
+            sqlx::query_scalar(&format!("SELECT count(*) FROM {FTS_TABLE}_docsize"))
+                .fetch_one(pool)
+                .await
+                .map_err(db_err)?;
+        rebuild = main_rows != fts_rows;
+    }
+    if rebuild {
+        // 'rebuild' repopulates the external-content index from the main table
+        // in one statement — idempotent by construction.
+        sqlx::query(&format!("INSERT INTO {FTS_TABLE}({FTS_TABLE}) VALUES('rebuild')"))
+            .execute(pool)
+            .await
+            .map_err(db_err)?;
+    }
+    Ok(())
+}
+
+pub(crate) fn row_to_memory(row: &sqlx::sqlite::SqliteRow) -> Result<CompanionMemory, AppError> {
     let tags: String = row.get("tags");
     let memory_id: String = row.get("memory_id");
     CompanionMemoryId::try_from(memory_id.as_str())
@@ -1547,6 +1744,12 @@ fn validate_suggestion_action(
 }
 
 impl CompanionStore {
+    /// Crate-internal pool handle for the store's submodule layers
+    /// (`memory_search` runs its SQL on the same connection pool).
+    pub(crate) fn pool(&self) -> &SqlitePool {
+        &self.pool
+    }
+
     /// Open (or create) the v3 baseline `{companion_dir}/memory.db`.
     pub async fn open(companion_dir: &Path) -> Result<Self, AppError> {
         std::fs::create_dir_all(companion_dir)
@@ -1580,7 +1783,12 @@ impl CompanionStore {
                 .await
                 .map_err(db_err)?;
             let init = if database_exists {
-                validate_baseline_schema(&bootstrap).await
+                // In-place upgrade first (idempotent ALTER/CREATE IF; preserves
+                // rows), then the strict contract check.
+                match upgrade_schema_in_place(&bootstrap).await {
+                    Ok(()) => validate_baseline_schema(&bootstrap).await,
+                    Err(error) => Err(error),
+                }
             } else {
                 create_baseline_schema(&bootstrap).await
             };
@@ -1744,6 +1952,18 @@ impl CompanionStore {
     pub async fn delete_companion_rows(&self, companion_id: &str) -> Result<(), AppError> {
         validate_companion_id(companion_id, "deleted companion_id")?;
         let mut tx = self.pool.begin().await.map_err(db_err)?;
+        // De-index the private memories about to be deleted (FTS 'delete' needs
+        // the old rowid+content, so this must run before the DELETE below).
+        let indexed = sqlx::query(
+            "SELECT id, content FROM companion_memories WHERE scope_kind = 'companion' AND scope_companion_id = ?",
+        )
+        .bind(companion_id)
+        .fetch_all(&mut *tx)
+        .await
+        .map_err(db_err)?;
+        for row in &indexed {
+            fts_index_delete(&mut *tx, row.get("id"), row.get("content")).await?;
+        }
         for sql in [
             "DELETE FROM companion_memories WHERE scope_kind = 'companion' AND scope_companion_id = ?",
             "DELETE FROM companion_skills WHERE scope_kind = 'companion' AND scope_companion_id = ?",
@@ -1844,9 +2064,11 @@ impl CompanionStore {
             scope_kind: scope_kind.to_owned(),
             scope_companion_id,
         };
-        sqlx::query(
+        let mut tx = self.pool.begin().await.map_err(db_err)?;
+        let row = sqlx::query(
             "INSERT INTO companion_memories(memory_id, kind, content, tags, importance, strength, pinned, source, status, created_at, updated_at, last_reinforced_at, scope_kind, scope_companion_id)
-             VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+             VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+             RETURNING id",
         )
         .bind(&mem.memory_id)
         .bind(&mem.kind)
@@ -1865,9 +2087,11 @@ impl CompanionStore {
         .bind(mem.last_reinforced_at)
         .bind(&mem.scope_kind)
         .bind(&mem.scope_companion_id)
-        .execute(&self.pool)
+        .fetch_one(&mut *tx)
         .await
         .map_err(db_err)?;
+        fts_index_insert(&mut *tx, row.get("id"), &mem.content).await?;
+        tx.commit().await.map_err(db_err)?;
         Ok(mem)
     }
 
@@ -1877,8 +2101,6 @@ impl CompanionStore {
     /// memory ("主人用 Rust") from swallowing a longer, genuinely distinct
     /// one that merely embeds the same phrase.
     pub async fn find_similar_active(&self, kind: &str, content: &str) -> Result<Option<String>, AppError> {
-        const CONTAINMENT_MIN_RATIO: f64 = 0.6;
-        let norm = content.trim().to_lowercase();
         let rows = sqlx::query("SELECT memory_id, content FROM companion_memories WHERE kind = ? AND status = 'active'")
             .bind(kind)
             .fetch_all(&self.pool)
@@ -1886,20 +2108,7 @@ impl CompanionStore {
             .map_err(db_err)?;
         for row in rows {
             let existing: String = row.get("content");
-            let existing_norm = existing.trim().to_lowercase();
-            if existing_norm == norm {
-                let id: String = row.get("memory_id");
-                CompanionMemoryId::try_from(id.as_str())
-                    .map_err(|error| invalid_disk_id("memory id", &id, error))?;
-                return Ok(Some(id));
-            }
-            let (short_len, long_len) = {
-                let a = norm.chars().count();
-                let b = existing_norm.chars().count();
-                (a.min(b), a.max(b))
-            };
-            let close_in_length = long_len > 0 && (short_len as f64 / long_len as f64) >= CONTAINMENT_MIN_RATIO;
-            if close_in_length && (existing_norm.contains(&norm) || norm.contains(&existing_norm)) {
+            if memory_contents_similar(content, &existing) {
                 let id: String = row.get("memory_id");
                 CompanionMemoryId::try_from(id.as_str())
                     .map_err(|error| invalid_disk_id("memory id", &id, error))?;
@@ -1935,11 +2144,23 @@ impl CompanionStore {
     }
 
     pub async fn list_memory_page(&self, filter: &MemoryFilter) -> Result<MemoryPage, AppError> {
+        self.list_memory_page_sorted(filter, MemoryListSort::Default).await
+    }
+
+    /// `list_memory_page` with an explicit sort order (the REST list endpoint's
+    /// `sort` param on the non-FTS path; the FTS path ranks in `search_memories`).
+    pub async fn list_memory_page_sorted(&self, filter: &MemoryFilter, sort: MemoryListSort) -> Result<MemoryPage, AppError> {
         if let Some(companion_id) = filter.scope_companion_id.as_deref() {
             validate_companion_id(companion_id, "memory filter companion_id")?;
         }
+        let order_by = match sort {
+            MemoryListSort::Default => " ORDER BY pinned DESC, strength DESC, updated_at DESC",
+            MemoryListSort::Time => " ORDER BY updated_at DESC",
+            MemoryListSort::Importance => " ORDER BY pinned DESC, importance DESC, strength DESC, updated_at DESC",
+        };
         let mut items_sql = format!("SELECT * FROM companion_memories{}", memory_filter_clause(filter));
-        items_sql.push_str(" ORDER BY pinned DESC, strength DESC, updated_at DESC LIMIT ? OFFSET ?");
+        items_sql.push_str(order_by);
+        items_sql.push_str(" LIMIT ? OFFSET ?");
         let mut items_query = sqlx::query(&items_sql);
         if let Some(kind) = &filter.kind {
             items_query = items_query.bind(kind);
@@ -2022,6 +2243,22 @@ impl CompanionStore {
             .as_ref()
             .and_then(|(_, companion_id)| companion_id.as_deref());
         let now = now_ms();
+        let mut tx = self.pool.begin().await.map_err(db_err)?;
+        // Content edits must re-index: capture the OLD indexed content first
+        // (the fts5 'delete' command needs it verbatim).
+        let old_indexed: Option<(i64, String)> = if redacted.is_some() {
+            let row = sqlx::query("SELECT id, content FROM companion_memories WHERE memory_id = ?")
+                .bind(memory_id)
+                .fetch_optional(&mut *tx)
+                .await
+                .map_err(db_err)?;
+            match row {
+                Some(row) => Some((row.get("id"), row.get("content"))),
+                None => return Err(AppError::NotFound(format!("memory '{memory_id}' not found"))),
+            }
+        } else {
+            None
+        };
         let result = sqlx::query(
             "UPDATE companion_memories SET
                content = COALESCE(?, content),
@@ -2041,24 +2278,220 @@ impl CompanionStore {
         .bind(scope_companion_id)
         .bind(now)
         .bind(memory_id)
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await
         .map_err(db_err)?;
         if result.rows_affected() == 0 {
             return Err(AppError::NotFound(format!("memory '{memory_id}' not found")));
         }
+        if let (Some((rowid, old_content)), Some(new_content)) = (old_indexed, redacted.as_deref()) {
+            fts_index_delete(&mut *tx, rowid, &old_content).await?;
+            fts_index_insert(&mut *tx, rowid, new_content).await?;
+        }
+        tx.commit().await.map_err(db_err)?;
         Ok(())
     }
 
     pub async fn delete_memory(&self, memory_id: &str) -> Result<(), AppError> {
         CompanionMemoryId::try_from(memory_id)
             .map_err(|error| AppError::BadRequest(format!("invalid memory id: {error}")))?;
-        sqlx::query("DELETE FROM companion_memories WHERE memory_id = ?")
+        let mut tx = self.pool.begin().await.map_err(db_err)?;
+        let row = sqlx::query("SELECT id, content FROM companion_memories WHERE memory_id = ?")
             .bind(memory_id)
-            .execute(&self.pool)
+            .fetch_optional(&mut *tx)
             .await
             .map_err(db_err)?;
+        let Some(row) = row else {
+            // Deleting a missing memory stays a no-op (historical semantics).
+            return Ok(());
+        };
+        sqlx::query("DELETE FROM companion_memories WHERE memory_id = ?")
+            .bind(memory_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(db_err)?;
+        fts_index_delete(&mut *tx, row.get("id"), row.get("content")).await?;
+        tx.commit().await.map_err(db_err)?;
         Ok(())
+    }
+
+    /// Apply one [`MemoryBatchAction`] to every id in a SINGLE transaction —
+    /// atomic: any invalid/missing id rolls the whole batch back.
+    pub async fn batch_update_memories(&self, ids: &[String], action: &MemoryBatchAction) -> Result<(), AppError> {
+        if ids.is_empty() {
+            return Err(AppError::BadRequest("batch ids must not be empty".into()));
+        }
+        for id in ids {
+            CompanionMemoryId::try_from(id.as_str())
+                .map_err(|error| AppError::BadRequest(format!("invalid memory id: {error}")))?;
+        }
+        if let MemoryBatchAction::Reclassify { kind } = action
+            && !MEMORY_KINDS.contains(&kind.as_str())
+        {
+            return Err(AppError::BadRequest(format!("invalid memory kind '{kind}'")));
+        }
+        let now = now_ms();
+        let mut tx = self.pool.begin().await.map_err(db_err)?;
+        for id in ids {
+            let affected = match action {
+                MemoryBatchAction::Archive => {
+                    sqlx::query("UPDATE companion_memories SET status = 'archived', updated_at = ? WHERE memory_id = ?")
+                        .bind(now)
+                        .bind(id)
+                        .execute(&mut *tx)
+                        .await
+                        .map_err(db_err)?
+                        .rows_affected()
+                }
+                MemoryBatchAction::Restore => {
+                    sqlx::query("UPDATE companion_memories SET status = 'active', updated_at = ? WHERE memory_id = ?")
+                        .bind(now)
+                        .bind(id)
+                        .execute(&mut *tx)
+                        .await
+                        .map_err(db_err)?
+                        .rows_affected()
+                }
+                MemoryBatchAction::Reclassify { kind } => {
+                    sqlx::query("UPDATE companion_memories SET kind = ?, updated_at = ? WHERE memory_id = ?")
+                        .bind(kind)
+                        .bind(now)
+                        .bind(id)
+                        .execute(&mut *tx)
+                        .await
+                        .map_err(db_err)?
+                        .rows_affected()
+                }
+                MemoryBatchAction::Delete => {
+                    let row = sqlx::query("SELECT id, content FROM companion_memories WHERE memory_id = ?")
+                        .bind(id)
+                        .fetch_optional(&mut *tx)
+                        .await
+                        .map_err(db_err)?;
+                    match row {
+                        None => 0,
+                        Some(row) => {
+                            sqlx::query("DELETE FROM companion_memories WHERE memory_id = ?")
+                                .bind(id)
+                                .execute(&mut *tx)
+                                .await
+                                .map_err(db_err)?;
+                            fts_index_delete(&mut *tx, row.get("id"), row.get("content")).await?;
+                            1
+                        }
+                    }
+                }
+            };
+            if affected == 0 {
+                // Dropping the tx rolls back the whole batch.
+                return Err(AppError::NotFound(format!("memory '{id}' not found")));
+            }
+        }
+        tx.commit().await.map_err(db_err)?;
+        Ok(())
+    }
+
+    /// Merge-assistant执行：insert the user-confirmed merged memory and archive
+    /// the source group in one transaction. Sources keep their content (提留痕)
+    /// and gain a `superseded_by:{merged_id}` audit tag. The group must be ≥2
+    /// active memories sharing one scope; the merged memory inherits that
+    /// scope, the max importance/strength and any pin.
+    pub async fn merge_memories(&self, group: &[String], merged_content: &str, kind: &str) -> Result<CompanionMemory, AppError> {
+        if group.len() < 2 {
+            return Err(AppError::BadRequest("merge group must contain at least two memories".into()));
+        }
+        for id in group {
+            CompanionMemoryId::try_from(id.as_str())
+                .map_err(|error| AppError::BadRequest(format!("invalid memory id: {error}")))?;
+        }
+        if !MEMORY_KINDS.contains(&kind) {
+            return Err(AppError::BadRequest(format!("invalid memory kind '{kind}'")));
+        }
+        let merged_content = merged_content.trim();
+        if merged_content.is_empty() {
+            return Err(AppError::BadRequest("merged content is empty".into()));
+        }
+        let merged_content = nomi_redact::redact_secrets(merged_content).into_owned();
+
+        let mut tx = self.pool.begin().await.map_err(db_err)?;
+        let mut sources = Vec::with_capacity(group.len());
+        for id in group {
+            let row = sqlx::query("SELECT * FROM companion_memories WHERE memory_id = ?")
+                .bind(id)
+                .fetch_optional(&mut *tx)
+                .await
+                .map_err(db_err)?
+                .ok_or_else(|| AppError::NotFound(format!("memory '{id}' not found")))?;
+            let memory = row_to_memory(&row)?;
+            if memory.status != "active" {
+                return Err(AppError::BadRequest(format!(
+                    "memory '{id}' is not active; only active memories can be merged"
+                )));
+            }
+            sources.push(memory);
+        }
+        let scope = (sources[0].scope_kind.clone(), sources[0].scope_companion_id.clone());
+        if sources.iter().any(|m| (m.scope_kind.clone(), m.scope_companion_id.clone()) != scope) {
+            return Err(AppError::BadRequest(
+                "merge group must share one scope (all shared, or all private to the same companion)".into(),
+            ));
+        }
+
+        let now = now_ms();
+        let merged = CompanionMemory {
+            memory_id: CompanionMemoryId::new().into_string(),
+            kind: kind.to_owned(),
+            content: merged_content,
+            tags: vec![],
+            importance: sources.iter().map(|m| m.importance).fold(0.0, f64::max),
+            strength: sources.iter().map(|m| m.strength).fold(0.0, f64::max),
+            pinned: sources.iter().any(|m| m.pinned),
+            source: "merge".into(),
+            status: "active".into(),
+            created_at: now,
+            updated_at: now,
+            last_reinforced_at: now,
+            scope_kind: scope.0,
+            scope_companion_id: scope.1,
+        };
+        let row = sqlx::query(
+            "INSERT INTO companion_memories(memory_id, kind, content, tags, importance, strength, pinned, source, status, created_at, updated_at, last_reinforced_at, scope_kind, scope_companion_id)
+             VALUES(?,?,?,'[]',?,?,?,?,?,?,?,?,?,?)
+             RETURNING id",
+        )
+        .bind(&merged.memory_id)
+        .bind(&merged.kind)
+        .bind(&merged.content)
+        .bind(merged.importance)
+        .bind(merged.strength)
+        .bind(merged.pinned as i64)
+        .bind(&merged.source)
+        .bind(&merged.status)
+        .bind(merged.created_at)
+        .bind(merged.updated_at)
+        .bind(merged.last_reinforced_at)
+        .bind(&merged.scope_kind)
+        .bind(&merged.scope_companion_id)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(db_err)?;
+        fts_index_insert(&mut *tx, row.get("id"), &merged.content).await?;
+
+        for source in &sources {
+            let mut tags = source.tags.clone();
+            tags.push(format!("superseded_by:{}", merged.memory_id));
+            sqlx::query("UPDATE companion_memories SET status = 'archived', tags = ?, updated_at = ? WHERE memory_id = ?")
+                .bind(serde_json::to_string(&tags).map_err(|error| {
+                    AppError::Internal(format!("serialize merged memory tags: {error}"))
+                })?)
+                .bind(now)
+                .bind(&source.memory_id)
+                .execute(&mut *tx)
+                .await
+                .map_err(db_err)?;
+        }
+        tx.commit().await.map_err(db_err)?;
+        Ok(merged)
     }
 
     /// Reinforce: bump strength toward 1.0 and refresh the reinforcement clock.
@@ -2671,9 +3104,11 @@ impl CompanionStore {
                 ));
             }
         }
-        sqlx::query(
+        let mut tx = self.pool.begin().await.map_err(db_err)?;
+        let row = sqlx::query(
             "INSERT INTO companion_memories(memory_id, kind, content, tags, importance, strength, pinned, source, status, created_at, updated_at, last_reinforced_at, scope_kind, scope_companion_id)
-             VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+             VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+             RETURNING id",
         )
         .bind(&mem.memory_id)
         .bind(&mem.kind)
@@ -2693,9 +3128,11 @@ impl CompanionStore {
         .bind(mem.last_reinforced_at)
         .bind(&mem.scope_kind)
         .bind(&mem.scope_companion_id)
-        .execute(&self.pool)
+        .fetch_one(&mut *tx)
         .await
         .map_err(db_err)?;
+        fts_index_insert(&mut *tx, row.get("id"), &mem.content).await?;
+        tx.commit().await.map_err(db_err)?;
         Ok(())
     }
 
@@ -3681,6 +4118,9 @@ mod tests {
             .await
             .unwrap();
         sqlx::raw_sql(schema).execute(&pool).await.unwrap();
+        // The FTS stanza is not under test here; create it so the failure
+        // points at the mutated fragment instead of a missing FTS table.
+        sqlx::raw_sql(FTS_SCHEMA).execute(&pool).await.unwrap();
         sqlx::raw_sql(&format!("PRAGMA user_version = {STORE_VERSION}"))
             .execute(&pool)
             .await
@@ -3903,6 +4343,212 @@ mod tests {
                 .await
                 .is_err()
         );
+    }
+
+    /// The pre-FTS v3 layout: current SCHEMA minus the embedding columns and
+    /// without the FTS5 stanza (which lives in `FTS_SCHEMA`, so plain SCHEMA
+    /// minus the columns IS the legacy layout).
+    fn legacy_v3_schema() -> String {
+        let legacy = SCHEMA.replacen("  embedding BLOB,\n  embedding_model TEXT,\n", "", 1);
+        assert_ne!(legacy, SCHEMA, "legacy fixture must strip the new columns");
+        legacy
+    }
+
+    /// Actual indexed-document count. `count(*)` on an external-content fts5
+    /// table mirrors the content table, so the docsize shadow table is the
+    /// only honest way to observe the index itself.
+    async fn fts_count(pool: &SqlitePool) -> i64 {
+        sqlx::query_scalar("SELECT count(*) FROM companion_memories_fts_docsize")
+            .fetch_one(pool)
+            .await
+            .unwrap()
+    }
+
+    async fn fts_match_count(pool: &SqlitePool, term: &str) -> i64 {
+        sqlx::query_scalar("SELECT count(*) FROM companion_memories_fts WHERE companion_memories_fts MATCH ?")
+            .bind(format!("\"{}\"", term.replace('"', "\"\"")))
+            .fetch_one(pool)
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn legacy_v3_file_store_upgrades_in_place_preserving_memories() {
+        let root = tempfile::tempdir().unwrap();
+        let database_path = root.path().join("memory.db");
+        let memory_id_active = CompanionMemoryId::new().into_string();
+        let memory_id_archived = CompanionMemoryId::new().into_string();
+        {
+            let pool = SqlitePoolOptions::new()
+                .max_connections(1)
+                .connect_with(
+                    SqliteConnectOptions::new()
+                        .filename(&database_path)
+                        .create_if_missing(true),
+                )
+                .await
+                .unwrap();
+            sqlx::raw_sql(&legacy_v3_schema()).execute(&pool).await.unwrap();
+            sqlx::raw_sql(&format!("PRAGMA user_version = {STORE_VERSION}"))
+                .execute(&pool)
+                .await
+                .unwrap();
+            for (memory_id, status, content) in [
+                (&memory_id_active, "active", "主人喜欢深烘焙咖啡豆"),
+                (&memory_id_archived, "archived", "主人去年在东京出差"),
+            ] {
+                sqlx::query(
+                    "INSERT INTO companion_memories(memory_id, kind, content, tags, importance, strength, pinned, source, status, created_at, updated_at, last_reinforced_at, scope_kind, scope_companion_id)
+                     VALUES(?, 'preference', ?, '[]', 0.8, 0.8, 0, 'manual', ?, 1, 1, 1, 'user', NULL)",
+                )
+                .bind(memory_id)
+                .bind(content)
+                .bind(status)
+                .execute(&pool)
+                .await
+                .unwrap();
+            }
+            pool.close().await;
+        }
+
+        let store = CompanionStore::open(root.path()).await.unwrap();
+
+        // The nullable embedding columns were added in place.
+        let columns: Vec<String> = sqlx::query_scalar("SELECT name FROM pragma_table_xinfo('companion_memories')")
+            .fetch_all(&store.pool)
+            .await
+            .unwrap();
+        assert!(columns.contains(&"embedding".to_owned()), "columns: {columns:?}");
+        assert!(columns.contains(&"embedding_model".to_owned()), "columns: {columns:?}");
+
+        // The FTS index exists and was backfilled with every row (active + archived).
+        assert_eq!(fts_count(&store.pool).await, 2);
+        assert_eq!(fts_match_count(&store.pool, "深烘焙").await, 1);
+        assert_eq!(fts_match_count(&store.pool, "东京出差").await, 1);
+
+        // Existing rows survived untouched.
+        let active = store.get_memory(&memory_id_active).await.unwrap().unwrap();
+        assert_eq!(active.content, "主人喜欢深烘焙咖啡豆");
+        assert_eq!(active.status, "active");
+        let archived = store.get_memory(&memory_id_archived).await.unwrap().unwrap();
+        assert_eq!(archived.status, "archived");
+
+        // Idempotent: a second open of the already-upgraded store succeeds.
+        drop(store);
+        let reopened = CompanionStore::open(root.path()).await.unwrap();
+        assert_eq!(fts_count(&reopened.pool).await, 2);
+    }
+
+    #[tokio::test]
+    async fn fts_index_rebuilds_when_out_of_sync() {
+        let root = tempfile::tempdir().unwrap();
+        {
+            let store = CompanionStore::open(root.path()).await.unwrap();
+            store
+                .insert_memory("knowledge", "Rust 的 borrow checker 很严格", &[], 0.8, "manual")
+                .await
+                .unwrap();
+            // Sabotage the index out-of-band (simulates a crash between the
+            // main-table write and the index write).
+            sqlx::query("INSERT INTO companion_memories_fts(companion_memories_fts) VALUES('delete-all')")
+                .execute(&store.pool)
+                .await
+                .unwrap();
+            assert_eq!(fts_count(&store.pool).await, 0);
+        }
+        let reopened = CompanionStore::open(root.path()).await.unwrap();
+        assert_eq!(fts_count(&reopened.pool).await, 1, "boot must rebuild a count-desynced index");
+        assert_eq!(fts_match_count(&reopened.pool, "borrow").await, 1);
+    }
+
+    #[tokio::test]
+    async fn fts_write_paths_keep_index_in_sync() {
+        let store = CompanionStore::open_memory().await.unwrap();
+
+        // insert
+        let m = store
+            .insert_memory("preference", "主人喜欢深烘焙咖啡豆", &[], 0.8, "manual")
+            .await
+            .unwrap();
+        assert_eq!(fts_count(&store.pool).await, 1);
+        assert_eq!(fts_match_count(&store.pool, "深烘焙").await, 1);
+
+        // update(content) re-indexes: old term gone, new term found
+        store
+            .update_memory(&m.memory_id, Some("主人现在只喝浅烘焙手冲"), None, None, None)
+            .await
+            .unwrap();
+        assert_eq!(fts_count(&store.pool).await, 1);
+        assert_eq!(fts_match_count(&store.pool, "深烘焙").await, 0);
+        assert_eq!(fts_match_count(&store.pool, "浅烘焙").await, 1);
+
+        // archive / restore only flip status — index untouched
+        store.archive_memories(std::slice::from_ref(&m.memory_id)).await.unwrap();
+        assert_eq!(fts_count(&store.pool).await, 1);
+        store
+            .update_memory(&m.memory_id, None, None, Some("active"), None)
+            .await
+            .unwrap();
+        assert_eq!(fts_count(&store.pool).await, 1);
+
+        // delete removes the index entry
+        store.delete_memory(&m.memory_id).await.unwrap();
+        assert_eq!(fts_count(&store.pool).await, 0);
+
+        // raw import path also indexes
+        let imported = CompanionMemory {
+            memory_id: CompanionMemoryId::new().into_string(),
+            kind: "episode".into(),
+            content: "上周和主人一起调通了流水线".into(),
+            tags: vec![],
+            importance: 0.7,
+            strength: 0.7,
+            pinned: false,
+            source: "import".into(),
+            status: "active".into(),
+            created_at: 1,
+            updated_at: 1,
+            last_reinforced_at: 1,
+            scope_kind: "user".into(),
+            scope_companion_id: None,
+        };
+        store.insert_memory_raw(&imported).await.unwrap();
+        assert_eq!(fts_match_count(&store.pool, "流水线").await, 1);
+
+        // delete_companion_rows drops the owner's private memories from the index
+        let owner = companion_fixture(7);
+        store
+            .insert_memory_scoped("task", "帮主人盯 CI 构建", &[], 0.8, "chat", MemoryScope::Companion(owner.clone()))
+            .await
+            .unwrap();
+        assert_eq!(fts_count(&store.pool).await, 2);
+        store.delete_companion_rows(&owner).await.unwrap();
+        assert_eq!(fts_count(&store.pool).await, 1);
+        assert_eq!(fts_match_count(&store.pool, "流水线").await, 1);
+    }
+
+    #[tokio::test]
+    async fn memory_import_transaction_indexes_fts() {
+        let store = CompanionStore::open_memory().await.unwrap();
+        let imported = CompanionMemory {
+            memory_id: CompanionMemoryId::new().into_string(),
+            kind: "knowledge".into(),
+            content: "跨机导入的记忆也要能检索".into(),
+            tags: vec![],
+            importance: 0.6,
+            strength: 0.6,
+            pinned: false,
+            source: "import".into(),
+            status: "active".into(),
+            created_at: 1,
+            updated_at: 1,
+            last_reinforced_at: 1,
+            scope_kind: "user".into(),
+            scope_companion_id: None,
+        };
+        let tx = store.begin_memory_import(std::slice::from_ref(&imported), &[]).await.unwrap();
+        tx.commit().await.unwrap();
+        assert_eq!(fts_match_count(&store.pool, "跨机导入").await, 1);
     }
 
     #[tokio::test]

@@ -19,11 +19,20 @@ pub const COMPANION_MEMORY_KINDS: [&str; 6] = ["profile", "preference", "knowled
 /// by `nomifun-companion` over its `CompanionStore`; `nomi-agent` only depends on this.
 #[async_trait]
 pub trait CompanionMemorySink: Send + Sync {
-    /// Search memories by keyword (optionally by kind / incl. archived).
-    /// `conversation_id` scopes the search to the owning companion (shared +
-    /// its own private memories), so one companion never recalls another's
-    /// private memories. Returns a human-readable digest the model can quote.
-    async fn recall(&self, conversation_id: &str, query: &str, kind: Option<&str>, include_archived: bool) -> Result<String, String>;
+    /// Full-text search over the companion's memories. `queries` are OR-merged
+    /// (multi-term query expansion); `include_archived` widens the search to
+    /// the archive layer. `conversation_id` scopes the search to the owning
+    /// companion (shared + its own private memories), so one companion never
+    /// recalls another's private memories. Returns a human-readable digest the
+    /// model can quote.
+    async fn recall(
+        &self,
+        conversation_id: &str,
+        queries: &[String],
+        kind: Option<&str>,
+        include_archived: bool,
+        limit: usize,
+    ) -> Result<String, String>;
 
     /// Persist one memory; implementations dedup. Returns a confirmation line.
     /// `conversation_id` identifies the session the save came from, so the
@@ -59,18 +68,24 @@ impl Tool for RecallMemoriesTool {
 
     fn description(&self) -> &str {
         "搜索你对主人的全部长期记忆（包含未注入上下文的与已归档的）。当主人问起过去的事、\
-         或你需要确认自己是否记得某事时使用。返回匹配的记忆列表。"
+         或你需要确认自己是否记得某事时使用。支持一次传多个查询词（queries）做查询扩展，\
+         找旧事/翻历史时带 include_archived。返回匹配的记忆列表。"
     }
 
     fn input_schema(&self) -> JsonSchema {
         json!({
             "type": "object",
             "properties": {
-                "query": {"type": "string", "description": "关键词（按内容模糊匹配）"},
+                "queries": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "查询词列表（OR 合并；建议同义词/近义词多给几个以扩大召回）"
+                },
+                "query": {"type": "string", "description": "（兼容旧参数）单个关键词，等价于 queries:[query]"},
                 "kind": {"type": "string", "enum": COMPANION_MEMORY_KINDS, "description": "可选：限定记忆类型"},
-                "include_archived": {"type": "boolean", "description": "是否包含已归档记忆，默认 false"}
-            },
-            "required": ["query"]
+                "include_archived": {"type": "boolean", "description": "是否包含已归档记忆，默认 false"},
+                "limit": {"type": "integer", "description": "最多返回多少条，默认 20，上限 50"}
+            }
         })
     }
 
@@ -79,10 +94,31 @@ impl Tool for RecallMemoriesTool {
     }
 
     async fn execute(&self, input: Value) -> ToolResult {
-        let query = input.get("query").and_then(|v| v.as_str()).unwrap_or("").trim();
-        if query.is_empty() {
+        let mut queries: Vec<String> = input
+            .get("queries")
+            .and_then(|v| v.as_array())
+            .map(|entries| {
+                entries
+                    .iter()
+                    .filter_map(|entry| entry.as_str())
+                    .map(str::trim)
+                    .filter(|term| !term.is_empty())
+                    .map(str::to_owned)
+                    .collect()
+            })
+            .unwrap_or_default();
+        if queries.is_empty()
+            && let Some(single) = input
+                .get("query")
+                .and_then(|v| v.as_str())
+                .map(str::trim)
+                .filter(|term| !term.is_empty())
+        {
+            queries.push(single.to_owned());
+        }
+        if queries.is_empty() {
             return ToolResult {
-                content: "query 不能为空".into(),
+                content: "queries 不能为空（传 queries 数组，或兼容的单个 query）".into(),
                 is_error: true,
                 images: Vec::new(),
             };
@@ -92,7 +128,12 @@ impl Tool for RecallMemoriesTool {
             .and_then(|v| v.as_str())
             .filter(|k| COMPANION_MEMORY_KINDS.contains(k));
         let include_archived = input.get("include_archived").and_then(|v| v.as_bool()).unwrap_or(false);
-        match self.sink.recall(&self.conversation_id, query, kind, include_archived).await {
+        let limit = input.get("limit").and_then(|v| v.as_i64()).unwrap_or(20).clamp(1, 50) as usize;
+        match self
+            .sink
+            .recall(&self.conversation_id, &queries, kind, include_archived, limit)
+            .await
+        {
             Ok(out) => ToolResult {
                 content: out,
                 is_error: false,
@@ -391,8 +432,8 @@ mod tests {
 
     #[async_trait]
     impl CompanionMemorySink for RecordingSink {
-        async fn recall(&self, _conversation_id: &str, query: &str, kind: Option<&str>, _archived: bool) -> Result<String, String> {
-            Ok(format!("hits for {query} kind={kind:?}"))
+        async fn recall(&self, _conversation_id: &str, queries: &[String], kind: Option<&str>, _archived: bool, limit: usize) -> Result<String, String> {
+            Ok(format!("hits for {} kind={kind:?} limit={limit}", queries.join("+")))
         }
         async fn save(&self, conversation_id: &str, kind: &str, content: &str, _tags: &[String]) -> Result<String, String> {
             self.saved
@@ -417,13 +458,29 @@ mod tests {
         let tool = RecallMemoriesTool::new(sink(), "conv_t");
         let bad = tool.execute(json!({})).await;
         assert!(bad.is_error);
+        let blank = tool.execute(json!({"queries": ["  ", ""]})).await;
+        assert!(blank.is_error, "whitespace-only queries are rejected");
         let ok = tool.execute(json!({"query": "结论", "kind": "preference"})).await;
         assert!(!ok.is_error);
+        assert!(ok.content.contains("结论"), "legacy single query stays an alias");
         assert!(ok.content.contains("preference"));
+        // Multi-query expansion reaches the sink OR-merged.
+        let multi = tool.execute(json!({"queries": ["咖啡", "拿铁"], "limit": 5})).await;
+        assert!(!multi.is_error);
+        assert!(multi.content.contains("咖啡+拿铁"));
+        assert!(multi.content.contains("limit=5"));
+        // `queries` wins over the legacy alias when both are present.
+        let both = tool.execute(json!({"queries": ["新词"], "query": "旧词"})).await;
+        assert!(both.content.contains("新词") && !both.content.contains("旧词"));
         // Invalid kind is dropped, not an error.
         let loose = tool.execute(json!({"query": "x", "kind": "bogus"})).await;
         assert!(!loose.is_error);
         assert!(loose.content.contains("None"));
+        // limit clamps into 1..=50 and defaults to 20.
+        let clamped = tool.execute(json!({"query": "x", "limit": 9999})).await;
+        assert!(clamped.content.contains("limit=50"));
+        let defaulted = tool.execute(json!({"query": "x"})).await;
+        assert!(defaulted.content.contains("limit=20"));
     }
 
     #[tokio::test]
