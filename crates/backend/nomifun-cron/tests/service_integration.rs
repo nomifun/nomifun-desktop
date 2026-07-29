@@ -229,6 +229,8 @@ impl StubConvRepo {
                 result_ok,
                 result_text: result_text.map(str::to_owned),
                 result_error: result_error.map(str::to_owned),
+                result_error_code: None,
+                result_error_retryable: None,
                 created_at: now_ms(),
                 updated_at: now_ms(),
                 completed_at: (status == "completed").then(now_ms),

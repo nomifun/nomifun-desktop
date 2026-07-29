@@ -640,6 +640,8 @@ impl IConversationRepository for MockRepo {
             result_ok: None,
             result_text: None,
             result_error: None,
+            result_error_code: None,
+            result_error_retryable: None,
             created_at: now,
             updated_at: now,
             completed_at: None,
