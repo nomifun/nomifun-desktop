@@ -1534,7 +1534,12 @@ pub(crate) struct CdpHostRuntime {
     attach_loop: tokio::task::JoinHandle<()>,
     target_router_loop: tokio::task::JoinHandle<()>,
     download_loop: Option<tokio::task::JoinHandle<()>>,
-    firewall_loop: tokio::task::JoinHandle<()>,
+    /// 出口防火墙循环的 abort 句柄（`JoinHandle` 本体归 `firewall_watchdog` 所有，
+    /// 供其监视非 abort 死亡）。shutdown/Drop 经此主动 abort 循环。
+    firewall_loop: tokio::task::AbortHandle,
+    /// 防火墙 watchdog（[`spawn_firewall_watchdog`]）：防火墙任务意外死亡（panic
+    /// 逃出循环）→ fail 整条 CDP 连接（fail-closed，恢复 = 重启 host）。
+    firewall_watchdog: tokio::task::JoinHandle<()>,
     router: Arc<HostTargetRouter>,
     download_dir: Option<String>,
     firewall_config: crate::firewall::FirewallConfig,
@@ -1679,6 +1684,9 @@ impl CdpHostRuntime {
             dns_resolver,
             crate::firewall::DnsResolverCache::default(),
         );
+        // watchdog 拿走 JoinHandle 监视意外死亡；shutdown/Drop 用 AbortHandle 主动停。
+        let firewall_abort = firewall_loop.abort_handle();
+        let firewall_watchdog = spawn_firewall_watchdog(conn.clone(), firewall_loop);
         if let Err(error) = enable_fetch_on_session(&conn, ROOT_SESSION).await {
             tracing::warn!(%error, "Fetch.enable on shared browser session failed");
         }
@@ -1691,7 +1699,8 @@ impl CdpHostRuntime {
             attach_loop,
             target_router_loop,
             download_loop,
-            firewall_loop,
+            firewall_loop: firewall_abort,
+            firewall_watchdog,
             router,
             download_dir,
             firewall_config,
@@ -1728,6 +1737,9 @@ impl CdpHostRuntime {
         }
         self.shutdown.store(true, Ordering::Release);
         self.target_router_loop.abort();
+        // 先停 watchdog 再 abort 防火墙循环：主动关停绝不能被误判为意外死亡
+        // （watchdog 对 is_cancelled 本就免疫，此顺序是双保险）。
+        self.firewall_watchdog.abort();
         self.firewall_loop.abort();
         self.attach_loop.abort();
         if let Some(loop_handle) = &self.download_loop {
@@ -1960,6 +1972,8 @@ impl Drop for DurableProcessCleanup {
 impl Drop for CdpHostRuntime {
     fn drop(&mut self) {
         self.target_router_loop.abort();
+        // 顺序同 shutdown：先停 watchdog，主动关停绝不误判为防火墙意外死亡。
+        self.firewall_watchdog.abort();
         self.firewall_loop.abort();
         self.attach_loop.abort();
         if let Some(loop_handle) = &self.download_loop {
@@ -2884,19 +2898,22 @@ pub struct CdpBackend {
     /// `BrowserError::Blocked`（fail-closed）。`None`（无 per-pet 上下文，如纯引擎冒烟）⇒
     /// **一律拒绝上传**（fail-closed，default-deny）。
     workspace_dir: Option<PathBuf>,
-    /// **出口防火墙后台循环句柄**（E5）——保活。对**每个** session（根 browser / page / OOPIF /
-    /// **service_worker**）挂 `Fetch.enable` 全流量拦截，订阅 `Fetch.requestPaused`，经
-    /// [`crate::firewall::decide`] 判定后 `continueRequest` 放行 / `failRequest` 阻断（IP 封禁硬阻）/
-    /// （F1）升审批（跨域 POST-body）。**SW 必须也拦**（裁决⑪/不变量⑬）——P0 保持 SW attach，本循环
-    /// 对其 session 也 Fetch.enable。backend Drop 即连带 abort。
-    _firewall_loop: Option<tokio::task::JoinHandle<()>>,
+    /// **出口防火墙后台循环的 watchdog 句柄**（E5 + fail-closed 加固）——保活。防火墙循环对
+    /// **每个** session（根 browser / page / OOPIF / **service_worker**）挂 `Fetch.enable` 全流量
+    /// 拦截，订阅 `Fetch.requestPaused`，经 [`crate::firewall::decide`] 判定后 `continueRequest`
+    /// 放行 / `failRequest` 阻断（IP 封禁硬阻）/（F1）升审批（跨域 POST-body）。**SW 必须也拦**
+    /// （裁决⑪/不变量⑬）——P0 保持 SW attach，本循环对其 session 也 Fetch.enable。
+    /// 本字段持的是 [`spawn_firewall_watchdog`] 的句柄（循环自身的 `JoinHandle` 归 watchdog 所有）：
+    /// 循环意外死亡（panic 逃出）→ watchdog fail 整条连接（fail-closed）。连接关闭时循环自然退出、
+    /// watchdog 随之收尾。
+    _firewall_watchdog: Option<tokio::task::JoinHandle<()>>,
     /// **P3-G1：注入的出口防火墙配置快照**（裁决①）。= `EngineConfig.firewall`（经 build_backend →
-    /// from_launched 透传），**与 `_firewall_loop` 持有的同一份配置**。仅供测试 accessor
+    /// from_launched 透传），**与防火墙循环持有的同一份配置**。仅供测试 accessor
     /// [`Self::firewall_config_for_test`] 读回断言「注入值真的到达引擎」（loop 在另一线程内消费，
     /// 无法直接观测）。**P3-D1 后 `FirewallConfig` 不再 `Copy`（改 `Clone`，因加了 `Vec` 域名策略字段）**，
     /// 存一份快照（`.clone()`，零热路径成本）。产品路径不读它（loop 才是真消费者）。
     firewall_config: crate::firewall::FirewallConfig,
-    /// **P3-D2：per-session 已批准出口域集合**（决策3 always_allow）。与 `_firewall_loop` 持有的
+    /// **P3-D2：per-session 已批准出口域集合**（决策3 always_allow）。与防火墙循环持有的
     /// 同一份（`Arc<Mutex<…>>` 共享）：审批一条被门控出口请求时若选「记住此域」（`EgressVerdict::
     /// ContinueAndRemember`），目标 eTLD+1 记进这里 → 同域后续出口请求不再悬挂审批直接放行。engine
     /// 生命周期内有效（非持久——持久域策略走 `FirewallConfig.allow_etld1` 的 secret 真值，X2）。
@@ -3114,6 +3131,9 @@ impl CdpBackend {
             dns_resolver,
             dns_cache,
         );
+        // fail-closed 加固：watchdog 拿走循环句柄，任务意外死亡（panic 逃出）即 fail
+        // 整条连接（见 spawn_firewall_watchdog doc）。
+        let firewall_watchdog = spawn_firewall_watchdog(conn.clone(), firewall_loop);
         // 已附着 session 补挂（循环只覆盖**之后**新 attach 的；启动时已在的根 + 初始 page 在此补）。
         if let Err(e) = enable_fetch_on_session(&conn, ROOT_SESSION).await {
             tracing::warn!(error = %e, "Fetch.enable on root browser session failed; egress firewall degraded");
@@ -3166,7 +3186,7 @@ impl CdpBackend {
             download_dir,
             // SD-2：上传路径沙箱根（per-pet workspace）。act_upload_file 逐路径 canonicalize + 包含判定。
             workspace_dir,
-            _firewall_loop: Some(firewall_loop),
+            _firewall_watchdog: Some(firewall_watchdog),
             // P3-G1：保留注入的 firewall 快照（与 loop 同值）供测试读回断言注入生效。
             firewall_config,
             // P3-D2：保留 always_allow 已批准域集合（与 loop 同 Arc）。
@@ -3345,7 +3365,7 @@ impl CdpBackend {
             _download_loop: None,
             download_dir,
             workspace_dir: config.workspace_dir,
-            _firewall_loop: None,
+            _firewall_watchdog: None,
             firewall_config: host.firewall_config.clone(),
             approved_domains: host.approved_domains.clone(),
             evaluate_gate: AsyncMutex::new(crate::evaluate::EvaluateGate {
@@ -7981,6 +8001,42 @@ fn spawn_fetch_firewall_loop(
     })
 }
 
+/// **防火墙 watchdog（fail-closed）**：监视出口防火墙循环的 `JoinHandle`，任务
+/// **非 abort 死亡**（panic 逃出循环，如经注入的 `EgressApprover` trait 对象逃出
+/// `handle_paused_request`）时把**整条 CDP 连接 fail 掉**（`Connection::shutdown`）。
+///
+/// 理由：防火墙循环一死，其 `Fetch.requestPaused` 可靠订阅接收端即被 drop——
+/// 已 arm 的 session 的被拦请求从此无人应答（永久悬挂），新 session 则会被
+/// transport 的粘性 arm 标记 fail-closed 拒绝放行。二者都不可恢复，唯一诚实的
+/// 处置是**立即 fail 整条连接**：挂起命令全部解除为 `Closed`、pipe 运输下
+/// Chromium 读到 EOF 自退。恢复路径 = 重启 host。
+///
+/// 正常退出（`Ok(())`，循环因连接关闭而结束）与**主动 abort**（shutdown/Drop 路径）
+/// **不**触发 fail——只有意外死亡才算。
+fn spawn_firewall_watchdog(
+    conn: Connection,
+    firewall_loop: tokio::task::JoinHandle<()>,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        match firewall_loop.await {
+            // 循环自然退出：可靠通道已关（连接已 fail/关闭），无需再动作。
+            Ok(()) => {}
+            // 主动 abort（shutdown/Drop 编排）：非死亡，勿 fail 连接。
+            Err(join_error) if join_error.is_cancelled() => {}
+            // 意外死亡（panic 逃出循环）→ fail-closed：fail 整条连接。
+            Err(join_error) => {
+                tracing::error!(
+                    target: "nomi_browser_engine::backend::cdp",
+                    error = %join_error,
+                    "egress firewall task died unexpectedly; failing the CDP connection closed \
+                     (relaunch the browser host to recover)"
+                );
+                conn.shutdown().await;
+            }
+        }
+    })
+}
+
 /// 处理一条 `Fetch.requestPaused`：抽取判定所需输入 → [`crate::firewall::decide`] → dispatch
 /// continue/fail/（D2）**悬挂等审批**。**绝不**让请求**无条件**悬挂（Allow/Block 立即 continue/fail；
 /// GatePost 走 D2 悬挂机制，仍有界——超时即 fail-closed，绝不永久挂起）。
@@ -8791,6 +8847,59 @@ mod tests {
         assert_eq!(released["sessionId"], "S-early");
 
         firewall_loop.abort();
+        connection.shutdown().await;
+        server.abort();
+        let _ = server.await;
+    }
+
+    /// **防火墙 watchdog fail-closed**：防火墙任务**非 abort 死亡**（panic 逃出
+    /// 循环，如经注入的 EgressApprover trait 对象）时，watchdog 必须把整条 CDP
+    /// 连接 fail 掉——后续命令全部 `Closed` 短路，绝不让引擎在「防火墙已死、
+    /// 拦截半失效」的状态下继续静默运行。
+    #[tokio::test]
+    async fn firewall_watchdog_fails_connection_closed_when_firewall_task_dies() {
+        let (connection, _requests, server) = generic_recording_fake_connection().await;
+
+        // 模拟防火墙任务死亡：panic 逃出任务体（JoinError::is_panic()==true）。
+        let doomed_firewall = tokio::spawn(async {
+            panic!("simulated egress firewall death (approver panic)");
+        });
+        let watchdog = spawn_firewall_watchdog(connection.clone(), doomed_firewall);
+        watchdog.await.expect("watchdog itself must not panic");
+
+        // 连接必须已 fail-closed：任何命令都 Closed 短路。
+        let error = connection
+            .send::<FetchEnableParams>(ROOT_SESSION, &FetchEnableParams::default())
+            .await
+            .expect_err("commands after firewall death must fail closed");
+        assert!(
+            matches!(error, TransportError::Closed),
+            "expected TransportError::Closed after the watchdog fired, got: {error:?}"
+        );
+
+        server.abort();
+        let _ = server.await;
+    }
+
+    /// **watchdog 不误伤主动关停**：shutdown/Drop 编排对防火墙循环的 `abort()`
+    /// 是刻意行为（`JoinError::is_cancelled()`），watchdog 必须无动作——连接保持
+    /// 可用（否则每次正常关停都会被 watchdog 抢先 fail 连接，破坏关停命令编排）。
+    #[tokio::test]
+    async fn firewall_watchdog_ignores_deliberate_abort() {
+        let (connection, _requests, server) = generic_recording_fake_connection().await;
+
+        let firewall_loop = tokio::spawn(std::future::pending::<()>());
+        let abort_handle = firewall_loop.abort_handle();
+        let watchdog = spawn_firewall_watchdog(connection.clone(), firewall_loop);
+        abort_handle.abort();
+        watchdog.await.expect("watchdog itself must not panic");
+
+        // 连接必须仍可用：主动 abort 不是防火墙死亡。
+        connection
+            .send::<FetchEnableParams>(ROOT_SESSION, &FetchEnableParams::default())
+            .await
+            .expect("connection must stay usable after a deliberate abort");
+
         connection.shutdown().await;
         server.abort();
         let _ = server.await;
@@ -10284,7 +10393,7 @@ mod tests {
             _download_loop: None,
             download_dir: None,
             workspace_dir: None,
-            _firewall_loop: None,
+            _firewall_watchdog: None,
             firewall_config: crate::firewall::FirewallConfig::default(),
             approved_domains: crate::firewall::ApprovedDomains::new(),
             evaluate_gate: AsyncMutex::new(crate::evaluate::EvaluateGate::default()),

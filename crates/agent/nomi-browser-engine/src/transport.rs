@@ -16,7 +16,7 @@
 //!
 //! 错误：本模块自有 [`TransportError`]（定义在 `session.rs`），不耦合 `BrowserError`。
 
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -72,6 +72,16 @@ struct ConnectionInner {
     next_id: AtomicUsize,
     /// 每命令默认超时。
     command_timeout: Duration,
+    /// **粘性防火墙 arm 标记（fail-closed 语义锚点）**：本连接上**曾经**注册过
+    /// `Fetch.requestPaused` 可靠订阅者即置位，此后**永不**清除。它把
+    /// `handle_attached` 的两种「无订阅者」区分开：
+    /// - 从未 arm（`Launched::connect` 诊断路径）→ 跳过 `Fetch.enable`，CDP 默认
+    ///   不拦截网络（与引入防火墙前一致，正确）；
+    /// - **曾 arm 后消失**（防火墙任务 panic/死亡，接收端被 drop）→ **fail
+    ///   closed**：拒绝放行新 session（保持 waiting-for-debugger），绝不静默退回
+    ///   无拦截——那是出口防火墙的无声逃逸。恢复路径是重启 host（cdp.rs 的
+    ///   watchdog 会在防火墙任务非 abort 死亡时把整条连接 fail 掉）。
+    fetch_firewall_armed: AtomicBool,
 }
 
 /// Removes a registered callback when a `send` future is cancelled or dropped
@@ -121,6 +131,7 @@ impl Connection {
             registry: Arc::clone(&registry),
             next_id: AtomicUsize::new(1),
             command_timeout: DEFAULT_COMMAND_TIMEOUT,
+            fetch_firewall_armed: AtomicBool::new(false),
         });
 
         // 后台 read loop：每条文本喂纯路由；WS 关闭/出错 → fail_connection 解除所有挂起。
@@ -174,6 +185,7 @@ impl Connection {
             registry: Arc::clone(&registry),
             next_id: AtomicUsize::new(1),
             command_timeout: DEFAULT_COMMAND_TIMEOUT,
+            fetch_firewall_armed: AtomicBool::new(false),
         });
 
         // 后台 read loop:从管道累积字节,按 NUL 切帧,每帧喂纯路由;EOF/出错 → fail_connection。
@@ -247,11 +259,19 @@ impl Connection {
 
     /// Lossless control-event subscription used for events whose omission can
     /// leave a target or network request paused indefinitely.
+    ///
+    /// `Fetch.requestPaused` 的订阅额外**粘性置位** `fetch_firewall_armed`：从此
+    /// `handle_attached` 视本连接为「防火墙曾 arm」——订阅者若消失（防火墙任务
+    /// 死亡）即 fail closed，绝不静默退回无拦截（见字段 doc）。
     pub fn subscribe_reliable(
         &self,
         method: impl Into<String>,
         session_id: Option<&str>,
     ) -> tokio::sync::mpsc::UnboundedReceiver<CdpEvent> {
+        let method = method.into();
+        if method == EventRequestPaused::IDENTIFIER {
+            self.inner.fetch_firewall_armed.store(true, Ordering::Release);
+        }
         self.inner.registry.subscribe_reliable(method, session_id)
     }
 
@@ -368,6 +388,9 @@ impl Connection {
         //    （不拦截）网络——与引入 Fetch.enable 前的行为一致。
         //    若 Fetch.enable 失败，保持 waiting-for-debugger 状态即为 fail-closed，
         //    绝不能让首批请求绕过策略。
+        //    **防火墙曾 arm 后消失 ≠ 从未 arm**：`fetch_firewall_armed` 粘性标记
+        //    区分二者——防火墙任务死亡（订阅者被 drop）时对新 session **fail
+        //    closed**（报错、不放行），绝不静默跳过 Fetch.enable（无声出口逃逸）。
         if self
             .inner
             .registry
@@ -375,6 +398,11 @@ impl Connection {
         {
             let fetch = FetchEnableParams::default();
             self.send::<FetchEnableParams>(&sid, &fetch).await?;
+        } else if self.inner.fetch_firewall_armed.load(Ordering::Acquire) {
+            return Err(TransportError::Protocol(format!(
+                "egress firewall subscriber vanished after arming; refusing to release \
+                 attached target (session {sid}) without interception (fail-closed)"
+            )));
         }
 
         // 3) **级联 setAutoAttach 到 page/iframe 子 session**：OOPIF（跨进程 iframe）只在其**所属帧的
@@ -623,6 +651,44 @@ mod tests {
         assert_eq!(
             requests[fetch_at]["sessionId"], "S2",
             "Fetch.enable must target the attached child session"
+        );
+    }
+
+    /// **防火墙死亡 fail-closed**：一旦本连接上注册过 `Fetch.requestPaused` 可靠
+    /// 订阅者（生产防火墙已 arm），此后订阅者消失（防火墙任务 panic/死亡，接收端
+    /// 被 drop）时，`handle_attached` 对新 session **必须失败**——绝不能退回
+    /// 「静默跳过 Fetch.enable + 照常放行」（那是无声出口逃逸）。目标保持
+    /// waiting-for-debugger 即 fail-closed；恢复路径是重启 host。
+    #[tokio::test]
+    async fn handle_attached_fails_closed_when_armed_firewall_subscriber_vanishes() {
+        let (ws_url, server) = recording_fake_ws_server().await;
+        let conn = Connection::connect(&ws_url).await.expect("connect fake");
+        // 生产编排：防火墙先注册可靠订阅（armed）……随后其任务死亡（接收端 drop）。
+        let paused_rx = conn.subscribe_reliable(EventRequestPaused::IDENTIFIER, None);
+        drop(paused_rx);
+
+        let error = conn
+            .handle_attached(&page_attach_event("S3"))
+            .await
+            .expect_err("armed firewall vanished: handle_attached must fail closed");
+        assert!(
+            matches!(error, TransportError::Protocol(_)),
+            "expected a protocol error surfacing the vanished firewall, got: {error:?}"
+        );
+
+        conn.shutdown().await;
+        let requests = server.await.expect("fake server joins");
+        let methods: Vec<&str> = requests
+            .iter()
+            .map(|request| request["method"].as_str().unwrap())
+            .collect();
+        assert!(
+            !methods.contains(&"Runtime.runIfWaitingForDebugger"),
+            "the target must NOT be released without interception: {methods:?}"
+        );
+        assert!(
+            !methods.contains(&"Fetch.enable"),
+            "Fetch.enable without a consumer would wedge the session; it must not be issued: {methods:?}"
         );
     }
 
