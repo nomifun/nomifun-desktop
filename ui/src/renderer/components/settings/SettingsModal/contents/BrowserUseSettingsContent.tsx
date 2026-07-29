@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { isBackendHttpError } from '@/common/adapter/httpBridge';
+import { AUTH_EXPIRED_EVENT, isBackendHttpError } from '@/common/adapter/httpBridge';
 import { configService } from '@/common/config/configService';
 import {
   BROWSER_DISPLAY_MODE_POLICY_VERSION,
@@ -235,6 +235,70 @@ export function startBrowserLoginPromotionPoll({
       handle = undefined;
     }
   };
+}
+
+// ---------------------------------------------------------------------------
+// Navigation-surviving promotion watch.
+//
+// The queued login branch starts this watch and immediately navigates to
+// /browser; /settings/browser-use is a routed page, so the settings component
+// unmounts before the poll's first 2s tick. The watch therefore lives at
+// module level: component lifecycles never own or cancel it. It ends only by
+// its own terminal states (opened / failed / timeout), an explicit
+// close-login cancel, or auth loss — so the queued toast's promise ("we'll
+// tell you when it opens") is kept regardless of navigation, and no interval
+// outlives a logged-out session.
+// ---------------------------------------------------------------------------
+
+let activeLoginPromotionStop: (() => void) | null = null;
+let detachLoginPromotionAuthListener: (() => void) | null = null;
+
+/** Forget the active watch and its auth listener without stopping the poll. */
+function forgetBrowserLoginPromotionWatch(): void {
+  activeLoginPromotionStop = null;
+  detachLoginPromotionAuthListener?.();
+  detachLoginPromotionAuthListener = null;
+}
+
+export function hasBrowserLoginPromotionWatch(): boolean {
+  return activeLoginPromotionStop !== null;
+}
+
+/** Stop the active watch (if any) without firing its callbacks. */
+export function cancelBrowserLoginPromotionWatch(): void {
+  const stop = activeLoginPromotionStop;
+  forgetBrowserLoginPromotionWatch();
+  stop?.();
+}
+
+/**
+ * Start (or replace) the singleton promotion watch. At most one queued
+ * Primary sign-in Lane exists per user, so a new queued login supersedes any
+ * previous watch instead of stacking polls.
+ */
+export function beginBrowserLoginPromotionWatch(
+  options: BrowserLoginPromotionPollOptions
+): void {
+  cancelBrowserLoginPromotionWatch();
+  activeLoginPromotionStop = startBrowserLoginPromotionPoll({
+    ...options,
+    onOpened: () => {
+      forgetBrowserLoginPromotionWatch();
+      options.onOpened();
+    },
+    onStopped: (reason) => {
+      forgetBrowserLoginPromotionWatch();
+      options.onStopped(reason);
+    },
+  });
+  // Auth loss (WebUI session expiry / logout redirect) must not leave a lanes
+  // poll spinning against 401s for the rest of the attempt budget.
+  if (typeof window !== 'undefined' && typeof window.addEventListener === 'function') {
+    const onAuthExpired = () => cancelBrowserLoginPromotionWatch();
+    window.addEventListener(AUTH_EXPIRED_EVENT, onAuthExpired);
+    detachLoginPromotionAuthListener = () =>
+      window.removeEventListener(AUTH_EXPIRED_EVENT, onAuthExpired);
+  }
 }
 
 export type BrowserSecuritySettings = {
@@ -479,7 +543,6 @@ const BrowserUseSettingsContent: React.FC = () => {
   const securitySettingsSavingRef = useRef(false);
   const [loginOpen, setLoginOpen] = useState(false);
   const [loginBusy, setLoginBusy] = useState(false);
-  const loginPromotionStopRef = useRef<(() => void) | null>(null);
   const [browserCapabilities, setBrowserCapabilities] = useState(() =>
     resolveBrowserOverviewCapabilities(null)
   );
@@ -631,17 +694,13 @@ const BrowserUseSettingsContent: React.FC = () => {
     };
   }, [canManagePrimaryIdentity]);
 
-  useEffect(
-    () => () => {
-      loginPromotionStopRef.current?.();
-      loginPromotionStopRef.current = null;
-    },
-    []
-  );
-
+  // The queued promotion watch is intentionally NOT cancelled on unmount:
+  // starting it is immediately followed by navigate('/browser'), which
+  // unmounts this routed page. The module-level singleton keeps the promise
+  // made by the queued toast; it ends via its own terminal states,
+  // close-login, or auth loss.
   const watchQueuedLoginPromotion = useCallback((laneId: string | undefined) => {
-    loginPromotionStopRef.current?.();
-    loginPromotionStopRef.current = startBrowserLoginPromotionPoll({
+    beginBrowserLoginPromotionWatch({
       probeLifecycle: async () => {
         // No lane id means there is nothing to promote: stop as failed.
         if (!laneId) return null;
@@ -655,11 +714,9 @@ const BrowserUseSettingsContent: React.FC = () => {
         return result?.foregrounded === true;
       },
       onOpened: () => {
-        loginPromotionStopRef.current = null;
         Message.info(translationRef.current('settings.browserLoginOpenedHint'));
       },
       onStopped: (reason) => {
-        loginPromotionStopRef.current = null;
         setLoginOpen(false);
         Message.error(
           translationRef.current(
@@ -678,8 +735,7 @@ const BrowserUseSettingsContent: React.FC = () => {
     setLoginBusy(true);
     try {
       if (loginOpen) {
-        loginPromotionStopRef.current?.();
-        loginPromotionStopRef.current = null;
+        cancelBrowserLoginPromotionWatch();
         const res = await ipcBridge.browserLogin.close.invoke();
         setLoginOpen(res ? !!res.active : false);
       } else {
