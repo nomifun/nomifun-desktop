@@ -5,7 +5,7 @@ use sqlx::{Sqlite, SqlitePool, Transaction};
 
 use nomifun_common::{
     AgentId, CompanionId, ConversationId, CronJobId, MessageId, PaginatedResult, ProviderId,
-    ProviderWithModel, PublicAgentId, RemoteAgentId, RequirementId, TimestampMs, validate_uuidv7,
+    ProviderWithModel, RemoteAgentId, RequirementId, TimestampMs, validate_uuidv7,
 };
 
 use crate::error::DbError;
@@ -847,13 +847,6 @@ async fn lock_conversation_extra_references(
         CompanionId::parse(companion_id).map_err(|error| {
             DbError::Conflict(format!(
                 "Conversation extra.companion_id is not a canonical UUIDv7: {error}"
-            ))
-        })?;
-    }
-    if let Some(public_agent_id) = optional_extra_id(object, "public_agent_id")? {
-        PublicAgentId::parse(public_agent_id).map_err(|error| {
-            DbError::Conflict(format!(
-                "Conversation extra.public_agent_id is not a canonical UUIDv7: {error}"
             ))
         })?;
     }

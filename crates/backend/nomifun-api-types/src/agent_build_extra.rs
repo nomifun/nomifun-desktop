@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use nomifun_common::{
-    CompanionId, CronJobId, DelegationPolicy, PublicAgentId, RemoteAgentId, UserId,
+    CompanionId, CronJobId, DelegationPolicy, RemoteAgentId, UserId,
 };
 use serde::{Deserialize, Serialize};
 
@@ -29,7 +29,6 @@ macro_rules! optional_id_deserializer {
 }
 
 optional_id_deserializer!(deserialize_companion_id, CompanionId);
-optional_id_deserializer!(deserialize_public_agent_id, PublicAgentId);
 optional_id_deserializer!(deserialize_user_id, UserId);
 optional_id_deserializer!(deserialize_cron_job_id, CronJobId);
 
@@ -352,18 +351,6 @@ pub struct NomiBuildExtra {
     /// conversation 时设置；普通会话恒空 = 不限制。
     #[serde(default)]
     pub allowed_tools: Vec<String>,
-    /// 对外服务信任档（正交于 Surface）。后端设定；`PublicService` 令 nomi 工厂把
-    /// 会话硬钳到安全白名单（关网关 / computer / browser / delegation），覆盖任何上游
-    /// 传入的工具授予——execution-time 后端权威闸。缺省 `Private` = 今日行为，零回归。
-    #[serde(default)]
-    pub exposure: crate::ExposureMode,
-    /// 对外伙伴（public agent / 对外服务）绑定 id。置位即标记本会话为对外服务：
-    /// nomi 工厂据此把 `exposure` 升到 `PublicService`（硬钳，安全边界），并从
-    /// `PublicAgentConfig` LIVE 解析人格 / 服务守则 / grounded / 知识库范围。后端
-    /// 设定 only —— HTTP 会话路由从 client extra 中剥离，
-    /// 防止自授权。缺省 `None` = 非对外会话。
-    #[serde(default, deserialize_with = "deserialize_public_agent_id")]
-    pub public_agent_id: Option<String>,
     /// Conversation-level delegation intent. This shapes when the Agent uses
     /// the unified persistent execution tools; it never grants tool authority.
     /// The factory always overwrites this from the typed runtime build option;

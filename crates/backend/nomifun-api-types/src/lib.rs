@@ -12,7 +12,6 @@ mod connection_test;
 mod conversation;
 mod cron;
 mod custom_agent;
-mod exposure;
 mod extension;
 mod file;
 mod idmm;
@@ -77,7 +76,6 @@ pub use agent_execution_template::{
     CreateAgentExecutionTemplateRequest, CreateExecutionFromTemplateRequest,
     UpdateAgentExecutionTemplateRequest,
 };
-pub use exposure::{ExposureClamp, ExposureMode, SAFE_PUBLIC_SERVICE_TOOLS, exposure_clamp};
 pub use preset::{
     AgentPreference, CreatePresetRequest, CreatePresetTagRequest, ImportPresetsRequest,
     ImportPresetsResult, KnowledgeBaseBinding, ModelPreference, PresetImportError,

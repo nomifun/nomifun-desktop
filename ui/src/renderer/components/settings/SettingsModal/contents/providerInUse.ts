@@ -7,22 +7,22 @@
 import {
   parseCompanionId,
   parseConversationId,
+  parseCsAgentId,
   parseExecutionId,
-  parsePublicAgentId,
   type CompanionId,
   type ConversationId,
+  type CsAgentId,
   type ExecutionId,
-  type PublicAgentId,
 } from '@/common/types/ids';
 
 export type ProviderUsageFeature =
   | 'desktopCompanion'
-  | 'publicCompanion'
+  | 'customerService'
   | 'smartDecision'
   | 'conversation'
   | 'agentExecution';
 
-export type ProviderUsageTargetId = CompanionId | PublicAgentId | ConversationId | ExecutionId;
+export type ProviderUsageTargetId = CompanionId | CsAgentId | ConversationId | ExecutionId;
 
 export interface ProviderUsage {
   feature: ProviderUsageFeature;
@@ -37,8 +37,8 @@ export function featureRoute(feature: ProviderUsageFeature, targetId?: ProviderU
       // Desktop-companion model control (CompanionModelControl → profile.model)
       // lives on the Nomi config page; /companion is the transparent pet overlay.
       return '/nomi';
-    case 'publicCompanion':
-      return targetId ? `/public-companions/${targetId}` : '/public-companions';
+    case 'customerService':
+      return targetId ? `/customer-service/` : '/customer-service';
     case 'smartDecision':
       // IDMM global backup model lives in Global Model Config → IDMM tab,
       // where backup_provider_id / backup_model can be cleared to unbind.
@@ -74,14 +74,14 @@ export function parseProviderInUseDetails(details: unknown): ProviderUsage[] {
       const raw = item as { feature?: unknown; label?: unknown; targetId?: unknown };
       if (typeof raw.feature !== 'string' || typeof raw.label !== 'string') return [];
       const feature = raw.feature as ProviderUsageFeature;
-      if (!['desktopCompanion', 'publicCompanion', 'smartDecision', 'conversation', 'agentExecution'].includes(feature)) {
+      if (!['desktopCompanion', 'customerService', 'smartDecision', 'conversation', 'agentExecution'].includes(feature)) {
         return [];
       }
       if (raw.targetId == null) return [{ feature, label: raw.label }];
       const targetId = (() => {
         switch (feature) {
           case 'desktopCompanion': return parseCompanionId(raw.targetId);
-          case 'publicCompanion': return parsePublicAgentId(raw.targetId);
+          case 'customerService': return parseCsAgentId(raw.targetId);
           case 'conversation': return parseConversationId(raw.targetId);
           case 'agentExecution': return parseExecutionId(raw.targetId);
           case 'smartDecision': return undefined;

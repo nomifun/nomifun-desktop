@@ -88,7 +88,6 @@ fn plugin_fixture(plugin_type: &str, bot_key: &str) -> NewChannelPluginRow {
         status: None,
         last_connected: None,
         companion_id: None,
-        public_agent_id: None,
         bot_key: Some(bot_key.into()),
         created_at: now,
         updated_at: now,

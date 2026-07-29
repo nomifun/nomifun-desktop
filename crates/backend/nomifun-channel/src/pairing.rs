@@ -221,9 +221,10 @@ impl PairingService {
     }
 
     /// Get or create the `channel_users.channel_user_id` for a platform sender
-    /// on this bot channel, WITHOUT a pairing code — used by the public-agent
-    /// auto-serve path (a bot bound to a public agent serves strangers directly
-    /// because the session is hard-clamped). Idempotent: a returning
+    /// on this bot channel, WITHOUT a pairing code — used by the
+    /// customer-service auto-serve path (a bot bound to a customer-service
+    /// agent serves strangers directly because the one-shot session's
+    /// read-only tool whitelist is the boundary). Idempotent: a returning
     /// stranger reuses their row. NOT used for companion/unbound bots — those
     /// still require explicit pairing approval.
     pub async fn ensure_channel_user(
@@ -253,7 +254,7 @@ impl PairingService {
             channel_user_id = %user.channel_user_id,
             platform_user_id = %platform_user_id,
             channel_plugin_id,
-            "public-agent channel auto-registered a stranger (no pairing)"
+            "customer-service channel auto-registered a stranger (no pairing)"
         );
         Ok(user.channel_user_id)
     }
@@ -421,7 +422,6 @@ mod tests {
                 status: row.status.clone(),
                 last_connected: row.last_connected,
                 companion_id: row.companion_id.clone(),
-                public_agent_id: row.public_agent_id.clone(),
                 bot_key: row.bot_key.clone(),
                 created_at: row.created_at,
                 updated_at: row.updated_at,
@@ -441,13 +441,6 @@ mod tests {
             &self,
             _channel_plugin_id: &str,
             _companion_id: Option<&str>,
-        ) -> Result<(), DbError> {
-            Ok(())
-        }
-        async fn update_plugin_public_agent(
-            &self,
-            _channel_plugin_id: &str,
-            _public_agent_id: Option<&str>,
         ) -> Result<(), DbError> {
             Ok(())
         }

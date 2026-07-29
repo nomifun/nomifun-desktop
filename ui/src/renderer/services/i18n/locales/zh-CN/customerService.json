@@ -1,0 +1,83 @@
+{
+  "siderTitle": "客服",
+  "title": "客服",
+  "subtitle": "面向陌生访客的客服员工 —— 只依据知识库与客服笔记回答，高危能力从不注册。",
+  "status": {
+    "enabled": "服务中",
+    "disabled": "已停用"
+  },
+  "trust": {
+    "readonly": "仅三个只读工具：知识检索 / 知识阅读 / 客服笔记",
+    "locked": "终端 / 文件 / 电脑 / 浏览器 等高危能力从不注册"
+  },
+  "card": {
+    "noModel": "未配置模型",
+    "kbCount": "{{count}} 个知识库"
+  },
+  "create": {
+    "action": "创建客服",
+    "title": "创建客服",
+    "done": "客服已创建"
+  },
+  "empty": {
+    "title": "还没有客服",
+    "desc": "创建一位客服，绑定知识库与服务策略，再把渠道机器人绑给它，让它安全地接待访客。",
+    "action": "创建第一位客服"
+  },
+  "fields": {
+    "name": "名称",
+    "namePlaceholder": "例如：售后小助",
+    "nameRequired": "请输入客服名称",
+    "provider": "模型服务商",
+    "providerPlaceholder": "选择服务商",
+    "model": "对话模型",
+    "modelPlaceholder": "选择模型",
+    "knowledgeBases": "知识库",
+    "knowledgeBasesPlaceholder": "选择可检索的知识库",
+    "greeting": "问候语",
+    "greetingPlaceholder": "访客打招呼时的开场白",
+    "persona": "人设话术",
+    "personaPlaceholder": "语气与人设，例如：耐心、简洁、以事实为准",
+    "servicePolicy": "服务策略",
+    "servicePolicyPlaceholder": "业务范围 / 禁答话题 / 合规话术",
+    "maxConcurrent": "并发上限"
+  },
+  "detail": {
+    "back": "返回花名册",
+    "enabled": "启用",
+    "delete": "删除",
+    "deleteConfirm": "删除该客服？其绑定、对话记录与私有笔记将一并删除。",
+    "deleted": "客服已删除",
+    "save": "保存",
+    "saved": "已保存",
+    "notFound": "客服不存在或已删除"
+  },
+  "sections": {
+    "identity": "身份与话术",
+    "modelKnowledge": "模型与知识库",
+    "bindings": "渠道机器人绑定",
+    "notes": "客服笔记"
+  },
+  "bindings": {
+    "saved": "绑定已更新",
+    "noBots": "还没有渠道机器人。先在「桌面伙伴 → 远程连接」或渠道设置中接入一个机器人。",
+    "companionBound": "已绑桌面伙伴",
+    "hint": "绑定后，该机器人的所有来访消息都会交给这位客服接待（陌生访客免配对码）。"
+  },
+  "notes": {
+    "add": "新增笔记",
+    "empty": "还没有笔记 — FAQ/话术/业务事实都可以放在这里，客服只读引用。",
+    "kind": "类型",
+    "kindFaq": "FAQ",
+    "kindScript": "话术",
+    "kindFact": "业务事实",
+    "content": "内容",
+    "contentPlaceholder": "写下 FAQ / 话术 / 业务事实…",
+    "scope": "范围",
+    "private": "私有",
+    "shared": "共享",
+    "sharedHint": "共享给全部客服（不勾选则仅本客服可用）",
+    "enabled": "启用",
+    "deleteConfirm": "删除该笔记？"
+  }
+}

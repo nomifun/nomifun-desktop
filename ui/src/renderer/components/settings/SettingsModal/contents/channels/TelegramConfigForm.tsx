@@ -188,7 +188,7 @@ const TelegramConfigForm: React.FC<TelegramConfigFormProps> = ({
       const config = { credentials: { token: telegramToken.trim() } };
       const result = await channel.enablePlugin.invoke(
         channelTarget
-          ? { plugin_id: channelTarget.channelPluginId, plugin_type: 'telegram', ...(channelTarget.publicAgentId ? { public_agent_id: channelTarget.publicAgentId } : { companion_id: channelTarget.companionId }), config }
+          ? { plugin_id: channelTarget.channelPluginId, plugin_type: 'telegram', ...(channelTarget.companionId ? { companion_id: channelTarget.companionId } : {}), config }
           : { plugin_type: 'telegram', config }
       );
       if (!result.success) {

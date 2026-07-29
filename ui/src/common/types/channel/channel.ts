@@ -4,7 +4,6 @@ import type {
   ChannelUserId,
   CompanionId,
   ConversationId,
-  PublicAgentId,
 } from '@/common/types/ids';
 
 export interface IChannelPluginStatus {
@@ -22,8 +21,6 @@ export interface IChannelPluginStatus {
   hasToken?: boolean;
   /** 绑定的伙伴（每机器人一宠；UNIQUE(type,bot_key) 保证同一机器人不绑多宠）。 */
   companionId?: CompanionId;
-  /** 绑定的对外伙伴（与 companionId 互斥；一个机器人只服务一个对象）。 */
-  publicAgentId?: PublicAgentId | null;
   /** 平台级机器人身份（lark app_id / telegram bot id / ...）。 */
   botKey?: string;
   isExtension?: boolean;

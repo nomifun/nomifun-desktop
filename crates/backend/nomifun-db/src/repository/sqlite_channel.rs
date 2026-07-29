@@ -1,6 +1,6 @@
 use nomifun_common::{
     ChannelPluginId, ChannelSessionId, ChannelUserId, CompanionId, ConversationId,
-    MessageId, PublicAgentId, UserId,
+    MessageId, UserId,
 };
 use sqlx::{Sqlite, SqlitePool, Transaction};
 
@@ -82,16 +82,10 @@ async fn lock_conversation(
     Ok(Some(conversation_id.into_string()))
 }
 
-fn canonical_plugin_binding_ids(
+fn canonical_plugin_companion_id(
     companion_id: Option<&str>,
-    public_agent_id: Option<&str>,
-) -> Result<(Option<String>, Option<String>), DbError> {
-    if companion_id.is_some() && public_agent_id.is_some() {
-        return Err(DbError::Conflict(
-            "channel plugin cannot bind both a companion and a public agent".into(),
-        ));
-    }
-    let companion_id = companion_id
+) -> Result<Option<String>, DbError> {
+    companion_id
         .map(|value| {
             CompanionId::parse(value)
                 .map(CompanionId::into_string)
@@ -101,19 +95,7 @@ fn canonical_plugin_binding_ids(
                     ))
                 })
         })
-        .transpose()?;
-    let public_agent_id = public_agent_id
-        .map(|value| {
-            PublicAgentId::parse(value)
-                .map(PublicAgentId::into_string)
-                .map_err(|error| {
-                    DbError::Conflict(format!(
-                        "channel plugin public_agent_id '{value}' is not a canonical UUIDv7: {error}"
-                    ))
-                })
-        })
-        .transpose()?;
-    Ok((companion_id, public_agent_id))
+        .transpose()
 }
 
 fn validate_agent_type(agent_type: &str, context: &str) -> Result<(), DbError> {
@@ -151,15 +133,12 @@ impl IChannelRepository for SqliteChannelRepository {
 
     async fn create_plugin(&self, row: &NewChannelPluginRow) -> Result<ChannelPluginRow, DbError> {
         let channel_plugin_id = ChannelPluginId::new().into_string();
-        let (companion_id, public_agent_id) = canonical_plugin_binding_ids(
-            row.companion_id.as_deref(),
-            row.public_agent_id.as_deref(),
-        )?;
+        let companion_id = canonical_plugin_companion_id(row.companion_id.as_deref())?;
         sqlx::query_as::<_, ChannelPluginRow>(
             "INSERT INTO channel_plugins \
                 (channel_plugin_id, type, name, enabled, config, status, last_connected, \
-                 companion_id, public_agent_id, bot_key, created_at, updated_at) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
+                 companion_id, bot_key, created_at, updated_at) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
              RETURNING *",
         )
         .bind(channel_plugin_id)
@@ -170,7 +149,6 @@ impl IChannelRepository for SqliteChannelRepository {
         .bind(&row.status)
         .bind(row.last_connected)
         .bind(&companion_id)
-        .bind(&public_agent_id)
         .bind(&row.bot_key)
         .bind(row.created_at)
         .bind(row.updated_at)
@@ -196,14 +174,11 @@ impl IChannelRepository for SqliteChannelRepository {
                 row.channel_plugin_id
             ))
         })?;
-        let (companion_id, public_agent_id) = canonical_plugin_binding_ids(
-            row.companion_id.as_deref(),
-            row.public_agent_id.as_deref(),
-        )?;
+        let companion_id = canonical_plugin_companion_id(row.companion_id.as_deref())?;
         let updated = sqlx::query_as::<_, ChannelPluginRow>(
             "UPDATE channel_plugins SET \
                 type = ?, name = ?, enabled = ?, config = ?, status = ?, \
-                last_connected = ?, companion_id = ?, public_agent_id = ?, \
+                last_connected = ?, companion_id = ?, \
                 bot_key = ?, updated_at = ? \
              WHERE channel_plugin_id = ? \
              RETURNING *",
@@ -215,7 +190,6 @@ impl IChannelRepository for SqliteChannelRepository {
         .bind(&row.status)
         .bind(row.last_connected)
         .bind(&companion_id)
-        .bind(&public_agent_id)
         .bind(&row.bot_key)
         .bind(row.updated_at)
         .bind(&row.channel_plugin_id)
@@ -295,69 +269,14 @@ impl IChannelRepository for SqliteChannelRepository {
         channel_plugin_id: &str,
         companion_id: Option<&str>,
     ) -> Result<(), DbError> {
-        let companion_id = companion_id
-            .map(|value| {
-                CompanionId::parse(value)
-                    .map(CompanionId::into_string)
-                    .map_err(|error| {
-                        DbError::Conflict(format!(
-                            "channel plugin companion_id '{value}' is not a canonical UUIDv7: {error}"
-                        ))
-                    })
-            })
-            .transpose()?;
-        // Row-level mutual exclusivity: binding a companion (non-null) clears any
-        // public-agent binding on the same row. Clearing (`None`) leaves the
-        // public-agent binding untouched.
+        let companion_id = canonical_plugin_companion_id(companion_id)?;
         let result = sqlx::query(
             "UPDATE channel_plugins \
              SET companion_id = ?, \
-                 public_agent_id = CASE WHEN ? IS NOT NULL THEN NULL ELSE public_agent_id END, \
                  updated_at = ? \
              WHERE channel_plugin_id = ?",
         )
         .bind(companion_id.as_deref())
-        .bind(companion_id.as_deref())
-        .bind(nomifun_common::now_ms())
-        .bind(channel_plugin_id)
-        .execute(&self.pool)
-        .await?;
-        if result.rows_affected() == 0 {
-            return Err(DbError::NotFound(format!(
-                "Plugin '{channel_plugin_id}' not found"
-            )));
-        }
-        Ok(())
-    }
-
-    async fn update_plugin_public_agent(
-        &self,
-        channel_plugin_id: &str,
-        public_agent_id: Option<&str>,
-    ) -> Result<(), DbError> {
-        let public_agent_id = public_agent_id
-            .map(|value| {
-                PublicAgentId::parse(value)
-                    .map(PublicAgentId::into_string)
-                    .map_err(|error| {
-                        DbError::Conflict(format!(
-                            "channel plugin public_agent_id '{value}' is not a canonical UUIDv7: {error}"
-                        ))
-                    })
-            })
-            .transpose()?;
-        // Row-level mutual exclusivity: binding a public agent (non-null) clears
-        // any companion binding on the same row. Clearing (`None`) leaves the
-        // companion binding untouched.
-        let result = sqlx::query(
-            "UPDATE channel_plugins \
-             SET public_agent_id = ?, \
-                 companion_id = CASE WHEN ? IS NOT NULL THEN NULL ELSE companion_id END, \
-                 updated_at = ? \
-             WHERE channel_plugin_id = ?",
-        )
-        .bind(public_agent_id.as_deref())
-        .bind(public_agent_id.as_deref())
         .bind(nomifun_common::now_ms())
         .bind(channel_plugin_id)
         .execute(&self.pool)
@@ -455,6 +374,14 @@ impl IChannelRepository for SqliteChannelRepository {
             .execute(&mut *tx)
             .await?;
         sqlx::query("DELETE FROM channel_pairing_codes WHERE channel_plugin_id = ?")
+            .bind(channel_plugin_id)
+            .execute(&mut *tx)
+            .await?;
+
+        // Deleting a bot releases its customer-service binding (Cascade):
+        // the binding is domain state of the customer-service crate, but the
+        // channel aggregate owns the plugin row lifecycle.
+        sqlx::query("DELETE FROM cs_channel_bindings WHERE channel_plugin_id = ?")
             .bind(channel_plugin_id)
             .execute(&mut *tx)
             .await?;
@@ -1278,7 +1205,6 @@ mod tests {
             status: None,
             last_connected: None,
             companion_id: None,
-            public_agent_id: None,
             bot_key: None,
             created_at: now,
             updated_at: now,
@@ -1445,7 +1371,6 @@ mod tests {
             status: Some("running".into()),
             last_connected: Some(now),
             companion_id: None,
-            public_agent_id: None,
             bot_key: None,
             created_at: now,
             updated_at: now,
@@ -1623,7 +1548,6 @@ mod tests {
             status: None,
             last_connected: None,
             companion_id: Some(companion.into()),
-            public_agent_id: None,
             bot_key: Some("cli_same_app".into()),
             created_at: now,
             updated_at: now,
@@ -1663,7 +1587,6 @@ mod tests {
                 status: None,
                 last_connected: None,
                 companion_id: None,
-                public_agent_id: None,
                 bot_key: Some(key.into()),
                 created_at: now,
                 updated_at: now,
@@ -1713,104 +1636,6 @@ mod tests {
         assert!(matches!(err, DbError::NotFound(_)));
     }
 
-    #[tokio::test]
-    async fn update_plugin_public_agent_roundtrip_and_clear() {
-        let (repo, _db) = setup().await;
-        let plugin = repo.create_plugin(&sample_plugin()).await.unwrap();
-        let public_agent_id = PublicAgentId::new().into_string();
-
-        repo.update_plugin_public_agent(&plugin.channel_plugin_id, Some(&public_agent_id))
-            .await
-            .unwrap();
-        assert_eq!(
-            repo.get_plugin(&plugin.channel_plugin_id)
-                .await
-                .unwrap()
-                .unwrap()
-                .public_agent_id
-                .as_deref(),
-            Some(public_agent_id.as_str())
-        );
-
-        repo.update_plugin_public_agent(&plugin.channel_plugin_id, None)
-            .await
-            .unwrap();
-        assert!(
-            repo.get_plugin(&plugin.channel_plugin_id)
-                .await
-                .unwrap()
-                .unwrap()
-                .public_agent_id
-                .is_none()
-        );
-
-        let missing_id = ChannelPluginId::new();
-        let err = repo
-            .update_plugin_public_agent(missing_id.as_str(), Some(&public_agent_id))
-            .await
-            .unwrap_err();
-        assert!(matches!(err, DbError::NotFound(_)));
-    }
-
-    /// A bot row serves EITHER a companion OR a public agent, never both:
-    /// setting one binding clears the other, in both directions.
-    #[tokio::test]
-    async fn companion_and_public_agent_bindings_are_mutually_exclusive_on_a_row() {
-        let (repo, _db) = setup().await;
-        let plugin = repo.create_plugin(&sample_plugin()).await.unwrap();
-        let companion_1 = CompanionId::new().into_string();
-        let companion_2 = CompanionId::new().into_string();
-        let public_agent_1 = PublicAgentId::new().into_string();
-        let public_agent_2 = PublicAgentId::new().into_string();
-
-        // Bind a companion, then bind a public agent → companion is cleared.
-        repo.update_plugin_companion(&plugin.channel_plugin_id, Some(&companion_1))
-            .await
-            .unwrap();
-        repo.update_plugin_public_agent(&plugin.channel_plugin_id, Some(&public_agent_1))
-            .await
-            .unwrap();
-        let row = repo
-            .get_plugin(&plugin.channel_plugin_id)
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(row.public_agent_id.as_deref(), Some(public_agent_1.as_str()));
-        assert!(
-            row.companion_id.is_none(),
-            "binding a public agent must clear the companion"
-        );
-
-        // Bind a companion again → public agent is cleared.
-        repo.update_plugin_companion(&plugin.channel_plugin_id, Some(&companion_2))
-            .await
-            .unwrap();
-        let row = repo
-            .get_plugin(&plugin.channel_plugin_id)
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(row.companion_id.as_deref(), Some(companion_2.as_str()));
-        assert!(
-            row.public_agent_id.is_none(),
-            "binding a companion must clear the public agent"
-        );
-
-        // Clearing one binding does NOT touch the other.
-        repo.update_plugin_public_agent(&plugin.channel_plugin_id, Some(&public_agent_2))
-            .await
-            .unwrap();
-        repo.update_plugin_public_agent(&plugin.channel_plugin_id, None)
-            .await
-            .unwrap();
-        let row = repo
-            .get_plugin(&plugin.channel_plugin_id)
-            .await
-            .unwrap()
-            .unwrap();
-        assert!(row.public_agent_id.is_none());
-        assert!(row.companion_id.is_none());
-    }
 
     #[tokio::test]
     async fn update_plugin_bot_key_backfills() {

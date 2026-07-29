@@ -14,7 +14,7 @@ use nomifun_api_types::{
     SendMessageRequest,
 };
 use nomifun_common::{
-    AppError, CompanionId, Confirmation, ConversationId, ConversationStatus, PublicAgentId,
+    AppError, CompanionId, Confirmation, ConversationId, ConversationStatus,
     TerminalId, UserId,
 };
 use nomifun_conversation::{ConversationService, IdmmTurnScope};
@@ -263,10 +263,6 @@ fn extra_marks_routed_conversation(extra: &str) -> bool {
             .get("companion_id")
             .and_then(serde_json::Value::as_str)
             .is_some_and(|id| CompanionId::parse(id).is_ok())
-        || v
-            .get("public_agent_id")
-            .and_then(serde_json::Value::as_str)
-            .is_some_and(|id| PublicAgentId::parse(id).is_ok())
 }
 
 /// Whether a conversation routes its decisions to a REMOTE human, so IDMM must
@@ -1307,9 +1303,6 @@ mod tests {
         assert!(extra_marks_routed_conversation(
             r#"{"companion_session":true,"companion_id":"0190f5fe-7c00-7a00-8abc-012345678942"}"#
         ));
-        assert!(extra_marks_routed_conversation(
-            r#"{"public_agent_id":"0190f5fe-7c00-7a00-8abc-012345678943"}"#
-        ));
         // A plain desktop conversation is NOT routed.
         assert!(!extra_marks_routed_conversation(r#"{"workspace":"/project"}"#));
         // Presentation-only metadata, blank ids, empty, and invalid extra do
@@ -1318,7 +1311,6 @@ mod tests {
             r#"{"channel_platform":"telegram"}"#
         ));
         assert!(!extra_marks_routed_conversation(r#"{"companion_id":""}"#));
-        assert!(!extra_marks_routed_conversation(r#"{"public_agent_id":" "}"#));
         assert!(!extra_marks_routed_conversation(""));
         assert!(!extra_marks_routed_conversation("{}"));
     }
@@ -1327,10 +1319,6 @@ mod tests {
     fn conversation_is_routed_combines_extra_and_channel_chat_id() {
         // Shared companion/public sessions carry canonical business markers.
         assert!(conversation_is_routed(r#"{"companion_session":true}"#, None));
-        assert!(conversation_is_routed(
-            r#"{"public_agent_id":"0190f5fe-7c00-7a00-8abc-012345678943"}"#,
-            None
-        ));
         // Every dedicated channel session is routed by its first-class row field,
         // independent of agent backend or presentation metadata.
         assert!(conversation_is_routed(
@@ -1991,13 +1979,6 @@ mod tests {
         let msgs = vec![msg_row("left", false, "text", pending_decision_text())];
         assert_eq!(
             pending_signal_from_page(r#"{"companion_session":true}"#, &msgs),
-            None
-        );
-        assert_eq!(
-            pending_signal_from_page(
-                r#"{"public_agent_id":"0190f5fe-7c00-7a00-8abc-012345678943"}"#,
-                &msgs,
-            ),
             None
         );
     }
