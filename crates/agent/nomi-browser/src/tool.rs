@@ -2884,11 +2884,19 @@ fn first_model_identity_field(input: &Value) -> Option<&'static str> {
 }
 
 fn managed_lane_id(input: &Value) -> Result<Option<BrowserLaneId>, BrowserPlatformError> {
-    input
-        .get("lane_id")
-        .and_then(Value::as_str)
-        .map(|value| BrowserLaneId::parse(value.to_string()))
-        .transpose()
+    // F55: parity with managed.rs — a typed-wrong lane_id (number/bool/object)
+    // is an explicit error, never a silent fallback to the caller's default
+    // Lane (which could execute the action against the wrong logged-in page).
+    match input.get("lane_id") {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(value)) => BrowserLaneId::parse(value.to_owned()).map(Some),
+        Some(_) => Err(BrowserPlatformError::new(
+            nomifun_browser_platform::BrowserErrorCode::LaneNotFound,
+            "`lane_id` must be a Lane handle string returned by the Browser Platform.",
+            false,
+            "Use a lane_id returned by browser_open, browser_fork, or browser_list.",
+        )),
+    }
 }
 
 async fn find_default_lane(
@@ -4226,6 +4234,48 @@ pub(crate) mod tests {
             Some(7),
             "the f<frame-seq> prefix must not be treated as an observation generation"
         );
+    }
+
+    #[tokio::test]
+    async fn managed_non_string_lane_id_is_rejected_not_defaulted() {
+        // F55: a typed-wrong lane_id must never silently fall back to the
+        // default Lane (parity with ManagedBrowserFacade) — the action would
+        // otherwise execute against whatever page the default Lane is on.
+        let client = Arc::new(FakeLaneClient::default());
+        let tool = managed_tool(Arc::clone(&client));
+
+        for lane_id in [json!(12345), json!(true), json!({"id": "lane-1"})] {
+            let result = tool
+                .execute(json!({
+                    "action": "click",
+                    "ref": "f0e1",
+                    "lane_id": lane_id,
+                }))
+                .await;
+
+            assert!(result.is_error, "non-string lane_id must be an error");
+            assert!(
+                result.content.contains("must be a Lane handle string"),
+                "error should name the contract: {}",
+                result.content
+            );
+            assert!(
+                client.opens.lock().unwrap().is_empty(),
+                "an invalid handle must never open/use the default Lane"
+            );
+            assert!(client.operations.lock().unwrap().is_empty());
+        }
+
+        // Null and absent still mean "the caller's default Lane".
+        let ok = tool
+            .execute(json!({
+                "action": "navigate",
+                "url": "https://example.test/",
+                "lane_id": Value::Null,
+            }))
+            .await;
+        assert!(!ok.is_error, "{}", ok.content);
+        assert_eq!(client.opens.lock().unwrap().len(), 1);
     }
 
     #[test]
