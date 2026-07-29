@@ -49,7 +49,7 @@ pub use hooks::{OnConversationDelete, OnTerminalDelete, RequirementCreator};
 pub use id::{
     AgentExecutionAttemptId, AgentExecutionId, AgentExecutionParticipantId,
     AgentExecutionStepId, AgentExecutionTemplateId, AgentExecutionTemplateParticipantId,
-    AgentId, AttachmentId, ChannelPluginId, ChannelSessionId, ChannelUserId,
+    AgentId, AttachmentId, ChannelPendingPromptId, ChannelPluginId, ChannelSessionId, ChannelUserId,
     CompanionEventId, CompanionEvolutionFeedbackId, CompanionId, CompanionLearnRunId,
     CompanionMemoryId, CompanionSessionWindowId, CompanionSkillId, CompanionSkillPatternId,
     CompanionSuggestionId, ConnectorCredentialId,

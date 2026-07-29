@@ -5957,3 +5957,68 @@ async fn abandoned_admission_with_wrong_payload_epoch_or_result_shape_remains_qu
     assert_eq!(epoch, initial.epoch + 1);
     assert_eq!(active.as_deref(), Some(operation_id));
 }
+
+// == Delivery-notify registrations (spec D2) ==
+
+#[tokio::test]
+async fn delivery_notify_register_take_is_atomic_and_idempotent() {
+    let (repo, _db) = setup().await;
+    let operation_id = "public-turn:v1:owner:conv:key-1";
+    let requester = ConversationId::new().into_string();
+    let now = nomifun_common::now_ms();
+
+    repo.register_notify(operation_id, &requester, now).await.unwrap();
+    // Same-pair re-registration is an idempotent replay.
+    repo.register_notify(operation_id, &requester, now + 1).await.unwrap();
+    // A different requester reusing the operation identity is a conflict.
+    let other = ConversationId::new().into_string();
+    assert!(repo.register_notify(operation_id, &other, now + 2).await.is_err());
+
+    let taken = repo
+        .take_pending_notify(operation_id, now + 3)
+        .await
+        .unwrap()
+        .expect("pending registration must be taken");
+    assert_eq!(taken.operation_id, operation_id);
+    assert_eq!(taken.requester_conversation_id, requester);
+    assert_eq!(taken.state, "notified");
+    assert_eq!(taken.settled_at, Some(now + 3));
+
+    // A second take must observe nothing: the claim is single-winner.
+    assert!(repo.take_pending_notify(operation_id, now + 4).await.unwrap().is_none());
+}
+
+#[tokio::test]
+async fn delivery_notify_take_of_unregistered_operation_is_none() {
+    let (repo, _db) = setup().await;
+    assert!(
+        repo.take_pending_notify("public-turn:v1:none", nomifun_common::now_ms())
+            .await
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn delivery_notify_failed_marking_applies_only_to_taken_rows() {
+    let (repo, _db) = setup().await;
+    let operation_id = "public-turn:v1:owner:conv:key-2";
+    let requester = ConversationId::new().into_string();
+    let now = nomifun_common::now_ms();
+
+    repo.register_notify(operation_id, &requester, now).await.unwrap();
+    // Not yet taken: mark_notify_failed is a no-op and the row stays pending.
+    repo.mark_notify_failed(operation_id, now + 1).await.unwrap();
+    let taken = repo.take_pending_notify(operation_id, now + 2).await.unwrap();
+    assert!(taken.is_some(), "pending row must survive a premature failure mark");
+
+    repo.mark_notify_failed(operation_id, now + 3).await.unwrap();
+    let state: String = sqlx::query_scalar(
+        "SELECT state FROM conversation_delivery_notify WHERE operation_id = ?",
+    )
+    .bind(operation_id)
+    .fetch_one(_db.pool())
+    .await
+    .unwrap();
+    assert_eq!(state, "failed");
+}

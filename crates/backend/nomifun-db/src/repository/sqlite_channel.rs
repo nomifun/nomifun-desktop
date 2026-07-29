@@ -6,13 +6,13 @@ use sqlx::{Sqlite, SqlitePool, Transaction};
 
 use crate::error::DbError;
 use crate::models::{
-    ChannelInboundReceiptRow, ChannelPairingCodeRow, ChannelPluginRow, ChannelSessionRow,
-    ChannelUserRow, NewChannelInboundReceiptRow, NewChannelPairingCodeRow, NewChannelPluginRow,
-    NewChannelSessionRow, NewChannelUserRow,
+    ChannelInboundReceiptRow, ChannelPairingCodeRow, ChannelPendingPromptRow, ChannelPluginRow,
+    ChannelSessionRow, ChannelUserRow, NewChannelInboundReceiptRow, NewChannelPairingCodeRow,
+    NewChannelPendingPromptRow, NewChannelPluginRow, NewChannelSessionRow, NewChannelUserRow,
 };
 use crate::repository::channel::{
-    ChannelInboundClaim, IChannelRepository, SettleChannelInboundReceiptParams,
-    UpdatePluginStatusParams,
+    ChannelInboundClaim, IChannelRepository, PendingPromptEnqueue,
+    SettleChannelInboundReceiptParams, UpdatePluginStatusParams,
 };
 
 /// SQLite-backed implementation of [`IChannelRepository`].
@@ -1171,6 +1171,199 @@ impl IChannelRepository for SqliteChannelRepository {
         .execute(&self.pool)
         .await?;
         Ok(result.rows_affected())
+    }
+
+    // -- Busy-time pending prompt queue (spec D1) ---------------------
+
+    async fn enqueue_pending_prompt(
+        &self,
+        row: &NewChannelPendingPromptRow,
+        now: nomifun_common::TimestampMs,
+    ) -> Result<PendingPromptEnqueue, DbError> {
+        ChannelPluginId::parse(&row.channel_plugin_id).map_err(|error| {
+            DbError::Conflict(format!(
+                "pending prompt channel plugin id is invalid: {error}"
+            ))
+        })?;
+        ChannelSessionId::parse(&row.channel_session_id).map_err(|error| {
+            DbError::Conflict(format!(
+                "pending prompt channel session id is invalid: {error}"
+            ))
+        })?;
+        ConversationId::parse(&row.conversation_id).map_err(|error| {
+            DbError::Conflict(format!("pending prompt conversation id is invalid: {error}"))
+        })?;
+        if row.chat_id.trim().is_empty() || row.text.trim().is_empty() {
+            return Err(DbError::Conflict(
+                "pending prompt requires a chat id and non-empty text".to_owned(),
+            ));
+        }
+        if row.idempotency_key.trim().is_empty() {
+            return Err(DbError::Conflict(
+                "pending prompt requires an idempotency key".to_owned(),
+            ));
+        }
+
+        let mut tx = self.pool.begin().await?;
+        // The zero-row write upgrades this transaction to the SQLite writer
+        // before the cap read, so concurrent enqueues of the same conversation
+        // serialize and the COUNT + INSERT pair is atomic.
+        sqlx::query(
+            "UPDATE channel_pending_prompts SET state = state \
+             WHERE conversation_id = ? AND state = 'queued' AND 0",
+        )
+        .bind(&row.conversation_id)
+        .execute(&mut *tx)
+        .await?;
+        let queued: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM channel_pending_prompts \
+             WHERE conversation_id = ? AND state = 'queued'",
+        )
+        .bind(&row.conversation_id)
+        .fetch_one(&mut *tx)
+        .await?;
+        if queued >= crate::repository::channel::PENDING_PROMPT_QUEUE_LIMIT {
+            tx.rollback().await?;
+            return Ok(PendingPromptEnqueue::QueueFull);
+        }
+        let prompt_id = nomifun_common::ChannelPendingPromptId::new().into_string();
+        let inserted = sqlx::query_as::<_, ChannelPendingPromptRow>(
+            "INSERT INTO channel_pending_prompts \
+                (prompt_id, channel_plugin_id, chat_id, channel_session_id, conversation_id, \
+                 text, idempotency_key, state, attempts, queued_at) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, 'queued', 0, ?) \
+             RETURNING prompt_id, channel_plugin_id, chat_id, channel_session_id, \
+                       conversation_id, text, idempotency_key, state, attempts, \
+                       queued_at, settled_at",
+        )
+        .bind(&prompt_id)
+        .bind(&row.channel_plugin_id)
+        .bind(&row.chat_id)
+        .bind(&row.channel_session_id)
+        .bind(&row.conversation_id)
+        .bind(&row.text)
+        .bind(&row.idempotency_key)
+        .bind(now)
+        .fetch_one(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(PendingPromptEnqueue::Queued {
+            row: inserted,
+            position: queued + 1,
+        })
+    }
+
+    async fn peek_next_queued(
+        &self,
+        conversation_id: &str,
+    ) -> Result<Option<ChannelPendingPromptRow>, DbError> {
+        let row = sqlx::query_as::<_, ChannelPendingPromptRow>(
+            "SELECT prompt_id, channel_plugin_id, chat_id, channel_session_id, \
+                    conversation_id, text, idempotency_key, state, attempts, \
+                    queued_at, settled_at \
+             FROM channel_pending_prompts \
+             WHERE conversation_id = ? AND state = 'queued' \
+             ORDER BY id ASC LIMIT 1",
+        )
+        .bind(conversation_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row)
+    }
+
+    async fn settle_prompt(
+        &self,
+        prompt_id: &str,
+        state: &str,
+        now: nomifun_common::TimestampMs,
+    ) -> Result<(), DbError> {
+        if !matches!(state, "delivered" | "expired" | "cancelled" | "failed") {
+            return Err(DbError::Conflict(format!(
+                "pending prompt cannot settle into state '{state}'"
+            )));
+        }
+        let result = sqlx::query(
+            "UPDATE channel_pending_prompts \
+             SET state = ?, settled_at = ? \
+             WHERE prompt_id = ? AND state = 'queued'",
+        )
+        .bind(state)
+        .bind(now)
+        .bind(prompt_id)
+        .execute(&self.pool)
+        .await?;
+        if result.rows_affected() == 0 {
+            return Err(DbError::Conflict(format!(
+                "pending prompt '{prompt_id}' is not queued; terminal states are absorbing"
+            )));
+        }
+        Ok(())
+    }
+
+    async fn increment_prompt_attempts(&self, prompt_id: &str) -> Result<i64, DbError> {
+        let attempts: Option<i64> = sqlx::query_scalar(
+            "UPDATE channel_pending_prompts \
+             SET attempts = attempts + 1 \
+             WHERE prompt_id = ? AND state = 'queued' \
+             RETURNING attempts",
+        )
+        .bind(prompt_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        attempts.ok_or_else(|| {
+            DbError::Conflict(format!(
+                "pending prompt '{prompt_id}' is not queued; retries only apply to queued prompts"
+            ))
+        })
+    }
+
+    async fn expire_stale(
+        &self,
+        before_ms: nomifun_common::TimestampMs,
+        now: nomifun_common::TimestampMs,
+    ) -> Result<Vec<ChannelPendingPromptRow>, DbError> {
+        let rows = sqlx::query_as::<_, ChannelPendingPromptRow>(
+            "UPDATE channel_pending_prompts \
+             SET state = 'expired', settled_at = ? \
+             WHERE state = 'queued' AND queued_at < ? \
+             RETURNING prompt_id, channel_plugin_id, chat_id, channel_session_id, \
+                       conversation_id, text, idempotency_key, state, attempts, \
+                       queued_at, settled_at",
+        )
+        .bind(now)
+        .bind(before_ms)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows)
+    }
+
+    async fn cancel_chat_queue(
+        &self,
+        channel_plugin_id: &str,
+        chat_id: &str,
+        now: nomifun_common::TimestampMs,
+    ) -> Result<u64, DbError> {
+        let result = sqlx::query(
+            "UPDATE channel_pending_prompts \
+             SET state = 'cancelled', settled_at = ? \
+             WHERE channel_plugin_id = ? AND chat_id = ? AND state = 'queued'",
+        )
+        .bind(now)
+        .bind(channel_plugin_id)
+        .bind(chat_id)
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected())
+    }
+
+    async fn list_queued_conversations(&self) -> Result<Vec<String>, DbError> {
+        let rows: Vec<String> = sqlx::query_scalar(
+            "SELECT DISTINCT conversation_id FROM channel_pending_prompts \
+             WHERE state = 'queued' ORDER BY conversation_id",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows)
     }
 }
 

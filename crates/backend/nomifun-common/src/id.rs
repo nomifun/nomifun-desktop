@@ -292,6 +292,12 @@ define_entity_id!(
     ChannelSessionId
 );
 define_entity_id!(
+    /// Globally unique queued channel prompt identifier (busy-time queue,
+    /// spec D1). The SQLite row `id` remains an implementation-only
+    /// autoincrement key providing FIFO order.
+    ChannelPendingPromptId
+);
+define_entity_id!(
     /// Globally unique authorized channel-user identifier.
     ChannelUserId
 );
