@@ -61,6 +61,14 @@ impl AdapterRegistry {
         }
         Ok(Arc::clone(adapter))
     }
+
+    /// Whether any adapter is registered under `protocol` (regardless of task
+    /// support). Lets the resolver distinguish "unknown protocol string" (a
+    /// user-fixable model-row override → Config) from "registered adapter
+    /// lacking the task" (a genuine NoAdapter) without sniffing messages.
+    pub fn contains(&self, protocol: &str) -> bool {
+        self.map.contains_key(protocol)
+    }
 }
 
 #[cfg(test)]
