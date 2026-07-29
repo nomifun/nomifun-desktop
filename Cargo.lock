@@ -5798,6 +5798,7 @@ dependencies = [
  "nomifun-auth",
  "nomifun-common",
  "nomifun-db",
+ "nomifun-model-invoke",
  "reqwest 0.12.28",
  "serde",
  "serde_json",

@@ -3,10 +3,12 @@
 //!
 //! The service owns the full lifecycle: `queued → running →
 //! succeeded/failed/canceled`, a per-provider concurrency gate + a global cap,
-//! synchronous and async (submit→poll) adapters, cancellation propagation, boot
-//! reconciliation, and handing produced bytes to an [`AssetSink`]. Provider
-//! rows are resolved (row lookup + API-key decrypt) here so the crypto/DB
-//! surface stays in one place; adapters receive a [`ResolvedProvider`].
+//! synchronous and async (submit→poll) protocols, cancellation propagation,
+//! boot reconciliation, and handing produced bytes to an [`AssetSink`]. Model
+//! execution is delegated to the unified invocation layer
+//! ([`nomifun_model_invoke::ModelInvokeService`]): a capability + params map to
+//! a typed [`TaskRequest`], and provider/protocol resolution happens inside the
+//! invoke layer against the model catalog.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
@@ -15,13 +17,19 @@ use std::time::Duration;
 use async_trait::async_trait;
 use nomifun_common::{
     AppError, CreationTaskId, ProviderId, WorkshopAssetId, WorkshopCanvasId, WorkshopNodeId,
-    decrypt_string, now_ms, validate_uuidv7,
+    now_ms, validate_uuidv7,
 };
 #[cfg(test)]
 use nomifun_common::generate_id;
 use nomifun_db::{
-    CreateCreationTaskParams, CreationTaskRow, ICreationTaskRepository, IProviderRepository,
+    CreateCreationTaskParams, CreationTaskRow, ICreationTaskRepository,
     ListCreationTasksParams, UpdateCreationTaskParams,
+};
+use nomifun_model_invoke::{
+    ChatTextRequest, ImageEditRequest, ImageGenRequest, InputAsset, JobHandle,
+    MAX_ARTIFACT_BYTES, ModelInvokeService, ModelRef, ProducedAsset, ProducedData, TaskOutcome,
+    TaskRequest, TaskResult, TtsRequest, VideoGenRequest, error_from_response, net_err,
+    read_body_capped,
 };
 use serde_json::Value;
 #[cfg(test)]
@@ -29,15 +37,8 @@ use serde_json::json;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio_util::sync::CancellationToken;
 
-use crate::adapters::{
-    MAX_ARTIFACT_BYTES, error_from_response, net_err, param_count, read_body_capped,
-    route_adapter_id,
-};
 use crate::artifact::{reconcile_mime, validate_for_capability};
 use crate::dto::CreationTask;
-use crate::provider::{
-    InputAsset, MediaProvider, PollResult, ProducedData, ResolvedProvider, SubmitAck, SubmitRequest,
-};
 use crate::types::{CreationError, CreationInput, MediaCapability, TaskStatus};
 
 /// Default per-provider in-flight cap (信号量).
@@ -50,6 +51,158 @@ const DEFAULT_POLL_INTERVAL: Duration = Duration::from_millis(2500);
 const DEFAULT_TASK_TIMEOUT: Duration = Duration::from_secs(600);
 /// Timeout for fetching a URL-form artifact the adapter returned.
 const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(180);
+
+/// The MIME stamped on produced text artifacts (the bridge keys its text-asset
+/// special case off a `text/plain` prefix).
+const TEXT_MIME: &str = "text/plain; charset=utf-8";
+
+// ---------------------------------------------------------------------------
+// Param helpers (ported verbatim from the retired adapters/mod.rs — the
+// product-facing params contract stays owned by the creation engine).
+// ---------------------------------------------------------------------------
+
+/// The prompt string from the opaque params (`""` when absent).
+fn param_prompt(params: &Value) -> String {
+    params.get("prompt").and_then(|v| v.as_str()).unwrap_or_default().to_string()
+}
+
+/// Maximum image batch size supported by the creation engine.
+const MAX_IMAGE_OUTPUT_COUNT: u32 = 10;
+
+/// Strict image batch count contract. Both the product-facing `count` name and
+/// the OpenAI-compatible `n` alias are accepted. Omission means one image, but
+/// a present value is never defaulted or clamped: malformed, zero, excessive,
+/// or conflicting values fail the request.
+fn param_count(params: &Value) -> Result<u32, CreationError> {
+    let mut parsed = None;
+    for field in ["count", "n"] {
+        let Some(value) = params.get(field) else {
+            continue;
+        };
+        let Some(value) = value.as_u64().filter(|value| *value > 0) else {
+            return Err(CreationError::new(
+                "invalid_params",
+                format!("params.{field} must be a positive integer"),
+            ));
+        };
+        if value > u64::from(MAX_IMAGE_OUTPUT_COUNT) {
+            return Err(CreationError::new(
+                "invalid_params",
+                format!(
+                    "params.{field} ({value}) exceeds the supported image output limit ({MAX_IMAGE_OUTPUT_COUNT})"
+                ),
+            ));
+        }
+        let value = value as u32;
+        if parsed.is_some_and(|previous| previous != value) {
+            return Err(CreationError::new(
+                "invalid_params",
+                "params.count and params.n must match when both are provided",
+            ));
+        }
+        parsed = Some(value);
+    }
+    Ok(parsed.unwrap_or(1))
+}
+
+/// A `WxH` size string from `params.width`/`params.height`, or an explicit
+/// `params.size` string, else `None`.
+fn param_size(params: &Value) -> Option<String> {
+    let w = params.get("width").and_then(|v| v.as_u64());
+    let h = params.get("height").and_then(|v| v.as_u64());
+    if let (Some(w), Some(h)) = (w, h) {
+        return Some(format!("{w}x{h}"));
+    }
+    params
+        .get("size")
+        .and_then(|v| v.as_str())
+        .map(str::to_string)
+        .filter(|s| !s.trim().is_empty())
+}
+
+/// A non-empty string param (`params.{key}`), trimmed-empty treated as absent.
+fn param_str(params: &Value, key: &str) -> Option<String> {
+    params
+        .get(key)
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+}
+
+/// Map a creation capability + opaque params + loaded inputs onto the invoke
+/// layer's typed [`TaskRequest`]. The full params object rides along as
+/// `extra` so protocol-specific knobs (`max_tokens`, `steps`, …) stay
+/// reachable by adapters that understand them.
+fn cap_to_task_request(
+    capability: MediaCapability,
+    params: &Value,
+    inputs: Vec<InputAsset>,
+) -> Result<TaskRequest, CreationError> {
+    Ok(match capability {
+        MediaCapability::T2i => TaskRequest::ImageGeneration(ImageGenRequest {
+            prompt: param_prompt(params),
+            count: param_count(params)?,
+            size: param_size(params),
+            quality: param_str(params, "quality"),
+            extra: params.clone(),
+        }),
+        MediaCapability::I2i | MediaCapability::Inpaint => TaskRequest::ImageEdit(ImageEditRequest {
+            prompt: param_prompt(params),
+            count: param_count(params)?,
+            size: param_size(params),
+            inputs,
+            extra: params.clone(),
+        }),
+        MediaCapability::T2v | MediaCapability::I2v => TaskRequest::VideoGeneration(VideoGenRequest {
+            prompt: param_prompt(params),
+            // Tolerate both a JSON number and a numeric string (the retired
+            // openai_video adapter accepted either form).
+            seconds: params.get("seconds").and_then(|v| {
+                v.as_u64().or_else(|| v.as_str().and_then(|s| s.trim().parse().ok()))
+            }).and_then(|v| u32::try_from(v).ok()),
+            size: param_size(params),
+            inputs,
+            extra: params.clone(),
+        }),
+        MediaCapability::V2v => {
+            return Err(CreationError::new(
+                "unsupported_capability",
+                "video-to-video (v2v) is not supported by any protocol adapter",
+            ));
+        }
+        MediaCapability::Tts => TaskRequest::SpeechSynthesis(TtsRequest {
+            text: param_prompt(params),
+            voice: param_str(params, "voice"),
+            format: param_str(params, "format"),
+            extra: params.clone(),
+        }),
+        MediaCapability::Text => TaskRequest::ChatText(ChatTextRequest {
+            prompt: param_prompt(params),
+            system: param_str(params, "system"),
+            extra: params.clone(),
+        }),
+    })
+}
+
+/// The invoke protocol that owned a LEGACY (pre-JobHandle) persisted remote
+/// task id. The only async protocol before the invoke migration was the
+/// OpenAI-compatible `/videos` submit→poll — every other capability was
+/// synchronous and never persisted a remote id.
+fn legacy_default_adapter_for(_capability: MediaCapability) -> &'static str {
+    "openai.videos"
+}
+
+/// Parse a persisted `remote_task_id` column value into a [`JobHandle`]:
+/// current rows carry the serialized handle JSON; legacy rows carried the bare
+/// provider-side id, which is wrapped with the capability's legacy protocol.
+fn parse_job_handle(raw: &str, capability: MediaCapability) -> JobHandle {
+    serde_json::from_str::<JobHandle>(raw).unwrap_or_else(|_| JobHandle {
+        adapter_id: legacy_default_adapter_for(capability).to_string(),
+        remote_id: raw.to_string(),
+        poll_state: serde_json::json!({}),
+    })
+}
 
 /// Resolve the minimum artifact count promised by a task. Image quantities are
 /// part of the public request contract; every other currently-supported media
@@ -189,6 +342,8 @@ struct WorkerJob {
     inputs: Vec<CreationInput>,
     submitted_at: i64,
     /// Present only on a boot resume (skip submit, poll this remote job).
+    /// Carries the raw persisted column value: serialized [`JobHandle`] JSON,
+    /// or a legacy bare remote id (see [`parse_job_handle`]).
     remote_task_id: Option<String>,
 }
 
@@ -203,12 +358,9 @@ enum ExecOutcome {
 
 pub struct CreationService {
     repo: Arc<dyn ICreationTaskRepository>,
-    /// Registered media adapters (see [`crate::default_adapters`]).
-    providers: Vec<Arc<dyn MediaProvider>>,
-    /// Provider-row lookup for endpoint/key resolution (`None` in the bare
-    /// skeleton — tasks then fail `config`).
-    provider_repo: Option<Arc<dyn IProviderRepository>>,
-    encryption_key: [u8; 32],
+    /// The unified model invocation layer (`None` in the bare skeleton —
+    /// tasks then fail `config`).
+    invoke: Option<Arc<ModelInvokeService>>,
     http: reqwest::Client,
     asset_source: Option<Arc<dyn AssetSource>>,
     asset_sink: Option<Arc<dyn AssetSink>>,
@@ -221,12 +373,10 @@ pub struct CreationService {
     task_timeout: Duration,
 }
 
-/// Builder for [`CreationService`] (the app wires adapters + resolver + sink).
+/// Builder for [`CreationService`] (the app wires the invoke layer + sink).
 pub struct CreationServiceBuilder {
     repo: Arc<dyn ICreationTaskRepository>,
-    providers: Vec<Arc<dyn MediaProvider>>,
-    provider_repo: Option<Arc<dyn IProviderRepository>>,
-    encryption_key: [u8; 32],
+    invoke: Option<Arc<ModelInvokeService>>,
     http: Option<reqwest::Client>,
     asset_source: Option<Arc<dyn AssetSource>>,
     asset_sink: Option<Arc<dyn AssetSink>>,
@@ -237,16 +387,10 @@ pub struct CreationServiceBuilder {
 }
 
 impl CreationServiceBuilder {
-    pub fn with_providers(mut self, providers: Vec<Arc<dyn MediaProvider>>) -> Self {
-        self.providers = providers;
-        self
-    }
-
-    /// Provider-row repo + machine-bound AES key (mirrors the `ProviderService`
-    /// / `ModelFetchService` key-passing convention).
-    pub fn with_provider_repo(mut self, repo: Arc<dyn IProviderRepository>, encryption_key: [u8; 32]) -> Self {
-        self.provider_repo = Some(repo);
-        self.encryption_key = encryption_key;
+    /// Wire the unified model invocation service (provider/model resolution +
+    /// protocol adapters live there).
+    pub fn with_invoke(mut self, invoke: Arc<ModelInvokeService>) -> Self {
+        self.invoke = Some(invoke);
         self
     }
 
@@ -280,9 +424,7 @@ impl CreationServiceBuilder {
     pub fn build(self) -> Arc<CreationService> {
         Arc::new(CreationService {
             repo: self.repo,
-            providers: self.providers,
-            provider_repo: self.provider_repo,
-            encryption_key: self.encryption_key,
+            invoke: self.invoke,
             http: self.http.unwrap_or_default(),
             asset_source: self.asset_source,
             asset_sink: self.asset_sink,
@@ -297,13 +439,11 @@ impl CreationServiceBuilder {
 }
 
 impl CreationService {
-    /// Start a builder over the task repo (adapters/resolver/sink layered on).
+    /// Start a builder over the task repo (invoke layer/sink layered on).
     pub fn builder(repo: Arc<dyn ICreationTaskRepository>) -> CreationServiceBuilder {
         CreationServiceBuilder {
             repo,
-            providers: Vec::new(),
-            provider_repo: None,
-            encryption_key: [0u8; 32],
+            invoke: None,
             http: None,
             asset_source: None,
             asset_sink: None,
@@ -314,16 +454,11 @@ impl CreationService {
         }
     }
 
-    /// Build a bare service over just the task repo (no adapters/resolver — tasks
-    /// created against it fail `config`/`adapter_unavailable`). Full wiring uses
+    /// Build a bare service over just the task repo (no invoke layer — tasks
+    /// created against it fail `config`). Full wiring uses
     /// [`CreationService::builder`].
     pub fn new(repo: Arc<dyn ICreationTaskRepository>) -> Arc<Self> {
         Self::builder(repo).build()
-    }
-
-    /// The first registered adapter that serves `cap`, if any.
-    pub fn provider_for(&self, cap: MediaCapability) -> Option<Arc<dyn MediaProvider>> {
-        self.providers.iter().find(|p| p.supports(cap)).cloned()
     }
 
     // -----------------------------------------------------------------------
@@ -345,8 +480,8 @@ impl CreationService {
         let provider_id = ProviderId::parse(req.provider_id)
             .map_err(|error| AppError::BadRequest(format!("invalid provider_id: {error}")))?
             .into_string();
-        if let Some(repo) = &self.provider_repo
-            && repo.find_by_id(&provider_id).await?.is_none()
+        if let Some(invoke) = &self.invoke
+            && invoke.provider_repo().find_by_id(&provider_id).await?.is_none()
         {
             return Err(AppError::NotFound(format!(
                 "provider {provider_id} not found"
@@ -790,13 +925,10 @@ impl CreationService {
     }
 
     async fn execute(&self, job: &WorkerJob, token: &CancellationToken) -> ExecOutcome {
-        let provider = match self.resolve_provider(&job.provider_id).await {
-            Ok(p) => p,
-            Err(e) => return ExecOutcome::Failed(e),
-        };
-        let adapter = match self.select_adapter(job.capability, &provider.platform, &job.model) {
-            Ok(a) => a,
-            Err(e) => return ExecOutcome::Failed(e),
+        let Some(invoke) = self.invoke.clone() else {
+            return ExecOutcome::Failed(CreationError::config(
+                "no invoke service wired into the creation engine",
+            ));
         };
         // Fresh tasks load their input bytes; a resume polls with no inputs.
         let inputs = if job.remote_task_id.is_none() {
@@ -807,27 +939,34 @@ impl CreationService {
         } else {
             Vec::new()
         };
-        let req = SubmitRequest {
-            provider,
-            model: job.model.clone(),
-            capability: job.capability,
-            params: job.params.clone(),
-            inputs,
+        let req = match cap_to_task_request(job.capability, &job.params, inputs) {
+            Ok(r) => r,
+            Err(e) => return ExecOutcome::Failed(e),
         };
+        let mref = ModelRef { provider_id: job.provider_id.clone(), model: job.model.clone() };
 
-        if let Some(remote) = job.remote_task_id.as_deref() {
-            return self.poll_loop(job, adapter.as_ref(), &req, remote, token).await;
+        if let Some(raw) = job.remote_task_id.as_deref() {
+            let handle = parse_job_handle(raw, job.capability);
+            return self.poll_loop(job, &invoke, &mref, &req, handle, token).await;
         }
 
-        let ack = tokio::select! {
+        let outcome = tokio::select! {
             _ = token.cancelled() => return ExecOutcome::Canceled,
-            r = adapter.submit(&req) => r,
+            r = invoke.invoke(&mref, req) => r,
         };
-        match ack {
-            Err(e) => ExecOutcome::Failed(e),
-            Ok(SubmitAck::Done(assets)) => self.persist_or_fail(job, assets).await,
-            Ok(SubmitAck::Pending { remote_task_id }) => {
-                match self.set_remote(&job.creation_task_id, &remote_task_id).await {
+        match outcome {
+            Err(e) => ExecOutcome::Failed(e.into()),
+            Ok(TaskOutcome::Done(result)) => self.persist_or_fail(job, result).await,
+            Ok(TaskOutcome::Pending(handle)) => {
+                let serialized = match serde_json::to_string(&handle) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        return ExecOutcome::Failed(CreationError::config(format!(
+                            "serialize job handle failed: {e}"
+                        )));
+                    }
+                };
+                match self.set_remote(&job.creation_task_id, &serialized).await {
                     Ok(true) => {}
                     Ok(false) => return ExecOutcome::Canceled,
                     Err(e) => {
@@ -836,7 +975,14 @@ impl CreationService {
                         )));
                     }
                 }
-                self.poll_loop(job, adapter.as_ref(), &req, &remote_task_id, token).await
+                // Poll rides an input-less request (mirroring a boot resume:
+                // inputs were consumed at submit; polling only needs the task
+                // shape), so submit-time input bytes are not held for hours.
+                let poll_req = match cap_to_task_request(job.capability, &job.params, Vec::new()) {
+                    Ok(r) => r,
+                    Err(e) => return ExecOutcome::Failed(e),
+                };
+                self.poll_loop(job, &invoke, &mref, &poll_req, handle, token).await
             }
         }
     }
@@ -844,9 +990,10 @@ impl CreationService {
     async fn poll_loop(
         &self,
         job: &WorkerJob,
-        adapter: &dyn MediaProvider,
-        req: &SubmitRequest,
-        remote_task_id: &str,
+        invoke: &ModelInvokeService,
+        mref: &ModelRef,
+        req: &TaskRequest,
+        mut handle: JobHandle,
         token: &CancellationToken,
     ) -> ExecOutcome {
         // A boot-resumed job (its `remote_task_id` was set at spawn from the
@@ -874,17 +1021,19 @@ impl CreationService {
             }
             let poll = tokio::select! {
                 _ = token.cancelled() => return ExecOutcome::Canceled,
-                r = adapter.poll(remote_task_id, req) => r,
+                r = invoke.poll(mref, req.clone(), &handle) => r,
             };
             match poll {
-                Ok(PollResult::Pending) => continue,
-                Ok(PollResult::Done(assets)) => return self.persist_or_fail(job, assets).await,
-                Ok(PollResult::Failed(e)) => return ExecOutcome::Failed(e),
+                Ok(TaskOutcome::Pending(next)) => {
+                    handle = next;
+                    continue;
+                }
+                Ok(TaskOutcome::Done(result)) => return self.persist_or_fail(job, result).await,
                 Err(e) => {
                     // 4xx is terminal (bad job id / auth); 5xx / network is
                     // transient — keep polling until the deadline.
                     if e.http_status.is_some_and(|s| (400..500).contains(&s)) {
-                        return ExecOutcome::Failed(e);
+                        return ExecOutcome::Failed(e.into());
                     }
                     tracing::warn!(id = %job.creation_task_id, error = %e.message, "creation poll transient error; retrying");
                 }
@@ -892,7 +1041,23 @@ impl CreationService {
         }
     }
 
-    async fn persist_or_fail(&self, job: &WorkerJob, assets: Vec<crate::provider::ProducedAsset>) -> ExecOutcome {
+    async fn persist_or_fail(&self, job: &WorkerJob, result: TaskResult) -> ExecOutcome {
+        let assets = match result {
+            TaskResult::Assets(assets) => assets,
+            // Chat text rides the same artifact pipeline as text/plain bytes
+            // (the bridge keys its text special case off the MIME prefix).
+            TaskResult::Text(text) => vec![ProducedAsset {
+                data: ProducedData::Bytes(text.into_bytes()),
+                mime: Some(TEXT_MIME.to_string()),
+            }],
+            // Defensive: no creation capability maps to these result shapes.
+            TaskResult::Transcript { .. } | TaskResult::Embeddings(_) => {
+                return ExecOutcome::Failed(CreationError::new(
+                    "invalid_artifact",
+                    "unexpected result type from the invoke layer for a creation task",
+                ));
+            }
+        };
         match self.persist_assets(job, assets).await {
             Ok(ids) => ExecOutcome::Succeeded(ids),
             Err(e) => ExecOutcome::Failed(e),
@@ -947,58 +1112,8 @@ impl CreationService {
     }
 
     // -----------------------------------------------------------------------
-    // Resolution + IO helpers
+    // IO helpers
     // -----------------------------------------------------------------------
-
-    async fn resolve_provider(&self, provider_id: &str) -> Result<ResolvedProvider, CreationError> {
-        let repo = self
-            .provider_repo
-            .as_ref()
-            .ok_or_else(|| CreationError::config("no provider repository wired into the creation engine"))?;
-        let row = repo
-            .find_by_id(provider_id)
-            .await
-            .map_err(|e| CreationError::config(format!("provider lookup failed: {e}")))?
-            .ok_or_else(|| CreationError::new("provider_not_found", format!("provider '{provider_id}' not found")))?;
-        let key_raw = decrypt_string(&row.api_key_encrypted, &self.encryption_key)
-            .map_err(|e| CreationError::config(format!("decrypt provider api key failed: {e}")))?;
-        let api_key = primary_api_key(&key_raw)
-            .ok_or_else(|| CreationError::config("provider has no usable api key"))?;
-        if row.base_url.trim().is_empty() {
-            return Err(CreationError::config("provider base_url is empty"));
-        }
-        Ok(ResolvedProvider {
-            provider_id: row.provider_id,
-            platform: row.platform,
-            base_url: row.base_url,
-            api_key,
-            is_full_url: row.is_full_url,
-        })
-    }
-
-    fn select_adapter(
-        &self,
-        cap: MediaCapability,
-        platform: &str,
-        model: &str,
-    ) -> Result<Arc<dyn MediaProvider>, CreationError> {
-        let id = route_adapter_id(cap, platform, model).ok_or_else(|| {
-            CreationError::new("unsupported_capability", format!("no adapter routes capability {}", cap.as_str()))
-        })?;
-        let adapter = self
-            .providers
-            .iter()
-            .find(|p| p.id() == id)
-            .cloned()
-            .ok_or_else(CreationError::adapter_unavailable)?;
-        if !adapter.supports(cap) {
-            return Err(CreationError::new(
-                "adapter_unavailable",
-                format!("adapter '{id}' does not support {}", cap.as_str()),
-            ));
-        }
-        Ok(adapter)
-    }
 
     async fn load_inputs(&self, inputs: &[CreationInput]) -> Result<Vec<InputAsset>, CreationError> {
         if inputs.is_empty() {
@@ -1012,7 +1127,7 @@ impl CreationService {
         for i in inputs {
             let loaded = source.load(&i.asset_id).await?;
             out.push(InputAsset {
-                asset_id: i.asset_id.clone(),
+                id: Some(i.asset_id.clone()),
                 role: i.role.clone(),
                 bytes: loaded.bytes,
                 mime: loaded.mime,
@@ -1024,7 +1139,7 @@ impl CreationService {
     async fn persist_assets(
         &self,
         job: &WorkerJob,
-        assets: Vec<crate::provider::ProducedAsset>,
+        assets: Vec<ProducedAsset>,
     ) -> Result<Vec<String>, CreationError> {
         if assets.is_empty() {
             return Err(CreationError::provider_error("adapter produced no artifacts"));
@@ -1139,16 +1254,22 @@ impl CreationService {
             .timeout(DOWNLOAD_TIMEOUT)
             .send()
             .await
-            .map_err(net_err)?;
+            .map_err(|e| CreationError::from(net_err(e)))?;
         if !resp.status().is_success() {
-            return Err(error_from_response(resp).await);
+            // Any non-2xx on an artifact download is a provider failure (the
+            // legacy classification), regardless of the invoke layer's finer
+            // status buckets.
+            let e = error_from_response(resp).await;
+            let mut err = CreationError::provider_error(e.message);
+            err.http_status = e.http_status;
+            return Err(err);
         }
         let response_content_type = resp
             .headers()
             .get(reqwest::header::CONTENT_TYPE)
             .and_then(|value| value.to_str().ok());
         let declared_mime = reconcile_mime(mime_hint, response_content_type)?;
-        let bytes = read_body_capped(resp, MAX_ARTIFACT_BYTES).await?;
+        let bytes = read_body_capped(resp, MAX_ARTIFACT_BYTES).await.map_err(CreationError::from)?;
         let mime = validate_for_capability(&bytes, declared_mime.as_deref(), capability)?;
         Ok((bytes, mime))
     }
@@ -1253,12 +1374,6 @@ impl CreationService {
 }
 
 
-/// The first non-empty API key from a comma/newline-separated list (P0 takes the
-/// first usable key; rotation is a later hook).
-fn primary_api_key(raw: &str) -> Option<String> {
-    raw.split([',', '\n']).map(str::trim).find(|k| !k.is_empty()).map(str::to_owned)
-}
-
 /// Build the provenance object stamped onto every produced asset's `origin`.
 fn build_origin(job: &WorkerJob) -> Value {
     let mut origin = serde_json::Map::from_iter([
@@ -1312,12 +1427,23 @@ impl TaskStatus {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::provider::{PollResult, ProducedAsset, ProducedData};
-    use nomifun_db::{CreationTaskRow, DbError, SqliteCreationTaskRepository, SqliteProviderRepository};
+    use nomifun_api_types::ModelTask;
+    use nomifun_db::{
+        CreationTaskRow, DbError, IProviderModelRepository, IProviderRepository, NewProviderModel,
+        SqliteCreationTaskRepository, SqliteProviderConnectionRepository,
+        SqliteProviderModelRepository, SqliteProviderRepository,
+    };
+    use nomifun_model_invoke::{AdapterRegistry, InvokeError, ProtocolAdapter, ResolvedCall};
     use std::sync::atomic::{AtomicUsize, Ordering};
     use tokio::sync::Semaphore as TestSemaphore;
 
     const TEST_KEY: [u8; 32] = [0x42; 32];
+
+    /// Every task the shared "test-model" row declares — the invoke layer's
+    /// task-membership gate is exercised by dedicated invoke-layer tests; here
+    /// the model is fully tagged so the state-machine tests stay focused.
+    const ALL_TEST_TASKS: &str =
+        r#"["image_generation","image_edit","video_generation","chat","speech_synthesis"]"#;
 
     fn valid_png() -> Vec<u8> {
         let image = image::DynamicImage::ImageRgba8(image::RgbaImage::from_pixel(
@@ -1336,11 +1462,14 @@ mod tests {
 
     // ---- test doubles ----
 
-    /// A configurable adapter: synchronous `Done`, or async `Pending` then a
-    /// scripted number of `Pending` polls before a terminal outcome.
+    /// A configurable invoke-level protocol adapter: synchronous `Done`, or
+    /// async `Pending` then a scripted number of `Pending` polls before a
+    /// terminal outcome. Registered in a private [`AdapterRegistry`] under a
+    /// REAL protocol id (e.g. `"openai.images"`) so the production platform
+    /// routing table selects it for the seeded `openai` provider.
     struct MockAdapter {
         id: &'static str,
-        supports: Vec<MediaCapability>,
+        supports: Vec<ModelTask>,
         behavior: MockBehavior,
         submit_calls: AtomicUsize,
         poll_calls: AtomicUsize,
@@ -1364,13 +1493,13 @@ mod tests {
         fn sync(id: &'static str) -> Arc<Self> {
             Arc::new(Self {
                 id,
-                supports: vec![MediaCapability::T2i, MediaCapability::I2i, MediaCapability::Inpaint],
+                supports: vec![ModelTask::ImageGeneration, ModelTask::ImageEdit],
                 behavior: MockBehavior::DoneSync,
                 submit_calls: AtomicUsize::new(0),
                 poll_calls: AtomicUsize::new(0),
             })
         }
-        fn with(id: &'static str, supports: Vec<MediaCapability>, behavior: MockBehavior) -> Arc<Self> {
+        fn with(id: &'static str, supports: Vec<ModelTask>, behavior: MockBehavior) -> Arc<Self> {
             Arc::new(Self {
                 id,
                 supports,
@@ -1379,80 +1508,78 @@ mod tests {
                 poll_calls: AtomicUsize::new(0),
             })
         }
+        fn png_asset() -> ProducedAsset {
+            ProducedAsset { data: ProducedData::Bytes(valid_png()), mime: Some("image/png".into()) }
+        }
+        fn pending_handle(&self) -> JobHandle {
+            JobHandle { adapter_id: self.id.into(), remote_id: "remote-123".into(), poll_state: json!({}) }
+        }
     }
     #[async_trait]
-    impl MediaProvider for MockAdapter {
+    impl ProtocolAdapter for MockAdapter {
         fn id(&self) -> &'static str {
             self.id
         }
-        fn supports(&self, cap: MediaCapability) -> bool {
-            self.supports.contains(&cap)
+        fn supports(&self, task: ModelTask) -> bool {
+            self.supports.contains(&task)
         }
-        async fn submit(&self, _req: &SubmitRequest) -> Result<SubmitAck, CreationError> {
+        async fn submit(&self, _http: &reqwest::Client, _call: &ResolvedCall) -> Result<TaskOutcome, InvokeError> {
             self.submit_calls.fetch_add(1, Ordering::SeqCst);
             match &self.behavior {
-                MockBehavior::DoneSync => Ok(SubmitAck::Done(vec![ProducedAsset {
-                    data: ProducedData::Bytes(valid_png()),
-                    mime: Some("image/png".into()),
-                }])),
-                MockBehavior::DoneEmpty => Ok(SubmitAck::Done(Vec::new())),
-                MockBehavior::DoneEmptyBytes => Ok(SubmitAck::Done(vec![ProducedAsset {
-                    data: ProducedData::Bytes(Vec::new()),
-                    mime: Some("image/png".into()),
-                }])),
-                MockBehavior::DoneInvalidImage => Ok(SubmitAck::Done(vec![ProducedAsset {
-                    data: ProducedData::Bytes(b"not-an-image".to_vec()),
-                    mime: Some("image/png".into()),
-                }])),
-                MockBehavior::DoneValidThenInvalid => Ok(SubmitAck::Done(vec![
-                    ProducedAsset {
-                        data: ProducedData::Bytes(valid_png()),
-                        mime: Some("image/png".into()),
-                    },
+                MockBehavior::DoneSync => {
+                    Ok(TaskOutcome::Done(TaskResult::Assets(vec![Self::png_asset()])))
+                }
+                MockBehavior::DoneEmpty => Ok(TaskOutcome::Done(TaskResult::Assets(Vec::new()))),
+                MockBehavior::DoneEmptyBytes => Ok(TaskOutcome::Done(TaskResult::Assets(vec![
+                    ProducedAsset { data: ProducedData::Bytes(Vec::new()), mime: Some("image/png".into()) },
+                ]))),
+                MockBehavior::DoneInvalidImage => Ok(TaskOutcome::Done(TaskResult::Assets(vec![
                     ProducedAsset {
                         data: ProducedData::Bytes(b"not-an-image".to_vec()),
                         mime: Some("image/png".into()),
                     },
-                ])),
-                MockBehavior::DoneTwoValid => Ok(SubmitAck::Done(vec![
+                ]))),
+                MockBehavior::DoneValidThenInvalid => Ok(TaskOutcome::Done(TaskResult::Assets(vec![
+                    Self::png_asset(),
                     ProducedAsset {
-                        data: ProducedData::Bytes(valid_png()),
+                        data: ProducedData::Bytes(b"not-an-image".to_vec()),
                         mime: Some("image/png".into()),
                     },
-                    ProducedAsset {
-                        data: ProducedData::Bytes(valid_png()),
-                        mime: Some("image/png".into()),
-                    },
-                ])),
-                MockBehavior::DoneManyValid(count) => Ok(SubmitAck::Done(
-                    (0..*count)
-                        .map(|_| ProducedAsset {
-                            data: ProducedData::Bytes(valid_png()),
-                            mime: Some("image/png".into()),
-                        })
-                        .collect(),
-                )),
-                MockBehavior::SubmitError(m) => Err(CreationError::provider_error(m.clone())),
+                ]))),
+                MockBehavior::DoneTwoValid => Ok(TaskOutcome::Done(TaskResult::Assets(vec![
+                    Self::png_asset(),
+                    Self::png_asset(),
+                ]))),
+                MockBehavior::DoneManyValid(count) => Ok(TaskOutcome::Done(TaskResult::Assets(
+                    (0..*count).map(|_| Self::png_asset()).collect(),
+                ))),
+                MockBehavior::SubmitError(m) => {
+                    Err(InvokeError::new(nomifun_model_invoke::InvokeErrorKind::ProviderError, m.clone()))
+                }
                 MockBehavior::AsyncDone { .. } | MockBehavior::AsyncNever => {
-                    Ok(SubmitAck::Pending { remote_task_id: "remote-123".into() })
+                    Ok(TaskOutcome::Pending(self.pending_handle()))
                 }
             }
         }
-        async fn poll(&self, _remote: &str, _req: &SubmitRequest) -> Result<PollResult, CreationError> {
+        async fn poll(
+            &self,
+            _http: &reqwest::Client,
+            _call: &ResolvedCall,
+            job: &JobHandle,
+        ) -> Result<TaskOutcome, InvokeError> {
             let n = self.poll_calls.fetch_add(1, Ordering::SeqCst);
             match &self.behavior {
                 MockBehavior::AsyncDone { pending_polls } => {
                     if n < *pending_polls {
-                        Ok(PollResult::Pending)
+                        Ok(TaskOutcome::Pending(job.clone()))
                     } else {
-                        Ok(PollResult::Done(vec![ProducedAsset {
+                        Ok(TaskOutcome::Done(TaskResult::Assets(vec![ProducedAsset {
                             data: ProducedData::Bytes(valid_mp4()),
                             mime: Some("video/mp4".into()),
-                        }]))
+                        }])))
                     }
                 }
-                MockBehavior::AsyncNever => Ok(PollResult::Pending),
-                _ => Ok(PollResult::Pending),
+                _ => Ok(TaskOutcome::Pending(job.clone())),
             }
         }
     }
@@ -1803,6 +1930,44 @@ mod tests {
         row.provider_id
     }
 
+    /// Tag `model` on the provider with `tasks` so the invoke layer's
+    /// task-membership gate admits it.
+    async fn seed_model_tasks(pool: &nomifun_db::SqlitePool, provider_id: &str, model: &str, tasks: &str) {
+        let repo = SqliteProviderModelRepository::new(pool.clone());
+        repo.create(
+            provider_id,
+            &NewProviderModel {
+                model,
+                enabled: true,
+                sort_order: 0,
+                tasks,
+                traits: "[]",
+                protocol: None,
+                params: "{}",
+                context_limit: None,
+                description: None,
+                source: "user",
+                health: None,
+            },
+        )
+        .await
+        .unwrap();
+    }
+
+    /// A [`ModelInvokeService`] over the shared pool with ONLY the given
+    /// protocol adapters registered (the platform route table then selects
+    /// them by their real protocol ids).
+    fn invoke_over(pool: &nomifun_db::SqlitePool, adapters: Vec<Arc<dyn ProtocolAdapter>>) -> Arc<ModelInvokeService> {
+        Arc::new(ModelInvokeService::new(
+            Arc::new(SqliteProviderRepository::new(pool.clone())),
+            Arc::new(SqliteProviderModelRepository::new(pool.clone())),
+            Arc::new(SqliteProviderConnectionRepository::new(pool.clone())),
+            TEST_KEY,
+            reqwest::Client::new(),
+            AdapterRegistry::new(adapters),
+        ))
+    }
+
     struct Harness {
         svc: Arc<CreationService>,
         provider_id: String,
@@ -1810,16 +1975,15 @@ mod tests {
         _db: nomifun_db::Database,
     }
 
-    async fn harness(adapter: Arc<dyn MediaProvider>, platform: &str) -> Harness {
+    async fn harness(adapter: Arc<MockAdapter>, platform: &str) -> Harness {
         let db = nomifun_db::init_database_memory().await.unwrap();
         let pool = db.pool().clone();
         let provider_id = seed_provider(&pool, platform).await;
+        seed_model_tasks(&pool, &provider_id, "test-model", ALL_TEST_TASKS).await;
         let repo: Arc<dyn ICreationTaskRepository> = Arc::new(SqliteCreationTaskRepository::new(pool.clone()));
-        let provider_repo: Arc<dyn IProviderRepository> = Arc::new(SqliteProviderRepository::new(pool));
         let sink = Arc::new(RecordingSink { count: AtomicUsize::new(0) });
         let svc = CreationService::builder(repo)
-            .with_providers(vec![adapter])
-            .with_provider_repo(provider_repo, TEST_KEY)
+            .with_invoke(invoke_over(&pool, vec![adapter as Arc<dyn ProtocolAdapter>]))
             .with_asset_source(Arc::new(StaticSource))
             .with_asset_sink(sink.clone())
             .with_poll_interval(Duration::from_millis(10))
@@ -1829,7 +1993,7 @@ mod tests {
     }
 
     async fn harness_with_sink_and_repo(
-        adapter: Arc<dyn MediaProvider>,
+        adapter: Arc<MockAdapter>,
         platform: &str,
         sink: Arc<dyn AssetSink>,
         success_commit_fault: Option<SuccessCommitFault>,
@@ -1837,16 +2001,15 @@ mod tests {
         let db = nomifun_db::init_database_memory().await.unwrap();
         let pool = db.pool().clone();
         let provider_id = seed_provider(&pool, platform).await;
+        seed_model_tasks(&pool, &provider_id, "test-model", ALL_TEST_TASKS).await;
         let sqlite_repo: Arc<dyn ICreationTaskRepository> =
             Arc::new(SqliteCreationTaskRepository::new(pool.clone()));
         let repo: Arc<dyn ICreationTaskRepository> = match success_commit_fault {
             Some(fault) => Arc::new(ScriptedSucceededRepo { inner: sqlite_repo, fault }),
             None => sqlite_repo,
         };
-        let provider_repo: Arc<dyn IProviderRepository> = Arc::new(SqliteProviderRepository::new(pool));
         let svc = CreationService::builder(repo)
-            .with_providers(vec![adapter])
-            .with_provider_repo(provider_repo, TEST_KEY)
+            .with_invoke(invoke_over(&pool, vec![adapter as Arc<dyn ProtocolAdapter>]))
             .with_asset_source(Arc::new(StaticSource))
             .with_asset_sink(sink)
             .with_poll_interval(Duration::from_millis(10))
@@ -1927,7 +2090,7 @@ mod tests {
 
     #[tokio::test]
     async fn sync_task_succeeds_and_persists_asset() {
-        let h = harness(MockAdapter::sync("openai_images"), "openai").await;
+        let h = harness(MockAdapter::sync("openai.images"), "openai").await;
         let created = h.svc.create_task(new_task(&h.provider_id, "t2i")).await.unwrap();
         assert_eq!(created.status, "queued");
         validate_uuidv7(&created.creation_task_id).unwrap();
@@ -1943,8 +2106,8 @@ mod tests {
     #[tokio::test]
     async fn successful_provider_response_without_artifacts_fails_task() {
         let adapter = MockAdapter::with(
-            "openai_images",
-            vec![MediaCapability::T2i],
+            "openai.images",
+            vec![ModelTask::ImageGeneration],
             MockBehavior::DoneEmpty,
         );
         let h = harness(adapter, "openai").await;
@@ -1959,7 +2122,7 @@ mod tests {
     #[tokio::test]
     async fn empty_or_invalid_image_bytes_never_reach_asset_sink() {
         for behavior in [MockBehavior::DoneEmptyBytes, MockBehavior::DoneInvalidImage] {
-            let adapter = MockAdapter::with("openai_images", vec![MediaCapability::T2i], behavior);
+            let adapter = MockAdapter::with("openai.images", vec![ModelTask::ImageGeneration], behavior);
             let h = harness(adapter, "openai").await;
             let created = h.svc.create_task(new_task(&h.provider_id, "t2i")).await.unwrap();
             let done = wait_terminal(&h.svc, &created.creation_task_id).await;
@@ -1973,8 +2136,8 @@ mod tests {
     #[tokio::test]
     async fn invalid_batch_member_is_rejected_before_any_asset_is_persisted() {
         let adapter = MockAdapter::with(
-            "openai_images",
-            vec![MediaCapability::T2i],
+            "openai.images",
+            vec![ModelTask::ImageGeneration],
             MockBehavior::DoneValidThenInvalid,
         );
         let h = harness(adapter, "openai").await;
@@ -1988,8 +2151,8 @@ mod tests {
     #[tokio::test]
     async fn second_persist_failure_rolls_back_first_provisional_asset() {
         let adapter = MockAdapter::with(
-            "openai_images",
-            vec![MediaCapability::T2i],
+            "openai.images",
+            vec![ModelTask::ImageGeneration],
             MockBehavior::DoneTwoValid,
         );
         let sink = TransactionalTestSink::new(Some(2), None);
@@ -2009,7 +2172,7 @@ mod tests {
 
     #[tokio::test]
     async fn cancel_during_persist_rolls_back_completed_provisional_write() {
-        let adapter = MockAdapter::sync("openai_images");
+        let adapter = MockAdapter::sync("openai.images");
         let sink = TransactionalTestSink::new(None, Some(1));
         let (svc, provider_id, _db) =
             harness_with_sink_and_repo(adapter, "openai", sink.clone(), None).await;
@@ -2038,7 +2201,7 @@ mod tests {
 
     #[tokio::test]
     async fn succeeded_status_write_failure_rolls_back_provisional_assets() {
-        let adapter = MockAdapter::sync("openai_images");
+        let adapter = MockAdapter::sync("openai.images");
         let sink = TransactionalTestSink::new(None, None);
         let (svc, provider_id, _db) =
             harness_with_sink_and_repo(adapter, "openai", sink.clone(), Some(SuccessCommitFault::Error)).await;
@@ -2060,7 +2223,7 @@ mod tests {
 
     #[tokio::test]
     async fn cancel_winning_terminal_compare_and_set_rolls_back_assets() {
-        let adapter = MockAdapter::sync("openai_images");
+        let adapter = MockAdapter::sync("openai.images");
         let sink = TransactionalTestSink::new(None, None);
         let (svc, provider_id, _db) = harness_with_sink_and_repo(
             adapter,
@@ -2087,8 +2250,8 @@ mod tests {
     #[tokio::test]
     async fn async_task_polls_then_succeeds() {
         let adapter = MockAdapter::with(
-            "openai_video",
-            vec![MediaCapability::T2v, MediaCapability::I2v],
+            "openai.videos",
+            vec![ModelTask::VideoGeneration],
             MockBehavior::AsyncDone { pending_polls: 2 },
         );
         let h = harness(adapter, "openai").await;
@@ -2104,8 +2267,8 @@ mod tests {
     #[tokio::test]
     async fn submit_error_fails_task() {
         let adapter = MockAdapter::with(
-            "openai_images",
-            vec![MediaCapability::T2i],
+            "openai.images",
+            vec![ModelTask::ImageGeneration],
             MockBehavior::SubmitError("boom".into()),
         );
         let h = harness(adapter, "openai").await;
@@ -2119,8 +2282,8 @@ mod tests {
     #[tokio::test]
     async fn cancel_interrupts_running_async_task() {
         let adapter = MockAdapter::with(
-            "openai_video",
-            vec![MediaCapability::T2v],
+            "openai.videos",
+            vec![ModelTask::VideoGeneration],
             MockBehavior::AsyncNever,
         );
         let h = harness(adapter, "openai").await;
@@ -2149,6 +2312,7 @@ mod tests {
         let db = nomifun_db::init_database_memory().await.unwrap();
         let pool = db.pool().clone();
         let provider_id = seed_provider(&pool, "openai").await;
+        seed_model_tasks(&pool, &provider_id, "test-model", ALL_TEST_TASKS).await;
         let inner: Arc<dyn ICreationTaskRepository> =
             Arc::new(SqliteCreationTaskRepository::new(pool.clone()));
         let gated = Arc::new(RemotePatchGateRepo {
@@ -2156,16 +2320,14 @@ mod tests {
             entered: TestSemaphore::new(0),
             release: TestSemaphore::new(0),
         });
-        let provider_repo: Arc<dyn IProviderRepository> = Arc::new(SqliteProviderRepository::new(pool));
         let adapter = MockAdapter::with(
-            "openai_video",
-            vec![MediaCapability::T2v],
+            "openai.videos",
+            vec![ModelTask::VideoGeneration],
             MockBehavior::AsyncNever,
         );
         let sink = Arc::new(RecordingSink { count: AtomicUsize::new(0) });
         let svc = CreationService::builder(gated.clone())
-            .with_providers(vec![adapter])
-            .with_provider_repo(provider_repo, TEST_KEY)
+            .with_invoke(invoke_over(&pool, vec![adapter as Arc<dyn ProtocolAdapter>]))
             .with_asset_source(Arc::new(StaticSource))
             .with_asset_sink(sink)
             .with_poll_interval(Duration::from_millis(10))
@@ -2189,7 +2351,7 @@ mod tests {
 
     #[tokio::test]
     async fn cancel_is_idempotent_on_terminal() {
-        let h = harness(MockAdapter::sync("openai_images"), "openai").await;
+        let h = harness(MockAdapter::sync("openai.images"), "openai").await;
         let created = h.svc.create_task(new_task(&h.provider_id, "t2i")).await.unwrap();
         let done = wait_terminal(&h.svc, &created.creation_task_id).await;
         assert_eq!(done.status, "succeeded");
@@ -2202,7 +2364,7 @@ mod tests {
 
     #[tokio::test]
     async fn malformed_entity_ids_are_rejected() {
-        let h = harness(MockAdapter::sync("openai_images"), "openai").await;
+        let h = harness(MockAdapter::sync("openai.images"), "openai").await;
         let mut bad = new_task(&h.provider_id, "nope");
         assert!(matches!(h.svc.create_task(bad).await.unwrap_err(), AppError::BadRequest(_)));
         bad = new_task("  ", "t2i");
@@ -2243,8 +2405,8 @@ mod tests {
     #[tokio::test]
     async fn create_task_enforces_image_count_and_n_without_defaulting_or_clamping() {
         let adapter = MockAdapter::with(
-            "openai_images",
-            vec![MediaCapability::T2i],
+            "openai.images",
+            vec![ModelTask::ImageGeneration],
             MockBehavior::DoneManyValid(10),
         );
         let h = harness(adapter.clone(), "openai").await;
@@ -2281,7 +2443,7 @@ mod tests {
 
     #[tokio::test]
     async fn missing_provider_is_rejected_before_task_persistence() {
-        let h = harness(MockAdapter::sync("openai_images"), "openai").await;
+        let h = harness(MockAdapter::sync("openai.images"), "openai").await;
         let missing_provider = ProviderId::new().into_string();
         assert!(matches!(
             h.svc.create_task(new_task(&missing_provider, "t2i")).await.unwrap_err(),
@@ -2291,7 +2453,7 @@ mod tests {
 
     #[tokio::test]
     async fn boot_reconcile_single_inventory_scan_removes_live_and_missing_task_assets() {
-        let adapter = MockAdapter::sync("openai_images");
+        let adapter = MockAdapter::sync("openai.images");
         let sink = TransactionalTestSink::new(None, None);
         let (svc, provider_id, _db) =
             harness_with_sink_and_repo(adapter, "openai", sink.clone(), None).await;
@@ -2352,7 +2514,7 @@ mod tests {
 
     #[tokio::test]
     async fn boot_asset_cleanup_failure_aborts_before_state_recovery_and_retries_next_pass() {
-        let adapter = MockAdapter::sync("openai_images");
+        let adapter = MockAdapter::sync("openai.images");
         let tracked = TransactionalTestSink::new(None, None);
         let flaky = Arc::new(FlakyReconcileSink {
             inner: tracked.clone(),
@@ -2400,7 +2562,7 @@ mod tests {
 
     #[tokio::test]
     async fn boot_inventory_fails_closed_before_cleanup_for_invalid_committed_task() {
-        let adapter = MockAdapter::sync("openai_images");
+        let adapter = MockAdapter::sync("openai.images");
         let sink = TransactionalTestSink::new(None, None);
         let (svc, provider_id, _db) =
             harness_with_sink_and_repo(adapter, "openai", sink.clone(), None).await;
@@ -2440,7 +2602,7 @@ mod tests {
 
     #[tokio::test]
     async fn query_fails_closed_when_succeeded_task_claims_missing_asset() {
-        let adapter = MockAdapter::sync("openai_images");
+        let adapter = MockAdapter::sync("openai.images");
         let sink = TransactionalTestSink::new(None, None);
         let (svc, provider_id, _db) =
             harness_with_sink_and_repo(adapter, "openai", sink, None).await;
@@ -2469,7 +2631,7 @@ mod tests {
 
     #[tokio::test]
     async fn get_and_list_fail_closed_for_short_image_successes_without_rewriting_rows() {
-        let h = harness(MockAdapter::sync("openai_images"), "openai").await;
+        let h = harness(MockAdapter::sync("openai.images"), "openai").await;
 
         async fn seed_short_success(
             svc: &CreationService,
@@ -2522,7 +2684,7 @@ mod tests {
     async fn boot_reconciliation_rejects_short_or_invalid_count_successes_without_cleanup() {
         let sink = TransactionalTestSink::new(None, None);
         let (svc, provider_id, _db) = harness_with_sink_and_repo(
-            MockAdapter::sync("openai_images"),
+            MockAdapter::sync("openai.images"),
             "openai",
             sink.clone(),
             None,
@@ -2581,7 +2743,7 @@ mod tests {
 
     #[tokio::test]
     async fn cancel_endpoint_fails_closed_for_invalid_terminal_success() {
-        let adapter = MockAdapter::sync("openai_images");
+        let adapter = MockAdapter::sync("openai.images");
         let sink = TransactionalTestSink::new(None, None);
         let (svc, provider_id, _db) =
             harness_with_sink_and_repo(adapter, "openai", sink, None).await;
@@ -2613,8 +2775,8 @@ mod tests {
         // Build a service whose adapter completes on the first poll, so a resumed
         // running-with-remote task reaches succeeded.
         let adapter = MockAdapter::with(
-            "openai_video",
-            vec![MediaCapability::T2v],
+            "openai.videos",
+            vec![ModelTask::VideoGeneration],
             MockBehavior::AsyncDone { pending_polls: 0 },
         );
         let h = harness(adapter, "openai").await;
@@ -2661,8 +2823,8 @@ mod tests {
     async fn reconcile_resumed_task_uses_fresh_deadline_not_stale_submitted_at() {
         // A resumable async task whose remote completes on the first poll.
         let adapter = MockAdapter::with(
-            "openai_video",
-            vec![MediaCapability::T2v],
+            "openai.videos",
+            vec![ModelTask::VideoGeneration],
             MockBehavior::AsyncDone { pending_polls: 0 },
         );
         let h = harness(adapter, "openai").await; // task_timeout = 30s
@@ -2722,14 +2884,6 @@ mod tests {
     }
 
     #[test]
-    fn primary_api_key_takes_first_nonempty() {
-        assert_eq!(primary_api_key("k1,k2").as_deref(), Some("k1"));
-        assert_eq!(primary_api_key("\n  ,  k2 \n k3").as_deref(), Some("k2"));
-        assert_eq!(primary_api_key("   ").as_deref(), None);
-        assert_eq!(primary_api_key("solo").as_deref(), Some("solo"));
-    }
-
-    #[test]
     fn build_origin_carries_provenance() {
         let creation_task_id = generate_id();
         let canvas_id = WorkshopCanvasId::new().into_string();
@@ -2783,16 +2937,168 @@ mod tests {
         assert!(!origin.as_object().unwrap().contains_key("canvas_id"));
         assert!(!origin.as_object().unwrap().contains_key("node_id"));
     }
+
+    // ---- param helpers (ported verbatim from the retired adapters/mod.rs) ----
+
+    #[test]
+    fn param_helpers() {
+        let p = serde_json::json!({"prompt": "a cat", "width": 512, "height": 768, "count": 3});
+        assert_eq!(param_prompt(&p), "a cat");
+        assert_eq!(param_count(&p).unwrap(), 3);
+        assert_eq!(param_size(&p).as_deref(), Some("512x768"));
+
+        let p2 = serde_json::json!({"size": "1024x1024", "count": MAX_IMAGE_OUTPUT_COUNT});
+        assert_eq!(param_size(&p2).as_deref(), Some("1024x1024"));
+        assert_eq!(param_count(&p2).unwrap(), MAX_IMAGE_OUTPUT_COUNT);
+        assert_eq!(param_count(&serde_json::json!({})).unwrap(), 1); // default
+        assert_eq!(param_count(&serde_json::json!({"n": 4})).unwrap(), 4);
+        assert_eq!(param_count(&serde_json::json!({"count": 4, "n": 4})).unwrap(), 4);
+        for invalid in [
+            serde_json::json!({"count": 0}),
+            serde_json::json!({"count": -1}),
+            serde_json::json!({"count": "2"}),
+            serde_json::json!({"count": 1.5}),
+            serde_json::json!({"n": MAX_IMAGE_OUTPUT_COUNT + 1}),
+            serde_json::json!({"count": 2, "n": 3}),
+        ] {
+            assert!(param_count(&invalid).is_err(), "must reject {invalid}");
+        }
+        assert_eq!(param_prompt(&serde_json::json!({})), "");
+        assert!(param_size(&serde_json::json!({})).is_none());
+    }
+
+    // ---- capability → TaskRequest mapping ----
+
+    #[test]
+    fn cap_to_task_request_maps_every_capability() {
+        let params = json!({
+            "prompt": "a cat", "count": 2, "width": 512, "height": 512,
+            "quality": "high", "seconds": 4, "voice": "alloy", "system": "be brief"
+        });
+        let input = InputAsset { id: None, role: "mask".into(), bytes: vec![1], mime: "image/png".into() };
+
+        match cap_to_task_request(MediaCapability::T2i, &params, vec![]).unwrap() {
+            TaskRequest::ImageGeneration(r) => {
+                assert_eq!(r.prompt, "a cat");
+                assert_eq!(r.count, 2);
+                assert_eq!(r.size.as_deref(), Some("512x512"));
+                assert_eq!(r.quality.as_deref(), Some("high"));
+                assert_eq!(r.extra, params);
+            }
+            _ => panic!("t2i must map to ImageGeneration"),
+        }
+        for cap in [MediaCapability::I2i, MediaCapability::Inpaint] {
+            match cap_to_task_request(cap, &params, vec![input.clone()]).unwrap() {
+                TaskRequest::ImageEdit(r) => {
+                    assert_eq!(r.count, 2);
+                    assert_eq!(r.inputs.len(), 1);
+                    assert_eq!(r.inputs[0].role, "mask");
+                }
+                _ => panic!("{cap:?} must map to ImageEdit"),
+            }
+        }
+        for cap in [MediaCapability::T2v, MediaCapability::I2v] {
+            match cap_to_task_request(cap, &params, vec![]).unwrap() {
+                TaskRequest::VideoGeneration(r) => {
+                    assert_eq!(r.seconds, Some(4));
+                    assert_eq!(r.size.as_deref(), Some("512x512"));
+                }
+                _ => panic!("{cap:?} must map to VideoGeneration"),
+            }
+        }
+        // Numeric-string seconds tolerated (legacy openai_video behavior).
+        match cap_to_task_request(MediaCapability::T2v, &json!({"seconds": "8"}), vec![]).unwrap() {
+            TaskRequest::VideoGeneration(r) => assert_eq!(r.seconds, Some(8)),
+            _ => unreachable!(),
+        }
+        match cap_to_task_request(MediaCapability::Tts, &params, vec![]).unwrap() {
+            TaskRequest::SpeechSynthesis(r) => {
+                assert_eq!(r.text, "a cat");
+                assert_eq!(r.voice.as_deref(), Some("alloy"));
+            }
+            _ => panic!("tts must map to SpeechSynthesis"),
+        }
+        match cap_to_task_request(MediaCapability::Text, &params, vec![]).unwrap() {
+            TaskRequest::ChatText(r) => {
+                assert_eq!(r.prompt, "a cat");
+                assert_eq!(r.system.as_deref(), Some("be brief"));
+            }
+            _ => panic!("text must map to ChatText"),
+        }
+        let Err(err) = cap_to_task_request(MediaCapability::V2v, &params, vec![]) else {
+            panic!("v2v must be rejected");
+        };
+        assert_eq!(err.kind, "unsupported_capability");
+        let Err(err) = cap_to_task_request(MediaCapability::T2i, &json!({"count": 0}), vec![]) else {
+            panic!("count 0 must be rejected");
+        };
+        assert_eq!(err.kind, "invalid_params");
+    }
+
+    // ---- JobHandle persistence compatibility ----
+
+    #[test]
+    fn parse_job_handle_accepts_json_and_legacy_bare_id() {
+        // Current format: serialized JobHandle JSON round-trips.
+        let handle = JobHandle { adapter_id: "openai.videos".into(), remote_id: "vid_1".into(), poll_state: json!({"k": 1}) };
+        let raw = serde_json::to_string(&handle).unwrap();
+        let parsed = parse_job_handle(&raw, MediaCapability::T2v);
+        assert_eq!(parsed.adapter_id, "openai.videos");
+        assert_eq!(parsed.remote_id, "vid_1");
+        assert_eq!(parsed.poll_state, json!({"k": 1}));
+
+        // Legacy format: a bare provider-side id → wrapped with the
+        // capability's legacy protocol (openai.videos — the only async one).
+        for cap in [MediaCapability::T2v, MediaCapability::I2v, MediaCapability::V2v] {
+            let parsed = parse_job_handle("vid-legacy-42", cap);
+            assert_eq!(parsed.adapter_id, "openai.videos");
+            assert_eq!(parsed.remote_id, "vid-legacy-42");
+            assert_eq!(parsed.poll_state, json!({}));
+        }
+    }
+
+    #[test]
+    fn invoke_error_maps_onto_creation_error_vocabulary() {
+        use nomifun_model_invoke::InvokeErrorKind as K;
+        for (kind, want) in [
+            (K::UnsupportedTask, "unsupported_capability"),
+            (K::InvalidParams, "invalid_params"),
+            (K::Timeout, "timeout"),
+            (K::Config, "config"),
+            (K::MissingConnection, "config"),
+            (K::NoAdapter, "adapter_unavailable"),
+            (K::Auth, "provider_error"),
+            (K::ProviderError, "provider_error"),
+            (K::Network, "provider_error"),
+            (K::ParseError, "provider_error"),
+            (K::RateLimited, "provider_error"),
+            (K::QuotaExhausted, "provider_error"),
+            (K::ContentPolicy, "provider_error"),
+            (K::NotPollable, "provider_error"),
+        ] {
+            let e: CreationError = InvokeError::new(kind, "boom").into();
+            assert_eq!(e.kind, want, "kind {kind:?}");
+            assert_eq!(e.message, "boom");
+        }
+        let mut src = InvokeError::new(K::ProviderError, "upstream said no");
+        src.http_status = Some(404);
+        let e: CreationError = src.into();
+        assert_eq!(e.http_status, Some(404), "http_status must transfer");
+    }
 }
 
-/// End-to-end tests driving the **real adapters** through the engine against a
-/// wiremock HTTP server — verifies request construction + response parsing +
-/// artifact persistence over the wire (no live network).
+/// End-to-end tests driving the **real invoke-layer adapters** through the
+/// engine against a wiremock HTTP server — verifies request construction +
+/// response parsing + artifact persistence over the wire (no live network).
 #[cfg(test)]
 mod http_e2e_tests {
     use super::*;
     use base64::Engine as _;
-    use nomifun_db::{SqliteCreationTaskRepository, SqliteProviderRepository};
+    use nomifun_db::{
+        IProviderModelRepository, IProviderRepository, NewProviderModel, SqliteCreationTaskRepository,
+        SqliteProviderConnectionRepository, SqliteProviderModelRepository, SqliteProviderRepository,
+    };
+    use nomifun_model_invoke::AdapterRegistry;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -2812,6 +3118,15 @@ mod http_e2e_tests {
 
     fn valid_mp4() -> Vec<u8> {
         crate::artifact::tests::bmff(b"isom")
+    }
+
+    /// Two minimal valid MPEG1-Layer3 frames (mirrors the artifact test
+    /// fixture) — the TTS e2e needs bytes `validate_audio` accepts as mp3.
+    fn valid_mp3() -> Vec<u8> {
+        let mut frame = vec![0; 417];
+        frame[..4].copy_from_slice(&[0xff, 0xfb, 0x90, 0]);
+        frame[10] = 1;
+        [frame.clone(), frame].concat()
     }
 
     struct CountingSink {
@@ -2888,12 +3203,50 @@ mod http_e2e_tests {
             .await
             .unwrap()
             .provider_id;
+        // Tag every test model with the tasks it serves (the invoke layer's
+        // task-membership gate refuses untagged models). The gemini text model
+        // pins its protocol via the row-level override — the invoke routing
+        // table is platform-keyed, and this provider row is "openai".
+        let model_repo = SqliteProviderModelRepository::new(pool.clone());
+        for (model, tasks, protocol) in [
+            ("gpt-image-1", r#"["image_generation","image_edit"]"#, None),
+            ("sora-2", r#"["video_generation"]"#, None),
+            ("gpt-4o-mini", r#"["chat"]"#, None),
+            ("gemini-2.5-flash", r#"["chat"]"#, Some("gemini.generate_text")),
+            ("tts-1", r#"["speech_synthesis"]"#, None),
+        ] {
+            model_repo
+                .create(
+                    &provider_id,
+                    &NewProviderModel {
+                        model,
+                        enabled: true,
+                        sort_order: 0,
+                        tasks,
+                        traits: "[]",
+                        protocol,
+                        params: "{}",
+                        context_limit: None,
+                        description: None,
+                        source: "user",
+                        health: None,
+                    },
+                )
+                .await
+                .unwrap();
+        }
         let repo: Arc<dyn ICreationTaskRepository> = Arc::new(SqliteCreationTaskRepository::new(pool.clone()));
-        let provider_repo: Arc<dyn IProviderRepository> = Arc::new(SqliteProviderRepository::new(pool));
+        let invoke = Arc::new(ModelInvokeService::new(
+            Arc::new(SqliteProviderRepository::new(pool.clone())),
+            Arc::new(SqliteProviderModelRepository::new(pool.clone())),
+            Arc::new(SqliteProviderConnectionRepository::new(pool.clone())),
+            TEST_KEY,
+            reqwest::Client::new(),
+            AdapterRegistry::new(nomifun_model_invoke::default_adapters()),
+        ));
         let sink = Arc::new(CountingSink { count: AtomicUsize::new(0), persisted: std::sync::Mutex::new(Vec::new()) });
         let svc = CreationService::builder(repo)
-            .with_providers(crate::default_adapters(reqwest::Client::new()))
-            .with_provider_repo(provider_repo, TEST_KEY)
+            .with_invoke(invoke)
             .with_asset_source(Arc::new(NoInputs))
             .with_asset_sink(sink.clone())
             .with_poll_interval(Duration::from_millis(10))
@@ -3188,5 +3541,58 @@ mod http_e2e_tests {
         assert_eq!(persisted.len(), 1);
         assert!(persisted[0].0.starts_with("text/plain"), "mime={}", persisted[0].0);
         assert_eq!(String::from_utf8_lossy(&persisted[0].1), "gemini says hi");
+    }
+
+    #[tokio::test]
+    async fn tts_end_to_end_produces_audio_artifact() {
+        // Tts is now routable: capability "tts" maps to SpeechSynthesis →
+        // openai.audio_speech → POST /v1/audio/speech returning audio bytes.
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/audio/speech"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "audio/mpeg")
+                    .set_body_bytes(valid_mp3()),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let (svc, provider_id, sink, _db) = build(&server.uri()).await;
+        let task = NewCreationTask {
+            canvas_id: None,
+            node_id: None,
+            provider_id: provider_id.clone(),
+            model: "tts-1".into(),
+            capability: "tts".into(),
+            params: json!({"prompt": "hello there", "voice": "alloy"}),
+            inputs: vec![],
+        };
+        let created = svc.create_task(task).await.unwrap();
+        let done = wait_terminal(&svc, &created.creation_task_id).await;
+        assert_eq!(done.status, "succeeded", "error={:?}", done.error);
+        assert_eq!(done.result_asset_ids.len(), 1);
+        let persisted = sink.persisted.lock().unwrap();
+        assert_eq!(persisted.len(), 1);
+        assert_eq!(persisted[0].0, "audio/mpeg", "mime={}", persisted[0].0);
+        assert_eq!(persisted[0].1, valid_mp3());
+    }
+
+    #[tokio::test]
+    async fn untagged_model_fails_with_unsupported_capability() {
+        // Gate tightening (planned new behavior): a task against a model that
+        // is not tagged for the capability's task gets a typed
+        // `unsupported_capability` error instead of hitting a wrong endpoint.
+        let server = MockServer::start().await;
+        let (svc, provider_id, sink, _db) = build(&server.uri()).await;
+        let mut request = t2i(&provider_id);
+        request.model = "gpt-4o-mini".into(); // tagged ["chat"], not image_generation
+        let created = svc.create_task(request).await.unwrap();
+        let done = wait_terminal(&svc, &created.creation_task_id).await;
+        assert_eq!(done.status, "failed");
+        assert_eq!(done.error.as_ref().unwrap()["kind"], "unsupported_capability");
+        assert_eq!(sink.count.load(Ordering::SeqCst), 0);
+        assert!(server.received_requests().await.unwrap().is_empty(), "gate must fire before the wire");
     }
 }

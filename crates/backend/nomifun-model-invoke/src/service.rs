@@ -75,6 +75,13 @@ impl ModelInvokeService {
         Self { provider_repo, provider_model_repo, provider_connection_repo, encryption_key, http, registry }
     }
 
+    /// The provider repository this service resolves against. Shared with
+    /// callers (e.g. the creation engine) that pre-check provider existence
+    /// before enqueueing work, so they don't need a second repo handle.
+    pub fn provider_repo(&self) -> &Arc<dyn nomifun_db::IProviderRepository> {
+        &self.provider_repo
+    }
+
     /// Execute one task invocation: full resolution (task-membership gate
     /// enforced) then the adapter's submit. A [`TaskOutcome::Pending`] hands
     /// back a [`JobHandle`] the caller later feeds to [`Self::poll`].
