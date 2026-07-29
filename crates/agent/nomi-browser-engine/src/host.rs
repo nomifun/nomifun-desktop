@@ -51,6 +51,11 @@ impl ManagedLaneCleanup for CdpBackend {
 struct ManagedLaneEntry<L> {
     lane: Arc<L>,
     close_gate: Mutex<()>,
+    /// Sticky "cleanup has started" flag (F16). Once a close begins, the lane
+    /// backend has already fenced itself (every operation fails TargetClosed)
+    /// and there is no un-close path, so a dying entry must never be handed
+    /// out as a live lane again — even while it is still in the map mid-close.
+    closing: AtomicBool,
     closed: AtomicBool,
 }
 
@@ -59,8 +64,13 @@ impl<L> ManagedLaneEntry<L> {
         Self {
             lane,
             close_gate: Mutex::new(()),
+            closing: AtomicBool::new(false),
             closed: AtomicBool::new(false),
         }
+    }
+
+    fn is_dying(&self) -> bool {
+        self.closing.load(Ordering::Acquire) || self.closed.load(Ordering::Acquire)
     }
 }
 
@@ -82,11 +92,15 @@ impl<L> Default for HostLaneCoordinator<L> {
 }
 
 impl<L> HostLaneCoordinator<L> {
+    /// Retrieve a live lane. An entry whose close is in flight (or finished)
+    /// is treated as absent (F16): returning it would hand the caller an
+    /// engine whose targets are being destroyed and which is unrecoverable.
     async fn get(&self, lane_id: &str) -> Option<Arc<L>> {
         self.lanes
             .lock()
             .await
             .get(lane_id)
+            .filter(|entry| !entry.is_dying())
             .map(|entry| Arc::clone(&entry.lane))
     }
 
@@ -104,7 +118,13 @@ impl<L> HostLaneCoordinator<L> {
             return Err(BrowserError::SessionLost { recoverable: false });
         }
         if let Some(existing) = lanes.get(&lane_id) {
-            return Ok(Arc::clone(&existing.lane));
+            // A dying entry must never be returned as the opened lane (F16).
+            // Replace it: the in-flight close holds its own Arc to the old
+            // entry and its final `remove_if_current` is ptr-guarded, so it
+            // cannot remove this replacement.
+            if !existing.is_dying() {
+                return Ok(Arc::clone(&existing.lane));
+            }
         }
         lanes.insert(
             lane_id,
@@ -157,6 +177,10 @@ where
             return Ok(());
         }
 
+        // Sticky from the moment cleanup starts (F16): the backend fences
+        // itself before any CDP I/O, so this entry can never be a valid
+        // open_lane result again, even if this close attempt fails.
+        entry.closing.store(true, Ordering::Release);
         entry.lane.shutdown_owned_targets().await?;
         entry.closed.store(true, Ordering::Release);
         self.remove_if_current(lane_id, &entry).await;
@@ -545,6 +569,7 @@ mod tests {
     struct FakeLaneCleanup {
         close_calls: AtomicUsize,
         release: Option<Notify>,
+        fail: AtomicBool,
     }
 
     impl FakeLaneCleanup {
@@ -552,6 +577,7 @@ mod tests {
             Arc::new(Self {
                 close_calls: AtomicUsize::new(0),
                 release: None,
+                fail: AtomicBool::new(false),
             })
         }
 
@@ -559,6 +585,15 @@ mod tests {
             Arc::new(Self {
                 close_calls: AtomicUsize::new(0),
                 release: Some(Notify::new()),
+                fail: AtomicBool::new(false),
+            })
+        }
+
+        fn failing() -> Arc<Self> {
+            Arc::new(Self {
+                close_calls: AtomicUsize::new(0),
+                release: None,
+                fail: AtomicBool::new(true),
             })
         }
 
@@ -575,6 +610,9 @@ mod tests {
             self.close_calls.fetch_add(1, Ordering::SeqCst);
             if let Some(release) = &self.release {
                 release.notified().await;
+            }
+            if self.fail.load(Ordering::SeqCst) {
+                return Err(BrowserError::Other("fake lane close failure".into()));
             }
             Ok(())
         }
@@ -720,6 +758,81 @@ mod tests {
         a2.await.unwrap();
         b1.await.unwrap();
         assert_eq!(entered.load(Ordering::SeqCst), 3);
+    }
+
+    /// **F16 回归**：close 在飞行中（close_gate 已持、closed 尚未置位、entry 仍在
+    /// map）时，open/retrieve 路径**绝不能**把这条垂死 lane 交出去——那是一个每个
+    /// 操作都恒 TargetClosed 的死引擎，且 close 完成后 map 槽位清空，调用方无从修复。
+    #[tokio::test]
+    async fn inflight_close_hides_the_dying_lane_from_open_paths() {
+        let coordinator = Arc::new(HostLaneCoordinator::<FakeLaneCleanup>::default());
+        let shutdown = AtomicBool::new(false);
+        let dying = FakeLaneCleanup::hanging();
+        coordinator
+            .insert_if_open("lane-a".into(), Arc::clone(&dying), &shutdown)
+            .await
+            .unwrap();
+        assert!(
+            coordinator.get("lane-a").await.is_some(),
+            "a live entry is retrievable before close starts"
+        );
+
+        let close = {
+            let coordinator = Arc::clone(&coordinator);
+            tokio::spawn(async move { coordinator.close_lane("lane-a").await })
+        };
+        wait_for_close_calls(&dying, 1).await;
+
+        assert!(
+            coordinator.get("lane-a").await.is_none(),
+            "a mid-close lane must be treated as absent, not returned"
+        );
+
+        // A concurrent reopen publishes a replacement, never the dying lane.
+        let replacement = FakeLaneCleanup::immediate();
+        let opened = coordinator
+            .insert_if_open("lane-a".into(), Arc::clone(&replacement), &shutdown)
+            .await
+            .unwrap();
+        assert!(
+            Arc::ptr_eq(&opened, &replacement),
+            "reopen during an in-flight close must not hand back the dying lane"
+        );
+
+        // The old close finishing must not evict the replacement entry.
+        dying.release();
+        close.await.unwrap().unwrap();
+        let survivor = coordinator
+            .get("lane-a")
+            .await
+            .expect("the replacement lane survives the old generation's close");
+        assert!(Arc::ptr_eq(&survivor, &replacement));
+        assert_eq!(coordinator.len().await, 1);
+    }
+
+    /// **F16**：close 失败后 entry 保持 fenced（sticky closing）——backend 已自我
+    /// fence（一切操作 TargetClosed），绝不能再被当作活 lane 交出；恢复路径是重试
+    /// close（幂等）后重开。
+    #[tokio::test]
+    async fn failed_close_keeps_the_lane_fenced_until_retry_succeeds() {
+        let coordinator = Arc::new(HostLaneCoordinator::<FakeLaneCleanup>::default());
+        let shutdown = AtomicBool::new(false);
+        let lane = FakeLaneCleanup::failing();
+        coordinator
+            .insert_if_open("lane-a".into(), Arc::clone(&lane), &shutdown)
+            .await
+            .unwrap();
+
+        assert!(coordinator.close_lane("lane-a").await.is_err());
+        assert!(
+            coordinator.get("lane-a").await.is_none(),
+            "an entry whose close failed is permanently fenced, never re-issued"
+        );
+
+        // Recovery path: a retried close succeeds once the fault clears.
+        lane.fail.store(false, Ordering::SeqCst);
+        coordinator.close_lane("lane-a").await.unwrap();
+        assert_eq!(coordinator.len().await, 0);
     }
 
     #[tokio::test]

@@ -338,7 +338,7 @@ async fn install_update(
     let updater = app
         .updater_builder()
         .on_before_exit(move || {
-            updater_before_exit_until_verified(
+            let verified = updater_before_exit_until_verified(
                 || shutdown_server.shutdown_all_blocking(),
                 || cleanup_app.cleanup_before_exit(),
                 |attempt, error| {
@@ -349,7 +349,15 @@ async fn install_update(
                     );
                 },
                 || std::thread::sleep(Duration::from_millis(250)),
+                UPDATER_SHUTDOWN_MAX_ATTEMPTS,
             );
+            if !verified {
+                tracing::error!(
+                    attempts = UPDATER_SHUTDOWN_MAX_ATTEMPTS,
+                    "proceeding with the updater installer handoff after exhausting bounded \
+                     shutdown attempts; desktop shutdown is NOT verified"
+                );
+            }
         })
         .build()
         .map_err(|error| error.to_string())?;
@@ -372,33 +380,70 @@ async fn install_update(
     update.install(bytes).map_err(|error| error.to_string())
 }
 
+/// Bounded shutdown attempts before the updater installer handoff proceeds
+/// anyway (F32). Each attempt is itself bounded (shutdown_all_blocking runs
+/// two ≤31s tries), so a persistently failing cleanup stage can no longer
+/// hang the update install forever with zero user-visible progress. The
+/// preflight semantics stay: shutdown is always attempted, and only after
+/// exhausting these attempts does the handoff continue with a loud error.
+const UPDATER_SHUTDOWN_MAX_ATTEMPTS: u64 = 4;
+
+/// Returns whether the desktop shutdown was positively verified before the
+/// preserved plugin cleanup ran. Callers must log loudly on `false`.
 fn updater_before_exit_until_verified<S, C, E, W>(
-    mut shutdown: S,
+    shutdown: S,
     cleanup_before_exit: C,
-    mut on_error: E,
-    mut wait_before_retry: W,
-) where
+    on_error: E,
+    wait_before_retry: W,
+    max_attempts: u64,
+) -> bool
+where
     S: FnMut() -> anyhow::Result<()>,
     C: FnOnce(),
     E: FnMut(u64, &anyhow::Error),
     W: FnMut(),
 {
-    let mut attempt = 0u64;
-    loop {
-        attempt = attempt.saturating_add(1);
-        match shutdown() {
-            Ok(()) => break,
+    let verified =
+        cleanup_until_verified_bounded(shutdown, on_error, wait_before_retry, max_attempts);
+
+    // `UpdaterExt::updater_builder()` installs this cleanup by default, but
+    // `on_before_exit` replaces that hook. Preserve it explicitly whether or
+    // not the application-owned shutdown was verified — a hung install with
+    // no escape hatch is strictly worse than an unverified handoff.
+    cleanup_before_exit();
+    verified
+}
+
+/// Shared bounded-then-proceed cleanup driver (the F32/F42/F33 pattern): run
+/// up to `max_attempts` verification-gated cleanup attempts, waiting between
+/// failed attempts, and return whether cleanup was positively verified.
+/// Callers must log loudly and still make forward progress on `false` — an
+/// unbounded retry that silently wedges the process is strictly worse than an
+/// unverified handoff.
+fn cleanup_until_verified_bounded<S, E, W>(
+    mut cleanup: S,
+    mut on_error: E,
+    mut wait_before_retry: W,
+    max_attempts: u64,
+) -> bool
+where
+    S: FnMut() -> anyhow::Result<()>,
+    E: FnMut(u64, &anyhow::Error),
+    W: FnMut(),
+{
+    let max_attempts = max_attempts.max(1);
+    for attempt in 1..=max_attempts {
+        match cleanup() {
+            Ok(()) => return true,
             Err(error) => {
                 on_error(attempt, &error);
-                wait_before_retry();
+                if attempt < max_attempts {
+                    wait_before_retry();
+                }
             }
         }
     }
-
-    // `UpdaterExt::updater_builder()` installs this cleanup by default, but
-    // `on_before_exit` replaces that hook. Preserve it explicitly after the
-    // application-owned shutdown has been positively verified.
-    cleanup_before_exit();
+    false
 }
 
 /// Desired desktop-companion window, one per companion (multi-companion, spec §4.6).
@@ -735,6 +780,9 @@ struct ExitCoordinator {
     shutdown_started: AtomicBool,
     fatal_dialog_started: AtomicBool,
     cleanup_verified: AtomicBool,
+    /// Single-flight guard for the F42 deferred exit waiter (repeated Cmd-Q
+    /// while the backend is still Starting must not stack waiter threads).
+    deferred_exit_wait_started: AtomicBool,
     original_code: Mutex<Option<i32>>,
     backend: Mutex<BackendRegistration>,
     retained_backend_runtimes: Mutex<Vec<tokio::runtime::Runtime>>,
@@ -750,6 +798,7 @@ impl Default for ExitCoordinator {
             shutdown_started: AtomicBool::new(false),
             fatal_dialog_started: AtomicBool::new(false),
             cleanup_verified: AtomicBool::new(false),
+            deferred_exit_wait_started: AtomicBool::new(false),
             original_code: Mutex::new(None),
             backend: Mutex::new(BackendRegistration::Starting),
             retained_backend_runtimes: Mutex::new(Vec::new()),
@@ -1073,36 +1122,26 @@ impl ExitCoordinator {
 }
 
 /// A restart request is a hard Tauri sentinel: unlike a normal exit it cannot
-/// be cancelled with `prevent_exit`. Therefore this path must not return to
-/// Tauri until the application-owned cleanup has been positively verified.
-/// Transient failures retain the `DesktopServer` and runtime authority and are
-/// retried synchronously. This intentionally favors safety over responsiveness
-/// when cleanup is persistently failing.
+/// be cancelled with `prevent_exit`. Cleanup is therefore attempted (and
+/// retried) synchronously before control returns to Tauri — but the retry is
+/// BOUNDED: this path runs on the Tauri main thread, so an unbounded retry
+/// against a wedged Chromium froze the UI forever and, because the
+/// post-update `relaunch()` funnels into it, defeated the updater's own F32
+/// bound. After [`RESTART_CLEANUP_MAX_ATTEMPTS`] the relaunch proceeds with a
+/// loud error (bounded-then-proceed, the F32/F42/F33 pattern); transient
+/// failures within the bound still retain the `DesktopServer` and runtime
+/// authority.
 fn cleanup_for_restart_until_verified(
     server: Arc<DesktopServer>,
     coordinator: &ExitCoordinator,
 ) {
-    let mut attempt = 0u64;
-    loop {
-        attempt = attempt.saturating_add(1);
-        match server.shutdown_all_blocking() {
-            Ok(()) => {
-                coordinator.release_backend_runtimes();
-                coordinator.mark_cleanup_verified();
-                coordinator.mark_backend_stopped_verified();
-                tracing::info!(attempt, "desktop restart cleanup verified");
-                return;
-            }
-            Err(error) => {
-                coordinator.mark_cleanup_failed();
-                tracing::error!(
-                    attempt,
-                    %error,
-                    "desktop restart cleanup is not verified; retaining authority and retrying"
-                );
-                std::thread::sleep(Duration::from_millis(250));
-            }
-        }
+    if restart_cleanup_bounded(coordinator, "backend shutdown", || {
+        server.shutdown_all_blocking()
+    }) {
+        coordinator.release_backend_runtimes();
+        coordinator.mark_cleanup_verified();
+        coordinator.mark_backend_stopped_verified();
+        tracing::info!("desktop restart cleanup verified");
     }
 }
 
@@ -1110,35 +1149,79 @@ fn cleanup_startup_for_restart_until_verified(
     authority: Arc<RetainedStartupCleanupAuthority>,
     coordinator: &ExitCoordinator,
 ) {
-    let mut attempt = 0u64;
-    loop {
-        attempt = attempt.saturating_add(1);
-        match authority.cleanup() {
-            Ok(()) => {
-                coordinator.release_startup_cleanup_authority(&authority);
-                coordinator.mark_cleanup_verified();
-                coordinator.mark_backend_failed_verified();
-                tracing::info!(attempt, "desktop startup cleanup verified before restart");
-                return;
-            }
-            Err(error) => {
-                coordinator.mark_cleanup_failed();
-                tracing::error!(
-                    attempt,
-                    %error,
-                    "desktop startup cleanup is not verified; retaining authority and retrying before restart"
-                );
-                std::thread::sleep(Duration::from_millis(250));
-            }
-        }
+    if restart_cleanup_bounded(coordinator, "startup cleanup", || authority.cleanup()) {
+        coordinator.release_startup_cleanup_authority(&authority);
+        coordinator.mark_cleanup_verified();
+        coordinator.mark_backend_failed_verified();
+        tracing::info!("desktop startup cleanup verified before restart");
     }
 }
 
+/// Bounded synchronous restart-cleanup attempts (250ms between attempts; each
+/// attempt is itself bounded — `shutdown_all_blocking` runs two ≤31s tries).
+/// The cleanup preflight semantics stay: cleanup is always attempted, and
+/// only after exhausting these attempts does the restart handoff continue
+/// with a loud error instead of freezing the main thread forever.
+const RESTART_CLEANUP_MAX_ATTEMPTS: u64 = 4;
+
+/// Run the bounded restart-cleanup attempts and return whether cleanup was
+/// positively verified. On exhaustion this forces the handoff to proceed
+/// (see [`allow_handoff_without_verified_cleanup`]) after logging loudly;
+/// the caller only performs its success-path bookkeeping on `true`.
+fn restart_cleanup_bounded<S>(
+    coordinator: &ExitCoordinator,
+    stage: &'static str,
+    cleanup: S,
+) -> bool
+where
+    S: FnMut() -> anyhow::Result<()>,
+{
+    let verified = cleanup_until_verified_bounded(
+        cleanup,
+        |attempt, error| {
+            coordinator.mark_cleanup_failed();
+            tracing::error!(
+                attempt,
+                %error,
+                stage,
+                "desktop restart cleanup is not verified; retaining authority and retrying"
+            );
+        },
+        || std::thread::sleep(Duration::from_millis(250)),
+        RESTART_CLEANUP_MAX_ATTEMPTS,
+    );
+    if !verified {
+        tracing::error!(
+            attempts = RESTART_CLEANUP_MAX_ATTEMPTS,
+            stage,
+            "proceeding with the restart handoff after exhausting bounded cleanup \
+             attempts; desktop cleanup is NOT verified"
+        );
+        allow_handoff_without_verified_cleanup(coordinator);
+    }
+    verified
+}
+
+/// Force a pending exit/restart handoff to proceed after bounded cleanup
+/// attempts were exhausted (or no cleanup authority ever became available).
+/// Marks cleanup verified — the coordinator's "may proceed" signal — even
+/// though the backend cleanup is NOT verified, and returns the exit code to
+/// use. Callers must log loudly BEFORE calling this: an unkillable or
+/// permanently frozen app is strictly worse than an unclean close (the data
+/// layer is crash-safe).
+fn allow_handoff_without_verified_cleanup(coordinator: &ExitCoordinator) -> i32 {
+    coordinator.mark_backend_failed_unverified();
+    coordinator.mark_cleanup_verified();
+    coordinator.original_code()
+}
+
 /// A restart request is a non-cancellable Tauri sentinel.  If the first
-/// cleanup attempt fails, do not return to Tauri and do not call
+/// cleanup attempt fails, do not return to Tauri immediately and do not call
 /// `process::exit`: retain either the published server or typed startup
-/// authority and retry until cleanup is verified. Only an actual authority
-/// loss falls back to the permanent fail-closed hold.
+/// authority and retry within the bounded restart-cleanup attempts. An actual
+/// authority loss falls back to the bounded no-authority hold; every path
+/// eventually proceeds with the handoff (loudly) instead of wedging the
+/// process forever.
 fn abort_restart(
     app: &tauri::AppHandle,
     coordinator: &ExitCoordinator,
@@ -1162,14 +1245,82 @@ fn abort_restart(
     }
 }
 
-fn hold_restart_without_cleanup_authority(coordinator: &ExitCoordinator) -> ! {
+/// How long a restart/exit request may be held while no cleanup authority is
+/// available, waiting for a late-arriving backend registration. After this
+/// bound the handoff proceeds with a loud error — the previous unbounded hold
+/// parked the process forever with zero user-visible progress.
+const RESTART_HOLD_WITHOUT_AUTHORITY_WAIT: Duration = Duration::from_secs(30);
+
+fn hold_restart_without_cleanup_authority(coordinator: &ExitCoordinator) {
     coordinator.mark_cleanup_failed();
     tracing::error!(
         "restart request is being held because desktop cleanup authority is unavailable"
     );
-    loop {
-        std::thread::sleep(Duration::from_secs(1));
+    // Within the bounded hold, keep ATTEMPTING to acquire a late-arriving
+    // cleanup authority instead of sleeping blindly. A terminal backend
+    // registration (stopped/failed) resolves immediately: no authority can
+    // appear anymore.
+    if let Some(server) = coordinator.wait_for_backend(RESTART_HOLD_WITHOUT_AUTHORITY_WAIT) {
+        cleanup_for_restart_until_verified(server, coordinator);
+        return;
     }
+    if let Some(authority) = coordinator.retained_startup_cleanup_authority() {
+        cleanup_startup_for_restart_until_verified(authority, coordinator);
+        return;
+    }
+    tracing::error!(
+        wait_secs = RESTART_HOLD_WITHOUT_AUTHORITY_WAIT.as_secs(),
+        "no desktop cleanup authority became available; proceeding with the exit/restart \
+         handoff without cleanup verification"
+    );
+    allow_handoff_without_verified_cleanup(coordinator);
+}
+
+/// How long a stranded normal-exit request waits for the backend to leave the
+/// `Starting` registration before it forces the exit (matches the restart
+/// path's `wait_for_backend` bound).
+const DEFERRED_EXIT_BACKEND_WAIT: Duration = Duration::from_secs(30);
+
+/// F42: complete a normal exit whose backend was unavailable when
+/// `ExitRequested` fired. Runs off the Tauri event loop. If the backend
+/// becomes available the ordinary verified shutdown runs; if it never does
+/// (stuck in `DesktopServer::start`, or already stopped/failed), the exit
+/// proceeds with a loud error — an unkillable app that silently swallows
+/// every quit gesture is strictly worse than an unclean close (the data
+/// layer is crash-safe), and there is no cleanup authority this path could
+/// have used anyway.
+fn spawn_deferred_exit_shutdown(app: tauri::AppHandle, coordinator: Arc<ExitCoordinator>) {
+    if coordinator
+        .deferred_exit_wait_started
+        .swap(true, Ordering::AcqRel)
+    {
+        return;
+    }
+    std::thread::spawn(move || {
+        if let Some(server) = coordinator.wait_for_backend(DEFERRED_EXIT_BACKEND_WAIT) {
+            start_shutdown_if_needed(&app, server, coordinator);
+            return;
+        }
+        if coordinator.is_exit_allowed() {
+            app.exit(coordinator.original_code());
+            return;
+        }
+        tracing::error!(
+            wait_secs = DEFERRED_EXIT_BACKEND_WAIT.as_secs(),
+            "embedded backend never became available for exit cleanup; forcing exit without \
+             backend cleanup"
+        );
+        let code = allow_exit_without_backend_cleanup(&coordinator);
+        app.exit(code);
+    });
+}
+
+/// Mark the exit as allowed even though no backend cleanup could run, and
+/// return the exit code to use. Only the deferred-exit path may call this,
+/// and only after positively establishing that no cleanup authority exists.
+fn allow_exit_without_backend_cleanup(coordinator: &ExitCoordinator) -> i32 {
+    coordinator.mark_cleanup_verified();
+    coordinator.original_code()
 }
 
 fn start_shutdown_if_needed(
@@ -1237,32 +1388,57 @@ fn start_shutdown_if_needed(
     });
 }
 
+/// Bounded retries for the spawned exit-cleanup thread (a normal quit whose
+/// two async shutdown attempts failed, and the backend-failure teardown
+/// path). `prevent_exit` has already swallowed the user's quit gesture by the
+/// time this runs, so an unbounded retry against a wedged Chromium made the
+/// app permanently unkillable. One second between attempts; each attempt is
+/// itself bounded (`shutdown_all_blocking` runs two ≤31s tries).
+const EXIT_SHUTDOWN_RETRY_MAX_ATTEMPTS: u64 = 4;
+
 fn retry_shutdown_until_verified(
     app: tauri::AppHandle,
     server: Arc<DesktopServer>,
     coordinator: Arc<ExitCoordinator>,
 ) {
-    std::thread::spawn(move || loop {
-        std::thread::sleep(Duration::from_secs(1));
-        match server.shutdown_all_blocking() {
-            Ok(()) => {
-                let restart = coordinator.is_restart_requested();
-                let code = coordinator.original_code();
-                coordinator.mark_cleanup_verified();
-                coordinator.mark_backend_failed_verified();
-                if !restart {
-                    app.exit(code);
-                }
-                coordinator.release_backend_runtimes();
-                return;
-            }
-            Err(error) => {
+    std::thread::spawn(move || {
+        let verified = cleanup_until_verified_bounded(
+            || server.shutdown_all_blocking(),
+            |attempt, error| {
                 coordinator.mark_cleanup_failed();
                 tracing::error!(
+                    attempt,
                     %error,
                     "desktop cleanup retry is still not verified; retaining authority"
                 );
+            },
+            || std::thread::sleep(Duration::from_secs(1)),
+            EXIT_SHUTDOWN_RETRY_MAX_ATTEMPTS,
+        );
+        if verified {
+            let restart = coordinator.is_restart_requested();
+            let code = coordinator.original_code();
+            coordinator.mark_cleanup_verified();
+            coordinator.mark_backend_failed_verified();
+            if !restart {
+                app.exit(code);
             }
+            coordinator.release_backend_runtimes();
+            return;
+        }
+        // F42 sibling: after prevent_exit swallowed the quit gesture, this
+        // thread is the only thing that can still complete the exit. Proceed
+        // with a loud error instead of retrying forever — an unkillable app
+        // is strictly worse than an unclean close.
+        tracing::error!(
+            attempts = EXIT_SHUTDOWN_RETRY_MAX_ATTEMPTS,
+            "desktop exit cleanup never verified after bounded retries; forcing the exit \
+             without verified cleanup"
+        );
+        let restart = coordinator.is_restart_requested();
+        let code = allow_handoff_without_verified_cleanup(&coordinator);
+        if !restart {
+            app.exit(code);
         }
     });
 }
@@ -1713,6 +1889,13 @@ fn handle_run_event(app: &tauri::AppHandle, event: tauri::RunEvent) {
                 .or_else(|| coordinator.backend_server())
             {
                 start_shutdown_if_needed(app, server, coordinator);
+            } else {
+                // F42: the backend may be wedged inside DesktopServer::start
+                // (registration stuck at Starting), and prevent_exit above has
+                // already swallowed this quit gesture. Never strand it: wait
+                // for the backend off the event loop, then either run the
+                // normal shutdown or force the exit with a loud error.
+                spawn_deferred_exit_shutdown(app.clone(), coordinator);
             }
         }
         #[cfg(target_os = "macos")]
@@ -1930,6 +2113,27 @@ fn main() -> std::process::ExitCode {
         let level = level.trim();
         if !level.is_empty() {
             cli.log_level = Some(level.to_owned());
+        }
+    }
+
+    // F48: publish Tauri's authoritative resource-dir resolution for the
+    // backend's bundled Chrome-for-Testing discovery. macOS .app bundles place
+    // resources in Contents/Resources while the executable lives in
+    // Contents/MacOS, so the backend's exe-relative fallback alone can never
+    // see a packaged Chrome there. The backend crate has no Tauri dependency;
+    // this env var is the seam (see nomifun_app::browser_resource).
+    let tauri_context = generated_tauri_context();
+    if let Ok(resource_dir) = tauri::utils::platform::resource_dir(
+        tauri_context.package_info(),
+        &tauri::Env::default(),
+    ) {
+        // SAFETY: same single-threaded window as `enhance_process_path`
+        // above — Tauri's runtime threads are only created by `.run()`.
+        unsafe {
+            std::env::set_var(
+                nomifun_app::browser_resource::BUNDLED_CHROME_DIR_ENV,
+                resource_dir.join("chrome-for-testing"),
+            );
         }
     }
 
@@ -2306,7 +2510,7 @@ fn main() -> std::process::ExitCode {
                 _ => {}
             }
         })
-        .build(generated_tauri_context())
+        .build(tauri_context)
         .expect("error while building tauri application");
 
     // `Builder::run(context)` installs an empty app-level event callback. Build
@@ -2333,7 +2537,7 @@ mod tests {
         let error_events = events.clone();
         let wait_events = events.clone();
 
-        updater_before_exit_until_verified(
+        let verified = updater_before_exit_until_verified(
             move || {
                 let attempt = shutdown_attempts.fetch_add(1, Ordering::SeqCst) + 1;
                 shutdown_events
@@ -2354,8 +2558,10 @@ mod tests {
                     .push(format!("error:{attempt}"));
             },
             move || wait_events.lock().unwrap().push("wait".to_owned()),
+            UPDATER_SHUTDOWN_MAX_ATTEMPTS,
         );
 
+        assert!(verified);
         assert_eq!(
             *events.lock().unwrap(),
             [
@@ -2368,6 +2574,145 @@ mod tests {
                 "shutdown:3",
                 "cleanup",
             ]
+        );
+    }
+
+    #[test]
+    fn updater_before_exit_is_bounded_and_still_cleans_up_when_shutdown_never_verifies() {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let shutdown_events = events.clone();
+        let cleanup_events = events.clone();
+        let error_events = events.clone();
+        let wait_events = events.clone();
+
+        // F32: a persistently failing cleanup stage must not hang the update
+        // install forever — the loop stops at the cap, preserves the plugin
+        // cleanup exactly once, and reports the unverified shutdown.
+        let verified = updater_before_exit_until_verified(
+            move || {
+                shutdown_events.lock().unwrap().push("shutdown".to_owned());
+                Err(anyhow::anyhow!("fixture shutdown failure"))
+            },
+            move || cleanup_events.lock().unwrap().push("cleanup".to_owned()),
+            move |attempt, _| {
+                error_events
+                    .lock()
+                    .unwrap()
+                    .push(format!("error:{attempt}"));
+            },
+            move || wait_events.lock().unwrap().push("wait".to_owned()),
+            3,
+        );
+
+        assert!(!verified);
+        assert_eq!(
+            *events.lock().unwrap(),
+            [
+                "shutdown", "error:1", "wait", "shutdown", "error:2", "wait", "shutdown",
+                "error:3", "cleanup",
+            ]
+        );
+    }
+
+    #[test]
+    fn deferred_exit_without_backend_cleanup_allows_the_exit_with_original_code() {
+        let coordinator = ExitCoordinator::default();
+        assert!(coordinator.request_normal_exit(Some(5)));
+        assert!(!coordinator.is_exit_allowed());
+
+        // F42: with no backend ever becoming available, the stranded quit
+        // gesture must still complete instead of being dropped forever.
+        let code = allow_exit_without_backend_cleanup(&coordinator);
+
+        assert_eq!(code, 5);
+        assert!(coordinator.is_exit_allowed());
+    }
+
+    #[test]
+    fn restart_cleanup_is_bounded_and_forces_the_handoff_when_never_verified() {
+        let coordinator = ExitCoordinator::default();
+        assert!(coordinator.request_restart());
+        let attempts = Arc::new(AtomicU8::new(0));
+        let cleanup_attempts = attempts.clone();
+
+        // A wedged Chromium on the restart path must not freeze the Tauri
+        // main thread forever: the loop stops at the cap and the relaunch
+        // handoff proceeds with unverified cleanup.
+        let verified = restart_cleanup_bounded(&coordinator, "test", move || {
+            cleanup_attempts.fetch_add(1, Ordering::SeqCst);
+            Err(anyhow::anyhow!("fixture cleanup failure"))
+        });
+
+        assert!(!verified);
+        assert_eq!(
+            u64::from(attempts.load(Ordering::SeqCst)),
+            RESTART_CLEANUP_MAX_ATTEMPTS,
+            "cleanup must still be attempted for every bounded retry"
+        );
+        assert!(
+            coordinator.is_exit_allowed(),
+            "the restart handoff must proceed after exhausting the bounded attempts"
+        );
+    }
+
+    #[test]
+    fn restart_cleanup_verifies_within_the_bound_without_forcing_the_handoff() {
+        let coordinator = ExitCoordinator::default();
+        assert!(coordinator.request_restart());
+        let attempts = Arc::new(AtomicU8::new(0));
+        let cleanup_attempts = attempts.clone();
+
+        let verified = restart_cleanup_bounded(&coordinator, "test", move || {
+            if cleanup_attempts.fetch_add(1, Ordering::SeqCst) + 1 < 3 {
+                Err(anyhow::anyhow!("fixture transient cleanup failure"))
+            } else {
+                Ok(())
+            }
+        });
+
+        assert!(verified);
+        assert_eq!(attempts.load(Ordering::SeqCst), 3);
+        assert!(
+            !coordinator.is_exit_allowed(),
+            "success-path bookkeeping (mark_cleanup_verified) is owned by the caller"
+        );
+    }
+
+    #[test]
+    fn restart_hold_without_cleanup_authority_is_bounded_and_proceeds() {
+        let coordinator = ExitCoordinator::default();
+        assert!(coordinator.request_restart());
+        // Terminal backend registration: no cleanup authority can appear
+        // anymore, so the bounded hold must resolve immediately instead of
+        // parking the restart forever.
+        coordinator.mark_backend_failed_unverified();
+
+        let start = Instant::now();
+        hold_restart_without_cleanup_authority(&coordinator);
+
+        assert!(
+            start.elapsed() < RESTART_HOLD_WITHOUT_AUTHORITY_WAIT,
+            "a terminal registration must not wait out the full authority hold"
+        );
+        assert!(
+            coordinator.is_exit_allowed(),
+            "the restart handoff must proceed after the bounded no-authority hold"
+        );
+    }
+
+    #[test]
+    fn exhausted_cleanup_handoff_reports_the_original_exit_code_and_allows_exit() {
+        let coordinator = ExitCoordinator::default();
+        assert!(coordinator.request_normal_exit(Some(9)));
+        coordinator.mark_cleanup_failed();
+
+        let code = allow_handoff_without_verified_cleanup(&coordinator);
+
+        assert_eq!(code, 9);
+        assert!(coordinator.is_exit_allowed());
+        assert!(
+            coordinator.backend_server().is_none(),
+            "no observer may re-acquire the backend after the forced handoff"
         );
     }
 

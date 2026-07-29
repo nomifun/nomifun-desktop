@@ -421,9 +421,16 @@ impl BrowserStdioServer {
             "tool": tool,
             "args": Value::Object(args),
         });
+        // At-most-once delivery for EVERY browser tool: click/type/press_key/
+        // navigate can be an irreversible submit/pay/send, and the Browser Hub
+        // loopback server executes each POST afresh (no idempotency-key
+        // dedup). Re-POSTing after a timeout or a post-send failure could
+        // execute the action twice, so only provably-undelivered connection
+        // failures are retried; everything else surfaces as a transport error
+        // the agent can inspect (observe) before deciding to act again.
         into_mcp_tool_result(
             self.client
-                .forward_tool_outcome(tool, body, false)
+                .forward_tool_outcome_at_most_once(tool, body, false)
                 .await,
         )
     }

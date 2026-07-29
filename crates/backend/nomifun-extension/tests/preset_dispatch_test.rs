@@ -19,6 +19,14 @@ use nomifun_extension::skill_routes::{SkillRouterState, skill_routes};
 use nomifun_extension::skill_service::SkillPaths;
 use tower::ServiceExt;
 
+// The wire DTOs validate `preset_id` as a canonical UUIDv7 business id
+// (`deserialize_preset_reference`); free-form labels are rejected with 400
+// before the dispatcher runs. Source classification is the dispatcher's job,
+// so "builtin"/"user"/"extension" here are fixture roles, not id formats.
+const BUILTIN_PRESET_ID: &str = "0190f5fe-7c00-7a00-8000-0000000000b1";
+const USER_PRESET_ID: &str = "0190f5fe-7c00-7a00-8000-0000000000a1";
+const EXT_PRESET_ID: &str = "0190f5fe-7c00-7a00-8000-0000000000e1";
+
 // ---------------------------------------------------------------------------
 // Fake dispatcher
 // ---------------------------------------------------------------------------
@@ -184,7 +192,7 @@ fn write_body(preset_id: &str, content: &str, locale: Option<&str>) -> Vec<u8> {
 #[tokio::test]
 async fn read_rule_routes_through_dispatcher_for_builtin() {
     let mut rule_content = std::collections::HashMap::new();
-    rule_content.insert("builtin-office".into(), "office rule body".into());
+    rule_content.insert(BUILTIN_PRESET_ID.into(), "office rule body".into());
     let dispatcher = Arc::new(FakeDispatcher {
         rule_content,
         skill_content: Default::default(),
@@ -193,7 +201,7 @@ async fn read_rule_routes_through_dispatcher_for_builtin() {
     });
     let router = router_with_dispatcher(dispatcher.clone()).await;
 
-    let req_body = read_body("builtin-office", Some("en-US"));
+    let req_body = read_body(BUILTIN_PRESET_ID, Some("en-US"));
     let req = Request::builder()
         .method("POST")
         .uri("/api/skills/preset-rule/read")
@@ -209,7 +217,7 @@ async fn read_rule_routes_through_dispatcher_for_builtin() {
 
     let log = dispatcher.log.lock().unwrap();
     assert_eq!(log.rule_reads.len(), 1);
-    assert_eq!(log.rule_reads[0].0, "builtin-office");
+    assert_eq!(log.rule_reads[0].0, BUILTIN_PRESET_ID);
     assert_eq!(log.rule_reads[0].1.as_deref(), Some("en-US"));
 }
 
@@ -217,14 +225,14 @@ async fn read_rule_routes_through_dispatcher_for_builtin() {
 async fn read_rule_routes_through_dispatcher_for_user() {
     // Classification returns User by default (not in reject set).
     let dispatcher = Arc::new(FakeDispatcher {
-        rule_content: std::collections::HashMap::from([("u1".into(), "user body".into())]),
+        rule_content: std::collections::HashMap::from([(USER_PRESET_ID.into(), "user body".into())]),
         skill_content: Default::default(),
         reject_writes_for: Default::default(),
         log: Mutex::new(CallLog::default()),
     });
     let router = router_with_dispatcher(dispatcher.clone()).await;
 
-    let req_body = read_body("u1", None);
+    let req_body = read_body(USER_PRESET_ID, None);
     let req = Request::builder()
         .method("POST")
         .uri("/api/skills/preset-rule/read")
@@ -249,7 +257,7 @@ async fn read_rule_routes_through_dispatcher_for_extension_returns_empty() {
     });
     let router = router_with_dispatcher(dispatcher).await;
 
-    let req_body = read_body("ext-preset", Some("en-US"));
+    let req_body = read_body(EXT_PRESET_ID, Some("en-US"));
     let req = Request::builder()
         .method("POST")
         .uri("/api/skills/preset-rule/read")
@@ -266,7 +274,7 @@ async fn read_rule_routes_through_dispatcher_for_extension_returns_empty() {
 #[tokio::test]
 async fn write_rule_rejects_builtin() {
     let mut reject = std::collections::HashSet::new();
-    reject.insert("builtin-office".to_string());
+    reject.insert(BUILTIN_PRESET_ID.to_string());
     let dispatcher = Arc::new(FakeDispatcher {
         rule_content: Default::default(),
         skill_content: Default::default(),
@@ -275,7 +283,7 @@ async fn write_rule_rejects_builtin() {
     });
     let router = router_with_dispatcher(dispatcher).await;
 
-    let req_body = write_body("builtin-office", "hack", None);
+    let req_body = write_body(BUILTIN_PRESET_ID, "hack", None);
     let req = Request::builder()
         .method("POST")
         .uri("/api/skills/preset-rule/write")
@@ -297,7 +305,7 @@ async fn write_rule_allows_user() {
     });
     let router = router_with_dispatcher(dispatcher.clone()).await;
 
-    let req_body = write_body("u1", "rule!", Some("en-US"));
+    let req_body = write_body(USER_PRESET_ID, "rule!", Some("en-US"));
     let req = Request::builder()
         .method("POST")
         .uri("/api/skills/preset-rule/write")
@@ -319,7 +327,7 @@ async fn write_rule_allows_user() {
 #[tokio::test]
 async fn delete_rule_rejects_builtin() {
     let mut reject = std::collections::HashSet::new();
-    reject.insert("builtin-office".to_string());
+    reject.insert(BUILTIN_PRESET_ID.to_string());
     let dispatcher = Arc::new(FakeDispatcher {
         rule_content: Default::default(),
         skill_content: Default::default(),
@@ -330,7 +338,7 @@ async fn delete_rule_rejects_builtin() {
 
     let req = Request::builder()
         .method("DELETE")
-        .uri("/api/skills/preset-rule/builtin-office")
+        .uri(&format!("/api/skills/preset-rule/{BUILTIN_PRESET_ID}"))
         .body(Body::empty())
         .unwrap();
     let resp = router.oneshot(req).await.unwrap();
@@ -349,27 +357,27 @@ async fn delete_rule_user_dispatches() {
 
     let req = Request::builder()
         .method("DELETE")
-        .uri("/api/skills/preset-rule/u1")
+        .uri(&format!("/api/skills/preset-rule/{USER_PRESET_ID}"))
         .body(Body::empty())
         .unwrap();
     let resp = router.oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
 
     let log = dispatcher.log.lock().unwrap();
-    assert_eq!(log.rule_deletes, vec!["u1".to_string()]);
+    assert_eq!(log.rule_deletes, vec![USER_PRESET_ID.to_string()]);
 }
 
 #[tokio::test]
 async fn read_skill_routes_through_dispatcher_for_builtin() {
     let dispatcher = Arc::new(FakeDispatcher {
         rule_content: Default::default(),
-        skill_content: std::collections::HashMap::from([("builtin-office".into(), "skill body".into())]),
+        skill_content: std::collections::HashMap::from([(BUILTIN_PRESET_ID.into(), "skill body".into())]),
         reject_writes_for: Default::default(),
         log: Mutex::new(CallLog::default()),
     });
     let router = router_with_dispatcher(dispatcher.clone()).await;
 
-    let req_body = read_body("builtin-office", Some("en-US"));
+    let req_body = read_body(BUILTIN_PRESET_ID, Some("en-US"));
     let req = Request::builder()
         .method("POST")
         .uri("/api/skills/preset-skill/read")
@@ -389,7 +397,7 @@ async fn read_skill_routes_through_dispatcher_for_builtin() {
 #[tokio::test]
 async fn write_skill_rejects_builtin() {
     let mut reject = std::collections::HashSet::new();
-    reject.insert("builtin-office".to_string());
+    reject.insert(BUILTIN_PRESET_ID.to_string());
     let dispatcher = Arc::new(FakeDispatcher {
         rule_content: Default::default(),
         skill_content: Default::default(),
@@ -398,7 +406,7 @@ async fn write_skill_rejects_builtin() {
     });
     let router = router_with_dispatcher(dispatcher).await;
 
-    let req_body = write_body("builtin-office", "x", None);
+    let req_body = write_body(BUILTIN_PRESET_ID, "x", None);
     let req = Request::builder()
         .method("POST")
         .uri("/api/skills/preset-skill/write")
@@ -421,12 +429,12 @@ async fn delete_skill_user_dispatches() {
 
     let req = Request::builder()
         .method("DELETE")
-        .uri("/api/skills/preset-skill/u1")
+        .uri(&format!("/api/skills/preset-skill/{USER_PRESET_ID}"))
         .body(Body::empty())
         .unwrap();
     let resp = router.oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
 
     let log = dispatcher.log.lock().unwrap();
-    assert_eq!(log.skill_deletes, vec!["u1".to_string()]);
+    assert_eq!(log.skill_deletes, vec![USER_PRESET_ID.to_string()]);
 }

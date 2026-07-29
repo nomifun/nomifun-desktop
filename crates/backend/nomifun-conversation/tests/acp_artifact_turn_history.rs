@@ -74,7 +74,10 @@ async fn setup_repo() -> (
         decision_policy: "automatic".into(),
         execution_template_id: None,
         model: None,
-        status: Some("running".into()),
+        // Running is runtime-owned authority: the DB turn-authority triggers
+        // forbid inserting a conversation already Running, so fixtures start
+        // in the legal Pending state.
+        status: Some("pending".into()),
         source: Some("nomifun".into()),
         channel_chat_id: None,
         pinned: false,

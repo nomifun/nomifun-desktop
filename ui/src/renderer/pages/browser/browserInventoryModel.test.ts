@@ -1,9 +1,10 @@
 import { describe, expect, test } from 'bun:test';
-import type { IBrowserLane } from '@/common/browser/browserTypes';
+import type { IBrowserHost, IBrowserLane } from '@/common/browser/browserTypes';
 import {
   browserConversationSearchParamsForLane,
   browserLaneCounts,
   buildBrowserInventoryTree,
+  matchBrowserLaneHost,
   pickDefaultBrowserLaneId,
   resolveBrowserConversationId,
   type BrowserInventoryLabels,
@@ -200,5 +201,56 @@ describe('browser inventory model', () => {
       })
     ).toBe(conversationId);
     expect(resolveBrowserConversationId({ pathname: '/browser' })).toBeNull();
+  });
+});
+
+describe('matchBrowserLaneHost', () => {
+  const host = (overrides: Partial<IBrowserHost>): IBrowserHost => ({
+    host_id: 'host-default',
+    state: 'running',
+    identity_mode: 'primary',
+    ...overrides,
+  });
+  const primaryLane = (overrides: Partial<IBrowserLane>): IBrowserLane =>
+    lane({ identity: { mode: 'primary' }, browser_epoch: 4, ...overrides });
+
+  test('matches the serving host by browser epoch', () => {
+    // Lane payloads carry no host_id (BrowserLaneDto serializes only
+    // browser_epoch), so the epoch is the sole direct host linkage.
+    const hosts = [
+      host({ host_id: 'host-a', epoch: 3 }),
+      host({ host_id: 'host-b', epoch: 4 }),
+    ];
+    expect(matchBrowserLaneHost(primaryLane({}), hosts)?.host_id).toBe('host-b');
+  });
+
+  test('tolerates snapshot skew by matching the sole primary host', () => {
+    // After a display-mode restart the overview may already list the
+    // new-epoch host while the lanes snapshot still carries the old epoch.
+    const hosts = [
+      host({ host_id: 'host-replacement', epoch: 9, headful: true }),
+      host({ host_id: 'host-anonymous', epoch: 9, identity_mode: 'anonymous' }),
+    ];
+    expect(matchBrowserLaneHost(primaryLane({ browser_epoch: 8 }), hosts)?.host_id).toBe(
+      'host-replacement'
+    );
+
+    // Ambiguity (two primary hosts mid-transition) must not guess.
+    expect(
+      matchBrowserLaneHost(primaryLane({ browser_epoch: 8 }), [
+        host({ host_id: 'host-one', epoch: 9 }),
+        host({ host_id: 'host-two', epoch: 10 }),
+      ])
+    ).toBeNull();
+  });
+
+  test('never matches non-primary lanes or empty inputs', () => {
+    expect(
+      matchBrowserLaneHost(lane({ identity: { mode: 'anonymous' }, browser_epoch: 4 }), [
+        host({ epoch: 4 }),
+      ])
+    ).toBeNull();
+    expect(matchBrowserLaneHost(null, [host({})])).toBeNull();
+    expect(matchBrowserLaneHost(primaryLane({}), undefined)).toBeNull();
   });
 });

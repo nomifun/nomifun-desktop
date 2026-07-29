@@ -797,6 +797,12 @@ enum BrowserOrphanRecoveryOutcome {
 impl BrowserOrphanRecoveryOutcome {
     fn from_report(report: &nomi_browser_engine::profile::ProfileRecoveryReport) -> Self {
         let summary = report.safety_summary();
+        // Resolved markers are never failures: profiles preserved for a live
+        // verified owner, terminated orphan trees, removed ephemeral profiles,
+        // and cleared stable markers all leave failures/profiles_preserved at
+        // zero on every platform. Only genuinely unresolved state (scan or
+        // identity-verification or termination or cleanup failures, each of
+        // which also preserves the affected profile) degrades fail closed.
         if report.failures == 0 && report.profiles_preserved == 0 {
             Self::Safe { summary }
         } else {
@@ -2585,6 +2591,11 @@ impl AppServices {
                     nomi_browser_engine::shared_storage_state_path(&services.data_dir),
                     services.encryption_key,
                 )
+                // F6 (裁决⑤): the same vault also feeds the HOST egress
+                // allowlist, so managed lanes enforce the allow_etld1 the
+                // standalone path enforces (and secret injection stays gated
+                // on that enforced list).
+                .with_secret_source(secret_source.clone())
                 .with_lane_policy(Arc::new(move |tool| {
                     tool.secret_source(secret_source.clone())
                 }));
@@ -3847,6 +3858,23 @@ mod tests {
     fn unsafe_orphan_recovery_degrades_browser_functionality() {
         let safe = nomi_browser_engine::profile::ProfileRecoveryReport::default();
         assert!(BrowserOrphanRecoveryOutcome::from_report(&safe).is_safe());
+
+        // Resolved markers are not failures: startup recovery that verified a
+        // live owner, terminated an orphan tree, removed ephemeral profiles,
+        // or cleared stable markers must keep the browser feature enabled.
+        let resolved = nomi_browser_engine::profile::ProfileRecoveryReport {
+            markers_scanned: 4,
+            process_trees_terminated: 1,
+            ephemeral_profiles_removed: 2,
+            stable_markers_cleared: 1,
+            live_owners_preserved: 1,
+            ..Default::default()
+        };
+        assert!(
+            BrowserOrphanRecoveryOutcome::from_report(&resolved)
+                .permits_host_composition(),
+            "resolved markers must not degrade browser startup"
+        );
 
         let with_failure = nomi_browser_engine::profile::ProfileRecoveryReport {
             failures: 1,

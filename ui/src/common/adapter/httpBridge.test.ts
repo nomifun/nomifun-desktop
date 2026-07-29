@@ -330,6 +330,56 @@ describe('httpRequest client deadline + network-failure diagnosis', () => {
     }
   });
 
+  test('redacts macOS/Linux managed and system browser profile paths', () => {
+    const managedMac =
+      'failed to acquire ProcessSingleton lock at /Users/alice/Library/Application Support/NomiFun/platform-profiles/primary';
+    const managedData =
+      'copy failed: /home/alice/.local/share/nomifun/browser-data/primary/Default is busy';
+    const systemLinux =
+      'profile locked: /home/alice/.config/google-chrome/Default';
+    const systemMac =
+      'profile locked: /Users/alice/Library/Application Support/Google/Chrome/Default';
+    const windows = 'lock at C:\\Users\\alice\\AppData\\Local\\Google\\Chrome\\User Data\\Default';
+
+    for (const input of [managedMac, managedData, systemLinux, systemMac, windows]) {
+      const redacted = redactSensitiveText(input);
+      expect(redacted.includes('[REDACTED_PROFILE_PATH]')).toBe(true);
+      expect(redacted.includes('alice')).toBe(false);
+    }
+  });
+
+  test('anchors cookie redaction to header/assignment position without erasing prose', () => {
+    const prose =
+      'browser login failed: could not persist session cookie: disk full (os error 28)';
+    expect(redactSensitiveText(prose)).toBe(prose);
+
+    expect(redactSensitiveText('Cookie: sid=secret-value; Theme=dark')).toBe(
+      'Cookie:[REDACTED]'
+    );
+    expect(redactSensitiveText('upstream sent header\nset-cookie: sid=secret-value')).toBe(
+      'upstream sent header\nset-cookie:[REDACTED]'
+    );
+  });
+
+  test('keeps checksum-style 64-hex digests while redacting hex in token contexts', () => {
+    const digestA = 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855';
+    const digestB = 'ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff';
+    const checksum = `checksum mismatch: expected ${digestA}, got ${digestB}`;
+    expect(redactSensitiveText(checksum)).toBe(checksum);
+
+    const tokenContexts = [
+      `csrf_token: ${digestA}`,
+      `viewer-token=${digestA}`,
+      `capability = ${digestA}`,
+      `"session_secret": "${digestA}"`,
+    ];
+    for (const input of tokenContexts) {
+      const redacted = redactSensitiveText(input);
+      expect(redacted.includes(digestA)).toBe(false);
+      expect(redacted.includes('[REDACTED')).toBe(true);
+    }
+  });
+
   test('redacts sensitive query values from generic HTTP URLs', () => {
     const accessToken = 'access-token-value';
     const apiKey = 'api-key-value';
@@ -406,6 +456,62 @@ describe('httpRequest client deadline + network-failure diagnosis', () => {
       expect(exposed.includes('page=2')).toBe(true);
       expect(exposed.includes('retryable')).toBe(true);
       expect(exposed.includes('[REDACTED')).toBe(true);
+    } finally {
+      globalThis.fetch = realFetch;
+      console.error = realConsoleError;
+    }
+  });
+
+  test('redacts the office preview capability value in object logging', async () => {
+    // The office preview stop endpoints send a minted 64-hex capability under
+    // the JSON key `capability`. Object logging redacts values one string at a
+    // time, so the value itself carries no key context — the key pattern must
+    // treat `capability` as sensitive or the secret round-trips into logs and
+    // BackendHttpError bodies.
+    const realConsoleError = console.error;
+    const consoleCalls: unknown[][] = [];
+    const capability = '0123456789abcdef'.repeat(4);
+    const checksumProse =
+      'checksum mismatch: expected e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855';
+    globalThis.fetch = (() =>
+      Promise.resolve(
+        new Response(
+          JSON.stringify({
+            success: false,
+            code: 'preview_stop_failed',
+            error: 'preview process did not acknowledge stop',
+            details: { capability, note: checksumProse, retryable: false },
+          }),
+          { status: 500, headers: { 'Content-Type': 'application/json' } }
+        )
+      )) as typeof fetch;
+    console.error = (...args: unknown[]) => {
+      consoleCalls.push(args);
+    };
+
+    try {
+      let caught: unknown;
+      try {
+        await httpRequest('POST', '/api/ppt-preview/stop', { capability });
+      } catch (error) {
+        caught = error;
+      }
+
+      expect(isBackendHttpError(caught)).toBe(true);
+      if (!isBackendHttpError(caught)) throw new Error('expected BackendHttpError');
+      const exposed = JSON.stringify({
+        message: caught.message,
+        backendMessage: caught.backendMessage,
+        body: caught.body,
+        details: caught.details,
+        consoleCalls,
+      });
+      expect(exposed.includes(capability)).toBe(false);
+      expect(exposed.includes('[REDACTED]')).toBe(true);
+      // A digest in prose under a non-sensitive key must keep surviving the
+      // per-key redaction: only the key context makes 64-hex a secret.
+      expect(exposed.includes(checksumProse)).toBe(true);
+      expect(exposed.includes('retryable')).toBe(true);
     } finally {
       globalThis.fetch = realFetch;
       console.error = realConsoleError;

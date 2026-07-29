@@ -269,21 +269,65 @@ fn take_pending_managed_cleanups() -> Vec<ManagedChildProcess> {
 }
 
 async fn shutdown_managed_children(processes: Vec<ManagedChildProcess>) {
+    let unfinished = shutdown_children_with_bounded_retries(
+        processes,
+        async |process: &mut ManagedChildProcess| process.shutdown().await,
+        MANAGED_CLEANUP_RETRY_DEADLINE,
+        MANAGED_CLEANUP_RETRY_WAIT,
+    )
+    .await;
+    // Exceeding the bounded window is loud but never a loss of authority: the
+    // exact process handle returns to the pending relay and is retried by the
+    // next cleanup hand-off, instead of spinning this worker thread forever
+    // (and head-of-line-blocking every process queued behind it) on a tree
+    // that never proves terminal.
+    for process in unfinished {
+        retain_pending_managed_cleanup(process);
+    }
+}
+
+/// Per-process retry window for one cleanup pass. A stuck descendant
+/// (uninterruptible I/O, an unproven platform tree) fails every attempt; the
+/// deadline turns that into a retained retry instead of an infinite loop.
+const MANAGED_CLEANUP_RETRY_DEADLINE: Duration = Duration::from_secs(30);
+const MANAGED_CLEANUP_RETRY_WAIT: Duration = Duration::from_millis(250);
+
+/// Drive each process's shutdown with retries bounded by `retry_deadline`,
+/// returning the processes whose cleanup never proved terminal so the caller
+/// can retain their exact authority for a later pass.
+async fn shutdown_children_with_bounded_retries<P>(
+    processes: Vec<P>,
+    mut shutdown: impl AsyncFnMut(&mut P) -> io::Result<()>,
+    retry_deadline: Duration,
+    retry_wait: Duration,
+) -> Vec<P> {
+    let mut unfinished = Vec::new();
     for mut process in processes {
+        let deadline = tokio::time::Instant::now() + retry_deadline;
+        let mut exhausted = false;
         loop {
-            match process.shutdown().await {
+            match shutdown(&mut process).await {
                 Ok(()) => break,
-                Err(error) => {
-                    tracing::warn!(
-                        pid = process.child.as_ref().and_then(Child::id),
+                Err(error) if tokio::time::Instant::now() >= deadline => {
+                    tracing::error!(
                         %error,
-                        "managed child cleanup retry is still pending"
+                        deadline_secs = retry_deadline.as_secs(),
+                        "managed child cleanup exceeded its bounded retry window"
                     );
-                    tokio::time::sleep(Duration::from_millis(250)).await;
+                    exhausted = true;
+                    break;
+                }
+                Err(error) => {
+                    tracing::warn!(%error, "managed child cleanup retry is still pending");
+                    tokio::time::sleep(retry_wait).await;
                 }
             }
         }
+        if exhausted {
+            unfinished.push(process);
+        }
     }
+    unfinished
 }
 
 fn retain_after_runtime_failure(processes: Vec<ManagedChildProcess>) {
@@ -772,5 +816,44 @@ mod tests {
             assert!(debug.contains("NO_COLOR=\"1\""));
             assert!(debug.contains("TERM=\"dumb\""));
         }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn bounded_cleanup_retries_transient_failures_until_success() {
+        let unfinished = shutdown_children_with_bounded_retries(
+            vec![3_u32],
+            async |remaining: &mut u32| {
+                if *remaining == 0 {
+                    Ok(())
+                } else {
+                    *remaining -= 1;
+                    Err(io::Error::other("transient tree-proof failure"))
+                }
+            },
+            Duration::from_secs(30),
+            Duration::from_millis(250),
+        )
+        .await;
+        assert!(unfinished.is_empty());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn bounded_cleanup_stops_spinning_on_a_never_terminal_tree() {
+        // One never-terminal process must neither loop forever nor
+        // head-of-line-block the processes queued behind it.
+        let unfinished = shutdown_children_with_bounded_retries(
+            vec!["stuck", "healthy"],
+            async |process: &mut &str| {
+                if *process == "stuck" {
+                    Err(io::Error::other("descendant never proves terminal"))
+                } else {
+                    Ok(())
+                }
+            },
+            Duration::from_secs(30),
+            Duration::from_millis(250),
+        )
+        .await;
+        assert_eq!(unfinished, vec!["stuck"]);
     }
 }

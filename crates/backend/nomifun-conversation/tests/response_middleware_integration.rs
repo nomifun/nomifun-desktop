@@ -319,7 +319,7 @@ async fn middleware_executes_cron_update() {
 
     assert!(!result.message.contains("[CRON_UPDATE"));
     assert_eq!(result.system_responses.len(), 1);
-    assert!(result.system_responses[0].contains("42"));
+    assert!(result.system_responses[0].contains("0190f5fe-7c00-7a00-8abc-012345678906"));
     assert!(result.system_responses[0].contains("c1"));
 }
 
@@ -331,7 +331,7 @@ async fn middleware_executes_cron_delete() {
 
     assert!(!result.message.contains("[CRON_DELETE"));
     assert_eq!(result.system_responses.len(), 1);
-    assert!(result.system_responses[0].contains("42"));
+    assert!(result.system_responses[0].contains("0190f5fe-7c00-7a00-8abc-012345678906"));
 }
 
 #[tokio::test]

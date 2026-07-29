@@ -18,12 +18,14 @@
 use std::collections::BTreeSet;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex as StdMutex, MutexGuard};
+use std::time::Duration;
 
 use async_trait::async_trait;
 use nomifun_browser_platform::{
-    BrowserErrorCode, BrowserIdentityMode, BrowserLaneClient, BrowserOperation,
-    BrowserOperationKind, BrowserPlatformError, BrowserSessionHub, BrowserSurface,
-    CallerIdentity, OpenLaneOutcome, OwnerLease, OwnerLeaseId,
+    BrowserErrorCode, BrowserIdentityMode, BrowserLaneClient, BrowserLaneSnapshot,
+    BrowserOperation, BrowserOperationKind, BrowserPlatformError, BrowserSessionHub,
+    BrowserSurface, CallerIdentity, LaneLifecycleState, OpenLaneOutcome, OwnerLease,
+    OwnerLeaseId,
 };
 use nomifun_common::{AppError, generate_id};
 use nomifun_knowledge::PageFetcher;
@@ -35,6 +37,16 @@ use tokio::sync::Mutex;
 
 const KNOWLEDGE_LANE_NAME: &str = "knowledge-render";
 const KNOWLEDGE_RUNTIME_PREFIX: &str = "knowledge-renderer";
+/// Bounded wait for scheduler promotion of a queued knowledge Lane (F40). The
+/// pre-Hub fetcher owned a serialized private engine where contention could
+/// only delay a fetch, never fail it; a queued admission therefore waits for
+/// capacity instead of failing the knowledge source outright. Only an
+/// exhausted wait cancels the owned queue entry and surfaces the capacity
+/// error.
+const KNOWLEDGE_QUEUE_WAIT_TIMEOUT: Duration = Duration::from_secs(180);
+const KNOWLEDGE_QUEUE_POLL_INTERVAL: Duration = Duration::from_millis(250);
+/// Upper bound for the detached Drop-time owner revoke (F49).
+const DROP_CLEANUP_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Hub-backed rendering fetcher pinned to Anonymous identity.
 pub struct BrowserFetcher {
@@ -45,6 +57,7 @@ pub struct BrowserFetcher {
     fetch_gate: Mutex<()>,
     closed: AtomicBool,
     cleanup_retry_pending: AtomicBool,
+    queue_wait_timeout: Duration,
 }
 
 impl BrowserFetcher {
@@ -71,7 +84,13 @@ impl BrowserFetcher {
             fetch_gate: Mutex::new(()),
             closed: AtomicBool::new(false),
             cleanup_retry_pending: AtomicBool::new(false),
+            queue_wait_timeout: KNOWLEDGE_QUEUE_WAIT_TIMEOUT,
         }
+    }
+
+    #[cfg(test)]
+    fn set_queue_wait_timeout(&mut self, timeout: Duration) {
+        self.queue_wait_timeout = timeout;
     }
 
     fn owner_lease_id(&self) -> Option<OwnerLeaseId> {
@@ -193,6 +212,65 @@ impl BrowserFetcher {
         }
     }
 
+    /// Wait for a queued knowledge Lane to be promoted to Running, bounded by
+    /// [`Self::queue_wait_timeout`]. On timeout (or a Lane that leaves the
+    /// queue without ever running) the owned queue entry is cancelled so it
+    /// cannot start later as an orphan, and the capacity error surfaces with
+    /// the freshest queue metadata.
+    async fn wait_for_queued_lane(
+        &self,
+        client: &BrowserLaneClient,
+        mut lane: BrowserLaneSnapshot,
+    ) -> Result<BrowserLaneSnapshot, FetchFailure> {
+        let deadline = tokio::time::Instant::now() + self.queue_wait_timeout;
+        loop {
+            match lane.lifecycle_state {
+                LaneLifecycleState::Running => return Ok(lane),
+                LaneLifecycleState::Queued | LaneLifecycleState::Starting => {}
+                LaneLifecycleState::Frozen
+                | LaneLifecycleState::Stopping
+                | LaneLifecycleState::Failed => {
+                    let _ = client.close(&lane.lane_id).await;
+                    return Err(FetchFailure::platform(
+                        "waiting for the queued knowledge lane",
+                        BrowserPlatformError::new(
+                            BrowserErrorCode::BrowserUnavailable,
+                            "The queued knowledge browser lane stopped before it could run.",
+                            true,
+                            "Retry the knowledge source.",
+                        )
+                        .for_lane(lane.lane_id),
+                    ));
+                }
+            }
+            if tokio::time::Instant::now() >= deadline {
+                let queue = lane
+                    .queue
+                    .as_ref()
+                    .and_then(|value| serde_json::to_value(value).ok())
+                    .unwrap_or(Value::Null);
+                // Cancel the owned queue entry so it cannot start later as an
+                // orphan after this request has already failed.
+                let _ = client.close(&lane.lane_id).await;
+                return Err(FetchFailure::platform(
+                    "opening Anonymous knowledge lane",
+                    BrowserPlatformError::new(
+                        BrowserErrorCode::BrowserCapacityQueued,
+                        "The knowledge browser lane is queued for capacity.",
+                        true,
+                        "Retry the knowledge source after the reported queue delay.",
+                    )
+                    .for_lane(lane.lane_id)
+                    .with_metadata(json!({ "queue": queue })),
+                ));
+            }
+            tokio::time::sleep(KNOWLEDGE_QUEUE_POLL_INTERVAL).await;
+            lane = client.status(&lane.lane_id).await.map_err(|error| {
+                FetchFailure::platform("waiting for the queued knowledge lane", error)
+            })?;
+        }
+    }
+
     async fn fetch_once(
         &self,
         client: &BrowserLaneClient,
@@ -211,26 +289,11 @@ impl BrowserFetcher {
 
         let lane = match outcome {
             OpenLaneOutcome::Running { lane } => lane,
+            // F40: a queued admission waits (bounded) for scheduler promotion
+            // so knowledge ingestion degrades to "slower" under contention,
+            // not "failed" — matching the pre-Hub serialized-engine behavior.
             OpenLaneOutcome::Queued { lane } => {
-                let queue = lane
-                    .queue
-                    .as_ref()
-                    .and_then(|value| serde_json::to_value(value).ok())
-                    .unwrap_or(Value::Null);
-                // This request cannot wait for scheduler promotion. Cancel the
-                // owned queue entry so it cannot start later as an orphan.
-                let _ = client.close(&lane.lane_id).await;
-                return Err(FetchFailure::platform(
-                    "opening Anonymous knowledge lane",
-                    BrowserPlatformError::new(
-                        BrowserErrorCode::BrowserCapacityQueued,
-                        "The knowledge browser lane is queued for capacity.",
-                        true,
-                        "Retry the knowledge source after the reported queue delay.",
-                    )
-                    .for_lane(lane.lane_id)
-                    .with_metadata(json!({ "queue": queue })),
-                ));
+                self.wait_for_queued_lane(client, lane).await?
             }
         };
 
@@ -361,22 +424,37 @@ impl Drop for BrowserFetcher {
         }
 
         // Drop may run after the application's Tokio runtime has already
-        // stopped. Build a bounded local executor so the exact owner still gets
-        // deterministically revoked rather than relying solely on later global
-        // Hub shutdown.
-        match tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-        {
-            Ok(runtime) => {
-                runtime.block_on(revoke);
-            }
-            Err(error) => {
-                tracing::error!(
-                    %error,
-                    "failed to build cleanup runtime for knowledge browser owner"
-                );
-            }
+        // stopped. Never drive Hub cleanup with a block_on here (F49): the
+        // Hub's lane/host teardown awaits CDP sockets and child-process
+        // handles registered on the (dead) main runtime, so blocking this
+        // Drop could stall or wedge the exit path. Hand the bounded revoke to
+        // a detached thread instead — best-effort by design, with global Hub
+        // shutdown and kill-on-drop children as the authoritative backstops.
+        let spawned = std::thread::Builder::new()
+            .name("nomi-knowledge-fetcher-cleanup".into())
+            .spawn(move || {
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build();
+                match runtime {
+                    Ok(runtime) => {
+                        let _ = runtime.block_on(async {
+                            tokio::time::timeout(DROP_CLEANUP_TIMEOUT, revoke).await
+                        });
+                    }
+                    Err(error) => {
+                        tracing::error!(
+                            %error,
+                            "failed to build cleanup runtime for knowledge browser owner"
+                        );
+                    }
+                }
+            });
+        if let Err(error) = spawned {
+            tracing::error!(
+                %error,
+                "failed to spawn cleanup thread for knowledge browser owner"
+            );
         }
     }
 }

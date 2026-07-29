@@ -48,7 +48,18 @@ struct SystemClockState {
 }
 
 fn next_monotonic_time(previous_ms: u64, elapsed_ms: u64, wall_ms: u64) -> u64 {
-    previous_ms.saturating_add(elapsed_ms).max(wall_ms)
+    let paced = previous_ms.saturating_add(elapsed_ms);
+    if wall_ms >= paced {
+        return wall_ms;
+    }
+    // The wall clock is behind the monotonic pace (NTP/sleep-wake stepped it
+    // backwards after a higher sample was already returned). Never go
+    // backwards, but advance at half rate so this clock re-converges with
+    // real wall time. Capability expiries are minted elsewhere from raw wall
+    // seconds; a permanently-ahead clock would reject still-valid
+    // capabilities for the rest of the process lifetime.
+    let catch_up = (elapsed_ms / 2).max(u64::from(elapsed_ms > 0));
+    previous_ms.saturating_add(catch_up).max(wall_ms)
 }
 
 #[derive(Clone, Default)]
@@ -84,7 +95,30 @@ mod tests {
 
     #[test]
     fn system_clock_progresses_across_wall_clock_rollback() {
-        assert_eq!(next_monotonic_time(10_000, 25, 9_000), 10_025);
+        let next = next_monotonic_time(10_000, 25, 9_000);
+        assert!(
+            next > 10_000,
+            "the clock must keep progressing while the wall clock is behind"
+        );
+        assert!(next <= 10_025, "a rollback must not accelerate the clock");
+    }
+
+    #[test]
+    fn system_clock_reconverges_with_wall_time_after_a_backwards_step() {
+        // The wall clock stepped back one second after the higher time was
+        // already sampled; both then advance in 100ms real-time steps.
+        let mut now = 10_000_u64;
+        let mut wall = 9_000_u64;
+        for _ in 0..100 {
+            wall += 100;
+            let next = next_monotonic_time(now, 100, wall);
+            assert!(next > now, "the clock must never stall during catch-up");
+            now = next;
+        }
+        assert_eq!(
+            now, wall,
+            "the ratcheted clock must re-converge with real wall time"
+        );
     }
 
     #[test]

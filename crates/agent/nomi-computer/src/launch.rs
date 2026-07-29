@@ -38,23 +38,58 @@ pub fn validate_launch_target(target: &str) -> Result<(), String> {
 /// Computer tool, the computer/open MCP servers, and Gateway capabilities), so
 /// an `http`/`https` target here would bypass the managed Browser Hub's
 /// approval, egress and lifecycle policies and could open a visible window the
-/// user never asked for. Matching is on the scheme prefix (`http:`/`https:`)
-/// rather than `://`, because browsers normalize scheme-only forms such as
-/// `https:example.com` back to a real web navigation, and the substring check
-/// also catches wrapper protocols such as `microsoft-edge:https://…`. Trusted
-/// user surfaces (the Browser management page's foreground action and
-/// UI-clicked links) do not route through this function.
+/// user never asked for. Classification is an anchored scheme parse rather
+/// than a substring scan: a local file whose NAME merely contains `http:`
+/// (legal on POSIX, e.g. a saved "Re: http://…" attachment) is not a web
+/// navigation, while scheme-only forms such as `https:example.com` (browsers
+/// normalize them back to a real navigation) and wrapper protocols such as
+/// `microsoft-edge:https://…` still fail closed — the leading scheme of every
+/// nesting level is classified. Trusted user surfaces (the Browser management
+/// page's foreground action and UI-clicked links) do not route through this
+/// function.
 pub fn validate_agent_web_target(target: &str) -> Result<(), String> {
-    let lower = target.to_ascii_lowercase();
-    if lower.contains("http:") || lower.contains("https:") {
-        return Err(format!(
-            "opening web URLs through the operating-system browser is not available to \
-             Agent tools ({target:?}). Use the managed Browser tool (browser navigate) to \
-             read or interact with web pages; the user can foreground a running Primary \
-             browser lane from the Browser management page when a visible window is needed."
-        ));
+    // Wrapper protocols nest at most a handful of levels; bound the unwrap so
+    // a pathological input cannot loop. Anything deeper simply stops being
+    // classified as a web target (the OS shell will not navigate it either).
+    let mut rest = target.trim();
+    for _ in 0..8 {
+        let Some((scheme, inner)) = leading_scheme(rest) else {
+            return Ok(());
+        };
+        if scheme.eq_ignore_ascii_case("http") || scheme.eq_ignore_ascii_case("https") {
+            return Err(format!(
+                "opening web URLs through the operating-system browser is not available to \
+                 Agent tools ({target:?}). Use the managed Browser tool (browser navigate) to \
+                 read or interact with web pages; the user can foreground a running Primary \
+                 browser lane from the Browser management page when a visible window is needed."
+            ));
+        }
+        // Descend into the wrapped target (`microsoft-edge:https://…`),
+        // normalizing the `//`/`\\` and whitespace browsers tolerate.
+        rest = inner.trim_start_matches(['/', '\\']).trim_start();
     }
     Ok(())
+}
+
+/// Extract the leading RFC 3986 scheme of `target`, if any: `ALPHA *( ALPHA /
+/// DIGIT / "+" / "-" / "." )` followed by `:`, anchored at the start. Returns
+/// the scheme and the remainder after the colon. Single-character "schemes"
+/// are rejected so Windows drive-letter paths (`C:\…`) never classify as URLs
+/// (same convention as [`is_url`]).
+fn leading_scheme(target: &str) -> Option<(&str, &str)> {
+    let colon = target.find(':')?;
+    if colon < 2 {
+        return None;
+    }
+    let scheme = &target[..colon];
+    let mut chars = scheme.chars();
+    if !chars.next().is_some_and(|c| c.is_ascii_alphabetic()) {
+        return None;
+    }
+    if !chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.')) {
+        return None;
+    }
+    Some((scheme, &target[colon + 1..]))
 }
 
 /// Browser and generic URL-opener executables that must not be selected as the
@@ -416,6 +451,21 @@ mod tests {
         assert!(validate_agent_web_target("QQ音乐").is_ok());
         assert!(validate_agent_web_target("/home/user/file.txt").is_ok());
         assert!(validate_agent_web_target("mailto:redacted@example.invalid").is_ok());
+    }
+
+    #[test]
+    fn local_targets_merely_containing_a_web_scheme_substring_stay_launchable() {
+        // The old substring scan false-positive-blocked local files whose
+        // names contain "http:"/"https:" (legal POSIX filename characters).
+        assert!(validate_agent_web_target("/Users/me/notes-http:draft.txt").is_ok());
+        assert!(validate_agent_web_target("attachments/https:archive/page.mhtml").is_ok());
+        assert!(validate_agent_web_target("/tmp/Re: http://example.com.eml").is_ok());
+        // Anchoring must not weaken the wrapper coverage: nested and
+        // whitespace-padded web schemes still fail closed.
+        assert!(validate_agent_web_target("  https://example.com").is_err());
+        assert!(validate_agent_web_target("x-web-wrap:msedge:https:example.com").is_err());
+        // A wrapped non-web protocol stays allowed.
+        assert!(validate_agent_web_target("shell:AppsFolder\\Some.App!Id").is_ok());
     }
 
     #[test]

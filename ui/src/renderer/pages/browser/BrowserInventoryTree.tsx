@@ -83,6 +83,8 @@ const BrowserInventoryTree: React.FC<BrowserInventoryTreeProps> = ({
         return t('browser.state.lifecycle.stopping');
       case 'failed':
         return t('browser.state.lifecycle.failed');
+      case 'unknown':
+        return t('browser.state.lifecycle.unknown');
       default:
         return state;
     }
