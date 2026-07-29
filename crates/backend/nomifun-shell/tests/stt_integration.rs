@@ -325,6 +325,29 @@ async fn stt_enabled_without_selection_is_not_configured() {
 }
 
 // ---------------------------------------------------------------------------
+// an empty-key embedded shell is "nothing configured", NOT a retired legacy
+// credential — the NOT_CONFIGURED 400 family keeps firing
+// ---------------------------------------------------------------------------
+#[tokio::test]
+async fn stt_empty_key_embedded_shell_is_not_configured() {
+    let (app, pool) = setup().await;
+    set_speech_pref(
+        &pool,
+        json!({
+            "enabled": true,
+            "provider": "openai",
+            "openai": {"api_key": "", "model": "whisper-1"}
+        }),
+    )
+    .await;
+
+    let resp = app.oneshot(stt_request()).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let body = body_json(resp).await;
+    assert_eq!(body["code"], "STT_OPENAI_NOT_CONFIGURED");
+}
+
+// ---------------------------------------------------------------------------
 // disabled STT keeps the STT_DISABLED wire error
 // ---------------------------------------------------------------------------
 #[tokio::test]

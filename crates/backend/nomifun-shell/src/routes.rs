@@ -297,7 +297,18 @@ async fn resolve_cloud_speech_to_text_config(
         // a provider_id) predate the provider catalog. The invoke layer only
         // executes catalog-backed models and the current UI always writes
         // provider_id mode, so this form is retired rather than emulated.
-        if config.openai.is_some() || config.deepgram.is_some() {
+        // Only a block actually CARRYING a credential counts as legacy — the
+        // frontend historically persisted empty-key shells for unconfigured
+        // providers, and those keep the legacy "not configured" 400s.
+        let has_embedded_credential = config
+            .openai
+            .as_ref()
+            .is_some_and(|openai| !openai.api_key.trim().is_empty())
+            || config
+                .deepgram
+                .as_ref()
+                .is_some_and(|deepgram| !deepgram.api_key.trim().is_empty());
+        if has_embedded_credential {
             return Err(SttError::Unknown(
                 "embedded-credential speech config is no longer supported; re-select your speech provider in Settings → 模型 → 语音识别".into(),
             ));
