@@ -836,7 +836,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn same_lane_close_is_single_flight_and_idempotent() {        let coordinator = Arc::new(HostLaneCoordinator::<FakeLaneCleanup>::default());
+    async fn same_lane_close_is_single_flight_and_idempotent() {
+        let coordinator = Arc::new(HostLaneCoordinator::<FakeLaneCleanup>::default());
         let shutdown = AtomicBool::new(false);
         let lane = FakeLaneCleanup::hanging();
         coordinator
