@@ -403,7 +403,7 @@ export type HttpRequestOptions = {
 };
 
 const SENSITIVE_LOG_KEY_PATTERN =
-  /api[_-]?key|authorization|auth[_-]?token|access[_-]?token|refresh[_-]?token|viewer[_-]?token|csrf[_-]?token|session[_-]?token|secret|password|credential|cookie|local[_-]?storage|session[_-]?storage|indexeddb|storage[_-]?value|cdp[_-]?(endpoint|url)|debug(ging)?[_-]?port|remote[_-]?debugging[_-]?port|profile[_-]?path|user[_-]?data[_-]?dir/i;
+  /api[_-]?key|authorization|auth[_-]?token|access[_-]?token|refresh[_-]?token|viewer[_-]?token|csrf[_-]?token|session[_-]?token|secret|password|credential|capability|cookie|local[_-]?storage|session[_-]?storage|indexeddb|storage[_-]?value|cdp[_-]?(endpoint|url)|debug(ging)?[_-]?port|remote[_-]?debugging[_-]?port|profile[_-]?path|user[_-]?data[_-]?dir/i;
 
 function isSensitiveLogKey(key: string): boolean {
   if (SENSITIVE_LOG_KEY_PATTERN.test(key)) return true;
