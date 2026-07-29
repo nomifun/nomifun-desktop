@@ -336,3 +336,201 @@ async fn pairing_expiry_and_status_transitions() {
         "approved"
     );
 }
+
+// ── Busy-time pending prompt queue (spec D1) ─────────────────────────
+
+fn pending_prompt_fixture(
+    conversation_id: &str,
+    chat_id: &str,
+    text: &str,
+) -> nomifun_db::models::NewChannelPendingPromptRow {
+    nomifun_db::models::NewChannelPendingPromptRow {
+        channel_plugin_id: nomifun_common::ChannelPluginId::new().into_string(),
+        chat_id: chat_id.to_owned(),
+        channel_session_id: nomifun_common::ChannelSessionId::new().into_string(),
+        conversation_id: conversation_id.to_owned(),
+        text: text.to_owned(),
+        idempotency_key: format!("channel-turn:v1:key-{text}"),
+    }
+}
+
+#[tokio::test]
+async fn pending_prompt_enqueue_reports_fifo_position_and_peek_returns_head() {
+    let (repo, _db) = repo().await;
+    let conversation = nomifun_common::ConversationId::new().into_string();
+    let now = nomifun_common::now_ms();
+
+    let first = repo
+        .enqueue_pending_prompt(&pending_prompt_fixture(&conversation, "chat-1", "one"), now)
+        .await
+        .unwrap();
+    let nomifun_db::PendingPromptEnqueue::Queued { row: first_row, position } = first else {
+        panic!("first enqueue must be queued");
+    };
+    assert_eq!(position, 1);
+    assert_eq!(first_row.state, "queued");
+    assert_eq!(first_row.attempts, 0);
+
+    let second = repo
+        .enqueue_pending_prompt(&pending_prompt_fixture(&conversation, "chat-1", "two"), now + 1)
+        .await
+        .unwrap();
+    let nomifun_db::PendingPromptEnqueue::Queued { position, .. } = second else {
+        panic!("second enqueue must be queued");
+    };
+    assert_eq!(position, 2);
+
+    // FIFO head is the earliest queued row, even after the later insert.
+    let head = repo.peek_next_queued(&conversation).await.unwrap().unwrap();
+    assert_eq!(head.prompt_id, first_row.prompt_id);
+    assert_eq!(head.text, "one");
+
+    // Other conversations see an empty queue.
+    let other = nomifun_common::ConversationId::new().into_string();
+    assert!(repo.peek_next_queued(&other).await.unwrap().is_none());
+}
+
+#[tokio::test]
+async fn pending_prompt_enqueue_rejects_when_conversation_queue_is_full() {
+    let (repo, _db) = repo().await;
+    let conversation = nomifun_common::ConversationId::new().into_string();
+    let now = nomifun_common::now_ms();
+
+    for index in 0..10 {
+        let outcome = repo
+            .enqueue_pending_prompt(
+                &pending_prompt_fixture(&conversation, "chat-1", &format!("prompt {index}")),
+                now + index,
+            )
+            .await
+            .unwrap();
+        assert!(matches!(outcome, nomifun_db::PendingPromptEnqueue::Queued { .. }));
+    }
+
+    let overflow = repo
+        .enqueue_pending_prompt(&pending_prompt_fixture(&conversation, "chat-1", "over"), now + 11)
+        .await
+        .unwrap();
+    assert_eq!(overflow, nomifun_db::PendingPromptEnqueue::QueueFull);
+
+    // Settling one row frees capacity again.
+    let head = repo.peek_next_queued(&conversation).await.unwrap().unwrap();
+    repo.settle_prompt(&head.prompt_id, "delivered", now + 12)
+        .await
+        .unwrap();
+    let after = repo
+        .enqueue_pending_prompt(&pending_prompt_fixture(&conversation, "chat-1", "next"), now + 13)
+        .await
+        .unwrap();
+    assert!(matches!(after, nomifun_db::PendingPromptEnqueue::Queued { position: 10, .. }));
+}
+
+#[tokio::test]
+async fn pending_prompt_settlement_is_absorbing_and_validates_state() {
+    let (repo, _db) = repo().await;
+    let conversation = nomifun_common::ConversationId::new().into_string();
+    let now = nomifun_common::now_ms();
+
+    let nomifun_db::PendingPromptEnqueue::Queued { row, .. } = repo
+        .enqueue_pending_prompt(&pending_prompt_fixture(&conversation, "chat-1", "one"), now)
+        .await
+        .unwrap()
+    else {
+        panic!("enqueue must succeed");
+    };
+
+    assert!(
+        repo.settle_prompt(&row.prompt_id, "running", now).await.is_err(),
+        "non-terminal state must be rejected"
+    );
+    repo.settle_prompt(&row.prompt_id, "failed", now + 1).await.unwrap();
+    assert!(
+        repo.settle_prompt(&row.prompt_id, "delivered", now + 2).await.is_err(),
+        "terminal state is absorbing"
+    );
+    assert!(repo.peek_next_queued(&conversation).await.unwrap().is_none());
+}
+
+#[tokio::test]
+async fn pending_prompt_attempts_increment_only_while_queued() {
+    let (repo, _db) = repo().await;
+    let conversation = nomifun_common::ConversationId::new().into_string();
+    let now = nomifun_common::now_ms();
+
+    let nomifun_db::PendingPromptEnqueue::Queued { row, .. } = repo
+        .enqueue_pending_prompt(&pending_prompt_fixture(&conversation, "chat-1", "one"), now)
+        .await
+        .unwrap()
+    else {
+        panic!("enqueue must succeed");
+    };
+
+    assert_eq!(repo.increment_prompt_attempts(&row.prompt_id).await.unwrap(), 1);
+    assert_eq!(repo.increment_prompt_attempts(&row.prompt_id).await.unwrap(), 2);
+    repo.settle_prompt(&row.prompt_id, "failed", now + 1).await.unwrap();
+    assert!(repo.increment_prompt_attempts(&row.prompt_id).await.is_err());
+}
+
+#[tokio::test]
+async fn pending_prompt_expiry_settles_only_stale_queued_rows() {
+    let (repo, _db) = repo().await;
+    let conversation = nomifun_common::ConversationId::new().into_string();
+    let now = nomifun_common::now_ms();
+
+    let nomifun_db::PendingPromptEnqueue::Queued { row: stale, .. } = repo
+        .enqueue_pending_prompt(&pending_prompt_fixture(&conversation, "chat-1", "stale"), now - 10)
+        .await
+        .unwrap()
+    else {
+        panic!("enqueue must succeed");
+    };
+    let nomifun_db::PendingPromptEnqueue::Queued { row: fresh, .. } = repo
+        .enqueue_pending_prompt(&pending_prompt_fixture(&conversation, "chat-1", "fresh"), now + 10)
+        .await
+        .unwrap()
+    else {
+        panic!("enqueue must succeed");
+    };
+
+    let expired = repo.expire_stale(now, now + 20).await.unwrap();
+    assert_eq!(expired.len(), 1);
+    assert_eq!(expired[0].prompt_id, stale.prompt_id);
+    assert_eq!(expired[0].state, "expired");
+    assert_eq!(expired[0].settled_at, Some(now + 20));
+
+    let head = repo.peek_next_queued(&conversation).await.unwrap().unwrap();
+    assert_eq!(head.prompt_id, fresh.prompt_id, "fresh row survives the sweep");
+
+    // Second sweep with the same watermark is a no-op.
+    assert!(repo.expire_stale(now, now + 30).await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn pending_prompt_chat_cancel_clears_only_that_chat_scope() {
+    let (repo, _db) = repo().await;
+    let conversation = nomifun_common::ConversationId::new().into_string();
+    let now = nomifun_common::now_ms();
+
+    let mut fixture_a = pending_prompt_fixture(&conversation, "chat-a", "one");
+    let plugin = fixture_a.channel_plugin_id.clone();
+    repo.enqueue_pending_prompt(&fixture_a, now).await.unwrap();
+    fixture_a.text = "two".into();
+    fixture_a.idempotency_key = "channel-turn:v1:another-key".into();
+    repo.enqueue_pending_prompt(&fixture_a, now + 1).await.unwrap();
+
+    // Same plugin, different chat: untouched by the cancel.
+    let mut fixture_b = pending_prompt_fixture(&conversation, "chat-b", "keep");
+    fixture_b.channel_plugin_id = plugin.clone();
+    repo.enqueue_pending_prompt(&fixture_b, now + 2).await.unwrap();
+
+    assert_eq!(repo.cancel_chat_queue(&plugin, "chat-a", now + 3).await.unwrap(), 2);
+    assert_eq!(repo.cancel_chat_queue(&plugin, "chat-a", now + 4).await.unwrap(), 0);
+
+    let head = repo.peek_next_queued(&conversation).await.unwrap().unwrap();
+    assert_eq!(head.text, "keep");
+
+    assert_eq!(
+        repo.list_queued_conversations().await.unwrap(),
+        vec![conversation.clone()]
+    );
+}
