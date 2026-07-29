@@ -472,6 +472,43 @@ async fn handle_dispatched(
     chat_id: &str,
     idempotency_key: &str,
 ) -> Option<crate::message_service::SendResult> {
+    // 客服接缝: a bot bound to a customer-service agent hands the WHOLE
+    // message to the customer-service domain — no Conversation, no decision
+    // interception, no per-chat busy guard (客服域自己管并发：同访客串行合并，
+    // 跨访客并发)。Empty reply = the text was merged into another in-flight
+    // batch → send nothing.
+    if let Some(cs_agent_id) = msg_svc.cs_bound_agent(plugin_id).await {
+        let session = match session_mgr.get_session_by_id(session_id).await {
+            Ok(Some(s)) => s,
+            Ok(None) => {
+                warn!(session_id = %session_id, "session not found for customer-service dispatch");
+                return None;
+            }
+            Err(e) => {
+                error!(error = %e, "failed to get session for customer-service dispatch");
+                return None;
+            }
+        };
+        let reply = msg_svc
+            .cs_handle_visitor_message(
+                &cs_agent_id,
+                plugin_id,
+                &session.channel_user_id,
+                chat_id,
+                text,
+            )
+            .await;
+        let outgoing = match reply {
+            Ok(reply) if reply.trim().is_empty() => return None, // merged
+            Ok(reply) => reply,
+            Err(notice) => notice,
+        };
+        let _ = sender
+            .send_message(plugin_id, chat_id, plain_text_message(outgoing))
+            .await;
+        return None;
+    }
+
     // Decision interception (Bug 1, Case A): when the bound conversation is
     // waiting on a relayed numbered decision, a reply is the user's *answer*,
     // not a new prompt. Map a valid number onto an option and resolve it via

@@ -106,7 +106,6 @@ mod telegram_tests {
             plugin_id: None,
             plugin_type: Some(plugin_type.to_owned()),
             companion_id: None,
-            public_agent_id: None,
         }
     }
 

@@ -3,7 +3,7 @@
 use nomifun_common::{
     AgentExecutionId, AgentExecutionTemplateId, AgentId, AttachmentId, ChannelPluginId,
     ChannelSessionId, ChannelUserId, CompanionId, ConversationId, CronJobId, CronJobRunId,
-    MessageId, PresetId, ProviderId, ProviderWithModel, PublicAgentId, RequirementId, TerminalId,
+    MessageId, PresetId, ProviderId, ProviderWithModel, RequirementId, TerminalId,
     UserId,
 };
 
@@ -237,11 +237,6 @@ string_id_deserializers!(
     deserialize_companion_id,
     deserialize_optional_companion_id,
     CompanionId
-);
-string_id_deserializers!(
-    deserialize_public_agent_id,
-    deserialize_optional_public_agent_id,
-    PublicAgentId
 );
 string_id_deserializers!(
     deserialize_preset_id,
