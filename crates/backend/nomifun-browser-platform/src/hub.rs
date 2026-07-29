@@ -1650,9 +1650,13 @@ impl BrowserSessionHub {
         ));
         self.inner.lanes.write().await.insert(lane_id.clone(), Arc::clone(&lane));
         self.inner.lane_keys.write().await.insert(lane_key, lane_id.clone());
-        drop(_open_guard);
-        self.emit("lane_created", Some(&snapshot));
-
+        // Register the creating caller's start waiter while `open_gate` is
+        // still held. `abandon_unclaimed_lane_start` serializes its
+        // zero-waiter decision only with registrations performed under this
+        // gate; registering after the gate drop would let a cancelled
+        // duplicate open observe a 1->0 waiter transition and detach the Lane
+        // its creator is about to wait on (spurious lane_closed for an open
+        // nobody closed).
         let action = match admission {
             Admission::Ready => {
                 let flight = start_flight.expect("Ready Lane must have a start flight");
@@ -1665,9 +1669,13 @@ impl BrowserSessionHub {
                 ))
             }
             Admission::Queued(_) => {
-                OpenLaneAction::Return(OpenLaneOutcome::Queued { lane: snapshot })
+                OpenLaneAction::Return(OpenLaneOutcome::Queued {
+                    lane: snapshot.clone(),
+                })
             }
         };
+        drop(_open_guard);
+        self.emit("lane_created", Some(&snapshot));
         self.finish_open_action(action).await
     }
 
