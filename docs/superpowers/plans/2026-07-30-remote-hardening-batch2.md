@@ -2,7 +2,11 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** 渠道忙时消息持久排队 + `nomi_send_to_conversation` 结果回推（spec §设计 D 的 D1/D2）。
+**Goal:** 渠道忙时消息持久排队 + `nomi_send_to_conversation` 结果回推（spec §设计 D 的 D1/D2），并补齐第一批移交的两个渠道侧缺口。
+
+**第一批移交的缺口（本批必须处理）：**
+1. **Channel surface 上 `nomi_stop_conversation` 被网关矩阵 Deny**（`(Channel, Destructive)=Deny` 无 allow-with-confirm 覆盖）：微信里无法远程解锁。本批在渠道层打通——利用渠道既有数字决策流程（message_loop 的 pending decision 机制）做确认：伙伴调 stop 被 Deny 时，渠道回"确认停止会话 X？1. 确认 2. 取消"，用户回 1 后由渠道以 owner 身份直接调 `ConversationService::cancel`（不经网关矩阵；渠道层本就持 conversation_svc）。
+2. **`abandon_exact_turn_admission`（service.rs 原 :1233 一带 "Public turn request was dropped…" 路径）未写结构化 code**：本批补 `admission_abandoned`/retryable=true（其 repo SQL 需加两列写入，模式照抄第一批 `complete_delivery_receipt` 的扩参做法）。
 
 **Architecture:** D1 在渠道层：新表 `channel_pending_prompts`，busy 时入队并回"已排队（第 N 位）"，turn 完成事件驱动同会话 FIFO 出队投递，retryable 失败有限重试。D2 在会话/网关层：`notify_back` 登记表 `conversation_delivery_notify`，receipt 终结钩子向发起伙伴会话投递 observed background 回执，经渠道既有 stream_relay 回传 IM；origin 标记防环。
 
