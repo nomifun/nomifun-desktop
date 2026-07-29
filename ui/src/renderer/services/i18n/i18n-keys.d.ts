@@ -2091,7 +2091,6 @@ export type I18nKey =
   | 'messages.turnProcess.collapseAllThinkingProcess'
   | 'messages.turnProcess.expandAllThinkingProcess'
   | 'messages.turnProcessed'
-  | 'messages.turnProcessing'
   | 'messages.turnWaiting'
   | 'messages.unknownMessageType'
   | 'modelFailover.add'

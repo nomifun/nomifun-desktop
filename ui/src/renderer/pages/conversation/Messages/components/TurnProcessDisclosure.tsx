@@ -42,7 +42,7 @@ export interface TurnProcessDisclosureExpansionControls {
 
 const labelKeyByState: Record<TurnDisclosureProcessState, string> = {
   completed: 'messages.turnProcessed',
-  running: 'messages.turnProcessing',
+  running: 'messages.turnProcessed',
   waiting: 'messages.turnWaiting',
   failed: 'messages.turnProcessed',
   canceled: 'messages.turnCanceled',
@@ -50,10 +50,10 @@ const labelKeyByState: Record<TurnDisclosureProcessState, string> = {
 
 const defaultLabelByState: Record<TurnDisclosureProcessState, string> = {
   completed: 'Processed {{duration}}',
-  running: 'Processing {{duration}}',
+  running: 'Processed {{duration}}',
   waiting: 'Waiting for confirmation {{duration}}',
   failed: 'Processed {{duration}}',
-  canceled: 'Canceled {{duration}}',
+  canceled: 'You stopped after {{duration}}',
 };
 
 const sanitizeDomId = (value: string): string => value.replace(/[^A-Za-z0-9_-]/g, '_');
