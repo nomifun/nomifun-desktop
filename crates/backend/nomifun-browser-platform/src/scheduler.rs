@@ -602,6 +602,15 @@ impl BrowserLaneScheduler {
         queue_order(&state, now_ms, &state.promotion_policy)
     }
 
+    /// Returns queued requests without simulating promotion order.
+    ///
+    /// Workload accounting only needs membership, class and estimates; the
+    /// full queue_order simulation is O(queue^2) under the scheduler mutex
+    /// and must not run on every admission/release decision.
+    pub fn queued_requests_unordered(&self) -> Vec<QueueRequest> {
+        self.state().queued.clone()
+    }
+
     fn state(&self) -> MutexGuard<'_, SchedulerState> {
         self.inner
             .state
@@ -920,12 +929,36 @@ fn queue_metadata_locked(
         .queued
         .iter()
         .find(|request| &request.request_id == request_id)?;
-    let order = queue_order(state, now_ms, policy);
-    let position = order
-        .iter()
-        .position(|queued| &queued.request_id == request_id)
-        .expect("queued request must appear in the simulated queue order")
-        + 1;
+    // Only this request's position is needed; stop the promotion simulation
+    // as soon as it is drained instead of ordering the entire queue while the
+    // scheduler mutex is held.
+    let mut simulated = state.clone();
+    let mut position = 0;
+    let mut found = false;
+    while let Some(index) = select_next_index_with_policy(&mut simulated, now_ms, policy) {
+        position += 1;
+        let drained = simulated.queued.remove(index);
+        if &drained.request_id == request_id {
+            found = true;
+            break;
+        }
+        prune_owner_ring(&mut simulated);
+    }
+    if !found {
+        // Deferred requests order after every promotable request, in the
+        // order they would use if admission recovered.
+        let allow_all = PromotionPolicy::allow_all();
+        while !simulated.queued.is_empty() {
+            let index = select_next_index_with_policy(&mut simulated, now_ms, &allow_all)
+                .expect("allow-all policy must select a queued request");
+            position += 1;
+            let drained = simulated.queued.remove(index);
+            if &drained.request_id == request_id {
+                break;
+            }
+            prune_owner_ring(&mut simulated);
+        }
+    }
     let owner_active = state
         .active
         .values()
