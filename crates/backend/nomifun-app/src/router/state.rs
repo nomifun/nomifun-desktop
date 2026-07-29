@@ -143,6 +143,9 @@ pub struct ChannelMessageLoopComponents {
     /// Busy-time prompt queue drain (spec D1). The caller spawns
     /// `queue_drain.run(event_bus.subscribe_user())` next to the message loop.
     pub queue_drain: nomifun_channel::queue_drain::QueueDrain,
+    /// Shared channel message service (pending-decision store + asset
+    /// resolver for the delivery-notify observer's IM relay).
+    pub message_service: Arc<nomifun_channel::message_service::ChannelMessageService>,
 }
 
 #[derive(Debug, Default)]
@@ -1042,6 +1045,7 @@ pub async fn build_channel_state(
         manager,
         plugin_factory,
         queue_drain,
+        message_service,
     };
 
     (state, components)

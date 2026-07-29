@@ -71,6 +71,10 @@ use std::sync::RwLock;
 const MAX_CRON_CONTINUATIONS_PER_TURN: usize = 4;
 const TEMP_WORKSPACE_ID_EXTRA_KEY: &str = "temp_workspace_id";
 pub(crate) const PUBLIC_IDEMPOTENCY_KEY_MAX_BYTES: usize = 128;
+/// Origin marker of a spec-D2 delivery-notify receipt message. A turn whose
+/// durable request payload carries this origin may never register another
+/// delivery-notify (hard loop guard).
+pub const DELIVERY_NOTIFY_ORIGIN: &str = "delivery-notify";
 const RECEIPT_FOREGROUND_BUDGET: Duration = Duration::from_secs(2);
 /// Stop waits for relay/receipt cleanup, then generation-safely releases the
 /// exact cancelled turn so the endpoint itself always remains bounded.
@@ -977,6 +981,30 @@ pub trait ConversationSupervisionHook: Send + Sync {
     fn on_turn_start(&self, conversation_id: &str, admitted_scope: IdmmTurnScope);
 }
 
+/// Completion hook for keyed turns (spec D2 delivery-notify push).
+///
+/// Defined here so `nomifun-conversation` stays free of gateway/companion
+/// dependencies; `nomifun-app` implements and injects it via
+/// [`ConversationService::with_turn_completion_observer`]. Invoked from a
+/// detached task AFTER the terminal turn receipt is durably persisted — it
+/// can never block or fail the exact-turn release path.
+#[async_trait::async_trait]
+pub trait TurnCompletionObserver: Send + Sync {
+    async fn on_turn_completed(&self, conversation_id: &str, operation_id: &str,
+        result_ok: bool, result_text: Option<&str>, result_error_code: Option<&str>);
+}
+
+/// Outcome of a delivery-notify registration attempt (spec D2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeliveryNotifyRegistration {
+    /// The requester will receive a completion receipt for the target turn.
+    Registered,
+    /// Hard anti-loop constraint: the requester's CURRENT turn was itself
+    /// started by a delivery-notify receipt (origin == "delivery-notify"),
+    /// so its sends must not register further receipts.
+    RefusedDeliveryNotifyOrigin,
+}
+
 #[derive(Clone)]
 pub struct ConversationService {
     /// Immutable installation owner used to derive the maximum runtime
@@ -1031,6 +1059,10 @@ pub struct ConversationService {
     /// as `cron_service`). Wired by `nomifun-app` so a desktop turn arms 智能决策
     /// supervision; `None` in contexts that don't run IDMM (tests, webui-only).
     supervision_hook: Arc<RwLock<Option<Arc<dyn ConversationSupervisionHook>>>>,
+    /// Spec D2 delivery-notify hook (same slot pattern): invoked after a
+    /// keyed turn's terminal receipt is durably persisted. `None` (default /
+    /// tests) disables completion push entirely.
+    turn_completion_observer: Arc<RwLock<Option<Arc<dyn TurnCompletionObserver>>>>,
     /// Phase 3 模型故障转移(plan D5)。挑选器要读 `providers` 表、配置要读
     /// `client_preferences`,而 `ConversationService::new` 不带这两个仓库。沿用
     /// `cron_service` / `supervision_hook` 的「构造后注册」槽位模式而非改 `new()`
@@ -2162,6 +2194,7 @@ impl ConversationService {
             agent_metadata_repo,
             acp_session_repo,
             supervision_hook: Arc::new(RwLock::new(None)),
+            turn_completion_observer: Arc::new(RwLock::new(None)),
             failover_provider_repo: Arc::new(RwLock::new(None)),
             failover_client_prefs: Arc::new(RwLock::new(None)),
             execution_conversation_boundary,
@@ -2208,6 +2241,104 @@ impl ConversationService {
         if let Ok(mut guard) = self.supervision_hook.write() {
             *guard = Some(hook);
         }
+    }
+
+    /// Register the spec D2 turn-completion observer (post-construction, same
+    /// slot pattern as `with_supervision_hook`). Shared across every clone of
+    /// this service instance.
+    pub fn with_turn_completion_observer(&self, observer: Arc<dyn TurnCompletionObserver>) {
+        if let Ok(mut guard) = self.turn_completion_observer.write() {
+            *guard = Some(observer);
+        }
+    }
+
+    // ── Delivery-notify registrations (spec D2) ──────────────────────
+
+    /// Register `requester_conversation_id` for a completion receipt of the
+    /// keyed public turn `(target_conversation_id, idempotency_key)`.
+    ///
+    /// Hard anti-loop constraint: when the requester's ACTIVE turn was itself
+    /// started by a delivery-notify receipt (its durable request payload has
+    /// `origin == "delivery-notify"`), the registration is refused so receipt
+    /// turns can never chain further receipts.
+    pub async fn register_delivery_notify(
+        &self,
+        user_id: &str,
+        target_conversation_id: &str,
+        idempotency_key: &str,
+        requester_conversation_id: &str,
+    ) -> Result<DeliveryNotifyRegistration, AppError> {
+        validate_public_idempotency_key(idempotency_key)?;
+        let target_key = parse_conv_id(target_conversation_id)?;
+        let requester_key = parse_conv_id(requester_conversation_id)?;
+
+        if self
+            .active_turn_origin(user_id, requester_key)
+            .await?
+            .as_deref()
+            == Some(DELIVERY_NOTIFY_ORIGIN)
+        {
+            return Ok(DeliveryNotifyRegistration::RefusedDeliveryNotifyOrigin);
+        }
+
+        let operation_id = Self::public_turn_operation_id(user_id, target_key, idempotency_key);
+        self.conversation_repo
+            .register_notify(&operation_id, requester_key, now_ms())
+            .await?;
+        Ok(DeliveryNotifyRegistration::Registered)
+    }
+
+    /// Atomically claim the pending delivery-notify registration for one
+    /// completed operation (single winner). `None` when nothing is registered
+    /// or a previous completion already took it.
+    pub async fn take_pending_delivery_notify(
+        &self,
+        operation_id: &str,
+    ) -> Result<Option<nomifun_db::models::ConversationDeliveryNotifyRow>, AppError> {
+        Ok(self
+            .conversation_repo
+            .take_pending_notify(operation_id, now_ms())
+            .await?)
+    }
+
+    /// Record that a taken registration's receipt delivery failed
+    /// (diagnostics only; the claim stays absorbed).
+    pub async fn mark_delivery_notify_failed(&self, operation_id: &str) -> Result<(), AppError> {
+        Ok(self
+            .conversation_repo
+            .mark_notify_failed(operation_id, now_ms())
+            .await?)
+    }
+
+    /// The `origin` recorded in the durable request payload of a
+    /// conversation's currently active keyed turn, if any.
+    async fn active_turn_origin(
+        &self,
+        user_id: &str,
+        conversation_id: &str,
+    ) -> Result<Option<String>, AppError> {
+        let admission = self
+            .conversation_repo
+            .get_turn_admission_state(user_id, conversation_id)
+            .await?;
+        let Some(operation_id) = admission.active_operation_id else {
+            return Ok(None);
+        };
+        let Some(receipt) = self
+            .conversation_repo
+            .get_delivery_receipt(user_id, conversation_id, &operation_id)
+            .await?
+        else {
+            return Ok(None);
+        };
+        let payload: serde_json::Value = match serde_json::from_str(&receipt.request_payload) {
+            Ok(value) => value,
+            Err(_) => return Ok(None),
+        };
+        Ok(payload
+            .get("origin")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned))
     }
 
     /// Register the repositories the Phase 3 model-failover seam needs
@@ -3510,6 +3641,35 @@ impl ConversationService {
                 guard_key,
                 *generation,
             );
+        }
+        // Spec D2: the terminal receipt is durably persisted (the finalize
+        // loop above broke on Committed/AlreadyApplied) — hand the completion
+        // to the registered observer. Detached: the observer performs its own
+        // keyed sends and must never block or fail exact-turn release.
+        if let Some(completion) = receipt_completion.as_ref()
+            && completion.kind == "turn"
+            && let Some(observer) = self
+                .turn_completion_observer
+                .read()
+                .ok()
+                .and_then(|slot| slot.clone())
+        {
+            let conversation_id = conversation_id.to_owned();
+            let operation_id = completion.operation_id.clone();
+            let result_ok = completion.result_ok;
+            let result_text = completion.result_text.clone();
+            let result_error_code = completion.result_error_code.clone();
+            tokio::spawn(async move {
+                observer
+                    .on_turn_completed(
+                        &conversation_id,
+                        &operation_id,
+                        result_ok,
+                        result_text.as_deref(),
+                        result_error_code.as_deref(),
+                    )
+                    .await;
+            });
         }
         let turn_generation = turn_handle.turn_id();
         if !turn_handle.release() {

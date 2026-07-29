@@ -337,6 +337,27 @@ pub async fn create_router(services: &AppServices) -> Router {
             .queue_drain
             .run(services.event_bus.subscribe_user()),
     );
+
+    // Spec D2: register the delivery-notify observer on the conversation
+    // service instance that executes gateway `nomi_send_to_conversation`
+    // turns (the same instance wired into GatewayDeps above). When a watched
+    // turn completes, the observer injects a receipt message into the
+    // requester session; a channel-bound requester relays the companion's
+    // summary to its IM chat through the standard stream relay.
+    let delivery_notify_observer = Arc::new(crate::delivery_notify::DeliveryNotifyObserver::new(
+        states.conversation.service.clone(),
+        services.agent_runtime_registry.clone(),
+        services.authoritative_user_id.clone(),
+        states.channel.repo.clone(),
+        channel_components.manager.clone()
+            as Arc<dyn nomifun_channel::stream_relay::ChannelSender>,
+        channel_components.message_service.pending_decisions(),
+        channel_components.message_service.asset_resolver(),
+    ));
+    states
+        .conversation
+        .service
+        .with_turn_completion_observer(delivery_notify_observer);
     tracing::info!(
         elapsed_ms = boot.elapsed().as_millis(),
         "startup: channel message loop spawned"
