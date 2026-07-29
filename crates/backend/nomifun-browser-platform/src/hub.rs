@@ -4633,6 +4633,10 @@ impl BrowserSessionHub {
                 .retain(|pending_key, flight| {
                     pending_key != key || flight.result.get().is_none()
                 });
+            // No process remains for this key; a retained restart gate could
+            // only leak (isolated-lane UUID and replica-generation keys never
+            // repeat). Gates with an in-flight attempt are kept.
+            self.inner.host_restarts.evict_settled(key).await;
         }
     }
 
