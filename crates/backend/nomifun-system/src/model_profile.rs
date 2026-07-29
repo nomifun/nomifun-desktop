@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use nomifun_api_types::{
@@ -126,13 +126,14 @@ impl ModelProfileService {
 
 /// Reconcile inferred capability profiles for a provider's catalog models.
 ///
-/// Two passes over the given catalog list:
-/// - models with no `provider_models` row are inserted (`insert_if_absent`)
-///   with tasks/traits from [`nomifun_api_types::derive_tasks_and_traits`] and
-///   `source = "inferred"`;
+/// Two phases:
+/// - catalog models with no `provider_models` row are inserted
+///   (`insert_if_absent`) with tasks/traits from
+///   [`nomifun_api_types::derive_tasks_and_traits`] and `source = "inferred"`;
 /// - existing rows that were created by membership dual-write and never
 ///   profiled (`tasks == "[]"` AND `source == "inferred"`) get their
-///   tasks/traits backfilled from the same heuristic (source stays inferred).
+///   tasks/traits backfilled from the same heuristic (source stays inferred)
+///   — every such row of the provider, whether or not it appears in `models`.
 ///
 /// The repository's atomic `insert_if_absent` primitive is intentional. A
 /// refresh runs in the background and may race with a user editing the same
@@ -161,64 +162,107 @@ where
         .map(|row| row.sort_order)
         .max()
         .map_or(0, |max| max + 1);
-    let by_model: HashMap<&str, &ProviderModelRow> =
-        existing.iter().map(|row| (row.model.as_str(), row)).collect();
+    let known: HashSet<&str> = existing.iter().map(|row| row.model.as_str()).collect();
 
+    // Phase 1: insert rows for catalog models that have none yet (with their
+    // derived profile, so they never need the backfill pass).
     let mut seen = HashSet::new();
     let mut changed = 0usize;
     for raw_model in models {
         let model = raw_model.as_ref().trim();
-        if model.is_empty() || !seen.insert(model.to_owned()) {
+        if model.is_empty() || !seen.insert(model.to_owned()) || known.contains(model) {
             continue;
         }
-        let (tasks, traits) = nomifun_api_types::derive_tasks_and_traits(platform, model);
-        let tasks_json = serde_json::to_string(&tasks)
-            .map_err(|error| AppError::Internal(format!("serialize inferred tasks: {error}")))?;
-        let traits_json = serde_json::to_string(&traits)
-            .map_err(|error| AppError::Internal(format!("serialize inferred traits: {error}")))?;
-
-        match by_model.get(model) {
-            // Membership dual-write inserts rows with empty tasks; give those
-            // (and only those) the heuristic profile. Anything a user or an
-            // earlier seed already profiled is left untouched.
-            Some(row) if row.tasks == "[]" && row.source == "inferred" => {
-                repo.update(
-                    provider_id.as_str(),
+        let (tasks_json, traits_json) = derive_profile_json(platform, model)?;
+        if repo
+            .insert_if_absent(
+                provider_id.as_str(),
+                &NewProviderModel {
                     model,
-                    &ProviderModelUpdate {
-                        tasks: Some(&tasks_json),
-                        traits: Some(&traits_json),
-                        ..Default::default()
-                    },
-                )
-                .await?;
-                changed += 1;
-            }
-            Some(_) => {}
-            None => {
-                if repo
-                    .insert_if_absent(
-                        provider_id.as_str(),
-                        &NewProviderModel {
-                            model,
-                            enabled: true,
-                            sort_order: next_sort,
-                            tasks: &tasks_json,
-                            traits: &traits_json,
-                            params: "{}",
-                            source: "inferred",
-                            ..Default::default()
-                        },
-                    )
-                    .await?
-                {
-                    changed += 1;
-                    next_sort += 1;
-                }
-            }
+                    enabled: true,
+                    sort_order: next_sort,
+                    tasks: &tasks_json,
+                    traits: &traits_json,
+                    params: "{}",
+                    source: "inferred",
+                    ..Default::default()
+                },
+            )
+            .await?
+        {
+            changed += 1;
+            next_sort += 1;
         }
     }
+
+    // Phase 2: backfill the rows that already existed (shared with the
+    // provider create/update path).
+    changed += backfill_unprofiled_rows(repo, provider_id.as_str(), platform, &existing).await?;
     Ok(changed)
+}
+
+/// Backfill inferred profiles for a provider's existing catalog rows.
+///
+/// Provider create/update dual-writes membership rows with `tasks = '[]'`
+/// and `source = 'inferred'`; this pass (run right after a successful
+/// create/update, before the response is projected) derives tasks/traits for
+/// exactly those rows so a provider added mid-session gets usable profiles
+/// without waiting for the boot reconcile. Unlike the boot path it needs no
+/// catalog list — the rows already exist via dual-write.
+///
+/// Returns the number of rows backfilled.
+pub(crate) async fn seed_inferred_provider_models(
+    repo: &dyn IProviderModelRepository,
+    provider_id: &str,
+    platform: &str,
+) -> Result<usize, AppError> {
+    let provider_id = ProviderId::parse(provider_id)
+        .map_err(|error| AppError::BadRequest(format!("invalid provider_id: {error}")))?;
+    let rows = repo.list_for_provider(provider_id.as_str()).await?;
+    backfill_unprofiled_rows(repo, provider_id.as_str(), platform.trim(), &rows).await
+}
+
+/// Shared backfill pass: rows created by membership dual-write and never
+/// profiled (`tasks == "[]"` AND `source == "inferred"`) get tasks/traits
+/// from the name/platform heuristic (source stays inferred). Anything a user
+/// or an earlier seed already profiled is left untouched, so a concurrent
+/// user edit (which sets `source = "user"`) wins.
+async fn backfill_unprofiled_rows(
+    repo: &dyn IProviderModelRepository,
+    provider_id: &str,
+    platform: &str,
+    rows: &[ProviderModelRow],
+) -> Result<usize, AppError> {
+    let mut changed = 0usize;
+    for row in rows {
+        if row.tasks != "[]" || row.source != "inferred" {
+            continue;
+        }
+        let (tasks_json, traits_json) = derive_profile_json(platform, &row.model)?;
+        repo.update(
+            provider_id,
+            &row.model,
+            &ProviderModelUpdate {
+                tasks: Some(&tasks_json),
+                traits: Some(&traits_json),
+                ..Default::default()
+            },
+        )
+        .await?;
+        changed += 1;
+    }
+    Ok(changed)
+}
+
+/// Derive a model's inferred profile and serialize it to the row's JSON
+/// column shape.
+fn derive_profile_json(platform: &str, model: &str) -> Result<(String, String), AppError> {
+    let (tasks, traits) = nomifun_api_types::derive_tasks_and_traits(platform, model);
+    let tasks_json = serde_json::to_string(&tasks)
+        .map_err(|error| AppError::Internal(format!("serialize inferred tasks: {error}")))?;
+    let traits_json = serde_json::to_string(&traits)
+        .map_err(|error| AppError::Internal(format!("serialize inferred traits: {error}")))?;
+    Ok((tasks_json, traits_json))
 }
 
 fn source_to_str(source: ProfileSource) -> &'static str {
