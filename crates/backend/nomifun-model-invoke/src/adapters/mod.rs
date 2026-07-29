@@ -18,8 +18,10 @@
 //! - [`deepgram`] — Deepgram pre-recorded `/v1/listen` (`"deepgram.listen"`).
 //! - [`ark`] — Volcengine Ark `/api/v3` image generation (`"ark.images"`) and
 //!   async video tasks (`"ark.video_jobs"`).
+//! - [`volc_voice`] — Volcengine speech domain (openspeech) file ASR
+//!   (`"volc.asr_file"`, rides the `"voice"` connection profile).
 //!
-//! Later tasks append the volc voice adapters to [`default_adapters`].
+//! Later tasks append the volc TTS adapter to [`default_adapters`].
 
 use std::sync::Arc;
 
@@ -33,6 +35,7 @@ pub mod openai_chat_text;
 pub mod openai_embeddings;
 pub mod openai_images;
 pub mod openai_videos;
+pub mod volc_voice;
 
 /// Build the standard adapter set registered on the service at assembly time.
 /// Adapters are stateless — the shared HTTP client is passed per call by the
@@ -50,6 +53,7 @@ pub fn default_adapters() -> Vec<Arc<dyn ProtocolAdapter>> {
         Arc::new(deepgram::DeepgramListenAdapter),
         Arc::new(ark::ArkImagesAdapter),
         Arc::new(ark::ArkVideoJobsAdapter),
+        Arc::new(volc_voice::VolcAsrFileAdapter),
     ]
 }
 
@@ -110,6 +114,7 @@ mod tests {
             ("deepgram.listen", ModelTask::SpeechRecognition),
             ("ark.images", ModelTask::ImageGeneration),
             ("ark.video_jobs", ModelTask::VideoGeneration),
+            ("volc.asr_file", ModelTask::SpeechRecognition),
         ] {
             let adapter = registry.get(protocol, task).expect("registered + supported");
             assert_eq!(adapter.id(), protocol);
@@ -127,5 +132,6 @@ mod tests {
         // ark.images serves ImageGeneration only (ImageEdit stays on openai.images).
         assert!(registry.get("ark.images", ModelTask::ImageEdit).is_err());
         assert!(registry.get("ark.video_jobs", ModelTask::ImageGeneration).is_err());
+        assert!(registry.get("volc.asr_file", ModelTask::SpeechSynthesis).is_err());
     }
 }
