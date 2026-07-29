@@ -41,6 +41,13 @@ export type TurnDisclosureOutputItem =
 export interface BuildTurnDisclosureOptions {
   tailClosed?: boolean;
   activeTurnId?: MessageId;
+  /**
+   * Present when the user stopped the latest turn in this session. The tail
+   * disclosure (once closed) renders as canceled with `endAt` pinned to the
+   * stop moment, so the header reads "you stopped after {duration}" even when
+   * the backend never emitted a Canceled tool status.
+   */
+  stopNotice?: { stoppedAt: number };
 }
 
 export interface AssignTurnIdOptions {
@@ -349,6 +356,32 @@ const coalesceTurnDisclosures = (
   return output;
 };
 
+const applyStopNotice = (
+  items: TurnDisclosureOutputItem[],
+  stopNotice?: { stoppedAt: number }
+): TurnDisclosureOutputItem[] => {
+  if (!stopNotice) return items;
+  const lastIndex = items.findLastIndex((entry) => entry.type === 'turn_disclosure');
+  if (lastIndex === -1) return items;
+  const disclosure = items[lastIndex];
+  if (disclosure.type !== 'turn_disclosure') return items;
+  // A live turn must keep ticking: the optimistic stop path flips
+  // isProcessing first, so a running disclosure here means the notice is
+  // stale (e.g. stop failed and the turn resumed).
+  if (disclosure.running) return items;
+  // A notice from an earlier turn must not cancel a newer one.
+  if (stopNotice.stoppedAt < disclosure.startAt) return items;
+  const next = items.slice();
+  next[lastIndex] = {
+    ...disclosure,
+    state: 'canceled',
+    endAt: stopNotice.stoppedAt,
+    running: false,
+    defaultCollapsed: true,
+  };
+  return next;
+};
+
 export function buildTurnDisclosureItems(
   items: TurnDisclosureInputItem[],
   options: BuildTurnDisclosureOptions = {}
@@ -416,5 +449,5 @@ export function buildTurnDisclosureItems(
   // segments. Keep ordinary transcript items in arrival order, but fold their
   // synthetic process metadata into the first disclosure so IDs/DOM controls
   // remain unique and one turn can never render two "processed" headers.
-  return coalesceTurnDisclosures(output, processObservedAtByItemId);
+  return applyStopNotice(coalesceTurnDisclosures(output, processObservedAtByItemId), options.stopNotice);
 }
