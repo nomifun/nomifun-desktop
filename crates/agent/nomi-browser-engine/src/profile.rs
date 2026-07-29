@@ -6936,6 +6936,50 @@ mod tests {
         let _ = child.wait().await;
     }
 
+    /// The executable-lineage guard must fail closed: when the spawned
+    /// process's live image does not resolve to the configured browser
+    /// executable (wrong binary, or a wrapper that exec'd into something
+    /// else), no ownership marker may be committed for the impostor process.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn marker_writer_rejects_spawned_executable_that_is_not_the_configured_browser() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let profile = tmp.path().join("profile-lineage-mismatch");
+        std::fs::create_dir_all(&profile).unwrap();
+        let claim =
+            prepare_ownership_marker_for_launch(&profile).expect("exclusive launch claim");
+        // A real, observable process whose image is NOT the configured
+        // browser below (the same directly-spawned sleeper the darwin
+        // fixtures use, so the observed identity is the live image itself).
+        let mut child = tokio::process::Command::new("/bin/sleep")
+            .arg("60")
+            .spawn()
+            .expect("spawn lineage-mismatch test child");
+        let configured_browser = PathBuf::from("/bin/ls");
+
+        let error = write_browser_ownership_marker(
+            &claim,
+            &profile,
+            &configured_browser,
+            &child,
+            None,
+        )
+        .await
+        .expect_err("a mismatched executable lineage must fail closed");
+
+        assert!(
+            error.contains("did not match configured browser"),
+            "rejection must name the lineage mismatch: {error}"
+        );
+        assert!(
+            !ownership_marker_path(&profile).exists(),
+            "no ownership marker may be committed for an impostor process"
+        );
+
+        let _ = child.kill().await;
+        let _ = child.wait().await;
+    }
+
     #[test]
     fn profile_operation_lock_is_exclusive_and_released_on_drop() {
         let tmp = tempfile::TempDir::new().unwrap();
