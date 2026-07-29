@@ -6085,6 +6085,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "nomifun-model-invoke"
+version = "0.3.3"
+dependencies = [
+ "async-trait",
+ "base64 0.22.1",
+ "nomifun-api-types",
+ "nomifun-common",
+ "nomifun-db",
+ "nomifun-net",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "wiremock",
+]
+
+[[package]]
 name = "nomifun-net"
 version = "0.3.3"
 dependencies = [
