@@ -14,9 +14,16 @@ use nomifun_common::AppError;
 use serde::Deserialize;
 
 use crate::profile::{HeadBox, CompanionProfileConfig, SharedCompanionConfig};
-use crate::service::{CompanionSkillContent, CompanionSkillViewPage, CompanionStatus, CompanionWeeklyDigest, SourceStats};
+use crate::memory_search::MemoryStatusFilter;
+use crate::service::{
+    CompanionSkillContent, CompanionSkillViewPage, CompanionStatus, CompanionWeeklyDigest,
+    MemoryListItem, MemoryListPage, MemoryMergeGroup, SourceStats,
+};
 use crate::state::CompanionRouterState;
-use crate::store::{MemoryFilter, MemoryPage, MemoryScope, CompanionLearnRun, CompanionMemory, CompanionSkill, CompanionSuggestion, SuggestionPage};
+use crate::store::{
+    MemoryBatchAction, MemoryFilter, MemoryListSort, MemoryScope, CompanionLearnRun,
+    CompanionMemory, CompanionSkill, CompanionSuggestion, SuggestionPage,
+};
 
 pub fn companion_routes(state: CompanionRouterState) -> Router {
     Router::new()
@@ -49,6 +56,9 @@ pub fn companion_routes(state: CompanionRouterState) -> Router {
             "/api/companion/memories/{memory_id}",
             axum::routing::put(update_memory).delete(delete_memory),
         )
+        .route("/api/companion/memories/batch", post(batch_memories))
+        .route("/api/companion/memories/merge-suggestions", post(memory_merge_suggestions))
+        .route("/api/companion/memories/merge", post(merge_memories))
         .route("/api/companion/suggestions", get(list_suggestions))
         .route(
             "/api/companion/suggestions/{suggestion_id}/decide",
@@ -171,10 +181,13 @@ fn scope_from_parts(
 struct ListMemoriesQuery {
     kind: Option<String>,
     q: Option<String>,
+    /// `active` (default) / `archived` / `all`.
     status: Option<String>,
     /// When set, scope the list to memories visible to this companion (shared +
     /// its own private). Absent = cross-companion "all" view.
     scope_companion_id: Option<String>,
+    /// `relevance` (default with `q`) / `time` / `importance`.
+    sort: Option<String>,
     limit: Option<i64>,
     offset: Option<i64>,
 }
@@ -183,21 +196,68 @@ async fn list_memories(
     State(state): State<CompanionRouterState>,
     Extension(_user): Extension<CurrentUser>,
     Query(query): Query<ListMemoriesQuery>,
-) -> Result<Json<ApiResponse<MemoryPage>>, AppError> {
+) -> Result<Json<ApiResponse<MemoryListPage>>, AppError> {
     if let Some(companion_id) = query.scope_companion_id.as_deref() {
         nomifun_common::CompanionId::try_from(companion_id).map_err(|error| {
             AppError::BadRequest(format!("invalid scope_companion_id: {error}"))
         })?;
     }
-    let filter = MemoryFilter {
-        kind: query.kind.filter(|k| !k.is_empty()),
-        q: query.q.filter(|q| !q.is_empty()),
-        status: Some(query.status.filter(|s| !s.is_empty()).unwrap_or_else(|| "active".into())),
-        scope_companion_id: query.scope_companion_id,
-        limit: query.limit.unwrap_or(100),
-        offset: query.offset.unwrap_or(0),
+    let status = query.status.filter(|s| !s.is_empty()).unwrap_or_else(|| "active".into());
+    let kind = query.kind.filter(|k| !k.is_empty());
+    let q = query.q.map(|q| q.trim().to_owned()).filter(|q| !q.is_empty());
+    let sort = query.sort.filter(|s| !s.is_empty());
+    if let Some(sort) = sort.as_deref()
+        && !matches!(sort, "relevance" | "time" | "importance")
+    {
+        return Err(AppError::BadRequest(format!("invalid memory sort '{sort}'")));
+    }
+    let limit = query.limit.unwrap_or(100);
+    let offset = query.offset.unwrap_or(0);
+
+    if let Some(q) = q {
+        // Full-text path: FTS relevance by default, snippet per hit.
+        let status = match status.as_str() {
+            "active" => MemoryStatusFilter::Active,
+            "archived" => MemoryStatusFilter::Archived,
+            "all" => MemoryStatusFilter::All,
+            other => return Err(AppError::BadRequest(format!("invalid memory status '{other}'"))),
+        };
+        let sort = sort.as_deref().unwrap_or("relevance");
+        let page = state
+            .service
+            .search_memory_page(&q, kind, status, query.scope_companion_id, sort, limit, offset)
+            .await?;
+        return Ok(Json(ApiResponse::ok(page)));
+    }
+
+    let status_filter = match status.as_str() {
+        "active" | "archived" => Some(status),
+        "all" => None,
+        other => return Err(AppError::BadRequest(format!("invalid memory status '{other}'"))),
     };
-    Ok(Json(ApiResponse::ok(state.service.list_memory_page(&filter).await?)))
+    let sort = match sort.as_deref() {
+        None | Some("relevance") => MemoryListSort::Default,
+        Some("time") => MemoryListSort::Time,
+        Some("importance") => MemoryListSort::Importance,
+        Some(_) => unreachable!("validated above"),
+    };
+    let filter = MemoryFilter {
+        kind,
+        q: None,
+        status: status_filter,
+        scope_companion_id: query.scope_companion_id,
+        limit,
+        offset,
+    };
+    let page = state.service.list_memory_page_sorted(&filter, sort).await?;
+    Ok(Json(ApiResponse::ok(MemoryListPage {
+        items: page
+            .items
+            .into_iter()
+            .map(|memory| MemoryListItem { memory, snippet: None, rank: None })
+            .collect(),
+        total: page.total,
+    })))
 }
 
 #[derive(Deserialize)]
@@ -266,6 +326,70 @@ async fn delete_memory(
 ) -> Result<Json<ApiResponse<()>>, AppError> {
     state.service.delete_memory(&memory_id).await?;
     Ok(Json(ApiResponse::ok(())))
+}
+
+#[derive(Deserialize)]
+struct BatchMemoriesRequest {
+    ids: Vec<String>,
+    /// `archive` | `restore` | `delete` | `reclassify`.
+    action: String,
+    /// Target kind — required for `reclassify`, ignored otherwise.
+    #[serde(default)]
+    kind: Option<String>,
+}
+
+/// Atomic batch memory operation (single transaction; any bad id rolls back).
+async fn batch_memories(
+    State(state): State<CompanionRouterState>,
+    Extension(_user): Extension<CurrentUser>,
+    body: Result<Json<BatchMemoriesRequest>, JsonRejection>,
+) -> Result<Json<ApiResponse<()>>, AppError> {
+    let Json(req) = body.map_err(|e| AppError::BadRequest(e.to_string()))?;
+    let action = match req.action.as_str() {
+        "archive" => MemoryBatchAction::Archive,
+        "restore" => MemoryBatchAction::Restore,
+        "delete" => MemoryBatchAction::Delete,
+        "reclassify" => MemoryBatchAction::Reclassify {
+            kind: req.kind.filter(|kind| !kind.is_empty()).ok_or_else(|| {
+                AppError::BadRequest("batch reclassify requires a target kind".into())
+            })?,
+        },
+        other => {
+            return Err(AppError::BadRequest(format!("invalid batch action '{other}'")));
+        }
+    };
+    state.service.batch_memories(&req.ids, &action).await?;
+    Ok(Json(ApiResponse::ok(())))
+}
+
+/// Merge-assistant dry run: suspected-duplicate groups (active layer only).
+async fn memory_merge_suggestions(
+    State(state): State<CompanionRouterState>,
+    Extension(_user): Extension<CurrentUser>,
+) -> Result<Json<ApiResponse<Vec<MemoryMergeGroup>>>, AppError> {
+    Ok(Json(ApiResponse::ok(state.service.memory_merge_suggestions().await?)))
+}
+
+#[derive(Deserialize)]
+struct MergeMemoriesRequest {
+    group: Vec<String>,
+    merged_content: String,
+    kind: String,
+}
+
+/// Merge-assistant confirm: insert the merged memory, archive the source group.
+async fn merge_memories(
+    State(state): State<CompanionRouterState>,
+    Extension(_user): Extension<CurrentUser>,
+    body: Result<Json<MergeMemoriesRequest>, JsonRejection>,
+) -> Result<Json<ApiResponse<CompanionMemory>>, AppError> {
+    let Json(req) = body.map_err(|e| AppError::BadRequest(e.to_string()))?;
+    Ok(Json(ApiResponse::ok(
+        state
+            .service
+            .merge_memories(&req.group, &req.merged_content, &req.kind)
+            .await?,
+    )))
 }
 
 #[derive(Deserialize)]
@@ -984,4 +1108,285 @@ async fn import_package(
     )
     .await?;
     Ok(Json(ApiResponse::ok(outcome)))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use http_body_util::BodyExt;
+    use nomifun_realtime::BroadcastEventBus;
+    use tower::ServiceExt;
+
+    use super::*;
+    use crate::learner::CompanionCompleter;
+    use crate::service::CompanionService;
+
+    struct NoopCompleter;
+
+    #[async_trait::async_trait]
+    impl CompanionCompleter for NoopCompleter {
+        async fn complete(&self, _provider_id: &str, _model: &str, _system: &str, _user: &str, _max_tokens: u32) -> Result<String, AppError> {
+            Ok(String::new())
+        }
+    }
+
+    async fn test_app(data_dir: &std::path::Path) -> (Router, Arc<CompanionService>) {
+        let service = CompanionService::start(
+            data_dir,
+            Arc::new(BroadcastEventBus::new(16)),
+            "owner-a",
+            Arc::new(NoopCompleter),
+            Arc::new(nomifun_extension::skill_service::resolve_skill_paths(data_dir, data_dir)),
+        )
+        .await
+        .unwrap();
+        let app = companion_routes(CompanionRouterState::new(service.clone())).layer(
+            Extension(CurrentUser {
+                id: nomifun_common::UserId::new(),
+                username: "u1".into(),
+            }),
+        );
+        (app, service)
+    }
+
+    async fn json_body(resp: axum::response::Response) -> serde_json::Value {
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        serde_json::from_slice(&bytes).unwrap()
+    }
+
+    fn post_json(uri: &str, body: serde_json::Value) -> Request<Body> {
+        Request::post(uri)
+            .header("content-type", "application/json")
+            .body(Body::from(body.to_string()))
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn batch_endpoint_applies_all_actions_atomically() {
+        let dir = tempfile::tempdir().unwrap();
+        let (app, service) = test_app(dir.path()).await;
+        let a = service.add_memory("episode", "上周试了埃塞俄比亚豆", &[], MemoryScope::Shared).await.unwrap();
+        let b = service.add_memory("episode", "昨天喝了危地马拉豆", &[], MemoryScope::Shared).await.unwrap();
+
+        // archive both
+        let resp = app
+            .clone()
+            .oneshot(post_json(
+                "/api/companion/memories/batch",
+                serde_json::json!({ "ids": [a.memory_id.as_str(), b.memory_id.as_str()], "action": "archive" }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(service.store.count_memories("archived").await.unwrap(), 2);
+
+        // restore both
+        let resp = app
+            .clone()
+            .oneshot(post_json(
+                "/api/companion/memories/batch",
+                serde_json::json!({ "ids": [a.memory_id.as_str(), b.memory_id.as_str()], "action": "restore" }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(service.store.count_memories("active").await.unwrap(), 2);
+
+        // reclassify one; an invalid kind is a 400 and changes nothing
+        let resp = app
+            .clone()
+            .oneshot(post_json(
+                "/api/companion/memories/batch",
+                serde_json::json!({ "ids": [a.memory_id.as_str()], "action": "reclassify", "kind": "knowledge" }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(service.store.get_memory(&a.memory_id).await.unwrap().unwrap().kind, "knowledge");
+        let resp = app
+            .clone()
+            .oneshot(post_json(
+                "/api/companion/memories/batch",
+                serde_json::json!({ "ids": [a.memory_id.as_str()], "action": "reclassify", "kind": "bogus" }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+        // atomic: one bad id rolls the whole delete back
+        let missing = nomifun_common::CompanionMemoryId::new().into_string();
+        let resp = app
+            .clone()
+            .oneshot(post_json(
+                "/api/companion/memories/batch",
+                serde_json::json!({ "ids": [a.memory_id.as_str(), missing.as_str()], "action": "delete" }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        assert!(service.store.get_memory(&a.memory_id).await.unwrap().is_some(), "failed batch must roll back");
+
+        // delete both
+        let resp = app
+            .clone()
+            .oneshot(post_json(
+                "/api/companion/memories/batch",
+                serde_json::json!({ "ids": [a.memory_id.as_str(), b.memory_id.as_str()], "action": "delete" }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(service.store.count_memories("active").await.unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn merge_flow_groups_then_archives_sources_with_audit_tag() {
+        let dir = tempfile::tempdir().unwrap();
+        let (app, service) = test_app(dir.path()).await;
+        // Two normalized-similar actives of one kind (dedup guard skips exact
+        // duplicates, so use containment ≥0.6 variants) + one unrelated.
+        let a = service.store.insert_memory("preference", "主人喜欢深烘焙咖啡", &[], 0.8, "manual").await.unwrap();
+        let b = service.store.insert_memory("preference", "主人喜欢深烘焙咖啡豆手冲", &[], 0.6, "manual").await.unwrap();
+        let other = service.store.insert_memory("task", "帮主人整理周报", &[], 0.8, "manual").await.unwrap();
+
+        let resp = app
+            .clone()
+            .oneshot(post_json("/api/companion/memories/merge-suggestions", serde_json::json!({})))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let v = json_body(resp).await;
+        let groups = v["data"].as_array().unwrap();
+        assert_eq!(groups.len(), 1, "exactly one duplicate group: {v}");
+        let ids: Vec<&str> = groups[0]["memories"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|m| m["memory_id"].as_str().unwrap())
+            .collect();
+        assert!(ids.contains(&a.memory_id.as_str()) && ids.contains(&b.memory_id.as_str()));
+        assert!(!ids.contains(&other.memory_id.as_str()));
+
+        // Confirm merge: merged row active, sources archived + audit-tagged.
+        let resp = app
+            .clone()
+            .oneshot(post_json(
+                "/api/companion/memories/merge",
+                serde_json::json!({
+                    "group": [a.memory_id.as_str(), b.memory_id.as_str()],
+                    "merged_content": "主人喜欢深烘焙咖啡豆，常用手冲",
+                    "kind": "preference",
+                }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let v = json_body(resp).await;
+        let merged_id = v["data"]["memory_id"].as_str().unwrap().to_owned();
+        assert_eq!(v["data"]["status"], "active");
+        assert_eq!(v["data"]["source"], "merge");
+        for source in [&a.memory_id, &b.memory_id] {
+            let row = service.store.get_memory(source).await.unwrap().unwrap();
+            assert_eq!(row.status, "archived");
+            assert!(
+                row.tags.iter().any(|t| t == &format!("superseded_by:{merged_id}")),
+                "source must carry the audit tag: {:?}",
+                row.tags
+            );
+        }
+
+        // Invalid kind → 400.
+        let resp = app
+            .clone()
+            .oneshot(post_json(
+                "/api/companion/memories/merge",
+                serde_json::json!({ "group": [a.memory_id.as_str(), b.memory_id.as_str()], "merged_content": "x", "kind": "bogus" }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn list_q_walks_fts_with_snippets_and_sort_and_status_all() {
+        let dir = tempfile::tempdir().unwrap();
+        let (app, service) = test_app(dir.path()).await;
+        // Controlled timestamps/status via the raw insert path so the sort
+        // assertions are deterministic (the public paths stamp now_ms()).
+        let raw = |content: &str, importance: f64, status: &str, updated_at: i64| CompanionMemory {
+            memory_id: nomifun_common::CompanionMemoryId::new().into_string(),
+            kind: "episode".into(),
+            content: content.into(),
+            tags: vec![],
+            importance,
+            strength: importance,
+            pinned: false,
+            source: "manual".into(),
+            status: status.into(),
+            created_at: updated_at,
+            updated_at,
+            last_reinforced_at: updated_at,
+            scope_kind: "user".into(),
+            scope_companion_id: None,
+        };
+        let old_archived = raw("主人上月研究了咖啡烘焙曲线", 0.9, "archived", 1_000);
+        let new_active = raw("主人今天又聊起咖啡豆产区", 0.2, "active", 2_000);
+        service.store.insert_memory_raw(&old_archived).await.unwrap();
+        service.store.insert_memory_raw(&new_active).await.unwrap();
+
+        // q + status=all: both layers found (咖啡 is a 2-char LIKE-fallback term).
+        let req = Request::get("/api/companion/memories?q=%E5%92%96%E5%95%A1&status=all")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let v = json_body(resp).await;
+        assert_eq!(v["data"]["total"], 2, "{v}");
+        // Default status stays active-only.
+        let req = Request::get("/api/companion/memories?q=%E5%92%96%E5%95%A1")
+            .body(Body::empty())
+            .unwrap();
+        let v = json_body(app.clone().oneshot(req).await.unwrap()).await;
+        assert_eq!(v["data"]["total"], 1, "{v}");
+
+        // A 3+ char query walks the trigram index and carries a highlight snippet.
+        let req = Request::get("/api/companion/memories?q=%E5%92%96%E5%95%A1%E7%83%98%E7%84%99&status=all")
+            .body(Body::empty())
+            .unwrap();
+        let v = json_body(app.clone().oneshot(req).await.unwrap()).await;
+        assert_eq!(v["data"]["total"], 1, "{v}");
+        assert!(
+            v["data"]["items"][0]["snippet"].as_str().unwrap().contains("<b>"),
+            "FTS hits carry a highlight snippet: {v}"
+        );
+
+        // sort=time puts the newest first even though it ranks lower.
+        let req = Request::get("/api/companion/memories?q=%E5%92%96%E5%95%A1&status=all&sort=time")
+            .body(Body::empty())
+            .unwrap();
+        let v = json_body(app.clone().oneshot(req).await.unwrap()).await;
+        assert!(
+            v["data"]["items"][0]["content"].as_str().unwrap().contains("产区"),
+            "time sort puts the newest first: {v}"
+        );
+
+        // An unknown sort value is a 400.
+        let req = Request::get("/api/companion/memories?q=x&sort=bogus").body(Body::empty()).unwrap();
+        assert_eq!(app.clone().oneshot(req).await.unwrap().status(), StatusCode::BAD_REQUEST);
+
+        // Non-q path still lists (sort honored, no snippet key).
+        let req = Request::get("/api/companion/memories?status=all&sort=importance")
+            .body(Body::empty())
+            .unwrap();
+        let v = json_body(app.oneshot(req).await.unwrap()).await;
+        assert_eq!(v["data"]["total"], 2);
+        assert!(v["data"]["items"][0].get("snippet").is_none());
+        assert!(
+            v["data"]["items"][0]["content"].as_str().unwrap().contains("烘焙曲线"),
+            "importance sort puts the 0.9-importance row first: {v}"
+        );
+    }
 }
