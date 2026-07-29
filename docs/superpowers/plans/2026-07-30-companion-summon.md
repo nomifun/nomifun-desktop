@@ -42,32 +42,32 @@
 
 ### Task 1: SummonConfig 类型 + summon 生命周期（TDD）
 
-- [ ] Step 1：agent_build_extra.rs 加 `SummonConfig`（serde 测试：roundtrip + 缺省字段拒绝）。
-- [ ] Step 2：`summon.rs`：`set_summon(conversation_id, cfg)` / `clear_summon(conversation_id)`——校验会话存在、属主、**无 active turn**（复用 runtime_state `has_active_turn` + 持久 running 检查，非空闲 409 Conflict）；写/删 `extra.summon`；调用与 knowledge 绑定变更同款的 runtime 失效路径（读 service.rs:12046-12084 的 `terminate_runtime_with_proof` 用法，空闲态直接终结注册 runtime 使下一条消息重建）。测试：空闲设置成功且 extra 落库；running 时 409；设置后 runtime 槽位被清。
-- [ ] Step 3：routes 挂 PUT/DELETE；commit。
+- [x] Step 1：agent_build_extra.rs 加 `SummonConfig`（serde 测试：roundtrip + 缺省字段拒绝）。
+- [x] Step 2：`summon.rs`：`set_summon(conversation_id, cfg)` / `clear_summon(conversation_id)`——校验会话存在、属主、**无 active turn**（复用 runtime_state `has_active_turn` + 持久 running 检查，非空闲 409 Conflict）；写/删 `extra.summon`；调用与 knowledge 绑定变更同款的 runtime 失效路径（读 service.rs:12046-12084 的 `terminate_runtime_with_proof` 用法，空闲态直接终结注册 runtime 使下一条消息重建）。测试：空闲设置成功且 extra 落库；running 时 409；设置后 runtime 槽位被清。
+- [x] Step 3：routes 挂 PUT/DELETE；commit。
 
 ### Task 2: companion 侧支撑件（TDD）
 
-- [ ] Step 1：`summon_support.rs`：`resolve_summon_context`（按 ids 查 store——含 archived 也解析，标注`[已归档]`；预算截断在条目边界；空 ids 返回空串）；只读 recall sink（复用 A 轨道 `search_memories`，scope 锁 companion_id，无写方法）；`propose_companion_memory` 处理器（插 `companion_suggestions`，kind 校验六维，source="summon"，payload 带来源 conversation_id）。
-- [ ] Step 2：单测：预算截断、归档标注、propose 落建议表且不触碰 companion_memories。commit。
+- [x] Step 1：`summon_support.rs`：`resolve_summon_context`（按 ids 查 store——含 archived 也解析，标注`[已归档]`；预算截断在条目边界；空 ids 返回空串）；只读 recall sink（复用 A 轨道 `search_memories`，scope 锁 companion_id，无写方法）；`propose_companion_memory` 处理器（插 `companion_suggestions`，kind 校验六维，source="summon"，payload 带来源 conversation_id）。
+- [x] Step 2：单测：预算截断、归档标注、propose 落建议表且不触碰 companion_memories。commit。
 
 ### Task 3: 工厂接线
 
-- [ ] Step 1：读 factory/nomi.rs 现有 companion 工具注册与 ContextContributor 注入点（agent_build_extra.rs:285、factory/mod.rs:212 一带）；为带 `extra.summon` 的**非伙伴**会话：注册 recall/propose 两工具、加 summon ContextContributor（每回合调 resolve_summon_context）、系统提示追加一句"本会话已装载伙伴 {name} 的技能与所选记忆（只读）"。
-- [ ] Step 2：技能物化：会话准备阶段（工作区就绪后）对 summon 会话调 `materialize_skills_for_agent`（active 技能 − skill_exclusions，manifest 所有权沿用）；clear_summon 时按 manifest 卸载。
-- [ ] Step 3：集成测试（factory 测试基建）：summon 会话工具表含 recall/propose 不含 save_memory；上下文含记忆区段；非 summon 会话不受影响。commit。
+- [x] Step 1：读 factory/nomi.rs 现有 companion 工具注册与 ContextContributor 注入点（agent_build_extra.rs:285、factory/mod.rs:212 一带）；为带 `extra.summon` 的**非伙伴**会话：注册 recall/propose 两工具、加 summon ContextContributor（每回合调 resolve_summon_context）、系统提示追加一句"本会话已装载伙伴 {name} 的技能与所选记忆（只读）"。
+- [x] Step 2：技能物化：会话准备阶段（工作区就绪后）对 summon 会话调 `materialize_skills_for_agent`（active 技能 − skill_exclusions，manifest 所有权沿用）；clear_summon 时按 manifest 卸载。
+- [x] Step 3：集成测试（factory 测试基建）：summon 会话工具表含 recall/propose 不含 save_memory；上下文含记忆区段；非 summon 会话不受影响。commit。
 
 ### Task 4: gateway 扩展 + 伙伴分流提示词
 
-- [ ] Step 1：`nomi_create_conversation` 入参加 `workpath?: string`（设 `extra.custom_workspace=true`+`extra.workspace`）与 `summon?: { companion_id, memory_ids?, skill_exclusions? }`（服务端盖 summoned_at）；权限沿用现状（companion 身份可建顶层会话）。测试：带两参数创建后 extra 正确。
-- [ ] Step 2：companion.rs 本地模式提示词（"总管家"段后）加分流规则：重型 coding/工程任务 → 提议开工作会话并用 nomi_create_conversation 带 workpath（用户给了路径时）与 summon（自己 id + 按任务 recall 预选的记忆 ids）；征得主人同意再建。commit。
+- [x] Step 1：`nomi_create_conversation` 入参加 `workpath?: string`（设 `extra.custom_workspace=true`+`extra.workspace`）与 `summon?: { companion_id, memory_ids?, skill_exclusions? }`（服务端盖 summoned_at）；权限沿用现状（companion 身份可建顶层会话）。测试：带两参数创建后 extra 正确。
+- [x] Step 2：companion.rs 本地模式提示词（"总管家"段后）加分流规则：重型 coding/工程任务 → 提议开工作会话并用 nomi_create_conversation 带 workpath（用户给了路径时）与 summon（自己 id + 按任务 recall 预选的记忆 ids）；征得主人同意再建。commit。
 
 ### Task 5: UI
 
-- [ ] Step 1：ipcBridge 加 `conversation.setSummon/clearSummon`；SendBox 工具条加"召唤伙伴"按钮（仅非伙伴、非客服会话显示）。
-- [ ] Step 2：`SummonPanel`（Drawer 三步：伙伴单选卡片 → 技能复选（默认全选 active）→ 记忆多选（复用 A 轨道 MemoriesTab 的搜索/过滤/多选件 + 预算字数条）→ 提交 PUT）；已召唤时按钮变徽标态，点开可查看/调整/解除（解除 DELETE）。会话头部与侧边栏条目徽标（侧边栏数据源 extra 已同步，加渲染即可）。
-- [ ] Step 3：i18n 双语 + gen:i18n；bun test 结构测试；commit。
+- [x] Step 1：ipcBridge 加 `conversation.setSummon/clearSummon`；SendBox 工具条加"召唤伙伴"按钮（仅非伙伴、非客服会话显示）。
+- [x] Step 2：`SummonPanel`（Drawer 三步：伙伴单选卡片 → 技能复选（默认全选 active）→ 记忆多选（复用 A 轨道 MemoriesTab 的搜索/过滤/多选件 + 预算字数条）→ 提交 PUT）；已召唤时按钮变徽标态，点开可查看/调整/解除（解除 DELETE）。会话头部与侧边栏条目徽标（侧边栏数据源 extra 已同步，加渲染即可）。
+- [x] Step 3：i18n 双语 + gen:i18n；bun test 结构测试；commit。
 
 ### Task 6: 回归
 
-- [ ] `cargo test -p nomifun-conversation -p nomifun-companion -p nomifun-ai-agent -p nomifun-gateway` + `bun test` + `cargo check --workspace` 全绿；E2E 手册（记录在 commit message）：召唤→发消息→recall 命中→propose→建议卡出现→解除→技能目录被卸载。
+- [x] `cargo test -p nomifun-conversation -p nomifun-companion -p nomifun-ai-agent -p nomifun-gateway` + `bun test` + `cargo check --workspace` 全绿；E2E 手册（记录在 commit message）：召唤→发消息→recall 命中→propose→建议卡出现→解除→技能目录被卸载。
