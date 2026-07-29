@@ -300,6 +300,12 @@ pub struct ResourceDecision {
     /// therefore does not subtract operations which already hold permits.
     pub operation_weight_limit: usize,
     pub recommended_concurrency: usize,
+    /// The memory reserve this decision actually enforced. For the `Custom`
+    /// preset this is the validated user-configured value; derived presets may
+    /// raise it to the machine-size floor. Surfacing it lets management
+    /// responses show the value in force instead of silently diverging from
+    /// configuration.
+    pub effective_reserved_memory_bytes: u64,
     pub reason_code: Option<&'static str>,
     pub first_lane_reason_code: Option<&'static str>,
     pub expansion_lane_reason_code: Option<&'static str>,
@@ -335,6 +341,7 @@ impl ResourcePolicy {
                 admit_expansion_lane: true,
                 operation_weight_limit: self.max_active_operations.max(1),
                 recommended_concurrency: static_recommendation,
+                effective_reserved_memory_bytes: self.reserved_memory_bytes,
                 reason_code: None,
                 first_lane_reason_code: None,
                 expansion_lane_reason_code: None,
@@ -351,9 +358,17 @@ impl ResourcePolicy {
             .min(logical_cpu_limit)
             .max(1);
         let static_recommendation = available_operation_concurrency(operation_limit, workload);
-        let reserved = self
-            .reserved_memory_bytes
-            .max(((total as f64) * 0.2) as u64);
+        // The 20%-of-total floor protects presets whose reserve was derived
+        // for a different machine size. An explicit `Custom` reserve passed
+        // validation and is authoritative: silently raising it would make the
+        // accepted 256MiB..512GiB range meaningless and force Pressured on
+        // machines whose available memory sits below the floor.
+        let reserved = if self.preset == ResourcePolicyPreset::Custom {
+            self.reserved_memory_bytes
+        } else {
+            self.reserved_memory_bytes
+                .max(((total as f64) * 0.2) as u64)
+        };
         let browser_limit = ((total as f64) * self.max_browser_memory_ratio) as u64;
         let predicted_lane_bytes = predicted_lane_cost(self, workload);
         let system_headroom = telemetry.available_memory_bytes.saturating_sub(reserved);
@@ -476,6 +491,7 @@ impl ResourcePolicy {
             admit_expansion_lane,
             operation_weight_limit,
             recommended_concurrency,
+            effective_reserved_memory_bytes: reserved,
             reason_code: first_lane_reason_code.or(expansion_lane_reason_code),
             first_lane_reason_code,
             expansion_lane_reason_code,
@@ -592,6 +608,41 @@ mod tests {
         policy.max_global_queue = 4;
         policy.max_owner_queue = 5;
         assert_eq!(policy.validate().unwrap_err().field, "max_owner_queue");
+    }
+
+    #[test]
+    fn custom_preset_honors_explicit_reserve_below_the_automatic_floor() {
+        // 64 GiB machine, user explicitly reserves 2 GiB (validated range).
+        let mut policy = ResourcePolicy::automatic(64 * GIB, 16);
+        policy.preset = ResourcePolicyPreset::Custom;
+        policy.reserved_memory_bytes = 2 * GIB;
+        assert_eq!(policy.validate(), Ok(()));
+        // 10 GiB available is below the 12.8 GiB automatic floor but far above
+        // the explicit 2 GiB reserve; the machine must not be Pressured.
+        let telemetry = ResourceTelemetry {
+            total_memory_bytes: 64 * GIB,
+            available_memory_bytes: 10 * GIB,
+            logical_cpus: 16,
+            ..Default::default()
+        };
+
+        let decision = policy.decide(&telemetry);
+        assert_eq!(decision.state, ResourcePressureState::Normal);
+        assert!(decision.admit_first_lane);
+        assert!(decision.admit_expansion_lane);
+        assert_eq!(decision.effective_reserved_memory_bytes, 2 * GIB);
+
+        // The same values under the Automatic preset keep the safety floor
+        // and surface the raised effective reserve.
+        let automatic = ResourcePolicy::automatic(64 * GIB, 16);
+        let floored = automatic.decide(&telemetry);
+        assert_eq!(floored.state, ResourcePressureState::Pressured);
+        assert_eq!(
+            floored.effective_reserved_memory_bytes,
+            automatic
+                .reserved_memory_bytes
+                .max((64 * GIB) / 5)
+        );
     }
 
     #[test]
