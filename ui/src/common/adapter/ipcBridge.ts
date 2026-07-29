@@ -4224,11 +4224,26 @@ export interface ICompanionMemory {
   scope_kind: 'user' | 'companion';
   /** Owning canonical companion id when private; `null` when shared. */
   scope_companion_id: CompanionId | null;
+  /** FTS highlight snippet (`<b>…</b>` markers) — list results of a full-text query only. */
+  snippet?: string | null;
+  /** Fused relevance rank — list results of a full-text query only. */
+  rank?: number | null;
 }
 
 export interface ICompanionMemoryPage {
   items: ICompanionMemory[];
   total: number;
+}
+
+/** Sort orders of the memory list (relevance needs a full-text `q`). */
+export type ICompanionMemorySort = 'relevance' | 'time' | 'importance';
+
+/** Atomic batch operations over memories (single server-side transaction). */
+export type ICompanionMemoryBatchAction = 'archive' | 'restore' | 'delete' | 'reclassify';
+
+/** One suspected-duplicate cluster from the merge assistant's dry run. */
+export interface ICompanionMemoryMergeGroup {
+  memories: ICompanionMemory[];
 }
 
 export interface ICompanionSuggestion {
@@ -4674,6 +4689,7 @@ export const companion = {
       q?: string;
       status?: string;
       scope_companion_id?: CompanionId;
+      sort?: ICompanionMemorySort;
       limit?: number;
       offset?: number;
       }
@@ -4683,6 +4699,7 @@ export const companion = {
       if (p?.q) params.set('q', p.q);
       if (p?.status) params.set('status', p.status);
       if (p?.scope_companion_id) params.set('scope_companion_id', p.scope_companion_id);
+      if (p?.sort) params.set('sort', p.sort);
       if (p?.limit) params.set('limit', String(p.limit));
       if (p?.offset) params.set('offset', String(p.offset));
       const qs = params.toString();
@@ -4710,6 +4727,30 @@ export const companion = {
     })
   ),
   deleteMemory: httpDelete<void, { memory_id: CompanionMemoryId }>((p) => `/api/companion/memories/${p.memory_id}`),
+  /** Atomic batch memory op (single transaction — any bad id rolls the whole batch back). */
+  batchMemories: httpPost<
+    void,
+    { ids: CompanionMemoryId[]; action: ICompanionMemoryBatchAction; kind?: ICompanionMemoryKind }
+  >('/api/companion/memories/batch'),
+  /** Merge-assistant dry run: suspected-duplicate groups over the active layer. */
+  memoryMergeSuggestions: withResponseMap(
+    httpPost<unknown[], void>('/api/companion/memories/merge-suggestions'),
+    (raw): ICompanionMemoryMergeGroup[] =>
+      raw.map((entry) => {
+        const value = asWireObject(entry, 'companion memory merge group');
+        if (!Array.isArray(value.memories)) {
+          throw new TypeError('companion memory merge group memories must be an array');
+        }
+        return { memories: value.memories.map(fromApiCompanionMemory) };
+      })
+  ),
+  /** Merge-assistant confirm: insert the merged memory, archive the source group. */
+  mergeMemories: withResponseMap(
+    httpPost<unknown, { group: CompanionMemoryId[]; merged_content: string; kind: ICompanionMemoryKind }>(
+      '/api/companion/memories/merge'
+    ),
+    fromApiCompanionMemory
+  ),
   listSuggestions: withResponseMap(
     httpGet<{ items: unknown[]; total: number }, { status?: string; limit?: number; offset?: number }>((p) => {
       const params = new URLSearchParams();

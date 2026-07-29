@@ -27,6 +27,7 @@ pub mod gamify;
 pub mod learner;
 pub mod matting_model;
 mod managed_skills;
+pub mod memory_search;
 pub mod profile;
 pub mod prompt;
 pub mod registry;
@@ -39,6 +40,9 @@ mod skill_io;
 
 pub use events::CompanionEventEmitter;
 pub use figures::FigureMeta;
+pub use memory_search::{
+    CompanionMemoryRow, MemoryScopeFilter, MemorySearchHit, MemorySearchQuery, MemoryStatusFilter,
+};
 pub use profile::{
     CompanionProfileConfig, CompanionSkillConfig, CompanionWindowConfig, CustomFigureMeta,
     HeadBox, SharedArchiveConfig, SharedCompanionConfig, SharedLearnConfig,

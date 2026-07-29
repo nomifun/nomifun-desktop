@@ -25,9 +25,10 @@ use crate::managed_skills::{
     load_manifest, record_managed_entry, record_source_matches, remove_stale_managed_entries,
     save_manifest,
 };
+use crate::memory_search::{MemorySearchQuery, MemoryStatusFilter};
 use crate::profile::{CompanionProfileConfig, normalized_effective_skill_names};
 use crate::registry::CompanionRegistry;
-use crate::store::{CompanionThread, MEMORY_KINDS, MemoryFilter, MemoryScope, CompanionStore};
+use crate::store::{CompanionThread, MEMORY_KINDS, MemoryScope, CompanionStore};
 
 /// Per-companion runtime-state key holding that companion's active companion thread.
 pub(crate) const ACTIVE_THREAD_KEY: &str = "companion_active_thread";
@@ -132,7 +133,7 @@ pub async fn build_companion_system_prompt(
          但行事前遵守两条规则：\
          ① 任何创建类操作（会话/定时任务/需求等）之前，先用对应的 list 工具查重；已有同名或同义的项就不要重复创建，除非主人在本轮对话中明确要求再建一个。\
          ② 主人的请求缺少必要配置（如模型供应商/模型）时，先用列表类工具查可用项，自动选一个合理默认（比如第一个可用供应商）并告知主人，或用一句话向主人确认——不要带着空配置硬创建，也不要长篇追问。\n\
-         你还有三个专属记忆工具：recall_memories（搜你对主人的长期记忆）、save_memory（记住主人告诉你的重要事）、\
+         你还有三个专属记忆工具：recall_memories（搜你对主人的长期记忆；可一次传多个查询词 queries 扩大召回，翻旧事时带 include_archived 连归档一起搜）、save_memory（记住主人告诉你的重要事）、\
          list_recent_events（看主人最近的工作活动）。当主人提到值得长期记住的偏好/约定/计划时主动 save_memory，宁缺毋滥；\
          下面的记忆节选是开聊时的快照，拿不准时先 recall_memories 查最新。"
     );
@@ -1054,30 +1055,34 @@ fn mirror_memory_to_nomi(dir: &std::path::Path, kind: &str, content: &str) -> st
 
 #[async_trait]
 impl CompanionMemorySink for CompanionStoreSink {
-    async fn recall(&self, conversation_id: &str, query: &str, kind: Option<&str>, include_archived: bool) -> Result<String, String> {
+    async fn recall(&self, conversation_id: &str, queries: &[String], kind: Option<&str>, include_archived: bool, limit: usize) -> Result<String, String> {
         // Scope recall to the owning companion: shared memories + this
         // companion's own private ones. Mirrors the prompt-injection scope so a
         // companion never recalls another's private memories.
         let scope_companion_id = self.xp_target(conversation_id).await;
-        let filter = MemoryFilter {
+        let companion_id = scope_companion_id
+            .as_deref()
+            .and_then(|id| nomifun_common::CompanionId::try_from(id).ok());
+        let query = MemorySearchQuery {
+            queries: queries.to_vec(),
             kind: kind.map(str::to_owned),
-            q: Some(query.to_owned()),
-            status: if include_archived { None } else { Some("active".into()) },
-            scope_companion_id,
-            limit: 20,
-            offset: 0,
+            scope: None,
+            status: if include_archived { MemoryStatusFilter::All } else { MemoryStatusFilter::Active },
+            companion_id,
+            limit: if limit == 0 { 20 } else { limit },
         };
-        let memories = self.store.list_memories(&filter).await.map_err(|e| e.to_string())?;
-        if memories.is_empty() {
+        let hits = self.store.search_memories(query).await.map_err(|e| e.to_string())?;
+        if hits.is_empty() {
             return Ok("没有找到相关记忆。".into());
         }
         let mut out = String::new();
-        for m in memories {
+        for hit in hits {
+            let m = &hit.memory;
             out.push_str(&format!(
-                "- [{}|{}|强度{:.0}%{}] {}\n",
+                "- [{}|{}|id:{}{}] {}\n",
                 format_date(m.created_at),
                 m.kind,
-                m.strength * 100.0,
+                m.memory_id,
                 if m.status == "archived" { "|已归档" } else { "" },
                 m.content
             ));
@@ -1324,10 +1329,17 @@ mod tests {
         assert!(other.contains("已保存"));
         assert_eq!(store.get_companion_state_i64(&default_companion, "xp").await.unwrap(), 5);
 
-        let hits = s.recall(&owned_conversation, "结论", None, false).await.unwrap();
+        let hits = s.recall(&owned_conversation, &["结论".into()], None, false, 20).await.unwrap();
         assert!(hits.contains("先结论后细节"));
-        let miss = s.recall(&owned_conversation, "不存在xyz", None, false).await.unwrap();
+        // Multi-query OR expansion hits either term; misses stay a friendly line.
+        let multi = s
+            .recall(&owned_conversation, &["不存在xyz".into(), "细节".into()], None, false, 20)
+            .await
+            .unwrap();
+        assert!(multi.contains("先结论后细节"));
+        let miss = s.recall(&owned_conversation, &["不存在xyz".into()], None, false, 20).await.unwrap();
         assert!(miss.contains("没有找到"));
+        assert!(s.recall(&owned_conversation, &[], None, false, 20).await.is_err(), "empty queries error");
 
         assert!(s.save(&owned_conversation, "bogus", "x", &[]).await.is_err());
         assert!(s.save(&owned_conversation, "task", "  ", &[]).await.is_err());
@@ -1548,17 +1560,26 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn sink_recall_output_carries_memory_dates() {
+    async fn sink_recall_output_carries_memory_dates_ids_and_archive_flag() {
         let dir = tempfile::tempdir().unwrap();
         let store = CompanionStore::open_memory().await.unwrap();
-        store
+        let m = store
             .insert_memory("task", "主人想做导出功能", &[], 0.8, "learn")
             .await
             .unwrap();
-        let s = sink(dir.path(), store, SharedCompanionConfig::default());
-        let hits = s.recall(&conversation_fixture(4), "导出", None, false).await.unwrap();
+        let s = sink(dir.path(), store.clone(), SharedCompanionConfig::default());
+        let hits = s.recall(&conversation_fixture(4), &["导出".into()], None, false, 20).await.unwrap();
         let today = format_date(nomifun_common::now_ms());
         assert!(hits.contains(&format!("[{today}|task|")), "recall lines must be dated: {hits}");
+        assert!(hits.contains(&format!("id:{}", m.memory_id)), "recall lines must carry the memory id: {hits}");
+
+        // Archived memories only surface with include_archived, flagged as such.
+        store.archive_memories(std::slice::from_ref(&m.memory_id)).await.unwrap();
+        let gone = s.recall(&conversation_fixture(4), &["导出".into()], None, false, 20).await.unwrap();
+        assert!(gone.contains("没有找到"));
+        let archived = s.recall(&conversation_fixture(4), &["导出".into()], None, true, 20).await.unwrap();
+        assert!(archived.contains("已归档"), "{archived}");
+        assert!(archived.contains("主人想做导出功能"));
     }
 
     #[tokio::test]
