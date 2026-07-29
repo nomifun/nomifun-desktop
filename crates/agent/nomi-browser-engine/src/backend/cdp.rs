@@ -8041,15 +8041,19 @@ fn spawn_firewall_watchdog(
 /// continue/fail/（D2）**悬挂等审批**。**绝不**让请求**无条件**悬挂（Allow/Block 立即 continue/fail；
 /// GatePost 走 D2 悬挂机制，仍有界——超时即 fail-closed，绝不永久挂起）。
 ///
-/// **P3-D2（裁决④/决策3）**：[`crate::firewall::FirewallDecision::GatePost`] 不再 detect-but-continue
-/// （P2 泄漏窗口），而是：
+/// **P3-D2（裁决④/决策3）+ F6 白屏回归修**：[`crate::firewall::FirewallDecision::GatePost`] 的处置
+/// 按审批通道有无分岔：
 /// 1. 先查 `approved_domains`（决策3 always_allow 记住域）——目标 eTLD+1 已被本会话批准 → **直接
 ///    continue**（不再悬挂审批）；
-/// 2. 否则**悬挂**该请求（保留 `request_id`，**不**立即 continue/fail）+ `tokio::spawn` 一个 detached
-///    任务（事件循环立即回到 `select!` 继续 pump，**绝不**在此同步阻塞）；该任务 `await`
-///    [`crate::firewall::EgressApprover`]（带 [`crate::firewall::EGRESS_APPROVAL_TIMEOUT`] 超时）取裁决 →
-///    批准 `continueRequest`（可选记住域）/ 拒绝/超时/**无审批通道** `failRequest`（**fail-closed**，
-///    闭合 P2 泄漏窗口）。
+/// 2. **无审批通道（`egress_approver=None`，托管上下文）→ 放行 + warn 留痕**（E5 pre-approval 姿态：
+///    「检测+留痕，审批接线前放行」）。托管 host 无人在回路可批——fail-closed 只会把被访问站点的正常
+///    出口打成 BlockedByClient 白屏（F6 回归）。审计记 host/size/字段名（绝不含值）。**硬 Block
+///    （SSRF IP 封禁 / DNS 守卫 / deny_etld1）不经 GatePost，仍 failRequest fail-closed**；
+/// 3. **有审批通道（standalone/桌面接管路径）→ 悬挂**该请求（保留 `request_id`，**不**立即
+///    continue/fail）+ `tokio::spawn` 一个 detached 任务（事件循环立即回到 `select!` 继续 pump，
+///    **绝不**在此同步阻塞）；该任务 `await` [`crate::firewall::EgressApprover`]（带
+///    [`crate::firewall::EGRESS_APPROVAL_TIMEOUT`] 超时）取裁决 → 批准 `continueRequest`（可选记住域）/
+///    拒绝/超时 `failRequest`（**fail-closed**，闭合 P2 泄漏窗口）。
 // egress firewall 上下文参数较多（config/approver/approved_domains/resolver/cache）；SD-5 接入真实
 // egress approver 时再收拢成一个 EgressContext 结构体（届时参数更多，结构体更划算），此处先 allow。
 #[allow(clippy::too_many_arguments)]
@@ -8158,16 +8162,37 @@ async fn handle_paused_request(
                 return;
             }
 
-            // ② 悬挂该请求等人在回路裁决。**绝不**在此 CDP 事件 handler 里同步阻塞（会卡死整个
-            //    防火墙事件循环——所有 session 的 requestPaused/attachedToTarget 都经它）。故把
-            //    request_id 保留（不 continue/不 fail），spawn 一个 detached 任务去 await 审批 → 据裁决
-            //    continue/fail。审批通道未接入（egress_approver=None）/ 超时 / 拒绝 → **fail-closed**
+            // ② **无审批通道（托管上下文）→ 检测 + 留痕后放行（E5 pre-approval 姿态；F6 白屏回归修）**。
+            //    托管 host 的模板 EngineConfig 不接线 EgressApprover（egress_approver=None，无人在回路
+            //    可批）——此时把 GatePost fail-closed 会让「域 allowlist 外的子资源出口 / 跨域 POST」
+            //    直接 BlockedByClient 白屏（注册任一 secret 即毁掉所有托管浏览）。产品红线是浏览顺滑
+            //    零打断：GatePost（软「升审批」档）在无审批通道时降级为 **continueRequest + warn 留痕**
+            //    （审计 host/size/字段名——绝不含字段值）。**硬 Block 不受影响**：SSRF IP 封禁（decide
+            //    的 Block 臂 + 上方 DNS 守卫 early-return）与 deny_etld1 黑名单仍 failRequest
+            //    （fail-closed）——只有 GatePost 这一档在无通道时放行留痕。
+            let Some(approver) = egress_approver else {
+                tracing::warn!(
+                    target: "nomi_browser_engine::backend::cdp",
+                    url = %url,
+                    target_host = %preview.host, body_size = preview.size,
+                    field_names = ?preview.field_names, // 仅字段名（绝不含值）
+                    "egress firewall gated egress but no approval channel is wired (managed context) — \
+                     allowing with audit trail (E5 pre-approval posture; SSRF/denylist hard blocks unaffected)"
+                );
+                fetch_continue(conn, session_id, request_id).await;
+                return;
+            };
+
+            // ③ 有审批通道（standalone/桌面接管路径）：悬挂该请求等人在回路裁决。**绝不**在此 CDP 事件
+            //    handler 里同步阻塞（会卡死整个防火墙事件循环——所有 session 的 requestPaused/
+            //    attachedToTarget 都经它）。故把 request_id 保留（不 continue/不 fail），spawn 一个
+            //    detached 任务去 await 审批 → 据裁决 continue/fail。审批超时 / 拒绝 → **fail-closed**
             //    （failRequest）。预览只 host/size/字段名（绝不含值，复用 E5 build_post_preview）。
             tracing::info!(
                 target: "nomi_browser_engine::backend::cdp",
                 target_host = %preview.host, body_size = preview.size,
                 field_names = ?preview.field_names, // 仅字段名（绝不含值）
-                "egress firewall gated cross-origin POST / off-allowlist egress — suspending for out-of-band approval (fail-closed on timeout/no-channel)"
+                "egress firewall gated cross-origin POST / off-allowlist egress — suspending for out-of-band approval (fail-closed on timeout/deny)"
             );
 
             // 句柄 + 上下文克隆进 detached 任务（Connection 内部 Arc，克隆廉价；request_id/session_id/url
@@ -8175,35 +8200,22 @@ async fn handle_paused_request(
             let conn = conn.clone();
             let session_id = session_id.to_string();
             let url = url.clone();
-            let approver = egress_approver.cloned();
+            let approver = Arc::clone(approver);
             let approved_domains = approved_domains.clone();
             tokio::spawn(async move {
-                let verdict = match approver {
-                    // 有审批通道：await 裁决（带超时——绝不无限悬挂）。
-                    Some(a) => {
-                        match tokio::time::timeout(
-                            crate::firewall::EGRESS_APPROVAL_TIMEOUT,
-                            a.approve_egress(&preview),
-                        )
-                        .await
-                        {
-                            Ok(v) => v,
-                            Err(_elapsed) => {
-                                tracing::warn!(
-                                    target: "nomi_browser_engine::backend::cdp",
-                                    target_host = %preview.host,
-                                    "egress approval timed out — failing closed (rejecting the gated request)"
-                                );
-                                crate::firewall::EgressVerdict::Fail
-                            }
-                        }
-                    }
-                    // 无审批通道接入 → fail-closed（闭合泄漏窗口；拒绝跨域 POST 比放行安全）。
-                    None => {
+                // await 裁决（带超时——绝不无限悬挂）。
+                let verdict = match tokio::time::timeout(
+                    crate::firewall::EGRESS_APPROVAL_TIMEOUT,
+                    approver.approve_egress(&preview),
+                )
+                .await
+                {
+                    Ok(v) => v,
+                    Err(_elapsed) => {
                         tracing::warn!(
                             target: "nomi_browser_engine::backend::cdp",
                             target_host = %preview.host,
-                            "egress firewall gated a request but no approval channel is wired — failing closed"
+                            "egress approval timed out — failing closed (rejecting the gated request)"
                         );
                         crate::firewall::EgressVerdict::Fail
                     }
@@ -8905,7 +8917,262 @@ mod tests {
         let _ = server.await;
     }
 
-    /// **F5 回归**：可执行下载红线走无损订阅——一次 >broadcast 容量（256）的
+    // ── F6 白屏回归修：GatePost 无审批通道（托管上下文）→ 放行留痕；硬 Block 仍 fail-closed ──
+
+    /// 测试用 fake DNS：任意 host → 公网 IP（SD-1 DNS 守卫放行，让断言聚焦 GatePost 裁决路径；
+    /// 不打真实 DNS，跨平台确定）。
+    struct PublicIpResolver;
+
+    #[async_trait::async_trait]
+    impl crate::firewall::HostResolver for PublicIpResolver {
+        async fn resolve(&self, _host: &str) -> std::io::Result<Vec<std::net::IpAddr>> {
+            Ok(vec!["93.184.216.34".parse().unwrap()])
+        }
+    }
+
+    /// 测试用 fake DNS：任意 host → 私网 IP（SD-1 DNS 守卫必拦）。
+    struct PrivateIpResolver;
+
+    #[async_trait::async_trait]
+    impl crate::firewall::HostResolver for PrivateIpResolver {
+        async fn resolve(&self, _host: &str) -> std::io::Result<Vec<std::net::IpAddr>> {
+            Ok(vec!["10.0.0.5".parse().unwrap()])
+        }
+    }
+
+    /// 测试用审批者：记录是否被调用 + 返回固定裁决（验「有审批通道时 GatePost 仍路由到审批者」）。
+    struct RecordingApprover {
+        invoked: Arc<std::sync::atomic::AtomicBool>,
+        verdict: crate::firewall::EgressVerdict,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::firewall::EgressApprover for RecordingApprover {
+        async fn approve_egress(
+            &self,
+            _preview: &crate::firewall::PostPreview,
+        ) -> crate::firewall::EgressVerdict {
+            self.invoked.store(true, Ordering::SeqCst);
+            self.verdict
+        }
+    }
+
+    /// 构造一条 `Fetch.requestPaused` 事件 fixture。
+    fn paused_event_fixture(
+        request_id: &str,
+        url: &str,
+        method: &str,
+        headers: serde_json::Value,
+        resource_type: &str,
+        has_post_data: bool,
+    ) -> EventRequestPaused {
+        serde_json::from_value(serde_json::json!({
+            "requestId": request_id,
+            "request": {
+                "url": url,
+                "method": method,
+                "headers": headers,
+                "initialPriority": "High",
+                "referrerPolicy": "no-referrer",
+                "hasPostData": has_post_data,
+            },
+            "frameId": "F-egress",
+            "resourceType": resource_type,
+        }))
+        .expect("valid EventRequestPaused fixture")
+    }
+
+    /// 把一条被拦请求喂给 `handle_paused_request`，返回它在 CDP wire 上的最终处置
+    /// （`Fetch.continueRequest` 或 `Fetch.failRequest` 的请求原文）。
+    async fn drive_paused_request(
+        config: crate::firewall::FirewallConfig,
+        approver: Option<Arc<dyn crate::firewall::EgressApprover>>,
+        paused: EventRequestPaused,
+        resolver: &dyn crate::firewall::HostResolver,
+    ) -> serde_json::Value {
+        let (connection, mut requests, server) = generic_recording_fake_connection().await;
+        connection.registry().register_session("S-egress", "page");
+        handle_paused_request(
+            &connection,
+            &config,
+            approver.as_ref(),
+            &crate::firewall::ApprovedDomains::new(),
+            "S-egress",
+            paused,
+            resolver,
+            &crate::firewall::DnsResolverCache::default(),
+        )
+        .await;
+        let released = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let request = requests.recv().await.expect("fake server stays alive");
+                let method = request["method"].as_str().unwrap_or_default();
+                if method == "Fetch.continueRequest" || method == "Fetch.failRequest" {
+                    break request;
+                }
+            }
+        })
+        .await
+        .expect("the paused request must be continued or failed");
+        connection.shutdown().await;
+        server.abort();
+        let _ = server.await;
+        released
+    }
+
+    /// **F6 白屏回归修**：无审批通道（托管上下文）时，域 allowlist 外的**跨站子资源**命中 GatePost
+    /// 必须 `Fetch.continueRequest` 放行（+ warn 留痕），**绝不** `failRequest` 白屏。
+    /// （旧实现无通道恒 fail-closed → 本测试对修复前 HEAD 失败。）
+    #[tokio::test]
+    async fn no_approver_gated_off_allowlist_subresource_is_continued_with_audit() {
+        let config = crate::firewall::FirewallConfig {
+            allow_etld1: vec!["stored-secret.com".to_string()],
+            ..Default::default()
+        };
+        let paused = paused_event_fixture(
+            "REQ-allowlist-gate",
+            "https://tracker.io/collect",
+            "GET",
+            serde_json::json!({"Referer": "https://news.example.com/story"}),
+            "XHR",
+            false,
+        );
+        let released = drive_paused_request(config, None, paused, &PublicIpResolver).await;
+        assert_eq!(
+            released["method"], "Fetch.continueRequest",
+            "no-approver GatePost (domain allowlist) must allow-and-audit, not fail: {released}"
+        );
+        assert_eq!(released["params"]["requestId"], "REQ-allowlist-gate");
+        assert_eq!(released["sessionId"], "S-egress");
+    }
+
+    /// **F6 白屏回归修**：无审批通道时，跨域 POST-body 门控命中的 GatePost 同样放行留痕
+    /// （E5 pre-approval 姿态：检测+留痕，审批接线前放行），绝不 failRequest。
+    #[tokio::test]
+    async fn no_approver_gated_cross_origin_post_is_continued_with_audit() {
+        let config = crate::firewall::FirewallConfig::default(); // 空 allowlist；POST 门控开
+        let paused = paused_event_fixture(
+            "REQ-post-gate",
+            "https://evil.com/collect",
+            "POST",
+            serde_json::json!({
+                "Origin": "https://x.com",
+                "Content-Type": "application/x-www-form-urlencoded",
+            }),
+            "XHR",
+            true,
+        );
+        let released = drive_paused_request(config, None, paused, &PublicIpResolver).await;
+        assert_eq!(
+            released["method"], "Fetch.continueRequest",
+            "no-approver GatePost (cross-origin POST gate) must allow-and-audit, not fail: {released}"
+        );
+        assert_eq!(released["params"]["requestId"], "REQ-post-gate");
+    }
+
+    /// **硬 Block 不受 allow-and-audit 影响①**：SSRF IP 封禁（IP 字面量目标）即便无审批通道
+    /// 仍 `Fetch.failRequest`（fail-closed；访问元数据/内网无「批准」语义）。
+    #[tokio::test]
+    async fn no_approver_ssrf_ip_literal_block_still_fails_closed() {
+        let config = crate::firewall::FirewallConfig::default();
+        let paused = paused_event_fixture(
+            "REQ-ssrf-literal",
+            "http://169.254.169.254/latest/meta-data/",
+            "GET",
+            serde_json::json!({"Referer": "https://x.com/"}),
+            "XHR",
+            false,
+        );
+        let released = drive_paused_request(config, None, paused, &PublicIpResolver).await;
+        assert_eq!(
+            released["method"], "Fetch.failRequest",
+            "SSRF IP block must stay fail-closed even with no approver: {released}"
+        );
+        assert_eq!(released["params"]["requestId"], "REQ-ssrf-literal");
+    }
+
+    /// **硬 Block 不受 allow-and-audit 影响②**：SD-1 DNS→私网 IP 守卫即便无审批通道仍 failRequest。
+    #[tokio::test]
+    async fn no_approver_dns_ssrf_block_still_fails_closed() {
+        let config = crate::firewall::FirewallConfig::default();
+        let paused = paused_event_fixture(
+            "REQ-ssrf-dns",
+            "https://rebind.attacker.example/x",
+            "GET",
+            serde_json::json!({"Referer": "https://x.com/"}),
+            "XHR",
+            false,
+        );
+        let released = drive_paused_request(config, None, paused, &PrivateIpResolver).await;
+        assert_eq!(
+            released["method"], "Fetch.failRequest",
+            "DNS→private-IP SSRF guard must stay fail-closed even with no approver: {released}"
+        );
+        assert_eq!(released["params"]["requestId"], "REQ-ssrf-dns");
+    }
+
+    /// **硬 Block 不受 allow-and-audit 影响③**：deny_etld1 黑名单即便无审批通道、即便**同站**请求，
+    /// 仍 failRequest（显式封禁名单优先一切豁免/降级）。
+    #[tokio::test]
+    async fn no_approver_deny_etld1_block_still_fails_closed() {
+        let config = crate::firewall::FirewallConfig {
+            deny_etld1: vec!["evil.com".to_string()],
+            ..Default::default()
+        };
+        let paused = paused_event_fixture(
+            "REQ-deny",
+            "https://sub.evil.com/asset.js",
+            "GET",
+            serde_json::json!({"Referer": "https://evil.com/page"}), // 同站也拦
+            "XHR",
+            false,
+        );
+        let released = drive_paused_request(config, None, paused, &PublicIpResolver).await;
+        assert_eq!(
+            released["method"], "Fetch.failRequest",
+            "deny_etld1 must stay a hard fail-closed block even with no approver: {released}"
+        );
+        assert_eq!(released["params"]["requestId"], "REQ-deny");
+    }
+
+    /// **standalone 路径不变**：有审批通道时 GatePost 仍路由到 `EgressApprover`（悬挂等裁决），
+    /// 拒 → failRequest、批 → continueRequest——allow-and-audit **只**作用于无通道分支。
+    #[tokio::test]
+    async fn approver_present_gatepost_still_routes_to_approver() {
+        for (verdict, expected_method) in [
+            (crate::firewall::EgressVerdict::Fail, "Fetch.failRequest"),
+            (crate::firewall::EgressVerdict::Continue, "Fetch.continueRequest"),
+        ] {
+            let invoked = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let approver: Arc<dyn crate::firewall::EgressApprover> = Arc::new(RecordingApprover {
+                invoked: Arc::clone(&invoked),
+                verdict,
+            });
+            let config = crate::firewall::FirewallConfig {
+                allow_etld1: vec!["stored-secret.com".to_string()],
+                ..Default::default()
+            };
+            let paused = paused_event_fixture(
+                "REQ-approver",
+                "https://tracker.io/collect",
+                "GET",
+                serde_json::json!({"Referer": "https://news.example.com/story"}),
+                "XHR",
+                false,
+            );
+            let released =
+                drive_paused_request(config, Some(approver), paused, &PublicIpResolver).await;
+            assert!(
+                invoked.load(Ordering::SeqCst),
+                "a wired approver must be consulted for GatePost (verdict {verdict:?})"
+            );
+            assert_eq!(
+                released["method"], expected_method,
+                "approver verdict {verdict:?} must drive the wire disposition: {released}"
+            );
+        }
+    }
+
     /// `downloadWillBegin` 突发，**每一条**被阻断的下载都必须发出 cancelDownload。
     /// 旧实现（lossy `subscribe` + `Lagged → continue`）在突发下静默丢事件，
     /// 丢掉的 .exe 下载不再被取消——红线被时序绕过。

@@ -536,9 +536,11 @@ pub fn decide(config: &FirewallConfig, req: &RequestInfo<'_>) -> FirewallDecisio
 /// - [`Self::ContinueAndRemember`] → `Fetch.continueRequest` + 记住此域（决策3 always_allow）。
 /// - [`Self::Fail`] → `Fetch.failRequest{BlockedByClient}`（拒绝；泄漏窗口闭合）。
 ///
-/// **fail-closed 默认**（D2 闭合 P2 泄漏窗口）：无审批通道接入（`EgressApprover` 为 `None`）、审批
-/// 超时、或审批者主动拒 → 一律 [`Self::Fail`]。**绝不**因「没人答」而放行——这正是 P2 的泄漏窗口
-/// （detect-but-continue），D2 必须反转为 detect-but-**fail**（除非显式批准）。
+/// **fail-closed 默认（有通道时）**（D2 闭合 P2 泄漏窗口）：审批通道已接入但**超时**、或审批者主动拒
+/// → 一律 [`Self::Fail`]。**绝不**因「有人可答却没答」而放行。**无审批通道（托管上下文，
+/// `EgressApprover` 为 `None`）是另一回事（F6 白屏回归修）**：无人在回路可批，fail-closed 只会把被
+/// 访问站点的正常出口打成白屏——接线层（`cdp.rs::handle_paused_request`）对该情形**放行 + warn 留痕**
+/// （E5 pre-approval 姿态）；硬 Block（SSRF IP 封禁 / deny_etld1）不经本裁决通道，恒 fail-closed。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum EgressVerdict {
     /// 批准放行**一次**（`Fetch.continueRequest`）。同域后续请求仍会再次悬挂审批。
