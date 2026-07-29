@@ -10,6 +10,25 @@ use tower::ServiceExt;
 
 use common::{body_json, build_app, get_with_token, json_with_token, setup_and_login};
 
+/// The client-preference layer validates every provider referenced by
+/// `agent.model_failover` against the providers table inside one writer
+/// transaction (dangling references are a 409 Conflict). Queue fixtures must
+/// therefore reference real rows.
+async fn seed_provider(services: &nomifun_app::AppServices, provider_id: &str, model: &str) {
+    nomifun_db::sqlx::query(
+        "INSERT INTO providers \
+         (provider_id, platform, name, base_url, api_key_encrypted, models, enabled, \
+          capabilities, created_at, updated_at) \
+         VALUES (?, 'openai', ?, 'https://example.invalid', 'encrypted', ?, 1, '[]', 1, 1)",
+    )
+    .bind(provider_id)
+    .bind(format!("Provider {provider_id}"))
+    .bind(serde_json::json!([model]).to_string())
+    .execute(services.database.pool())
+    .await
+    .unwrap();
+}
+
 #[tokio::test]
 async fn model_failover_get_defaults_to_disabled_with_auth() {
     let (mut app, services) = build_app().await;
@@ -31,6 +50,8 @@ async fn model_failover_get_defaults_to_disabled_with_auth() {
 async fn model_failover_put_then_get_roundtrips_with_auth() {
     let (mut app, services) = build_app().await;
     let (token, csrf) = setup_and_login(&mut app, &services, "admin", "StrongP@ss1").await;
+    seed_provider(&services, "0190f5fe-7c00-7a00-8000-000000000010", "m1").await;
+    seed_provider(&services, "0190f5fe-7c00-7a00-8000-000000000011", "m2").await;
 
     let cfg = json!({
         "enabled": true,
