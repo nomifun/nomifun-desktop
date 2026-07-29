@@ -330,6 +330,56 @@ describe('httpRequest client deadline + network-failure diagnosis', () => {
     }
   });
 
+  test('redacts macOS/Linux managed and system browser profile paths', () => {
+    const managedMac =
+      'failed to acquire ProcessSingleton lock at /Users/alice/Library/Application Support/NomiFun/platform-profiles/primary';
+    const managedData =
+      'copy failed: /home/alice/.local/share/nomifun/browser-data/primary/Default is busy';
+    const systemLinux =
+      'profile locked: /home/alice/.config/google-chrome/Default';
+    const systemMac =
+      'profile locked: /Users/alice/Library/Application Support/Google/Chrome/Default';
+    const windows = 'lock at C:\\Users\\alice\\AppData\\Local\\Google\\Chrome\\User Data\\Default';
+
+    for (const input of [managedMac, managedData, systemLinux, systemMac, windows]) {
+      const redacted = redactSensitiveText(input);
+      expect(redacted.includes('[REDACTED_PROFILE_PATH]')).toBe(true);
+      expect(redacted.includes('alice')).toBe(false);
+    }
+  });
+
+  test('anchors cookie redaction to header/assignment position without erasing prose', () => {
+    const prose =
+      'browser login failed: could not persist session cookie: disk full (os error 28)';
+    expect(redactSensitiveText(prose)).toBe(prose);
+
+    expect(redactSensitiveText('Cookie: sid=secret-value; Theme=dark')).toBe(
+      'Cookie:[REDACTED]'
+    );
+    expect(redactSensitiveText('upstream sent header\nset-cookie: sid=secret-value')).toBe(
+      'upstream sent header\nset-cookie:[REDACTED]'
+    );
+  });
+
+  test('keeps checksum-style 64-hex digests while redacting hex in token contexts', () => {
+    const digestA = 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855';
+    const digestB = 'ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff';
+    const checksum = `checksum mismatch: expected ${digestA}, got ${digestB}`;
+    expect(redactSensitiveText(checksum)).toBe(checksum);
+
+    const tokenContexts = [
+      `csrf_token: ${digestA}`,
+      `viewer-token=${digestA}`,
+      `capability = ${digestA}`,
+      `"session_secret": "${digestA}"`,
+    ];
+    for (const input of tokenContexts) {
+      const redacted = redactSensitiveText(input);
+      expect(redacted.includes(digestA)).toBe(false);
+      expect(redacted.includes('[REDACTED')).toBe(true);
+    }
+  });
+
   test('redacts sensitive query values from generic HTTP URLs', () => {
     const accessToken = 'access-token-value';
     const apiKey = 'api-key-value';

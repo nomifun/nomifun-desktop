@@ -413,6 +413,48 @@ describe('Browser management presentation', () => {
     expect(html.includes('>Close lane<')).toBe(true);
   });
 
+  test('renders a recoverable browser restart as an informational notice, not an error', () => {
+    const restarted = renderLaneDetails(
+      lane({
+        lane_id: 'restarted-lane',
+        error_code: 'browser_restarted',
+        error_message: 'The managed browser restarted.',
+        recoverable: true,
+      })
+    );
+    expect(restarted.includes('arco-alert-info')).toBe(true);
+    expect(restarted.includes('arco-alert-error')).toBe(false);
+    expect(restarted.includes('browser_restarted')).toBe(true);
+
+    // Red styling stays for every other error and for a terminal restart.
+    const terminalRestart = renderLaneDetails(
+      lane({
+        lane_id: 'terminal-restart',
+        error_code: 'browser_restarted',
+        error_message: 'The managed browser restarted.',
+        recoverable: false,
+      })
+    );
+    expect(terminalRestart.includes('arco-alert-error')).toBe(true);
+
+    const otherError = renderLaneDetails(
+      lane({
+        lane_id: 'other-error',
+        error_code: 'browser_unavailable',
+        error_message: 'The managed browser is unavailable.',
+        recoverable: true,
+      })
+    );
+    expect(otherError.includes('arco-alert-error')).toBe(true);
+  });
+
+  test('presents an unknown lifecycle state with neutral styling and copy', () => {
+    const html = renderLaneDetails(lane({ lifecycle_state: 'unknown' }));
+    expect(html.includes('>Unknown<')).toBe(true);
+    expect(html.includes('arco-tag-red')).toBe(false);
+    expect(html.includes('Not recoverable')).toBe(false);
+  });
+
   test('renders a complete managed lane surface without importing viewer code', () => {
     const html = renderLaneDetails(
       lane({
@@ -517,7 +559,7 @@ describe('Browser management presentation', () => {
     ).toBe(true);
     expect(html.includes('Open browser in foreground')).toBe(false);
     expect(
-      browserPageSource.includes('host.epoch === selectedLane.browser_epoch')
+      browserPageSource.includes('matchBrowserLaneHost(selectedLane, overview?.hosts)')
     ).toBe(true);
     expect(browserPageSource.includes('hostHeadful={selectedLaneHost?.headful}')).toBe(
       true

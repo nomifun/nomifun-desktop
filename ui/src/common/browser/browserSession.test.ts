@@ -169,6 +169,66 @@ describe('normalizeBrowserLane tab projection', () => {
   });
 });
 
+describe('normalizeBrowserLane lifecycle fallback', () => {
+  test('maps a missing or empty lifecycle state to unknown instead of failed', () => {
+    for (const raw of [
+      { lane_id: 'lane-no-state' },
+      { lane_id: 'lane-empty-state', lifecycle_state: '' },
+      { lane_id: 'lane-bad-state', lifecycle_state: 42 },
+    ]) {
+      expect(normalizeBrowserLane(raw)?.lifecycle_state).toBe('unknown');
+    }
+    expect(
+      normalizeBrowserLane({ lane_id: 'lane-real', lifecycle_state: 'failed' })
+        ?.lifecycle_state
+    ).toBe('failed');
+  });
+});
+
+describe('normalizeBrowserLane owner attribution', () => {
+  test('lets an explicit owner-object null retract legacy lane-level attribution', () => {
+    const lane = normalizeBrowserLane({
+      lane_id: 'lane-owner-null',
+      lifecycle_state: 'running',
+      user_id: 'legacy-user',
+      conversation_id: 'legacy-conversation',
+      owner: {
+        user_id: null,
+        conversation_id: null,
+        label: 'system maintenance',
+      },
+    });
+
+    expect(lane?.owner?.user_id).toBeNull();
+    expect(lane?.owner?.conversation_id).toBeNull();
+    expect(lane?.owner?.label).toBe('system maintenance');
+  });
+
+  test('still falls back to lane-level attribution when the owner object omits the key', () => {
+    const lane = normalizeBrowserLane({
+      lane_id: 'lane-owner-fallback',
+      lifecycle_state: 'running',
+      user_id: 'lane-user',
+      runtime_id: 'lane-runtime',
+      owner: { label: 'labelled owner' },
+    });
+
+    expect(lane?.owner?.user_id).toBe('lane-user');
+    expect(lane?.owner?.runtime_instance_id).toBe('lane-runtime');
+    expect(lane?.owner?.label).toBe('labelled owner');
+  });
+
+  test('honors the runtime_id alias inside the owner object including explicit null', () => {
+    const aliased = normalizeBrowserLane({
+      lane_id: 'lane-owner-alias',
+      lifecycle_state: 'running',
+      runtime_instance_id: 'lane-runtime',
+      owner: { runtime_id: null, label: 'maintenance' },
+    });
+    expect(aliased?.owner?.runtime_instance_id).toBeNull();
+  });
+});
+
 describe('normalizeBrowserOverview Host projection', () => {
   test('keeps safe Host diagnostics and ignores sensitive backend fields', () => {
     const overview = normalizeBrowserOverview({

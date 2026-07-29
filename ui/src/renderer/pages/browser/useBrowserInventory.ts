@@ -6,7 +6,7 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { ipcBridge } from '@/common';
-import { isBackendHttpError } from '@/common/adapter/httpBridge';
+import { isBackendHttpError, isWsConnected } from '@/common/adapter/httpBridge';
 import type {
   IBrowserInventoryChangedEvent,
   IBrowserLane,
@@ -86,10 +86,20 @@ export const createBrowserInventoryRealtimeHandler = (
 
       if (sequence !== null && sequence !== lastSequence) {
         lastSequence = sequence;
+        refresh(
+          hasSequenceGap ? 'sequence-gap' : requiresResync ? 'resync' : 'event'
+        );
+        return;
       }
-      refresh(
-        hasSequenceGap ? 'sequence-gap' : requiresResync ? 'resync' : 'event'
-      );
+      if (requiresResync) {
+        refresh('resync');
+        return;
+      }
+      // The backend forwards lifecycle-kind payloads on both the inventory
+      // and lifecycle channels. A repeated sequence is that duplicate
+      // delivery, not a new state change: refreshing again is pure waste.
+      if (sequence !== null && sequence === lastSequence) return;
+      refresh('event');
     },
     reconnected: () => {
       lastSequence = null;
@@ -118,6 +128,14 @@ interface BrowserInventoryRealtimeSubscriptionOptions {
 }
 
 /**
+ * Ordinary `event` refreshes are coalesced behind a leading-edge refresh so a
+ * burst (per-tab CDP churn, telemetry samples, dual-channel deliveries) costs
+ * one leading and at most one trailing snapshot instead of one per event.
+ * Connect/reconnect/resync/sequence-gap refreshes stay immediate.
+ */
+export const BROWSER_INVENTORY_EVENT_COALESCE_MS = 1_000;
+
+/**
  * Installs every realtime listener before issuing the initial full snapshot.
  * The shared socket has no replay buffer, so callers must never reverse this
  * order. Its local reconnect signal and event sequence gaps both force the
@@ -129,7 +147,40 @@ export const subscribeBrowserInventoryRealtime = ({
   subscribeLifecycle,
   subscribeReconnected,
 }: BrowserInventoryRealtimeSubscriptionOptions): (() => void) => {
-  const realtime = createBrowserInventoryRealtimeHandler(refresh);
+  let coalesceTimer: ReturnType<typeof setTimeout> | null = null;
+  let trailingQueued = false;
+
+  const clearCoalesce = () => {
+    if (coalesceTimer !== null) {
+      clearTimeout(coalesceTimer);
+      coalesceTimer = null;
+    }
+    trailingQueued = false;
+  };
+
+  const coalescedRefresh = (reason: BrowserInventoryRealtimeRefreshReason) => {
+    if (reason !== 'event') {
+      // Urgent reasons refresh immediately and supersede any queued trailing
+      // refresh — the authoritative snapshot they trigger is already newer.
+      clearCoalesce();
+      refresh(reason);
+      return;
+    }
+    if (coalesceTimer !== null) {
+      trailingQueued = true;
+      return;
+    }
+    refresh(reason);
+    coalesceTimer = setTimeout(() => {
+      coalesceTimer = null;
+      if (trailingQueued) {
+        trailingQueued = false;
+        refresh('event');
+      }
+    }, BROWSER_INVENTORY_EVENT_COALESCE_MS);
+  };
+
+  const realtime = createBrowserInventoryRealtimeHandler(coalescedRefresh);
   const stopInventory = subscribeInventory(realtime.browserEvent);
   const stopLifecycle = subscribeLifecycle(realtime.browserEvent);
   const stopReconnected = subscribeReconnected(realtime.reconnected);
@@ -139,10 +190,36 @@ export const subscribeBrowserInventoryRealtime = ({
   realtime.connected();
 
   return () => {
+    clearCoalesce();
     stopInventory();
     stopLifecycle();
     stopReconnected();
   };
+};
+
+export const BROWSER_INVENTORY_POLL_INTERVAL_MS = 30_000;
+
+interface BrowserInventoryFallbackPollOptions {
+  poll: () => void;
+  isRealtimeHealthy: () => boolean;
+  intervalMs?: number;
+}
+
+/**
+ * Snapshot polling is a fallback for a wedged realtime channel (half-open
+ * socket after sleep/resume, dead backend forwarder), not a supplement to a
+ * healthy one: connect, reconnect, sequence-gap, and resync_required already
+ * cover every event-visible failure. Only poll while the socket is down.
+ */
+export const startBrowserInventoryFallbackPoll = ({
+  poll,
+  isRealtimeHealthy,
+  intervalMs = BROWSER_INVENTORY_POLL_INTERVAL_MS,
+}: BrowserInventoryFallbackPollOptions): (() => void) => {
+  const timer = setInterval(() => {
+    if (!isRealtimeHealthy()) poll();
+  }, intervalMs);
+  return () => clearInterval(timer);
 };
 
 const unavailableOverview = (): IBrowserOverview => ({
@@ -322,10 +399,13 @@ export const useBrowserInventory = (): BrowserInventoryState => {
       subscribeReconnected: (listener) =>
         ipcBridge.conversation.reconnected.on(listener),
     });
-    const poll = setInterval(() => void controller.poll(), 30_000);
+    const stopFallbackPoll = startBrowserInventoryFallbackPoll({
+      poll: () => void controller.poll(),
+      isRealtimeHealthy: isWsConnected,
+    });
 
     return () => {
-      clearInterval(poll);
+      stopFallbackPoll();
       stopRealtime();
       controller.dispose();
       if (controllerRef.current === controller) controllerRef.current = null;

@@ -4,10 +4,36 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { IBrowserLane } from '@/common/browser/browserTypes';
+import type { IBrowserHost, IBrowserLane } from '@/common/browser/browserTypes';
 import { parseSessionRoute } from '@/renderer/utils/routes/sessionRoute';
 
 const UNASSIGNED_CONVERSATION = '__browser_unassigned__';
+
+/**
+ * Resolve the Host serving a primary Lane. Lanes and overview arrive from two
+ * independent snapshot requests, so a display-mode restart can leave one side
+ * carrying a stale epoch. Prefer the stable host_id, fall back to the epoch,
+ * and finally tolerate skew by accepting the single primary Host — but never
+ * guess between multiple candidates.
+ */
+export const matchBrowserLaneHost = (
+  lane: IBrowserLane | null | undefined,
+  hosts: IBrowserHost[] | null | undefined
+): IBrowserHost | null => {
+  if (!lane || lane.identity?.mode !== 'primary' || !hosts?.length) return null;
+  const primaryHosts = hosts.filter((host) => host.identity_mode === 'primary');
+  if (primaryHosts.length === 0) return null;
+
+  if (lane.host_id != null) {
+    const byId = primaryHosts.find((host) => host.host_id === lane.host_id);
+    if (byId) return byId;
+  }
+  if (lane.browser_epoch != null) {
+    const byEpoch = primaryHosts.find((host) => host.epoch === lane.browser_epoch);
+    if (byEpoch) return byEpoch;
+  }
+  return primaryHosts.length === 1 ? primaryHosts[0] : null;
+};
 
 export interface BrowserOwnerGroup {
   key: string;

@@ -12,6 +12,7 @@ import {
   browserSettingsServerErrorMessage,
   createBrowserSettingsCapabilityLoader,
   persistBrowserSecuritySettingsTransaction,
+  startBrowserLoginPromotionPoll,
   validateBrowserResourcePolicy,
 } from './BrowserUseSettingsContent';
 
@@ -75,7 +76,9 @@ describe('Browser Use settings contract', () => {
     const source = readSource(new URL('./BrowserUseSettingsContent.tsx', import.meta.url));
 
     expect(source.includes("configService.get('agent.browserUse.displayModeVersion')")).toBe(true);
-    expect(source.includes("configService.get('agent.browserUse.silent')")).toBe(false);
+    // The legacy silent value participates in migration classification only;
+    // it must never be written back.
+    expect(source.includes("silent: configService.get('agent.browserUse.silent')")).toBe(true);
     expect(source.includes("configService.set('agent.browserUse.displayMode'")).toBe(false);
     expect(source.includes('ipcBridge.browserSession.displayMode.get.invoke()')).toBe(true);
     expect(source.includes('ipcBridge.browserSession.displayMode.put.invoke')).toBe(true);
@@ -650,11 +653,160 @@ describe('Browser Use settings contract', () => {
       'browserResourcePolicySaving',
       'browserResourcePolicyHighConcurrency',
       'browserResourcePolicyAdvanced',
+      'browserLoginQueuedHint',
     ];
 
     for (const key of requiredKeys) {
       expect(en[key]).toBeTruthy();
       expect(zh[key]).toBeTruthy();
     }
+  });
+
+  test('distinguishes a queued login lane from an opened one', () => {
+    const source = readSource(new URL('./BrowserUseSettingsContent.tsx', import.meta.url));
+
+    // active:true + message:'queued' means the lane is waiting for capacity —
+    // no window exists yet, so the "opened" toast would be a lie.
+    expect(source.includes("res.message === 'queued'")).toBe(true);
+    expect(source.includes("t('settings.browserLoginQueuedHint')")).toBe(true);
+    expect(source.includes('startBrowserLoginPromotionPoll')).toBe(true);
+  });
+
+  test('sends a preset-only body on preset switch unless advanced was edited', () => {
+    const source = readSource(new URL('./BrowserUseSettingsContent.tsx', import.meta.url));
+    const handlerStart = source.indexOf('const handleResourcePolicyPresetChange');
+    const handlerEnd = source.indexOf('const handleResourcePolicyAdvancedChange');
+    const handler = source.slice(handlerStart, handlerEnd);
+    expect(handler.includes('buildBrowserResourcePolicyPresetRequest(')).toBe(true);
+    // The PUT body is the filtered request, never the echoed previous state.
+    expect(handler.includes('persistResourcePolicy(request')).toBe(true);
+    expect(handler.includes('persistResourcePolicy(next')).toBe(false);
+  });
+
+  test('keeps the source-change network write outside the setState updater', () => {
+    const source = readSource(new URL('./BrowserUseSettingsContent.tsx', import.meta.url));
+    const handlerStart = source.indexOf('const handleSourceChange');
+    const handlerEnd = source.indexOf('const handleDisplayModeChange');
+    const handler = source.slice(handlerStart, handlerEnd);
+
+    // React state updaters must stay pure: no configService.set / rollback
+    // inside a setSource((prev) => ...) callback.
+    expect(handler.includes('setSource((prev)')).toBe(false);
+    expect(handler.includes('configService.set(')).toBe(true);
+  });
+});
+
+describe('startBrowserLoginPromotionPoll', () => {
+  const manualScheduler = () => {
+    const pending: Array<() => void | Promise<void>> = [];
+    return {
+      schedule: (callback: () => void | Promise<void>) => {
+        pending.push(callback);
+        return pending.length;
+      },
+      cancel: () => {
+        pending.length = 0;
+      },
+      run: async () => {
+        const next = pending.shift();
+        if (next) await next();
+      },
+      count: () => pending.length,
+    };
+  };
+
+  test('announces the window only after the queued lane is promoted and foregrounded', async () => {
+    const scheduler = manualScheduler();
+    const outcomes: string[] = [];
+    let lifecycle = 'queued';
+    let foregroundCalls = 0;
+    startBrowserLoginPromotionPoll({
+      // Calling open() while the lane is still queued would tear the queued
+      // session down on the backend; promotion is observed via the lanes
+      // snapshot and open() is re-issued only once the lane runs.
+      probeLifecycle: async () => lifecycle,
+      foreground: async () => {
+        foregroundCalls += 1;
+        return true;
+      },
+      onOpened: () => outcomes.push('opened'),
+      onStopped: (reason) => outcomes.push(`stopped:${reason}`),
+      schedule: scheduler.schedule,
+      cancelScheduled: scheduler.cancel,
+    });
+
+    expect(outcomes).toEqual([]);
+    await scheduler.run();
+    expect(outcomes).toEqual([]);
+    expect(foregroundCalls).toBe(0);
+    lifecycle = 'running';
+    await scheduler.run();
+    expect(outcomes).toEqual(['opened']);
+    expect(foregroundCalls).toBe(1);
+    expect(scheduler.count()).toBe(0);
+  });
+
+  test('stops and reports when the queued lane fails or disappears', async () => {
+    const scheduler = manualScheduler();
+    for (const terminal of ['failed', null]) {
+      const outcomes: string[] = [];
+      startBrowserLoginPromotionPoll({
+        probeLifecycle: async () => terminal,
+        foreground: async () => true,
+        onOpened: () => outcomes.push('opened'),
+        onStopped: (reason) => outcomes.push(`stopped:${reason}`),
+        schedule: scheduler.schedule,
+        cancelScheduled: scheduler.cancel,
+      });
+      await scheduler.run();
+      expect(outcomes).toEqual(['stopped:failed']);
+      expect(scheduler.count()).toBe(0);
+    }
+  });
+
+  test('reports an unconfirmed foreground as failed instead of claiming a window', async () => {
+    const scheduler = manualScheduler();
+    const outcomes: string[] = [];
+    startBrowserLoginPromotionPoll({
+      probeLifecycle: async () => 'running',
+      foreground: async () => false,
+      onOpened: () => outcomes.push('opened'),
+      onStopped: (reason) => outcomes.push(`stopped:${reason}`),
+      schedule: scheduler.schedule,
+      cancelScheduled: scheduler.cancel,
+    });
+    await scheduler.run();
+    expect(outcomes).toEqual(['stopped:failed']);
+  });
+
+  test('gives up after the attempt budget and can be cancelled', async () => {
+    const scheduler = manualScheduler();
+    const outcomes: string[] = [];
+    startBrowserLoginPromotionPoll({
+      probeLifecycle: async () => 'queued',
+      foreground: async () => true,
+      onOpened: () => outcomes.push('opened'),
+      onStopped: (reason) => outcomes.push(`stopped:${reason}`),
+      schedule: scheduler.schedule,
+      cancelScheduled: scheduler.cancel,
+      maxAttempts: 2,
+    });
+    await scheduler.run();
+    await scheduler.run();
+    expect(outcomes).toEqual(['stopped:timeout']);
+    expect(scheduler.count()).toBe(0);
+
+    const cancelled: string[] = [];
+    const stop = startBrowserLoginPromotionPoll({
+      probeLifecycle: async () => 'queued',
+      foreground: async () => true,
+      onOpened: () => cancelled.push('opened'),
+      onStopped: (reason) => cancelled.push(`stopped:${reason}`),
+      schedule: scheduler.schedule,
+      cancelScheduled: scheduler.cancel,
+    });
+    stop();
+    expect(scheduler.count()).toBe(0);
+    expect(cancelled).toEqual([]);
   });
 });

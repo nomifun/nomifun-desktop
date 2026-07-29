@@ -5089,10 +5089,12 @@ export const browserSecret = {
 export interface IBrowserLoginStatus {
   /** Whether a visible login browser is currently open. */
   active: boolean;
-  /** Outcome code: 'opened' | 'already_open' | 'closed' | 'not_open' | 'launch_failed:<err>'. */
+  /** Outcome code: 'opened' | 'already_open' | 'queued' | 'closed' | 'not_open' | 'launch_failed:<err>'. */
   message?: string;
   /** Whether close() captured the login state into the encrypted vault backup. */
   saved: boolean;
+  /** Lane backing the login session; present while a session exists. */
+  lane_id?: string;
 }
 
 /** 「登录我的浏览器」— open a visible browser bound to the shared profile so the user logs

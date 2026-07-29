@@ -159,6 +159,33 @@ export function isBrowserResourcePolicyUnavailableError(error: unknown): boolean
   return isBackendHttpError(error) && RESOURCE_POLICY_UNAVAILABLE_STATUSES.includes(error.status);
 }
 
+const advancedFieldsEqual = (
+  a: BrowserResourcePolicyAdvanced | undefined,
+  b: BrowserResourcePolicyAdvanced | undefined
+): boolean =>
+  BROWSER_RESOURCE_POLICY_ADVANCED_FIELDS.every(
+    (field) => a?.[field] === b?.[field]
+  );
+
+/**
+ * Build the PUT body for a preset switch. The GET endpoint materializes every
+ * advanced field, and the backend applies request.advanced as authoritative
+ * overrides AFTER the preset transition — echoing the fetched values back
+ * would silently turn every preset change into a label-only no-op. Advanced
+ * values are therefore included only when the user actually edited them away
+ * from the persisted state.
+ */
+export function buildBrowserResourcePolicyPresetRequest(
+  nextPreset: BrowserResourcePolicyPreset,
+  current: BrowserResourcePolicy,
+  persisted: BrowserResourcePolicy
+): BrowserResourcePolicy {
+  if (advancedFieldsEqual(current.advanced, persisted.advanced)) {
+    return { preset: nextPreset };
+  }
+  return { preset: nextPreset, advanced: current.advanced };
+}
+
 export const browserResourcePolicyApi = {
   async get(): Promise<BrowserResourcePolicy> {
     const raw = await httpRequest<unknown>('GET', RESOURCE_POLICY_PATH, undefined, {
