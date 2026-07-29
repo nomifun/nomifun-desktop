@@ -4221,6 +4221,11 @@ mod tests {
     ) -> (Arc<nomifun_knowledge::KnowledgeService>, tempfile::TempDir) {
         let data_dir = tempfile::TempDir::new().unwrap();
         let repo = MemKbRepo::default();
+        // Production registration canonicalizes the root server-side
+        // (knowledge broker). Mirror that here: on macOS a TempDir lives under
+        // the `/var -> /private/var` symlink and the non-canonical spelling is
+        // rejected by the symlink-component root validator.
+        let kb_root = kb_root.canonicalize().unwrap();
         repo.bases.lock().unwrap().insert(
             TEST_KB_ID.into(),
             nomifun_db::models::KnowledgeBaseRow {
@@ -5003,12 +5008,25 @@ mod tests {
         svc.kill(&id).await.unwrap();
     }
 
+    /// A request env with an explicit complete locale. This keeps spawn-failure
+    /// tests hermetic: with no explicit locale key, `spawn_pty` wraps the
+    /// launch as `/usr/bin/env -u LC_ALL <program>` whenever the inherited
+    /// environment lacks `LC_ALL`, and `/usr/bin/env` exists — so a
+    /// nonexistent program would exit 127 instead of failing the spawn.
+    fn explicit_locale_env() -> Option<HashMap<String, String>> {
+        Some(HashMap::from([(
+            "LC_ALL".to_owned(),
+            "en_US.UTF-8".to_owned(),
+        )]))
+    }
+
     #[tokio::test]
     async fn failed_deferred_spawn_is_stable_broadcast_and_relaunchable() {
         const CALLERS: usize = 8;
         let (svc, bc) = service();
         let mut r = req("nomifun-command-that-does-not-exist-2c5f4d", &[]);
         r.defer_spawn = true;
+        r.env = explicit_locale_env();
         let id = svc.create(TEST_USER_ID, r).await.unwrap().terminal_id;
         bc.events.lock().unwrap().clear();
 
@@ -5551,13 +5569,10 @@ mod tests {
     #[tokio::test]
     async fn non_deferred_spawn_failure_never_leaves_running_row() {
         let (svc, _bc) = service();
+        let mut r = req("nomifun-command-that-does-not-exist-0c54db", &[]);
+        r.env = explicit_locale_env();
         assert!(matches!(
-            svc.create(
-                TEST_USER_ID,
-                req("nomifun-command-that-does-not-exist-0c54db", &[])
-            )
-            .await
-            .unwrap_err(),
+            svc.create(TEST_USER_ID, r).await.unwrap_err(),
             TerminalError::Spawn(_)
         ));
         let rows = svc.list(TEST_USER_ID).await.unwrap();
