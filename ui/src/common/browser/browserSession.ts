@@ -70,6 +70,22 @@ const nullableString = (record: UnknownRecord, ...keys: string[]): string | null
   return undefined;
 };
 
+/**
+ * Owner-object fields are authoritative over lane-level legacy attribution:
+ * an explicit `null` in the owner object retracts the lane-level value, while
+ * an absent key still falls back to it.
+ */
+const ownerString = (
+  owner: UnknownRecord,
+  lane: UnknownRecord,
+  ownerKeys: string[],
+  laneKeys: string[] = ownerKeys
+): string | null | undefined => {
+  const explicit = nullableString(owner, ...ownerKeys);
+  if (explicit !== undefined) return explicit;
+  return nullableString(lane, ...laneKeys);
+};
+
 const normalizeTab = (raw: unknown): IBrowserTab | null => {
   const value = asRecord(raw);
   const tabId = firstString(value, 'tab_id', 'id');
@@ -86,21 +102,16 @@ const normalizeTab = (raw: unknown): IBrowserTab | null => {
 const normalizeOwner = (raw: unknown, lane: UnknownRecord): IBrowserLaneOwner | null => {
   const value = asRecord(raw);
   const owner: IBrowserLaneOwner = {
-    user_id: nullableString(value, 'user_id') ?? nullableString(lane, 'user_id'),
-    conversation_id:
-      nullableString(value, 'conversation_id') ?? nullableString(lane, 'conversation_id'),
-    runtime_instance_id:
-      nullableString(value, 'runtime_instance_id', 'runtime_id') ??
-      nullableString(lane, 'runtime_instance_id', 'runtime_id'),
-    execution_id:
-      nullableString(value, 'execution_id') ?? nullableString(lane, 'execution_id'),
-    attempt_id: nullableString(value, 'attempt_id') ?? nullableString(lane, 'attempt_id'),
-    cluster_node_id:
-      nullableString(value, 'cluster_node_id') ?? nullableString(lane, 'cluster_node_id'),
-    agent_id: nullableString(value, 'agent_id') ?? nullableString(lane, 'agent_id'),
-    agent_name: nullableString(value, 'agent_name') ?? nullableString(lane, 'agent_name'),
-    surface: nullableString(value, 'surface') ?? nullableString(lane, 'surface'),
-    label: nullableString(value, 'label', 'owner_label') ?? nullableString(lane, 'owner_label'),
+    user_id: ownerString(value, lane, ['user_id']),
+    conversation_id: ownerString(value, lane, ['conversation_id']),
+    runtime_instance_id: ownerString(value, lane, ['runtime_instance_id', 'runtime_id']),
+    execution_id: ownerString(value, lane, ['execution_id']),
+    attempt_id: ownerString(value, lane, ['attempt_id']),
+    cluster_node_id: ownerString(value, lane, ['cluster_node_id']),
+    agent_id: ownerString(value, lane, ['agent_id']),
+    agent_name: ownerString(value, lane, ['agent_name']),
+    surface: ownerString(value, lane, ['surface']),
+    label: ownerString(value, lane, ['label', 'owner_label'], ['owner_label']),
   };
   return Object.values(owner).some((entry) => entry != null) ? owner : null;
 };
@@ -145,8 +156,11 @@ export const normalizeBrowserLane = (raw: unknown): IBrowserLane | null => {
       ? value.targets
       : [];
   const tabs = rawTabs.map(normalizeTab).filter((tab): tab is IBrowserTab => tab != null);
+  // A lane payload without a recognizable state is presented as `unknown`
+  // (neutral styling), never as `failed`: mislabeling healthy lanes as failed
+  // invites users to close in-use browser sessions.
   const lifecycle =
-    firstString(value, 'lifecycle_state', 'state', 'status') ?? 'failed';
+    firstString(value, 'lifecycle_state', 'state', 'status') ?? 'unknown';
   const owner = normalizeOwner(value.owner, value);
 
   return {
@@ -154,6 +168,7 @@ export const normalizeBrowserLane = (raw: unknown): IBrowserLane | null => {
     lane_name: nullableString(value, 'lane_name', 'name'),
     lifecycle_state: lifecycle as BrowserLaneLifecycleState,
     browser_epoch: nonNegativeNumber(value, 'browser_epoch', 'epoch'),
+    host_id: nullableString(value, 'host_id', 'browser_host_id'),
     conversation_id:
       nullableString(value, 'conversation_id') ?? owner?.conversation_id,
     conversation_title: nullableString(value, 'conversation_title'),

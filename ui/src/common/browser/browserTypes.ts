@@ -68,6 +68,8 @@ export interface IBrowserLane {
   lifecycle_state: BrowserLaneLifecycleState;
   /** Epoch of the managed Browser Host currently serving this Lane. */
   browser_epoch?: number | null;
+  /** Stable id of the Host serving this Lane; preferred over the epoch. */
+  host_id?: string | null;
 
   conversation_id?: string | null;
   conversation_title?: string | null;

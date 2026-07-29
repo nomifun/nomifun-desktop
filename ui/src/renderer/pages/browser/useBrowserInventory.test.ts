@@ -12,11 +12,14 @@ import type {
   IBrowserOverview,
 } from '@/common/browser/browserTypes';
 import {
+  BROWSER_INVENTORY_EVENT_COALESCE_MS,
+  BROWSER_INVENTORY_POLL_INTERVAL_MS,
   BROWSER_RETRY_BASE_DELAY_MS,
   BROWSER_RETRY_MAX_DELAY_MS,
   createBrowserInventoryRealtimeHandler,
   createBrowserInventoryRecoveryController,
   createBrowserOverviewRecoveryController,
+  startBrowserInventoryFallbackPoll,
   subscribeBrowserInventoryRealtime,
   type BrowserInventoryState,
   type BrowserInventoryRealtimeRefreshReason,
@@ -144,6 +147,122 @@ describe('browser inventory recovery', () => {
       'stop:lifecycle',
       'stop:reconnected',
     ]);
+  });
+
+  test('suppresses the duplicate dual-channel delivery of the same sequence', () => {
+    const reasons: BrowserInventoryRealtimeRefreshReason[] = [];
+    const realtime = createBrowserInventoryRealtimeHandler((reason) => {
+      reasons.push(reason);
+    });
+
+    realtime.connected();
+    // The backend forwards lifecycle-kind payloads on BOTH
+    // browser.inventory.changed and browser.lifecycle.changed; the second
+    // delivery carries the identical sequence and must not refresh again.
+    realtime.browserEvent({ sequence: 10 });
+    realtime.browserEvent({ sequence: 10 });
+    realtime.browserEvent({ sequence: 11 });
+    realtime.browserEvent({ sequence: 11 });
+    // Events without a sequence can never be proven duplicates: refresh.
+    realtime.browserEvent({});
+    realtime.browserEvent({});
+    // An explicit resync marker always wins, even on a repeated sequence.
+    realtime.browserEvent({ sequence: 11, resync_required: true });
+
+    expect(reasons).toEqual([
+      'connected',
+      'event',
+      'event',
+      'event',
+      'event',
+      'resync',
+    ]);
+  });
+
+  test('coalesces realtime event bursts into a leading and one trailing refresh', () => {
+    timers.useFakeTimers();
+    try {
+      const order: string[] = [];
+      let inventory:
+        | ((event: { sequence?: number; change_kind?: string }) => void)
+        | undefined;
+      const stop = subscribeBrowserInventoryRealtime({
+        refresh: (reason) => order.push(`refresh:${reason}`),
+        subscribeInventory: (listener) => {
+          inventory = listener;
+          return () => undefined;
+        },
+        subscribeLifecycle: () => () => undefined,
+        subscribeReconnected: () => () => undefined,
+      });
+      expect(order).toEqual(['refresh:connected']);
+
+      inventory?.({ sequence: 1 });
+      inventory?.({ sequence: 2 });
+      inventory?.({ sequence: 3 });
+      inventory?.({ sequence: 4 });
+      // Leading edge fires immediately; the burst coalesces behind it.
+      expect(order).toEqual(['refresh:connected', 'refresh:event']);
+
+      timers.advanceTimersByTime(BROWSER_INVENTORY_EVENT_COALESCE_MS);
+      expect(order).toEqual([
+        'refresh:connected',
+        'refresh:event',
+        'refresh:event',
+      ]);
+
+      // Quiet period: a single event outside a burst refreshes immediately.
+      timers.advanceTimersByTime(BROWSER_INVENTORY_EVENT_COALESCE_MS);
+      inventory?.({ sequence: 5 });
+      expect(order.at(-1)).toBe('refresh:event');
+      expect(order).toHaveLength(4);
+
+      // Urgent reasons bypass and clear any pending coalesced refresh.
+      inventory?.({ sequence: 6 });
+      inventory?.({ sequence: 9 });
+      expect(order.at(-1)).toBe('refresh:sequence-gap');
+      const lengthAfterGap = order.length;
+      timers.advanceTimersByTime(BROWSER_INVENTORY_EVENT_COALESCE_MS * 4);
+      expect(order).toHaveLength(lengthAfterGap);
+
+      stop();
+    } finally {
+      timers.clearAllTimers();
+      timers.useRealTimers();
+    }
+  });
+
+  test('polls the snapshot fallback only while the realtime channel is unhealthy', () => {
+    timers.useFakeTimers();
+    try {
+      let healthy = true;
+      let polls = 0;
+      const stop = startBrowserInventoryFallbackPoll({
+        poll: () => {
+          polls += 1;
+        },
+        isRealtimeHealthy: () => healthy,
+      });
+
+      timers.advanceTimersByTime(BROWSER_INVENTORY_POLL_INTERVAL_MS * 3);
+      expect(polls).toBe(0);
+
+      healthy = false;
+      timers.advanceTimersByTime(BROWSER_INVENTORY_POLL_INTERVAL_MS * 2);
+      expect(polls).toBe(2);
+
+      healthy = true;
+      timers.advanceTimersByTime(BROWSER_INVENTORY_POLL_INTERVAL_MS * 2);
+      expect(polls).toBe(2);
+
+      stop();
+      healthy = false;
+      timers.advanceTimersByTime(BROWSER_INVENTORY_POLL_INTERVAL_MS * 2);
+      expect(polls).toBe(2);
+    } finally {
+      timers.clearAllTimers();
+      timers.useRealTimers();
+    }
   });
 
   test('recovers a direct /browser load after an initial transient failure', async () => {

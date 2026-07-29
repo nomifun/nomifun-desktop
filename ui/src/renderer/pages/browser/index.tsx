@@ -29,6 +29,7 @@ import {
   browserConversationSearchParamsForLane,
   browserLaneCounts,
   buildBrowserInventoryTree,
+  matchBrowserLaneHost,
   pickDefaultBrowserLaneId,
   resolveBrowserConversationId,
   type BrowserConversationGroup,
@@ -36,6 +37,7 @@ import {
 import {
   browserInstallationWideCloseCopy,
   browserClosePartialFailureMessage,
+  canBackgroundBrowserLane,
   canForegroundBrowserLane,
   createBrowserManagementMutationGate,
   requestBrowserCloseAll,
@@ -142,21 +144,12 @@ const BrowserPage: React.FC = () => {
   const hasManagedResources =
     lanes.length > 0 || managedHostCount > 0 || pendingCleanupCount > 0;
   const hasResidualResources = lanes.length === 0 && hasManagedResources;
-  const selectedLaneHost = useMemo(() => {
-    if (
-      selectedLane?.browser_epoch == null ||
-      selectedLane.identity?.mode !== 'primary'
-    ) {
-      return null;
-    }
-    return (
-      overview?.hosts?.find(
-        (host) =>
-          host.epoch === selectedLane.browser_epoch &&
-          host.identity_mode === 'primary'
-      ) ?? null
-    );
-  }, [overview?.hosts, selectedLane]);
+  // Lanes and overview come from two independent requests; the shared helper
+  // matches by stable host_id first and tolerates one-epoch snapshot skew.
+  const selectedLaneHost = useMemo(
+    () => matchBrowserLaneHost(selectedLane, overview?.hosts),
+    [overview?.hosts, selectedLane]
+  );
   const managementMutationBusy =
     busyLaneId != null ||
     busyConversationId != null ||
@@ -611,7 +604,11 @@ const BrowserPage: React.FC = () => {
                   (busyLaneId != null && busyLaneId !== selectedLane.lane_id)
                 }
                 hostHeadful={selectedLaneHost?.headful}
-                canChangeVisibility={canForegroundBrowserLane(selectedLane)}
+                canChangeVisibility={
+                  selectedLaneHost?.headful === true
+                    ? canBackgroundBrowserLane(selectedLane)
+                    : canForegroundBrowserLane(selectedLane)
+                }
                 onClose={handleCloseLane}
                 onForeground={handleForegroundLane}
                 onBackground={handleBackgroundLane}

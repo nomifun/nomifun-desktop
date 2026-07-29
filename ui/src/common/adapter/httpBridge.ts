@@ -435,7 +435,12 @@ export function redactSensitiveText(input: string): string {
     )
     .replace(/\bBearer\s+[A-Za-z0-9._~+/=-]+/gi, 'Bearer [REDACTED]')
     .replace(/\beyJ[A-Za-z0-9_-]*\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b/g, '[REDACTED_JWT]')
-    .replace(/\b[a-f0-9]{64}\b/gi, '[REDACTED_TOKEN]')
+    // 64-hex is only a secret in a token-ish key context. Blanket rewriting
+    // destroys legitimate SHA-256 digests in checksum/diagnostic messages.
+    .replace(
+      /([a-z0-9_-]*(?:token|secret|capability|credential|password|api[_-]?key)["']?\s*[:=]\s*["']?)[a-f0-9]{64}\b/gi,
+      '$1[REDACTED_TOKEN]'
+    )
     .replace(/(?:wss?|https?):\/\/[^\s"'<>]+\/devtools\/[^\s"'<>]*/gi, '[REDACTED_CDP_ENDPOINT]')
     .replace(
       /(?:wss?|https?):\/\/(?:localhost|127(?:\.\d{1,3}){3}|\[::1\]):\d+\/(?:json(?:\/list|\/version)?|devtools)(?:[^\s"'<>]*)?/gi,
@@ -449,8 +454,17 @@ export function redactSensitiveText(input: string): string {
       /((?:profile[_ -]?path|user[_ -]?data[_ -]?dir)\s*[:=]\s*)(?:"[^"]*"|'[^']*'|[^\r\n,;}]+)/gi,
       '$1[REDACTED]'
     )
-    .replace(/((?:set-)?cookie\s*[:=]\s*)[^\r\n]+/gi, '$1[REDACTED]')
-    .replace(/[A-Za-z]:\\[^\r\n"'<>]*(?:User Data|Profiles?)[^\r\n"'<>]*/gi, '[REDACTED_PROFILE_PATH]');
+    // Anchor to a header/assignment position (line start, after ';', or a
+    // quoted key) so prose like "could not persist session cookie: disk full"
+    // survives.
+    .replace(/((?:^|[;{,]\s*|")(?:set-)?cookie["']?\s*[:=])\s*[^\r\n]+/gim, '$1[REDACTED]')
+    .replace(/[A-Za-z]:\\[^\r\n"'<>]*(?:User Data|Profiles?)[^\r\n"'<>]*/gi, '[REDACTED_PROFILE_PATH]')
+    // POSIX equivalent of the drive-letter rule: managed platform profile
+    // roots and system-browser profile directories on macOS/Linux.
+    .replace(
+      /\/(?:Users|home|root|private|var|tmp|opt)\/[^\r\n"'<>]*?(?:platform-profiles|browser-data|User Data|(?:Application Support|\.config)\/(?:Google\/Chrome|google-chrome|Chromium|chromium|Microsoft Edge|microsoft-edge|BraveSoftware|vivaldi|Vivaldi))[^\s"'<>]*/g,
+      '[REDACTED_PROFILE_PATH]'
+    );
 }
 
 function redactForLog(value: unknown, depth = 0): unknown {
@@ -836,6 +850,16 @@ function scheduleWsReconnect(): void {
     if (wsListeners.size === 0) return;
     ensureWs();
   }, delay);
+}
+
+/**
+ * Whether the shared realtime WebSocket is currently OPEN. Consumers use this
+ * to gate fallback snapshot polling on realtime health; it says nothing about
+ * a half-open socket the OS has not surfaced yet, which is exactly the case
+ * the fallback poll exists for.
+ */
+export function isWsConnected(): boolean {
+  return ws != null && ws.readyState === WebSocket.OPEN;
 }
 
 // ---------------------------------------------------------------------------
