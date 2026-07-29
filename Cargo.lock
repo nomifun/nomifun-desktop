@@ -5732,6 +5732,7 @@ dependencies = [
  "axum",
  "chrono",
  "hex",
+ "http-body-util",
  "nomi-memory",
  "nomi-redact",
  "nomifun-ai-agent",
@@ -5751,6 +5752,7 @@ dependencies = [
  "sqlx",
  "tempfile",
  "tokio",
+ "tower",
  "tracing",
  "zip 2.4.2",
 ]
