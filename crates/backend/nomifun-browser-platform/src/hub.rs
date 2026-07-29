@@ -5071,6 +5071,22 @@ impl BrowserSessionHub {
         }
 
         let slot_keys: Vec<_> = self.inner.host_slots.read().await.keys().cloned().collect();
+        // Mirror finalize_empty_host: a retained target cleanup or an
+        // unsettled Lane start still belongs to its Host. Retiring the process
+        // first would make that in-flight close/open race a dead CDP
+        // connection, violating the ordering invariant that target cleanup
+        // settles before the process is stopped.
+        let mut blocked_keys = HashSet::new();
+        for key in &slot_keys {
+            if used_keys.contains(key) {
+                continue;
+            }
+            if self.host_has_pending_lane_cleanup(key).await
+                || self.host_has_unsettled_lane_start(key).await
+            {
+                blocked_keys.insert(key.clone());
+            }
+        }
         let mut ready = Vec::new();
         {
             let mut empty = self.inner.host_empty_since_ms.write().await;
@@ -5078,7 +5094,7 @@ impl BrowserSessionHub {
                 empty.remove(key);
             }
             for key in slot_keys {
-                if used_keys.contains(&key) {
+                if used_keys.contains(&key) || blocked_keys.contains(&key) {
                     continue;
                 }
                 let empty_since = *empty.entry(key.clone()).or_insert(now);
@@ -11634,6 +11650,70 @@ mod tests {
                 .lock()
                 .await
                 .is_empty()
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn sweep_never_retires_a_host_while_its_target_cleanup_is_still_running() {
+        let harness = harness();
+        let lane_id = open(&harness.client, "sweep-pending-cleanup").await;
+        harness
+            .probe
+            .block_lane_close
+            .store(true, Ordering::Release);
+
+        // The close times out for its caller but the driver close keeps
+        // running under Hub authority; the lane is already out of inventory.
+        let hub = harness.hub.clone();
+        let closing = lane_id.clone();
+        let close = tokio::spawn(async move { hub.close_lane(&closing).await });
+        harness.probe.wait_for_lane_closes(1).await;
+        tokio::time::advance(LANE_CLEANUP_WAITER_TIMEOUT).await;
+        tokio::task::yield_now().await;
+        let error = close
+            .await
+            .expect("close task panicked")
+            .expect_err("blocked cleanup must time out for its caller");
+        assert_eq!(error.metadata["cleanup_pending"], true);
+        assert!(harness.hub.list_lanes().await.is_empty());
+
+        // The key has no live lanes, but the periodic sweep must not hard-stop
+        // the process while the retained target cleanup is still talking to it.
+        let _ = harness.hub.sweep().await;
+        assert_eq!(
+            harness.probe.host_shutdowns.load(Ordering::Acquire),
+            0,
+            "sweep retired the Host while its Lane cleanup was still in flight"
+        );
+        assert_eq!(
+            harness
+                .hub
+                .inner
+                .pending_lane_cleanups
+                .lock()
+                .await
+                .len(),
+            1
+        );
+
+        // Once the close settles, retirement converges normally.
+        harness.probe.lane_close_release.add_permits(1);
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            harness.probe.wait_for_lane_close_completions(1),
+        )
+        .await
+        .expect("the blocked driver close did not finish after release");
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            harness.probe.wait_for_host_shutdowns(1),
+        )
+        .await
+        .expect("the empty Host was not retired after cleanup settled");
+        harness.hub.sweep().await.unwrap();
+        assert_eq!(
+            harness.hub.remaining_resources().await,
+            RemainingResources::default()
         );
     }
 
