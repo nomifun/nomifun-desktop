@@ -145,7 +145,7 @@ const BrowserPage: React.FC = () => {
     lanes.length > 0 || managedHostCount > 0 || pendingCleanupCount > 0;
   const hasResidualResources = lanes.length === 0 && hasManagedResources;
   // Lanes and overview come from two independent requests; the shared helper
-  // matches by stable host_id first and tolerates one-epoch snapshot skew.
+  // matches by browser epoch and tolerates one-epoch snapshot skew.
   const selectedLaneHost = useMemo(
     () => matchBrowserLaneHost(selectedLane, overview?.hosts),
     [overview?.hosts, selectedLane]
