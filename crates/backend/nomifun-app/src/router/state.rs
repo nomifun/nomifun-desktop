@@ -443,6 +443,7 @@ pub async fn build_module_states(services: &AppServices) -> (ModuleStates, Chann
         services.provider_model_repo.clone(),
         encryption_key,
         services.data_dir.clone(),
+        services.model_invoke_service.clone(),
     );
     tracing::info!(elapsed_ms = boot.elapsed().as_millis(), "startup: agent service built");
 
@@ -1898,7 +1899,9 @@ pub fn build_shell_state(services: &AppServices) -> ShellRouterState {
         shell_service: Arc::new(nomifun_shell::ShellService::new(Arc::new(
             nomifun_shell::DefaultSystemOpener,
         ))),
-        stt_service: Arc::new(nomifun_shell::SttService::new_dynamic()),
+        stt_service: Arc::new(nomifun_shell::SttService::new(Some(
+            services.model_invoke_service.clone(),
+        ))),
         client_pref_service,
         provider_service: Some(ProviderService::new(
             provider_repo,
@@ -1906,7 +1909,7 @@ pub fn build_shell_state(services: &AppServices) -> ShellRouterState {
             services.encryption_key,
         )),
         // The process-wide invoke singleton (assembled in AppServices next to
-        // the creation service) backs `/api/tts`.
+        // the creation service) backs `/api/tts` and, via SttService, `/api/stt`.
         model_invoke_service: Some(services.model_invoke_service.clone()),
     }
 }

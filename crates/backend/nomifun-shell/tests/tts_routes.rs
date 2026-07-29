@@ -31,23 +31,23 @@ async fn setup() -> (axum::Router, nomifun_db::SqlitePool) {
     let pool = db.pool().clone();
     std::mem::forget(db);
 
-    let invoke = ModelInvokeService::new(
+    let invoke = Arc::new(ModelInvokeService::new(
         Arc::new(SqliteProviderRepository::new(pool.clone())),
         Arc::new(SqliteProviderModelRepository::new(pool.clone())),
         Arc::new(SqliteProviderConnectionRepository::new(pool.clone())),
         TEST_KEY,
         reqwest::Client::new(),
         AdapterRegistry::new(default_adapters()),
-    );
+    ));
 
     let state = ShellRouterState {
         shell_service: Arc::new(ShellService::new(Arc::new(NoopSystemOpener))),
-        stt_service: Arc::new(SttService::new(reqwest::Client::new())),
+        stt_service: Arc::new(SttService::new(Some(invoke.clone()))),
         client_pref_service: nomifun_system::ClientPrefService::new(Arc::new(
             nomifun_db::SqliteClientPreferenceRepository::new(pool.clone()),
         )),
         provider_service: None,
-        model_invoke_service: Some(Arc::new(invoke)),
+        model_invoke_service: Some(invoke),
     };
     (shell_routes(state), pool)
 }
@@ -280,7 +280,7 @@ async fn tts_unwired_invoke_service_is_500() {
     let pool = sqlx::SqlitePool::connect_lazy("sqlite::memory:").unwrap();
     let state = ShellRouterState {
         shell_service: Arc::new(ShellService::new(Arc::new(NoopSystemOpener))),
-        stt_service: Arc::new(SttService::new(reqwest::Client::new())),
+        stt_service: Arc::new(SttService::new(None)),
         client_pref_service: nomifun_system::ClientPrefService::new(Arc::new(
             nomifun_db::SqliteClientPreferenceRepository::new(pool),
         )),
