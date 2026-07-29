@@ -9,6 +9,7 @@ import type { ConfigKeyMap } from '@/common/config/configKeys';
 import {
   BROWSER_DISPLAY_MODES,
   BROWSER_DISPLAY_MODE_POLICY_VERSION,
+  buildBrowserResourcePolicyAdvancedSaveRequest,
   buildBrowserResourcePolicyPresetRequest,
   isBrowserDisplayMode,
   migrateBrowserDisplayMode,
@@ -156,7 +157,72 @@ describe('buildBrowserResourcePolicyPresetRequest', () => {
   });
 });
 
+describe('buildBrowserResourcePolicyAdvancedSaveRequest', () => {
+  const persisted = {
+    preset: 'automatic' as const,
+    advanced: {
+      max_memory_ratio: 0.5,
+      reserved_memory_bytes: 512 * 1024 * 1024,
+      max_active_operations: 4,
+      max_open_lanes: 16,
+      max_queued_requests: 64,
+      max_owner_queued_requests: 8,
+    },
+  };
+
+  test('resolves user-edited advanced values to the custom preset', () => {
+    // An explicit reserved_memory_bytes is honored by the scheduler only
+    // under the custom preset; a named preset silently re-floors it to 20%
+    // of total memory. Saving edited advanced values must therefore hand
+    // control to custom end-to-end.
+    const edited = {
+      ...persisted,
+      advanced: { ...persisted.advanced, reserved_memory_bytes: 2 * 1024 * 1024 * 1024 },
+    };
+    expect(buildBrowserResourcePolicyAdvancedSaveRequest(edited, persisted)).toEqual({
+      preset: 'custom',
+      advanced: edited.advanced,
+    });
+
+    const cleared = {
+      ...persisted,
+      advanced: (({ reserved_memory_bytes: _dropped, ...rest }) => rest)(persisted.advanced),
+    };
+    expect(buildBrowserResourcePolicyAdvancedSaveRequest(cleared, persisted)).toEqual({
+      preset: 'custom',
+      advanced: cleared.advanced,
+    });
+  });
+
+  test('keeps the current preset when advanced values merely echo the server state', () => {
+    expect(buildBrowserResourcePolicyAdvancedSaveRequest(persisted, persisted)).toEqual({
+      preset: 'automatic',
+      advanced: persisted.advanced,
+    });
+    expect(
+      buildBrowserResourcePolicyAdvancedSaveRequest(
+        { ...persisted, preset: 'custom', advanced: { ...persisted.advanced } },
+        { ...persisted, preset: 'custom' }
+      )
+    ).toEqual({ preset: 'custom', advanced: persisted.advanced });
+  });
+});
+
 describe('normalizeBrowserResourcePolicy', () => {
+  test('preserves the backend custom preset instead of collapsing it to automatic', () => {
+    // Dropping 'custom' on GET would make the next advanced save re-attach a
+    // named preset and re-floor the explicitly configured memory reserve.
+    expect(
+      normalizeBrowserResourcePolicy({
+        preset: 'custom',
+        advanced: { reserved_memory_bytes: 2 * 1024 * 1024 * 1024 },
+      })
+    ).toEqual({
+      preset: 'custom',
+      advanced: { reserved_memory_bytes: 2 * 1024 * 1024 * 1024 },
+    });
+  });
+
   test('preserves the final nested wire shape', () => {
     expect(
       normalizeBrowserResourcePolicy({
