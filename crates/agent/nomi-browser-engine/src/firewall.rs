@@ -67,12 +67,15 @@ pub struct FirewallConfig {
     /// 接线 F1（E5 仅检测 + 预览）。
     pub gate_cross_origin_post: bool,
     /// **D1 域名 allowlist（eTLD+1）**：出口域**白名单**。**空 = 不限制**（任何域放行，现行为/零回归）；
-    /// **非空 = 仅放行 eTLD+1 ∈ 本表的目标域**，其余域升 [`FirewallDecision::GatePost`]（交 D2 审批）。
+    /// **非空 = 只门控跨 registrable domain 的出口**——目标与当前页 origin **跨 eTLD+1** 且目标 eTLD+1
+    /// ∉ 本表 → 升 [`FirewallDecision::GatePost`]（交 D2 审批）。**同 registrable domain 请求（页面加载
+    /// 自己的子资源）与顶层 Document 导航豁免本档**（F6 白屏回归修 / P3 导航修——allowlist 是数据外泄
+    /// 控制，不是把被访问站点自身渲染卡死的监狱）。
     /// 条目应是 eTLD+1（`x.com`），但调用方传任意 host/origin 也安全——内部用 [`nomifun_secret::etld_plus_one`]
     /// 归一后比较（与 secret `register` 的 `allowed_origins`→eTLD+1 归一同款 PSL 机器）。**真值来自 secret 的
     /// per-pet `allowed_origins`，由 `BrowserTool::ensure_secret_store_and_firewall` 注入（P3-X2）**。无法解析出
-    /// eTLD+1 的目标域（IP/localhost/畸形）在 allowlist 非空时**保守门控**（fail-closed：无 registrable domain
-    /// 无从证明在白名单内）。
+    /// eTLD+1 的目标域（IP/localhost/畸形）在 allowlist 非空时对**跨站**请求**保守门控**（fail-closed：无
+    /// registrable domain 无从证明在白名单内；同裸 host 的请求按同站豁免）。
     pub allow_etld1: Vec<String>,
     /// **D1 域名 denylist（eTLD+1）**：出口域**黑名单**，**优先级高于 allowlist**。eTLD+1 命中 → 硬
     /// [`FirewallDecision::Block`]（即便同时在 allowlist 内也阻断）。空 = 无黑名单。条目按 eTLD+1 归一
@@ -369,13 +372,16 @@ pub struct RequestInfo<'a> {
 ///
 /// 返回：
 /// - `Some(Block)` —— 目标 eTLD+1 命中 `deny_etld1`（**deny 优先级最高**，即便也在 allowlist 内；
-///   **含顶层 Document 导航**——黑名单硬拦导航合理）。
-/// - `Some(GatePost{preview})` —— `allow_etld1` **非空** 且目标 eTLD+1 **不在** allowlist（出口到未授权域，
-///   交 D2 审批；同时也覆盖目标域**无法解析出 eTLD+1**（IP/localhost/畸形）这一 fail-closed 情形——
-///   allowlist 非空时无 registrable domain 无从证明在白名单内，保守门控）。**顶层 Document 导航豁免本档**
-///   （`req.is_top_level_navigation` → allowlist 不门控导航；见下）。
+///   **含顶层 Document 导航与同站子资源**——黑名单硬拦一切）。
+/// - `Some(GatePost{preview})` —— `allow_etld1` **非空** 且请求是**跨 registrable domain 出口**
+///   （目标与当前页 origin 跨 eTLD+1，[`is_cross_origin`]）且目标 eTLD+1 **不在** allowlist（出口到
+///   未授权域，交 D2 审批；同时也覆盖跨站目标**无法解析出 eTLD+1**（IP/localhost/畸形）这一
+///   fail-closed 情形——allowlist 非空时无 registrable domain 无从证明在白名单内，保守门控）。两类
+///   豁免：**顶层 Document 导航**（allowlist 不是导航监狱）与**同 registrable domain 请求**（F6 白屏
+///   回归修：页面加载自己的子资源是自渲染，不是数据外泄面）——见下。
 /// - `None` —— 域名档不触发（无 deny 命中；且 allowlist 空=不限制，或目标域∈allowlist，或**是顶层
-///   Document 导航**）→ 交由后续档（跨域 POST 门控 / 放行）处理。
+///   Document 导航**，或**与当前页 origin 同 registrable domain**）→ 交由后续档（跨域 POST 门控 /
+///   放行）处理。
 ///
 /// 复用 [`nomifun_secret::etld_plus_one`]（同一 PSL 机器，co.uk 等多级后缀正确）解析目标域。`deny`/`allow`
 /// 条目同样经 `etld_plus_one` 归一后比较——故调用方传 `x.com` / `https://x.com:443` / `sub.x.com` 都安全
@@ -409,7 +415,8 @@ fn domain_policy(config: &FirewallConfig, req: &RequestInfo<'_>) -> Option<Firew
         }
     }
 
-    // 2) allowlist（非空 = 仅放行表内域）。空 allowlist 不限制（deny 已在上面单独处理）。
+    // 2) allowlist（非空 = 仅门控**跨 registrable domain** 的出口）。空 allowlist 不限制（deny 已在
+    //    上面单独处理）。
     //
     //    **顶层 Document 导航豁免（P3 回归修，安全设计）**：allowlist 是**出口/数据外泄控制**（限制跨域
     //    子请求/POST 把数据发往哪），**不是导航监狱**——agent 导航到一个 URL 是意图行为，不该因「注册了
@@ -418,7 +425,18 @@ fn domain_policy(config: &FirewallConfig, req: &RequestInfo<'_>) -> Option<Firew
     //    最高优先档对**所有**请求（含 Document）生效；②`deny_etld1` 黑名单已在上面 `1)` 对**所有**请求
     //    （含 Document）硬 Block；③跨域 POST-body 门控走 `decide` 的独立档（导航不是 POST-body 写）。
     //    本豁免**只**松绑 allow_etld1 白名单对顶层导航的拦截，不触碰任何其它出口/SSRF/黑名单拦截。
-    if !config.allow_etld1.is_empty() && !req.is_top_level_navigation {
+    //
+    //    **同 registrable domain 豁免（F6 白屏回归修，产品红线：浏览顺滑零白屏）**：目标与当前页 origin
+    //    同 eTLD+1（或双方无 eTLD+1 时同裸 host——复用 [`is_cross_origin`] 的退化比较）= 页面加载
+    //    **自己的**子资源（CSS/JS/XHR/图片/站内提交），是页面自渲染而非数据外泄面——**绝不**因
+    //    「allowlist 非空但不含被访问站点」被门控（否则注册任一 secret 即令一切非 secret 域站点白屏：
+    //    托管上下文无审批通道，GatePost fail-closed 直接 BlockedByClient）。allowlist 只门控**真正
+    //    跨站**的出口。deny 黑名单（上方 `1)`）与 IP 封禁（`decide` 最高档）**不受**本豁免影响
+    //    （同站请求仍硬 Block）。
+    if !config.allow_etld1.is_empty()
+        && !req.is_top_level_navigation
+        && is_cross_origin(req.current_origin, req.target_url)
+    {
         let allowed = match target_e1 {
             // 目标域可解析 → 必须 eTLD+1 ∈ allowlist 才放行。
             Some(ref e1) => config
@@ -449,10 +467,12 @@ fn domain_policy(config: &FirewallConfig, req: &RequestInfo<'_>) -> Option<Firew
 /// 1. **IP 封禁**最高优先（硬 SSRF 防护）：`block_private_ips` 开 且 `resolved_ip` 命中
 ///    [`is_blocked_ip`] → [`FirewallDecision::Block`]。
 /// 2. **域名档（D1，[`domain_policy`]）**：`deny_etld1` 命中 → 硬 Block（黑名单，优先 allow，**含顶层
-///    导航**）；`allow_etld1` 非空且目标 eTLD+1 ∉ allowlist → GatePost（出口到未授权域，交 D2 审批）。
-///    **allowlist 出口门控豁免顶层 Document 导航**（`is_top_level_navigation`——allowlist 是出口/数据外泄
-///    控制，不是导航监狱；agent 导航是意图行为，注册 secret 后仍可自由导航）；子资源请求（XHR/Fetch/...）
-///    仍受 allowlist 出口门控。空 allowlist = 不限制（现行为/零回归）。
+///    导航与同站子资源**）；`allow_etld1` 非空且请求**跨 registrable domain** 且目标 eTLD+1 ∉ allowlist
+///    → GatePost（出口到未授权域，交 D2 审批）。**allowlist 出口门控两类豁免**：①顶层 Document 导航
+///    （`is_top_level_navigation`——allowlist 是出口/数据外泄控制，不是导航监狱；agent 导航是意图行为，
+///    注册 secret 后仍可自由导航）；②**同 registrable domain 请求**（F6 白屏回归修——页面加载自己的
+///    同站子资源（CSS/JS/XHR/图片）是自渲染，不是数据外泄，绝不门控）。真正跨站的子资源请求
+///    （XHR/Fetch/...）仍受 allowlist 出口门控。空 allowlist = 不限制（现行为/零回归）。
 /// 3. **跨域 POST 门控**：`gate_cross_origin_post` 开 且 [`is_gated_post`] 命中 →
 ///    [`FirewallDecision::GatePost`]（构造预览）。**与域名档叠加**——域名档放行（域在白名单/不限制）
 ///    后，跨域 POST-body 仍单独门控。
@@ -1478,6 +1498,107 @@ mod tests {
             ),
             other => panic!("expected IP Block for top-level navigation to metadata IP, got {other:?}"),
         }
+    }
+
+    // ── [纯逻辑] F6 白屏回归修：allowlist 出口门控豁免「同 registrable domain 子资源」──────────
+    //
+    // F6 把 secret 域并集灌进 allow_etld1 后，被访问站点若不在其中，页面加载**自己的**子资源
+    // （CSS/JS/XHR/图片/站内提交）也会被 GatePost——托管上下文无审批通道时即白屏（注册任一 secret
+    // 就毁掉所有托管浏览/知识抓取/新站登录）。修复：allowlist 档只门控**跨 registrable domain**
+    // 的出口（同站子资源 = 页面自渲染，不是数据外泄面；复用 is_cross_origin 的 eTLD+1 / 裸 host
+    // 语义）。deny 黑名单与 IP 封禁**不受**此豁免影响（对同站请求仍硬 Block）。
+
+    #[test]
+    fn domain_policy_same_site_subresource_exempt_from_allowlist() {
+        // allowlist 非空且**不含**当前站点（注册了别家 secret 的典型态）：页面加载自己的同 eTLD+1
+        // 子资源 → **Allow**（绝不 GatePost；F6 白屏回归的核心断言——旧实现此处 GatePost）。
+        let cfg = FirewallConfig {
+            allow_etld1: vec!["stored-secret.com".to_string()],
+            ..Default::default()
+        };
+        // 同 host 子资源（页面加载自己的 CSS）。
+        assert_eq!(
+            decide(&cfg, &req_get("https://news.example.com/story", "https://news.example.com/style.css")),
+            FirewallDecision::Allow,
+            "a page loading its own same-host asset must not be gated by a non-matching allowlist"
+        );
+        // 同 eTLD+1 子域子资源（站点自己的静态/接口域）。
+        assert_eq!(
+            decide(&cfg, &req_get("https://news.example.com/story", "https://static.example.com/app.js")),
+            FirewallDecision::Allow,
+            "same-eTLD+1 subdomain assets are same-site rendering, not egress"
+        );
+        // 同 eTLD+1 XHR POST（站内提交）：allowlist 同站豁免 + 非跨域 POST（POST 门控也不触发）→ Allow。
+        let req = RequestInfo {
+            resolved_ip: None,
+            method: "POST",
+            has_post_data: true,
+            body: Some(b"q=1"),
+            content_type: Some("application/x-www-form-urlencoded"),
+            current_origin: "https://news.example.com",
+            target_url: "https://api.example.com/search",
+            is_top_level_navigation: false,
+        };
+        assert_eq!(
+            decide(&cfg, &req),
+            FirewallDecision::Allow,
+            "same-site POST must not be gated by the allowlist nor the cross-origin POST gate"
+        );
+    }
+
+    #[test]
+    fn domain_policy_same_host_localhost_subresource_exempt_from_allowlist() {
+        // 无 eTLD+1 的同 host（localhost/IP 上的页面加载自己的资源）同样豁免（is_cross_origin 的
+        // 裸 host 退化比较）：allowlist 非空时不再对**同 host** 子资源 fail-closed 门控。
+        // （跨 host 的无 eTLD+1 目标仍 fail-closed 门控，见
+        // domain_policy_failclosed_on_unresolvable_target_when_allowlist_nonempty。）
+        let cfg = FirewallConfig {
+            allow_etld1: vec!["x.com".to_string()],
+            ..Default::default()
+        };
+        assert_eq!(
+            decide(&cfg, &req_get("http://localhost:3000/app", "http://localhost:3000/main.js")),
+            FirewallDecision::Allow,
+            "a localhost page loading its own asset must not be gated"
+        );
+        assert_eq!(
+            decide(&cfg, &req_get("http://127.0.0.1:8080/", "http://127.0.0.1:8080/favicon.ico")),
+            FirewallDecision::Allow,
+            "a same-IP-host page loading its own asset must not be gated"
+        );
+    }
+
+    #[test]
+    fn domain_policy_cross_site_subresource_still_gated_after_same_site_exemption() {
+        // 真正**跨** eTLD+1 且不在 allowlist 的子资源出口 → 仍 GatePost（豁免只松绑同站，
+        // 出口门控语义保留）。
+        let cfg = FirewallConfig {
+            allow_etld1: vec!["stored-secret.com".to_string()],
+            ..Default::default()
+        };
+        assert!(
+            matches!(
+                decide(&cfg, &req_get("https://news.example.com/story", "https://tracker.io/collect")),
+                FirewallDecision::GatePost { .. }
+            ),
+            "cross-eTLD+1 off-allowlist egress must still be gated"
+        );
+    }
+
+    #[test]
+    fn domain_policy_deny_blocks_even_same_site_subresource() {
+        // deny 黑名单不受同站豁免影响：站点加载**自己**的子资源也硬 Block（显式封禁优先一切豁免）。
+        let cfg = FirewallConfig {
+            deny_etld1: vec!["evil.com".to_string()],
+            ..Default::default()
+        };
+        assert!(
+            matches!(
+                decide(&cfg, &req_get("https://evil.com/page", "https://evil.com/asset.js")),
+                FirewallDecision::Block { .. }
+            ),
+            "denylist must stay a hard block even for same-site subresources"
+        );
     }
 
     // ── [纯逻辑] P3-D2：ApprovedDomains（always_allow 记住域，eTLD+1 归一，fail-closed）─────
