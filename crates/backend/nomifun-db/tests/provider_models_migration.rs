@@ -91,6 +91,46 @@ async fn backfill_merges_maps_and_profiles_and_drops_orphans() {
 }
 
 #[tokio::test]
+async fn backfill_dedupes_duplicate_models_and_tolerates_corrupt_health() {
+    let pool = SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect("sqlite::memory:")
+        .await
+        .unwrap();
+    migrate_to(&pool, 13).await;
+
+    // Legacy catalog with a duplicated name (the legacy API never deduplicated
+    // providers.models) plus a corrupt model_health value: json_each unwraps
+    // the bare-string entry to non-JSON text, which raw json() would reject.
+    sqlx::query(
+        "INSERT INTO providers (provider_id, platform, name, base_url, api_key_encrypted, models, enabled, capabilities, model_health, is_full_url, sort_order, created_at, updated_at) \
+         VALUES (?, 'openai', 'P', 'https://x.test/v1', 'enc', ?, 1, '[]', ?, 0, 0, 1, 1)",
+    )
+    .bind(PROVIDER)
+    .bind(r#"["a","a","b"]"#)
+    .bind(r#"{"a":"not-an-object"}"#)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    migrate_to(&pool, 14).await;
+
+    let rows: Vec<(String, i64, Option<String>)> = sqlx::query_as(
+        "SELECT model, sort_order, health FROM provider_models WHERE provider_id = ? ORDER BY sort_order",
+    )
+    .bind(PROVIDER)
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+
+    assert_eq!(rows.len(), 2, "duplicate catalog entry must collapse to one row");
+    assert_eq!(rows[0].0, "a");
+    assert_eq!(rows[0].1, 0, "first array occurrence wins, matching dual-write semantics");
+    assert!(rows[0].2.is_none(), "corrupt legacy health degrades to NULL, not a failed migration");
+    assert_eq!(rows[1].0, "b");
+}
+
+#[tokio::test]
 async fn migration_15_drops_model_profiles() {
     let pool = SqlitePoolOptions::new()
         .max_connections(1)
