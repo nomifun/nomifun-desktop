@@ -23,6 +23,7 @@ use crate::ExecutionConversationBoundary;
 use crate::orphan_recovery::{
     RunningOrphanDisposition, running_orphan_disposition,
 };
+use crate::relay_error_code;
 use nomifun_api_types::{
     ApprovalCheckResponse, CloneConversationRequest, ConfirmRequest, ConfirmationListResponse,
     ConversationArtifactListResponse, ConversationArtifactResponse, ConversationListResponse,
@@ -145,6 +146,11 @@ pub struct IdempotentMessageDelivery {
     pub result_ok: Option<bool>,
     pub result_text: Option<String>,
     pub result_error: Option<String>,
+    /// Stable snake_case terminal error token (spec D4); `None` on success,
+    /// while in flight, and for pre-014 receipts.
+    pub result_error_code: Option<String>,
+    /// Whether the terminal failure is safe to retry automatically.
+    pub result_error_retryable: Option<bool>,
 }
 
 /// Read-only durable state of one public keyed Conversation turn.
@@ -1155,6 +1161,8 @@ impl ConversationService {
             result_ok,
             result_text: receipt.result_text.clone(),
             result_error: receipt.result_error.clone(),
+            result_error_code: receipt.result_error_code.clone(),
+            result_error_retryable: receipt.result_error_retryable,
         };
         match self
             .conversation_repo
@@ -1639,6 +1647,7 @@ impl ConversationService {
         conversation_id: &str,
         delivery: &DurableDeliveryLease,
         fallback_error: &str,
+        fallback_error_code: &'static str,
     ) {
         // The exact repository command below preserves an already-completed
         // receipt's authoritative result. If that receipt is still attached to
@@ -1651,6 +1660,10 @@ impl ConversationService {
             result_ok: false,
             result_text: None,
             result_error: Some(fallback_error.to_owned()),
+            result_error_code: Some(fallback_error_code.to_owned()),
+            result_error_retryable: Some(relay_error_code::fixed_code_retryable(
+                fallback_error_code,
+            )),
         };
         match self
             .conversation_repo
@@ -1691,6 +1704,8 @@ impl ConversationService {
         result_ok: bool,
         result_text: Option<&str>,
         result_error: Option<&str>,
+        result_error_code: Option<&str>,
+        result_error_retryable: Option<bool>,
     ) -> bool {
         match repo
             .complete_delivery_receipt(
@@ -1700,6 +1715,8 @@ impl ConversationService {
                 result_ok,
                 result_text,
                 result_error,
+                result_error_code,
+                result_error_retryable,
                 now_ms(),
             )
             .await
@@ -1912,17 +1929,26 @@ impl ConversationService {
         result_ok: bool,
         result_text: Option<&str>,
         result_error: Option<&str>,
+        result_error_code: Option<(String, bool)>,
     ) -> Option<TurnReceiptCompletion> {
         operation_id
             .zip(kind)
             .zip(request_payload)
-            .map(|((operation_id, kind), request_payload)| TurnReceiptCompletion {
-                operation_id: operation_id.to_owned(),
-                kind: kind.to_owned(),
-                request_payload: request_payload.to_owned(),
-                result_ok,
-                result_text: result_text.map(str::to_owned),
-                result_error: result_error.map(str::to_owned),
+            .map(|((operation_id, kind), request_payload)| {
+                let (code, retryable) = match result_error_code {
+                    Some((code, retryable)) => (Some(code), Some(retryable)),
+                    None => (None, None),
+                };
+                TurnReceiptCompletion {
+                    operation_id: operation_id.to_owned(),
+                    kind: kind.to_owned(),
+                    request_payload: request_payload.to_owned(),
+                    result_ok,
+                    result_text: result_text.map(str::to_owned),
+                    result_error: result_error.map(str::to_owned),
+                    result_error_code: code,
+                    result_error_retryable: retryable,
+                }
             })
     }
 
@@ -1953,6 +1979,8 @@ impl ConversationService {
         result_ok: bool,
         result_text: Option<String>,
         result_error: Option<String>,
+        result_error_code: Option<String>,
+        result_error_retryable: Option<bool>,
         operation_guard: Option<(
             DurableOperationGuards,
             String,
@@ -1970,6 +1998,8 @@ impl ConversationService {
                     result_ok,
                     result_text.as_deref(),
                     result_error.as_deref(),
+                    result_error_code.as_deref(),
+                    result_error_retryable,
                 )
                 .await
                 {
@@ -1996,6 +2026,8 @@ impl ConversationService {
         result_ok: bool,
         result_text: Option<&str>,
         result_error: Option<&str>,
+        result_error_code: Option<&str>,
+        result_error_retryable: Option<bool>,
         cancellation: &CancellationToken,
         operation_guard: Option<(
             &DurableOperationGuards,
@@ -2018,6 +2050,8 @@ impl ConversationService {
                     result_ok,
                     result_text.map(str::to_owned),
                     result_error.map(str::to_owned),
+                    result_error_code.map(str::to_owned),
+                    result_error_retryable,
                     operation_guard
                         .map(|(guard, key, generation)| (Arc::clone(guard), key.to_owned(), generation)),
                 );
@@ -2032,6 +2066,8 @@ impl ConversationService {
                 result_ok,
                 result_text,
                 result_error,
+                result_error_code,
+                result_error_retryable,
             );
             let completed = tokio::select! {
                 biased;
@@ -2056,6 +2092,8 @@ impl ConversationService {
                         result_ok,
                         result_text.map(str::to_owned),
                         result_error.map(str::to_owned),
+                        result_error_code.map(str::to_owned),
+                        result_error_retryable,
                         operation_guard
                             .map(|(guard, key, generation)| (Arc::clone(guard), key.to_owned(), generation)),
                     );
@@ -2074,6 +2112,8 @@ impl ConversationService {
                         result_ok,
                         result_text.map(str::to_owned),
                         result_error.map(str::to_owned),
+                        result_error_code.map(str::to_owned),
+                        result_error_retryable,
                         operation_guard
                             .map(|(guard, key, generation)| (Arc::clone(guard), key.to_owned(), generation)),
                     );
@@ -2918,6 +2958,30 @@ impl ConversationService {
 
         self.runtime_state
             .summary_from_parts(conversation_id, runtime_status, has_runtime, pending_confirmations)
+    }
+
+    /// The most recent completed `turn` receipt for one owned Conversation.
+    ///
+    /// Read-only diagnostics for the gateway status surface (spec D4): the
+    /// receipt's structured `result_error_code` names the last terminal
+    /// failure. Returns `None` when no turn has ever completed.
+    pub async fn latest_completed_turn_receipt(
+        &self,
+        user_id: &str,
+        conversation_id: &str,
+    ) -> Result<Option<nomifun_db::models::ConversationDeliveryReceiptRow>, AppError> {
+        let conversation_key = parse_conv_id(conversation_id)?;
+        self.conversation_repo
+            .get(conversation_key)
+            .await?
+            .filter(|row| row.user_id == user_id)
+            .ok_or_else(|| {
+                AppError::NotFound(format!("Conversation {conversation_id} not found"))
+            })?;
+        Ok(self
+            .conversation_repo
+            .latest_completed_turn_receipt(user_id, conversation_key)
+            .await?)
     }
 
     pub fn begin_runtime_build(&self, conversation_id: &str) -> Result<RuntimeBuildLease, AppError> {
@@ -6451,6 +6515,8 @@ impl ConversationService {
             result_ok: receipt.result_ok,
             result_text: receipt.result_text,
             result_error: receipt.result_error,
+            result_error_code: receipt.result_error_code,
+            result_error_retryable: receipt.result_error_retryable,
         }))
     }
 
@@ -6507,6 +6573,8 @@ impl ConversationService {
                     result_ok: receipt.result_ok,
                     result_text: receipt.result_text,
                     result_error: receipt.result_error,
+                    result_error_code: receipt.result_error_code,
+                    result_error_retryable: receipt.result_error_retryable,
                 },
             )),
             status => Err(AppError::Conflict(format!(
@@ -6574,6 +6642,8 @@ impl ConversationService {
             result_ok: receipt.result_ok,
             result_text: receipt.result_text,
             result_error: receipt.result_error,
+            result_error_code: receipt.result_error_code,
+            result_error_retryable: receipt.result_error_retryable,
         }))
     }
 
@@ -6935,6 +7005,8 @@ impl ConversationService {
                 result_ok: receipt.result_ok,
                 result_text: receipt.result_text,
                 result_error: receipt.result_error,
+                result_error_code: receipt.result_error_code,
+                result_error_retryable: receipt.result_error_retryable,
             });
         }
 
@@ -7145,6 +7217,8 @@ impl ConversationService {
                 result_ok: receipt.result_ok,
                 result_text: receipt.result_text,
                 result_error: receipt.result_error,
+                result_error_code: receipt.result_error_code,
+                result_error_retryable: receipt.result_error_retryable,
             });
         }
         {
@@ -7163,6 +7237,8 @@ impl ConversationService {
                     result_ok: None,
                     result_text: None,
                     result_error: None,
+                    result_error_code: None,
+                    result_error_retryable: None,
                 });
             }
             operations.insert(
@@ -7205,6 +7281,7 @@ impl ConversationService {
                 conversation_key,
                 &delivery_lease,
                 "Durably admitted turn was cancelled before process-local execution",
+                relay_error_code::TURN_CANCELLED,
             )
             .await;
             if !delivery_lease.receipt_was_handed_off() {
@@ -7253,6 +7330,7 @@ impl ConversationService {
                         conversation_key,
                         &delivery_lease,
                         &format!("{}", ErrorChain(&error)),
+                        relay_error_code::PREPARATION_FAILED,
                     )
                     .await;
                 } else if promote_before_execution
@@ -7268,6 +7346,10 @@ impl ConversationService {
                         false,
                         None,
                         Some("Public turn was cancelled before execution admission"),
+                        Some(relay_error_code::TURN_CANCELLED),
+                        Some(relay_error_code::fixed_code_retryable(
+                            relay_error_code::TURN_CANCELLED,
+                        )),
                         &runtime_build_cancellation,
                         Some((
                             &self.durable_operations_in_flight,
@@ -7299,6 +7381,8 @@ impl ConversationService {
             result_ok: None,
             result_text: None,
             result_error: None,
+            result_error_code: None,
+            result_error_retryable: None,
         })
     }
 
@@ -7451,6 +7535,8 @@ impl ConversationService {
             result_ok: receipt.result_ok,
             result_text: receipt.result_text,
             result_error: receipt.result_error,
+            result_error_code: receipt.result_error_code,
+            result_error_retryable: receipt.result_error_retryable,
         }))
     }
 
@@ -7744,6 +7830,10 @@ impl ConversationService {
                                 false,
                                 None,
                                 Some(&receipt_error),
+                                Some(relay_error_code::PREPARATION_FAILED),
+                                Some(relay_error_code::fixed_code_retryable(
+                                    relay_error_code::PREPARATION_FAILED,
+                                )),
                                 &CancellationToken::new(),
                                 durable_guard.as_ref().map(|(key, generation)| {
                                     (
@@ -7798,6 +7888,10 @@ impl ConversationService {
                         false,
                         None,
                         Some(&receipt_error),
+                        Some(relay_error_code::PREPARATION_FAILED),
+                        Some(relay_error_code::fixed_code_retryable(
+                            relay_error_code::PREPARATION_FAILED,
+                        )),
                         &preparation_token,
                         durable_guard.as_ref().map(|(key, generation)| {
                             (&self.durable_operations_in_flight, key.as_str(), *generation)
@@ -7896,6 +7990,10 @@ impl ConversationService {
                 false,
                 None,
                 Some(&receipt_error),
+                Some(relay_error_code::ADMISSION_REJECTED),
+                Some(relay_error_code::fixed_code_retryable(
+                    relay_error_code::ADMISSION_REJECTED,
+                )),
                 &preparation_token,
                 durable_guard.as_ref().map(|(key, generation)| {
                     (&self.durable_operations_in_flight, key.as_str(), *generation)
@@ -7973,6 +8071,7 @@ impl ConversationService {
                 false,
                 None,
                 Some(&receipt_error),
+                relay_error_code::fixed_failure(relay_error_code::PREPARATION_FAILED),
             );
             self.release_and_complete_turn(
                 &mut turn_handle,
@@ -8024,6 +8123,7 @@ impl ConversationService {
                     false,
                     None,
                     Some(&receipt_error),
+                    relay_error_code::fixed_failure(relay_error_code::PREPARATION_FAILED),
                 );
                 self.release_and_complete_turn(
                     &mut turn_handle,
@@ -8194,6 +8294,7 @@ impl ConversationService {
                         false,
                         None,
                         Some(&receipt_error),
+                        relay_error_code::fixed_failure(relay_error_code::PREPARATION_FAILED),
                     );
                     service
                         .release_and_complete_turn(
@@ -8263,6 +8364,7 @@ impl ConversationService {
                     false,
                     None,
                     Some(&receipt_error),
+                    relay_error_code::fixed_failure(relay_error_code::PREPARATION_FAILED),
                 );
                 service
                     .release_and_complete_turn(
@@ -8327,6 +8429,7 @@ impl ConversationService {
                     false,
                     None,
                     Some(&receipt_error),
+                    relay_error_code::fixed_failure(relay_error_code::PREPARATION_FAILED),
                 );
                 service
                     .release_and_complete_turn(
@@ -8391,7 +8494,12 @@ impl ConversationService {
                 String,
                 Option<ProviderWithModel>,
             )> = None;
-            let mut durable_completion: Option<(bool, Option<String>, Option<String>)> = None;
+            let mut durable_completion: Option<(
+                bool,
+                Option<String>,
+                Option<String>,
+                Option<(String, bool)>,
+            )> = None;
             // Phase 3 (review #1/#5): resolve the effective failover config ONCE
             // (it does not change mid-turn). Used to build the relay's error
             // suppressor so a pre-response provider fault that WILL be failed over
@@ -8410,6 +8518,7 @@ impl ConversationService {
                         false,
                         None,
                         Some("Agent turn was cancelled before send".to_owned()),
+                        relay_error_code::fixed_failure(relay_error_code::TURN_CANCELLED),
                     ));
                     break;
                 }
@@ -8421,6 +8530,7 @@ impl ConversationService {
                                 false,
                                 None,
                                 Some("Agent turn was cancelled before continuation admission".to_owned()),
+                                relay_error_code::fixed_failure(relay_error_code::TURN_CANCELLED),
                             ));
                             final_turn_writeback = None;
                             break;
@@ -8510,6 +8620,7 @@ impl ConversationService {
                         false,
                         outcome.final_text.clone(),
                         Some("Agent turn was cancelled".to_owned()),
+                        relay_error_code::fixed_failure(relay_error_code::TURN_CANCELLED),
                     ));
                     final_turn_writeback = None;
                     break;
@@ -8534,6 +8645,7 @@ impl ConversationService {
                         false,
                         outcome.final_text.clone(),
                         Some("Agent event stream integrity was lost".to_owned()),
+                        relay_error_code::map_turn_failure(&outcome.terminal, None),
                     ));
                     final_turn_writeback = None;
                     break;
@@ -8551,6 +8663,7 @@ impl ConversationService {
                         false,
                         outcome.final_text.clone(),
                         Some("Agent turn was cancelled during session persistence".to_owned()),
+                        relay_error_code::fixed_failure(relay_error_code::TURN_CANCELLED),
                     ));
                     final_turn_writeback = None;
                     break;
@@ -8589,6 +8702,7 @@ impl ConversationService {
                         false,
                         outcome.final_text.clone(),
                         Some("Agent turn was cancelled during model failover".to_owned()),
+                        relay_error_code::fixed_failure(relay_error_code::TURN_CANCELLED),
                     ));
                     final_turn_writeback = None;
                     break;
@@ -8653,6 +8767,7 @@ impl ConversationService {
                                 false,
                                 outcome.final_text.clone(),
                                 Some("Agent turn was cancelled during image fallback".to_owned()),
+                                relay_error_code::fixed_failure(relay_error_code::TURN_CANCELLED),
                             ));
                             break;
                         }
@@ -8680,6 +8795,7 @@ impl ConversationService {
                         false,
                         outcome.final_text.clone(),
                         Some("Agent turn was cancelled during fallback evaluation".to_owned()),
+                        relay_error_code::fixed_failure(relay_error_code::TURN_CANCELLED),
                     ));
                     final_turn_writeback = None;
                     break;
@@ -8718,6 +8834,10 @@ impl ConversationService {
                     outcome.final_text.clone(),
                     (!matches!(outcome.terminal, RelayTerminal::Finish))
                         .then(|| format!("{:?}", outcome.terminal)),
+                    relay_error_code::map_turn_failure(
+                        &outcome.terminal,
+                        outcome.final_text.as_deref(),
+                    ),
                 ));
 
                 let acp_evicted = service
@@ -8738,6 +8858,7 @@ impl ConversationService {
                         false,
                         outcome.final_text.clone(),
                         Some("Agent turn was cancelled during terminal cleanup".to_owned()),
+                        relay_error_code::fixed_failure(relay_error_code::TURN_CANCELLED),
                     ));
                     final_turn_writeback = None;
                     break;
@@ -8773,6 +8894,7 @@ impl ConversationService {
                         false,
                         outcome.final_text.clone(),
                         Some("Agent turn was cancelled before continuation".to_owned()),
+                        relay_error_code::fixed_failure(relay_error_code::TURN_CANCELLED),
                     ));
                     final_turn_writeback = None;
                     break;
@@ -8795,11 +8917,12 @@ impl ConversationService {
                 ));
             }
 
-            let (ok, text, error) = durable_completion.unwrap_or_else(|| {
+            let (ok, text, error, error_code) = durable_completion.unwrap_or_else(|| {
                 (
                     false,
                     None,
                     Some("Agent turn ended without a terminal relay outcome".to_owned()),
+                    relay_error_code::fixed_failure(relay_error_code::OWNER_TASK_EXITED),
                 )
             });
             if turn_token.is_cancelled() {
@@ -8882,6 +9005,7 @@ impl ConversationService {
                 ok,
                 text.as_deref(),
                 error.as_deref(),
+                error_code,
             );
             service
                 .release_and_complete_turn(
@@ -8971,6 +9095,7 @@ impl ConversationService {
                     false,
                     None,
                     Some("Agent turn task exited unexpectedly before durable completion"),
+                    relay_error_code::fixed_failure(relay_error_code::OWNER_TASK_EXITED),
                 );
                 service
                     .release_and_complete_turn(
@@ -9173,6 +9298,8 @@ impl ConversationService {
                 conv_id,
                 operation_id,
                 true,
+                None,
+                None,
                 None,
                 None,
                 now_ms(),
@@ -9700,6 +9827,8 @@ impl ConversationService {
                 result_ok: receipt.result_ok,
                 result_text: receipt.result_text,
                 result_error: receipt.result_error,
+                result_error_code: receipt.result_error_code,
+                result_error_retryable: receipt.result_error_retryable,
             });
         }
         let steer_fence_prefix =
@@ -9751,6 +9880,8 @@ impl ConversationService {
                 result_ok: receipt.result_ok,
                 result_text: receipt.result_text,
                 result_error: receipt.result_error,
+                result_error_code: receipt.result_error_code,
+                result_error_retryable: receipt.result_error_retryable,
             });
         }
 
@@ -9772,6 +9903,8 @@ impl ConversationService {
                         false,
                         None,
                         Some("the Agent turn ended before the steer was delivered"),
+                        None,
+                        None,
                         now_ms(),
                     )
                     .await?;
@@ -9790,6 +9923,8 @@ impl ConversationService {
                         false,
                         None,
                         Some(&detail),
+                        None,
+                        None,
                         now_ms(),
                     )
                     .await?;
@@ -9820,6 +9955,8 @@ impl ConversationService {
                 conv_id,
                 &operation_id,
                 true,
+                None,
+                None,
                 None,
                 None,
                 now_ms(),
@@ -9859,6 +9996,8 @@ impl ConversationService {
             result_ok: Some(true),
             result_text: None,
             result_error: None,
+            result_error_code: None,
+            result_error_retryable: None,
         })
     }
 
@@ -10101,6 +10240,8 @@ impl ConversationService {
                 result_ok: receipt.result_ok,
                 result_text: receipt.result_text,
                 result_error: receipt.result_error,
+                result_error_code: receipt.result_error_code,
+                result_error_retryable: receipt.result_error_retryable,
             });
         }
         let runtime_build_lease =
@@ -10305,6 +10446,8 @@ impl ConversationService {
                 result_ok: receipt.result_ok,
                 result_text: receipt.result_text,
                 result_error: receipt.result_error,
+                result_error_code: receipt.result_error_code,
+                result_error_retryable: receipt.result_error_retryable,
             });
         }
 
@@ -10420,6 +10563,7 @@ impl ConversationService {
                 conv_id,
                 &delivery,
                 &format!("{}", ErrorChain(&error)),
+                relay_error_code::PREPARATION_FAILED,
             )
             .await;
             if !delivery.receipt_was_handed_off() {
@@ -10472,6 +10616,7 @@ impl ConversationService {
                     conv_id,
                     &delivery,
                     &format!("{}", ErrorChain(&error)),
+                    relay_error_code::PREPARATION_FAILED,
                 )
                 .await;
                 if !delivery.receipt_was_handed_off() {
@@ -10491,6 +10636,8 @@ impl ConversationService {
             result_ok: None,
             result_text: None,
             result_error: None,
+            result_error_code: None,
+            result_error_retryable: None,
         })
     }
 

@@ -830,6 +830,8 @@ async fn internal_creation_and_delivery_operations_are_durable_and_repository_id
             false,
             None,
             Some("terminal provider error"),
+            None,
+            None,
             accepted_at + 2,
         )
         .await
@@ -843,6 +845,8 @@ async fn internal_creation_and_delivery_operations_are_durable_and_repository_id
             false,
             None,
             Some("terminal provider error"),
+            None,
+            None,
             accepted_at + 3,
         )
         .await
@@ -1033,6 +1037,8 @@ async fn atomic_turn_claim_has_one_leader_and_existing_receipt_never_readmits_li
                 result_ok: true,
                 result_text: Some("finished before replay".to_owned()),
                 result_error: None,
+                result_error_code: None,
+                result_error_retryable: None,
             },
             now + 1,
         )
@@ -1265,6 +1271,8 @@ async fn late_a_finalizer_cannot_touch_b_after_external_a_result() {
                 result_ok: true,
                 result_text: Some("late A".to_owned()),
                 result_error: None,
+                result_error_code: None,
+                result_error_retryable: None,
             },
             now + 3,
         )
@@ -1315,6 +1323,8 @@ async fn exact_finalize_adopts_receipt_only_completion_for_its_active_generation
         false,
         None,
         Some("stop result"),
+        None,
+        None,
         now + 1,
     )
     .await
@@ -1330,6 +1340,8 @@ async fn exact_finalize_adopts_receipt_only_completion_for_its_active_generation
                 result_ok: true,
                 result_text: Some("late success".to_owned()),
                 result_error: None,
+                result_error_code: None,
+                result_error_retryable: None,
             },
             now + 2,
         )
@@ -1398,6 +1410,8 @@ async fn exact_finalize_repairs_finished_row_that_still_owns_the_operation() {
                 result_ok: true,
                 result_text: Some("done".to_owned()),
                 result_error: None,
+                result_error_code: None,
+                result_error_retryable: None,
             },
             nomifun_common::now_ms() + 1,
         )
@@ -1448,6 +1462,8 @@ async fn missing_a_receipt_cannot_release_or_mutate_active_b_generation() {
                 result_ok: false,
                 result_text: None,
                 result_error: Some("ambiguous".to_owned()),
+                result_error_code: None,
+                result_error_retryable: None,
             },
             now + 1,
         )
@@ -1988,6 +2004,8 @@ async fn admission_epoch_boundaries_finish_at_i64_max_without_overflow() {
                 result_ok: true,
                 result_text: Some("done".to_owned()),
                 result_error: None,
+                result_error_code: None,
+                result_error_retryable: None,
             },
             nomifun_common::now_ms() + 1,
         )
@@ -2320,6 +2338,8 @@ async fn running_authority_rejects_unkeyed_and_raw_reopen_but_allows_receipt_adm
         true,
         Some("completed exactly once"),
         None,
+        None,
+        None,
         now + 4,
     )
     .await
@@ -2352,6 +2372,8 @@ async fn running_authority_rejects_unkeyed_and_raw_reopen_but_allows_receipt_adm
                 result_ok: true,
                 result_text: Some("completed exactly once".to_owned()),
                 result_error: None,
+                result_error_code: None,
+                result_error_retryable: None,
             },
             now + 5,
         )
@@ -2421,6 +2443,8 @@ async fn list_unsettled_turn_admissions_includes_running_and_finished_active_row
         partial_operation,
         true,
         Some("receipt committed before aggregate cleanup"),
+        None,
+        None,
         None,
         now + 2,
     )
@@ -2526,6 +2550,8 @@ async fn finalize_turn_atomically_finishes_conversation_and_receipt_and_replays(
         result_ok: true,
         result_text: Some("done".to_owned()),
         result_error: None,
+        result_error_code: None,
+        result_error_retryable: None,
     };
     assert_eq!(
         repo.finalize_exact_turn_operation(
@@ -2597,6 +2623,8 @@ async fn completed_old_receipt_cannot_finalize_a_new_running_turn_generation() {
         true,
         Some("old result"),
         None,
+        None,
+        None,
         now + 1,
     )
     .await
@@ -2628,6 +2656,8 @@ async fn completed_old_receipt_cannot_finalize_a_new_running_turn_generation() {
                 result_ok: true,
                 result_text: Some("old result".to_owned()),
                 result_error: None,
+                result_error_code: None,
+                result_error_retryable: None,
             }),
             now + 3,
         )
@@ -2671,6 +2701,8 @@ async fn finalize_turn_rejects_stale_pending_without_settling_receipt() {
         result_ok: true,
         result_text: Some("must not commit".to_owned()),
         result_error: None,
+        result_error_code: None,
+        result_error_retryable: None,
     };
 
     assert_eq!(
@@ -2729,6 +2761,8 @@ async fn exact_finalize_adopts_terminal_receipt_and_missing_receipt_cannot_touch
             false,
             None,
             Some("original error"),
+            None,
+            None,
             accepted_at + 1,
         )
         .await
@@ -2741,6 +2775,8 @@ async fn exact_finalize_adopts_terminal_receipt_and_missing_receipt_cannot_touch
         result_ok: true,
         result_text: Some("different result".to_owned()),
         result_error: None,
+        result_error_code: None,
+        result_error_retryable: None,
     };
     assert_eq!(
         repo.finalize_exact_turn_operation(
@@ -2784,6 +2820,8 @@ async fn exact_finalize_adopts_terminal_receipt_and_missing_receipt_cannot_touch
         result_ok: true,
         result_text: Some("done".to_owned()),
         result_error: None,
+        result_error_code: None,
+        result_error_retryable: None,
     };
     assert!(matches!(
         repo.finalize_exact_turn_operation(
@@ -2841,6 +2879,8 @@ async fn finalize_turn_rolls_back_receipt_if_conversation_finish_write_fails() {
         result_ok: true,
         result_text: Some("would finish".to_owned()),
         result_error: None,
+        result_error_code: None,
+        result_error_retryable: None,
     };
 
     assert!(
@@ -3303,6 +3343,8 @@ async fn reset_terminal_conversation_clears_finished_aggregate_atomically() {
             completed_operation_id,
             true,
             Some("original result"),
+            None,
+            None,
             None,
             nomifun_common::now_ms(),
         )
@@ -5344,6 +5386,8 @@ async fn conversation_delivery_receipt_identity_and_retention_are_physical_invar
             true,
             Some("completed"),
             None,
+            None,
+            None,
             200,
         )
         .await
@@ -5361,6 +5405,8 @@ async fn conversation_delivery_receipt_identity_and_retention_are_physical_invar
                 result_ok: true,
                 result_text: Some("completed".to_owned()),
                 result_error: None,
+                result_error_code: None,
+                result_error_retryable: None,
             },
             201,
         )
@@ -5469,6 +5515,8 @@ async fn conversation_delivery_receipt_identity_and_retention_are_physical_invar
                 result_ok: false,
                 result_text: Some("usable partial final text".to_owned()),
                 result_error: Some("provider disconnected after partial output".to_owned()),
+                result_error_code: None,
+                result_error_retryable: None,
             },
             400,
         )
@@ -5641,6 +5689,8 @@ async fn late_abandon_of_a_preserves_external_a_result_and_active_b() {
             result_ok: true,
             result_text: Some("external A result".to_owned()),
             result_error: None,
+            result_error_code: None,
+            result_error_retryable: None,
         },
         200,
     )

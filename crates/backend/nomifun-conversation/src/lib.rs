@@ -7,6 +7,7 @@ mod failover_seam;
 mod message_persistence;
 mod orphan_recovery;
 pub mod model_failover;
+pub mod relay_error_code;
 pub mod response_middleware;
 pub mod routes;
 pub mod routes_aux;

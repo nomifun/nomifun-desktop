@@ -1216,6 +1216,7 @@ impl IConversationRepository for SqliteConversationRepository {
                 let completed = sqlx::query(
                     "UPDATE conversation_delivery_receipts \
                      SET status = 'completed', result_ok = ?, result_text = ?, result_error = ?, \
+                         result_error_code = ?, result_error_retryable = ?, \
                          completed_at = MAX(created_at, updated_at, ?), \
                          updated_at = MAX(created_at, updated_at, ?) \
                      WHERE operation_id = ? AND conversation_id = ? AND user_id = ? \
@@ -1224,6 +1225,8 @@ impl IConversationRepository for SqliteConversationRepository {
                 .bind(completion.result_ok)
                 .bind(completion.result_text.as_deref())
                 .bind(completion.result_error.as_deref())
+                .bind(completion.result_error_code.as_deref())
+                .bind(completion.result_error_retryable)
                 .bind(completed_at)
                 .bind(completed_at)
                 .bind(&completion.operation_id)
@@ -1416,6 +1419,7 @@ impl IConversationRepository for SqliteConversationRepository {
             let settled = sqlx::query(
                 "UPDATE conversation_delivery_receipts \
                  SET status = 'completed', result_ok = ?, result_text = ?, result_error = ?, \
+                     result_error_code = ?, result_error_retryable = ?, \
                      completed_at = MAX(created_at, updated_at, ?), \
                      updated_at = MAX(created_at, updated_at, ?) \
                  WHERE operation_id = ? AND conversation_id = ? AND user_id = ? \
@@ -1424,6 +1428,8 @@ impl IConversationRepository for SqliteConversationRepository {
             .bind(completion.result_ok)
             .bind(completion.result_text.as_deref())
             .bind(completion.result_error.as_deref())
+            .bind(completion.result_error_code.as_deref())
+            .bind(completion.result_error_retryable)
             .bind(completed_at)
             .bind(completed_at)
             .bind(&completion.operation_id)
@@ -3339,11 +3345,14 @@ impl IConversationRepository for SqliteConversationRepository {
         result_ok: bool,
         result_text: Option<&str>,
         result_error: Option<&str>,
+        result_error_code: Option<&str>,
+        result_error_retryable: Option<bool>,
         completed_at: i64,
     ) -> Result<bool, DbError> {
         let result = sqlx::query(
             "UPDATE conversation_delivery_receipts \
              SET status = 'completed', result_ok = ?, result_text = ?, result_error = ?, \
+                 result_error_code = ?, result_error_retryable = ?, \
                  completed_at = MAX(created_at, updated_at, ?), \
                  updated_at = MAX(created_at, updated_at, ?) \
              WHERE operation_id = ? AND conversation_id = ? AND user_id = ? \
@@ -3352,6 +3361,8 @@ impl IConversationRepository for SqliteConversationRepository {
         .bind(result_ok)
         .bind(result_text)
         .bind(result_error)
+        .bind(result_error_code)
+        .bind(result_error_retryable)
         .bind(completed_at)
         .bind(completed_at)
         .bind(operation_id)
@@ -3371,6 +3382,24 @@ impl IConversationRepository for SqliteConversationRepository {
                 && receipt.result_text.as_deref() == result_text
                 && receipt.result_error.as_deref() == result_error
         }))
+    }
+
+    async fn latest_completed_turn_receipt(
+        &self,
+        user_id: &str,
+        conversation_id: &str,
+    ) -> Result<Option<ConversationDeliveryReceiptRow>, DbError> {
+        let receipt = sqlx::query_as::<_, ConversationDeliveryReceiptRow>(
+            "SELECT * FROM conversation_delivery_receipts \
+             WHERE user_id = ? AND conversation_id = ? \
+               AND kind = 'turn' AND status = 'completed' \
+             ORDER BY completed_at DESC, id DESC LIMIT 1",
+        )
+        .bind(user_id)
+        .bind(conversation_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(receipt)
     }
 
     async fn project_assistant_message_with_receipt(
@@ -6999,6 +7028,8 @@ mod tests {
                 true,
                 Some("steered"),
                 None,
+                None,
+                None,
                 now + 2,
             )
             .await
@@ -7612,6 +7643,8 @@ mod tests {
                 original_operation_id,
                 true,
                 Some("original-result"),
+                None,
+                None,
                 None,
                 now + 2,
             )
