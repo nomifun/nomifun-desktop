@@ -187,18 +187,27 @@ impl HostSlot {
         // Gate contention must not consume the factory's own cold-start
         // budget. This matters after a failed initializer: the next caller is
         // allowed one complete, independently bounded launch attempt.
-        let host = tokio::time::timeout(
+        let host = match tokio::time::timeout(
             HOST_INITIALIZATION_LAUNCH_TIMEOUT,
             self.driver.get_or_try_init(init),
         )
         .await
-        .map_err(|_| {
-            host_initialization_timeout_error(
-                self.epoch,
-                "launch",
-                HOST_INITIALIZATION_LAUNCH_TIMEOUT,
-            )
-        })??;
+        {
+            Ok(result) => result?,
+            Err(_) => {
+                // The launch future was dropped mid-flight; its half-started
+                // browser may still be tearing down asynchronously. Unlike a
+                // clean factory error, this slot must never rerun a launch
+                // into the same profile: retire it so the caller hands it to
+                // cleanup authority and retries on a fresh slot/epoch.
+                self.retire();
+                return Err(host_initialization_timeout_error(
+                    self.epoch,
+                    "launch",
+                    HOST_INITIALIZATION_LAUNCH_TIMEOUT,
+                ));
+            }
+        };
         // Retirement is published before cleanup waits for the initialization
         // gate. If shutdown/sweep selected this slot while launch was in
         // flight, never hand the late Host back to a Lane; the cleanup waiter
@@ -2146,6 +2155,20 @@ impl BrowserSessionHub {
                 Ok(HostHandle { key, slot, driver })
             }
             Err(error) => {
+                // A cold-start launch timeout retires the slot (its cancelled
+                // launch may still be tearing a half-started browser down).
+                // Hand the retired slot to cleanup authority so the retry gets
+                // a fresh slot and epoch instead of relaunching into the same
+                // profile directory behind the dying process.
+                if is_host_initialization_launch_timeout(&error)
+                    && self
+                        .retire_host_slot_for_cleanup(&key, slot.epoch, &slot)
+                        .await
+                {
+                    let _ = self
+                        .attempt_orphaned_host_slot_cleanup(&key, &slot)
+                        .await;
+                }
                 if half_open_probe {
                     circuit_attempt.fail();
                 } else {
@@ -5762,6 +5785,15 @@ fn is_host_fatal_error(error: &BrowserPlatformError) -> bool {
             .get("failure_scope")
             .and_then(serde_json::Value::as_str)
             == Some("host")
+}
+
+fn is_host_initialization_launch_timeout(error: &BrowserPlatformError) -> bool {
+    error
+        .metadata
+        .get("host_initialization_timeout")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false)
+        && error.metadata.get("phase").and_then(serde_json::Value::as_str) == Some("launch")
 }
 
 fn lane_restart_notice(
@@ -11723,6 +11755,52 @@ mod tests {
             harness.hub.remaining_resources().await,
             RemainingResources::default()
         );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn cold_start_launch_timeout_retires_the_slot_and_retry_gets_a_fresh_epoch() {
+        let harness = harness();
+        harness
+            .probe
+            .block_host_launch
+            .store(true, Ordering::Release);
+
+        let error = harness
+            .client
+            .open(
+                Some("cold-start-timeout"),
+                BrowserIdentityMode::Primary,
+                None,
+            )
+            .await
+            .expect_err("a blocked cold start must time out");
+        assert_eq!(error.metadata["host_initialization_timeout"], true);
+        assert_eq!(error.metadata["phase"], "launch");
+        assert!(
+            harness.hub.inner.host_slots.read().await.is_empty(),
+            "the timed-out slot must be retired to cleanup authority, not left active"
+        );
+
+        harness
+            .probe
+            .block_host_launch
+            .store(false, Ordering::Release);
+        let lane = harness
+            .client
+            .open(
+                Some("cold-start-retry"),
+                BrowserIdentityMode::Primary,
+                None,
+            )
+            .await
+            .expect("retry after a cold-start timeout must succeed")
+            .lane()
+            .clone();
+        assert_eq!(
+            lane.browser_epoch, 2,
+            "the retry must launch a fresh slot/epoch instead of reusing the timed-out slot"
+        );
+        assert_eq!(harness.factory.launches.load(Ordering::Acquire), 2);
     }
 
     #[tokio::test]
