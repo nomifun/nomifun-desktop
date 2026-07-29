@@ -3985,6 +3985,65 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn unattributable_lane_id_observation_is_dropped_not_misfiled() {
+        let harness = harness();
+        let caller = caller(&harness.hub, "runtime-observe-guard", "attempt-guard");
+        // An observe result that lost its authoritative lane attribution,
+        // e.g. because the post-operation status refresh failed and the
+        // facade serialized `"lane": null`.
+        let orphaned = ToolResult::text(
+            json!({
+                "ok": true,
+                "action": "observe",
+                "lane_id": "lane-unattributable",
+                "lane": null,
+                "output": { "text": "- button \"Pay now\" [ref=f0e7]" },
+            })
+            .to_string(),
+        );
+
+        harness.registry.cache_managed_observation(
+            &caller,
+            None,
+            &json!({ "action": "observe", "lane_id": "lane-unattributable" }),
+            &orphaned,
+        );
+        {
+            let observations = harness
+                .registry
+                .observations
+                .lock()
+                .expect("gateway browser observation cache poisoned");
+            assert!(
+                observations.is_empty(),
+                "a lane_id-addressed snapshot without authoritative lane \
+                 attribution must be dropped, not filed under another lane"
+            );
+        }
+
+        // Control: without the caller-supplied lane_id the identical result
+        // legitimately attributes to the default lane, so the drop above is
+        // the mis-attribution guard and not an unrelated parse failure.
+        harness.registry.cache_managed_observation(
+            &caller,
+            None,
+            &json!({ "action": "observe" }),
+            &orphaned,
+        );
+        let observations = harness
+            .registry
+            .observations
+            .lock()
+            .expect("gateway browser observation cache poisoned");
+        let default_lane = LaneKey::new("runtime-observe-guard", None).unwrap();
+        assert_eq!(observations.len(), 1);
+        assert_eq!(
+            observations.get(&default_lane).map(String::as_str),
+            Some("- button \"Pay now\" [ref=f0e7]")
+        );
+    }
+
     #[test]
     fn gateway_rejects_every_shared_trusted_owner_field() {
         // F23: the gateway must enforce the ONE shared trusted-owner field
