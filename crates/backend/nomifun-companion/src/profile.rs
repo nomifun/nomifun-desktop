@@ -4,6 +4,7 @@
 //! loop and the default-companion pointer. Both reuse the shared config value
 //! types from [`crate::config`] and the same atomic temp+rename write pattern.
 
+use std::collections::{BTreeSet, HashSet};
 use std::path::{Path, PathBuf};
 
 use nomifun_common::{CompanionId, FigureId, ProviderWithModel, now_ms};
@@ -79,6 +80,42 @@ pub struct CustomFigureMeta {
     pub figure_id: Option<String>,
 }
 
+/// General-purpose skills explicitly configured for one companion.
+///
+/// This intent is separate from the companion's self-evolved skills. `enabled`
+/// contains opt-in catalog skills, while `disabled_auto` records auto-injected
+/// built-ins that this companion has explicitly opted out of.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default, deny_unknown_fields)]
+pub struct CompanionSkillConfig {
+    pub enabled: Vec<String>,
+    pub disabled_auto: Vec<String>,
+}
+
+/// Merge global auto-injected skills with one companion's explicit intent.
+/// Values are normalized at the trusted profile boundary because profiles can
+/// be patched by API callers other than the desktop UI.
+pub(crate) fn normalized_effective_skill_names(
+    auto_names: impl IntoIterator<Item = String>,
+    config: &CompanionSkillConfig,
+) -> Vec<String> {
+    let disabled: HashSet<String> = config
+        .disabled_auto
+        .iter()
+        .map(|name| name.trim())
+        .filter(|name| !name.is_empty())
+        .map(ToOwned::to_owned)
+        .collect();
+    auto_names
+        .into_iter()
+        .chain(config.enabled.iter().map(|name| name.trim().to_owned()))
+        .map(|name| name.trim().to_owned())
+        .filter(|name| !name.is_empty() && !disabled.contains(name))
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
+}
+
 /// Per-companion profile persisted as `companion/companions/{companion_id}/config.json`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
@@ -104,6 +141,9 @@ pub struct CompanionProfileConfig {
         serialize_with = "serialize_optional_model"
     )]
     pub model: Option<ProviderWithModel>,
+    /// General-purpose skills assigned from the global skill catalog.
+    #[serde(default)]
+    pub skills: CompanionSkillConfig,
     pub appearance: CompanionWindowConfig,
     /// Frozen reusable configuration applied to this companion. Identity,
     /// memories, evolved skills, window state and channel credentials remain
@@ -126,6 +166,7 @@ impl CompanionProfileConfig {
             character: character.to_owned(),
             persona: PersonaConfig::default(),
             model: None,
+            skills: CompanionSkillConfig::default(),
             appearance: CompanionWindowConfig::default(),
             applied_preset: None,
             created_at: now_ms(),
@@ -466,6 +507,8 @@ mod tests {
             model: "claude-fable-5".into(),
             use_model: None,
         });
+        profile.skills.enabled = vec!["mermaid".into()];
+        profile.skills.disabled_auto = vec!["cron".into()];
         profile.appearance.companion_enabled = true;
         profile.save(dir.path()).unwrap();
 
@@ -473,6 +516,37 @@ mod tests {
         assert_eq!(again, profile);
         assert!(CompanionId::parse(&again.companion_id).is_ok());
         assert!(again.created_at > 0);
+    }
+
+    #[test]
+    fn old_profile_without_skills_defaults_to_empty_configuration() {
+        let companion_id = CompanionId::new().into_string();
+        let raw = serde_json::json!({
+            "companion_id": companion_id,
+            "seq": 1,
+            "name": "Old",
+            "character": "ink",
+            "persona": PersonaConfig::default(),
+            "model": null,
+            "appearance": CompanionWindowConfig::default(),
+            "created_at": 1
+        });
+        let profile: CompanionProfileConfig = serde_json::from_value(raw).unwrap();
+        assert!(profile.skills.enabled.is_empty());
+        assert!(profile.skills.disabled_auto.is_empty());
+    }
+
+    #[test]
+    fn effective_skill_names_trim_deduplicate_and_exclude_auto() {
+        let config = CompanionSkillConfig {
+            enabled: vec![" mermaid ".into(), "mermaid".into(), " ".into()],
+            disabled_auto: vec![" cron ".into()],
+        };
+
+        assert_eq!(
+            normalized_effective_skill_names(vec!["cron".into(), "todo".into()], &config),
+            vec!["mermaid", "todo"]
+        );
     }
 
     #[test]

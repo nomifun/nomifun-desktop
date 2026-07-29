@@ -2,9 +2,9 @@
 pub(crate) mod runtime_state;
 pub mod artifact_store;
 pub mod runtime_handle;
-// P3-K2: rendering page-fetch backend for knowledge URL sources. Gated behind
-// `browser-use` — the ONE bridge from the (agent-layer) browser engine into the
-// knowledge `PageFetcher` trait, keeping the knowledge crate engine-free (②).
+// Rendering page-fetch adapter for knowledge URL sources. The implementation
+// consumes the application-owned Browser Session Hub and keeps the knowledge
+// crate browser-platform-free.
 #[cfg(feature = "browser-use")]
 pub mod browser_fetcher;
 pub mod capability;
@@ -55,6 +55,11 @@ pub use factory::provider_config::{
 pub use factory::{
     AgentFactoryDeps, CompanionPromptProvider, PublicAgentProvider, PublicAgentRuntime,
     build_agent_factory,
+};
+#[cfg(feature = "browser-use")]
+pub use factory::browser_lane::{
+    BrowserLaneBinding, BrowserLaneClientProvider, BrowserLaneClientProviderSlot,
+    BrowserOwnerLeaseGuard, TrustedBrowserRuntimeContext,
 };
 pub use idle_scanner::start_idle_scanner;
 #[cfg(feature = "browser-use")]

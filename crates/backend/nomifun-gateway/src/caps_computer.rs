@@ -96,9 +96,10 @@ struct ScrollParams {
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct LaunchParams {
-    /// What to open: a URL (https://…), a file/folder path, or an app name.
+    /// What to open: a file/folder path or an app name. Web URLs (http/https)
+    /// are rejected — use the managed Browser tools for web pages.
     target: String,
-    /// Optional application to open the target WITH (e.g. app="msedge").
+    /// Optional application to open the target WITH (e.g. a specific editor).
     #[serde(default)]
     app: Option<String>,
 }
@@ -263,7 +264,7 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
         CapabilityMeta::new(
             "nomi_computer_launch",
             "computer",
-            "Open an application, URL, file, or folder via the OS shell. Always use this instead of shell `start`/`Start-Process`.",
+            "Open an application, file, or folder via the OS shell. Always use this instead of shell `start`/`Start-Process`. Web URLs (http/https) are rejected: use the managed Browser tools for web pages.",
             DangerTier::Write,
         ),
         launch,

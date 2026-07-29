@@ -24,7 +24,7 @@ use std::sync::Mutex;
 
 use chromiumoxide::types::{CallId, Error as CdpError};
 use serde::Deserialize;
-use tokio::sync::{broadcast, oneshot};
+use tokio::sync::{broadcast, mpsc, oneshot};
 
 /// 根（browser）session 在注册表里的 key。CDP 根连接的消息无 `sessionId` 字段，
 /// 我们用一个固定哨兵 key 统一登记，避免 `Option<String>` 在两处分叉。
@@ -150,8 +150,15 @@ pub struct SessionRegistry {
 struct RegistryInner {
     /// 所有活动 session：sessionId（根 = `ROOT_SESSION`）→ Session。
     sessions: HashMap<String, Session>,
+    /// Target-to-session routing for lifecycle events such as
+    /// `Target.targetCrashed`, whose payload has a targetId but no sessionId.
+    target_sessions: HashMap<String, String>,
     /// 事件订阅：(method, Option<session>) → broadcast 发送端。
     subscriptions: HashMap<SubKey, broadcast::Sender<CdpEvent>>,
+    /// Security/lifecycle control events must never be dropped merely because
+    /// a consumer was briefly busy. These subscribers use an unbounded queue;
+    /// they are reserved for the attach and Fetch-paused control paths.
+    reliable_subscriptions: HashMap<SubKey, Vec<mpsc::UnboundedSender<CdpEvent>>>,
     /// 整个连接是否已关闭（粘性）。置位后所有 send 短路 `Closed`。
     connection_closed: bool,
 }
@@ -173,7 +180,9 @@ impl SessionRegistry {
         Self {
             inner: Mutex::new(RegistryInner {
                 sessions,
+                target_sessions: HashMap::new(),
                 subscriptions: HashMap::new(),
+                reliable_subscriptions: HashMap::new(),
                 connection_closed: false,
             }),
         }
@@ -191,9 +200,45 @@ impl SessionRegistry {
             .or_insert_with(|| Session::new(session_id, target_type));
     }
 
+    /// Atomically records all routing facts carried by
+    /// `Target.attachedToTarget`. The read loop calls this before broadcasting
+    /// the event, so other subscribers cannot race their first session command
+    /// against a separate attach worker.
+    pub fn register_attached(
+        &self,
+        session_id: impl Into<String>,
+        target_id: impl Into<String>,
+        target_type: impl Into<String>,
+    ) {
+        let session_id = session_id.into();
+        let target_id = target_id.into();
+        let target_type = target_type.into();
+        let mut g = self.inner.lock().unwrap();
+        g.sessions
+            .entry(session_id.clone())
+            .and_modify(|session| {
+                session.target_type = target_type.clone();
+                session.closed = false;
+                session.crashed = false;
+            })
+            .or_insert_with(|| Session::new(session_id.clone(), target_type));
+        g.target_sessions.insert(target_id, session_id);
+    }
+
     /// 该 session 当前是否已登记。
     pub fn has_session(&self, session_id: &str) -> bool {
         self.inner.lock().unwrap().sessions.contains_key(session_id)
+    }
+
+    /// Returns the sticky crash state for a registered session. Unknown or
+    /// normally-closed sessions are not reported as crashed.
+    pub fn is_session_crashed(&self, session_id: &str) -> bool {
+        self.inner
+            .lock()
+            .unwrap()
+            .sessions
+            .get(session_id)
+            .is_some_and(|session| session.crashed)
     }
 
     /// 该 session 的 target 类型（未登记 → None）。
@@ -243,6 +288,23 @@ impl SessionRegistry {
             .entry(key)
             .or_insert_with(|| broadcast::channel(EVENT_CHANNEL_CAPACITY).0);
         tx.subscribe()
+    }
+
+    /// Subscribe to a control event without broadcast lag loss. This is only
+    /// for events where dropping one item can strand a paused target/request;
+    /// ordinary observation and telemetry should continue to use `subscribe`.
+    pub fn subscribe_reliable(
+        &self,
+        method: impl Into<String>,
+        session_id: Option<&str>,
+    ) -> mpsc::UnboundedReceiver<CdpEvent> {
+        let key: SubKey = (method.into(), session_id.map(str::to_owned));
+        let (tx, rx) = mpsc::unbounded_channel();
+        let mut g = self.inner.lock().unwrap();
+        if !g.connection_closed {
+            g.reliable_subscriptions.entry(key).or_default().push(tx);
+        }
+        rx
     }
 
     /// 在某 session 上登记一个进行中的命令回调。返回等待结果的 `oneshot::Receiver`。
@@ -340,12 +402,39 @@ impl SessionRegistry {
         // 生命周期副作用：登记子 session / 标记死亡。这些只改本注册表，不发 CDP
         // 命令（runIfWaitingForDebugger 由传输层在「先装监听」之后补发）。
         match method {
+            "Target.attachedToTarget" => {
+                let session_id = params.get("sessionId").and_then(|value| value.as_str());
+                let target_info = params.get("targetInfo");
+                let target_id = target_info
+                    .and_then(|value| value.get("targetId"))
+                    .and_then(|value| value.as_str());
+                let target_type = target_info
+                    .and_then(|value| value.get("type"))
+                    .and_then(|value| value.as_str());
+                if let (Some(session_id), Some(target_id), Some(target_type)) =
+                    (session_id, target_id, target_type)
+                {
+                    self.register_attached(session_id, target_id, target_type);
+                }
+            }
             "Target.detachedFromTarget" => {
                 if let Some(sid) = params.get("sessionId").and_then(|v| v.as_str()) {
                     self.fail_session(sid, false);
                 }
             }
             "Target.targetCrashed" => {
+                if let Some(target_id) = params.get("targetId").and_then(|value| value.as_str()) {
+                    let session_id = self
+                        .inner
+                        .lock()
+                        .unwrap()
+                        .target_sessions
+                        .get(target_id)
+                        .cloned();
+                    if let Some(session_id) = session_id {
+                        self.fail_session(&session_id, true);
+                    }
+                }
                 // targetCrashed 在根 session 上来，targetId 在 params。子 session 的崩溃
                 // 通过对应 sessionId 标记；若只有 targetId 无 sessionId，则交由后续
                 // detachedFromTarget 兜底（CDP 通常崩溃后随即 detach）。
@@ -367,14 +456,20 @@ impl SessionRegistry {
     /// 广播一个事件给：① 精确 (method, session) 订阅者；② 通配 (method, None) 订阅者。
     /// 无人订阅 → 静默丢弃（合法：不是所有事件都有人关心）。
     fn broadcast_event(&self, event: CdpEvent) {
-        let g = self.inner.lock().unwrap();
+        let mut g = self.inner.lock().unwrap();
         let exact: SubKey = (event.method.clone(), Some(event.session_id.clone()));
         let wildcard: SubKey = (event.method.clone(), None);
         if let Some(tx) = g.subscriptions.get(&exact) {
             let _ = tx.send(event.clone());
         }
         if let Some(tx) = g.subscriptions.get(&wildcard) {
-            let _ = tx.send(event);
+            let _ = tx.send(event.clone());
+        }
+        if let Some(subscribers) = g.reliable_subscriptions.get_mut(&exact) {
+            subscribers.retain(|tx| tx.send(event.clone()).is_ok());
+        }
+        if let Some(subscribers) = g.reliable_subscriptions.get_mut(&wildcard) {
+            subscribers.retain(|tx| tx.send(event.clone()).is_ok());
         }
     }
 
@@ -393,6 +488,12 @@ impl SessionRegistry {
                 let _ = tx.send(Err(err.clone()));
             }
         }
+        g.subscriptions
+            .retain(|(_, subscribed_session), _| subscribed_session.as_deref() != Some(session_id));
+        g.reliable_subscriptions
+            .retain(|(_, subscribed_session), _| subscribed_session.as_deref() != Some(session_id));
+        g.target_sessions
+            .retain(|_, mapped_session| mapped_session != session_id);
     }
 
     /// 标记整个连接关闭（WS 断开）：drain 所有 session 的所有挂起回调为 `Closed`，
@@ -406,6 +507,9 @@ impl SessionRegistry {
                 let _ = tx.send(Err(TransportError::Closed));
             }
         }
+        g.subscriptions.clear();
+        g.reliable_subscriptions.clear();
+        g.target_sessions.clear();
     }
 }
 
@@ -438,6 +542,94 @@ mod tests {
         let val = got.expect("expected Ok result");
         assert_eq!(val["frameId"], "F0");
         assert_eq!(val["ok"], true);
+    }
+
+    #[tokio::test]
+    async fn attached_event_registers_session_before_it_is_broadcast() {
+        let reg = SessionRegistry::new();
+        let mut attached = reg.subscribe("Target.attachedToTarget", None);
+        reg.dispatch_message(
+            r#"{"method":"Target.attachedToTarget","params":{"sessionId":"S1","targetInfo":{"targetId":"T1","type":"page"}}}"#,
+        )
+        .unwrap();
+
+        let event = attached.recv().await.unwrap();
+        assert_eq!(event.params["sessionId"], "S1");
+        assert!(reg.has_session("S1"));
+        assert_eq!(reg.target_type("S1").as_deref(), Some("page"));
+        assert!(reg.register_command("S1", call(1)).is_ok());
+    }
+
+    #[tokio::test]
+    async fn target_crash_fails_the_session_mapped_at_attach() {
+        let reg = SessionRegistry::new();
+        reg.dispatch_message(
+            r#"{"method":"Target.attachedToTarget","params":{"sessionId":"S1","targetInfo":{"targetId":"T1","type":"page"}}}"#,
+        )
+        .unwrap();
+        reg.dispatch_message(
+            r#"{"method":"Target.attachedToTarget","params":{"sessionId":"S2","targetInfo":{"targetId":"T2","type":"page"}}}"#,
+        )
+        .unwrap();
+        let rx = reg.register_command("S1", call(7)).unwrap();
+        let other_lane = reg.register_command("S2", call(8)).unwrap();
+
+        reg.dispatch_message(
+            r#"{"method":"Target.targetCrashed","params":{"targetId":"T1","status":"crashed","errorCode":1}}"#,
+        )
+        .unwrap();
+
+        assert_eq!(rx.await.unwrap(), Err(TransportError::SessionCrashed));
+        assert_eq!(
+            reg.register_command("S1", call(8)).unwrap_err(),
+            TransportError::SessionCrashed
+        );
+
+        reg.dispatch_message(
+            r#"{"id":8,"sessionId":"S2","result":{"stillAlive":true}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            other_lane.await.unwrap().unwrap()["stillAlive"],
+            true,
+            "crashing T1 must not fail another target/session"
+        );
+        assert!(
+            reg.register_command("S2", call(9)).is_ok(),
+            "the unrelated target remains routable"
+        );
+    }
+
+    #[tokio::test]
+    async fn connection_failure_closes_event_subscriptions() {
+        let reg = SessionRegistry::new();
+        let mut events = reg.subscribe("Target.attachedToTarget", None);
+        let mut reliable = reg.subscribe_reliable("Fetch.requestPaused", None);
+        reg.fail_connection();
+        assert!(matches!(
+            events.recv().await,
+            Err(broadcast::error::RecvError::Closed)
+        ));
+        assert!(reliable.recv().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn reliable_control_subscription_does_not_drop_a_burst() {
+        let reg = SessionRegistry::new();
+        reg.register_session("S1", "page");
+        let mut events = reg.subscribe_reliable("Fetch.requestPaused", None);
+
+        for index in 0..(EVENT_CHANNEL_CAPACITY * 3) {
+            reg.dispatch_message(&format!(
+                r#"{{"method":"Fetch.requestPaused","sessionId":"S1","params":{{"index":{index}}}}}"#
+            ))
+            .unwrap();
+        }
+
+        for index in 0..(EVENT_CHANNEL_CAPACITY * 3) {
+            let event = events.recv().await.expect("reliable event");
+            assert_eq!(event.params["index"], index);
+        }
     }
 
     /// **F1-sec (I1)**: session_ids_of_type 按 target_type 枚举已登记 session（SW 启动竞态补挂用）。

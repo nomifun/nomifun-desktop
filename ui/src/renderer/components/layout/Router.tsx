@@ -13,6 +13,7 @@ const SkillsSettingsPage = React.lazy(() => import('@renderer/pages/settings/Ski
 const ModelHubPage = React.lazy(() => import('@renderer/pages/modelHub'));
 const McpPage = React.lazy(() => import('@renderer/pages/mcp'));
 const OpenCapabilitiesPage = React.lazy(() => import('@renderer/pages/openCapabilities'));
+const BrowserPage = React.lazy(() => import('@renderer/pages/browser'));
 const SystemSettings = React.lazy(() => import('@renderer/pages/settings/SystemSettings'));
 const ExecutionEngineSettings = React.lazy(() => import('@renderer/pages/settings/AgentSettings'));
 const ExtensionSettingsPage = React.lazy(() => import('@renderer/pages/settings/ExtensionSettingsPage'));
@@ -200,6 +201,7 @@ const PanelRoute: React.FC<{ layout: React.ReactElement }> = ({ layout }) => {
           <Route path='/extensions' element={<LegacyExtensionsRedirect />} />
           <Route path='/mcp' element={withRouteFallback(McpPage)} />
           <Route path='/open-capabilities' element={withRouteFallback(OpenCapabilitiesPage)} />
+          <Route path='/browser' element={withRouteFallback(BrowserPage)} />
           <Route path='/presets' element={withRouteFallback(PresetSettings)} />
           <Route path='/skills' element={withRouteFallback(SkillsSettingsPage)} />
           {/* Session section — the secondary sidebar (ContentSider) persists across these routes */}

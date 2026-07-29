@@ -55,20 +55,29 @@ fn domains_from_query_value(domains: Option<&str>) -> Option<Vec<String>> {
     (!selected.is_empty()).then_some(selected)
 }
 
+fn without_browser_tools(specs: Vec<ToolSpec>) -> Vec<ToolSpec> {
+    specs
+        .into_iter()
+        .filter(|spec| spec.domain != "browser" && !spec.name.starts_with("nomi_browser_"))
+        .collect()
+}
+
 /// Resolve a profile name to the matching Remote-surface tool specs.
 fn specs_for_profile(profile: Option<&str>) -> Vec<ToolSpec> {
-    match profile {
+    without_browser_tools(match profile {
         Some("agent") => {
             Registry::global().tool_specs_for(Surface::Remote, crate::AGENT_PROFILE_DOMAINS)
         }
         _ => Registry::global().tool_specs(Surface::Remote),
-    }
+    })
 }
 
 fn specs_for_query(q: &ProfileQuery) -> Vec<ToolSpec> {
     if let Some(domains) = domains_from_query_value(q.domains.as_deref()) {
         let domain_refs: Vec<&str> = domains.iter().map(String::as_str).collect();
-        return Registry::global().tool_specs_for(Surface::Remote, &domain_refs);
+        return without_browser_tools(
+            Registry::global().tool_specs_for(Surface::Remote, &domain_refs),
+        );
     }
     specs_for_profile(q.profile.as_deref())
 }
@@ -317,5 +326,35 @@ mod tests {
                 .iter()
                 .all(|s| s.domain == "agent" || s.domain == "files")
         );
+    }
+
+    #[test]
+    fn rest_catalog_and_openapi_never_expose_browser_tools() {
+        for query in [
+            ProfileQuery {
+                profile: None,
+                domains: None,
+            },
+            ProfileQuery {
+                profile: Some("agent".to_owned()),
+                domains: None,
+            },
+            ProfileQuery {
+                profile: None,
+                domains: Some("browser".to_owned()),
+            },
+            ProfileQuery {
+                profile: None,
+                domains: Some("agent,browser,files".to_owned()),
+            },
+        ] {
+            assert!(
+                specs_for_query(&query)
+                    .iter()
+                    .all(|spec| spec.domain != "browser"
+                        && !spec.name.starts_with("nomi_browser_")),
+                "REST has no logical session lifecycle and must hide browser tools"
+            );
+        }
     }
 }

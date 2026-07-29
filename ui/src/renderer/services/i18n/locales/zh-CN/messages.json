@@ -80,6 +80,15 @@
   "planProgress": "{{done}}/{{total}}",
   "fileChanges": "文件变更",
   "fileChangesCount": "{{count}} 个文件变更",
+  "turnDeliverables": {
+    "title": "已生成 {{count}} 个文件",
+    "showMore": "再显示 {{count}} 个文件",
+    "showLess": "收起",
+    "verified": "完整性已校验(SHA-256)",
+    "open": "打开",
+    "reveal": "在文件夹中显示",
+    "viewDiff": "查看改动"
+  },
   "conversationInProgress": "当前正在进行对话中...",
   "confirm": "确认",
   "canceledExecution": "已取消执行",

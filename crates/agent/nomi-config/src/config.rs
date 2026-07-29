@@ -344,56 +344,66 @@ impl Default for ComputerConfig {
     }
 }
 
-/// Browser-use (CDP automation) tool settings.
+/// Browser-use tool-client settings.
+///
+/// In production these values configure the Hub-backed Browser tool adapter.
+/// The application main process owns the sole `BrowserSessionHub`; Agent
+/// runtimes receive a `BrowserLaneClient` and never own Chromium or a profile.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct BrowserConfig {
     /// Off by default: driving a browser is opt-in.
     #[serde(default)]
     pub enabled: bool,
-    /// DEPRECATED (no longer consumed). Browser-use is now the in-process native
-    /// CDP engine, which acquires its own managed Chromium; the executable is not
-    /// chosen via this field. Kept (serde-defaulted) one release so existing
-    /// config.toml files still deserialize; remove after the migration window.
+    /// DEPRECATED (no longer consumed). Browser executable selection belongs to
+    /// the main-process `BrowserSessionHub` Host factory, not an Agent runtime.
+    /// Kept (serde-defaulted) one release so existing config.toml files still
+    /// deserialize; remove after the migration window.
     #[serde(default)]
     pub browser_path: String,
     #[serde(default)]
     pub headless: bool,
-    /// DEPRECATED (no longer consumed). The native engine manages its own browser
-    /// lifecycle, not an idle timeout here. Kept (serde-defaulted) one release for
-    /// config compatibility; remove after the migration window. (Not to be confused
-    /// with the unrelated agent-session idle timeout in `idle_scanner`.)
+    /// DEPRECATED (no longer consumed). Lane expiry and Browser Host lifecycle
+    /// are owned by the main-process `BrowserSessionHub`, not an Agent-local idle
+    /// timeout. Kept (serde-defaulted) one release for config compatibility;
+    /// remove after the migration window. (Not to be confused with the unrelated
+    /// agent-session idle timeout in `idle_scanner`.)
     #[serde(default = "default_browser_idle_timeout")]
     pub idle_timeout_secs: u64,
-    /// Optional origin allowlist for the native browser engine's egress firewall
-    /// (per-pet, derived alongside the secret vault's `allowed_origins`). Empty =
-    /// allow all. Defense-in-depth, not a sole security boundary.
+    /// Optional origin allowlist for Browser operations, derived alongside the
+    /// shared secret vault's `allowed_origins`. It is enforced by the managed
+    /// tool/policy path before Hub execution. Empty = allow all.
+    /// Defense-in-depth, not a sole security boundary.
     #[serde(default)]
     pub allowed_origins: Vec<String>,
     /// **F1-sec: evaluate「全权模式」开关**（E3 裁决⑨，default-deny）。`false`（默认）→ 引擎的
     /// `evaluate` 动作返 `Unsupported`（最高危逃生舱默认封死）。`true` → evaluate 放行（仍受「与持久
     /// 登录互斥」约束）。上层（backend factory）把用户在 System Settings 显式 opt-in 的
     /// `client_preferences` `agent.browserUse.fullPower` LIVE 值写到这里（与 `computer_use`/`browser_use`
-    /// 启用开关同范式，每会话构造时读最新值），bootstrap 据它构造 `BrowserTool::with_policy`。
+    /// 启用开关同范式，每会话构造时读最新值），bootstrap 将该策略交给 Hub-backed Browser
+    /// tool adapter；最终操作仍通过 `BrowserLaneClient` 进入主进程 Hub。
     /// **绝不看 session_mode**——yolo/companion 无从豁免（不变量⑧）。
     #[serde(default)]
     pub full_power: bool,
     /// **SD-6: 持久登录开关**（DESIGN §16/§27 互斥约束）。`true`（产品默认）→ 与全权互斥（evaluate
     /// 动作在两者皆 true 时 Blocked）。上层（backend factory）把用户在 System Settings 的
     /// `client_preferences` `agent.browserUse.persistentLogin` LIVE 值写到这里（与 `full_power`
-    /// 同范式，每会话构造时读最新值），bootstrap 据它构造 `BrowserTool::with_policy`。
+    /// 同范式，每会话构造时读最新值），bootstrap 将该约束交给 Hub-backed Browser tool
+    /// adapter。Primary 实时身份由 Hub 的应用管理 profile 提供。
     /// **代码级 Default = `false`**（default-deny 基线；产品 ON 由 factory host_default=true 实现）。
     #[serde(default)]
     pub persistent_login: bool,
-    /// **Site memory（P7A 站点记忆）开关**（opt-in）。`false`（默认/代码级 Default）→ facade 不挂
-    /// site-memory sink：不持久化、不向 observe 注入 per-domain hints（零行为变化）。`true` → bootstrap
-    /// 据它给 `BrowserTool` 注入文件型 `SiteMemorySink`（agent 跨会话记住站点结构）。上层 factory 把
+    /// **Site memory（P7A 站点记忆）开关**（opt-in）。`false`（默认/代码级 Default）→
+    /// Hub-backed Browser tool adapter 不挂 site-memory sink：不持久化、不向 observe 注入
+    /// per-domain hints（零行为变化）。`true` → bootstrap 注入文件型 `SiteMemorySink`
+    /// （Agent 跨会话记住站点结构）。上层 factory 把
     /// `client_preferences` `agent.browserUse.siteMemory` LIVE 值写到这里（与 full_power/persistent_login
     /// 同范式，host_default=false=OFF——记录站点交互到磁盘是隐私相关行为，须用户显式 opt-in）。
     #[serde(default)]
     pub site_memory: bool,
-    /// **Visual fallback（P7B 视觉兜底点击）开关**（opt-in）。`false`（默认/代码级 Default）→ facade 不挂
-    /// vision locator：DOM/aria 锚定失败时不做截图+视觉模型定位（零行为变化，仅返回原始锚定错误）。`true`
-    /// → bootstrap 据它给 `BrowserTool` 注入会话模型的 `VisualLocator` 适配器并置位
+    /// **Visual fallback（P7B 视觉兜底点击）开关**（opt-in）。`false`（默认/代码级 Default）→
+    /// Hub-backed Browser tool adapter 不挂 vision locator：DOM/aria 锚定失败时不做截图+
+    /// 视觉模型定位（零行为变化，仅返回原始锚定错误）。`true` → bootstrap 注入会话模型的
+    /// `VisualLocator` 适配器并置位
     /// `visual_fallback_enabled`（锚定 stale/detached 时截图交视觉模型定位再点）。上层 factory 把
     /// `client_preferences` `agent.browserUse.visualFallback` LIVE 值写到这里（与 site_memory/full_power
     /// 同范式，host_default=false=OFF——视觉兜底每次都过一遍视觉模型，有额外 token 成本，须用户显式 opt-in）。
@@ -403,12 +413,12 @@ pub struct BrowserConfig {
     /// this from `agent.browserUse.unrestrictedApproval`.
     #[serde(default)]
     pub unrestricted_approval: bool,
-    /// **浏览器来源**（「浏览器模式」的来源维度，与 `headless` 正交）。`"managed"`（默认）=
-    /// 内置/下载的 Chrome for Testing；`"system"` = 用户系统已装的 Chrome/Edge 本体优先
-    /// （未探到回退 managed）。**两种来源都用专属 user-data-dir 起独立托管实例**（红线：绝不
-    /// 碰用户真实 profile；登录态由持久登录保险库单独维护）。上层（backend factory）把用户在
-    /// System Settings 的 `client_preferences` `agent.browserUse.source` LIVE 值写到这里（每会话
-    /// 构造时读最新值），facade `BrowserTool` 由本字段解析出 `ChromeSource`。坏值静默退回 managed。
+    /// **浏览器来源**（Browser Host 可执行文件偏好，与 `headless` 正交）。`"managed"`（默认）=
+    /// 内置/下载的 Chrome for Testing；`"system"` = 系统安装的 Chrome/Edge 本体优先
+    /// （未探到回退 managed）。该值不会授予 runtime 浏览器所有权：主进程唯一
+    /// `BrowserSessionHub` 创建和共享 Browser Host，Primary 使用应用管理的稳定 profile，
+    /// Crawl Host 使用临时 profile，绝不读取用户真实 Chrome/Edge profile。上层 factory
+    /// 每会话读取 `agent.browserUse.source`；坏值静默退回 managed。
     #[serde(default = "default_browser_source")]
     pub source: String,
 }
@@ -809,12 +819,15 @@ pub fn app_data_dir() -> PathBuf {
         .unwrap_or_else(|| std::env::temp_dir().join("nomi"))
 }
 
-/// Regenerable browser-engine assets, caches, and ephemeral profiles.
+/// Browser platform storage namespace for regenerable assets, caches, and
+/// ephemeral profiles.
 ///
-/// Durable browser identity/workspaces use sibling roots under
-/// [`app_data_dir`] (`browser-state`, `browser-profiles`, `login-profile`,
-/// `browser-secrets`) so backup can include those without copying Chromium
-/// caches or downloaded binaries.
+/// The main-process `BrowserSessionHub` owns the actual Host/profile lifecycle.
+/// Durable identity/workspace roots remain siblings under [`app_data_dir`]
+/// (`browser-state`, `browser-profiles`, `login-profile`, `browser-secrets`) so
+/// backup can include managed identity data without copying Chromium caches or
+/// downloaded binaries. This helper does not grant an Agent runtime browser
+/// ownership.
 pub fn browser_data_dir() -> PathBuf {
     app_data_dir().join("browser-data")
 }
@@ -1526,8 +1539,8 @@ mod tests {
 
     #[test]
     fn browser_config_default_source_is_managed() {
-        // 默认来源 = "managed"（内置/下载 CfT）—— 新装/未配置即现行为，零回归。
-        // 引擎侧 `ChromeSource::from_source_str("managed")` == Managed（见 nomi-browser-engine::acquire）。
+        // 默认来源 = "managed"（内置/下载 CfT）——新装/未配置即现行为，零回归。
+        // Browser Host source parsing maps "managed" to Managed.
         assert_eq!(BrowserConfig::default().source, "managed");
     }
 

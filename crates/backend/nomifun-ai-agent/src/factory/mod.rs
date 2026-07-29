@@ -1,4 +1,6 @@
 pub mod acp_assembler;
+#[cfg(feature = "browser-use")]
+pub mod browser_lane;
 pub mod provider_config;
 
 mod acp;
@@ -168,6 +170,14 @@ pub struct AgentFactoryDeps {
     /// otherwise (web/headless), and so never injected there. Symmetric with
     /// `computer_mcp_config`.
     pub browser_mcp_config: Option<BrowserMcpConfig>,
+    /// Late-wired issuer for native Browser Platform capabilities.
+    ///
+    /// `Some(slot)` means this host requires the process-wide Hub path. If the
+    /// slot has not been installed when a browser-enabled Nomi runtime is
+    /// built, construction fails closed; it never falls back to a private
+    /// Chromium engine. `None` is reserved for explicit standalone/test hosts.
+    #[cfg(feature = "browser-use")]
+    pub browser_lane_provider: Option<browser_lane::BrowserLaneClientProviderSlot>,
     /// Client-preferences repo for reading user-facing settings at session-build
     /// time — currently the `agent.computerUse` toggle that gates the nomi
     /// Computer tool. `Option` so tests can omit it (then the default applies).

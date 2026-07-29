@@ -103,12 +103,11 @@ pub struct GatewayDeps {
     pub agent_execution_engine: Arc<nomifun_agent_execution::AgentExecutionEngine>,
     /// Preset service — the same singleton used by `/api/presets`.
     pub preset_service: Arc<PresetService>,
-    /// **P3-GW1 (route A)**: per-companion browser tool registry, living in the
-    /// main process. `Some` only when the `browser-use` feature is on and the
-    /// app wired it; `None` (or the field absent without the feature) → the
-    /// gateway exposes no `nomi_browser_*` tools. Each companion gets its own
-    /// lazily-engined `BrowserTool` + a serialization mutex (X5). See
-    /// [`crate::browser_registry`].
+    /// Gateway bridge to the application-owned [`BrowserSessionHub`]. `Some`
+    /// only when the `browser-use` feature is on and the app injected the shared
+    /// hub; the Gateway never owns a browser engine or Chromium process.
+    ///
+    /// [`BrowserSessionHub`]: nomifun_browser_platform::BrowserSessionHub
     #[cfg(feature = "browser-use")]
     pub browser_registry: Option<crate::browser_registry::BrowserRegistry>,
     /// Shared desktop `ComputerTool` (one screen → one serialized instance).
@@ -150,6 +149,13 @@ pub struct CallerCtx {
     /// operation. Conversation send capabilities fail closed when absent; it
     /// is never read from model-visible tool arguments or a JSON-RPC request id.
     pub operation_id: Option<String>,
+    /// Main-process-resolved browser capability for this authenticated runtime.
+    ///
+    /// This value is attached by the app ingress after it validates the signed
+    /// Gateway capability. Model/tool arguments never populate it. Browser
+    /// capabilities fail closed when it is absent.
+    #[cfg(feature = "browser-use")]
+    pub browser_identity: Option<nomifun_browser_platform::CallerIdentity>,
 }
 
 impl Default for CallerCtx {
@@ -162,6 +168,8 @@ impl Default for CallerCtx {
             session_mode: None,
             remote: false,
             operation_id: None,
+            #[cfg(feature = "browser-use")]
+            browser_identity: None,
         }
     }
 }
@@ -182,6 +190,8 @@ impl CallerCtx {
             session_mode: None,
             remote: true,
             operation_id: None,
+            #[cfg(feature = "browser-use")]
+            browser_identity: None,
         })
     }
 }

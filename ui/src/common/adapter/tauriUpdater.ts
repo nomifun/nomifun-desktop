@@ -11,10 +11,12 @@
  * and the Tauri modules load via dynamic `import()` so the WebUI browser bundle
  * never evaluates Tauri IPC code.
  *
- * Lifecycle — one shared `Update` resource flows across check → download →
- * install. `check()` returns a Rust-side Resource handle (`rid`); the SAME
- * object must be reused for `download()`/`install()`, so it is held in
- * `pendingUpdate` between calls. The modal performs two back-to-back checks
+ * Lifecycle — one shared renderer `Update` resource flows across check →
+ * download only. `check()` returns a Rust-side Resource handle (`rid`), so the
+ * same object is held in `pendingUpdate` for progress download. Installation
+ * crosses a custom Rust command that re-checks, re-downloads, and verifies the
+ * selected version before the native installer handoff. The modal performs two
+ * back-to-back checks
  * (autoUpdate.check then update.check); `checkPromise` memoizes them into ONE
  * network round-trip, while `force` re-checks on retry / modal reopen.
  *
@@ -26,8 +28,8 @@
 
 import type { AutoUpdateStatus } from '@/common/update/updateTypes';
 import { isTauriRuntime } from './tauriRuntime';
-import { tauriGetUpdaterInstallContext } from './tauriShell';
-import { installUpdateWithPreflight } from './tauriUpdateInstall';
+import { tauriGetUpdaterInstallContext, tauriInstallUpdate } from './tauriShell';
+import { AUTO_INSTALL_UNSUPPORTED_ERROR } from './tauriUpdateInstall';
 
 // Structural mirror of @tauri-apps/plugin-updater's public surface, so this
 // module type-checks without a static import (the plugin loads lazily).
@@ -42,8 +44,6 @@ interface TauriUpdate {
   date?: string;
   body?: string;
   download(onEvent?: (e: DownloadEvent) => void): Promise<void>;
-  install(): Promise<void>;
-  downloadAndInstall(onEvent?: (e: DownloadEvent) => void): Promise<void>;
   close(): Promise<void>;
 }
 
@@ -56,7 +56,7 @@ export interface TauriUpdateInfo {
 }
 
 // The `Update` is a Rust-side Resource handle: the object returned by `check()`
-// must be the one used for `download()`/`install()`. Hold it between calls.
+// must be the one used for `download()`. Hold it between calls.
 let pendingUpdate: TauriUpdate | null = null;
 // Set once `pendingUpdate` has been fully downloaded. A re-check would `close()`
 // the handle and discard those bytes (forcing a full re-download), so once true
@@ -195,21 +195,21 @@ export async function tauriUpdateDownload(emit: (s: AutoUpdateStatus) => void): 
 }
 
 /**
- * Install the downloaded update (swap the macOS bundle / run the NSIS installer)
- * and relaunch into the new version. No-op outside the desktop shell.
+ * Ask Rust to re-check and install the selected version, then relaunch on
+ * platforms where installation returns. Windows exits inside the updater
+ * plugin after its fail-closed pre-exit hook. No-op outside the desktop shell.
  */
 export async function tauriUpdateInstallAndRelaunch(): Promise<void> {
   if (!isTauriRuntime()) return;
   if (!pendingUpdate) return;
-  const update = pendingUpdate;
-  await installUpdateWithPreflight({
-    getContext: tauriGetUpdaterInstallContext,
-    install: () => update.install(),
-    relaunch: async () => {
-      const { relaunch } = await import('@tauri-apps/plugin-process');
-      await relaunch();
-    },
-  });
+  const context = await tauriGetUpdaterInstallContext();
+  if (!context.autoInstallSupported) {
+    throw new Error(`${AUTO_INSTALL_UNSUPPORTED_ERROR}:${context.reason ?? 'metadata_unavailable'}`);
+  }
+
+  await tauriInstallUpdate(pendingUpdate.version);
+  const { relaunch } = await import('@tauri-apps/plugin-process');
+  await relaunch();
 }
 
 // ---------------------------------------------------------------------------

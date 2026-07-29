@@ -52,10 +52,12 @@ snapshot).\n\
 given `ref` (pixel gesture at the element center).\n\
 - set_element_value: set the `text` value of the element with the given `ref` (accessibility \
 set-value, with a focus-and-type fallback).\n\
-- launch: open an application, URL, file, or folder reliably via the OS shell — pass `target` \
-(e.g. \"notepad\", \"msedge\", \"https://example.com\", a file path) and optionally `app` to open \
-the target WITH a specific application. ALWAYS use this to open apps/URLs; do NOT run `cmd /c \
-start`, `Start-Process`, or `explorer` in a shell — those are unreliable here.\n\
+- launch: open an application, file, or folder reliably via the OS shell — pass `target` \
+(e.g. \"notepad\", a file path) and optionally `app` to open the target WITH a specific \
+application. ALWAYS use this to open apps/files; do NOT run `cmd /c \
+start`, `Start-Process`, or `explorer` in a shell — those are unreliable here. Web URLs \
+(http/https) are not launchable: read or interact with web pages through the managed \
+Browser tool instead.\n\
 - screenshot: capture the screen (optional `display` index) when you need raw pixels.\n\
 - cursor_position: report the mouse cursor position in screenshot coordinates.\n\
 - list_windows: list open windows with ids, titles, positions and sizes.\n\
@@ -511,15 +513,17 @@ impl ComputerTool {
         }
     }
 
-    /// Reliably open an application, URL, file, or folder via the OS shell
+    /// Reliably open an application, file, or folder via the OS shell
     /// (ShellExecute on Windows). The dependable way to launch things — never
     /// shell out to `cmd /c start` / `Start-Process`, which fail and pop a
-    /// "Windows cannot find" dialog on this host.
+    /// "Windows cannot find" dialog on this host. Web URLs fail closed toward
+    /// the managed Browser tool (see `launch::validate_agent_web_target`).
     async fn do_launch(&self, input: &Value) -> ToolResult {
         let Some(target) = input.get("target").and_then(|v| v.as_str()) else {
             return ToolResult::error(
-                "Missing required parameter `target` for launch (a URL like \"https://…\", a \
-                 file/folder path, or an application name like \"notepad\" / \"msedge\").",
+                "Missing required parameter `target` for launch (a file/folder path, or an \
+                 application name like \"notepad\"). Web URLs are opened with the managed \
+                 Browser tool, not launch.",
             );
         };
         let app = input.get("app").and_then(|v| v.as_str());
@@ -884,8 +888,8 @@ impl Tool for ComputerTool {
                     "description": "The desktop operation to perform"
                 },
                 "ref": { "type": "integer", "description": "Element number from the latest `observe` snapshot (click_element / right_click_element / double_click_element / set_element_value)" },
-                "target": { "type": "string", "description": "What to open (launch action): a URL (https://…), a file/folder path, or an application name (e.g. \"notepad\", \"msedge\")" },
-                "app": { "type": "string", "description": "Optional application to open the `target` WITH (launch action), e.g. target a URL and app=\"msedge\" to open it in Edge" },
+                "target": { "type": "string", "description": "What to open (launch action): a file/folder path or an application name (e.g. \"notepad\"). Web URLs (http/https) are rejected — use the managed Browser tool for web pages" },
+                "app": { "type": "string", "description": "Optional application to open the `target` WITH (launch action), e.g. open a file with a specific editor" },
                 "x": { "type": "integer", "description": "X coordinate in pixels of the most recent screenshot" },
                 "y": { "type": "integer", "description": "Y coordinate in pixels of the most recent screenshot" },
                 "start_x": { "type": "integer", "description": "Drag start X (left_click_drag)" },

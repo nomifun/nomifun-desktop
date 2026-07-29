@@ -50,7 +50,17 @@
     "source_mined": "Mined",
     "source_reflected": "Reflected",
     "source_demonstrated": "Demonstrated",
-    "source_manual": "Manual"
+    "source_manual": "Manual",
+    "configuredTitle": "Configured capabilities",
+    "configuredHint": "Grant this companion skills from the global catalog. Skills it learns by itself are managed below.",
+    "configSearch": "Search skills",
+    "configEmpty": "No configurable skills",
+    "configDefault": "Default",
+    "configOptional": "Optional",
+    "configSaved": "Skill configuration saved. It will take effect on the next message.",
+    "learnedTitle": "Companion specialties",
+    "configMissing": "Not installed",
+    "configMissingHint": "This skill is not currently installed. It will be restored automatically if installed again."
   },
   "secrets": {
     "title": "Browser credentials",

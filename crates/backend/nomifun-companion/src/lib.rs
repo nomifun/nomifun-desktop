@@ -26,6 +26,7 @@ mod fsio;
 pub mod gamify;
 pub mod learner;
 pub mod matting_model;
+mod managed_skills;
 pub mod profile;
 pub mod prompt;
 pub mod registry;
@@ -38,7 +39,10 @@ mod skill_io;
 
 pub use events::CompanionEventEmitter;
 pub use figures::FigureMeta;
-pub use profile::{CustomFigureMeta, HeadBox, CompanionProfileConfig, CompanionWindowConfig, SharedArchiveConfig, SharedLearnConfig, SharedCompanionConfig};
+pub use profile::{
+    CompanionProfileConfig, CompanionSkillConfig, CompanionWindowConfig, CustomFigureMeta,
+    HeadBox, SharedArchiveConfig, SharedCompanionConfig, SharedLearnConfig,
+};
 pub use registry::CompanionRegistry;
 pub use routes::{companion_public_routes, companion_routes};
 pub use service::CompanionService;

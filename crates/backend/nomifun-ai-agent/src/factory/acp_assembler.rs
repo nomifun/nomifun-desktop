@@ -190,7 +190,12 @@ fn resolve_mcp_servers(
     // this is a no-op there. Pushed after computer so the wire layout stays
     // deterministic.
     if let Some(browser_cfg) = config.browser_mcp_config.as_ref() {
-        servers.push(browser_mcp_server(browser_cfg));
+        if let Some((server, lease)) =
+            browser_mcp_server(browser_cfg, config, conversation_id)
+        {
+            servers.push(server);
+            leases.push(lease);
+        }
     }
     if let Some(gw_cfg) = config.gateway_mcp_config.as_ref() {
         if let Some((server, lease)) = gateway_mcp_server(gw_cfg, config, conversation_id) {
@@ -249,14 +254,16 @@ fn append_launch_nudge(
     // never reaches macOS/Linux sessions.
     if open_injected {
         rule.push_str(
-            "[Launching apps/URLs — MANDATORY on this Windows host] To open ANY URL, file, folder, or \
+            "[Launching apps/files — MANDATORY on this Windows host] To open ANY file, folder, or \
             application on the user's desktop, you MUST call the `open` tool (MCP server `nomifun-open`). \
-            Pass `target` = a URL (https://…), a file/folder path, or an app name (\"msedge\", \"notepad\"); \
-            optionally pass `app` to open a URL in a specific browser (e.g. target=URL, app=\"msedge\"). \
-            NEVER launch apps/URLs by running `cmd /c start`, `start`, `Start-Process`, `explorer`, or an \
+            Pass `target` = a file/folder path or an app name (\"notepad\"); optionally pass `app` to \
+            open the target with a specific application. \
+            NEVER launch apps/files by running `cmd /c start`, `start`, `Start-Process`, `explorer`, or an \
             `.exe` path in the shell (Bash/exec_command) — on this host those FAIL (the shell has no \
             console) and pop a blocking \"Windows 找不到\" / \"cannot find\" modal dialog at the user. Use \
-            the shell only for non-launch work (file ops, `taskkill` to close apps, queries).",
+            the shell only for non-launch work (file ops, `taskkill` to close apps, queries). Web URLs \
+            (http/https) are NOT openable through `open` or the shell: read or interact with web pages \
+            with the managed Browser tools instead.",
         );
     }
 
@@ -271,7 +278,8 @@ fn append_launch_nudge(
             `nomifun-computer` MCP tools: call `snapshot` to get a numbered [ref] tree of windows \
             and controls (+ a screenshot), then act with `click`/`right_click`/`double_click`/\
             `set_value` by [ref], or `type`/`key`/`scroll`/`click_xy` for raw input. To open an \
-            application, URL, file, or folder, use the `launch` tool. Re-run `snapshot` after any \
+            application, file, or folder, use the `launch` tool; web URLs are read through the \
+            managed Browser tools, never launched into the OS browser. Re-run `snapshot` after any \
             UI change — a [ref] is only valid for the latest snapshot. Prefer these over guessing \
             pixel coordinates.",
         );
@@ -434,17 +442,47 @@ fn computer_mcp_server(cfg: &ComputerMcpConfig) -> McpServer {
     McpServer::Stdio(stdio)
 }
 
-/// Build the browser-use discrete-tool MCP stdio bridge server. The bridge
-/// (`nomicore mcp-browser-stdio`) drives a managed Chromium directly (a facade
-/// over the in-tree BrowserTool), so it needs no env (no port/token/conv id) —
-/// stateless fail-safe, symmetric with the open/computer bridges. R2: carrying
-/// NO env-borne session context is deliberate (secret:NAME fails closed, downloads
-/// land in the data-dir sandbox; per-pet context stays on the nomi engine path).
-fn browser_mcp_server(cfg: &BrowserMcpConfig) -> McpServer {
-    let stdio = McpServerStdio::new(BrowserMcpConfig::SERVER_NAME, &cfg.binary_path)
+/// Build the browser-use discrete-tool MCP stdio proxy. The child receives one
+/// signed renewable bootstrap bound to the authoritative user, conversation,
+/// fresh runtime instance, ACP audience, tools, and browser operation families.
+/// It receives no browser process/profile/CDP authority.
+fn browser_mcp_server(
+    cfg: &BrowserMcpConfig,
+    extra: &AcpBuildExtra,
+    conversation_id: &str,
+) -> Option<(McpServer, LoopbackCapabilityLease)> {
+    let Some(user_id) = extra.user_id.as_deref() else {
+        tracing::warn!(
+            conversation_id,
+            "browser MCP capability issuance requires an authoritative user ID"
+        );
+        return None;
+    };
+    let child = match cfg.issue_for_conversation(
+        user_id,
+        conversation_id,
+        extra.agent_id.as_deref(),
+    ) {
+        Ok(child) => child,
+        Err(error) => {
+            tracing::warn!(
+                %error,
+                conversation_id,
+                "browser MCP capability issuance failed closed"
+            );
+            return None;
+        }
+    };
+    let env = vec![EnvVariable::new(
+        BrowserMcpConfig::ENV_CAPABILITY.to_owned(),
+        child
+            .bootstrap_json()
+            .expect("validated browser capability serializes"),
+    )];
+    let stdio = McpServerStdio::new(BrowserMcpConfig::SERVER_NAME, &child.binary_path)
         .args(vec!["mcp-browser-stdio".to_owned()])
-        .env(Vec::new());
-    McpServer::Stdio(stdio)
+        .env(env);
+    Some((McpServer::Stdio(stdio), child.lease))
 }
 
 /// Build the Platform Gateway MCP stdio bridge for an ACP session. The
@@ -507,6 +545,10 @@ mod tests {
 
     fn gateway_config(port: u16, binary: &str, owner: &str) -> GatewayMcpConfig {
         GatewayMcpConfig::from_issuer(port, test_issuer(), binary.into(), std::sync::Arc::<str>::from(owner))
+    }
+
+    fn browser_config(port: u16, binary: &str) -> BrowserMcpConfig {
+        BrowserMcpConfig::from_issuer(port, test_issuer(), binary.into())
     }
 
     #[test]
@@ -948,20 +990,20 @@ mod tests {
         }
     }
 
-    /// P4-2: symmetric with the computer test — `browser_mcp_config` Some →
-    /// the assembler injects the `nomifun-browser` stdio bridge spawning
-    /// `mcp-browser-stdio`, stateless (no env).
+    /// A process-private browser issuer injects one scoped bootstrap into the
+    /// `nomifun-browser` stdio proxy.
     #[test]
     fn resolve_mcp_servers_appends_browser_when_configured() {
+        let conversation_id = "0190f5fe-7c00-7a00-8000-000000000041";
         let config = AcpBuildExtra {
             backend: Some("codex".into()),
-            browser_mcp_config: Some(BrowserMcpConfig {
-                binary_path: "/bin/nomicore".into(),
-            }),
+            agent_id: Some("agent-browser".into()),
+            user_id: Some("0190f5fe-7c00-7a00-8000-000000000042".into()),
+            browser_mcp_config: Some(browser_config(41_000, "/bin/nomicore")),
             ..Default::default()
         };
         let (servers, _leases) =
-            resolve_mcp_servers(&config, "conv-browser", "/workspace", Vec::new());
+            resolve_mcp_servers(&config, conversation_id, "/workspace", Vec::new());
         assert_eq!(servers.len(), 1);
         match &servers[0] {
             McpServer::Stdio(s) => {
@@ -970,9 +1012,24 @@ mod tests {
                     s.args.iter().any(|a| a == "mcp-browser-stdio"),
                     "must spawn the browser stdio bridge"
                 );
+                assert_eq!(s.env.len(), 1, "browser bridge gets one scoped bootstrap");
+                assert_eq!(s.env[0].name, BrowserMcpConfig::ENV_CAPABILITY);
+                let bootstrap: nomifun_api_types::ScopedMcpChildBootstrap<
+                    nomifun_api_types::BrowserCapabilityClaims,
+                > = serde_json::from_str(&s.env[0].value).unwrap();
+                assert_eq!(
+                    bootstrap.access.claims.session.session_id,
+                    conversation_id
+                );
+                assert_eq!(
+                    bootstrap.access.claims.scope.surface,
+                    nomifun_api_types::BrowserCapabilitySurface::Acp
+                );
                 assert!(
-                    s.env.is_empty(),
-                    "browser bridge needs no env (stateless fail-safe)"
+                    !s.env[0].value.contains("9222")
+                        && !s.env[0].value.contains("profile")
+                        && !s.env[0].value.contains("cookie"),
+                    "child bootstrap must not contain browser internals"
                 );
             }
             _ => panic!("expected stdio server"),
@@ -987,16 +1044,20 @@ mod tests {
     fn resolve_mcp_servers_browser_and_computer_coexist_distinct_slots() {
         let config = AcpBuildExtra {
             backend: Some("codex".into()),
+            user_id: Some("0190f5fe-7c00-7a00-8000-000000000043".into()),
             computer_mcp_config: Some(ComputerMcpConfig {
                 binary_path: "/bin/nomicore".into(),
             }),
-            browser_mcp_config: Some(BrowserMcpConfig {
-                binary_path: "/bin/nomicore".into(),
-            }),
+            browser_mcp_config: Some(browser_config(41_001, "/bin/nomicore")),
             ..Default::default()
         };
         let (servers, _leases) =
-            resolve_mcp_servers(&config, "conv-both", "/workspace", Vec::new());
+            resolve_mcp_servers(
+                &config,
+                "0190f5fe-7c00-7a00-8000-000000000044",
+                "/workspace",
+                Vec::new(),
+            );
         assert_eq!(servers.len(), 2, "both bridges injected");
         let names: Vec<&str> = servers
             .iter()

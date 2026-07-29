@@ -187,36 +187,38 @@ export class BackendHttpError extends Error {
   readonly status: number;
   /** Machine-readable error code from the backend `ErrorResponse.code`, or `''` when parse failed. */
   readonly code: string;
-  /** Backend-provided human message from `ErrorResponse.error`, or the raw body when parse failed. */
+  /** Redacted backend message from `ErrorResponse.error`, or redacted text when parsing failed. */
   readonly backendMessage: string;
   /** True when the backend rejected a browser session token as missing/expired/invalid. */
   readonly authExpired: boolean;
   /** True when the WebUI login redirect/event handler was eligible to handle this error. */
   readonly authExpiredHandled: boolean;
-  /** Structured backend metadata from `ErrorResponse.details`, when present. */
+  /** Structured backend metadata with sensitive fields redacted, when present. */
   readonly details: unknown;
-  /** Raw parsed body (object on JSON response, string on text/non-JSON). */
+  /** Parsed response body with sensitive fields and values redacted. */
   readonly body: unknown;
 
   constructor(params: { method: string; path: string; status: number; body: unknown }) {
     const { method, path, status, body } = params;
+    const safePath = redactSensitiveText(path);
+    const safeBody = redactForLog(body);
     let code = '';
     let backendMessage = '';
     let details: unknown;
-    if (body && typeof body === 'object') {
-      const b = body as { code?: unknown; error?: unknown; details?: unknown };
+    if (safeBody && typeof safeBody === 'object') {
+      const b = safeBody as { code?: unknown; error?: unknown; details?: unknown };
       if (typeof b.code === 'string') code = b.code;
       if (typeof b.error === 'string') backendMessage = b.error;
       details = b.details;
-    } else if (typeof body === 'string') {
-      backendMessage = body;
+    } else if (typeof safeBody === 'string') {
+      backendMessage = safeBody;
     }
     const authExpired = isAuthExpiredResponse(status, body);
     const authExpiredHandled = authExpired && isWebUiBrowserMode();
     super(
       authExpired
-        ? `Backend ${method} ${path} failed (${status}): authentication expired`
-        : `Backend ${method} ${path} failed (${status}): ${JSON.stringify(body)}`
+        ? `Backend ${method} ${safePath} failed (${status}): authentication expired`
+        : `Backend ${method} ${safePath} failed (${status}): ${JSON.stringify(safeBody)}`
     );
     this.name = 'BackendHttpError';
     this.status = status;
@@ -225,7 +227,7 @@ export class BackendHttpError extends Error {
     this.authExpired = authExpired;
     this.authExpiredHandled = authExpiredHandled;
     this.details = details;
-    this.body = body;
+    this.body = safeBody;
   }
 }
 
@@ -400,10 +402,65 @@ export type HttpRequestOptions = {
   timeoutMs?: number;
 };
 
-const SENSITIVE_LOG_KEY_PATTERN = /api[_-]?key|authorization|auth[_-]?token|access[_-]?token|refresh[_-]?token|secret/i;
+const SENSITIVE_LOG_KEY_PATTERN =
+  /api[_-]?key|authorization|auth[_-]?token|access[_-]?token|refresh[_-]?token|viewer[_-]?token|csrf[_-]?token|session[_-]?token|secret|password|credential|cookie|local[_-]?storage|session[_-]?storage|indexeddb|storage[_-]?value|cdp[_-]?(endpoint|url)|debug(ging)?[_-]?port|remote[_-]?debugging[_-]?port|profile[_-]?path|user[_-]?data[_-]?dir/i;
+
+function isSensitiveLogKey(key: string): boolean {
+  if (SENSITIVE_LOG_KEY_PATTERN.test(key)) return true;
+  const normalized = key.replace(/[^a-z0-9]/gi, '').toLowerCase();
+  return (
+    normalized === 'token' ||
+    normalized.endsWith('token') ||
+    normalized.includes('apikey') ||
+    normalized.includes('authorization') ||
+    normalized.includes('privatekey') ||
+    normalized.includes('clientsecret') ||
+    normalized.includes('cdpendpoint') ||
+    normalized.includes('debuggingport') ||
+    normalized.includes('profilepath') ||
+    normalized.includes('userdatadir')
+  );
+}
+
+/**
+ * Remove credentials and browser-internal locations from text that may be
+ * rendered or copied to logs. This is defense in depth: Browser API responses
+ * must still use the backend's allow-listed, user-safe error contract.
+ */
+export function redactSensitiveText(input: string): string {
+  return input
+    .replace(
+      /([?&](?:token|viewer[_-]?token|access[_-]?token|refresh[_-]?token|auth[_-]?token|csrf[_-]?token|api[_-]?key|secret|password|code)=)[^&#\s]*/gi,
+      '$1[REDACTED]'
+    )
+    .replace(/\bBearer\s+[A-Za-z0-9._~+/=-]+/gi, 'Bearer [REDACTED]')
+    .replace(/\beyJ[A-Za-z0-9_-]*\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b/g, '[REDACTED_JWT]')
+    .replace(/\b[a-f0-9]{64}\b/gi, '[REDACTED_TOKEN]')
+    .replace(/(?:wss?|https?):\/\/[^\s"'<>]+\/devtools\/[^\s"'<>]*/gi, '[REDACTED_CDP_ENDPOINT]')
+    .replace(
+      /(?:wss?|https?):\/\/(?:localhost|127(?:\.\d{1,3}){3}|\[::1\]):\d+\/(?:json(?:\/list|\/version)?|devtools)(?:[^\s"'<>]*)?/gi,
+      '[REDACTED_DEBUG_ENDPOINT]'
+    )
+    .replace(
+      /((?:remote[_ -]?debugging[_ -]?port|debugging[_ -]?port)\s*[:=]\s*)\d+/gi,
+      '$1[REDACTED]'
+    )
+    .replace(
+      /((?:profile[_ -]?path|user[_ -]?data[_ -]?dir)\s*[:=]\s*)(?:"[^"]*"|'[^']*'|[^\r\n,;}]+)/gi,
+      '$1[REDACTED]'
+    )
+    .replace(/((?:set-)?cookie\s*[:=]\s*)[^\r\n]+/gi, '$1[REDACTED]')
+    .replace(/[A-Za-z]:\\[^\r\n"'<>]*(?:User Data|Profiles?)[^\r\n"'<>]*/gi, '[REDACTED_PROFILE_PATH]');
+}
 
 function redactForLog(value: unknown, depth = 0): unknown {
-  if (depth > 8 || value === null || typeof value !== 'object') {
+  if (typeof value === 'string') {
+    return redactSensitiveText(value);
+  }
+  if (depth > 8) {
+    return '[REDACTED_DEPTH_LIMIT]';
+  }
+  if (value === null || typeof value !== 'object') {
     return value;
   }
   if (Array.isArray(value)) {
@@ -413,7 +470,7 @@ function redactForLog(value: unknown, depth = 0): unknown {
   return Object.fromEntries(
     Object.entries(value as Record<string, unknown>).map(([key, entry]) => [
       key,
-      SENSITIVE_LOG_KEY_PATTERN.test(key) ? '[REDACTED]' : redactForLog(entry, depth + 1),
+      isSensitiveLogKey(key) ? '[REDACTED]' : redactForLog(entry, depth + 1),
     ])
   );
 }
@@ -425,6 +482,7 @@ export async function httpRequest<T>(
   options?: HttpRequestOptions
 ): Promise<T> {
   const url = `${getBaseUrl()}${path}`;
+  const safePath = redactSensitiveText(path);
   const headers: Record<string, string> = {};
 
   if (body !== undefined) {
@@ -443,7 +501,7 @@ export async function httpRequest<T>(
   const isNoisyPath = NOISY_HTTP_FRAGMENTS.some((frag) => path.includes(frag));
   if (isDebugEnabled('debug:http') && !isNoisyPath) {
     console.debug(
-      `[httpBridge] ${method} ${path}`,
+      `[httpBridge] ${method} ${safePath}`,
       body !== undefined ? JSON.stringify(redactForLog(body)).slice(0, 500) : '(no body)'
     );
   }
@@ -481,11 +539,14 @@ export async function httpRequest<T>(
     if (controller?.signal.aborted) {
       throw new BackendRequestError(
         'timeout',
-        `Backend ${method} ${path} timed out after ${options?.timeoutMs}ms; the backend may be busy or unreachable`
+        `Backend ${method} ${safePath} timed out after ${options?.timeoutMs}ms; the backend may be busy or unreachable`
       );
     }
-    const detail = e instanceof Error ? e.message : String(e);
-    throw new BackendRequestError('network', `Backend ${method} ${path} failed: backend unreachable (${detail})`);
+    const detail = redactSensitiveText(e instanceof Error ? e.message : String(e));
+    throw new BackendRequestError(
+      'network',
+      `Backend ${method} ${safePath} failed: backend unreachable (${detail})`
+    );
   } finally {
     if (timeoutHandle !== undefined) clearTimeout(timeoutHandle);
   }
@@ -509,18 +570,24 @@ export async function httpRequest<T>(
     }
     if (authExpired) {
       if (isDebugEnabled('debug:http') && !isNoisyPath) {
-        console.debug(`[httpBridge] ${method} ${path} → ${response.status} (auth-expired)`, errorBody);
+        console.debug(
+          `[httpBridge] ${method} ${safePath} → ${response.status} (auth-expired)`,
+          redactForLog(errorBody)
+        );
       }
     } else if (options?.silentStatuses?.includes(response.status)) {
-      console.debug(`[httpBridge] ${method} ${path} → ${response.status} (silenced)`, errorBody);
+      console.debug(
+        `[httpBridge] ${method} ${safePath} → ${response.status} (silenced)`,
+        redactForLog(errorBody)
+      );
     } else {
-      console.error(`[httpBridge] ${method} ${path} → ${response.status}`, errorBody);
+      console.error(`[httpBridge] ${method} ${safePath} → ${response.status}`, redactForLog(errorBody));
     }
     throw new BackendHttpError({ method, path, status: response.status, body: errorBody });
   }
 
   if (isDebugEnabled('debug:http') && !isNoisyPath) {
-    console.debug(`[httpBridge] ${method} ${path} → ${response.status} OK`);
+    console.debug(`[httpBridge] ${method} ${safePath} → ${response.status} OK`);
   }
 
   const contentType = response.headers.get('Content-Type');

@@ -11,7 +11,10 @@ use nomifun_api_types::{
     CreateConversationRequest, ListConversationsQuery, ListMessagesQuery, SendMessageRequest,
     UpdateConversationRequest,
 };
-use nomifun_common::{AgentType, AppError, CompanionId, ConversationId, ProviderWithModel, ProviderId, RemoteAgentId};
+use nomifun_common::{
+    AgentId, AgentType, AppError, CompanionId, ConversationId, ProviderId, ProviderWithModel,
+    RemoteAgentId,
+};
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -70,7 +73,12 @@ struct CreateConversationParams {
     /// terminal/shell intent must go through nomi_create_terminal instead.
     #[serde(default)]
     agent_type: Option<String>,
+    /// Canonical agent catalog id. Required when agent_type is "acp".
+    #[serde(default)]
+    #[schemars(schema_with = "crate::id_schema::optional_canonical_uuid_v7_schema")]
+    agent_id: Option<AgentId>,
     /// ACP backend vendor when agent_type is "acp" (e.g. "claude", "codex", "gemini").
+    /// Descriptive compatibility metadata only; agent_id is authoritative.
     #[serde(default)]
     backend: Option<String>,
     /// Exact provider/model pair for a nomi session. Omit to auto-resolve:
@@ -329,6 +337,14 @@ async fn create(deps: Arc<GatewayDeps>, ctx: CallerCtx, p: CreateConversationPar
         Err(_) => return json!({ "error": format!("invalid agent_type '{agent_type_str}'") }),
     };
     let mut extra = json!({});
+    if agent_type == AgentType::Acp {
+        let Some(agent_id) = p.agent_id else {
+            return json!({ "error": "agent_id is required when agent_type is 'acp'" });
+        };
+        extra["agent_id"] = json!(agent_id);
+    } else if p.agent_id.is_some() {
+        return json!({ "error": "agent_id is only valid when agent_type is 'acp'" });
+    }
     if agent_type == AgentType::Remote {
         let Some(remote_agent_id) = p.remote_agent_id else {
             return json!({ "error": "remote_agent_id is required when agent_type is 'remote'" });
@@ -529,7 +545,7 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
         CapabilityMeta::new(
             "nomi_create_conversation",
             "conversation",
-            "Open a fresh desktop session on behalf of the calling companion (nomi, acp, or remote OpenClaw). For remote sessions pass remote_agent_id from nomi_remote_agent_list; for multi-Agent work inside the current conversation, use nomi_delegate.",
+            "Open a fresh desktop session on behalf of the calling companion (nomi, acp, or remote OpenClaw). For ACP sessions pass agent_id from nomi_agent_list; for remote sessions pass remote_agent_id from nomi_remote_agent_list. For multi-Agent work inside the current conversation, use nomi_delegate.",
             DangerTier::Write,
         ),
         create,

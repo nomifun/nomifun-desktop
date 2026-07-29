@@ -22,6 +22,7 @@ const TEST_USER_B: &str = "0190f5fe-7c00-7a00-8abc-012345678914";
 const TEST_USER_SECONDARY: &str = "0190f5fe-7c00-7a00-8abc-012345678915";
 const TEST_COMPANION: &str = "0190f5fe-7c00-7a00-8abc-012345678921";
 const TEST_PROVIDER: &str = "0190f5fe-7c00-7a00-8abc-012345678931";
+const TEST_CODEX_AGENT: &str = "0190f5fe-7c00-7a00-8000-000000000102";
 
 use serde_json::{Value, json};
 
@@ -100,7 +101,21 @@ async fn seed_user_and_conversation_with_extra(
     conv_id: &str,
     extra: &str,
 ) {
-    sqlx::query("INSERT OR IGNORE INTO users (id, username, password_hash, created_at, updated_at) VALUES (?, ?, 'hash', 0, 0)")
+    let workspace = services.work_dir.join("gateway-e2e").join(conv_id);
+    std::fs::create_dir_all(&workspace).unwrap();
+    let mut extra: Value = serde_json::from_str(extra).unwrap();
+    extra
+        .as_object_mut()
+        .expect("conversation extra fixture must be an object")
+        .insert(
+            "workspace".to_owned(),
+            Value::String(workspace.to_string_lossy().into_owned()),
+        );
+    sqlx::query(
+        "INSERT OR IGNORE INTO users \
+         (user_id, username, password_hash, created_at, updated_at) \
+         VALUES (?, ?, 'hash', 0, 0)",
+    )
         .bind(user_id)
         .bind(format!("user-{user_id}"))
         .execute(services.database.pool())
@@ -108,13 +123,13 @@ async fn seed_user_and_conversation_with_extra(
         .unwrap();
     sqlx::query(
         "INSERT INTO conversations \
-         (id, user_id, name, type, extra, delegation_policy, created_at, updated_at) \
+         (conversation_id, user_id, name, type, extra, delegation_policy, created_at, updated_at) \
          VALUES (?, ?, ?, 'nomi', ?, 'disabled', 0, 0)",
     )
     .bind(conv_id)
     .bind(user_id)
     .bind(format!("Conv {conv_id}"))
-    .bind(extra)
+    .bind(extra.to_string())
     .execute(services.database.pool())
     .await
     .unwrap();
@@ -301,7 +316,12 @@ async fn gw_companion_can_create_a_top_level_conversation() {
             TEST_COMPANION_CALLER,
             services.authoritative_user_id.as_ref(),
             Some(TEST_COMPANION),
-            json!({"name": "伙伴创建的会话", "agent_type": "acp", "backend": "codex"}),
+            json!({
+                "name": "伙伴创建的会话",
+                "agent_type": "acp",
+                "agent_id": TEST_CODEX_AGENT,
+                "backend": "codex"
+            }),
         )
         .await;
     let created = result_of(&body);

@@ -40,6 +40,7 @@ import workshopAssets from './workshopAssets.json';
 import workshopEditor from './workshopEditor.json';
 import workshopGeneration from './workshopGeneration.json';
 import workshopAgent from './workshopAgent.json';
+import browser from './browser.json';
 
 export default {
   common,
@@ -79,4 +80,5 @@ export default {
   workshopEditor,
   workshopGeneration,
   workshopAgent,
+  browser,
 };

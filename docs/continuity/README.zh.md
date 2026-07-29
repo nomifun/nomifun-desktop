@@ -152,6 +152,7 @@ repository/service 在事务中验证、维护删除策略，并通过索引和 
 | `04-verification-gates.zh.md` | 低耗时验证、编译策略、完成门禁 | `ACCEPTED / WORKSPACE CHECK VERIFIED` |
 | `05-handoff-template.md` | 跨账号/平台交接模板 | `TEMPLATE` |
 | `06-open-questions.zh.md` | 实施证据与发布前检查表 | `IMPLEMENTATION AUDIT` |
+| `07-browser-platform-handoff.zh.md` | Browser Platform 已完成范围、剩余 TODO、验证顺序与可复制启动 Prompt | `CORE VERIFIED / FOLLOW-UP OPEN` |
 | `decisions/ID-001-current-v2.md` | 对旧 UUIDv7 硬契约的决策结论 | `SUPERSEDED` |
 | `decisions/ID-002-layered-id-v3.md` | 新分层 ID 架构决策 | `ACCEPTED` |
 | `decisions/ID-003-bare-uuidv7.md` | 无前缀、固定结构 UUIDv7 决策 | `ACCEPTED` |
