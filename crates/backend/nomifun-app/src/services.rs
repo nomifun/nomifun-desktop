@@ -1062,6 +1062,10 @@ pub struct AppServices {
     /// service domain, entirely separate from `companion_service`. Owns its own
     /// `public-agents/` store, roster, and day-partitioned audit.
     pub public_agent_service: Arc<nomifun_public_agent::PublicAgentService>,
+    /// 客服独立域 CRUD service (agents / notes / bindings).
+    pub customer_service_service: Arc<nomifun_customer_service::CustomerServiceService>,
+    /// 客服无状态并发回合执行器 (channel seam target).
+    pub cs_dialogue_engine: Arc<nomifun_customer_service::CsDialogueEngine>,
     /// Singleton 创意工坊 (Creative Workshop) service — canvas/asset CRUD +
     /// on-disk canvas docs / asset binaries under `{data_dir}/workshop/`. Shared
     /// by the `/api/workshop/*` routes.
@@ -2295,6 +2299,31 @@ impl AppServices {
                 Some(provider_lifecycle.clone()),
             );
 
+        // 客服独立域 (customer-service domain): agents/notes/bindings CRUD
+        // service + the stateless concurrent dialogue engine. The engine's
+        // LLM turns go through the generic one-shot entry whose tool table is
+        // fixed at construction to three read-only tools — no workspace mount,
+        // no runtime registry, no Conversation.
+        let customer_service_repo: Arc<dyn nomifun_db::ICustomerServiceRepository> =
+            Arc::new(nomifun_db::SqliteCustomerServiceRepository::new(
+                database.pool().clone(),
+            ));
+        let customer_service_service = Arc::new(
+            nomifun_customer_service::CustomerServiceService::new(customer_service_repo.clone()),
+        );
+        let cs_dialogue_engine = Arc::new(nomifun_customer_service::CsDialogueEngine::new(
+            customer_service_repo,
+            knowledge_service.clone(),
+            Arc::new(nomifun_customer_service::LiveTurnRunner {
+                deps: nomifun_ai_agent::OneShotDeps {
+                    provider_repo: provider_repo.clone()
+                        as Arc<dyn nomifun_db::IProviderRepository>,
+                    encryption_key,
+                    workspace: data_dir.clone(),
+                },
+            }),
+        ));
+
         // 创意工坊 (Creative Workshop) + 生成引擎 (creation): the workshop service
         // owns canvas/asset index rows + on-disk docs/binaries; the creation
         // service owns the media generation task queue. Both are plain repo-backed
@@ -2523,6 +2552,8 @@ impl AppServices {
             _knowledge_mcp_server: knowledge_mcp_server,
             companion_service,
             public_agent_service,
+            customer_service_service,
+            cs_dialogue_engine,
             workshop_service,
             creation_service,
             knowledge_service,
