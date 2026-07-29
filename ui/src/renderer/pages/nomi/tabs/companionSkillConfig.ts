@@ -15,14 +15,16 @@ export function toggleCompanionSkill(
 ): ICompanionSkillConfig {
   const enabled = new Set(config.enabled);
   const disabledAuto = new Set(config.disabled_auto);
-  // A removed auto-inject Skill is no longer present in the live catalog, but
-  // its persisted opt-out still proves which side of the configuration it
-  // belongs to and must remain reversible from the missing-state row.
-  if (autoNames.has(name) || disabledAuto.has(name)) {
-    if (checked) disabledAuto.delete(name);
-    else disabledAuto.add(name);
-  } else if (checked) {
-    enabled.add(name);
+  if (checked) {
+    // Clearing an opt-out only restores Skills the live catalog still
+    // auto-injects. A stale opt-out (the auto Skill was demoted to a regular
+    // catalog entry or uninstalled) must also become an explicit opt-in —
+    // the backend effective set is (auto ∪ enabled) \ disabled_auto, so
+    // deleting the opt-out alone would make the click a silent no-op.
+    disabledAuto.delete(name);
+    if (!autoNames.has(name)) enabled.add(name);
+  } else if (autoNames.has(name)) {
+    disabledAuto.add(name);
   } else {
     enabled.delete(name);
   }
