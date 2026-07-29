@@ -6,7 +6,8 @@
 //! Ark lives under `/api/v3` rather than the OpenAI `/v1` convention, so both
 //! adapters compose their own URLs via [`ark_v3_url`] instead of the
 //! conventional dispatch path; a `params.endpoint` override still wins for
-//! images (routed through [`crate::call::ResolvedCall::dispatch_target`]).
+//! images (routed through [`crate::call::ResolvedCall::dispatch_target`]) and
+//! for video (submit + poll alike, via [`video_tasks_base`]).
 //!
 //! - [`ArkImagesAdapter`] (`"ark.images"`, ImageGeneration): sync
 //!   `POST {root}/api/v3/images/generations`, OpenAI-shaped body plus Ark
@@ -132,6 +133,21 @@ impl ProtocolAdapter for ArkImagesAdapter {
 const VIDEO_ADAPTER_ID: &str = "ark.video_jobs";
 const VIDEO_TASKS_PATH: &str = "/contents/generations/tasks";
 
+/// The video-tasks collection URL for this call: an explicit `params.endpoint`
+/// override wins (the dispatch-target URL with any query string stripped —
+/// the poll's `/{id}` sub-path cannot carry a mid-URL query segment);
+/// otherwise the conventional Ark `/api/v3` path. Submit and poll both ride
+/// this, so an override moves the whole job lifecycle.
+fn video_tasks_base(call: &ResolvedCall) -> String {
+    if has_endpoint_override(&call.model_params) {
+        let url = call.dispatch_target().url;
+        let no_query = url.split('?').next().unwrap_or(url.as_str());
+        no_query.trim_end_matches('/').to_string()
+    } else {
+        ark_v3_url(&call.connection, VIDEO_TASKS_PATH)
+    }
+}
+
 /// Ark asynchronous `/api/v3/contents/generations/tasks` submit→poll
 /// (seedance family).
 pub struct ArkVideoJobsAdapter;
@@ -153,7 +169,7 @@ impl ProtocolAdapter for ArkVideoJobsAdapter {
                 format!("ark.video_jobs cannot serve task {:?}", call.request.task()),
             ));
         };
-        let url = ark_v3_url(&call.connection, VIDEO_TASKS_PATH);
+        let url = video_tasks_base(call);
         let body = build_video_submit_body(&call.model, req);
 
         let rb = http.post(&url).timeout(SUBMIT_TIMEOUT).json(&body);
@@ -181,7 +197,7 @@ impl ProtocolAdapter for ArkVideoJobsAdapter {
         call: &ResolvedCall,
         job: &JobHandle,
     ) -> Result<TaskOutcome, InvokeError> {
-        let status_url = format!("{}/{}", ark_v3_url(&call.connection, VIDEO_TASKS_PATH), job.remote_id);
+        let status_url = format!("{}/{}", video_tasks_base(call), job.remote_id);
         let rb = http.get(&status_url).timeout(POLL_TIMEOUT);
         let resp = call.connection.auth.apply(rb)?.send().await.map_err(net_err)?;
         if !resp.status().is_success() {
@@ -588,6 +604,39 @@ mod tests {
         let err = ArkVideoJobsAdapter.poll(&reqwest::Client::new(), &call, &job("cgt-9")).await.unwrap_err();
         assert_eq!(err.kind, InvokeErrorKind::JobFailed);
         assert_eq!(err.message, "content blocked");
+    }
+
+    #[tokio::test]
+    async fn video_params_endpoint_override_applies_to_submit_and_poll() {
+        // Task 9 review fix: an explicit params.endpoint moves the WHOLE job
+        // lifecycle — the custom path is the only place anything is mounted.
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/custom/video-tasks"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"id": "cgt-c1", "status": "queued"})))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/custom/video-tasks/cgt-c1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "id": "cgt-c1", "status": "succeeded", "content": {"video_url": "https://cdn/c.mp4"}
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let mut call = ark_call(&server.uri(), "doubao-seedance", video_request(None, None, vec![]));
+        call.model_params = json!({"endpoint": "/custom/video-tasks"});
+        let http = reqwest::Client::new();
+
+        let out = ArkVideoJobsAdapter.submit(&http, &call).await.unwrap();
+        let TaskOutcome::Pending(handle) = out else { panic!("expected Pending") };
+        assert_eq!(handle.remote_id, "cgt-c1");
+
+        let done = ArkVideoJobsAdapter.poll(&http, &call, &handle).await.unwrap();
+        let TaskOutcome::Done(TaskResult::Assets(assets)) = done else { panic!("expected Done(Assets)") };
+        assert!(matches!(&assets[0].data, ProducedData::Url(u) if u == "https://cdn/c.mp4"));
     }
 
     #[tokio::test]
