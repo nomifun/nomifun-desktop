@@ -1,5 +1,7 @@
 //! Integration tests verifying that --work-dir is used for conversation workspace creation.
 
+mod common;
+
 use nomifun_api_types::CreateConversationRequest;
 use nomifun_app::{AppConfig, AppServices, build_conversation_state};
 use nomifun_common::AgentType;
@@ -31,7 +33,7 @@ async fn conversation_workspace_uses_work_dir() {
         execution_model_pool: None,
         decision_policy: Default::default(),
         execution_template_id: None,
-        extra: serde_json::json!({}),
+        extra: common::acp_extra(),
     };
     let response = state
         .service
@@ -78,9 +80,7 @@ async fn user_specified_workspace_is_not_overridden() {
         execution_model_pool: None,
         decision_policy: Default::default(),
         execution_template_id: None,
-        extra: serde_json::json!({
-            "workspace": custom_workspace.path().to_str().unwrap()
-        }),
+        extra: common::acp_extra_with_workspace(custom_workspace.path().to_str().unwrap()),
     };
     let response = state
         .service
@@ -121,7 +121,7 @@ async fn workspace_defaults_to_data_dir_when_work_dir_equals_data_dir() {
         execution_model_pool: None,
         decision_policy: Default::default(),
         execution_template_id: None,
-        extra: serde_json::json!({}),
+        extra: common::acp_extra(),
     };
     let response = state
         .service

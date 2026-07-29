@@ -446,7 +446,7 @@ async fn batch_delete_removes_selected() {
         .oneshot(json_with_token(
             "POST",
             "/api/requirements/batch-delete",
-            json!({ "ids": [ids[0], ids[1], MISSING_REQUIREMENT_ID] }),
+            json!({ "requirement_ids": [ids[0], ids[1], MISSING_REQUIREMENT_ID] }),
             &token,
             &csrf,
         ))
@@ -470,7 +470,7 @@ async fn batch_delete_removes_selected() {
         .oneshot(json_with_token(
             "POST",
             "/api/requirements/batch-delete",
-            json!({ "ids": [] }),
+            json!({ "requirement_ids": [] }),
             &token,
             &csrf,
         ))
