@@ -1039,6 +1039,11 @@ fn safe_chromium_spawn_error() -> BrowserError {
     BrowserError::Other("browser launch could not start Chromium".into())
 }
 
+// The DevToolsActivePort polling machinery is Windows-only (Unix connects over
+// --remote-debugging-pipe and never waits for the port file), so this error is
+// unreachable on Unix production builds; `test` keeps the cross-platform
+// privacy assertion in launch_boundary_errors_do_not_echo_private_paths_or_endpoints.
+#[cfg(any(windows, test))]
 fn safe_devtools_timeout_error() -> BrowserError {
     BrowserError::Other("browser launch timed out waiting for DevToolsActivePort".into())
 }
