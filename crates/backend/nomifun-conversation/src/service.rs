@@ -146,6 +146,11 @@ pub struct IdempotentMessageDelivery {
     pub result_ok: Option<bool>,
     pub result_text: Option<String>,
     pub result_error: Option<String>,
+    /// Stable snake_case terminal error token (spec D4); `None` on success,
+    /// while in flight, and for pre-014 receipts.
+    pub result_error_code: Option<String>,
+    /// Whether the terminal failure is safe to retry automatically.
+    pub result_error_retryable: Option<bool>,
 }
 
 /// Read-only durable state of one public keyed Conversation turn.
@@ -6486,6 +6491,8 @@ impl ConversationService {
             result_ok: receipt.result_ok,
             result_text: receipt.result_text,
             result_error: receipt.result_error,
+            result_error_code: receipt.result_error_code,
+            result_error_retryable: receipt.result_error_retryable,
         }))
     }
 
@@ -6542,6 +6549,8 @@ impl ConversationService {
                     result_ok: receipt.result_ok,
                     result_text: receipt.result_text,
                     result_error: receipt.result_error,
+                    result_error_code: receipt.result_error_code,
+                    result_error_retryable: receipt.result_error_retryable,
                 },
             )),
             status => Err(AppError::Conflict(format!(
@@ -6609,6 +6618,8 @@ impl ConversationService {
             result_ok: receipt.result_ok,
             result_text: receipt.result_text,
             result_error: receipt.result_error,
+            result_error_code: receipt.result_error_code,
+            result_error_retryable: receipt.result_error_retryable,
         }))
     }
 
@@ -6970,6 +6981,8 @@ impl ConversationService {
                 result_ok: receipt.result_ok,
                 result_text: receipt.result_text,
                 result_error: receipt.result_error,
+                result_error_code: receipt.result_error_code,
+                result_error_retryable: receipt.result_error_retryable,
             });
         }
 
@@ -7180,6 +7193,8 @@ impl ConversationService {
                 result_ok: receipt.result_ok,
                 result_text: receipt.result_text,
                 result_error: receipt.result_error,
+                result_error_code: receipt.result_error_code,
+                result_error_retryable: receipt.result_error_retryable,
             });
         }
         {
@@ -7198,6 +7213,8 @@ impl ConversationService {
                     result_ok: None,
                     result_text: None,
                     result_error: None,
+                    result_error_code: None,
+                    result_error_retryable: None,
                 });
             }
             operations.insert(
@@ -7340,6 +7357,8 @@ impl ConversationService {
             result_ok: None,
             result_text: None,
             result_error: None,
+            result_error_code: None,
+            result_error_retryable: None,
         })
     }
 
@@ -7492,6 +7511,8 @@ impl ConversationService {
             result_ok: receipt.result_ok,
             result_text: receipt.result_text,
             result_error: receipt.result_error,
+            result_error_code: receipt.result_error_code,
+            result_error_retryable: receipt.result_error_retryable,
         }))
     }
 
@@ -9782,6 +9803,8 @@ impl ConversationService {
                 result_ok: receipt.result_ok,
                 result_text: receipt.result_text,
                 result_error: receipt.result_error,
+                result_error_code: receipt.result_error_code,
+                result_error_retryable: receipt.result_error_retryable,
             });
         }
         let steer_fence_prefix =
@@ -9833,6 +9856,8 @@ impl ConversationService {
                 result_ok: receipt.result_ok,
                 result_text: receipt.result_text,
                 result_error: receipt.result_error,
+                result_error_code: receipt.result_error_code,
+                result_error_retryable: receipt.result_error_retryable,
             });
         }
 
@@ -9947,6 +9972,8 @@ impl ConversationService {
             result_ok: Some(true),
             result_text: None,
             result_error: None,
+            result_error_code: None,
+            result_error_retryable: None,
         })
     }
 
@@ -10189,6 +10216,8 @@ impl ConversationService {
                 result_ok: receipt.result_ok,
                 result_text: receipt.result_text,
                 result_error: receipt.result_error,
+                result_error_code: receipt.result_error_code,
+                result_error_retryable: receipt.result_error_retryable,
             });
         }
         let runtime_build_lease =
@@ -10393,6 +10422,8 @@ impl ConversationService {
                 result_ok: receipt.result_ok,
                 result_text: receipt.result_text,
                 result_error: receipt.result_error,
+                result_error_code: receipt.result_error_code,
+                result_error_retryable: receipt.result_error_retryable,
             });
         }
 
@@ -10581,6 +10612,8 @@ impl ConversationService {
             result_ok: None,
             result_text: None,
             result_error: None,
+            result_error_code: None,
+            result_error_retryable: None,
         })
     }
 

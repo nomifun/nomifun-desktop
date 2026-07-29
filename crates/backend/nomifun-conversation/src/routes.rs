@@ -377,6 +377,8 @@ fn send_message_response(delivery: IdempotentMessageDelivery) -> SendMessageResp
         result_ok: delivery.result_ok,
         result_text: delivery.result_text,
         result_error: delivery.result_error,
+        result_error_code: delivery.result_error_code,
+        result_error_retryable: delivery.result_error_retryable,
     }
 }
 
@@ -687,6 +689,8 @@ mod tests {
             result_ok: Some(false),
             result_text: Some("terminal output".to_owned()),
             result_error: Some("provider failed".to_owned()),
+            result_error_code: Some("user_llm_provider_gateway_error".to_owned()),
+            result_error_retryable: Some(true),
         });
 
         assert_eq!(
@@ -698,7 +702,30 @@ mod tests {
                 "result_ok": false,
                 "result_text": "terminal output",
                 "result_error": "provider failed",
+                "result_error_code": "user_llm_provider_gateway_error",
+                "result_error_retryable": true,
             })
+        );
+    }
+
+    #[test]
+    fn public_delivery_response_omits_absent_structured_error_fields() {
+        let response = send_message_response(IdempotentMessageDelivery {
+            message_id: "0190f5fe-7c00-7a00-8000-000000000502".to_owned(),
+            replayed: false,
+            completed: false,
+            result_ok: None,
+            result_text: None,
+            result_error: None,
+            result_error_code: None,
+            result_error_retryable: None,
+        });
+
+        let value = serde_json::to_value(response).unwrap();
+        assert!(
+            value.get("result_error_code").is_none()
+                && value.get("result_error_retryable").is_none(),
+            "absent structured error fields must not appear on the wire: {value}"
         );
     }
 
