@@ -792,9 +792,10 @@ const BROWSER_SOURCE_DEFAULT: &str = "system";
 
 /// Read a boolean `client_preferences` toggle live, falling back to
 /// `host_default` when there is no setting row (fresh install) or no
-/// client_prefs repo is wired. The stored value is the bare JSON the frontend
-/// `configService` persists (`true`/`false`). Read per session so toggling the
-/// setting affects new sessions without a restart.
+/// client_prefs repo is wired. The frontend `configService` persists bare JSON
+/// (`true`/`false`); the raw settings API may store the quoted string forms.
+/// Read per session so toggling the setting affects new sessions without a
+/// restart.
 async fn read_bool_pref(deps: &AgentFactoryDeps, key: &str, host_default: bool) -> bool {
     let Some(repo) = deps.client_prefs.as_ref() else {
         return host_default;
@@ -803,9 +804,29 @@ async fn read_bool_pref(deps: &AgentFactoryDeps, key: &str, host_default: bool) 
         Ok(rows) => rows
             .into_iter()
             .find(|r| r.key == key)
-            .map(|r| r.value.trim() == "true")
+            .map(|r| parse_bool_pref(&r.value, host_default))
             .unwrap_or(host_default),
         Err(_) => host_default,
+    }
+}
+
+/// Shared boolean-preference parse semantics for the `agent.browserUse.*`
+/// toggles this factory shares with the Hub.
+///
+/// Deliberately identical to the boot-time reader in nomifun-app
+/// `load_browser_startup_preferences` (services.rs), so Hub startup policy and
+/// this per-session policy can never disagree about the same stored row:
+/// quotes are trimmed (a raw settings-API write stores JSON strings like
+/// `"false"`), an explicit opposite value flips the toggle, and any junk value
+/// resolves to `host_default` — default-ON toggles (e.g. persistentLogin)
+/// parse as `value != "false"`, default-OFF toggles (e.g. fullPower) parse as
+/// `value == "true"`.
+fn parse_bool_pref(value: &str, host_default: bool) -> bool {
+    let value = value.trim().trim_matches('"');
+    if host_default {
+        value != "false"
+    } else {
+        value == "true"
     }
 }
 
@@ -1548,6 +1569,27 @@ fn gateway_mcp_to_config(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bool_pref_parse_matches_the_boot_time_reader_semantics() {
+        // Fail-open default-ON keys (persistentLogin): only an explicit
+        // "false" (bare or JSON-quoted) turns them off; junk keeps the default.
+        for on in ["true", "\"true\"", "yes", "\"yes\"", "", "junk"] {
+            assert!(parse_bool_pref(on, true), "{on:?} must keep a default-ON toggle on");
+        }
+        assert!(!parse_bool_pref("false", true));
+        assert!(!parse_bool_pref("\"false\"", true));
+        assert!(!parse_bool_pref("  \"false\"  ", true));
+
+        // Fail-closed default-OFF keys (fullPower): only an explicit "true"
+        // (bare or JSON-quoted) turns them on; junk keeps them off.
+        for off in ["false", "\"false\"", "yes", "\"yes\"", "", "junk"] {
+            assert!(!parse_bool_pref(off, false), "{off:?} must keep a default-OFF toggle off");
+        }
+        assert!(parse_bool_pref("true", false));
+        assert!(parse_bool_pref("\"true\"", false));
+        assert!(parse_bool_pref("  \"true\"  ", false));
+    }
 
     fn gateway_config(port: u16, binary: &str, owner: &str) -> GatewayMcpConfig {
         GatewayMcpConfig::from_issuer(
