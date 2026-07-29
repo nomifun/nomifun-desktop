@@ -31,6 +31,7 @@ use serde_json::{Map, Value, json};
 use tokio::sync::Mutex as AsyncMutex;
 
 use crate::BrowserTool;
+use crate::tool::BrowserSecretSource;
 
 const DEFAULT_ACTION_TIMEOUT: Duration = Duration::from_secs(45);
 const MAX_ACTION_TIMEOUT: Duration = Duration::from_secs(120);
@@ -59,6 +60,11 @@ pub struct ManagedEngineHostFactory {
     resolver: EngineConfigResolver,
     lane_policy: ManagedLanePolicyDecorator,
     identity_snapshot_persister: Option<IdentitySnapshotPersister>,
+    /// F6 (裁决⑤): the per-pet secret vault the STANDALONE path derives its
+    /// egress `allow_etld1` from. When set, every host launch loads the vault
+    /// and enforces the same allowlist, and each lane facade is told exactly
+    /// which allowlist the host enforces (the secret-injection gate reads it).
+    secret_source: Option<BrowserSecretSource>,
 }
 
 impl ManagedEngineHostFactory {
@@ -88,7 +94,24 @@ impl ManagedEngineHostFactory {
             resolver,
             lane_policy: Arc::new(|policy| policy),
             identity_snapshot_persister: None,
+            secret_source: None,
         }
+    }
+
+    /// **F6 (裁决⑤ managed parity)**: enforce the SecretStore-derived egress
+    /// allowlist on every managed host, exactly like the standalone path.
+    ///
+    /// At each host launch the vault is loaded and its
+    /// [`nomifun_secret::SecretStore::allowed_etld1_union`] is unioned into
+    /// `EngineConfig.firewall.allow_etld1`. The launch-time list is also handed
+    /// to every lane facade, whose `secret:NAME` injection gate refuses to
+    /// release a credential onto a page the enforced allowlist does not cover.
+    /// Composition roots that decorate lanes with a secret source (via
+    /// [`Self::with_lane_policy`]) must set the SAME source here; otherwise
+    /// managed secret injection fails closed.
+    pub fn with_secret_source(mut self, source: BrowserSecretSource) -> Self {
+        self.secret_source = Some(source);
+        self
     }
 
     /// Decorate the fail-closed managed policy with trusted application
@@ -129,7 +152,12 @@ impl BrowserHostFactory for ManagedEngineHostFactory {
         &self,
         request: HostLaunchRequest,
     ) -> Result<Arc<dyn BrowserHostDriver>, BrowserPlatformError> {
-        let config = (self.resolver)(&request)?;
+        let mut config = (self.resolver)(&request)?;
+        // F6 (裁决⑤): the vault-derived allowlist must be enforced by the HOST
+        // (lanes share its single firewall loop), so it is applied here — the
+        // managed twin of the standalone `ensure_secret_store_and_firewall`.
+        let enforced_allow_etld1 =
+            apply_secret_egress_allowlist(&mut config, self.secret_source.as_ref());
         if config.user_data_dir.is_none() {
             return Err(BrowserPlatformError::new(
                 BrowserErrorCode::BrowserUnavailable,
@@ -165,6 +193,7 @@ impl BrowserHostFactory for ManagedEngineHostFactory {
             headful,
             lane_policy: self.lane_policy.clone(),
             identity_snapshot_persister: self.identity_snapshot_persister.clone(),
+            enforced_allow_etld1,
             state: AtomicU8::new(HostState::Running as u8),
             shutdown_gate: AsyncMutex::new(()),
         }))
@@ -182,6 +211,9 @@ struct ManagedEngineHostDriver {
     headful: bool,
     lane_policy: ManagedLanePolicyDecorator,
     identity_snapshot_persister: Option<IdentitySnapshotPersister>,
+    /// F6: the egress allowlist this host's firewall was LAUNCHED with. Every
+    /// lane facade receives it so the `secret:NAME` gate matches enforcement.
+    enforced_allow_etld1: Vec<String>,
     state: AtomicU8,
     shutdown_gate: AsyncMutex<()>,
 }
@@ -266,7 +298,7 @@ impl BrowserHostDriver for ManagedEngineHostDriver {
             .open_lane(request.lane_id.to_string(), config.clone())
             .await
             .map_err(map_engine_error)?;
-        let policy = BrowserTool::with_managed_engine(
+        let mut policy = BrowserTool::with_managed_engine(
             engine.clone(),
             self.data_dir.clone(),
             config.workspace_dir,
@@ -275,6 +307,10 @@ impl BrowserHostDriver for ManagedEngineHostDriver {
             config.evaluate_persistent_login,
             known_secret_values,
         );
+        // F6: record the allowlist the host firewall actually enforces, so the
+        // facade's secret-injection gate stays consistent with enforcement even
+        // when its own vault snapshot is fresher than the host launch.
+        policy.managed_enforced_allow_etld1 = Some(self.enforced_allow_etld1.clone());
         let policy = (self.lane_policy)(policy);
         Ok(Arc::new(ManagedEngineLaneDriver {
             lane_id: request.lane_id,
@@ -716,6 +752,30 @@ impl BrowserLaneDriver for ManagedEngineLaneDriver {
             coverage,
         }))
     }
+}
+
+/// **F6 (裁决⑤)**: union the vault-derived egress allowlist into the host's
+/// launch firewall, returning the full allowlist the host will enforce.
+///
+/// Mirrors the standalone `ensure_secret_store_and_firewall`: the SecretStore's
+/// `allowed_etld1_union` feeds `firewall.allow_etld1` (a missing/corrupt vault
+/// degrades to an empty store, identical to the standalone path). An
+/// application-resolved allowlist is never weakened — vault domains are added,
+/// existing entries are kept. Without a secret source the resolver's own
+/// firewall is left untouched and reported as the enforced list.
+fn apply_secret_egress_allowlist(
+    config: &mut EngineConfig,
+    secret_source: Option<&BrowserSecretSource>,
+) -> Vec<String> {
+    if let Some(source) = secret_source {
+        let store = nomifun_secret::load_secret_store(&source.vault_path, source.key);
+        for domain in store.allowed_etld1_union() {
+            if !config.firewall.allow_etld1.contains(&domain) {
+                config.firewall.allow_etld1.push(domain);
+            }
+        }
+    }
+    config.firewall.allow_etld1.clone()
 }
 
 fn derive_host_config(
@@ -1841,5 +1901,85 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(missing.code, BrowserErrorCode::NeedsPrimaryIdentity);
+    }
+
+    // ── F6 (裁决⑤): managed hosts launch with the vault-derived egress allowlist ──
+
+    #[test]
+    fn host_launch_config_enforces_vault_derived_egress_allowlist() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let key = [0x42u8; nomifun_secret::KEY_SIZE];
+        let vault_path = nomifun_secret::shared_vault_path(dir.path());
+        let mut store = nomifun_secret::SecretStore::new(key);
+        store
+            .register("pw", "the-secret", vec!["bank.com".into()])
+            .unwrap();
+        store
+            .register("tok", "ghp", vec!["github.com".into()])
+            .unwrap();
+        nomifun_secret::save_secret_store(&store, &vault_path).expect("save vault");
+
+        // The template firewall is the app default (empty allowlist), exactly
+        // like the production HubConfig template.
+        let mut config = EngineConfig::default();
+        let enforced = apply_secret_egress_allowlist(
+            &mut config,
+            Some(&BrowserSecretSource { vault_path, key }),
+        );
+
+        // The host EngineConfig now enforces the same allow_etld1 the
+        // standalone path derives from this vault (裁决⑤ shared truth).
+        assert_eq!(
+            config.firewall.allow_etld1,
+            vec!["bank.com".to_string(), "github.com".to_string()]
+        );
+        assert_eq!(enforced, config.firewall.allow_etld1);
+        // The remaining firewall posture is untouched (IP block + POST gate).
+        let default = nomi_browser_engine::FirewallConfig::default();
+        assert_eq!(config.firewall.block_private_ips, default.block_private_ips);
+        assert_eq!(
+            config.firewall.gate_cross_origin_post,
+            default.gate_cross_origin_post
+        );
+    }
+
+    #[test]
+    fn vault_allowlist_unions_with_resolver_allowlist_and_never_weakens_it() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let key = [0x42u8; nomifun_secret::KEY_SIZE];
+        let vault_path = nomifun_secret::shared_vault_path(dir.path());
+        let mut store = nomifun_secret::SecretStore::new(key);
+        store
+            .register("pw", "the-secret", vec!["bank.com".into()])
+            .unwrap();
+        nomifun_secret::save_secret_store(&store, &vault_path).expect("save vault");
+
+        let mut config = EngineConfig::default();
+        config.firewall.allow_etld1 = vec!["app-pinned.com".into(), "bank.com".into()];
+        let enforced = apply_secret_egress_allowlist(
+            &mut config,
+            Some(&BrowserSecretSource { vault_path, key }),
+        );
+        assert_eq!(
+            enforced,
+            vec!["app-pinned.com".to_string(), "bank.com".to_string()]
+        );
+    }
+
+    #[test]
+    fn missing_secret_source_or_vault_keeps_resolver_firewall_untouched() {
+        // No source: the resolver's firewall is authoritative and reported as-is.
+        let mut config = EngineConfig::default();
+        assert!(apply_secret_egress_allowlist(&mut config, None).is_empty());
+        assert!(config.firewall.allow_etld1.is_empty());
+
+        // A missing vault degrades to an empty store (standalone parity).
+        let dir = tempfile::tempdir().expect("tempdir");
+        let source = BrowserSecretSource {
+            vault_path: nomifun_secret::shared_vault_path(dir.path()),
+            key: [0x42u8; nomifun_secret::KEY_SIZE],
+        };
+        assert!(apply_secret_egress_allowlist(&mut config, Some(&source)).is_empty());
+        assert!(config.firewall.allow_etld1.is_empty());
     }
 }
