@@ -1,6 +1,6 @@
 //! The catalog resolution pipeline: `(ModelRef, ModelTask, TaskRequest)` →
 //! [`ResolvedCall`] + protocol adapter. This is THE single resolution
-//! algorithm — invoke, poll and probe (T5) all ride it; no other code path
+//! algorithm — invoke, poll and probe all ride it; no other code path
 //! may combine providers/provider_models/provider_connections rows with the
 //! platform route table.
 
@@ -80,9 +80,6 @@ impl ModelInvokeService {
     /// 6. model_params = row.params (bad → {}); adapter = registry[(protocol,
     ///    task)] — an *unregistered* protocol coming from the model-row
     ///    override is user-fixable model config → Config, not NoAdapter.
-    // Consumed by the T5 invoke/poll/probe orchestration; until then the
-    // only in-crate callers are tests, so mark it live for the lib build.
-    #[allow(dead_code)]
     pub(crate) async fn resolve(
         &self,
         m: &ModelRef,

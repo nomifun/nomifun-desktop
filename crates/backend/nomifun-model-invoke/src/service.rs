@@ -1,12 +1,38 @@
 //! [`ModelInvokeService`] — the invoke layer's entry point: catalog
 //! repositories + credential decryption key + shared HTTP client + the
-//! protocol adapter registry. This module carries the constructor; the
-//! catalog resolution pipeline lives in [`crate::resolve`], and the
-//! invoke/poll/probe orchestration arrives in a later task (T5).
+//! protocol adapter registry. This module carries the constructor and the
+//! invoke / poll / probe orchestration; the catalog resolution pipeline they
+//! all share lives in [`crate::resolve`].
 
 use std::sync::Arc;
+use std::time::{Duration, Instant};
+
+use nomifun_api_types::ModelTask;
+use serde_json::json;
 
 use crate::adapter::AdapterRegistry;
+use crate::error::{InvokeError, InvokeErrorKind};
+use crate::types::{
+    AsrRequest, EmbedRequest, ImageEditRequest, ImageGenRequest, InputAsset, JobHandle, ModelRef,
+    TaskOutcome, TaskRequest, TtsRequest, VideoGenRequest,
+};
+
+/// Ceiling on one modality probe (resolution + submit), matching the legacy
+/// `provider_health` modality probe.
+const PROBE_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// Outcome of a health probe. Upstream failures never surface as `Err` — they
+/// fold into `healthy = false` + `message`; `Err` is reserved for calls the
+/// probe path does not serve at all (chat rides the agent engine).
+#[derive(Debug, Clone)]
+pub struct ProbeReport {
+    pub healthy: bool,
+    /// Wall time of the probe attempt (resolution is a few local DB reads;
+    /// this effectively measures the submit round-trip).
+    pub latency_ms: u64,
+    /// Failure detail when `healthy == false`.
+    pub message: Option<String>,
+}
 
 /// The unified multimodal model invocation service.
 pub struct ModelInvokeService {
@@ -15,8 +41,7 @@ pub struct ModelInvokeService {
     pub(crate) provider_connection_repo: Arc<dyn nomifun_db::IProviderConnectionRepository>,
     /// AES-256-GCM key used to decrypt stored provider/connection credentials.
     pub(crate) encryption_key: [u8; 32],
-    /// Shared client for all adapter calls (consumed by the T5 orchestration).
-    #[allow(dead_code)]
+    /// Shared client for all adapter calls.
     pub(crate) http: reqwest::Client,
     pub(crate) registry: AdapterRegistry,
 }
@@ -31,5 +56,531 @@ impl ModelInvokeService {
         registry: AdapterRegistry,
     ) -> Self {
         Self { provider_repo, provider_model_repo, provider_connection_repo, encryption_key, http, registry }
+    }
+
+    /// Execute one task invocation: full resolution (task-membership gate
+    /// enforced) then the adapter's submit. A [`TaskOutcome::Pending`] hands
+    /// back a [`JobHandle`] the caller later feeds to [`Self::poll`].
+    pub async fn invoke(&self, m: &ModelRef, req: TaskRequest) -> Result<TaskOutcome, InvokeError> {
+        let task = req.task();
+        let (call, adapter) = self.resolve(m, task, req, true).await?;
+        adapter.submit(&self.http, &call).await
+    }
+
+    /// Poll a pending job. Resolution runs with `enforce_task_membership =
+    /// false` — recovery semantics: the model's task tags may have changed
+    /// since submit, and polling must not re-gate an already-accepted job.
+    /// The adapter is taken DIRECTLY from the registry by `job.adapter_id`
+    /// (the job pins its protocol; no route/row re-derivation), so an
+    /// unregistered `adapter_id` is an honest NoAdapter.
+    pub async fn poll(
+        &self,
+        m: &ModelRef,
+        req: TaskRequest,
+        job: &JobHandle,
+    ) -> Result<TaskOutcome, InvokeError> {
+        let task = req.task();
+        // Resolved connection/params ride the CURRENT catalog state; the
+        // resolver's own adapter pick is deliberately discarded below.
+        let (call, _route_adapter) = self.resolve(m, task, req, false).await?;
+        let adapter = self.registry.get(&job.adapter_id, task)?;
+        adapter.poll(&self.http, &call, job).await
+    }
+
+    /// Health-probe `(model, task)` with the smallest valid request (a port of
+    /// the legacy `provider_health::run_modality_probe` semantics):
+    ///
+    /// - resolution runs un-gated (`enforce_task_membership = false`) — probing
+    ///   an untagged model must not be blocked by catalog membership (disabled
+    ///   provider/model rows still refuse, and fold into `healthy = false`);
+    /// - `Done` OR `Pending` → healthy (an async accept proves the endpoint;
+    ///   the probe never polls and never downloads content);
+    /// - multipart tasks (ImageEdit / SpeechRecognition) carry no real file, so
+    ///   an [`InvokeErrorKind::InvalidParams`] (missing-file 400) still proves
+    ///   endpoint + auth + model are reachable → healthy;
+    /// - any other error → `healthy = false` with the error text;
+    /// - the whole attempt is capped at 60 s.
+    ///
+    /// Chat is refused up front ([`InvokeErrorKind::Config`]): chat probes run
+    /// through the agent engine, not the invoke layer.
+    pub async fn probe(&self, m: &ModelRef, task: ModelTask) -> Result<ProbeReport, InvokeError> {
+        if task == ModelTask::Chat {
+            return Err(InvokeError::config(
+                "chat probes run through the agent engine, not the invoke layer",
+            ));
+        }
+        let started = Instant::now();
+        let attempt = async {
+            // Two-phase build: resolve with a params-free placeholder, then
+            // rebuild the minimal request from the resolved model_params so
+            // catalog defaults (image size/quality, TTS voice, …) ride along —
+            // the mirror of the legacy prober's minimal_json_body overlay.
+            let placeholder = probe_request(task, &json!({}));
+            let (mut call, adapter) = self.resolve(m, task, placeholder, false).await?;
+            call.request = probe_request(task, &call.model_params);
+            adapter.submit(&self.http, &call).await
+        };
+        let outcome = tokio::time::timeout(PROBE_TIMEOUT, attempt).await;
+        let latency_ms = started.elapsed().as_millis() as u64;
+        let report = match outcome {
+            // Sync success, or async accepted — either proves the model
+            // answers. Pending is NOT followed up: no poll, no download.
+            Ok(Ok(TaskOutcome::Done(_) | TaskOutcome::Pending(_))) => {
+                ProbeReport { healthy: true, latency_ms, message: None }
+            }
+            // Reachable-only tolerance for the file-based tasks: the probe
+            // sends no usable file, so a missing-file 400 (InvalidParams)
+            // still proves endpoint + auth + model are reachable.
+            Ok(Err(e))
+                if matches!(task, ModelTask::ImageEdit | ModelTask::SpeechRecognition)
+                    && e.kind == InvokeErrorKind::InvalidParams =>
+            {
+                ProbeReport { healthy: true, latency_ms, message: None }
+            }
+            Ok(Err(e)) => ProbeReport { healthy: false, latency_ms, message: Some(e.to_string()) },
+            Err(_) => ProbeReport {
+                healthy: false,
+                latency_ms,
+                message: Some(format!("modality probe timeout ({}s)", PROBE_TIMEOUT.as_secs())),
+            },
+        };
+        Ok(report)
+    }
+}
+
+/// The smallest valid [`TaskRequest`] for a probe, overlaying known catalog
+/// params (image size/quality + steps/cfg_scale/text_mode passthrough, TTS
+/// voice) — the typed mirror of the legacy prober's `minimal_json_body` /
+/// `minimal_multipart_form`.
+fn probe_request(task: ModelTask, params: &serde_json::Value) -> TaskRequest {
+    match task {
+        ModelTask::ImageGeneration => TaskRequest::ImageGeneration(ImageGenRequest {
+            prompt: "health check".into(),
+            count: 1,
+            size: params.get("size").and_then(|v| v.as_str()).map(str::to_string),
+            quality: params.get("quality").and_then(|v| v.as_str()).map(str::to_string),
+            extra: {
+                // Params only some providers require; adapters that understand
+                // them (ark images steps/cfg_scale/text_mode) read `extra`.
+                let mut extra = serde_json::Map::new();
+                for key in ["steps", "cfg_scale", "text_mode"] {
+                    if let Some(v) = params.get(key) {
+                        extra.insert(key.to_string(), v.clone());
+                    }
+                }
+                serde_json::Value::Object(extra)
+            },
+        }),
+        ModelTask::ImageEdit => TaskRequest::ImageEdit(ImageEditRequest {
+            prompt: "health check".into(),
+            count: 1,
+            size: None,
+            // No file — reachable-only: a missing-file 400 counts as healthy.
+            inputs: vec![],
+            extra: json!({}),
+        }),
+        ModelTask::VideoGeneration => TaskRequest::VideoGeneration(VideoGenRequest {
+            prompt: "health check".into(),
+            seconds: None,
+            size: None,
+            inputs: vec![],
+            extra: json!({}),
+        }),
+        ModelTask::SpeechSynthesis => TaskRequest::SpeechSynthesis(TtsRequest {
+            text: "hi".into(),
+            // None → the adapter's default voice (openai family: "alloy").
+            voice: params.get("voice").and_then(|v| v.as_str()).map(str::to_string),
+            format: None,
+            extra: json!({}),
+        }),
+        ModelTask::SpeechRecognition => TaskRequest::SpeechRecognition(AsrRequest {
+            // Empty audio — reachable-only, same rule as ImageEdit.
+            audio: InputAsset { id: None, role: "audio".into(), bytes: vec![], mime: "audio/wav".into() },
+            language: None,
+            prompt: None,
+            extra: json!({}),
+        }),
+        ModelTask::Embedding => {
+            TaskRequest::Embedding(EmbedRequest { inputs: vec!["health check".into()], extra: json!({}) })
+        }
+        // Rerank has no TaskRequest shape yet; the probe still flows through
+        // resolution so the registry's NoAdapter is the honest "nothing serves
+        // rerank" signal — this placeholder payload is never submitted. Chat
+        // is unreachable here (guarded in `probe`), folded in for exhaustiveness.
+        ModelTask::Rerank | ModelTask::Chat => {
+            TaskRequest::Embedding(EmbedRequest { inputs: vec!["health check".into()], extra: json!({}) })
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use nomifun_api_types::ModelTask;
+    use nomifun_common::encrypt_string;
+    use nomifun_db::{
+        CreateProviderParams, IProviderModelRepository, IProviderRepository, NewProviderModel,
+        SqliteProviderConnectionRepository, SqliteProviderModelRepository, SqliteProviderRepository,
+        SqlitePool, init_database_memory,
+    };
+    use serde_json::json;
+    use wiremock::matchers::{body_partial_json, header, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    use super::*;
+    use crate::adapters::default_adapters;
+    use crate::error::InvokeErrorKind;
+    use crate::types::{
+        ImageGenRequest, JobHandle, ModelRef, ProducedData, TaskOutcome, TaskRequest, TaskResult,
+        VideoGenRequest,
+    };
+
+    const TEST_KEY: [u8; 32] = [0x42; 32];
+
+    /// Real in-memory DB + the production adapter set: these are the invoke
+    /// layer's end-to-end tests (catalog rows → resolution → wire → outcome).
+    async fn setup() -> (ModelInvokeService, SqlitePool) {
+        let db = init_database_memory().await.unwrap();
+        let pool = db.pool().clone();
+        std::mem::forget(db);
+        let service = ModelInvokeService::new(
+            Arc::new(SqliteProviderRepository::new(pool.clone())),
+            Arc::new(SqliteProviderModelRepository::new(pool.clone())),
+            Arc::new(SqliteProviderConnectionRepository::new(pool.clone())),
+            TEST_KEY,
+            reqwest::Client::new(),
+            AdapterRegistry::new(default_adapters()),
+        );
+        (service, pool)
+    }
+
+    /// Seed an enabled openai-platform provider whose base_url is the mock
+    /// server (key decrypts to `sk-test` → `Authorization: Bearer sk-test`).
+    async fn seed_provider(pool: &SqlitePool, base_url: &str) -> String {
+        let repo = SqliteProviderRepository::new(pool.clone());
+        let encrypted = encrypt_string("sk-test", &TEST_KEY).unwrap();
+        repo.create(CreateProviderParams {
+            provider_id: None,
+            platform: "openai",
+            name: "Wiremock Provider",
+            base_url,
+            api_key_encrypted: &encrypted,
+            models: "[]",
+            enabled: true,
+            capabilities: "[]",
+            model_context_limits: None,
+            model_protocols: None,
+            model_descriptions: None,
+            model_enabled: None,
+            model_health: None,
+            bedrock_config: None,
+            is_full_url: false,
+            sort_order: None,
+        })
+        .await
+        .unwrap()
+        .provider_id
+    }
+
+    async fn seed_model(
+        pool: &SqlitePool,
+        provider_id: &str,
+        model: &str,
+        tasks: &str,
+        params: &str,
+        enabled: bool,
+    ) {
+        let repo = SqliteProviderModelRepository::new(pool.clone());
+        repo.create(
+            provider_id,
+            &NewProviderModel {
+                model,
+                enabled,
+                sort_order: 0,
+                tasks,
+                traits: "[]",
+                protocol: None,
+                params,
+                context_limit: None,
+                description: None,
+                source: "user",
+                health: None,
+            },
+        )
+        .await
+        .unwrap();
+    }
+
+    fn mref(provider_id: &str, model: &str) -> ModelRef {
+        ModelRef { provider_id: provider_id.into(), model: model.into() }
+    }
+
+    fn image_request(prompt: &str) -> TaskRequest {
+        TaskRequest::ImageGeneration(ImageGenRequest {
+            prompt: prompt.into(),
+            count: 1,
+            size: None,
+            quality: None,
+            extra: json!({}),
+        })
+    }
+
+    fn video_request() -> TaskRequest {
+        TaskRequest::VideoGeneration(VideoGenRequest {
+            prompt: "a wave".into(),
+            seconds: None,
+            size: None,
+            inputs: vec![],
+            extra: json!({}),
+        })
+    }
+
+    // -- invoke --------------------------------------------------------------
+
+    #[tokio::test]
+    async fn invoke_image_generation_end_to_end() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/images/generations"))
+            .and(header("authorization", "Bearer sk-test"))
+            .and(body_partial_json(json!({"model": "gpt-image-1", "prompt": "a fox", "n": 1})))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data": [{"b64_json": "aGk="}]})))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let (svc, pool) = setup().await;
+        let pid = seed_provider(&pool, &server.uri()).await;
+        seed_model(&pool, &pid, "gpt-image-1", r#"["image_generation"]"#, "{}", true).await;
+
+        let out = svc.invoke(&mref(&pid, "gpt-image-1"), image_request("a fox")).await.unwrap();
+        let TaskOutcome::Done(TaskResult::Assets(assets)) = out else { panic!("expected Done(Assets)") };
+        assert_eq!(assets.len(), 1);
+        assert!(matches!(&assets[0].data, ProducedData::Bytes(b) if b == b"hi"));
+    }
+
+    #[tokio::test]
+    async fn invoke_task_mismatch_is_unsupported_task_without_network() {
+        let server = MockServer::start().await;
+        // No mock mounted: any request reaching the server would 404 — but the
+        // gate must reject before the wire.
+        let (svc, pool) = setup().await;
+        let pid = seed_provider(&pool, &server.uri()).await;
+        seed_model(&pool, &pid, "gpt-4o", r#"["chat"]"#, "{}", true).await;
+
+        let err = svc.invoke(&mref(&pid, "gpt-4o"), image_request("a fox")).await.unwrap_err();
+        assert_eq!(err.kind, InvokeErrorKind::UnsupportedTask);
+        assert!(server.received_requests().await.unwrap().is_empty(), "gate must fire before the wire");
+    }
+
+    // -- probe ---------------------------------------------------------------
+
+    #[tokio::test]
+    async fn probe_multipart_task_missing_file_400_is_healthy() {
+        // Reachable-only rule: the probe sends an empty file, a missing-file
+        // 400 proves endpoint + auth + model are reachable (mirrors
+        // provider_health's classify for ImageEdit / SpeechRecognition).
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/audio/transcriptions"))
+            .and(header("authorization", "Bearer sk-test"))
+            .respond_with(ResponseTemplate::new(400).set_body_json(
+                json!({"error": {"message": "file is required", "type": "invalid_request_error"}}),
+            ))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let (svc, pool) = setup().await;
+        let pid = seed_provider(&pool, &server.uri()).await;
+        seed_model(&pool, &pid, "whisper-1", r#"["speech_recognition"]"#, "{}", true).await;
+
+        let report = svc.probe(&mref(&pid, "whisper-1"), ModelTask::SpeechRecognition).await.unwrap();
+        assert!(report.healthy, "message: {:?}", report.message);
+        assert_eq!(report.message, None);
+    }
+
+    #[tokio::test]
+    async fn probe_500_is_unhealthy_with_message() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/images/generations"))
+            .respond_with(ResponseTemplate::new(500).set_body_string("boom"))
+            .mount(&server)
+            .await;
+
+        let (svc, pool) = setup().await;
+        let pid = seed_provider(&pool, &server.uri()).await;
+        seed_model(&pool, &pid, "gpt-image-1", r#"["image_generation"]"#, "{}", true).await;
+
+        let report = svc.probe(&mref(&pid, "gpt-image-1"), ModelTask::ImageGeneration).await.unwrap();
+        assert!(!report.healthy);
+        let message = report.message.expect("unhealthy probe carries a message");
+        assert!(message.contains("500"), "message: {message}");
+    }
+
+    #[tokio::test]
+    async fn probe_400_on_json_task_stays_unhealthy() {
+        // The reachable-only tolerance is scoped to the multipart tasks
+        // (ImageEdit / SpeechRecognition) whose probe cannot carry a file; a
+        // 400 on a JSON task is a real failure.
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/images/generations"))
+            .respond_with(ResponseTemplate::new(400).set_body_json(
+                json!({"error": {"message": "prompt rejected", "type": "invalid_request_error"}}),
+            ))
+            .mount(&server)
+            .await;
+
+        let (svc, pool) = setup().await;
+        let pid = seed_provider(&pool, &server.uri()).await;
+        seed_model(&pool, &pid, "gpt-image-1", r#"["image_generation"]"#, "{}", true).await;
+
+        let report = svc.probe(&mref(&pid, "gpt-image-1"), ModelTask::ImageGeneration).await.unwrap();
+        assert!(!report.healthy);
+        assert!(report.message.unwrap().contains("400"));
+    }
+
+    #[tokio::test]
+    async fn probe_video_pending_is_healthy_and_never_polls() {
+        // An async-accepted submit is healthy on its own; the probe must not
+        // follow up with poll or content requests.
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/videos"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"id": "v1", "status": "queued"})))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let (svc, pool) = setup().await;
+        let pid = seed_provider(&pool, &server.uri()).await;
+        seed_model(&pool, &pid, "sora-2", r#"["video_generation"]"#, "{}", true).await;
+
+        let report = svc.probe(&mref(&pid, "sora-2"), ModelTask::VideoGeneration).await.unwrap();
+        assert!(report.healthy, "message: {:?}", report.message);
+        let requests = server.received_requests().await.unwrap();
+        assert_eq!(requests.len(), 1, "probe must stop at submit: no poll, no content download");
+    }
+
+    #[tokio::test]
+    async fn probe_overlays_catalog_params_like_minimal_json_body() {
+        // minimal_json_body mirror: catalog params (size/quality) ride the
+        // minimal "health check" request so providers requiring them validate.
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/images/generations"))
+            .and(body_partial_json(json!({
+                "prompt": "health check",
+                "n": 1,
+                "size": "512x512",
+                "quality": "high",
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data": [{"b64_json": "aGk="}]})))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let (svc, pool) = setup().await;
+        let pid = seed_provider(&pool, &server.uri()).await;
+        seed_model(
+            &pool,
+            &pid,
+            "gpt-image-1",
+            r#"["image_generation"]"#,
+            r#"{"size": "512x512", "quality": "high", "steps": 20}"#,
+            true,
+        )
+        .await;
+
+        let report = svc.probe(&mref(&pid, "gpt-image-1"), ModelTask::ImageGeneration).await.unwrap();
+        assert!(report.healthy, "message: {:?}", report.message);
+    }
+
+    #[tokio::test]
+    async fn probe_disabled_model_is_unhealthy_with_model_disabled_message() {
+        // Pinned T2 decision: resolve(enforce=false) still rejects disabled
+        // rows, so probing a disabled model reports unhealthy — it does not
+        // silently probe past the operator's kill switch.
+        let (svc, pool) = setup().await;
+        let pid = seed_provider(&pool, "https://unused.example").await;
+        seed_model(&pool, &pid, "gpt-image-1", r#"["image_generation"]"#, "{}", false).await;
+
+        let report = svc.probe(&mref(&pid, "gpt-image-1"), ModelTask::ImageGeneration).await.unwrap();
+        assert!(!report.healthy);
+        let message = report.message.expect("unhealthy probe carries a message");
+        assert!(message.contains("model disabled"), "message: {message}");
+    }
+
+    #[tokio::test]
+    async fn probe_chat_is_config_error_before_resolution() {
+        // Chat probes stay on the agent-engine path; the guard fires before
+        // any catalog read (no provider seeded here).
+        let (svc, _pool) = setup().await;
+        let err = svc.probe(&mref("any", "gpt-4o"), ModelTask::Chat).await.unwrap_err();
+        assert_eq!(err.kind, InvokeErrorKind::Config);
+        assert!(err.message.contains("agent engine"), "message: {}", err.message);
+    }
+
+    // -- poll ----------------------------------------------------------------
+
+    #[tokio::test]
+    async fn poll_rides_job_adapter_id_and_hits_status_endpoint() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1/videos/v1"))
+            .and(header("authorization", "Bearer sk-test"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"id": "v1", "status": "in_progress"})))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let (svc, pool) = setup().await;
+        let pid = seed_provider(&pool, &server.uri()).await;
+        seed_model(&pool, &pid, "sora-2", r#"["video_generation"]"#, "{}", true).await;
+
+        let job = JobHandle { adapter_id: "openai.videos".into(), remote_id: "v1".into(), poll_state: json!({}) };
+        let out = svc.poll(&mref(&pid, "sora-2"), video_request(), &job).await.unwrap();
+        let TaskOutcome::Pending(handle) = out else { panic!("expected Pending") };
+        assert_eq!(handle.remote_id, "v1");
+        assert_eq!(handle.adapter_id, "openai.videos");
+    }
+
+    #[tokio::test]
+    async fn poll_does_not_regate_task_membership() {
+        // Recovery semantics: the model's tags may have changed since submit;
+        // poll resolves with enforce=false, so a row now tagged chat-only
+        // still lets the pinned job be polled.
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1/videos/v1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"id": "v1", "status": "in_progress"})))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let (svc, pool) = setup().await;
+        let pid = seed_provider(&pool, &server.uri()).await;
+        seed_model(&pool, &pid, "sora-2", r#"["chat"]"#, "{}", true).await;
+
+        let job = JobHandle { adapter_id: "openai.videos".into(), remote_id: "v1".into(), poll_state: json!({}) };
+        let out = svc.poll(&mref(&pid, "sora-2"), video_request(), &job).await.unwrap();
+        assert!(matches!(out, TaskOutcome::Pending(_)));
+    }
+
+    #[tokio::test]
+    async fn poll_unregistered_job_adapter_is_no_adapter() {
+        // The job pins its adapter: an adapter_id nothing registered is a
+        // NoAdapter, not a silent protocol re-derivation.
+        let (svc, pool) = setup().await;
+        let pid = seed_provider(&pool, "https://unused.example").await;
+        seed_model(&pool, &pid, "sora-2", r#"["video_generation"]"#, "{}", true).await;
+
+        let job = JobHandle { adapter_id: "ghost.videos".into(), remote_id: "v1".into(), poll_state: json!({}) };
+        let err = svc.poll(&mref(&pid, "sora-2"), video_request(), &job).await.unwrap_err();
+        assert_eq!(err.kind, InvokeErrorKind::NoAdapter);
+        assert!(err.message.contains("ghost.videos"), "message: {}", err.message);
     }
 }
