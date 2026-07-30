@@ -1,14 +1,9 @@
 import React, { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import { isDesktopShell } from '@renderer/utils/platform';
 import { configService } from '@/common/config/configService';
-import { AUTH_EXPIRED_EVENT } from '@/common/adapter/httpBridge';
+import { AUTH_EXPIRED_EVENT, buildBackendAuthHeaders } from '@/common/adapter/httpBridge';
 import { consumeQrLoginResume } from './qrLoginResume';
 import { parseUserId, type UserId } from '@/common/types/ids';
-// M6: CSRF removed with legacy webserver — stub functions for compatibility, re-implement in M7
-const withCsrfToken = <T extends Record<string, unknown>>(data: T): T => data;
-const hasValidCsrfToken = (): boolean => true;
-const clearCookie = (_name: string, _path?: string): void => {};
-const CSRF_COOKIE_NAME = 'csrf-token';
 
 type AuthStatus = 'checking' | 'authenticated' | 'unauthenticated';
 
@@ -94,16 +89,18 @@ const AUTH_SETUP_ENDPOINT = '/api/auth/setup';
 // leave the desktop stuck on the login screen.
 const isDesktopRuntime = isDesktopShell();
 
-// Clear expired auth cache including cookies and localStorage
-// 清除过期的认证缓存，包括 Cookie 和 localStorage
+// Clear expired auth cache (localStorage only).
+//
+// Deliberately does NOT touch the CSRF cookie: it is independent of the
+// session, the backend re-issues it on every response, and deleting it while
+// other requests are in flight cascades them into fresh CSRF 403s
+// (audit 2026-07-30, finding B). The session cookie is HttpOnly and cannot be
+// cleared from script at all.
+// 清除过期的认证缓存（仅 localStorage；CSRF cookie 由后端滑动续期，不在此清除）
 function clearAuthCache(): void {
   if (typeof window === 'undefined') return;
 
   try {
-    // Clear CSRF cookie
-    clearCookie(CSRF_COOKIE_NAME);
-    clearCookie(CSRF_COOKIE_NAME, '/');
-
     // Clear localStorage auth-related items
     const keysToRemove: string[] = [];
     for (let i = 0; i < localStorage.length; i++) {
@@ -118,7 +115,18 @@ function clearAuthCache(): void {
   }
 }
 
-async function fetchCurrentUser(signal?: AbortSignal): Promise<AuthUser | null> {
+/**
+ * Result of probing `GET /api/auth/user`.
+ *
+ * `transient` covers everything that does NOT prove the session is gone:
+ * 429 (a shared rate-limit bucket tripping — common in docker deployments),
+ * 5xx, and network failures. Treating those as "logged out" bounced users
+ * with perfectly valid sessions to the login screen whenever the deployment
+ * was busy (audit 2026-07-30, finding A).
+ */
+export type CurrentUserProbe = { kind: 'user'; user: AuthUser } | { kind: 'unauthenticated' } | { kind: 'transient' };
+
+export async function fetchCurrentUser(signal?: AbortSignal): Promise<CurrentUserProbe> {
   try {
     const response = await fetch(AUTH_USER_ENDPOINT, {
       method: 'GET',
@@ -128,7 +136,12 @@ async function fetchCurrentUser(signal?: AbortSignal): Promise<AuthUser | null> 
     });
 
     if (!response.ok) {
-      return null;
+      // Only a definitive credential rejection means "not logged in".
+      if (response.status === 401 || response.status === 403) {
+        return { kind: 'unauthenticated' };
+      }
+      console.warn(`[auth] ${AUTH_USER_ENDPOINT} returned ${response.status}; keeping current session state`);
+      return { kind: 'transient' };
     }
 
     const data = (await response.json()) as {
@@ -137,16 +150,33 @@ async function fetchCurrentUser(signal?: AbortSignal): Promise<AuthUser | null> 
     };
     const user = parseAuthUser(data.user);
     if (data.success && user) {
-      return user;
+      return { kind: 'user', user };
     }
+    // A well-formed 200 without a user is an authoritative "no session".
+    return { kind: 'unauthenticated' };
   } catch (error) {
     if ((error as Error).name === 'AbortError') {
-      return null;
+      return { kind: 'transient' };
     }
     console.error('Failed to fetch current user:', error);
+    return { kind: 'transient' };
   }
+}
 
-  return null;
+/**
+ * Probe the current user, retrying transient failures (429/5xx/network) a few
+ * times with a short delay so a momentary hiccup doesn't decide auth state.
+ */
+async function fetchCurrentUserWithRetry(signal?: AbortSignal): Promise<CurrentUserProbe> {
+  const delaysMs = [800, 2000];
+  let result = await fetchCurrentUser(signal);
+  for (const delay of delaysMs) {
+    if (result.kind !== 'transient' || signal?.aborted) return result;
+    await new Promise((resolve) => setTimeout(resolve, delay));
+    if (signal?.aborted) return result;
+    result = await fetchCurrentUser(signal);
+  }
+  return result;
 }
 
 /**
@@ -181,6 +211,10 @@ export const AuthProvider: React.FC<React.PropsWithChildren> = ({ children }) =>
   const [ready, setReady] = useState(false);
   const [needsSetup, setNeedsSetup] = useState(false);
   const abortRef = useRef<AbortController | null>(null);
+  // Last authoritative answer about the session, surviving the 'checking'
+  // interlude a refresh() introduces: a transient probe failure must restore
+  // this instead of logging the user out.
+  const hadSessionRef = useRef(false);
 
   const refresh = useCallback(async () => {
     if (isDesktopRuntime) {
@@ -193,6 +227,7 @@ export const AuthProvider: React.FC<React.PropsWithChildren> = ({ children }) =>
 
     const qrLoginUser = consumeQrLoginResume();
     if (qrLoginUser) {
+      hadSessionRef.current = true;
       setUser(qrLoginUser);
       setStatus('authenticated');
       setNeedsSetup(false);
@@ -213,13 +248,20 @@ export const AuthProvider: React.FC<React.PropsWithChildren> = ({ children }) =>
     // screen decides between "sign in" and "create admin".
     setNeedsSetup(await fetchNeedsSetup(controller.signal));
 
-    const currentUser = await fetchCurrentUser(controller.signal);
-    if (currentUser) {
-      setUser(currentUser);
+    const probe = await fetchCurrentUserWithRetry(controller.signal);
+    if (probe.kind === 'user') {
+      hadSessionRef.current = true;
+      setUser(probe.user);
       setStatus('authenticated');
-    } else {
+    } else if (probe.kind === 'unauthenticated') {
+      hadSessionRef.current = false;
       setUser(null);
       setStatus('unauthenticated');
+    } else {
+      // Transient failure (rate limit / 5xx / network): do not destroy an
+      // existing session over it. Without prior state, fall back to the login
+      // screen — it's recoverable, whereas a spinner forever is not.
+      setStatus(hadSessionRef.current ? 'authenticated' : 'unauthenticated');
     }
     setReady(true);
   }, []);
@@ -235,6 +277,7 @@ export const AuthProvider: React.FC<React.PropsWithChildren> = ({ children }) =>
     if (isDesktopRuntime || typeof window === 'undefined') return undefined;
     const handleAuthExpired = () => {
       abortRef.current?.abort();
+      hadSessionRef.current = false;
       setUser(null);
       setStatus('unauthenticated');
       setNeedsSetup(false);
@@ -252,24 +295,15 @@ export const AuthProvider: React.FC<React.PropsWithChildren> = ({ children }) =>
         return { success: true };
       }
 
-      // Check CSRF token availability before login
-      // If token is missing, clear cache and inform user
-      const csrfTokenValid = hasValidCsrfToken();
-      if (!csrfTokenValid) {
-        console.warn('CSRF token missing or invalid, clearing cache');
-        clearAuthCache();
-        // Allow login to proceed anyway - server will set new token
-      }
-
-      // P1 安全修复：登录请求需要 CSRF Token / P1 Security fix: Login needs CSRF token
-      // Backend route is /login; web-host's static-server explicitly proxies it.
+      // /login is CSRF-exempt (no session exists yet to protect); the response
+      // seeds/refreshes both the session and CSRF cookies for everything after.
       const response = await fetch('/login', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
         },
         credentials: 'include',
-        body: JSON.stringify(withCsrfToken(buildLoginRequestBody(credentials))),
+        body: JSON.stringify(buildLoginRequestBody(credentials)),
       });
 
       const data = (await response.json()) as {
@@ -296,11 +330,6 @@ export const AuthProvider: React.FC<React.PropsWithChildren> = ({ children }) =>
           code = 'tooManyAttempts';
         } else if (response.status >= 500) {
           code = 'serverError';
-        } else if (!csrfTokenValid) {
-          // If we knew CSRF was invalid and login failed, suggest cache clear
-          code = 'csrfError';
-          message = 'Login failed due to cached data. Please clear your browser cache and try again.';
-          shouldClearCache = true;
         }
 
         // Clear cache on CSRF-related errors
@@ -316,6 +345,7 @@ export const AuthProvider: React.FC<React.PropsWithChildren> = ({ children }) =>
         };
       }
 
+      hadSessionRef.current = true;
       setUser(authenticatedUser);
       setStatus('authenticated');
       setReady(true);
@@ -399,6 +429,7 @@ export const AuthProvider: React.FC<React.PropsWithChildren> = ({ children }) =>
         return { success: false, message, code };
       }
 
+      hadSessionRef.current = true;
       setUser(authenticatedUser);
       setStatus('authenticated');
       setNeedsSetup(false);
@@ -431,18 +462,27 @@ export const AuthProvider: React.FC<React.PropsWithChildren> = ({ children }) =>
     }
 
     try {
-      await fetch('/logout', {
+      // /logout is CSRF-exempt server-side, but send the header anyway when we
+      // have it (defense in depth / older servers still enforcing it), and
+      // surface failures instead of pretending the session ended: an ignored
+      // non-2xx here left the server session alive while the UI showed the
+      // login screen (audit 2026-07-30, finding C).
+      const response = await fetch('/logout', {
         method: 'POST',
-        // Logout also needs CSRF token / 登出同样需要 CSRF Token
         headers: {
           'Content-Type': 'application/json',
+          ...buildBackendAuthHeaders('POST'),
         },
         credentials: 'include',
-        body: JSON.stringify(withCsrfToken({})),
+        body: JSON.stringify({}),
       });
+      if (!response.ok) {
+        console.error(`[auth] logout failed with HTTP ${response.status}; server session may still be alive`);
+      }
     } catch (error) {
       console.error('Logout request failed:', error);
     } finally {
+      hadSessionRef.current = false;
       setUser(null);
       setStatus('unauthenticated');
       // Clear cache on logout for security

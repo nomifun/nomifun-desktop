@@ -269,7 +269,7 @@ fn heartbeat_tick(
         if now.duration_since(client.last_ping) > HEARTBEAT_TIMEOUT {
             info!(%conn_id, "heartbeat timeout, closing connection");
             let force_close = client.tx.try_send(WsOutbound::Close(
-                WebSocketCloseCode::PolicyViolation,
+                WebSocketCloseCode::HeartbeatTimeout,
                 "heartbeat timeout".into(),
             )).is_err();
             to_remove.push((conn_id, force_close));
@@ -570,7 +570,7 @@ mod tests {
         let msg = rx.try_recv().unwrap();
         assert_eq!(
             msg,
-            WsOutbound::Close(WebSocketCloseCode::PolicyViolation, "heartbeat timeout".into())
+            WsOutbound::Close(WebSocketCloseCode::HeartbeatTimeout, "heartbeat timeout".into())
         );
         assert!(
             !cancellation.is_cancelled(),
@@ -669,7 +669,7 @@ mod tests {
         let msg = rx.try_recv().unwrap();
         assert_eq!(
             msg,
-            WsOutbound::Close(WebSocketCloseCode::PolicyViolation, "heartbeat timeout".into())
+            WsOutbound::Close(WebSocketCloseCode::HeartbeatTimeout, "heartbeat timeout".into())
         );
         // No more messages
         assert!(rx.try_recv().is_err());

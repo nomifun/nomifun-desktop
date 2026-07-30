@@ -6386,9 +6386,11 @@ dependencies = [
  "axum",
  "clap",
  "nomifun-app",
+ "nomifun-common",
  "nomifun-runtime",
  "serde_json",
  "tokio",
+ "tower",
  "tower-http",
  "tracing",
 ]
