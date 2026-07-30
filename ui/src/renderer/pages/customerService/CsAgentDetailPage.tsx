@@ -24,9 +24,9 @@ import {
 import { Delete, Headset, Left, Plus } from '@icon-park/react';
 import { ipcBridge } from '@/common';
 import type { ICsNote } from '@/common/adapter/ipcBridge';
-import type { IChannelPluginStatus } from '@/common/types/channel/channel';
-import { parseCsAgentId, type ChannelPluginId, type CsAgentId, type KnowledgeBaseId, type ProviderId } from '@/common/types/ids';
+import { parseCsAgentId, type CsAgentId, type KnowledgeBaseId, type ProviderId } from '@/common/types/ids';
 import { useModelProviderList } from '@renderer/hooks/agent/useModelProviderList';
+import CsChannelBotsSection from './CsChannelBotsSection';
 import { useCsAgent } from './useCsAgents';
 import { useKnowledgeBaseOptions } from './useKnowledgeBaseOptions';
 
@@ -93,48 +93,6 @@ const CsAgentDetailPage: React.FC = () => {
       Message.error(error instanceof Error ? error.message : String(error));
     } finally {
       setSavingIdentity(false);
-    }
-  };
-
-  // ── bindings ─────────────────────────────────────────────────────────
-  const [bots, setBots] = useState<IChannelPluginStatus[]>([]);
-  const [boundIds, setBoundIds] = useState<ChannelPluginId[]>([]);
-  const [savingBindings, setSavingBindings] = useState(false);
-
-  const refreshBindings = useCallback(async () => {
-    if (!csAgentId) return;
-    try {
-      const [statuses, bindings] = await Promise.all([
-        ipcBridge.channel.getPluginStatus.invoke(),
-        ipcBridge.customerService.listBindings.invoke({ cs_agent_id: csAgentId }),
-      ]);
-      setBots(statuses ?? []);
-      setBoundIds((bindings ?? []).map((binding) => binding.channel_plugin_id));
-    } catch {
-      setBots([]);
-      setBoundIds([]);
-    }
-  }, [csAgentId]);
-
-  useEffect(() => {
-    void refreshBindings();
-  }, [refreshBindings]);
-
-  const saveBindings = async (next: ChannelPluginId[]) => {
-    if (!csAgentId) return;
-    setSavingBindings(true);
-    try {
-      const bindings = await ipcBridge.customerService.replaceBindings.invoke({
-        cs_agent_id: csAgentId,
-        channel_plugin_ids: next,
-      });
-      setBoundIds(bindings.map((binding) => binding.channel_plugin_id));
-      Message.success(t('customerService.bindings.saved', { defaultValue: '绑定已更新' }));
-    } catch (error) {
-      Message.error(error instanceof Error ? error.message : String(error));
-      await refreshBindings();
-    } finally {
-      setSavingBindings(false);
     }
   };
 
@@ -344,45 +302,12 @@ const CsAgentDetailPage: React.FC = () => {
           </div>
         </Section>
 
-        {/* 绑定管理 — 渠道机器人复选（全量替换） */}
-        <Section title={t('customerService.sections.bindings', { defaultValue: '渠道机器人绑定' })}>
-          {bots.length === 0 ? (
-            <div className='text-13px text-t-tertiary'>
-              {t('customerService.bindings.noBots', {
-                defaultValue: '还没有渠道机器人。先在「桌面伙伴 → 远程连接」或渠道设置中接入一个机器人。',
-              })}
-            </div>
-          ) : (
-            <div className='flex flex-col gap-8px'>
-              {bots.map((bot) => (
-                <label key={bot.plugin_id} className='flex items-center gap-10px text-13px text-t-primary'>
-                  <Checkbox
-                    checked={boundIds.includes(bot.plugin_id)}
-                    disabled={savingBindings}
-                    onChange={(checked: boolean) => {
-                      const next = checked
-                        ? [...boundIds, bot.plugin_id]
-                        : boundIds.filter((id) => id !== bot.plugin_id);
-                      void saveBindings(next);
-                    }}
-                  />
-                  <span className='truncate'>{bot.name}</span>
-                  <Tag size='small' className='shrink-0'>{bot.type}</Tag>
-                  {bot.companionId && (
-                    <Tag size='small' color='orange' className='shrink-0'>
-                      {t('customerService.bindings.companionBound', { defaultValue: '已绑桌面伙伴' })}
-                    </Tag>
-                  )}
-                </label>
-              ))}
-              <div className='text-12px text-t-quaternary'>
-                {t('customerService.bindings.hint', {
-                  defaultValue: '绑定后，该机器人的所有来访消息都会交给这位客服接待（陌生访客免配对码）。',
-                })}
-              </div>
-            </div>
-          )}
-        </Section>
+        {/* 绑定管理 — 客服域渠道机器人自闭环（与桌面伙伴渠道分域互斥） */}
+        {csAgentId && (
+          <Section title={t('customerService.sections.bindings', { defaultValue: '渠道机器人绑定' })}>
+            <CsChannelBotsSection csAgentId={csAgentId} />
+          </Section>
+        )}
 
         {/* 客服笔记 */}
         <Section

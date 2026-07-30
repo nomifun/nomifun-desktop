@@ -3007,6 +3007,7 @@ export const extensions = {
 // ---------------------------------------------------------------------------
 
 import type {
+  ChannelOwnerDomain,
   IChannelPairingRequest,
   IChannelPluginStatus,
   IChannelSession,
@@ -3048,6 +3049,8 @@ function toPluginStatus(raw: RawPluginStatus): IChannelPluginStatus {
     activeUsers: (raw.active_users ?? 0) as number,
     botUsername: raw.bot_username as string | undefined,
     hasToken: (raw.has_token ?? false) as boolean,
+    // 所有权分域：缺省（过渡期后端未透出）按 companion 处理，与 DB DEFAULT 一致。
+    owner_domain: raw.owner_domain === 'customer_service' ? 'customer_service' : 'companion',
     companionId: raw.companion_id == null ? undefined : parseCompanionId(raw.companion_id),
     botKey: raw.bot_key as string | undefined,
     isExtension: raw.is_extension as boolean | undefined,
@@ -3108,6 +3111,8 @@ export const channel = {
    * - 省略 `plugin_id` 并给 `plugin_type` → 新建一行（每宠多机器人路径）；
    * - `companion_id` 把机器人绑到桌面伙伴；同一机器人(bot_key)已绑其他对象时后端 409。
    *   （客服绑定归客服域所有：PUT /api/customer-service/agents/{id}/bindings。）
+   * - `owner_domain` 仅创建时可选（缺省 companion）；'customer_service' 域的行
+   *   与 companion_id 互斥（后端 400/ABORT）。
    */
   enablePlugin: withResponseMap(httpPost<
     { success: boolean; plugin_id?: unknown; error?: string },
@@ -3115,6 +3120,7 @@ export const channel = {
       plugin_id?: import('../types/ids').ChannelPluginId;
       plugin_type?: string;
       companion_id?: CompanionId;
+      owner_domain?: ChannelOwnerDomain;
       config: Record<string, unknown>;
     }
   >('/api/channel/plugins/enable'), (raw): IChannelEnableResponse => {

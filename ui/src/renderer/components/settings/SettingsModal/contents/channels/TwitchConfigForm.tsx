@@ -10,6 +10,7 @@ import { Button, Empty, Input, Message, Spin, Tooltip } from '@arco-design/web-r
 import { CheckOne, CloseOne, Delete, Refresh } from '@icon-park/react';
 import React, { useCallback, useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
+import { buildEnablePluginRequest, findEnabledChannelStatus } from '@/renderer/components/channels/channelStatusSelection';
 import type { ChannelTarget } from './channelTarget';
 
 interface TwitchConfigFormProps {
@@ -75,14 +76,19 @@ const TwitchConfigForm: React.FC<TwitchConfigFormProps> = ({ pluginStatus, chann
 
   const handleAutoEnable = async () => {
     const config = { credentials: { token: token.trim(), twitch_channel: twitchChannel.trim() } };
-    const result = await channel.enablePlugin.invoke(channelTarget ? { plugin_id: channelTarget.channelPluginId, plugin_type: 'twitch', ...(channelTarget.companionId ? { companion_id: channelTarget.companionId } : {}), config } : { plugin_type: 'twitch', config });
+    const result = await channel.enablePlugin.invoke(buildEnablePluginRequest('twitch', channelTarget, config));
     if (!result.success) {
       throw new Error(result.error || t('nomi.settings.remoteEnableFailed', { defaultValue: 'Failed to enable channel' }));
     }
     Message.success(t('settings.twitch.pluginEnabled', 'Twitch bot enabled'));
     const plugins = await channel.getPluginStatus.invoke();
     if (plugins) {
-      const row = channelTarget ? (channelTarget.channelPluginId ? plugins.find((p) => p.plugin_id === channelTarget.channelPluginId) : plugins.find((p) => p.type === 'twitch' && p.companionId === channelTarget.companionId)) : plugins.find((p) => p.type === 'twitch');
+      const row = findEnabledChannelStatus(plugins, {
+        platform: 'twitch',
+        enabledPluginId: result.plugin_id,
+        companionId: channelTarget?.companionId,
+        ownerDomain: channelTarget?.ownerDomain,
+      });
       onStatusChange(row || null);
     }
   };

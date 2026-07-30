@@ -21,11 +21,17 @@
  *
  * Forms that receive no `channelTarget` create an unbound row by platform.
  */
+import type { ChannelOwnerDomain } from '@/common/types/channel/channel';
 import type { ChannelPluginId, CompanionId } from '@/common/types/ids';
 
 export interface ChannelTarget {
   channelPluginId?: ChannelPluginId;
   companionId?: CompanionId;
+  /**
+   * 目标所有权域。`'customer_service'` 时创建请求带 `owner_domain` 且绝不携带
+   * `companion_id`（两域互斥）；缺省 = companion 域（伙伴侧既有行为不变）。
+   */
+  ownerDomain?: ChannelOwnerDomain;
 }
 
 /** Builtin IM platforms a companion can connect (the channel config forms cover this set). */
