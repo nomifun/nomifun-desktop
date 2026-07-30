@@ -5,7 +5,7 @@
  */
 
 import { Trigger } from '@arco-design/web-react';
-import { Lightning, Robot } from '@icon-park/react';
+import { EveryUser, Lightning, Robot } from '@icon-park/react';
 import React, { useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { resolveSkillDisplay, type LocalizableSkill } from '@/renderer/pages/settings/skill/skillDisplay';
@@ -26,6 +26,10 @@ export interface ComposerEntryStripProps {
   activeSkillCount?: number;
   activeSkills?: GuidActiveSkill[];
   collaborationPolicyNode?: React.ReactNode;
+  /** 召唤伙伴 draft entry — the Guid page wires it only for nomi launches. */
+  onSummonCompanion?: () => void;
+  /** Name of the drafted companion; the entry shows it as its label. */
+  summonedCompanionName?: string | null;
 }
 
 /**
@@ -45,6 +49,8 @@ const ComposerEntryStrip: React.FC<ComposerEntryStripProps> = ({
   activeSkillCount,
   activeSkills = [],
   collaborationPolicyNode,
+  onSummonCompanion,
+  summonedCompanionName,
 }) => {
   const { t } = useTranslation();
   const [skillsOpen, setSkillsOpen] = useState(false);
@@ -194,11 +200,29 @@ const ComposerEntryStrip: React.FC<ComposerEntryStripProps> = ({
     </span>
   );
 
+  // --- Summon companion entry (optional; nomi launches only) ---
+  const summonEntry = onSummonCompanion ? (
+    <button
+      type='button'
+      className={`${styles.entryButton} ${styles.entryButtonInteractive}`}
+      onClick={onSummonCompanion}
+      aria-label={t('conversation.summon.buttonTooltip')}
+      data-testid='guid-summon-entry'
+    >
+      <EveryUser theme='outline' size={15} fill='currentColor' />
+      <span className={styles.entryButtonText}>
+        {summonedCompanionName || t('conversation.summon.button')}
+      </span>
+    </button>
+  ) : null;
+
   // --- Preset selected state ---
   if (isPresetAgent) {
     return (
       <div className={styles.entryStrip}>
         {collaborationPolicyNode}
+
+        {summonEntry}
 
         {/* Persona token */}
         <span className={`${styles.entryButton} ${styles.entryButtonActive} ${styles.entryPersonaButton}`}>
@@ -234,6 +258,8 @@ const ComposerEntryStrip: React.FC<ComposerEntryStripProps> = ({
   return (
     <div className={styles.entryStrip}>
       {collaborationPolicyNode}
+
+      {summonEntry}
 
       {/* Choose preset */}
       <button

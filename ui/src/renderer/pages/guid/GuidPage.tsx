@@ -43,6 +43,7 @@ import FeedbackReportModal from '@/renderer/components/settings/SettingsModal/co
 import AutoWorkControl from '@/renderer/pages/conversation/components/AutoWorkControl';
 import IdmmControl from '@/renderer/pages/conversation/components/IdmmControl';
 import KnowledgeControl from '@/renderer/pages/conversation/components/KnowledgeControl';
+import { SummonDrawer, useCompanionRoster } from '@/renderer/pages/conversation/components/SummonPanel';
 import { useGuidAgentSelection } from './hooks/useGuidAgentSelection';
 import { useGuidAdvancedConfig } from './hooks/useGuidAdvancedConfig';
 import { autoWorkStartDisabled, isAutoWorkEntry } from './hooks/autoWorkEntry';
@@ -237,9 +238,18 @@ const GuidPage: React.FC = () => {
     locationState: location.state as { workspace?: string } | null,
   });
 
-  // Advanced per-conversation drafts (knowledge mounts / AutoWork / IDMM) —
-  // collected up front and applied right after the conversation is created.
+  // Advanced per-conversation drafts (knowledge mounts / AutoWork / IDMM /
+  // summon) — collected up front and applied right after the conversation is
+  // created.
   const advancedConfig = useGuidAdvancedConfig();
+
+  // 召唤伙伴 draft entry (nomi launches only): pick in the shared drawer here,
+  // apply onto the conversation right after create.
+  const [summonDrawerOpen, setSummonDrawerOpen] = useState(false);
+  const companionRoster = useCompanionRoster();
+  const summonedCompanionName = advancedConfig.summon
+    ? (companionRoster.find((c) => c.companion_id === advancedConfig.summon?.companion_id)?.name ?? null)
+    : null;
 
   const mention = useGuidMention({
     availableAgents: agentSelection.availableAgents,
@@ -598,6 +608,16 @@ const GuidPage: React.FC = () => {
     ? agentSelection.currentEffectiveAgentInfo.agent_type
     : agentSelection.selectedAgent;
 
+  // Only the nomi factory reads `extra.summon` — drop a staged summon draft
+  // when the user switches away so it is never applied to a non-nomi launch.
+  useEffect(() => {
+    if (effectiveAgentType !== 'nomi' && advancedConfig.summon) {
+      advancedConfig.setSummon(null);
+      setSummonDrawerOpen(false);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [effectiveAgentType, advancedConfig.summon]);
+
   // Agents that use configured model providers instead of ACP probe-based models.
   // Only nomi now — Gemini runs as a regular ACP backend with ACP-cached models.
   const PROVIDER_BASED_AGENTS = new Set(['nomi']);
@@ -835,11 +855,30 @@ const GuidPage: React.FC = () => {
                   activeSkillCount={activeSkillCount}
                   activeSkills={activeSkills}
                   collaborationPolicyNode={collaborationPolicyNode}
+                  onSummonCompanion={
+                    effectiveAgentType === 'nomi' ? () => setSummonDrawerOpen(true) : undefined
+                  }
+                  summonedCompanionName={summonedCompanionName}
                 />
               }
             />
 
             <GuidResourceCards />
+
+        {/* 召唤伙伴 draft drawer — applied after the conversation is created. */}
+        <SummonDrawer
+          visible={summonDrawerOpen}
+          onCancel={() => setSummonDrawerOpen(false)}
+          initial={advancedConfig.summon}
+          onApply={(draft) => {
+            advancedConfig.setSummon(draft);
+            setSummonDrawerOpen(false);
+          }}
+          onRelease={() => {
+            advancedConfig.setSummon(null);
+            setSummonDrawerOpen(false);
+          }}
+        />
 
             {/* Editor host (modals + example prompts + fallback notice) */}
             <GuidPresetEditorHost
