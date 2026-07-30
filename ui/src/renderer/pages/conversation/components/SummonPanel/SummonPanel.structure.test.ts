@@ -42,6 +42,24 @@ describe('SummonPanel structure', () => {
     expect(source.includes('conversation.summon.stepMemories')).toBe(true);
   });
 
+  test('selected companion card is visibly highlighted (solid border + tinted fill)', () => {
+    // This app's UnoCSS preflight carries no Tailwind-style reset, so a bare
+    // `border` utility sets only border-width and paints nothing — the card
+    // MUST spell out `border-solid` or neither the idle nor the selected
+    // border ever renders and the picker looks selection-less.
+    expect(source.includes('border-solid')).toBe(true);
+    // Border color alone is a 1px signal; the selected card also gets a
+    // primary-tinted fill so the chosen companion is obvious at a glance.
+    expect(source.includes('bg-[rgba(var(--primary-6),0.08)]')).toBe(true);
+    expect(source.includes("data-selected=")).toBe(true);
+  });
+
+  test('companion prefill follows a late-arriving roster instead of staying empty', () => {
+    // The drawer can open before the roster SWR resolves; the prefill must
+    // re-run when companions arrive, without overriding a manual pick.
+    expect(source.includes('current ??')).toBe(true);
+  });
+
   test('summoned state exposes update + release, and 409 maps to the busy toast', () => {
     expect(source.includes('summon-release-button')).toBe(true);
     expect(source.includes('summon-apply-button')).toBe(true);

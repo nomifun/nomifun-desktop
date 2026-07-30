@@ -8,10 +8,12 @@
  * 会话召唤伙伴（spec 2026-07-29 §设计 B5）——工作会话把一位伙伴的技能与勾选
  * 记忆（只读）装进来：
  *
- * - `SummonControl`：SendBox 工具条按钮 + 三步 Drawer（伙伴单选 → 技能复选
- *   （默认全选，去勾 = skill_exclusions）→ 记忆多选（FTS 搜索/kind 过滤，
- *   复用 A 轨道 listMemories 检索面 + 预算字数条））。已召唤时按钮变徽标态，
- *   点开可查看/调整/解除（解除 DELETE，幂等）。
+ * - `SummonDrawer`：可复用的三步 Drawer（伙伴单选 → 技能复选（默认全选，
+ *   去勾 = skill_exclusions）→ 记忆多选（FTS 搜索/kind 过滤，复用 A 轨道
+ *   listMemories 检索面 + 预算字数条））。不绑定会话——落地页（Guid）用它
+ *   暂存「创建后再应用」的召唤草稿。
+ * - `SummonControl`：SendBox 工具条按钮 + 上述 Drawer 的会话绑定壳。已召唤时
+ *   按钮变徽标态，点开可查看/调整/解除（解除 DELETE，幂等）。
  * - `SummonHeaderBadge`：会话头部的被动徽标（伙伴名），侧边栏条目徽标见
  *   `SessionList/utils/sessionCapabilityItems.tsx`。
  *
@@ -34,6 +36,9 @@ import { getConversationOrNull, refreshConversationCache } from '../../utils/con
 /** Mirror of the backend snapshot budget (`SUMMON_CONTEXT_BUDGET`, 8000 chars). */
 export const SUMMON_CONTEXT_BUDGET = 8000;
 
+/** What the drawer collects; the server stamps `summoned_at` on apply. */
+export type SummonDraft = Pick<ISummonConfig, 'companion_id' | 'memory_ids' | 'skill_exclusions'>;
+
 const MEMORY_KINDS: ICompanionMemoryKind[] = ['profile', 'preference', 'knowledge', 'episode', 'task', 'affective'];
 
 const summonOf = (conversation: { extra?: unknown } | null | undefined): ISummonConfig | null => {
@@ -47,7 +52,7 @@ const useConversationSummon = (conversationId: ConversationId): ISummonConfig | 
   return summonOf(data);
 };
 
-const useCompanionRoster = (): ICompanionWithStatus[] => {
+export const useCompanionRoster = (): ICompanionWithStatus[] => {
   const { data } = useSWR('companion/roster/summon', () => ipcBridge.companion.listCompanions.invoke(), {
     revalidateOnFocus: false,
   });
@@ -107,12 +112,24 @@ export const SummonHeaderBadge: React.FC<{ conversationId: ConversationId }> = (
   );
 };
 
-const SummonControl: React.FC<{ conversationId: ConversationId }> = ({ conversationId }) => {
+export interface SummonDrawerProps {
+  visible: boolean;
+  onCancel: () => void;
+  /** Prefill (live summon, or a pending draft on the Guid page). */
+  initial: SummonDraft | null;
+  submitting?: boolean;
+  onApply: (draft: SummonDraft) => void;
+  /** Shown only when provided AND `initial` is set (release / clear draft). */
+  onRelease?: () => void;
+}
+
+/**
+ * 三步召唤 Drawer，本身不接触任何会话端点——由外壳决定「应用」落到哪里
+ * （会话内 setSummon，或落地页暂存草稿创建后应用）。
+ */
+export const SummonDrawer: React.FC<SummonDrawerProps> = ({ visible, onCancel, initial, submitting = false, onApply, onRelease }) => {
   const { t } = useTranslation();
-  const summon = useConversationSummon(conversationId);
   const roster = useCompanionRoster();
-  const [visible, setVisible] = useState(false);
-  const [submitting, setSubmitting] = useState(false);
 
   // Step 1 — companion (single choice).
   const [companionId, setCompanionId] = useState<CompanionId | null>(null);
@@ -131,16 +148,24 @@ const SummonControl: React.FC<{ conversationId: ConversationId }> = ({ conversat
   const [selectedMemoryIds, setSelectedMemoryIds] = useState<CompanionMemoryId[]>([]);
   const [memoryContents, setMemoryContents] = useState<Map<CompanionMemoryId, string>>(new Map());
 
-  // Prefill from the live summon whenever the drawer opens.
+  // Prefill whenever the drawer opens.
   useEffect(() => {
     if (!visible) return;
-    setCompanionId(summon?.companion_id ?? roster[0]?.companion_id ?? null);
-    setExcludedSkills(new Set(summon?.skill_exclusions ?? []));
-    setSelectedMemoryIds((summon?.memory_ids ?? []) as CompanionMemoryId[]);
+    setCompanionId(initial?.companion_id ?? roster[0]?.companion_id ?? null);
+    setExcludedSkills(new Set(initial?.skill_exclusions ?? []));
+    setSelectedMemoryIds((initial?.memory_ids ?? []) as CompanionMemoryId[]);
     setMemoryQuery('');
     setMemoryKind('');
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [visible]);
+
+  // The drawer can open before the roster SWR resolves — follow the
+  // late-arriving roster without overriding a manual pick.
+  useEffect(() => {
+    if (!visible || roster.length === 0) return;
+    setCompanionId((current) => current ?? initial?.companion_id ?? roster[0]?.companion_id ?? null);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [visible, roster]);
 
   // Memory search scoped to the summoned companion's visibility (shared + its
   // own private memories) — the same scope the read-only recall tool gets.
@@ -189,15 +214,166 @@ const SummonControl: React.FC<{ conversationId: ConversationId }> = ({ conversat
     );
   };
 
-  const apply = async () => {
+  const apply = () => {
     if (!companionId) return;
+    onApply({
+      companion_id: companionId,
+      memory_ids: selectedMemoryIds,
+      skill_exclusions: Array.from(excludedSkills),
+    });
+  };
+
+  return (
+    <Drawer
+      width={430}
+      title={t('conversation.summon.title')}
+      visible={visible}
+      onCancel={onCancel}
+      footer={
+        <div className='flex items-center justify-between w-full'>
+          <span>
+            {initial && onRelease && (
+              <Button status='danger' loading={submitting} onClick={onRelease} data-testid='summon-release-button'>
+                {t('conversation.summon.release')}
+              </Button>
+            )}
+          </span>
+          <span className='flex gap-8px'>
+            <Button onClick={onCancel}>{t('common.cancel', { defaultValue: 'Cancel' })}</Button>
+            <Button type='primary' loading={submitting} disabled={!companionId} onClick={apply} data-testid='summon-apply-button'>
+              {initial ? t('conversation.summon.update') : t('conversation.summon.apply')}
+            </Button>
+          </span>
+        </div>
+      }
+    >
+      {/* Step 1 — 伙伴单选 */}
+      <div className='text-13px font-500 mb-8px'>{t('conversation.summon.stepCompanion')}</div>
+      {roster.length === 0 ? (
+        <Empty description={t('conversation.summon.noCompanions')} />
+      ) : (
+        <div className='flex flex-wrap gap-8px mb-16px'>
+          {roster.map((profile) => (
+            <div
+              key={profile.companion_id}
+              onClick={() => {
+                if (profile.companion_id !== companionId) {
+                  setCompanionId(profile.companion_id);
+                  setExcludedSkills(new Set());
+                  setSelectedMemoryIds([]);
+                }
+              }}
+              className={`cursor-pointer rounded-8px border border-solid px-12px py-8px text-13px transition-colors ${
+                profile.companion_id === companionId
+                  ? 'border-[rgb(var(--primary-6))] bg-[rgba(var(--primary-6),0.08)] text-[rgb(var(--primary-6))]'
+                  : 'border-[var(--color-border-2)] hover:border-[var(--color-border-3)]'
+              }`}
+              data-testid='summon-companion-card'
+              data-selected={profile.companion_id === companionId}
+            >
+              <div className='font-500'>{profile.name}</div>
+              <div className='text-11px op-60'>Lv.{profile.status?.level ?? 1}</div>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* Step 2 — 技能复选（默认全选 active；去勾 = 排除） */}
+      <div className='text-13px font-500 mb-8px'>{t('conversation.summon.stepSkills')}</div>
+      {effectiveSkills.length === 0 ? (
+        <div className='text-12px op-60 mb-16px'>{t('conversation.summon.noSkills')}</div>
+      ) : (
+        <div className='flex flex-col gap-4px mb-16px max-h-140px overflow-auto'>
+          {effectiveSkills.map((name) => (
+            <Checkbox
+              key={name}
+              checked={!excludedSkills.has(name)}
+              onChange={(checked) => {
+                setExcludedSkills((previous) => {
+                  const next = new Set(previous);
+                  if (checked) next.delete(name);
+                  else next.add(name);
+                  return next;
+                });
+              }}
+            >
+              <span className='text-12px'>{name}</span>
+            </Checkbox>
+          ))}
+        </div>
+      )}
+
+      {/* Step 3 — 记忆多选 + 预算字数条 */}
+      <div className='text-13px font-500 mb-8px'>{t('conversation.summon.stepMemories')}</div>
+      <div className='flex gap-8px mb-8px'>
+        <Input.Search
+          allowClear
+          placeholder={t('conversation.summon.searchMemories')}
+          onSearch={(value) => setMemoryQuery(value)}
+          onClear={() => setMemoryQuery('')}
+          style={{ flex: 1 }}
+        />
+        <Select allowClear placeholder='kind' style={{ width: 110 }} value={memoryKind || undefined} onChange={(v) => setMemoryKind(v ?? '')}>
+          {MEMORY_KINDS.map((kind) => (
+            <Select.Option key={kind} value={kind}>
+              {kind}
+            </Select.Option>
+          ))}
+        </Select>
+      </div>
+      <div className='text-12px op-70 mb-8px' data-testid='summon-budget-meter'>
+        {t('conversation.summon.budget', { used: budgetUsed, budget: SUMMON_CONTEXT_BUDGET })}
+        {budgetUsed > SUMMON_CONTEXT_BUDGET && (
+          <span className='text-[rgb(var(--warning-6))] ml-4px'>{t('conversation.summon.budgetOverflow')}</span>
+        )}
+      </div>
+      <Spin loading={memoriesLoading} className='w-full'>
+        {memories.length === 0 ? (
+          <Empty description={t('conversation.summon.noMemories')} />
+        ) : (
+          <div className='flex flex-col gap-4px max-h-220px overflow-auto'>
+            {memories.map((memory) => (
+              <label key={memory.memory_id} className='flex items-start gap-6px cursor-pointer'>
+                <Checkbox
+                  checked={selectedMemoryIds.includes(memory.memory_id)}
+                  onChange={() => toggleMemory(memory.memory_id)}
+                />
+                <span className='text-12px min-w-0'>
+                  <Tag size='small' className='mr-4px'>
+                    {memory.kind}
+                  </Tag>
+                  {memory.status === 'archived' && (
+                    <Tag size='small' color='gray' className='mr-4px'>
+                      {t('conversation.summon.archived')}
+                    </Tag>
+                  )}
+                  {memory.content}
+                </span>
+              </label>
+            ))}
+          </div>
+        )}
+      </Spin>
+      <div className='text-12px op-60 mt-8px'>{t('conversation.summon.selectedCount', { count: selectedMemoryIds.length })}</div>
+    </Drawer>
+  );
+};
+
+const SummonControl: React.FC<{ conversationId: ConversationId }> = ({ conversationId }) => {
+  const { t } = useTranslation();
+  const summon = useConversationSummon(conversationId);
+  const roster = useCompanionRoster();
+  const [visible, setVisible] = useState(false);
+  const [submitting, setSubmitting] = useState(false);
+
+  const apply = async (draft: SummonDraft) => {
     setSubmitting(true);
     try {
       await ipcBridge.conversation.setSummon.invoke({
         conversation_id: conversationId,
-        companion_id: companionId,
-        memory_ids: selectedMemoryIds,
-        skill_exclusions: Array.from(excludedSkills),
+        companion_id: draft.companion_id,
+        memory_ids: draft.memory_ids,
+        skill_exclusions: draft.skill_exclusions,
       });
       Message.success(t('conversation.summon.applied'));
       await refreshConversationCache(conversationId);
@@ -249,137 +425,14 @@ const SummonControl: React.FC<{ conversationId: ConversationId }> = ({ conversat
           </span>
         </Button>
       </Tooltip>
-      <Drawer
-        width={430}
-        title={t('conversation.summon.title')}
+      <SummonDrawer
         visible={visible}
         onCancel={() => setVisible(false)}
-        footer={
-          <div className='flex items-center justify-between w-full'>
-            <span>
-              {summon && (
-                <Button status='danger' loading={submitting} onClick={release} data-testid='summon-release-button'>
-                  {t('conversation.summon.release')}
-                </Button>
-              )}
-            </span>
-            <span className='flex gap-8px'>
-              <Button onClick={() => setVisible(false)}>{t('common.cancel', { defaultValue: 'Cancel' })}</Button>
-              <Button type='primary' loading={submitting} disabled={!companionId} onClick={apply} data-testid='summon-apply-button'>
-                {summon ? t('conversation.summon.update') : t('conversation.summon.apply')}
-              </Button>
-            </span>
-          </div>
-        }
-      >
-        {/* Step 1 — 伙伴单选 */}
-        <div className='text-13px font-500 mb-8px'>{t('conversation.summon.stepCompanion')}</div>
-        {roster.length === 0 ? (
-          <Empty description={t('conversation.summon.noCompanions')} />
-        ) : (
-          <div className='flex flex-wrap gap-8px mb-16px'>
-            {roster.map((profile) => (
-              <div
-                key={profile.companion_id}
-                onClick={() => {
-                  if (profile.companion_id !== companionId) {
-                    setCompanionId(profile.companion_id);
-                    setExcludedSkills(new Set());
-                    setSelectedMemoryIds([]);
-                  }
-                }}
-                className={`cursor-pointer rounded-8px border px-12px py-8px text-13px ${
-                  profile.companion_id === companionId
-                    ? 'border-[rgb(var(--primary-6))] text-[rgb(var(--primary-6))]'
-                    : 'border-[var(--color-border-2)]'
-                }`}
-                data-testid='summon-companion-card'
-              >
-                <div className='font-500'>{profile.name}</div>
-                <div className='text-11px op-60'>Lv.{profile.status?.level ?? 1}</div>
-              </div>
-            ))}
-          </div>
-        )}
-
-        {/* Step 2 — 技能复选（默认全选 active；去勾 = 排除） */}
-        <div className='text-13px font-500 mb-8px'>{t('conversation.summon.stepSkills')}</div>
-        {effectiveSkills.length === 0 ? (
-          <div className='text-12px op-60 mb-16px'>{t('conversation.summon.noSkills')}</div>
-        ) : (
-          <div className='flex flex-col gap-4px mb-16px max-h-140px overflow-auto'>
-            {effectiveSkills.map((name) => (
-              <Checkbox
-                key={name}
-                checked={!excludedSkills.has(name)}
-                onChange={(checked) => {
-                  setExcludedSkills((previous) => {
-                    const next = new Set(previous);
-                    if (checked) next.delete(name);
-                    else next.add(name);
-                    return next;
-                  });
-                }}
-              >
-                <span className='text-12px'>{name}</span>
-              </Checkbox>
-            ))}
-          </div>
-        )}
-
-        {/* Step 3 — 记忆多选 + 预算字数条 */}
-        <div className='text-13px font-500 mb-8px'>{t('conversation.summon.stepMemories')}</div>
-        <div className='flex gap-8px mb-8px'>
-          <Input.Search
-            allowClear
-            placeholder={t('conversation.summon.searchMemories')}
-            onSearch={(value) => setMemoryQuery(value)}
-            onClear={() => setMemoryQuery('')}
-            style={{ flex: 1 }}
-          />
-          <Select allowClear placeholder='kind' style={{ width: 110 }} value={memoryKind || undefined} onChange={(v) => setMemoryKind(v ?? '')}>
-            {MEMORY_KINDS.map((kind) => (
-              <Select.Option key={kind} value={kind}>
-                {kind}
-              </Select.Option>
-            ))}
-          </Select>
-        </div>
-        <div className='text-12px op-70 mb-8px' data-testid='summon-budget-meter'>
-          {t('conversation.summon.budget', { used: budgetUsed, budget: SUMMON_CONTEXT_BUDGET })}
-          {budgetUsed > SUMMON_CONTEXT_BUDGET && (
-            <span className='text-[rgb(var(--warning-6))] ml-4px'>{t('conversation.summon.budgetOverflow')}</span>
-          )}
-        </div>
-        <Spin loading={memoriesLoading} className='w-full'>
-          {memories.length === 0 ? (
-            <Empty description={t('conversation.summon.noMemories')} />
-          ) : (
-            <div className='flex flex-col gap-4px max-h-220px overflow-auto'>
-              {memories.map((memory) => (
-                <label key={memory.memory_id} className='flex items-start gap-6px cursor-pointer'>
-                  <Checkbox
-                    checked={selectedMemoryIds.includes(memory.memory_id)}
-                    onChange={() => toggleMemory(memory.memory_id)}
-                  />
-                  <span className='text-12px min-w-0'>
-                    <Tag size='small' className='mr-4px'>
-                      {memory.kind}
-                    </Tag>
-                    {memory.status === 'archived' && (
-                      <Tag size='small' color='gray' className='mr-4px'>
-                        {t('conversation.summon.archived')}
-                      </Tag>
-                    )}
-                    {memory.content}
-                  </span>
-                </label>
-              ))}
-            </div>
-          )}
-        </Spin>
-        <div className='text-12px op-60 mt-8px'>{t('conversation.summon.selectedCount', { count: selectedMemoryIds.length })}</div>
-      </Drawer>
+        initial={summon}
+        submitting={submitting}
+        onApply={(draft) => void apply(draft)}
+        onRelease={() => void release()}
+      />
     </>
   );
 };
