@@ -66,11 +66,15 @@ pub type PluginFactory = Box<dyn Fn(PluginType) -> Option<Box<dyn ChannelPlugin>
 /// - `plugin_id` unset + `plugin_type` set: create a new row and use the
 ///   repository-generated UUIDv7.
 /// - `companion_id`: bind the bot to a companion; `None` keeps the row's binding.
+/// - `owner_domain`: owning domain for a newly created row (`companion`
+///   default | `customer_service`). An existing row's domain is immutable;
+///   customer-service rows may never carry a companion binding.
 #[derive(Debug, Default, Clone)]
 pub struct EnableChannelSpec {
     pub plugin_id: Option<String>,
     pub plugin_type: Option<String>,
     pub companion_id: Option<String>,
+    pub owner_domain: Option<String>,
 }
 
 impl EnableChannelSpec {
@@ -253,36 +257,76 @@ impl ChannelManager {
         {
             return Err(ChannelError::PluginNotFound(id.to_string()));
         }
-        let (mut channel_plugin_id, plugin_type, mut created_at, mut prior_companion) =
-            match (&existing, spec.plugin_id.as_deref()) {
-                (Some(row), _) => {
-                    let pt = PluginType::from_str_opt(&row.r#type)
-                        .ok_or_else(|| ChannelError::InvalidPluginType(row.r#type.clone()))?;
-                    (
-                        Some(row.channel_plugin_id.clone()),
-                        pt,
-                        row.created_at,
-                        row.companion_id.clone(),
-                    )
-                }
-                (None, Some(id)) => {
-                    let type_str = requested_type.ok_or_else(|| {
-                        ChannelError::InvalidConfig(format!(
-                            "plugin_type is required when channel '{id}' does not exist"
-                        ))
-                    })?;
-                    let pt = PluginType::from_str_opt(type_str)
-                        .ok_or_else(|| ChannelError::InvalidPluginType(type_str.to_owned()))?;
-                    (None, pt, now_ms(), None)
-                }
-                (None, None) => {
-                    let type_str = requested_type
-                        .ok_or_else(|| ChannelError::InvalidConfig("plugin_type is required to create a channel".into()))?;
-                    let pt = PluginType::from_str_opt(type_str)
-                        .ok_or_else(|| ChannelError::InvalidPluginType(type_str.to_owned()))?;
-                    (None, pt, now_ms(), None)
-                }
-            };
+        // Owner-domain resolution: a new row takes the requested domain
+        // (companion by default); an existing row's domain is immutable.
+        let spec_owner_domain = spec
+            .owner_domain
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
+        if let Some(domain) = spec_owner_domain
+            && !matches!(domain, "companion" | "customer_service")
+        {
+            return Err(ChannelError::InvalidConfig(format!(
+                "invalid owner_domain '{domain}': expected 'companion' or 'customer_service'"
+            )));
+        }
+        if let (Some(row), Some(domain)) = (&existing, spec_owner_domain)
+            && row.owner_domain != domain
+        {
+            return Err(ChannelError::InvalidConfig(format!(
+                "channel '{}' belongs to the '{}' domain; its owner domain cannot be changed",
+                row.channel_plugin_id, row.owner_domain
+            )));
+        }
+        let (
+            mut channel_plugin_id,
+            plugin_type,
+            mut created_at,
+            mut prior_companion,
+            mut owner_domain,
+        ) = match (&existing, spec.plugin_id.as_deref()) {
+            (Some(row), _) => {
+                let pt = PluginType::from_str_opt(&row.r#type)
+                    .ok_or_else(|| ChannelError::InvalidPluginType(row.r#type.clone()))?;
+                (
+                    Some(row.channel_plugin_id.clone()),
+                    pt,
+                    row.created_at,
+                    row.companion_id.clone(),
+                    row.owner_domain.clone(),
+                )
+            }
+            (None, Some(id)) => {
+                let type_str = requested_type.ok_or_else(|| {
+                    ChannelError::InvalidConfig(format!(
+                        "plugin_type is required when channel '{id}' does not exist"
+                    ))
+                })?;
+                let pt = PluginType::from_str_opt(type_str)
+                    .ok_or_else(|| ChannelError::InvalidPluginType(type_str.to_owned()))?;
+                (
+                    None,
+                    pt,
+                    now_ms(),
+                    None,
+                    spec_owner_domain.unwrap_or("companion").to_owned(),
+                )
+            }
+            (None, None) => {
+                let type_str = requested_type
+                    .ok_or_else(|| ChannelError::InvalidConfig("plugin_type is required to create a channel".into()))?;
+                let pt = PluginType::from_str_opt(type_str)
+                    .ok_or_else(|| ChannelError::InvalidPluginType(type_str.to_owned()))?;
+                (
+                    None,
+                    pt,
+                    now_ms(),
+                    None,
+                    spec_owner_domain.unwrap_or("companion").to_owned(),
+                )
+            }
+        };
 
         // Parse and validate config structure
         let config = self.plugin_config_from_request(config_value, existing.as_ref())?;
@@ -305,6 +349,8 @@ impl ChannelManager {
             if let Some(other) = clash {
                 if existing.is_none()
                     && spec.plugin_id.is_none()
+                    && other.owner_domain
+                        == spec_owner_domain.unwrap_or("companion")
                     && self.can_reuse_identity_row_for_spec(&other, spec)
                 {
                     info!(
@@ -316,6 +362,7 @@ impl ChannelManager {
                     channel_plugin_id = Some(other.channel_plugin_id);
                     created_at = other.created_at;
                     prior_companion = other.companion_id;
+                    owner_domain = other.owner_domain;
                 } else {
                     let owner = Self::bound_owner(&other).ok_or_else(|| {
                         ChannelError::InvalidConfig(format!(
@@ -359,6 +406,13 @@ impl ChannelManager {
         } else {
             prior_companion
         };
+        // Mutual exclusion (application layer; migration 019's guard triggers
+        // are the backstop): a customer-service bot never carries a companion.
+        if owner_domain == "customer_service" && companion_id.is_some() {
+            return Err(ChannelError::InvalidConfig(
+                "customer-service channel bots cannot carry a companion binding".into(),
+            ));
+        }
         let now = now_ms();
         let row = if let Some(channel_plugin_id) = channel_plugin_id {
             self.repo
@@ -372,6 +426,7 @@ impl ChannelManager {
                     last_connected: None,
                     companion_id,
                     bot_key,
+                    owner_domain,
                     created_at,
                     updated_at: now,
                 })
@@ -387,6 +442,7 @@ impl ChannelManager {
                     last_connected: None,
                     companion_id,
                     bot_key,
+                    owner_domain,
                     created_at,
                     updated_at: now,
                 })
@@ -478,6 +534,7 @@ impl ChannelManager {
                     last_connected: existing.last_connected,
                     companion_id: existing.companion_id.clone(),
                     bot_key: existing.bot_key.clone(),
+                    owner_domain: existing.owner_domain.clone(),
                     created_at: existing.created_at,
                     updated_at: now,
                 })
@@ -493,6 +550,7 @@ impl ChannelManager {
                     last_connected: None,
                     companion_id: None,
                     bot_key: None,
+                    owner_domain: nomifun_db::models::default_owner_domain(),
                     created_at: now,
                     updated_at: now,
                 })
@@ -567,6 +625,18 @@ impl ChannelManager {
             CompanionId::parse(id).map_err(|error| {
                 ChannelError::InvalidConfig(format!("invalid companion_id '{id}': {error}"))
             })?;
+            // Application-layer mutual exclusion (the 019 guard trigger is the
+            // backstop): only companion-domain bots may bind a companion.
+            let row = self
+                .repo
+                .get_plugin(plugin_id)
+                .await?
+                .ok_or_else(|| ChannelError::PluginNotFound(plugin_id.to_owned()))?;
+            if row.owner_domain != "companion" {
+                return Err(ChannelError::InvalidConfig(
+                    "customer-service channel bots cannot carry a companion binding".into(),
+                ));
+            }
         }
         self.repo.update_plugin_companion(plugin_id, companion_id).await?;
         self.repo.delete_sessions_by_channel(plugin_id).await?;
@@ -1232,6 +1302,7 @@ impl ChannelManager {
             last_connected: row.last_connected,
             companion_id: row.companion_id.clone(),
             bot_key: row.bot_key.clone(),
+            owner_domain: row.owner_domain.clone(),
             created_at: row.created_at,
             updated_at: row.updated_at,
             connected,
@@ -1319,6 +1390,7 @@ mod tests {
             plugin_id: None,
             plugin_type: Some(plugin_type.to_owned()),
             companion_id: None,
+            owner_domain: None,
         }
     }
 
@@ -1399,6 +1471,7 @@ mod tests {
                 last_connected: row.last_connected,
                 companion_id: row.companion_id.clone(),
                 bot_key: row.bot_key.clone(),
+                owner_domain: row.owner_domain.clone(),
                 created_at: row.created_at,
                 updated_at: row.updated_at,
             };
@@ -1839,6 +1912,7 @@ mod tests {
             last_connected: Some(now),
             companion_id: None,
             bot_key: None,
+            owner_domain: "companion".into(),
             created_at: now,
             updated_at: now,
         });
@@ -1899,6 +1973,7 @@ mod tests {
             last_connected: Some(now),
             companion_id: Some(COMPANION_A.into()),
             bot_key: None,
+            owner_domain: "companion".into(),
             created_at: now,
             updated_at: now,
         });
@@ -1984,6 +2059,7 @@ mod tests {
                 plugin_id: Some(channel_id),
                 plugin_type: Some("telegram".into()),
                 companion_id: None,
+                owner_domain: None,
             },
             &make_test_config(),
             &factory,
@@ -2008,6 +2084,7 @@ mod tests {
                 plugin_id: Some(channel_id.clone()),
                 plugin_type: Some("telegram".into()),
                 companion_id: None,
+                owner_domain: None,
             },
             &serde_json::json!({}),
             &factory,
@@ -2140,6 +2217,7 @@ mod tests {
             last_connected: None,
             companion_id: None,
             bot_key: None,
+            owner_domain: "companion".into(),
             created_at: now_ms(),
             updated_at: now_ms(),
         });
@@ -2219,6 +2297,7 @@ mod tests {
             last_connected: None,
             companion_id: None,
             bot_key: None,
+            owner_domain: "companion".into(),
             created_at: now_ms(),
             updated_at: now_ms(),
         });
@@ -2246,6 +2325,7 @@ mod tests {
             last_connected: None,
             companion_id: None,
             bot_key: None,
+            owner_domain: "companion".into(),
             created_at: now_ms(),
             updated_at: now_ms(),
         });
@@ -2277,6 +2357,7 @@ mod tests {
                 last_connected: None,
                 companion_id: None,
                 bot_key: None,
+                owner_domain: "companion".into(),
                 created_at: now_ms(),
                 updated_at: now_ms(),
             });
@@ -2290,6 +2371,7 @@ mod tests {
                 last_connected: None,
                 companion_id: None,
                 bot_key: None,
+                owner_domain: "companion".into(),
                 created_at: now_ms(),
                 updated_at: now_ms(),
             });
@@ -2446,6 +2528,7 @@ mod tests {
             plugin_id: None,
             plugin_type: Some("lark".into()),
             companion_id: Some(companion.into()),
+            owner_domain: None,
         }
     }
 
@@ -2461,6 +2544,7 @@ mod tests {
             plugin_id: None,
             plugin_type: Some("qqbot".into()),
             companion_id: Some(companion.into()),
+            owner_domain: None,
         }
     }
 
@@ -2606,6 +2690,7 @@ mod tests {
                     plugin_id: None,
                     plugin_type: Some("lark".into()),
                     companion_id: None,
+                    owner_domain: None,
                 },
                 &lark_config_with_app("cli_app_1"),
                 &factory,
@@ -3190,5 +3275,165 @@ mod tests {
         assert!(bc.take_events().is_empty());
         let plugins = repo.get_plugins();
         assert_eq!(plugins[0].status.as_deref(), Some("running"));
+    }
+
+    // ── Channel bot ownership domains (customer-service isolation) ──────
+
+    fn cs_spec(plugin_type: &str) -> EnableChannelSpec {
+        EnableChannelSpec {
+            plugin_id: None,
+            plugin_type: Some(plugin_type.to_owned()),
+            companion_id: None,
+            owner_domain: Some("customer_service".into()),
+        }
+    }
+
+    #[tokio::test]
+    async fn enable_creates_customer_service_domain_bot() {
+        let (mgr, repo, _bc) = make_manager();
+        let factory = make_factory();
+
+        let channel_id = mgr
+            .enable_plugin(&cs_spec("telegram"), &make_test_config(), &factory)
+            .await
+            .unwrap();
+
+        let plugins = repo.get_plugins();
+        assert_eq!(plugins[0].owner_domain, "customer_service");
+        assert!(plugins[0].companion_id.is_none());
+
+        let statuses = mgr.get_plugin_status().await.unwrap();
+        assert_eq!(statuses[0].plugin_id, channel_id);
+        assert_eq!(statuses[0].owner_domain, "customer_service");
+    }
+
+    #[tokio::test]
+    async fn enable_rejects_customer_service_bot_with_companion() {
+        let (mgr, _repo, _bc) = make_manager();
+        let factory = make_factory();
+
+        let err = mgr
+            .enable_plugin(
+                &EnableChannelSpec {
+                    plugin_id: None,
+                    plugin_type: Some("telegram".into()),
+                    companion_id: Some(COMPANION_A.into()),
+                    owner_domain: Some("customer_service".into()),
+                },
+                &make_test_config(),
+                &factory,
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("companion binding"),
+            "cross-domain enable must fail: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn enable_rejects_unknown_owner_domain() {
+        let (mgr, _repo, _bc) = make_manager();
+        let factory = make_factory();
+
+        let err = mgr
+            .enable_plugin(
+                &EnableChannelSpec {
+                    plugin_id: None,
+                    plugin_type: Some("telegram".into()),
+                    companion_id: None,
+                    owner_domain: Some("martian".into()),
+                },
+                &make_test_config(),
+                &factory,
+            )
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("owner_domain"));
+    }
+
+    #[tokio::test]
+    async fn existing_bot_owner_domain_is_immutable() {
+        let (mgr, _repo, _bc) = make_manager();
+        let factory = make_factory();
+
+        let channel_id = mgr
+            .enable_plugin(&platform_spec("telegram"), &make_test_config(), &factory)
+            .await
+            .unwrap();
+
+        let err = mgr
+            .enable_plugin(
+                &EnableChannelSpec {
+                    plugin_id: Some(channel_id),
+                    plugin_type: Some("telegram".into()),
+                    companion_id: None,
+                    owner_domain: Some("customer_service".into()),
+                },
+                &make_test_config(),
+                &factory,
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("owner domain cannot be changed"),
+            "domain flip must fail: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn rebind_companion_rejects_customer_service_bot() {
+        let (mgr, _repo, _bc) = make_manager();
+        let factory = make_factory();
+
+        let channel_id = mgr
+            .enable_plugin(&cs_spec("telegram"), &make_test_config(), &factory)
+            .await
+            .unwrap();
+
+        let err = mgr
+            .rebind_channel_companion(&channel_id, Some(COMPANION_A))
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("companion binding"),
+            "cs bot must not accept a companion: {err}"
+        );
+
+        // Clearing (None) stays a no-op-safe path for cs bots.
+        mgr.rebind_channel_companion(&channel_id, None).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn cs_bot_identity_row_is_not_adopted_by_companion_create() {
+        let (mgr, repo, _bc) = make_manager();
+        let factory = make_factory();
+
+        // A cs-domain lark bot reserves its bot identity.
+        mgr.enable_plugin(&cs_spec("lark"), &lark_config_with_app("cli_shared"), &factory)
+            .await
+            .unwrap();
+
+        // A companion-domain create with the same lark app must not silently
+        // adopt (steal) the cs-domain row.
+        let err = mgr
+            .enable_plugin(
+                &EnableChannelSpec {
+                    plugin_id: None,
+                    plugin_type: Some("lark".into()),
+                    companion_id: None,
+                    owner_domain: None,
+                },
+                &lark_config_with_app("cli_shared"),
+                &factory,
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            ChannelError::InvalidConfig(_) | ChannelError::BotAlreadyBound(_)
+        ));
+        assert_eq!(repo.get_plugins().len(), 1, "no second row for the same bot identity");
+        assert_eq!(repo.get_plugins()[0].owner_domain, "customer_service");
     }
 }
