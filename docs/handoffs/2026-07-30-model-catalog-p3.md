@@ -106,3 +106,10 @@
 - 全局：`cargo check --workspace --exclude nomifun-desktop` 干净（仅 pre-existing nomifun-app dead-code warnings）；`cargo fmt --all --check` 干净。
 - docs 收官波次（按钮删除后复跑）：`bun run test:ui` 1574 pass / 0 fail；`bun run typecheck` 0 错误；`i18n-keys.d.ts` 已再生成（5180 keys）。
 - 既有失败基线（与本分支无关）：openclaw 构造测试 1 个 + nomifun-terminal 套件环境性抖动。
+
+
+## 验证状态（截至收尾，2026-07-30）
+
+- 提交时点各自验证：T1/T2（db/api-types/system 1818/0 + FE 1574/0）、T3/4/5（model-invoke 220/220、api-types 684/684、FE+typecheck 绿）、合并 origin/main 后 FE 1628/0 + typecheck 0 错。
+- **合并 origin/main 后的全 workspace cargo 套件未做最终确认**（按用户指示：编译/验证在另一任务统一处理）。合并前的全量跑有 2 个小套件共 4 个失败待归因；合并后首跑 grep 无 FAILED 行但未经 ok 计数确证。统一验证时建议：`cargo test --workspace --exclude nomifun-desktop --no-fail-fast` 并与基线（openclaw 1 个既有失败 + terminal 套件环境性抖动）对照。
+- 迁移编号注意：本分支的 capabilities 删列迁移因远程占用 017-020 已重编号为 **021**；在本分支旧编号（017）上初始化过的开发数据集需重置。
