@@ -123,6 +123,8 @@ const GeneratorCard: React.FC<GeneratorCardProps> = ({ id, data }) => {
 
   const continueEdit = useCallback(
     (instruction: string) => {
+      // Continue-edit chains only exist for image/video; tts has no edit flow.
+      if (mode === 'tts') return;
       const card = rf.getNode(id);
       if (!card) return;
       spawnContinueCard(rf, card, {

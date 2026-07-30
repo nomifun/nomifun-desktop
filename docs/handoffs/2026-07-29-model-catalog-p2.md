@@ -42,7 +42,7 @@
 **6. 工坊媒体/语音/TTS + 前端启发式清场（T5）**
 
 - 工坊 ModelPicker/`useGeneratorModels`：image→resolve(image_generation)∪(image_edit)、video→resolve(video_generation)、text→resolve(chat)；`creationModels.ts` 三级回退（profile>override>名称启发式）收敛 resolve 单源，创作页 provider 级 override chips 移除（改为跳管理页打标引导）。
-- `SpeechToTextContent` 候选 = resolve(speech_recognition)，`inferCloudSpeechService` 名字猜测删除；会话图像工具配置改 resolve(image_generation)，`NOMIFUN_IMG_*` 死码链前端侧删除。
+- `SpeechToTextContent` 候选 = resolve(speech_recognition)，`inferCloudSpeechService` 名字猜测删除；`tools.imageGenerationModel` 选择器已不存在于任何页面——`useConfigModelListWithImage.ts`/`imageGenerationMcpEnv.ts`/`imageModelAllowlist.ts` 作为零引用死码删除（`NOMIFUN_IMG_*` 环境变量链从未与后端 builder 的键名匹配过）。
 - **工坊 TTS 入口**：GenMode 'tts'（文本 + voice 选择 + resolve(speech_synthesis) 模型选择）→ 现有 `POST /api/creation/tasks` capability 'tts'；结果卡音频播放器。P1 打通的 TTS 链路自此有产品入口。
 
 **7. legacy STT 偏好一次性迁移（T7）**
@@ -74,6 +74,7 @@
 - `ui/src/renderer/utils/model/providerClone.ts` + `.test.ts`（客户端克隆，T4）
 - `ui/src/common/utils/modelCapabilities.ts` + `ui/src/renderer/utils/model/modelCapabilities.ts`（TS 启发式双胞胎，T5）
 - `ui/src/common/utils/imageModelAllowlist.ts`、`ui/src/common/config/imageGenerationMcpEnv.ts`（图像 allowlist/`NOMIFUN_IMG_*` 前端死码链，T5）
+- `ui/src/renderer/hooks/agent/useConfigModelListWithImage.ts`（`tools.imageGenerationModel` 选择器 hook，零引用死码，T5）
 - `SpeechToTextContent` 的 `inferCloudSpeechService` 名字猜测（T5）
 
 后端：
