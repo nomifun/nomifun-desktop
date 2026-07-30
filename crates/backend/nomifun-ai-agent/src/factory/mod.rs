@@ -8,6 +8,7 @@ pub(crate) mod construction_guard;
 mod context;
 mod nanobot;
 pub(crate) mod nomi;
+pub(crate) mod platform_table;
 mod openclaw;
 mod remote;
 

@@ -19,6 +19,7 @@ use tracing::{debug, info, warn};
 use crate::runtime_handle::AgentRuntimeHandle;
 use crate::factory::AgentFactoryDeps;
 use crate::factory::context::FactoryContext;
+use crate::factory::platform_table;
 use crate::manager::nomi::{
     NomiAgentManager, NomiHostWiring, sanitize_session_messages,
 };
@@ -1105,31 +1106,31 @@ pub(crate) fn build_public_agent_prompt(runtime: &crate::factory::PublicAgentRun
 
 /// Map Nomi DB platform name to the nomi provider identifier.
 ///
-/// Mirrors the frontend `src/process/agent/nomi/envBuilder.ts` mapping.
-/// For `new-api` platform, the model's per-row `protocol` override (from its
-/// `provider_models` row) takes precedence.
+/// Mirrors the frontend `src/process/agent/nomi/envBuilder.ts` mapping. Pure
+/// table lookup against [`platform_table::PLATFORM_CHAT_RULES`] (default row:
+/// `openai`), except the new-api gateway special case: for the `new-api`
+/// platform the model's per-row `protocol` override (from its
+/// `provider_models` row) takes precedence over the table.
 pub(crate) fn map_nomi_provider(platform: &str, protocol: Option<&str>) -> String {
     if platform == "new-api" && protocol == Some("anthropic") {
         return "anthropic".to_owned();
     }
 
-    match platform {
-        "anthropic" => "anthropic",
-        "bedrock" => "bedrock",
-        "gemini-vertex-ai" => "vertex",
-        _ => "openai",
-    }
-    .to_owned()
+    platform_table::platform_chat_rule(platform).nomi_provider.to_owned()
 }
 
 /// Resolve base_url and compat overrides for the nomi provider.
 ///
-/// Mirrors the frontend `envBuilder.ts` logic:
-/// - Strips trailing `/v1` from base_url (nomi appends its own path)
-/// - Gemini: prepends `/v1beta/openai` and overrides `api_path`
-/// - Domestic OpenAI-compatible providers with nonstandard version paths keep
-///   their configured base URL and append `/chat/completions`
-/// - OpenAI official (`api.openai.com`): sets `max_completion_tokens`
+/// `is_full_url` bypasses every platform rule (the configured URL is the
+/// request URL, minus trailing `/`, with an empty `api_path`). Otherwise the
+/// platform's [`platform_table::UrlRule`] decides:
+/// - `GeminiOpenAiCompat`: prepend `/v1beta/openai`, pin `api_path` to
+///   `/chat/completions`
+/// - `ConfiguredChatBase`: keep the configured base (nonstandard version
+///   path), pin `api_path` to `/chat/completions`
+/// - `StripTrailingV1` (default row): strip trailing `/v1` (nomi appends its
+///   own path); OpenAI official (`api.openai.com`, mapped provider `openai`)
+///   additionally sets `max_tokens_field = max_completion_tokens`
 pub(crate) fn resolve_nomi_url_and_compat(
     platform: &str,
     raw_base_url: &str,
@@ -1144,43 +1145,29 @@ pub(crate) fn resolve_nomi_url_and_compat(
         return (Some(trimmed.to_owned()), compat);
     }
 
-    if platform == "gemini" {
-        let trimmed = raw_base_url.trim_end_matches('/');
-        let base = format!("{trimmed}/v1beta/openai");
-        compat.api_path = Some("/chat/completions".to_owned());
-        return (Some(base), compat);
+    match platform_table::platform_chat_rule(platform).url_rule {
+        platform_table::UrlRule::GeminiOpenAiCompat => {
+            let trimmed = raw_base_url.trim_end_matches('/');
+            let base = format!("{trimmed}/v1beta/openai");
+            compat.api_path = Some("/chat/completions".to_owned());
+            (Some(base), compat)
+        }
+        platform_table::UrlRule::ConfiguredChatBase => {
+            let base = raw_base_url.trim_end_matches('/').to_owned();
+            compat.api_path = Some("/chat/completions".to_owned());
+            (Some(base).filter(|u| !u.is_empty()), compat)
+        }
+        platform_table::UrlRule::StripTrailingV1 => {
+            let normalized = normalize_nomi_base_url(raw_base_url);
+            let base_url = Some(normalized).filter(|u| !u.is_empty());
+
+            if mapped_provider == "openai" && is_openai_host(raw_base_url) {
+                compat.max_tokens_field = Some("max_completion_tokens".to_owned());
+            }
+
+            (base_url, compat)
+        }
     }
-
-    if uses_configured_openai_chat_base(platform) {
-        let base = raw_base_url.trim_end_matches('/').to_owned();
-        compat.api_path = Some("/chat/completions".to_owned());
-        return (Some(base).filter(|u| !u.is_empty()), compat);
-    }
-
-    let normalized = normalize_nomi_base_url(raw_base_url);
-    let base_url = Some(normalized).filter(|u| !u.is_empty());
-
-    if mapped_provider == "openai" && is_openai_host(raw_base_url) {
-        compat.max_tokens_field = Some("max_completion_tokens".to_owned());
-    }
-
-    (base_url, compat)
-}
-
-fn uses_configured_openai_chat_base(platform: &str) -> bool {
-    matches!(
-        platform,
-        "ark"
-            | "ark-coding-plan"
-            | "ark-agent-plan"
-            | "stepfun"
-            | "stepfun-plan"
-            | "dashscope-coding"
-            | "zhipu"
-            | "glm-coding-plan"
-            | "qianfan"
-            | "qianfan-coding-plan"
-    )
 }
 
 fn is_openai_host(url: &str) -> bool {
@@ -2625,4 +2612,374 @@ mod tests {
             resolve_write_policy(WriteSurface::ExternalChannel, &reconstruct(&on), "conv-c");
         assert!(matches!(staged.mode, WriteMode::Staged { .. }));
     }
+}
+
+/// P2 Task 6 behavior snapshot for the chat-path platform mapping.
+///
+/// Locks the EXACT `(provider, base_url, api_path, compat)` outputs of
+/// `map_nomi_provider` + `resolve_nomi_url_and_compat` over the full platform
+/// matrix — every `MODEL_PLATFORMS` entry from
+/// `ui/src/renderer/utils/model/modelPlatforms.ts` (kept per-entry, so custom
+/// presets with distinct base URLs each get a row) × representative base_url
+/// variants (configured / trailing slash / toggled `/v1` / empty / full-URL),
+/// plus new-api per-model protocol-override edge cases.
+///
+/// `SNAPSHOT` was generated by CALLING the pre-refactor implementation
+/// (2026-07-29, commit eff19c8f working tree). It must stay byte-identical —
+/// UNCHANGED — through the `platform_table` refactor; any diff means the
+/// chat-path behavior regressed.
+#[cfg(test)]
+mod platform_chat_snapshot {
+    use super::{map_nomi_provider, resolve_nomi_url_and_compat};
+
+    /// Every `MODEL_PLATFORMS` entry as `(platform key, configured base_url)`,
+    /// in file order. Entries without a preset base_url (Custom / New API /
+    /// Vertex / Bedrock) use a representative or empty base. Two extra rows:
+    /// the managed free-model platform and an unknown platform (default row).
+    const PLATFORM_MATRIX: &[(&str, &str)] = &[
+        ("custom", "https://api.example.com/v1"), // Custom (user-supplied base)
+        ("new-api", "https://gateway.example.com/v1"), // New API gateway
+        ("gemini", "https://generativelanguage.googleapis.com"),
+        ("gemini-vertex-ai", ""),
+        ("custom", "https://api.openai.com/v1"), // OpenAI preset
+        ("anthropic", "https://api.anthropic.com"),
+        ("bedrock", ""),
+        ("deepseek", "https://api.deepseek.com/v1"),
+        ("mimo", "https://api.xiaomimimo.com/v1"),
+        ("mimo-token-plan-cn", "https://token-plan-cn.xiaomimimo.com/v1"),
+        ("mimo-token-plan-sgp", "https://token-plan-sgp.xiaomimimo.com/v1"),
+        ("mimo-token-plan-ams", "https://token-plan-ams.xiaomimimo.com/v1"),
+        ("minimax", "https://api.minimaxi.com/v1"),
+        ("minimax-code", "https://api.minimax.io/v1"),
+        ("minimax-coding-plan", "https://api.minimaxi.com/v1"),
+        ("custom", "https://api.novita.ai/openai/v1"), // Novita
+        ("custom", "https://openrouter.ai/api/v1"),    // OpenRouter
+        ("dashscope", "https://dashscope.aliyuncs.com/compatible-mode/v1"),
+        ("dashscope-coding", "https://coding.dashscope.aliyuncs.com/v1"),
+        ("siliconflow", "https://api.siliconflow.cn/v1"), // SiliconFlow-CN
+        ("siliconflow", "https://api.siliconflow.com/v1"), // SiliconFlow
+        ("zhipu", "https://open.bigmodel.cn/api/paas/v4"),
+        ("glm-coding-plan", "https://open.bigmodel.cn/api/coding/paas/v4"),
+        ("moonshot-cn", "https://api.moonshot.cn/v1"),
+        ("moonshot-global", "https://api.moonshot.ai/v1"),
+        ("custom", "https://api.x.ai/v1"), // xAI
+        ("ark", "https://ark.cn-beijing.volces.com/api/v3"),
+        ("ark-coding-plan", "https://ark.cn-beijing.volces.com/api/coding/v3"),
+        ("ark-agent-plan", "https://ark.cn-beijing.volces.com/api/plan/v3"),
+        ("qianfan", "https://qianfan.baidubce.com/v2"),
+        ("qianfan-coding-plan", "https://qianfan.baidubce.com/v2/coding"),
+        ("hunyuan", "https://api.hunyuan.cloud.tencent.com/v1"),
+        ("lingyi", "https://api.lingyiwanwu.com/v1"),
+        ("custom", "https://api.poe.com/v1"),            // Poe
+        ("custom", "https://api.ppinfra.com/v3/openai"), // PPIO
+        ("custom", "https://api-inference.modelscope.cn/v1"), // ModelScope
+        ("custom", "https://cloud.infini-ai.com/maas/v1"), // InfiniAI
+        ("custom", "https://wishub-x1.ctyun.cn/v1"),     // Ctyun
+        ("stepfun", "https://api.stepfun.com/v1"),
+        ("stepfun-plan", "https://api.stepfun.com/step_plan/v1"),
+        ("nomifun-free-model", "https://free.nomifun.example/v1"), // managed free model
+        ("totally-unknown", "https://api.example.org/v1"), // default row
+    ];
+
+    /// `(platform, base_url, is_full_url, protocol)` extras: the new-api
+    /// per-model protocol override, its interaction with the api.openai.com
+    /// host rule, and full-URL edge cases (empty base; full-URL beating the
+    /// gemini / domestic-whitelist platform rules).
+    const EXTRA_CASES: &[(&str, &str, bool, Option<&str>)] = &[
+        ("new-api", "https://gateway.example.com/v1", false, Some("anthropic")),
+        ("new-api", "https://gateway.example.com/v1", false, Some("openai")),
+        ("new-api", "https://gateway.example.com/v1", false, Some("gemini")),
+        ("custom", "https://api.example.com/v1", false, Some("anthropic")),
+        ("anthropic", "https://api.anthropic.com", false, Some("openai")),
+        ("new-api", "https://api.openai.com/v1", false, None),
+        ("new-api", "https://api.openai.com/v1", false, Some("anthropic")),
+        ("custom", "", true, None),
+        ("gemini", "https://proxy.example.com/gemini/chat", true, None),
+        ("ark", "https://proxy.example.com/ark/chat", true, None),
+    ];
+
+    /// Base-url variants per platform row: configured / trailing slash /
+    /// toggled `/v1` (stripped when present, appended when absent) / empty /
+    /// full-URL (`is_full_url = true`).
+    fn variants(base: &str) -> Vec<(String, bool)> {
+        let toggled_v1 = match base.strip_suffix("/v1") {
+            Some(stripped) => stripped.to_owned(),
+            None => format!("{base}/v1"),
+        };
+        vec![
+            (base.to_owned(), false),
+            (format!("{base}/"), false),
+            (toggled_v1, false),
+            (String::new(), false),
+            (format!("{base}/chat/completions"), true),
+        ]
+    }
+
+    /// Mirrors the production call sequence (`provider_config.rs` /
+    /// `provider_health.rs`): map the platform first, then resolve URL/compat
+    /// with the MAPPED provider.
+    fn render_case(platform: &str, base: &str, full: bool, proto: Option<&str>) -> String {
+        let provider = map_nomi_provider(platform, proto);
+        let (base_url, compat) = resolve_nomi_url_and_compat(platform, base, &provider, full);
+        format!(
+            "{platform} | in={base:?} | full={full} | proto={proto:?} => provider={provider} \
+             | base={base_url:?} | api_path={:?} | max_tokens={:?} | image={:?} | reasoning={:?}",
+            compat.api_path,
+            compat.max_tokens_field,
+            compat.supports_image,
+            compat.require_reasoning_content,
+        )
+    }
+
+    fn render_all() -> String {
+        let mut out = String::new();
+        for (platform, base) in PLATFORM_MATRIX {
+            for (variant, full) in variants(base) {
+                out.push_str(&render_case(platform, &variant, full, None));
+                out.push('\n');
+            }
+        }
+        for (platform, base, full, proto) in EXTRA_CASES {
+            out.push_str(&render_case(platform, base, *full, *proto));
+            out.push('\n');
+        }
+        out
+    }
+
+    #[test]
+    fn platform_chat_rules_snapshot_locked() {
+        let actual = render_all();
+        if actual != SNAPSHOT {
+            println!("=== ACTUAL SNAPSHOT BEGIN ===");
+            print!("{actual}");
+            println!("=== ACTUAL SNAPSHOT END ===");
+            panic!(
+                "platform chat snapshot changed — chat-path (provider, base_url, api_path, \
+                 compat) must stay byte-identical to the pre-table behavior"
+            );
+        }
+    }
+
+    #[rustfmt::skip]
+    const SNAPSHOT: &str = r#"custom | in="https://api.example.com/v1" | full=false | proto=None => provider=openai | base=Some("https://api.example.com") | api_path=None | max_tokens=None | image=None | reasoning=None
+custom | in="https://api.example.com/v1/" | full=false | proto=None => provider=openai | base=Some("https://api.example.com") | api_path=None | max_tokens=None | image=None | reasoning=None
+custom | in="https://api.example.com" | full=false | proto=None => provider=openai | base=Some("https://api.example.com") | api_path=None | max_tokens=None | image=None | reasoning=None
+custom | in="" | full=false | proto=None => provider=openai | base=None | api_path=None | max_tokens=None | image=None | reasoning=None
+custom | in="https://api.example.com/v1/chat/completions" | full=true | proto=None => provider=openai | base=Some("https://api.example.com/v1/chat/completions") | api_path=Some("") | max_tokens=None | image=None | reasoning=None
+new-api | in="https://gateway.example.com/v1" | full=false | proto=None => provider=openai | base=Some("https://gateway.example.com") | api_path=None | max_tokens=None | image=None | reasoning=None
+new-api | in="https://gateway.example.com/v1/" | full=false | proto=None => provider=openai | base=Some("https://gateway.example.com") | api_path=None | max_tokens=None | image=None | reasoning=None
+new-api | in="https://gateway.example.com" | full=false | proto=None => provider=openai | base=Some("https://gateway.example.com") | api_path=None | max_tokens=None | image=None | reasoning=None
+new-api | in="" | full=false | proto=None => provider=openai | base=None | api_path=None | max_tokens=None | image=None | reasoning=None
+new-api | in="https://gateway.example.com/v1/chat/completions" | full=true | proto=None => provider=openai | base=Some("https://gateway.example.com/v1/chat/completions") | api_path=Some("") | max_tokens=None | image=None | reasoning=None
+gemini | in="https://generativelanguage.googleapis.com" | full=false | proto=None => provider=openai | base=Some("https://generativelanguage.googleapis.com/v1beta/openai") | api_path=Some("/chat/completions") | max_tokens=None | image=None | reasoning=None
+gemini | in="https://generativelanguage.googleapis.com/" | full=false | proto=None => provider=openai | base=Some("https://generativelanguage.googleapis.com/v1beta/openai") | api_path=Some("/chat/completions") | max_tokens=None | image=None | reasoning=None
+gemini | in="https://generativelanguage.googleapis.com/v1" | full=false | proto=None => provider=openai | base=Some("https://generativelanguage.googleapis.com/v1/v1beta/openai") | api_path=Some("/chat/completions") | max_tokens=None | image=None | reasoning=None
+gemini | in="" | full=false | proto=None => provider=openai | base=Some("/v1beta/openai") | api_path=Some("/chat/completions") | max_tokens=None | image=None | reasoning=None
+gemini | in="https://generativelanguage.googleapis.com/chat/completions" | full=true | proto=None => provider=openai | base=Some("https://generativelanguage.googleapis.com/chat/completions") | api_path=Some("") | max_tokens=None | image=None | reasoning=None
+gemini-vertex-ai | in="" | full=false | proto=None => provider=vertex | base=None | api_path=None | max_tokens=None | image=None | reasoning=None
+gemini-vertex-ai | in="/" | full=false | proto=None => provider=vertex | base=None | api_path=None | max_tokens=None | image=None | reasoning=None
+gemini-vertex-ai | in="/v1" | full=false | proto=None => provider=vertex | base=None | api_path=None | max_tokens=None | image=None | reasoning=None
+gemini-vertex-ai | in="" | full=false | proto=None => provider=vertex | base=None | api_path=None | max_tokens=None | image=None | reasoning=None
+gemini-vertex-ai | in="/chat/completions" | full=true | proto=None => provider=vertex | base=Some("/chat/completions") | api_path=Some("") | max_tokens=None | image=None | reasoning=None
+custom | in="https://api.openai.com/v1" | full=false | proto=None => provider=openai | base=Some("https://api.openai.com") | api_path=None | max_tokens=Some("max_completion_tokens") | image=None | reasoning=None
+custom | in="https://api.openai.com/v1/" | full=false | proto=None => provider=openai | base=Some("https://api.openai.com") | api_path=None | max_tokens=Some("max_completion_tokens") | image=None | reasoning=None
+custom | in="https://api.openai.com" | full=false | proto=None => provider=openai | base=Some("https://api.openai.com") | api_path=None | max_tokens=Some("max_completion_tokens") | image=None | reasoning=None
+custom | in="" | full=false | proto=None => provider=openai | base=None | api_path=None | max_tokens=None | image=None | reasoning=None
+custom | in="https://api.openai.com/v1/chat/completions" | full=true | proto=None => provider=openai | base=Some("https://api.openai.com/v1/chat/completions") | api_path=Some("") | max_tokens=None | image=None | reasoning=None
+anthropic | in="https://api.anthropic.com" | full=false | proto=None => provider=anthropic | base=Some("https://api.anthropic.com") | api_path=None | max_tokens=None | image=None | reasoning=None
+anthropic | in="https://api.anthropic.com/" | full=false | proto=None => provider=anthropic | base=Some("https://api.anthropic.com") | api_path=None | max_tokens=None | image=None | reasoning=None
+anthropic | in="https://api.anthropic.com/v1" | full=false | proto=None => provider=anthropic | base=Some("https://api.anthropic.com") | api_path=None | max_tokens=None | image=None | reasoning=None
+anthropic | in="" | full=false | proto=None => provider=anthropic | base=None | api_path=None | max_tokens=None | image=None | reasoning=None
+anthropic | in="https://api.anthropic.com/chat/completions" | full=true | proto=None => provider=anthropic | base=Some("https://api.anthropic.com/chat/completions") | api_path=Some("") | max_tokens=None | image=None | reasoning=None
+bedrock | in="" | full=false | proto=None => provider=bedrock | base=None | api_path=None | max_tokens=None | image=None | reasoning=None
+bedrock | in="/" | full=false | proto=None => provider=bedrock | base=None | api_path=None | max_tokens=None | image=None | reasoning=None
+bedrock | in="/v1" | full=false | proto=None => provider=bedrock | base=None | api_path=None | max_tokens=None | image=None | reasoning=None
+bedrock | in="" | full=false | proto=None => provider=bedrock | base=None | api_path=None | max_tokens=None | image=None | reasoning=None
+bedrock | in="/chat/completions" | full=true | proto=None => provider=bedrock | base=Some("/chat/completions") | api_path=Some("") | max_tokens=None | image=None | reasoning=None
+deepseek | in="https://api.deepseek.com/v1" | full=false | proto=None => provider=openai | base=Some("https://api.deepseek.com") | api_path=None | max_tokens=None | image=None | reasoning=None
+deepseek | in="https://api.deepseek.com/v1/" | full=false | proto=None => provider=openai | base=Some("https://api.deepseek.com") | api_path=None | max_tokens=None | image=None | reasoning=None
+deepseek | in="https://api.deepseek.com" | full=false | proto=None => provider=openai | base=Some("https://api.deepseek.com") | api_path=None | max_tokens=None | image=None | reasoning=None
+deepseek | in="" | full=false | proto=None => provider=openai | base=None | api_path=None | max_tokens=None | image=None | reasoning=None
+deepseek | in="https://api.deepseek.com/v1/chat/completions" | full=true | proto=None => provider=openai | base=Some("https://api.deepseek.com/v1/chat/completions") | api_path=Some("") | max_tokens=None | image=None | reasoning=None
+mimo | in="https://api.xiaomimimo.com/v1" | full=false | proto=None => provider=openai | base=Some("https://api.xiaomimimo.com") | api_path=None | max_tokens=None | image=None | reasoning=None
+mimo | in="https://api.xiaomimimo.com/v1/" | full=false | proto=None => provider=openai | base=Some("https://api.xiaomimimo.com") | api_path=None | max_tokens=None | image=None | reasoning=None
+mimo | in="https://api.xiaomimimo.com" | full=false | proto=None => provider=openai | base=Some("https://api.xiaomimimo.com") | api_path=None | max_tokens=None | image=None | reasoning=None
+mimo | in="" | full=false | proto=None => provider=openai | base=None | api_path=None | max_tokens=None | image=None | reasoning=None
+mimo | in="https://api.xiaomimimo.com/v1/chat/completions" | full=true | proto=None => provider=openai | base=Some("https://api.xiaomimimo.com/v1/chat/completions") | api_path=Some("") | max_tokens=None | image=None | reasoning=None
+mimo-token-plan-cn | in="https://token-plan-cn.xiaomimimo.com/v1" | full=false | proto=None => provider=openai | base=Some("https://token-plan-cn.xiaomimimo.com") | api_path=None | max_tokens=None | image=None | reasoning=None
+mimo-token-plan-cn | in="https://token-plan-cn.xiaomimimo.com/v1/" | full=false | proto=None => provider=openai | base=Some("https://token-plan-cn.xiaomimimo.com") | api_path=None | max_tokens=None | image=None | reasoning=None
+mimo-token-plan-cn | in="https://token-plan-cn.xiaomimimo.com" | full=false | proto=None => provider=openai | base=Some("https://token-plan-cn.xiaomimimo.com") | api_path=None | max_tokens=None | image=None | reasoning=None
+mimo-token-plan-cn | in="" | full=false | proto=None => provider=openai | base=None | api_path=None | max_tokens=None | image=None | reasoning=None
+mimo-token-plan-cn | in="https://token-plan-cn.xiaomimimo.com/v1/chat/completions" | full=true | proto=None => provider=openai | base=Some("https://token-plan-cn.xiaomimimo.com/v1/chat/completions") | api_path=Some("") | max_tokens=None | image=None | reasoning=None
+mimo-token-plan-sgp | in="https://token-plan-sgp.xiaomimimo.com/v1" | full=false | proto=None => provider=openai | base=Some("https://token-plan-sgp.xiaomimimo.com") | api_path=None | max_tokens=None | image=None | reasoning=None
+mimo-token-plan-sgp | in="https://token-plan-sgp.xiaomimimo.com/v1/" | full=false | proto=None => provider=openai | base=Some("https://token-plan-sgp.xiaomimimo.com") | api_path=None | max_tokens=None | image=None | reasoning=None
+mimo-token-plan-sgp | in="https://token-plan-sgp.xiaomimimo.com" | full=false | proto=None => provider=openai | base=Some("https://token-plan-sgp.xiaomimimo.com") | api_path=None | max_tokens=None | image=None | reasoning=None
+mimo-token-plan-sgp | in="" | full=false | proto=None => provider=openai | base=None | api_path=None | max_tokens=None | image=None | reasoning=None
+mimo-token-plan-sgp | in="https://token-plan-sgp.xiaomimimo.com/v1/chat/completions" | full=true | proto=None => provider=openai | base=Some("https://token-plan-sgp.xiaomimimo.com/v1/chat/completions") | api_path=Some("") | max_tokens=None | image=None | reasoning=None
+mimo-token-plan-ams | in="https://token-plan-ams.xiaomimimo.com/v1" | full=false | proto=None => provider=openai | base=Some("https://token-plan-ams.xiaomimimo.com") | api_path=None | max_tokens=None | image=None | reasoning=None
+mimo-token-plan-ams | in="https://token-plan-ams.xiaomimimo.com/v1/" | full=false | proto=None => provider=openai | base=Some("https://token-plan-ams.xiaomimimo.com") | api_path=None | max_tokens=None | image=None | reasoning=None
+mimo-token-plan-ams | in="https://token-plan-ams.xiaomimimo.com" | full=false | proto=None => provider=openai | base=Some("https://token-plan-ams.xiaomimimo.com") | api_path=None | max_tokens=None | image=None | reasoning=None
+mimo-token-plan-ams | in="" | full=false | proto=None => provider=openai | base=None | api_path=None | max_tokens=None | image=None | reasoning=None
+mimo-token-plan-ams | in="https://token-plan-ams.xiaomimimo.com/v1/chat/completions" | full=true | proto=None => provider=openai | base=Some("https://token-plan-ams.xiaomimimo.com/v1/chat/completions") | api_path=Some("") | max_tokens=None | image=None | reasoning=None
+minimax | in="https://api.minimaxi.com/v1" | full=false | proto=None => provider=openai | base=Some("https://api.minimaxi.com") | api_path=None | max_tokens=None | image=None | reasoning=None
+minimax | in="https://api.minimaxi.com/v1/" | full=false | proto=None => provider=openai | base=Some("https://api.minimaxi.com") | api_path=None | max_tokens=None | image=None | reasoning=None
+minimax | in="https://api.minimaxi.com" | full=false | proto=None => provider=openai | base=Some("https://api.minimaxi.com") | api_path=None | max_tokens=None | image=None | reasoning=None
+minimax | in="" | full=false | proto=None => provider=openai | base=None | api_path=None | max_tokens=None | image=None | reasoning=None
+minimax | in="https://api.minimaxi.com/v1/chat/completions" | full=true | proto=None => provider=openai | base=Some("https://api.minimaxi.com/v1/chat/completions") | api_path=Some("") | max_tokens=None | image=None | reasoning=None
+minimax-code | in="https://api.minimax.io/v1" | full=false | proto=None => provider=openai | base=Some("https://api.minimax.io") | api_path=None | max_tokens=None | image=None | reasoning=None
+minimax-code | in="https://api.minimax.io/v1/" | full=false | proto=None => provider=openai | base=Some("https://api.minimax.io") | api_path=None | max_tokens=None | image=None | reasoning=None
+minimax-code | in="https://api.minimax.io" | full=false | proto=None => provider=openai | base=Some("https://api.minimax.io") | api_path=None | max_tokens=None | image=None | reasoning=None
+minimax-code | in="" | full=false | proto=None => provider=openai | base=None | api_path=None | max_tokens=None | image=None | reasoning=None
+minimax-code | in="https://api.minimax.io/v1/chat/completions" | full=true | proto=None => provider=openai | base=Some("https://api.minimax.io/v1/chat/completions") | api_path=Some("") | max_tokens=None | image=None | reasoning=None
+minimax-coding-plan | in="https://api.minimaxi.com/v1" | full=false | proto=None => provider=openai | base=Some("https://api.minimaxi.com") | api_path=None | max_tokens=None | image=None | reasoning=None
+minimax-coding-plan | in="https://api.minimaxi.com/v1/" | full=false | proto=None => provider=openai | base=Some("https://api.minimaxi.com") | api_path=None | max_tokens=None | image=None | reasoning=None
+minimax-coding-plan | in="https://api.minimaxi.com" | full=false | proto=None => provider=openai | base=Some("https://api.minimaxi.com") | api_path=None | max_tokens=None | image=None | reasoning=None
+minimax-coding-plan | in="" | full=false | proto=None => provider=openai | base=None | api_path=None | max_tokens=None | image=None | reasoning=None
+minimax-coding-plan | in="https://api.minimaxi.com/v1/chat/completions" | full=true | proto=None => provider=openai | base=Some("https://api.minimaxi.com/v1/chat/completions") | api_path=Some("") | max_tokens=None | image=None | reasoning=None
+custom | in="https://api.novita.ai/openai/v1" | full=false | proto=None => provider=openai | base=Some("https://api.novita.ai/openai") | api_path=None | max_tokens=None | image=None | reasoning=None
+custom | in="https://api.novita.ai/openai/v1/" | full=false | proto=None => provider=openai | base=Some("https://api.novita.ai/openai") | api_path=None | max_tokens=None | image=None | reasoning=None
+custom | in="https://api.novita.ai/openai" | full=false | proto=None => provider=openai | base=Some("https://api.novita.ai/openai") | api_path=None | max_tokens=None | image=None | reasoning=None
+custom | in="" | full=false | proto=None => provider=openai | base=None | api_path=None | max_tokens=None | image=None | reasoning=None
+custom | in="https://api.novita.ai/openai/v1/chat/completions" | full=true | proto=None => provider=openai | base=Some("https://api.novita.ai/openai/v1/chat/completions") | api_path=Some("") | max_tokens=None | image=None | reasoning=None
+custom | in="https://openrouter.ai/api/v1" | full=false | proto=None => provider=openai | base=Some("https://openrouter.ai/api") | api_path=None | max_tokens=None | image=None | reasoning=None
+custom | in="https://openrouter.ai/api/v1/" | full=false | proto=None => provider=openai | base=Some("https://openrouter.ai/api") | api_path=None | max_tokens=None | image=None | reasoning=None
+custom | in="https://openrouter.ai/api" | full=false | proto=None => provider=openai | base=Some("https://openrouter.ai/api") | api_path=None | max_tokens=None | image=None | reasoning=None
+custom | in="" | full=false | proto=None => provider=openai | base=None | api_path=None | max_tokens=None | image=None | reasoning=None
+custom | in="https://openrouter.ai/api/v1/chat/completions" | full=true | proto=None => provider=openai | base=Some("https://openrouter.ai/api/v1/chat/completions") | api_path=Some("") | max_tokens=None | image=None | reasoning=None
+dashscope | in="https://dashscope.aliyuncs.com/compatible-mode/v1" | full=false | proto=None => provider=openai | base=Some("https://dashscope.aliyuncs.com/compatible-mode") | api_path=None | max_tokens=None | image=None | reasoning=None
+dashscope | in="https://dashscope.aliyuncs.com/compatible-mode/v1/" | full=false | proto=None => provider=openai | base=Some("https://dashscope.aliyuncs.com/compatible-mode") | api_path=None | max_tokens=None | image=None | reasoning=None
+dashscope | in="https://dashscope.aliyuncs.com/compatible-mode" | full=false | proto=None => provider=openai | base=Some("https://dashscope.aliyuncs.com/compatible-mode") | api_path=None | max_tokens=None | image=None | reasoning=None
+dashscope | in="" | full=false | proto=None => provider=openai | base=None | api_path=None | max_tokens=None | image=None | reasoning=None
+dashscope | in="https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions" | full=true | proto=None => provider=openai | base=Some("https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions") | api_path=Some("") | max_tokens=None | image=None | reasoning=None
+dashscope-coding | in="https://coding.dashscope.aliyuncs.com/v1" | full=false | proto=None => provider=openai | base=Some("https://coding.dashscope.aliyuncs.com/v1") | api_path=Some("/chat/completions") | max_tokens=None | image=None | reasoning=None
+dashscope-coding | in="https://coding.dashscope.aliyuncs.com/v1/" | full=false | proto=None => provider=openai | base=Some("https://coding.dashscope.aliyuncs.com/v1") | api_path=Some("/chat/completions") | max_tokens=None | image=None | reasoning=None
+dashscope-coding | in="https://coding.dashscope.aliyuncs.com" | full=false | proto=None => provider=openai | base=Some("https://coding.dashscope.aliyuncs.com") | api_path=Some("/chat/completions") | max_tokens=None | image=None | reasoning=None
+dashscope-coding | in="" | full=false | proto=None => provider=openai | base=None | api_path=Some("/chat/completions") | max_tokens=None | image=None | reasoning=None
+dashscope-coding | in="https://coding.dashscope.aliyuncs.com/v1/chat/completions" | full=true | proto=None => provider=openai | base=Some("https://coding.dashscope.aliyuncs.com/v1/chat/completions") | api_path=Some("") | max_tokens=None | image=None | reasoning=None
+siliconflow | in="https://api.siliconflow.cn/v1" | full=false | proto=None => provider=openai | base=Some("https://api.siliconflow.cn") | api_path=None | max_tokens=None | image=None | reasoning=None
+siliconflow | in="https://api.siliconflow.cn/v1/" | full=false | proto=None => provider=openai | base=Some("https://api.siliconflow.cn") | api_path=None | max_tokens=None | image=None | reasoning=None
+siliconflow | in="https://api.siliconflow.cn" | full=false | proto=None => provider=openai | base=Some("https://api.siliconflow.cn") | api_path=None | max_tokens=None | image=None | reasoning=None
+siliconflow | in="" | full=false | proto=None => provider=openai | base=None | api_path=None | max_tokens=None | image=None | reasoning=None
+siliconflow | in="https://api.siliconflow.cn/v1/chat/completions" | full=true | proto=None => provider=openai | base=Some("https://api.siliconflow.cn/v1/chat/completions") | api_path=Some("") | max_tokens=None | image=None | reasoning=None
+siliconflow | in="https://api.siliconflow.com/v1" | full=false | proto=None => provider=openai | base=Some("https://api.siliconflow.com") | api_path=None | max_tokens=None | image=None | reasoning=None
+siliconflow | in="https://api.siliconflow.com/v1/" | full=false | proto=None => provider=openai | base=Some("https://api.siliconflow.com") | api_path=None | max_tokens=None | image=None | reasoning=None
+siliconflow | in="https://api.siliconflow.com" | full=false | proto=None => provider=openai | base=Some("https://api.siliconflow.com") | api_path=None | max_tokens=None | image=None | reasoning=None
+siliconflow | in="" | full=false | proto=None => provider=openai | base=None | api_path=None | max_tokens=None | image=None | reasoning=None
+siliconflow | in="https://api.siliconflow.com/v1/chat/completions" | full=true | proto=None => provider=openai | base=Some("https://api.siliconflow.com/v1/chat/completions") | api_path=Some("") | max_tokens=None | image=None | reasoning=None
+zhipu | in="https://open.bigmodel.cn/api/paas/v4" | full=false | proto=None => provider=openai | base=Some("https://open.bigmodel.cn/api/paas/v4") | api_path=Some("/chat/completions") | max_tokens=None | image=None | reasoning=None
+zhipu | in="https://open.bigmodel.cn/api/paas/v4/" | full=false | proto=None => provider=openai | base=Some("https://open.bigmodel.cn/api/paas/v4") | api_path=Some("/chat/completions") | max_tokens=None | image=None | reasoning=None
+zhipu | in="https://open.bigmodel.cn/api/paas/v4/v1" | full=false | proto=None => provider=openai | base=Some("https://open.bigmodel.cn/api/paas/v4/v1") | api_path=Some("/chat/completions") | max_tokens=None | image=None | reasoning=None
+zhipu | in="" | full=false | proto=None => provider=openai | base=None | api_path=Some("/chat/completions") | max_tokens=None | image=None | reasoning=None
+zhipu | in="https://open.bigmodel.cn/api/paas/v4/chat/completions" | full=true | proto=None => provider=openai | base=Some("https://open.bigmodel.cn/api/paas/v4/chat/completions") | api_path=Some("") | max_tokens=None | image=None | reasoning=None
+glm-coding-plan | in="https://open.bigmodel.cn/api/coding/paas/v4" | full=false | proto=None => provider=openai | base=Some("https://open.bigmodel.cn/api/coding/paas/v4") | api_path=Some("/chat/completions") | max_tokens=None | image=None | reasoning=None
+glm-coding-plan | in="https://open.bigmodel.cn/api/coding/paas/v4/" | full=false | proto=None => provider=openai | base=Some("https://open.bigmodel.cn/api/coding/paas/v4") | api_path=Some("/chat/completions") | max_tokens=None | image=None | reasoning=None
+glm-coding-plan | in="https://open.bigmodel.cn/api/coding/paas/v4/v1" | full=false | proto=None => provider=openai | base=Some("https://open.bigmodel.cn/api/coding/paas/v4/v1") | api_path=Some("/chat/completions") | max_tokens=None | image=None | reasoning=None
+glm-coding-plan | in="" | full=false | proto=None => provider=openai | base=None | api_path=Some("/chat/completions") | max_tokens=None | image=None | reasoning=None
+glm-coding-plan | in="https://open.bigmodel.cn/api/coding/paas/v4/chat/completions" | full=true | proto=None => provider=openai | base=Some("https://open.bigmodel.cn/api/coding/paas/v4/chat/completions") | api_path=Some("") | max_tokens=None | image=None | reasoning=None
+moonshot-cn | in="https://api.moonshot.cn/v1" | full=false | proto=None => provider=openai | base=Some("https://api.moonshot.cn") | api_path=None | max_tokens=None | image=None | reasoning=None
+moonshot-cn | in="https://api.moonshot.cn/v1/" | full=false | proto=None => provider=openai | base=Some("https://api.moonshot.cn") | api_path=None | max_tokens=None | image=None | reasoning=None
+moonshot-cn | in="https://api.moonshot.cn" | full=false | proto=None => provider=openai | base=Some("https://api.moonshot.cn") | api_path=None | max_tokens=None | image=None | reasoning=None
+moonshot-cn | in="" | full=false | proto=None => provider=openai | base=None | api_path=None | max_tokens=None | image=None | reasoning=None
+moonshot-cn | in="https://api.moonshot.cn/v1/chat/completions" | full=true | proto=None => provider=openai | base=Some("https://api.moonshot.cn/v1/chat/completions") | api_path=Some("") | max_tokens=None | image=None | reasoning=None
+moonshot-global | in="https://api.moonshot.ai/v1" | full=false | proto=None => provider=openai | base=Some("https://api.moonshot.ai") | api_path=None | max_tokens=None | image=None | reasoning=None
+moonshot-global | in="https://api.moonshot.ai/v1/" | full=false | proto=None => provider=openai | base=Some("https://api.moonshot.ai") | api_path=None | max_tokens=None | image=None | reasoning=None
+moonshot-global | in="https://api.moonshot.ai" | full=false | proto=None => provider=openai | base=Some("https://api.moonshot.ai") | api_path=None | max_tokens=None | image=None | reasoning=None
+moonshot-global | in="" | full=false | proto=None => provider=openai | base=None | api_path=None | max_tokens=None | image=None | reasoning=None
+moonshot-global | in="https://api.moonshot.ai/v1/chat/completions" | full=true | proto=None => provider=openai | base=Some("https://api.moonshot.ai/v1/chat/completions") | api_path=Some("") | max_tokens=None | image=None | reasoning=None
+custom | in="https://api.x.ai/v1" | full=false | proto=None => provider=openai | base=Some("https://api.x.ai") | api_path=None | max_tokens=None | image=None | reasoning=None
+custom | in="https://api.x.ai/v1/" | full=false | proto=None => provider=openai | base=Some("https://api.x.ai") | api_path=None | max_tokens=None | image=None | reasoning=None
+custom | in="https://api.x.ai" | full=false | proto=None => provider=openai | base=Some("https://api.x.ai") | api_path=None | max_tokens=None | image=None | reasoning=None
+custom | in="" | full=false | proto=None => provider=openai | base=None | api_path=None | max_tokens=None | image=None | reasoning=None
+custom | in="https://api.x.ai/v1/chat/completions" | full=true | proto=None => provider=openai | base=Some("https://api.x.ai/v1/chat/completions") | api_path=Some("") | max_tokens=None | image=None | reasoning=None
+ark | in="https://ark.cn-beijing.volces.com/api/v3" | full=false | proto=None => provider=openai | base=Some("https://ark.cn-beijing.volces.com/api/v3") | api_path=Some("/chat/completions") | max_tokens=None | image=None | reasoning=None
+ark | in="https://ark.cn-beijing.volces.com/api/v3/" | full=false | proto=None => provider=openai | base=Some("https://ark.cn-beijing.volces.com/api/v3") | api_path=Some("/chat/completions") | max_tokens=None | image=None | reasoning=None
+ark | in="https://ark.cn-beijing.volces.com/api/v3/v1" | full=false | proto=None => provider=openai | base=Some("https://ark.cn-beijing.volces.com/api/v3/v1") | api_path=Some("/chat/completions") | max_tokens=None | image=None | reasoning=None
+ark | in="" | full=false | proto=None => provider=openai | base=None | api_path=Some("/chat/completions") | max_tokens=None | image=None | reasoning=None
+ark | in="https://ark.cn-beijing.volces.com/api/v3/chat/completions" | full=true | proto=None => provider=openai | base=Some("https://ark.cn-beijing.volces.com/api/v3/chat/completions") | api_path=Some("") | max_tokens=None | image=None | reasoning=None
+ark-coding-plan | in="https://ark.cn-beijing.volces.com/api/coding/v3" | full=false | proto=None => provider=openai | base=Some("https://ark.cn-beijing.volces.com/api/coding/v3") | api_path=Some("/chat/completions") | max_tokens=None | image=None | reasoning=None
+ark-coding-plan | in="https://ark.cn-beijing.volces.com/api/coding/v3/" | full=false | proto=None => provider=openai | base=Some("https://ark.cn-beijing.volces.com/api/coding/v3") | api_path=Some("/chat/completions") | max_tokens=None | image=None | reasoning=None
+ark-coding-plan | in="https://ark.cn-beijing.volces.com/api/coding/v3/v1" | full=false | proto=None => provider=openai | base=Some("https://ark.cn-beijing.volces.com/api/coding/v3/v1") | api_path=Some("/chat/completions") | max_tokens=None | image=None | reasoning=None
+ark-coding-plan | in="" | full=false | proto=None => provider=openai | base=None | api_path=Some("/chat/completions") | max_tokens=None | image=None | reasoning=None
+ark-coding-plan | in="https://ark.cn-beijing.volces.com/api/coding/v3/chat/completions" | full=true | proto=None => provider=openai | base=Some("https://ark.cn-beijing.volces.com/api/coding/v3/chat/completions") | api_path=Some("") | max_tokens=None | image=None | reasoning=None
+ark-agent-plan | in="https://ark.cn-beijing.volces.com/api/plan/v3" | full=false | proto=None => provider=openai | base=Some("https://ark.cn-beijing.volces.com/api/plan/v3") | api_path=Some("/chat/completions") | max_tokens=None | image=None | reasoning=None
+ark-agent-plan | in="https://ark.cn-beijing.volces.com/api/plan/v3/" | full=false | proto=None => provider=openai | base=Some("https://ark.cn-beijing.volces.com/api/plan/v3") | api_path=Some("/chat/completions") | max_tokens=None | image=None | reasoning=None
+ark-agent-plan | in="https://ark.cn-beijing.volces.com/api/plan/v3/v1" | full=false | proto=None => provider=openai | base=Some("https://ark.cn-beijing.volces.com/api/plan/v3/v1") | api_path=Some("/chat/completions") | max_tokens=None | image=None | reasoning=None
+ark-agent-plan | in="" | full=false | proto=None => provider=openai | base=None | api_path=Some("/chat/completions") | max_tokens=None | image=None | reasoning=None
+ark-agent-plan | in="https://ark.cn-beijing.volces.com/api/plan/v3/chat/completions" | full=true | proto=None => provider=openai | base=Some("https://ark.cn-beijing.volces.com/api/plan/v3/chat/completions") | api_path=Some("") | max_tokens=None | image=None | reasoning=None
+qianfan | in="https://qianfan.baidubce.com/v2" | full=false | proto=None => provider=openai | base=Some("https://qianfan.baidubce.com/v2") | api_path=Some("/chat/completions") | max_tokens=None | image=None | reasoning=None
+qianfan | in="https://qianfan.baidubce.com/v2/" | full=false | proto=None => provider=openai | base=Some("https://qianfan.baidubce.com/v2") | api_path=Some("/chat/completions") | max_tokens=None | image=None | reasoning=None
+qianfan | in="https://qianfan.baidubce.com/v2/v1" | full=false | proto=None => provider=openai | base=Some("https://qianfan.baidubce.com/v2/v1") | api_path=Some("/chat/completions") | max_tokens=None | image=None | reasoning=None
+qianfan | in="" | full=false | proto=None => provider=openai | base=None | api_path=Some("/chat/completions") | max_tokens=None | image=None | reasoning=None
+qianfan | in="https://qianfan.baidubce.com/v2/chat/completions" | full=true | proto=None => provider=openai | base=Some("https://qianfan.baidubce.com/v2/chat/completions") | api_path=Some("") | max_tokens=None | image=None | reasoning=None
+qianfan-coding-plan | in="https://qianfan.baidubce.com/v2/coding" | full=false | proto=None => provider=openai | base=Some("https://qianfan.baidubce.com/v2/coding") | api_path=Some("/chat/completions") | max_tokens=None | image=None | reasoning=None
+qianfan-coding-plan | in="https://qianfan.baidubce.com/v2/coding/" | full=false | proto=None => provider=openai | base=Some("https://qianfan.baidubce.com/v2/coding") | api_path=Some("/chat/completions") | max_tokens=None | image=None | reasoning=None
+qianfan-coding-plan | in="https://qianfan.baidubce.com/v2/coding/v1" | full=false | proto=None => provider=openai | base=Some("https://qianfan.baidubce.com/v2/coding/v1") | api_path=Some("/chat/completions") | max_tokens=None | image=None | reasoning=None
+qianfan-coding-plan | in="" | full=false | proto=None => provider=openai | base=None | api_path=Some("/chat/completions") | max_tokens=None | image=None | reasoning=None
+qianfan-coding-plan | in="https://qianfan.baidubce.com/v2/coding/chat/completions" | full=true | proto=None => provider=openai | base=Some("https://qianfan.baidubce.com/v2/coding/chat/completions") | api_path=Some("") | max_tokens=None | image=None | reasoning=None
+hunyuan | in="https://api.hunyuan.cloud.tencent.com/v1" | full=false | proto=None => provider=openai | base=Some("https://api.hunyuan.cloud.tencent.com") | api_path=None | max_tokens=None | image=None | reasoning=None
+hunyuan | in="https://api.hunyuan.cloud.tencent.com/v1/" | full=false | proto=None => provider=openai | base=Some("https://api.hunyuan.cloud.tencent.com") | api_path=None | max_tokens=None | image=None | reasoning=None
+hunyuan | in="https://api.hunyuan.cloud.tencent.com" | full=false | proto=None => provider=openai | base=Some("https://api.hunyuan.cloud.tencent.com") | api_path=None | max_tokens=None | image=None | reasoning=None
+hunyuan | in="" | full=false | proto=None => provider=openai | base=None | api_path=None | max_tokens=None | image=None | reasoning=None
+hunyuan | in="https://api.hunyuan.cloud.tencent.com/v1/chat/completions" | full=true | proto=None => provider=openai | base=Some("https://api.hunyuan.cloud.tencent.com/v1/chat/completions") | api_path=Some("") | max_tokens=None | image=None | reasoning=None
+lingyi | in="https://api.lingyiwanwu.com/v1" | full=false | proto=None => provider=openai | base=Some("https://api.lingyiwanwu.com") | api_path=None | max_tokens=None | image=None | reasoning=None
+lingyi | in="https://api.lingyiwanwu.com/v1/" | full=false | proto=None => provider=openai | base=Some("https://api.lingyiwanwu.com") | api_path=None | max_tokens=None | image=None | reasoning=None
+lingyi | in="https://api.lingyiwanwu.com" | full=false | proto=None => provider=openai | base=Some("https://api.lingyiwanwu.com") | api_path=None | max_tokens=None | image=None | reasoning=None
+lingyi | in="" | full=false | proto=None => provider=openai | base=None | api_path=None | max_tokens=None | image=None | reasoning=None
+lingyi | in="https://api.lingyiwanwu.com/v1/chat/completions" | full=true | proto=None => provider=openai | base=Some("https://api.lingyiwanwu.com/v1/chat/completions") | api_path=Some("") | max_tokens=None | image=None | reasoning=None
+custom | in="https://api.poe.com/v1" | full=false | proto=None => provider=openai | base=Some("https://api.poe.com") | api_path=None | max_tokens=None | image=None | reasoning=None
+custom | in="https://api.poe.com/v1/" | full=false | proto=None => provider=openai | base=Some("https://api.poe.com") | api_path=None | max_tokens=None | image=None | reasoning=None
+custom | in="https://api.poe.com" | full=false | proto=None => provider=openai | base=Some("https://api.poe.com") | api_path=None | max_tokens=None | image=None | reasoning=None
+custom | in="" | full=false | proto=None => provider=openai | base=None | api_path=None | max_tokens=None | image=None | reasoning=None
+custom | in="https://api.poe.com/v1/chat/completions" | full=true | proto=None => provider=openai | base=Some("https://api.poe.com/v1/chat/completions") | api_path=Some("") | max_tokens=None | image=None | reasoning=None
+custom | in="https://api.ppinfra.com/v3/openai" | full=false | proto=None => provider=openai | base=Some("https://api.ppinfra.com/v3/openai") | api_path=None | max_tokens=None | image=None | reasoning=None
+custom | in="https://api.ppinfra.com/v3/openai/" | full=false | proto=None => provider=openai | base=Some("https://api.ppinfra.com/v3/openai") | api_path=None | max_tokens=None | image=None | reasoning=None
+custom | in="https://api.ppinfra.com/v3/openai/v1" | full=false | proto=None => provider=openai | base=Some("https://api.ppinfra.com/v3/openai") | api_path=None | max_tokens=None | image=None | reasoning=None
+custom | in="" | full=false | proto=None => provider=openai | base=None | api_path=None | max_tokens=None | image=None | reasoning=None
+custom | in="https://api.ppinfra.com/v3/openai/chat/completions" | full=true | proto=None => provider=openai | base=Some("https://api.ppinfra.com/v3/openai/chat/completions") | api_path=Some("") | max_tokens=None | image=None | reasoning=None
+custom | in="https://api-inference.modelscope.cn/v1" | full=false | proto=None => provider=openai | base=Some("https://api-inference.modelscope.cn") | api_path=None | max_tokens=None | image=None | reasoning=None
+custom | in="https://api-inference.modelscope.cn/v1/" | full=false | proto=None => provider=openai | base=Some("https://api-inference.modelscope.cn") | api_path=None | max_tokens=None | image=None | reasoning=None
+custom | in="https://api-inference.modelscope.cn" | full=false | proto=None => provider=openai | base=Some("https://api-inference.modelscope.cn") | api_path=None | max_tokens=None | image=None | reasoning=None
+custom | in="" | full=false | proto=None => provider=openai | base=None | api_path=None | max_tokens=None | image=None | reasoning=None
+custom | in="https://api-inference.modelscope.cn/v1/chat/completions" | full=true | proto=None => provider=openai | base=Some("https://api-inference.modelscope.cn/v1/chat/completions") | api_path=Some("") | max_tokens=None | image=None | reasoning=None
+custom | in="https://cloud.infini-ai.com/maas/v1" | full=false | proto=None => provider=openai | base=Some("https://cloud.infini-ai.com/maas") | api_path=None | max_tokens=None | image=None | reasoning=None
+custom | in="https://cloud.infini-ai.com/maas/v1/" | full=false | proto=None => provider=openai | base=Some("https://cloud.infini-ai.com/maas") | api_path=None | max_tokens=None | image=None | reasoning=None
+custom | in="https://cloud.infini-ai.com/maas" | full=false | proto=None => provider=openai | base=Some("https://cloud.infini-ai.com/maas") | api_path=None | max_tokens=None | image=None | reasoning=None
+custom | in="" | full=false | proto=None => provider=openai | base=None | api_path=None | max_tokens=None | image=None | reasoning=None
+custom | in="https://cloud.infini-ai.com/maas/v1/chat/completions" | full=true | proto=None => provider=openai | base=Some("https://cloud.infini-ai.com/maas/v1/chat/completions") | api_path=Some("") | max_tokens=None | image=None | reasoning=None
+custom | in="https://wishub-x1.ctyun.cn/v1" | full=false | proto=None => provider=openai | base=Some("https://wishub-x1.ctyun.cn") | api_path=None | max_tokens=None | image=None | reasoning=None
+custom | in="https://wishub-x1.ctyun.cn/v1/" | full=false | proto=None => provider=openai | base=Some("https://wishub-x1.ctyun.cn") | api_path=None | max_tokens=None | image=None | reasoning=None
+custom | in="https://wishub-x1.ctyun.cn" | full=false | proto=None => provider=openai | base=Some("https://wishub-x1.ctyun.cn") | api_path=None | max_tokens=None | image=None | reasoning=None
+custom | in="" | full=false | proto=None => provider=openai | base=None | api_path=None | max_tokens=None | image=None | reasoning=None
+custom | in="https://wishub-x1.ctyun.cn/v1/chat/completions" | full=true | proto=None => provider=openai | base=Some("https://wishub-x1.ctyun.cn/v1/chat/completions") | api_path=Some("") | max_tokens=None | image=None | reasoning=None
+stepfun | in="https://api.stepfun.com/v1" | full=false | proto=None => provider=openai | base=Some("https://api.stepfun.com/v1") | api_path=Some("/chat/completions") | max_tokens=None | image=None | reasoning=None
+stepfun | in="https://api.stepfun.com/v1/" | full=false | proto=None => provider=openai | base=Some("https://api.stepfun.com/v1") | api_path=Some("/chat/completions") | max_tokens=None | image=None | reasoning=None
+stepfun | in="https://api.stepfun.com" | full=false | proto=None => provider=openai | base=Some("https://api.stepfun.com") | api_path=Some("/chat/completions") | max_tokens=None | image=None | reasoning=None
+stepfun | in="" | full=false | proto=None => provider=openai | base=None | api_path=Some("/chat/completions") | max_tokens=None | image=None | reasoning=None
+stepfun | in="https://api.stepfun.com/v1/chat/completions" | full=true | proto=None => provider=openai | base=Some("https://api.stepfun.com/v1/chat/completions") | api_path=Some("") | max_tokens=None | image=None | reasoning=None
+stepfun-plan | in="https://api.stepfun.com/step_plan/v1" | full=false | proto=None => provider=openai | base=Some("https://api.stepfun.com/step_plan/v1") | api_path=Some("/chat/completions") | max_tokens=None | image=None | reasoning=None
+stepfun-plan | in="https://api.stepfun.com/step_plan/v1/" | full=false | proto=None => provider=openai | base=Some("https://api.stepfun.com/step_plan/v1") | api_path=Some("/chat/completions") | max_tokens=None | image=None | reasoning=None
+stepfun-plan | in="https://api.stepfun.com/step_plan" | full=false | proto=None => provider=openai | base=Some("https://api.stepfun.com/step_plan") | api_path=Some("/chat/completions") | max_tokens=None | image=None | reasoning=None
+stepfun-plan | in="" | full=false | proto=None => provider=openai | base=None | api_path=Some("/chat/completions") | max_tokens=None | image=None | reasoning=None
+stepfun-plan | in="https://api.stepfun.com/step_plan/v1/chat/completions" | full=true | proto=None => provider=openai | base=Some("https://api.stepfun.com/step_plan/v1/chat/completions") | api_path=Some("") | max_tokens=None | image=None | reasoning=None
+nomifun-free-model | in="https://free.nomifun.example/v1" | full=false | proto=None => provider=openai | base=Some("https://free.nomifun.example") | api_path=None | max_tokens=None | image=None | reasoning=None
+nomifun-free-model | in="https://free.nomifun.example/v1/" | full=false | proto=None => provider=openai | base=Some("https://free.nomifun.example") | api_path=None | max_tokens=None | image=None | reasoning=None
+nomifun-free-model | in="https://free.nomifun.example" | full=false | proto=None => provider=openai | base=Some("https://free.nomifun.example") | api_path=None | max_tokens=None | image=None | reasoning=None
+nomifun-free-model | in="" | full=false | proto=None => provider=openai | base=None | api_path=None | max_tokens=None | image=None | reasoning=None
+nomifun-free-model | in="https://free.nomifun.example/v1/chat/completions" | full=true | proto=None => provider=openai | base=Some("https://free.nomifun.example/v1/chat/completions") | api_path=Some("") | max_tokens=None | image=None | reasoning=None
+totally-unknown | in="https://api.example.org/v1" | full=false | proto=None => provider=openai | base=Some("https://api.example.org") | api_path=None | max_tokens=None | image=None | reasoning=None
+totally-unknown | in="https://api.example.org/v1/" | full=false | proto=None => provider=openai | base=Some("https://api.example.org") | api_path=None | max_tokens=None | image=None | reasoning=None
+totally-unknown | in="https://api.example.org" | full=false | proto=None => provider=openai | base=Some("https://api.example.org") | api_path=None | max_tokens=None | image=None | reasoning=None
+totally-unknown | in="" | full=false | proto=None => provider=openai | base=None | api_path=None | max_tokens=None | image=None | reasoning=None
+totally-unknown | in="https://api.example.org/v1/chat/completions" | full=true | proto=None => provider=openai | base=Some("https://api.example.org/v1/chat/completions") | api_path=Some("") | max_tokens=None | image=None | reasoning=None
+new-api | in="https://gateway.example.com/v1" | full=false | proto=Some("anthropic") => provider=anthropic | base=Some("https://gateway.example.com") | api_path=None | max_tokens=None | image=None | reasoning=None
+new-api | in="https://gateway.example.com/v1" | full=false | proto=Some("openai") => provider=openai | base=Some("https://gateway.example.com") | api_path=None | max_tokens=None | image=None | reasoning=None
+new-api | in="https://gateway.example.com/v1" | full=false | proto=Some("gemini") => provider=openai | base=Some("https://gateway.example.com") | api_path=None | max_tokens=None | image=None | reasoning=None
+custom | in="https://api.example.com/v1" | full=false | proto=Some("anthropic") => provider=openai | base=Some("https://api.example.com") | api_path=None | max_tokens=None | image=None | reasoning=None
+anthropic | in="https://api.anthropic.com" | full=false | proto=Some("openai") => provider=anthropic | base=Some("https://api.anthropic.com") | api_path=None | max_tokens=None | image=None | reasoning=None
+new-api | in="https://api.openai.com/v1" | full=false | proto=None => provider=openai | base=Some("https://api.openai.com") | api_path=None | max_tokens=Some("max_completion_tokens") | image=None | reasoning=None
+new-api | in="https://api.openai.com/v1" | full=false | proto=Some("anthropic") => provider=anthropic | base=Some("https://api.openai.com") | api_path=None | max_tokens=None | image=None | reasoning=None
+custom | in="" | full=true | proto=None => provider=openai | base=Some("") | api_path=Some("") | max_tokens=None | image=None | reasoning=None
+gemini | in="https://proxy.example.com/gemini/chat" | full=true | proto=None => provider=openai | base=Some("https://proxy.example.com/gemini/chat") | api_path=Some("") | max_tokens=None | image=None | reasoning=None
+ark | in="https://proxy.example.com/ark/chat" | full=true | proto=None => provider=openai | base=Some("https://proxy.example.com/ark/chat") | api_path=Some("") | max_tokens=None | image=None | reasoning=None
+"#;
 }
