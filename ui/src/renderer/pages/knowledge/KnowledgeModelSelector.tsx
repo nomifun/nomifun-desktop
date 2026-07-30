@@ -12,8 +12,7 @@ import { Brain, Down, Plus } from '@icon-park/react';
 import { configService } from '@/common/config/configService';
 import { useConfig } from '@/renderer/hooks/config/useConfig';
 import { iconColors } from '@/renderer/styles/colors';
-import { useModelProviderList } from '@/renderer/hooks/agent/useModelProviderList';
-import { useProvidersQuery } from '@/renderer/hooks/agent/useModelProviderList';
+import { useModelsForTask } from '@/renderer/hooks/agent/useModelsForTask';
 import type { ProviderId } from '@/common/types/ids';
 import { useModelSelectorProviderLabel } from '@/renderer/hooks/agent/useModelSelectorProviderLabel';
 
@@ -79,17 +78,17 @@ const KnowledgeModelSelector: React.FC<KnowledgeModelSelectorProps> = ({
 }) => {
   const { t } = useTranslation();
   const navigate = useNavigate();
-  const { providers, getAvailableModels, isLoading } = useModelProviderList();
-  const { data: modelConfig } = useProvidersQuery();
+  // Chat-capable catalog (backend resolve; heuristics gone).
+  const { groups, isLoading } = useModelsForTask('chat');
   const providerLabel = useModelSelectorProviderLabel();
 
   const defaultLabel = t('common.defaultModel');
   const choiceAvailable =
     !choice ||
-    providers.some(
-      (provider) =>
-        provider.id === choice.provider_id &&
-        getAvailableModels(provider).includes(choice.model),
+    groups.some(
+      (group) =>
+        group.provider.id === choice.provider_id &&
+        group.models.includes(choice.model),
     );
   const choiceUnavailable = Boolean(choice && !isLoading && !choiceAvailable);
   const buttonLabel = choice
@@ -103,7 +102,7 @@ const KnowledgeModelSelector: React.FC<KnowledgeModelSelectorProps> = ({
       <Menu.Item key='__default__' onClick={() => onChange(null)}>
         {defaultLabel}
       </Menu.Item>
-      {providers.length === 0
+      {groups.length === 0
         ? [
             <Menu.Item
               key='add-model'
@@ -114,14 +113,11 @@ const KnowledgeModelSelector: React.FC<KnowledgeModelSelectorProps> = ({
               {t('settings.addModel')}
             </Menu.Item>,
           ]
-        : providers.map((provider) => {
-            const models = getAvailableModels(provider);
-            if (models.length === 0) return null;
+        : groups.map(({ provider, models }) => {
             return (
               <Menu.ItemGroup title={providerLabel(provider)} key={provider.id}>
                 {models.map((modelName) => {
-                  const matched = modelConfig?.find((p) => p.id === provider.id);
-                  const healthStatus = matched?.model_health?.[modelName]?.status || 'unknown';
+                  const healthStatus = provider.model_health?.[modelName]?.status || 'unknown';
                   const healthColor =
                     healthStatus === 'healthy'
                       ? 'bg-green-500'

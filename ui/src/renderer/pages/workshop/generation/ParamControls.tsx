@@ -20,11 +20,13 @@ import {
   IMAGE_COUNT_MIN,
   IMAGE_QUALITIES,
   IMAGE_SIZE_PRESETS,
+  TTS_VOICES,
   VIDEO_ASPECTS,
   VIDEO_RESOLUTIONS,
   VIDEO_SECONDS_MAX,
   VIDEO_SECONDS_MIN,
   readImageParams,
+  readTtsParams,
   readVideoParams,
 } from './genConstants';
 
@@ -150,6 +152,35 @@ const ParamControls: React.FC<ParamControlsProps> = ({ mode, params, onChange })
   const { t } = useTranslation();
 
   if (mode === 'text') return null;
+
+  if (mode === 'tts') {
+    // Voice = preset pills + a free-text override (the "allowCreate" path for
+    // provider-specific voice ids the preset vocabulary misses).
+    const p = readTtsParams(params);
+    const voiceOptions: PillOption[] = TTS_VOICES.map((v) => ({ key: v, label: v }));
+    const isPreset = (TTS_VOICES as readonly string[]).includes(p.voice);
+    return (
+      <div className='flex min-w-0 flex-col gap-11px'>
+        <FieldRow label={t('workshopGeneration.param.voice', { defaultValue: '音色' })}>
+          <PillGroup
+            options={voiceOptions}
+            value={isPreset ? p.voice : ''}
+            fill
+            onSelect={(key) => onChange({ voice: key })}
+          />
+          <input
+            value={p.voice}
+            onChange={(e) => onChange({ voice: e.target.value })}
+            onKeyDown={(e) => e.stopPropagation()}
+            placeholder={t('workshopGeneration.param.voiceCustomPlaceholder', {
+              defaultValue: '自定义音色 ID…',
+            })}
+            className='nodrag w-full min-w-0 box-border rounded-7px border border-solid border-[var(--color-border-2)] bg-[var(--color-fill-1)] px-8px py-5px text-12px text-[var(--color-text-1)] outline-none focus:border-[rgb(var(--primary-6))] placeholder:text-[var(--color-text-3)]'
+          />
+        </FieldRow>
+      </div>
+    );
+  }
 
   if (mode === 'image') {
     const p = readImageParams(params);

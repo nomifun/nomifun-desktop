@@ -13,6 +13,7 @@
  */
 
 import type { IProvider, ModelCapability, ModelProfile, ModelTask, ModelTrait } from '@/common/config/storage';
+import type { ProviderModelResponse } from '@/common/types/provider/providerModel';
 import { parseProviderId, type ProviderId } from '@/common/types/ids';
 
 /**
@@ -36,6 +37,11 @@ export interface ProviderResponse {
   model_enabled?: Record<string, boolean>;
   model_health?: IProvider['model_health'];
   bedrock_config?: IProvider['bedrock_config'];
+  /**
+   * All authoritative per-model rows for this provider (`provider_models`),
+   * in `(sort_order, id)` order. Skipped on the wire when empty.
+   */
+  models_detail?: ProviderModelResponse[];
   is_full_url: boolean;
   sort_order: number;
   created_at: number;
@@ -90,6 +96,7 @@ export function fromProviderResponse(response: ProviderResponse): IProvider {
     model_enabled: response.model_enabled,
     model_health: response.model_health,
     bedrock_config: response.bedrock_config,
+    models_detail: response.models_detail,
     is_full_url: response.is_full_url,
     sort_order: response.sort_order,
   };

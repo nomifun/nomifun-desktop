@@ -121,7 +121,7 @@ async fn replace_bindings(
     let Json(req) = body.map_err(|e| AppError::BadRequest(e.to_string()))?;
     // Every listed plugin must name a live bot row owned by the
     // customer-service domain — companion-pool bots are never bindable here
-    // (channel ownership is domain-exclusive since migration 019).
+    // (channel ownership is domain-exclusive since migration 020).
     for plugin_id in &req.channel_plugin_ids {
         let plugin = state
             .channel_repo

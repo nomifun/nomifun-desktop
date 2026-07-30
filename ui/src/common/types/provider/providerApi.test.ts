@@ -11,6 +11,7 @@ import {
   toCreateProviderRequest,
   type ProviderResponse,
 } from './providerApi';
+import type { ProviderModelResponse } from './providerModel';
 
 const PROVIDER_ID = '0190f5fe-7c00-7a00-8000-000000000002';
 
@@ -64,5 +65,29 @@ describe('provider wire contract', () => {
     expect(request.model_context_limits).toEqual({ 'gpt-4o': 128_000 });
     expect(Object.prototype.hasOwnProperty.call(request, 'id')).toBe(false);
     expect(Object.prototype.hasOwnProperty.call(request, 'context_limit')).toBe(false);
+  });
+
+  test('passes models_detail through to the renderer model as-is', () => {
+    const modelsDetail: ProviderModelResponse[] = [
+      {
+        provider_id: PROVIDER_ID,
+        model: 'gpt-4o',
+        enabled: true,
+        sort_order: 0,
+        tasks: ['chat'],
+        traits: ['vision_input'],
+        params: null,
+        source: 'inferred',
+        created_at: 1,
+        updated_at: 1,
+      },
+    ];
+    const withDetail = fromProviderResponse({ ...response(PROVIDER_ID), models_detail: modelsDetail });
+    expect(withDetail.models_detail).toEqual(modelsDetail);
+
+    // Empty models_detail is skipped on the wire; the renderer model mirrors
+    // that by keeping the field undefined instead of inventing [].
+    const withoutDetail = fromProviderResponse(response(PROVIDER_ID));
+    expect(withoutDetail.models_detail).toBeUndefined();
   });
 });

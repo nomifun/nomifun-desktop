@@ -794,10 +794,9 @@ async fn setup_with_conv_repo() -> (
     ] {
         sqlx::query(
             "INSERT INTO providers (\
-                provider_id, platform, name, base_url, api_key_encrypted, models, enabled, \
+                provider_id, platform, name, base_url, api_key_encrypted, enabled, \
                 capabilities, created_at, updated_at\
              ) VALUES (?, 'openai', ?, 'https://example.invalid', 'encrypted', \
-                       '[\"model-safe\",\"gemini-2.5-pro\",\"claude-sonnet-4-20250514\"]', \
                        1, '[]', 1, 1)",
         )
         .bind(provider_id)
@@ -805,6 +804,22 @@ async fn setup_with_conv_repo() -> (
         .execute(&pool)
         .await
         .unwrap();
+        for (index, model) in ["model-safe", "gemini-2.5-pro", "claude-sonnet-4-20250514"]
+            .iter()
+            .enumerate()
+        {
+            sqlx::query(
+                "INSERT INTO provider_models (\
+                    provider_id, model, enabled, sort_order, tasks, traits, params, source, created_at, updated_at\
+                 ) VALUES (?, ?, 1, ?, '[]', '[]', '{}', 'inferred', 1, 1)",
+            )
+            .bind(provider_id)
+            .bind(model)
+            .bind(index as i64)
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
     }
 
     // Seed canonical conversation business IDs into the real DB so logical Cron relations
@@ -1740,11 +1755,20 @@ async fn cj1_private_job_events_are_scoped_to_each_conversation_owner() {
     }
     sqlx::query(
         "INSERT INTO providers (\
-            provider_id, platform, name, base_url, api_key_encrypted, models, enabled, \
+            provider_id, platform, name, base_url, api_key_encrypted, enabled, \
             capabilities, created_at, updated_at\
          ) VALUES ('0190f5fe-7c00-7a00-8000-000000000008', 'openai', 'multiuser', \
                    'https://example.invalid', 'encrypted', \
-                   '[\"model-multiuser\"]', 1, '[]', 1, 1)",
+                   1, '[]', 1, 1)",
+    )
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO provider_models (\
+            provider_id, model, enabled, sort_order, tasks, traits, params, source, created_at, updated_at\
+         ) VALUES ('0190f5fe-7c00-7a00-8000-000000000008', 'model-multiuser', 1, 0, \
+                   '[]', '[]', '{}', 'inferred', 1, 1)",
     )
         .execute(&pool)
         .await

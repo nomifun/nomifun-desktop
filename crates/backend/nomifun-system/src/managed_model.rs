@@ -20,8 +20,8 @@ use nomifun_api_types::{
 };
 use nomifun_common::{AppError, ProviderId, encrypt_string, now_ms};
 use nomifun_db::{
-    CreateProviderParams, IClientPreferenceRepository, IProviderRepository,
-    UpdateProviderParams, models::Provider,
+    CreateProviderParams, IClientPreferenceRepository, IProviderModelRepository,
+    IProviderRepository, ProviderModelRow, UpdateProviderParams, models::Provider,
 };
 use reqwest::Url;
 use serde::Deserialize;
@@ -224,13 +224,29 @@ impl ManagedModelService {
         Ok(())
     }
 
-    /// Hydrate user-controlled flags from an existing managed provider row.
-    pub async fn hydrate_from_provider(&self, row: Option<&Provider>) {
+    /// Hydrate user-controlled flags from an existing managed provider row
+    /// plus its authoritative `provider_models` rows (the catalog + per-model
+    /// enabled flags live only there since migration 016). A toggle for a
+    /// model that currently has no row (e.g. it vanished from the live
+    /// catalog before a restart) is not representable and therefore not
+    /// restored; within a process lifetime the in-memory state still
+    /// preserves such toggles across refreshes.
+    pub async fn hydrate_from_provider(
+        &self,
+        row: Option<&Provider>,
+        model_rows: &[ProviderModelRow],
+    ) {
         let Some(row) = row else {
             return;
         };
-        let persisted_catalog = parse_persisted_catalog(row);
-        let persisted_enabled = parse_model_enabled(row.model_enabled.as_deref());
+        let persisted_catalog: Vec<CatalogModel> = model_rows
+            .iter()
+            .map(|model_row| CatalogModel::opencode(model_row.model.clone(), model_row.model.clone()))
+            .collect();
+        let persisted_enabled: HashMap<String, bool> = model_rows
+            .iter()
+            .map(|model_row| (model_row.model.clone(), model_row.enabled))
+            .collect();
 
         let mut state = self.free.write().await;
         state.enabled = row.enabled;
@@ -1112,19 +1128,28 @@ async fn run_refresh_loop<J>(
 
 /// Start the loopback supply and create/update its stable provider projection.
 ///
-/// Existing `enabled` and `model_enabled` values are hydrated first and never
-/// overwritten by startup defaults.
+/// Existing `enabled` and per-model enabled flags are hydrated first (from the
+/// provider row + its `provider_models` rows) and never overwritten by startup
+/// defaults.
 pub async fn start_and_provision_free_model(
     provider_repo: Arc<dyn IProviderRepository>,
+    provider_model_repo: Arc<dyn IProviderModelRepository>,
     encryption_key: [u8; 32],
 ) -> Result<(Arc<ManagedModelService>, ManagedModelServer), AppError> {
-    start_and_provision_free_model_with_preferences(provider_repo, None, encryption_key).await
+    start_and_provision_free_model_with_preferences(
+        provider_repo,
+        provider_model_repo,
+        None,
+        encryption_key,
+    )
+    .await
 }
 
 /// Provision the managed free-model supply and optionally persist refresh
 /// diagnostics in the application's generic preference store.
 pub async fn start_and_provision_free_model_with_preferences(
     provider_repo: Arc<dyn IProviderRepository>,
+    provider_model_repo: Arc<dyn IProviderModelRepository>,
     preference_repo: Option<Arc<dyn IClientPreferenceRepository>>,
     encryption_key: [u8; 32],
 ) -> Result<(Arc<ManagedModelService>, ManagedModelServer), AppError> {
@@ -1174,7 +1199,13 @@ pub async fn start_and_provision_free_model_with_preferences(
             managed_http_client(),
         ),
     };
-    service.hydrate_from_provider(existing.as_ref()).await;
+    let existing_model_rows = match existing.as_ref() {
+        Some(row) => provider_model_repo.list_for_provider(&row.provider_id).await?,
+        None => Vec::new(),
+    };
+    service
+        .hydrate_from_provider(existing.as_ref(), &existing_model_rows)
+        .await;
     if let Err(error) = service.hydrate_refresh_metadata().await {
         // Refresh timestamps/errors are diagnostics only. A corrupt or
         // temporarily unavailable preference store must not prevent the
@@ -1766,19 +1797,6 @@ fn seed_catalog() -> Vec<CatalogModel> {
         .collect()
 }
 
-fn parse_persisted_catalog(row: &Provider) -> Vec<CatalogModel> {
-    serde_json::from_str::<Vec<String>>(&row.models)
-        .unwrap_or_default()
-        .into_iter()
-        .map(|id| CatalogModel::opencode(id.clone(), id))
-        .collect()
-}
-
-fn parse_model_enabled(raw: Option<&str>) -> HashMap<String, bool> {
-    raw.and_then(|value| serde_json::from_str(value).ok())
-        .unwrap_or_default()
-}
-
 fn status_from_free_state(state: &FreeState, provider_id: &str) -> ManagedModelServiceStatus {
     let models = state
         .catalog
@@ -1958,12 +1976,16 @@ mod tests {
     use nomifun_common::decrypt_string;
     use nomifun_db::{
         IClientPreferenceRepository, SqliteClientPreferenceRepository,
-        SqliteProviderRepository, init_database_memory,
+        SqliteProviderModelRepository, SqliteProviderRepository, init_database_memory,
     };
     use wiremock::matchers::method;
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     const TEST_KEY: [u8; 32] = [0x42; 32];
+
+    fn model_repo(db: &nomifun_db::Database) -> Arc<dyn IProviderModelRepository> {
+        Arc::new(SqliteProviderModelRepository::new(db.pool().clone()))
+    }
 
     fn normalize_managed_sse(input: &str, chunk_size: usize) -> String {
         let mut normalizer = ManagedFreeSseNormalizer::default();
@@ -2187,7 +2209,7 @@ mod tests {
         let repo: Arc<dyn IProviderRepository> =
             Arc::new(SqliteProviderRepository::new(db.pool().clone()));
         let (service, mut server) =
-            start_and_provision_free_model(repo.clone(), TEST_KEY).await.unwrap();
+            start_and_provision_free_model(repo.clone(), model_repo(&db), TEST_KEY).await.unwrap();
 
         let provider_id = service.free_status().await.provider_id.unwrap();
         let row = repo.find_by_id(&provider_id).await.unwrap().unwrap();
@@ -2209,7 +2231,7 @@ mod tests {
         let repo: Arc<dyn IProviderRepository> =
             Arc::new(SqliteProviderRepository::new(db.pool().clone()));
         let (first_service, mut first_server) =
-            start_and_provision_free_model(repo.clone(), TEST_KEY).await.unwrap();
+            start_and_provision_free_model(repo.clone(), model_repo(&db), TEST_KEY).await.unwrap();
         let provider_id = first_service.free_status().await.provider_id.unwrap();
         first_server.stop();
         repo.update(
@@ -2224,7 +2246,7 @@ mod tests {
         .unwrap();
 
         let (service, mut second_server) =
-            start_and_provision_free_model(repo.clone(), TEST_KEY).await.unwrap();
+            start_and_provision_free_model(repo.clone(), model_repo(&db), TEST_KEY).await.unwrap();
         let status = service.free_status().await;
         assert!(!status.enabled);
         assert_eq!(
@@ -2241,31 +2263,50 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn reprovision_preserves_toggle_for_temporarily_missing_model() {
+    async fn reprovision_restores_row_backed_toggles_and_drops_rowless_ones() {
         let db = init_database_memory().await.unwrap();
         let repo: Arc<dyn IProviderRepository> =
             Arc::new(SqliteProviderRepository::new(db.pool().clone()));
         let (first_service, mut first_server) =
-            start_and_provision_free_model(repo.clone(), TEST_KEY).await.unwrap();
+            start_and_provision_free_model(repo.clone(), model_repo(&db), TEST_KEY).await.unwrap();
         let provider_id = first_service.free_status().await.provider_id.unwrap();
         first_server.stop();
+        // Shrink the persisted catalog to one model and disable it. The map
+        // entry for a model with no catalog row is not representable since
+        // migration 016 (rows are the only per-model store), so it cannot
+        // survive a restart; the row-backed toggle must.
         repo.update(
             &provider_id,
             UpdateProviderParams {
                 models: Some(r#"["big-pickle"]"#),
-                model_enabled: Some(Some(r#"{"temporarily-missing-free":false}"#)),
+                model_enabled: Some(Some(
+                    r#"{"big-pickle":false,"temporarily-missing-free":false}"#,
+                )),
                 ..Default::default()
             },
         )
         .await
         .unwrap();
 
-        let (_service, mut second_server) =
-            start_and_provision_free_model(repo.clone(), TEST_KEY).await.unwrap();
-        let row = repo.find_by_id(&provider_id).await.unwrap().unwrap();
-        let flags: HashMap<String, bool> =
-            serde_json::from_str(row.model_enabled.as_deref().unwrap()).unwrap();
-        assert_eq!(flags.get("temporarily-missing-free"), Some(&false));
+        let (service, mut second_server) =
+            start_and_provision_free_model(repo.clone(), model_repo(&db), TEST_KEY).await.unwrap();
+        let status = service.free_status().await;
+        assert_eq!(
+            status
+                .models
+                .iter()
+                .find(|model| model.id == "big-pickle")
+                .map(|model| model.enabled),
+            Some(false),
+            "the row-backed toggle survives reprovision"
+        );
+        assert!(
+            !status
+                .models
+                .iter()
+                .any(|model| model.id == "temporarily-missing-free"),
+            "a model without a catalog row is not resurrected"
+        );
         second_server.stop();
     }
 
@@ -2296,7 +2337,7 @@ mod tests {
         .await
         .unwrap();
 
-        let error = match start_and_provision_free_model(repo.clone(), TEST_KEY).await {
+        let error = match start_and_provision_free_model(repo.clone(), model_repo(&db), TEST_KEY).await {
             Ok(_) => panic!("noncanonical managed platform alias must be rejected"),
             Err(error) => error,
         };
@@ -2336,7 +2377,11 @@ mod tests {
 
         let service = ManagedModelService::new(repo.clone());
         let row = repo.find_by_id(&provider_id).await.unwrap();
-        service.hydrate_from_provider(row.as_ref()).await;
+        let rows = model_repo(&db)
+            .list_for_provider(&provider_id)
+            .await
+            .unwrap();
+        service.hydrate_from_provider(row.as_ref(), &rows).await;
         let status = service.free_status().await;
         assert_eq!(status.models[0].name, "big-pickle");
     }

@@ -406,7 +406,7 @@ impl ChannelManager {
         } else {
             prior_companion
         };
-        // Mutual exclusion (application layer; migration 019's guard triggers
+        // Mutual exclusion (application layer; migration 020's guard triggers
         // are the backstop): a customer-service bot never carries a companion.
         if owner_domain == "customer_service" && companion_id.is_some() {
             return Err(ChannelError::InvalidConfig(

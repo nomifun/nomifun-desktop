@@ -706,10 +706,10 @@ mod tests {
         let db = init_database_memory().await.unwrap();
         sqlx::query(
             "INSERT INTO providers (\
-                provider_id, platform, name, base_url, api_key_encrypted, models, enabled, \
+                provider_id, platform, name, base_url, api_key_encrypted, enabled, \
                 capabilities, created_at, updated_at\
              ) VALUES (?, 'openai', 'preset fixture', 'https://example.invalid', \
-                       'encrypted', '[]', 1, '[]', 1, 1)",
+                       'encrypted', 1, '[]', 1, 1)",
         )
         .bind(FIXTURE_PROVIDER_ID)
         .execute(db.pool())

@@ -3,9 +3,11 @@ use serde::{Deserialize, Serialize};
 
 /// Row mapping for the `providers` table.
 ///
-/// JSON fields (models, capabilities, model_context_limits, model_protocols,
-/// model_descriptions, model_enabled, model_health, bedrock_config) are stored
-/// as TEXT in SQLite and deserialized by the service layer.
+/// JSON fields (capabilities, bedrock_config) are stored as TEXT in SQLite
+/// and deserialized by the service layer. The per-model surface (membership,
+/// enabled, protocol, context limit, description, health) lives exclusively
+/// on `provider_models` rows since migration 016 dropped the legacy `models`
+/// array and the five per-model JSON map columns.
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct Provider {
     pub id: i64,
@@ -14,21 +16,9 @@ pub struct Provider {
     pub name: String,
     pub base_url: String,
     pub api_key_encrypted: String,
-    /// JSON array of model ID strings.
-    pub models: String,
     pub enabled: bool,
     /// JSON array of capability objects.
     pub capabilities: String,
-    /// JSON object: model_id -> context window token count.
-    pub model_context_limits: Option<String>,
-    /// JSON object: model_id -> protocol string.
-    pub model_protocols: Option<String>,
-    /// JSON object: model_id -> description string (user-authored).
-    pub model_descriptions: Option<String>,
-    /// JSON object: model_id -> bool.
-    pub model_enabled: Option<String>,
-    /// JSON object: model_id -> health status object.
-    pub model_health: Option<String>,
     /// JSON object: Bedrock-specific configuration.
     pub bedrock_config: Option<String>,
     /// When true, base_url is treated as a complete endpoint URL.

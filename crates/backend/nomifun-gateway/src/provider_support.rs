@@ -18,21 +18,19 @@ pub(crate) struct ProviderSummary {
     pub name: String,
     pub platform: String,
     pub enabled: bool,
-    /// Effective model ids: the `models` JSON array filtered by the
-    /// per-model `model_enabled` map (absent entry = enabled).
+    /// Effective model ids: the provider's `provider_models` rows filtered by
+    /// their per-row `enabled` flag, in `sort_order` order.
     pub models: Vec<String>,
 }
 
-pub(crate) fn summarize_provider(row: &nomifun_db::models::Provider) -> ProviderSummary {
-    let all_models: Vec<String> = serde_json::from_str(&row.models).unwrap_or_default();
-    let enabled_map: serde_json::Map<String, Value> = row
-        .model_enabled
-        .as_deref()
-        .and_then(|s| serde_json::from_str(s).ok())
-        .unwrap_or_default();
-    let models = all_models
-        .into_iter()
-        .filter(|m| enabled_map.get(m).and_then(Value::as_bool).unwrap_or(true))
+pub(crate) fn summarize_provider(
+    row: &nomifun_db::models::Provider,
+    model_rows: &[nomifun_db::ProviderModelRow],
+) -> ProviderSummary {
+    let models = model_rows
+        .iter()
+        .filter(|model_row| model_row.provider_id == row.provider_id && model_row.enabled)
+        .map(|model_row| model_row.model.clone())
         .collect();
     ProviderSummary {
         provider_id: row.provider_id.clone(),
@@ -49,7 +47,17 @@ pub(crate) async fn load_provider_summaries(deps: &GatewayDeps) -> Result<Vec<Pr
         .list()
         .await
         .map_err(|e| json!({"error": format!("failed to list providers: {e}")}))?;
-    Ok(rows.iter().map(summarize_provider).collect())
+    // Ordered by (provider_id, sort_order, model), so each provider's slice
+    // keeps its catalog order when filtered in summarize_provider.
+    let model_rows = deps
+        .provider_model_repo
+        .list()
+        .await
+        .map_err(|e| json!({"error": format!("failed to list provider models: {e}")}))?;
+    Ok(rows
+        .iter()
+        .map(|row| summarize_provider(row, &model_rows))
+        .collect())
 }
 
 /// `nomi_list_providers` lives in `caps_provider`; this module retains only the
@@ -311,29 +319,48 @@ mod tests {
     }
 
     #[test]
-    fn summarize_filters_per_model_enabled_map() {
+    fn summarize_filters_per_row_enabled_flag() {
+        let provider_id = nomifun_common::ProviderId::new().into_string();
         let row = nomifun_db::models::Provider {
             id: 1,
-            provider_id: nomifun_common::ProviderId::new().into_string(),
+            provider_id: provider_id.clone(),
             platform: "openai".into(),
             name: "P1".into(),
             base_url: String::new(),
             api_key_encrypted: String::new(),
-            models: r#"["a","b","c"]"#.into(),
             enabled: true,
             capabilities: "[]".into(),
-            model_context_limits: None,
-            model_protocols: None,
-            model_descriptions: None,
-            model_enabled: Some(r#"{"b": false}"#.into()),
-            model_health: None,
             bedrock_config: None,
             is_full_url: false,
             sort_order: 0,
             created_at: 0,
             updated_at: 0,
         };
-        let s = summarize_provider(&row);
+        let model_row = |model: &str, enabled: bool, sort_order: i64| nomifun_db::ProviderModelRow {
+            id: 0,
+            provider_id: provider_id.clone(),
+            model: model.into(),
+            enabled,
+            sort_order,
+            tasks: "[]".into(),
+            traits: "[]".into(),
+            protocol: None,
+            connection_role: None,
+            params: "{}".into(),
+            context_limit: None,
+            description: None,
+            source: "inferred".into(),
+            health: None,
+            health_checked_at: None,
+            created_at: 0,
+            updated_at: 0,
+        };
+        let rows = vec![
+            model_row("a", true, 0),
+            model_row("b", false, 1),
+            model_row("c", true, 2),
+        ];
+        let s = summarize_provider(&row, &rows);
         assert_eq!(s.models, vec!["a".to_owned(), "c".to_owned()]);
     }
 }

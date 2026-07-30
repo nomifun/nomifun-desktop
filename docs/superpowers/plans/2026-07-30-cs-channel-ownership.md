@@ -6,7 +6,7 @@
 
 **Architecture:** 渠道运行时（14 个 IM 插件、QR 配对、watchdog、消息循环）保持单一基建不动；`channel_plugins` 加 `owner_domain` 列（'companion'|'customer_service'）做所有权分域，DB 触发器 + 应用层双重互斥；客服详情页内建 bot 创建/管理（复用各平台配置表单组件），伙伴侧 UI 过滤只见伙伴域。
 
-**Tech Stack:** Rust（nomifun-db 迁移 019、nomifun-channel、nomifun-customer-service）、React/Arco。
+**Tech Stack:** Rust（nomifun-db 迁移 020（与远程 016 合并重排前为 019）、nomifun-channel、nomifun-customer-service）、React/Arco。
 
 ## Global Constraints
 
@@ -40,7 +40,7 @@
 
 ---
 
-### Task 1: 迁移 019 + 行模型/契约（TDD）
+### Task 1: 迁移 020（原 019） + 行模型/契约（TDD）
 
 - [ ] Step 1：先读 `017_customer_service.sql` 里 channel_plugins 的重建段与 `id_schema_contract.rs` 中该表契约的表达方式；写 019：
 

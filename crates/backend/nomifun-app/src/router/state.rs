@@ -530,7 +530,10 @@ pub fn build_preset_state(services: &AppServices, extension_registry: ExtensionR
     let state_repo: Arc<dyn IPresetStateRepository> = Arc::new(SqlitePresetStateRepository::new(pool.clone()));
     let tag_repo: Arc<dyn IPresetTagRepository> = Arc::new(SqlitePresetTagRepository::new(pool.clone()));
     let agent_repo: Arc<dyn IAgentMetadataRepository> = Arc::new(SqliteAgentMetadataRepository::new(pool.clone()));
-    let provider_repo: Arc<dyn IProviderRepository> = Arc::new(SqliteProviderRepository::new(pool));
+    let provider_repo: Arc<dyn IProviderRepository> =
+        Arc::new(SqliteProviderRepository::new(pool.clone()));
+    let provider_model_repo: Arc<dyn nomifun_db::IProviderModelRepository> =
+        Arc::new(nomifun_db::SqliteProviderModelRepository::new(pool));
     let builtin = Arc::new(BuiltinPresetRegistry::load());
     let service = Arc::new(PresetService::new(
         repo,
@@ -538,6 +541,7 @@ pub fn build_preset_state(services: &AppServices, extension_registry: ExtensionR
         tag_repo,
         agent_repo,
         provider_repo,
+        provider_model_repo,
         builtin,
         extension_registry,
         services.data_dir.clone(),
@@ -635,6 +639,7 @@ pub fn build_conversation_state(
     // nomi turn can switch to the next queued model (plan D5).
     conversation_service.with_failover_deps(
         Arc::new(SqliteProviderRepository::new(services.database.pool().clone())),
+        Arc::new(nomifun_db::SqliteProviderModelRepository::new(services.database.pool().clone())),
         Arc::new(SqliteClientPreferenceRepository::new(services.database.pool().clone())),
     );
     // Drop the conversation's knowledge binding when the conversation goes away.
@@ -981,6 +986,7 @@ pub async fn build_channel_state(
     // Channel turns run the same Nomi send loop as other conversations.
     conversation_svc.with_failover_deps(
         Arc::new(SqliteProviderRepository::new(services.database.pool().clone())),
+        Arc::new(nomifun_db::SqliteProviderModelRepository::new(services.database.pool().clone())),
         Arc::new(SqliteClientPreferenceRepository::new(services.database.pool().clone())),
     );
     if let Some(hook) = services.runtime_registry_delete_hook.clone() {
@@ -1150,6 +1156,7 @@ pub fn build_requirement_state(services: &AppServices) -> (RequirementRouterStat
     // supervision (Task 3) reuses `perform_model_failover` —wire the deps here too.
     conv_service.with_failover_deps(
         Arc::new(SqliteProviderRepository::new(pool.clone())),
+        Arc::new(nomifun_db::SqliteProviderModelRepository::new(pool.clone())),
         Arc::new(SqliteClientPreferenceRepository::new(pool.clone())),
     );
 
@@ -1265,10 +1272,14 @@ pub fn build_agent_execution_engine(
     let provider_repository: Arc<dyn IProviderRepository> = Arc::new(
         SqliteProviderRepository::new(services.database.pool().clone()),
     );
+    let provider_model_repository: Arc<dyn nomifun_db::IProviderModelRepository> = Arc::new(
+        nomifun_db::SqliteProviderModelRepository::new(services.database.pool().clone()),
+    );
     let engine = Arc::new(AgentExecutionEngine::new(AgentExecutionEngineConfig {
         repository,
         template_repository,
         provider_repository,
+        provider_model_repository,
         preset_service,
         realtime: services.ws_manager.clone(),
         conversation,
@@ -1320,6 +1331,7 @@ pub fn build_idmm_state(
     // data dir as the (unused-for-supervision) workspace root.
     let completer: Arc<dyn nomifun_idmm::Completer> = Arc::new(nomifun_idmm::LiveCompleter {
         provider_repo,
+        provider_model_repo: services.provider_model_repo.clone(),
         encryption_key,
         workspace: services.data_dir.clone(),
     });
@@ -1425,6 +1437,7 @@ pub fn build_companion_state(
     // Phase 3: companion turns run the same nomi send loop, so wire failover too.
     conv_service.with_failover_deps(
         Arc::new(SqliteProviderRepository::new(services.database.pool().clone())),
+        Arc::new(nomifun_db::SqliteProviderModelRepository::new(services.database.pool().clone())),
         Arc::new(SqliteClientPreferenceRepository::new(services.database.pool().clone())),
     );
     if let Some(hook) = services.runtime_registry_delete_hook.clone() {
@@ -1809,6 +1822,7 @@ pub fn build_cron_state(
     // Phase 3: cron-spawned nomi conversations run the send loop too.
     conv_service.with_failover_deps(
         Arc::new(SqliteProviderRepository::new(services.database.pool().clone())),
+        Arc::new(nomifun_db::SqliteProviderModelRepository::new(services.database.pool().clone())),
         Arc::new(SqliteClientPreferenceRepository::new(services.database.pool().clone())),
     );
 

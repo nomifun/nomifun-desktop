@@ -268,11 +268,20 @@ async fn au3_authenticated_users_cannot_observe_or_mutate_each_others_cron_jobs(
     // service strips every host-capability field before persistence.
     sqlx::query(
         "INSERT INTO providers (\
-            provider_id, platform, name, base_url, api_key_encrypted, models, enabled, \
+            provider_id, platform, name, base_url, api_key_encrypted, enabled, \
             capabilities, created_at, updated_at\
          ) VALUES (?, 'openai', 'secondary-safe', \
                    'https://example.invalid', 'encrypted', \
-                   '[\"model-secondary\"]', 1, '[]', 1, 1)",
+                   1, '[]', 1, 1)",
+    )
+    .bind(SECONDARY_PROVIDER_ID)
+    .execute(services.database.pool())
+    .await
+    .unwrap();
+    nomifun_db::sqlx::query(
+        "INSERT INTO provider_models \
+         (provider_id, model, enabled, sort_order, tasks, traits, params, source, created_at, updated_at) \
+         VALUES (?, 'model-secondary', 1, 0, '[]', '[]', '{}', 'inferred', 1, 1)",
     )
     .bind(SECONDARY_PROVIDER_ID)
     .execute(services.database.pool())

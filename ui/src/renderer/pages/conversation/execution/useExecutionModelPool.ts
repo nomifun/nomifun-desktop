@@ -1,5 +1,7 @@
 import type { TExecutionModelPool, TExecutionModelRef } from '@/common/types/agentExecution/agentExecutionTypes';
+import type { IProvider } from '@/common/config/storage';
 import { useModelProviderList } from '@/renderer/hooks/agent/useModelProviderList';
+import { useModelsForTask } from '@/renderer/hooks/agent/useModelsForTask';
 import { useCallback, useMemo } from 'react';
 import { parseProviderId } from '@/common/types/ids';
 
@@ -24,8 +26,23 @@ export type ExecutionModelPoolSource = {
 };
 
 export function useExecutionModelPool() {
-  const { providers, configuredProviders, isLoading, getAvailableModels, formatModelLabel } = useModelProviderList();
+  const { configuredProviders, isLoading: isProvidersLoading, formatModelLabel } = useModelProviderList();
+  // Selectable execution models come from the unified chat catalog resolve —
+  // the same source as every other chat-family selector (heuristics gone).
+  const { groups, isLoading: isCatalogLoading } = useModelsForTask('chat');
 
+  const providers = useMemo(() => groups.map((group) => group.provider), [groups]);
+  const modelsByProvider = useMemo(
+    () => new Map(groups.map((group) => [group.provider.id, group.models])),
+    [groups]
+  );
+  const getAvailableModels = useCallback(
+    (provider: IProvider): string[] => modelsByProvider.get(provider.id) ?? [],
+    [modelsByProvider]
+  );
+
+  // The full configured universe (raw catalog membership, not task-filtered):
+  // used to distinguish "temporarily unavailable" from "removed" refs.
   const configuredPairs = useMemo<TExecutionModelRef[]>(
     () =>
       configuredProviders.flatMap((provider) =>
@@ -39,13 +56,13 @@ export function useExecutionModelPool() {
 
   const allPairs = useMemo<TExecutionModelRef[]>(
     () =>
-      providers.flatMap((provider) =>
-        getAvailableModels(provider).map((model) => ({
-          provider_id: provider.id,
+      groups.flatMap((group) =>
+        group.models.map((model) => ({
+          provider_id: group.provider.id,
           model,
         })),
       ),
-    [providers, getAvailableModels],
+    [groups],
   );
 
   const buildModelPool = useCallback((source: ExecutionModelPoolSource): TExecutionModelPool | null => {
@@ -61,7 +78,9 @@ export function useExecutionModelPool() {
     providers,
     getAvailableModels,
     formatModelLabel,
-    isLoading,
+    // Loading covers BOTH sources: consumers gate destructive reconciliation on
+    // this flag, so a failed/unfinished catalog resolve must read as loading.
+    isLoading: isProvidersLoading || isCatalogLoading,
     configuredPairs,
     allPairs,
     hasModels: allPairs.length > 0,

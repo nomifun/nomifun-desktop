@@ -4,14 +4,15 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { Button, InputNumber, Select, Switch } from '@arco-design/web-react';
+import { Button, InputNumber, Switch } from '@arco-design/web-react';
 import { Close, Down, Plus, Up } from '@icon-park/react';
 import { ipcBridge } from '@/common';
 import type { IModelFailoverCandidate, IModelFailoverConfig } from '@/common/adapter/ipcBridge';
 import { useArcoMessage } from '@/renderer/utils/ui/useArcoMessage';
 import { useProvidersQuery } from '@renderer/hooks/agent/useModelProviderList';
+import TaskModelSelect, { type TaskModelSelection } from '@/renderer/components/agent/TaskModelSelect';
 import { buildModelFailoverConfigForSave } from './modelFailoverQueue';
 import type { ProviderId } from '@/common/types/ids';
 import { useModelSelectorProviderLabel } from '@/renderer/hooks/agent/useModelSelectorProviderLabel';
@@ -38,9 +39,10 @@ const ModelFailoverContent: React.FC = () => {
   const [config, setConfig] = useState<IModelFailoverConfig>(DEFAULT_CONFIG);
   const [saving, setSaving] = useState(false);
 
-  // Pending "add candidate" row state.
-  const [draftProvider, setDraftProvider] = useState<ProviderId | undefined>(undefined);
-  const [draftModel, setDraftModel] = useState<string | undefined>(undefined);
+  // Pending "add candidate" selection — one unified chat-capable model pick
+  // (task='chat' catalog resolve; the queue previously listed ALL models of a
+  // provider unfiltered, this is its first-time task filtering).
+  const [draft, setDraft] = useState<TaskModelSelection | null>(null);
 
   useEffect(() => {
     void ipcBridge.agentModelFailover.getSettings
@@ -48,16 +50,6 @@ const ModelFailoverContent: React.FC = () => {
       .then((c) => setConfig({ ...DEFAULT_CONFIG, ...c, queue: c.queue ?? [] }))
       .catch(() => {});
   }, []);
-
-  const providerOptions = useMemo(
-    () => (providers ?? []).map((p) => ({ label: providerLabel(p), value: p.id })),
-    [providers, providerLabel]
-  );
-
-  const draftModelOptions = useMemo(() => {
-    const p = (providers ?? []).find((x) => x.id === draftProvider);
-    return (p?.models ?? []).map((m) => ({ label: m, value: m }));
-  }, [providers, draftProvider]);
 
   const providerName = (id: ProviderId) => {
     const provider = (providers ?? []).find((item) => item.id === id);
@@ -80,25 +72,25 @@ const ModelFailoverContent: React.FC = () => {
   };
 
   const addCandidate = () => {
-    if (!draftProvider || !draftModel) return;
-    const next: IModelFailoverCandidate = { provider_id: draftProvider, model: draftModel };
+    if (!draft) return;
+    const next: IModelFailoverCandidate = { provider_id: draft.providerId, model: draft.model };
     const dup = config.queue.some((q) => q.provider_id === next.provider_id && q.model === next.model);
     if (dup) {
       message.warning(t('modelFailover.duplicate'));
       return;
     }
     setConfig((c) => ({ ...c, queue: [...c.queue, next] }));
-    setDraftModel(undefined);
+    setDraft(null);
   };
 
   const save = async () => {
     setSaving(true);
     try {
-      const saveResult = buildModelFailoverConfigForSave(config, draftProvider, draftModel);
+      const saveResult = buildModelFailoverConfigForSave(config, draft?.providerId, draft?.model);
       const saved = await ipcBridge.agentModelFailover.updateSettings.invoke(saveResult.config);
       setConfig({ ...DEFAULT_CONFIG, ...saved, queue: saved.queue ?? [] });
       if (saveResult.hasCompleteDraft) {
-        setDraftModel(undefined);
+        setDraft(null);
       }
       message.success(t('modelFailover.saved'));
     } catch (e) {
@@ -170,35 +162,21 @@ const ModelFailoverContent: React.FC = () => {
           </div>
         )}
 
-        {/* Add a candidate. */}
-        <div className='flex items-end gap-8px'>
+        {/* Add a candidate — unified task-scoped picker (chat models only). */}
+        <div className='flex items-center gap-8px'>
           <div className='min-w-0 flex-1'>
-            <Select
-              placeholder={t('modelFailover.selectProvider')}
-              value={draftProvider}
-              onChange={(v: ProviderId | undefined) => {
-                setDraftProvider(v);
-                setDraftModel(undefined);
-              }}
-              options={providerOptions}
-              allowClear
-            />
-          </div>
-          <div className='min-w-0 flex-1'>
-            <Select
+            <TaskModelSelect
+              task='chat'
+              value={draft}
+              onSelect={setDraft}
               placeholder={t('modelFailover.selectModel')}
-              value={draftModel}
-              onChange={(v: string) => setDraftModel(v)}
-              options={draftModelOptions}
-              disabled={!draftProvider}
-              allowClear
             />
           </div>
           <div
             role='button'
             aria-label={t('modelFailover.add')}
             className={`flex h-32px shrink-0 items-center gap-4px rounded-6px px-12px text-13px ${
-              draftProvider && draftModel
+              draft
                 ? 'cursor-pointer bg-[rgba(var(--primary-6),0.12)] text-primary-6 hover:bg-[rgba(var(--primary-6),0.2)]'
                 : 'cursor-not-allowed bg-[rgba(var(--primary-6),0.06)] text-t-disabled'
             }`}

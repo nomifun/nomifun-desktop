@@ -9,13 +9,13 @@ import { compositeKey } from '@/common/utils/compositeKey';
 import { iconColors } from '@/renderer/styles/colors';
 import { getModelDisplayLabel } from '@/renderer/utils/model/agentLogo';
 import type { AcpModelInfo } from '../types';
-import { getAvailableModels } from '../utils/modelUtils';
 import { Button, Dropdown, Menu, Tooltip } from '@arco-design/web-react';
 import { Brain, Down, Plus } from '@icon-park/react';
 import React from 'react';
 import { useTranslation } from 'react-i18next';
 import { useNavigate } from 'react-router-dom';
 import { useProvidersQuery } from '@/renderer/hooks/agent/useModelProviderList';
+import { useModelsForTask } from '@/renderer/hooks/agent/useModelsForTask';
 import { useModelSelectorProviderLabel } from '@/renderer/hooks/agent/useModelSelectorProviderLabel';
 
 type GuidModelSelectorProps = {
@@ -48,10 +48,15 @@ const GuidModelSelector: React.FC<GuidModelSelectorProps> = ({
   // 获取模型配置数据（包含健康状态）
   const { data: modelConfig } = useProvidersQuery();
 
-  // 过滤掉被禁用的 provider
-  const enabledModelList = React.useMemo(() => {
-    return modelList.filter((p) => p.enabled !== false);
-  }, [modelList]);
+  // 统一 chat catalog（后端 resolve，无名称启发式）。modelList 仅约束「允许哪些
+  // 供应商」（如 nomi 模式排除 Google Auth）；模型清单一律来自 catalog 分组。
+  const { groups: chatGroups } = useModelsForTask('chat');
+
+  // 过滤掉被禁用的 provider，且仅保留调用方允许的供应商
+  const enabledGroups = React.useMemo(() => {
+    const allowedIds = new Set(modelList.filter((p) => p.enabled !== false).map((p) => p.id));
+    return chatGroups.filter((group) => allowedIds.has(group.provider.id));
+  }, [chatGroups, modelList]);
 
   const geminiSelectedLabel = React.useMemo(() => {
     if (!current_model?.use_model) return '';
@@ -91,7 +96,7 @@ const GuidModelSelector: React.FC<GuidModelSelectorProps> = ({
   }, [acpSelectedLabel, currentAcpCachedModelInfo?.current_model_id, defaultModelLabel, selectedAcpModel]);
 
   if (isGeminiMode) {
-    const hasModels = !!enabledModelList && enabledModelList.length > 0;
+    const hasModels = enabledGroups.length > 0;
 
     // Per-model health dot color.
     const healthDotColor = (providerId: string, modelName: string): string | null => {
@@ -124,12 +129,10 @@ const GuidModelSelector: React.FC<GuidModelSelectorProps> = ({
                   </Menu.Item>,
                 ]
               : [
-                  ...enabledModelList.map((provider) => {
-                    const available_models = getAvailableModels(provider);
-                    if (available_models.length === 0) return null;
+                  ...enabledGroups.map(({ provider, models }) => {
                     return (
                       <Menu.ItemGroup title={providerLabel(provider)} key={provider.id}>
-                        {available_models.map((modelName) => {
+                        {models.map((modelName) => {
                           const dot = healthDotColor(provider.id, modelName);
                           return (
                             <Menu.Item

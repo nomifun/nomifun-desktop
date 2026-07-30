@@ -314,10 +314,19 @@ mod tests {
         let installation_owner = nomifun_db::installation_owner_id(database.pool()).await.unwrap();
         sqlx::query(
             "INSERT INTO providers (\
-                provider_id, platform, name, base_url, api_key_encrypted, models, enabled, \
+                provider_id, platform, name, base_url, api_key_encrypted, enabled, \
                 capabilities, created_at, updated_at\
              ) VALUES (?1, 'openai', 'provider', 'https://example.invalid', \
-                       'encrypted', '[\"model\"]', 1, '[]', 1, 1)",
+                       'encrypted', 1, '[]', 1, 1)",
+        )
+        .bind(PROVIDER_ID)
+        .execute(database.pool())
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO provider_models (\
+                provider_id, model, enabled, sort_order, tasks, traits, params, source, created_at, updated_at\
+             ) VALUES (?1, 'model', 1, 0, '[]', '[]', '{}', 'inferred', 1, 1)",
         )
         .bind(PROVIDER_ID)
         .execute(database.pool())

@@ -22,7 +22,7 @@ use nomi_types::llm::{LlmEvent, LlmRequest};
 use nomi_types::message::{ContentBlock, Message, Role, StopReason};
 use nomi_types::tool::ToolDef;
 use nomifun_common::AppError;
-use nomifun_db::IProviderRepository;
+use nomifun_db::{IProviderModelRepository, IProviderRepository};
 
 use crate::factory::provider_config::resolve_provider_config;
 
@@ -58,6 +58,9 @@ pub struct OneShotTurnRequest {
 /// learner).
 pub struct OneShotDeps {
     pub provider_repo: Arc<dyn IProviderRepository>,
+    /// Per-model rows (base URL/API-key overrides and enablement live on
+    /// `provider_models` since migration 016).
+    pub provider_model_repo: Arc<dyn IProviderModelRepository>,
     pub encryption_key: [u8; 32],
     /// Directory handed to `Config::resolve` as project dir. The one-shot
     /// engine registers no filesystem tools, so nothing is read or written
@@ -75,6 +78,7 @@ pub struct OneShotDeps {
 pub async fn run_one_shot_turn(services: &OneShotDeps, req: OneShotTurnRequest) -> Result<String, AppError> {
     let config = resolve_provider_config(
         &services.provider_repo,
+        &services.provider_model_repo,
         &services.encryption_key,
         &req.provider.provider_id,
         &req.provider.model,

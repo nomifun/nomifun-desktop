@@ -34,6 +34,7 @@ pub struct AgentExecutionEngineConfig {
     pub repository: Arc<dyn IAgentExecutionRepository>,
     pub template_repository: Arc<dyn IAgentExecutionTemplateRepository>,
     pub provider_repository: Arc<dyn IProviderRepository>,
+    pub provider_model_repository: Arc<dyn nomifun_db::IProviderModelRepository>,
     pub preset_service: Arc<PresetService>,
     pub realtime: Arc<dyn UserEventSink>,
     pub conversation: ConversationService,
@@ -132,6 +133,7 @@ impl AgentExecutionEngine {
         // absence stays typed and fails explicitly in the planner.
         let planner: Arc<dyn PlanProducer> = Arc::new(LlmPlanProducer::new(
             config.provider_repository.clone(),
+            config.provider_model_repository.clone(),
             config.encryption_key,
             config.workspace_root.clone(),
             None,
@@ -148,6 +150,7 @@ impl AgentExecutionEngine {
             config.repository,
             config.template_repository,
             config.provider_repository,
+            config.provider_model_repository,
             config.preset_service,
             planner,
             attempt_runner,

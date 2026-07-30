@@ -19,10 +19,18 @@ const MISSING_COMPANION_ID: &str =
 async fn seed_test_provider(services: &nomifun_app::AppServices) {
     nomifun_db::sqlx::query(
         "INSERT INTO providers (\
-            provider_id, platform, name, base_url, api_key_encrypted, models, enabled, \
+            provider_id, platform, name, base_url, api_key_encrypted, enabled, \
             capabilities, created_at, updated_at\
          ) VALUES ('0190f5fe-7c00-7a00-8000-000000000012', 'openai', 'test', 'https://example.invalid', \
-                   'encrypted', '[\"test-model\"]', 1, '[]', 1, 1)",
+                   'encrypted', 1, '[]', 1, 1)",
+    )
+    .execute(services.database.pool())
+    .await
+    .unwrap();
+    nomifun_db::sqlx::query(
+        "INSERT INTO provider_models \
+         (provider_id, model, enabled, sort_order, tasks, traits, params, source, created_at, updated_at) \
+         VALUES ('0190f5fe-7c00-7a00-8000-000000000012', 'test-model', 1, 0, '[]', '[]', '{}', 'inferred', 1, 1)",
     )
     .execute(services.database.pool())
     .await

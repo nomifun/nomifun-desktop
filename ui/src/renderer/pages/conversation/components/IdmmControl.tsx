@@ -32,6 +32,7 @@ import { IDMM_STATUS_COLOR } from '@/renderer/components/capability/capabilitySt
 import { renderIdmmCapabilityIcon } from '@/renderer/components/capability/idmmCapabilityIcon';
 import { applyIdmmStateToSessionCapabilities } from '@/renderer/pages/conversation/SessionList/hooks/useSessionCapabilities';
 import { useProvidersQuery } from '@renderer/hooks/agent/useModelProviderList';
+import { useModelsForTask } from '@/renderer/hooks/agent/useModelsForTask';
 import IdmmInterventionRow from './IdmmInterventionRow';
 import { isLiveEventForTarget } from './liveEventMatch';
 import { capabilityHeaderButtonClass, capabilityHeaderButtonStyle } from './CapabilityHeaderButton';
@@ -165,9 +166,12 @@ const IdmmControl: React.FC<IdmmControlProps> = ({ target, draft, disabledReason
     () => (providers ?? []).map((p) => ({ label: providerLabel(p), value: p.id })),
     [providers, providerLabel]
   );
+  // 旁路模型要做对话补全 —— 只列 chat-capable 模型（统一 catalog resolve；
+  // 此前列出 provider 的全部模型，首次获得任务过滤）。
+  const { groups: chatGroups } = useModelsForTask('chat');
   const modelsForProvider = (providerId?: ProviderId | null) => {
-    const p = (providers ?? []).find((x) => x.id === providerId);
-    return (p?.models ?? []).map((m) => ({ label: m, value: m }));
+    const group = chatGroups.find((g) => g.provider.id === providerId);
+    return (group?.models ?? []).map((m) => ({ label: m, value: m }));
   };
 
   // Load live state + seed the form from the persisted config (so user

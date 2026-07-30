@@ -1075,6 +1075,8 @@ pub struct ConversationService {
     /// [`Self::with_failover_deps`]。未注册(两槽为 `None`)即视为故障转移关闭
     /// —— fail-safe,所以不跑故障转移的上下文(测试、纯 webui)无需任何改动。
     failover_provider_repo: Arc<RwLock<Option<Arc<dyn nomifun_db::IProviderRepository>>>>,
+    failover_provider_model_repo:
+        Arc<RwLock<Option<Arc<dyn nomifun_db::IProviderModelRepository>>>>,
     failover_client_prefs: Arc<RwLock<Option<Arc<dyn nomifun_db::IClientPreferenceRepository>>>>,
     /// Mandatory read-side for the explicit Conversation↔Execution relation.
     /// Production assembly shares one repository-backed instance across every
@@ -2201,6 +2203,7 @@ impl ConversationService {
             supervision_hook: Arc::new(RwLock::new(None)),
             turn_completion_observer: Arc::new(RwLock::new(None)),
             failover_provider_repo: Arc::new(RwLock::new(None)),
+            failover_provider_model_repo: Arc::new(RwLock::new(None)),
             failover_client_prefs: Arc::new(RwLock::new(None)),
             execution_conversation_boundary,
         }
@@ -2356,10 +2359,14 @@ impl ConversationService {
     pub fn with_failover_deps(
         &self,
         provider_repo: Arc<dyn nomifun_db::IProviderRepository>,
+        provider_model_repo: Arc<dyn nomifun_db::IProviderModelRepository>,
         client_prefs: Arc<dyn nomifun_db::IClientPreferenceRepository>,
     ) {
         if let Ok(mut guard) = self.failover_provider_repo.write() {
             *guard = Some(provider_repo);
+        }
+        if let Ok(mut guard) = self.failover_provider_model_repo.write() {
+            *guard = Some(provider_model_repo);
         }
         if let Ok(mut guard) = self.failover_client_prefs.write() {
             *guard = Some(client_prefs);
@@ -2406,11 +2413,13 @@ impl ConversationService {
         &self,
     ) -> Option<(
         Arc<dyn nomifun_db::IProviderRepository>,
+        Arc<dyn nomifun_db::IProviderModelRepository>,
         Arc<dyn nomifun_db::IClientPreferenceRepository>,
     )> {
         let provider_repo = self.failover_provider_repo.read().ok()?.clone()?;
+        let provider_model_repo = self.failover_provider_model_repo.read().ok()?.clone()?;
         let client_prefs = self.failover_client_prefs.read().ok()?.clone()?;
-        Some((provider_repo, client_prefs))
+        Some((provider_repo, provider_model_repo, client_prefs))
     }
 
     /// Resolve the model for one knowledge write-back. A valid explicit
@@ -2422,7 +2431,7 @@ impl ConversationService {
         session_model: Option<&ProviderWithModel>,
     ) -> Result<Option<ProviderWithModel>, String> {
         let fallback = session_model.cloned();
-        let Some((provider_repo, client_prefs)) = self.failover_deps() else {
+        let Some((provider_repo, provider_model_repo, client_prefs)) = self.failover_deps() else {
             return Ok(fallback);
         };
         let preferences = match client_prefs
@@ -2490,16 +2499,27 @@ impl ConversationService {
                 );
             }
         };
-        let models = serde_json::from_str::<Vec<String>>(&provider.models).unwrap_or_default();
-        let model_enabled = provider
-            .model_enabled
-            .as_deref()
-            .and_then(|raw| serde_json::from_str::<HashMap<String, bool>>(raw).ok())
-            .unwrap_or_default();
-        if !provider.enabled
-            || !models.iter().any(|model| model == &selected.model)
-            || model_enabled.get(&selected.model) == Some(&false)
+        // Membership + per-model enabled live on provider_models rows
+        // (migration 016): the selected model must have an enabled row.
+        let model_row = match provider_model_repo
+            .get(&selected.provider_id, &selected.model)
+            .await
         {
+            Ok(row) => row,
+            Err(error) => {
+                warn!(
+                    provider_id = %selected.provider_id,
+                    model = %selected.model,
+                    error = %ErrorChain(&error),
+                    "Failed to validate explicit knowledge write-back model"
+                );
+                return Err(
+                    "Could not validate the configured knowledge write-back model; retry"
+                        .to_owned(),
+                );
+            }
+        };
+        if !provider.enabled || !model_row.is_some_and(|row| row.enabled) {
             warn!(
                 provider_id = %selected.provider_id,
                 model = %selected.model,

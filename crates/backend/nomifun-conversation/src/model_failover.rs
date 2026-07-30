@@ -11,8 +11,9 @@
 //!    形状抄 `nomifun-idmm/service.rs` 的多字段 pref 先例),会话级可在
 //!    `conversations.extra.model_failover` 覆盖(存在则优先于全局)。
 //!
-//! 健康字段 fail-open:`provider` 的 `model_enabled` / `model_health` 是 TEXT JSON,
-//! 解析失败时按"未禁用 / 未知健康"处理 —— 宁可多保留一个候选也不要因脏数据把队列误清空。
+//! 健康字段 fail-open:`provider_models.health` 是 TEXT JSON,解析失败时按
+//! "未知健康"处理 —— 宁可多保留一个候选也不要因脏数据把队列误清空。迁移 016 之后
+//! 每模型 enabled / health 只存在于 `provider_models` 行上,挑选器据此读行。
 
 use std::sync::Arc;
 
@@ -20,6 +21,7 @@ use nomifun_api_types::{AgentErrorCode, HealthStatus, ModelFailoverConfig};
 use nomifun_common::{AppError, ErrorChain, ProviderId, ProviderWithModel};
 use nomifun_db::IClientPreferenceRepository;
 use nomifun_db::models::Provider;
+use nomifun_db::ProviderModelRow;
 use tracing::warn;
 
 /// `client_preferences` 键,存放全局模型故障转移配置(整体 JSON)。
@@ -134,52 +136,34 @@ pub fn read_conversation_failover_override(extra_json: &str) -> Option<ModelFail
         .filter(|config| validate_failover_config(config).is_ok())
 }
 
-/// 解析的可用性视图(从 [`Provider`] 的 TEXT JSON 字段抽出,fail-open)。
-struct ProviderAvailability {
-    enabled: bool,
-    model_enabled: std::collections::HashMap<String, bool>,
-    model_health: std::collections::HashMap<String, HealthStatus>,
-}
-
-impl ProviderAvailability {
-    /// 解析一行 provider 的 `enabled` / `model_enabled` / `model_health`。JSON 字段
-    /// 解析失败时退化为空映射(=未知/未禁用),保证脏数据不会误判候选不可用。
-    fn from_provider(provider: &Provider) -> Self {
-        let model_enabled = provider
-            .model_enabled
-            .as_deref()
-            .and_then(|s| serde_json::from_str::<std::collections::HashMap<String, bool>>(s).ok())
-            .unwrap_or_default();
-        // 只取每个模型的 `status` 字段;其余健康元数据(last_check 等)与挑选无关。
-        let model_health = provider
-            .model_health
-            .as_deref()
-            .and_then(|s| {
-                serde_json::from_str::<std::collections::HashMap<String, nomifun_api_types::ModelHealthStatus>>(s).ok()
-            })
-            .map(|m| m.into_iter().map(|(k, v)| (k, v.status)).collect())
-            .unwrap_or_default();
-        Self {
-            enabled: provider.enabled,
-            model_enabled,
-            model_health,
-        }
+/// 一个候选 `(provider, model)` 的可用性判定(行读,fail-open)。
+///
+/// provider 启用 && 该模型的 `provider_models` 行未被禁用 && 行上健康 JSON 未标
+/// Unhealthy(Unknown / Healthy / 无记录 / 脏 JSON 都放行)。模型没有行(已从
+/// 目录移除)按"未禁用/未知健康"处理,与旧 map 缺项语义一致 —— provider 存在性
+/// 本身仍是硬闸。
+fn model_is_candidate(provider: &Provider, model_rows: &[ProviderModelRow], model: &str) -> bool {
+    if !provider.enabled {
+        return false;
     }
-
-    /// 该模型是否可作为候选:provider 启用 && 模型未被显式禁用 && 健康检查未标
-    /// Unhealthy(Unknown / Healthy / 无记录都放行)。
-    fn model_is_candidate(&self, model: &str) -> bool {
-        if !self.enabled {
-            return false;
-        }
-        if self.model_enabled.get(model) == Some(&false) {
-            return false;
-        }
-        if self.model_health.get(model) == Some(&HealthStatus::Unhealthy) {
-            return false;
-        }
-        true
+    let row = model_rows
+        .iter()
+        .find(|row| row.provider_id == provider.provider_id && row.model == model);
+    let Some(row) = row else {
+        // 无行 = 目录里已没有这个模型;沿用旧语义(map 缺项不禁用)让 provider
+        // 存在性与调用侧校验兜底,不在这里误清空队列。
+        return true;
+    };
+    if !row.enabled {
+        return false;
     }
+    // 只取健康 JSON 的 `status` 字段;解析失败按未知健康放行(fail-open)。
+    let health = row
+        .health
+        .as_deref()
+        .and_then(|s| serde_json::from_str::<nomifun_api_types::ModelHealthStatus>(s).ok())
+        .map(|h| h.status);
+    health != Some(HealthStatus::Unhealthy)
 }
 
 /// D2 挑选器(纯函数):按队列序返回首个可用候选模型。
@@ -197,6 +181,7 @@ pub fn next_failover_model(
     failed: &ProviderWithModel,
     tried: &[ProviderWithModel],
     providers: &[Provider],
+    model_rows: &[ProviderModelRow],
 ) -> Option<ProviderWithModel> {
     let same = |a: &ProviderWithModel, b: &ProviderWithModel| a.provider_id == b.provider_id && a.model == b.model;
     queue.iter().find_map(|candidate| {
@@ -215,8 +200,7 @@ pub fn next_failover_model(
             ProviderId::try_from(p.provider_id.as_str()).is_ok()
                 && p.provider_id == candidate.provider_id
         })?;
-        let availability = ProviderAvailability::from_provider(provider);
-        if availability.model_is_candidate(&candidate.model) {
+        if model_is_candidate(provider, model_rows, &candidate.model) {
             Some(candidate.clone())
         } else {
             None
@@ -227,7 +211,6 @@ pub fn next_failover_model(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashMap;
 
     const P1: &str = "0190f5fe-7c00-7a00-8000-000000000001";
     const P2: &str = "0190f5fe-7c00-7a00-8000-000000000002";
@@ -242,29 +225,8 @@ mod tests {
         }
     }
 
-    /// 构造一行 provider:`enabled` + 每模型启用/健康映射序列化进 TEXT JSON。
-    fn provider(
-        id: &str,
-        enabled: bool,
-        model_enabled: &[(&str, bool)],
-        model_health: &[(&str, HealthStatus)],
-    ) -> Provider {
-        let enabled_map: HashMap<String, bool> =
-            model_enabled.iter().map(|(m, e)| (m.to_string(), *e)).collect();
-        let health_map: HashMap<String, nomifun_api_types::ModelHealthStatus> = model_health
-            .iter()
-            .map(|(m, s)| {
-                (
-                    m.to_string(),
-                    nomifun_api_types::ModelHealthStatus {
-                        status: *s,
-                        last_check: None,
-                        latency: None,
-                        error: None,
-                    },
-                )
-            })
-            .collect();
+    /// 构造一行 provider(每模型状态在 `row(...)` 构造的 provider_models 行上)。
+    fn provider(id: &str, enabled: bool) -> Provider {
         Provider {
             id: 0,
             provider_id: id.into(),
@@ -272,25 +234,43 @@ mod tests {
             name: id.into(),
             base_url: "https://example.com".into(),
             api_key_encrypted: "x".into(),
-            models: "[]".into(),
             enabled,
             capabilities: "[]".into(),
-            model_context_limits: None,
-            model_protocols: None,
-            model_descriptions: None,
-            model_enabled: if enabled_map.is_empty() {
-                None
-            } else {
-                Some(serde_json::to_string(&enabled_map).unwrap())
-            },
-            model_health: if health_map.is_empty() {
-                None
-            } else {
-                Some(serde_json::to_string(&health_map).unwrap())
-            },
             bedrock_config: None,
             is_full_url: false,
             sort_order: 0,
+            created_at: 0,
+            updated_at: 0,
+        }
+    }
+
+    /// 构造一条 provider_models 行:enabled 标志 + 可选健康 JSON。
+    fn row(provider_id: &str, model: &str, enabled: bool, health: Option<HealthStatus>) -> ProviderModelRow {
+        let health_json = health.map(|status| {
+            serde_json::to_string(&nomifun_api_types::ModelHealthStatus {
+                status,
+                last_check: None,
+                latency: None,
+                error: None,
+            })
+            .unwrap()
+        });
+        ProviderModelRow {
+            id: 0,
+            provider_id: provider_id.into(),
+            model: model.into(),
+            enabled,
+            sort_order: 0,
+            tasks: "[]".into(),
+            traits: "[]".into(),
+            protocol: None,
+            connection_role: None,
+            params: "{}".into(),
+            context_limit: None,
+            description: None,
+            source: "inferred".into(),
+            health: health_json,
+            health_checked_at: None,
             created_at: 0,
             updated_at: 0,
         }
@@ -300,8 +280,9 @@ mod tests {
     fn picks_next_available_skipping_failed() {
         let queue = vec![pwm(P1, "m1"), pwm(P2, "m2")];
         let failed = pwm(P1, "m1");
-        let providers = vec![provider(P1, true, &[], &[]), provider(P2, true, &[], &[])];
-        let pick = next_failover_model(&queue, &failed, &[], &providers).expect("should pick p2/m2");
+        let providers = vec![provider(P1, true), provider(P2, true)];
+        let pick = next_failover_model(&queue, &failed, &[], &providers, &[])
+            .expect("should pick p2/m2");
         assert_eq!(pick.provider_id, P2);
         assert_eq!(pick.model, "m2");
     }
@@ -315,11 +296,12 @@ mod tests {
         let failed = pwm(P1, "m1");
         let tried = vec![pwm(P2, "m2")];
         let providers = vec![
-            provider(P1, true, &[], &[]),
-            provider(P2, true, &[], &[]),
-            provider(P3, true, &[], &[]),
+            provider(P1, true),
+            provider(P2, true),
+            provider(P3, true),
         ];
-        let pick = next_failover_model(&queue, &failed, &tried, &providers).expect("should skip tried p2/m2");
+        let pick = next_failover_model(&queue, &failed, &tried, &providers, &[])
+            .expect("should skip tried p2/m2");
         assert_eq!(pick.provider_id, P3);
         assert_eq!(pick.model, "m3");
     }
@@ -330,8 +312,8 @@ mod tests {
         let queue = vec![pwm(P1, "m1"), pwm(P2, "m2")];
         let failed = pwm(P1, "m1");
         let tried = vec![pwm(P2, "m2")];
-        let providers = vec![provider(P1, true, &[], &[]), provider(P2, true, &[], &[])];
-        assert!(next_failover_model(&queue, &failed, &tried, &providers).is_none());
+        let providers = vec![provider(P1, true), provider(P2, true)];
+        assert!(next_failover_model(&queue, &failed, &tried, &providers, &[]).is_none());
     }
 
     #[test]
@@ -339,8 +321,9 @@ mod tests {
         let queue = vec![pwm(P1, "m1"), pwm(P2, "m2")];
         let failed = pwm(GHOST, "orig");
         // p1 是禁用 provider → 跳过,落到 p2。
-        let providers = vec![provider(P1, false, &[], &[]), provider(P2, true, &[], &[])];
-        let pick = next_failover_model(&queue, &failed, &[], &providers).expect("should skip disabled p1");
+        let providers = vec![provider(P1, false), provider(P2, true)];
+        let pick = next_failover_model(&queue, &failed, &[], &providers, &[])
+            .expect("should skip disabled p1");
         assert_eq!(pick.provider_id, P2);
     }
 
@@ -348,9 +331,11 @@ mod tests {
     fn skips_model_disabled() {
         let queue = vec![pwm(P1, "m1"), pwm(P1, "m2")];
         let failed = pwm(GHOST, "orig");
-        // p1 的 m1 被显式禁用 → 跳过,落到 m2。
-        let providers = vec![provider(P1, true, &[("m1", false), ("m2", true)], &[])];
-        let pick = next_failover_model(&queue, &failed, &[], &providers).expect("should skip disabled m1");
+        // p1 的 m1 行被禁用 → 跳过,落到 m2。
+        let providers = vec![provider(P1, true)];
+        let rows = vec![row(P1, "m1", false, None), row(P1, "m2", true, None)];
+        let pick = next_failover_model(&queue, &failed, &[], &providers, &rows)
+            .expect("should skip disabled m1");
         assert_eq!(pick.model, "m2");
     }
 
@@ -358,14 +343,14 @@ mod tests {
     fn skips_unhealthy_model() {
         let queue = vec![pwm(P1, "m1"), pwm(P1, "m2")];
         let failed = pwm(GHOST, "orig");
-        // m1 标 Unhealthy → 跳过;m2 Healthy → 选中。
-        let providers = vec![provider(
-            P1,
-            true,
-            &[],
-            &[("m1", HealthStatus::Unhealthy), ("m2", HealthStatus::Healthy)],
-        )];
-        let pick = next_failover_model(&queue, &failed, &[], &providers).expect("should skip unhealthy m1");
+        // m1 行标 Unhealthy → 跳过;m2 Healthy → 选中。
+        let providers = vec![provider(P1, true)];
+        let rows = vec![
+            row(P1, "m1", true, Some(HealthStatus::Unhealthy)),
+            row(P1, "m2", true, Some(HealthStatus::Healthy)),
+        ];
+        let pick = next_failover_model(&queue, &failed, &[], &providers, &rows)
+            .expect("should skip unhealthy m1");
         assert_eq!(pick.model, "m2");
     }
 
@@ -374,8 +359,9 @@ mod tests {
         // Unknown / 无健康记录 不应被跳过(只有 Unhealthy 才排除)。
         let queue = vec![pwm(P1, "m1")];
         let failed = pwm(GHOST, "orig");
-        let providers = vec![provider(P1, true, &[], &[("m1", HealthStatus::Unknown)])];
-        assert!(next_failover_model(&queue, &failed, &[], &providers).is_some());
+        let providers = vec![provider(P1, true)];
+        let rows = vec![row(P1, "m1", true, Some(HealthStatus::Unknown))];
+        assert!(next_failover_model(&queue, &failed, &[], &providers, &rows).is_some());
     }
 
     #[test]
@@ -383,8 +369,8 @@ mod tests {
         // 队列里唯一候选就是刚失败的那个 → 耗尽 → None。
         let queue = vec![pwm(P1, "m1")];
         let failed = pwm(P1, "m1");
-        let providers = vec![provider(P1, true, &[], &[])];
-        assert!(next_failover_model(&queue, &failed, &[], &providers).is_none());
+        let providers = vec![provider(P1, true)];
+        assert!(next_failover_model(&queue, &failed, &[], &providers, &[]).is_none());
     }
 
     #[test]
@@ -392,11 +378,9 @@ mod tests {
         let queue = vec![pwm(P1, "m1"), pwm(P2, "m2")];
         let failed = pwm(GHOST, "orig");
         // p1 禁用 + p2 的 m2 Unhealthy → 全不可用 → None。
-        let providers = vec![
-            provider(P1, false, &[], &[]),
-            provider(P2, true, &[], &[("m2", HealthStatus::Unhealthy)]),
-        ];
-        assert!(next_failover_model(&queue, &failed, &[], &providers).is_none());
+        let providers = vec![provider(P1, false), provider(P2, true)];
+        let rows = vec![row(P2, "m2", true, Some(HealthStatus::Unhealthy))];
+        assert!(next_failover_model(&queue, &failed, &[], &providers, &rows).is_none());
     }
 
     #[test]
@@ -404,24 +388,29 @@ mod tests {
         // 候选引用的 provider 不在表中 → 找不到即不可用,跳到下一个。
         let queue = vec![pwm(GHOST, "m1"), pwm(P2, "m2")];
         let failed = pwm(GHOST, "orig");
-        let providers = vec![provider(P2, true, &[], &[])];
-        let pick = next_failover_model(&queue, &failed, &[], &providers).expect("should fall to p2");
+        let providers = vec![provider(P2, true)];
+        let pick = next_failover_model(&queue, &failed, &[], &providers, &[])
+            .expect("should fall to p2");
         assert_eq!(pick.provider_id, P2);
     }
 
     #[test]
     fn empty_queue_returns_none() {
-        let providers = vec![provider(P1, true, &[], &[])];
-        assert!(next_failover_model(&[], &pwm(P1, "m1"), &[], &providers).is_none());
+        let providers = vec![provider(P1, true)];
+        assert!(next_failover_model(&[], &pwm(P1, "m1"), &[], &providers, &[]).is_none());
     }
 
     #[test]
     fn malformed_model_health_json_fails_open() {
-        // model_health 是垃圾字符串 → 按未知健康处理,候选仍可用。
-        let mut p = provider(P1, true, &[], &[]);
-        p.model_health = Some("{not json".into());
+        // 行上的 health 是垃圾字符串 → 按未知健康处理,候选仍可用。
+        let mut broken = row(P1, "m1", true, None);
+        broken.health = Some("{not json".into());
+        let providers = vec![provider(P1, true)];
         let queue = vec![pwm(P1, "m1")];
-        assert!(next_failover_model(&queue, &pwm(GHOST, "orig"), &[], &[p]).is_some());
+        assert!(
+            next_failover_model(&queue, &pwm(GHOST, "orig"), &[], &providers, &[broken])
+                .is_some()
+        );
     }
 
     // ── 配置读写 ──

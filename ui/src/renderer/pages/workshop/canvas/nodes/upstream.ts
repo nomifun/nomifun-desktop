@@ -48,6 +48,8 @@ export function upstreamPrimary(node: { type?: string; data?: unknown } | null |
     const batchPrimary = tryParseEntityId('asset', batch?.primary);
     const primary = batchPrimary && results.includes(batchPrimary) ? batchPrimary : results[0];
     const mode = typeof data.mode === 'string' ? (data.mode as WorkshopGeneratorMode) : 'image';
+    // tts results are audio assets — no displayable canvas kind; contribute nothing.
+    if (mode === 'tts') return null;
     const kind: WorkshopAssetKind = mode === 'video' ? 'video' : mode === 'text' ? 'text' : 'image';
     return { assetId: primary, kind, text: null };
   }

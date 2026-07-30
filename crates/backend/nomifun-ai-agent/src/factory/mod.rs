@@ -8,6 +8,7 @@ pub(crate) mod construction_guard;
 mod context;
 mod nanobot;
 pub(crate) mod nomi;
+pub(crate) mod platform_table;
 mod openclaw;
 mod remote;
 
@@ -116,6 +117,9 @@ pub struct AgentFactoryDeps {
     pub skill_manager: Arc<AcpSkillManager>,
     pub remote_agent_repo: Arc<dyn IRemoteAgentRepository>,
     pub provider_repo: Arc<dyn IProviderRepository>,
+    /// Authoritative per-model rows (protocol/context-limit overrides for the
+    /// selected model live here since migration 016).
+    pub provider_model_repo: Arc<dyn nomifun_db::IProviderModelRepository>,
     pub encryption_key: [u8; 32],
     pub agent_registry: Arc<AgentRegistry>,
     pub acp_agent_service: Arc<AcpSessionSyncService>,

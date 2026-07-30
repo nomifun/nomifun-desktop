@@ -1415,7 +1415,7 @@ fn is_unique_violation(err: &sqlx::Error) -> bool {
 }
 
 /// Checks whether a sqlx error carries the owner-domain guard-trigger abort
-/// (migration 019: cs-domain bots must never carry a companion binding).
+/// (migration 020: cs-domain bots must never carry a companion binding).
 fn is_owner_domain_violation(err: &sqlx::Error) -> bool {
     match err {
         sqlx::Error::Database(db_err) => db_err
@@ -1889,7 +1889,7 @@ mod tests {
         assert!(matches!(err, DbError::NotFound(_)));
     }
 
-    // -- Owner-domain tests (migration 019) ---------------------------------
+    // -- Owner-domain tests (migration 020) ---------------------------------
 
     fn cs_plugin(name: &str) -> NewChannelPluginRow {
         NewChannelPluginRow {
