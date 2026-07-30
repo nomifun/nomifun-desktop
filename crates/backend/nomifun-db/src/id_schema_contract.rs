@@ -951,7 +951,7 @@ pub async fn validate_id_schema_contract(pool: &SqlitePool) -> Result<(), DbErro
     require_column(pool, "preset_tags", "key", "TEXT", true).await?;
     require_single_column_unique_index(pool, "preset_tags", "key").await?;
     require_column(pool, "preset_tag_bindings", "preset_tag_id", "TEXT", true).await?;
-    // Channel bot ownership domain (migration 019): every row names its owning
+    // Channel bot ownership domain (migration 020): every row names its owning
     // domain and defaults to the legacy companion pool.
     require_column(pool, "channel_plugins", "owner_domain", "TEXT", true).await?;
     let owner_domain_default: Option<String> = sqlx::query_scalar(

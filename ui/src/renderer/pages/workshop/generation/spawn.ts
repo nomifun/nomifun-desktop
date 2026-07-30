@@ -74,6 +74,8 @@ export async function spawnResultNodes(
   options: SpawnResultNodesOptions = {}
 ): Promise<void> {
   if (assetIds.length === 0) return;
+  // Audio (tts) results have no canvas node kind; they play inside the card.
+  if (mode === 'tts') return;
   if (options.shouldCommit && !options.shouldCommit()) return;
   const origin = rightOf(rf, card);
   const cell = KIND_META[mode];

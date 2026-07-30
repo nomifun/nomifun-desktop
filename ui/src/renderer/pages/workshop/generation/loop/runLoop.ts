@@ -205,7 +205,9 @@ async function executeRound(ctx: RunContext, round: number): Promise<LoopRoundRe
       .map((text, col) => (text ? placeRoundNode(rf, target, round, col, (pos) => makeTextNode(pos, { content: text })) : null))
       .filter((n): n is WorkshopFlowNode => n !== null);
     spawnRoundResults(rf, target, created);
-  } else {
+  } else if (mode !== 'tts') {
+    // Audio (tts) artifacts have no canvas node kind; they stay reachable
+    // from the target card's own result list.
     const factory = (assetId: AssetId) =>
       mode === 'video'
         ? (pos: { x: number; y: number }) => makeVideoNode(pos, { assetId })

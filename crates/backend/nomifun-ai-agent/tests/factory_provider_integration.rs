@@ -23,6 +23,7 @@ fn test_encryption_key() -> [u8; 32] {
 
 async fn setup() -> (
     Arc<dyn IProviderRepository>,
+    Arc<dyn nomifun_db::IProviderModelRepository>,
     Arc<SqliteRemoteAgentRepository>,
     Arc<AgentRegistry>,
     Arc<AcpSessionSyncService>,
@@ -30,13 +31,15 @@ async fn setup() -> (
     let db = init_database_memory().await.unwrap();
     let pool = db.pool().clone();
     let provider_repo: Arc<dyn IProviderRepository> = Arc::new(SqliteProviderRepository::new(pool.clone()));
+    let provider_model_repo: Arc<dyn nomifun_db::IProviderModelRepository> =
+        Arc::new(nomifun_db::SqliteProviderModelRepository::new(pool.clone()));
     let remote_agent_repo = Arc::new(SqliteRemoteAgentRepository::new(pool.clone()));
     let metadata_repo = Arc::new(SqliteAgentMetadataRepository::new(pool.clone()));
     let registry = AgentRegistry::new(metadata_repo);
     registry.hydrate().await.unwrap();
     let session_repo: Arc<dyn IAcpSessionRepository> = Arc::new(SqliteAcpSessionRepository::new(pool));
     let acp_agent_service = AcpSessionSyncService::new(session_repo);
-    (provider_repo, remote_agent_repo, registry, acp_agent_service)
+    (provider_repo, provider_model_repo, remote_agent_repo, registry, acp_agent_service)
 }
 
 async fn insert_test_provider(repo: &dyn IProviderRepository, id: &str, platform: &str) {
@@ -66,12 +69,14 @@ async fn insert_test_provider(repo: &dyn IProviderRepository, id: &str, platform
 
 fn make_factory(
     provider_repo: Arc<dyn IProviderRepository>,
+    provider_model_repo: Arc<dyn nomifun_db::IProviderModelRepository>,
     remote_agent_repo: Arc<SqliteRemoteAgentRepository>,
     agent_registry: Arc<AgentRegistry>,
     acp_agent_service: Arc<AcpSessionSyncService>,
 ) -> nomifun_ai_agent::runtime_registry::AgentRuntimeFactory {
     make_factory_with_summon(
         provider_repo,
+        provider_model_repo,
         remote_agent_repo,
         agent_registry,
         acp_agent_service,
@@ -81,6 +86,7 @@ fn make_factory(
 
 fn make_factory_with_summon(
     provider_repo: Arc<dyn IProviderRepository>,
+    provider_model_repo: Arc<dyn nomifun_db::IProviderModelRepository>,
     remote_agent_repo: Arc<SqliteRemoteAgentRepository>,
     agent_registry: Arc<AgentRegistry>,
     acp_agent_service: Arc<AcpSessionSyncService>,
@@ -105,6 +111,7 @@ fn make_factory_with_summon(
         skill_manager: AcpSkillManager::new(skill_paths),
         remote_agent_repo,
         provider_repo,
+        provider_model_repo,
         encryption_key: test_encryption_key(),
         agent_registry,
         acp_agent_service,
@@ -126,8 +133,8 @@ async fn nomi_factory_returns_unavailable_when_no_providers_configured() {
     // With NO providers in the DB, a conversation bound to any provider id has
     // nothing to fall back to → ProviderUnavailable (the friendly terminal error,
     // surfaced to the user as "no usable model" rather than a raw provider id).
-    let (provider_repo, remote_agent_repo, agent_registry, acp_agent_service) = setup().await;
-    let factory = make_factory(provider_repo, remote_agent_repo, agent_registry, acp_agent_service);
+    let (provider_repo, provider_model_repo, remote_agent_repo, agent_registry, acp_agent_service) = setup().await;
+    let factory = make_factory(provider_repo, provider_model_repo, remote_agent_repo, agent_registry, acp_agent_service);
 
     let options = AgentRuntimeBuildOptions {
         user_id: TEST_OWNER_ID.into(),
@@ -163,9 +170,9 @@ async fn nomi_factory_falls_back_to_first_enabled_when_bound_provider_missing() 
     // A conversation bound to a DELETED provider must NOT hard-fail while an
     // enabled provider still exists — it falls back to the first enabled model
     // instead of erroring with "Provider '<id>' not found".
-    let (provider_repo, remote_agent_repo, agent_registry, acp_agent_service) = setup().await;
+    let (provider_repo, provider_model_repo, remote_agent_repo, agent_registry, acp_agent_service) = setup().await;
     insert_test_provider(&*provider_repo, PROVIDER_ID_1, "openai").await;
-    let factory = make_factory(provider_repo, remote_agent_repo, agent_registry, acp_agent_service);
+    let factory = make_factory(provider_repo, provider_model_repo, remote_agent_repo, agent_registry, acp_agent_service);
 
     let options = AgentRuntimeBuildOptions {
         user_id: TEST_OWNER_ID.into(),
@@ -189,9 +196,9 @@ async fn nomi_factory_falls_back_to_first_enabled_when_bound_provider_missing() 
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn nomi_factory_resolves_provider_from_db() {
-    let (provider_repo, remote_agent_repo, agent_registry, acp_agent_service) = setup().await;
+    let (provider_repo, provider_model_repo, remote_agent_repo, agent_registry, acp_agent_service) = setup().await;
     insert_test_provider(&*provider_repo, PROVIDER_ID_1, "openai").await;
-    let factory = make_factory(provider_repo, remote_agent_repo, agent_registry, acp_agent_service);
+    let factory = make_factory(provider_repo, provider_model_repo, remote_agent_repo, agent_registry, acp_agent_service);
 
     let options = AgentRuntimeBuildOptions {
         user_id: TEST_OWNER_ID.into(),
@@ -215,9 +222,9 @@ async fn nomi_factory_resolves_provider_from_db() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn nomi_factory_respects_use_model_override() {
-    let (provider_repo, remote_agent_repo, agent_registry, acp_agent_service) = setup().await;
+    let (provider_repo, provider_model_repo, remote_agent_repo, agent_registry, acp_agent_service) = setup().await;
     insert_test_provider(&*provider_repo, PROVIDER_ID_2, "openai").await;
-    let factory = make_factory(provider_repo, remote_agent_repo, agent_registry, acp_agent_service);
+    let factory = make_factory(provider_repo, provider_model_repo, remote_agent_repo, agent_registry, acp_agent_service);
 
     let options = AgentRuntimeBuildOptions {
         user_id: TEST_OWNER_ID.into(),
@@ -360,11 +367,12 @@ fn summon_build_options(conversation_id: &str, extra: serde_json::Value) -> Agen
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn nomi_factory_summon_session_consults_provider_and_materializes_skills() {
-    let (provider_repo, remote_agent_repo, agent_registry, acp_agent_service) = setup().await;
+    let (provider_repo, provider_model_repo, remote_agent_repo, agent_registry, acp_agent_service) = setup().await;
     insert_test_provider(&*provider_repo, PROVIDER_ID_1, "openai").await;
     let fake = FakeSummonProvider::new();
     let factory = make_factory_with_summon(
         provider_repo,
+        provider_model_repo,
         remote_agent_repo,
         agent_registry,
         acp_agent_service,
@@ -398,11 +406,12 @@ async fn nomi_factory_summon_session_consults_provider_and_materializes_skills()
 async fn nomi_factory_plain_session_runs_summon_cleanup_only() {
     // A non-summoned session build triggers the manifest-owned cleanup path
     // (unloads skills after 解除召唤 on the next build) and never syncs.
-    let (provider_repo, remote_agent_repo, agent_registry, acp_agent_service) = setup().await;
+    let (provider_repo, provider_model_repo, remote_agent_repo, agent_registry, acp_agent_service) = setup().await;
     insert_test_provider(&*provider_repo, PROVIDER_ID_1, "openai").await;
     let fake = FakeSummonProvider::new();
     let factory = make_factory_with_summon(
         provider_repo,
+        provider_model_repo,
         remote_agent_repo,
         agent_registry,
         acp_agent_service,
@@ -421,11 +430,12 @@ async fn nomi_factory_companion_session_ignores_summon() {
     // persona boundary: a companion conversation never consults the summon
     // provider — neither sync nor cleanup (its manifest belongs to the
     // companion-thread skill reconciler).
-    let (provider_repo, remote_agent_repo, agent_registry, acp_agent_service) = setup().await;
+    let (provider_repo, provider_model_repo, remote_agent_repo, agent_registry, acp_agent_service) = setup().await;
     insert_test_provider(&*provider_repo, PROVIDER_ID_1, "openai").await;
     let fake = FakeSummonProvider::new();
     let factory = make_factory_with_summon(
         provider_repo,
+        provider_model_repo,
         remote_agent_repo,
         agent_registry,
         acp_agent_service,

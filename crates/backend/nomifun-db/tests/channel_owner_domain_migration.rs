@@ -1,4 +1,4 @@
-//! Migration 019 (`channel_plugins.owner_domain`) backfill + guard-trigger
+//! Migration 020 (`channel_plugins.owner_domain`) backfill + guard-trigger
 //! tests over pre-migration data shapes.
 
 use sqlx::migrate::{Migrate, Migrator};
@@ -44,8 +44,8 @@ async fn insert_bot(pool: &sqlx::SqlitePool, bot_id: &str, companion_id: Option<
     .unwrap();
 }
 
-async fn seed_pre_019(pool: &sqlx::SqlitePool) {
-    migrate_to(pool, 18).await;
+async fn seed_pre_020(pool: &sqlx::SqlitePool) {
+    migrate_to(pool, 19).await;
     sqlx::query(
         "INSERT INTO cs_agents (cs_agent_id, name, created_at, updated_at) VALUES (?, 'CS', 1, 1)",
     )
@@ -87,9 +87,9 @@ async fn backfill_moves_cs_bound_bots_and_repairs_dual_bindings() {
         .connect("sqlite::memory:")
         .await
         .unwrap();
-    seed_pre_019(&pool).await;
+    seed_pre_020(&pool).await;
 
-    migrate_to(&pool, 19).await;
+    migrate_to(&pool, 20).await;
 
     assert_eq!(
         owner_domain(&pool, BOT_CS_BOUND).await,
@@ -126,8 +126,8 @@ async fn guard_triggers_reject_companion_bindings_on_cs_bots() {
         .connect("sqlite::memory:")
         .await
         .unwrap();
-    seed_pre_019(&pool).await;
-    migrate_to(&pool, 19).await;
+    seed_pre_020(&pool).await;
+    migrate_to(&pool, 20).await;
 
     // UPDATE guard: a cs-domain bot cannot gain a companion binding.
     let err = sqlx::query(

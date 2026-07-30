@@ -25,7 +25,7 @@ pub use managed_model::{
 };
 pub use model_classify::{ModelGenerationSuggestion, suggest_generation_capabilities};
 pub use model_fetcher::ModelFetchService;
-pub use model_profile::{ModelProfileService, seed_missing_inferred_profiles};
+pub use model_profile::{ModelProfileService, seed_inferred_provider_models, seed_missing_inferred_profiles};
 pub use protocol::ProtocolDetectionService;
 pub use provider::ProviderService;
 pub use provider_connection::ProviderConnectionService;

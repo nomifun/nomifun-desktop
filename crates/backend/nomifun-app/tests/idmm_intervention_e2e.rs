@@ -181,10 +181,19 @@ async fn seed_mock_provider(services: &AppServices) -> String {
     let provider_id = ProviderId::new().into_string();
     nomifun_db::sqlx::query(
         "INSERT INTO providers \
-         (provider_id, platform, name, base_url, api_key_encrypted, models, enabled, \
+         (provider_id, platform, name, base_url, api_key_encrypted, enabled, \
           capabilities, created_at, updated_at) \
          VALUES (?, 'openai', 'IDMM intervention mock', 'https://example.invalid', \
-                 'encrypted', '[\"mock-model\"]', 1, '[]', 1, 1)",
+                 'encrypted', 1, '[]', 1, 1)",
+    )
+    .bind(&provider_id)
+    .execute(services.database.pool())
+    .await
+    .unwrap();
+    nomifun_db::sqlx::query(
+        "INSERT INTO provider_models \
+         (provider_id, model, enabled, sort_order, tasks, traits, params, source, created_at, updated_at) \
+         VALUES (?, 'mock-model', 1, 0, '[]', '[]', '{}', 'inferred', 1, 1)",
     )
     .bind(&provider_id)
     .execute(services.database.pool())

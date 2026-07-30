@@ -48,6 +48,12 @@ export type VideoAspect = (typeof VIDEO_ASPECTS)[number];
 export const VIDEO_SECONDS_MIN = 4;
 export const VIDEO_SECONDS_MAX = 20;
 
+// ─── TTS presets ───────────────────────────────────────────────────────────────
+
+/** The OpenAI-compatible voice vocabulary; the voice field also accepts custom values. */
+export const TTS_VOICES = ['alloy', 'echo', 'fable', 'onyx', 'nova', 'shimmer'] as const;
+export type TtsVoice = (typeof TTS_VOICES)[number];
+
 /**
  * Explicit `resolution × aspect → width/height` table. The video card only lets
  * the user pick a resolution + aspect, but the openai_video adapter derives its
@@ -96,6 +102,11 @@ export interface VideoParams {
   watermark: boolean;
 }
 
+export interface TtsParams {
+  /** Preset or custom voice id, passed through to the provider adapter. */
+  voice: string;
+}
+
 export const DEFAULT_IMAGE_PARAMS: ImageParams = {
   preset: '1:1',
   width: 1024,
@@ -112,11 +123,16 @@ export const DEFAULT_VIDEO_PARAMS: VideoParams = {
   watermark: false,
 };
 
+export const DEFAULT_TTS_PARAMS: TtsParams = {
+  voice: 'alloy',
+};
+
 /** Comfortable default node box the card grows to on first mount, per mode. */
 export const CARD_SIZE: Record<GenMode, { width: number; height: number }> = {
   image: { width: 344, height: 496 },
   video: { width: 344, height: 470 },
   text: { width: 340, height: 340 },
+  tts: { width: 344, height: 400 },
 };
 
 /** The factory-minted box (`model.ts` `KIND_META.generator`) we grow away from. */
@@ -152,6 +168,11 @@ export function readVideoParams(p: Record<string, unknown>): VideoParams {
   };
 }
 
+export function readTtsParams(p: Record<string, unknown>): TtsParams {
+  const voice = typeof p.voice === 'string' && p.voice.trim() ? p.voice.trim() : DEFAULT_TTS_PARAMS.voice;
+  return { voice };
+}
+
 /** Assemble the `params` object sent to `POST /api/creation/tasks`. */
 export function buildTaskParams(mode: GenMode, stored: Record<string, unknown>, prompt: string): Record<string, unknown> {
   if (mode === 'image') {
@@ -174,6 +195,11 @@ export function buildTaskParams(mode: GenMode, stored: Record<string, unknown>, 
       // any combo missing from VIDEO_DIMENSIONS so the provider default applies.
       ...(dims ? { width: dims.width, height: dims.height } : {}),
     };
+  }
+  if (mode === 'tts') {
+    // Backend capability 'tts' (SpeechSynthesis) consumes {prompt, voice}.
+    const p = readTtsParams(stored);
+    return { prompt, voice: p.voice };
   }
   return { prompt };
 }

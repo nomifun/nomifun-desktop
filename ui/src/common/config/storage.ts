@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import type { ProviderModelResponse } from '@/common/types/provider/providerModel';
 import type { SpeechToTextConfig } from '@/common/types/provider/speech';
 import type { PresetReference, ResolvedPresetSnapshot } from '@/common/types/agent/presetTypes';
 import type {
@@ -539,6 +540,12 @@ export interface IProvider {
       error?: string; // 错误信息 / error message
     }
   >;
+  /**
+   * 权威 per-model 目录行（provider_models 表投影），wire→renderer 透传。
+   * Authoritative row-level model catalog entries, passed through as-is from
+   * `ProviderResponse.models_detail`. Absent when the provider has no rows.
+   */
+  models_detail?: ProviderModelResponse[];
   is_full_url?: boolean;
 }
 

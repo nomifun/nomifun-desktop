@@ -6,8 +6,8 @@
 
 import { ipcBridge } from '@/common';
 import type { IProvider, ModelProfile, ModelTask, ModelTrait } from '@/common/config/storage';
-import { uuidv7 } from '@/common/utils';
-import { parseProviderId, type ProviderId } from '@/common/types/ids';
+import type { ProviderModelResponse, UpdateProviderModelRequest } from '@/common/types/provider/providerModel';
+import type { ProviderId } from '@/common/types/ids';
 import { Button, Checkbox, Collapse, Divider, Input, Message, Modal, Popconfirm, Popover, Select, Switch, Tag, Tooltip } from '@arco-design/web-react';
 import { useArcoMessage } from '@/renderer/utils/ui/useArcoMessage';
 import { Copy, DeleteFour, Info, Minus, Plus, Write, Heartbeat, Drag, TagOne } from '@icon-park/react';
@@ -39,6 +39,8 @@ import {
 } from './providerInUse';
 import AddModelModal from '@/renderer/pages/settings/components/AddModelModal';
 import AddPlatformModal from '@/renderer/pages/settings/components/AddPlatformModal';
+import ModelAdvancedEditor from '@/renderer/pages/settings/components/ModelAdvancedEditor';
+import ProviderConnectionsSection from '@/renderer/pages/settings/components/ProviderConnectionsSection';
 import { isNewApiPlatform, NEW_API_PROTOCOL_OPTIONS } from '@/renderer/utils/model/modelPlatforms';
 import EditModeModal from '@/renderer/pages/settings/components/EditModeModal';
 import NomiScrollArea from '@/renderer/components/base/NomiScrollArea';
@@ -48,14 +50,16 @@ import { useContainerWidth } from '@/renderer/hooks/ui/useContainerWidth';
 import { useSettingsViewMode } from '../settingsViewContext';
 import { consumePendingDeepLink } from '@/renderer/hooks/system/useDeepLink';
 import { ContextLimitSelect, formatContextLimit } from '@/renderer/pages/settings/components/ContextLimitSelect';
-import { cloneProviderConfig } from '@/renderer/utils/model/providerClone';
 import { isManagedModelProvider } from '@/common/types/provider/managedModelService';
 import { reorderById, reorderStrings } from './modelProviderOrdering';
 import {
   buildModelProfileUpsertRequest,
   editableModelTasks,
   editableModelTraits,
+  isInferredModelProfile,
   MODEL_TASK_ORDER,
+  MODEL_TRAIT_ORDER,
+  primaryModelTask,
   visibleModelTaskBadges,
 } from '@/renderer/hooks/agent/modelProfileEditing';
 import '../model-provider.css';
@@ -101,36 +105,47 @@ const getApiKeyCount = (api_key: string): number => {
 };
 
 /**
- * 获取供应商的启用状态（全选/半选/全不选）
- * Get provider enable state (all/partial/none)
+ * 权威 per-model 行：优先 `models_detail`（provider_models 投影）；无投影时
+ * 从 legacy 字段合成只读行（仅剩托管/异常供应商会走到这里）。
+ * Prefer the authoritative `models_detail` rows; synthesize fallback rows
+ * from the legacy projection fields when absent.
  */
-const getProviderState = (platform: IProvider): { checked: boolean; indeterminate: boolean } => {
-  if (!platform.model_enabled) {
-    // 没有 model_enabled 记录，默认全部启用
-    return { checked: true, indeterminate: false };
-  }
-
-  const models = platform.models ?? [];
-  const enabledCount = models.filter((model) => platform.model_enabled?.[model] !== false).length;
-  const totalCount = models.length;
-
-  if (enabledCount === 0) {
-    return { checked: false, indeterminate: false }; // 全不选
-  } else if (enabledCount === totalCount) {
-    return { checked: true, indeterminate: false }; // 全选
-  } else {
-    return { checked: true, indeterminate: true }; // 半选（有模型开启，显示为开启状态）
-  }
+const modelRowsFor = (platform: IProvider): ProviderModelResponse[] => {
+  if (platform.models_detail && platform.models_detail.length > 0) return platform.models_detail;
+  return (platform.models ?? []).map((model, index) => ({
+    provider_id: platform.id,
+    model,
+    enabled: platform.model_enabled?.[model] !== false,
+    sort_order: index,
+    tasks: [],
+    traits: [],
+    protocol: platform.model_protocols?.[model],
+    params: null,
+    context_limit: platform.model_context_limits?.[model],
+    description: platform.model_descriptions?.[model],
+    source: 'inferred',
+    health: platform.model_health?.[model],
+    created_at: 0,
+    updated_at: 0,
+  }));
 };
 
-/**
- * 检查模型是否启用
- * Check if model is enabled
- */
-const isModelEnabled = (platform: IProvider, model: string): boolean => {
-  if (!platform.model_enabled) return true; // 默认启用
-  return platform.model_enabled[model] !== false;
-};
+/** Row-level partial update body minus the composite key. */
+type ModelRowPatch = Omit<UpdateProviderModelRequest, 'provider_id' | 'model'>;
+
+/** Apply a tri-state row patch to the cached row for optimistic rendering. */
+const applyRowPatch = (row: ProviderModelResponse, patch: ModelRowPatch): ProviderModelResponse => ({
+  ...row,
+  ...(patch.enabled !== undefined ? { enabled: patch.enabled } : {}),
+  ...(patch.sort_order !== undefined ? { sort_order: patch.sort_order } : {}),
+  ...(patch.tasks !== undefined ? { tasks: patch.tasks } : {}),
+  ...(patch.traits !== undefined ? { traits: patch.traits } : {}),
+  ...(patch.protocol !== undefined ? { protocol: patch.protocol ?? undefined } : {}),
+  ...(patch.connection_role !== undefined ? { connection_role: patch.connection_role ?? undefined } : {}),
+  ...(patch.params !== undefined ? { params: patch.params } : {}),
+  ...(patch.context_limit !== undefined ? { context_limit: patch.context_limit ?? undefined } : {}),
+  ...(patch.description !== undefined ? { description: patch.description ?? undefined } : {}),
+});
 
 /**
  * 每模型描述编辑浮层 / Per-model description editor popover.
@@ -266,6 +281,12 @@ const ModelContextLimitEditor: React.FC<{
   );
 };
 
+/**
+ * 模态能力编辑浮层。推断档案（source='inferred'）的任务/能力预勾选展示，
+ * 并带「系统推断」提示标；保存即转为 user 档案。四项 trait 全部可编辑。
+ * Inferred profiles are shown pre-checked with a hint tag; saving converts
+ * them to a user profile. All four traits are editable.
+ */
 const ModelModalityEditor: React.FC<{
   profile?: ModelProfile;
   onSave: (tasks: ModelTask[], traits: ModelTrait[]) => Promise<void>;
@@ -274,9 +295,8 @@ const ModelModalityEditor: React.FC<{
   const [open, setOpen] = useState(false);
   const [saving, setSaving] = useState(false);
   const [draftTasks, setDraftTasks] = useState<ModelTask[]>(() => editableModelTasks(profile));
-  const [draftVisionInput, setDraftVisionInput] = useState(() =>
-    editableModelTraits(profile).includes('vision_input')
-  );
+  const [draftTraits, setDraftTraits] = useState<ModelTrait[]>(() => editableModelTraits(profile));
+  const isInferred = isInferredModelProfile(profile);
   const taskOptions = useMemo(
     () => MODEL_TASK_ORDER.map((v) => ({ label: t(`settings.modelTask.${v}`), value: v })),
     [t]
@@ -286,23 +306,21 @@ const ModelModalityEditor: React.FC<{
 
   const handleVisibleChange = (visible: boolean) => {
     if (visible) {
-      const nextTasks = editableModelTasks(profile);
-      setDraftTasks(nextTasks);
-      setDraftVisionInput(nextTasks.includes('chat') && editableModelTraits(profile).includes('vision_input'));
+      setDraftTasks(editableModelTasks(profile));
+      setDraftTraits(editableModelTraits(profile));
     }
     setOpen(visible);
   };
 
-  const handleTasksChange = (value: ModelTask[]) => {
-    const next = value ?? [];
-    setDraftTasks(next);
-    if (!next.includes('chat')) setDraftVisionInput(false);
+  const toggleTrait = (trait: ModelTrait, checked: boolean) => {
+    setDraftTraits((prev) => (checked ? [...prev.filter((item) => item !== trait), trait] : prev.filter((item) => item !== trait)));
   };
 
   const handleSave = async () => {
     setSaving(true);
     try {
-      await onSave(draftTasks, draftTasks.includes('chat') && draftVisionInput ? ['vision_input'] : []);
+      // Persist traits in canonical display order for stable badges/serialization.
+      await onSave(draftTasks, MODEL_TRAIT_ORDER.filter((trait) => draftTraits.includes(trait)));
       setOpen(false);
     } catch {
       // Parent save handler owns the toast; keep the editor open so the user can retry.
@@ -319,24 +337,44 @@ const ModelModalityEditor: React.FC<{
       onVisibleChange={handleVisibleChange}
       content={
         <div className='flex flex-col gap-8px w-280px' onClick={(e) => e.stopPropagation()}>
-          <div className='text-12px text-t-secondary'>
-            {t('settings.modelModality', { defaultValue: '模态能力' })}
+          <div className='flex items-center gap-6px text-12px text-t-secondary'>
+            <span>{t('settings.modelModality', { defaultValue: '模态能力' })}</span>
+            {isInferred && (
+              <Tag size='small' color='arcoblue' bordered className='select-none'>
+                {t('settings.modelInferredTag', { defaultValue: '系统推断' })}
+              </Tag>
+            )}
           </div>
+          {isInferred && (
+            <div className='text-11px text-t-tertiary leading-4'>
+              {t('settings.modelInferredHint', {
+                defaultValue: '以下为系统推断的能力，保存后转为人工确认',
+              })}
+            </div>
+          )}
           <Select
             mode='multiple'
             value={draftTasks}
-            onChange={handleTasksChange}
+            onChange={(value: ModelTask[]) => setDraftTasks(value ?? [])}
             options={taskOptions}
             placeholder={t('settings.modelModality', { defaultValue: '模态能力' })}
             triggerProps={{ getPopupContainer: () => document.body }}
           />
-          {draftTasks.includes('chat') && (
-            <Checkbox checked={draftVisionInput} onChange={setDraftVisionInput} className='!pl-0'>
-              <span className='text-12px text-t-secondary'>
-                {t('settings.modelVisionInput', { defaultValue: '支持图片输入（视觉）' })}
-              </span>
-            </Checkbox>
-          )}
+          <div className='text-11px text-t-tertiary'>
+            {t('settings.modelTraitsLabel', { defaultValue: '能力细化（traits）' })}
+          </div>
+          <div className='flex flex-col gap-2px'>
+            {MODEL_TRAIT_ORDER.map((trait) => (
+              <Checkbox
+                key={trait}
+                checked={draftTraits.includes(trait)}
+                onChange={(checked) => toggleTrait(trait, checked)}
+                className='!pl-0'
+              >
+                <span className='text-12px text-t-secondary'>{t(`settings.modelTrait.${trait}`)}</span>
+              </Checkbox>
+            ))}
+          </div>
           <div className='text-11px text-t-tertiary leading-4'>
             {t('settings.modelModalityTip', {
               defaultValue: '声明该模型能做什么——探测与调用据此选择正确的端点',
@@ -524,6 +562,61 @@ const ModelModalContent: React.FC = () => {
       });
   };
 
+  /**
+   * 行级模型更新（providerModel.update）：修复整 map PUT 的读改写竞态。
+   * Row-level partial update with optimistic `models_detail` patch.
+   */
+  const updateModelRow = (platform: IProvider, model: string, patch: ModelRowPatch, rethrow = false): Promise<void> => {
+    if (data) {
+      const nextArray = data.map((item) =>
+        item.id === platform.id && item.models_detail
+          ? {
+              ...item,
+              models_detail: item.models_detail.map((row) => (row.model === model ? applyRowPatch(row, patch) : row)),
+            }
+          : item
+      );
+      void mutate(nextArray, false);
+    }
+    return ipcBridge.providerModel.update
+      .invoke({ provider_id: platform.id, model, ...patch })
+      .then(() => {
+        void mutate();
+      })
+      .catch((error) => {
+        void mutate();
+        console.error('Failed to update model row:', error);
+        message.error(t('settings.saveModelConfigFailed'));
+        if (rethrow) throw error;
+      });
+  };
+
+  /** 行级删除：不再手动清理 5 个 legacy map。 */
+  const removeModel = (platform: IProvider, model: string) => {
+    if (data) {
+      const nextArray = data.map((item) =>
+        item.id === platform.id
+          ? {
+              ...item,
+              models: (item.models ?? []).filter((m) => m !== model),
+              ...(item.models_detail ? { models_detail: item.models_detail.filter((row) => row.model !== model) } : {}),
+            }
+          : item
+      );
+      void mutate(nextArray, false);
+    }
+    ipcBridge.providerModel.remove
+      .invoke({ provider_id: platform.id, model })
+      .then(() => {
+        void mutate();
+      })
+      .catch((error) => {
+        void mutate();
+        console.error('Failed to delete model:', error);
+        message.error(t('settings.saveModelConfigFailed'));
+      });
+  };
+
   const removePlatform = (id: ProviderId) => {
     const nextArray = (data ?? []).filter((item: IProvider) => item.id !== id);
     void mutate(nextArray, false);
@@ -613,6 +706,10 @@ const ModelModalContent: React.FC = () => {
       });
   };
 
+  /**
+   * 模型排序：对受影响的行逐条 providerModel.update({sort_order})。
+   * Model reorder persists per-row sort_order updates.
+   */
   const handleModelDragEnd = (activeData: SortableDragData, overData: SortableDragData) => {
     if (activeData.type !== 'model' || overData.type !== 'model' || activeData.providerId !== overData.providerId) {
       return;
@@ -621,16 +718,45 @@ const ModelModalContent: React.FC = () => {
     const platform = (data || []).find((item) => item.id === activeData.providerId);
     if (!platform) return;
 
-    const nextModels = reorderStrings(platform.models ?? [], activeData.model, overData.model);
-    if (nextModels === platform.models) return;
+    const rows = modelRowsFor(platform);
+    const names = rows.map((row) => row.model);
+    const nextNames = reorderStrings(names, activeData.model, overData.model);
+    if (nextNames === names) return;
 
-    updatePlatform(
-      {
-        ...platform,
-        models: nextModels,
-      },
-      () => {}
-    );
+    const rowByModel = new Map(rows.map((row) => [row.model, row]));
+    const nextRows = nextNames.map((name, index) => ({ ...rowByModel.get(name)!, sort_order: index }));
+    const changed = nextRows.filter((row) => rowByModel.get(row.model)!.sort_order !== row.sort_order);
+
+    if (data) {
+      const nextArray = data.map((item) =>
+        item.id === platform.id
+          ? {
+              ...item,
+              models: nextNames,
+              ...(item.models_detail ? { models_detail: nextRows } : {}),
+            }
+          : item
+      );
+      void mutate(nextArray, false);
+    }
+
+    Promise.all(
+      changed.map((row) =>
+        ipcBridge.providerModel.update.invoke({
+          provider_id: platform.id,
+          model: row.model,
+          sort_order: row.sort_order,
+        })
+      )
+    )
+      .then(() => {
+        void mutate();
+      })
+      .catch((error) => {
+        void mutate();
+        console.error('Failed to save model order:', error);
+        message.error(t('settings.saveModelConfigFailed'));
+      });
   };
 
   const handleDragEnd = ({ active, over }: DragEndEvent) => {
@@ -647,51 +773,48 @@ const ModelModalContent: React.FC = () => {
     }
   };
 
+  /**
+   * 服务端整组克隆：`POST /api/providers/{id}/clone` 连模型档案与连接档案一起复制。
+   * Server-side provider clone (models + connections copied atomically).
+   */
   const duplicatePlatform = (platform: IProvider) => {
-    const copied = cloneProviderConfig(
-      platform,
-      parseProviderId(uuidv7()),
-      t('settings.providerCopySuffix', { defaultValue: '副本' })
-    );
-    updatePlatform(copied, () => {
-      setCollapseKey((prev) => ({ ...prev, [copied.id]: true }));
-      message.success(t('settings.providerConfigCopied', { name: copied.name }));
-    });
+    ipcBridge.mode.cloneProvider
+      .invoke({ provider_id: platform.id })
+      .then((copied) => {
+        void mutate();
+        setCollapseKey((prev) => ({ ...prev, [copied.id]: true }));
+        message.success(t('settings.providerConfigCopied', { name: copied.name }));
+      })
+      .catch((error) => {
+        console.error('Failed to clone provider:', error);
+        message.error(t('settings.saveModelConfigFailed'));
+      });
   };
 
-  // 切换供应商启用状态（全选 ↔ 全不选）
+  // 供应商启用开关写 provider.enabled 本身（语义修正：不再批量翻转 model_enabled）
+  // Provider enable switch writes provider.enabled itself.
   const toggleProviderEnabled = (platform: IProvider) => {
-    const { checked } = getProviderState(platform);
-    const newState = !checked; // 切换状态
-
-    // 批量更新所有模型状态
-    const model_enabled: Record<string, boolean> = {};
-    (platform.models ?? []).forEach((model) => {
-      model_enabled[model] = newState;
-    });
-
-    const updated = {
-      ...platform,
-      model_enabled,
-    };
-    updatePlatform(updated, () => {});
-  };
-
-  // 切换模型启用状态
-  const toggleModelEnabled = (platform: IProvider, model: string, enabled: boolean) => {
-    const model_enabled = { ...platform.model_enabled };
-    model_enabled[model] = enabled;
-
-    const updated = {
-      ...platform,
-      model_enabled,
-    };
-
-    updatePlatform(updated, () => {});
+    const enabled = platform.enabled === false;
+    if (data) {
+      void mutate(
+        data.map((item) => (item.id === platform.id ? { ...item, enabled } : item)),
+        false
+      );
+    }
+    ipcBridge.mode.updateProvider
+      .invoke({ provider_id: platform.id, enabled })
+      .then(() => {
+        void mutate();
+      })
+      .catch((error) => {
+        void mutate();
+        console.error('Failed to update provider enabled state:', error);
+        message.error(t('settings.saveModelConfigFailed'));
+      });
   };
 
   // Execute provider/model health check without creating a conversation.
-  const performHealthCheck = async (platform: IProvider, modelName: string) => {
+  const performHealthCheck = async (platform: IProvider, modelName: string, task?: ModelTask) => {
     const loadingKey = `${platform.id}-${modelName}`;
     setHealthCheckLoading((prev) => ({ ...prev, [loadingKey]: true }));
 
@@ -701,6 +824,7 @@ const ModelModalContent: React.FC = () => {
       const result = await ipcBridge.acpConversation.checkProviderHealth.invoke({
         provider_id: platform.id,
         model: modelName,
+        task,
       });
       const latency = result.elapsed_ms || Date.now() - startTime;
       const success = result.status === 'healthy';
@@ -925,6 +1049,8 @@ const ModelModalContent: React.FC = () => {
             {editableProviders.map((platform: IProvider) => {
               const key = platform.id;
               const isExpanded = collapseKey[platform.id] ?? false;
+              const modelRows = modelRowsFor(platform);
+              const hasDetail = Boolean(platform.models_detail && platform.models_detail.length > 0);
               return (
                 <SortableProviderCard key={key} provider={platform}>
                   {({ attributes, listeners, setActivatorNodeRef, isDragging }) => (
@@ -975,7 +1101,7 @@ const ModelModalContent: React.FC = () => {
                               className='cursor-pointer hover:text-t-primary transition-colors'
                               onClick={() => setCollapseKey((prev) => ({ ...prev, [platform.id]: !isExpanded }))}
                             >
-                              {t('settings.modelCount')}（{(platform.models ?? []).length}）
+                              {t('settings.modelCount')}（{modelRows.length}）
                             </span>
                             <span className='mx-6px'>|</span>
                             <span
@@ -986,12 +1112,12 @@ const ModelModalContent: React.FC = () => {
                             </span>
                           </span>
                           <span className={`text-12px text-t-secondary whitespace-nowrap ${isWide ? 'hidden' : 'inline'}`}>
-                            {(platform.models ?? []).length} / {getApiKeyCount(platform.api_key)}
+                            {modelRows.length} / {getApiKeyCount(platform.api_key)}
                           </span>
-                          {/* 供应商启用开关 / Provider enable switch */}
+                          {/* 供应商启用开关（写 provider.enabled）/ Provider enable switch */}
                           <Switch
                             size='small'
-                            checked={getProviderState(platform).checked}
+                            checked={platform.enabled !== false}
                             onChange={() => toggleProviderEnabled(platform)}
                           />
                           <div className='flex items-center gap-4px'>
@@ -1031,17 +1157,29 @@ const ModelModalContent: React.FC = () => {
                     }
                   >
                     <SortableContext
-                      items={(platform.models ?? []).map((model) => modelSortableId(platform.id, model))}
+                      items={modelRows.map((row) => modelSortableId(platform.id, row.model))}
                       strategy={verticalListSortingStrategy}
                     >
-                    {(platform.models ?? []).map((model: string, index: number, arr: string[]) => {
+                    {modelRows.map((row: ProviderModelResponse, index: number, arr: ProviderModelResponse[]) => {
+                      const model = row.model;
                       const isNewApiProvider = isNewApiPlatform(platform.platform);
-                      const modelProtocol = platform.model_protocols?.[model] || 'openai';
-                      const model_health = platform.model_health?.[model];
+                      const modelProtocol = row.protocol || 'openai';
+                      const model_health = row.health ?? platform.model_health?.[model];
                       const healthStatus = model_health?.status || 'unknown';
-                      const modelDescription = platform.model_descriptions?.[model] ?? '';
-                      const modelContextLimit = platform.model_context_limits?.[model];
-                      const modelProfile = profileFor(platform.id, model);
+                      const modelDescription = row.description ?? '';
+                      const modelContextLimit = row.context_limit;
+                      // Prefer the authoritative row's profile; fall back to the
+                      // model-profiles store when the provider has no rows yet.
+                      const modelProfile: ModelProfile | undefined = hasDetail
+                        ? {
+                            provider_id: platform.id,
+                            model,
+                            tasks: row.tasks,
+                            traits: row.traits,
+                            source: row.source,
+                            updated_at: row.updated_at,
+                          }
+                        : profileFor(platform.id, model);
 
                       return (
                         <SortableModelRow key={model} providerId={platform.id} model={model}>
@@ -1100,12 +1238,12 @@ const ModelModalContent: React.FC = () => {
                                   {model}
                                 </span>
 
-                                {/* 模态徽章 / Modality badges — non-chat tasks (image/tts/asr/...) surfaced. */}
+                                {/* 模态徽章 / Modality badges — all tasks incl. chat (chat neutral, others colored). */}
                                 {visibleModelTaskBadges(modelProfile).map((tk) => (
                                     <Tag
                                       key={tk}
                                       size='small'
-                                      color='purple'
+                                      color={tk === 'chat' ? 'gray' : 'purple'}
                                       bordered
                                       className='shrink-0 select-none'
                                     >
@@ -1113,17 +1251,14 @@ const ModelModalContent: React.FC = () => {
                                     </Tag>
                                   ))}
 
-                                {/* New API 协议标签（点击循环切换）/ New API protocol badge (click to cycle) */}
+                                {/* New API 协议标签（点击循环切换，行级写入）/ New API protocol badge (click to cycle, row-level write) */}
                                 {isNewApiProvider && (
                                   <Tag
                                     size='small'
                                     color={getProtocolColor(modelProtocol)}
                                     className='cursor-pointer select-none shrink-0'
                                     onClick={() => {
-                                      const nextProtocol = getNextProtocol(modelProtocol);
-                                      const newProtocols = { ...platform.model_protocols };
-                                      newProtocols[model] = nextProtocol;
-                                      updatePlatform({ ...platform, model_protocols: newProtocols }, () => {});
+                                      void updateModelRow(platform, model, { protocol: getNextProtocol(modelProtocol) });
                                     }}
                                   >
                                     {getProtocolLabel(modelProtocol)}
@@ -1134,19 +1269,9 @@ const ModelModalContent: React.FC = () => {
                                 <ModelContextLimitEditor
                                   value={modelContextLimit}
                                   onSave={(value) => {
-                                    const next = { ...platform.model_context_limits };
-                                    if (value && value > 0) {
-                                      next[model] = value;
-                                    } else {
-                                      delete next[model];
-                                    }
-                                    updatePlatform(
-                                      {
-                                        ...platform,
-                                        model_context_limits: next,
-                                      },
-                                      () => {}
-                                    );
+                                    void updateModelRow(platform, model, {
+                                      context_limit: value && value > 0 ? value : null,
+                                    });
                                   }}
                                 />
 
@@ -1158,7 +1283,7 @@ const ModelModalContent: React.FC = () => {
                                       await ipcBridge.modelProfile.upsert.invoke(
                                         buildModelProfileUpsertRequest(platform.id, model, tasks, traits)
                                       );
-                                      await mutateProfiles();
+                                      await Promise.all([mutateProfiles(), mutate()]);
                                     } catch (error) {
                                       console.error('model profile upsert failed', error);
                                       message.error(t('settings.saveModelConfigFailed'));
@@ -1167,31 +1292,30 @@ const ModelModalContent: React.FC = () => {
                                   }}
                                 />
 
-                                {/* 模型启用开关 / Model enable switch */}
+                                {/* 高级：协议/连接档案/params / Advanced: protocol, connection_role, params */}
+                                <ModelAdvancedEditor
+                                  providerId={platform.id}
+                                  protocol={row.protocol}
+                                  connectionRole={row.connection_role}
+                                  params={row.params}
+                                  onSave={(patch) => updateModelRow(platform, model, patch, true)}
+                                />
+
+                                {/* 模型启用开关（行级）/ Model enable switch (row-level) */}
                                 <Switch
                                   size='small'
                                   className='shrink-0'
-                                  checked={isModelEnabled(platform, model)}
-                                  onChange={(checked) => toggleModelEnabled(platform, model, checked)}
+                                  checked={row.enabled}
+                                  onChange={(checked) => {
+                                    void updateModelRow(platform, model, { enabled: checked });
+                                  }}
                                 />
 
                                 {/* 每模型描述编辑（驱动智能协作选择）/ Per-model collaboration description */}
                                 <ModelDescriptionEditor
                                   description={modelDescription}
                                   onSave={(text) => {
-                                    const next = { ...platform.model_descriptions };
-                                    if (text) {
-                                      next[model] = text;
-                                    } else {
-                                      delete next[model];
-                                    }
-                                    updatePlatform(
-                                      {
-                                        ...platform,
-                                        model_descriptions: Object.keys(next).length > 0 ? next : undefined,
-                                      },
-                                      () => {}
-                                    );
+                                    void updateModelRow(platform, model, { description: text || null });
                                   }}
                                 />
                               </div>
@@ -1208,49 +1332,20 @@ const ModelModalContent: React.FC = () => {
                             </div>
 
                             <div className='flex items-center gap-6px shrink-0'>
-                              {/* 心跳检测按钮 / Health check button */}
+                              {/* 心跳检测按钮（携带档案主任务）/ Health check button (probes the profile's primary task) */}
                               <Tooltip content={t('settings.healthCheck')}>
                                 <Button
                                   size='mini'
                                   className='!w-28px !h-28px !min-w-28px !bg-[var(--color-bg-1)] text-t-secondary hover:text-t-primary hover:!bg-[var(--fill-0)]'
                                   icon={<Heartbeat theme='outline' size='16' />}
                                   loading={healthCheckLoading[`${platform.id}-${model}`]}
-                                  onClick={() => performHealthCheck(platform, model)}
+                                  onClick={() => performHealthCheck(platform, model, primaryModelTask(modelProfile))}
                                 />
                               </Tooltip>
 
                               <Popconfirm
                                 title={t('settings.deleteModelConfirm')}
-                                onOk={() => {
-                                  const newModels = platform.models.filter((item: string) => item !== model);
-                                  // 同时清理模型相关状态，避免删除后重加模型时复用脏状态
-                                  // Clean all per-model state to avoid stale state on re-add.
-                                  const newProtocols = { ...platform.model_protocols };
-                                  const newModelEnabled = { ...platform.model_enabled };
-                                  const newModelHealth = { ...platform.model_health };
-                                  const newModelDescriptions = { ...platform.model_descriptions };
-                                  const newModelContextLimits = { ...platform.model_context_limits };
-                                  delete newProtocols[model];
-                                  delete newModelEnabled[model];
-                                  delete newModelHealth[model];
-                                  delete newModelDescriptions[model];
-                                  delete newModelContextLimits[model];
-
-                                  updatePlatform(
-                                    {
-                                      ...platform,
-                                      models: newModels,
-                                      model_protocols: Object.keys(newProtocols).length > 0 ? newProtocols : undefined,
-                                      model_enabled:
-                                        Object.keys(newModelEnabled).length > 0 ? newModelEnabled : undefined,
-                                      model_health: Object.keys(newModelHealth).length > 0 ? newModelHealth : undefined,
-                                      model_descriptions:
-                                        Object.keys(newModelDescriptions).length > 0 ? newModelDescriptions : undefined,
-                                      model_context_limits: newModelContextLimits,
-                                    },
-                                    () => {}
-                                  );
-                                }}
+                                onOk={() => removeModel(platform, model)}
                               >
                                 <Button
                                   size='mini'
@@ -1267,6 +1362,10 @@ const ModelModalContent: React.FC = () => {
                       );
                     })}
                     </SortableContext>
+
+                    {/* 连接档案区 / Per-role connection profiles */}
+                    {modelRows.length > 0 && <Divider className='!my-4px !border-[var(--color-border-2)]/70' />}
+                    <ProviderConnectionsSection provider={platform} />
                   </Collapse.Item>
                 </Collapse>
                   )}

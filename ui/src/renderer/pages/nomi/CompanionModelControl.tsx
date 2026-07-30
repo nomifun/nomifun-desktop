@@ -7,7 +7,8 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Select, Tooltip } from '@arco-design/web-react';
-import { useModelProviderList, useProvidersQuery } from '@renderer/hooks/agent/useModelProviderList';
+import { useProvidersQuery } from '@renderer/hooks/agent/useModelProviderList';
+import { useModelsForTask } from '@/renderer/hooks/agent/useModelsForTask';
 import type { ProviderId } from '@/common/types/ids';
 import type { useCompanion } from './useNomi';
 import { useModelSelectorProviderLabel } from '@/renderer/hooks/agent/useModelSelectorProviderLabel';
@@ -26,14 +27,15 @@ interface Props {
  * 供应商下拉列出【所有已启用的供应商】（不再按「是否含主模型」过滤），这样：
  *   - 用户始终能看到自己配置的供应商，当前选择也能正常显示名字（而非生 provider id）；
  *   - 只有图像/视频/嵌入等生成类模型的供应商也可见，其模型下拉为空并给出说明。
- * 模型下拉只列出可作对话主模型的文本模型（图像等生成类模型经 excludeFromPrimary 排除，
- * 不能作对话模型）。当前存储的模型若已不在该供应商的可用列表里（供应商改配后失效），
+ * 模型下拉只列出可作对话主模型的文本模型（chat catalog resolve 权威过滤，图像等
+ * 生成类模型不在其中，不能作对话模型）。当前存储的模型若已不在该供应商的可用列表里（供应商改配后失效），
  * 会以「(不可用)」禁用项显式呈现并给出重选提示，避免出现无法解释的残留值。
  */
 const CompanionModelControl: React.FC<Props> = ({ companion }) => {
   const { t } = useTranslation();
   const { profile, patchCompanion } = companion;
-  const { getAvailableModels } = useModelProviderList();
+  // 对话主模型清单来自统一 catalog resolve（task='chat'，无名称启发式）。
+  const { groups: chatGroups } = useModelsForTask('chat');
   const { data: rawProviders } = useProvidersQuery();
   const providerLabel = useModelSelectorProviderLabel();
   const [draftProviderId, setDraftProviderId] = useState<ProviderId | null>(null);
@@ -52,15 +54,15 @@ const CompanionModelControl: React.FC<Props> = ({ companion }) => {
   );
 
   const availableModels = useMemo(
-    () => (currentProvider ? getAvailableModels(currentProvider) : []),
-    [currentProvider, getAvailableModels]
+    () =>
+      currentProvider
+        ? (chatGroups.find((group) => group.provider.id === currentProvider.id)?.models ?? [])
+        : [],
+    [chatGroups, currentProvider]
   );
 
   // 是否至少有一个供应商提供可用于对话的文本模型。
-  const anyChatModel = useMemo(
-    () => enabledProviders.some((p) => getAvailableModels(p).length > 0),
-    [enabledProviders, getAvailableModels]
-  );
+  const anyChatModel = chatGroups.length > 0;
 
   if (!profile) return null;
 

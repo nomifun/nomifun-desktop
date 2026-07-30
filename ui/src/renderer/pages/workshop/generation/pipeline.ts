@@ -97,6 +97,9 @@ export function nodeContribution(node: WorkshopFlowNode): NodeContribution | nul
         ? tryParseEntityId('asset', (data.batch as { primary?: unknown }).primary)!
         : results[0];
     const mode = typeof data.mode === 'string' ? (data.mode as GenMode) : 'image';
+    // A tts card's results are audio assets — there is no audio input role /
+    // node kind on the canvas, so it contributes nothing downstream.
+    if (mode === 'tts') return null;
     const kind: WorkshopAssetKind = mode === 'video' ? 'video' : mode === 'text' ? 'text' : 'image';
     return { assetId: primary, kind, text: null };
   }
@@ -265,27 +268,33 @@ export async function buildRunPlan(input: RunPlanInput): Promise<RunPlan> {
     effectiveRefs = refAssets.filter((r) => r.kind !== 'image' || windowed.has(r.assetId));
   }
 
-  // 3) Build inputs.
+  // 3) Build inputs. TTS consumes no reference assets — the backend's
+  //    speech-synthesis adapter reads only params {prompt, voice}; upstream /
+  //    mentioned text still folds into the prompt below.
   const inputs: CreationInput[] = [];
   let imageRefCount = 0;
-  for (const ref of effectiveRefs) {
-    if (ref.kind === 'image') {
-      // Image references drive i2i / i2v and get numbered 图N.
-      inputs.push({ asset_id: ref.assetId, role: 'reference' });
-      imageRefCount += 1;
-    } else if (mode === 'video' && ref.kind === 'video') {
-      inputs.push({ asset_id: ref.assetId, role: 'video' });
+  if (mode !== 'tts') {
+    for (const ref of effectiveRefs) {
+      if (ref.kind === 'image') {
+        // Image references drive i2i / i2v and get numbered 图N.
+        inputs.push({ asset_id: ref.assetId, role: 'reference' });
+        imageRefCount += 1;
+      } else if (mode === 'video' && ref.kind === 'video') {
+        inputs.push({ asset_id: ref.assetId, role: 'video' });
+      }
+      // image-mode video refs are ignored (no capability path).
     }
-    // image-mode video refs are ignored (no capability path).
-  }
-  if (mode === 'image' && maskAssetId) {
-    inputs.push({ asset_id: maskAssetId, role: 'mask' });
+    if (mode === 'image' && maskAssetId) {
+      inputs.push({ asset_id: maskAssetId, role: 'mask' });
+    }
   }
 
   // 4) Capability.
   let capability: MediaCapability;
   if (mode === 'text') {
     capability = 'text';
+  } else if (mode === 'tts') {
+    capability = 'tts';
   } else if (mode === 'video') {
     capability = imageRefCount > 0 ? 'i2v' : 't2v';
   } else if (maskAssetId) {
@@ -299,5 +308,5 @@ export async function buildRunPlan(input: RunPlanInput): Promise<RunPlan> {
     .filter((s) => s.length > 0)
     .join('\n\n');
 
-  return { capability, inputs, prompt, referenceCount: effectiveRefs.length };
+  return { capability, inputs, prompt, referenceCount: mode === 'tts' ? 0 : effectiveRefs.length };
 }

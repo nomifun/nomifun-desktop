@@ -23,6 +23,7 @@ pub struct PresetService {
     tag_repo: Arc<dyn IPresetTagRepository>,
     agent_repo: Arc<dyn IAgentMetadataRepository>,
     provider_repo: Arc<dyn IProviderRepository>,
+    provider_model_repo: Arc<dyn nomifun_db::IProviderModelRepository>,
     builtin: Arc<BuiltinPresetRegistry>,
     extension_registry: ExtensionRegistry,
     user_data_dir: PathBuf,
@@ -63,6 +64,7 @@ impl PresetService {
         tag_repo: Arc<dyn IPresetTagRepository>,
         agent_repo: Arc<dyn IAgentMetadataRepository>,
         provider_repo: Arc<dyn IProviderRepository>,
+        provider_model_repo: Arc<dyn nomifun_db::IProviderModelRepository>,
         builtin: Arc<BuiltinPresetRegistry>,
         extension_registry: ExtensionRegistry,
         user_data_dir: PathBuf,
@@ -73,6 +75,7 @@ impl PresetService {
             tag_repo,
             agent_repo,
             provider_repo,
+            provider_model_repo,
             builtin,
             extension_registry,
             user_data_dir,
@@ -403,6 +406,8 @@ impl PresetService {
             })?;
         }
         let providers = self.provider_repo.list().await?;
+        // Membership lives on provider_models rows since migration 016.
+        let model_rows = self.provider_model_repo.list().await?;
         let candidates: Vec<_> = providers
             .into_iter()
             .filter(|provider| {
@@ -414,8 +419,10 @@ impl PresetService {
             })
             .collect();
         for provider in candidates {
-            let models: Vec<String> = serde_json::from_str(&provider.models).unwrap_or_default();
-            if models.iter().any(|m| m == &preference.model) {
+            let has_model = model_rows.iter().any(|row| {
+                row.provider_id == provider.provider_id && row.model == preference.model
+            });
+            if has_model {
                 if preference.provider_id.is_none() {
                     warnings.push(format!(
                         "Unqualified model '{}' resolved to provider '{}'",

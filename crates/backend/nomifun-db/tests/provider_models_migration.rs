@@ -159,6 +159,108 @@ async fn migration_15_drops_model_profiles() {
 }
 
 #[tokio::test]
+async fn migration_16_drops_legacy_provider_model_columns_preserving_rows() {
+    let pool = SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect("sqlite::memory:")
+        .await
+        .unwrap();
+    migrate_to(&pool, 13).await;
+
+    // Legacy-shaped provider row: the 014 backfill materializes its
+    // provider_models rows, which must survive the 016 column drop intact.
+    sqlx::query(
+        "INSERT INTO providers (provider_id, platform, name, base_url, api_key_encrypted, models, enabled, capabilities, model_context_limits, model_protocols, model_descriptions, model_enabled, model_health, is_full_url, sort_order, created_at, updated_at) \
+         VALUES (?, 'openai', 'P', 'https://x.test/v1', 'enc', ?, 1, '[]', ?, ?, ?, ?, ?, 0, 0, 1, 1)",
+    )
+    .bind(PROVIDER)
+    .bind(r#"["gpt-4o","flux-pro"]"#)
+    .bind(r#"{"gpt-4o":128000}"#)
+    .bind(r#"{"flux-pro":"anthropic"}"#)
+    .bind(r#"{"gpt-4o":"desc"}"#)
+    .bind(r#"{"flux-pro":false}"#)
+    .bind(r#"{"gpt-4o":{"status":"healthy"}}"#)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    migrate_to(&pool, 15).await;
+    let legacy_columns = [
+        "models",
+        "model_context_limits",
+        "model_protocols",
+        "model_descriptions",
+        "model_enabled",
+        "model_health",
+    ];
+    let columns_at_15: Vec<String> =
+        sqlx::query_scalar("SELECT name FROM pragma_table_info('providers')")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+    for column in legacy_columns {
+        assert!(
+            columns_at_15.iter().any(|name| name == column),
+            "column {column} must still exist at migration 15"
+        );
+    }
+
+    migrate_to(&pool, 16).await;
+    let columns_at_16: Vec<String> =
+        sqlx::query_scalar("SELECT name FROM pragma_table_info('providers')")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+    for column in legacy_columns {
+        assert!(
+            !columns_at_16.iter().any(|name| name == column),
+            "migration 16 must drop providers.{column}"
+        );
+    }
+    // The remaining provider fields and the authoritative rows are untouched.
+    for column in [
+        "provider_id",
+        "platform",
+        "name",
+        "base_url",
+        "api_key_encrypted",
+        "enabled",
+        "capabilities",
+        "bedrock_config",
+        "is_full_url",
+        "sort_order",
+    ] {
+        assert!(
+            columns_at_16.iter().any(|name| name == column),
+            "providers.{column} must survive migration 16"
+        );
+    }
+    let (name, enabled): (String, i64) =
+        sqlx::query_as("SELECT name, enabled FROM providers WHERE provider_id = ?")
+            .bind(PROVIDER)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!((name.as_str(), enabled), ("P", 1));
+    let rows: Vec<(String, i64, Option<i64>, Option<String>)> = sqlx::query_as(
+        "SELECT model, enabled, context_limit, protocol FROM provider_models \
+         WHERE provider_id = ? ORDER BY sort_order",
+    )
+    .bind(PROVIDER)
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        rows,
+        vec![
+            ("gpt-4o".to_owned(), 1, Some(128_000), None),
+            ("flux-pro".to_owned(), 0, None, Some("anthropic".to_owned())),
+        ],
+        "the 014-backfilled rows must survive the 016 column drop verbatim"
+    );
+}
+
+#[tokio::test]
 async fn fresh_database_passes_schema_contract_with_new_tables() {
     // init_database_memory runs ALL migrations + the id schema contract.
     let db = nomifun_db::init_database_memory().await.unwrap();

@@ -10,7 +10,7 @@ use nomi_providers::{LlmProvider, ProviderError, create_provider};
 use nomi_types::llm::{LlmEvent, LlmRequest};
 use nomi_types::message::{ContentBlock, Message, Role};
 use nomifun_common::{AppError, ProviderId};
-use nomifun_db::IProviderRepository;
+use nomifun_db::{IProviderModelRepository, IProviderRepository};
 
 use crate::types::NomiCompatOverrides;
 
@@ -43,13 +43,17 @@ pub(crate) struct ResolvedProviderFields {
 }
 
 /// Load a provider row from the DB, decrypt its API key, map platform to nomi
-/// provider name, and resolve base URL / compat / bedrock fields.
+/// provider name, and resolve base URL / compat / bedrock fields. The
+/// per-model protocol override and context limit come from the model's
+/// `provider_models` row (absent row → no override, matching the legacy
+/// "no map entry" semantics).
 ///
 /// This is the shared extraction used by both the full `resolve_provider_config`
 /// (which also calls `Config::resolve`) and the nomi factory `build()` (which
 /// passes the pieces into `NomiResolvedConfig`).
 pub(crate) async fn resolve_provider_fields(
     provider_repo: &Arc<dyn IProviderRepository>,
+    provider_model_repo: &Arc<dyn IProviderModelRepository>,
     encryption_key: &[u8; 32],
     provider_id: &str,
     model: &str,
@@ -59,10 +63,15 @@ pub(crate) async fn resolve_provider_fields(
         .await
         .map_err(|e| AppError::Internal(format!("Failed to load provider config: {e}")))?
         .ok_or_else(|| AppError::BadRequest(format!("Provider '{provider_id}' not found")))?;
+    let model_row = provider_model_repo
+        .get(provider_id, model)
+        .await
+        .map_err(|e| AppError::Internal(format!("Failed to load provider model row: {e}")))?;
 
     let api_key = nomifun_common::decrypt_string(&row.api_key_encrypted, encryption_key)?;
 
-    let provider = map_nomi_provider(&row.platform, model, row.model_protocols.as_deref());
+    let protocol = model_row.as_ref().and_then(|m| m.protocol.as_deref());
+    let provider = map_nomi_provider(&row.platform, protocol);
 
     let (base_url, mut compat_overrides) =
         resolve_nomi_url_and_compat(&row.platform, &row.base_url, &provider, row.is_full_url);
@@ -88,7 +97,9 @@ pub(crate) async fn resolve_provider_fields(
         base_url,
         compat_overrides,
         bedrock_config,
-        context_limit: resolve_model_context_limit(row.model_context_limits.as_deref(), model),
+        context_limit: model_row
+            .and_then(|m| m.context_limit)
+            .filter(|value| *value > 0),
     })
 }
 
@@ -105,6 +116,7 @@ pub(crate) async fn resolve_provider_fields(
 /// callers must read the model from `fields.model` (not the requested id).
 pub(crate) async fn resolve_provider_fields_with_fallback(
     provider_repo: &Arc<dyn IProviderRepository>,
+    provider_model_repo: &Arc<dyn IProviderModelRepository>,
     encryption_key: &[u8; 32],
     provider_id: &str,
     model: &str,
@@ -124,10 +136,17 @@ pub(crate) async fn resolve_provider_fields_with_fallback(
         .is_some();
 
     if stored_ok {
-        return resolve_provider_fields(provider_repo, encryption_key, provider_id, model).await;
+        return resolve_provider_fields(
+            provider_repo,
+            provider_model_repo,
+            encryption_key,
+            provider_id,
+            model,
+        )
+        .await;
     }
 
-    match crate::resolve_default_model(provider_repo).await {
+    match crate::resolve_default_model(provider_repo, provider_model_repo).await {
         Some((pid, m)) => {
             tracing::warn!(
                 requested_provider = %provider_id,
@@ -135,22 +154,13 @@ pub(crate) async fn resolve_provider_fields_with_fallback(
                 fallback_model = %m,
                 "conversation provider unavailable; falling back to first enabled model"
             );
-            resolve_provider_fields(provider_repo, encryption_key, &pid, &m).await
+            resolve_provider_fields(provider_repo, provider_model_repo, encryption_key, &pid, &m)
+                .await
         }
         None => Err(AppError::ProviderUnavailable(
             "no enabled model provider is configured".into(),
         )),
     }
-}
-
-fn resolve_model_context_limit(
-    model_context_limits: Option<&str>,
-    model: &str,
-) -> Option<i64> {
-    model_context_limits
-        .and_then(|raw| serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(raw).ok())
-        .and_then(|map| map.get(model).and_then(serde_json::Value::as_i64))
-        .filter(|value| *value > 0)
 }
 
 /// Resolve a provider DB row into a base `Config` suitable for LLM calls.
@@ -163,12 +173,20 @@ fn resolve_model_context_limit(
 /// servers, session directory, session mode) — callers layer those on top.
 pub async fn resolve_provider_config(
     provider_repo: &Arc<dyn IProviderRepository>,
+    provider_model_repo: &Arc<dyn IProviderModelRepository>,
     encryption_key: &[u8; 32],
     provider_id: &str,
     model: &str,
     workspace: &Path,
 ) -> Result<Config, AppError> {
-    let fields = resolve_provider_fields(provider_repo, encryption_key, provider_id, model).await?;
+    let fields = resolve_provider_fields(
+        provider_repo,
+        provider_model_repo,
+        encryption_key,
+        provider_id,
+        model,
+    )
+    .await?;
 
     let cli_args = CliArgs {
         provider: Some(fields.provider),
@@ -555,20 +573,6 @@ mod tests {
         assert!(matches!(err, AppError::BadGateway(_)));
     }
 
-    #[test]
-    fn resolve_model_context_limit_uses_only_selected_model_map_entry() {
-        let per_model = r#"{"model-a":32000,"model-b":128000}"#;
-
-        assert_eq!(
-            resolve_model_context_limit(Some(per_model), "model-b"),
-            Some(128_000)
-        );
-        assert_eq!(resolve_model_context_limit(Some(per_model), "missing"), None);
-        assert_eq!(resolve_model_context_limit(Some(per_model), "model-a"), Some(32_000));
-        assert_eq!(resolve_model_context_limit(None, "model-a"), None);
-        assert_eq!(resolve_model_context_limit(Some(r#"{"model-a":0}"#), "model-a"), None);
-    }
-
     // The kinded drain forwards TextDelta as DeltaKind::Text and ThinkingDelta as
     // DeltaKind::Reasoning, but the RETURNED text is built from TextDelta ONLY —
     // byte-for-byte identical to the one-shot answer (reasoning is observability,
@@ -685,11 +689,12 @@ mod fallback_tests {
     const PROVIDER_DEAD: &str = "0190f5fe-7c00-7a00-8000-000000000099";
 
     // Copied (and lightly adapted) from knowledge_completer.rs tests: the same
-    // `ListOnlyRepo` + `provider(...)` fixture. `api_key_encrypted` is a REAL
-    // AES-GCM ciphertext under the all-zero test key so `resolve_provider_fields`
-    // (which decrypts) succeeds — an empty string would fail decrypt. `models`
-    // takes a `&[&str]` and is serialized to the JSON the repo stores.
-    fn provider(id: &str, enabled: bool, models: &[&str], model_enabled: Option<&str>) -> Provider {
+    // `ListOnlyRepo`/`ListOnlyModelRepo` + `provider(...)` fixture.
+    // `api_key_encrypted` is a REAL AES-GCM ciphertext under the all-zero
+    // test key so `resolve_provider_fields` (which decrypts) succeeds — an
+    // empty string would fail decrypt. Per-model state lives on the stubbed
+    // `provider_models` rows.
+    fn provider(id: &str, enabled: bool) -> Provider {
         Provider {
             id: 0,
             provider_id: id.into(),
@@ -698,14 +703,8 @@ mod fallback_tests {
             base_url: String::new(),
             api_key_encrypted: nomifun_common::encrypt_string("sk-test", &[0u8; 32])
                 .expect("encrypt test api key"),
-            models: serde_json::to_string(models).expect("serialize models"),
             enabled,
             capabilities: "[]".into(),
-            model_context_limits: None,
-            model_protocols: None,
-            model_descriptions: None,
-            model_enabled: model_enabled.map(str::to_owned),
-            model_health: None,
             bedrock_config: None,
             is_full_url: false,
             sort_order: 0,
@@ -739,10 +738,28 @@ mod fallback_tests {
         Arc::new(ListOnlyRepo(providers))
     }
 
+    fn rows_for(provider_id: &str, models: &[&str]) -> Arc<dyn IProviderModelRepository> {
+        Arc::new(crate::knowledge_completer::tests::ListOnlyModelRepo(
+            models
+                .iter()
+                .enumerate()
+                .map(|(index, model)| {
+                    crate::knowledge_completer::tests::model_row(
+                        provider_id,
+                        model,
+                        true,
+                        index as i64,
+                    )
+                })
+                .collect(),
+        ))
+    }
+
     #[tokio::test]
     async fn fallback_uses_stored_provider_when_present() {
-        let repo = list_only(vec![provider(PROVIDER_A, true, &["m1"], None)]);
-        let f = resolve_provider_fields_with_fallback(&repo, &[0u8; 32], PROVIDER_A, "m1")
+        let repo = list_only(vec![provider(PROVIDER_A, true)]);
+        let models = rows_for(PROVIDER_A, &["m1"]);
+        let f = resolve_provider_fields_with_fallback(&repo, &models, &[0u8; 32], PROVIDER_A, "m1")
             .await
             .unwrap();
         assert_eq!(f.model, "m1");
@@ -750,27 +767,34 @@ mod fallback_tests {
 
     #[tokio::test]
     async fn fallback_to_first_enabled_when_provider_missing() {
-        let repo = list_only(vec![provider(PROVIDER_A, true, &["m1"], None)]);
-        let f = resolve_provider_fields_with_fallback(&repo, &[0u8; 32], PROVIDER_DEAD, "mX")
-            .await
-            .unwrap();
+        let repo = list_only(vec![provider(PROVIDER_A, true)]);
+        let models = rows_for(PROVIDER_A, &["m1"]);
+        let f =
+            resolve_provider_fields_with_fallback(&repo, &models, &[0u8; 32], PROVIDER_DEAD, "mX")
+                .await
+                .unwrap();
         assert_eq!(f.model, "m1"); // 回退到首个可用
     }
 
     #[tokio::test]
     async fn empty_provider_id_is_rejected() {
-        let repo = list_only(vec![provider(PROVIDER_A, true, &["m1"], None)]);
-        let result = resolve_provider_fields_with_fallback(&repo, &[0u8; 32], "", "m1").await;
+        let repo = list_only(vec![provider(PROVIDER_A, true)]);
+        let models = rows_for(PROVIDER_A, &["m1"]);
+        let result =
+            resolve_provider_fields_with_fallback(&repo, &models, &[0u8; 32], "", "m1").await;
         assert!(matches!(result, Err(AppError::BadRequest(_))));
     }
 
     #[tokio::test]
     async fn fallback_errors_provider_unavailable_when_none() {
-        let repo = list_only(vec![provider(PROVIDER_A, false, &["m1"], None)]); // disabled
+        let repo = list_only(vec![provider(PROVIDER_A, false)]); // disabled
+        let models = rows_for(PROVIDER_A, &["m1"]);
         // NB: match on the `Result` directly rather than `.unwrap_err()` — the Ok
         // variant (`ResolvedProviderFields`) intentionally does not derive `Debug`
         // (it holds a decrypted api key we must not risk logging).
-        let result = resolve_provider_fields_with_fallback(&repo, &[0u8; 32], PROVIDER_DEAD, "m").await;
+        let result =
+            resolve_provider_fields_with_fallback(&repo, &models, &[0u8; 32], PROVIDER_DEAD, "m")
+                .await;
         assert!(matches!(result, Err(AppError::ProviderUnavailable(_))));
     }
 }
