@@ -18,6 +18,7 @@
  */
 
 import { useMemo } from 'react';
+import { modelNamesOf } from '@/common/utils/providerModels';
 import { useProvidersQuery } from '@renderer/hooks/agent/useModelProviderList';
 import { useModelsForTask, type TaskModelGroup } from '@renderer/hooks/agent/useModelsForTask';
 import { filterCreationModels, useCreationModels } from '@renderer/pages/modelHub/creationModels';
@@ -67,7 +68,7 @@ export function useGeneratorModels(mode: GenMode): GeneratorModels {
 
   return useMemo<GeneratorModels>(() => {
     const hasProviders =
-      (rawProviders ?? []).some((p) => p.enabled !== false && (p.models ?? []).length > 0) || chatGroups.length > 0;
+      (rawProviders ?? []).some((p) => p.enabled !== false && modelNamesOf(p).length > 0) || chatGroups.length > 0;
 
     if (mode === 'text' || mode === 'tts') {
       const flat = flattenTaskGroups(mode === 'text' ? chatGroups : ttsGroups, providerLabel);

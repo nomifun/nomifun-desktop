@@ -110,7 +110,7 @@ async fn setup_with_workspace_root(
     let db = init_database_memory().await.unwrap();
     let repo = Arc::new(SqliteConversationRepository::new(db.pool().clone()));
     let provider_repo = nomifun_db::SqliteProviderRepository::new(db.pool().clone());
-    provider_repo.create(nomifun_db::CreateProviderParams { provider_id: Some("0190f5fe-7c00-7a00-8000-000000000001"), platform: "openai", name: "test", base_url: "https://example.invalid", api_key_encrypted: "", models: "[\"m1\",\"gpt-4o\",\"claude-sonnet-4-20250514\"]", enabled: true, capabilities: "[]", model_context_limits: None, model_protocols: None, model_descriptions: None, model_enabled: None, model_health: None, bedrock_config: None, is_full_url: false, sort_order: Some(0) }).await.unwrap();
+    provider_repo.create(nomifun_db::CreateProviderParams { provider_id: Some("0190f5fe-7c00-7a00-8000-000000000001"), platform: "openai", name: "test", base_url: "https://example.invalid", api_key_encrypted: "", models: "[\"m1\",\"gpt-4o\",\"claude-sonnet-4-20250514\"]", enabled: true, model_context_limits: None, model_protocols: None, model_descriptions: None, model_enabled: None, bedrock_config: None, is_full_url: false, sort_order: Some(0) }).await.unwrap();
     let broadcaster = Arc::new(TestBroadcaster::new());
     let agent_metadata_repo: Arc<dyn nomifun_db::IAgentMetadataRepository> =
         Arc::new(nomifun_db::SqliteAgentMetadataRepository::new(db.pool().clone()));

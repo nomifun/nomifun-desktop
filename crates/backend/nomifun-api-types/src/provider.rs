@@ -142,6 +142,10 @@ pub struct ProviderResponse {
     pub api_key: String,
     pub models: Vec<String>,
     pub enabled: bool,
+    /// Retired: the providers.capabilities column was dropped in migration
+    /// 017, so this is always `[]`. The field is kept for wire-shape
+    /// compatibility only.
+    #[serde(default)]
     pub capabilities: Vec<ModelCapability>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model_context_limits: Option<HashMap<String, i64>>,
@@ -187,6 +191,9 @@ pub struct CreateProviderRequest {
     pub models: Vec<String>,
     #[serde(default = "default_true")]
     pub enabled: bool,
+    /// Accepted-and-ignored since P3: the providers.capabilities column was
+    /// dropped in migration 017. Kept so older clients sending it are not
+    /// rejected by `deny_unknown_fields`.
     #[serde(default)]
     pub capabilities: Vec<ModelCapability>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -197,6 +204,9 @@ pub struct CreateProviderRequest {
     pub model_descriptions: Option<HashMap<String, String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model_enabled: Option<HashMap<String, bool>>,
+    /// Accepted-and-ignored since P3: the server-side health probe is the
+    /// only health writer. Kept so older clients sending it are not rejected
+    /// by `deny_unknown_fields`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model_health: Option<HashMap<String, ModelHealthStatus>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -214,6 +224,10 @@ fn default_true() -> bool {
 /// Request body for `PUT /api/providers/:id`.
 ///
 /// All fields are optional — partial update semantics.
+///
+/// `capabilities` and `model_health` are accepted-and-ignored since P3:
+/// the providers.capabilities column was dropped in migration 017, and the
+/// server-side health probe is the only health writer.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 pub struct UpdateProviderRequest {
@@ -223,15 +237,31 @@ pub struct UpdateProviderRequest {
     pub api_key: Option<String>,
     pub models: Option<Vec<String>>,
     pub enabled: Option<bool>,
+    /// Accepted-and-ignored since P3 (column dropped in migration 017).
     pub capabilities: Option<Vec<ModelCapability>>,
     pub model_context_limits: Option<HashMap<String, i64>>,
     pub model_protocols: Option<HashMap<String, String>>,
     pub model_descriptions: Option<HashMap<String, String>>,
     pub model_enabled: Option<HashMap<String, bool>>,
+    /// Accepted-and-ignored since P3 (the server probe is the only health
+    /// writer).
     pub model_health: Option<HashMap<String, ModelHealthStatus>>,
     pub bedrock_config: Option<BedrockConfig>,
     pub is_full_url: Option<bool>,
     pub sort_order: Option<i64>,
+}
+
+/// Request body for `POST /api/providers/:id/clone`.
+///
+/// The body is optional on the wire: a missing/empty body clones with the
+/// default `"{source name} copy"` name.
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct CloneProviderRequest {
+    /// Optional display name for the clone. A trimmed non-empty value wins;
+    /// missing/blank falls back to `"{source name} copy"`.
+    #[serde(default)]
+    pub name: Option<String>,
 }
 
 /// Request body for `POST /api/providers/:id/models`.
@@ -585,6 +615,27 @@ mod tests {
     // -- CreateProviderRequest --
 
     #[test]
+    fn test_provider_response_capabilities_defaults_when_absent() {
+        // Retired field: servers ≥ P3 always send [], but the serde default
+        // also tolerates the field being dropped entirely.
+        let raw = json!({
+            "provider_id": PROVIDER_ID,
+            "platform": "openai",
+            "name": "OpenAI",
+            "base_url": "https://api.openai.com",
+            "api_key": "sk-test",
+            "models": [],
+            "enabled": true,
+            "is_full_url": false,
+            "sort_order": 0,
+            "created_at": 0,
+            "updated_at": 0
+        });
+        let resp: ProviderResponse = serde_json::from_value(raw).unwrap();
+        assert!(resp.capabilities.is_empty());
+    }
+
+    #[test]
     fn test_create_provider_request_required_fields() {
         let raw = json!({
             "platform": "anthropic",
@@ -729,6 +780,36 @@ mod tests {
         let req: UpdateProviderRequest = serde_json::from_value(raw).unwrap();
         assert!(req.platform.is_none());
         assert!(req.name.is_none());
+    }
+
+    // -- CloneProviderRequest --
+
+    #[test]
+    fn test_clone_provider_request_empty_object_defaults() {
+        let req: CloneProviderRequest = serde_json::from_value(json!({})).unwrap();
+        assert_eq!(req, CloneProviderRequest::default());
+        assert!(req.name.is_none());
+    }
+
+    #[test]
+    fn test_clone_provider_request_with_name() {
+        let req: CloneProviderRequest =
+            serde_json::from_value(json!({"name": "My clone"})).unwrap();
+        assert_eq!(req.name.as_deref(), Some("My clone"));
+    }
+
+    #[test]
+    fn test_clone_provider_request_null_name() {
+        let req: CloneProviderRequest =
+            serde_json::from_value(json!({"name": null})).unwrap();
+        assert!(req.name.is_none());
+    }
+
+    #[test]
+    fn test_clone_provider_request_rejects_unknown_fields() {
+        assert!(
+            serde_json::from_value::<CloneProviderRequest>(json!({"nmae": "typo"})).is_err()
+        );
     }
 
     // -- FetchModelsRequest --

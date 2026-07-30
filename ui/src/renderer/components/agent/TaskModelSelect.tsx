@@ -12,6 +12,7 @@ import { Brain, Down, Plus } from '@icon-park/react';
 import type { ModelTask, ModelTrait } from '@/common/config/storage';
 import type { ProviderId } from '@/common/types/ids';
 import { compositeKey } from '@/common/utils/compositeKey';
+import { modelHealthOf } from '@/common/utils/providerModels';
 import { iconColors } from '@/renderer/styles/colors';
 import { useModelsForTask } from '@/renderer/hooks/agent/useModelsForTask';
 import { useModelSelectorProviderLabel } from '@/renderer/hooks/agent/useModelSelectorProviderLabel';
@@ -97,7 +98,7 @@ const TaskModelSelect: React.FC<TaskModelSelectProps> = ({
         : groups.map(({ provider, models }) => (
             <Menu.ItemGroup title={providerLabel(provider)} key={provider.id}>
               {models.map((modelName) => {
-                const healthStatus = provider.model_health?.[modelName]?.status || 'unknown';
+                const healthStatus = modelHealthOf(provider, modelName)?.status || 'unknown';
                 const healthColor =
                   healthStatus === 'healthy'
                     ? 'bg-green-500'

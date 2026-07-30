@@ -704,7 +704,6 @@ mod fallback_tests {
             api_key_encrypted: nomifun_common::encrypt_string("sk-test", &[0u8; 32])
                 .expect("encrypt test api key"),
             enabled,
-            capabilities: "[]".into(),
             bedrock_config: None,
             is_full_url: false,
             sort_order: 0,

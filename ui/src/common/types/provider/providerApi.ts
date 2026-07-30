@@ -12,7 +12,7 @@
  * backend spec.
  */
 
-import type { IProvider, ModelCapability, ModelProfile, ModelTask, ModelTrait } from '@/common/config/storage';
+import type { IProvider, ModelProfile, ModelTask, ModelTrait } from '@/common/config/storage';
 import type { ProviderModelResponse } from '@/common/types/provider/providerModel';
 import { parseProviderId, type ProviderId } from '@/common/types/ids';
 
@@ -21,6 +21,10 @@ import { parseProviderId, type ProviderId } from '@/common/types/ids';
  *
  * The wire uses `provider_id`; renderer code deliberately keeps using
  * `IProvider.id`. Do not collapse the two shapes or read a wire-level `id`.
+ *
+ * The wire still carries a vestigial `capabilities: []` field; it is
+ * deliberately not mirrored here and never passed through to `IProvider`
+ * (row-level `models_detail` tasks/traits are the capability authority).
  */
 export interface ProviderResponse {
   provider_id: string;
@@ -30,7 +34,6 @@ export interface ProviderResponse {
   api_key: string;
   models: string[];
   enabled: boolean;
-  capabilities: ModelCapability[];
   model_context_limits?: Record<string, number>;
   model_protocols?: Record<string, string>;
   model_descriptions?: Record<string, string>;
@@ -61,7 +64,6 @@ export interface CreateProviderRequest {
   models?: string[];
   enabled?: boolean;
   sort_order?: number;
-  capabilities?: ModelCapability[];
   model_context_limits?: Record<string, number>;
   model_protocols?: Record<string, string>;
   model_descriptions?: Record<string, string>;
@@ -89,7 +91,6 @@ export function fromProviderResponse(response: ProviderResponse): IProvider {
     api_key: response.api_key,
     models: response.models,
     enabled: response.enabled,
-    capabilities: response.capabilities,
     model_context_limits: response.model_context_limits,
     model_protocols: response.model_protocols,
     model_descriptions: response.model_descriptions,
@@ -113,7 +114,6 @@ export function toCreateProviderRequest(input: CreateProviderInput): CreateProvi
     models: input.models,
     enabled: input.enabled,
     sort_order: input.sort_order,
-    capabilities: input.capabilities,
     model_context_limits: input.model_context_limits,
     model_protocols: input.model_protocols,
     model_descriptions: input.model_descriptions,
@@ -136,7 +136,6 @@ export interface UpdateProviderRequest {
   models?: string[];
   enabled?: boolean;
   sort_order?: number;
-  capabilities?: ModelCapability[];
   model_context_limits?: Record<string, number>;
   model_protocols?: Record<string, string>;
   model_descriptions?: Record<string, string>;
