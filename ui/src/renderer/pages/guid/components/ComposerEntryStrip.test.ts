@@ -92,4 +92,26 @@ describe('Guid composer entry strip polish', () => {
     expect(presetPickerPos).toBeGreaterThan(-1);
     expect(policyPos).toBeLessThan(presetPickerPos);
   });
+
+  test('offers the summon-companion entry to the left of the preset picker', () => {
+    const source = readSource(new URL('./ComposerEntryStrip.tsx', import.meta.url));
+
+    // Optional entry: the Guid page only wires it for nomi-typed launches.
+    expect(source.includes('onSummonCompanion?: () => void')).toBe(true);
+    expect(source.includes('summonedCompanionName')).toBe(true);
+    expect(source.includes('conversation.summon.button')).toBe(true);
+    expect(source.includes('onClick={onSummonCompanion}')).toBe(true);
+
+    const presetState = source.slice(
+      source.indexOf('// --- Preset selected state ---'),
+      source.indexOf('// --- Default state ---')
+    );
+    expect(presetState.includes('{summonEntry}')).toBe(true);
+
+    const defaultState = source.slice(source.indexOf('// --- Default state ---'));
+    const summonPos = defaultState.indexOf('{summonEntry}');
+    const presetPickerPos = defaultState.indexOf('onClick={onChoosePreset}');
+    expect(summonPos).toBeGreaterThan(-1);
+    expect(summonPos).toBeLessThan(presetPickerPos);
+  });
 });
