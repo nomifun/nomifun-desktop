@@ -8,8 +8,10 @@ mod config;
 mod browser_mcp_server;
 #[cfg(feature = "browser-use")]
 mod browser_lane_provider;
+// Public only for `BUNDLED_CHROME_DIR_ENV`: the desktop shell resolves the
+// Tauri resource dir and publishes it through that env seam (F48).
 #[cfg(feature = "browser-use")]
-mod browser_resource;
+pub mod browser_resource;
 mod provider_deletion;
 mod router;
 mod services;

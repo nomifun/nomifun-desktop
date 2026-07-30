@@ -13,7 +13,6 @@ import {
 import { ipcBridge } from '@/common';
 import { toDisplayText } from '@/common/chat/displayText';
 import { useConversationContextSafe } from '@/renderer/hooks/context/ConversationContext';
-import { useLayoutContext } from '@/renderer/hooks/context/LayoutContext';
 import { iconColors } from '@/renderer/styles/colors';
 import { Alert, Message, Tooltip } from '@arco-design/web-react';
 import { CheckOne, CloseOne, Copy, Edit, Info, Loading } from '@icon-park/react';
@@ -311,7 +310,11 @@ const useFormatContent = (content: string) => {
   }, [content]);
 };
 
-const MessageText: React.FC<{ message: IMessageText; hideActions?: boolean }> = ({ message, hideActions = false }) => {
+const MessageText: React.FC<{
+  message: IMessageText;
+  hideActions?: boolean;
+  actionsOnly?: boolean;
+}> = ({ message, hideActions = false, actionsOnly = false }) => {
   // Filter think tags from content before rendering
   // 在渲染前过滤 think 标签
   const contentToRender = useMemo(() => {
@@ -335,9 +338,7 @@ const MessageText: React.FC<{ message: IMessageText; hideActions?: boolean }> = 
   const writebackState = !isUserMessage ? message.content.knowledge_writeback : undefined;
   const shouldRenderPlainText = isUserMessage;
   const conversationContext = useConversationContextSafe();
-  const layout = useLayoutContext();
-  const isMobile = layout?.isMobile ?? false;
-  const shouldShowActions = !hideActions && !isMobile;
+  const shouldShowActions = !hideActions;
   const resolvedFiles = useMemo(
     () => files.map((file_path) => resolveMessageFilePath(file_path, conversationContext?.workspace)),
     [conversationContext?.workspace, files]
@@ -376,11 +377,12 @@ const MessageText: React.FC<{ message: IMessageText; hideActions?: boolean }> = 
   const copyButton = (
     <Tooltip content={t('common.copy', { defaultValue: 'Copy' })}>
       <div
-        className='p-4px rd-4px cursor-pointer hover:bg-3 transition-colors opacity-0 pointer-events-none group-hover:opacity-100 group-hover:pointer-events-auto focus-within:opacity-100 focus-within:pointer-events-auto'
+        data-testid='message-copy-action'
+        className='flex h-24px w-24px shrink-0 items-center justify-center rd-4px cursor-pointer text-t-secondary hover:bg-3 transition-colors'
         onClick={handleCopy}
         style={{ lineHeight: 0 }}
       >
-        <Copy theme='outline' size='16' fill={iconColors.secondary} />
+        <Copy theme='outline' size='16' fill='currentColor' />
       </div>
     </Tooltip>
   );
@@ -419,6 +421,41 @@ const MessageText: React.FC<{ message: IMessageText; hideActions?: boolean }> = 
   const senderAgentType = message.content.senderAgentType;
   const senderConversationId = message.content.senderConversationId;
   const fallbackBackendLogo = senderAgentType ? getAgentLogo(senderAgentType) : null;
+  const actionsRow = shouldShowActions ? (
+    <div
+      data-testid='message-actions'
+      className={classNames('message-text-actions h-28px flex items-center mt-4px gap-6px text-t-secondary', {
+        'flex-row-reverse': isUserMessage,
+      })}
+    >
+      {copyButton}
+      {editButton}
+      {message.created_at && (
+        <span className='text-12px leading-20px text-inherit select-none'>
+          {formatMessageTime(message.created_at)}
+        </span>
+      )}
+    </div>
+  ) : null;
+  const copyAlert = showCopyAlert ? (
+    <Alert
+      type='success'
+      content={t('messages.copySuccess')}
+      showIcon
+      className='fixed top-20px left-50% transform -translate-x-50% z-9999 w-max max-w-[80%]'
+      style={{ boxShadow: '0px 2px 12px rgba(0,0,0,0.12)' }}
+      closable={false}
+    />
+  ) : null;
+
+  if (actionsOnly) {
+    return (
+      <>
+        {actionsRow}
+        {copyAlert}
+      </>
+    );
+  }
 
   return (
     <>
@@ -501,34 +538,9 @@ const MessageText: React.FC<{ message: IMessageText; hideActions?: boolean }> = 
             messageId={message.message_id ?? message.msg_id}
           />
         )}
-        {/* Hover-revealed copy + timestamp row. Mobile has no hover affordance,
-            so we drop the row entirely — system-level long-press still copies. */}
-        {shouldShowActions && (
-          <div
-            className={classNames('h-32px flex items-center mt-4px gap-8px', {
-              'flex-row-reverse': isUserMessage,
-            })}
-          >
-            {copyButton}
-            {editButton}
-            {message.created_at && (
-              <span className='text-12px text-t-secondary opacity-0 group-hover:opacity-100 transition-opacity select-none'>
-                {formatMessageTime(message.created_at)}
-              </span>
-            )}
-          </div>
-        )}
+        {actionsRow}
       </div>
-      {showCopyAlert && (
-        <Alert
-          type='success'
-          content={t('messages.copySuccess')}
-          showIcon
-          className='fixed top-20px left-50% transform -translate-x-50% z-9999 w-max max-w-[80%]'
-          style={{ boxShadow: '0px 2px 12px rgba(0,0,0,0.12)' }}
-          closable={false}
-        />
-      )}
+      {copyAlert}
     </>
   );
 };

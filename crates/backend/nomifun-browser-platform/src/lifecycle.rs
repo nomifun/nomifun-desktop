@@ -720,6 +720,28 @@ where
             .run_bounded(observed_epoch, attempt_timeout, restart)
             .await
     }
+
+    /// Drops the gate for a key whose Host no longer exists.
+    ///
+    /// The map is keyed by identifiers that can churn (isolated-lane UUIDs,
+    /// replica identity generations); without eviction every failed Host on a
+    /// unique key retains its gate for the process lifetime. A gate with an
+    /// in-flight attempt is kept so the single-flight guarantee is never
+    /// split across two gate instances.
+    pub async fn evict_settled(&self, key: &K) {
+        let mut gates = self.gates.lock().await;
+        if let Some(gate) = gates.get(key)
+            && gate.inner.state.lock().await.in_flight.is_some()
+        {
+            return;
+        }
+        gates.remove(key);
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn gate_count(&self) -> usize {
+        self.gates.lock().await.len()
+    }
 }
 
 fn host_restart_timeout_error(
@@ -918,6 +940,72 @@ mod tests {
         assert_eq!(stale.metadata["current_epoch"], 8);
         assert_eq!(stale.metadata["fresh_observe_required"], true);
         assert!(HostRestartTransition::new(8, 8).is_err());
+    }
+
+    #[tokio::test]
+    async fn evict_settled_reclaims_idle_gates_but_never_an_in_flight_attempt() {
+        let flights = Arc::new(PerKeyHostRestartSingleFlight::<String>::default());
+        let release = Arc::new(Semaphore::new(0));
+
+        // A settled gate for a churned key is reclaimable.
+        let settled = flights
+            .run("isolated-a".into(), 1, || async {
+                HostRestartTransition::new(1, 2)
+            })
+            .await;
+        assert!(settled.result.is_ok());
+        assert_eq!(flights.gate_count().await, 1);
+        flights.evict_settled(&"isolated-a".to_string()).await;
+        assert_eq!(flights.gate_count().await, 0);
+
+        // An in-flight attempt keeps its gate so followers still join it.
+        let leader = {
+            let flights = flights.clone();
+            let release = release.clone();
+            tokio::spawn(async move {
+                flights
+                    .run("isolated-b".into(), 5, move || async move {
+                        let permit = release.acquire().await.unwrap();
+                        permit.forget();
+                        HostRestartTransition::new(5, 6)
+                    })
+                    .await
+            })
+        };
+        while flights
+            .gate("isolated-b".into())
+            .await
+            .active_observed_epoch()
+            .await
+            != Some(5)
+        {
+            tokio::task::yield_now().await;
+        }
+        flights.evict_settled(&"isolated-b".to_string()).await;
+        assert_eq!(
+            flights.gate_count().await,
+            1,
+            "an in-flight gate must survive eviction"
+        );
+        let follower = {
+            let flights = flights.clone();
+            tokio::spawn(async move {
+                flights
+                    .run("isolated-b".into(), 5, || async {
+                        panic!("follower must join the retained in-flight attempt")
+                    })
+                    .await
+            })
+        };
+        release.add_permits(1);
+        assert!(leader.await.unwrap().result.is_ok());
+        assert_eq!(
+            follower.await.unwrap().result.unwrap(),
+            HostRestartTransition {
+                old_epoch: 5,
+                new_epoch: 6,
+            }
+        );
     }
 
     #[tokio::test]

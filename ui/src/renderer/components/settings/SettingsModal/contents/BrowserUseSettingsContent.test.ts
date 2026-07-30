@@ -5,13 +5,18 @@
  */
 
 import { readFileSync } from 'node:fs';
-import { describe, expect, test } from 'bun:test';
+import { afterEach, describe, expect, test } from 'bun:test';
+import { AUTH_EXPIRED_EVENT } from '@/common/adapter/httpBridge';
 import {
   BROWSER_SETTINGS_OVERVIEW_RETRY_DELAYS_MS,
   BROWSER_RESOURCE_POLICY_LIMITS,
+  beginBrowserLoginPromotionWatch,
   browserSettingsServerErrorMessage,
+  cancelBrowserLoginPromotionWatch,
   createBrowserSettingsCapabilityLoader,
+  hasBrowserLoginPromotionWatch,
   persistBrowserSecuritySettingsTransaction,
+  startBrowserLoginPromotionPoll,
   validateBrowserResourcePolicy,
 } from './BrowserUseSettingsContent';
 
@@ -70,12 +75,38 @@ const createManualScheduler = () => {
   };
 };
 
+const createPromotionScheduler = () => {
+  const pending = new Map<number, () => void | Promise<void>>();
+  let nextId = 0;
+  return {
+    schedule: (callback: () => void | Promise<void>) => {
+      const id = ++nextId;
+      pending.set(id, callback);
+      return id;
+    },
+    cancel: (handle: unknown) => {
+      pending.delete(handle as number);
+    },
+    run: async () => {
+      const entry = pending.entries().next().value as
+        | [number, () => void | Promise<void>]
+        | undefined;
+      if (!entry) return;
+      pending.delete(entry[0]);
+      await entry[1]();
+    },
+    count: () => pending.size,
+  };
+};
+
 describe('Browser Use settings contract', () => {
   test('trusts only v2 local fallback state and applies display mode through the live API', () => {
     const source = readSource(new URL('./BrowserUseSettingsContent.tsx', import.meta.url));
 
     expect(source.includes("configService.get('agent.browserUse.displayModeVersion')")).toBe(true);
-    expect(source.includes("configService.get('agent.browserUse.silent')")).toBe(false);
+    // The legacy silent value participates in migration classification only;
+    // it must never be written back.
+    expect(source.includes("silent: configService.get('agent.browserUse.silent')")).toBe(true);
     expect(source.includes("configService.set('agent.browserUse.displayMode'")).toBe(false);
     expect(source.includes('ipcBridge.browserSession.displayMode.get.invoke()')).toBe(true);
     expect(source.includes('ipcBridge.browserSession.displayMode.put.invoke')).toBe(true);
@@ -650,11 +681,350 @@ describe('Browser Use settings contract', () => {
       'browserResourcePolicySaving',
       'browserResourcePolicyHighConcurrency',
       'browserResourcePolicyAdvanced',
+      'browserLoginQueuedHint',
     ];
 
     for (const key of requiredKeys) {
       expect(en[key]).toBeTruthy();
       expect(zh[key]).toBeTruthy();
     }
+  });
+
+  test('distinguishes a queued login lane from an opened one', () => {
+    const source = readSource(new URL('./BrowserUseSettingsContent.tsx', import.meta.url));
+
+    // active:true + message:'queued' means the lane is waiting for capacity —
+    // no window exists yet, so the "opened" toast would be a lie.
+    expect(source.includes("res.message === 'queued'")).toBe(true);
+    expect(source.includes("t('settings.browserLoginQueuedHint')")).toBe(true);
+    expect(source.includes('startBrowserLoginPromotionPoll')).toBe(true);
+  });
+
+  test('wires the queued promotion watch through the navigation-surviving singleton', () => {
+    const source = readSource(new URL('./BrowserUseSettingsContent.tsx', import.meta.url));
+
+    // The queued branch navigates to /browser immediately, which unmounts the
+    // routed settings page (/settings/browser-use). The watch must therefore
+    // live outside the component: e027cef5 stored the stop handle in
+    // loginPromotionStopRef and cancelled it from the unmount effect, killing
+    // the poll before its first 2s tick ever ran.
+    expect(source.includes('loginPromotionStopRef')).toBe(false);
+
+    // The component's watch callback delegates to the module singleton.
+    const watchCallbackStart = source.indexOf('const watchQueuedLoginPromotion');
+    const watchCallbackEnd = source.indexOf('const handleLoginToggle', watchCallbackStart);
+    expect(watchCallbackStart).toBeGreaterThan(-1);
+    expect(watchCallbackEnd).toBeGreaterThan(watchCallbackStart);
+    const watchCallback = source.slice(watchCallbackStart, watchCallbackEnd);
+    expect(watchCallback.includes('beginBrowserLoginPromotionWatch({')).toBe(true);
+    expect(watchCallback.includes('startBrowserLoginPromotionPoll(')).toBe(false);
+
+    // The queued branch begins the watch, then navigates.
+    const queuedBranch = source.indexOf("res.message === 'queued'");
+    expect(queuedBranch).toBeGreaterThan(-1);
+    const watchCall = source.indexOf('watchQueuedLoginPromotion(res.lane_id)', queuedBranch);
+    const navigateCall = source.indexOf("navigate('/browser')", queuedBranch);
+    expect(watchCall).toBeGreaterThan(queuedBranch);
+    expect(navigateCall).toBeGreaterThan(watchCall);
+
+    // Close-login still cancels the watch explicitly.
+    const closeBranch = source.indexOf('if (loginOpen) {');
+    const closeInvoke = source.indexOf('ipcBridge.browserLogin.close.invoke()', closeBranch);
+    expect(closeBranch).toBeGreaterThan(-1);
+    expect(closeInvoke).toBeGreaterThan(closeBranch);
+    expect(
+      source.slice(closeBranch, closeInvoke).includes('cancelBrowserLoginPromotionWatch()')
+    ).toBe(true);
+  });
+
+  test('sends a preset-only body on preset switch unless advanced was edited', () => {
+    const source = readSource(new URL('./BrowserUseSettingsContent.tsx', import.meta.url));
+    const handlerStart = source.indexOf('const handleResourcePolicyPresetChange');
+    const handlerEnd = source.indexOf('const handleResourcePolicyAdvancedChange');
+    const handler = source.slice(handlerStart, handlerEnd);
+    expect(handler.includes('buildBrowserResourcePolicyPresetRequest(')).toBe(true);
+    // The PUT body is the filtered request, never the echoed previous state.
+    expect(handler.includes('persistResourcePolicy(request')).toBe(true);
+    expect(handler.includes('persistResourcePolicy(next')).toBe(false);
+  });
+
+  test('saves user-edited advanced values under the custom preset', () => {
+    const source = readSource(new URL('./BrowserUseSettingsContent.tsx', import.meta.url));
+    const handlerStart = source.indexOf('const handleSaveResourcePolicyAdvanced');
+    const handlerEnd = source.indexOf('const persistSecuritySettings');
+    expect(handlerStart).toBeGreaterThan(-1);
+    expect(handlerEnd).toBeGreaterThan(handlerStart);
+    const handler = source.slice(handlerStart, handlerEnd);
+    // A named preset re-floors reserved_memory_bytes to 20% of total memory;
+    // only preset=custom makes the explicitly configured reserve take effect.
+    // The save handler therefore builds its body through the helper that
+    // resolves edited advanced values to custom.
+    expect(handler.includes('buildBrowserResourcePolicyAdvancedSaveRequest(')).toBe(true);
+    expect(handler.includes('persistResourcePolicy(request')).toBe(true);
+    expect(handler.includes('persistResourcePolicy(resourcePolicy)')).toBe(false);
+  });
+
+  test('keeps the source-change network write outside the setState updater', () => {
+    const source = readSource(new URL('./BrowserUseSettingsContent.tsx', import.meta.url));
+    const handlerStart = source.indexOf('const handleSourceChange');
+    const handlerEnd = source.indexOf('const handleDisplayModeChange');
+    const handler = source.slice(handlerStart, handlerEnd);
+
+    // React state updaters must stay pure: no configService.set / rollback
+    // inside a setSource((prev) => ...) callback.
+    expect(handler.includes('setSource((prev)')).toBe(false);
+    expect(handler.includes('configService.set(')).toBe(true);
+  });
+});
+
+describe('startBrowserLoginPromotionPoll', () => {
+  const manualScheduler = createPromotionScheduler;
+
+  test('announces the window only after the queued lane is promoted and foregrounded', async () => {
+    const scheduler = manualScheduler();
+    const outcomes: string[] = [];
+    let lifecycle = 'queued';
+    let foregroundCalls = 0;
+    startBrowserLoginPromotionPoll({
+      // Calling open() while the lane is still queued would tear the queued
+      // session down on the backend; promotion is observed via the lanes
+      // snapshot and open() is re-issued only once the lane runs.
+      probeLifecycle: async () => lifecycle,
+      foreground: async () => {
+        foregroundCalls += 1;
+        return true;
+      },
+      onOpened: () => outcomes.push('opened'),
+      onStopped: (reason) => outcomes.push(`stopped:${reason}`),
+      schedule: scheduler.schedule,
+      cancelScheduled: scheduler.cancel,
+    });
+
+    expect(outcomes).toEqual([]);
+    await scheduler.run();
+    expect(outcomes).toEqual([]);
+    expect(foregroundCalls).toBe(0);
+    lifecycle = 'running';
+    await scheduler.run();
+    expect(outcomes).toEqual(['opened']);
+    expect(foregroundCalls).toBe(1);
+    expect(scheduler.count()).toBe(0);
+  });
+
+  test('stops and reports when the queued lane fails or disappears', async () => {
+    const scheduler = manualScheduler();
+    for (const terminal of ['failed', null]) {
+      const outcomes: string[] = [];
+      startBrowserLoginPromotionPoll({
+        probeLifecycle: async () => terminal,
+        foreground: async () => true,
+        onOpened: () => outcomes.push('opened'),
+        onStopped: (reason) => outcomes.push(`stopped:${reason}`),
+        schedule: scheduler.schedule,
+        cancelScheduled: scheduler.cancel,
+      });
+      await scheduler.run();
+      expect(outcomes).toEqual(['stopped:failed']);
+      expect(scheduler.count()).toBe(0);
+    }
+  });
+
+  test('reports an unconfirmed foreground as failed instead of claiming a window', async () => {
+    const scheduler = manualScheduler();
+    const outcomes: string[] = [];
+    startBrowserLoginPromotionPoll({
+      probeLifecycle: async () => 'running',
+      foreground: async () => false,
+      onOpened: () => outcomes.push('opened'),
+      onStopped: (reason) => outcomes.push(`stopped:${reason}`),
+      schedule: scheduler.schedule,
+      cancelScheduled: scheduler.cancel,
+    });
+    await scheduler.run();
+    expect(outcomes).toEqual(['stopped:failed']);
+  });
+
+  test('gives up after the attempt budget and can be cancelled', async () => {
+    const scheduler = manualScheduler();
+    const outcomes: string[] = [];
+    startBrowserLoginPromotionPoll({
+      probeLifecycle: async () => 'queued',
+      foreground: async () => true,
+      onOpened: () => outcomes.push('opened'),
+      onStopped: (reason) => outcomes.push(`stopped:${reason}`),
+      schedule: scheduler.schedule,
+      cancelScheduled: scheduler.cancel,
+      maxAttempts: 2,
+    });
+    await scheduler.run();
+    await scheduler.run();
+    expect(outcomes).toEqual(['stopped:timeout']);
+    expect(scheduler.count()).toBe(0);
+
+    const cancelled: string[] = [];
+    const stop = startBrowserLoginPromotionPoll({
+      probeLifecycle: async () => 'queued',
+      foreground: async () => true,
+      onOpened: () => cancelled.push('opened'),
+      onStopped: (reason) => cancelled.push(`stopped:${reason}`),
+      schedule: scheduler.schedule,
+      cancelScheduled: scheduler.cancel,
+    });
+    stop();
+    expect(scheduler.count()).toBe(0);
+    expect(cancelled).toEqual([]);
+  });
+});
+
+describe('browser login promotion watch singleton', () => {
+  const realWindow = (globalThis as { window?: unknown }).window;
+
+  const installFakeWindow = () => {
+    const listeners = new Map<string, Set<(event: unknown) => void>>();
+    // defineProperty instead of plain assignment: other test files restore
+    // `window` as a non-writable property, which makes strict-mode assignment
+    // throw depending on file order.
+    Object.defineProperty(globalThis, 'window', {
+      configurable: true,
+      writable: true,
+      value: {
+        addEventListener: (type: string, listener: (event: unknown) => void) => {
+          const set = listeners.get(type) ?? new Set();
+          set.add(listener);
+          listeners.set(type, set);
+        },
+        removeEventListener: (
+          type: string,
+          listener: (event: unknown) => void,
+        ) => {
+          listeners.get(type)?.delete(listener);
+        },
+      },
+    });
+    return {
+      emit: (type: string) => {
+        for (const listener of [...(listeners.get(type) ?? [])]) listener({ type });
+      },
+      listenerCount: (type: string) => listeners.get(type)?.size ?? 0,
+    };
+  };
+
+  const restoreWindow = () => {
+    if (realWindow === undefined) {
+      Reflect.deleteProperty(globalThis, 'window');
+    } else {
+      Object.defineProperty(globalThis, 'window', {
+        configurable: true,
+        writable: true,
+        value: realWindow,
+      });
+    }
+  };
+
+  afterEach(() => {
+    cancelBrowserLoginPromotionWatch();
+    restoreWindow();
+  });
+
+  test('keeps polling across the settings-page unmount and still notifies + foregrounds on promotion', async () => {
+    // Real flow: the queued branch begins the watch and immediately calls
+    // navigate('/browser'), unmounting the routed /settings/browser-use page.
+    // Under e027cef5 the stop handle lived in a component ref and the unmount
+    // effect cancelled the poll before its first 2s tick, so the promised
+    // promotion notification never arrived. The watch is now module-level:
+    // no component lifecycle may touch it, only close-login/auth-loss/its own
+    // terminal states.
+    installFakeWindow();
+    const scheduler = createPromotionScheduler();
+    const outcomes: string[] = [];
+    let lifecycle = 'queued';
+    let foregroundCalls = 0;
+    beginBrowserLoginPromotionWatch({
+      probeLifecycle: async () => lifecycle,
+      foreground: async () => {
+        foregroundCalls += 1;
+        return true;
+      },
+      onOpened: () => outcomes.push('opened'),
+      onStopped: (reason) => outcomes.push(`stopped:${reason}`),
+      schedule: scheduler.schedule,
+      cancelScheduled: scheduler.cancel,
+    });
+
+    // The settings component has unmounted here (navigate already ran); the
+    // first tick must still be pending and the watch still registered.
+    expect(hasBrowserLoginPromotionWatch()).toBe(true);
+    expect(scheduler.count()).toBe(1);
+
+    await scheduler.run();
+    expect(outcomes).toEqual([]);
+    expect(foregroundCalls).toBe(0);
+    expect(scheduler.count()).toBe(1);
+
+    lifecycle = 'running';
+    await scheduler.run();
+    expect(outcomes).toEqual(['opened']);
+    expect(foregroundCalls).toBe(1);
+    expect(hasBrowserLoginPromotionWatch()).toBe(false);
+    expect(scheduler.count()).toBe(0);
+  });
+
+  test('replacing or cancelling the watch never leaks a scheduled tick', async () => {
+    installFakeWindow();
+    const scheduler = createPromotionScheduler();
+    const first: string[] = [];
+    beginBrowserLoginPromotionWatch({
+      probeLifecycle: async () => 'queued',
+      foreground: async () => true,
+      onOpened: () => first.push('opened'),
+      onStopped: (reason) => first.push(`stopped:${reason}`),
+      schedule: scheduler.schedule,
+      cancelScheduled: scheduler.cancel,
+    });
+    expect(scheduler.count()).toBe(1);
+
+    // A second queued login replaces the first watch instead of stacking.
+    const second: string[] = [];
+    beginBrowserLoginPromotionWatch({
+      probeLifecycle: async () => 'queued',
+      foreground: async () => true,
+      onOpened: () => second.push('opened'),
+      onStopped: (reason) => second.push(`stopped:${reason}`),
+      schedule: scheduler.schedule,
+      cancelScheduled: scheduler.cancel,
+    });
+    expect(scheduler.count()).toBe(1);
+    expect(first).toEqual([]);
+
+    // Close-login cancels the active watch without firing callbacks.
+    cancelBrowserLoginPromotionWatch();
+    expect(hasBrowserLoginPromotionWatch()).toBe(false);
+    expect(scheduler.count()).toBe(0);
+    await Promise.resolve();
+    expect(first).toEqual([]);
+    expect(second).toEqual([]);
+  });
+
+  test('auth expiry cancels the active watch and detaches its listener', () => {
+    const fakeWindow = installFakeWindow();
+    const scheduler = createPromotionScheduler();
+    const outcomes: string[] = [];
+    beginBrowserLoginPromotionWatch({
+      probeLifecycle: async () => 'queued',
+      foreground: async () => true,
+      onOpened: () => outcomes.push('opened'),
+      onStopped: (reason) => outcomes.push(`stopped:${reason}`),
+      schedule: scheduler.schedule,
+      cancelScheduled: scheduler.cancel,
+    });
+    expect(fakeWindow.listenerCount(AUTH_EXPIRED_EVENT)).toBe(1);
+
+    // WebUI logout / expired session: keeping a lanes poll spinning against
+    // 401s for up to 3 minutes would be a silent leak.
+    fakeWindow.emit(AUTH_EXPIRED_EVENT);
+    expect(hasBrowserLoginPromotionWatch()).toBe(false);
+    expect(scheduler.count()).toBe(0);
+    expect(outcomes).toEqual([]);
+    expect(fakeWindow.listenerCount(AUTH_EXPIRED_EVENT)).toBe(0);
   });
 });

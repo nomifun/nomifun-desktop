@@ -203,6 +203,25 @@ struct CompanionWindowPatch {
 
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
+struct CompanionSkillConfigPatch {
+    /// Opt-in catalog skills explicitly enabled for this companion.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_present"
+    )]
+    enabled: Option<Vec<String>>,
+    /// Auto-injected built-in skills this companion has opted out of.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_present"
+    )]
+    disabled_auto: Option<Vec<String>>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 struct CompanionProfilePatch {
     #[serde(
         default,
@@ -228,6 +247,12 @@ struct CompanionProfilePatch {
         deserialize_with = "deserialize_optional_nullable"
     )]
     model: Option<Option<CompanionModelRefParam>>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_present"
+    )]
+    skills: Option<CompanionSkillConfigPatch>,
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
@@ -697,6 +722,46 @@ mod id_contract_tests {
         ] {
             assert!(serde_json::from_value::<CompanionUpdateParams>(invalid).is_err());
         }
+    }
+
+    #[test]
+    fn companion_patch_accepts_catalog_skills_and_stays_closed() {
+        let params: CompanionUpdateParams = serde_json::from_value(json!({
+            "companion_id": "0190f5fe-7c00-7a00-8abc-012345678901",
+            "patch": {
+                "skills": {"enabled": ["web-search"]}
+            }
+        }))
+        .unwrap();
+        let patch = serde_json::to_value(params.patch).unwrap();
+        assert_eq!(patch["skills"]["enabled"], json!(["web-search"]));
+        assert!(
+            patch["skills"].get("disabled_auto").is_none(),
+            "an omitted skills field must stay omitted in the merge patch"
+        );
+
+        let params: CompanionUpdateParams = serde_json::from_value(json!({
+            "companion_id": "0190f5fe-7c00-7a00-8abc-012345678901",
+            "patch": {
+                "name": "Nomi",
+                "skills": {"disabled_auto": ["memory"]}
+            }
+        }))
+        .unwrap();
+        let patch = serde_json::to_value(params.patch).unwrap();
+        assert_eq!(patch["name"], "Nomi");
+        assert_eq!(patch["skills"]["disabled_auto"], json!(["memory"]));
+
+        assert!(
+            serde_json::from_value::<CompanionUpdateParams>(json!({
+                "companion_id": "0190f5fe-7c00-7a00-8abc-012345678901",
+                "patch": {
+                    "skills": {"enabled": ["web-search"], "levels": {}}
+                }
+            }))
+            .is_err(),
+            "unknown skills fields must stay closed"
+        );
     }
 
     #[test]

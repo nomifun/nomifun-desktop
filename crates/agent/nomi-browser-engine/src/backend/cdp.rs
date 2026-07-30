@@ -688,12 +688,22 @@ impl HostTargetRouter {
         guid: &str,
         suggested_filename: &str,
     ) {
-        let mut state = self.state.lock().await;
-        let lane_id = state
-            .frame_owner
-            .get(frame_id)
-            .cloned()
-            .or_else(|| state.ownership.owner(frame_id).map(str::to_string));
+        let lane_id = {
+            let state = self.state.lock().await;
+            state
+                .frame_owner
+                .get(frame_id)
+                .cloned()
+                .or_else(|| state.ownership.owner(frame_id).map(str::to_string))
+        };
+        // F21：frame_owner/ownership 只登记主帧 id（== page target id）；iframe
+        //（同进程或 OOPIF）内发起的下载带的是**子帧** frameId，两张表恒查不到。
+        // 未命中时按各 lane 活 tab 的 frame tree 解析归属（CDP roundtrip 仅在
+        // 子帧下载这一低频路径发生）。
+        let lane_id = match lane_id {
+            Some(lane_id) => Some(lane_id),
+            None => self.resolve_subframe_download_owner(frame_id).await,
+        };
         let Some(lane_id) = lane_id else {
             tracing::warn!(
                 %guid,
@@ -702,6 +712,7 @@ impl HostTargetRouter {
             );
             return;
         };
+        let mut state = self.state.lock().await;
         let download_dir = state
             .lanes
             .get(&lane_id)
@@ -717,6 +728,50 @@ impl HostTargetRouter {
                 suggested_filename: suggested_filename.to_string(),
             },
         );
+    }
+
+    /// F21：把子帧 frameId 解析到其所属 lane。遍历各 lane 的活 [`TabRecord`]，查
+    /// page session 的 frameTree（同进程 iframe）与 OOPIF 子 session 的 frameTree
+    /// （跨进程 iframe，其根 frame id 即 downloadWillBegin 携带的子帧 id）。
+    ///
+    /// 锁纪律：短锁克隆句柄（lane 表 → tabs 表 → oopif 表逐层克隆后立即放锁），
+    /// CDP I/O（`frame_ids`）全在锁外。单帧树查询失败（session 已关竞态）跳过——
+    /// 解析不到即维持隔离检疫（fail-closed：文件留在 Host staging，绝不误配 lane）。
+    async fn resolve_subframe_download_owner(&self, frame_id: &str) -> Option<LaneId> {
+        let lanes: Vec<(LaneId, Arc<AsyncMutex<HashMap<String, TabRecord>>>)> = {
+            let state = self.state.lock().await;
+            state
+                .lanes
+                .iter()
+                .filter_map(|(lane_id, route)| {
+                    route.tabs.upgrade().map(|tabs| (lane_id.clone(), tabs))
+                })
+                .collect()
+        };
+        for (lane_id, tabs) in lanes {
+            let (mut managers, oopif_tables) = {
+                let tabs = tabs.lock().await;
+                let mut managers = Vec::new();
+                let mut oopif_tables = Vec::new();
+                for record in tabs.values() {
+                    managers.push(record.injection.clone());
+                    oopif_tables.push(Arc::clone(&record.oopif_managers));
+                }
+                (managers, oopif_tables)
+            };
+            for table in oopif_tables {
+                let table = table.lock().await;
+                managers.extend(table.values().map(|entry| entry.manager.clone()));
+            }
+            for manager in managers {
+                if let Ok(frame_ids) = manager.frame_ids().await
+                    && frame_ids.iter().any(|candidate| candidate == frame_id)
+                {
+                    return Some(lane_id);
+                }
+            }
+        }
+        None
     }
 
     async fn finish_download(&self, guid: &str, source: &std::path::Path) -> bool {
@@ -1479,7 +1534,12 @@ pub(crate) struct CdpHostRuntime {
     attach_loop: tokio::task::JoinHandle<()>,
     target_router_loop: tokio::task::JoinHandle<()>,
     download_loop: Option<tokio::task::JoinHandle<()>>,
-    firewall_loop: tokio::task::JoinHandle<()>,
+    /// 出口防火墙循环的 abort 句柄（`JoinHandle` 本体归 `firewall_watchdog` 所有，
+    /// 供其监视非 abort 死亡）。shutdown/Drop 经此主动 abort 循环。
+    firewall_loop: tokio::task::AbortHandle,
+    /// 防火墙 watchdog（[`spawn_firewall_watchdog`]）：防火墙任务意外死亡（panic
+    /// 逃出循环）→ fail 整条 CDP 连接（fail-closed，恢复 = 重启 host）。
+    firewall_watchdog: tokio::task::JoinHandle<()>,
     router: Arc<HostTargetRouter>,
     download_dir: Option<String>,
     firewall_config: crate::firewall::FirewallConfig,
@@ -1580,6 +1640,10 @@ impl CdpHostRuntime {
                 return Err(cleanup_failed_host_launch(primary, cleanup).await);
             }
         };
+        // F1：防火墙的可靠订阅必须在 attach loop 之前注册——handle_attached 的
+        // Fetch.enable arming gate 依赖它；早于防火墙循环 spawn 的事件在 unbounded
+        // 通道里缓存不丢。
+        let firewall_subscriptions = FetchFirewallSubscriptions::subscribe(&conn);
         let attach_loop = conn.run_attach_loop();
         if let Err(error) = conn.enable_auto_attach().await {
             attach_loop.abort();
@@ -1613,12 +1677,16 @@ impl CdpHostRuntime {
             .unwrap_or_else(|| Arc::new(crate::firewall::TokioResolver::default()));
         let firewall_loop = spawn_fetch_firewall_loop(
             conn.clone(),
+            firewall_subscriptions,
             firewall,
             egress_approver,
             approved_domains.clone(),
             dns_resolver,
             crate::firewall::DnsResolverCache::default(),
         );
+        // watchdog 拿走 JoinHandle 监视意外死亡；shutdown/Drop 用 AbortHandle 主动停。
+        let firewall_abort = firewall_loop.abort_handle();
+        let firewall_watchdog = spawn_firewall_watchdog(conn.clone(), firewall_loop);
         if let Err(error) = enable_fetch_on_session(&conn, ROOT_SESSION).await {
             tracing::warn!(%error, "Fetch.enable on shared browser session failed");
         }
@@ -1631,7 +1699,8 @@ impl CdpHostRuntime {
             attach_loop,
             target_router_loop,
             download_loop,
-            firewall_loop,
+            firewall_loop: firewall_abort,
+            firewall_watchdog,
             router,
             download_dir,
             firewall_config,
@@ -1668,6 +1737,9 @@ impl CdpHostRuntime {
         }
         self.shutdown.store(true, Ordering::Release);
         self.target_router_loop.abort();
+        // 先停 watchdog 再 abort 防火墙循环：主动关停绝不能被误判为意外死亡
+        // （watchdog 对 is_cancelled 本就免疫，此顺序是双保险）。
+        self.firewall_watchdog.abort();
         self.firewall_loop.abort();
         self.attach_loop.abort();
         if let Some(loop_handle) = &self.download_loop {
@@ -1900,6 +1972,8 @@ impl Drop for DurableProcessCleanup {
 impl Drop for CdpHostRuntime {
     fn drop(&mut self) {
         self.target_router_loop.abort();
+        // 顺序同 shutdown：先停 watchdog，主动关停绝不误判为防火墙意外死亡。
+        self.firewall_watchdog.abort();
         self.firewall_loop.abort();
         self.attach_loop.abort();
         if let Some(loop_handle) = &self.download_loop {
@@ -2666,7 +2740,15 @@ impl LaneCleanupAuthority {
             }
             None => false,
         };
-        if unregistered && !self.conn.registry().is_connection_closed() {
+        // F20: the retired finalizer must run whenever this Lane was ever
+        // registered — not only when THIS call performed the unregister. An
+        // explicit shutdown_lane may already have unregistered (moving owned
+        // targets into retired tombstones) and then failed inside
+        // finalize_retired_lane; this Drop/hand_off path is the last cleanup
+        // authority for those still-live retired targets. finalize is
+        // idempotent and cheap when nothing is retired. A never-registered
+        // Lane has no retired inventory and skips it entirely.
+        if registration.is_some() && !self.conn.registry().is_connection_closed() {
             loop {
                 match self.router.finalize_retired_lane(&self.lane_id).await {
                     Ok(()) => break,
@@ -2674,6 +2756,7 @@ impl LaneCleanupAuthority {
                     Err(error) => {
                         tracing::warn!(
                             lane_id = %self.lane_id,
+                            unregistered_by_this_call = unregistered,
                             %error,
                             "pending-Lane retired finalizer is retrying"
                         );
@@ -2815,19 +2898,22 @@ pub struct CdpBackend {
     /// `BrowserError::Blocked`（fail-closed）。`None`（无 per-pet 上下文，如纯引擎冒烟）⇒
     /// **一律拒绝上传**（fail-closed，default-deny）。
     workspace_dir: Option<PathBuf>,
-    /// **出口防火墙后台循环句柄**（E5）——保活。对**每个** session（根 browser / page / OOPIF /
-    /// **service_worker**）挂 `Fetch.enable` 全流量拦截，订阅 `Fetch.requestPaused`，经
-    /// [`crate::firewall::decide`] 判定后 `continueRequest` 放行 / `failRequest` 阻断（IP 封禁硬阻）/
-    /// （F1）升审批（跨域 POST-body）。**SW 必须也拦**（裁决⑪/不变量⑬）——P0 保持 SW attach，本循环
-    /// 对其 session 也 Fetch.enable。backend Drop 即连带 abort。
-    _firewall_loop: Option<tokio::task::JoinHandle<()>>,
+    /// **出口防火墙后台循环的 watchdog 句柄**（E5 + fail-closed 加固）——保活。防火墙循环对
+    /// **每个** session（根 browser / page / OOPIF / **service_worker**）挂 `Fetch.enable` 全流量
+    /// 拦截，订阅 `Fetch.requestPaused`，经 [`crate::firewall::decide`] 判定后 `continueRequest`
+    /// 放行 / `failRequest` 阻断（IP 封禁硬阻）/（F1）升审批（跨域 POST-body）。**SW 必须也拦**
+    /// （裁决⑪/不变量⑬）——P0 保持 SW attach，本循环对其 session 也 Fetch.enable。
+    /// 本字段持的是 [`spawn_firewall_watchdog`] 的句柄（循环自身的 `JoinHandle` 归 watchdog 所有）：
+    /// 循环意外死亡（panic 逃出）→ watchdog fail 整条连接（fail-closed）。连接关闭时循环自然退出、
+    /// watchdog 随之收尾。
+    _firewall_watchdog: Option<tokio::task::JoinHandle<()>>,
     /// **P3-G1：注入的出口防火墙配置快照**（裁决①）。= `EngineConfig.firewall`（经 build_backend →
-    /// from_launched 透传），**与 `_firewall_loop` 持有的同一份配置**。仅供测试 accessor
+    /// from_launched 透传），**与防火墙循环持有的同一份配置**。仅供测试 accessor
     /// [`Self::firewall_config_for_test`] 读回断言「注入值真的到达引擎」（loop 在另一线程内消费，
     /// 无法直接观测）。**P3-D1 后 `FirewallConfig` 不再 `Copy`（改 `Clone`，因加了 `Vec` 域名策略字段）**，
     /// 存一份快照（`.clone()`，零热路径成本）。产品路径不读它（loop 才是真消费者）。
     firewall_config: crate::firewall::FirewallConfig,
-    /// **P3-D2：per-session 已批准出口域集合**（决策3 always_allow）。与 `_firewall_loop` 持有的
+    /// **P3-D2：per-session 已批准出口域集合**（决策3 always_allow）。与防火墙循环持有的
     /// 同一份（`Arc<Mutex<…>>` 共享）：审批一条被门控出口请求时若选「记住此域」（`EgressVerdict::
     /// ContinueAndRemember`），目标 eTLD+1 记进这里 → 同域后续出口请求不再悬挂审批直接放行。engine
     /// 生命周期内有效（非持久——持久域策略走 `FirewallConfig.allow_etld1` 的 secret 真值，X2）。
@@ -2929,6 +3015,10 @@ impl CdpBackend {
             }
         };
 
+        // F1：防火墙的可靠订阅必须在 attach loop 之前注册——handle_attached 的
+        // Fetch.enable arming gate 依赖它；早于防火墙循环 spawn 的事件在 unbounded
+        // 通道里缓存不丢。
+        let firewall_subscriptions = FetchFirewallSubscriptions::subscribe(&conn);
         // 先装 attach loop（订阅在循环内部），再放行自动附着。顺序勿换。
         let attach_loop = conn.run_attach_loop();
         if let Err(error) = conn.enable_auto_attach().await {
@@ -3034,12 +3124,16 @@ impl CdpBackend {
         let dns_cache = crate::firewall::DnsResolverCache::default();
         let firewall_loop = spawn_fetch_firewall_loop(
             conn.clone(),
+            firewall_subscriptions,
             firewall,
             egress_approver,
             approved_domains.clone(),
             dns_resolver,
             dns_cache,
         );
+        // fail-closed 加固：watchdog 拿走循环句柄，任务意外死亡（panic 逃出）即 fail
+        // 整条连接（见 spawn_firewall_watchdog doc）。
+        let firewall_watchdog = spawn_firewall_watchdog(conn.clone(), firewall_loop);
         // 已附着 session 补挂（循环只覆盖**之后**新 attach 的；启动时已在的根 + 初始 page 在此补）。
         if let Err(e) = enable_fetch_on_session(&conn, ROOT_SESSION).await {
             tracing::warn!(error = %e, "Fetch.enable on root browser session failed; egress firewall degraded");
@@ -3047,11 +3141,10 @@ impl CdpBackend {
         if let Err(e) = enable_fetch_on_session(&conn, &page_session).await {
             tracing::warn!(error = %e, "Fetch.enable on initial page session failed; egress firewall degraded");
         }
-        // F1-sec (I1 启动竞态收口)：防火墙循环在 `enable_auto_attach` **之后**才 subscribe
-        // `attachedToTarget`，故启动瞬间已 attach 的 **service_worker** 的 attach 事件可能早于订阅丢失
-        // → 那个 SW 漏挂 Fetch.enable，其出口请求绕过防火墙（裁决⑪/不变量⑬：SW 必须也拦）。但更早启动的
-        // attach loop 已把这些 SW session 登记进注册表（P0 保持 SW attach 不 detach），故据 target_type
-        // 枚举已存在的 service_worker session 补挂 Fetch.enable（与上面对根/page 的补挂同理，收口竞态）。
+        // F1-sec (I1 启动竞态收口)：历史上防火墙循环在 `enable_auto_attach` **之后**才 subscribe
+        // `attachedToTarget`，启动瞬间已 attach 的 **service_worker** 可能漏挂 Fetch.enable。F1 重构后
+        // 可靠订阅已提前到 attach loop 之前（结构上无窗口），本补挂保留为 belt-and-braces：据
+        // target_type 枚举已登记的 service_worker session 补挂 Fetch.enable（幂等，绝不多余拦截）。
         for sw_session in conn.registry().session_ids_of_type("service_worker") {
             if let Err(e) = enable_fetch_on_session(&conn, &sw_session).await {
                 tracing::warn!(
@@ -3093,7 +3186,7 @@ impl CdpBackend {
             download_dir,
             // SD-2：上传路径沙箱根（per-pet workspace）。act_upload_file 逐路径 canonicalize + 包含判定。
             workspace_dir,
-            _firewall_loop: Some(firewall_loop),
+            _firewall_watchdog: Some(firewall_watchdog),
             // P3-G1：保留注入的 firewall 快照（与 loop 同值）供测试读回断言注入生效。
             firewall_config,
             // P3-D2：保留 always_allow 已批准域集合（与 loop 同 Arc）。
@@ -3272,7 +3365,7 @@ impl CdpBackend {
             _download_loop: None,
             download_dir,
             workspace_dir: config.workspace_dir,
-            _firewall_loop: None,
+            _firewall_watchdog: None,
             firewall_config: host.firewall_config.clone(),
             approved_domains: host.approved_domains.clone(),
             evaluate_gate: AsyncMutex::new(crate::evaluate::EvaluateGate {
@@ -3608,7 +3701,8 @@ impl CdpBackend {
     /// **Takeover seam: bring the headful browser window to the foreground.**
     ///
     /// - Headful + display available → resolves the active target's real browser window,
-    ///   restores it to `normal`, then activates the active target/tab. Returns `Ok(())`.
+    ///   restores it to `normal`, activates the active target/tab, then delivers
+    ///   renderer/document focus via `Page.bringToFront`. Returns `Ok(())`.
     /// - Headless or no display → returns `Err(BrowserError::Unsupported)` with
     ///   capability="takeover" so the caller can map it to [`TakeoverResolution::Unavailable`].
     ///
@@ -3668,6 +3762,19 @@ impl CdpBackend {
                 ROOT_SESSION,
                 &ActivateTargetParams::new(handles.target_id.clone()),
             )
+            .await
+            .map_err(map_transport_err)?;
+
+        // F37: Page.bringToFront is the one command which delivers renderer/
+        // document focus (WebContents Activate()+Focus()); Target.activateTarget
+        // alone only selects the tab, so document.hasFocus() stays false and
+        // focus-gated widgets (OTP/clipboard/login) never react. Issue it last,
+        // on the page session, once the window is restored and the tab selected
+        // — this was the old implementation's primary foreground command.
+        use chromiumoxide::cdp::browser_protocol::page::BringToFrontParams;
+        let _ = self
+            .conn
+            .send::<BringToFrontParams>(&handles.session_id, &BringToFrontParams::default())
             .await
             .map_err(map_transport_err)?;
 
@@ -3798,10 +3905,10 @@ fn spawn_tab_discovery_loop(
                             // 再次确认未被并发插入（双查，避免两条 attach 事件窗口竞态重 arm）。
                             let mut guard = tabs.lock().await;
                             if guard.contains_key(&tid) {
-                                // 已被插入：丢弃本次 record（其 loop handle 随 drop 是 detach，但本 record
-                                // 的注入管线没被任何 tab 用，下面显式 abort 它的两个 loop 防泄漏）。
-                                record._inject_loop.abort();
-                                record._oopif_loop.abort();
+                                // 已被插入：丢弃本次 record，经共享 helper 全量 abort 其
+                                // **三个**后台循环（F52：此前漏 abort `_debug_loop`，泄漏一条
+                                // 长驻订阅 Runtime/Log/Network 事件的调试捕获任务）。
+                                abort_tab_record(&record);
                                 continue;
                             }
                             let target_id_suffix = cdp_id_suffix(&tid);
@@ -6684,10 +6791,24 @@ impl CdpBackend {
                 host.router.claim_frame(&self.lane_id, &main_frame_id).await;
             }
         }
-        self.conn
+        if let Err(error) = self
+            .conn
             .send::<NavigateParams>(&new_session, &NavigateParams::new(url))
             .await
-            .map_err(map_transport_err)?;
+        {
+            // F53：standalone（无 router）后端没有 target-loss 事件路径来移除刚 arm
+            // 的 TabRecord——navigate 失败时 PendingCreatedPage 的清理会关掉 target，
+            // 但 tabs 里的记录会残留成永久幽灵 tab（tabs 恒列出、switch 后一切操作
+            // TargetClosed）。此处主动剔除并 abort 其后台循环。host 模式保留原
+            // loss 事件路径（detach → handle_top_level_target_loss 同步移除记录并
+            // 清 frame_owner），不在此双改。
+            if self.target_router().is_none()
+                && let Some(record) = self.tabs.lock().await.remove(&new_tid)
+            {
+                abort_tab_record(&record);
+            }
+            return Err(map_transport_err(error));
+        }
         let _ = pending_page.transfer_to_lane();
         let l4 = last4(&new_tid);
 
@@ -7620,19 +7741,22 @@ async fn set_download_behavior_sandbox(
 ///    `Browser.cancelDownload{guid}` **取消**该下载（fail-closed，**红线**——yolo/companion 也取消，
 ///    因为这道判定**不看 session_mode**：denylist 命中即拒，无放行参数，见 `reject_executable_download`
 ///    的红线语义）。这正是「可执行下载在红线会话也拒」的真实 enforcement（在落盘之前拦下）。
+///    **F5：本红线事件走 `subscribe_reliable`（无损）**——lossy broadcast 在事件突发（>容量）时
+///    静默丢事件，等于用时序就能绕过红线；控制事件绝不能丢。
 /// 2. **`Browser.downloadProgress`**：对**完成**（`state=="completed"`）的下载在其落盘文件打 Win MOTW
 ///    （`Zone.Identifier` ADS，Windows 真写 / mac-linux 空实现）。**绝不**自动打开/启动文件。
+///    仍走 lossy broadcast（MOTW/落盘路由是 best-effort 纵深层，非红线控制事件）。
 ///
 /// 二者互补：`downloadWillBegin` 在**发起**侧拦可执行（早于落盘）；`downloadProgress` 在**完成**侧对
 /// 放行的非可执行下载打 MOTW。被取消的可执行下载不会走到 completed，故不打 MOTW（也无需）。
 ///
 /// best-effort + 绝不 panic：解析失败 / cancel 失败 / MOTW 写失败只 `warn`/`debug`，不致命。连接关闭
-/// （`RecvError::Closed`）→ 退出循环（backend Drop 关连接即触发）。
+/// （可靠通道 `None` / `RecvError::Closed`）→ 退出循环（backend Drop 关连接即触发）。
 fn spawn_download_loop(
     conn: Connection,
     router: Option<Arc<HostTargetRouter>>,
 ) -> tokio::task::JoinHandle<()> {
-    let mut begin_rx = conn.subscribe(EventDownloadWillBegin::IDENTIFIER, None);
+    let mut begin_rx = conn.subscribe_reliable(EventDownloadWillBegin::IDENTIFIER, None);
     let mut progress_rx = conn.subscribe(EventDownloadProgress::IDENTIFIER, None);
     tokio::spawn(async move {
         loop {
@@ -7640,7 +7764,7 @@ fn spawn_download_loop(
                 // ① 下载发起 → 可执行 denylist 红线（命中即 cancelDownload，fail-closed/yolo 也取消）。
                 ev = begin_rx.recv() => {
                     match ev {
-                        Ok(ev) => {
+                        Some(ev) => {
                             let Ok(b) = serde_json::from_value::<EventDownloadWillBegin>(ev.params.clone())
                             else { continue };
                             // SD-3: Two complementary checks — filename extension denylist OR
@@ -7659,7 +7783,7 @@ fn spawn_download_loop(
                                 tracing::warn!(
                                     target: "nomi_browser_engine::backend::cdp",
                                     guid = %b.guid, suggested = %b.suggested_filename,
-                                    url_scheme = %if b.url.starts_with("data:") { "data:" } else { &b.url[..b.url.find(':').unwrap_or(0).min(10) + 1] },
+                                    url_scheme = %blocked_download_url_scheme(&b.url),
                                     reason = %reason,
                                     "download blocked (red-line, denied even under yolo/companion); cancelling"
                                 );
@@ -7687,8 +7811,7 @@ fn spawn_download_loop(
                                     .await;
                             }
                         }
-                        Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
-                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                        None => break,
                     }
                 }
                 // ② 下载完成 → 对放行的非可执行下载打 MOTW（被取消的可执行不会到这里）。
@@ -7730,6 +7853,23 @@ fn spawn_download_loop(
     })
 }
 
+/// 取 URL 的 scheme（含冒号，如 `"https:"`）供**阻断日志**使用。**绝不 panic**（F46）：
+/// 旧实现 `&url[..url.find(':').unwrap_or(0).min(10) + 1]` 对空 URL 越界、对冒号前含
+/// 多字节字符的非常规 URL 可能切在 char 边界内——panic 会杀死整条下载红线循环，之后
+/// 可执行下载不再被取消。空串/无冒号 → `"[no-scheme]"`；冒号位置 >10 字节（非常规
+/// scheme）→ 不切片，返回 `"[odd-scheme]"`。
+fn blocked_download_url_scheme(url: &str) -> &str {
+    if url.starts_with("data:") {
+        return "data:";
+    }
+    match url.find(':') {
+        // ':' 是单字节 ASCII，`..=pos` 的右边界紧跟其后，恒为合法 char 边界。
+        Some(pos) if pos <= 10 => &url[..=pos],
+        Some(_) => "[odd-scheme]",
+        None => "[no-scheme]",
+    }
+}
+
 /// **E5 出口防火墙：对单个 session 挂 `Fetch.enable`**（全流量拦截）。
 ///
 /// `EnableParams::default()`（空 `patterns`）= 拦截**所有** Request 阶段的请求（nav + XHR + fetch +
@@ -7744,12 +7884,37 @@ async fn enable_fetch_on_session(conn: &Connection, session_id: &str) -> Result<
         .await
 }
 
-/// **E5 出口防火墙后台循环**：①订阅 `Target.attachedToTarget`（全 session 通配）→ 对每个新 session
-/// （page / OOPIF / **service_worker**）挂 `Fetch.enable`；②订阅 `Fetch.requestPaused`（全 session
+/// **F1：防火墙循环的可靠订阅，必须在 attach loop 启动之前注册。**
+///
+/// `Connection::handle_attached` 只在存在 `Fetch.requestPaused` 可靠订阅者时才对
+/// attach 的 session 挂 `Fetch.enable`（无消费者的 requestPaused 事件被静默丢弃且
+/// CDP 不重发——请求会永久卡死）。构造器先建本订阅（unbounded，事件在循环 spawn 前
+/// 缓存不丢）、再 `run_attach_loop()`、最后把它交给 [`spawn_fetch_firewall_loop`]，
+/// 保证「先有消费者、后开拦截」在结构上恒成立。
+struct FetchFirewallSubscriptions {
+    attached_rx: tokio::sync::mpsc::UnboundedReceiver<crate::transport::CdpEvent>,
+    paused_rx: tokio::sync::mpsc::UnboundedReceiver<crate::transport::CdpEvent>,
+}
+
+impl FetchFirewallSubscriptions {
+    fn subscribe(conn: &Connection) -> Self {
+        Self {
+            attached_rx: conn.subscribe_reliable(EventAttachedToTarget::IDENTIFIER, None),
+            paused_rx: conn.subscribe_reliable(EventRequestPaused::IDENTIFIER, None),
+        }
+    }
+}
+
+/// **E5 出口防火墙后台循环**：①消费 `Target.attachedToTarget`（全 session 通配）→ 对每个新 session
+/// （page / OOPIF / **service_worker**）挂 `Fetch.enable`；②消费 `Fetch.requestPaused`（全 session
 /// 通配）→ 对每条被拦请求经 [`crate::firewall::decide`] 判定 → 在**事件自身的 sessionId** 上发
 /// `Fetch.continueRequest`（放行）/ `Fetch.failRequest{BlockedByClient}`（阻断）。
 ///
-/// **SW 链路（裁决⑪/不变量⑬）**：本循环订阅的 `attachedToTarget` 含 service_worker（P0 保持其
+/// **订阅先于循环（F1）**：两路可靠订阅由调用方经 [`FetchFirewallSubscriptions::subscribe`]
+/// 在 attach loop 启动**之前**注册后传入——`handle_attached` 的 Fetch.enable arming gate
+/// 依赖该订阅已存在；订阅与循环 spawn 之间的事件在 unbounded 通道里缓存，循环启动后补处理。
+///
+/// **SW 链路（裁决⑪/不变量⑬）**：本循环消费的 `attachedToTarget` 含 service_worker（P0 保持其
 /// attach、不 detach），故 SW session 同样被挂 `Fetch.enable`、其出口请求同样经本循环判定——SW 无法
 /// 绕过防火墙。
 ///
@@ -7760,17 +7925,20 @@ async fn enable_fetch_on_session(conn: &Connection, session_id: &str) -> Result<
 ///
 /// 所有错误 best-effort：单条请求判定/dispatch 失败只 `debug`/`warn`，**绝不 panic**，且**绝不**让一条
 /// 请求悬挂（任何分支都对它 continue 或 fail——否则 Fetch.enable 下未应答的请求会卡住页面）。连接关闭
-/// （`RecvError::Closed`）→ 退出循环（backend Drop 关连接即触发）。
+/// （可靠通道 `None`）→ 退出循环（backend Drop 关连接即触发）。
 fn spawn_fetch_firewall_loop(
     conn: Connection,
+    subscriptions: FetchFirewallSubscriptions,
     config: crate::firewall::FirewallConfig,
     egress_approver: Option<Arc<dyn crate::firewall::EgressApprover>>,
     approved_domains: crate::firewall::ApprovedDomains,
     dns_resolver: Arc<dyn crate::firewall::HostResolver>,
     dns_cache: crate::firewall::DnsResolverCache,
 ) -> tokio::task::JoinHandle<()> {
-    let mut attached_rx = conn.subscribe_reliable(EventAttachedToTarget::IDENTIFIER, None);
-    let mut paused_rx = conn.subscribe_reliable(EventRequestPaused::IDENTIFIER, None);
+    let FetchFirewallSubscriptions {
+        mut attached_rx,
+        mut paused_rx,
+    } = subscriptions;
     tokio::spawn(async move {
         loop {
             tokio::select! {
@@ -7833,19 +8001,59 @@ fn spawn_fetch_firewall_loop(
     })
 }
 
+/// **防火墙 watchdog（fail-closed）**：监视出口防火墙循环的 `JoinHandle`，任务
+/// **非 abort 死亡**（panic 逃出循环，如经注入的 `EgressApprover` trait 对象逃出
+/// `handle_paused_request`）时把**整条 CDP 连接 fail 掉**（`Connection::shutdown`）。
+///
+/// 理由：防火墙循环一死，其 `Fetch.requestPaused` 可靠订阅接收端即被 drop——
+/// 已 arm 的 session 的被拦请求从此无人应答（永久悬挂），新 session 则会被
+/// transport 的粘性 arm 标记 fail-closed 拒绝放行。二者都不可恢复，唯一诚实的
+/// 处置是**立即 fail 整条连接**：挂起命令全部解除为 `Closed`、pipe 运输下
+/// Chromium 读到 EOF 自退。恢复路径 = 重启 host。
+///
+/// 正常退出（`Ok(())`，循环因连接关闭而结束）与**主动 abort**（shutdown/Drop 路径）
+/// **不**触发 fail——只有意外死亡才算。
+fn spawn_firewall_watchdog(
+    conn: Connection,
+    firewall_loop: tokio::task::JoinHandle<()>,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        match firewall_loop.await {
+            // 循环自然退出：可靠通道已关（连接已 fail/关闭），无需再动作。
+            Ok(()) => {}
+            // 主动 abort（shutdown/Drop 编排）：非死亡，勿 fail 连接。
+            Err(join_error) if join_error.is_cancelled() => {}
+            // 意外死亡（panic 逃出循环）→ fail-closed：fail 整条连接。
+            Err(join_error) => {
+                tracing::error!(
+                    target: "nomi_browser_engine::backend::cdp",
+                    error = %join_error,
+                    "egress firewall task died unexpectedly; failing the CDP connection closed \
+                     (relaunch the browser host to recover)"
+                );
+                conn.shutdown().await;
+            }
+        }
+    })
+}
+
 /// 处理一条 `Fetch.requestPaused`：抽取判定所需输入 → [`crate::firewall::decide`] → dispatch
 /// continue/fail/（D2）**悬挂等审批**。**绝不**让请求**无条件**悬挂（Allow/Block 立即 continue/fail；
 /// GatePost 走 D2 悬挂机制，仍有界——超时即 fail-closed，绝不永久挂起）。
 ///
-/// **P3-D2（裁决④/决策3）**：[`crate::firewall::FirewallDecision::GatePost`] 不再 detect-but-continue
-/// （P2 泄漏窗口），而是：
+/// **P3-D2（裁决④/决策3）+ F6 白屏回归修**：[`crate::firewall::FirewallDecision::GatePost`] 的处置
+/// 按审批通道有无分岔：
 /// 1. 先查 `approved_domains`（决策3 always_allow 记住域）——目标 eTLD+1 已被本会话批准 → **直接
 ///    continue**（不再悬挂审批）；
-/// 2. 否则**悬挂**该请求（保留 `request_id`，**不**立即 continue/fail）+ `tokio::spawn` 一个 detached
-///    任务（事件循环立即回到 `select!` 继续 pump，**绝不**在此同步阻塞）；该任务 `await`
-///    [`crate::firewall::EgressApprover`]（带 [`crate::firewall::EGRESS_APPROVAL_TIMEOUT`] 超时）取裁决 →
-///    批准 `continueRequest`（可选记住域）/ 拒绝/超时/**无审批通道** `failRequest`（**fail-closed**，
-///    闭合 P2 泄漏窗口）。
+/// 2. **无审批通道（`egress_approver=None`，托管上下文）→ 放行 + warn 留痕**（E5 pre-approval 姿态：
+///    「检测+留痕，审批接线前放行」）。托管 host 无人在回路可批——fail-closed 只会把被访问站点的正常
+///    出口打成 BlockedByClient 白屏（F6 回归）。审计记 host/size/字段名（绝不含值）。**硬 Block
+///    （SSRF IP 封禁 / DNS 守卫 / deny_etld1）不经 GatePost，仍 failRequest fail-closed**；
+/// 3. **有审批通道（standalone/桌面接管路径）→ 悬挂**该请求（保留 `request_id`，**不**立即
+///    continue/fail）+ `tokio::spawn` 一个 detached 任务（事件循环立即回到 `select!` 继续 pump，
+///    **绝不**在此同步阻塞）；该任务 `await` [`crate::firewall::EgressApprover`]（带
+///    [`crate::firewall::EGRESS_APPROVAL_TIMEOUT`] 超时）取裁决 → 批准 `continueRequest`（可选记住域）/
+///    拒绝/超时 `failRequest`（**fail-closed**，闭合 P2 泄漏窗口）。
 // egress firewall 上下文参数较多（config/approver/approved_domains/resolver/cache）；SD-5 接入真实
 // egress approver 时再收拢成一个 EgressContext 结构体（届时参数更多，结构体更划算），此处先 allow。
 #[allow(clippy::too_many_arguments)]
@@ -7954,16 +8162,37 @@ async fn handle_paused_request(
                 return;
             }
 
-            // ② 悬挂该请求等人在回路裁决。**绝不**在此 CDP 事件 handler 里同步阻塞（会卡死整个
-            //    防火墙事件循环——所有 session 的 requestPaused/attachedToTarget 都经它）。故把
-            //    request_id 保留（不 continue/不 fail），spawn 一个 detached 任务去 await 审批 → 据裁决
-            //    continue/fail。审批通道未接入（egress_approver=None）/ 超时 / 拒绝 → **fail-closed**
+            // ② **无审批通道（托管上下文）→ 检测 + 留痕后放行（E5 pre-approval 姿态；F6 白屏回归修）**。
+            //    托管 host 的模板 EngineConfig 不接线 EgressApprover（egress_approver=None，无人在回路
+            //    可批）——此时把 GatePost fail-closed 会让「域 allowlist 外的子资源出口 / 跨域 POST」
+            //    直接 BlockedByClient 白屏（注册任一 secret 即毁掉所有托管浏览）。产品红线是浏览顺滑
+            //    零打断：GatePost（软「升审批」档）在无审批通道时降级为 **continueRequest + warn 留痕**
+            //    （审计 host/size/字段名——绝不含字段值）。**硬 Block 不受影响**：SSRF IP 封禁（decide
+            //    的 Block 臂 + 上方 DNS 守卫 early-return）与 deny_etld1 黑名单仍 failRequest
+            //    （fail-closed）——只有 GatePost 这一档在无通道时放行留痕。
+            let Some(approver) = egress_approver else {
+                tracing::warn!(
+                    target: "nomi_browser_engine::backend::cdp",
+                    url = %url,
+                    target_host = %preview.host, body_size = preview.size,
+                    field_names = ?preview.field_names, // 仅字段名（绝不含值）
+                    "egress firewall gated egress but no approval channel is wired (managed context) — \
+                     allowing with audit trail (E5 pre-approval posture; SSRF/denylist hard blocks unaffected)"
+                );
+                fetch_continue(conn, session_id, request_id).await;
+                return;
+            };
+
+            // ③ 有审批通道（standalone/桌面接管路径）：悬挂该请求等人在回路裁决。**绝不**在此 CDP 事件
+            //    handler 里同步阻塞（会卡死整个防火墙事件循环——所有 session 的 requestPaused/
+            //    attachedToTarget 都经它）。故把 request_id 保留（不 continue/不 fail），spawn 一个
+            //    detached 任务去 await 审批 → 据裁决 continue/fail。审批超时 / 拒绝 → **fail-closed**
             //    （failRequest）。预览只 host/size/字段名（绝不含值，复用 E5 build_post_preview）。
             tracing::info!(
                 target: "nomi_browser_engine::backend::cdp",
                 target_host = %preview.host, body_size = preview.size,
                 field_names = ?preview.field_names, // 仅字段名（绝不含值）
-                "egress firewall gated cross-origin POST / off-allowlist egress — suspending for out-of-band approval (fail-closed on timeout/no-channel)"
+                "egress firewall gated cross-origin POST / off-allowlist egress — suspending for out-of-band approval (fail-closed on timeout/deny)"
             );
 
             // 句柄 + 上下文克隆进 detached 任务（Connection 内部 Arc，克隆廉价；request_id/session_id/url
@@ -7971,35 +8200,22 @@ async fn handle_paused_request(
             let conn = conn.clone();
             let session_id = session_id.to_string();
             let url = url.clone();
-            let approver = egress_approver.cloned();
+            let approver = Arc::clone(approver);
             let approved_domains = approved_domains.clone();
             tokio::spawn(async move {
-                let verdict = match approver {
-                    // 有审批通道：await 裁决（带超时——绝不无限悬挂）。
-                    Some(a) => {
-                        match tokio::time::timeout(
-                            crate::firewall::EGRESS_APPROVAL_TIMEOUT,
-                            a.approve_egress(&preview),
-                        )
-                        .await
-                        {
-                            Ok(v) => v,
-                            Err(_elapsed) => {
-                                tracing::warn!(
-                                    target: "nomi_browser_engine::backend::cdp",
-                                    target_host = %preview.host,
-                                    "egress approval timed out — failing closed (rejecting the gated request)"
-                                );
-                                crate::firewall::EgressVerdict::Fail
-                            }
-                        }
-                    }
-                    // 无审批通道接入 → fail-closed（闭合泄漏窗口；拒绝跨域 POST 比放行安全）。
-                    None => {
+                // await 裁决（带超时——绝不无限悬挂）。
+                let verdict = match tokio::time::timeout(
+                    crate::firewall::EGRESS_APPROVAL_TIMEOUT,
+                    approver.approve_egress(&preview),
+                )
+                .await
+                {
+                    Ok(v) => v,
+                    Err(_elapsed) => {
                         tracing::warn!(
                             target: "nomi_browser_engine::backend::cdp",
                             target_host = %preview.host,
-                            "egress firewall gated a request but no approval channel is wired — failing closed"
+                            "egress approval timed out — failing closed (rejecting the gated request)"
                         );
                         crate::firewall::EgressVerdict::Fail
                     }
@@ -8385,16 +8601,19 @@ mod tests {
 
         #[cfg(unix)]
         {
-            let shell = PathBuf::from("/bin/sh");
-            let mut builder = nomi_process_runtime::ChildProcessBuilder::new(&shell);
+            // Spawn the sleeper directly: a `/bin/sh -c` wrapper may exec into
+            // sleep, so the committed ownership marker would name a different
+            // executable than the live process image (darwin rejects that).
+            let executable = PathBuf::from("/bin/sleep");
+            let mut builder = nomi_process_runtime::ChildProcessBuilder::new(&executable);
             builder
-                .args(["-c", "sleep 60"])
+                .arg("60")
                 .stdin(std::process::Stdio::null())
                 .stdout(std::process::Stdio::null())
                 .stderr(std::process::Stdio::null());
             (
                 builder.spawn_managed().expect("spawn Unix cleanup fixture"),
-                shell,
+                executable,
             )
         }
     }
@@ -8547,6 +8766,841 @@ mod tests {
             .await
             .expect("connect router test websocket");
         (connection, server)
+    }
+
+    /// 通用 CDP fake：对每条命令回 `{"id":id,"result":{}}` 并把请求原文推给测试侧
+    /// （unbounded channel），供断言方法名/参数与到达顺序。
+    async fn generic_recording_fake_connection() -> (
+        Connection,
+        tokio::sync::mpsc::UnboundedReceiver<serde_json::Value>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind generic recording fake websocket");
+        let address = listener.local_addr().expect("read fake websocket address");
+        let (request_tx, request_rx) = tokio::sync::mpsc::unbounded_channel();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("accept fake client");
+            let mut websocket = tokio_tungstenite::accept_async(stream)
+                .await
+                .expect("complete fake websocket handshake");
+            while let Some(Ok(message)) = futures_util::StreamExt::next(&mut websocket).await {
+                let tokio_tungstenite::tungstenite::Message::Text(text) = message else {
+                    break;
+                };
+                let request: serde_json::Value =
+                    serde_json::from_str(&text).expect("fake received valid json");
+                let id = request["id"].as_u64().expect("fake request has id");
+                // 回包须回显 sessionId，否则子 session 命令的回调路由不到。
+                let mut response = serde_json::json!({ "id": id, "result": {} });
+                if let Some(session_id) = request.get("sessionId") {
+                    response["sessionId"] = session_id.clone();
+                }
+                let _ = request_tx.send(request);
+                futures_util::SinkExt::send(
+                    &mut websocket,
+                    tokio_tungstenite::tungstenite::Message::Text(
+                        response.to_string().into(),
+                    ),
+                )
+                .await
+                .expect("fake sends generic success");
+            }
+        });
+        let connection = Connection::connect(&format!("ws://{address}"))
+            .await
+            .expect("connect generic recording fake websocket");
+        (connection, request_rx, server)
+    }
+
+    /// **F1 回归**：在防火墙循环 spawn **之前**到达的 `Fetch.requestPaused`（早期
+    /// attach 的 target 的首批被拦请求）必须在循环启动后被补处理（continue/fail），
+    /// 绝不能因「事件到达时无订阅者」而被丢弃、把请求永久卡死。旧编排（循环内部才
+    /// subscribe）下本测试失败：事件在 spawn 前无人订阅即被丢弃。
+    #[tokio::test]
+    async fn early_paused_request_is_released_once_firewall_loop_starts() {
+        let (connection, mut requests, server) = generic_recording_fake_connection().await;
+
+        // 生产编排：订阅先于 attach loop / 防火墙循环。
+        let subscriptions = FetchFirewallSubscriptions::subscribe(&connection);
+        connection.registry().register_session("S-early", "page");
+
+        // 防火墙循环尚未 spawn 时，一条被拦请求已经到达（早 attach target 的首批请求）。
+        connection
+            .registry()
+            .dispatch_message(
+                r#"{"method":"Fetch.requestPaused","sessionId":"S-early","params":{"requestId":"REQ-early","request":{"url":"https://example.com/","method":"GET","headers":{},"initialPriority":"High","referrerPolicy":"no-referrer"},"frameId":"F-early","resourceType":"Document"}}"#,
+            )
+            .expect("dispatch early paused event");
+
+        let firewall_loop = spawn_fetch_firewall_loop(
+            connection.clone(),
+            subscriptions,
+            crate::firewall::FirewallConfig::default(),
+            None,
+            crate::firewall::ApprovedDomains::new(),
+            Arc::new(crate::firewall::TokioResolver::default()),
+            crate::firewall::DnsResolverCache::default(),
+        );
+
+        let released = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let request = requests.recv().await.expect("fake server stays alive");
+                let method = request["method"].as_str().unwrap_or_default();
+                if method == "Fetch.continueRequest" || method == "Fetch.failRequest" {
+                    break request;
+                }
+            }
+        })
+        .await
+        .expect("the buffered paused request must be continued or failed after loop start");
+        assert_eq!(released["params"]["requestId"], "REQ-early");
+        assert_eq!(released["sessionId"], "S-early");
+
+        firewall_loop.abort();
+        connection.shutdown().await;
+        server.abort();
+        let _ = server.await;
+    }
+
+    /// **防火墙 watchdog fail-closed**：防火墙任务**非 abort 死亡**（panic 逃出
+    /// 循环，如经注入的 EgressApprover trait 对象）时，watchdog 必须把整条 CDP
+    /// 连接 fail 掉——后续命令全部 `Closed` 短路，绝不让引擎在「防火墙已死、
+    /// 拦截半失效」的状态下继续静默运行。
+    #[tokio::test]
+    async fn firewall_watchdog_fails_connection_closed_when_firewall_task_dies() {
+        let (connection, _requests, server) = generic_recording_fake_connection().await;
+
+        // 模拟防火墙任务死亡：panic 逃出任务体（JoinError::is_panic()==true）。
+        let doomed_firewall = tokio::spawn(async {
+            panic!("simulated egress firewall death (approver panic)");
+        });
+        let watchdog = spawn_firewall_watchdog(connection.clone(), doomed_firewall);
+        watchdog.await.expect("watchdog itself must not panic");
+
+        // 连接必须已 fail-closed：任何命令都 Closed 短路。
+        let error = connection
+            .send::<FetchEnableParams>(ROOT_SESSION, &FetchEnableParams::default())
+            .await
+            .expect_err("commands after firewall death must fail closed");
+        assert!(
+            matches!(error, TransportError::Closed),
+            "expected TransportError::Closed after the watchdog fired, got: {error:?}"
+        );
+
+        server.abort();
+        let _ = server.await;
+    }
+
+    /// **watchdog 不误伤主动关停**：shutdown/Drop 编排对防火墙循环的 `abort()`
+    /// 是刻意行为（`JoinError::is_cancelled()`），watchdog 必须无动作——连接保持
+    /// 可用（否则每次正常关停都会被 watchdog 抢先 fail 连接，破坏关停命令编排）。
+    #[tokio::test]
+    async fn firewall_watchdog_ignores_deliberate_abort() {
+        let (connection, _requests, server) = generic_recording_fake_connection().await;
+
+        let firewall_loop = tokio::spawn(std::future::pending::<()>());
+        let abort_handle = firewall_loop.abort_handle();
+        let watchdog = spawn_firewall_watchdog(connection.clone(), firewall_loop);
+        abort_handle.abort();
+        watchdog.await.expect("watchdog itself must not panic");
+
+        // 连接必须仍可用：主动 abort 不是防火墙死亡。
+        connection
+            .send::<FetchEnableParams>(ROOT_SESSION, &FetchEnableParams::default())
+            .await
+            .expect("connection must stay usable after a deliberate abort");
+
+        connection.shutdown().await;
+        server.abort();
+        let _ = server.await;
+    }
+
+    // ── F6 白屏回归修：GatePost 无审批通道（托管上下文）→ 放行留痕；硬 Block 仍 fail-closed ──
+
+    /// 测试用 fake DNS：任意 host → 公网 IP（SD-1 DNS 守卫放行，让断言聚焦 GatePost 裁决路径；
+    /// 不打真实 DNS，跨平台确定）。
+    struct PublicIpResolver;
+
+    #[async_trait::async_trait]
+    impl crate::firewall::HostResolver for PublicIpResolver {
+        async fn resolve(&self, _host: &str) -> std::io::Result<Vec<std::net::IpAddr>> {
+            Ok(vec!["93.184.216.34".parse().unwrap()])
+        }
+    }
+
+    /// 测试用 fake DNS：任意 host → 私网 IP（SD-1 DNS 守卫必拦）。
+    struct PrivateIpResolver;
+
+    #[async_trait::async_trait]
+    impl crate::firewall::HostResolver for PrivateIpResolver {
+        async fn resolve(&self, _host: &str) -> std::io::Result<Vec<std::net::IpAddr>> {
+            Ok(vec!["10.0.0.5".parse().unwrap()])
+        }
+    }
+
+    /// 测试用审批者：记录是否被调用 + 返回固定裁决（验「有审批通道时 GatePost 仍路由到审批者」）。
+    struct RecordingApprover {
+        invoked: Arc<std::sync::atomic::AtomicBool>,
+        verdict: crate::firewall::EgressVerdict,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::firewall::EgressApprover for RecordingApprover {
+        async fn approve_egress(
+            &self,
+            _preview: &crate::firewall::PostPreview,
+        ) -> crate::firewall::EgressVerdict {
+            self.invoked.store(true, Ordering::SeqCst);
+            self.verdict
+        }
+    }
+
+    /// 构造一条 `Fetch.requestPaused` 事件 fixture。
+    fn paused_event_fixture(
+        request_id: &str,
+        url: &str,
+        method: &str,
+        headers: serde_json::Value,
+        resource_type: &str,
+        has_post_data: bool,
+    ) -> EventRequestPaused {
+        serde_json::from_value(serde_json::json!({
+            "requestId": request_id,
+            "request": {
+                "url": url,
+                "method": method,
+                "headers": headers,
+                "initialPriority": "High",
+                "referrerPolicy": "no-referrer",
+                "hasPostData": has_post_data,
+            },
+            "frameId": "F-egress",
+            "resourceType": resource_type,
+        }))
+        .expect("valid EventRequestPaused fixture")
+    }
+
+    /// 把一条被拦请求喂给 `handle_paused_request`，返回它在 CDP wire 上的最终处置
+    /// （`Fetch.continueRequest` 或 `Fetch.failRequest` 的请求原文）。
+    async fn drive_paused_request(
+        config: crate::firewall::FirewallConfig,
+        approver: Option<Arc<dyn crate::firewall::EgressApprover>>,
+        paused: EventRequestPaused,
+        resolver: &dyn crate::firewall::HostResolver,
+    ) -> serde_json::Value {
+        let (connection, mut requests, server) = generic_recording_fake_connection().await;
+        connection.registry().register_session("S-egress", "page");
+        handle_paused_request(
+            &connection,
+            &config,
+            approver.as_ref(),
+            &crate::firewall::ApprovedDomains::new(),
+            "S-egress",
+            paused,
+            resolver,
+            &crate::firewall::DnsResolverCache::default(),
+        )
+        .await;
+        let released = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let request = requests.recv().await.expect("fake server stays alive");
+                let method = request["method"].as_str().unwrap_or_default();
+                if method == "Fetch.continueRequest" || method == "Fetch.failRequest" {
+                    break request;
+                }
+            }
+        })
+        .await
+        .expect("the paused request must be continued or failed");
+        connection.shutdown().await;
+        server.abort();
+        let _ = server.await;
+        released
+    }
+
+    /// **F6 白屏回归修**：无审批通道（托管上下文）时，域 allowlist 外的**跨站子资源**命中 GatePost
+    /// 必须 `Fetch.continueRequest` 放行（+ warn 留痕），**绝不** `failRequest` 白屏。
+    /// （旧实现无通道恒 fail-closed → 本测试对修复前 HEAD 失败。）
+    #[tokio::test]
+    async fn no_approver_gated_off_allowlist_subresource_is_continued_with_audit() {
+        let config = crate::firewall::FirewallConfig {
+            allow_etld1: vec!["stored-secret.com".to_string()],
+            ..Default::default()
+        };
+        let paused = paused_event_fixture(
+            "REQ-allowlist-gate",
+            "https://tracker.io/collect",
+            "GET",
+            serde_json::json!({"Referer": "https://news.example.com/story"}),
+            "XHR",
+            false,
+        );
+        let released = drive_paused_request(config, None, paused, &PublicIpResolver).await;
+        assert_eq!(
+            released["method"], "Fetch.continueRequest",
+            "no-approver GatePost (domain allowlist) must allow-and-audit, not fail: {released}"
+        );
+        assert_eq!(released["params"]["requestId"], "REQ-allowlist-gate");
+        assert_eq!(released["sessionId"], "S-egress");
+    }
+
+    /// **F6 白屏回归修**：无审批通道时，跨域 POST-body 门控命中的 GatePost 同样放行留痕
+    /// （E5 pre-approval 姿态：检测+留痕，审批接线前放行），绝不 failRequest。
+    #[tokio::test]
+    async fn no_approver_gated_cross_origin_post_is_continued_with_audit() {
+        let config = crate::firewall::FirewallConfig::default(); // 空 allowlist；POST 门控开
+        let paused = paused_event_fixture(
+            "REQ-post-gate",
+            "https://evil.com/collect",
+            "POST",
+            serde_json::json!({
+                "Origin": "https://x.com",
+                "Content-Type": "application/x-www-form-urlencoded",
+            }),
+            "XHR",
+            true,
+        );
+        let released = drive_paused_request(config, None, paused, &PublicIpResolver).await;
+        assert_eq!(
+            released["method"], "Fetch.continueRequest",
+            "no-approver GatePost (cross-origin POST gate) must allow-and-audit, not fail: {released}"
+        );
+        assert_eq!(released["params"]["requestId"], "REQ-post-gate");
+    }
+
+    /// **硬 Block 不受 allow-and-audit 影响①**：SSRF IP 封禁（IP 字面量目标）即便无审批通道
+    /// 仍 `Fetch.failRequest`（fail-closed；访问元数据/内网无「批准」语义）。
+    #[tokio::test]
+    async fn no_approver_ssrf_ip_literal_block_still_fails_closed() {
+        let config = crate::firewall::FirewallConfig::default();
+        let paused = paused_event_fixture(
+            "REQ-ssrf-literal",
+            "http://169.254.169.254/latest/meta-data/",
+            "GET",
+            serde_json::json!({"Referer": "https://x.com/"}),
+            "XHR",
+            false,
+        );
+        let released = drive_paused_request(config, None, paused, &PublicIpResolver).await;
+        assert_eq!(
+            released["method"], "Fetch.failRequest",
+            "SSRF IP block must stay fail-closed even with no approver: {released}"
+        );
+        assert_eq!(released["params"]["requestId"], "REQ-ssrf-literal");
+    }
+
+    /// **硬 Block 不受 allow-and-audit 影响②**：SD-1 DNS→私网 IP 守卫即便无审批通道仍 failRequest。
+    #[tokio::test]
+    async fn no_approver_dns_ssrf_block_still_fails_closed() {
+        let config = crate::firewall::FirewallConfig::default();
+        let paused = paused_event_fixture(
+            "REQ-ssrf-dns",
+            "https://rebind.attacker.example/x",
+            "GET",
+            serde_json::json!({"Referer": "https://x.com/"}),
+            "XHR",
+            false,
+        );
+        let released = drive_paused_request(config, None, paused, &PrivateIpResolver).await;
+        assert_eq!(
+            released["method"], "Fetch.failRequest",
+            "DNS→private-IP SSRF guard must stay fail-closed even with no approver: {released}"
+        );
+        assert_eq!(released["params"]["requestId"], "REQ-ssrf-dns");
+    }
+
+    /// **硬 Block 不受 allow-and-audit 影响③**：deny_etld1 黑名单即便无审批通道、即便**同站**请求，
+    /// 仍 failRequest（显式封禁名单优先一切豁免/降级）。
+    #[tokio::test]
+    async fn no_approver_deny_etld1_block_still_fails_closed() {
+        let config = crate::firewall::FirewallConfig {
+            deny_etld1: vec!["evil.com".to_string()],
+            ..Default::default()
+        };
+        let paused = paused_event_fixture(
+            "REQ-deny",
+            "https://sub.evil.com/asset.js",
+            "GET",
+            serde_json::json!({"Referer": "https://evil.com/page"}), // 同站也拦
+            "XHR",
+            false,
+        );
+        let released = drive_paused_request(config, None, paused, &PublicIpResolver).await;
+        assert_eq!(
+            released["method"], "Fetch.failRequest",
+            "deny_etld1 must stay a hard fail-closed block even with no approver: {released}"
+        );
+        assert_eq!(released["params"]["requestId"], "REQ-deny");
+    }
+
+    /// **standalone 路径不变**：有审批通道时 GatePost 仍路由到 `EgressApprover`（悬挂等裁决），
+    /// 拒 → failRequest、批 → continueRequest——allow-and-audit **只**作用于无通道分支。
+    #[tokio::test]
+    async fn approver_present_gatepost_still_routes_to_approver() {
+        for (verdict, expected_method) in [
+            (crate::firewall::EgressVerdict::Fail, "Fetch.failRequest"),
+            (crate::firewall::EgressVerdict::Continue, "Fetch.continueRequest"),
+        ] {
+            let invoked = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let approver: Arc<dyn crate::firewall::EgressApprover> = Arc::new(RecordingApprover {
+                invoked: Arc::clone(&invoked),
+                verdict,
+            });
+            let config = crate::firewall::FirewallConfig {
+                allow_etld1: vec!["stored-secret.com".to_string()],
+                ..Default::default()
+            };
+            let paused = paused_event_fixture(
+                "REQ-approver",
+                "https://tracker.io/collect",
+                "GET",
+                serde_json::json!({"Referer": "https://news.example.com/story"}),
+                "XHR",
+                false,
+            );
+            let released =
+                drive_paused_request(config, Some(approver), paused, &PublicIpResolver).await;
+            assert!(
+                invoked.load(Ordering::SeqCst),
+                "a wired approver must be consulted for GatePost (verdict {verdict:?})"
+            );
+            assert_eq!(
+                released["method"], expected_method,
+                "approver verdict {verdict:?} must drive the wire disposition: {released}"
+            );
+        }
+    }
+
+    /// `downloadWillBegin` 突发，**每一条**被阻断的下载都必须发出 cancelDownload。
+    /// 旧实现（lossy `subscribe` + `Lagged → continue`）在突发下静默丢事件，
+    /// 丢掉的 .exe 下载不再被取消——红线被时序绕过。
+    #[tokio::test]
+    async fn executable_download_burst_never_drops_red_line_cancels() {
+        const BURST: usize = 600; // > EVENT_CHANNEL_CAPACITY (256)
+
+        let (connection, mut requests, server) = generic_recording_fake_connection().await;
+        let download_loop = spawn_download_loop(connection.clone(), None);
+
+        // 紧凑同步派发（无 await 点）：当前线程 runtime 下循环任务无机会消费，
+        // lossy broadcast 必然溢出丢事件；可靠通道则全量缓存。
+        for index in 0..BURST {
+            connection
+                .registry()
+                .dispatch_message(&format!(
+                    r#"{{"method":"Browser.downloadWillBegin","params":{{"frameId":"F1","guid":"guid-{index}","url":"https://example.com/evil.exe","suggestedFilename":"evil-{index}.exe"}}}}"#
+                ))
+                .expect("dispatch downloadWillBegin");
+        }
+
+        let mut cancelled = HashSet::new();
+        tokio::time::timeout(Duration::from_secs(30), async {
+            while cancelled.len() < BURST {
+                let request = requests.recv().await.expect("fake server stays alive");
+                if request["method"] == "Browser.cancelDownload" {
+                    cancelled.insert(
+                        request["params"]["guid"].as_str().unwrap().to_string(),
+                    );
+                }
+            }
+        })
+        .await
+        .expect("every blocked executable download must be cancelled");
+        for index in 0..BURST {
+            assert!(
+                cancelled.contains(&format!("guid-{index}")),
+                "cancelDownload for guid-{index} must not be dropped under burst"
+            );
+        }
+
+        download_loop.abort();
+        connection.shutdown().await;
+        server.abort();
+        let _ = server.await;
+    }
+
+    /// **F46 回归**：阻断日志的 url scheme 提取绝不 panic——空 URL、无冒号、冒号
+    /// 过深、冒号前多字节字符统统安全（旧裸切片对空串越界 panic，杀死下载循环）。
+    #[test]
+    fn blocked_download_url_scheme_never_panics() {
+        assert_eq!(blocked_download_url_scheme(""), "[no-scheme]");
+        assert_eq!(blocked_download_url_scheme("no-colon-here"), "[no-scheme]");
+        assert_eq!(blocked_download_url_scheme("https://x/evil.exe"), "https:");
+        assert_eq!(blocked_download_url_scheme("data:app/x;base64,TVo="), "data:");
+        assert_eq!(blocked_download_url_scheme("blob:https://x"), "blob:");
+        // 冒号正好在第 10 字节（旧实现的钳制边界）。
+        assert_eq!(blocked_download_url_scheme("abcdefghij:x"), "abcdefghij:");
+        // 冒号 >10 字节：不切片（旧实现会切进 scheme 中部）。
+        assert_eq!(blocked_download_url_scheme("verylongscheme:x"), "[odd-scheme]");
+        // 冒号前多字节字符（旧实现可能切在 char 边界内 panic）。
+        assert_eq!(blocked_download_url_scheme("приложение:x"), "[odd-scheme]");
+        // 多字节但冒号 ≤10 字节：切片边界紧跟单字节 ':' 之后，恒安全。
+        assert_eq!(blocked_download_url_scheme("网页:x"), "网页:");
+    }
+
+    /// 清理/下载路由测试用 fake：`Target.closeTarget` → `success:true`；
+    /// `Target.getTargets` → 依次弹 `inventories`（耗尽后恒空）；`Page.getFrameTree` →
+    /// `frame_tree`（`None` → `{}`）；其它 → `{}`。所有回包回显 sessionId；每条请求
+    /// 推给测试侧供断言。
+    async fn cleanup_routing_fake_connection(
+        inventories: Vec<Vec<serde_json::Value>>,
+        frame_tree: Option<serde_json::Value>,
+    ) -> (
+        Connection,
+        tokio::sync::mpsc::UnboundedReceiver<serde_json::Value>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind cleanup-routing fake websocket");
+        let address = listener.local_addr().expect("read fake websocket address");
+        let (request_tx, request_rx) = tokio::sync::mpsc::unbounded_channel();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("accept fake client");
+            let mut websocket = tokio_tungstenite::accept_async(stream)
+                .await
+                .expect("complete fake websocket handshake");
+            let mut inventories = std::collections::VecDeque::from(inventories);
+            while let Some(Ok(message)) = futures_util::StreamExt::next(&mut websocket).await {
+                let tokio_tungstenite::tungstenite::Message::Text(text) = message else {
+                    break;
+                };
+                let request: serde_json::Value =
+                    serde_json::from_str(&text).expect("fake received valid json");
+                let id = request["id"].as_u64().expect("fake request has id");
+                let method = request["method"].as_str().unwrap_or_default();
+                let result = match method {
+                    "Target.closeTarget" => serde_json::json!({ "success": true }),
+                    "Target.getTargets" => serde_json::json!({
+                        "targetInfos": inventories.pop_front().unwrap_or_default()
+                    }),
+                    "Page.getFrameTree" => frame_tree
+                        .clone()
+                        .map(|tree| serde_json::json!({ "frameTree": tree }))
+                        .unwrap_or_else(|| serde_json::json!({})),
+                    _ => serde_json::json!({}),
+                };
+                let mut response = serde_json::json!({ "id": id, "result": result });
+                if let Some(session_id) = request.get("sessionId") {
+                    response["sessionId"] = session_id.clone();
+                }
+                let _ = request_tx.send(request);
+                futures_util::SinkExt::send(
+                    &mut websocket,
+                    tokio_tungstenite::tungstenite::Message::Text(
+                        response.to_string().into(),
+                    ),
+                )
+                .await
+                .expect("fake sends response");
+            }
+        });
+        let connection = Connection::connect(&format!("ws://{address}"))
+            .await
+            .expect("connect cleanup-routing fake websocket");
+        (connection, request_rx, server)
+    }
+
+    /// **F20 回归**：显式 shutdown 已推进到 unregister（owned targets 已成 retired
+    /// tombstones）但 finalize 失败后，调用方 drop 了 backend——Drop/hand_off 兜底
+    /// 路径的 `finish` 必须**重驱** finalize，关掉仍存活的 retired 目标；旧实现
+    /// `if unregistered && …` 在「本次调用没做 unregister」时直接跳过，泄漏目标。
+    #[tokio::test]
+    async fn drop_path_finalizes_a_previously_unregistered_lane_with_live_retired_targets() {
+        let (connection, mut requests, server) = cleanup_routing_fake_connection(
+            vec![vec![serde_json::json!({ "targetId": "leaked-popup", "type": "page" })]],
+            None,
+        )
+        .await;
+        let router = HostTargetRouter::new(connection.clone());
+        let router_loop = router.spawn();
+
+        let tabs = Arc::new(AsyncMutex::new(HashMap::new()));
+        let active_target = Arc::new(AsyncMutex::new("old-target".to_string()));
+        let active_frame = Arc::new(AsyncMutex::new(None));
+        let lane_closing = Arc::new(AtomicBool::new(false));
+        let registration = router
+            .register_lane(
+                "retired-lane".into(),
+                &tabs,
+                &active_target,
+                &active_frame,
+                Arc::clone(&lane_closing),
+                None,
+            )
+            .await
+            .expect("lane registers");
+        assert!(router.claim_target("retired-lane", "old-target").await);
+        assert!(router.claim_target("retired-lane", "leaked-popup").await);
+        // 显式 shutdown 已 unregister（tombstones 建立）但 finalize 失败的残局形态。
+        assert!(
+            router
+                .unregister_lane_if_current("retired-lane", registration)
+                .await
+        );
+
+        let cleanup = LaneCleanupAuthority::new(
+            connection.clone(),
+            Arc::clone(&router.cleanup_executor),
+            Arc::clone(&router),
+            "retired-lane".into(),
+            lane_closing,
+            Arc::clone(&tabs),
+            "old-target".into(),
+            "old-session".into(),
+            "old-frame".into(),
+        );
+        cleanup.set_registration(registration);
+
+        tokio::time::timeout(Duration::from_secs(20), Arc::clone(&cleanup).finish())
+            .await
+            .expect("drop-path finish completes");
+        assert_eq!(cleanup.state.load(Ordering::Acquire), 2);
+
+        let mut closed_targets = Vec::new();
+        while let Ok(request) = requests.try_recv() {
+            if request["method"] == "Target.closeTarget" {
+                closed_targets
+                    .push(request["params"]["targetId"].as_str().unwrap().to_string());
+            }
+        }
+        assert!(closed_targets.contains(&"old-target".to_string()));
+        assert!(
+            closed_targets.contains(&"leaked-popup".to_string()),
+            "the still-live retired popup must be closed by the Drop/hand_off fallback: {closed_targets:?}"
+        );
+
+        router_loop.abort();
+        connection.shutdown().await;
+        server.abort();
+        let _ = server.await;
+    }
+
+    /// **F21 回归**：iframe 子帧发起的下载（downloadWillBegin 带子帧 frameId，
+    /// frame_owner/ownership 恒查不到）必须经 frame-tree 解析归属其 lane 并被
+    /// finish_download 路由到 lane 工作区；旧实现直接检疫在 Host staging，
+    /// act_download 永远等不到文件。
+    #[tokio::test]
+    async fn subframe_download_routes_to_its_owning_lane() {
+        let temp = tempfile::tempdir().expect("create download routing root");
+        let staging = temp.path().join("host-staging");
+        let lane_dir = temp.path().join("lane-downloads");
+        std::fs::create_dir_all(&staging).expect("create staging dir");
+        std::fs::create_dir_all(&lane_dir).expect("create lane downloads dir");
+
+        let (connection, _requests, server) = cleanup_routing_fake_connection(
+            Vec::new(),
+            Some(serde_json::json!({
+                "frame": { "id": "tab-1" },
+                "childFrames": [{ "frame": { "id": "sub-frame-9" } }]
+            })),
+        )
+        .await;
+        connection.registry().register_session("session-tab-1", "page");
+
+        let router = HostTargetRouter::new(connection.clone());
+        let tabs = Arc::new(AsyncMutex::new(HashMap::new()));
+        tabs.lock().await.insert(
+            "tab-1".to_string(),
+            test_tab_record(&connection, "tab-1", "session-tab-1"),
+        );
+        let active_target = Arc::new(AsyncMutex::new("tab-1".to_string()));
+        let active_frame = Arc::new(AsyncMutex::new(None));
+        router
+            .register_lane(
+                "lane-a".into(),
+                &tabs,
+                &active_target,
+                &active_frame,
+                Arc::new(AtomicBool::new(false)),
+                Some(lane_dir.to_string_lossy().into_owned()),
+            )
+            .await
+            .expect("lane registers");
+        assert!(router.claim_target("lane-a", "tab-1").await);
+        router.claim_frame("lane-a", "tab-1").await;
+
+        // 子帧下载：frameId 是 iframe 的，不在 frame_owner（主帧表）/ownership（target 表）。
+        router
+            .begin_download("sub-frame-9", "guid-sub", "report.pdf")
+            .await;
+
+        let staged = staging.join("guid-sub");
+        std::fs::write(&staged, b"pdf-bytes").expect("stage downloaded file");
+        assert!(
+            router.finish_download("guid-sub", &staged).await,
+            "a subframe-initiated download must be routed to its owning lane"
+        );
+        assert_eq!(
+            std::fs::read(lane_dir.join("report.pdf")).expect("routed file exists"),
+            b"pdf-bytes"
+        );
+
+        // 真正不属于任何 lane 的帧仍然检疫（fail-closed 不误配）。
+        router
+            .begin_download("frame-of-no-lane", "guid-alien", "alien.bin")
+            .await;
+        let alien = staging.join("guid-alien");
+        std::fs::write(&alien, b"alien").expect("stage alien file");
+        assert!(
+            !router.finish_download("guid-alien", &alien).await,
+            "an unowned frame's download must stay quarantined in host staging"
+        );
+
+        connection.shutdown().await;
+        server.abort();
+        let _ = server.await;
+    }
+
+    /// **F52**：`abort_tab_record` 契约——三个后台循环（inject/oopif/**debug**）
+    /// 全部被 abort（tab 发现循环的重复插入丢弃路径此前漏掉 `_debug_loop`，
+    /// 现已统一走本 helper）。
+    #[tokio::test]
+    async fn abort_tab_record_aborts_all_three_tab_loops() {
+        let (connection, server) = router_test_connection().await;
+        let record = test_tab_record(&connection, "tab-x", "session-x");
+
+        abort_tab_record(&record);
+
+        let TabRecord {
+            _inject_loop,
+            _oopif_loop,
+            _debug_loop,
+            ..
+        } = record;
+        for (name, handle) in [
+            ("inject", _inject_loop),
+            ("oopif", _oopif_loop),
+            ("debug", _debug_loop),
+        ] {
+            let error = tokio::time::timeout(Duration::from_secs(2), handle)
+                .await
+                .expect("aborted loop settles promptly")
+                .expect_err("loop task must not complete normally");
+            assert!(error.is_cancelled(), "{name} loop must be aborted, not leaked");
+        }
+
+        connection.shutdown().await;
+        server.abort();
+        let _ = server.await;
+    }
+
+    /// F53 专用 fake：`createTarget` → 先回 nonce 关联的 attach 事件再回 targetId；
+    /// `Page.getFrameTree` → 单帧树；`Page.navigate` → CDP error（模拟导航失败）；
+    /// `closeTarget` → success:true；`getTargets` → 空；其它 → {}（回显 sessionId）。
+    async fn navigate_failure_open_link_fake_connection() -> (
+        Connection,
+        tokio::task::JoinHandle<()>,
+    ) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind navigate-failure fake websocket");
+        let address = listener.local_addr().expect("read fake websocket address");
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("accept fake client");
+            let mut websocket = tokio_tungstenite::accept_async(stream)
+                .await
+                .expect("complete fake websocket handshake");
+            while let Some(Ok(message)) = futures_util::StreamExt::next(&mut websocket).await {
+                let tokio_tungstenite::tungstenite::Message::Text(text) = message else {
+                    break;
+                };
+                let request: serde_json::Value =
+                    serde_json::from_str(&text).expect("fake received valid json");
+                let id = request["id"].as_u64().expect("fake request has id");
+                let method = request["method"].as_str().unwrap_or_default();
+                let response = match method {
+                    "Target.createTarget" => {
+                        let url = request["params"]["url"].as_str().unwrap_or_default();
+                        // flatten auto-attach 模拟：先发 nonce 关联 attach 事件。
+                        futures_util::SinkExt::send(
+                            &mut websocket,
+                            tokio_tungstenite::tungstenite::Message::Text(
+                                serde_json::json!({
+                                    "method": "Target.attachedToTarget",
+                                    "params": {
+                                        "sessionId": "pending-session",
+                                        "targetInfo": {
+                                            "targetId": "pending-target",
+                                            "type": "page",
+                                            "title": "",
+                                            "url": url,
+                                            "attached": true,
+                                            "canAccessOpener": false
+                                        },
+                                        "waitingForDebugger": false
+                                    }
+                                })
+                                .to_string()
+                                .into(),
+                            ),
+                        )
+                        .await
+                        .expect("fake sends nonce-correlated attach");
+                        serde_json::json!({ "id": id, "result": { "targetId": "pending-target" } })
+                    }
+                    "Page.getFrameTree" => serde_json::json!({
+                        "id": id,
+                        "result": { "frameTree": { "frame": { "id": "pending-target" } } }
+                    }),
+                    "Page.navigate" => serde_json::json!({
+                        "id": id,
+                        "error": { "code": -32000, "message": "net::ERR_FAILED (fake)" }
+                    }),
+                    "Target.closeTarget" => serde_json::json!({
+                        "id": id,
+                        "result": { "success": true }
+                    }),
+                    "Target.getTargets" => serde_json::json!({
+                        "id": id,
+                        "result": { "targetInfos": [] }
+                    }),
+                    _ => serde_json::json!({ "id": id, "result": {} }),
+                };
+                let mut response = response;
+                if let Some(session_id) = request.get("sessionId") {
+                    response["sessionId"] = session_id.clone();
+                }
+                futures_util::SinkExt::send(
+                    &mut websocket,
+                    tokio_tungstenite::tungstenite::Message::Text(
+                        response.to_string().into(),
+                    ),
+                )
+                .await
+                .expect("fake sends response");
+            }
+        });
+        let connection = Connection::connect(&format!("ws://{address}"))
+            .await
+            .expect("connect navigate-failure fake websocket");
+        (connection, server)
+    }
+
+    /// **F53 回归**：standalone 后端（无 router loss 事件路径）的
+    /// `open_link_new_tab` 在 navigate 失败时不得留下幽灵 TabRecord——
+    /// PendingCreatedPage 清理会关掉 target，tabs 里的残留记录会让 tabs 永远列出
+    /// 一个死 tab、switch 过去后一切操作 TargetClosed。
+    #[tokio::test]
+    async fn standalone_open_link_navigate_failure_leaves_no_ghost_tab() {
+        let (connection, server) = navigate_failure_open_link_fake_connection().await;
+        let backend = test_backend_with_tabs(connection.clone(), &["tab-main"]);
+
+        backend
+            .act_open_link_new_tab("https://example.com/next")
+            .await
+            .expect_err("navigate failure must surface to the caller");
+
+        assert!(
+            !backend.tabs.lock().await.contains_key("pending-target"),
+            "the armed record must be scrubbed on navigate failure (no ghost tab)"
+        );
+
+        drop(backend);
+        connection.shutdown().await;
+        server.abort();
+        let _ = server.await;
     }
 
     async fn withheld_create_response_fake_connection(
@@ -9496,7 +10550,7 @@ mod tests {
                 .await
                 .expect("complete fake websocket handshake");
             let mut requests = Vec::new();
-            while requests.len() < 3 {
+            while requests.len() < 4 {
                 let Some(Ok(tokio_tungstenite::tungstenite::Message::Text(text))) =
                     futures_util::StreamExt::next(&mut websocket).await
                 else {
@@ -9526,13 +10580,15 @@ mod tests {
                 } else {
                     serde_json::json!({})
                 };
+                let mut response = serde_json::json!({ "id": id, "result": result });
+                if let Some(session_id) = request.get("sessionId") {
+                    response["sessionId"] = session_id.clone();
+                }
                 requests.push(request);
                 futures_util::SinkExt::send(
                     &mut websocket,
                     tokio_tungstenite::tungstenite::Message::Text(
-                        serde_json::json!({ "id": id, "result": result })
-                            .to_string()
-                            .into(),
+                        response.to_string().into(),
                     ),
                 )
                 .await
@@ -9604,7 +10660,7 @@ mod tests {
             _download_loop: None,
             download_dir: None,
             workspace_dir: None,
-            _firewall_loop: None,
+            _firewall_watchdog: None,
             firewall_config: crate::firewall::FirewallConfig::default(),
             approved_domains: crate::firewall::ApprovedDomains::new(),
             evaluate_gate: AsyncMutex::new(crate::evaluate::EvaluateGate::default()),
@@ -9622,6 +10678,10 @@ mod tests {
         let mut backend = test_backend_with_tabs(connection.clone(), &["target-active"]);
         backend.headful = true;
         backend.display_available = true;
+        // Page.bringToFront 发到 page session——先在注册表登记它（生产由 attach 事件登记）。
+        connection
+            .registry()
+            .register_session("session-target-active", "page");
 
         backend
             .bring_to_front()
@@ -9641,17 +10701,22 @@ mod tests {
                 "Browser.getWindowForTarget",
                 "Browser.setWindowBounds",
                 "Target.activateTarget",
+                "Page.bringToFront",
             ],
-            "the native window must be restored before target activation"
+            "restore window, select tab, then deliver document focus (F37)"
         );
         assert_eq!(requests[0]["params"]["targetId"], "target-active");
         assert_eq!(requests[1]["params"]["windowId"], 73);
         assert_eq!(requests[1]["params"]["bounds"]["windowState"], "normal");
         assert_eq!(requests[2]["params"]["targetId"], "target-active");
         assert!(
-            requests.iter().all(|request| request.get("sessionId").is_none()),
+            requests[..3]
+                .iter()
+                .all(|request| request.get("sessionId").is_none()),
             "Browser and Target window commands must use the root session"
         );
+        // F37：Page.bringToFront 必须发在 page session 上（文档焦点属于 renderer）。
+        assert_eq!(requests[3]["sessionId"], "session-target-active");
     }
 
     #[tokio::test]

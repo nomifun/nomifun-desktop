@@ -75,6 +75,7 @@ async fn forward_user_events(
     mut receiver: tokio::sync::broadcast::Receiver<UserEventEnvelope>,
     ws_manager: Arc<WebSocketManager>,
 ) {
+    let resync = BrowserResyncCoalescer::new(ws_manager.clone(), RESYNC_COALESCE_INTERVAL);
     loop {
         match receiver.recv().await {
             Ok(envelope) => ws_manager.broadcast_to_user(&envelope.user_id, envelope.event),
@@ -87,10 +88,92 @@ async fn forward_user_events(
                 // snapshot. Sending directly avoids the already-lagged bus.
                 // Backward-compatible clients refresh on every inventory event;
                 // marker-aware clients explicitly classify this as a resync.
-                ws_manager.broadcast_all(browser_inventory_resync_event(skipped));
+                //
+                // Coalesced (F61): a sustained burst of unrelated events (
+                // terminal scrollback, agent step updates) produces repeated
+                // lag errors; without coalescing every one became another
+                // all-clients browser-inventory refetch. At most one resync per
+                // interval is broadcast, with a guaranteed trailing resync
+                // covering the last suppressed lag.
+                resync.on_lag(skipped);
             }
             Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
         }
+    }
+}
+
+/// Minimum spacing between all-clients lag-resync invalidations (F61).
+const RESYNC_COALESCE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Rate-limits `browser.inventory.changed` resync broadcasts.
+///
+/// Leading edge: a lag outside the interval broadcasts immediately. Inside
+/// the interval, skipped counts accumulate and exactly one trailing broadcast
+/// is scheduled for the interval boundary, so no invalidation is ever lost —
+/// clients that refetched on the previous resync still learn about events
+/// dropped after it.
+#[derive(Clone)]
+struct BrowserResyncCoalescer {
+    ws_manager: Arc<WebSocketManager>,
+    interval: std::time::Duration,
+    state: Arc<std::sync::Mutex<ResyncCoalescerState>>,
+}
+
+struct ResyncCoalescerState {
+    next_allowed: tokio::time::Instant,
+    pending_skipped: u64,
+    trailing_scheduled: bool,
+}
+
+impl BrowserResyncCoalescer {
+    fn new(ws_manager: Arc<WebSocketManager>, interval: std::time::Duration) -> Self {
+        Self {
+            ws_manager,
+            interval,
+            state: Arc::new(std::sync::Mutex::new(ResyncCoalescerState {
+                next_allowed: tokio::time::Instant::now(),
+                pending_skipped: 0,
+                trailing_scheduled: false,
+            })),
+        }
+    }
+
+    fn on_lag(&self, skipped: u64) {
+        let now = tokio::time::Instant::now();
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if now >= state.next_allowed && !state.trailing_scheduled {
+            state.next_allowed = now + self.interval;
+            drop(state);
+            self.ws_manager
+                .broadcast_all(browser_inventory_resync_event(skipped));
+            return;
+        }
+        state.pending_skipped = state.pending_skipped.saturating_add(skipped);
+        if state.trailing_scheduled {
+            return;
+        }
+        state.trailing_scheduled = true;
+        let deadline = state.next_allowed;
+        drop(state);
+        let coalescer = self.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep_until(deadline).await;
+            let skipped = {
+                let mut state = coalescer
+                    .state
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                state.trailing_scheduled = false;
+                state.next_allowed = tokio::time::Instant::now() + coalescer.interval;
+                std::mem::take(&mut state.pending_skipped)
+            };
+            coalescer
+                .ws_manager
+                .broadcast_all(browser_inventory_resync_event(skipped));
+        });
     }
 }
 
@@ -367,7 +450,7 @@ pub async fn create_router(services: &AppServices) -> Router {
 
 #[cfg(test)]
 mod realtime_bridge_tests {
-    use super::{forward_instance_events, forward_user_events};
+    use super::{BrowserResyncCoalescer, forward_instance_events, forward_user_events};
     use nomifun_api_types::WebSocketMessage;
     use nomifun_realtime::{BroadcastEventBus, EventBroadcaster, UserEventSink, WebSocketManager, WsOutbound};
     use serde_json::json;
@@ -383,6 +466,51 @@ mod realtime_bridge_tests {
             panic!("expected a text event")
         };
         serde_json::from_str(&text).expect("forwarded websocket event must be valid JSON")
+    }
+
+    #[tokio::test]
+    async fn lag_resyncs_are_coalesced_with_a_guaranteed_trailing_broadcast() {
+        let manager = Arc::new(WebSocketManager::new());
+        let (client_tx, mut client_rx) = mpsc::channel(8);
+        manager.add_client("owner-a".into(), "token".into(), client_tx);
+        let coalescer = BrowserResyncCoalescer::new(
+            Arc::clone(&manager),
+            std::time::Duration::from_millis(200),
+        );
+
+        // A burst of lag errors: leading edge broadcasts immediately, the
+        // rest coalesce into exactly one trailing broadcast at the interval.
+        coalescer.on_lag(1);
+        coalescer.on_lag(2);
+        coalescer.on_lag(3);
+
+        let leading = receive_event(&mut client_rx).await;
+        assert_eq!(leading.name, "browser.inventory.changed");
+        assert_eq!(leading.data["change_kind"], "resync_required");
+        assert_eq!(leading.data["skipped"], 1);
+        assert!(
+            client_rx.try_recv().is_err(),
+            "suppressed lags must not broadcast before the interval boundary"
+        );
+
+        // The scheduled trailing task fires at the interval boundary and no
+        // invalidation is lost: the suppressed counts accumulate into it.
+        let trailing = receive_event(&mut client_rx).await;
+        assert_eq!(trailing.name, "browser.inventory.changed");
+        assert_eq!(
+            trailing.data["skipped"], 5,
+            "suppressed lag counts must accumulate into the trailing resync"
+        );
+        assert!(
+            client_rx.try_recv().is_err(),
+            "three lag errors must produce exactly two broadcasts"
+        );
+
+        // A later lag (outside the interval) broadcasts immediately again.
+        tokio::time::sleep(std::time::Duration::from_millis(450)).await;
+        coalescer.on_lag(7);
+        let next = receive_event(&mut client_rx).await;
+        assert_eq!(next.data["skipped"], 7);
     }
 
     #[tokio::test]
@@ -817,6 +945,12 @@ pub fn create_router_with_all_state(
         let login_state = crate::router::browser_login::BrowserLoginState::new(
             services.browser_session_hub.clone(),
             services.authoritative_user_id.clone(),
+            // Boot-time snapshot source for the effective-source echo (F67);
+            // the same store the composition root froze into the Hub's engine
+            // template at startup.
+            Some(Arc::new(nomifun_db::SqliteClientPreferenceRepository::new(
+                services.database.pool().clone(),
+            ))),
         );
         protect_instance_owner(
             Router::new()

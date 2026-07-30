@@ -722,13 +722,21 @@ async fn preflight_and_attach_browser_identity(
         .validate_managed_request(&ctx, tool, args)
         .await
         .map_err(crate::browser_registry::platform_error_to_value)?;
-    attach_browser_identity(
-        registry,
+    let ctx = attach_browser_identity(
+        registry.clone(),
         ctx,
         lease_id,
         capability_expires_at_ms,
     )
-    .await
+    .await?;
+    // The owner-scoped lane_id check needs the trusted identity, which only
+    // exists after attachment. Re-validate so an unowned handle fails here
+    // rather than surfacing later from the bound Hub dispatch.
+    registry
+        .validate_managed_request(&ctx, tool, args)
+        .await
+        .map_err(crate::browser_registry::platform_error_to_value)?;
+    Ok(ctx)
 }
 
 #[cfg(feature = "browser-use")]
@@ -1604,6 +1612,89 @@ mod tests {
             browser_registry.signed_child_cleanup_status().pending_owner_leases,
             1,
             "invalid args must not renew or replace the existing Browser owner lease"
+        );
+    }
+
+    #[cfg(feature = "browser-use")]
+    #[tokio::test]
+    async fn preflight_accepts_forked_lane_id_for_owner_and_rejects_sibling() {
+        let close_probe = Arc::new(BrowserCloseProbe {
+            lane_closes: AtomicUsize::new(0),
+        });
+        let hub = BrowserSessionHub::new(
+            Arc::new(TestBrowserFactory {
+                probe: Arc::clone(&close_probe),
+            }),
+            HubConfig::default(),
+        );
+        let browser_registry =
+            crate::browser_registry::BrowserRegistry::from_hub(hub);
+        let ctx = CallerCtx {
+            conversation_id: Some(
+                nomifun_common::ConversationId::parse(TEST_CONVERSATION_ID)
+                    .unwrap(),
+            ),
+            user_id: UserId::parse(TEST_OWNER_ID).unwrap(),
+            ..Default::default()
+        };
+
+        // nomi_browser_fork returns the owner-scoped Lane handle.
+        let attached = preflight_and_attach_browser_identity(
+            browser_registry.clone(),
+            ctx.clone(),
+            "nomi_browser_fork",
+            &json!({"lane_name": "research"}),
+            "signed-browser-lease-fork".to_owned(),
+            u64::MAX,
+        )
+        .await
+        .expect("fork request must attach the Browser owner");
+        let forked = browser_registry
+            .dispatch_managed(
+                &attached,
+                None,
+                json!({"action": "browser_fork", "lane_name": "research"}),
+            )
+            .await
+            .unwrap();
+        assert!(!forked.is_error, "{}", forked.content);
+        let forked: Value = serde_json::from_str(&forked.content).unwrap();
+        let lane_id = forked
+            .pointer("/lane/lane_id")
+            .and_then(Value::as_str)
+            .unwrap()
+            .to_owned();
+
+        // A follow-up request carrying that lane_id starts from a fresh
+        // per-request CallerCtx with no browser identity; the transport
+        // preflight must accept it for the same signed lease.
+        preflight_and_attach_browser_identity(
+            browser_registry.clone(),
+            ctx.clone(),
+            "nomi_browser_status",
+            &json!({"lane_id": lane_id}),
+            "signed-browser-lease-fork".to_owned(),
+            u64::MAX,
+        )
+        .await
+        .expect("the owning lease must be able to target its forked lane_id");
+
+        // A different signed lease is a different trusted runtime; the same
+        // handle must still fail closed after identity attachment.
+        let error = preflight_and_attach_browser_identity(
+            browser_registry.clone(),
+            ctx,
+            "nomi_browser_status",
+            &json!({"lane_id": lane_id}),
+            "signed-browser-lease-sibling".to_owned(),
+            u64::MAX,
+        )
+        .await
+        .expect_err("an unowned lane handle must be rejected at preflight");
+        assert_eq!(
+            error.get("code").and_then(Value::as_str),
+            Some("operation_not_allowed"),
+            "{error}"
         );
     }
 

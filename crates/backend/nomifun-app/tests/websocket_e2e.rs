@@ -28,7 +28,24 @@ const TEST_USER_ID: &str = "0190f5fe-7c00-7a00-8000-000000000017";
 
 async fn start_app() -> TestApp {
     let db = nomifun_db::init_database_memory().await.unwrap();
-    let services = AppServices::from_config(db, &AppConfig::default()).await.unwrap();
+    // Hermetic per-test dirs: AppConfig::default() points at the relative
+    // `data` directory, which parallel test binaries would share on disk
+    // (and which must never accumulate machine-local droppings).
+    let root = tempfile::Builder::new()
+        .prefix("nomifun-ws-e2e-")
+        .tempdir()
+        .unwrap()
+        .keep();
+    let services = AppServices::from_config(
+        db,
+        &AppConfig {
+            data_dir: root.join("data"),
+            work_dir: root.join("work"),
+            ..AppConfig::default()
+        },
+    )
+    .await
+    .unwrap();
     let router = create_router(&services).await;
 
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -204,6 +221,25 @@ fn ws_manager(app: &TestApp) -> &Arc<WebSocketManager> {
     &app.services.ws_manager
 }
 
+/// Wait until the manager registers `expected` clients. A completed WebSocket
+/// handshake only proves the server sent 101; the connection task registers
+/// the client afterwards, so a fixed sleep flakes under parallel load.
+async fn wait_for_clients(app: &TestApp, expected: usize) {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        if ws_manager(app).client_count() == expected {
+            return;
+        }
+        if tokio::time::Instant::now() >= deadline {
+            panic!(
+                "expected {expected} registered WebSocket clients, got {}",
+                ws_manager(app).client_count()
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
 // ===========================================================================
 // T1 — Connection establishment and authentication
 // ===========================================================================
@@ -214,9 +250,7 @@ async fn t1_1_valid_bearer_token_connects() {
     let token = sign_token(&app);
 
     let (_tx, _rx) = connect_bearer(app.addr, &token).await;
-    tokio::time::sleep(Duration::from_millis(50)).await;
-
-    assert_eq!(ws_manager(&app).client_count(), 1);
+    wait_for_clients(&app, 1).await;
 }
 
 #[tokio::test]
@@ -248,9 +282,7 @@ async fn t1_4_token_from_cookie() {
     let token = sign_token(&app);
 
     let (_tx, _rx) = connect_cookie(app.addr, &token).await;
-    tokio::time::sleep(Duration::from_millis(50)).await;
-
-    assert_eq!(ws_manager(&app).client_count(), 1);
+    wait_for_clients(&app, 1).await;
 }
 
 #[tokio::test]
@@ -259,9 +291,7 @@ async fn t1_5_token_from_sec_websocket_protocol() {
     let token = sign_token(&app);
 
     let (_tx, _rx) = connect_protocol(app.addr, &token).await;
-    tokio::time::sleep(Duration::from_millis(50)).await;
-
-    assert_eq!(ws_manager(&app).client_count(), 1);
+    wait_for_clients(&app, 1).await;
 }
 
 // ===========================================================================
@@ -325,9 +355,7 @@ async fn t4_1_broadcast_reaches_all_clients() {
 
     let (_, mut rx1) = connect_bearer(app.addr, &token).await;
     let (_, mut rx2) = connect_bearer(app.addr, &token).await;
-    tokio::time::sleep(Duration::from_millis(50)).await;
-
-    assert_eq!(ws_manager(&app).client_count(), 2);
+    wait_for_clients(&app, 2).await;
 
     let event = WebSocketMessage::new("test-broadcast", json!({"seq": 1}));
     ws_manager(&app).broadcast_all(event);
@@ -348,9 +376,7 @@ async fn t4_2_unicast_reaches_only_target() {
 
     let (_, mut rx1) = connect_bearer(app.addr, &token).await;
     let (_, mut rx2) = connect_bearer(app.addr, &token).await;
-    tokio::time::sleep(Duration::from_millis(50)).await;
-
-    assert_eq!(ws_manager(&app).client_count(), 2);
+    wait_for_clients(&app, 2).await;
 
     let first_conn_id = ConnectionId(1);
     let msg = WebSocketMessage::new("unicast-test", json!({"target": true}));
@@ -370,15 +396,11 @@ async fn t4_3_broadcast_after_disconnect_no_error() {
 
     let (mut tx1, _rx1) = connect_bearer(app.addr, &token).await;
     let (_, mut rx2) = connect_bearer(app.addr, &token).await;
-    tokio::time::sleep(Duration::from_millis(50)).await;
-
-    assert_eq!(ws_manager(&app).client_count(), 2);
+    wait_for_clients(&app, 2).await;
 
     // Disconnect client 1
     tx1.send(tungstenite::Message::Close(None)).await.unwrap();
-    tokio::time::sleep(Duration::from_millis(100)).await;
-
-    assert_eq!(ws_manager(&app).client_count(), 1);
+    wait_for_clients(&app, 1).await;
 
     // Broadcast — should not error even though client 1 is gone
     let event = WebSocketMessage::new("after-disconnect", json!({}));
@@ -478,13 +500,10 @@ async fn t6_1_client_close_removes_from_manager() {
     let token = sign_token(&app);
 
     let (mut tx, _rx) = connect_bearer(app.addr, &token).await;
-    tokio::time::sleep(Duration::from_millis(50)).await;
-    assert_eq!(ws_manager(&app).client_count(), 1);
+    wait_for_clients(&app, 1).await;
 
     tx.send(tungstenite::Message::Close(None)).await.unwrap();
-    tokio::time::sleep(Duration::from_millis(100)).await;
-
-    assert_eq!(ws_manager(&app).client_count(), 0);
+    wait_for_clients(&app, 0).await;
 }
 
 // ===========================================================================
@@ -508,8 +527,7 @@ async fn t7_1_multiple_concurrent_connections() {
         connections.push(h.await.unwrap());
     }
 
-    tokio::time::sleep(Duration::from_millis(100)).await;
-    assert_eq!(ws_manager(&app).client_count(), 10);
+    wait_for_clients(&app, 10).await;
 }
 
 // ===========================================================================

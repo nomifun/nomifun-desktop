@@ -67,7 +67,8 @@ describe('MessageList turn completion disclosure structure', () => {
     expect(source.includes('lastUserTextIndex')).toBe(true);
     expect(source.includes("conversationContext?.isProcessing === true")).toBe(true);
     expect(source.includes('<MessageText message={message} hideActions={hideActions}></MessageText>')).toBe(true);
-    expect(source.includes('hideActions={isActiveProcessTextItem(item, _index)}')).toBe(true);
+    expect(source.includes('isActiveProcessTextItem(item, _index) ||')).toBe(true);
+    expect(source.includes('movedActionMessageIds.has((item as TMessage).id)')).toBe(true);
   });
 
   test('passes closed-turn effective process state into disclosure details', () => {

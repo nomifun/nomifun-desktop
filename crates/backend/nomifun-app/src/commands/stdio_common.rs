@@ -33,6 +33,30 @@ fn valid_idempotency_key(value: &str) -> bool {
         && value.bytes().all(|byte| (0x21..=0x7e).contains(&byte))
 }
 
+/// How a forwarded tool POST may be retried at the transport level.
+#[derive(Clone, Copy)]
+enum ToolDeliveryPolicy<'a> {
+    /// Retry any transport failure. Safe only when the endpoint's tools are
+    /// idempotent, or when `idempotency_key` is set and the server dedupes on
+    /// it (the Platform Gateway does).
+    AtLeastOnce { idempotency_key: Option<&'a str> },
+    /// Never re-POST once the request may have been delivered. Only
+    /// connection-setup failures — where the request provably never left this
+    /// process — are retried. Used for endpoints that execute non-idempotent
+    /// side effects and have no idempotency-key dedup (the Browser Hub
+    /// bridge: click/type/press_key can be an irreversible submit).
+    AtMostOnce,
+}
+
+impl ToolDeliveryPolicy<'_> {
+    fn idempotency_key(&self) -> Option<&str> {
+        match self {
+            Self::AtLeastOnce { idempotency_key } => *idempotency_key,
+            Self::AtMostOnce => None,
+        }
+    }
+}
+
 /// Structured outcome of forwarding a tool call over the loopback bridge.
 ///
 /// The distinction is derived from the HTTP status and the gateway's JSON
@@ -344,8 +368,40 @@ where
         body: serde_json::Value,
         stringify_non_string_result: bool,
     ) -> ForwardToolOutcome {
-        self.forward_tool_outcome_inner(operation, body, stringify_non_string_result, None)
-            .await
+        self.forward_tool_outcome_inner(
+            operation,
+            body,
+            stringify_non_string_result,
+            ToolDeliveryPolicy::AtLeastOnce {
+                idempotency_key: None,
+            },
+        )
+        .await
+    }
+
+    /// Forward one tool call with at-most-once delivery: the POST is retried
+    /// only while the request provably never reached the server (connection
+    /// setup failed). Once it may have been delivered — a timeout, a reset
+    /// after send, or a lost response body — the transport error is returned
+    /// WITHOUT re-POSTing, because the endpoint may already have committed a
+    /// non-idempotent side effect and performs no idempotency-key dedup.
+    ///
+    /// A 401 still renews the capability and re-POSTs exactly once: the
+    /// server rejects unauthorized requests before dispatching any tool, so
+    /// that response is proof the side effect was not executed.
+    pub(crate) async fn forward_tool_outcome_at_most_once(
+        &self,
+        operation: &str,
+        body: serde_json::Value,
+        stringify_non_string_result: bool,
+    ) -> ForwardToolOutcome {
+        self.forward_tool_outcome_inner(
+            operation,
+            body,
+            stringify_non_string_result,
+            ToolDeliveryPolicy::AtMostOnce,
+        )
+        .await
     }
 
     /// Forward a tool call with one transport-level business operation key.
@@ -370,7 +426,9 @@ where
             operation,
             body,
             stringify_non_string_result,
-            Some(idempotency_key),
+            ToolDeliveryPolicy::AtLeastOnce {
+                idempotency_key: Some(idempotency_key),
+            },
         )
         .await
     }
@@ -380,7 +438,7 @@ where
         operation: &str,
         mut body: serde_json::Value,
         stringify_non_string_result: bool,
-        idempotency_key: Option<&str>,
+        delivery: ToolDeliveryPolicy<'_>,
     ) -> ForwardToolOutcome {
         let first = match self.access_for(operation).await {
             Ok(access) => access,
@@ -388,7 +446,7 @@ where
         };
         inject_session(&mut body, &first.claims);
         let first_response = self
-            .post_tool_with_retry(&first.token, &body, idempotency_key)
+            .post_tool_with_retry(&first.token, &body, delivery)
             .await;
 
         let (status, text) = match first_response {
@@ -403,7 +461,7 @@ where
                 };
                 inject_session(&mut body, &renewed.claims);
                 match self
-                    .post_tool_with_retry(&renewed.token, &body, idempotency_key)
+                    .post_tool_with_retry(&renewed.token, &body, delivery)
                     .await
                 {
                     Ok(response) => response,
@@ -427,10 +485,11 @@ where
         &self,
         token: &str,
         body: &serde_json::Value,
-        idempotency_key: Option<&str>,
+        delivery: ToolDeliveryPolicy<'_>,
     ) -> Result<(reqwest::StatusCode, String), String> {
         let url = format!("http://127.0.0.1:{}/tool", self.inner.port);
         let delays_ms = [0_u64, 250, 750, 1_500];
+        let idempotency_key = delivery.idempotency_key();
         let mut last_error = String::new();
         for delay_ms in delays_ms {
             if delay_ms > 0 {
@@ -463,7 +522,20 @@ where
                         }
                     }
                 }
-                Err(error) => last_error = format!("tool transport failed: {error:#}"),
+                Err(error) => {
+                    // A connection-setup failure proves the request never left
+                    // this process, so even at-most-once delivery may retry it.
+                    // Any other send failure (timeout, reset after send) may
+                    // have delivered — and possibly executed — the request.
+                    let undelivered = error.is_connect();
+                    let error = format!("tool transport failed: {error:#}");
+                    if matches!(delivery, ToolDeliveryPolicy::AtMostOnce) && !undelivered {
+                        return Err(format!(
+                            "{error}; the request may already have been executed and was not retried"
+                        ));
+                    }
+                    last_error = error;
+                }
             }
         }
         Err(last_error)
@@ -943,6 +1015,145 @@ mod tests {
             *state.idempotency_headers.lock().unwrap(),
             vec![vec![key.to_owned()], vec![key.to_owned()]]
         );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn at_most_once_never_reposts_after_possible_delivery() {
+        let now = unix_time_secs();
+        let state = state(now);
+        // The response stream aborts after the server has already committed —
+        // exactly the window where a re-POST would double-execute a click.
+        state.fail_response_body_once.store(true, Ordering::SeqCst);
+        let (port, server) = spawn_server(state.clone()).await;
+        let bootstrap = bootstrap(&state.issuer, port, now);
+        let clock_state = state.now.clone();
+        let client = ScopedBridgeClient::from_bootstrap(
+            bootstrap,
+            DOMAIN,
+            "test-bridge",
+            validate_test_claims,
+            Arc::new(move || clock_state.load(Ordering::SeqCst)),
+        )
+        .await
+        .unwrap();
+
+        let result = client
+            .forward_tool_outcome_at_most_once(
+                "tools/call",
+                serde_json::json!({"tool": "click", "args": {"ref": "f1e2"}}),
+                false,
+            )
+            .await;
+
+        // Depending on where the abort lands, the loss surfaces as a body-read
+        // failure or as a post-send transport failure; both count as possible
+        // delivery and must not retry.
+        assert!(
+            matches!(
+                result,
+                ForwardToolOutcome::Error(ref message)
+                    if message.contains("failed to read response")
+                        || message.contains("was not retried")
+            ),
+            "unexpected outcome: {result:?}"
+        );
+        assert_eq!(
+            state.tool_count.load(Ordering::SeqCst),
+            1,
+            "a possibly-executed browser action must never be re-POSTed"
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn at_most_once_retries_undelivered_connection_failures() {
+        let now = unix_time_secs();
+        let state = state(now);
+        let (port, server) = spawn_server(state.clone()).await;
+        let bootstrap = bootstrap(&state.issuer, port, now);
+        let clock_state = state.now.clone();
+        let client = ScopedBridgeClient::from_bootstrap(
+            bootstrap,
+            DOMAIN,
+            "test-bridge",
+            validate_test_claims,
+            Arc::new(move || clock_state.load(Ordering::SeqCst)),
+        )
+        .await
+        .unwrap();
+
+        // Take the server down (connection refused: the request provably never
+        // leaves the client), then bring it back on the same port before the
+        // client's third transport attempt (delays are 0/250/750/1500 ms).
+        server.abort();
+        let restart_state = state.clone();
+        let restart = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(400)).await;
+            let listener = loop {
+                match tokio::net::TcpListener::bind(("127.0.0.1", port)).await {
+                    Ok(listener) => break listener,
+                    Err(_) => tokio::time::sleep(Duration::from_millis(25)).await,
+                }
+            };
+            let app = axum::Router::new()
+                .route(
+                    LOOPBACK_CAPABILITY_RENEW_PATH,
+                    axum::routing::post(renew_handler),
+                )
+                .route("/tool", axum::routing::post(tool_handler))
+                .with_state(restart_state);
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let result = client
+            .forward_tool_outcome_at_most_once(
+                "tools/call",
+                serde_json::json!({"tool": "observe", "args": {}}),
+                false,
+            )
+            .await;
+
+        assert_eq!(result, ForwardToolOutcome::Success("ok".into()));
+        assert_eq!(
+            state.tool_count.load(Ordering::SeqCst),
+            1,
+            "the refused attempts never reached the server"
+        );
+        restart.abort();
+    }
+
+    #[tokio::test]
+    async fn at_most_once_still_renews_once_after_unauthorized() {
+        let now = unix_time_secs();
+        let state = state(now);
+        state.reject_tools.store(true, Ordering::SeqCst);
+        let (port, server) = spawn_server(state.clone()).await;
+        let bootstrap = bootstrap(&state.issuer, port, now);
+        let clock_state = state.now.clone();
+        let client = ScopedBridgeClient::from_bootstrap(
+            bootstrap,
+            DOMAIN,
+            "test-bridge",
+            validate_test_claims,
+            Arc::new(move || clock_state.load(Ordering::SeqCst)),
+        )
+        .await
+        .unwrap();
+
+        let result = client
+            .forward_tool_outcome_at_most_once(
+                "tools/call",
+                serde_json::json!({"tool": "click", "args": {"ref": "f1e2"}}),
+                false,
+            )
+            .await;
+
+        // A 401 is proof the tool was not dispatched, so the single renewed
+        // re-POST is compatible with at-most-once execution.
+        assert!(matches!(result, ForwardToolOutcome::Error(text) if text.contains("unauthorized")));
+        assert_eq!(state.renew_count.load(Ordering::SeqCst), 2);
+        assert_eq!(state.tool_count.load(Ordering::SeqCst), 2);
         server.abort();
     }
 

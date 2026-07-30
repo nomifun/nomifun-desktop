@@ -173,8 +173,8 @@ async fn patch_settings_type_error_rejected() {
 
 #[tokio::test]
 async fn patch_settings_unknown_field_rejected() {
-    // UpdateSettingsRequest is #[serde(deny_unknown_fields)] — "Unknown or
-    // retired fields are rejected" per its doc contract.
+    // UpdateSettingsRequest is deny_unknown_fields: unknown or retired
+    // fields are rejected instead of silently ignored.
     let (app, _db) = setup().await;
     let req = json_request("PATCH", "/api/settings", serde_json::json!({"unknown_field": 123}));
     let resp = app.oneshot(req).await.unwrap();

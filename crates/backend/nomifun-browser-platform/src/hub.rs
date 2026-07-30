@@ -187,18 +187,27 @@ impl HostSlot {
         // Gate contention must not consume the factory's own cold-start
         // budget. This matters after a failed initializer: the next caller is
         // allowed one complete, independently bounded launch attempt.
-        let host = tokio::time::timeout(
+        let host = match tokio::time::timeout(
             HOST_INITIALIZATION_LAUNCH_TIMEOUT,
             self.driver.get_or_try_init(init),
         )
         .await
-        .map_err(|_| {
-            host_initialization_timeout_error(
-                self.epoch,
-                "launch",
-                HOST_INITIALIZATION_LAUNCH_TIMEOUT,
-            )
-        })??;
+        {
+            Ok(result) => result?,
+            Err(_) => {
+                // The launch future was dropped mid-flight; its half-started
+                // browser may still be tearing down asynchronously. Unlike a
+                // clean factory error, this slot must never rerun a launch
+                // into the same profile: retire it so the caller hands it to
+                // cleanup authority and retries on a fresh slot/epoch.
+                self.retire();
+                return Err(host_initialization_timeout_error(
+                    self.epoch,
+                    "launch",
+                    HOST_INITIALIZATION_LAUNCH_TIMEOUT,
+                ));
+            }
+        };
         // Retirement is published before cleanup waits for the initialization
         // gate. If shutdown/sweep selected this slot while launch was in
         // flight, never hand the late Host back to a Lane; the cleanup waiter
@@ -507,6 +516,10 @@ struct BrowserSessionHubInner {
     host_cleanup_retry_gate: Mutex<()>,
     cleanup_sequence: AtomicU64,
     host_epoch_sequence: AtomicU64,
+    // Last pressure state broadcast by the telemetry sampler, encoded for the
+    // idle-sample suppression in `update_resource_telemetry`.
+    // 0 = never sampled, 1 = Normal, 2 = Pressured, 3 = Critical.
+    last_sampled_pressure_state: AtomicU64,
     host_restarts: PerKeyHostRestartSingleFlight<HostKey>,
     host_circuits: Mutex<HashMap<HostKey, Arc<HostCircuitBreaker>>>,
     // Primary process visibility is a Host-wide property. Serialize explicit
@@ -714,6 +727,7 @@ impl BrowserSessionHub {
                 host_cleanup_retry_gate: Mutex::new(()),
                 cleanup_sequence: AtomicU64::new(0),
                 host_epoch_sequence: AtomicU64::new(0),
+                last_sampled_pressure_state: AtomicU64::new(0),
                 host_restarts: PerKeyHostRestartSingleFlight::default(),
                 host_circuits: Mutex::new(HashMap::new()),
                 primary_visibility_gate: Mutex::new(()),
@@ -1032,7 +1046,12 @@ impl BrowserSessionHub {
         let result = self
             .close_matching(|lane| &lane.caller.owner_lease_id == lease_id)
             .await?;
-        self.finish_owner_cleanup(lease_id).await?;
+        // A pending owner-cleanup error must not discard the accurate close
+        // count: sweep and management callers read `detached_closed` to credit
+        // the lanes that did close in this call.
+        if let Err(error) = self.finish_owner_cleanup(lease_id).await {
+            return Err(Self::scoped_cleanup_error(error, result.closed));
+        }
         Ok(result)
     }
 
@@ -1376,7 +1395,10 @@ impl BrowserSessionHub {
 
     async fn resource_workload(&self, lane_cold_start_bytes: u64) -> ResourceWorkload {
         let active_requests = self.inner.scheduler.active_requests();
-        let queued_requests = self.inner.scheduler.queued_requests();
+        // Workload accounting is order-independent; the unordered snapshot
+        // avoids running the O(queue^2) promotion simulation under the
+        // scheduler mutex on every admission/release decision.
+        let queued_requests = self.inner.scheduler.queued_requests_unordered();
         let records = self.inner.lanes.read().await.clone();
         let mut workload = ResourceWorkload {
             active_lanes: active_requests.len(),
@@ -1645,9 +1667,16 @@ impl BrowserSessionHub {
         ));
         self.inner.lanes.write().await.insert(lane_id.clone(), Arc::clone(&lane));
         self.inner.lane_keys.write().await.insert(lane_key, lane_id.clone());
-        drop(_open_guard);
+        // The creation event precedes the start task so subscribers can never
+        // observe lane_running before lane_created.
         self.emit("lane_created", Some(&snapshot));
-
+        // Register the creating caller's start waiter while `open_gate` is
+        // still held. `abandon_unclaimed_lane_start` serializes its
+        // zero-waiter decision only with registrations performed under this
+        // gate; registering after the gate drop would let a cancelled
+        // duplicate open observe a 1->0 waiter transition and detach the Lane
+        // its creator is about to wait on (spurious lane_closed for an open
+        // nobody closed).
         let action = match admission {
             Admission::Ready => {
                 let flight = start_flight.expect("Ready Lane must have a start flight");
@@ -1663,6 +1692,7 @@ impl BrowserSessionHub {
                 OpenLaneAction::Return(OpenLaneOutcome::Queued { lane: snapshot })
             }
         };
+        drop(_open_guard);
         self.finish_open_action(action).await
     }
 
@@ -2133,6 +2163,20 @@ impl BrowserSessionHub {
                 Ok(HostHandle { key, slot, driver })
             }
             Err(error) => {
+                // A cold-start launch timeout retires the slot (its cancelled
+                // launch may still be tearing a half-started browser down).
+                // Hand the retired slot to cleanup authority so the retry gets
+                // a fresh slot and epoch instead of relaunching into the same
+                // profile directory behind the dying process.
+                if is_host_initialization_launch_timeout(&error)
+                    && self
+                        .retire_host_slot_for_cleanup(&key, slot.epoch, &slot)
+                        .await
+                {
+                    let _ = self
+                        .attempt_orphaned_host_slot_cleanup(&key, &slot)
+                        .await;
+                }
                 if half_open_probe {
                     circuit_attempt.fail();
                 } else {
@@ -2340,7 +2384,18 @@ impl BrowserSessionHub {
     ) -> Result<HostRestartTransition, BrowserPlatformError> {
         let hub = self.clone();
         let restart_key = key.clone();
-        let restart_identity_mode = key.identity_mode;
+        // LOCK ORDER: primary_visibility_gate is always acquired BEFORE
+        // joining or leading a per-key restart flight. The visibility paths
+        // (set_primary_visibility_once / set_lane_visibility_and_maybe_focus
+        // -> transition_primary_visibility_locked) hold the gate and then
+        // enter host_restarts.run_bounded; acquiring the gate inside the
+        // flight's leader closure instead would deadlock those callers
+        // against crash recovery until the attempt timeout aborts the leader.
+        let _primary_visibility_guard = if key.identity_mode == BrowserIdentityMode::Primary {
+            Some(self.inner.primary_visibility_gate.lock().await)
+        } else {
+            None
+        };
         let flight = self
             .inner
             .host_restarts
@@ -2349,12 +2404,6 @@ impl BrowserSessionHub {
                 observed_epoch,
                 HOST_RESTART_ATTEMPT_TIMEOUT,
                 move || async move {
-                    let _primary_visibility_guard =
-                        if restart_identity_mode == BrowserIdentityMode::Primary {
-                            Some(hub.inner.primary_visibility_gate.lock().await)
-                        } else {
-                            None
-                        };
                     hub.mark_host_restarting(&restart_key, observed_epoch)
                         .await;
                     let result = hub
@@ -2404,8 +2453,14 @@ impl BrowserSessionHub {
                     ));
                 }
                 let transition = HostRestartTransition::new(observed_epoch, current.epoch)?;
-                self.rebind_host_lanes(&key, observed_epoch, transition, host)
-                    .await?;
+                self.rebind_host_lanes(
+                    &key,
+                    observed_epoch,
+                    transition,
+                    host,
+                    requested_headful.is_some(),
+                )
+                .await?;
                 return Ok(transition);
             }
         }
@@ -2541,8 +2596,14 @@ impl BrowserSessionHub {
             }
         };
         let transition = HostRestartTransition::new(observed_epoch, new_epoch)?;
-        self.rebind_host_lanes(&key, observed_epoch, transition, host)
-            .await?;
+        self.rebind_host_lanes(
+            &key,
+            observed_epoch,
+            transition,
+            host,
+            requested_headful.is_some(),
+        )
+        .await?;
         // Close the remaining race window: an explicit close may have emptied
         // this key between the live-lane check above and the slot insert.
         // `finalize_empty_host` re-validates under `open_gate` and retires the
@@ -2569,6 +2630,7 @@ impl BrowserSessionHub {
         observed_epoch: u64,
         transition: HostRestartTransition,
         host: Arc<dyn BrowserHostDriver>,
+        intentional_visibility_transition: bool,
     ) -> Result<(), BrowserPlatformError> {
         let mut prepared = Vec::new();
         for lane in self.lanes_for_host_key(key).await {
@@ -2680,9 +2742,20 @@ impl BrowserSessionHub {
                 snapshot.tabs.clear();
                 snapshot.active_tab_id = None;
                 snapshot.active_frame_id = None;
-                snapshot.error_code = Some(BrowserErrorCode::BrowserRestarted);
-                snapshot.error_message =
-                    Some("The managed browser restarted; a fresh observe is required.".to_owned());
+                if intentional_visibility_transition {
+                    // A user-requested visibility replacement is not a
+                    // failure. The stale-epoch fence stays armed through
+                    // `fresh_observe_required`, but the Lane must not carry a
+                    // persistent restart error that nothing will ever clear
+                    // (login lanes may never observe again).
+                    snapshot.error_code = None;
+                    snapshot.error_message = None;
+                } else {
+                    snapshot.error_code = Some(BrowserErrorCode::BrowserRestarted);
+                    snapshot.error_message = Some(
+                        "The managed browser restarted; a fresh observe is required.".to_owned(),
+                    );
+                }
                 snapshot.recoverable = true;
                 snapshot.clone()
             };
@@ -3304,7 +3377,8 @@ impl BrowserSessionHub {
             .cloned()
             .ok_or_else(|| foreground_lane_not_ready_error(lane_id.clone()))?;
         let desired_headful = visibility.is_headful();
-        if slot.is_headful() != desired_headful {
+        let transitioned = slot.is_headful() != desired_headful;
+        if transitioned {
             self.transition_primary_visibility_locked(
                 &host_key,
                 authorized_epoch,
@@ -3339,6 +3413,15 @@ impl BrowserSessionHub {
                 return Err(foreground_lane_not_ready_error(lane_id.clone()));
             }
             snapshot.last_active_at_ms = self.inner.clock.now_ms();
+            // The intentional replacement above completed for this exact Lane.
+            // Its restart marker is not an error the user can act on; clearing
+            // it keeps the requesting Lane usable while
+            // `fresh_observe_required` still fences stale page state. A pure
+            // focus without a transition must not clear a genuine crash marker.
+            if transitioned {
+                snapshot.error_code = None;
+                snapshot.error_message = None;
+            }
             snapshot.clone()
         };
         if focus {
@@ -3349,6 +3432,12 @@ impl BrowserSessionHub {
         Ok(snapshot)
     }
 
+    /// Replaces the live Primary Host with the requested visibility.
+    ///
+    /// LOCK ORDER: the caller must already hold `primary_visibility_gate`
+    /// before this method enters the per-key restart single-flight. Crash
+    /// recovery (`recover_host_failure`) follows the same order — gate first,
+    /// flight second — so the two can never wait on each other.
     async fn transition_primary_visibility_locked(
         &self,
         host_key: &HostKey,
@@ -4549,6 +4638,10 @@ impl BrowserSessionHub {
                 .retain(|pending_key, flight| {
                     pending_key != key || flight.result.get().is_none()
                 });
+            // No process remains for this key; a retained restart gate could
+            // only leak (isolated-lane UUID and replica-generation keys never
+            // repeat). Gates with an in-flight attempt are kept.
+            self.inner.host_restarts.evict_settled(key).await;
         }
     }
 
@@ -5032,6 +5125,22 @@ impl BrowserSessionHub {
         }
 
         let slot_keys: Vec<_> = self.inner.host_slots.read().await.keys().cloned().collect();
+        // Mirror finalize_empty_host: a retained target cleanup or an
+        // unsettled Lane start still belongs to its Host. Retiring the process
+        // first would make that in-flight close/open race a dead CDP
+        // connection, violating the ordering invariant that target cleanup
+        // settles before the process is stopped.
+        let mut blocked_keys = HashSet::new();
+        for key in &slot_keys {
+            if used_keys.contains(key) {
+                continue;
+            }
+            if self.host_has_pending_lane_cleanup(key).await
+                || self.host_has_unsettled_lane_start(key).await
+            {
+                blocked_keys.insert(key.clone());
+            }
+        }
         let mut ready = Vec::new();
         {
             let mut empty = self.inner.host_empty_since_ms.write().await;
@@ -5039,7 +5148,7 @@ impl BrowserSessionHub {
                 empty.remove(key);
             }
             for key in slot_keys {
-                if used_keys.contains(&key) {
+                if used_keys.contains(&key) || blocked_keys.contains(&key) {
                     continue;
                 }
                 let empty_since = *empty.entry(key.clone()).or_insert(now);
@@ -5297,7 +5406,23 @@ impl BrowserSessionHub {
         self.apply_operation_weight_limit(decision.operation_weight_limit)
             .await;
         self.promote_released_capacity().await;
-        self.emit("resource_pressure_sampled", None);
+        // Every sample drives a client-visible inventory event, and clients
+        // refresh on each one. With zero lanes and an unchanged pressure
+        // state there is nothing actionable in the sample; suppress the
+        // broadcast so an idle installation does not poll itself forever.
+        let encoded_state = match decision.state {
+            ResourcePressureState::Normal => 1,
+            ResourcePressureState::Pressured => 2,
+            ResourcePressureState::Critical => 3,
+        };
+        let previous = self
+            .inner
+            .last_sampled_pressure_state
+            .swap(encoded_state, Ordering::AcqRel);
+        let has_lanes = !self.inner.lanes.read().await.is_empty();
+        if has_lanes || previous != encoded_state {
+            self.emit("resource_pressure_sampled", None);
+        }
     }
 
     async fn refresh_lane_resource_estimates(&self, telemetry: &ResourceTelemetry) {
@@ -5701,6 +5826,15 @@ fn is_host_fatal_error(error: &BrowserPlatformError) -> bool {
             == Some("host")
 }
 
+fn is_host_initialization_launch_timeout(error: &BrowserPlatformError) -> bool {
+    error
+        .metadata
+        .get("host_initialization_timeout")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false)
+        && error.metadata.get("phase").and_then(serde_json::Value::as_str) == Some("launch")
+}
+
 fn lane_restart_notice(
     lane: &LaneRecord,
     snapshot: &BrowserLaneSnapshot,
@@ -5919,15 +6053,14 @@ fn replica_operation_requires_primary(operation: &BrowserOperation) -> bool {
     match operation.kind {
         // Ordinary GET-style navigation is the supported authenticated crawl
         // path. Explicitly state-changing request shapes remain Primary-only.
-        // `reload` is deliberately never treated as safe: the current
+        // `reload` is deliberately absent from the safe list: the current
         // history entry may have been produced by a POST, and an empty reload
         // input cannot prove that replaying it is side-effect free.
         BrowserOperationKind::Navigate => {
             !matches!(
                 operation.action.as_str(),
-                "navigate" | "back" | "forward" | "reload"
-            ) || operation.action == "reload"
-                || operation_declares_stateful_request(&operation.input)
+                "navigate" | "back" | "forward"
+            ) || operation_declares_stateful_request(&operation.input)
         }
         BrowserOperationKind::Crawl => {
             !matches!(
@@ -7262,9 +7395,24 @@ mod tests {
             "the process replacement must advance the browser epoch"
         );
         assert_eq!(
-            foregrounded.error_code,
-            Some(BrowserErrorCode::BrowserRestarted),
-            "old refs must be invalidated and a fresh observe required"
+            foregrounded.error_code, None,
+            "the lane that requested the visibility transition must not be left errored"
+        );
+        assert_eq!(foregrounded.error_message, None);
+        let refreshed = harness.client.status(&lane_id).await.unwrap();
+        assert_eq!(
+            refreshed.error_code, None,
+            "the requesting lane must not surface a persistent restart banner"
+        );
+        let fence = harness
+            .client
+            .execute(&lane_id, navigate())
+            .await
+            .unwrap_err();
+        assert_eq!(
+            fence.code,
+            BrowserErrorCode::BrowserRestarted,
+            "old refs must be invalidated and a fresh observe still required"
         );
         assert_eq!(foregrounded.last_active_at_ms, before.last_active_at_ms + 25);
         assert_eq!(
@@ -7298,8 +7446,8 @@ mod tests {
         assert_ne!(headful_first.browser_epoch, initial_first.browser_epoch);
         assert_eq!(headful_first.browser_epoch, headful_second.browser_epoch);
         assert_eq!(
-            headful_first.error_code,
-            Some(BrowserErrorCode::BrowserRestarted)
+            headful_first.error_code, None,
+            "an intentional visibility change must not surface a restart error"
         );
         assert_eq!(
             harness.hub.primary_visibility().await,
@@ -7456,6 +7604,113 @@ mod tests {
         assert!(harness.client.status(&lane_id).await.is_ok());
     }
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn lane_created_is_emitted_before_the_start_task_is_spawned() {
+        // Ordering regression pin: `open_lane` must publish `lane_created`
+        // synchronously BEFORE spawning the start task. If the emit moves back
+        // after the spawn, a start task scheduled on another worker can publish
+        // `lane_running` first, so inventory subscribers would observe a lane
+        // running before it was ever created. Blocking the Host launch parks
+        // the start task at its earliest observable step; by that point the
+        // creation event must already be in the channel.
+        let harness = harness();
+        let mut events = harness.hub.subscribe();
+        harness
+            .probe
+            .block_host_launch
+            .store(true, Ordering::Release);
+
+        let client = harness.client.clone();
+        let opener = tokio::spawn(async move {
+            client
+                .open(
+                    Some("created-before-start"),
+                    BrowserIdentityMode::Primary,
+                    None,
+                )
+                .await
+        });
+
+        // The start task has been spawned and is parked inside the blocked
+        // launch; `lane_created` must already be observable and no start
+        // progress may have been published ahead of it.
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            harness.probe.wait_for_host_launches(1),
+        )
+        .await
+        .expect("the lane start task never reached the Host launch");
+        assert_eq!(
+            events
+                .try_recv()
+                .expect("lane_created must be published before the start task runs")
+                .change_kind,
+            "lane_created"
+        );
+
+        harness
+            .probe
+            .block_host_launch
+            .store(false, Ordering::Release);
+        harness.probe.host_launch_release.add_permits(1);
+        let outcome = opener.await.unwrap().unwrap();
+        assert!(matches!(outcome, OpenLaneOutcome::Running { .. }));
+        assert_eq!(
+            events.recv().await.unwrap().change_kind,
+            "lane_running",
+            "lane_running must strictly follow lane_created"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn crash_recovery_and_visibility_gate_holder_never_deadlock() {
+        // Lock-order regression test: crash recovery must acquire
+        // primary_visibility_gate BEFORE entering the restart single-flight.
+        // If it registered its flight first and acquired the gate inside the
+        // leader closure, the gate-holding transition below would join that
+        // flight and both sides would wait on each other until the 75s
+        // attempt timeout.
+        let harness = harness();
+        let lane_id = open(&harness.client, "gate-order").await;
+        let before = harness.client.status(&lane_id).await.unwrap();
+
+        // Simulate the visibility caller's critical section.
+        let gate = harness.hub.inner.primary_visibility_gate.lock().await;
+        harness
+            .probe
+            .host_fatal_executions_remaining
+            .store(1, Ordering::Release);
+        let client = harness.client.clone();
+        let op_lane = lane_id.clone();
+        let recovery =
+            tokio::spawn(async move { client.execute(&op_lane, navigate()).await });
+        for _ in 0..32 {
+            tokio::task::yield_now().await;
+        }
+
+        let key = HostKey {
+            identity_mode: BrowserIdentityMode::Primary,
+            identity_generation: 0,
+            isolation_lane_id: None,
+        };
+        harness
+            .hub
+            .transition_primary_visibility_locked(&key, before.browser_epoch, true)
+            .await
+            .expect("the gate holder's transition must not deadlock against crash recovery");
+        drop(gate);
+
+        let error = tokio::time::timeout(Duration::from_secs(5), recovery)
+            .await
+            .expect("crash recovery did not settle after the gate was released")
+            .unwrap()
+            .unwrap_err();
+        assert_eq!(error.code, BrowserErrorCode::BrowserRestarted);
+        let current = harness.client.status(&lane_id).await.unwrap();
+        assert_ne!(current.browser_epoch, before.browser_epoch);
+        assert!(harness.hub.overview().await.hosts[0].headful);
+    }
+
     #[tokio::test]
     async fn visibility_transition_racing_start_never_publishes_old_epoch_driver() {
         let harness = harness();
@@ -7511,8 +7766,8 @@ mod tests {
         let current = harness.client.status(&opened.lane_id).await.unwrap();
         assert_ne!(current.browser_epoch, opened.browser_epoch);
         assert_eq!(
-            current.error_code,
-            Some(BrowserErrorCode::BrowserRestarted)
+            current.error_code, None,
+            "an intentional visibility change must not surface a restart error"
         );
         assert_eq!(harness.factory.launches.load(Ordering::Acquire), 2);
         assert!(harness.hub.overview().await.hosts[0].headful);
@@ -7975,6 +8230,66 @@ mod tests {
         assert_eq!(overview.total_lanes, 0);
         assert_eq!(overview.pending_cleanup_count, 0);
         assert_eq!(overview.managed_host_count, 0);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn owner_close_pending_cleanup_error_reports_accurate_detached_count() {
+        let harness = harness();
+        let (client, lease_id) =
+            client_for_runtime_with_lease(&harness, "runtime-owner-close-count");
+        let stuck_lane = open(&client, "owner-count-stuck").await;
+        harness
+            .probe
+            .block_lane_close
+            .store(true, Ordering::Release);
+
+        // A slow target close times out for its caller and retains cleanup
+        // authority while the driver close keeps running.
+        let hub = harness.hub.clone();
+        let closing = stuck_lane.clone();
+        let stuck_close = tokio::spawn(async move { hub.close_lane(&closing).await });
+        harness.probe.wait_for_lane_closes(1).await;
+        tokio::time::advance(LANE_CLEANUP_WAITER_TIMEOUT).await;
+        tokio::task::yield_now().await;
+        let stuck_error = stuck_close
+            .await
+            .expect("close task panicked")
+            .expect_err("blocked cleanup must time out for its caller");
+        assert_eq!(stuck_error.metadata["cleanup_pending"], true);
+
+        // Two more owner lanes close successfully in the same owner call, but
+        // the retained cleanup keeps finish_owner_cleanup pending. The error
+        // must still credit both lanes that actually closed.
+        harness
+            .probe
+            .block_lane_close
+            .store(false, Ordering::Release);
+        open(&client, "owner-count-a").await;
+        open(&client, "owner-count-b").await;
+        let error = harness
+            .hub
+            .close_owner_lanes(&lease_id)
+            .await
+            .expect_err("retained cleanup must keep the owner call pending");
+        assert_eq!(error.metadata["cleanup_pending"], true);
+        assert_eq!(
+            error.metadata["detached_closed"], 2,
+            "the pending owner-cleanup error must not discard the accurate close count"
+        );
+
+        // Convergence: releasing the blocked driver lets the exact owner
+        // finish its retained Host obligation.
+        harness.probe.lane_close_release.add_permits(1);
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            harness.probe.wait_for_lane_close_completions(3),
+        )
+        .await
+        .expect("the blocked driver close did not finish after release");
+        let converged = harness.hub.revoke_owner_lease(&lease_id).await.unwrap();
+        assert_eq!(converged.closed, 0);
+        assert!(converged.already_closed);
+        assert_eq!(harness.hub.remaining_resources().await, RemainingResources::default());
     }
 
     #[tokio::test]
@@ -11520,6 +11835,169 @@ mod tests {
                 .lock()
                 .await
                 .is_empty()
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn sweep_never_retires_a_host_while_its_target_cleanup_is_still_running() {
+        let harness = harness();
+        let lane_id = open(&harness.client, "sweep-pending-cleanup").await;
+        harness
+            .probe
+            .block_lane_close
+            .store(true, Ordering::Release);
+
+        // The close times out for its caller but the driver close keeps
+        // running under Hub authority; the lane is already out of inventory.
+        let hub = harness.hub.clone();
+        let closing = lane_id.clone();
+        let close = tokio::spawn(async move { hub.close_lane(&closing).await });
+        harness.probe.wait_for_lane_closes(1).await;
+        tokio::time::advance(LANE_CLEANUP_WAITER_TIMEOUT).await;
+        tokio::task::yield_now().await;
+        let error = close
+            .await
+            .expect("close task panicked")
+            .expect_err("blocked cleanup must time out for its caller");
+        assert_eq!(error.metadata["cleanup_pending"], true);
+        assert!(harness.hub.list_lanes().await.is_empty());
+
+        // The key has no live lanes, but the periodic sweep must not hard-stop
+        // the process while the retained target cleanup is still talking to it.
+        let _ = harness.hub.sweep().await;
+        assert_eq!(
+            harness.probe.host_shutdowns.load(Ordering::Acquire),
+            0,
+            "sweep retired the Host while its Lane cleanup was still in flight"
+        );
+        assert_eq!(
+            harness
+                .hub
+                .inner
+                .pending_lane_cleanups
+                .lock()
+                .await
+                .len(),
+            1
+        );
+
+        // Once the close settles, retirement converges normally.
+        harness.probe.lane_close_release.add_permits(1);
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            harness.probe.wait_for_lane_close_completions(1),
+        )
+        .await
+        .expect("the blocked driver close did not finish after release");
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            harness.probe.wait_for_host_shutdowns(1),
+        )
+        .await
+        .expect("the empty Host was not retired after cleanup settled");
+        harness.hub.sweep().await.unwrap();
+        assert_eq!(
+            harness.hub.remaining_resources().await,
+            RemainingResources::default()
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn cold_start_launch_timeout_retires_the_slot_and_retry_gets_a_fresh_epoch() {
+        let harness = harness();
+        harness
+            .probe
+            .block_host_launch
+            .store(true, Ordering::Release);
+
+        let error = harness
+            .client
+            .open(
+                Some("cold-start-timeout"),
+                BrowserIdentityMode::Primary,
+                None,
+            )
+            .await
+            .expect_err("a blocked cold start must time out");
+        assert_eq!(error.metadata["host_initialization_timeout"], true);
+        assert_eq!(error.metadata["phase"], "launch");
+        assert!(
+            harness.hub.inner.host_slots.read().await.is_empty(),
+            "the timed-out slot must be retired to cleanup authority, not left active"
+        );
+
+        harness
+            .probe
+            .block_host_launch
+            .store(false, Ordering::Release);
+        let lane = harness
+            .client
+            .open(
+                Some("cold-start-retry"),
+                BrowserIdentityMode::Primary,
+                None,
+            )
+            .await
+            .expect("retry after a cold-start timeout must succeed")
+            .lane()
+            .clone();
+        assert_eq!(
+            lane.browser_epoch, 2,
+            "the retry must launch a fresh slot/epoch instead of reusing the timed-out slot"
+        );
+        assert_eq!(harness.factory.launches.load(Ordering::Acquire), 2);
+    }
+
+    #[tokio::test]
+    async fn idle_telemetry_samples_do_not_broadcast_without_change_or_lanes() {
+        let harness = harness();
+        let mut events = harness.hub.subscribe();
+        let normal = ResourceTelemetry {
+            total_memory_bytes: 16 * crate::resource::GIB,
+            available_memory_bytes: 12 * crate::resource::GIB,
+            logical_cpus: 8,
+            ..Default::default()
+        };
+
+        // The first sample establishes the pressure state and is broadcast.
+        harness.hub.update_resource_telemetry(normal.clone()).await;
+        assert_eq!(
+            events.recv().await.unwrap().change_kind,
+            "resource_pressure_sampled"
+        );
+
+        // An idle repeat (zero lanes, unchanged state) must not push a
+        // client-visible event every sample period forever.
+        harness.hub.update_resource_telemetry(normal.clone()).await;
+        harness.hub.update_resource_telemetry(normal.clone()).await;
+        assert!(
+            matches!(
+                events.try_recv(),
+                Err(tokio::sync::broadcast::error::TryRecvError::Empty)
+            ),
+            "idle unchanged samples must be suppressed"
+        );
+
+        // A pressure-state transition is actionable and is broadcast.
+        let pressured = ResourceTelemetry {
+            available_memory_bytes: 3 * crate::resource::GIB,
+            ..normal.clone()
+        };
+        harness.hub.update_resource_telemetry(pressured.clone()).await;
+        assert_eq!(
+            events.recv().await.unwrap().change_kind,
+            "resource_pressure_sampled"
+        );
+
+        // With live lanes every sample is broadcast so lane resource
+        // estimates stay fresh in the management surface.
+        let lane_id = open(&harness.client, "telemetry-live").await;
+        assert!(harness.client.status(&lane_id).await.is_ok());
+        while events.try_recv().is_ok() {}
+        harness.hub.update_resource_telemetry(pressured).await;
+        assert_eq!(
+            events.recv().await.unwrap().change_kind,
+            "resource_pressure_sampled"
         );
     }
 

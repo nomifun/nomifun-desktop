@@ -420,7 +420,7 @@ impl ChannelMessageService {
         // runtime build. That gate is also the only safe place to recover a
         // pre-admission edit reservation; an observer-only precheck here used
         // to make that crash cutpoint permanently unrecoverable.
-        let delivery = self
+        let delivery = match self
             .conversation_svc
             .send_message_with_idempotency_key(
                 user_id,
@@ -430,15 +430,23 @@ impl ChannelMessageService {
                 &self.runtime_registry,
             )
             .await
-            .map_err(|e| match e {
-                // A concurrent turn already holds the (now shared) session —
-                // surface a distinct busy error so the message loop answers with
-                // the friendly "still processing" notice instead of a raw failure
-                // line. Covers the first-turn race the per-chat busy guard can't
-                // see (it checks the pre-bind session id).
-                nomifun_common::AppError::Conflict(_) => ChannelError::ConversationBusy,
-                other => ChannelError::MessageSendFailed(other.to_string()),
-            })?;
+        {
+            Ok(delivery) => delivery,
+            // A Conflict is only "please wait" when the (now shared) session is
+            // actually working a turn — the turn-claim race the per-chat busy
+            // guard can't see (it checks the pre-bind session id). A Conflict on
+            // an IDLE conversation is a real failure (e.g. a knowledge workspace
+            // lease clash or an idempotency-key reuse) and must reach the user;
+            // disguising it as busy traps the chat in a permanent "still being
+            // processed" loop.
+            Err(error @ nomifun_common::AppError::Conflict(_)) => {
+                if self.is_conversation_busy(&conversation_id).await {
+                    return Err(ChannelError::ConversationBusy);
+                }
+                return Err(ChannelError::MessageSendFailed(error.to_string()));
+            }
+            Err(other) => return Err(ChannelError::MessageSendFailed(other.to_string())),
+        };
         let message_id = delivery.message_id;
 
         // `send_message_with_idempotency_key` admits synchronously but builds a

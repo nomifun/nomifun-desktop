@@ -45,6 +45,22 @@ describe('turn process disclosure content layout', () => {
     expect(cssSource.includes('.turn-process-disclosure--failed')).toBe(false);
   });
 
+  test('shows processed instead of processing while the turn is running', () => {
+    expect(disclosureSource.includes("running: 'messages.turnProcessed'")).toBe(true);
+    expect(disclosureSource.includes('messages.turnProcessing')).toBe(false);
+    expect(zhMessages.turnProcessing).toBeUndefined();
+    expect(enMessages.turnProcessing).toBeUndefined();
+  });
+
+  test('labels a stopped turn with the stop moment copy', () => {
+    expect(zhMessages.turnCanceled).toBe('你在 {{duration}} 后停止了');
+    expect(enMessages.turnCanceled).toBe('You stopped after {{duration}}');
+  });
+
+  test('routes the user stop notice from the nomi runtime into the disclosure model', () => {
+    expect(messageListSource.includes('stopNotice: conversationContext?.stopNotice ?? undefined')).toBe(true);
+  });
+
   test('keeps execution duration in processed and canceled header copy', () => {
     expect(zhMessages.turnProcessed.includes('{{duration}}')).toBe(true);
     expect(zhMessages.turnCanceled.includes('{{duration}}')).toBe(true);

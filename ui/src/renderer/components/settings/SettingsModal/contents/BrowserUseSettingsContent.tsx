@@ -4,11 +4,13 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { isBackendHttpError } from '@/common/adapter/httpBridge';
+import { AUTH_EXPIRED_EVENT, isBackendHttpError } from '@/common/adapter/httpBridge';
 import { configService } from '@/common/config/configService';
 import {
   BROWSER_DISPLAY_MODE_POLICY_VERSION,
   browserResourcePolicyApi,
+  buildBrowserResourcePolicyAdvancedSaveRequest,
+  buildBrowserResourcePolicyPresetRequest,
   isBrowserResourcePolicyUnavailableError,
   migrateBrowserDisplayMode,
   type BrowserResourcePolicy,
@@ -152,6 +154,152 @@ export function createBrowserSettingsCapabilityLoader({
       clearRetry();
     },
   };
+}
+
+export const BROWSER_LOGIN_PROMOTION_POLL_INTERVAL_MS = 2_000;
+export const BROWSER_LOGIN_PROMOTION_POLL_MAX_ATTEMPTS = 90;
+
+export type BrowserLoginPromotionStopReason = 'failed' | 'timeout';
+
+type BrowserLoginPromotionPollOptions = {
+  /** Lifecycle of the queued login lane, or null when it no longer exists. */
+  probeLifecycle: () => Promise<string | null | undefined>;
+  /** Foreground the promoted lane; resolves true when a window is confirmed. */
+  foreground: () => Promise<boolean>;
+  onOpened: () => void;
+  onStopped: (reason: BrowserLoginPromotionStopReason) => void;
+  schedule?: (callback: () => void | Promise<void>, delayMs: number) => unknown;
+  cancelScheduled?: (handle: unknown) => void;
+  maxAttempts?: number;
+};
+
+/**
+ * A queued login open (active:true, message:'queued') has no window yet, and
+ * the backend never foregrounds the lane when capacity later frees up. Watch
+ * the lane until it runs, then explicitly foreground it — only that success
+ * may be announced as an open window. Terminal lane states and a bounded
+ * attempt budget both stop the poll so it can never spin forever.
+ */
+export function startBrowserLoginPromotionPoll({
+  probeLifecycle,
+  foreground,
+  onOpened,
+  onStopped,
+  schedule = (callback, delayMs) => setTimeout(() => void callback(), delayMs),
+  cancelScheduled = (handle) => clearTimeout(handle as ReturnType<typeof setTimeout>),
+  maxAttempts = BROWSER_LOGIN_PROMOTION_POLL_MAX_ATTEMPTS,
+}: BrowserLoginPromotionPollOptions): () => void {
+  let cancelled = false;
+  let attempts = 0;
+  let handle: unknown;
+
+  const tick = async (): Promise<void> => {
+    if (cancelled) return;
+    attempts += 1;
+    let lifecycle: string | null | undefined;
+    try {
+      lifecycle = await probeLifecycle();
+    } catch {
+      lifecycle = undefined; // transient snapshot failure: keep waiting
+    }
+    if (cancelled) return;
+
+    if (lifecycle === 'failed' || lifecycle === 'stopping' || lifecycle === null) {
+      onStopped('failed');
+      return;
+    }
+    if (lifecycle === 'running') {
+      let confirmed = false;
+      try {
+        confirmed = await foreground();
+      } catch {
+        confirmed = false;
+      }
+      if (cancelled) return;
+      if (confirmed) onOpened();
+      else onStopped('failed');
+      return;
+    }
+    if (attempts >= maxAttempts) {
+      onStopped('timeout');
+      return;
+    }
+    handle = schedule(tick, BROWSER_LOGIN_PROMOTION_POLL_INTERVAL_MS);
+  };
+
+  handle = schedule(tick, BROWSER_LOGIN_PROMOTION_POLL_INTERVAL_MS);
+
+  return () => {
+    cancelled = true;
+    if (handle !== undefined) {
+      cancelScheduled(handle);
+      handle = undefined;
+    }
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Navigation-surviving promotion watch.
+//
+// The queued login branch starts this watch and immediately navigates to
+// /browser; /settings/browser-use is a routed page, so the settings component
+// unmounts before the poll's first 2s tick. The watch therefore lives at
+// module level: component lifecycles never own or cancel it. It ends only by
+// its own terminal states (opened / failed / timeout), an explicit
+// close-login cancel, or auth loss — so the queued toast's promise ("we'll
+// tell you when it opens") is kept regardless of navigation, and no interval
+// outlives a logged-out session.
+// ---------------------------------------------------------------------------
+
+let activeLoginPromotionStop: (() => void) | null = null;
+let detachLoginPromotionAuthListener: (() => void) | null = null;
+
+/** Forget the active watch and its auth listener without stopping the poll. */
+function forgetBrowserLoginPromotionWatch(): void {
+  activeLoginPromotionStop = null;
+  detachLoginPromotionAuthListener?.();
+  detachLoginPromotionAuthListener = null;
+}
+
+export function hasBrowserLoginPromotionWatch(): boolean {
+  return activeLoginPromotionStop !== null;
+}
+
+/** Stop the active watch (if any) without firing its callbacks. */
+export function cancelBrowserLoginPromotionWatch(): void {
+  const stop = activeLoginPromotionStop;
+  forgetBrowserLoginPromotionWatch();
+  stop?.();
+}
+
+/**
+ * Start (or replace) the singleton promotion watch. At most one queued
+ * Primary sign-in Lane exists per user, so a new queued login supersedes any
+ * previous watch instead of stacking polls.
+ */
+export function beginBrowserLoginPromotionWatch(
+  options: BrowserLoginPromotionPollOptions
+): void {
+  cancelBrowserLoginPromotionWatch();
+  activeLoginPromotionStop = startBrowserLoginPromotionPoll({
+    ...options,
+    onOpened: () => {
+      forgetBrowserLoginPromotionWatch();
+      options.onOpened();
+    },
+    onStopped: (reason) => {
+      forgetBrowserLoginPromotionWatch();
+      options.onStopped(reason);
+    },
+  });
+  // Auth loss (WebUI session expiry / logout redirect) must not leave a lanes
+  // poll spinning against 401s for the rest of the attempt budget.
+  if (typeof window !== 'undefined' && typeof window.addEventListener === 'function') {
+    const onAuthExpired = () => cancelBrowserLoginPromotionWatch();
+    window.addEventListener(AUTH_EXPIRED_EVENT, onAuthExpired);
+    detachLoginPromotionAuthListener = () =>
+      window.removeEventListener(AUTH_EXPIRED_EVENT, onAuthExpired);
+  }
 }
 
 export type BrowserSecuritySettings = {
@@ -409,6 +557,9 @@ const BrowserUseSettingsContent: React.FC = () => {
     const displayModeMigration = migrateBrowserDisplayMode({
       displayMode: configService.get('agent.browserUse.displayMode'),
       displayModeVersion: configService.get('agent.browserUse.displayModeVersion'),
+      // Classification input only (legacy-silent installs are 'lineage', not
+      // 'default'); the value is never persisted or written back.
+      silent: configService.get('agent.browserUse.silent'),
     });
     setDisplayMode(
       displayModeMigration.displayMode === 'external' ? 'external' : 'headless'
@@ -544,12 +695,48 @@ const BrowserUseSettingsContent: React.FC = () => {
     };
   }, [canManagePrimaryIdentity]);
 
+  // The queued promotion watch is intentionally NOT cancelled on unmount:
+  // starting it is immediately followed by navigate('/browser'), which
+  // unmounts this routed page. The module-level singleton keeps the promise
+  // made by the queued toast; it ends via its own terminal states,
+  // close-login, or auth loss.
+  const watchQueuedLoginPromotion = useCallback((laneId: string | undefined) => {
+    beginBrowserLoginPromotionWatch({
+      probeLifecycle: async () => {
+        // No lane id means there is nothing to promote: stop as failed.
+        if (!laneId) return null;
+        const lanes = await ipcBridge.browserSession.lanes.invoke();
+        return lanes.find((lane) => lane.lane_id === laneId)?.lifecycle_state ?? null;
+      },
+      foreground: async () => {
+        const result = (await ipcBridge.browserSession.foregroundLane.invoke({
+          lane_id: laneId ?? '',
+        })) as { foregrounded?: boolean } | undefined;
+        return result?.foregrounded === true;
+      },
+      onOpened: () => {
+        Message.info(translationRef.current('settings.browserLoginOpenedHint'));
+      },
+      onStopped: (reason) => {
+        setLoginOpen(false);
+        Message.error(
+          translationRef.current(
+            reason === 'timeout'
+              ? 'settings.browserLoginQueuedTimeout'
+              : 'settings.browserLoginFailed'
+          )
+        );
+      },
+    });
+  }, []);
+
   // Toggle the managed Primary sign-in Lane for the selected browser source.
   const handleLoginToggle = useCallback(async () => {
     if (!canManagePrimaryIdentity || loginBusy) return;
     setLoginBusy(true);
     try {
       if (loginOpen) {
+        cancelBrowserLoginPromotionWatch();
         const res = await ipcBridge.browserLogin.close.invoke();
         setLoginOpen(res ? !!res.active : false);
       } else {
@@ -557,6 +744,13 @@ const BrowserUseSettingsContent: React.FC = () => {
         setLoginOpen(res ? !!res.active : false);
         if (res && !res.active && (res.message || '').startsWith('launch_failed')) {
           Message.error(t('settings.browserLoginFailed'));
+        } else if (res && res.active && res.message === 'queued') {
+          // Queued: the lane is waiting for capacity and no window exists
+          // yet. Announce the wait honestly and watch for promotion; only a
+          // confirmed foreground after promotion reports an open window.
+          Message.info(t('settings.browserLoginQueuedHint'));
+          watchQueuedLoginPromotion(res.lane_id);
+          navigate('/browser');
         } else if (res && res.active) {
           Message.info(t('settings.browserLoginOpenedHint'));
           navigate('/browser');
@@ -567,7 +761,15 @@ const BrowserUseSettingsContent: React.FC = () => {
     } finally {
       setLoginBusy(false);
     }
-  }, [canManagePrimaryIdentity, loginBusy, loginOpen, navigate, source, t]);
+  }, [
+    canManagePrimaryIdentity,
+    loginBusy,
+    loginOpen,
+    navigate,
+    source,
+    t,
+    watchQueuedLoginPromotion,
+  ]);
 
   const persistBoolean = useCallback(
     (key: Parameters<typeof configService.set>[0], checked: boolean, revert: () => void) => {
@@ -589,15 +791,20 @@ const BrowserUseSettingsContent: React.FC = () => {
 
   // Browser source only selects the executable. Both choices remain isolated,
   // Hub-owned instances; routine Agent work stays headless.
+  const sourceRef = useRef(source);
+  sourceRef.current = source;
   const handleSourceChange = useCallback(
     (value: string) => {
       const next: BrowserSource = value === 'system' ? 'system' : 'managed';
-      setSource((prev) => {
-        configService.set('agent.browserUse.source', next).catch(() => {
-          setSource(prev);
-          configService.setLocal('agent.browserUse.source', prev);
-        });
-        return next;
+      // Capture the pre-change value outside the state updater: React may
+      // replay updaters, and a network write with rollback inside one can
+      // issue duplicate PUTs or roll back to a mid-transition value.
+      const previous = sourceRef.current;
+      if (next === previous) return;
+      setSource(next);
+      configService.set('agent.browserUse.source', next).catch(() => {
+        setSource(previous);
+        configService.setLocal('agent.browserUse.source', previous);
       });
     },
     []
@@ -705,14 +912,21 @@ const BrowserUseSettingsContent: React.FC = () => {
       const nextPreset: BrowserResourcePolicyPreset =
         value === 'resource_saving' || value === 'high_concurrency' ? value : 'automatic';
       const previous = resourcePolicy;
-      const next = { ...previous, preset: nextPreset };
-      const validationError = validateBrowserResourcePolicy(next, persistedResourcePolicy);
+      // Advanced values that merely echo the fetched server state must not be
+      // sent back: the backend applies them as overrides after the preset
+      // transition, turning the switch into a label-only no-op.
+      const request = buildBrowserResourcePolicyPresetRequest(
+        nextPreset,
+        previous,
+        persistedResourcePolicy
+      );
+      const validationError = validateBrowserResourcePolicy(request, persistedResourcePolicy);
       if (validationError) {
         Message.error(validationError.message);
         return;
       }
-      setResourcePolicy(next);
-      void persistResourcePolicy(next, previous);
+      setResourcePolicy({ ...previous, preset: nextPreset });
+      void persistResourcePolicy(request, previous);
     },
     [persistResourcePolicy, persistedResourcePolicy, resourcePolicy]
   );
@@ -737,12 +951,19 @@ const BrowserUseSettingsContent: React.FC = () => {
   );
 
   const handleSaveResourcePolicyAdvanced = useCallback(() => {
-    const validationError = validateBrowserResourcePolicy(resourcePolicy, persistedResourcePolicy);
+    // Edited advanced values resolve the preset to 'custom': only then does
+    // the backend honor an explicit reserved_memory_bytes instead of raising
+    // it to the 20%-of-total floor that protects the named presets.
+    const request = buildBrowserResourcePolicyAdvancedSaveRequest(
+      resourcePolicy,
+      persistedResourcePolicy
+    );
+    const validationError = validateBrowserResourcePolicy(request, persistedResourcePolicy);
     if (validationError) {
       Message.error(validationError.message);
       return;
     }
-    void persistResourcePolicy(resourcePolicy);
+    void persistResourcePolicy(request);
   }, [persistResourcePolicy, persistedResourcePolicy, resourcePolicy]);
 
   const persistSecuritySettings = useCallback(
