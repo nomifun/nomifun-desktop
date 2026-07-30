@@ -237,8 +237,8 @@ export type WorkshopNodeKind = 'image' | 'text' | 'video' | 'generator' | 'loop'
 /** Canvas background style. */
 export type WorkshopCanvasBackground = 'dots' | 'lines' | 'blank';
 
-/** Generator card mode. */
-export type WorkshopGeneratorMode = 'image' | 'text' | 'video';
+/** Generator card mode. `tts` appended (P2): text → speech via capability 'tts'. */
+export type WorkshopGeneratorMode = 'image' | 'text' | 'video' | 'tts';
 
 /** Generator card runtime status (independent of the backend task state). */
 export type WorkshopGeneratorStatus = 'idle' | 'queued' | 'running' | 'success' | 'error';

@@ -57,6 +57,7 @@ export function generationModeForTask(task: Pick<CreationTask, 'capability'>): W
     case 'inpaint':
       return 'image';
     case 'tts':
+      return 'tts';
     default:
       return null;
   }

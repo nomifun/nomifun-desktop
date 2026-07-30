@@ -17,8 +17,9 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useParams } from 'react-router-dom';
 import { useReactFlow } from '@xyflow/react';
 import { useTranslation } from 'react-i18next';
-import { Info, MagicWand, Pause, Pic, Play, Refresh, Text, VideoTwo } from '@icon-park/react';
+import { Info, MagicWand, Pause, Pic, Play, Refresh, Text, VideoTwo, Voice } from '@icon-park/react';
 import SegmentedTabs, { type SegmentedTabItem } from '@renderer/components/base/SegmentedTabs';
+import TaskModelSelect, { type TaskModelSelection } from '@renderer/components/agent/TaskModelSelect';
 import { useCanvasNode } from '../canvas/CanvasNodeContext';
 import type { WorkshopFlowEdge, WorkshopFlowNode } from '../canvas/model';
 import type { WorkshopGeneratorMode, WorkshopGeneratorNodeData, WorkshopGeneratorStatus } from '../types';
@@ -39,6 +40,7 @@ const MODE_META: Record<GenMode, { icon: React.ReactNode }> = {
   image: { icon: <Pic theme='outline' size={12} strokeWidth={3} /> },
   video: { icon: <VideoTwo theme='outline' size={12} strokeWidth={3} /> },
   text: { icon: <Text theme='outline' size={12} strokeWidth={3} /> },
+  tts: { icon: <Voice theme='outline' size={12} strokeWidth={3} /> },
 };
 
 function statusTone(status: WorkshopGeneratorStatus): { color: string; bg: string } {
@@ -95,6 +97,11 @@ const GeneratorCard: React.FC<GeneratorCardProps> = ({ id, data }) => {
   const setMode = useCallback((m: WorkshopGeneratorMode) => api.updateNodeData(id, { mode: m }), [api, id]);
   const setModel = useCallback(
     (opt: ModelOption) => api.updateNodeData(id, { providerId: opt.providerId, model: opt.model }),
+    [api, id]
+  );
+  const setTaskModel = useCallback(
+    (selection: TaskModelSelection) =>
+      api.updateNodeData(id, { providerId: selection.providerId, model: selection.model }),
     [api, id]
   );
   const setPrompt = useCallback((text: string) => api.updateNodeData(id, { prompt: text }), [api, id]);
@@ -166,7 +173,7 @@ const GeneratorCard: React.FC<GeneratorCardProps> = ({ id, data }) => {
   const [errExpanded, setErrExpanded] = useState(false);
   const tone = statusTone(status);
 
-  const modeItems: SegmentedTabItem[] = (['image', 'video', 'text'] as GenMode[]).map((m) => ({
+  const modeItems: SegmentedTabItem[] = (['image', 'video', 'text', 'tts'] as GenMode[]).map((m) => ({
     key: m,
     label: t(`workshopGeneration.mode.${m}`, { defaultValue: m }),
     icon: MODE_META[m].icon,
@@ -210,12 +217,34 @@ const GeneratorCard: React.FC<GeneratorCardProps> = ({ id, data }) => {
         <div className='nodrag mb-8px'>
           <SegmentedTabs items={modeItems} activeKey={mode} onChange={(k) => setMode(k as WorkshopGeneratorMode)} size='sm' block />
         </div>
-        <ModelPicker
-          mode={mode}
-          providerId={data.providerId ?? effectiveModel?.providerId}
-          model={data.model ?? effectiveModel?.model}
-          onChange={setModel}
-        />
+        {mode === 'tts' ? (
+          // Unified task-scoped selector: TTS candidates come straight from
+          // resolve(speech_synthesis) — same source useGeneratorModels reads
+          // for the effective-model fallback.
+          <div className='nodrag' onClick={(e) => e.stopPropagation()}>
+            <TaskModelSelect
+              task='speech_synthesis'
+              size='small'
+              value={
+                (data.providerId ?? effectiveModel?.providerId) && (data.model ?? effectiveModel?.model)
+                  ? {
+                      providerId: (data.providerId ?? effectiveModel?.providerId)!,
+                      model: (data.model ?? effectiveModel?.model)!,
+                    }
+                  : null
+              }
+              onSelect={setTaskModel}
+              placeholder={t('workshopGeneration.model.placeholder', { defaultValue: '选择模型' })}
+            />
+          </div>
+        ) : (
+          <ModelPicker
+            mode={mode}
+            providerId={data.providerId ?? effectiveModel?.providerId}
+            model={data.model ?? effectiveModel?.model}
+            onChange={setModel}
+          />
+        )}
       </div>
 
       {/* Body */}

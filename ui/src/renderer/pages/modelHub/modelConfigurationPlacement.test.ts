@@ -37,7 +37,10 @@ describe('model-owned tool configuration placement', () => {
 
     expect(hubSource.includes("key: 'speech'")).toBe(true);
     expect(hubSource.includes('<SpeechToTextContent />')).toBe(true);
-    expect(speechSource.includes('useProvidersQuery()')).toBe(true);
+    // Candidates come from the authoritative catalog resolve, not provider
+    // rows + name guessing.
+    expect(speechSource.includes("useModelsForTask('speech_recognition')")).toBe(true);
+    expect(speechSource.includes('inferCloudSpeechService')).toBe(false);
     expect(creationSource.includes('ImageGenerationToolSettings')).toBe(false);
     expect(providerSource.includes('SpeechToTextCloudSettings')).toBe(false);
   });

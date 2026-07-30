@@ -9,11 +9,9 @@ import { HeadsetOne, LinkCloud } from '@icon-park/react';
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useNavigate } from 'react-router-dom';
-import type { IProvider } from '@/common/config/storage';
 import type { SpeechToTextConfig, SpeechToTextProvider } from '@/common/types/provider/speech';
 import NomiSelect from '@/renderer/components/base/NomiSelect';
-import { useProvidersQuery } from '@/renderer/hooks/agent/useModelProviderList';
-import { useModelProfiles } from '@/renderer/hooks/agent/useModelProfiles';
+import { useModelsForTask } from '@/renderer/hooks/agent/useModelsForTask';
 import {
   DEFAULT_SPEECH_TO_TEXT_CONFIG,
   getSpeechToTextConfig,
@@ -33,20 +31,14 @@ type SpeechSourceOption = {
   model: string;
 };
 
-const inferCloudSpeechService = (provider: IProvider, model: string): SpeechToTextProvider => {
-  const identity = `${provider.platform} ${provider.name} ${provider.base_url} ${model}`.toLowerCase();
-  return identity.includes('deepgram') || identity.includes('nova-2') || identity.includes('nova-3')
-    ? 'deepgram'
-    : 'openai';
-};
-
 const SpeechToTextContent: React.FC = () => {
   const { t } = useTranslation();
   const navigate = useNavigate();
   const [message, messageContext] = useArcoMessage({ maxCount: 2 });
   const [config, setConfig] = useState<SpeechToTextConfig>(DEFAULT_SPEECH_TO_TEXT_CONFIG);
-  const { data: providers } = useProvidersQuery();
-  const { profiles } = useModelProfiles();
+  // Candidates = the authoritative catalog resolution for speech_recognition
+  // (per-model task tags via /api/model-profiles/resolve; no name guessing).
+  const { groups: speechGroups } = useModelsForTask('speech_recognition');
   const providerLabel = useModelSelectorProviderLabel();
 
   useEffect(() => {
@@ -57,38 +49,19 @@ const SpeechToTextContent: React.FC = () => {
   }, []);
 
   const cloudOptions = useMemo<SpeechSourceOption[]>(() => {
-    const profileKeys = new Set(
-      profiles
-        .filter((profile) => profile.tasks.includes('speech_recognition'))
-        .map((profile) => `${profile.provider_id}\u0000${profile.model}`)
+    return speechGroups.flatMap(({ provider, models }) =>
+      models.map((model) => ({
+        value: `cloud\u0000${provider.id}\u0000${model}`,
+        label: `${providerLabel(provider)} · ${model}`,
+        // The stored `provider` enum is legacy: transcription executes by
+        // provider_id + model and the backend ignores this field. Keep the
+        // 'openai' constant so persisted configs stay shape-compatible.
+        provider: 'openai' as const,
+        providerId: provider.id,
+        model,
+      }))
     );
-
-    return (providers ?? [])
-      .filter((provider) => provider.enabled !== false && provider.api_key.trim().length > 0)
-      .flatMap((provider) =>
-        (provider.models ?? [])
-          .filter((model) => provider.model_enabled?.[model] !== false)
-          .filter((model) => {
-            if (profileKeys.has(`${provider.id}\u0000${model}`)) return true;
-            const name = model.toLowerCase();
-            return (
-              name.includes('whisper') ||
-              name.includes('transcrib') ||
-              name.includes('speech-to-text') ||
-              name.includes('asr') ||
-              name.includes('nova-2') ||
-              name.includes('nova-3')
-            );
-          })
-          .map((model) => ({
-            value: `cloud\u0000${provider.id}\u0000${model}`,
-            label: `${providerLabel(provider)} · ${model}`,
-            provider: inferCloudSpeechService(provider, model),
-            providerId: provider.id,
-            model,
-          }))
-      );
-  }, [profiles, providers, providerLabel]);
+  }, [speechGroups, providerLabel]);
 
   const sourceOptions = cloudOptions;
 
