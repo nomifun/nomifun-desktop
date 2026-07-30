@@ -5632,6 +5632,7 @@ dependencies = [
 name = "nomifun-auth"
 version = "0.3.3"
 dependencies = [
+ "async-trait",
  "axum",
  "base64 0.22.1",
  "bcrypt",
