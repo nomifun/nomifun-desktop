@@ -58,8 +58,19 @@ const DirectorySelectionModal: React.FC<DirectorySelectionModalProps> = ({
           }
         );
         if (!response.ok) {
-          const errorData = await response.json().catch(() => ({ error: 'Unknown error' }));
-          setError(errorData.error || `HTTP ${response.status}`);
+          // Error bodies are not guaranteed to be JSON: axum extractor
+          // rejections and reverse-proxy error pages are plain text. Fall
+          // back to the raw text so the real failure is never masked.
+          const rawText = await response.text().catch(() => '');
+          let message = '';
+          try {
+            const parsed: unknown = rawText ? JSON.parse(rawText) : null;
+            const err = (parsed as { error?: unknown } | null)?.error;
+            message = typeof err === 'string' ? err : '';
+          } catch {
+            message = rawText.slice(0, 300);
+          }
+          setError(message || `HTTP ${response.status}`);
           return;
         }
         const envelope = await response.json();
