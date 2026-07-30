@@ -423,6 +423,7 @@ mod tests {
                 last_connected: row.last_connected,
                 companion_id: row.companion_id.clone(),
                 bot_key: row.bot_key.clone(),
+                owner_domain: row.owner_domain.clone(),
                 created_at: row.created_at,
                 updated_at: row.updated_at,
             })

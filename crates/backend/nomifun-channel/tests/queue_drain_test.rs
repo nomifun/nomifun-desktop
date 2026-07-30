@@ -343,6 +343,7 @@ async fn build_stack(pool: nomifun_db::SqlitePool, fail_first: u32) -> Stack {
             last_connected: None,
             companion_id: None,
             bot_key: Some("drain".to_owned()),
+            owner_domain: "companion".into(),
             created_at: now,
             updated_at: now,
         })

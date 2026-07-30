@@ -342,6 +342,7 @@ async fn bind_channel_session(stack: &Stack, conversation_id: &str) {
             last_connected: None,
             companion_id: None,
             bot_key: Some("notify".to_owned()),
+            owner_domain: "companion".into(),
             created_at: now,
             updated_at: now,
         })

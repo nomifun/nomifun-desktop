@@ -951,6 +951,21 @@ pub async fn validate_id_schema_contract(pool: &SqlitePool) -> Result<(), DbErro
     require_column(pool, "preset_tags", "key", "TEXT", true).await?;
     require_single_column_unique_index(pool, "preset_tags", "key").await?;
     require_column(pool, "preset_tag_bindings", "preset_tag_id", "TEXT", true).await?;
+    // Channel bot ownership domain (migration 019): every row names its owning
+    // domain and defaults to the legacy companion pool.
+    require_column(pool, "channel_plugins", "owner_domain", "TEXT", true).await?;
+    let owner_domain_default: Option<String> = sqlx::query_scalar(
+        "SELECT dflt_value FROM pragma_table_info('channel_plugins') \
+         WHERE name = 'owner_domain'",
+    )
+    .fetch_optional(pool)
+    .await?
+    .flatten();
+    if owner_domain_default.as_deref() != Some("'companion'") {
+        return Err(DbError::Init(
+            "v3 schema channel_plugins.owner_domain must default to 'companion'".to_owned(),
+        ));
+    }
 
     validate_logical_reference_registry(pool).await?;
     validate_logical_reference_coverage(pool).await?;
@@ -1224,6 +1239,22 @@ async fn validate_no_triggers(pool: &SqlitePool) -> Result<(), DbError> {
             &[
                 "BEFORE UPDATE OF CHANNEL_PLUGIN_ID, CHANNEL_USER_ID, CHAT_ID, CHANNEL_SESSION_ID, CREATED_AT ON CHANNEL_SESSION_BINDINGS",
                 "RAISE(ABORT, 'CHANNEL SESSION BINDING IDENTITY IS IMMUTABLE')",
+            ],
+        ),
+        (
+            "trg_channel_plugins_owner_domain_insert_guard",
+            &[
+                "BEFORE INSERT ON CHANNEL_PLUGINS",
+                "NEW.OWNER_DOMAIN = 'CUSTOMER_SERVICE' AND NEW.COMPANION_ID IS NOT NULL",
+                "RAISE(ABORT, 'CUSTOMER-SERVICE CHANNEL BOTS CANNOT CARRY A COMPANION BINDING')",
+            ],
+        ),
+        (
+            "trg_channel_plugins_owner_domain_update_guard",
+            &[
+                "BEFORE UPDATE OF OWNER_DOMAIN, COMPANION_ID ON CHANNEL_PLUGINS",
+                "NEW.OWNER_DOMAIN = 'CUSTOMER_SERVICE' AND NEW.COMPANION_ID IS NOT NULL",
+                "RAISE(ABORT, 'CUSTOMER-SERVICE CHANNEL BOTS CANNOT CARRY A COMPANION BINDING')",
             ],
         ),
         (
