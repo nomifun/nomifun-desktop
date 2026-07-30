@@ -92,7 +92,8 @@ pub use auth::{
     WebuiGenerateQrTokenResponse, WebuiResetPasswordResponse, WsTokenResponse,
 };
 pub use channel::{
-    ApprovePairingRequest, BridgeResponse, ChannelSessionResponse, ChannelUserResponse,
+    ApprovePairingRequest, BridgeResponse, CHANNEL_OWNER_DOMAIN_COMPANION,
+    CHANNEL_OWNER_DOMAIN_CUSTOMER_SERVICE, ChannelSessionResponse, ChannelUserResponse,
     DisablePluginRequest, EnablePluginRequest, EnablePluginResponse, PairingRequestResponse,
     PairingRequestedPayload,
     PluginStatusChangedPayload, PluginStatusResponse, RejectPairingRequest, RevokeUserRequest,

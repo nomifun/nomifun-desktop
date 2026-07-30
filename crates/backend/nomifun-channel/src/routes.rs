@@ -166,6 +166,9 @@ struct ChannelPluginStatusView {
     companion_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     bot_key: Option<String>,
+    /// Owning domain (`companion` | `customer_service`), used by the UI to
+    /// keep the two pools disjoint.
+    owner_domain: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     created_at: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -208,6 +211,7 @@ impl ChannelPluginStatusView {
             last_connected: status.last_connected,
             companion_id: status.companion_id,
             bot_key: status.bot_key,
+            owner_domain: status.owner_domain,
             created_at: Some(status.created_at),
             updated_at: Some(status.updated_at),
             connected: status.connected,
@@ -290,10 +294,40 @@ async fn enable_plugin(
         }
     }
 
+    // Owner-domain validation (mutual exclusion, application layer): the
+    // domain enum must be known, a customer-service bot can never carry a
+    // companion binding, and an existing bot's domain is immutable.
+    if let Some(owner_domain) = req.owner_domain.as_deref() {
+        if !matches!(owner_domain, "companion" | "customer_service") {
+            return Err(AppError::BadRequest(format!(
+                "invalid owner_domain '{owner_domain}': expected 'companion' or 'customer_service'"
+            )));
+        }
+        if owner_domain == "customer_service" && req.companion_id.is_some() {
+            return Err(AppError::BadRequest(
+                "customer-service channel bots cannot carry a companion binding".into(),
+            ));
+        }
+    }
+    if let Some(plugin_id) = req.plugin_id.as_deref()
+        && req.companion_id.is_some()
+        && let Some(row) = state
+            .repo
+            .get_plugin(plugin_id)
+            .await
+            .map_err(|e| AppError::Internal(e.to_string()))?
+        && row.owner_domain != "companion"
+    {
+        return Err(AppError::BadRequest(
+            "customer-service channel bots cannot carry a companion binding".into(),
+        ));
+    }
+
     let spec = EnableChannelSpec {
         plugin_id: req.plugin_id.clone(),
         plugin_type: req.plugin_type.clone(),
         companion_id: req.companion_id.clone(),
+        owner_domain: req.owner_domain.clone(),
     };
 
     match state
