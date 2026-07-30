@@ -33,10 +33,12 @@ const ModalMcpManagementSection: React.FC<{
   setMcpServers: React.Dispatch<React.SetStateAction<IMcpServer[]>>;
   saveMcpServers: (serversOrUpdater: IMcpServer[] | ((prev: IMcpServer[]) => IMcpServer[])) => Promise<void>;
   isPageMode?: boolean;
-}> = ({ message, mcpServers, extensionMcpServers, setMcpServers, saveMcpServers, isPageMode }) => {
+  autoEditServerName?: string;
+}> = ({ message, mcpServers, extensionMcpServers, setMcpServers, saveMcpServers, isPageMode, autoEditServerName }) => {
   const { t } = useTranslation();
   const { oauthStatus, loggingIn, checkOAuthStatus, markLoginRequired, clearLoginRequired, login } = useMcpOAuth();
   const visibleMcpServers = useMemo(() => mcpServers, [mcpServers]);
+  const autoEditOpenedRef = React.useRef<string | null>(null);
 
   const handleAuthRequired = useCallback(
     (server: IMcpServer) => {
@@ -119,6 +121,15 @@ const ModalMcpManagementSection: React.FC<{
 
   const [detectedAgents, setDetectedAgents] = useState<Array<{ backend: string; name: string }>>([]);
   const [importMode, setImportMode] = useState<'json' | 'oneclick'>('json');
+
+  useEffect(() => {
+    if (!autoEditServerName || autoEditOpenedRef.current === autoEditServerName) return;
+    const server = mcpServers.find((item) => item.name === autoEditServerName);
+    if (!server) return;
+    autoEditOpenedRef.current = autoEditServerName;
+    setImportMode('json');
+    showEditMcpModal(server);
+  }, [autoEditServerName, mcpServers, showEditMcpModal]);
 
   useEffect(() => {
     const loadAgents = async () => {
@@ -290,6 +301,27 @@ const ModalMcpManagementSection: React.FC<{
 const ToolsModalContent: React.FC = () => {
   const [mcpMessage, mcpMessageContext] = useArcoMessage({ maxCount: 10 });
   const { mcpServers, extensionMcpServers, saveMcpServers, setMcpServers } = useMcpServers();
+  return (
+    <ToolsModalContentWithState
+      mcpMessage={mcpMessage}
+      mcpMessageContext={mcpMessageContext}
+      mcpServers={mcpServers}
+      extensionMcpServers={extensionMcpServers}
+      saveMcpServers={saveMcpServers}
+      setMcpServers={setMcpServers}
+    />
+  );
+};
+
+export const ToolsModalContentWithState: React.FC<{
+  mcpMessage: MessageInstance;
+  mcpMessageContext: React.ReactElement;
+  mcpServers: IMcpServer[];
+  extensionMcpServers: ExtensionMcpServerContribution[];
+  setMcpServers: React.Dispatch<React.SetStateAction<IMcpServer[]>>;
+  saveMcpServers: (serversOrUpdater: IMcpServer[] | ((prev: IMcpServer[]) => IMcpServer[])) => Promise<void>;
+  autoEditServerName?: string;
+}> = ({ mcpMessage, mcpMessageContext, mcpServers, extensionMcpServers, saveMcpServers, setMcpServers, autoEditServerName }) => {
   const viewMode = useSettingsViewMode();
   const isPageMode = viewMode === 'page';
 
@@ -310,6 +342,7 @@ const ToolsModalContent: React.FC = () => {
               setMcpServers={setMcpServers}
               saveMcpServers={saveMcpServers}
               isPageMode={isPageMode}
+              autoEditServerName={autoEditServerName}
             />
           </NomiScrollArea>
         </div>

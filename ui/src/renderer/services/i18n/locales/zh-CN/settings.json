@@ -70,8 +70,9 @@
   },
   "skillsMarket": {
     "title": "技能市场",
-    "description": "浏览 ClawHub 与 SkillHub 当前榜单，并把经过检查的安装草稿交给 Nomi。",
+    "description": "浏览 ClawHub、LoopHub 与 SkillHub 当前榜单，并把经过检查的安装草稿交给 Nomi。",
     "syncSuccess": "技能市场已更新",
+    "syncKeptCache": "未获取到新榜单，已保留本地缓存。",
     "syncEmpty": "未采集到榜单数据。",
     "syncError": "更新技能市场失败",
     "openMarketFailed": "无法打开技能市场",
@@ -82,6 +83,59 @@
     "noDescription": "暂无描述。",
     "lastUpdated": "上次更新：{{time}}",
     "openInBrowser": "在浏览器中打开市场"
+  },
+  "market": {
+    "syncSuccess": "市场已更新",
+    "syncKeptCache": "未获取到新数据，已保留本地缓存。",
+    "syncEmpty": "未获取到市场数据。",
+    "syncError": "更新市场失败",
+    "openFailed": "无法打开市场",
+    "noSearchMatch": "{{source}} 中未找到与“{{query}}”相关的条目。",
+    "lastUpdated": "上次更新：{{time}}",
+    "openInBrowser": "打开市场",
+    "requiresApi": "需 API",
+    "noApi": "免 API"
+  },
+  "presetsPage": {
+    "libraryTab": "已安装设定",
+    "marketTab": "设定市场"
+  },
+  "presetMarket": {
+    "title": "设定市场",
+    "description": "浏览 SkillHub 专家包，并一键添加为可复用的 Nomi 设定。",
+    "addSuccess": "专家包已添加。",
+    "addSkipped": "专家包已存在。",
+    "addFailed": "添加专家包失败。",
+    "skillInstallFailed": "专家包的 {{count}} 个技能均安装失败：{{skills}}。",
+    "partialSkillInstall": "专家包已添加，但 {{count}} 个技能安装失败：{{skills}}。",
+    "stateUpdateFailed": "专家包已添加，但未能启用协作任务自动选择。",
+    "searchPlaceholder": "搜索专家包...",
+    "empty": "点击刷新获取专家包列表。"
+  },
+  "mcpMarket": {
+    "title": "MCP 市场",
+    "description": "浏览 SkillHub MCP 与 MCP World 热门服务，并直接导入 MCP 配置。",
+    "configMissing": "未找到可导入的 MCP 配置。",
+    "addSuccess": "已添加 {{count}} 个 MCP 服务。",
+    "addNeedsConfig": "{{name}} 已添加，请填写必需 API 配置后再启用。",
+    "addFailed": "添加 MCP 服务失败。",
+    "searchPlaceholder": "搜索 MCP 服务...",
+    "empty": "点击刷新获取 MCP 市场列表。"
+  },
+  "mcpPage": {
+    "installedMcpTab": "已安装MCP",
+    "mcpMarketTab": "MCP市场",
+    "installedPluginsTab": "已安装插件",
+    "pluginMarketTab": "插件市场"
+  },
+  "plugins": {
+    "installedTitle": "已安装插件",
+    "installedDescription": "当前应用已加载的 Nomi 扩展与插件包。",
+    "emptyInstalled": "暂未发现已安装插件。",
+    "marketTitle": "插件市场",
+    "marketDescription": "浏览 ClawHub 插件，并生成安装草稿供确认。",
+    "searchPlaceholder": "搜索插件...",
+    "emptyMarket": "点击刷新获取插件市场列表。"
   },
   "agentSkillImport": {
     "title": "从 Agent 导入",
@@ -134,7 +188,7 @@
   "presetPromptPlaceholder": "请输入提示词或规则",
   "savePreset": "保存设置",
   "createPreset": "创建设定",
-  "presetsListDescription": "保存可复用的 Agent、模型、Skill 与知识启动配置。可复用工作流和领域能力应放在 Skill 中。",
+  "presetsListDescription": "将 Agent、模型、Skill 与知识范围固化为可一键启动的复用配置。",
   "presetFilterAll": "全部",
   "presetFilterBuiltin": "系统",
   "presetFilterCustom": "自定义",
@@ -221,8 +275,18 @@
   "presetTagPickScenario": "技能场景标签",
   "presetTagNone": "无",
   "addSkills": "添加技能",
+  "addMcp": "添加 MCP",
+  "addPlugin": "添加插件",
+  "presetResources": "MCP / 插件",
+  "presetInstalledMcp": "已安装MCP",
+  "presetInstalledPlugins": "已安装插件",
+  "presetNoInstalledMcp": "暂无已安装 MCP，点击添加进入 MCP 市场。",
+  "presetNoInstalledPlugins": "暂无已安装插件，点击添加进入插件市场。",
+  "presetResourceMore": "还有 {{count}} 个",
   "customSkills": "自定义技能",
   "builtinSkills": "内置技能",
+  "marketPackageSkillDescription": "来自设定市场角色包",
+  "marketPackageSkillBadge": "角色包",
   "noCustomSkills": "暂无自定义技能",
   "noBuiltinSkills": "暂无可用的内置技能",
   "autoInjectedSkills": "自动注入技能",
@@ -751,6 +815,8 @@
   "mcpJsonBareServerError": "请将 MCP 服务配置放在顶层 \"mcpServers\" 对象中，或在数组项中添加 \"name\"。",
   "mcpJsonUrlRequiredError": "HTTP 和 SSE MCP 服务必须提供非空 \"url\"。",
   "mcpJsonStdioCommandRequiredError": "Stdio MCP 服务必须提供非空 \"command\"。",
+  "mcpGetApi": "获取 API",
+  "mcpTestMcp": "测试 MCP",
   "mcpTestConnection": "检测MCP可用状态",
   "mcpTestConnectionSuccess": "连接测试成功",
   "mcpConnected": "可用",
@@ -856,6 +922,8 @@
   },
   "mcpNoDescription": "暂无描述",
   "mcpAuthRequired": "需要身份验证",
+  "mcpApiConfigRequired": "请填写必需 API 配置后再测试。",
+  "mcpNeedsApiConfig": "需要 API 配置",
   "mcpOAuthLoginSuccess": "OAuth 登录成功",
   "mcpOAuthLoginFailed": "OAuth 登录失败",
   "mcpLogin": "登录",
@@ -1335,7 +1403,7 @@
   },
   "mcpHub": {
     "title": "MCP",
-    "subtitle": "注册、导入并管理 MCP 服务器配置。",
+    "subtitle": "管理已安装 MCP、MCP 市场、已安装插件与插件市场。",
     "railTitle": "MCP"
   },
   "openCapabilities": {

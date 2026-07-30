@@ -70,8 +70,9 @@
   },
   "skillsMarket": {
     "title": "Skill Market",
-    "description": "Browse current ClawHub and SkillHub rankings, then hand a reviewed installation draft to Nomi.",
+    "description": "Browse current ClawHub, LoopHub and SkillHub rankings, then hand a reviewed installation draft to Nomi.",
     "syncSuccess": "Skill Market updated",
+    "syncKeptCache": "No new ranking data was fetched. Kept the cached list.",
     "syncEmpty": "No ranking data was found.",
     "syncError": "Failed to update Skill Market",
     "openMarketFailed": "Unable to open the Skill Market",
@@ -82,6 +83,59 @@
     "noDescription": "No description available.",
     "lastUpdated": "Last updated: {{time}}",
     "openInBrowser": "Open market in browser"
+  },
+  "market": {
+    "syncSuccess": "Market updated",
+    "syncKeptCache": "No new entries were fetched. Kept the cached list.",
+    "syncEmpty": "No market entries found.",
+    "syncError": "Failed to update market",
+    "openFailed": "Failed to open market",
+    "noSearchMatch": "No {{source}} entries matched “{{query}}”.",
+    "lastUpdated": "Last updated: {{time}}",
+    "openInBrowser": "Open market",
+    "requiresApi": "Needs API",
+    "noApi": "No API"
+  },
+  "presetsPage": {
+    "libraryTab": "Installed Presets",
+    "marketTab": "Preset Market"
+  },
+  "presetMarket": {
+    "title": "Preset Market",
+    "description": "Browse SkillHub expert packages and add them as reusable Nomi presets.",
+    "addSuccess": "Expert package added.",
+    "addSkipped": "Expert package already exists.",
+    "addFailed": "Failed to add expert package.",
+    "skillInstallFailed": "Failed to install {{count}} expert package skill(s): {{skills}}.",
+    "partialSkillInstall": "Expert package added, but {{count}} skill(s) failed to install: {{skills}}.",
+    "stateUpdateFailed": "Expert package added, but automatic selection could not be enabled.",
+    "searchPlaceholder": "Search expert packages...",
+    "empty": "Refresh to load expert packages."
+  },
+  "mcpMarket": {
+    "title": "MCP Market",
+    "description": "Browse SkillHub MCP and MCP World popular servers, then import their MCP JSON directly.",
+    "configMissing": "No importable MCP config found.",
+    "addSuccess": "Added {{count}} MCP server(s).",
+    "addNeedsConfig": "{{name}} added. Fill required API config before enabling it.",
+    "addFailed": "Failed to add MCP server.",
+    "searchPlaceholder": "Search MCP servers...",
+    "empty": "Refresh to load MCP market entries."
+  },
+  "mcpPage": {
+    "installedMcpTab": "Installed MCP",
+    "mcpMarketTab": "MCP Market",
+    "installedPluginsTab": "Installed Plugins",
+    "pluginMarketTab": "Plugin Market"
+  },
+  "plugins": {
+    "installedTitle": "Installed Plugins",
+    "installedDescription": "Loaded Nomi extensions and plugin packages currently available to the app.",
+    "emptyInstalled": "No installed plugins found.",
+    "marketTitle": "Plugin Market",
+    "marketDescription": "Browse ClawHub plugins and prepare an installation draft for review.",
+    "searchPlaceholder": "Search plugins...",
+    "emptyMarket": "Refresh to load plugin market entries."
   },
   "agentSkillImport": {
     "title": "Import from Agent",
@@ -134,7 +188,7 @@
   "presetPromptPlaceholder": "Enter prompt or rules...",
   "savePreset": "Save Settings",
   "createPreset": "Create Preset",
-  "presetsListDescription": "Save reusable Agent, model, Skill, and knowledge launch configurations. Reusable workflows and domain capabilities belong in Skills.",
+  "presetsListDescription": "Save Agent, model, Skill and knowledge scope as reusable one-click configurations.",
   "presetFilterAll": "All",
   "presetFilterBuiltin": "System",
   "presetFilterCustom": "Custom",
@@ -221,8 +275,18 @@
   "presetTagPickScenario": "Scenario tags",
   "presetTagNone": "None",
   "addSkills": "Add Skills",
+  "addMcp": "Add MCP",
+  "addPlugin": "Add Plugin",
+  "presetResources": "MCP / Plugins",
+  "presetInstalledMcp": "Installed MCP",
+  "presetInstalledPlugins": "Installed Plugins",
+  "presetNoInstalledMcp": "No installed MCP. Add one from the market.",
+  "presetNoInstalledPlugins": "No installed plugins. Add one from the market.",
+  "presetResourceMore": "+{{count}} more",
   "customSkills": "Custom Skills",
   "builtinSkills": "Builtin Skills",
+  "marketPackageSkillDescription": "From preset market package",
+  "marketPackageSkillBadge": "Package",
   "noCustomSkills": "No custom skills added",
   "noBuiltinSkills": "No builtin skills available",
   "autoInjectedSkills": "Auto-injected Skills",
@@ -751,6 +815,8 @@
   "mcpJsonBareServerError": "Wrap the MCP server config in a top-level \"mcpServers\" object or add a \"name\" in an array item.",
   "mcpJsonUrlRequiredError": "HTTP and SSE MCP servers require a non-empty \"url\".",
   "mcpJsonStdioCommandRequiredError": "Stdio MCP servers require a non-empty \"command\".",
+  "mcpGetApi": "Get API",
+  "mcpTestMcp": "Test MCP",
   "mcpTestConnection": "Check MCP Availability",
   "mcpTestConnectionSuccess": "Connection test successful",
   "mcpConnected": "Available",
@@ -856,6 +922,8 @@
   },
   "mcpNoDescription": "No description",
   "mcpAuthRequired": "Authentication required",
+  "mcpApiConfigRequired": "Fill required API config, then test again.",
+  "mcpNeedsApiConfig": "API config required",
   "mcpOAuthLoginSuccess": "OAuth login successful",
   "mcpOAuthLoginFailed": "OAuth login failed",
   "mcpLogin": "Login",
@@ -1334,7 +1402,7 @@
   },
   "mcpHub": {
     "title": "MCP",
-    "subtitle": "Register, import, and manage MCP server configurations.",
+    "subtitle": "Manage installed MCP, MCP Market, installed plugins, and Plugin Market.",
     "railTitle": "MCP"
   },
   "openCapabilities": {

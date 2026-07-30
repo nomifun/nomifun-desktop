@@ -15,8 +15,12 @@ import {
   buildSkillMarketInstallPrompt,
   cleanMarketText,
   filterSkillMarketItems,
+  marketSourceLabel,
+  marketSourceUrl,
   normalizeSkillMarketErrors,
   normalizeSkillMarketItems,
+  resolveMarketSyncItems,
+  selectMarketSourceWithItems,
   SKILL_MARKET_SOURCES,
 } from './skill/skillMarket';
 import { Button, Input } from '@arco-design/web-react';
@@ -25,18 +29,14 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next';
 
 const CARD_GRID_COLS = 'repeat(auto-fill, minmax(min(232px, 100%), 1fr))';
-const CACHE_KEY = 'nomifun.skillMarket.rankings.v3';
-const AUTO_SYNC_KEY = 'nomifun.skillMarket.autoSynced.v3';
+const CACHE_KEY = 'nomifun.skillMarket.rankings.v4';
+const AUTO_SYNC_KEY = 'nomifun.skillMarket.autoSynced.v4';
 
 type SkillMarketCache = {
   fetched_at?: number;
   items?: unknown;
   errors?: unknown;
 };
-
-const sourceLabel = (source: SkillMarketSource): string => (source === 'clawhub' ? 'ClawHub' : 'SkillHub');
-const sourceMarketUrl = (source: SkillMarketSource): string =>
-  source === 'clawhub' ? 'https://clawhub.ai/' : 'https://www.skills.sh/';
 
 const SkillMarketSettings: React.FC = () => {
   const { t, i18n } = useTranslation();
@@ -47,6 +47,7 @@ const SkillMarketSettings: React.FC = () => {
   const tags = usePresetTags();
   const { start } = useNomiQuickStart();
   const autoSyncStartedRef = useRef(false);
+  const itemsRef = useRef<ISkillMarketItem[]>([]);
 
   const [activeSource, setActiveSource] = useState<SkillMarketSource>('clawhub');
   const [items, setItems] = useState<ISkillMarketItem[]>([]);
@@ -63,7 +64,9 @@ const SkillMarketSettings: React.FC = () => {
       if (!raw) return;
       const cache = JSON.parse(raw) as SkillMarketCache;
       const normalized = normalizeSkillMarketItems(cache.items);
+      itemsRef.current = normalized;
       setItems(normalized);
+      setActiveSource((source) => selectMarketSourceWithItems(source, SKILL_MARKET_SOURCES, normalized));
       setFetchedAt(typeof cache.fetched_at === 'number' ? cache.fetched_at : null);
       setErrors(normalizeSkillMarketErrors(cache.errors));
     } catch {
@@ -89,20 +92,25 @@ const SkillMarketSettings: React.FC = () => {
       const result = await ipcBridge.fs.syncSkillMarketRankings.invoke({ sources: SKILL_MARKET_SOURCES });
       const normalized = normalizeSkillMarketItems(result.items);
       const normalizedErrors = normalizeSkillMarketErrors(result.errors);
-      setItems(normalized);
+      const nextItems = resolveMarketSyncItems(itemsRef.current, normalized);
+      itemsRef.current = nextItems;
+      setItems(nextItems);
+      setActiveSource((source) => selectMarketSourceWithItems(source, SKILL_MARKET_SOURCES, nextItems));
       setFetchedAt(result.fetched_at);
       setErrors(normalizedErrors);
       localStorage.setItem(
         CACHE_KEY,
         JSON.stringify({
           fetched_at: result.fetched_at,
-          items: normalized,
+          items: nextItems,
           errors: normalizedErrors,
         })
       );
       if (showToast) {
         if (normalized.length > 0) {
           message.success(t('settings.skillsMarket.syncSuccess', { defaultValue: '技能市场已更新' }));
+        } else if (nextItems.length > 0) {
+          message.warning(t('settings.skillsMarket.syncKeptCache', { defaultValue: '未获取到新榜单，已保留本地缓存。' }));
         } else {
           message.warning(t('settings.skillsMarket.syncEmpty', { defaultValue: '未采集到榜单数据。' }));
         }
@@ -151,8 +159,13 @@ const SkillMarketSettings: React.FC = () => {
   );
 
   const sourceCounts = useMemo(() => {
-    const counts: Record<SkillMarketSource, number> = { clawhub: 0, skillhub: 0 };
-    for (const item of items) counts[item.source] += 1;
+    const counts: Partial<Record<SkillMarketSource, number>> = {};
+    for (const source of SKILL_MARKET_SOURCES) counts[source] = 0;
+    for (const item of items) {
+      if (SKILL_MARKET_SOURCES.includes(item.source)) {
+        counts[item.source] = (counts[item.source] ?? 0) + 1;
+      }
+    }
     return counts;
   }, [items]);
 
@@ -169,7 +182,7 @@ const SkillMarketSettings: React.FC = () => {
 
   const handleOpenMarket = useCallback(async () => {
     try {
-      await openExternalUrl(sourceMarketUrl(activeSource));
+      await openExternalUrl(marketSourceUrl(activeSource));
     } catch (error) {
       console.error('Failed to open skill market:', error);
       message.error(t('settings.skillsMarket.openMarketFailed', { defaultValue: '无法打开技能市场' }));
@@ -185,8 +198,8 @@ const SkillMarketSettings: React.FC = () => {
       : activeSearch
         ? t('settings.skillsMarket.noSearchMatch', {
             query: searchQuery.trim(),
-            source: sourceLabel(activeSource),
-            defaultValue: `当前 ${sourceLabel(activeSource)} 未找到“${searchQuery.trim()}”相关技能。`,
+            source: marketSourceLabel(activeSource),
+            defaultValue: `当前 ${marketSourceLabel(activeSource)} 未找到“${searchQuery.trim()}”相关技能。`,
           })
         : t('settings.skillsMarket.noMatch', { defaultValue: '没有符合当前筛选条件的技能。' });
 
@@ -218,8 +231,8 @@ const SkillMarketSettings: React.FC = () => {
                       className='!rounded-9px !h-28px !px-12px !text-12px'
                       onClick={() => setActiveSource(source)}
                     >
-                      {sourceLabel(source)}
-                      {sourceCounts[source] > 0 ? ` ${sourceCounts[source]}` : ''}
+                      {marketSourceLabel(source)}
+                      {(sourceCounts[source] ?? 0) > 0 ? ` ${sourceCounts[source]}` : ''}
                     </Button>
                   ))}
                 </div>

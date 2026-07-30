@@ -7,6 +7,7 @@ import { isBackendHttpError } from '@/common/adapter/httpBridge';
 import { mcpService } from '@/common/adapter/ipcBridge';
 import { buildMcpConnectionTestRequest } from '@/common/adapter/mcpRequest';
 import type { IMcpServer } from '@/common/config/storage';
+import { needsMcpApiConfiguration } from './mcpAuthConfig';
 
 /**
  * 截断过长的错误消息，保持可读性
@@ -164,10 +165,20 @@ export const useMcpConnection = (
       try {
         const result = await mcpService.testMcpConnection.invoke(buildMcpConnectionTestRequest(server));
         const needsAuth = result.needsAuth ?? result.needs_auth;
+        const authMethod = result.authMethod ?? result.auth_method;
 
         // 检查是否需要认证
         if (needsAuth) {
           await updateServerStatus('disconnected');
+          if (needsMcpApiConfiguration(server.transport)) {
+            if (notify) {
+              Message.warning({
+                content: `${server.name}: ${t('settings.mcpApiConfigRequired', { defaultValue: 'Fill required API config, then test again.' })}`,
+                duration: 4000,
+              });
+            }
+            return;
+          }
           if (notify) {
             Message.warning({
               content: `${server.name}: ${t('settings.mcpAuthRequired') || 'Authentication required'}`,
@@ -176,8 +187,10 @@ export const useMcpConnection = (
           }
 
           // 触发认证回调
-          if (onAuthRequired) {
+          if (authMethod === 'oauth' && onAuthRequired) {
             onAuthRequired(server);
+          } else {
+            await updateServerStatus('error');
           }
           return;
         }

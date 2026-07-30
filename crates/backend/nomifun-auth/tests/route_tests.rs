@@ -401,6 +401,19 @@ async fn t6_4_status_unauthenticated() {
     assert_eq!(json["is_authenticated"], false);
 }
 
+#[tokio::test]
+async fn t6_5_status_noauth_uses_default_login_state() {
+    let (app, _ctx) = test_app_with_local(true).await;
+
+    let req = get_anonymous("/api/auth/status");
+    let resp = app.oneshot(req).await.unwrap();
+
+    assert_eq!(resp.status(), StatusCode::OK);
+    let json = body_json(resp).await;
+    assert_eq!(json["needs_setup"], false);
+    assert_eq!(json["is_authenticated"], true);
+}
+
 // ===========================================================================
 // T7. Current User (GET /api/auth/user)
 // ===========================================================================
@@ -419,6 +432,20 @@ async fn t7_1_get_user_success() {
     assert_eq!(json["success"], true);
     assert_eq!(json["user"]["username"], "admin");
     assert!(json["user"]["user_id"].is_string());
+}
+
+#[tokio::test]
+async fn t7_1_noauth_get_user_returns_default_login_user() {
+    let (app, ctx) = test_app_with_local(true).await;
+
+    let req = get_anonymous("/api/auth/user");
+    let resp = app.oneshot(req).await.unwrap();
+
+    assert_eq!(resp.status(), StatusCode::OK);
+    let json = body_json(resp).await;
+    assert_eq!(json["success"], true);
+    assert_eq!(json["user"]["user_id"], ctx.installation_owner);
+    assert!(json["user"]["username"].as_str().unwrap_or_default().len() > 0);
 }
 
 #[tokio::test]

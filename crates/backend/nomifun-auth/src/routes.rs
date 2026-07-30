@@ -288,6 +288,7 @@ async fn logout_handler(State(state): State<AuthRouterState>, headers: HeaderMap
 
 async fn status_handler(
     State(state): State<AuthRouterState>,
+    current_user: Option<Extension<CurrentUser>>,
     headers: HeaderMap,
 ) -> Result<Json<AuthStatusResponse>, AppError> {
     let has_users = state
@@ -302,14 +303,16 @@ async fn status_handler(
         .await
         .map_err(|e| AppError::Internal(format!("Database error: {e}")))?;
 
-    // Check authentication without requiring it
+    // Check authentication without requiring it. Local trusted modes such as
+    // NoAuth already inject CurrentUser in the outer trust middleware.
     let is_authenticated = extract_token_from_headers(&headers)
         .and_then(|token| state.jwt_service.verify(&token).ok())
-        .is_some();
+        .is_some()
+        || current_user.is_some();
 
     Ok(Json(AuthStatusResponse {
         success: true,
-        needs_setup: !has_users,
+        needs_setup: !has_users && !is_authenticated,
         user_count: user_count as u64,
         is_authenticated,
     }))

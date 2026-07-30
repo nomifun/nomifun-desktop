@@ -1,12 +1,14 @@
 import type { McpServerId } from '@/common/types/ids';
 import type { IMcpServer } from '@/common/config/storage';
 import { Button, Dropdown, Menu, Popover, Tooltip } from '@arco-design/web-react';
-import { Check, CloseSmall, Info, LoadingOne, Refresh, Write, DeleteFour, SettingOne, Login } from '@icon-park/react';
+import { Check, CloseSmall, Info, LoadingOne, Refresh, Write, DeleteFour, SettingOne, Login, Link } from '@icon-park/react';
 import React from 'react';
 import { useTranslation } from 'react-i18next';
 import type { McpOAuthStatus } from '@/renderer/hooks/mcp/useMcpOAuth';
 import FeedbackButton from '@/renderer/components/base/FeedbackButton';
 import { iconColors } from '@/renderer/styles/colors';
+import { getMcpApiKeyUrl, needsMcpApiConfiguration, supportsMcpOAuthLogin } from '@/renderer/hooks/mcp/mcpAuthConfig';
+import { openExternalUrl } from '@/renderer/utils/platform';
 
 interface McpServerHeaderProps {
   server: IMcpServer;
@@ -35,7 +37,7 @@ const getStatusIcon = (
   }
 
   if (oauthStatus?.needsLogin) {
-    return <span className='text-orange-500 text-xl font-bold leading-none'>△</span>;
+    return <span className='text-orange-500 text-xl font-bold leading-none'>!</span>;
   }
 
   if (last_test_status === 'connected') {
@@ -140,9 +142,6 @@ const getStatusText = (
   return t?.('settings.mcpDisconnected') || 'Not tested';
 };
 
-const supportsOAuth = (server: IMcpServer) =>
-  server.transport.type === 'http' || server.transport.type === 'sse' || server.transport.type === 'streamable_http';
-
 const McpServerHeader: React.FC<McpServerHeaderProps> = ({
   server,
   isTestingConnection,
@@ -156,13 +155,25 @@ const McpServerHeader: React.FC<McpServerHeaderProps> = ({
 }) => {
   const { t } = useTranslation();
 
-  const oauthCapable = supportsOAuth(server);
-  const needsLogin = oauthCapable && oauthStatus?.needsLogin;
-  const statusText = getStatusText(server, server.last_test_status, oauthStatus, isTestingConnection, t);
-  const statusIcon = getStatusIcon(server.last_test_status, oauthStatus, isTestingConnection);
+  const apiConfigNeeded = needsMcpApiConfiguration(server.transport);
+  const apiKeyUrl = getMcpApiKeyUrl(server.transport);
+  const effectiveOAuthStatus = apiConfigNeeded ? undefined : oauthStatus;
+  const oauthCapable = supportsMcpOAuthLogin(server.transport);
+  const needsLogin = oauthCapable && effectiveOAuthStatus?.needsLogin;
+  const statusText = apiConfigNeeded
+    ? t('settings.mcpNeedsApiConfig', { defaultValue: 'API config required' })
+    : getStatusText(server, server.last_test_status, effectiveOAuthStatus, isTestingConnection, t);
+  const statusIcon = getStatusIcon(server.last_test_status, effectiveOAuthStatus, isTestingConnection);
   const statusPopoverContent = getStatusPopoverContent(server, t);
 
   const isError = server.last_test_status === 'error';
+  const handleOpenApiKeyUrl = (event: Event) => {
+    event.stopPropagation();
+    if (!apiKeyUrl) return;
+    void openExternalUrl(apiKeyUrl).catch((error) => {
+      console.error('Failed to open MCP API page:', error);
+    });
+  };
 
   return (
     <div className='flex items-center justify-between group'>
@@ -178,7 +189,33 @@ const McpServerHeader: React.FC<McpServerHeaderProps> = ({
           </Tooltip>
         )}
         {isError && <FeedbackButton module='mcp-tools' />}
-        {!isReadOnly && needsLogin && onOAuthLogin && (
+        {!isReadOnly && apiConfigNeeded && (
+          <Button
+            size='mini'
+            type='outline'
+            icon={<Refresh size={'14'} />}
+            title={t('settings.mcpTestConnection')}
+            loading={isTestingConnection}
+            onClick={(event) => {
+              event.stopPropagation();
+              onTestConnection(server);
+            }}
+          >
+            {t('settings.mcpTestMcp', { defaultValue: 'Test MCP' })}
+          </Button>
+        )}
+        {!isReadOnly && apiConfigNeeded && apiKeyUrl && (
+          <Button
+            size='mini'
+            type='text'
+            icon={<Link size={'14'} />}
+            title={t('settings.mcpGetApi', { defaultValue: 'Get API' })}
+            onClick={handleOpenApiKeyUrl}
+          >
+            {t('settings.mcpGetApi', { defaultValue: 'Get API' })}
+          </Button>
+        )}
+        {!isReadOnly && !apiConfigNeeded && needsLogin && onOAuthLogin && (
           <Button
             size='mini'
             type='primary'
@@ -190,14 +227,19 @@ const McpServerHeader: React.FC<McpServerHeaderProps> = ({
             {t('settings.mcpLogin') || 'Login'}
           </Button>
         )}
-        {!isReadOnly && !needsLogin && (
+        {!isReadOnly && !apiConfigNeeded && !needsLogin && (
           <Button
             size='mini'
             icon={<Refresh size={'14'} />}
             title={t('settings.mcpTestConnection')}
             loading={isTestingConnection}
-            onClick={() => onTestConnection(server)}
-          />
+            onClick={(event) => {
+              event.stopPropagation();
+              onTestConnection(server);
+            }}
+          >
+            {t('settings.mcpTestMcp', { defaultValue: 'Test MCP' })}
+          </Button>
         )}
       </div>
       {!isReadOnly && (

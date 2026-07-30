@@ -20,6 +20,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useLocation, useSearchParams } from 'react-router-dom';
+import { Tabs } from '@arco-design/web-react';
 import { useArcoMessage } from '@/renderer/utils/ui/useArcoMessage';
 import coworkSvg from '@/renderer/assets/icons/cowork.svg';
 import NomiScrollArea from '@/renderer/components/base/NomiScrollArea';
@@ -31,12 +32,16 @@ import PresetListPanel from './PresetListPanel';
 import DeletePresetModal from './DeletePresetModal';
 import SkillConfirmModals from './SkillConfirmModals';
 import TagManagementModal from './TagManagementModal';
+import PresetPackageMarketSettings from './PresetPackageMarketSettings';
 
 type PresetNavigationState = {
   openPresetId?: string;
   openPresetEditor?: boolean;
 };
 const OPEN_PRESET_EDITOR_INTENT_KEY = 'guid.openPresetEditorIntent';
+type PresetSettingsTab = 'library' | 'market';
+const isPresetSettingsTab = (value: string | null): value is PresetSettingsTab =>
+  value === 'library' || value === 'market';
 
 const PresetSettings: React.FC = () => {
   const { t } = useTranslation();
@@ -45,12 +50,24 @@ const PresetSettings: React.FC = () => {
   const [searchParams, setSearchParams] = useSearchParams();
   const navigationState = (location.state as PresetNavigationState | null) ?? null;
   const highlightId = searchParams.get('highlight');
+  const activeTab = isPresetSettingsTab(searchParams.get('tab')) ? searchParams.get('tab')! : 'library';
 
   const handleHighlightConsumed = useCallback(() => {
     const next = new URLSearchParams(searchParams);
     next.delete('highlight');
     setSearchParams(next, { replace: true });
   }, [searchParams, setSearchParams]);
+
+  const handleTabChange = useCallback(
+    (key: string) => {
+      if (!isPresetSettingsTab(key)) return;
+      const next = new URLSearchParams(searchParams);
+      if (key === 'library') next.delete('tab');
+      else next.set('tab', key);
+      setSearchParams(next, { replace: true });
+    },
+    [searchParams, setSearchParams]
+  );
   const avatarImageMap: Record<string, string> = useMemo(
     () => ({
       'cowork.svg': coworkSvg,
@@ -125,131 +142,141 @@ const PresetSettings: React.FC = () => {
   return (
     <HubPageShell
       title={t('settings.presetsHub.title', { defaultValue: 'Presets' })}
-      subtitle={t('settings.presetsHub.subtitle', {
-        defaultValue: 'Save reusable agent, model, skill and knowledge configurations for one-click startup.',
-      })}
       maxWidthClass='md:max-w-1200px'
     >
       {messageContext}
-    <div className='flex flex-col h-full w-full'>
-      <NomiScrollArea className='flex-1 min-h-0 pb-16px scrollbar-hide' disableOverflow>
-        <PresetListPanel
-          presets={presets}
-          localeKey={localeKey}
-          avatarImageMap={avatarImageMap}
-          isExtensionPreset={isExtensionPreset}
-          onEdit={(preset) => void editor.handleEdit(preset)}
-          onDuplicate={(preset) => void editor.handleDuplicate(preset)}
-          onCreate={() => void editor.handleCreate()}
-          onToggleEnabled={(preset, checked) => void editor.handleToggleEnabled(preset, checked)}
-          setActivePresetId={setActivePresetId}
-          highlightId={highlightId}
-          onHighlightConsumed={handleHighlightConsumed}
-          audienceTags={tags.audienceTags}
-          scenarioTags={tags.scenarioTags}
-          tagById={tags.tagById}
-          onManageTags={() => setTagModalVisible(true)}
-        />
+      <Tabs
+        activeTab={activeTab}
+        onChange={handleTabChange}
+        type='line'
+        lazyload
+        className='flex flex-col flex-1 min-h-0 [&>.arco-tabs-content]:pt-0'
+      >
+        <Tabs.TabPane key='library' title={t('settings.presetsPage.libraryTab', { defaultValue: 'Installed Presets' })}>
+          <div className='flex flex-col h-full w-full'>
+            <NomiScrollArea className='flex-1 min-h-0 pb-16px scrollbar-hide' disableOverflow>
+              <PresetListPanel
+                presets={presets}
+                localeKey={localeKey}
+                avatarImageMap={avatarImageMap}
+                isExtensionPreset={isExtensionPreset}
+                onEdit={(preset) => void editor.handleEdit(preset)}
+                onDuplicate={(preset) => void editor.handleDuplicate(preset)}
+                onCreate={() => void editor.handleCreate()}
+                onToggleEnabled={(preset, checked) => void editor.handleToggleEnabled(preset, checked)}
+                setActivePresetId={setActivePresetId}
+                highlightId={highlightId}
+                onHighlightConsumed={handleHighlightConsumed}
+                audienceTags={tags.audienceTags}
+                scenarioTags={tags.scenarioTags}
+                tagById={tags.tagById}
+                onManageTags={() => setTagModalVisible(true)}
+              />
 
-        <PresetEditDrawer
-          editVisible={editor.editVisible}
-          setEditVisible={editor.setEditVisible}
-          isCreating={editor.isCreating}
-          editName={editor.editName}
-          setEditName={editor.setEditName}
-          editDescription={editor.editDescription}
-          setEditDescription={editor.setEditDescription}
-          editRoutingDescription={editor.editRoutingDescription}
-          setEditRoutingDescription={editor.setEditRoutingDescription}
-          editAvatar={editor.editAvatar}
-          setEditAvatar={editor.setEditAvatar}
-          editAvatarImage={editAvatarImage}
-          editAgents={editor.editAgents}
-          setEditAgents={editor.setEditAgents}
-          editModels={editor.editModels}
-          setEditModels={editor.setEditModels}
-          editTargets={editor.editTargets}
-          setEditTargets={editor.setEditTargets}
-          fallbackAllowed={editor.fallbackAllowed}
-          setFallbackAllowed={editor.setFallbackAllowed}
-          autoSelectable={editor.autoSelectable}
-          setAutoSelectable={editor.setAutoSelectable}
-          knowledgePolicy={editor.knowledgePolicy}
-          setKnowledgePolicy={editor.setKnowledgePolicy}
-          knowledgeBaseIds={editor.knowledgeBaseIds}
-          setKnowledgeBaseIds={editor.setKnowledgeBaseIds}
-          editContext={editor.editContext}
-          setEditContext={editor.setEditContext}
-          promptViewMode={editor.promptViewMode}
-          setPromptViewMode={editor.setPromptViewMode}
-          availableSkills={editor.availableSkills}
-          selectedSkills={editor.selectedSkills}
-          setSelectedSkills={editor.setSelectedSkills}
-          pendingSkills={editor.pendingSkills}
-          customSkills={editor.customSkills}
-          setDeletePendingSkillName={editor.setDeletePendingSkillName}
-          setDeleteCustomSkillName={editor.setDeleteCustomSkillName}
-          builtinAutoSkills={editor.builtinAutoSkills}
-          disabledBuiltinSkills={editor.disabledBuiltinSkills}
-          setDisabledBuiltinSkills={editor.setDisabledBuiltinSkills}
-          editAudienceTags={editor.editAudienceTags}
-          setEditAudienceTags={editor.setEditAudienceTags}
-          editScenarioTags={editor.editScenarioTags}
-          setEditScenarioTags={editor.setEditScenarioTags}
-          audienceTags={tags.audienceTags}
-          scenarioTags={tags.scenarioTags}
-          onCreateTag={tags.createTag}
-          readOnly={
-            editor.isCreating
-              ? false
-              : activePreset?.source === 'builtin' || isExtensionPreset(activePreset)
-          }
-          localeKey={localeKey}
-          activePreset={activePreset}
-          activePresetId={activePresetId}
-          isExtensionPreset={isExtensionPreset}
-          availableBackends={availableBackends}
-          handleSave={editor.handleSave}
-          onImportAgentSkills={editor.handleImportAgentSkills}
-          handleDeleteClick={editor.handleDeleteClick}
-          handleDuplicate={(preset) => void editor.handleDuplicate(preset)}
-        />
+              <PresetEditDrawer
+                editVisible={editor.editVisible}
+                setEditVisible={editor.setEditVisible}
+                isCreating={editor.isCreating}
+                editName={editor.editName}
+                setEditName={editor.setEditName}
+                editDescription={editor.editDescription}
+                setEditDescription={editor.setEditDescription}
+                editRoutingDescription={editor.editRoutingDescription}
+                setEditRoutingDescription={editor.setEditRoutingDescription}
+                editAvatar={editor.editAvatar}
+                setEditAvatar={editor.setEditAvatar}
+                editAvatarImage={editAvatarImage}
+                editAgents={editor.editAgents}
+                setEditAgents={editor.setEditAgents}
+                editModels={editor.editModels}
+                setEditModels={editor.setEditModels}
+                editTargets={editor.editTargets}
+                setEditTargets={editor.setEditTargets}
+                fallbackAllowed={editor.fallbackAllowed}
+                setFallbackAllowed={editor.setFallbackAllowed}
+                autoSelectable={editor.autoSelectable}
+                setAutoSelectable={editor.setAutoSelectable}
+                knowledgePolicy={editor.knowledgePolicy}
+                setKnowledgePolicy={editor.setKnowledgePolicy}
+                knowledgeBaseIds={editor.knowledgeBaseIds}
+                setKnowledgeBaseIds={editor.setKnowledgeBaseIds}
+                editContext={editor.editContext}
+                setEditContext={editor.setEditContext}
+                promptViewMode={editor.promptViewMode}
+                setPromptViewMode={editor.setPromptViewMode}
+                availableSkills={editor.availableSkills}
+                selectedSkills={editor.selectedSkills}
+                setSelectedSkills={editor.setSelectedSkills}
+                pendingSkills={editor.pendingSkills}
+                customSkills={editor.customSkills}
+                setDeletePendingSkillName={editor.setDeletePendingSkillName}
+                setDeleteCustomSkillName={editor.setDeleteCustomSkillName}
+                builtinAutoSkills={editor.builtinAutoSkills}
+                disabledBuiltinSkills={editor.disabledBuiltinSkills}
+                setDisabledBuiltinSkills={editor.setDisabledBuiltinSkills}
+                editAudienceTags={editor.editAudienceTags}
+                setEditAudienceTags={editor.setEditAudienceTags}
+                editScenarioTags={editor.editScenarioTags}
+                setEditScenarioTags={editor.setEditScenarioTags}
+                audienceTags={tags.audienceTags}
+                scenarioTags={tags.scenarioTags}
+                onCreateTag={tags.createTag}
+                readOnly={
+                  editor.isCreating
+                    ? false
+                    : activePreset?.source === 'builtin' || isExtensionPreset(activePreset)
+                }
+                localeKey={localeKey}
+                activePreset={activePreset}
+                activePresetId={activePresetId}
+                isExtensionPreset={isExtensionPreset}
+                availableBackends={availableBackends}
+                handleSave={editor.handleSave}
+                onImportAgentSkills={editor.handleImportAgentSkills}
+                handleDeleteClick={editor.handleDeleteClick}
+                handleDuplicate={(preset) => void editor.handleDuplicate(preset)}
+              />
 
-        <DeletePresetModal
-          visible={editor.deleteConfirmVisible}
-          onCancel={() => editor.setDeleteConfirmVisible(false)}
-          onConfirm={editor.handleDeleteConfirm}
-          activePreset={activePreset}
-          avatarImageMap={avatarImageMap}
-        />
+              <DeletePresetModal
+                visible={editor.deleteConfirmVisible}
+                onCancel={() => editor.setDeleteConfirmVisible(false)}
+                onConfirm={editor.handleDeleteConfirm}
+                activePreset={activePreset}
+                avatarImageMap={avatarImageMap}
+              />
 
-        <SkillConfirmModals
-          deletePendingSkillName={editor.deletePendingSkillName}
-          setDeletePendingSkillName={editor.setDeletePendingSkillName}
-          pendingSkills={editor.pendingSkills}
-          setPendingSkills={editor.setPendingSkills}
-          deleteCustomSkillName={editor.deleteCustomSkillName}
-          setDeleteCustomSkillName={editor.setDeleteCustomSkillName}
-          customSkills={editor.customSkills}
-          setCustomSkills={editor.setCustomSkills}
-          selectedSkills={editor.selectedSkills}
-          setSelectedSkills={editor.setSelectedSkills}
-          message={message}
-        />
-      </NomiScrollArea>
+              <SkillConfirmModals
+                deletePendingSkillName={editor.deletePendingSkillName}
+                setDeletePendingSkillName={editor.setDeletePendingSkillName}
+                pendingSkills={editor.pendingSkills}
+                setPendingSkills={editor.setPendingSkills}
+                deleteCustomSkillName={editor.deleteCustomSkillName}
+                setDeleteCustomSkillName={editor.setDeleteCustomSkillName}
+                customSkills={editor.customSkills}
+                setCustomSkills={editor.setCustomSkills}
+                selectedSkills={editor.selectedSkills}
+                setSelectedSkills={editor.setSelectedSkills}
+                message={message}
+              />
+            </NomiScrollArea>
 
-      <TagManagementModal
-        visible={tagModalVisible}
-        onClose={() => setTagModalVisible(false)}
-        audienceTags={tags.audienceTags}
-        scenarioTags={tags.scenarioTags}
-        localeKey={localeKey}
-        onCreate={tags.createTag}
-        onRename={tags.renameTag}
-        onDelete={tags.deleteTag}
-        message={message}
-      />
-    </div>
+            <TagManagementModal
+              visible={tagModalVisible}
+              onClose={() => setTagModalVisible(false)}
+              audienceTags={tags.audienceTags}
+              scenarioTags={tags.scenarioTags}
+              localeKey={localeKey}
+              onCreate={tags.createTag}
+              onRename={tags.renameTag}
+              onDelete={tags.deleteTag}
+              message={message}
+            />
+          </div>
+        </Tabs.TabPane>
+        <Tabs.TabPane key='market' title={t('settings.presetsPage.marketTab', { defaultValue: 'Preset Market' })}>
+          <PresetPackageMarketSettings onImported={loadPresets} />
+        </Tabs.TabPane>
+      </Tabs>
     </HubPageShell>
   );
 };

@@ -42,6 +42,14 @@ type UsePresetEditorParams = {
 
 const isBuiltinPreset = (preset: Preset | null | undefined): boolean => preset?.source === 'builtin';
 
+export const customSkillNamesFromIncluded = (skillsList: SkillInfo[], includedNames: string[]): string[] => {
+  const sourceByName = new Map(skillsList.map((skill) => [skill.name, skill.source]));
+  return includedNames.filter((name) => {
+    const source = sourceByName.get(name);
+    return source === undefined || source === 'custom';
+  });
+};
+
 /**
  * Manages all preset editing state and handlers:
  * create, edit, duplicate, save, delete, and toggle enabled.
@@ -132,7 +140,7 @@ export const usePresetEditor = ({
       setAvailableSkills(skillsList);
       const includedNames = preset.included_skills.map((item) => item.skill_name);
       setSelectedSkills(includedNames);
-      setCustomSkills(skillsList.filter((skill) => skill.source === 'custom' && includedNames.includes(skill.name)).map((skill) => skill.name));
+      setCustomSkills(customSkillNamesFromIncluded(skillsList, includedNames));
       setDisabledBuiltinSkills(preset.excluded_auto_skills);
     } catch (error) {
       console.error('Failed to load preset content:', error);
@@ -211,7 +219,7 @@ export const usePresetEditor = ({
       setBuiltinAutoSkills(autoSkills);
       const includedNames = preset.included_skills.map((item) => item.skill_name);
       setSelectedSkills(includedNames);
-      setCustomSkills(skillsList.filter((skill) => skill.source === 'custom' && includedNames.includes(skill.name)).map((skill) => skill.name));
+      setCustomSkills(customSkillNamesFromIncluded(skillsList, includedNames));
       setDisabledBuiltinSkills(preset.excluded_auto_skills);
     } catch (error) {
       console.error('Failed to load preset content for duplication:', error);
@@ -258,9 +266,17 @@ export const usePresetEditor = ({
         }
       }
 
-      // Calculate final customSkills: merge existing + pending
-      const pendingSkillNames = pendingSkills.map((s) => s.name);
-      const finalSelectedSkills = Array.from(new Set([...selectedSkills, ...pendingSkillNames]));
+      // Calculate final customSkills: merge existing + still-selected pending
+      const pendingSkillNames = pendingSkills
+        .filter((skill) => selectedSkills.includes(skill.name))
+        .map((skill) => skill.name);
+      const builtinAutoNames = new Set(builtinAutoSkills.map((skill) => skill.name));
+      const finalSelectedSkills = Array.from(new Set([...selectedSkills, ...pendingSkillNames])).filter(
+        (skillName) => !builtinAutoNames.has(skillName)
+      );
+      const finalDisabledBuiltinSkills = Array.from(new Set(disabledBuiltinSkills)).filter((name) =>
+        builtinAutoNames.has(name)
+      );
 
       const content: CreatePresetRequest = {
         name: editName,
@@ -274,7 +290,7 @@ export const usePresetEditor = ({
         agent_preferences: editAgents.map((agent_id) => ({ agent_id, required: false })),
         model_preferences: editModels,
         included_skills: finalSelectedSkills.map((skill_name) => ({ skill_name, required: false })),
-        excluded_auto_skills: disabledBuiltinSkills,
+        excluded_auto_skills: finalDisabledBuiltinSkills,
         knowledge_policy: knowledgePolicy,
         knowledge_bases: knowledgeBaseIds.map((knowledge_base_id) => ({
           knowledge_base_id: parseKnowledgeBaseId(knowledge_base_id),

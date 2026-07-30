@@ -3,6 +3,8 @@
  * Contains name/avatar fields, agent selector, rules editor, and skills section.
  */
 import type { PresetListItem, BuiltinAutoSkill, SkillInfo } from './types';
+import { ipcBridge } from '@/common';
+import type { IExtensionInfo } from '@/common/adapter/ipcBridge';
 import type { AvailableBackend } from '@/renderer/hooks/preset';
 import type {
   CreatePresetTagRequest,
@@ -27,6 +29,7 @@ import MarkdownView from '@/renderer/components/Markdown';
 import NomiSelect from '@/renderer/components/base/NomiSelect';
 import { useModelProviderList } from '@/renderer/hooks/agent/useModelProviderList';
 import { useModelSelectorProviderLabel } from '@/renderer/hooks/agent/useModelSelectorProviderLabel';
+import { useMcpServers } from '@/renderer/hooks/mcp';
 import { useKnowledgeBases } from '@/renderer/pages/knowledge/useKnowledge';
 import { Avatar, Button, Checkbox, Collapse, Drawer, Input, Select, Tag, Typography } from '@arco-design/web-react';
 import { Close, Delete, Info, Plus, Robot } from '@icon-park/react';
@@ -142,6 +145,12 @@ type PresetEditDrawerProps = {
   handleDuplicate: (preset: PresetListItem) => void;
 };
 
+type ResourcePreviewItem = {
+  key: string;
+  name: string;
+  description?: string;
+};
+
 const PresetEditDrawer: React.FC<PresetEditDrawerProps> = ({
   editVisible,
   setEditVisible,
@@ -177,12 +186,11 @@ const PresetEditDrawer: React.FC<PresetEditDrawerProps> = ({
   selectedSkills,
   setSelectedSkills,
   pendingSkills,
-  customSkills: _customSkills,
+  customSkills,
   setDeletePendingSkillName,
   setDeleteCustomSkillName,
   builtinAutoSkills,
   disabledBuiltinSkills,
-  setDisabledBuiltinSkills,
   editAudienceTags,
   setEditAudienceTags,
   editScenarioTags,
@@ -209,6 +217,11 @@ const PresetEditDrawer: React.FC<PresetEditDrawerProps> = ({
   const [drawerWidth, setDrawerWidth] = useState(500);
   const [rulesExpanded, setRulesExpanded] = useState(false);
   const [agentImportVisible, setAgentImportVisible] = useState(false);
+  const [installedPlugins, setInstalledPlugins] = useState<IExtensionInfo[]>([]);
+  const [pluginsLoading, setPluginsLoading] = useState(true);
+  const [selectedMcpResourceKeys, setSelectedMcpResourceKeys] = useState<string[]>([]);
+  const [selectedPluginResourceNames, setSelectedPluginResourceNames] = useState<string[]>([]);
+  const { mcpServers, extensionMcpServers, isMcpServersLoading } = useMcpServers();
 
   const { resetPendingTagDrafts, closeDrawer, handleDrawerSave } = useMemo(
     () => createPresetTagDraftLifecycle(audiencePickerRef, scenarioPickerRef, setEditVisible, handleSave),
@@ -220,6 +233,31 @@ const PresetEditDrawer: React.FC<PresetEditDrawerProps> = ({
       resetPendingTagDrafts();
     }
   }, [editVisible, resetPendingTagDrafts]);
+
+  useEffect(() => {
+    if (!editVisible) return;
+    setSelectedMcpResourceKeys([]);
+    setSelectedPluginResourceNames([]);
+
+    let cancelled = false;
+    setPluginsLoading(true);
+    void ipcBridge.extensions.getLoadedExtensions
+      .invoke()
+      .then((items) => {
+        if (!cancelled) setInstalledPlugins(items);
+      })
+      .catch((error) => {
+        console.error('Failed to load installed plugins for preset editor:', error);
+        if (!cancelled) setInstalledPlugins([]);
+      })
+      .finally(() => {
+        if (!cancelled) setPluginsLoading(false);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [editVisible]);
 
   // Auto focus textarea when drawer opens in edit mode
   useEffect(() => {
@@ -280,12 +318,32 @@ const PresetEditDrawer: React.FC<PresetEditDrawerProps> = ({
     { value: 'cron', label: t('settings.presetTargetCron', { defaultValue: 'Scheduled task' }) },
   ];
 
-  const customSkillItems = availableSkills.filter((skill) => skill.source === 'custom');
-  const builtinSkillItems = availableSkills.filter((skill) => skill.source === 'builtin');
+  const selectedSkillNameSet = new Set(selectedSkills);
+  const availableSkillNameSet = new Set(availableSkills.map((skill) => skill.name));
+  const pendingSkillNameSet = new Set(pendingSkills.map((skill) => skill.name));
+  const builtinAutoSkillNameSet = new Set(builtinAutoSkills.map((skill) => skill.name));
+  const allCustomSkillItems = availableSkills.filter((skill) => skill.source === 'custom');
+  const customSkillItems = allCustomSkillItems;
+  const marketPackageSkillItems: LocalizableSkill[] = customSkills
+    .filter((name) => !pendingSkillNameSet.has(name) && !availableSkillNameSet.has(name))
+    .map((name) => ({
+      name,
+      description: t('settings.marketPackageSkillDescription', { defaultValue: 'From preset market package' }),
+    }));
+  const builtinSkillItems = availableSkills.filter(
+    (skill) => skill.source === 'builtin' && !builtinAutoSkillNameSet.has(skill.name)
+  );
   const extensionSkillItems = availableSkills.filter((skill) => skill.source === 'extension');
+  const builtinAutoSkillItems = Array.from(
+    new Map(builtinAutoSkills.map((skill) => [skill.name, skill])).values()
+  );
+  const customCandidateNames = new Set([
+    ...pendingSkills.map((skill) => skill.name),
+    ...allCustomSkillItems.map((skill) => skill.name),
+    ...marketPackageSkillItems.map((skill) => skill.name),
+  ]);
   const customActiveCount = selectedSkills.filter(
-    (name) =>
-      pendingSkills.some((skill) => skill.name === name) || customSkillItems.some((skill) => skill.name === name)
+    (name) => customCandidateNames.has(name)
   ).length;
   const builtinActiveCount = selectedSkills.filter((name) =>
     builtinSkillItems.some((skill) => skill.name === name)
@@ -293,24 +351,30 @@ const PresetEditDrawer: React.FC<PresetEditDrawerProps> = ({
   const extensionActiveCount = selectedSkills.filter((name) =>
     extensionSkillItems.some((skill) => skill.name === name)
   ).length;
-  const autoInjectedActiveCount = builtinAutoSkills.filter(
+  const autoInjectedActiveCount = builtinAutoSkillItems.filter(
     (skill) => !disabledBuiltinSkills.includes(skill.name)
   ).length;
   const customStatusDotColor = customActiveCount > 0 ? 'rgb(var(--success-6))' : 'var(--color-text-4)';
   const builtinStatusDotColor = builtinActiveCount > 0 ? 'rgb(var(--success-6))' : 'var(--color-text-4)';
   const extensionStatusDotColor = extensionActiveCount > 0 ? 'rgb(var(--success-6))' : 'var(--color-text-4)';
   const autoInjectedStatusDotColor = autoInjectedActiveCount > 0 ? 'rgb(var(--success-6))' : 'var(--color-text-4)';
+  const customSkillSourceCount = pendingSkills.length + allCustomSkillItems.length + marketPackageSkillItems.length;
+  const visibleCustomSkillCount = pendingSkills.length + customSkillItems.length + marketPackageSkillItems.length;
   const totalSkillsCount =
     pendingSkills.length +
-    customSkillItems.length +
+    allCustomSkillItems.length +
+    marketPackageSkillItems.length +
     builtinSkillItems.length +
     extensionSkillItems.length +
-    builtinAutoSkills.length;
+    builtinAutoSkillItems.length;
   const totalActiveSkillsCount =
     selectedSkills.filter(
       (name) =>
-        pendingSkills.some((skill) => skill.name === name) || availableSkills.some((skill) => skill.name === name)
-    ).length + autoInjectedActiveCount;
+        !builtinAutoSkillNameSet.has(name) &&
+        (pendingSkills.some((skill) => skill.name === name) || availableSkills.some((skill) => skill.name === name))
+    ).length +
+    marketPackageSkillItems.filter((skill) => selectedSkills.includes(skill.name)).length +
+    builtinAutoSkillItems.filter((skill) => !disabledBuiltinSkills.includes(skill.name)).length;
   const isBuiltin = activePreset?.source === 'builtin';
   const isRuleEditable = !readOnly;
   const isSkillsEditable = !readOnly;
@@ -319,6 +383,105 @@ const PresetEditDrawer: React.FC<PresetEditDrawerProps> = ({
     : isRuleEditable && promptViewMode === 'edit'
       ? '260px'
       : '220px';
+  const installedMcpItems = useMemo(
+    () => [
+      ...mcpServers.map((server) => ({
+        key: String(server.mcp_server_id),
+        name: server.name,
+        description: server.description,
+      })),
+      ...extensionMcpServers.map((server) => ({
+        key: String(server.source_key),
+        name: server.name,
+        description: server.description,
+      })),
+    ],
+    [extensionMcpServers, mcpServers]
+  );
+  const installedPluginItems = useMemo<ResourcePreviewItem[]>(
+    () =>
+      installedPlugins.map((plugin) => ({
+        key: plugin.name,
+        name: plugin.display_name || plugin.name,
+        description: plugin.description,
+      })),
+    [installedPlugins]
+  );
+
+  useEffect(() => {
+    if (!editVisible) return;
+    const installedMcpKeys = new Set(installedMcpItems.map((item) => item.key));
+    setSelectedMcpResourceKeys((selectedKeys) => {
+      const resourceSelectionKeys = Array.isArray(selectedKeys) ? selectedKeys : [];
+      return resourceSelectionKeys.filter((key) => installedMcpKeys.has(key));
+    });
+  }, [editVisible, installedMcpItems]);
+
+  useEffect(() => {
+    if (!editVisible) return;
+    const installedPluginNames = new Set(installedPluginItems.map((item) => item.key));
+    setSelectedPluginResourceNames((selectedNames) => {
+      const resourceSelectionNames = Array.isArray(selectedNames) ? selectedNames : [];
+      return resourceSelectionNames.filter((name) => installedPluginNames.has(name));
+    });
+  }, [editVisible, installedPluginItems]);
+
+  const hasInstalledMcpServers = installedMcpItems.length > 0;
+  const hasInstalledPlugins = installedPluginItems.length > 0;
+  const handleAddMcp = () => navigate('/mcp?tab=market');
+  const handleAddPlugin = () => navigate('/mcp?tab=plugin-market');
+  const selectedPresetAutoBadge = (skillName: string) =>
+    selectedSkillNameSet.has(skillName) ? (
+      <span className='bg-[rgba(var(--success-6),0.08)] text-[rgb(var(--success-6))] border border-[rgba(var(--success-6),0.2)] text-10px px-4px py-1px rd-4px font-medium uppercase'>
+        {t('settings.skillsHub.sourceAuto', { defaultValue: 'Auto' })}
+      </span>
+    ) : null;
+  const toggleSelectedResource = (
+    key: string,
+    setSelectedKeys: React.Dispatch<React.SetStateAction<string[]>>
+  ) => {
+    setSelectedKeys((selectedKeys) => {
+      const resourceSelectionKeys = Array.isArray(selectedKeys) ? selectedKeys : [];
+      return resourceSelectionKeys.includes(key)
+        ? resourceSelectionKeys.filter((selectedKey) => selectedKey !== key)
+        : [...resourceSelectionKeys, key];
+    });
+  };
+  const renderResourcePreview = (
+    testId: string,
+    loading: boolean,
+    items: ResourcePreviewItem[],
+    emptyText: string,
+    selectedKeys: string[],
+    setSelectedKeys: React.Dispatch<React.SetStateAction<string[]>>
+  ) => {
+    const resourceSelectionKeys = Array.isArray(selectedKeys) ? selectedKeys : [];
+    return (
+      <div data-testid={testId} className='mt-10px'>
+        {loading ? (
+          <div className='text-12px text-t-secondary py-6px'>{t('common.loading', { defaultValue: 'Loading...' })}</div>
+        ) : items.length > 0 ? (
+          <div className='max-h-[174px] overflow-y-auto pr-1px space-y-6px'>
+            {items.map((item) => (
+              <div key={item.key} className='flex items-start gap-8px rounded-8px bg-bg-1 px-10px py-8px'>
+                <Checkbox
+                  checked={resourceSelectionKeys.includes(item.key)}
+                  onChange={() => toggleSelectedResource(item.key, setSelectedKeys)}
+                  className='preset-resource-selection-checkbox mt-2px cursor-pointer'
+                />
+                <div className='min-w-0 flex-1'>
+                  <div className='text-13px font-medium text-t-primary truncate'>{item.name}</div>
+                  {item.description && <div className='mt-2px text-12px text-t-secondary line-clamp-1'>{item.description}</div>}
+                </div>
+              </div>
+            ))}
+          </div>
+        ) : (
+          <div className='text-12px text-t-secondary py-6px'>{emptyText}</div>
+        )}
+      </div>
+    );
+  };
 
   return (
     <Drawer
@@ -843,8 +1006,8 @@ const PresetEditDrawer: React.FC<PresetEditDrawerProps> = ({
                       />
                       <span className='text-12px text-t-secondary'>
                         {customActiveCount > 0
-                          ? `${customActiveCount}/${pendingSkills.length + customSkillItems.length}`
-                          : pendingSkills.length + customSkillItems.length}
+                          ? `${customActiveCount}/${customSkillSourceCount}`
+                          : customSkillSourceCount}
                       </span>
                     </div>
                   }
@@ -871,9 +1034,11 @@ const PresetEditDrawer: React.FC<PresetEditDrawerProps> = ({
                         <div className='flex-1 min-w-0'>
                           <div className='flex items-center gap-6px'>
                             <div className='text-13px font-medium text-t-primary'>{skill.name}</div>
-                            <span className='bg-[rgba(var(--primary-6),0.08)] text-primary-6 border border-[rgba(var(--primary-6),0.2)] text-10px px-4px py-1px rd-4px font-medium uppercase'>
-                              {t('settings.pending', { defaultValue: 'Pending' })}
-                            </span>
+                            {selectedPresetAutoBadge(skill.name) || (
+                              <span className='bg-[rgba(var(--primary-6),0.08)] text-primary-6 border border-[rgba(var(--primary-6),0.2)] text-10px px-4px py-1px rd-4px font-medium uppercase'>
+                                {t('settings.pending', { defaultValue: 'Pending' })}
+                              </span>
+                            )}
                           </div>
                           {skill.description && (
                             <div className='text-12px text-t-secondary mt-2px line-clamp-2'>{skill.description}</div>
@@ -912,11 +1077,11 @@ const PresetEditDrawer: React.FC<PresetEditDrawerProps> = ({
                         <LocalizedSkillContent
                           skill={skill}
                           localeKey={localeKey}
-                          badge={
+                          badge={selectedPresetAutoBadge(skill.name) || (
                             <span className='bg-[rgba(242,156,27,0.08)] text-[rgb(242,156,27)] border border-[rgba(242,156,27,0.2)] text-10px px-4px py-1px rd-4px font-medium uppercase'>
                               {t('settings.skillsHub.custom', { defaultValue: 'Custom' })}
                             </span>
-                          }
+                          )}
                         />
                         <button
                           className='opacity-0 group-hover:opacity-100 transition-opacity p-4px hover:bg-fill-2 rounded-4px'
@@ -930,7 +1095,45 @@ const PresetEditDrawer: React.FC<PresetEditDrawerProps> = ({
                         </button>
                       </div>
                     ))}
-                    {pendingSkills.length === 0 && customSkillItems.length === 0 && (
+                    {marketPackageSkillItems.map((skill) => (
+                      <div
+                        key={`market-package-${skill.name}`}
+                        className='flex items-start gap-8px p-8px hover:bg-fill-1 rounded-4px group'
+                      >
+                        <Checkbox
+                          checked={selectedSkills.includes(skill.name)}
+                          disabled={!isSkillsEditable}
+                          className='preset-skill-selection-checkbox mt-2px cursor-pointer'
+                          onChange={() => {
+                            if (selectedSkills.includes(skill.name)) {
+                              setSelectedSkills(selectedSkills.filter((s) => s !== skill.name));
+                            } else {
+                              setSelectedSkills([...selectedSkills, skill.name]);
+                            }
+                          }}
+                        />
+                        <LocalizedSkillContent
+                          skill={skill}
+                          localeKey={localeKey}
+                          badge={selectedPresetAutoBadge(skill.name) || (
+                            <span className='bg-[rgba(var(--cyan-6),0.08)] text-[rgb(var(--cyan-7))] border border-[rgba(var(--cyan-6),0.2)] text-10px px-4px py-1px rd-4px font-medium uppercase'>
+                              {t('settings.marketPackageSkillBadge', { defaultValue: 'Package' })}
+                            </span>
+                          )}
+                        />
+                        <button
+                          className='opacity-0 group-hover:opacity-100 transition-opacity p-4px hover:bg-fill-2 rounded-4px'
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setDeleteCustomSkillName(skill.name);
+                          }}
+                          title={t('settings.removeFromPreset', { defaultValue: 'Remove from preset' })}
+                        >
+                          <Delete size={16} fill='var(--color-text-3)' />
+                        </button>
+                      </div>
+                    ))}
+                    {visibleCustomSkillCount === 0 && (
                       <div className='text-center text-t-secondary text-12px py-16px'>
                         {t('settings.noCustomSkills', { defaultValue: 'No custom skills added' })}
                       </div>
@@ -967,6 +1170,7 @@ const PresetEditDrawer: React.FC<PresetEditDrawerProps> = ({
                         <div key={skill.name} className='flex items-start gap-8px p-8px hover:bg-fill-1 rounded-4px'>
                           <Checkbox
                             checked={selectedSkills.includes(skill.name)}
+                            disabled={!isSkillsEditable}
                             className='preset-skill-selection-checkbox mt-2px cursor-pointer'
                             onChange={() => {
                               if (selectedSkills.includes(skill.name)) {
@@ -976,7 +1180,11 @@ const PresetEditDrawer: React.FC<PresetEditDrawerProps> = ({
                               }
                             }}
                           />
-                          <LocalizedSkillContent skill={skill} localeKey={localeKey} />
+                          <LocalizedSkillContent
+                            skill={skill}
+                            localeKey={localeKey}
+                            badge={selectedPresetAutoBadge(skill.name)}
+                          />
                         </div>
                       ))}
                     </div>
@@ -1016,6 +1224,7 @@ const PresetEditDrawer: React.FC<PresetEditDrawerProps> = ({
                         <div key={skill.name} className='flex items-start gap-8px p-8px hover:bg-fill-1 rounded-4px'>
                           <Checkbox
                             checked={selectedSkills.includes(skill.name)}
+                            disabled={!isSkillsEditable}
                             className='preset-skill-selection-checkbox mt-2px cursor-pointer'
                             onChange={() => {
                               if (selectedSkills.includes(skill.name)) {
@@ -1041,7 +1250,7 @@ const PresetEditDrawer: React.FC<PresetEditDrawerProps> = ({
                 )}
 
                 {/* Auto-injected Builtin Skills */}
-                {builtinAutoSkills.length > 0 && (
+                {builtinAutoSkillItems.length > 0 && (
                   <Collapse.Item
                     header={
                       <span className='text-13px font-medium'>
@@ -1057,25 +1266,22 @@ const PresetEditDrawer: React.FC<PresetEditDrawerProps> = ({
                           aria-hidden='true'
                         />
                         <span className='text-12px text-t-secondary'>
-                          {`${autoInjectedActiveCount}/${builtinAutoSkills.length}`}
+                          {`${autoInjectedActiveCount}/${builtinAutoSkillItems.length}`}
                         </span>
                       </div>
                     }
                   >
                     <div className='space-y-4px'>
-                      {builtinAutoSkills.map((skill) => (
-                        <div key={skill.name} className='flex items-start gap-8px p-8px hover:bg-fill-1 rounded-4px'>
+                      {builtinAutoSkillItems.map((skill) => (
+                        <div
+                          key={skill.name}
+                          className='flex items-start gap-8px p-8px hover:bg-fill-1 rounded-4px'
+                          data-testid='preset-builtin-auto-skill-readonly'
+                        >
                           <Checkbox
                             checked={!disabledBuiltinSkills.includes(skill.name)}
-                            disabled={!isSkillsEditable}
+                            disabled
                             className='preset-skill-selection-checkbox mt-2px cursor-pointer'
-                            onChange={() => {
-                              if (disabledBuiltinSkills.includes(skill.name)) {
-                                setDisabledBuiltinSkills(disabledBuiltinSkills.filter((s) => s !== skill.name));
-                              } else {
-                                setDisabledBuiltinSkills([...disabledBuiltinSkills, skill.name]);
-                              }
-                            }}
                           />
                           <LocalizedSkillContent
                             skill={skill}
@@ -1092,6 +1298,70 @@ const PresetEditDrawer: React.FC<PresetEditDrawerProps> = ({
                   </Collapse.Item>
                 )}
               </Collapse>
+            </div>
+          )}
+
+          {isSkillsEditable && (
+            <div className='flex-shrink-0 mt-8px' data-testid='preset-resource-section'>
+              <div className='flex items-center justify-between mb-10px'>
+                <Typography.Text bold>{t('settings.presetResources', { defaultValue: 'MCP / Plugins' })}</Typography.Text>
+              </div>
+              <div className='grid grid-cols-1 sm:grid-cols-2 gap-10px'>
+                <div className='rounded-12px bg-fill-1 p-12px'>
+                  <div className='flex items-center justify-between gap-8px'>
+                    <div className='text-13px font-medium text-t-primary'>
+                      {t('settings.presetInstalledMcp', { defaultValue: 'Installed MCP' })}
+                    </div>
+                    {!isMcpServersLoading && !hasInstalledMcpServers && (
+                      <Button
+                        size='mini'
+                        type='outline'
+                        icon={<Plus size={12} />}
+                        className='rounded-[100px]'
+                        onClick={handleAddMcp}
+                        data-testid='btn-add-mcp-to-preset'
+                      >
+                        {t('settings.addMcp', { defaultValue: 'Add MCP' })}
+                      </Button>
+                    )}
+                  </div>
+                  {renderResourcePreview(
+                    'preset-installed-mcp-list',
+                    isMcpServersLoading,
+                    installedMcpItems,
+                    t('settings.presetNoInstalledMcp', { defaultValue: 'No installed MCP. Add one from the market.' }),
+                    selectedMcpResourceKeys,
+                    setSelectedMcpResourceKeys
+                  )}
+                </div>
+                <div className='rounded-12px bg-fill-1 p-12px'>
+                  <div className='flex items-center justify-between gap-8px'>
+                    <div className='text-13px font-medium text-t-primary'>
+                      {t('settings.presetInstalledPlugins', { defaultValue: 'Installed Plugins' })}
+                    </div>
+                    {!pluginsLoading && !hasInstalledPlugins && (
+                      <Button
+                        size='mini'
+                        type='outline'
+                        icon={<Plus size={12} />}
+                        className='rounded-[100px]'
+                        onClick={handleAddPlugin}
+                        data-testid='btn-add-plugin-to-preset'
+                      >
+                        {t('settings.addPlugin', { defaultValue: 'Add Plugin' })}
+                      </Button>
+                    )}
+                  </div>
+                  {renderResourcePreview(
+                    'preset-installed-plugin-list',
+                    pluginsLoading,
+                    installedPluginItems,
+                    t('settings.presetNoInstalledPlugins', { defaultValue: 'No installed plugins. Add one from the market.' }),
+                    selectedPluginResourceNames,
+                    setSelectedPluginResourceNames
+                  )}
+                </div>
+              </div>
             </div>
           )}
         </div>
