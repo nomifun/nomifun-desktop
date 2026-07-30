@@ -11,3 +11,8 @@ serde_json.workspace = true
 # (deserialize_with/deny_unknown_fields) — harmless, but each would print a
 # pseudo-compiler warning on every build.
 ts-rs = { workspace = true, features = ["no-serde-warnings"] }
+
+[dev-dependencies]
+# Mirrors axum's Query extractor deserializer so wire-contract tests exercise
+# exactly what the HTTP layer does with query strings.
+serde_urlencoded = "0.7"

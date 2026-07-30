@@ -966,7 +966,7 @@ pub struct AppServices {
     pub(crate) _boot_reconciliation_authority:
         Option<crate::bootstrap::BootServerLockAuthority>,
     /// Process-local barrier covering Provider lifecycle operations that span
-    /// SQLite and JSON side stores (companions/public agents).
+    /// SQLite and JSON side stores (companions).
     pub provider_lifecycle: nomifun_common::SharedProviderLifecycleBarrier,
     /// Canonical owner of every installation-scoped resource. Resolved once
     /// through `installation_identity` at boot; usernames are mutable display
@@ -1058,10 +1058,10 @@ pub struct AppServices {
     /// factory so the factory can register the companion memory tools for
     /// companion_session conversations; the router reuses this same instance.
     pub companion_service: Arc<nomifun_companion::CompanionService>,
-    /// Singleton public-companion (对外伙伴) service — the enterprise external-
-    /// service domain, entirely separate from `companion_service`. Owns its own
-    /// `public-agents/` store, roster, and day-partitioned audit.
-    pub public_agent_service: Arc<nomifun_public_agent::PublicAgentService>,
+    /// 客服独立域 CRUD service (agents / notes / bindings).
+    pub customer_service_service: Arc<nomifun_customer_service::CustomerServiceService>,
+    /// 客服无状态并发回合执行器 (channel seam target).
+    pub cs_dialogue_engine: Arc<nomifun_customer_service::CsDialogueEngine>,
     /// Singleton 创意工坊 (Creative Workshop) service — canvas/asset CRUD +
     /// on-disk canvas docs / asset binaries under `{data_dir}/workshop/`. Shared
     /// by the `/api/workshop/*` routes.
@@ -2293,15 +2293,31 @@ impl AppServices {
         .await
         .map_err(|e| anyhow::anyhow!("companion service start failed: {e}"))?;
 
-        // Public-companion (对外伙伴) domain — its own store under public-agents/.
-        // No completer / event bus / memory: it is a controlled enterprise service
-        // agent, not a growing personal companion.
-        let public_agent_service =
-            nomifun_public_agent::PublicAgentService::start_with_provider_lifecycle(
-                &data_dir,
-                Some(provider_repo.clone() as Arc<dyn nomifun_db::IProviderRepository>),
-                Some(provider_lifecycle.clone()),
-            );
+        // 客服独立域 (customer-service domain): agents/notes/bindings CRUD
+        // service + the stateless concurrent dialogue engine. The engine's
+        // LLM turns go through the generic one-shot entry whose tool table is
+        // fixed at construction to three read-only tools — no workspace mount,
+        // no runtime registry, no Conversation.
+        let customer_service_repo: Arc<dyn nomifun_db::ICustomerServiceRepository> =
+            Arc::new(nomifun_db::SqliteCustomerServiceRepository::new(
+                database.pool().clone(),
+            ));
+        let customer_service_service = Arc::new(
+            nomifun_customer_service::CustomerServiceService::new(customer_service_repo.clone()),
+        );
+        let cs_dialogue_engine = Arc::new(nomifun_customer_service::CsDialogueEngine::new(
+            customer_service_repo,
+            knowledge_service.clone(),
+            Arc::new(nomifun_customer_service::LiveTurnRunner {
+                deps: nomifun_ai_agent::OneShotDeps {
+                    provider_repo: provider_repo.clone()
+                        as Arc<dyn nomifun_db::IProviderRepository>,
+                    provider_model_repo: provider_model_repo.clone(),
+                    encryption_key,
+                    workspace: data_dir.clone(),
+                },
+            }),
+        ));
 
         // 创意工坊 (Creative Workshop) + 生成引擎 (creation): the workshop service
         // owns canvas/asset index rows + on-disk docs/binaries; the creation
@@ -2491,8 +2507,11 @@ impl AppServices {
             companion_prompt: Some(
                 companion_service.clone() as Arc<dyn nomifun_ai_agent::CompanionPromptProvider>
             ),
-            public_agent_provider: Some(
-                public_agent_service.clone() as Arc<dyn nomifun_ai_agent::PublicAgentProvider>
+            // In-session companion summon (spec §设计 B): skills + selected
+            // memories of one companion loaded read-only into work sessions
+            // whose `extra.summon` is present (factory gates authority).
+            companion_summon: Some(
+                companion_service.clone() as Arc<dyn nomifun_ai_agent::CompanionSummonProvider>
             ),
         });
 
@@ -2549,7 +2568,8 @@ impl AppServices {
             _gateway_mcp_server: gateway_mcp_server,
             _knowledge_mcp_server: knowledge_mcp_server,
             companion_service,
-            public_agent_service,
+            customer_service_service,
+            cs_dialogue_engine,
             workshop_service,
             creation_service,
             model_invoke_service,

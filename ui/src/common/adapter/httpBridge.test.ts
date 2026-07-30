@@ -53,6 +53,107 @@ function restoreWebSocketGlobal() {
 }
 
 describe('httpRequest client deadline + network-failure diagnosis', () => {
+  test('retries a CSRF-rejected mutation exactly once with the re-seeded token', async () => {
+    // WebUI browser mode: window without __backendPort + a document cookie jar.
+    installBrowserGlobals({});
+    const attempts: Array<{ csrfHeader: string | null }> = [];
+    globalThis.fetch = ((_url: string, init?: RequestInit) => {
+      const headers = new Headers(init?.headers);
+      attempts.push({ csrfHeader: headers.get('x-csrf-token') });
+      if (attempts.length === 1) {
+        // The backend re-seeds the csrf cookie on the rejecting 403 itself.
+        (globalThis as { document?: { cookie: string } }).document!.cookie = 'nomifun-csrf-token=fresh-token';
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({ success: false, error: 'Forbidden: CSRF token validation failed', code: 'FORBIDDEN' }),
+            { status: 403, headers: { 'Content-Type': 'application/json' } }
+          )
+        );
+      }
+      return Promise.resolve(
+        new Response(JSON.stringify({ success: true, data: { saved: true } }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        })
+      );
+    }) as unknown as typeof fetch;
+
+    try {
+      const result = await httpRequest<{ saved: boolean }>('POST', '/api/things', { a: 1 });
+      expect(result).toEqual({ saved: true });
+      expect(attempts.length).toBe(2);
+      // First attempt had no cookie to echo; the retry must carry the re-seeded token.
+      expect(attempts[0]?.csrfHeader).toBe(null);
+      expect(attempts[1]?.csrfHeader).toBe('fresh-token');
+    } finally {
+      globalThis.fetch = realFetch;
+      restoreBrowserGlobals();
+    }
+  });
+
+  test('a persistent CSRF rejection is thrown after the single retry, not looped', async () => {
+    installBrowserGlobals({});
+    let calls = 0;
+    globalThis.fetch = (() => {
+      calls += 1;
+      return Promise.resolve(
+        new Response(
+          JSON.stringify({ success: false, error: 'Forbidden: CSRF token validation failed', code: 'FORBIDDEN' }),
+          { status: 403, headers: { 'Content-Type': 'application/json' } }
+        )
+      );
+    }) as unknown as typeof fetch;
+
+    try {
+      let thrown: unknown;
+      try {
+        await httpRequest('POST', '/api/things', { a: 1 });
+      } catch (e) {
+        thrown = e;
+      }
+      expect(isBackendHttpError(thrown)).toBe(true);
+      expect((thrown as { status: number }).status).toBe(403);
+      expect(calls).toBe(2);
+    } finally {
+      globalThis.fetch = realFetch;
+      restoreBrowserGlobals();
+    }
+  });
+
+  test('a 2xx text/html answer to an API call throws a contract violation instead of returning undefined', async () => {
+    // The web host's SPA fallback answers unmatched /api paths with
+    // index.html; that must never parse as "successful empty data".
+    globalThis.fetch = (() =>
+      Promise.resolve(
+        new Response('<!doctype html><html><body>app shell</body></html>', {
+          status: 200,
+          headers: { 'Content-Type': 'text/html; charset=utf-8' },
+        })
+      )) as unknown as typeof fetch;
+
+    try {
+      let thrown: unknown;
+      try {
+        await httpRequest('GET', '/api/removed-endpoint');
+      } catch (e) {
+        thrown = e;
+      }
+      expect(isBackendHttpError(thrown)).toBe(true);
+      expect((thrown as { code: string }).code).toBe('NON_JSON_RESPONSE');
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+  });
+
+  test('a 2xx response without a content type still resolves as undefined (no body endpoints)', async () => {
+    globalThis.fetch = (() => Promise.resolve(new Response(null, { status: 204 }))) as unknown as typeof fetch;
+    try {
+      expect(await httpRequest('POST', '/api/fire-and-forget')).toBeUndefined();
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+  });
+
   test('forces mutable API reads past every host WebView HTTP cache', async () => {
     const requestInits: RequestInit[] = [];
     globalThis.fetch = ((_url: string, init?: RequestInit) => {

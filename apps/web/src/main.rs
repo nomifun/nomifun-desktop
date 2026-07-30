@@ -25,6 +25,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use anyhow::{Context, Result};
+use axum::response::IntoResponse;
 use clap::Parser;
 use tower_http::services::{ServeDir, ServeFile};
 use tower_http::trace::TraceLayer;
@@ -48,10 +49,10 @@ struct Args {
     port: u16,
     /// Data directory for the backend (db + storage). Defaults to the same
     /// per-user dir as hosts built for the active channel (for example,
-    /// `%LOCALAPPDATA%\NomiFun\Nomi-dev` for `NOMI_CHANNEL=dev`; see
-    /// `nomifun_app::cli::default_data_dir`). The env value is taken literally
-    /// (no `/Nomi` suffix) — production deployments (Docker `/data`, systemd
-    /// `/var/lib/nomifun`) rely on that.
+    /// `%LOCALAPPDATA%\NomiFun-dev` for `NOMI_CHANNEL=dev`; see
+    /// `nomifun_app::cli::default_data_dir`). The env value is the FINAL data
+    /// root, taken literally on every host — production deployments (Docker
+    /// `/data`, systemd `/var/lib/nomifun`) rely on that.
     #[arg(
         long,
         env = "NOMIFUN_DATA_DIR",
@@ -96,6 +97,86 @@ fn env_flag(name: &str) -> bool {
             )
         })
         .unwrap_or(false)
+}
+
+/// True for request paths owned by the backend API/realtime surface.
+///
+/// An unmatched path under these prefixes must fail with a JSON 404, never
+/// fall through to the SPA's index.html: a 200 text/html response to an API
+/// client (stale tab after an image upgrade, typo'd endpoint) parses as
+/// `undefined` data and surfaces as silent empty views instead of a legible
+/// error (audit 2026-07-30, finding G).
+fn is_api_path(path: &str) -> bool {
+    path == "/api" || path.starts_with("/api/") || path == "/ws" || path.starts_with("/ws/")
+}
+
+/// True for Vite's content-hashed bundle output (`/assets/index-abc123.js`).
+/// These are immutable by construction: a content change produces a new hash,
+/// so they can be cached forever — and a MISS means the client's index.html
+/// is from an older build, which must fail fast (404) instead of receiving
+/// index.html through the SPA fallback (audit 2026-07-30, finding H).
+fn is_hashed_asset_path(path: &str) -> bool {
+    path.starts_with("/assets/")
+}
+
+/// SPA fallback service with the cache contract each class of file needs:
+///
+/// - unmatched `/api`/`/ws` paths → the backend's structured JSON 404;
+/// - `/assets/*` (content-hashed) → served with `immutable` year-long
+///   caching, and a plain 404 on miss so a stale browser reloads instead of
+///   white-screening on a failed dynamic import;
+/// - everything else (index.html, favicons, client routes) → served with
+///   `no-cache`, forcing revalidation so browsers pick up each new build
+///   promptly (tower-http emits ETag/Last-Modified, so revalidation is a
+///   cheap 304, not a re-download).
+fn spa_with_api_404(dist: &std::path::Path) -> axum::routing::MethodRouter {
+    use tower::ServiceExt as _;
+
+    const IMMUTABLE: axum::http::HeaderValue =
+        axum::http::HeaderValue::from_static("public, max-age=31536000, immutable");
+    const NO_CACHE: axum::http::HeaderValue = axum::http::HeaderValue::from_static("no-cache");
+
+    // Hashed assets: no index.html fallback — a miss is an honest 404.
+    let assets = ServeDir::new(dist);
+    let spa = ServeDir::new(dist)
+        .append_index_html_on_directories(true)
+        .fallback(ServeFile::new(dist.join("index.html")));
+
+    axum::routing::any(move |request: axum::extract::Request| {
+        let assets = assets.clone();
+        let spa = spa.clone();
+        async move {
+            let path = request.uri().path();
+            if is_api_path(path) {
+                return nomifun_common::AppError::NotFound(format!("no API route matches {path}"))
+                    .into_response();
+            }
+            if is_hashed_asset_path(path) {
+                let mut response = match assets.oneshot(request).await {
+                    Ok(response) => response.into_response(),
+                    Err(_) => return axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+                };
+                if response.status().is_success() {
+                    response
+                        .headers_mut()
+                        .insert(axum::http::header::CACHE_CONTROL, IMMUTABLE);
+                }
+                return response;
+            }
+            match spa.oneshot(request).await {
+                Ok(response) => {
+                    let mut response = response.into_response();
+                    response
+                        .headers_mut()
+                        .insert(axum::http::header::CACHE_CONTROL, NO_CACHE);
+                    response
+                }
+                // ServeDir's error type is Infallible; this arm is unreachable
+                // but keeps the signature honest if tower-http ever changes it.
+                Err(_) => axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+            }
+        }
+    })
 }
 
 fn validate_static_dist(args: &Args) -> Result<Option<nomifun_app::bootstrap::UiBuildManifest>> {
@@ -149,7 +230,12 @@ fn main() -> Result<ExitCode> {
     let mut cli = nomifun_app::cli::Cli::parse_from(["nomifun-web"]);
     cli.host = args.host.clone();
     cli.port = args.port;
-    cli.data_dir = args.data_dir.clone();
+    // Map known self-export/default locations onto the channel default and
+    // run the one-shot legacy layout migration (`NomiFun/Nomi<suffix>` →
+    // `NomiFun<suffix>`); explicit deployments (Docker `/data`, systemd
+    // `/var/lib/nomifun`) pass through verbatim.
+    cli.data_dir =
+        nomifun_app::bootstrap::resolve_startup_data_root(args.data_dir.clone());
     cli.local = insecure_no_auth;
 
     // Same ordering as the nomicore bin: runtime init + PATH enhancement BEFORE
@@ -179,6 +265,15 @@ async fn serve(cli: nomifun_app::cli::Cli, merged_path: String, args: Args) -> R
             "binding a non-loopback address with --insecure-no-auth: authentication is DISABLED — \
              anyone who can reach this port gets full host access (shell, files, agents). \
              Put a trusted gateway in front, use a private network, or drop --insecure-no-auth."
+        );
+    }
+    if env_flag("NOMIFUN_HTTPS") {
+        tracing::warn!(
+            "NOMIFUN_HTTPS=true: session/CSRF cookies carry the Secure flag, so any plain-HTTP access \
+             path (e.g. http://<ip>:{}) CANNOT keep a session — browsers silently drop Secure cookies \
+             and sign-in loops forever. Serve exclusively through the TLS proxy and stop publishing \
+             the plain-HTTP port (compose: replace `ports` with `expose`).",
+            args.port
         );
     }
 
@@ -224,11 +319,7 @@ async fn serve(cli: nomifun_app::cli::Cli, merged_path: String, args: Args) -> R
 
     let mut app = nomifun_app::create_router(&services).await;
     if !args.api_only {
-        app = app.fallback_service(
-            ServeDir::new(&args.dist)
-                .append_index_html_on_directories(true)
-                .fallback(ServeFile::new(args.dist.join("index.html"))),
-        );
+        app = app.fallback_service(spa_with_api_404(&args.dist));
     }
     let app = app.layer(TraceLayer::new_for_http());
 
@@ -257,7 +348,16 @@ async fn serve(cli: nomifun_app::cli::Cli, merged_path: String, args: Args) -> R
         );
     }
     nomifun_app::bootstrap::announce_bound_port(&cli.data_dir, &args.host, actual_port);
-    if let Err(error) = axum::serve(listener, app).await {
+    // ConnectInfo gives the rate limiter each client's real peer address. Without
+    // it every browser in the deployment collapses into one shared "unknown"
+    // bucket: a single user's login failures 429-lock everyone out, and aggregate
+    // traffic trips the shared per-minute API quota (audit 2026-07-30, finding A).
+    if let Err(error) = axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .await
+    {
         return Err(services.cleanup_after_startup_failure(error.into()).await);
     }
 
@@ -271,6 +371,111 @@ async fn serve(cli: nomifun_app::cli::Cli, merged_path: String, args: Args) -> R
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn api_paths_are_classified_for_json_404() {
+        assert!(is_api_path("/api"));
+        assert!(is_api_path("/api/fs/browse"));
+        assert!(is_api_path("/ws"));
+        assert!(is_api_path("/ws/anything"));
+        assert!(!is_api_path("/"));
+        assert!(!is_api_path("/login"));
+        assert!(!is_api_path("/apiary")); // prefix must respect segment boundary
+        assert!(!is_api_path("/assets/index-abc123.js"));
+    }
+
+    #[tokio::test]
+    async fn unmatched_api_path_gets_json_404_not_index_html() {
+        use tower::ServiceExt;
+
+        // dist dir intentionally does not exist: the API branch must
+        // short-circuit before any filesystem access.
+        let service = spa_with_api_404(std::path::Path::new("/definitely/missing/dist"));
+        let app = axum::Router::new().fallback_service(service);
+
+        let response = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/api/does-not-exist")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), axum::http::StatusCode::NOT_FOUND);
+        let content_type = response
+            .headers()
+            .get(axum::http::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or_default()
+            .to_owned();
+        assert!(content_type.contains("application/json"), "got {content_type}");
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(json["success"], false);
+        assert_eq!(json["code"], "NOT_FOUND");
+    }
+
+    /// A dist dir with an index.html and one content-hashed bundle chunk.
+    fn fake_dist() -> tempfile::TempDir {
+        let dist = tempfile::tempdir().expect("temp dist");
+        std::fs::write(dist.path().join("index.html"), "<!doctype html><title>app</title>").unwrap();
+        std::fs::create_dir(dist.path().join("assets")).unwrap();
+        std::fs::write(dist.path().join("assets/index-abc123.js"), "console.log('chunk')").unwrap();
+        dist
+    }
+
+    async fn get_static(dist: &std::path::Path, uri: &str) -> axum::response::Response {
+        use tower::ServiceExt;
+        axum::Router::new()
+            .fallback_service(spa_with_api_404(dist))
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri(uri)
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+    }
+
+    fn cache_control(response: &axum::response::Response) -> String {
+        response
+            .headers()
+            .get(axum::http::header::CACHE_CONTROL)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or_default()
+            .to_owned()
+    }
+
+    #[tokio::test]
+    async fn hashed_assets_are_immutable_cached() {
+        let dist = fake_dist();
+        let response = get_static(dist.path(), "/assets/index-abc123.js").await;
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        assert_eq!(cache_control(&response), "public, max-age=31536000, immutable");
+    }
+
+    #[tokio::test]
+    async fn missing_hashed_asset_is_a_plain_404_not_index_html() {
+        // A stale index.html requesting a chunk from an older build must get
+        // a fast 404 (→ the app reloads), not index.html as a JS module
+        // (→ white screen with a MIME-type import error).
+        let dist = fake_dist();
+        let response = get_static(dist.path(), "/assets/index-gone999.js").await;
+        assert_eq!(response.status(), axum::http::StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn index_html_and_client_routes_revalidate_every_load() {
+        let dist = fake_dist();
+        for uri in ["/", "/conversations/some-client-route"] {
+            let response = get_static(dist.path(), uri).await;
+            assert_eq!(response.status(), axum::http::StatusCode::OK, "uri {uri}");
+            assert_eq!(cache_control(&response), "no-cache", "uri {uri}");
+        }
+    }
 
     #[test]
     fn api_only_flag_disables_static_spa_mode() {

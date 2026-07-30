@@ -37,10 +37,18 @@ pub use models::{
     UpdatePresetTagParams, UpsertPresetStateParams,
 };
 pub use models::{
+    CsAgentRow, CsAuditEventRow, CsChannelBindingRow, CsDialogueRow, CsMessageRow, CsNoteRow,
+    NewCsAgentRow,
+};
+pub use models::{
     NewProviderModel, ProviderConnectionRow, ProviderModelRow, ProviderModelUpdate,
     UpsertProviderConnectionParams,
 };
 pub use repository::channel::UpdatePluginStatusParams;
+pub use repository::customer_service::{
+    CsDialogueKey, ICustomerServiceRepository, UpdateCsAgentParams,
+};
+pub use repository::SqliteCustomerServiceRepository;
 pub use repository::conversation::{
     ConversationDeliveryReceiptClaim, ConversationFilters, ConversationMessageProjection,
     ConversationTurnAdmissionState,
@@ -74,7 +82,8 @@ pub use repository::{
     RetryAgentExecutionStep, SettleAgentExecutionAttemptParams, UpdateAgentExecutionParams,
     CreateAcpSessionParams, CreateTerminalParams, IAcpSessionRepository,
     IAgentMetadataRepository, IAttachmentRepository, ChannelInboundClaim,
-    IChannelRepository, SettleChannelInboundReceiptParams,
+    IChannelRepository, PENDING_PROMPT_EXPIRY_MS, PENDING_PROMPT_QUEUE_LIMIT,
+    PendingPromptEnqueue, SettleChannelInboundReceiptParams,
     IClientPreferenceRepository, ICompanionTokenRepository, IConnectorCredentialRepository,
     IConversationRepository, ICronRepository, IIdmmInterventionRepository,
     IdmmActionReservationKey, IdmmActionReserveResult, IdmmActionSettleResult,

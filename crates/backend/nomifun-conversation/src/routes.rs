@@ -2,7 +2,7 @@ use axum::Router;
 use axum::extract::rejection::JsonRejection;
 use axum::extract::{Extension, Json, Path, Query, State};
 use axum::http::{HeaderMap, StatusCode};
-use axum::routing::{get, patch, post};
+use axum::routing::{get, patch, post, put};
 
 use nomifun_api_types::{
     ActiveCountResponse, ApiResponse, ApprovalCheckQuery, ApprovalCheckResponse, CloneConversationRequest,
@@ -14,6 +14,7 @@ use nomifun_api_types::{
 use nomifun_auth::CurrentUser;
 use nomifun_common::{AppError, ConversationId, MessageId};
 
+use crate::service::summon::SetSummonRequest;
 use crate::service::{
     IdempotentMessageDelivery, strip_clone_instance_state, validate_public_idempotency_key,
 };
@@ -56,6 +57,10 @@ pub fn conversation_routes(state: ConversationRouterState) -> Router {
             patch(update_artifact),
         )
         .route("/api/conversations/{conversation_id}/cancel", post(cancel))
+        .route(
+            "/api/conversations/{conversation_id}/summon",
+            put(set_summon).delete(clear_summon),
+        )
         .route("/api/conversations/{conversation_id}/steer", post(steer))
         .route("/api/conversations/{conversation_id}/warmup", post(warmup))
         // Confirmation system
@@ -104,8 +109,6 @@ fn strip_server_owned_runtime_fields(extra: &mut serde_json::Value) {
             "companion",
             "companion_id",
             "channel_platform",
-            "public_agent_id",
-            "exposure",
             "cron_job_id",
             "mcp_server_ids",
             "mcp_servers",
@@ -113,6 +116,10 @@ fn strip_server_owned_runtime_fields(extra: &mut serde_json::Value) {
             "session_mcp_servers",
             "skills",
             "temp_workspace_id",
+            // Summon is written only through PUT /summon (idle-validated,
+            // server-stamped) or trusted backend creators; open JSON cannot
+            // smuggle or clone it.
+            "summon",
         ] {
             map.remove(key);
         }
@@ -219,6 +226,32 @@ async fn reset(
     Path(conversation_id): Path<ConversationId>,
 ) -> Result<Json<ApiResponse<()>>, AppError> {
     state.service.reset(&user.id, conversation_id.as_str()).await?;
+    Ok(Json(ApiResponse::success()))
+}
+
+async fn set_summon(
+    State(state): State<ConversationRouterState>,
+    Extension(user): Extension<CurrentUser>,
+    Path(conversation_id): Path<ConversationId>,
+    body: Result<Json<SetSummonRequest>, JsonRejection>,
+) -> Result<Json<ApiResponse<nomifun_api_types::SummonConfig>>, AppError> {
+    let Json(req) = body.map_err(|e| AppError::BadRequest(e.to_string()))?;
+    let config = state
+        .service
+        .set_summon(&user.id, conversation_id.as_str(), req)
+        .await?;
+    Ok(Json(ApiResponse::ok(config)))
+}
+
+async fn clear_summon(
+    State(state): State<ConversationRouterState>,
+    Extension(user): Extension<CurrentUser>,
+    Path(conversation_id): Path<ConversationId>,
+) -> Result<Json<ApiResponse<()>>, AppError> {
+    state
+        .service
+        .clear_summon(&user.id, conversation_id.as_str())
+        .await?;
     Ok(Json(ApiResponse::success()))
 }
 
@@ -377,6 +410,8 @@ fn send_message_response(delivery: IdempotentMessageDelivery) -> SendMessageResp
         result_ok: delivery.result_ok,
         result_text: delivery.result_text,
         result_error: delivery.result_error,
+        result_error_code: delivery.result_error_code,
+        result_error_retryable: delivery.result_error_retryable,
     }
 }
 
@@ -687,6 +722,8 @@ mod tests {
             result_ok: Some(false),
             result_text: Some("terminal output".to_owned()),
             result_error: Some("provider failed".to_owned()),
+            result_error_code: Some("user_llm_provider_gateway_error".to_owned()),
+            result_error_retryable: Some(true),
         });
 
         assert_eq!(
@@ -698,7 +735,30 @@ mod tests {
                 "result_ok": false,
                 "result_text": "terminal output",
                 "result_error": "provider failed",
+                "result_error_code": "user_llm_provider_gateway_error",
+                "result_error_retryable": true,
             })
+        );
+    }
+
+    #[test]
+    fn public_delivery_response_omits_absent_structured_error_fields() {
+        let response = send_message_response(IdempotentMessageDelivery {
+            message_id: "0190f5fe-7c00-7a00-8000-000000000502".to_owned(),
+            replayed: false,
+            completed: false,
+            result_ok: None,
+            result_text: None,
+            result_error: None,
+            result_error_code: None,
+            result_error_retryable: None,
+        });
+
+        let value = serde_json::to_value(response).unwrap();
+        assert!(
+            value.get("result_error_code").is_none()
+                && value.get("result_error_retryable").is_none(),
+            "absent structured error fields must not appear on the wire: {value}"
         );
     }
 
@@ -743,12 +803,17 @@ mod tests {
             "desktopGateway": true,
             "desktop_gateway": true,
             "companion_session": true,
+            "summon": { "companion_id": "0190f5fe-7c00-7a00-8abc-000000000001", "summoned_at": 1 },
             "backend": "claude",
         });
         strip_server_owned_runtime_fields(&mut extra);
         assert!(extra.get("desktopGateway").is_none());
         assert!(extra.get("desktop_gateway").is_none());
         assert!(extra.get("companion_session").is_none());
+        assert!(
+            extra.get("summon").is_none(),
+            "summon is only written through its idle-validated endpoint"
+        );
         // Non-authority agent configuration survives.
         assert_eq!(extra["backend"], json!("claude"));
     }

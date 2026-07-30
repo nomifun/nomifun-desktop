@@ -233,7 +233,9 @@ async fn enable_plugin(deps: Arc<GatewayDeps>, p: EnablePluginParams) -> Value {
         plugin_id: p.plugin_id.map(ChannelPluginId::into_string),
         plugin_type: p.plugin_type.clone(),
         companion_id: p.companion_id.map(CompanionId::into_string),
-        public_agent_id: None,
+        // The gateway capability surface manages companion-domain bots only;
+        // customer-service bots are created via the customer-service UI.
+        owner_domain: None,
     };
 
     match deps

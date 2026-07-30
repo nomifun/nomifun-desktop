@@ -78,6 +78,10 @@ pub struct TurnReceiptCompletion {
     pub result_ok: bool,
     pub result_text: Option<String>,
     pub result_error: Option<String>,
+    /// Stable snake_case terminal error token (spec D4); `None` on success.
+    pub result_error_code: Option<String>,
+    /// Whether the terminal failure is safe to retry automatically.
+    pub result_error_retryable: Option<bool>,
 }
 
 /// Atomic result of claiming an at-most-once delivery operation.
@@ -646,9 +650,63 @@ pub trait IConversationRepository: Send + Sync {
         _result_ok: bool,
         _result_text: Option<&str>,
         _result_error: Option<&str>,
+        _result_error_code: Option<&str>,
+        _result_error_retryable: Option<bool>,
         _completed_at: i64,
     ) -> Result<bool, DbError> {
         Ok(false)
+    }
+
+    /// The most recent completed `turn` receipt for one Conversation, or
+    /// `None` when no turn has ever reached a terminal state. Read-only
+    /// diagnostics used by the gateway status surface.
+    async fn latest_completed_turn_receipt(
+        &self,
+        _user_id: &str,
+        _conversation_id: &str,
+    ) -> Result<Option<ConversationDeliveryReceiptRow>, DbError> {
+        Ok(None)
+    }
+
+    // ── Delivery-notify registrations (spec D2) ─────────────────────
+    //
+    // Independent小表 keyed by the target turn's receipt `operation_id`; the
+    // receipt table itself never gains columns for this feature.
+
+    /// Register (idempotently) that `requester_conversation_id` wants a
+    /// completion receipt for the target turn `operation_id`. Re-registering
+    /// the same pair is a no-op; reusing the operation for a different
+    /// requester is a conflict.
+    async fn register_notify(
+        &self,
+        _operation_id: &str,
+        _requester_conversation_id: &str,
+        _now: i64,
+    ) -> Result<(), DbError> {
+        Err(DbError::Init(
+            "delivery-notify registrations are not supported by this repository".to_owned(),
+        ))
+    }
+
+    /// Atomically claim the pending registration for `operation_id`
+    /// (`pending` → `notified`), returning it. `None` when no registration
+    /// exists or it was already taken — the caller must then deliver nothing.
+    async fn take_pending_notify(
+        &self,
+        _operation_id: &str,
+        _now: i64,
+    ) -> Result<Option<crate::models::ConversationDeliveryNotifyRow>, DbError> {
+        Err(DbError::Init(
+            "delivery-notify registrations are not supported by this repository".to_owned(),
+        ))
+    }
+
+    /// Record that a taken registration's receipt delivery failed
+    /// (`notified` → `failed`); diagnostics only, never retried.
+    async fn mark_notify_failed(&self, _operation_id: &str, _now: i64) -> Result<(), DbError> {
+        Err(DbError::Init(
+            "delivery-notify registrations are not supported by this repository".to_owned(),
+        ))
     }
 
     /// Atomically inserts one trusted assistant message and completes its

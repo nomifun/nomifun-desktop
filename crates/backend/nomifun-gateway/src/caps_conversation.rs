@@ -61,6 +61,28 @@ struct SendToConversationParams {
     /// background task prompts, like AutoWork does).
     #[serde(default)]
     hidden: Option<bool>,
+    /// When true (default false), you will automatically receive a completion
+    /// receipt message in YOUR conversation once the target finishes this
+    /// task — use it for fire-and-forget delegation instead of polling
+    /// nomi_conversation_status.
+    #[serde(default)]
+    notify_back: Option<bool>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct CreateSummonParams {
+    /// The companion to summon — normally your own id (from nomi_whoami).
+    #[schemars(schema_with = "crate::id_schema::canonical_uuid_v7_schema")]
+    companion_id: CompanionId,
+    /// Hand-picked memory ids to load read-only (pre-select with
+    /// recall_memories; the owner can trim them later in the summon panel).
+    #[serde(default)]
+    memory_ids: Vec<String>,
+    /// Active skills to EXCLUDE from materialization (default: none — the
+    /// full active skill set loads).
+    #[serde(default)]
+    skill_exclusions: Vec<String>,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -89,6 +111,17 @@ struct CreateConversationParams {
     #[serde(default)]
     #[schemars(schema_with = "crate::id_schema::optional_canonical_uuid_v7_schema")]
     remote_agent_id: Option<RemoteAgentId>,
+    /// Absolute project path the user gave you. Sets the conversation's
+    /// workspace ("project session", grouped under that workpath in the
+    /// sidebar). Omit for an auto-provisioned workspace. Not valid for
+    /// agent_type "remote".
+    #[serde(default)]
+    workpath: Option<String>,
+    /// Summon a companion into the new work session (spec 召唤伙伴): loads its
+    /// skills plus the selected memories read-only. Only valid for agent_type
+    /// "nomi". The server stamps summoned_at.
+    #[serde(default)]
+    summon: Option<CreateSummonParams>,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -113,6 +146,15 @@ struct UpdateConversationParams {
 struct DeleteConversationParams {
     /// The id of the conversation to delete. Confirm the target with the user
     /// before calling — deletion also kills its agent and cron bindings.
+    #[schemars(schema_with = "crate::id_schema::canonical_uuid_v7_schema")]
+    conversation_id: ConversationId,
+}
+
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct StopConversationParams {
+    /// The id of the conversation whose current turn should be stopped
+    /// (from nomi_list_conversations / nomi_conversation_status).
     #[schemars(schema_with = "crate::id_schema::canonical_uuid_v7_schema")]
     conversation_id: ConversationId,
 }
@@ -225,6 +267,25 @@ async fn list(deps: Arc<GatewayDeps>, ctx: CallerCtx, p: ListConversationsParams
     ok(json!({ "total": resp.total, "conversations": items }))
 }
 
+/// Restart-isolation ("stuck") assessment for one conversation (spec D3).
+///
+/// A conversation is stuck when its durable status is still `running` but no
+/// live runtime exists in this process: after a backend restart the running
+/// authority is fail-closed quarantined and nothing will finish it without an
+/// explicit stop. Returns the flag plus the remote-facing unlock hint.
+fn stuck_assessment(
+    is_persisted_running: bool,
+    has_runtime: bool,
+) -> (bool, Option<&'static str>) {
+    let stuck = is_persisted_running && !has_runtime;
+    (
+        stuck,
+        stuck.then_some(
+            "该会话因后端重启被保护性挂起，可用 nomi_stop_conversation 解除后重试",
+        ),
+    )
+}
+
 async fn status(deps: Arc<GatewayDeps>, ctx: CallerCtx, p: ConversationStatusParams) -> Value {
     let user_id = match require_user(&ctx) {
         Ok(u) => u,
@@ -236,6 +297,18 @@ async fn status(deps: Arc<GatewayDeps>, ctx: CallerCtx, p: ConversationStatusPar
         Err(e) => return error_value(e),
     };
     let runtime = deps.conversation_service.runtime_summary_for(id).await;
+    let (stuck, stuck_hint) = stuck_assessment(
+        conv.status == nomifun_common::ConversationStatus::Running,
+        runtime.has_runtime,
+    );
+    let last_receipt = match deps
+        .conversation_service
+        .latest_completed_turn_receipt(user_id, id)
+        .await
+    {
+        Ok(receipt) => receipt,
+        Err(e) => return error_value(e),
+    };
     let message_limit = p.message_limit.unwrap_or(DEFAULT_MESSAGE_LIMIT).clamp(1, 50);
     let messages = match deps
         .conversation_service
@@ -265,6 +338,11 @@ async fn status(deps: Arc<GatewayDeps>, ctx: CallerCtx, p: ConversationStatusPar
         "agent_type": conv.r#type,
         "status": conv.status,
         "runtime": runtime,
+        "stuck": stuck,
+        "stuck_hint": stuck_hint,
+        "last_result_error_code": last_receipt
+            .as_ref()
+            .and_then(|receipt| receipt.result_error_code.clone()),
         "recent_messages": messages_json,
     }))
 }
@@ -283,6 +361,40 @@ async fn send(deps: Arc<GatewayDeps>, ctx: CallerCtx, p: SendToConversationParam
             "error": "missing_idempotency_key: conversation send requires an authenticated operation identity"
         });
     };
+    // Spec D2: register the completion receipt BEFORE the send — a fast
+    // target turn may otherwise complete before the registration lands and
+    // the observer would find nothing to take. An orphaned registration from
+    // a failed send is inert (nothing ever completes that operation).
+    let mut notify_note: Option<&'static str> = None;
+    if p.notify_back.unwrap_or(false) {
+        match ctx.conversation_id.as_ref() {
+            None => {
+                notify_note =
+                    Some("notify_back ignored: the caller has no conversation to notify");
+            }
+            Some(requester) => {
+                match deps
+                    .conversation_service
+                    .register_delivery_notify(&user_id, &id, operation_id, requester.as_str())
+                    .await
+                {
+                    Ok(nomifun_conversation::DeliveryNotifyRegistration::Registered) => {
+                        notify_note = Some(
+                            "notify_back registered: you will receive a receipt message when the target finishes",
+                        );
+                    }
+                    Ok(
+                        nomifun_conversation::DeliveryNotifyRegistration::RefusedDeliveryNotifyOrigin,
+                    ) => {
+                        notify_note = Some(
+                            "notify_back ignored: a delivery-notify receipt turn cannot register further receipts (loop guard)",
+                        );
+                    }
+                    Err(e) => return error_value(e),
+                }
+            }
+        }
+    }
     let req = SendMessageRequest {
         content: p.content,
         files: vec![],
@@ -309,6 +421,7 @@ async fn send(deps: Arc<GatewayDeps>, ctx: CallerCtx, p: SendToConversationParam
             "result_ok": delivery.result_ok,
             "result_text": delivery.result_text,
             "result_error": delivery.result_error,
+            "notify_back": notify_note,
             "note": "message accepted; the target session processes it asynchronously — use nomi_conversation_status to follow progress"
         })),
         Err(AppError::Conflict(m)) => json!({
@@ -318,11 +431,46 @@ async fn send(deps: Arc<GatewayDeps>, ctx: CallerCtx, p: SendToConversationParam
     }
 }
 
+/// Normalize the `workpath` create param (spec §B6 反向召唤入口 1).
+fn normalized_workpath(raw: &str) -> Result<String, String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err("workpath must be a non-empty project path".into());
+    }
+    Ok(trimmed.to_owned())
+}
+
+/// Compose the server-stamped `extra.summon` value from the create param
+/// (spec §B6 反向召唤入口 2). Memory ids are validated + deduped; the caller
+/// never controls `summoned_at`.
+fn summon_extra_value(summon: &CreateSummonParams, summoned_at: i64) -> Result<Value, String> {
+    let mut memory_ids: Vec<String> = Vec::with_capacity(summon.memory_ids.len());
+    for id in &summon.memory_ids {
+        nomifun_common::CompanionMemoryId::parse(id.as_str())
+            .map_err(|error| format!("invalid summon memory id '{id}': {error}"))?;
+        if !memory_ids.contains(id) {
+            memory_ids.push(id.clone());
+        }
+    }
+    let mut skill_exclusions: Vec<String> = Vec::with_capacity(summon.skill_exclusions.len());
+    for name in &summon.skill_exclusions {
+        let name = name.trim().to_owned();
+        if !name.is_empty() && !skill_exclusions.contains(&name) {
+            skill_exclusions.push(name);
+        }
+    }
+    Ok(json!({
+        "companion_id": summon.companion_id,
+        "memory_ids": memory_ids,
+        "skill_exclusions": skill_exclusions,
+        "summoned_at": summoned_at,
+    }))
+}
+
 async fn create(deps: Arc<GatewayDeps>, ctx: CallerCtx, p: CreateConversationParams) -> Value {
     if let Err(error) = require_companion_creator(&ctx) {
         return error;
-    }
-    let user_id = match require_user(&ctx) {
+    }    let user_id = match require_user(&ctx) {
         Ok(u) => u.to_owned(),
         Err(e) => return e,
     };
@@ -364,6 +512,32 @@ async fn create(deps: Arc<GatewayDeps>, ctx: CallerCtx, p: CreateConversationPar
     }
     if let Some(backend) = p.backend {
         extra["backend"] = json!(backend);
+    }
+    // Project session (spec §B6): a user-given path becomes the workspace —
+    // the sidebar groups it under that workpath drawer; `custom_workspace` is
+    // derived client-side from a non-empty non-temporary workspace.
+    if let Some(workpath) = p.workpath.as_deref() {
+        if agent_type == AgentType::Remote {
+            return json!({ "error": "workpath is not valid for remote conversations" });
+        }
+        match normalized_workpath(workpath) {
+            Ok(path) => extra["workspace"] = json!(path),
+            Err(e) => return json!({ "error": e }),
+        }
+    }
+    // Reverse summon (spec §B6): create the work session already carrying the
+    // companion's capability pack; the owner can trim it later in the summon
+    // panel. First wave is nomi-native only.
+    if let Some(summon) = p.summon.as_ref() {
+        if agent_type != AgentType::Nomi {
+            return json!({
+                "error": "summon is only supported for nomi conversations in this version"
+            });
+        }
+        match summon_extra_value(summon, nomifun_common::now_ms()) {
+            Ok(value) => extra["summon"] = value,
+            Err(e) => return json!({ "error": e }),
+        }
     }
     let mut model = None;
     let mut model_source = None;
@@ -480,6 +654,47 @@ async fn delete(deps: Arc<GatewayDeps>, ctx: CallerCtx, p: DeleteConversationPar
     }
 }
 
+/// Map the pre-stop persisted status onto the tool's `{stopped, previous_status}`
+/// contract: only a conversation that was durably `running` counts as stopped.
+fn stop_outcome(previous_status: &str) -> (bool, &str) {
+    (previous_status == "running", previous_status)
+}
+
+async fn stop(deps: Arc<GatewayDeps>, ctx: CallerCtx, p: StopConversationParams) -> Value {
+    let user_id = match require_user(&ctx) {
+        Ok(u) => u.to_owned(),
+        Err(e) => return e,
+    };
+    let id = p.conversation_id.into_string();
+    if ctx.conversation_id.as_ref().is_some_and(|caller| id == caller.as_str()) {
+        return json!({ "error": "self_stop_forbidden: stopping your own conversation would cancel the turn you are answering from; ask the owner to stop it from the desktop" });
+    }
+    let conv = match deps.conversation_service.get(&user_id, &id).await {
+        Ok(c) => c,
+        Err(e) => return error_value(e),
+    };
+    let previous_status = match serde_json::to_value(conv.status) {
+        Ok(Value::String(status)) => status,
+        _ => return json!({ "error": "conversation status could not be serialized" }),
+    };
+    // Same safe service path as the desktop stop button (POST
+    // /api/conversations/{id}/cancel): the stop tombstone, exact-generation
+    // teardown, and durable finalization all stay owned by the service. This
+    // tool never mutates receipts or lifecycle rows directly.
+    if let Err(e) = deps
+        .conversation_service
+        .cancel(&user_id, &id, &deps.runtime_registry)
+        .await
+    {
+        return error_value(e);
+    }
+    let (stopped, previous_status) = stop_outcome(&previous_status);
+    ok(json!({
+        "stopped": stopped,
+        "previous_status": previous_status,
+    }))
+}
+
 /// Cap every `content` string inside the serialized message list so a long
 /// transcript cannot flood the calling agent.
 fn truncate_message_contents(mut value: Value) -> Value {
@@ -536,7 +751,7 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
         CapabilityMeta::new(
             "nomi_send_to_conversation",
             "conversation",
-            "Inject a message (or a hidden task prompt) into another session.",
+            "Inject a message (or a hidden task prompt) into another session. Set notify_back=true to automatically receive a completion receipt in your own conversation when the target finishes.",
             DangerTier::Write,
         ),
         send,
@@ -545,7 +760,7 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
         CapabilityMeta::new(
             "nomi_create_conversation",
             "conversation",
-            "Open a fresh desktop session on behalf of the calling companion (nomi, acp, or remote OpenClaw). For ACP sessions pass agent_id from nomi_agent_list; for remote sessions pass remote_agent_id from nomi_remote_agent_list. For multi-Agent work inside the current conversation, use nomi_delegate.",
+            "Open a fresh desktop session on behalf of the calling companion (nomi, acp, or remote OpenClaw). For ACP sessions pass agent_id from nomi_agent_list; for remote sessions pass remote_agent_id from nomi_remote_agent_list. Pass workpath when the user gave a project path (creates a project session in that directory), and summon to load your own skills + hand-picked memories (read-only) into the new session — pre-select memory_ids with recall_memories. For multi-Agent work inside the current conversation, use nomi_delegate.",
             DangerTier::Write,
         ),
         create,
@@ -569,6 +784,15 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
         .deny_on(&[Surface::Channel]),
         delete,
     ));
+    out.push(Capability::new::<StopConversationParams, _, _>(
+        CapabilityMeta::new(
+            "nomi_stop_conversation",
+            "conversation",
+            "Stop a conversation's current turn — including one left protectively suspended (stuck) by a backend restart. Same safe path as the desktop stop button.",
+            DangerTier::Destructive,
+        ),
+        stop,
+    ));
     out.push(Capability::new::<WhoamiParams, _, _>(
         CapabilityMeta::new(
             "nomi_whoami",
@@ -584,6 +808,210 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
 mod tests {
     use super::*;
     use nomifun_common::UserId;
+
+    const TEST_COMPANION_ID: &str = "0190f5fe-7c00-7a00-8abc-000000000001";
+    const TEST_MEMORY_ID: &str = "0190f5fe-7c00-7a00-8abc-000000000101";
+
+    #[test]
+    fn create_conversation_schema_exposes_workpath_and_summon() {
+        let mut caps = Vec::new();
+        register(&mut caps);
+        let cap = caps
+            .iter()
+            .find(|cap| cap.meta.name == "nomi_create_conversation")
+            .expect("nomi_create_conversation must be registered");
+        let properties = cap.input_schema["properties"].as_object().unwrap();
+        assert!(properties.contains_key("workpath"));
+        assert!(properties.contains_key("summon"));
+        assert_eq!(
+            cap.input_schema.get("additionalProperties"),
+            Some(&json!(false))
+        );
+    }
+
+    #[test]
+    fn create_conversation_params_parse_workpath_and_summon() {
+        let parsed: CreateConversationParams = serde_json::from_value(json!({
+            "name": "重构任务",
+            "workpath": "C:/code/project",
+            "summon": {
+                "companion_id": TEST_COMPANION_ID,
+                "memory_ids": [TEST_MEMORY_ID],
+                "skill_exclusions": ["heavy-refactor"],
+            },
+        }))
+        .unwrap();
+        assert_eq!(parsed.workpath.as_deref(), Some("C:/code/project"));
+        let summon = parsed.summon.unwrap();
+        assert_eq!(summon.companion_id.as_str(), TEST_COMPANION_ID);
+        assert_eq!(summon.memory_ids, vec![TEST_MEMORY_ID]);
+
+        // The summon sub-object is a closed contract: clients can never stamp
+        // summoned_at (server-owned) or smuggle unknown fields.
+        for invalid in [
+            json!({ "summon": { "companion_id": TEST_COMPANION_ID, "summoned_at": 1 } }),
+            json!({ "summon": { "companion_id": "not-an-id" } }),
+            json!({ "summon": {} }),
+        ] {
+            assert!(
+                serde_json::from_value::<CreateConversationParams>(invalid.clone()).is_err(),
+                "must reject {invalid}"
+            );
+        }
+    }
+
+    #[test]
+    fn summon_extra_value_stamps_validates_and_dedups() {
+        let summon: CreateSummonParams = serde_json::from_value(json!({
+            "companion_id": TEST_COMPANION_ID,
+            "memory_ids": [TEST_MEMORY_ID, TEST_MEMORY_ID],
+            "skill_exclusions": [" heavy-refactor ", "heavy-refactor", "  "],
+        }))
+        .unwrap();
+        let value = summon_extra_value(&summon, 42).unwrap();
+        assert_eq!(value["companion_id"], TEST_COMPANION_ID);
+        assert_eq!(value["memory_ids"], json!([TEST_MEMORY_ID]));
+        assert_eq!(value["skill_exclusions"], json!(["heavy-refactor"]));
+        assert_eq!(value["summoned_at"], 42, "server stamp wins");
+
+        let bad: CreateSummonParams = serde_json::from_value(json!({
+            "companion_id": TEST_COMPANION_ID,
+            "memory_ids": ["not-a-memory-id"],
+        }))
+        .unwrap();
+        assert!(summon_extra_value(&bad, 42).is_err());
+    }
+
+    #[test]
+    fn workpath_normalization_rejects_blank() {
+        assert_eq!(normalized_workpath("  C:/code/x  ").unwrap(), "C:/code/x");
+        assert!(normalized_workpath("   ").is_err());
+    }
+
+    #[test]
+    fn stop_conversation_is_a_registered_destructive_capability() {
+        let mut caps = Vec::new();
+        register(&mut caps);
+        let cap = caps
+            .iter()
+            .find(|cap| cap.meta.name == "nomi_stop_conversation")
+            .expect("nomi_stop_conversation must be registered");
+        assert_eq!(cap.meta.domain, "conversation");
+        assert_eq!(cap.meta.danger, DangerTier::Destructive);
+        let properties = cap.input_schema["properties"].as_object().unwrap();
+        assert!(properties.contains_key("conversation_id"));
+        assert!(
+            properties.contains_key("confirm"),
+            "a Destructive capability must expose the confirm gate field"
+        );
+        assert_eq!(
+            cap.input_schema.get("additionalProperties"),
+            Some(&json!(false))
+        );
+    }
+
+    #[test]
+    fn stop_conversation_requires_confirm_on_remote_surface() {
+        let mut caps = Vec::new();
+        register(&mut caps);
+        let cap = caps
+            .iter()
+            .find(|cap| cap.meta.name == "nomi_stop_conversation")
+            .expect("nomi_stop_conversation must be registered");
+        assert_eq!(
+            crate::registry::decide(&cap.meta, Surface::Remote, false),
+            crate::registry::Decision::Confirm,
+            "Remote surface without confirm must be refused"
+        );
+        assert_eq!(
+            crate::registry::decide(&cap.meta, Surface::Remote, true),
+            crate::registry::Decision::Allow,
+        );
+    }
+
+    #[test]
+    fn stop_conversation_params_require_a_canonical_conversation_id() {
+        let params: StopConversationParams = serde_json::from_value(json!({
+            "conversation_id": "0190f5fe-7c00-7a00-8abc-012345678901"
+        }))
+        .unwrap();
+        assert_eq!(
+            params.conversation_id.as_str(),
+            "0190f5fe-7c00-7a00-8abc-012345678901"
+        );
+        assert!(
+            serde_json::from_value::<StopConversationParams>(
+                json!({"conversation_id": "conversation-1"})
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn send_params_accept_optional_notify_back() {
+        let params: SendToConversationParams = serde_json::from_value(json!({
+            "conversation_id": "0190f5fe-7c00-7a00-8abc-012345678901",
+            "content": "do the thing",
+            "notify_back": true
+        }))
+        .unwrap();
+        assert_eq!(params.notify_back, Some(true));
+
+        // Default stays off.
+        let params: SendToConversationParams = serde_json::from_value(json!({
+            "conversation_id": "0190f5fe-7c00-7a00-8abc-012345678901",
+            "content": "do the thing"
+        }))
+        .unwrap();
+        assert_eq!(params.notify_back, None);
+
+        // The registered capability schema exposes the field.
+        let mut caps = Vec::new();
+        register(&mut caps);
+        let cap = caps
+            .iter()
+            .find(|cap| cap.meta.name == "nomi_send_to_conversation")
+            .expect("nomi_send_to_conversation must be registered");
+        assert!(
+            cap.input_schema["properties"]
+                .as_object()
+                .unwrap()
+                .contains_key("notify_back")
+        );
+    }
+
+    #[test]
+    fn stop_outcome_maps_previous_status_to_stopped_flag() {
+        assert_eq!(
+            stop_outcome("running"),
+            (true, "running"),
+            "stopping a running conversation reports stopped=true"
+        );
+        assert_eq!(
+            stop_outcome("finished"),
+            (false, "finished"),
+            "an idle conversation reports stopped=false with its previous status"
+        );
+        assert_eq!(stop_outcome("pending"), (false, "pending"));
+    }
+
+    #[test]
+    fn stuck_assessment_flags_only_durable_running_without_runtime() {
+        let (stuck, hint) = stuck_assessment(true, false);
+        assert!(stuck, "durable running with no live runtime is the restart-isolated state");
+        assert_eq!(
+            hint,
+            Some("该会话因后端重启被保护性挂起，可用 nomi_stop_conversation 解除后重试"),
+        );
+
+        for (is_persisted_running, has_runtime) in [(true, true), (false, false), (false, true)] {
+            let (stuck, hint) = stuck_assessment(is_persisted_running, has_runtime);
+            assert!(
+                !stuck && hint.is_none(),
+                "({is_persisted_running}, {has_runtime}) must not be reported stuck"
+            );
+        }
+    }
 
     #[test]
     fn truncate_caps_long_content_strings() {

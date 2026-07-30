@@ -66,6 +66,10 @@ pub struct ActionExecutor {
     /// Opt-in IM → requirement creator. `None` (default) keeps the normal AI
     /// dispatch path unchanged.
     requirement_creator: Option<Arc<dyn nomifun_common::RequirementCreator>>,
+    /// 客服域接缝: used ONLY as the auto-serve gate for strangers on a
+    /// customer-service bound bot. `None` keeps the pairing approval gate for
+    /// every bot.
+    cs_routing: Option<Arc<dyn crate::message_service::CsRouting>>,
 }
 
 /// Derive a requirement `(title, content)` from an inbound message's text:
@@ -97,6 +101,7 @@ impl ActionExecutor {
             settings,
             default_agent_type: default_agent_type.to_owned(),
             requirement_creator: None,
+            cs_routing: None,
         }
     }
 
@@ -107,6 +112,16 @@ impl ActionExecutor {
         creator: Option<Arc<dyn nomifun_common::RequirementCreator>>,
     ) -> Self {
         self.requirement_creator = creator;
+        self
+    }
+
+    /// Wire the customer-service seam used as the stranger auto-serve gate.
+    /// When unset, every bot keeps the pairing approval gate.
+    pub fn with_cs_routing(
+        mut self,
+        routing: Option<Arc<dyn crate::message_service::CsRouting>>,
+    ) -> Self {
+        self.cs_routing = routing;
         self
     }
 
@@ -139,27 +154,21 @@ impl ActionExecutor {
         let internal_user_id = match internal_user_id {
             Some(id) => id,
             None => {
-                // 对外伙伴自动接待 (SECURITY-CRITICAL): a bot bound to a PUBLIC
-                // AGENT auto-serves unknown senders with NO pairing code — the
-                // public-agent session is hard-clamped to `PublicService` (safe
-                // tools only), which is the whole point of the feature. Auto-served
-                // strangers run under the owner/system identity (the clamp is the
-                // boundary, not the user id); their per-chat conversation gives
-                // per-stranger isolation. This bypass is gated STRICTLY on the BOT
-                // (per-bot `channel_plugins.public_agent_id`, keyed by the arriving
-                // `channel_id`) being bound to a public agent — companion-bound and
-                // unbound bots keep the pairing approval gate UNCHANGED.
-                if self
-                    .session_mgr
-                    .channel_public_agent_id(channel_plugin_id)
-                    .await?
-                    .is_some()
-                {
-                    // Auto-register the stranger as a channel user (no pairing code) so
-                    // channel_sessions.channel_user_id resolves to its logical parent. The
-                    // agent itself runs under the owner/system identity (set in
-                    // ChannelMessageService); the PublicService clamp is the real boundary,
-                    // and the per-chat conversation gives per-stranger isolation.
+                // 客服自动接待 (SECURITY-CRITICAL): a bot bound to a
+                // CUSTOMER-SERVICE agent auto-serves unknown senders with NO
+                // pairing code — the customer-service turn runs in a disposable
+                // one-shot engine session whose tool table is fixed at
+                // construction to three read-only tools, which is the boundary.
+                // Auto-served strangers get a channel-user row so the dialogue
+                // lane resolves its logical parent. This bypass is gated
+                // STRICTLY on the BOT (cs_channel_bindings, keyed by the
+                // arriving `channel_plugin_id`) — companion-bound and unbound
+                // bots keep the pairing approval gate UNCHANGED.
+                let cs_bound = match &self.cs_routing {
+                    Some(routing) => routing.binding_for(channel_plugin_id).await.is_some(),
+                    None => false,
+                };
+                if cs_bound {
                     self.pairing
                         .ensure_channel_user(
                             user_id,
@@ -887,9 +896,8 @@ mod action_tests {
             self.users.lock().unwrap().push(user);
         }
 
-        /// Seeds a bot channel row bound to a public agent, so the per-bot
-        /// auto-serve gate (`SessionManager::channel_public_agent_id`) resolves it.
-        fn add_public_agent_channel(&self, channel_plugin_id: &str, public_agent_id: &str) {
+        /// Seeds a bot channel row, so the arriving plugin id resolves a row.
+        fn add_channel_row(&self, channel_plugin_id: &str) {
             self.plugins.lock().unwrap().push(ChannelPluginRow {
                 channel_plugin_id: channel_plugin_id.to_owned(),
                 r#type: "telegram".to_owned(),
@@ -899,8 +907,8 @@ mod action_tests {
                 status: None,
                 last_connected: None,
                 companion_id: None,
-                public_agent_id: Some(public_agent_id.to_owned()),
                 bot_key: None,
+                owner_domain: "companion".into(),
                 created_at: now_ms(),
                 updated_at: now_ms(),
             });
@@ -932,8 +940,8 @@ mod action_tests {
                 status: row.status.clone(),
                 last_connected: row.last_connected,
                 companion_id: row.companion_id.clone(),
-                public_agent_id: row.public_agent_id.clone(),
                 bot_key: row.bot_key.clone(),
+                owner_domain: row.owner_domain.clone(),
                 created_at: row.created_at,
                 updated_at: row.updated_at,
             };
@@ -963,13 +971,7 @@ mod action_tests {
         ) -> Result<(), DbError> {
             Ok(())
         }
-        async fn update_plugin_public_agent(
-            &self,
-            _channel_plugin_id: &str,
-            _public_agent_id: Option<&str>,
-        ) -> Result<(), DbError> {
-            Ok(())
-        }
+
         async fn update_plugin_bot_key(
             &self,
             _channel_plugin_id: &str,
@@ -1171,7 +1173,7 @@ mod action_tests {
     }
 
     /// Read-only pref repo seeded with fixed `(key, value)` rows — lets the
-    /// pairing-bypass tests stand up a platform bound to a public agent (or a
+    /// pairing-bypass tests stand up a bot bound to a customer-service agent (or a
     /// companion) without a real DB.
     struct SeededPrefRepo {
         data: Vec<(String, String)>,
@@ -1234,7 +1236,7 @@ mod action_tests {
     }
 
     /// Like `setup()` but with the settings service backed by seeded preference
-    /// rows (used to bind a platform to a public agent / companion).
+    /// rows (used to bind a platform to a companion).
     fn setup_with_prefs(entries: &[(&str, &str)]) -> (ActionExecutor, Arc<MockRepo>) {
         let repo = Arc::new(MockRepo::new());
         let broadcaster = Arc::new(MockBroadcaster);
@@ -1351,16 +1353,43 @@ mod action_tests {
         }
     }
 
-    // ── 对外伙伴 pairing bypass (public-agent-bound platforms only) ─────────
+    // ── 客服 pairing bypass (customer-service bound bots only) ─────────
 
-    /// A bot BOUND to a public agent auto-serves an unknown sender with NO
-    /// pairing code — the public-agent session is hard-clamped, so this is safe.
-    /// Per-bot: the binding lives on the arriving channel row.
+    /// A stub CsRouting that binds exactly one plugin id to one agent.
+    struct StubCsRouting {
+        bound_plugin: String,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::message_service::CsRouting for StubCsRouting {
+        async fn binding_for(&self, channel_plugin_id: &str) -> Option<String> {
+            (channel_plugin_id == self.bound_plugin)
+                .then(|| "018f1234-5678-7abc-8def-0123456789cc".to_owned())
+        }
+        async fn handle_visitor_message(
+            &self,
+            _cs_agent_id: &str,
+            _channel_plugin_id: &str,
+            _channel_user_id: &str,
+            _chat_id: &str,
+            _text: &str,
+        ) -> Result<String, String> {
+            Ok("stub reply".into())
+        }
+    }
+
+    /// A bot BOUND to a customer-service agent auto-serves an unknown sender
+    /// with NO pairing code — the customer-service one-shot session's
+    /// construction-time read-only tool whitelist is the boundary. Per-bot:
+    /// the binding lives in cs_channel_bindings keyed by the arriving bot.
     #[tokio::test]
-    async fn public_agent_bound_platform_auto_serves_unknown_sender() {
-        // No authorized user; the bot (channel `tg-1`) is bound to a public agent.
+    async fn cs_bound_platform_auto_serves_unknown_sender() {
+        // No authorized user; the bot (channel `tg-1`) is bound to a customer-service agent.
         let (executor, repo) = setup();
-        repo.add_public_agent_channel(TEST_CHANNEL_PLUGIN_ID, "pubagent_1");
+        repo.add_channel_row(TEST_CHANNEL_PLUGIN_ID);
+        let executor = executor.with_cs_routing(Some(Arc::new(StubCsRouting {
+            bound_plugin: TEST_CHANNEL_PLUGIN_ID.to_owned(),
+        })));
 
         let msg = make_text_message("tg_stranger", "chat_1", "hi", PluginType::Telegram);
         let result = executor
@@ -1370,7 +1399,7 @@ mod action_tests {
 
         match result {
             MessageResult::Dispatched { session_id, .. } => assert!(!session_id.is_empty()),
-            other => panic!("stranger on a public-agent bot must be auto-served, got {other:?}"),
+            other => panic!("stranger on a customer-service bot must be auto-served, got {other:?}"),
         }
 
         // Regression guard: auto-serve must REGISTER the stranger in
@@ -1391,13 +1420,13 @@ mod action_tests {
         );
     }
 
-    /// The bypass is STRICTLY gated on a public-agent binding: a COMPANION-bound
-    /// bot still gates unknown senders behind pairing (never loosened).
+    /// The bypass is STRICTLY gated on the customer-service binding: a
+    /// COMPANION-bound bot still gates unknown senders behind pairing
+    /// (never loosened).
     #[tokio::test]
     async fn companion_bound_platform_still_gates_unknown_sender() {
-        // Companion bound, but NO public-agent binding on the row → pairing gate
-        // intact. (channel_public_agent_id returns None for a row with no
-        // public_agent_id, and here there's no row at all.)
+        // Companion bound, but NO customer-service binding for the bot →
+        // pairing gate intact (no CsRouting wired at all here).
         let (executor, _repo) =
             setup_with_prefs(&[("channels.telegram.companion_id", "\"companion_1\"")]);
 

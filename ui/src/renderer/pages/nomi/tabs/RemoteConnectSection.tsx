@@ -18,6 +18,7 @@ import {
 } from '@/renderer/components/channels/PlatformConfigBody';
 import {
   retargetConfigAfterStatus,
+  statusInOwnerDomain,
   statusOwnedBy,
   statusIsUnbound,
   type ChannelConfigTarget,
@@ -57,7 +58,12 @@ const RemoteConnectSection: React.FC<{ companionId: CompanionId; companionName: 
       if (!plugins) return;
       setStatuses(() => {
         const next: Record<string, IChannelPluginStatus> = {};
-        for (const plugin of plugins) next[plugin.plugin_id] = plugin;
+        // 渠道所有权分域：伙伴侧只见 companion 域；客服域 bot 在客服详情页
+        // 自闭环管理，绝不进入伙伴的挑选/迁移池。
+        for (const plugin of plugins) {
+          if (!statusInOwnerDomain(plugin, 'companion')) continue;
+          next[plugin.plugin_id] = plugin;
+        }
         return next;
       });
     } catch (error) {
@@ -212,7 +218,7 @@ const RemoteConnectSection: React.FC<{ companionId: CompanionId; companionName: 
   // channel's old sessions server-side).
   const confirmMove = useCallback(
     (row: IChannelPluginStatus) => {
-      const fromName = companionNameOf(row.companionId) ?? row.companionId ?? row.publicAgentId ?? '';
+      const fromName = companionNameOf(row.companionId) ?? row.companionId ?? '';
       Modal.confirm({
         title: t('nomi.settings.remoteMoveHere'),
         content: t('nomi.settings.remoteMoveConfirm', { from: fromName, to: companionName }),

@@ -41,17 +41,18 @@ Web 宿主与之相反：默认要求登录。两者的差异是有意的——�
 存在**数据目录**里。具体位置取决于你运行的是哪种宿主：
 
 - **桌面端**：默认在**按用户的应用数据目录**——Windows 上是
-  `%LOCALAPPDATA%\NomiFun\Nomi`，macOS 上是
-  `~/Library/Application Support/NomiFun/Nomi`，Linux 上是
-  `$XDG_DATA_HOME/NomiFun/Nomi`（通常为 `~/.local/share/NomiFun/Nomi`）。
-  设置 `NOMIFUN_DATA_DIR=<absolute path>` 后目录会变成
-  `$NOMIFUN_DATA_DIR/Nomi`（覆盖语义不变）。旧版构建把数据存在
-  `<system temp>/nomifun-data/Nomi` 下；若存在这样的安装，启动时会
-  自动搬迁到新位置，旧目录保留为备份。
+  `%LOCALAPPDATA%\NomiFun`，macOS 上是
+  `~/Library/Application Support/NomiFun`，Linux 上是
+  `$XDG_DATA_HOME/NomiFun`（通常为 `~/.local/share/NomiFun`）。
+  设置 `NOMIFUN_DATA_DIR=<absolute path>` 后，该路径**就是**数据
+  目录——所有宿主都按字面值使用，不附加 `/Nomi` 后缀。旧版构建把
+  数据存在 `NomiFun/Nomi`（更早为 `<system temp>/nomifun-data/Nomi`）
+  下；若存在这样的遗留数据集，升级后首次启动时会自动迁移到新位置
+  （一次性、抗崩溃，中断后下次启动续跑）。
 - **Web（`nomifun-web`）**：你传给 `--data-dir`（或
-  `NOMIFUN_DATA_DIR`）的任何位置，按字面值生效——不附加 `/Nomi`
-  后缀。两者都未设置时，默认与桌面应用是**同一个按用户目录**，因此
-  开发中的 `bun run serve:web` 与已安装的应用看到的是同一份状态。
+  `NOMIFUN_DATA_DIR`）的任何位置，按字面值生效。两者都未设置时，
+  默认与桌面应用是**同一个按用户目录**，因此开发中的
+  `bun run serve:web` 与已安装的应用看到的是同一份状态。
 - **Docker**：compose 文件中定义的命名卷（`nomifun-data`，挂载到
   `/data`）。
 

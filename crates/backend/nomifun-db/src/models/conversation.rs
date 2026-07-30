@@ -66,6 +66,11 @@ pub struct ConversationDeliveryReceiptRow {
     pub result_ok: Option<bool>,
     pub result_text: Option<String>,
     pub result_error: Option<String>,
+    /// Stable snake_case terminal error token (spec D4). `None` for success
+    /// or legacy receipts completed before migration 014.
+    pub result_error_code: Option<String>,
+    /// Whether the terminal failure is safe to retry automatically.
+    pub result_error_retryable: Option<bool>,
     pub created_at: TimestampMs,
     pub updated_at: TimestampMs,
     pub completed_at: Option<TimestampMs>,
@@ -73,4 +78,23 @@ pub struct ConversationDeliveryReceiptRow {
     /// detaches these without deleting the replay receipt.
     pub projected_conversation_id: Option<String>,
     pub projected_message_id: Option<String>,
+}
+
+/// Row mapping for the `conversation_delivery_notify` table (spec D2).
+///
+/// Registers the requester conversation that asked for a completion receipt
+/// of one keyed turn operation (`nomi_send_to_conversation` with
+/// `notify_back=true`). Kept separate from `conversation_delivery_receipts`
+/// so the receipt table's identity-immutable triggers stay untouched.
+/// `state`: `pending` → `notified | failed` (absorbing).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, sqlx::FromRow)]
+pub struct ConversationDeliveryNotifyRow {
+    /// Receipt operation id of the TARGET turn being watched (UNIQUE).
+    pub operation_id: String,
+    /// Conversation of the requesting companion session that receives the
+    /// observed background receipt message.
+    pub requester_conversation_id: String,
+    pub state: String,
+    pub created_at: TimestampMs,
+    pub settled_at: Option<TimestampMs>,
 }

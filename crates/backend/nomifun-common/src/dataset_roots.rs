@@ -120,6 +120,9 @@ pub const MANAGED_DATASET_ROOTS: &[ManagedDatasetRoot] = &[
         backup: BackupPolicy::Include,
     },
     ManagedDatasetRoot {
+        // Legacy root of the retired public-agent (对外伙伴) domain. Kept ONLY
+        // so factory reset / backup still handle data left behind by old
+        // installations; no live code writes here anymore.
         path: "public-agents",
         kind: DatasetRootKind::Directory,
         reset: ResetPolicy::Retire,

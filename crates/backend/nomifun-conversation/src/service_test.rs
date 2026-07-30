@@ -68,6 +68,9 @@ use nomifun_knowledge::{
 #[path = "service_test/acp_error_recovery_test.rs"]
 mod acp_error_recovery_test;
 
+#[path = "service_test/summon_test.rs"]
+mod summon_test;
+
 const SQLITE_TEST_OWNER: &str = "0190f5fe-7c00-7a00-8000-000000000001";
 const TEST_USER_1: &str = "0190f5fe-7c00-7a00-8000-000000000011";
 const TEST_USER_2: &str = "0190f5fe-7c00-7a00-8000-000000000012";
@@ -640,6 +643,8 @@ impl IConversationRepository for MockRepo {
             result_ok: None,
             result_text: None,
             result_error: None,
+            result_error_code: None,
+            result_error_retryable: None,
             created_at: now,
             updated_at: now,
             completed_at: None,
@@ -789,6 +794,8 @@ impl IConversationRepository for MockRepo {
             receipt.result_ok = Some(completion.result_ok);
             receipt.result_text = completion.result_text.clone();
             receipt.result_error = completion.result_error.clone();
+            receipt.result_error_code = completion.result_error_code.clone();
+            receipt.result_error_retryable = completion.result_error_retryable;
             receipt.updated_at = receipt.updated_at.max(completed_at);
             receipt.completed_at = Some(completed_at.max(receipt.created_at));
         }
@@ -6460,6 +6467,78 @@ async fn idempotent_send_replay_reuses_pending_turn_and_completed_receipt() {
 }
 
 #[tokio::test]
+async fn empty_final_text_finish_persists_structured_error_code_on_receipt() {
+    const USER_ID: &str = SQLITE_TEST_OWNER;
+
+    let database = init_database_memory().await.unwrap();
+    let repo = Arc::new(SqliteConversationRepository::new(database.pool().clone()));
+    let broadcaster = Arc::new(MockBroadcaster::new());
+    let runtime_registry: Arc<dyn AgentRuntimeRegistry> =
+        Arc::new(MockAgentRuntimeRegistry::new());
+    let svc = ConversationService::new(
+        Arc::<str>::from(USER_ID),
+        std::env::temp_dir(),
+        broadcaster,
+        Arc::new(FixedSkillResolver { names: vec![] }),
+        runtime_registry.clone(),
+        repo.clone(),
+        Arc::new(StubAgentMetadataRepo),
+        Arc::new(StubAcpSessionRepo::default()),
+        Arc::new(crate::NoExecutionConversationBoundary),
+    );
+    let workspace = isolated_test_workspace("empty-final-text-code");
+    let request: CreateConversationRequest = serde_json::from_value(json!({
+        "type": "acp",
+        "extra": { "agent_id": TEST_ACP_AGENT_ID, "workspace": workspace }
+    }))
+    .unwrap();
+    let conversation = svc.create(USER_ID, request).await.unwrap();
+    let operation_id = "execution:decision:empty-final-text";
+
+    // The mock agent terminates with Finish and no streamed text, which is
+    // exactly the historical asymmetry: result_ok = false without any error
+    // reason. D4 requires the structured code to name it.
+    svc.send_message_idempotent(
+        USER_ID,
+        &conversation.conversation_id,
+        operation_id,
+        make_send_req(),
+        &runtime_registry,
+    )
+    .await
+    .unwrap();
+    wait_for_turn_released(&svc, &conversation.conversation_id).await;
+
+    let receipt = tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let receipt = repo
+                .get_delivery_receipt(
+                    USER_ID,
+                    &conversation.conversation_id,
+                    operation_id,
+                )
+                .await
+                .unwrap();
+            if let Some(receipt) = receipt
+                && receipt.status == "completed"
+            {
+                return receipt;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("turn receipt must reach its terminal state");
+    assert_eq!(receipt.result_ok, Some(false));
+    assert_eq!(receipt.result_error_code.as_deref(), Some("empty_final_text"));
+    assert_eq!(receipt.result_error_retryable, Some(false));
+    assert_eq!(
+        receipt.result_error, None,
+        "the legacy free-text column keeps its historical Finish shape"
+    );
+}
+
+#[tokio::test]
 async fn public_idempotent_send_reuses_one_turn_and_never_restarts_after_completion() {
     const USER_ID: &str = SQLITE_TEST_OWNER;
     const CLIENT_KEY: &str = "0190f5fe-7c00-7a00-8000-000000000777";
@@ -7811,6 +7890,8 @@ async fn finish_exact_sqlite_turn_for_test(
                 result_ok: false,
                 result_text: None,
                 result_error: Some("fixture terminal proof".to_owned()),
+                result_error_code: None,
+                result_error_retryable: None,
             },
             now_ms(),
         )
@@ -8402,6 +8483,8 @@ async fn background_reconcile_stale_operation_cannot_settle_or_terminate_success
             result_ok: false,
             result_text: None,
             result_error: Some("settled A".to_owned()),
+            result_error_code: None,
+            result_error_retryable: None,
         },
         now_ms(),
     )
@@ -8671,6 +8754,8 @@ async fn boot_reconcile_treats_exact_terminal_generation_as_noop_without_buildin
                 result_ok: true,
                 result_text: Some("completed before restart".to_owned()),
                 result_error: None,
+                result_error_code: None,
+                result_error_retryable: None,
             },
             now_ms(),
         )
@@ -9740,6 +9825,8 @@ async fn completed_turn_receipt_read_boundaries_adopt_its_still_active_running_g
             true,
             Some("authoritative public result"),
             None,
+            None,
+            None,
             now_ms(),
         )
         .await
@@ -9807,6 +9894,8 @@ async fn completed_turn_receipt_read_boundaries_adopt_its_still_active_running_g
             false,
             None,
             Some("authoritative internal result"),
+            None,
+            None,
             now_ms(),
         )
         .await
@@ -9865,6 +9954,8 @@ async fn completed_turn_receipt_read_boundaries_adopt_its_still_active_running_g
             &proof_operation,
             true,
             Some("authoritative proof result"),
+            None,
+            None,
             None,
             now_ms(),
         )
@@ -9931,6 +10022,8 @@ async fn completed_turn_receipt_read_boundaries_adopt_its_still_active_running_g
             &edit_operation,
             true,
             Some("authoritative edit result"),
+            None,
+            None,
             None,
             now_ms(),
         )
@@ -12367,6 +12460,8 @@ async fn agent_execution_steer_operation_cannot_cross_turn_generation() {
                 result_ok: false,
                 result_text: None,
                 result_error: Some("turn A ended".to_owned()),
+                result_error_code: None,
+                result_error_retryable: None,
             },
             now_ms(),
         )
@@ -13776,6 +13871,8 @@ async fn edit_resubmit_rebuilds_a_missing_terminal_runtime_before_rewind() {
                 result_ok: true,
                 result_text: None,
                 result_error: None,
+                result_error_code: None,
+                result_error_retryable: None,
             },
             now_ms(),
         )

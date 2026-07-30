@@ -17,6 +17,21 @@ use crate::constants::{STREAM_THROTTLE_INTERVAL, TOOL_CONFIRM_TIMEOUT};
 use crate::error::ChannelError;
 use crate::types::{OutgoingMessageType, PluginType, UnifiedOutgoingMessage};
 
+/// 客服域接缝 (customer-service routing seam) — the channel layer's ONLY
+/// contact point with the customer-service domain. Implemented in
+/// `nomifun-app` over the customer-service crate; the channel crate stays
+/// domain-agnostic.
+///
+/// `handle_visitor_message` contract: `Ok(reply)` is the final reply text to
+/// send to the visitor — an EMPTY string means the message was merged into
+/// another in-flight batch (同访客串行合并) and the caller must send nothing.
+/// `Err(notice)` is a visitor-facing failure notice to send verbatim.
+#[async_trait::async_trait] pub trait CsRouting: Send + Sync {
+    async fn binding_for(&self, channel_plugin_id: &str) -> Option<String /*cs_agent_id*/>;
+    async fn handle_visitor_message(&self, cs_agent_id: &str, channel_plugin_id: &str,
+        channel_user_id: &str, chat_id: &str, text: &str) -> Result<String /*回复文本*/, String /*给访客的失败提示*/>;
+}
+
 /// Agent profile used by channel conversations. The channel layer
 /// resolves which companion greets a session via the channel row's own `companion_id`
 /// binding first, falling back to this profile (`channel_companion_id`: the
@@ -54,45 +69,6 @@ pub trait ChannelAgentProfile: Send + Sync {
     /// is not configured) — the caller then refuses the turn with a notice
     /// rather than leaking an unintended per-chat conversation.
     async fn ensure_companion_session(&self, companion_id: &str) -> Option<String>;
-
-    // ── 对外伙伴 / public agent (a platform bot serves EITHER a companion OR a
-    //    public agent, never both) ──────────────────────────────────────────
-
-    /// Whether public agent `id` is SERVABLE right now: it names a LIVE, ENABLED
-    /// agent. A stale binding (deleted agent) or a disabled/paused agent resolves
-    /// to `false` so the channel layer refuses the turn with a notice rather than
-    /// serving a dead agent. The bot→agent binding itself is per-bot (the channel
-    /// row's `public_agent_id`), so this is a pure by-id liveness check. Default
-    /// `false` keeps companion-only / test impls unaffected.
-    async fn public_agent_servable(&self, _id: &str) -> bool {
-        false
-    }
-
-    /// Whether `id` names a live public agent (regardless of enabled/model
-    /// state). Used to validate public-agent-binding writes against the roster,
-    /// mirroring [`Self::companion_exists`]. Default `false` (no public-agent
-    /// domain wired) — the binding route then rejects unknown ids.
-    async fn public_agent_exists(&self, _id: &str) -> bool {
-        false
-    }
-
-    /// Display name of public agent `id`, `None` when it does not exist. Used only
-    /// to render a friendlier "already bound to public agent …" error. Default `None`.
-    async fn public_agent_name(&self, _id: &str) -> Option<String> {
-        None
-    }
-
-    /// The configured answering model of public agent `id`, `None` when the agent
-    /// does not exist or its model is not configured. Used by the channel layer to
-    /// pick the conversation model for a public-agent session. Default `None`.
-    async fn public_agent_model(&self, _id: &str) -> Option<nomifun_common::ProviderWithModel> {
-        None
-    }
-
-    /// Best-effort audit hook for an inbound public-agent turn. Called once per
-    /// inbound turn routed into a public agent's per-chat session. Default no-op
-    /// so non-audit impls (tests) are unaffected. Must never fail the turn.
-    async fn record_public_agent_turn(&self, _id: &str, _platform: &str, _text: &str) {}
 }
 
 /// Resolves a workshop asset UUIDv7 to raw bytes for outbound media.
@@ -122,6 +98,11 @@ pub struct ChannelMessageService {
     repo: Arc<dyn IChannelRepository>,
     owner_user_id: String,
     channel_agent_profile: Option<Arc<dyn ChannelAgentProfile>>,
+    /// 客服域接缝: when wired, a bot bound to a customer-service agent has its
+    /// inbound turns handed to the customer-service domain instead of any
+    /// Conversation path. `None` (default / tests) means no customer-service
+    /// domain is available and every bot follows the companion path.
+    cs_routing: Option<Arc<dyn CsRouting>>,
     /// Per-conversation store of the decision currently awaiting a numbered
     /// reply. Shared with each `ChannelStreamRelay` (writer) so the inbound
     /// reply can be resolved against the right `call_id`/option.
@@ -147,12 +128,47 @@ impl ChannelMessageService {
             repo,
             owner_user_id,
             channel_agent_profile: None,
+            cs_routing: None,
             pending_decisions: crate::pending_decision::PendingDecisionStore::new(),
             asset_resolver: None,
         }
     }
 
-    /// Wire the profile that resolves a channel's companion and public-agent owner.
+    /// Wire the customer-service routing seam. Without it, no bot is treated
+    /// as customer-service bound.
+    pub fn with_cs_routing(mut self, routing: Arc<dyn CsRouting>) -> Self {
+        self.cs_routing = Some(routing);
+        self
+    }
+
+    /// The customer-service agent bound to `channel_plugin_id`, if the seam is
+    /// wired and a binding exists. The message loop uses this to skip the
+    /// conversation-based busy guard (客服域自己管并发).
+    pub async fn cs_bound_agent(&self, channel_plugin_id: &str) -> Option<String> {
+        let routing = self.cs_routing.as_ref()?;
+        routing.binding_for(channel_plugin_id).await
+    }
+
+    /// Hand one visitor message to the customer-service domain and return the
+    /// reply text (`Ok("")` = merged into another in-flight batch → send
+    /// nothing) or a visitor-facing failure notice.
+    pub async fn cs_handle_visitor_message(
+        &self,
+        cs_agent_id: &str,
+        channel_plugin_id: &str,
+        channel_user_id: &str,
+        chat_id: &str,
+        text: &str,
+    ) -> Result<String, String> {
+        let Some(routing) = self.cs_routing.as_ref() else {
+            return Err("customer-service routing not configured".to_owned());
+        };
+        routing
+            .handle_visitor_message(cs_agent_id, channel_plugin_id, channel_user_id, chat_id, text)
+            .await
+    }
+
+    /// Wire the profile that resolves a channel's companion owner.
     /// Without it, channel conversations still receive their base Agent context,
     /// but owner-specific model and persona resolution are unavailable.
     pub fn with_channel_agent_profile(mut self, profile: Arc<dyn ChannelAgentProfile>) -> Self {
@@ -198,6 +214,72 @@ impl ChannelMessageService {
             summary.state,
             ConversationRuntimeStateKind::Starting | ConversationRuntimeStateKind::Running
         )
+    }
+
+    // ── Busy-time pending prompt queue (spec D1) ─────────────────────
+
+    /// Persist a prompt that arrived while its conversation was busy. The
+    /// queue drain delivers it FIFO once the running turn completes.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn enqueue_busy_prompt(
+        &self,
+        channel_plugin_id: &str,
+        chat_id: &str,
+        channel_session_id: &str,
+        conversation_id: &str,
+        text: &str,
+        idempotency_key: &str,
+    ) -> Result<nomifun_db::PendingPromptEnqueue, ChannelError> {
+        let row = nomifun_db::models::NewChannelPendingPromptRow {
+            channel_plugin_id: channel_plugin_id.to_owned(),
+            chat_id: chat_id.to_owned(),
+            channel_session_id: channel_session_id.to_owned(),
+            conversation_id: conversation_id.to_owned(),
+            text: text.to_owned(),
+            idempotency_key: idempotency_key.to_owned(),
+        };
+        Ok(self
+            .repo
+            .enqueue_pending_prompt(&row, nomifun_common::now_ms())
+            .await?)
+    }
+
+    /// Clear every queued prompt of one `(plugin, chat)` scope (the IM
+    /// 「取消排队」 command). Returns how many prompts were cancelled.
+    pub async fn cancel_chat_queue(
+        &self,
+        channel_plugin_id: &str,
+        chat_id: &str,
+    ) -> Result<u64, ChannelError> {
+        Ok(self
+            .repo
+            .cancel_chat_queue(channel_plugin_id, chat_id, nomifun_common::now_ms())
+            .await?)
+    }
+
+    /// Read-only durable outcome of one keyed public turn — the drain's
+    /// retryable-failure classifier (spec D4 fields from batch 1).
+    pub async fn turn_outcome(
+        &self,
+        conversation_id: &str,
+        idempotency_key: &str,
+    ) -> Result<nomifun_conversation::PublicTurnDeliveryState, ChannelError> {
+        self.conversation_svc
+            .public_turn_delivery_state(&self.owner_user_id, conversation_id, idempotency_key)
+            .await
+            .map_err(|e| ChannelError::MessageSendFailed(e.to_string()))
+    }
+
+    /// Remote unlock (batch-1 handover gap): stop a conversation's current
+    /// turn as the installation owner after the channel user confirmed the
+    /// numbered stop decision. Same safe service path as the desktop stop
+    /// button (`POST /api/conversations/{id}/cancel`); deliberately NOT the
+    /// gateway matrix, which denies Destructive on the Channel surface.
+    pub async fn stop_conversation(&self, conversation_id: &str) -> Result<(), ChannelError> {
+        self.conversation_svc
+            .cancel(&self.owner_user_id, conversation_id, &self.runtime_registry)
+            .await
+            .map_err(|e| ChannelError::MessageSendFailed(e.to_string()))
     }
 
     /// Submits a numbered-decision choice back through the confirm chain.
@@ -260,20 +342,16 @@ impl ChannelMessageService {
         platform: PluginType,
         idempotency_key: &str,
     ) -> Result<SendResult, ChannelError> {
-        // 对外伙伴 (public agent) binding takes precedence over EVERYTHING. A
-        // bot bound to a public agent serves strangers via an isolated per-chat,
-        // PublicService-clamped nomi session — never a companion, and never the
-        // Platform Gateway. Resolved FIRST and PER-BOT (from the channel row's own
-        // `public_agent_id`, via session.channel_plugin_id) so a companion-bound bot on
-        // the same platform is unaffected: precedence is per-bot, and the hard
-        // clamp is the boundary.
+        // 客服接缝 (defensive): a bot bound to a customer-service agent is
+        // routed in the message loop BEFORE this method — its turns must never
+        // create or touch a Conversation. If a caller still lands here with a
+        // bound bot, refuse instead of leaking a conversation.
         if let Some(channel_plugin_id) = session.channel_plugin_id.as_deref()
-            && let Some(row) = self.repo.get_plugin(channel_plugin_id).await?
-            && let Some(pa_id) = row.public_agent_id.filter(|s| !s.trim().is_empty())
+            && self.cs_bound_agent(channel_plugin_id).await.is_some()
         {
-            return self
-                .send_to_public_agent(session, text, platform, &pa_id, idempotency_key)
-                .await;
+            return Err(ChannelError::MessageSendFailed(
+                "customer-service bound bot must not enter the conversation path".into(),
+            ));
         }
 
         // Resolve the target conversation. A nomi channel turn bound to a
@@ -331,69 +409,11 @@ impl ChannelMessageService {
             .await
     }
 
-    /// Routes an inbound turn on a 对外伙伴 (public-agent) bound platform into an
-    /// isolated per-chat, `PublicService`-clamped nomi session. NEVER a companion
-    /// and NEVER the Platform Gateway — the session's `extra.public_agent_id` is
-    /// what hard-clamps it to safe tools in the nomi factory, so a stranger can be
-    /// auto-served safely.
-    async fn send_to_public_agent(
-        &self,
-        session: &ChannelSessionRow,
-        text: &str,
-        platform: PluginType,
-        public_agent_id: &str,
-        idempotency_key: &str,
-    ) -> Result<SendResult, ChannelError> {
-        let profile = self.channel_agent_profile.as_ref().ok_or_else(|| {
-            ChannelError::MessageSendFailed("channel agent profile not configured".into())
-        })?;
-
-        // Servable = bound + alive + enabled. A disabled/missing public agent
-        // refuses the turn with a friendly notice; we do NOT fall through to a
-        // companion (the whole point of the binding is data isolation). The bind
-        // is per-bot, so this is a pure by-id liveness check.
-        if !profile.public_agent_servable(public_agent_id).await {
-            return Err(ChannelError::CompanionNotReady(
-                "这个对外服务当前不可用，请稍后再试。".into(),
-            ));
-        }
-
-        // Per-chat isolation: reuse the session's bound conversation, or mint a
-        // fresh per-chat public-agent conversation (NOT a shared companion session).
-        let conversation_id = match &session.conversation_id {
-            Some(cid) => cid.clone(),
-            None => {
-                self.create_public_agent_conversation(session, platform, public_agent_id)
-                    .await?
-            }
-        };
-
-        // The public-agent conversation carries `channel_platform` in its own extra,
-        // so no per-turn marker is needed (None).
-        let result = self
-            .dispatch_to_conversation(
-                &session.channel_session_id,
-                conversation_id,
-                text,
-                None,
-                idempotency_key,
-            )
-            .await?;
-
-        // Best-effort audit of the inbound turn (records only for the public agent;
-        // never fails the turn).
-        profile
-            .record_public_agent_turn(public_agent_id, &platform.to_string(), text)
-            .await;
-
-        Ok(result)
-    }
-
     /// Warms the conversation's agent, subscribes to its stream, and sends the
-    /// user turn. Shared by the companion / per-chat path and the public-agent
-    /// path — the only per-path difference is the `channel_platform` per-turn
-    /// marker (companion shared session ⇒ platform; public-agent / per-chat ⇒
-    /// None, the marker rides the conversation extra).
+    /// user turn. Shared by the companion and per-chat paths — the only
+    /// per-path difference is the `channel_platform` per-turn marker
+    /// (companion shared session ⇒ platform; per-chat ⇒ None, the marker
+    /// rides the conversation extra).
     async fn dispatch_to_conversation(
         &self,
         session_id: &str,
@@ -441,7 +461,7 @@ impl ChannelMessageService {
             // processed" loop.
             Err(error @ nomifun_common::AppError::Conflict(_)) => {
                 if self.is_conversation_busy(&conversation_id).await {
-                    return Err(ChannelError::ConversationBusy);
+                    return Err(ChannelError::ConversationBusy(conversation_id));
                 }
                 return Err(ChannelError::MessageSendFailed(error.to_string()));
             }
@@ -581,83 +601,6 @@ impl ChannelMessageService {
         Ok(response.conversation_id)
     }
 
-    /// Creates a fresh per-chat conversation for a 对外伙伴 (public-agent) session.
-    ///
-    /// A public-agent session is ALWAYS a nomi conversation (the `PublicService`
-    /// hard clamp lives in the nomi factory and keys off `extra.public_agent_id`),
-    /// regardless of the platform's configured agent type. The extra carries
-    /// `public_agent_id` + `channel_platform` but deliberately no `companion_id`.
-    /// The factory recognizes the public-agent marker and denies private gateway
-    /// capabilities. The answering model comes from the public agent's own config.
-    async fn create_public_agent_conversation(
-        &self,
-        session: &ChannelSessionRow,
-        platform: PluginType,
-        public_agent_id: &str,
-    ) -> Result<String, ChannelError> {
-        let profile = self.channel_agent_profile.as_ref().ok_or_else(|| {
-            ChannelError::MessageSendFailed("channel agent profile not configured".into())
-        })?;
-
-        // Resolve the answering model through the SINGLE authority
-        // `public_agent_model`: the agent's OWN configured model wins, else the
-        // app's default (first enabled provider + model, resolved from the
-        // provider catalog). It returns `None` ONLY when THIS running instance
-        // has no enabled model provider at all — so the error is truthful about
-        // the one remaining cause and points at 模型管理, instead of misleading
-        // the owner into thinking they must configure THIS agent's model (a fresh
-        // agent answers as soon as any provider exists — no per-agent setup).
-        //
-        // NOTE on diagnosis: if this fires while the owner "clearly configured a
-        // model", the provider lives in a DIFFERENT running instance/data-dir
-        // (e.g. installed Nomi vs Nomi-dev) than the one serving this channel —
-        // the catalog this turn reads is genuinely empty. The message says so.
-        let model = profile.public_agent_model(public_agent_id).await.ok_or_else(|| {
-            ChannelError::CompanionNotReady(
-                "本机尚未启用任何对话模型，对外伙伴无法作答。请在桌面端「模型管理」中启用一个模型服务商后再试——对外伙伴会自动使用默认模型；也可在「对外服务」→ 选择该伙伴 →「身份 & 话术」→「对话模型」中为它单独指定。".into(),
-            )
-        })?;
-
-        let extra = Self::build_public_agent_extra(platform, public_agent_id);
-        let name = channel_conversation_name(platform, "nomi", None, session.chat_id.as_deref());
-
-        let req = CreateConversationRequest {
-            r#type: AgentType::Nomi,
-            name: Some(name),
-            // Public agents are nomi only → the model rides the top-level field.
-            model: Some(model),
-            source: Some(platform_to_source(platform)),
-            channel_chat_id: session.chat_id.clone(),
-            preset_id: None,
-            preset_overrides: None,
-            delegation_policy: Default::default(),
-            execution_model_pool: None,
-            decision_policy: Default::default(),
-            execution_template_id: None,
-            extra,
-        };
-
-        let creation_key = channel_creation_key(
-            &self.owner_user_id,
-            session,
-            &format!("public-agent:{public_agent_id}"),
-        );
-        let response = self
-            .conversation_svc
-            .create_idempotent(&self.owner_user_id, req, &creation_key)
-            .await
-            .map_err(|e| ChannelError::MessageSendFailed(e.to_string()))?;
-
-        debug!(
-            conversation_id = %response.conversation_id,
-            channel_session_id = %session.channel_session_id,
-            public_agent_id = %public_agent_id,
-            "public-agent conversation created for channel session"
-        );
-
-        Ok(response.conversation_id)
-    }
-
     /// Resolves which companion greets a channel session.
     ///
     /// The channel row's `companion_id` wins (each bot is bound to its own companion);
@@ -731,6 +674,14 @@ impl ChannelMessageService {
             AgentStreamEvent::Error(data) => Some(StreamAction::Error(data.message.clone())),
             AgentStreamEvent::Thinking(data) => Some(StreamAction::Thinking(data.content.clone())),
             AgentStreamEvent::ToolCall(data) => {
+                // Remote unlock (batch-1 handover gap): the gateway matrix
+                // denies nomi_stop_conversation on the Channel surface, so the
+                // channel takes over with its own numbered confirmation.
+                if let Some(target) = stop_denied_target(data) {
+                    return Some(StreamAction::StopDenied {
+                        target_conversation_id: target,
+                    });
+                }
                 // Verified Nomi/ACP artifacts are already durable workspace
                 // files. Preserve their receipts so the relay can upload the
                 // bytes (or explicitly report the path if upload/read fails).
@@ -945,19 +896,6 @@ impl ChannelMessageService {
         extra
     }
 
-    /// Build the `extra` JSON for a 对外伙伴 (public-agent) channel conversation.
-    ///
-    /// `session_mode: "yolo"` (no interactive confirmations on a channel), plus
-    /// `public_agent_id` (the nomi factory keys the `PublicService` hard clamp off
-    /// this) and `channel_platform` (persona remote-context framing). Deliberately
-    /// carries no `companion_id`; the factory-owned public clamp turns off gateway /
-    /// computer / browser / spawn capabilities.
-    pub fn build_public_agent_extra(platform: PluginType, public_agent_id: &str) -> serde_json::Value {
-        let mut extra = Self::build_channel_extra(None);
-        extra["public_agent_id"] = serde_json::Value::String(public_agent_id.to_owned());
-        extra["channel_platform"] = serde_json::Value::String(platform.to_string());
-        extra
-    }
 }
 
 fn channel_creation_key(
@@ -1031,6 +969,13 @@ pub enum StreamAction {
         prompt: String,
         options: Vec<crate::types::DecisionOption>,
     },
+    /// The companion's `nomi_stop_conversation` was denied by the gateway
+    /// matrix on the Channel surface (batch-1 handover gap). The relay
+    /// forwards the channel-owned numbered stop confirmation; on "确认" the
+    /// message loop cancels the target as owner.
+    StopDenied {
+        target_conversation_id: String,
+    },
     /// One or more workshop asset ids produced by a *completed* tool call
     /// (e.g. `nomi_workshop_get_task` `result_asset_ids`). The relay resolves
     /// each to bytes and sends it as media after the final text.
@@ -1065,6 +1010,42 @@ fn apply_channel_agent_context(
             extra["companion_id"] = serde_json::Value::String(pid.to_owned());
         }
     }
+}
+
+/// Detects a gateway-denied `nomi_stop_conversation` tool call and extracts
+/// its target conversation id.
+///
+/// On the Channel surface the gateway matrix denies Destructive capabilities,
+/// answering either `'…' is not permitted on the Channel surface` (dispatch
+/// deny) or `session_capability_denied` (visibility filter). Both shapes ride
+/// the tool-call OUTPUT of a terminal event; the target id comes from the
+/// model-provided arguments (`args`, falling back to the raw `input` JSON).
+fn stop_denied_target(
+    data: &nomifun_ai_agent::protocol::events::ToolCallEventData,
+) -> Option<String> {
+    use nomifun_ai_agent::protocol::events::ToolCallStatus;
+    if !matches!(data.status, ToolCallStatus::Completed | ToolCallStatus::Error) {
+        return None;
+    }
+    if !data.name.ends_with("nomi_stop_conversation") {
+        return None;
+    }
+    let output = data.output.as_deref()?;
+    if !(output.contains("not permitted on the") || output.contains("session_capability_denied")) {
+        return None;
+    }
+    let from_args = data
+        .args
+        .get("conversation_id")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned);
+    from_args.or_else(|| {
+        data.input
+            .as_ref()
+            .and_then(|value| value.get("conversation_id"))
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned)
+    })
 }
 
 /// Maps a `nomifun_common::Confirmation` to a `Decision` action.
@@ -1357,22 +1338,6 @@ mod tests {
         assert!(extra.get("channel_platform").is_none());
         assert!(extra.get("companion_id").is_none());
         assert_eq!(extra["backend"], serde_json::json!("claude"));
-    }
-
-    // ── build_public_agent_extra ───────────────────────────────────────
-
-    #[test]
-    fn public_agent_extra_marks_public_without_companion_context() {
-        let extra = ChannelMessageService::build_public_agent_extra(PluginType::Telegram, "pubagent_1");
-        // Public-agent marker + platform present.
-        assert_eq!(extra["public_agent_id"], serde_json::json!("pubagent_1"));
-        assert_eq!(extra["channel_platform"], serde_json::json!("telegram"));
-        // Yolo channel semantics preserved.
-        assert_eq!(extra["session_mode"], serde_json::json!("yolo"));
-        // The factory owns capability denial; persisted context only identifies
-        // the public agent and must never claim a desktop companion.
-        assert!(extra.get("companion_id").is_none(), "public agent must not carry a companion");
-        assert!(extra.get("companion_session").is_none());
     }
 
     #[test]
@@ -1686,6 +1651,92 @@ mod tests {
     }
 
     // ── process_stream_event → Decision ────────────────────────────────
+
+    #[test]
+    fn denied_stop_tool_call_produces_stop_denied_with_target() {
+        let target = "0190f5fe-7c00-7a00-8abc-012345678901";
+        for output in [
+            "{\"error\":\"'nomi_stop_conversation' is not permitted on the Channel surface\"}",
+            "{\"error\":\"session_capability_denied\",\"tool\":\"nomi_stop_conversation\"}",
+        ] {
+            let event = AgentStreamEvent::ToolCall(ToolCallEventData {
+                call_id: "c1".into(),
+                name: "mcp__nomi__nomi_stop_conversation".into(),
+                args: serde_json::json!({ "conversation_id": target }),
+                status: ToolCallStatus::Completed,
+                description: None,
+                input: None,
+                output: Some(output.into()),
+                artifacts: Vec::new(),
+                retry: None,
+            });
+            match ChannelMessageService::process_stream_event(&event) {
+                Some(StreamAction::StopDenied { target_conversation_id }) => {
+                    assert_eq!(target_conversation_id, target);
+                }
+                other => panic!("expected StopDenied for output {output:?}, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn denied_stop_target_falls_back_to_raw_input_json() {
+        let target = "0190f5fe-7c00-7a00-8abc-012345678902";
+        let event = AgentStreamEvent::ToolCall(ToolCallEventData {
+            call_id: "c1".into(),
+            name: "nomi_stop_conversation".into(),
+            args: serde_json::Value::Null,
+            status: ToolCallStatus::Error,
+            description: None,
+            input: Some(serde_json::json!({ "conversation_id": target })),
+            output: Some("'nomi_stop_conversation' is not permitted on the Channel surface".into()),
+            artifacts: Vec::new(),
+            retry: None,
+        });
+        match ChannelMessageService::process_stream_event(&event) {
+            Some(StreamAction::StopDenied { target_conversation_id }) => {
+                assert_eq!(target_conversation_id, target);
+            }
+            other => panic!("expected StopDenied, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn successful_or_unrelated_tool_calls_never_produce_stop_denied() {
+        // A SUCCESSFUL stop (allowed surface) keeps the plain tool-call action.
+        let event = AgentStreamEvent::ToolCall(ToolCallEventData {
+            call_id: "c1".into(),
+            name: "nomi_stop_conversation".into(),
+            args: serde_json::json!({ "conversation_id": "0190f5fe-7c00-7a00-8abc-012345678903" }),
+            status: ToolCallStatus::Completed,
+            description: None,
+            input: None,
+            output: Some("{\"result\":{\"stopped\":true}}".into()),
+            artifacts: Vec::new(),
+            retry: None,
+        });
+        assert!(matches!(
+            ChannelMessageService::process_stream_event(&event),
+            Some(StreamAction::ToolCall { .. })
+        ));
+
+        // Another denied tool must not be misread as a stop confirmation.
+        let event = AgentStreamEvent::ToolCall(ToolCallEventData {
+            call_id: "c2".into(),
+            name: "nomi_delete_conversation".into(),
+            args: serde_json::json!({ "conversation_id": "0190f5fe-7c00-7a00-8abc-012345678903" }),
+            status: ToolCallStatus::Completed,
+            description: None,
+            input: None,
+            output: Some("'nomi_delete_conversation' is not permitted on the Channel surface".into()),
+            artifacts: Vec::new(),
+            retry: None,
+        });
+        assert!(matches!(
+            ChannelMessageService::process_stream_event(&event),
+            Some(StreamAction::ToolCall { .. })
+        ));
+    }
 
     #[test]
     fn acp_permission_request_produces_decision() {

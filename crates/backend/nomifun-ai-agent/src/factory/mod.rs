@@ -54,63 +54,58 @@ pub trait CompanionPromptProvider: Send + Sync {
     ) -> Option<String>;
 }
 
-/// Runtime persona/policy/model resolved for a 对外伙伴 (public agent / public
-/// companion) session, sourced LIVE from the `PublicAgentConfig` at every agent
-/// build. Deliberately a small DTO owned by the runtime layer so the factory
-/// stays free of the `nomifun-public-agent` config types (which depend on this
-/// crate, not the other way around — no cycle). Mirrors the shape a
-/// `PublicService`-clamped session needs: identity + hard service directive +
-/// grounded switch + the scoped knowledge-base id set + the answering model.
-#[derive(Debug, Clone)]
-pub struct PublicAgentRuntime {
-    /// Owner-facing brand / display name.
-    pub name: String,
-    /// Opening / welcome message shown to strangers on first contact.
-    pub greeting: String,
-    /// Tone & style guidelines (free-text; injected into the persona prompt).
-    pub tone: String,
-    /// Instructions from the frozen preset applied to this public companion.
-    /// They shape behavior but never alter the public-service security clamp.
-    pub preset_instructions: String,
-    /// Service policy / 服务守则 (business scope, forbidden topics, compliance).
-    /// Injected as a HARD system directive.
-    pub service_policy: String,
-    /// Grounded (strict) mode: only answer from the bound knowledge bases.
-    pub grounded_mode: bool,
-    /// The bound platform knowledge-base ids. The factory feeds these verbatim
-    /// into the scoped `knowledge_search` tool so a turn can never widen the base
-    /// set beyond the agent's configuration (the retrieval security boundary).
-    pub knowledge_base_ids: Vec<nomifun_common::KnowledgeBaseId>,
-    /// The model the agent answers with (used by the channel layer to pick the
-    /// conversation model; the Nomi factory itself requires
-    /// `options.model.as_ref()`).
-    pub model: nomifun_common::ProviderWithModel,
-}
-
-/// Resolves a public agent's LIVE runtime + records inbound turns for audit.
-/// Implemented by `nomifun_public_agent::PublicAgentService`. Read at every agent
-/// build so persona / policy / grounded / KB edits take effect on the next turn
-/// (no stale session extra). A public-agent session's exposure is clamped to
-/// `PublicService` by the factory purely from the presence of
-/// `extra.public_agent_id` — resolving the runtime only supplies the persona, so
-/// a deleted/unresolvable agent still yields a hard-clamped (persona-less) session.
+/// In-session companion summon support (spec §设计 B) — implemented by
+/// `nomifun-companion::CompanionService` over its store; the factory only
+/// consumes trait objects so the dependency direction stays acyclic (mirrors
+/// [`CompanionPromptProvider`]). Consulted only for owner-authority,
+/// non-companion nomi sessions whose `extra.summon` is present.
 #[async_trait::async_trait]
-pub trait PublicAgentProvider: Send + Sync {
-    /// The public agent's runtime persona/policy/model/KB, or `None` when the id
-    /// names no live public agent.
-    async fn resolve_public_agent(&self, id: &str) -> Option<PublicAgentRuntime>;
+pub trait CompanionSummonProvider: Send + Sync {
+    /// Display name of the summoned companion, `None` when it no longer
+    /// exists (the summon degrades to a nameless notice; tools still scope
+    /// by id and simply see an empty memory set).
+    async fn companion_name(&self, companion_id: &str) -> Option<String>;
 
-    /// Best-effort audit hook for an inbound public-agent turn (surface e.g.
-    /// "channel", platform e.g. "telegram"). Default no-op so non-audit impls
-    /// (tests) are unaffected. Must never fail the turn.
-    async fn record_public_agent_turn(
+    /// Read-only recall sink locked to the companion's visibility (shared +
+    /// its own private memories). Its write methods refuse by construction.
+    fn summon_memory_sink(
         &self,
-        _id: &str,
-        _surface: &str,
-        _platform: Option<&str>,
-        _text: &str,
-    ) {
-    }
+        companion_id: &str,
+    ) -> Result<Arc<dyn nomi_agent::companion_tools::CompanionMemorySink>, AppError>;
+
+    /// `propose_companion_memory` sink: candidate memories become suggestion
+    /// cards (owner-confirmed), never direct memory writes.
+    fn summon_proposal_sink(
+        &self,
+        companion_id: &str,
+    ) -> Result<Arc<dyn nomi_agent::summon_tools::SummonProposalSink>, AppError>;
+
+    /// Per-turn live resolver for the summon's selected memory ids.
+    fn summon_context_sink(
+        &self,
+        config: &nomifun_api_types::SummonConfig,
+    ) -> Result<Arc<dyn nomi_agent::summon_tools::SummonContextSink>, AppError>;
+
+    /// Materialize the companion's active skills minus `skill_exclusions` into
+    /// the workspace `.nomi/skills` under manifest ownership (stale managed
+    /// entries are pruned; user-created skills are never touched). Returns the
+    /// materialized skill names.
+    async fn sync_summon_workspace_skills(
+        &self,
+        conversation_id: &str,
+        workspace: &std::path::Path,
+        companion_id: &str,
+        skill_exclusions: &[String],
+    ) -> Result<Vec<String>, AppError>;
+
+    /// Remove every manifest-owned summon skill from the workspace. Called on
+    /// builds of non-summoned sessions so a cleared summon unloads its skills
+    /// on the next runtime build. No-op for workspaces without a manifest.
+    async fn clear_summon_workspace_skills(
+        &self,
+        conversation_id: &str,
+        workspace: &std::path::Path,
+    ) -> Result<(), AppError>;
 }
 
 /// Dependencies needed by the agent factory to construct agents.
@@ -231,14 +226,13 @@ pub struct AgentFactoryDeps {
     /// Optional persona prompt provider for companion_session conversations that
     /// carry no `extra.system_prompt` (Channel Agent sessions).
     pub companion_prompt: Option<Arc<dyn CompanionPromptProvider>>,
-    /// Optional 对外伙伴 (public agent) runtime provider. When `Some` AND a
-    /// session carries `extra.public_agent_id`, the factory sources the persona /
-    /// service policy / grounded switch / scoped knowledge bases from the live
-    /// `PublicAgentConfig`. The `PublicService` exposure clamp fires from the
-    /// id's presence alone (independent of this provider), so an unresolvable id
-    /// still yields a hard-clamped session. `None` (standalone / tests) leaves
-    /// public-agent resolution unwired.
-    pub public_agent_provider: Option<Arc<dyn PublicAgentProvider>>,
+    /// Optional in-session companion summon provider (spec §设计 B). When `Some`
+    /// AND an owner-authority non-companion nomi session carries `extra.summon`,
+    /// the factory materializes the companion's skills, registers the read-only
+    /// `recall_memories` + `propose_companion_memory` tools and injects the
+    /// per-turn memory-snapshot contributor. `None` (standalone / tests) leaves
+    /// summon unwired — `extra.summon` is then inert.
+    pub companion_summon: Option<Arc<dyn CompanionSummonProvider>>,
 }
 
 /// Build a production agent factory that dispatches to concrete agent types.

@@ -5,7 +5,7 @@
 //! (index rows in `nomifun-db`, canvas bodies + asset binaries on disk under
 //! the data dir), while `nomifun-creation` owns the generation task queue.
 //!
-//! Deliberately mirrors the `nomifun-public-agent` crate shape: `fsio` (atomic
+//! `fsio` (atomic
 //! temp+rename writes), `service` (the single handle the routes talk to),
 //! `state`/`routes` (the `/api/workshop/*` surface). The canvas *doc*
 //! (nodes/edges/viewport/settings) is a frontend-owned JSON contract. The

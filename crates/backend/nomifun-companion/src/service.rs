@@ -20,10 +20,15 @@ use crate::events::CompanionEventEmitter;
 use crate::evolution::{EvolutionEngine, NoopTranscriptSource};
 use crate::gamify::level_for_xp;
 use crate::learner::{Learner, CompanionCompleter};
+use crate::memory_search::{MemorySearchQuery, MemoryStatusFilter};
 use crate::profile::{CompanionProfileConfig, SharedCompanionConfig};
 use crate::registry::{CompanionRegistry, json_merge_patch};
 use crate::skill_sink::CompanionSkillStoreSink;
-use crate::store::{CompanionThread, MemoryFilter, MemoryPage, MemoryScope, CompanionLearnRun, CompanionMemory, CompanionSkill, CompanionStore, CompanionSuggestion, SuggestionPage};
+use crate::store::{
+    CompanionThread, MemoryBatchAction, MemoryFilter, MemoryListSort, MemoryPage, MemoryScope,
+    CompanionLearnRun, CompanionMemory, CompanionSkill, CompanionStore, CompanionSuggestion,
+    SuggestionPage, memory_contents_similar,
+};
 use nomifun_extension::skill_service::{self, SkillPaths, SkillScope};
 use nomifun_extension::constants::SKILL_MANIFEST_FILE;
 
@@ -115,6 +120,61 @@ pub struct SourceStats {
     pub total: u64,
 }
 
+/// One suspected-duplicate cluster for the merge assistant: active memories of
+/// one kind + one scope whose contents are normalized-similar. v1 carries no
+/// LLM-drafted merged text (YAGNI) — the UI pre-fills from the members and the
+/// user edits before confirming.
+#[derive(Debug, Clone, Serialize)]
+pub struct MemoryMergeGroup {
+    pub memories: Vec<CompanionMemory>,
+}
+
+/// One row of the REST memory list: the memory plus FTS extras (highlight
+/// snippet + fused rank) when the page came from a full-text query.
+#[derive(Debug, Clone, Serialize)]
+pub struct MemoryListItem {
+    #[serde(flatten)]
+    pub memory: CompanionMemory,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub snippet: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rank: Option<f64>,
+}
+
+/// The REST memory-list page (superset of the legacy `MemoryPage` wire shape).
+#[derive(Debug, Clone, Serialize)]
+pub struct MemoryListPage {
+    pub items: Vec<MemoryListItem>,
+    pub total: i64,
+}
+
+/// Cluster active memories into suspected-duplicate groups (same kind + same
+/// scope, contents pairwise similar to an existing member). Groups of one are
+/// dropped — there is nothing to merge.
+fn group_similar_memories(memories: Vec<CompanionMemory>) -> Vec<MemoryMergeGroup> {
+    let mut groups: Vec<Vec<CompanionMemory>> = Vec::new();
+    for memory in memories {
+        let slot = groups.iter_mut().find(|group| {
+            let head = &group[0];
+            head.kind == memory.kind
+                && head.scope_kind == memory.scope_kind
+                && head.scope_companion_id == memory.scope_companion_id
+                && group
+                    .iter()
+                    .any(|member| memory_contents_similar(&member.content, &memory.content))
+        });
+        match slot {
+            Some(group) => group.push(memory),
+            None => groups.push(vec![memory]),
+        }
+    }
+    groups
+        .into_iter()
+        .filter(|group| group.len() >= 2)
+        .map(|memories| MemoryMergeGroup { memories })
+        .collect()
+}
+
 /// Post-delete cascade hook for companion removal. Registered by the app assembly
 /// (e.g. knowledge-binding cleanup wrapping `KnowledgeService`) so this crate
 /// stays free of those dependencies. Implementations must swallow their own
@@ -148,7 +208,7 @@ pub struct CompanionService {
     figures_lock: Mutex<()>,
     config: SharedConfig,
     registry: Arc<CompanionRegistry>,
-    store: CompanionStore,
+    pub(crate) store: CompanionStore,
     emitter: CompanionEventEmitter,
     learner: Arc<Learner>,
     /// Skill-evolution engine; held so on-demand drafting (learn-by-demonstration) can
@@ -395,6 +455,11 @@ impl CompanionService {
             config: self.config.clone(),
             skill_paths: self.skill_paths.clone(),
         })
+    }
+
+    fn parse_summon_companion_id(companion_id: &str) -> Result<nomifun_common::CompanionId, AppError> {
+        nomifun_common::CompanionId::try_from(companion_id)
+            .map_err(|error| AppError::BadRequest(format!("invalid summon companion id: {error}")))
     }
 
     fn companion(&self) -> Result<&CompanionThreads, AppError> {
@@ -1170,6 +1235,111 @@ impl CompanionService {
         self.store.list_memory_page(filter).await
     }
 
+    /// Non-FTS list with an explicit sort (the REST `sort` param without `q`).
+    pub async fn list_memory_page_sorted(&self, filter: &MemoryFilter, sort: MemoryListSort) -> Result<MemoryPage, AppError> {
+        self.store.list_memory_page_sorted(filter, sort).await
+    }
+
+    /// FTS-backed memory list page (`q` present): full-text hits with snippet +
+    /// rank, re-sorted per `sort` ('relevance' keeps the fused-rank order),
+    /// paginated in memory over a capped hit set.
+    pub async fn search_memory_page(
+        &self,
+        q: &str,
+        kind: Option<String>,
+        status: MemoryStatusFilter,
+        scope_companion_id: Option<String>,
+        sort: &str,
+        limit: i64,
+        offset: i64,
+    ) -> Result<MemoryListPage, AppError> {
+        let companion_id = scope_companion_id
+            .as_deref()
+            .map(|id| {
+                CompanionId::try_from(id).map_err(|error| {
+                    AppError::BadRequest(format!("invalid scope_companion_id: {error}"))
+                })
+            })
+            .transpose()?;
+        let query = MemorySearchQuery {
+            queries: vec![q.to_owned()],
+            kind,
+            scope: None,
+            status,
+            companion_id,
+            limit: 500,
+        };
+        let mut hits = self.store.search_memories(query).await?;
+        match sort {
+            "time" => hits.sort_by(|a, b| b.memory.updated_at.cmp(&a.memory.updated_at)),
+            "importance" => hits.sort_by(|a, b| {
+                (b.memory.pinned as i64)
+                    .cmp(&(a.memory.pinned as i64))
+                    .then_with(|| {
+                        b.memory
+                            .importance
+                            .partial_cmp(&a.memory.importance)
+                            .unwrap_or(std::cmp::Ordering::Equal)
+                    })
+                    .then_with(|| b.memory.updated_at.cmp(&a.memory.updated_at))
+            }),
+            _ => {} // relevance: keep the search ranking
+        }
+        let total = hits.len() as i64;
+        let limit = if limit <= 0 { 100 } else { limit.min(500) } as usize;
+        let offset = offset.max(0) as usize;
+        let items = hits
+            .into_iter()
+            .skip(offset)
+            .take(limit)
+            .map(|hit| MemoryListItem {
+                memory: hit.memory,
+                snippet: hit.snippet,
+                rank: Some(hit.rank),
+            })
+            .collect();
+        Ok(MemoryListPage { items, total })
+    }
+
+    /// Atomic batch memory operation + live per-row surface refresh events.
+    pub async fn batch_memories(&self, ids: &[String], action: &MemoryBatchAction) -> Result<(), AppError> {
+        self.store.batch_update_memories(ids, action).await?;
+        for id in ids {
+            match self.store.get_memory(id).await {
+                Ok(Some(updated)) => self.emitter.emit_memory_updated(&updated),
+                Ok(None) => self.emitter.emit_memory_deleted(id),
+                Err(_) => {}
+            }
+        }
+        Ok(())
+    }
+
+    /// Merge-assistant dry run: suspected-duplicate groups over the ACTIVE
+    /// layer (per kind + scope, normalized-similarity clustering).
+    pub async fn memory_merge_suggestions(&self) -> Result<Vec<MemoryMergeGroup>, AppError> {
+        let active: Vec<CompanionMemory> = self
+            .store
+            .dump_memories_all()
+            .await?
+            .into_iter()
+            .filter(|memory| memory.status == "active")
+            .collect();
+        Ok(group_similar_memories(active))
+    }
+
+    /// Merge-assistant confirm: persist the merged memory, archive the source
+    /// group (audit-tagged `superseded_by:{id}`), and notify open surfaces.
+    pub async fn merge_memories(&self, group: &[String], merged_content: &str, kind: &str) -> Result<CompanionMemory, AppError> {
+        let merged = self.store.merge_memories(group, merged_content, kind).await?;
+        self.emitter.emit_memory_created(&merged);
+        for id in group {
+            if let Ok(Some(archived)) = self.store.get_memory(id).await {
+                self.emitter.emit_memory_updated(&archived);
+            }
+        }
+        Ok(merged)
+    }
+
     // ----- session-window day digests (伙伴会话归档回看) -----
 
     /// Archived day-digests for one companion. `since`/`until` are inclusive
@@ -1299,6 +1469,16 @@ impl CompanionService {
                     }
                 }
             }
+            // Summon write-back (spec §B3 确认式回写): a memory proposed from a
+            // summoned work session only enters companion_memories on accept.
+            // Inside the `newly` gate → re-accept never duplicates the memory.
+            if decided.kind == crate::summon_support::SUMMON_MEMORY_SUGGESTION_KIND {
+                if let Some(action) = &decided.action {
+                    if let Err(e) = self.materialize_proposed_memory(action).await {
+                        tracing::warn!(error = %e, suggestion_id, "failed to materialize accepted memory proposal");
+                    }
+                }
+            }
         }
         // Rejecting a create_skill suggestion records correction feedback so the
         // originating mined pattern is suppressed from re-proposal (纠偏回流), and
@@ -1347,6 +1527,44 @@ impl CompanionService {
         )
         .await
         .map(|_| ())
+    }
+
+    /// Materialize an accepted summon memory proposal (spec §B3): parse the
+    /// suggestion card's action payload and insert the memory as the summoned
+    /// companion's PRIVATE memory (`source="summon"`). Store-level insert
+    /// redacts secrets and dedup is checked first so a re-proposed accepted
+    /// fact never duplicates. Caller gates this inside the `newly` branch.
+    async fn materialize_proposed_memory(&self, action: &serde_json::Value) -> Result<(), AppError> {
+        let Some(kind) = action
+            .get("memory_kind")
+            .and_then(|v| v.as_str())
+            .filter(|kind| crate::store::MEMORY_KINDS.contains(kind))
+        else {
+            return Ok(());
+        };
+        let Some(content) = action
+            .get("content")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|content| !content.is_empty())
+        else {
+            return Ok(());
+        };
+        let scope = action
+            .get("companion_id")
+            .and_then(|v| v.as_str())
+            .and_then(|id| CompanionId::try_from(id).ok())
+            .map(|id| crate::store::MemoryScope::Companion(id.into_string()))
+            .unwrap_or(crate::store::MemoryScope::Shared);
+        if self.store.find_similar_active(kind, content).await?.is_some() {
+            return Ok(());
+        }
+        let memory = self
+            .store
+            .insert_memory_scoped(kind, content, &[], 0.8, "summon", scope)
+            .await?;
+        self.emitter.emit_memory_created(&memory);
+        Ok(())
     }
 
     /// Rejecting a create_skill suggestion → delegate to the single idempotent skill-decide
@@ -1747,6 +1965,91 @@ impl nomifun_ai_agent::CompanionPromptProvider for CompanionService {
         let profile = self.registry.get(companion_id.as_str()).await?;
         let smart = self.config.read().await.smart_collaboration;
         Some(crate::companion::build_companion_system_prompt(&self.store, &profile, channel_platform, smart).await)
+    }
+}
+
+/// In-session companion summon provider (spec §设计 B): the nomi factory's
+/// seam into the companion domain for `extra.summon` sessions — read-only
+/// sinks over the store, the per-turn snapshot resolver, and manifest-owned
+/// workspace skill materialization/unload.
+#[async_trait::async_trait]
+impl nomifun_ai_agent::CompanionSummonProvider for CompanionService {
+    async fn companion_name(&self, companion_id: &str) -> Option<String> {
+        self.registry.get(companion_id).await.map(|profile| profile.name)
+    }
+
+    fn summon_memory_sink(
+        &self,
+        companion_id: &str,
+    ) -> Result<Arc<dyn nomifun_ai_agent::CompanionMemorySink>, AppError> {
+        Ok(Arc::new(crate::summon_support::SummonMemorySink::new(
+            self.store.clone(),
+            Self::parse_summon_companion_id(companion_id)?,
+        )))
+    }
+
+    fn summon_proposal_sink(
+        &self,
+        companion_id: &str,
+    ) -> Result<Arc<dyn nomifun_ai_agent::SummonProposalSink>, AppError> {
+        Ok(Arc::new(crate::summon_support::SummonSuggestionSink::new(
+            self.store.clone(),
+            self.emitter.clone(),
+            Self::parse_summon_companion_id(companion_id)?,
+        )))
+    }
+
+    fn summon_context_sink(
+        &self,
+        config: &nomifun_api_types::SummonConfig,
+    ) -> Result<Arc<dyn nomifun_ai_agent::SummonContextSink>, AppError> {
+        Self::parse_summon_companion_id(&config.companion_id)?;
+        Ok(Arc::new(crate::summon_support::SummonContextResolver::new(
+            self.store.clone(),
+            config.clone(),
+        )))
+    }
+
+    async fn sync_summon_workspace_skills(
+        &self,
+        conversation_id: &str,
+        workspace: &std::path::Path,
+        companion_id: &str,
+        skill_exclusions: &[String],
+    ) -> Result<Vec<String>, AppError> {
+        let profile = self
+            .registry
+            .get(companion_id)
+            .await
+            .ok_or_else(|| AppError::NotFound(format!("companion '{companion_id}' not found")))?;
+        let names: Vec<String> =
+            crate::companion::effective_skill_names(&self.skill_paths, &profile)
+                .await?
+                .into_iter()
+                .filter(|name| !skill_exclusions.iter().any(|excluded| excluded == name))
+                .collect();
+        Ok(crate::companion::sync_managed_workspace_skills(
+            &self.skill_paths,
+            conversation_id,
+            workspace,
+            &names,
+        )
+        .await)
+    }
+
+    async fn clear_summon_workspace_skills(
+        &self,
+        conversation_id: &str,
+        workspace: &std::path::Path,
+    ) -> Result<(), AppError> {
+        crate::companion::sync_managed_workspace_skills(
+            &self.skill_paths,
+            conversation_id,
+            workspace,
+            &[],
+        )
+        .await;
+        Ok(())
     }
 }
 
@@ -2451,6 +2754,47 @@ mod tests {
             .unwrap();
         svc.decide_suggestion(&s2.suggestion_id, false).await.unwrap();
         assert_eq!(svc.store.get_companion_state_i64(&a.companion_id, "xp").await.unwrap(), 20);
+    }
+
+    #[tokio::test]
+    async fn accepting_memory_proposal_materializes_private_memory() {
+        let dir = tempfile::tempdir().unwrap();
+        let svc = service(dir.path()).await;
+        let companion = svc.create_companion("甲", "ink").await.unwrap();
+
+        let sink = crate::summon_support::SummonSuggestionSink::new(
+            svc.store.clone(),
+            svc.emitter.clone(),
+            nomifun_common::CompanionId::try_from(companion.companion_id.as_str()).unwrap(),
+        );
+        use nomifun_ai_agent::SummonProposalSink as _;
+        sink.propose(&conversation_fixture(9), "preference", "主人喜欢 TDD 流程", "多次强调")
+            .await
+            .unwrap();
+        // Proposal alone must not create the memory.
+        assert_eq!(svc.store.count_memories("active").await.unwrap(), 0);
+
+        let card = &svc.store.list_suggestions(Some("new"), 10).await.unwrap()[0];
+        let decided = svc.decide_suggestion(&card.suggestion_id, true).await.unwrap();
+        assert_eq!(decided.status, "accepted");
+        let memories = svc.store.list_memories(&crate::store::MemoryFilter::default()).await.unwrap();
+        assert_eq!(memories.len(), 1);
+        assert_eq!(memories[0].content, "主人喜欢 TDD 流程");
+        assert_eq!(memories[0].source, "summon");
+        assert_eq!(memories[0].scope_kind, "companion");
+        assert_eq!(memories[0].scope_companion_id.as_deref(), Some(companion.companion_id.as_str()));
+
+        // Idempotent: re-accepting must not duplicate.
+        svc.decide_suggestion(&card.suggestion_id, true).await.unwrap();
+        assert_eq!(svc.store.count_memories("active").await.unwrap(), 1);
+
+        // Dismissal of a second proposal never materializes.
+        sink.propose(&conversation_fixture(9), "task", "帮主人调研咖啡豆", "任务线索")
+            .await
+            .unwrap();
+        let card2 = &svc.store.list_suggestions(Some("new"), 10).await.unwrap()[0];
+        svc.decide_suggestion(&card2.suggestion_id, false).await.unwrap();
+        assert_eq!(svc.store.count_memories("active").await.unwrap(), 1);
     }
 
     #[tokio::test]

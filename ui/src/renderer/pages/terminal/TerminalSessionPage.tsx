@@ -482,15 +482,19 @@ const TerminalSessionContent: React.FC<{ sessionId: TerminalId }> = ({ sessionId
               target={{ kind: 'terminal', id: sessionId }}
               applyNote={t('terminal.knowledge.applyAfterRelaunch')}
               footer={
-                <div className='flex flex-col gap-6px'>
-                  <span className='text-11px leading-15px text-t-tertiary'>
-                    {t('terminal.extended.knowledgeConnectNote', {
-                      defaultValue:
-                        '外置 CLI 可注册无密钥命令；启动时由当前系统用户专属的本地安全通道授权。',
-                    })}
-                  </span>
-                  <RegisterKnowledgeButton cwd={session?.cwd ?? ''} command={session?.command ?? ''} />
-                </div>
+                // External-CLI registration footer is desktop-host-only
+                // (audit 2026-07-30, finding I).
+                isDesktopShell() ? (
+                  <div className='flex flex-col gap-6px'>
+                    <span className='text-11px leading-15px text-t-tertiary'>
+                      {t('terminal.extended.knowledgeConnectNote', {
+                        defaultValue:
+                          '外置 CLI 可注册无密钥命令；启动时由当前系统用户专属的本地安全通道授权。',
+                      })}
+                    </span>
+                    <RegisterKnowledgeButton cwd={session?.cwd ?? ''} command={session?.command ?? ''} />
+                  </div>
+                ) : undefined
               }
             />
             <AutoWorkControl

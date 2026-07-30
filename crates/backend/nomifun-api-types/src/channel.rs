@@ -1,6 +1,15 @@
 use nomifun_common::TimestampMs;
 use serde::{Deserialize, Serialize};
 
+/// `channel_plugins.owner_domain` value for desktop-companion bots.
+pub const CHANNEL_OWNER_DOMAIN_COMPANION: &str = "companion";
+/// `channel_plugins.owner_domain` value for customer-service bots.
+pub const CHANNEL_OWNER_DOMAIN_CUSTOMER_SERVICE: &str = "customer_service";
+
+fn default_owner_domain() -> String {
+    CHANNEL_OWNER_DOMAIN_COMPANION.to_owned()
+}
+
 // ---------------------------------------------------------------------------
 // A. Plugin management — Request DTOs
 // ---------------------------------------------------------------------------
@@ -32,13 +41,11 @@ pub struct EnablePluginRequest {
         deserialize_with = "crate::serde_util::deserialize_optional_companion_id"
     )]
     pub companion_id: Option<String>,
-    /// 对外伙伴 (public agent) to bind this bot to. Mutually exclusive with
-    /// `companion_id` — a bot serves EITHER a companion OR a public agent.
-    #[serde(
-        default,
-        deserialize_with = "crate::serde_util::deserialize_optional_public_agent_id"
-    )]
-    pub public_agent_id: Option<String>,
+    /// Owning domain for a newly created bot: `companion` (default) or
+    /// `customer_service`. A customer-service bot never carries a
+    /// `companion_id`, and an existing bot's domain cannot be changed.
+    #[serde(default)]
+    pub owner_domain: Option<String>,
 }
 
 /// Request body for `POST /api/channel/plugins/disable`.
@@ -165,17 +172,13 @@ pub struct PluginStatusResponse {
         deserialize_with = "crate::serde_util::deserialize_optional_companion_id"
     )]
     pub companion_id: Option<String>,
-    /// 对外伙伴 (public agent) bound to this bot channel. Row-level mutually
-    /// exclusive with `companion_id`.
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        deserialize_with = "crate::serde_util::deserialize_optional_public_agent_id"
-    )]
-    pub public_agent_id: Option<String>,
     /// Platform-level bot identity (lark app_id, telegram bot id, ...).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub bot_key: Option<String>,
+    /// Owning domain: `companion` (desktop companion pool) or
+    /// `customer_service` (customer-service self-managed pool).
+    #[serde(default = "default_owner_domain")]
+    pub owner_domain: String,
     pub created_at: TimestampMs,
     pub updated_at: TimestampMs,
     pub connected: bool,
@@ -570,8 +573,8 @@ mod tests {
             status: Some("running".into()),
             last_connected: Some(1700000000000),
             companion_id: Some(COMPANION_ID.into()),
-            public_agent_id: None,
             bot_key: Some("123456".into()),
+            owner_domain: "companion".into(),
             created_at: 1699000000000,
             updated_at: 1700000000000,
             connected: true,
@@ -583,6 +586,7 @@ mod tests {
         assert_eq!(json["plugin_id"], CHANNEL_ID);
         assert_eq!(json["companion_id"], COMPANION_ID);
         assert_eq!(json["bot_key"], "123456");
+        assert_eq!(json["owner_domain"], "companion");
         assert_eq!(json["type"], "telegram");
         assert_eq!(json["name"], "Telegram Bot");
         assert_eq!(json["enabled"], true);
@@ -606,8 +610,8 @@ mod tests {
             status: None,
             last_connected: None,
             companion_id: None,
-            public_agent_id: None,
             bot_key: None,
+            owner_domain: "customer_service".into(),
             created_at: 1699000000000,
             updated_at: 1699000000000,
             connected: false,
@@ -621,6 +625,25 @@ mod tests {
         assert!(json.get("companion_id").is_none());
         assert!(json.get("bot_key").is_none());
         assert!(json.get("bot_username").is_none());
+        assert_eq!(json["owner_domain"], "customer_service");
+    }
+
+    #[test]
+    fn test_plugin_status_response_owner_domain_defaults_on_deserialize() {
+        // Older peers may omit owner_domain; it degrades to the companion pool.
+        let raw = json!({
+            "plugin_id": CHANNEL_ID,
+            "type": "telegram",
+            "name": "Telegram Bot",
+            "enabled": true,
+            "created_at": 1_i64,
+            "updated_at": 1_i64,
+            "connected": false,
+            "has_token": false,
+            "active_users": 0
+        });
+        let resp: PluginStatusResponse = serde_json::from_value(raw).unwrap();
+        assert_eq!(resp.owner_domain, CHANNEL_OWNER_DOMAIN_COMPANION);
     }
 
     // -- E. Test plugin response ----------------------------------------------
@@ -872,8 +895,8 @@ mod tests {
                 status: Some("running".into()),
                 last_connected: Some(1700000000000),
                 companion_id: None,
-                public_agent_id: None,
                 bot_key: None,
+                owner_domain: "companion".into(),
                 created_at: 1699000000000,
                 updated_at: 1700000000000,
                 connected: false,
@@ -935,8 +958,8 @@ mod tests {
             status: Some("ready".into()),
             last_connected: None,
             companion_id: Some(COMPANION_ID.into()),
-            public_agent_id: None,
             bot_key: Some("cli_app".into()),
+            owner_domain: "companion".into(),
             created_at: 1699000000000,
             updated_at: 1699000000000,
             connected: false,

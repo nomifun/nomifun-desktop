@@ -77,8 +77,8 @@ async fn setup() -> (
         status: None,
         last_connected: None,
         companion_id: None,
-        public_agent_id: None,
         bot_key: None,
+        owner_domain: "companion".into(),
         created_at: now_ms(),
         updated_at: now_ms(),
         })

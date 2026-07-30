@@ -285,19 +285,27 @@ fn generated_tauri_context<R: tauri::Runtime>() -> tauri::Context<R> {
 
 /// Data root resolution, in priority order:
 ///
-/// 1. `NOMIFUN_DATA_DIR` env — explicit override; the shell appends `/Nomi`
-///    (semantics unchanged since the Electron era).
-/// 2. The shared per-channel default from `nomifun_app::cli::default_data_dir()`:
-///    stable builds use the `Nomi` leaf; non-stable builds use a suffixed
-///    sibling such as `Nomi-dev`. The web host and the `nomicore` bin resolve
-///    to the same directory when built for the same channel, while dev state
-///    remains isolated from the installed stable app. The historic system-temp
-///    stable location remains an extreme fallback (see `relocate.rs`).
+/// 1. `NOMIFUN_DATA_DIR` env — the FINAL data root, taken verbatim. This is
+///    the same literal semantics as the web host and the `nomicore` bin, so
+///    the value the backend re-exports for its children is a fixed point: an
+///    in-app restart or auto-update relaunch that inherits it resolves to
+///    the SAME directory instead of drifting. (The pre-0.3.4 shell appended
+///    `/Nomi` here, which turned that inheritance into `…/Nomi/Nomi` and
+///    made the post-update boot reject its own dataset.)
+/// 2. The shared per-channel default from
+///    `nomifun_app::cli::default_data_dir()`: stable builds use `NomiFun`,
+///    non-stable builds a sibling such as `NomiFun-dev`.
+///
+/// `resolve_startup_data_root` then maps known self-export/default locations
+/// (including values inherited from affected releases) onto the channel
+/// default and runs the one-shot legacy layout migration
+/// (`NomiFun/Nomi` → `NomiFun`).
 fn default_data_dir() -> PathBuf {
-    if let Some(dir) = std::env::var_os("NOMIFUN_DATA_DIR") {
-        return PathBuf::from(dir).join("Nomi");
-    }
-    nomifun_app::cli::default_data_dir()
+    let requested = std::env::var_os("NOMIFUN_DATA_DIR")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(nomifun_app::cli::default_data_dir);
+    nomifun_app::bootstrap::resolve_startup_data_root(requested)
 }
 
 /// Updater scaffold: ask the configured update endpoint whether a newer signed
@@ -2086,10 +2094,12 @@ fn main() -> std::process::ExitCode {
     }
 
     // Env mutation + runtime init BEFORE Tauri builds its runtime/threads,
-    // mirroring the nomicore bin's ordering. v3 is a hard dataset cut, so the
-    // desktop must never copy or reopen the historical temp-rooted dataset
-    // before the shared dataset gate runs. The backend will quarantine any
-    // incompatible dataset already present at the current data root.
+    // mirroring the nomicore bin's ordering. `default_data_dir` resolves the
+    // effective root (literal NOMIFUN_DATA_DIR or the channel default) and
+    // runs the one-shot legacy layout migration (`NomiFun/Nomi` → `NomiFun`,
+    // see nomifun_app::bootstrap::resolve_startup_data_root). v3 remains a
+    // hard dataset cut for the historical pre-v3 temp-rooted dataset: the
+    // backend quarantines any incompatible dataset found at the current root.
     let data_dir = default_data_dir();
     nomifun_runtime::init(&data_dir);
     // SAFETY: no worker threads exist yet (Tauri's runtime is built by .run()).

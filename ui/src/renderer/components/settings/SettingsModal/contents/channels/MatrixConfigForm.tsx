@@ -10,6 +10,7 @@ import { Button, Empty, Input, Message, Spin, Tooltip } from '@arco-design/web-r
 import { CheckOne, CloseOne, Delete, Refresh } from '@icon-park/react';
 import React, { useCallback, useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
+import { buildEnablePluginRequest, findEnabledChannelStatus } from '@/renderer/components/channels/channelStatusSelection';
 import type { ChannelTarget } from './channelTarget';
 
 interface MatrixConfigFormProps {
@@ -80,14 +81,19 @@ const MatrixConfigForm: React.FC<MatrixConfigFormProps> = ({ pluginStatus, chann
 
   const handleAutoEnable = async () => {
     const config = { credentials: { access_token: accessToken.trim(), homeserver_url: homeserver.trim(), user_id: userId.trim() } };
-    const result = await channel.enablePlugin.invoke(channelTarget ? { plugin_id: channelTarget.channelPluginId, plugin_type: 'matrix', ...(channelTarget.publicAgentId ? { public_agent_id: channelTarget.publicAgentId } : { companion_id: channelTarget.companionId }), config } : { plugin_type: 'matrix', config });
+    const result = await channel.enablePlugin.invoke(buildEnablePluginRequest('matrix', channelTarget, config));
     if (!result.success) {
       throw new Error(result.error || t('nomi.settings.remoteEnableFailed', { defaultValue: 'Failed to enable channel' }));
     }
     Message.success(t('settings.matrix.pluginEnabled', 'Matrix bot enabled'));
     const plugins = await channel.getPluginStatus.invoke();
     if (plugins) {
-      const row = channelTarget ? (channelTarget.channelPluginId ? plugins.find((p) => p.plugin_id === channelTarget.channelPluginId) : plugins.find((p) => p.type === 'matrix' && p.companionId === channelTarget.companionId)) : plugins.find((p) => p.type === 'matrix');
+      const row = findEnabledChannelStatus(plugins, {
+        platform: 'matrix',
+        enabledPluginId: result.plugin_id,
+        companionId: channelTarget?.companionId,
+        ownerDomain: channelTarget?.ownerDomain,
+      });
       onStatusChange(row || null);
     }
   };

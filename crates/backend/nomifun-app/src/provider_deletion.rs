@@ -1,6 +1,6 @@
 //! App-layer aggregation of every subsystem's provider-in-use scan.
 //!
-//! `nomifun-app` is the only layer that sees the companion, public-agent, IDMM
+//! `nomifun-app` is the only layer that sees the companion, customer-service, IDMM
 //! and Agent Execution subsystems at once, so the cross-subsystem
 //! [`ProviderDeletionCoordinator`](nomifun_system::provider_deletion::ProviderDeletionCoordinator)
 //! is implemented here and injected into `ProviderService` (see
@@ -26,7 +26,7 @@ use nomifun_system::provider_deletion::ProviderDeletionCoordinator;
 pub struct AppProviderDeletionCoordinator {
     pub provider_lifecycle: Arc<ProviderLifecycleBarrier>,
     pub companion: Arc<nomifun_companion::CompanionService>,
-    pub public_agent: Arc<nomifun_public_agent::PublicAgentService>,
+    pub customer_service: Arc<nomifun_customer_service::CustomerServiceService>,
     pub workshop: Arc<nomifun_workshop::WorkshopService>,
     pub client_prefs: Arc<dyn IClientPreferenceRepository>,
     pub execution_repo: Arc<dyn IAgentExecutionRepository>,
@@ -52,7 +52,7 @@ impl ProviderDeletionCoordinator for AppProviderDeletionCoordinator {
 
         let mut out = Vec::new();
         out.extend(self.companion.providers_in_use(provider_id).await);
-        out.extend(self.public_agent.providers_in_use(provider_id).await);
+        out.extend(self.customer_service.providers_in_use(provider_id).await);
 
         // 智能决策 (smart decision): the global backup model is a hard binding
         // surfaced here as a friendly product error. Per-session watch bypass
@@ -160,7 +160,7 @@ mod tests {
     }
 
     /// Build a real coordinator over an in-memory DB + tempdir-backed companion /
-    /// public-agent services — mirrors the app's `build_system_state` construction
+    /// customer-service services — mirrors the app's `build_system_state` construction
     /// (minus the live provider completer). Returns the `Database` so its in-memory
     /// pool outlives the coordinator.
     async fn coordinator(
@@ -198,7 +198,9 @@ mod tests {
         )
         .await
         .unwrap();
-        let public_agent = nomifun_public_agent::PublicAgentService::start(dir);
+        let customer_service = Arc::new(nomifun_customer_service::CustomerServiceService::new(
+            Arc::new(nomifun_db::SqliteCustomerServiceRepository::new(db.pool().clone())),
+        ));
         let client_prefs: Arc<dyn IClientPreferenceRepository> =
             Arc::new(SqliteClientPreferenceRepository::new(db.pool().clone()));
         let execution_repo: Arc<dyn IAgentExecutionRepository> =
@@ -212,7 +214,7 @@ mod tests {
             AppProviderDeletionCoordinator {
                 provider_lifecycle: provider_lifecycle.clone(),
                 companion,
-                public_agent,
+                customer_service,
                 workshop: nomifun_workshop::WorkshopService::start_with_provider_lifecycle(
                     dir,
                     Arc::new(nomifun_db::SqliteWorkshopRepository::new(db.pool().clone())),

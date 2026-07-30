@@ -6,7 +6,7 @@
 
 import type { IChannelPairingRequest, IChannelPluginStatus, IChannelUser } from '@/common/types/channel/channel';
 import { channel } from '@/common/adapter/ipcBridge';
-import { findEnabledChannelStatus } from '@/renderer/components/channels/channelStatusSelection';
+import { findEnabledChannelStatus, buildEnablePluginRequest } from '@/renderer/components/channels/channelStatusSelection';
 import { Button, Empty, Input, Message, Spin, Tooltip } from '@arco-design/web-react';
 import { CheckOne, CloseOne, Delete, Refresh } from '@icon-park/react';
 import React, { useCallback, useEffect, useState } from 'react';
@@ -89,18 +89,7 @@ const QQBotConfigForm: React.FC<QQBotConfigFormProps> = ({
 
   const handleAutoEnable = async () => {
     const config = { credentials: { client_id: appId.trim(), client_secret: clientSecret.trim() } };
-    const result = await channel.enablePlugin.invoke(
-      channelTarget
-        ? {
-            plugin_id: channelTarget.channelPluginId,
-            plugin_type: 'qqbot',
-            ...(channelTarget.publicAgentId
-              ? { public_agent_id: channelTarget.publicAgentId }
-              : { companion_id: channelTarget.companionId }),
-            config,
-          }
-        : { plugin_type: 'qqbot', config }
-    );
+    const result = await channel.enablePlugin.invoke(buildEnablePluginRequest('qqbot', channelTarget, config));
     if (!result.success) {
       throw new Error(
         result.error ||
@@ -116,7 +105,7 @@ const QQBotConfigForm: React.FC<QQBotConfigFormProps> = ({
         platform: 'qqbot',
         enabledPluginId: result.plugin_id,
         companionId: channelTarget?.companionId,
-        publicAgentId: channelTarget?.publicAgentId,
+        ownerDomain: channelTarget?.ownerDomain,
       });
       // Only report a resolved plugin — feeding the parent `null` would skip its
       // optimistic merge + retarget (the adopt effect + next refresh still heal).

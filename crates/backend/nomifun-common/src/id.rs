@@ -292,6 +292,12 @@ define_entity_id!(
     ChannelSessionId
 );
 define_entity_id!(
+    /// Globally unique queued channel prompt identifier (busy-time queue,
+    /// spec D1). The SQLite row `id` remains an implementation-only
+    /// autoincrement key providing FIFO order.
+    ChannelPendingPromptId
+);
+define_entity_id!(
     /// Globally unique authorized channel-user identifier.
     ChannelUserId
 );
@@ -336,23 +342,28 @@ define_entity_id!(
     FigureId
 );
 define_entity_id!(
-    /// Globally unique public-agent audit-entry identifier.
-    ///
-    /// Audit entries are durable JSONL records and may be paged or exported
-    /// independently of the public-agent profile that owns them.
-    PublicAgentAuditEntryId
-);
-define_entity_id!(
     /// Globally unique companion evolution-feedback identifier.
     CompanionEvolutionFeedbackId
 );
 define_entity_id!(
-    /// Globally unique public-agent identifier.
-    PublicAgentId
-);
-define_entity_id!(
     /// Globally unique workshop-canvas identifier.
     WorkshopCanvasId
+);
+define_entity_id!(
+    /// Globally unique customer-service agent (客服员工) identifier.
+    CsAgentId
+);
+define_entity_id!(
+    /// Globally unique customer-service dialogue (访客对话) identifier.
+    CsDialogueId
+);
+define_entity_id!(
+    /// Globally unique customer-service message identifier.
+    CsMessageId
+);
+define_entity_id!(
+    /// Globally unique customer-service note (客服笔记) identifier.
+    CsNoteId
 );
 define_entity_id!(
     /// Globally unique workshop-asset identifier.

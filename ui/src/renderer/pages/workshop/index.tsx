@@ -9,7 +9,7 @@
  *
  * Grid of canvas cards (thumbnail / title / node-count / updated-time) with
  * create-and-jump, inline-modal rename, confirm-delete, search filter, and an
- * elegant empty state. Mirrors the knowledge / publicCompanion visual language
+ * elegant empty state. Mirrors the knowledge visual language
  * (rounded surfaces, theme variables, hover-revealed actions). M1 replaces the
  * editor at `/workshop/:id`; this page stays the domain's home.
  */

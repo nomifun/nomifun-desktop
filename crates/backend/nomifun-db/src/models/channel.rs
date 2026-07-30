@@ -20,13 +20,14 @@ pub struct ChannelPluginRow {
     /// Companion bound to this bot. UNIQUE(type, bot_key) guarantees a bot is
     /// never bound to more than one companion.
     pub companion_id: Option<String>,
-    /// 对外伙伴 (public agent) bound to this bot. Row-level mutually exclusive
-    /// with `companion_id`: a bot serves EITHER a companion OR a public agent OR
-    /// nothing, never both (enforced in the repository/manager layer).
-    pub public_agent_id: Option<String>,
     /// Platform-level bot identity (lark app_id, telegram bot id, ...),
     /// extracted from credentials on enable/restore.
     pub bot_key: Option<String>,
+    /// Owning domain: `companion` (desktop companion pool, default) or
+    /// `customer_service` (customer-service self-managed pool). A
+    /// customer-service bot never carries a `companion_id` (DB trigger +
+    /// application validation).
+    pub owner_domain: String,
     pub created_at: TimestampMs,
     pub updated_at: TimestampMs,
 }
@@ -44,11 +45,24 @@ pub struct NewChannelPluginRow {
     pub status: Option<String>,
     pub last_connected: Option<TimestampMs>,
     pub companion_id: Option<String>,
-    pub public_agent_id: Option<String>,
     pub bot_key: Option<String>,
+    /// Owning domain (`companion` | `customer_service`). Defaults to the
+    /// legacy companion pool when omitted on the wire.
+    #[serde(default = "default_owner_domain")]
+    pub owner_domain: String,
     pub created_at: TimestampMs,
     pub updated_at: TimestampMs,
 }
+
+/// The legacy/default channel bot ownership domain.
+pub fn default_owner_domain() -> String {
+    CHANNEL_OWNER_DOMAIN_COMPANION.to_owned()
+}
+
+/// `channel_plugins.owner_domain` value for desktop-companion bots.
+pub const CHANNEL_OWNER_DOMAIN_COMPANION: &str = "companion";
+/// `channel_plugins.owner_domain` value for customer-service bots.
+pub const CHANNEL_OWNER_DOMAIN_CUSTOMER_SERVICE: &str = "customer_service";
 
 /// Row mapping for the `channel_users` table.
 ///
@@ -183,3 +197,42 @@ pub struct NewChannelPairingCodeRow {
     pub expires_at: TimestampMs,
     pub status: String,
 }
+
+/// Row mapping for the `channel_pending_prompts` table (spec D1).
+///
+/// One IM prompt that arrived while its bound conversation was busy and is
+/// waiting for the queue drain to deliver it FIFO. `state` transitions from
+/// `queued` to exactly one absorbing terminal:
+/// `delivered | expired | cancelled | failed`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, sqlx::FromRow)]
+pub struct ChannelPendingPromptRow {
+    pub prompt_id: String,
+    pub channel_plugin_id: String,
+    pub chat_id: String,
+    pub channel_session_id: String,
+    pub conversation_id: String,
+    pub text: String,
+    /// Idempotency key minted at enqueue time; the drain reuses it so the
+    /// eventual delivery rides the same at-most-once receipt the immediate
+    /// dispatch path would have used.
+    pub idempotency_key: String,
+    pub state: String,
+    /// Number of automatic retries already spent on this prompt (retryable
+    /// delivery failures only, capped by the drain).
+    pub attempts: i64,
+    pub queued_at: TimestampMs,
+    pub settled_at: Option<TimestampMs>,
+}
+
+/// Values accepted when enqueueing a `channel_pending_prompts` row. The
+/// repository owns `prompt_id`, `state`, `attempts` and `queued_at`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NewChannelPendingPromptRow {
+    pub channel_plugin_id: String,
+    pub chat_id: String,
+    pub channel_session_id: String,
+    pub conversation_id: String,
+    pub text: String,
+    pub idempotency_key: String,
+}
+

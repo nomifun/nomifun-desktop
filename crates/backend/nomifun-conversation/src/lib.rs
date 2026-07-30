@@ -7,6 +7,7 @@ mod failover_seam;
 mod message_persistence;
 mod orphan_recovery;
 pub mod model_failover;
+pub mod relay_error_code;
 pub mod response_middleware;
 pub mod routes;
 pub mod routes_aux;
@@ -32,8 +33,9 @@ pub use execution_conversation_boundary::{
 pub use routes::conversation_routes;
 pub use routes_aux::conversation_ops_routes;
 pub use service::{
-    ConversationService, ConversationSupervisionHook, IdempotentMessageDelivery, IdmmTurnScope,
-    PublicTurnDeliveryState,
+    ConversationService, ConversationSupervisionHook, DELIVERY_NOTIFY_ORIGIN,
+    DeliveryNotifyRegistration, IdempotentMessageDelivery, IdmmTurnScope,
+    PublicTurnDeliveryState, TurnCompletionObserver,
 };
 pub use state::ConversationRouterState;
 

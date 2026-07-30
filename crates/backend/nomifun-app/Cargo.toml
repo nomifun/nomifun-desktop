@@ -17,6 +17,10 @@ name = "custom_agent_e2e"
 path = "tests/custom_agent_e2e.rs"
 
 [[test]]
+name = "delivery_notify_integration"
+path = "tests/delivery_notify_integration.rs"
+
+[[test]]
 name = "webui_lan_smoke"
 path = "tests/webui_lan_smoke.rs"
 
@@ -229,7 +233,7 @@ nomifun-idmm.workspace = true
 nomifun-knowledge.workspace = true
 nomifun-agent-execution.workspace = true
 nomifun-companion.workspace = true
-nomifun-public-agent.workspace = true
+nomifun-customer-service.workspace = true
 nomifun-workshop.workspace = true
 nomifun-creation.workspace = true
 nomifun-gateway.workspace = true

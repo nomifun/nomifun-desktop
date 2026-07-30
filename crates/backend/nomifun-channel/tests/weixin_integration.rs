@@ -217,7 +217,7 @@ mod weixin_tests {
                     plugin_id: None,
                     plugin_type: Some("nonexistent".into()),
                     companion_id: None,
-                    public_agent_id: None,
+                    owner_domain: None,
                 },
                 &config,
                 &factory,

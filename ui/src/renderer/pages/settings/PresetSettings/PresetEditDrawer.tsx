@@ -276,7 +276,6 @@ const PresetEditDrawer: React.FC<PresetEditDrawerProps> = ({
     { value: 'conversation', label: t('settings.presetTargetConversation', { defaultValue: 'Agent conversation' }) },
     { value: 'execution_step', label: t('settings.presetTargetExecutionStep', { defaultValue: '协作任务' }) },
     { value: 'companion', label: t('settings.presetTargetCompanion', { defaultValue: 'Companion' }) },
-    { value: 'public_companion', label: t('settings.presetTargetPublicCompanion', { defaultValue: 'Public companion' }) },
     { value: 'cron', label: t('settings.presetTargetCron', { defaultValue: 'Scheduled task' }) },
   ];
 

@@ -23,14 +23,12 @@ use tokio::sync::broadcast;
 
 const DEFAULT_PROVIDER: &str = "018f1234-5678-7abc-8def-012345678940";
 const COMPANION_PROVIDER: &str = "018f1234-5678-7abc-8def-012345678941";
-const PUBLIC_AGENT_PROVIDER: &str = "018f1234-5678-7abc-8def-012345678942";
-const SESSION_A: &str = "018f1234-5678-7abc-8def-012345678943";
+ const SESSION_A: &str = "018f1234-5678-7abc-8def-012345678943";
 const SESSION_B: &str = "018f1234-5678-7abc-8def-012345678944";
 const CHANNEL_USER_ID: &str = "018f1234-5678-7abc-8def-012345678945";
 const COMPANION_X: &str = "018f1234-5678-7abc-8def-012345678948";
 const COMPANION_Y: &str = "018f1234-5678-7abc-8def-012345678949";
-const UNUSED_COMPANION: &str = "018f1234-5678-7abc-8def-01234567894a";
-const PUBLIC_AGENT: &str = "018f1234-5678-7abc-8def-01234567894b";
+const CS_AGENT: &str = "018f1234-5678-7abc-8def-01234567894b";
 
 struct TestBroadcaster {
     events: Mutex<Vec<WebSocketMessage<serde_json::Value>>>,
@@ -198,7 +196,7 @@ impl AgentRuntimeRegistry for RecordingAgentRuntimeRegistry {
 /// Conversation model authorities, so tests must model a real provider catalog.
 async fn seed_channel_models(pool: &nomifun_db::SqlitePool) {
     let providers = SqliteProviderRepository::new(pool.clone());
-    for id in [DEFAULT_PROVIDER, COMPANION_PROVIDER, PUBLIC_AGENT_PROVIDER] {
+    for id in [DEFAULT_PROVIDER, COMPANION_PROVIDER] {
         providers
             .create(CreateProviderParams {
                 provider_id: Some(id),
@@ -530,8 +528,78 @@ async fn active_turn_conflict_still_maps_to_busy() {
         .unwrap_err();
 
     assert!(
-        matches!(error, ChannelError::ConversationBusy),
-        "a concurrent-turn Conflict must keep the busy notice, got: {error:?}"
+        matches!(error, ChannelError::ConversationBusy(ref cid) if cid == &sent.conversation_id),
+        "a concurrent-turn Conflict must keep the busy signal and carry the resolved conversation, got: {error:?}"
+    );
+}
+
+// ── Busy-time prompt queue (spec D1, Task 2) ─────────────────────────
+
+/// Busy-time prompts are persisted (not dropped) with correct FIFO positions,
+/// and the 「取消排队」 command clears exactly this chat's scope.
+#[tokio::test]
+async fn busy_prompts_enqueue_with_positions_and_cancel_clears_chat() {
+    use nomifun_db::PendingPromptEnqueue;
+
+    let db = init_database_memory().await.unwrap();
+    let stack = build_stack(db.pool().clone()).await;
+    let channel_plugin_id = create_plain_channel(&stack.channel_repo).await;
+    let conversation_id = nomifun_common::ConversationId::new().into_string();
+
+    let first = stack
+        .message_svc
+        .enqueue_busy_prompt(
+            &channel_plugin_id,
+            "chat-1",
+            SESSION_A,
+            &conversation_id,
+            "queued one",
+            "test:queue:first",
+        )
+        .await
+        .unwrap();
+    assert!(matches!(first, PendingPromptEnqueue::Queued { position: 1, .. }));
+
+    let second = stack
+        .message_svc
+        .enqueue_busy_prompt(
+            &channel_plugin_id,
+            "chat-1",
+            SESSION_A,
+            &conversation_id,
+            "queued two",
+            "test:queue:second",
+        )
+        .await
+        .unwrap();
+    assert!(matches!(second, PendingPromptEnqueue::Queued { position: 2, .. }));
+
+    // Nothing was lost: the FIFO head is the first prompt.
+    use nomifun_db::IChannelRepository;
+    let head = stack
+        .channel_repo
+        .peek_next_queued(&conversation_id)
+        .await
+        .unwrap()
+        .expect("queued rows must survive");
+    assert_eq!(head.text, "queued one");
+
+    // Cancel clears this chat's queue and reports the count.
+    assert_eq!(
+        stack
+            .message_svc
+            .cancel_chat_queue(&channel_plugin_id, "chat-1")
+            .await
+            .unwrap(),
+        2
+    );
+    assert!(
+        stack
+            .channel_repo
+            .peek_next_queued(&conversation_id)
+            .await
+            .unwrap()
+            .is_none()
     );
 }
 
@@ -615,8 +683,8 @@ async fn bind_channel_to_companion(
         status: None,
         last_connected: None,
         companion_id: Some(companion_id.to_owned()),
-        public_agent_id: None,
         bot_key: Some("42".to_owned()),
+        owner_domain: "companion".into(),
         created_at: now,
         updated_at: now,
     })
@@ -768,12 +836,9 @@ async fn companion_without_model_refuses_turn() {
     assert!(matches!(err, ChannelError::CompanionNotReady(_)));
 }
 
-/// Binds a bot channel row to a 对外伙伴 (public agent) — the per-bot binding the
-/// dispatch reads via `session.channel_id` → `get_plugin` → `row.public_agent_id`.
-async fn bind_channel_to_public_agent(
-    repo: &Arc<SqliteChannelRepository>,
-    public_agent_id: &str,
-) -> String {
+
+/// Creates a plain (unbound) bot channel row and returns its id.
+async fn create_plain_channel(repo: &Arc<SqliteChannelRepository>) -> String {
     use nomifun_db::IChannelRepository;
     let now = nomifun_common::now_ms();
     repo.create_plugin(&NewChannelPluginRow {
@@ -784,8 +849,8 @@ async fn bind_channel_to_public_agent(
         status: None,
         last_connected: None,
         companion_id: None,
-        public_agent_id: Some(public_agent_id.to_owned()),
         bot_key: Some("43".to_owned()),
+        owner_domain: "companion".into(),
         created_at: now,
         updated_at: now,
     })
@@ -794,126 +859,114 @@ async fn bind_channel_to_public_agent(
     .channel_plugin_id
 }
 
-// ── 对外伙伴 / public-agent channel routing ─────────────────────────────────
+// ── 客服 / customer-service channel routing ────────────────────────────────
 
-/// Profile stub for public-agent routing: `servable` is what
-/// `public_agent_servable` returns (true ⇒ alive + enabled), and `model` is the
-/// agent's answering model. Companion methods are inert (a public-agent bot must
-/// never touch the companion path).
-struct PublicStubProfile {
-    servable: bool,
-    model: Option<nomifun_common::ProviderWithModel>,
+/// Recording CsRouting stub: binds exactly one plugin, records every visitor
+/// message it is handed and answers with a fixed reply.
+struct RecordingCsRouting {
+    bound_plugin: String,
+    calls: std::sync::Mutex<Vec<(String, String, String, String)>>,
 }
 
 #[async_trait]
-impl nomifun_channel::message_service::ChannelAgentProfile for PublicStubProfile {
-    async fn companion_model(&self, _companion_id: &str) -> Option<nomifun_common::ProviderWithModel> {
-        None
+impl nomifun_channel::message_service::CsRouting for RecordingCsRouting {
+    async fn binding_for(&self, channel_plugin_id: &str) -> Option<String> {
+        (channel_plugin_id == self.bound_plugin).then(|| CS_AGENT.to_owned())
     }
-    async fn channel_companion_id(&self, _platform: &str) -> Option<String> {
-        // If the public-agent path ever fell through to the companion path, this
-        // would host the turn — the tests assert that never happens.
-        Some(UNUSED_COMPANION.to_owned())
-    }
-    async fn companion_exists(&self, _companion_id: &str) -> bool {
-        true
-    }
-    async fn ensure_companion_session(&self, _companion_id: &str) -> Option<String> {
-        panic!("public-agent bot must NOT route into a companion session");
-    }
-    async fn public_agent_servable(&self, _id: &str) -> bool {
-        self.servable
-    }
-    async fn public_agent_model(&self, _id: &str) -> Option<nomifun_common::ProviderWithModel> {
-        self.model.clone()
+    async fn handle_visitor_message(
+        &self,
+        cs_agent_id: &str,
+        channel_plugin_id: &str,
+        channel_user_id: &str,
+        chat_id: &str,
+        text: &str,
+    ) -> Result<String, String> {
+        self.calls.lock().unwrap().push((
+            cs_agent_id.to_owned(),
+            channel_plugin_id.to_owned(),
+            format!("{channel_user_id}:{chat_id}"),
+            text.to_owned(),
+        ));
+        Ok("客服回复".to_owned())
     }
 }
 
-/// (a) A public-agent-bound bot's turn builds an ISOLATED per-chat nomi
-/// conversation carrying `public_agent_id` + `channel_platform` + the public
-/// agent's model, and no `companion_id`. The factory applies the public capability
-/// clamp; the companion path is never taken.
+/// (a) A customer-service-bound bot's message is handed to the CsRouting seam
+/// with the full identity, and its reply comes back verbatim — no
+/// Conversation is created and the companion path is never touched.
 #[tokio::test]
-async fn public_agent_bound_platform_builds_clamped_session() {
+async fn cs_bound_bot_routes_to_seam_not_conversation() {
+    use nomifun_channel::error::ChannelError;
+
     let db = init_database_memory().await.unwrap();
     let stack = build_stack(db.pool().clone()).await;
+    let channel_plugin_id = create_plain_channel(&stack.channel_repo).await;
 
-    // The routing reads the BOT ROW's public_agent_id (per-bot), via channel_id.
-    let channel_plugin_id = bind_channel_to_public_agent(&stack.channel_repo, PUBLIC_AGENT).await;
+    let routing = Arc::new(RecordingCsRouting {
+        bound_plugin: channel_plugin_id.clone(),
+        calls: std::sync::Mutex::new(Vec::new()),
+    });
+    let message_svc = stack.message_svc.with_cs_routing(routing.clone());
 
-    let model = nomifun_common::ProviderWithModel {
-        provider_id: PUBLIC_AGENT_PROVIDER.to_owned(),
-        model: "pa-model".to_owned(),
-        use_model: Some("pa-model-v1".to_owned()),
-    };
-    let message_svc = stack
-        .message_svc
-        .with_channel_agent_profile(Arc::new(PublicStubProfile {
-            servable: true,
-            model: Some(model),
-        }));
+    // The loop-level gate resolves the binding…
+    assert_eq!(
+        message_svc.cs_bound_agent(&channel_plugin_id).await.as_deref(),
+        Some(CS_AGENT)
+    );
+    // …and the seam handles the visitor message.
+    let reply = message_svc
+        .cs_handle_visitor_message(CS_AGENT, &channel_plugin_id, CHANNEL_USER_ID, "chat-9", "你好")
+        .await
+        .unwrap();
+    assert_eq!(reply, "客服回复");
+    {
+        let calls = routing.calls.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].0, CS_AGENT);
+        assert_eq!(calls[0].1, channel_plugin_id);
+        assert_eq!(calls[0].2, format!("{CHANNEL_USER_ID}:chat-9"));
+        assert_eq!(calls[0].3, "你好");
+    }
+
+    // Defensive: the conversation path REFUSES a cs-bound bot instead of
+    // leaking a Conversation.
+    let mut session = make_session(None);
+    session.channel_plugin_id = Some(channel_plugin_id);
+    let err = message_svc
+        .send_to_agent(&session, "你好", PluginType::Telegram, "test:cs-bound:refuse")
+        .await
+        .expect_err("cs-bound bot must never enter the conversation path");
+    assert!(matches!(err, ChannelError::MessageSendFailed(_)));
+}
+
+/// (b) With the seam wired but the bot UNBOUND, the dedicated per-chat path
+/// behaves exactly as before (regression guard for the seam insertion).
+#[tokio::test]
+async fn unbound_bot_keeps_companion_path_with_seam_wired() {
+    let db = init_database_memory().await.unwrap();
+    let stack = build_stack(db.pool().clone()).await;
+    let channel_plugin_id = create_plain_channel(&stack.channel_repo).await;
+
+    let routing = Arc::new(RecordingCsRouting {
+        bound_plugin: "none".to_owned(), // binds nothing
+        calls: std::sync::Mutex::new(Vec::new()),
+    });
+    let message_svc = stack.message_svc.with_cs_routing(routing.clone());
+
+    assert!(message_svc.cs_bound_agent(&channel_plugin_id).await.is_none());
 
     let mut session = make_session(None);
     session.channel_plugin_id = Some(channel_plugin_id);
     let sent = message_svc
-        .send_to_agent(
-            &session,
-            "你好",
-            PluginType::Telegram,
-            "test:public-agent:enabled",
-        )
+        .send_to_agent(&session, "hello", PluginType::Telegram, "test:cs-unbound:normal")
         .await
         .unwrap();
     wait_until_idle(&stack.conversation_svc, &sent.conversation_id).await;
-
+    assert!(routing.calls.lock().unwrap().is_empty(), "seam must not be consulted");
     let conv = stack
         .conversation_svc
         .get(&stack.installation_owner, &sent.conversation_id)
         .await
         .unwrap();
-
     assert_eq!(conv.r#type, AgentType::Nomi);
-    assert_eq!(conv.extra["public_agent_id"], serde_json::json!(PUBLIC_AGENT));
-    assert_eq!(conv.extra["channel_platform"], serde_json::json!("telegram"));
-    assert!(
-        conv.extra.get("companion_id").is_none(),
-        "public agent must not carry a companion"
-    );
-    let m = conv.model.expect("public-agent conversation must carry a model");
-    assert_eq!(m.provider_id, PUBLIC_AGENT_PROVIDER);
-    assert_eq!(m.use_model.as_deref(), Some("pa-model-v1"));
-}
-
-/// A public-agent-bound bot whose agent is disabled/missing refuses with a
-/// friendly notice — it MUST NOT fall through to the companion path (the stub's
-/// `ensure_companion_session` panics if it does).
-#[tokio::test]
-async fn public_agent_bound_but_disabled_refuses_without_companion_fallthrough() {
-    use nomifun_channel::error::ChannelError;
-
-    let db = init_database_memory().await.unwrap();
-    let stack = build_stack(db.pool().clone()).await;
-
-    let channel_plugin_id = bind_channel_to_public_agent(&stack.channel_repo, PUBLIC_AGENT).await;
-
-    // servable = false models a disabled/deleted agent.
-    let message_svc = stack
-        .message_svc
-        .with_channel_agent_profile(Arc::new(PublicStubProfile {
-            servable: false,
-            model: None,
-        }));
-
-    let mut session = make_session(None);
-    session.channel_plugin_id = Some(channel_plugin_id);
-    let err = message_svc
-        .send_to_agent(
-            &session,
-            "你好",
-            PluginType::Telegram,
-            "test:public-agent:disabled",
-        )
-        .await
-        .expect_err("a disabled public agent must refuse the turn");
-    assert!(matches!(err, ChannelError::CompanionNotReady(_)));
 }

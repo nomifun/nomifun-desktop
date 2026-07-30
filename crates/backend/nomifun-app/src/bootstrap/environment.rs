@@ -59,7 +59,7 @@ pub(crate) fn acquire_work_root_lock(work_dir: &Path) -> Result<WorkRootLock> {
         );
     }
 
-    let canonical_work = std::fs::canonicalize(work_dir)
+    let canonical_work = nomifun_common::paths::canonicalize_simplified(work_dir)
         .with_context(|| format!("canonicalize work dir {}", work_dir.display()))?;
 
     let path = canonical_work.join(WORK_ROOT_LOCK_FILE);
@@ -103,7 +103,7 @@ pub(crate) fn acquire_distinct_work_root_lock(
             work_dir.display()
         );
     }
-    let canonical_work = std::fs::canonicalize(work_dir)
+    let canonical_work = nomifun_common::paths::canonicalize_simplified(work_dir)
         .with_context(|| format!("canonicalize work dir {}", work_dir.display()))?;
     if canonical_work == data_root_lock.canonical_root {
         return Ok(None);
@@ -713,6 +713,11 @@ pub async fn init_data_layer(config: &AppConfig) -> Result<Database> {
     let database = nomifun_db::init_database(&db_path).await?;
     info!(elapsed_ms = boot.elapsed().as_millis(), "startup: database initialized");
 
+    // One-shot absolute-path rewrite after a data-root relocation (layout
+    // migration). Idempotent and never fails the boot; see
+    // `bootstrap::relocation`.
+    super::relocation::rewrite_relocated_paths(&database, &config.data_dir).await;
+
     Ok(database)
 }
 
@@ -720,7 +725,7 @@ pub async fn init_data_layer(config: &AppConfig) -> Result<Database> {
 /// product-owned side store has initialized successfully.
 ///
 /// Keeping this separate from [`init_data_layer`] is deliberate: the main
-/// SQLite schema alone is not proof that companion/public-agent/workshop and
+/// SQLite schema alone is not proof that companion/workshop and
 /// the other service-owned stores completed their v3 bootstrap. If service
 /// assembly fails, the pending reset plan remains durable and the next boot
 /// resumes instead of accepting a half-initialized dataset.

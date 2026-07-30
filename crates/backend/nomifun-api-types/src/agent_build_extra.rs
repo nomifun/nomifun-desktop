@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use nomifun_common::{
-    CompanionId, CronJobId, DelegationPolicy, PublicAgentId, RemoteAgentId, UserId,
+    CompanionId, CronJobId, DelegationPolicy, RemoteAgentId, UserId,
 };
 use serde::{Deserialize, Serialize};
 
@@ -29,9 +29,44 @@ macro_rules! optional_id_deserializer {
 }
 
 optional_id_deserializer!(deserialize_companion_id, CompanionId);
-optional_id_deserializer!(deserialize_public_agent_id, PublicAgentId);
 optional_id_deserializer!(deserialize_user_id, UserId);
 optional_id_deserializer!(deserialize_cron_job_id, CronJobId);
+
+fn deserialize_required_companion_id<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = String::deserialize(deserializer)?;
+    CompanionId::parse(value.clone())
+        .map(|_| value)
+        .map_err(serde::de::Error::custom)
+}
+
+/// In-session companion summon marker (spec §设计 B), stored at
+/// `conversation.extra.summon` on ordinary work conversations.
+///
+/// The nomi factory reads it (via [`NomiBuildExtra::summon`]) to materialize
+/// the companion's active skills, register the read-only
+/// `recall_memories` / `propose_companion_memory` tools and inject the live
+/// memory-snapshot context section. The persona is never taken over and
+/// `save_memory` is never registered for a summoned work session.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SummonConfig {
+    /// The summoned companion (canonical UUIDv7). Required.
+    #[serde(deserialize_with = "deserialize_required_companion_id")]
+    pub companion_id: String,
+    /// Hand-picked memory ids, re-resolved live each turn under the
+    /// snapshot budget (edits to a memory naturally propagate).
+    #[serde(default)]
+    pub memory_ids: Vec<String>,
+    /// Companion skills excluded from materialization (subtractive; the
+    /// default is every active skill).
+    #[serde(default)]
+    pub skill_exclusions: Vec<String>,
+    /// Server-stamped epoch milliseconds. Required — clients never set it.
+    pub summoned_at: i64,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
@@ -352,24 +387,17 @@ pub struct NomiBuildExtra {
     /// conversation 时设置；普通会话恒空 = 不限制。
     #[serde(default)]
     pub allowed_tools: Vec<String>,
-    /// 对外服务信任档（正交于 Surface）。后端设定；`PublicService` 令 nomi 工厂把
-    /// 会话硬钳到安全白名单（关网关 / computer / browser / delegation），覆盖任何上游
-    /// 传入的工具授予——execution-time 后端权威闸。缺省 `Private` = 今日行为，零回归。
-    #[serde(default)]
-    pub exposure: crate::ExposureMode,
-    /// 对外伙伴（public agent / 对外服务）绑定 id。置位即标记本会话为对外服务：
-    /// nomi 工厂据此把 `exposure` 升到 `PublicService`（硬钳，安全边界），并从
-    /// `PublicAgentConfig` LIVE 解析人格 / 服务守则 / grounded / 知识库范围。后端
-    /// 设定 only —— HTTP 会话路由从 client extra 中剥离，
-    /// 防止自授权。缺省 `None` = 非对外会话。
-    #[serde(default, deserialize_with = "deserialize_public_agent_id")]
-    pub public_agent_id: Option<String>,
     /// Conversation-level delegation intent. This shapes when the Agent uses
     /// the unified persistent execution tools; it never grants tool authority.
     /// The factory always overwrites this from the typed runtime build option;
     /// a same-named value in open-ended JSON is never authoritative.
     #[serde(default = "default_delegation_policy")]
     pub delegation_policy: DelegationPolicy,
+    /// In-session companion summon (spec §设计 B): skills + selected memories
+    /// of one companion loaded read-only into an ordinary work conversation.
+    /// `None` = not summoned (today's behavior, zero regression).
+    #[serde(default)]
+    pub summon: Option<SummonConfig>,
 }
 
 fn default_nomi_max_tokens() -> u32 {
@@ -400,6 +428,71 @@ mod tests {
     use super::*;
 
     const MCP_SERVER_ID: &str = "0190f5fe-7c00-7a00-8000-000000000123";
+    const COMPANION_ID: &str = "0190f5fe-7c00-7a00-8abc-000000000001";
+
+    #[test]
+    fn summon_config_roundtrips_through_serde() {
+        let config = SummonConfig {
+            companion_id: COMPANION_ID.into(),
+            memory_ids: vec!["0190f5fe-7c00-7a00-8abc-000000000002".into()],
+            skill_exclusions: vec!["heavy-refactor".into()],
+            summoned_at: 1_722_000_000_000,
+        };
+        let json = serde_json::to_value(&config).unwrap();
+        let parsed: SummonConfig = serde_json::from_value(json).unwrap();
+        assert_eq!(parsed, config);
+    }
+
+    #[test]
+    fn summon_config_lists_default_empty_but_identity_fields_are_required() {
+        let parsed: SummonConfig = serde_json::from_value(serde_json::json!({
+            "companion_id": COMPANION_ID,
+            "summoned_at": 1,
+        }))
+        .unwrap();
+        assert!(parsed.memory_ids.is_empty());
+        assert!(parsed.skill_exclusions.is_empty());
+
+        for invalid in [
+            // companion_id missing entirely
+            serde_json::json!({ "summoned_at": 1 }),
+            // summoned_at missing (server must stamp it before persistence)
+            serde_json::json!({ "companion_id": COMPANION_ID }),
+            // companion_id not a canonical UUIDv7
+            serde_json::json!({ "companion_id": "not-an-id", "summoned_at": 1 }),
+            // unknown fields are rejected (extra.summon is a closed contract)
+            serde_json::json!({
+                "companion_id": COMPANION_ID,
+                "summoned_at": 1,
+                "persona_takeover": true,
+            }),
+        ] {
+            assert!(
+                serde_json::from_value::<SummonConfig>(invalid.clone()).is_err(),
+                "must reject {invalid}"
+            );
+        }
+    }
+
+    #[test]
+    fn nomi_build_extra_surfaces_summon_and_defaults_none() {
+        let extra: NomiBuildExtra = serde_json::from_value(serde_json::json!({
+            "summon": {
+                "companion_id": COMPANION_ID,
+                "memory_ids": [],
+                "skill_exclusions": ["x"],
+                "summoned_at": 42,
+            }
+        }))
+        .unwrap();
+        let summon = extra.summon.expect("summon must parse");
+        assert_eq!(summon.companion_id, COMPANION_ID);
+        assert_eq!(summon.skill_exclusions, vec!["x".to_owned()]);
+        assert_eq!(summon.summoned_at, 42);
+
+        let plain: NomiBuildExtra = serde_json::from_value(serde_json::json!({})).unwrap();
+        assert!(plain.summon.is_none(), "absent summon must stay None");
+    }
 
     /// Process-private browser issuers must never survive build-extra
     /// serialization, while the stateless computer bridge remains serializable.

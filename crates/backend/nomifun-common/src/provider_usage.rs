@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 pub enum ProviderUsageFeature {
     Conversation,
     DesktopCompanion,
-    PublicCompanion,
+    CustomerService,
     SmartDecision,
     AgentExecution,
 }

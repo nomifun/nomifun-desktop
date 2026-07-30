@@ -19,6 +19,7 @@ import SendBox from '@/renderer/components/chat/SendBox';
 import FileAttachButton from '@/renderer/components/media/FileAttachButton';
 import FilePreview from '@/renderer/components/media/FilePreview';
 import HorizontalFileList from '@/renderer/components/media/HorizontalFileList';
+import SummonControl from '@/renderer/pages/conversation/components/SummonPanel';
 import { useConversationContextSafe } from '@/renderer/hooks/context/ConversationContext';
 import { useLayoutContext } from '@/renderer/hooks/context/LayoutContext';
 import { useAutoTitle } from '@/renderer/hooks/chat/useAutoTitle';
@@ -981,6 +982,9 @@ const NomiSendBox: React.FC<{
             <div className='flex items-center gap-2 min-w-0' data-testid='nomi-sendbox-config-group'>
               {hasContextUsage && <ContextUsageRing used={tokenUsage?.context_tokens} max={tokenUsage?.context_window} />}
               <NomiModelSelector selection={modelSelection} className='nomi-sendbox-model-btn' />
+              {/* 召唤伙伴（设计 B5）：仅普通工作会话可见 —— 伙伴/客服等锁定面
+                  通过 hideModeSelector 隐藏整个配置组，天然不渲染。 */}
+              <SummonControl conversationId={conversation_id} />
               {collaboratorSelectorNode}
               {extraRightTools}
               <AgentModeSelector

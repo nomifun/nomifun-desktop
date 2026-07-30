@@ -20,7 +20,7 @@ use nomifun_auth::{
 };
 use nomifun_channel::channel_routes;
 use nomifun_companion::{companion_public_routes, companion_routes};
-use nomifun_public_agent::public_agent_routes;
+use nomifun_customer_service::customer_service_routes;
 use nomifun_workshop::{workshop_public_routes, workshop_routes};
 use nomifun_creation::creation_routes;
 use nomifun_conversation::{conversation_ops_routes, conversation_routes};
@@ -331,6 +331,36 @@ pub async fn create_router(services: &AppServices) -> Router {
             .message_loop
             .run(channel_components.message_rx, channel_components.confirm_rx),
     );
+    // Start the busy-time queue drain (spec D1): it consumes `turn.completed`
+    // envelopes from the same in-process bus the conversation service
+    // publishes through, recovers persisted queued prompts on startup, and
+    // expires stale ones.
+    tokio::spawn(
+        channel_components
+            .queue_drain
+            .run(services.event_bus.subscribe_user()),
+    );
+
+    // Spec D2: register the delivery-notify observer on the conversation
+    // service instance that executes gateway `nomi_send_to_conversation`
+    // turns (the same instance wired into GatewayDeps above). When a watched
+    // turn completes, the observer injects a receipt message into the
+    // requester session; a channel-bound requester relays the companion's
+    // summary to its IM chat through the standard stream relay.
+    let delivery_notify_observer = Arc::new(crate::delivery_notify::DeliveryNotifyObserver::new(
+        states.conversation.service.clone(),
+        services.agent_runtime_registry.clone(),
+        services.authoritative_user_id.clone(),
+        states.channel.repo.clone(),
+        channel_components.manager.clone()
+            as Arc<dyn nomifun_channel::stream_relay::ChannelSender>,
+        channel_components.message_service.pending_decisions(),
+        channel_components.message_service.asset_resolver(),
+    ));
+    states
+        .conversation
+        .service
+        .with_turn_completion_observer(delivery_notify_observer);
     tracing::info!(
         elapsed_ms = boot.elapsed().as_millis(),
         "startup: channel message loop spawned"
@@ -343,15 +373,14 @@ pub async fn create_router(services: &AppServices) -> Router {
         let mgr = chan_mgr.clone();
         let factory = chan_factory.clone();
         let companion_service = services.companion_service.clone();
-        let public_agent_service = services.public_agent_service.clone();
         tokio::spawn(async move {
             // Self-heal ghost owner bindings BEFORE restoring: a channel row
-            // bound to a 伙伴 / 对外伙伴 that was deleted before the delete-hook
-            // existed (or missed by it) keeps reserving its bot identity
+            // bound to a 伙伴 that was deleted before the delete-hook existed
+            // (or missed by it) keeps reserving its bot identity
             // (UNIQUE(type,bot_key)), so re-enabling that bot under a live owner
             // fails with "already bound" forever. Unbind rows whose owner is no
-            // longer in the roster so they become adoptable again. Both rosters
-            // are scanned into memory at service construction, so an empty list
+            // longer in the roster so they become adoptable again. The roster is
+            // scanned into memory at service construction, so an empty list
             // here means the owner really is gone.
             let live_companions: std::collections::HashSet<String> = companion_service
                 .list_companions()
@@ -360,24 +389,14 @@ pub async fn create_router(services: &AppServices) -> Router {
                 .map(|c| c.companion_id)
                 .filter(|id| !id.is_empty())
                 .collect();
-            let live_public_agents: std::collections::HashSet<String> = public_agent_service
-                .list()
-                .await
-                .unwrap_or_else(|error| {
-                    tracing::warn!(%error, "reconcile_orphaned_owners: public-agent roster unavailable");
-                    Vec::new()
-                })
-                .into_iter()
-                .map(|a| a.public_agent_id.into_string())
-                .collect();
             // Safety valve: never mass-unbind on an ambiguous "no owners at all"
-            // signal (e.g. a roster that failed to load). If the user genuinely
-            // has zero companions AND zero public agents, there is nothing to
-            // reconcile against — skip rather than risk unbinding every row.
-            if live_companions.is_empty() && live_public_agents.is_empty() {
+            // signal. If the user genuinely has zero companions, there is
+            // nothing to reconcile against — skip rather than risk unbinding
+            // every row.
+            if live_companions.is_empty() {
                 tracing::info!("reconcile_orphaned_owners: empty roster, skipping to avoid mass-unbind");
             } else {
-                mgr.reconcile_orphaned_owners(&live_companions, &live_public_agents).await;
+                mgr.reconcile_orphaned_owners(&live_companions).await;
             }
 
             if let Err(e) = mgr.restore_plugins(&factory).await {
@@ -636,6 +655,7 @@ pub fn create_router_with_all_state(
     let auth_mw_state = AuthState {
         jwt_service: services.jwt_service.clone(),
         user_repo: services.user_repo.clone(),
+        cookie_config: services.cookie_config.clone(),
     };
     let instance_owner_state =
         InstanceOwnerState::new(services.authoritative_user_id.clone());
@@ -766,10 +786,10 @@ pub fn create_router_with_all_state(
         &instance_owner_state,
     );
 
-    // 对外伙伴 (public companion) enterprise-service domain — its OWN routes,
-    // separate from the desktop companion. Protected by auth middleware.
-    let public_agent_authenticated = protect_instance_owner(
-        public_agent_routes(states.public_agent.clone()),
+    // 客服独立域 (customer-service domain) — roster/bindings/notes/dialogues
+    // REST surface. Protected by auth middleware.
+    let customer_service_authenticated = protect_instance_owner(
+        customer_service_routes(states.customer_service.clone()),
         &auth_mw_state,
         &instance_owner_state,
     );
@@ -1024,7 +1044,7 @@ pub fn create_router_with_all_state(
         .merge(requirement_authenticated)
         .merge(idmm_authenticated)
         .merge(companion_authenticated)
-        .merge(public_agent_authenticated)
+        .merge(customer_service_authenticated)
         .merge(workshop_authenticated)
         .merge(creation_authenticated)
         .merge(knowledge_authenticated)

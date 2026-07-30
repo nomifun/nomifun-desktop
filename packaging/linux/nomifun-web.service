@@ -15,7 +15,7 @@ Environment=NOMIFUN_WEB_PORT=8787
 # NOTE: keep NOMIFUN_DATA_DIR in sync with StateDirectory below — both must
 # point at /var/lib/nomifun. If you drop this line, the data dir silently falls
 # back to the service user's per-user app-data dir
-# ($XDG_DATA_HOME/NomiFun/Nomi, usually ~nomifun/.local/share/NomiFun/Nomi),
+# ($XDG_DATA_HOME/NomiFun, usually ~nomifun/.local/share/NomiFun),
 # decoupled from the systemd-managed StateDirectory.
 Environment=NOMIFUN_DATA_DIR=/var/lib/nomifun
 Environment=NOMIFUN_WEB_DIST=/opt/nomifun/web
