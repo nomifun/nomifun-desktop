@@ -22,7 +22,8 @@ use crate::model_capability::{base_model_name, infer_generation_capabilities, in
 use crate::ModelType;
 
 /// The endpoint-determining task a model performs. Wire values are snake_case.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export_to = "../../../../ui/src/common/protocolBindings/")]
 #[serde(rename_all = "snake_case")]
 pub enum ModelTask {
     /// Text / multimodal chat completions (`/chat/completions`).
@@ -44,7 +45,8 @@ pub enum ModelTask {
 }
 
 /// Within-task refinement of a model's abilities. Mostly modifies [`ModelTask::Chat`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export_to = "../../../../ui/src/common/protocolBindings/")]
 #[serde(rename_all = "snake_case")]
 pub enum ModelTrait {
     /// Chat model accepts image input (vision understanding).
@@ -58,7 +60,8 @@ pub enum ModelTrait {
 }
 
 /// Provenance of a [`ModelProfile`]. User-authored profiles override inferred values.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default, ts_rs::TS)]
+#[ts(export_to = "../../../../ui/src/common/protocolBindings/")]
 #[serde(rename_all = "snake_case")]
 pub enum ProfileSource {
     /// Auto-derived from the model name/platform heuristic.

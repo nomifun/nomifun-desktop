@@ -31,7 +31,9 @@ use serde_json::Value;
 use crate::adapter::ProtocolAdapter;
 use crate::call::ResolvedCall;
 use crate::error::{InvokeError, InvokeErrorKind};
-use crate::transport::{MAX_ARTIFACT_BYTES, error_from_response, net_err, read_body_capped};
+use crate::transport::{
+    MAX_ARTIFACT_BYTES, error_from_response, post_json, post_multipart, read_body_capped,
+};
 use crate::types::{ProducedAsset, ProducedData, TaskOutcome, TaskRequest, TaskResult};
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
@@ -61,32 +63,36 @@ impl ProtocolAdapter for OpenAiAudioTranscriptionsAdapter {
             ));
         };
         let url = call.dispatch_target().url;
-
-        let file_part = Part::bytes(req.audio.bytes.clone())
-            .file_name(format!("audio.{}", ext_for_audio_mime(&req.audio.mime)))
-            .mime_str(&req.audio.mime)
-            .map_err(|e| InvokeError::new(InvokeErrorKind::InvalidParams, format!("invalid audio mime: {e}")))?;
-
-        let mut form = Form::new()
-            .part("file", file_part)
-            .text("model", call.model.clone())
-            // OpenAI defaults this to JSON, but StepFun's `step-asr` contract
-            // requires the field explicitly.
-            .text("response_format", "json");
-
         let language = req.language.as_deref().map(str::trim).filter(|s| !s.is_empty());
-        if let Some(lang) = language {
-            form = form.text("language", lang.to_owned());
-        }
-        if let Some(prompt) = req.prompt.as_deref().filter(|s| !s.is_empty()) {
-            form = form.text("prompt", prompt.to_owned());
-        }
-        if let Some(temp) = req.extra.get("temperature").and_then(|v| v.as_f64()) {
-            form = form.text("temperature", temp.to_string());
-        }
 
-        let rb = http.post(&url).timeout(REQUEST_TIMEOUT).multipart(form);
-        let resp = call.connection.auth.apply(rb)?.send().await.map_err(net_err)?;
+        // Built per attempt: multipart forms cannot be cloned, and rotation
+        // may need to resend.
+        let build_form = || -> Result<Form, InvokeError> {
+            let file_part = Part::bytes(req.audio.bytes.clone())
+                .file_name(format!("audio.{}", ext_for_audio_mime(&req.audio.mime)))
+                .mime_str(&req.audio.mime)
+                .map_err(|e| InvokeError::new(InvokeErrorKind::InvalidParams, format!("invalid audio mime: {e}")))?;
+
+            let mut form = Form::new()
+                .part("file", file_part)
+                .text("model", call.model.clone())
+                // OpenAI defaults this to JSON, but StepFun's `step-asr` contract
+                // requires the field explicitly.
+                .text("response_format", "json");
+
+            if let Some(lang) = language {
+                form = form.text("language", lang.to_owned());
+            }
+            if let Some(prompt) = req.prompt.as_deref().filter(|s| !s.is_empty()) {
+                form = form.text("prompt", prompt.to_owned());
+            }
+            if let Some(temp) = req.extra.get("temperature").and_then(|v| v.as_f64()) {
+                form = form.text("temperature", temp.to_string());
+            }
+            Ok(form)
+        };
+
+        let resp = post_multipart(http, &url, REQUEST_TIMEOUT, &call.connection.auth, build_form).await?;
         if !resp.status().is_success() {
             return Err(error_from_response(resp).await);
         }
@@ -133,8 +139,7 @@ impl ProtocolAdapter for OpenAiAudioSpeechAdapter {
             body["response_format"] = Value::String(format.to_owned());
         }
 
-        let rb = http.post(&url).timeout(REQUEST_TIMEOUT).json(&body);
-        let resp = call.connection.auth.apply(rb)?.send().await.map_err(net_err)?;
+        let resp = post_json(http, &url, REQUEST_TIMEOUT, &call.connection.auth, &body).await?;
         if !resp.status().is_success() {
             return Err(error_from_response(resp).await);
         }

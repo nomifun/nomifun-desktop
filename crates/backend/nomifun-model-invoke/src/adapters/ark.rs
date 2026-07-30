@@ -32,7 +32,7 @@ use serde_json::{Value, json};
 use crate::adapter::ProtocolAdapter;
 use crate::call::{ResolvedCall, ResolvedConnection};
 use crate::error::{InvokeError, InvokeErrorKind};
-use crate::transport::{encode_b64, error_from_response, net_err};
+use crate::transport::{encode_b64, error_from_response, get_request, post_json};
 use crate::types::{
     JobHandle, ProducedAsset, ProducedData, TaskOutcome, TaskRequest, TaskResult, VideoGenRequest,
 };
@@ -107,8 +107,7 @@ impl ProtocolAdapter for ArkImagesAdapter {
             }
         }
 
-        let rb = http.post(&url).timeout(SUBMIT_TIMEOUT).json(&body);
-        let resp = call.connection.auth.apply(rb)?.send().await.map_err(net_err)?;
+        let resp = post_json(http, &url, SUBMIT_TIMEOUT, &call.connection.auth, &body).await?;
         if !resp.status().is_success() {
             return Err(error_from_response(resp).await);
         }
@@ -164,8 +163,7 @@ impl ProtocolAdapter for ArkVideoJobsAdapter {
         let url = video_tasks_base(call);
         let body = build_video_submit_body(&call.model, req);
 
-        let rb = http.post(&url).timeout(SUBMIT_TIMEOUT).json(&body);
-        let resp = call.connection.auth.apply(rb)?.send().await.map_err(net_err)?;
+        let resp = post_json(http, &url, SUBMIT_TIMEOUT, &call.connection.auth, &body).await?;
         if !resp.status().is_success() {
             return Err(error_from_response(resp).await);
         }
@@ -190,8 +188,7 @@ impl ProtocolAdapter for ArkVideoJobsAdapter {
         job: &JobHandle,
     ) -> Result<TaskOutcome, InvokeError> {
         let status_url = format!("{}/{}", video_tasks_base(call), job.remote_id);
-        let rb = http.get(&status_url).timeout(POLL_TIMEOUT);
-        let resp = call.connection.auth.apply(rb)?.send().await.map_err(net_err)?;
+        let resp = get_request(http, &status_url, POLL_TIMEOUT, &call.connection.auth).await?;
         if !resp.status().is_success() {
             return Err(error_from_response(resp).await);
         }

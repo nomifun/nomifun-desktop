@@ -7,3 +7,7 @@ edition.workspace = true
 nomifun-common.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+# no-serde-warnings: this crate's DTOs carry serde attrs ts-rs cannot parse
+# (deserialize_with/deny_unknown_fields) — harmless, but each would print a
+# pseudo-compiler warning on every build.
+ts-rs = { workspace = true, features = ["no-serde-warnings"] }

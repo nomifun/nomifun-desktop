@@ -18,8 +18,9 @@ pub struct TaskRoute {
 /// Resolve the built-in route for `(platform, task)`.
 ///
 /// Defaults (any platform) are the OpenAI-compatible protocols; `gemini`,
-/// `deepgram` and `ark`/`volcengine` override specific tasks. Volcano voice
-/// tasks ride the dedicated `"voice"` connection profile.
+/// `deepgram`, `ark`/`volcengine`, `dashscope`/`alibaba` and `minimax`
+/// override specific tasks. Volcano voice tasks ride the dedicated `"voice"`
+/// connection profile.
 pub fn platform_route(platform: &str, task: ModelTask) -> TaskRoute {
     use ModelTask::*;
     const fn route(protocol: &'static str) -> TaskRoute {
@@ -41,6 +42,13 @@ pub fn platform_route(platform: &str, task: ModelTask) -> TaskRoute {
         ("ark" | "volcengine", SpeechSynthesis) => {
             TaskRoute { protocol: "volc.tts_v3", connection_role: Some("voice") }
         }
+        // -- DashScope (dashscope / alibaba) overrides: native input/parameters
+        //    protocols on the default connection ------------------------------
+        ("dashscope" | "alibaba", ImageGeneration) => route("dashscope.images"),
+        ("dashscope" | "alibaba", Embedding) => route("dashscope.embeddings"),
+        // -- MiniMax override: t2a rides the default connection (same Bearer
+        //    key as chat; GroupId comes from the connection's extra) ----------
+        ("minimax", SpeechSynthesis) => route("minimax.t2a"),
         // -- defaults: OpenAI-compatible protocols on the default connection --
         (_, Chat) => route("openai.chat_text"),
         (_, ImageGeneration | ImageEdit) => route("openai.images"),
@@ -125,5 +133,35 @@ mod tests {
                 assert_eq!(platform_route(platform, task), want, "({platform}, {task:?})");
             }
         }
+    }
+
+    #[test]
+    fn dashscope_and_alibaba_override_image_and_embedding_only() {
+        for platform in ["dashscope", "alibaba"] {
+            let cases = [
+                (ImageGeneration, route("dashscope.images")),
+                (Embedding, route("dashscope.embeddings")),
+                // Not overridden: everything else falls to defaults (ImageEdit
+                // included — wanx has no mapped edit endpoint).
+                (ImageEdit, route("openai.images")),
+                (Chat, route("openai.chat_text")),
+                (VideoGeneration, route("openai.videos")),
+                (SpeechSynthesis, route("openai.audio_speech")),
+                (SpeechRecognition, route("openai.audio_transcriptions")),
+                (Rerank, route("openai.rerank")),
+            ];
+            for (task, want) in cases {
+                assert_eq!(platform_route(platform, task), want, "({platform}, {task:?})");
+            }
+        }
+    }
+
+    #[test]
+    fn minimax_overrides_speech_synthesis_only_on_default_connection() {
+        assert_eq!(platform_route("minimax", SpeechSynthesis), route("minimax.t2a"));
+        assert_eq!(platform_route("minimax", SpeechSynthesis).connection_role, None);
+        assert_eq!(platform_route("minimax", Chat), route("openai.chat_text"));
+        assert_eq!(platform_route("minimax", ImageGeneration), route("openai.images"));
+        assert_eq!(platform_route("minimax", VideoGeneration), route("openai.videos"));
     }
 }

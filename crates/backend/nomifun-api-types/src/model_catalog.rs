@@ -12,7 +12,8 @@ use crate::model_task::{derive_tasks_and_traits, ModelProfile, ModelTask, ModelT
 use crate::provider::ProviderResponse;
 
 /// A concrete provider/model selection returned by catalog resolution.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, ts_rs::TS)]
+#[ts(export_to = "../../../../ui/src/common/protocolBindings/")]
 pub struct CatalogModelRef {
     #[serde(deserialize_with = "crate::serde_util::deserialize_provider_id")]
     pub provider_id: String,
@@ -21,16 +22,19 @@ pub struct CatalogModelRef {
 }
 
 /// Request body for `POST /api/model-profiles/resolve`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export_to = "../../../../ui/src/common/protocolBindings/")]
 #[serde(deny_unknown_fields)]
 pub struct ResolveModelsRequest {
     pub task: ModelTask,
     #[serde(default)]
+    #[ts(optional = nullable)]
     pub required_traits: Vec<ModelTrait>,
 }
 
 /// Response body for `POST /api/model-profiles/resolve`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export_to = "../../../../ui/src/common/protocolBindings/")]
 pub struct ResolveModelsResponse {
     pub models: Vec<CatalogModelRef>,
 }

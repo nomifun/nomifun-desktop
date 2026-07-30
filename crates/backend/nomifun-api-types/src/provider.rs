@@ -31,7 +31,8 @@ pub struct ModelCapability {
 }
 
 /// Health status values for a model.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export_to = "../../../../ui/src/common/protocolBindings/")]
 #[serde(rename_all = "lowercase")]
 pub enum HealthStatus {
     Unknown,
@@ -40,14 +41,18 @@ pub enum HealthStatus {
 }
 
 /// Per-model health check information.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, ts_rs::TS)]
+#[ts(export_to = "../../../../ui/src/common/protocolBindings/")]
 pub struct ModelHealthStatus {
     pub status: HealthStatus,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional, type = "number")]
     pub last_check: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional, type = "number")]
     pub latency: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub error: Option<String>,
 }
 
@@ -255,12 +260,14 @@ pub struct UpdateProviderRequest {
 ///
 /// The body is optional on the wire: a missing/empty body clones with the
 /// default `"{source name} copy"` name.
-#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq, ts_rs::TS)]
+#[ts(export_to = "../../../../ui/src/common/protocolBindings/")]
 #[serde(deny_unknown_fields)]
 pub struct CloneProviderRequest {
     /// Optional display name for the clone. A trimmed non-empty value wins;
     /// missing/blank falls back to `"{source name} copy"`.
     #[serde(default)]
+    #[ts(optional = nullable)]
     pub name: Option<String>,
 }
 

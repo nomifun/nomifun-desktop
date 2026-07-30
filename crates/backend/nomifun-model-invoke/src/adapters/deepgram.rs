@@ -29,7 +29,7 @@ use crate::adapter::ProtocolAdapter;
 use crate::adapters::has_endpoint_override;
 use crate::call::ResolvedCall;
 use crate::error::{InvokeError, InvokeErrorKind};
-use crate::transport::{error_from_response, net_err};
+use crate::transport::{error_from_response, post_raw};
 use crate::types::{TaskOutcome, TaskRequest, TaskResult};
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
@@ -81,13 +81,16 @@ impl ProtocolAdapter for DeepgramListenAdapter {
             query.push(("smart_format", "true".to_string()));
         }
 
-        let rb = http
-            .post(&url)
-            .timeout(REQUEST_TIMEOUT)
-            .header(reqwest::header::CONTENT_TYPE, req.audio.mime.as_str())
-            .query(&query)
-            .body(req.audio.bytes.clone());
-        let resp = call.connection.auth.apply(rb)?.send().await.map_err(net_err)?;
+        let resp = post_raw(
+            http,
+            &url,
+            REQUEST_TIMEOUT,
+            &call.connection.auth,
+            req.audio.mime.as_str(),
+            &query,
+            &req.audio.bytes,
+        )
+        .await?;
         if !resp.status().is_success() {
             return Err(error_from_response(resp).await);
         }
