@@ -135,6 +135,36 @@ const MediaResult: React.FC<{ mode: 'image' | 'video'; assetId: AssetId; index: 
   );
 };
 
+/** Synthesized speech playback — an inline audio player per produced asset. */
+const AudioResult: React.FC<{ assetId: AssetId; index: number; total: number }> = ({ assetId, index, total }) => {
+  const { t } = useTranslation();
+  const media = useWorkshopMedia(assetId);
+  return (
+    <div
+      data-workshop-result-id={assetId}
+      className='relative overflow-hidden rounded-10px border border-solid border-[var(--color-border-2)] bg-[var(--color-fill-1)] px-8px py-8px'
+    >
+      <ResultOrdinal index={index} total={total} assetId={assetId} />
+      {media.status === 'ready' ? (
+        <audio src={media.url} controls className='nodrag block w-full' />
+      ) : (
+        <div className='flex h-48px flex-col items-center justify-center gap-5px px-8px text-center'>
+          {media.status === 'error' ? (
+            <>
+              <span className='text-11px text-[rgb(var(--danger-6))]'>
+                {t('workshopGeneration.result.loadFailed', { defaultValue: '加载失败' })}
+              </span>
+              <span className='max-w-full break-all text-9px text-[var(--color-text-3)]'>{assetId}</span>
+            </>
+          ) : (
+            <Spinner />
+          )}
+        </div>
+      )}
+    </div>
+  );
+};
+
 type TextLoadState = { status: 'loading' } | { status: 'ready'; content: string } | { status: 'error' };
 
 const TextResult: React.FC<{
@@ -209,6 +239,17 @@ const ResultView: React.FC<ResultViewProps> = ({ mode, resultAssetIds, batch, on
             total={orderedIds.length}
             onToTextNode={onToTextNode}
           />
+        ))}
+      </div>
+    );
+  }
+
+  if (mode === 'tts') {
+    // Audio playback only — no continue-edit chain for synthesized speech.
+    return (
+      <div className='flex flex-col gap-8px'>
+        {orderedIds.map((assetId, index) => (
+          <AudioResult key={`${assetId}:${index}`} assetId={assetId} index={index} total={orderedIds.length} />
         ))}
       </div>
     );

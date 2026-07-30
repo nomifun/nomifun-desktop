@@ -43,6 +43,8 @@ function sourceKind(type: string | undefined, data: Record<string, unknown> | un
       data.resultAssetIds.some((value) => tryParseEntityId('asset', value) !== null);
     if (!hasResult) return null;
     const mode = typeof data?.mode === 'string' ? data.mode : 'image';
+    // tts results are audio — no input kind; mirrors pipeline nodeContribution.
+    if (mode === 'tts') return null;
     return mode === 'video' ? 'video' : mode === 'text' ? 'text' : 'image';
   }
   return null;

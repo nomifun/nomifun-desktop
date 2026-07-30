@@ -5,7 +5,8 @@
   "mode": {
     "image": "图像",
     "video": "视频",
-    "text": "文本"
+    "text": "文本",
+    "tts": "语音"
   },
   "status": {
     "idle": "空闲",
@@ -44,7 +45,9 @@
     "resolution": "分辨率",
     "aspect": "比例",
     "audio": "生成声音",
-    "watermark": "添加水印"
+    "watermark": "添加水印",
+    "voice": "音色",
+    "voiceCustomPlaceholder": "自定义音色 ID…"
   },
   "size": {
     "square": "1:1",

@@ -5,7 +5,8 @@
   "mode": {
     "image": "Image",
     "video": "Video",
-    "text": "Text"
+    "text": "Text",
+    "tts": "Speech"
   },
   "status": {
     "idle": "Idle",
@@ -44,7 +45,9 @@
     "resolution": "Resolution",
     "aspect": "Aspect",
     "audio": "Generate audio",
-    "watermark": "Watermark"
+    "watermark": "Watermark",
+    "voice": "Voice",
+    "voiceCustomPlaceholder": "Custom voice id…"
   },
   "size": {
     "square": "1:1",
