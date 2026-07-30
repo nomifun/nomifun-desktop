@@ -396,6 +396,12 @@ pub struct InMemoryAgentRuntimeRegistry {
     nomi_session_persistence: Option<Arc<NomiSessionPersistence>>,
     /// Bounds rapid crash-respawn loops per conversation (see [`RestartGovernor`]).
     governor: Arc<RestartGovernor>,
+    /// The exact slot whose crash-eviction was last fed to the governor, per
+    /// conversation. Crash accounting is per runtime *instance*: retried or
+    /// overlapping teardown requests for the same slot (e.g.
+    /// `terminate_runtime_until_confirmed`'s retry loop over a stuck
+    /// quarantined runtime) must consume exactly one unit of restart budget.
+    counted_crash_slots: Arc<DashMap<String, Weak<OnceCell<AgentRuntimeHandle>>>>,
 }
 
 impl InMemoryAgentRuntimeRegistry {
@@ -409,6 +415,7 @@ impl InMemoryAgentRuntimeRegistry {
             factory,
             nomi_session_persistence: None,
             governor: Arc::new(RestartGovernor::default()),
+            counted_crash_slots: Arc::new(DashMap::new()),
         }
     }
 
@@ -684,6 +691,7 @@ impl InMemoryAgentRuntimeRegistry {
                 .get(conversation_id)
                 .map(|entry| entry.value().clone())
         });
+        self.note_termination_for_governor(conversation_id, reason, slot.as_ref());
         let Some(slot) = slot else {
             return Ok(());
         };
@@ -702,9 +710,32 @@ impl InMemoryAgentRuntimeRegistry {
     /// budget; every other termination is a deliberate recycle and must not. A
     /// definitive teardown ([`AgentKillReason::ConversationDeleted`]) drops the
     /// bookkeeping so a reused conversation id starts fresh.
-    fn note_termination_for_governor(&self, conversation_id: &str, reason: Option<AgentKillReason>) {
+    ///
+    /// Crash accounting is per runtime *instance*: `slot` is the exact slot
+    /// being torn down. A termination that resolves no slot tears down nothing
+    /// and records nothing (an administrative teardown request against an idle
+    /// conversation is not a crash), and repeated teardown requests for the
+    /// same slot — retry loops awaiting proof, overlapping recovery owners —
+    /// consume exactly one unit of budget.
+    fn note_termination_for_governor(
+        &self,
+        conversation_id: &str,
+        reason: Option<AgentKillReason>,
+        slot: Option<&RuntimeSlot>,
+    ) {
         match reason {
             Some(AgentKillReason::AgentErrorRecovery) => {
+                let Some(slot) = slot else { return };
+                let slot = Arc::downgrade(slot);
+                let already_counted = self
+                    .counted_crash_slots
+                    .get(conversation_id)
+                    .is_some_and(|counted| Weak::ptr_eq(counted.value(), &slot));
+                if already_counted {
+                    return;
+                }
+                self.counted_crash_slots
+                    .insert(conversation_id.to_owned(), slot);
                 let count = self.governor.record_crash(conversation_id, now_ms());
                 warn!(
                     conversation_id,
@@ -712,7 +743,10 @@ impl InMemoryAgentRuntimeRegistry {
                     "Recorded agent crash-eviction for the restart governor"
                 );
             }
-            Some(AgentKillReason::ConversationDeleted) => self.governor.forget(conversation_id),
+            Some(AgentKillReason::ConversationDeleted) => {
+                self.counted_crash_slots.remove(conversation_id);
+                self.governor.forget(conversation_id);
+            }
             _ => {}
         }
     }
@@ -868,6 +902,7 @@ impl InMemoryAgentRuntimeRegistry {
             self.note_termination_for_governor(
                 conversation_id,
                 Some(AgentKillReason::AgentErrorRecovery),
+                Some(&slot),
             );
             warn!(conversation_id, "Evicting cached runtime with a broken event transport");
             if let Err(error) = self
@@ -1135,7 +1170,7 @@ impl AgentRuntimeRegistry for InMemoryAgentRuntimeRegistry {
             return Ok(());
         }
 
-        self.note_termination_for_governor(conversation_id, reason);
+        self.note_termination_for_governor(conversation_id, reason, Some(&admission.slot));
         self.quarantine_teardown_slot(conversation_id, &admission.slot);
         if let Some(agent) = admission.slot.get() {
             agent.kill(reason)?;
@@ -1144,12 +1179,12 @@ impl AgentRuntimeRegistry for InMemoryAgentRuntimeRegistry {
     }
 
     fn terminate(&self, conversation_id: &str, reason: Option<AgentKillReason>) -> Result<(), AppError> {
-        self.note_termination_for_governor(conversation_id, reason);
         let slot = self.quarantined_slot(conversation_id).or_else(|| {
             self.runtimes
                 .get(conversation_id)
                 .map(|entry| entry.value().clone())
         });
+        self.note_termination_for_governor(conversation_id, reason, slot.as_ref());
         if let Some(slot) = slot {
             info!(conversation_id, ?reason, "Quarantining Agent runtime for termination");
             self.quarantine_teardown_slot(conversation_id, &slot);
@@ -1183,7 +1218,9 @@ impl AgentRuntimeRegistry for InMemoryAgentRuntimeRegistry {
         conversation_id: &str,
         reason: Option<AgentKillReason>,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), AppError>> + Send>> {
-        self.note_termination_for_governor(conversation_id, reason);
+        // Governor accounting happens inside `terminate_registered_runtime`,
+        // after the exact slot is resolved under the lifecycle gate — a
+        // request that tears down nothing must not be booked as a crash.
         let registry = self.clone();
         let conversation_id = conversation_id.to_owned();
         Box::pin(async move {
@@ -1244,6 +1281,7 @@ impl AgentRuntimeRegistry for InMemoryAgentRuntimeRegistry {
 
     fn terminate_all(&self) {
         self.governor.clear();
+        self.counted_crash_slots.clear();
         let keys: Vec<String> = self.runtimes.iter().map(|r| r.key().clone()).collect();
         for key in keys {
             if let Some(slot) = self
@@ -3114,12 +3152,12 @@ mod tests {
     #[tokio::test]
     async fn agent_error_recovery_crashes_trip_the_restart_breaker() {
         let registry = make_registry();
-        // Initial build succeeds.
-        registry.get_or_create_runtime("c", make_runtime_options("c")).await.unwrap();
-        // Crash-evictions accumulate (recorded whether or not a rebuild
-        // intervenes). At the cap, gate() returns Err *before* any backoff
-        // sleep, so the test needs no clock control.
+        // A genuine crash loop: each crash-eviction is followed by a respawn
+        // that crashes again. Every cycle kills a distinct runtime instance,
+        // so every cycle consumes restart budget. At the cap, gate() returns
+        // Err *before* any backoff sleep on the next build.
         for _ in 0..RESTART_MAX_PER_WINDOW {
+            registry.get_or_create_runtime("c", make_runtime_options("c")).await.unwrap();
             registry.terminate("c", Some(AgentKillReason::AgentErrorRecovery)).unwrap();
         }
         // The next respawn is refused — the loop is broken.
@@ -3128,6 +3166,50 @@ mod tests {
             Err(other) => panic!("expected Conflict, got {other:?}"),
             Ok(_) => panic!("crash loop must trip the breaker, but the build succeeded"),
         }
+    }
+
+    #[tokio::test]
+    async fn terminations_without_a_runtime_never_trip_the_breaker() {
+        let registry = make_registry();
+        // No runtime was ever built: these terminations tear down nothing, so
+        // they must not count as crashes. (Administrative teardown requests —
+        // summon/skill-snapshot recycles on an idle conversation — used to be
+        // recorded here as phantom crashes and paused the conversation.)
+        for _ in 0..(RESTART_MAX_PER_WINDOW + 4) {
+            registry.terminate("c", Some(AgentKillReason::AgentErrorRecovery)).unwrap();
+        }
+        assert!(
+            registry.get_or_create_runtime("c", make_runtime_options("c")).await.is_ok(),
+            "terminating a conversation with no runtime must not consume restart budget"
+        );
+    }
+
+    #[tokio::test]
+    async fn repeated_teardowns_of_one_runtime_count_a_single_crash() {
+        let registry = make_registry();
+        registry.get_or_create_runtime("c", make_runtime_options("c")).await.unwrap();
+        // Retried/duplicate teardown requests for the SAME runtime instance
+        // (e.g. terminate_runtime_until_confirmed's retry loop, or overlapping
+        // recovery owners) are one crash, not many.
+        for _ in 0..(RESTART_MAX_PER_WINDOW + 4) {
+            registry.terminate("c", Some(AgentKillReason::AgentErrorRecovery)).unwrap();
+        }
+        assert!(
+            registry.get_or_create_runtime("c", make_runtime_options("c")).await.is_ok(),
+            "one crashed runtime instance must consume exactly one unit of restart budget"
+        );
+    }
+
+    #[tokio::test]
+    async fn configuration_recycles_never_trip_the_breaker() {
+        let registry = make_registry();
+        for _ in 0..6 {
+            registry.get_or_create_runtime("c", make_runtime_options("c")).await.unwrap();
+            // Config-driven rebuild (model/skills/summon change) is a
+            // deliberate recycle, not a crash.
+            registry.terminate("c", Some(AgentKillReason::ConfigurationChanged)).unwrap();
+        }
+        assert!(registry.get_or_create_runtime("c", make_runtime_options("c")).await.is_ok());
     }
 
     #[tokio::test]
@@ -3145,8 +3227,8 @@ mod tests {
     #[tokio::test]
     async fn conversation_delete_resets_the_restart_governor() {
         let registry = make_registry();
-        registry.get_or_create_runtime("c", make_runtime_options("c")).await.unwrap();
         for _ in 0..RESTART_MAX_PER_WINDOW {
+            registry.get_or_create_runtime("c", make_runtime_options("c")).await.unwrap();
             registry.terminate("c", Some(AgentKillReason::AgentErrorRecovery)).unwrap();
         }
         // Deleting the conversation clears the crash history so a reused id starts fresh.

@@ -1405,7 +1405,7 @@ impl ConversationService {
         Self::terminate_runtime_until_confirmed(
             runtime_registry,
             conversation_id,
-            AgentKillReason::AgentErrorRecovery,
+            AgentKillReason::ConfigurationChanged,
             "failed edit/resubmit destructive preparation",
         )
         .await;
@@ -4935,7 +4935,7 @@ impl ConversationService {
             Self::terminate_runtime_with_proof(
                 runtime_registry,
                 id,
-                AgentKillReason::AgentErrorRecovery,
+                AgentKillReason::ConfigurationChanged,
                 "conversation configuration update",
             )
             .await?;
@@ -5059,7 +5059,7 @@ impl ConversationService {
         Self::terminate_runtime_with_proof(
             &self.runtime_registry,
             conversation_id,
-            AgentKillReason::AgentErrorRecovery,
+            AgentKillReason::ConfigurationChanged,
             "companion skill snapshot update",
         )
         .await

@@ -316,7 +316,7 @@ impl ConversationService {
             failed_model = %failed.model,
             next_provider = %picked.provider_id,
             next_model = %picked.model,
-            reason = ?AgentKillReason::AgentErrorRecovery,
+            reason = ?AgentKillReason::ConfigurationChanged,
             "Model failover: switching model and rebuilding task"
         );
 
@@ -329,7 +329,7 @@ impl ConversationService {
         Self::terminate_runtime_until_confirmed(
             runtime_registry,
             conversation_id,
-            AgentKillReason::AgentErrorRecovery,
+            AgentKillReason::ConfigurationChanged,
             "model failover",
         )
         .await;
@@ -459,7 +459,7 @@ impl ConversationService {
         Self::terminate_runtime_until_confirmed(
             runtime_registry,
             conversation_id,
-            AgentKillReason::AgentErrorRecovery,
+            AgentKillReason::ConfigurationChanged,
             "image fallback rebuild",
         )
         .await;

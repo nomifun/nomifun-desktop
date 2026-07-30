@@ -200,6 +200,14 @@ pub enum AgentKillReason {
     /// next message". The conversation (and any persisted ACP session) is
     /// preserved; the rebuilt agent resumes and re-delivers the section.
     KnowledgeBindingChanged,
+    /// A deliberate administrative recycle so a conversation-level
+    /// configuration change takes effect on the next build: a model /
+    /// workspace / delegation update, a companion skill-snapshot refresh, a
+    /// summon change, a failover model switch, or a failed-edit session
+    /// rollback. Like [`Self::KnowledgeBindingChanged`] this recycles a
+    /// healthy runtime on purpose, so the restart governor must never count
+    /// it as a crash.
+    ConfigurationChanged,
     /// The owning conversation was deleted via `DELETE /api/conversations/{id}`.
     /// The agent process must be torn down so it stops emitting stream events
     /// for a conversation row that no longer exists.

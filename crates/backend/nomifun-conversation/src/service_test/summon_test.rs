@@ -80,6 +80,12 @@ async fn set_summon_stamps_persists_and_recycles_runtime_when_idle() {
         1,
         "summon must await runtime teardown so the change takes effect on the next message"
     );
+    assert_eq!(
+        registry.termination_records(),
+        vec![(conversation_id.clone(), Some(AgentKillReason::ConfigurationChanged))],
+        "summon recycles are deliberate config changes and must never be booked \
+         as crashes by the restart governor"
+    );
 }
 
 #[tokio::test]
