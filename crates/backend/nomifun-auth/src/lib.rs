@@ -18,7 +18,10 @@ mod validation;
 pub use error::AuthError;
 
 // JWT service
-pub use jwt::{JwtService, TokenPayload, generate_random_hex_secret, generate_random_secret_string, resolve_jwt_secret};
+pub use jwt::{
+    JwtService, TokenPayload, generate_random_hex_secret, generate_random_secret_string, is_past_half_life,
+    resolve_jwt_secret,
+};
 
 // Per-companion API token (Remote front door)
 pub use companion_token::{CompanionTokenValidator, token_sha256_hex};

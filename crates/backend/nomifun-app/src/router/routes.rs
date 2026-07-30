@@ -652,6 +652,7 @@ pub fn create_router_with_all_state(
     let auth_mw_state = AuthState {
         jwt_service: services.jwt_service.clone(),
         user_repo: services.user_repo.clone(),
+        cookie_config: services.cookie_config.clone(),
     };
     let instance_owner_state =
         InstanceOwnerState::new(services.authoritative_user_id.clone());

@@ -230,18 +230,26 @@ pub async fn api_rate_limit_middleware(
 
 /// Authenticated action rate limit middleware: 20 requests per minute.
 ///
-/// Prefers user ID from [`CurrentUser`] extension (set by auth middleware),
-/// falls back to client IP.
+/// Key priority: session/bearer token (hashed) → user id → client IP.
+///
+/// Keying by token gives every browser session its own bucket. Keying by
+/// user id alone made the quota deployment-wide in practice: WebUI installs
+/// typically share one admin account, so every tab and device drained the
+/// same 20/min budget (audit 2026-07-30). The token hash is truncated —
+/// it identifies a bucket, it cannot be reversed into the token.
 pub async fn authenticated_action_rate_limit_middleware(
     State(limiter): State<Arc<RateLimiter>>,
     request: Request,
     next: Next,
 ) -> Result<Response, AppError> {
-    let key = request
-        .extensions()
-        .get::<CurrentUser>()
-        .map(|u| format!("user:{}", u.id))
-        .unwrap_or_else(|| format!("ip:{}", rate_limit_ip(&request)));
+    let key = if let Some(token) = crate::extract::extract_token_from_headers(request.headers()) {
+        format!("session:{}", crate::jwt::token_bucket_key(&token))
+    } else if let Some(user) = request.extensions().get::<CurrentUser>() {
+        // Locally-trusted callers (desktop webview) carry no session token.
+        format!("user:{}", user.id)
+    } else {
+        format!("ip:{}", rate_limit_ip(&request))
+    };
     limiter.check_and_increment(&key)?;
     Ok(next.run(request).await)
 }
@@ -449,5 +457,52 @@ mod tests {
                 "status {status} must not consume the login budget"
             );
         }
+    }
+
+    // -- authenticated_action bucket selection --------------------------------
+
+    async fn run_action(app: &axum::Router, cookie: Option<&str>) -> axum::http::StatusCode {
+        use tower::ServiceExt;
+        let mut builder = axum::http::Request::builder().method("POST").uri("/action");
+        if let Some(cookie) = cookie {
+            builder = builder.header(axum::http::header::COOKIE, cookie);
+        }
+        app.clone()
+            .oneshot(builder.body(axum::body::Body::empty()).unwrap())
+            .await
+            .unwrap()
+            .status()
+    }
+
+    fn action_app(limiter: Arc<RateLimiter>) -> axum::Router {
+        use axum::routing::post;
+        axum::Router::new()
+            .route("/action", post(|| async { "done" }))
+            .layer(axum::middleware::from_fn_with_state(
+                limiter,
+                authenticated_action_rate_limit_middleware,
+            ))
+    }
+
+    #[tokio::test]
+    async fn action_limiter_buckets_by_session_token_not_shared_account() {
+        // WebUI deployments share one admin account across every browser; the
+        // quota must therefore follow the session, not the user.
+        let app = action_app(Arc::new(RateLimiter::new(1, Duration::from_secs(60))));
+
+        assert_eq!(
+            run_action(&app, Some("nomifun-session=session-a")).await,
+            axum::http::StatusCode::OK
+        );
+        // A DIFFERENT session of the same account still has its own budget.
+        assert_eq!(
+            run_action(&app, Some("nomifun-session=session-b")).await,
+            axum::http::StatusCode::OK
+        );
+        // The same session is limited.
+        assert_eq!(
+            run_action(&app, Some("nomifun-session=session-a")).await,
+            axum::http::StatusCode::TOO_MANY_REQUESTS
+        );
     }
 }
