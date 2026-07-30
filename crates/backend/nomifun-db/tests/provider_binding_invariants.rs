@@ -20,9 +20,9 @@ async fn insert_provider(database: &nomifun_db::Database, id: &str) {
     nomifun_db::sqlx::query(
         "INSERT INTO providers (\
             provider_id, platform, name, base_url, api_key_encrypted, enabled, \
-            capabilities, created_at, updated_at\
+            created_at, updated_at\
          ) VALUES (?, 'openai', ?, 'https://example.invalid', 'encrypted', \
-                    1, '[]', 1, 1)",
+                    1, 1, 1)",
     )
     .bind(id)
     .bind(id)

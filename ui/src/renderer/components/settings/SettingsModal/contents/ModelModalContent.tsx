@@ -775,11 +775,16 @@ const ModelModalContent: React.FC = () => {
 
   /**
    * 服务端整组克隆：`POST /api/providers/{id}/clone` 连模型档案与连接档案一起复制。
-   * Server-side provider clone (models + connections copied atomically).
+   * 副本名走本地化后缀（`settings.providerCopySuffix`），由 FE 随 body 传给克隆端点。
+   * Server-side provider clone (models + connections copied atomically); the
+   * copy's display name carries a localized suffix supplied by the frontend.
    */
   const duplicatePlatform = (platform: IProvider) => {
     ipcBridge.mode.cloneProvider
-      .invoke({ provider_id: platform.id })
+      .invoke({
+        provider_id: platform.id,
+        name: `${platform.name} ${t('settings.providerCopySuffix', { defaultValue: '副本' })}`,
+      })
       .then((copied) => {
         void mutate();
         setCollapseKey((prev) => ({ ...prev, [copied.id]: true }));
@@ -830,63 +835,31 @@ const ModelModalContent: React.FC = () => {
       const success = result.status === 'healthy';
       const errorMessage = result.message || t('common.unknownError');
 
-      try {
-        // 先获取最新的数据，确保不会覆盖其他并发的更新
-        const latestData = await ipcBridge.mode.listProviders.invoke();
-        const latestPlatform = (latestData || []).find((item) => item.id === platform.id);
-        const model_health = { ...latestPlatform?.model_health };
-        model_health[modelName] = {
-          status: success ? 'healthy' : 'unhealthy',
-          last_check: Date.now(),
-          latency,
-          error: success ? undefined : errorMessage,
-        };
-
-        await ipcBridge.mode.updateProvider.invoke({ provider_id: platform.id, model_health });
-        await mutate();
-        if (success) {
-          Message.success({
-            content: `${platform.name} - ${modelName}: ${t('common.success')} (${latency}ms)`,
-            duration: 3000,
-          });
-        } else {
-          Message.error({
-            content: `${platform.name} - ${modelName}: ${t('common.failed')} - ${errorMessage}`,
-            duration: 5000,
-          });
-        }
-      } catch (saveError) {
-        console.error('Failed to save health check result:', saveError);
-        Message.error({
-          content: t('settings.saveModelConfigFailed'),
+      // 服务端探针已把结果持久化到 provider_models 行；这里只刷新读投影，
+      // 不再 fetch-latest-then-merge 整个 model_health map 回写（冗余写已删除）。
+      // The server-side probe persists the result into the model's catalog row;
+      // refresh the projection instead of PUTting the legacy health map back.
+      await mutate();
+      if (success) {
+        Message.success({
+          content: `${platform.name} - ${modelName}: ${t('common.success')} (${latency}ms)`,
           duration: 3000,
+        });
+      } else {
+        Message.error({
+          content: `${platform.name} - ${modelName}: ${t('common.failed')} - ${errorMessage}`,
+          duration: 5000,
         });
       }
     } catch (error: unknown) {
-      const latency = Date.now() - startTime;
       const errorMessage = error instanceof Error ? error.message : String(error);
       Message.error({
         content: `${platform.name} - ${modelName}: ${t('common.failed')} - ${errorMessage}`,
         duration: 5000,
       });
-
-      try {
-        // 先获取最新的数据，确保不会覆盖其他并发的更新
-        const latestData = await ipcBridge.mode.listProviders.invoke();
-        const latestPlatform = (latestData || []).find((item) => item.id === platform.id);
-        const model_health = { ...latestPlatform?.model_health };
-        model_health[modelName] = {
-          status: 'unhealthy',
-          last_check: Date.now(),
-          latency,
-          error: errorMessage,
-        };
-
-        await ipcBridge.mode.updateProvider.invoke({ provider_id: platform.id, model_health });
-        await mutate();
-      } catch (saveError) {
-        console.error('Failed to save health check result:', saveError);
-      }
+      // The probe request itself failed (transport error). Refresh anyway in
+      // case the server recorded a row-level result before the failure.
+      await mutate().catch(() => undefined);
     } finally {
       setHealthCheckLoading((prev) => ({ ...prev, [loadingKey]: false }));
     }
@@ -1164,7 +1137,9 @@ const ModelModalContent: React.FC = () => {
                       const model = row.model;
                       const isNewApiProvider = isNewApiPlatform(platform.platform);
                       const modelProtocol = row.protocol || 'openai';
-                      const model_health = row.health ?? platform.model_health?.[model];
+                      // 行 health 即权威（legacy 合成行已在 modelRowsFor 里回填），
+                      // 不再直接读 provider.model_health map。
+                      const model_health = row.health;
                       const healthStatus = model_health?.status || 'unknown';
                       const modelDescription = row.description ?? '';
                       const modelContextLimit = row.context_limit;

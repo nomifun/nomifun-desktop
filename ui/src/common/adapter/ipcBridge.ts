@@ -1358,12 +1358,14 @@ export const mode = {
   /**
    * Server-side provider clone (`POST /api/providers/{id}/clone`): copies the
    * provider row plus every `provider_models` profile row (minus per-deployment
-   * health) and every connection profile. No request body.
+   * health) and every connection profile. Optional body `{ name }` sets the
+   * copy's display name (e.g. a localized "<source> 副本"); omitted → the
+   * backend picks its default copy name.
    */
   cloneProvider: withResponseMap(
-    httpPost<ProviderResponse, { provider_id: ProviderId }>(
+    httpPost<ProviderResponse, { provider_id: ProviderId; name?: string }>(
       (p) => `/api/providers/${p.provider_id}/clone`,
-      () => undefined
+      (p) => (p.name === undefined ? undefined : { name: p.name })
     ),
     fromProviderResponse
   ),

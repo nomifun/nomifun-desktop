@@ -23,10 +23,10 @@ async fn setup() -> (SqliteConversationRepository, nomifun_db::Database) {
     sqlx::query(
         "INSERT INTO providers (\
             provider_id, platform, name, base_url, api_key_encrypted, enabled, \
-            capabilities, created_at, updated_at\
+            created_at, updated_at\
          ) VALUES (\
             ?, 'openai', 'Fixture provider', 'https://example.invalid', \
-            'encrypted', 1, '[]', 0, 0\
+            'encrypted', 1, 0, 0\
          )",
     )
     .bind(PROVIDER_ID)
@@ -460,9 +460,9 @@ async fn session_deletion_retains_only_ambiguous_typed_owners_and_survives_reope
     sqlx::query(
         "INSERT INTO providers (\
             provider_id, platform, name, base_url, api_key_encrypted, enabled, \
-            capabilities, created_at, updated_at\
+            created_at, updated_at\
          ) VALUES (?, 'openai', 'Fixture provider', 'https://example.invalid', \
-                   'encrypted', 1, '[]', 0, 0)",
+                   'encrypted', 1, 0, 0)",
     )
     .bind(PROVIDER_ID)
     .execute(database.pool())
@@ -1075,10 +1075,10 @@ async fn public_turn_claim_and_edit_reservation_have_one_sqlite_winner() {
     sqlx::query(
         "INSERT INTO providers (\
             provider_id, platform, name, base_url, api_key_encrypted, enabled, \
-            capabilities, created_at, updated_at\
+            created_at, updated_at\
          ) VALUES (\
             ?, 'openai', 'Fixture provider', 'https://example.invalid', \
-            'encrypted', 1, '[]', 0, 0\
+            'encrypted', 1, 0, 0\
          )",
     )
     .bind(PROVIDER_ID)

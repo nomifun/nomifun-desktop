@@ -25,12 +25,16 @@ pub trait IProviderRepository: Send + Sync {
 
 /// Parameters for creating a new provider.
 ///
-/// `models` and the five per-model map params (`model_context_limits`,
-/// `model_protocols`, `model_descriptions`, `model_enabled`, `model_health`)
-/// are wire-compat INPUTS only: migration 016 dropped the matching providers
-/// columns, so these params feed exclusively the `provider_models` row sync
+/// `models` and the four per-model map params (`model_context_limits`,
+/// `model_protocols`, `model_descriptions`, `model_enabled`) are wire-compat
+/// INPUTS only: migration 016 dropped the matching providers columns, so
+/// these params feed exclusively the `provider_models` row sync
 /// (`sync_provider_models_tx`) — one row per `models` entry, mirrored columns
 /// seeded from the maps. They are never persisted on the providers row.
+///
+/// There is deliberately no `model_health` param: since P3 the server-side
+/// health probe (`IProviderModelRepository::set_health`) is the only health
+/// writer, and no `capabilities` param: migration 017 dropped the column.
 #[derive(Debug)]
 pub struct CreateProviderParams<'a> {
     /// Optional caller-supplied stable business ID.
@@ -41,12 +45,10 @@ pub struct CreateProviderParams<'a> {
     pub api_key_encrypted: &'a str,
     pub models: &'a str,
     pub enabled: bool,
-    pub capabilities: &'a str,
     pub model_context_limits: Option<&'a str>,
     pub model_protocols: Option<&'a str>,
     pub model_descriptions: Option<&'a str>,
     pub model_enabled: Option<&'a str>,
-    pub model_health: Option<&'a str>,
     pub bedrock_config: Option<&'a str>,
     pub is_full_url: bool,
     /// Optional explicit provider priority. Omitted means append after current max.
@@ -57,12 +59,13 @@ pub struct CreateProviderParams<'a> {
 ///
 /// All fields are optional; `None` means "keep the current value".
 ///
-/// Like [`CreateProviderParams`], `models` and the five per-model map params
+/// Like [`CreateProviderParams`], `models` and the four per-model map params
 /// are wire-compat INPUTS that only drive the `provider_models` row sync:
 /// `models: Some` replaces membership (insert new rows, delete removed,
 /// re-index survivors); a map param `Some(...)` is a whole-map replacement of
 /// that mirrored column across ALL rows (`Some(None)` = empty map → column
-/// defaults); a map param `None` leaves existing rows untouched.
+/// defaults); a map param `None` leaves existing rows untouched. Health is
+/// intentionally not updatable here — `set_health` is the only write path.
 #[derive(Debug, Default)]
 pub struct UpdateProviderParams<'a> {
     pub platform: Option<&'a str>,
@@ -71,12 +74,10 @@ pub struct UpdateProviderParams<'a> {
     pub api_key_encrypted: Option<&'a str>,
     pub models: Option<&'a str>,
     pub enabled: Option<bool>,
-    pub capabilities: Option<&'a str>,
     pub model_context_limits: Option<Option<&'a str>>,
     pub model_protocols: Option<Option<&'a str>>,
     pub model_descriptions: Option<Option<&'a str>>,
     pub model_enabled: Option<Option<&'a str>>,
-    pub model_health: Option<Option<&'a str>>,
     pub bedrock_config: Option<Option<&'a str>>,
     pub is_full_url: Option<bool>,
     pub sort_order: Option<i64>,

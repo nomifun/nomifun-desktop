@@ -414,7 +414,9 @@ async fn create_provider_with_optional_fields() {
     let data = &json["data"];
     assert!(!data["enabled"].as_bool().unwrap());
     assert_eq!(data["models"].as_array().unwrap().len(), 1);
-    assert_eq!(data["capabilities"].as_array().unwrap().len(), 2);
+    // `capabilities` in the request is accepted-and-ignored since P3 (the
+    // column was dropped in migration 017); the response is always [].
+    assert_eq!(data["capabilities"], json!([]));
     assert_eq!(
         data["model_context_limits"]["anthropic.claude-3-sonnet"],
         200000
@@ -663,6 +665,49 @@ async fn clone_provider_nonexistent_returns_not_found() {
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn clone_provider_accepts_optional_name_body() {
+    let (_app, db) = setup().await;
+    let (_, source_id) = create_one(&db).await;
+
+    // A JSON body with a name wins over the default "{source} copy".
+    let named_resp = system_routes(build_state(&db))
+        .oneshot(json_request(
+            "POST",
+            &format!("/api/providers/{source_id}/clone"),
+            json!({"name": "Renamed clone"}),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(named_resp.status(), StatusCode::CREATED);
+    let named = body_json(named_resp).await;
+    assert_eq!(named["data"]["name"], "Renamed clone");
+
+    // An empty JSON object falls back to the default name.
+    let empty_resp = system_routes(build_state(&db))
+        .oneshot(json_request(
+            "POST",
+            &format!("/api/providers/{source_id}/clone"),
+            json!({}),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(empty_resp.status(), StatusCode::CREATED);
+    let empty = body_json(empty_resp).await;
+    assert_eq!(empty["data"]["name"], "Anthropic copy");
+
+    // Unknown fields are rejected (deny_unknown_fields).
+    let bad_resp = system_routes(build_state(&db))
+        .oneshot(json_request(
+            "POST",
+            &format!("/api/providers/{source_id}/clone"),
+            json!({"nmae": "typo"}),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(bad_resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
 }
 
 // ===========================================================================

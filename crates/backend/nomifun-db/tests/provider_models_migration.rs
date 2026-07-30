@@ -261,6 +261,83 @@ async fn migration_16_drops_legacy_provider_model_columns_preserving_rows() {
 }
 
 #[tokio::test]
+async fn migration_17_drops_capabilities_preserving_rows() {
+    let pool = SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect("sqlite::memory:")
+        .await
+        .unwrap();
+    migrate_to(&pool, 13).await;
+
+    // Legacy-shaped provider row (pre-016 schema, so the legacy columns are
+    // still insertable here); only name/enabled/capabilities matter below.
+    sqlx::query(
+        "INSERT INTO providers (provider_id, platform, name, base_url, api_key_encrypted, models, enabled, capabilities, is_full_url, sort_order, created_at, updated_at) \
+         VALUES (?, 'openai', 'P', 'https://x.test/v1', 'enc', '[\"gpt-4o\"]', 1, '[{\"type\":\"text\"}]', 0, 0, 1, 1)",
+    )
+    .bind(PROVIDER)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    migrate_to(&pool, 16).await;
+    let columns_at_16: Vec<String> =
+        sqlx::query_scalar("SELECT name FROM pragma_table_info('providers')")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+    assert!(
+        columns_at_16.iter().any(|name| name == "capabilities"),
+        "providers.capabilities must still exist at migration 16"
+    );
+
+    migrate_to(&pool, 17).await;
+    let columns_at_17: Vec<String> =
+        sqlx::query_scalar("SELECT name FROM pragma_table_info('providers')")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+    assert!(
+        !columns_at_17.iter().any(|name| name == "capabilities"),
+        "migration 17 must drop providers.capabilities"
+    );
+    // The remaining provider fields survive.
+    for column in [
+        "provider_id",
+        "platform",
+        "name",
+        "base_url",
+        "api_key_encrypted",
+        "enabled",
+        "bedrock_config",
+        "is_full_url",
+        "sort_order",
+    ] {
+        assert!(
+            columns_at_17.iter().any(|name| name == column),
+            "providers.{column} must survive migration 17"
+        );
+    }
+    // And the provider row itself is untouched.
+    let (name, enabled): (String, i64) =
+        sqlx::query_as("SELECT name, enabled FROM providers WHERE provider_id = ?")
+            .bind(PROVIDER)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!((name.as_str(), enabled), ("P", 1));
+    // The 014-backfilled provider_models row survives too.
+    let models: Vec<String> = sqlx::query_scalar(
+        "SELECT model FROM provider_models WHERE provider_id = ? ORDER BY sort_order",
+    )
+    .bind(PROVIDER)
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(models, vec!["gpt-4o"]);
+}
+
+#[tokio::test]
 async fn fresh_database_passes_schema_contract_with_new_tables() {
     // init_database_memory runs ALL migrations + the id schema contract.
     let db = nomifun_db::init_database_memory().await.unwrap();

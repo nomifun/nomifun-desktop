@@ -184,12 +184,12 @@ pub use office::{
     StartPreviewRequest, StopPreviewRequest, PREVIEW_CAPABILITY_BYTES, PREVIEW_CAPABILITY_HEX_LEN,
 };
 pub use provider::{
-    BedrockAuthMethod, BedrockConfig, CreateProviderRequest, DetectProtocolRequest,
-    DetectedProtocol, DetectionSuggestion, FetchModelsAnonymousRequest, FetchModelsRequest,
-    FetchModelsResponse, HealthStatus, KeyTestResult, ModelCapability, ModelHealthStatus,
-    ModelInfo, ModelType, MultiKeyResult, ProtocolDetectionResponse, ProviderHealthCheckErrorKind,
-    ProviderHealthCheckRequest, ProviderHealthCheckResponse, ProviderResponse, SuggestionType,
-    UpdateProviderRequest,
+    BedrockAuthMethod, BedrockConfig, CloneProviderRequest, CreateProviderRequest,
+    DetectProtocolRequest, DetectedProtocol, DetectionSuggestion, FetchModelsAnonymousRequest,
+    FetchModelsRequest, FetchModelsResponse, HealthStatus, KeyTestResult, ModelCapability,
+    ModelHealthStatus, ModelInfo, ModelType, MultiKeyResult, ProtocolDetectionResponse,
+    ProviderHealthCheckErrorKind, ProviderHealthCheckRequest, ProviderHealthCheckResponse,
+    ProviderResponse, SuggestionType, UpdateProviderRequest,
 };
 pub use provider_connection::{ProviderConnectionResponse, UpsertProviderConnectionRequest};
 pub use provider_model::{

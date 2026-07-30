@@ -99,9 +99,12 @@ impl IProviderModelRepository for SqliteProviderModelRepository {
     }
 
     async fn list_for_provider(&self, provider_id: &str) -> Result<Vec<ProviderModelRow>, DbError> {
+        // `(sort_order, id)` matches the response-projection tie-break
+        // (`row_to_response` sorts by the same key), so equal sort_order
+        // resolves by insertion order everywhere.
         let rows = sqlx::query_as::<_, ProviderModelRow>(
             "SELECT * FROM provider_models WHERE provider_id = ? \
-             ORDER BY sort_order ASC, model ASC",
+             ORDER BY sort_order ASC, id ASC",
         )
         .bind(provider_id)
         .fetch_all(&self.pool)
@@ -277,12 +280,10 @@ mod tests {
                 api_key_encrypted: "enc",
                 models: "[]",
                 enabled: true,
-                capabilities: "[]",
                 model_context_limits: None,
                 model_protocols: None,
                 model_descriptions: None,
                 model_enabled: None,
-                model_health: None,
                 bedrock_config: None,
                 is_full_url: false,
                 sort_order: None,
@@ -442,6 +443,10 @@ mod tests {
         for (provider, model, sort_order) in [
             (PROVIDER_1, "b-model", 1_i64),
             (PROVIDER_1, "a-model", 0),
+            // Two rows tied on sort_order: insertion order (id) breaks the
+            // tie, NOT the model name — matching the response projection.
+            (PROVIDER_1, "z-tied", 2),
+            (PROVIDER_1, "a-tied", 2),
             (PROVIDER_2, "other", 0),
         ] {
             assert!(
@@ -462,11 +467,12 @@ mod tests {
                 .unwrap()
             );
         }
-        assert_eq!(r.list().await.unwrap().len(), 3);
+        assert_eq!(r.list().await.unwrap().len(), 5);
         let scoped = r.list_for_provider(PROVIDER_1).await.unwrap();
         assert_eq!(
             scoped.iter().map(|m| m.model.as_str()).collect::<Vec<_>>(),
-            ["a-model", "b-model"],
+            ["a-model", "b-model", "z-tied", "a-tied"],
+            "equal sort_order resolves by id (insertion order), not model name"
         );
     }
 }

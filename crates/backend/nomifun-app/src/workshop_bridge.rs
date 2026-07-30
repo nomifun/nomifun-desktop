@@ -1001,8 +1001,8 @@ mod tests {
         let provider_id = generate_id();
         nomifun_db::sqlx::query(
             "INSERT INTO providers \
-             (provider_id, platform, name, base_url, api_key_encrypted, enabled, capabilities, created_at, updated_at) \
-             VALUES (?, 'test', 'workshop fixture provider', 'https://example.invalid', '', 1, '[]', 1, 1)",
+             (provider_id, platform, name, base_url, api_key_encrypted, enabled, created_at, updated_at) \
+             VALUES (?, 'test', 'workshop fixture provider', 'https://example.invalid', '', 1, 1, 1)",
         )
         .bind(&provider_id)
         .execute(db.pool())

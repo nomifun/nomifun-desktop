@@ -6,6 +6,7 @@
 
 import type { IProvider, TProviderWithModel } from '@/common/config/storage';
 import { compositeKey } from '@/common/utils/compositeKey';
+import { modelHealthOf } from '@/common/utils/providerModels';
 import { iconColors } from '@/renderer/styles/colors';
 import { getModelDisplayLabel } from '@/renderer/utils/model/agentLogo';
 import type { AcpModelInfo } from '../types';
@@ -101,7 +102,7 @@ const GuidModelSelector: React.FC<GuidModelSelectorProps> = ({
     // Per-model health dot color.
     const healthDotColor = (providerId: string, modelName: string): string | null => {
       const matchedProvider = modelConfig?.find((p) => p.id === providerId);
-      const healthStatus = matchedProvider?.model_health?.[modelName]?.status || 'unknown';
+      const healthStatus = modelHealthOf(matchedProvider, modelName)?.status || 'unknown';
       if (healthStatus === 'unknown') return null;
       return healthStatus === 'healthy' ? 'bg-green-500' : healthStatus === 'unhealthy' ? 'bg-red-500' : 'bg-gray-400';
     };
@@ -188,7 +189,7 @@ const GuidModelSelector: React.FC<GuidModelSelectorProps> = ({
               {currentAcpCachedModelInfo.available_models.map((model) => {
                 // 获取模型健康状态
                 const providerConfig = modelConfig?.find((p) => p.platform?.includes(''));
-                const healthStatus = providerConfig?.model_health?.[model.id]?.status || 'unknown';
+                const healthStatus = modelHealthOf(providerConfig, model.id)?.status || 'unknown';
                 const healthColor =
                   healthStatus === 'healthy'
                     ? 'bg-green-500'
