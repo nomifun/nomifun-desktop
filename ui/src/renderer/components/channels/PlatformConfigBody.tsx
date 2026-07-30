@@ -34,7 +34,7 @@ import WeixinConfigForm from '@/renderer/components/settings/SettingsModal/conte
 import { Message, Switch } from '@arco-design/web-react';
 import React, { useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { findEnabledChannelStatus } from './channelStatusSelection';
+import { buildEnablePluginRequest, findEnabledChannelStatus } from './channelStatusSelection';
 
 /**
  * Shared channel-config machinery for the multi-bot flows. The desktop
@@ -173,16 +173,7 @@ export const PlatformConfigBody: React.FC<{
           return;
         }
         const config = pendingQqbotConfig ?? (pendingToken ? { credentials: { token: pendingToken } } : {});
-        const result = await channel.enablePlugin.invoke(
-          channelTarget
-            ? {
-                plugin_id: channelTarget.channelPluginId,
-                plugin_type: platform,
-                ...(channelTarget.companionId ? { companion_id: channelTarget.companionId } : {}),
-                config,
-              }
-            : { plugin_type: platform, config }
-        );
+        const result = await channel.enablePlugin.invoke(buildEnablePluginRequest(platform, channelTarget, config));
         if (!result.success) {
           throw new Error(
             result.error ||
@@ -195,6 +186,7 @@ export const PlatformConfigBody: React.FC<{
               platform,
               enabledPluginId: result.plugin_id,
               companionId: channelTarget?.companionId,
+              ownerDomain: channelTarget?.ownerDomain,
             })
           : null;
         if (enabledStatus) {
