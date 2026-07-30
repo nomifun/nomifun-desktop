@@ -83,16 +83,16 @@ $ bun run build
 
 ## 数据存储位置
 
-已安装桌面应用将 SQLite 数据库、agent 状态、日志和 Bun 运行时缓存持久化到 stable 的按用户应用数据目录下 —— Windows 上是 **`%LOCALAPPDATA%\NomiFun\Nomi`**，macOS 上是 **`~/Library/Application Support/NomiFun/Nomi`**，Linux 上是 **`$XDG_DATA_HOME/NomiFun/Nomi`**（由 `nomifun_app::cli::default_data_dir()` 解析）。同一 build channel 的宿主共享默认目录；开发脚本改用隔离的同级目录 `Nomi-dev`。开发环境需要 stable 状态副本时可运行 `bun run seed:dev`。
+已安装桌面应用将 SQLite 数据库、agent 状态、日志和 Bun 运行时缓存持久化到 stable 的按用户应用数据目录下 —— Windows 上是 **`%LOCALAPPDATA%\NomiFun`**，macOS 上是 **`~/Library/Application Support/NomiFun`**，Linux 上是 **`$XDG_DATA_HOME/NomiFun`**（由 `nomifun_app::cli::default_data_dir()` 解析）。同一 build channel 的宿主共享默认目录；开发脚本改用隔离的同级目录 `NomiFun-dev`。开发环境需要 stable 状态副本时可运行 `bun run seed:dev`。
 
-在启动应用前设置 `NOMIFUN_DATA_DIR=<absolute path>`，数据目录就会变为 `$NOMIFUN_DATA_DIR/Nomi`。后端启动时会对数据目录取排他的 `server.lock`；若启动失败 (例如该目录已被另一个实例占用)，桌面外壳会弹出原生错误对话框并退出。
+在启动应用前设置 `NOMIFUN_DATA_DIR=<absolute path>`，该路径**就是**数据目录——所有宿主都按字面值使用，不附加 `/Nomi` 后缀。后端启动时会对数据目录取排他的 `server.lock`；若启动失败 (例如该目录已被另一个实例占用)，桌面外壳会弹出原生错误对话框并退出。
 
-> 旧版本默认使用 `<system temp>/nomifun-data/Nomi`。在那里发现的安装会在启动时自动迁移到按用户位置 (一次性)：数据被复制，数据库中存储的绝对路径会被改写，旧目录保留作为备份。可再生的缓存 (解压出的 Bun 运行时、日志、浏览器配置 …) 不会带过去 —— 它们会在首次使用时重建。
+> 旧版本把数据存在 `NomiFun/Nomi` 下 (dev 为 `NomiFun/Nomi-dev`；更早为 `<system temp>/nomifun-data/Nomi`)。升级后首次启动时，一次性的自动迁移会把这类遗留数据集搬入新的数据根。迁移是抗崩溃的，中断后会在下次启动续跑；若旧应用实例仍在运行，则推迟到下次启动。数据库中存储的绝对路径 (知识库根目录、终端 cwd、自定义工作区) 会在搬迁后一次性改写。
 
 要重新开始，**退出应用**并删除该目录。要迁移，将该目录复制到新机器上即可。
 
 ```text
-~/Library/Application Support/NomiFun/Nomi/    # macOS（Windows/Linux 路径见上文）
+~/Library/Application Support/NomiFun/    # macOS（Windows/Linux 路径见上文）
 ├── nomifun-backend.db        # SQLite 状态（会话、设置、session 等）
 ├── logs/                     # nomicore.log
 ├── companion/                # 伙伴 + 共享记忆中枢

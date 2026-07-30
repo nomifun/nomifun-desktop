@@ -246,14 +246,26 @@ impl ArtifactStore {
     /// bytes. Turn-finalization calls this after all tools have stopped, so a
     /// later shell/edit call cannot delete or replace an earlier snapshot and
     /// still leave the accepted turn in a successful state.
+    ///
+    /// History replays additionally tolerate a relocated workspace: when the
+    /// receipt's absolute `path` no longer resolves (the data root moved), the
+    /// workspace-relative locator is retried against the CURRENT workspace
+    /// root. Integrity still rests on the byte checks — regular file,
+    /// size, SHA-256, kind and MIME must all match the receipt — so a
+    /// relocated artifact stays verified while a tampered one still fails.
     pub fn reverify_receipt(
         &self,
         receipt: &PersistedArtifact,
     ) -> Result<(), ArtifactStoreError> {
-        let verified = self.verify_existing_path(&receipt.path)?;
+        let verified = match self.verify_existing_path(&receipt.path) {
+            Ok(verified) => verified,
+            Err(_) if !receipt.relative_path.is_empty() => {
+                self.verify_existing_path(&receipt.relative_path)?
+            }
+            Err(error) => return Err(error),
+        };
         if verified.kind != receipt.kind
             || verified.mime_type != receipt.mime_type
-            || verified.path != receipt.path
             || verified.relative_path != receipt.relative_path
             || verified.size_bytes != receipt.size_bytes
             || !verified.sha256.eq_ignore_ascii_case(&receipt.sha256)
@@ -3508,6 +3520,37 @@ mod tests {
         assert!(matches!(
             store.verify_existing_path("fake.png"),
             Err(ArtifactStoreError::InvalidImage(_))
+        ));
+    }
+
+    #[test]
+    fn reverify_survives_a_relocated_workspace_via_the_relative_locator() {
+        // Persist a receipt in one workspace, then physically move the whole
+        // workspace (the data-root layout migration does exactly this). The
+        // receipt's absolute `path` is now stale; re-verification must fall
+        // back to the workspace-relative locator and still enforce the byte
+        // integrity checks.
+        let old_parent = tempfile::tempdir().unwrap();
+        let old_workspace = old_parent.path().join("ws");
+        fs::create_dir_all(&old_workspace).unwrap();
+        fs::write(old_workspace.join("report.md"), b"# migrated report\n").unwrap();
+        let old_store = ArtifactStore::new(&old_workspace);
+        let receipt = old_store.verify_existing_path("report.md").unwrap();
+
+        let new_parent = tempfile::tempdir().unwrap();
+        let new_workspace = new_parent.path().join("ws");
+        fs::rename(&old_workspace, &new_workspace).unwrap();
+        let new_store = ArtifactStore::new(&new_workspace);
+
+        new_store
+            .reverify_receipt(&receipt)
+            .expect("relocated artifact must re-verify through its relative path");
+
+        // Tampering after the move must still fail the integrity check.
+        fs::write(new_workspace.join("report.md"), b"# tampered\n").unwrap();
+        assert!(matches!(
+            new_store.reverify_receipt(&receipt),
+            Err(ArtifactStoreError::VerificationFailed)
         ));
     }
 

@@ -48,10 +48,10 @@ struct Args {
     port: u16,
     /// Data directory for the backend (db + storage). Defaults to the same
     /// per-user dir as hosts built for the active channel (for example,
-    /// `%LOCALAPPDATA%\NomiFun\Nomi-dev` for `NOMI_CHANNEL=dev`; see
-    /// `nomifun_app::cli::default_data_dir`). The env value is taken literally
-    /// (no `/Nomi` suffix) — production deployments (Docker `/data`, systemd
-    /// `/var/lib/nomifun`) rely on that.
+    /// `%LOCALAPPDATA%\NomiFun-dev` for `NOMI_CHANNEL=dev`; see
+    /// `nomifun_app::cli::default_data_dir`). The env value is the FINAL data
+    /// root, taken literally on every host — production deployments (Docker
+    /// `/data`, systemd `/var/lib/nomifun`) rely on that.
     #[arg(
         long,
         env = "NOMIFUN_DATA_DIR",
@@ -149,7 +149,12 @@ fn main() -> Result<ExitCode> {
     let mut cli = nomifun_app::cli::Cli::parse_from(["nomifun-web"]);
     cli.host = args.host.clone();
     cli.port = args.port;
-    cli.data_dir = args.data_dir.clone();
+    // Map known self-export/default locations onto the channel default and
+    // run the one-shot legacy layout migration (`NomiFun/Nomi<suffix>` →
+    // `NomiFun<suffix>`); explicit deployments (Docker `/data`, systemd
+    // `/var/lib/nomifun`) pass through verbatim.
+    cli.data_dir =
+        nomifun_app::bootstrap::resolve_startup_data_root(args.data_dir.clone());
     cli.local = insecure_no_auth;
 
     // Same ordering as the nomicore bin: runtime init + PATH enhancement BEFORE
