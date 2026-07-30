@@ -26,14 +26,23 @@ pub enum WsOutbound {
     Close(WebSocketCloseCode, String),
 }
 
-/// WebSocket close codes per RFC 6455.
+/// WebSocket close codes: RFC 6455 standard codes plus application codes in
+/// the 4000-4999 private range.
+///
+/// Auth failures and liveness failures MUST use distinct codes: browser
+/// clients map 1008 to "session expired → redirect to login", so reusing it
+/// for heartbeat timeouts force-logged-out users whose sessions were fine
+/// (audit 2026-07-30, finding F).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u16)]
 pub enum WebSocketCloseCode {
     /// 1000 — normal closure.
     NormalClosure = 1000,
-    /// 1008 — policy violation (auth failure, heartbeat timeout).
+    /// 1008 — policy violation (authentication failure only).
     PolicyViolation = 1008,
+    /// 4408 — application code: heartbeat timeout (liveness, NOT auth).
+    /// Clients should simply reconnect.
+    HeartbeatTimeout = 4408,
 }
 
 impl WebSocketCloseCode {
@@ -112,6 +121,9 @@ mod tests {
     fn close_code_values() {
         assert_eq!(WebSocketCloseCode::NormalClosure.as_u16(), 1000);
         assert_eq!(WebSocketCloseCode::PolicyViolation.as_u16(), 1008);
+        // 4408 sits in the RFC 6455 private-use range (4000-4999); browser
+        // clients treat it as "reconnect", never as "session expired".
+        assert_eq!(WebSocketCloseCode::HeartbeatTimeout.as_u16(), 4408);
     }
 
     #[test]

@@ -1,14 +1,18 @@
 use std::sync::Arc;
 
 use axum::extract::{Request, State};
+use axum::http::{HeaderValue, header};
 use axum::middleware::Next;
 use axum::response::Response;
 
+use nomifun_common::constants::COOKIE_NAME;
 use nomifun_common::{AppError, UserId};
 use nomifun_db::IUserRepository;
 
 use crate::JwtService;
-use crate::extract::extract_token_from_headers;
+use crate::cookie::CookieConfig;
+use crate::extract::{extract_bearer_token, extract_cookie_value, extract_token_from_headers};
+use crate::jwt::is_past_half_life;
 
 /// Authenticated user injected into request extensions by the auth middleware.
 ///
@@ -27,6 +31,8 @@ pub struct CurrentUser {
 pub struct AuthState {
     pub jwt_service: Arc<JwtService>,
     pub user_repo: Arc<dyn IUserRepository>,
+    /// Cookie attributes for the sliding session renewal `Set-Cookie`.
+    pub cookie_config: Arc<CookieConfig>,
 }
 
 /// Stable authorization state for installation-scoped control planes.
@@ -62,6 +68,11 @@ impl InstanceOwnerState {
 /// 3. Verify JWT signature, expiration, and blacklist
 /// 4. Look up user in the database to ensure they still exist
 /// 5. Insert [`CurrentUser`] into request extensions
+/// 6. Sliding renewal: when a **cookie** session is past half of its
+///    lifetime, re-sign it and attach a fresh `Set-Cookie` — an actively
+///    used browser session never hits the hard 30-day expiry mid-use
+///    (audit 2026-07-30, finding E). Bearer-token clients manage their own
+///    token (`/api/auth/refresh`) and are left untouched.
 ///
 /// Returns HTTP 403 for any authentication failure (per API spec).
 ///
@@ -92,12 +103,38 @@ pub async fn auth_middleware(
         .map_err(|e| AppError::Internal(format!("Database error: {e}")))?
         .ok_or_else(|| AppError::Forbidden("User not found".into()))?;
 
+    // Renew only sessions that actually ride the cookie: a bearer token also
+    // present in the headers wins during extraction, so a renewed cookie
+    // would be ignored by that client — skip those.
+    let renew_cookie = is_past_half_life(&payload)
+        && extract_bearer_token(request.headers()).is_none()
+        && extract_cookie_value(request.headers(), COOKIE_NAME).as_deref() == Some(token.as_str());
+    let renewed = if renew_cookie {
+        match state.jwt_service.sign(user.user_id.as_str(), &user.username) {
+            Ok(fresh) => Some(state.cookie_config.build_session_cookie(&fresh)),
+            Err(error) => {
+                // Renewal is opportunistic: the current token is still valid,
+                // so serve the request rather than failing it.
+                tracing::warn!(%error, "session sliding renewal failed; keeping current token");
+                None
+            }
+        }
+    } else {
+        None
+    };
+
     request.extensions_mut().insert(CurrentUser {
         id: user.user_id,
         username: user.username,
     });
 
-    Ok(next.run(request).await)
+    let mut response = next.run(request).await;
+    if let Some(cookie) = renewed
+        && let Ok(value) = HeaderValue::from_str(&cookie)
+    {
+        response.headers_mut().append(header::SET_COOKIE, value);
+    }
+    Ok(response)
 }
 
 /// Require the already-authenticated caller to be the installation owner.
