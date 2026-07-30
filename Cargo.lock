@@ -5491,6 +5491,7 @@ dependencies = [
  "nomifun-extension",
  "nomifun-knowledge",
  "nomifun-mcp",
+ "nomifun-model-invoke",
  "nomifun-net",
  "nomifun-realtime",
  "nomifun-runtime",
@@ -5573,6 +5574,7 @@ dependencies = [
  "nomifun-idmm",
  "nomifun-knowledge",
  "nomifun-mcp",
+ "nomifun-model-invoke",
  "nomifun-net",
  "nomifun-office",
  "nomifun-preset",
@@ -5800,6 +5802,7 @@ dependencies = [
  "nomifun-auth",
  "nomifun-common",
  "nomifun-db",
+ "nomifun-model-invoke",
  "reqwest 0.12.28",
  "serde",
  "serde_json",
@@ -6110,6 +6113,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "nomifun-model-invoke"
+version = "0.3.3"
+dependencies = [
+ "async-trait",
+ "base64 0.22.1",
+ "nomifun-api-types",
+ "nomifun-common",
+ "nomifun-db",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "wiremock",
+]
+
+[[package]]
 name = "nomifun-net"
 version = "0.3.3"
 dependencies = [
@@ -6282,7 +6303,7 @@ dependencies = [
  "nomifun-api-types",
  "nomifun-common",
  "nomifun-db",
- "nomifun-net",
+ "nomifun-model-invoke",
  "nomifun-system",
  "open",
  "reqwest 0.12.28",

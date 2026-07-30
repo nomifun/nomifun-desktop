@@ -2,7 +2,7 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use serde_json::json;
 use tower::ServiceExt;
-use wiremock::matchers::{body_string_contains, header, method, path};
+use wiremock::matchers::{body_string_contains, header, method, path, query_param};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 use common::{body_json, build_app_with_noop_opener, json_with_token, setup_and_login};
@@ -79,10 +79,12 @@ async fn set_stt_config(app: &mut axum::Router, token: &str, csrf: &str, config:
     assert_eq!(resp.status(), StatusCode::OK);
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn create_provider(
     app: &mut axum::Router,
     token: &str,
     csrf: &str,
+    platform: &str,
     name: &str,
     base_url: &str,
     api_key: &str,
@@ -92,7 +94,7 @@ async fn create_provider(
         "POST",
         "/api/providers",
         json!({
-            "platform": "custom",
+            "platform": platform,
             "name": name,
             "base_url": base_url,
             "api_key": api_key,
@@ -337,12 +339,14 @@ async fn st4_stt_config_not_set() {
     assert_eq!(json["code"], "STT_DISABLED");
 }
 
-// ST-5: OpenAI not configured (missing API key)
+// ST-5: OpenAI not configured (empty-key legacy shell, no provider selected)
 #[tokio::test]
 async fn st5_openai_not_configured() {
     let (mut app, services) = build_app_with_noop_opener().await;
     let (token, csrf) = setup_and_login(&mut app, &services, "admin", "StrongP@ss1").await;
 
+    // An empty-key embedded shell is "nothing configured", not a retired
+    // legacy credential: the NOT_CONFIGURED 400 family must keep firing.
     set_stt_config(
         &mut app,
         &token,
@@ -368,7 +372,7 @@ async fn st5_openai_not_configured() {
     assert_eq!(json["code"], "STT_OPENAI_NOT_CONFIGURED");
 }
 
-// ST-6: Deepgram not configured (missing API key)
+// ST-6: Deepgram not configured (empty-key legacy shell, no provider selected)
 #[tokio::test]
 async fn st6_deepgram_not_configured() {
     let (mut app, services) = build_app_with_noop_opener().await;
@@ -399,7 +403,44 @@ async fn st6_deepgram_not_configured() {
     assert_eq!(json["code"], "STT_DEEPGRAM_NOT_CONFIGURED");
 }
 
-// ST-7: STT third-party API failure (fake API key → 401)
+// ST-legacy: an embedded config CARRYING a credential (pre-catalog shape) is
+// retired — 500 STT_UNKNOWN with re-selection guidance, never silent execution.
+#[tokio::test]
+async fn st_legacy_embedded_credential_config_is_rejected() {
+    let (mut app, services) = build_app_with_noop_opener().await;
+    let (token, csrf) = setup_and_login(&mut app, &services, "admin", "StrongP@ss1").await;
+
+    set_stt_config(
+        &mut app,
+        &token,
+        &csrf,
+        json!({
+            "enabled": true,
+            "provider": "openai",
+            "openai": { "api_key": "sk-legacy-key", "model": "whisper-1" }
+        }),
+    )
+    .await;
+
+    let (content_type, body) = MultipartBuilder::new()
+        .add_file("file", "test.wav", "audio/wav", b"fake audio data")
+        .add_text("fileName", "test.wav")
+        .add_text("mimeType", "audio/wav")
+        .build();
+
+    let req = multipart_request("/api/stt", &content_type, body, &token, &csrf);
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    let json = body_json(resp).await;
+    assert_eq!(json["code"], "STT_UNKNOWN");
+    assert!(
+        json["error"].as_str().unwrap().contains("no longer supported"),
+        "error: {}",
+        json["error"]
+    );
+}
+
+// ST-7: STT third-party API failure (catalog provider, upstream 401)
 #[tokio::test]
 async fn st7_stt_api_failure() {
     let mock_server = MockServer::start().await;
@@ -411,7 +452,17 @@ async fn st7_stt_api_failure() {
 
     let (mut app, services) = build_app_with_noop_opener().await;
     let (token, csrf) = setup_and_login(&mut app, &services, "admin", "StrongP@ss1").await;
-
+    let provider_id = create_provider(
+        &mut app,
+        &token,
+        &csrf,
+        "openai",
+        "Failing Speech Provider",
+        &mock_server.uri(),
+        "sk-fake-key",
+        &["whisper-1"],
+    )
+    .await;
     set_stt_config(
         &mut app,
         &token,
@@ -419,11 +470,8 @@ async fn st7_stt_api_failure() {
         json!({
             "enabled": true,
             "provider": "openai",
-            "openai": {
-                "api_key": "sk-fake-key",
-                "base_url": mock_server.uri(),
-                "model": "whisper-1"
-            }
+            "provider_id": provider_id,
+            "model": "whisper-1"
         }),
     )
     .await;
@@ -493,19 +541,34 @@ async fn st9_multipart_missing_file() {
     assert_eq!(json["success"], false);
 }
 
-// ST-1: OpenAI transcription success (mocked)
+// ST-1: OpenAI transcription success (catalog provider, mocked)
 #[tokio::test]
 async fn st1_openai_transcription_success() {
     let mock_server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/v1/audio/transcriptions"))
+        .and(header("Authorization", "Bearer sk-test-key"))
+        .and(body_string_contains("name=\"file\""))
+        .and(body_string_contains("name=\"model\""))
+        .and(body_string_contains("whisper-1"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "text": "hello world" })))
+        .expect(1)
         .mount(&mock_server)
         .await;
 
     let (mut app, services) = build_app_with_noop_opener().await;
     let (token, csrf) = setup_and_login(&mut app, &services, "admin", "StrongP@ss1").await;
-
+    let provider_id = create_provider(
+        &mut app,
+        &token,
+        &csrf,
+        "openai",
+        "Speech Provider",
+        &mock_server.uri(),
+        "sk-test-key",
+        &["whisper-1"],
+    )
+    .await;
     set_stt_config(
         &mut app,
         &token,
@@ -513,11 +576,8 @@ async fn st1_openai_transcription_success() {
         json!({
             "enabled": true,
             "provider": "openai",
-            "openai": {
-                "api_key": "sk-test-key",
-                "base_url": mock_server.uri(),
-                "model": "whisper-1"
-            }
+            "provider_id": provider_id,
+            "model": "whisper-1"
         }),
     )
     .await;
@@ -538,11 +598,17 @@ async fn st1_openai_transcription_success() {
     assert_eq!(json["data"]["provider"], "openai");
 }
 
-// ST-2: Deepgram transcription success (mocked)
+// ST-2: Deepgram transcription success (catalog provider on the deepgram
+// platform; the invoke layer routes to /v1/listen with Token auth — the
+// stored `provider` enum plays no part in execution)
 #[tokio::test]
 async fn st2_deepgram_transcription_success() {
     let mock_server = MockServer::start().await;
     Mock::given(method("POST"))
+        .and(path("/v1/listen"))
+        .and(header("Authorization", "Token dg-test-key"))
+        .and(header("Content-Type", "audio/wav"))
+        .and(query_param("model", "nova-2"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "metadata": {
                 "model_info": {
@@ -557,12 +623,23 @@ async fn st2_deepgram_transcription_success() {
                 }]
             }
         })))
+        .expect(1)
         .mount(&mock_server)
         .await;
 
     let (mut app, services) = build_app_with_noop_opener().await;
     let (token, csrf) = setup_and_login(&mut app, &services, "admin", "StrongP@ss1").await;
-
+    let provider_id = create_provider(
+        &mut app,
+        &token,
+        &csrf,
+        "deepgram",
+        "Deepgram",
+        &mock_server.uri(),
+        "dg-test-key",
+        &["nova-2"],
+    )
+    .await;
     set_stt_config(
         &mut app,
         &token,
@@ -570,11 +647,8 @@ async fn st2_deepgram_transcription_success() {
         json!({
             "enabled": true,
             "provider": "deepgram",
-            "deepgram": {
-                "api_key": "dg-test-key",
-                "base_url": mock_server.uri(),
-                "model": "nova-2"
-            }
+            "provider_id": provider_id,
+            "model": "nova-2"
         }),
     )
     .await;
@@ -591,6 +665,7 @@ async fn st2_deepgram_transcription_success() {
     let json = body_json(resp).await;
     assert_eq!(json["success"], true);
     assert_eq!(json["data"]["text"], "hello from deepgram");
+    assert_eq!(json["data"]["model"], "nova-2-general");
     assert_eq!(json["data"]["provider"], "deepgram");
 }
 
@@ -609,6 +684,7 @@ async fn st11_configured_provider_is_resolved_by_id() {
         &mut app,
         &token,
         &csrf,
+        "custom",
         "Speech Provider",
         &mock_server.uri(),
         "sk-from-provider",
@@ -664,6 +740,7 @@ async fn st12_stepfun_provider_uses_single_version_prefix_and_required_form_fiel
         &mut app,
         &token,
         &csrf,
+        "custom",
         "StepFun",
         &format!("{}/v1", mock_server.uri()),
         "sk-stepfun-provider",
@@ -697,19 +774,33 @@ async fn st12_stepfun_provider_uses_single_version_prefix_and_required_form_fiel
     assert_eq!(body["data"]["model"], "step-asr");
 }
 
-// ST-10: languageHint passed through
+// ST-10: languageHint passed through (catalog provider; the hint must reach
+// the provider as the multipart `language` field)
 #[tokio::test]
 async fn st10_language_hint_passed() {
     let mock_server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/v1/audio/transcriptions"))
+        .and(body_string_contains("name=\"language\""))
+        .and(body_string_contains("zh"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "text": "你好世界" })))
+        .expect(1)
         .mount(&mock_server)
         .await;
 
     let (mut app, services) = build_app_with_noop_opener().await;
     let (token, csrf) = setup_and_login(&mut app, &services, "admin", "StrongP@ss1").await;
-
+    let provider_id = create_provider(
+        &mut app,
+        &token,
+        &csrf,
+        "openai",
+        "Speech Provider",
+        &mock_server.uri(),
+        "sk-test-key",
+        &["whisper-1"],
+    )
+    .await;
     set_stt_config(
         &mut app,
         &token,
@@ -717,11 +808,8 @@ async fn st10_language_hint_passed() {
         json!({
             "enabled": true,
             "provider": "openai",
-            "openai": {
-                "api_key": "sk-test-key",
-                "base_url": mock_server.uri(),
-                "model": "whisper-1"
-            }
+            "provider_id": provider_id,
+            "model": "whisper-1"
         }),
     )
     .await;
@@ -739,6 +827,7 @@ async fn st10_language_hint_passed() {
     let json = body_json(resp).await;
     assert_eq!(json["success"], true);
     assert_eq!(json["data"]["text"], "你好世界");
+    assert_eq!(json["data"]["language"], "zh");
 }
 
 // ===========================================================================

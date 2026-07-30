@@ -221,6 +221,7 @@ nomifun-system.workspace = true
 nomifun-file.workspace = true
 nomifun-office.workspace = true
 nomifun-shell.workspace = true
+nomifun-model-invoke.workspace = true
 nomifun-ai-agent.workspace = true
 nomifun-mcp.workspace = true
 nomifun-conversation.workspace = true

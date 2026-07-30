@@ -155,6 +155,10 @@ pub struct ProviderResponse {
     pub model_health: Option<HashMap<String, ModelHealthStatus>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub bedrock_config: Option<BedrockConfig>,
+    /// All authoritative per-model rows for this provider (`provider_models`),
+    /// in `(sort_order, id)` order. Empty for a provider with no models.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub models_detail: Vec<crate::provider_model::ProviderModelResponse>,
     #[serde(default)]
     pub is_full_url: bool,
     pub sort_order: i64,
@@ -529,6 +533,7 @@ mod tests {
             model_enabled: Some(HashMap::from([("claude-sonnet-4-20250514".into(), true)])),
             model_health: None,
             bedrock_config: None,
+            models_detail: vec![],
             is_full_url: false,
             sort_order: 0,
             created_at: 1712345678000,
@@ -544,6 +549,8 @@ mod tests {
         assert!(json.get("context_limit").is_none());
         assert!(json.get("model_protocols").is_none());
         assert!(json.get("bedrock_config").is_none());
+        // Empty models_detail is skipped on the wire (legacy-shape faithful).
+        assert!(json.get("models_detail").is_none());
     }
 
     #[test]
@@ -564,6 +571,7 @@ mod tests {
             model_enabled: None,
             model_health: None,
             bedrock_config: None,
+            models_detail: vec![],
             is_full_url: false,
             sort_order: 0,
             created_at: 0,

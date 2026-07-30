@@ -336,6 +336,27 @@ fn is_natural_key(value: &str) -> bool {
         })
 }
 
+/// Deserialize a "double Option" partial-update field, distinguishing the
+/// three JSON states of a nullable column:
+///
+/// - field absent → `None` ("keep current value"; requires `#[serde(default)]`)
+/// - field `null` → `Some(None)` ("clear the value")
+/// - field value  → `Some(Some(v))` ("set the value")
+///
+/// Use as `#[serde(default, deserialize_with =
+/// "crate::serde_util::deserialize_double_option")]`.
+pub(crate) fn deserialize_double_option<'de, T, D>(
+    deserializer: D,
+) -> Result<Option<Option<T>>, D::Error>
+where
+    T: serde::Deserialize<'de>,
+    D: serde::Deserializer<'de>,
+{
+    Ok(Some(<Option<T> as serde::Deserialize>::deserialize(
+        deserializer,
+    )?))
+}
+
 /// Deserialize a canonical conversation-or-terminal entity ID.
 ///
 /// The wire representation is string-only. Numeric JSON values, malformed
@@ -353,5 +374,37 @@ where
         Err(serde::de::Error::custom(
             "expected a canonical conversation or terminal entity ID",
         ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use serde::Deserialize;
+
+    #[derive(Debug, Deserialize, PartialEq)]
+    struct DoubleOptionProbe {
+        #[serde(
+            default,
+            deserialize_with = "super::deserialize_double_option"
+        )]
+        value: Option<Option<i64>>,
+    }
+
+    #[test]
+    fn double_option_absent_field_is_none() {
+        let probe: DoubleOptionProbe = serde_json::from_str("{}").unwrap();
+        assert_eq!(probe.value, None, "absent field must mean 'keep'");
+    }
+
+    #[test]
+    fn double_option_null_is_some_none() {
+        let probe: DoubleOptionProbe = serde_json::from_str(r#"{"value":null}"#).unwrap();
+        assert_eq!(probe.value, Some(None), "explicit null must mean 'clear'");
+    }
+
+    #[test]
+    fn double_option_value_is_some_some() {
+        let probe: DoubleOptionProbe = serde_json::from_str(r#"{"value":42}"#).unwrap();
+        assert_eq!(probe.value, Some(Some(42)), "present value must mean 'set'");
     }
 }
