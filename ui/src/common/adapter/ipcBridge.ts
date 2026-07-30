@@ -105,6 +105,16 @@ import type {
   SetManagedModelEnabledRequest,
   SetManagedModelServiceEnabledRequest,
 } from '../types/provider/managedModelService';
+import type {
+  CreateProviderModelRequest,
+  ProviderModelKeyRequest,
+  ProviderModelResponse,
+  UpdateProviderModelRequest,
+} from '../types/provider/providerModel';
+import type {
+  ProviderConnectionResponse,
+  UpsertProviderConnectionRequest,
+} from '../types/provider/providerConnection';
 import type { SpeechToTextRequest, SpeechToTextResult } from '../types/provider/speech';
 import type {
   TAdoptExecutionStepOutput,
@@ -1332,12 +1342,30 @@ export const mode = {
   updateProvider: withResponseMap(httpPut<ProviderResponse, { provider_id: ProviderId } & UpdateProviderRequest>(
     (p) => `/api/providers/${p.provider_id}`,
     (p) => {
-      const { provider_id: _provider_id, ...body } = p;
+      // Call sites read-modify-write whole `IProvider` records into this body
+      // (`const { id, ...body } = provider`). `models_detail` is a
+      // response-only projection (`ProviderResponse.models_detail` →
+      // `IProvider.models_detail`); the deny_unknown_fields backend update
+      // contract must never see it.
+      const { provider_id: _provider_id, models_detail: _modelsDetail, ...body } =
+        p as typeof p & { models_detail?: unknown };
       return body;
     }
   ), fromProviderResponse),
   deleteProvider: httpDelete<void, { provider_id: ProviderId }>(
     (p) => `/api/providers/${p.provider_id}`
+  ),
+  /**
+   * Server-side provider clone (`POST /api/providers/{id}/clone`): copies the
+   * provider row plus every `provider_models` profile row (minus per-deployment
+   * health) and every connection profile. No request body.
+   */
+  cloneProvider: withResponseMap(
+    httpPost<ProviderResponse, { provider_id: ProviderId }>(
+      (p) => `/api/providers/${p.provider_id}/clone`,
+      () => undefined
+    ),
+    fromProviderResponse
   ),
   fetchProviderModels: httpPost<FetchModelsResponse, { provider_id: ProviderId; try_fix?: boolean }>(
     (p) => `/api/providers/${p.provider_id}/models`,
@@ -1412,6 +1440,73 @@ export const modelProfile = {
         provider_id: parseProviderId(model.provider_id),
       })),
     })
+  ),
+};
+
+// ---------------------------------------------------------------------------
+// Provider model catalog (row-level) — routed to /api/provider-models/*
+// ---------------------------------------------------------------------------
+
+const normalizeProviderModel = (row: ProviderModelResponse): ProviderModelResponse => ({
+  ...row,
+  provider_id: parseProviderId(row.provider_id),
+});
+
+export const providerModel = {
+  /** List catalog rows; pass `provider_id` to filter to one provider. */
+  list: withResponseMap(
+    httpGet<ProviderModelResponse[], { provider_id?: ProviderId }>((p) =>
+      p.provider_id === undefined
+        ? '/api/provider-models'
+        : `/api/provider-models?provider_id=${encodeURIComponent(p.provider_id)}`
+    ),
+    (rows) => rows.map(normalizeProviderModel)
+  ),
+  create: withResponseMap(
+    httpPost<ProviderModelResponse, CreateProviderModelRequest>('/api/provider-models'),
+    normalizeProviderModel
+  ),
+  update: withResponseMap(
+    httpPost<ProviderModelResponse, UpdateProviderModelRequest>('/api/provider-models/update'),
+    normalizeProviderModel
+  ),
+  remove: httpPost<void, ProviderModelKeyRequest>('/api/provider-models/delete'),
+};
+
+// ---------------------------------------------------------------------------
+// Provider connection profiles (per-role, non-default) —
+// routed to /api/providers/{id}/connections[/{role}]
+// ---------------------------------------------------------------------------
+
+const normalizeProviderConnection = (
+  connection: ProviderConnectionResponse
+): ProviderConnectionResponse => ({
+  ...connection,
+  provider_id: parseProviderId(connection.provider_id),
+});
+
+export const providerConnection = {
+  list: withResponseMap(
+    httpGet<ProviderConnectionResponse[], { provider_id: ProviderId }>(
+      (p) => `/api/providers/${p.provider_id}/connections`
+    ),
+    (connections) => connections.map(normalizeProviderConnection)
+  ),
+  upsert: withResponseMap(
+    httpPost<
+      ProviderConnectionResponse,
+      { provider_id: ProviderId } & UpsertProviderConnectionRequest
+    >(
+      (p) => `/api/providers/${p.provider_id}/connections`,
+      (p) => {
+        const { provider_id: _providerId, ...body } = p;
+        return body;
+      }
+    ),
+    normalizeProviderConnection
+  ),
+  remove: httpDelete<void, { provider_id: ProviderId; role: string }>(
+    (p) => `/api/providers/${p.provider_id}/connections/${encodeURIComponent(p.role)}`
   ),
 };
 
