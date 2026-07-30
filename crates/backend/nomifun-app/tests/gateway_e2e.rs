@@ -141,12 +141,21 @@ async fn seed_user_and_conversation_with_extra(
 async fn seed_provider(services: &nomifun_app::AppServices, provider_id: &str, model: &str) {
     sqlx::query(
         "INSERT OR IGNORE INTO providers \
-         (provider_id, platform, name, base_url, api_key_encrypted, models, enabled, created_at, updated_at) \
-         VALUES (?, 'openai', ?, 'http://127.0.0.1:1', 'k', ?, 1, 0, 0)",
+         (provider_id, platform, name, base_url, api_key_encrypted, enabled, created_at, updated_at) \
+         VALUES (?, 'openai', ?, 'http://127.0.0.1:1', 'k', 1, 0, 0)",
     )
     .bind(provider_id)
     .bind(format!("Provider {provider_id}"))
-    .bind(format!("[\"{model}\"]"))
+    .execute(services.database.pool())
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT OR IGNORE INTO provider_models \
+         (provider_id, model, enabled, sort_order, tasks, traits, params, source, created_at, updated_at) \
+         VALUES (?, ?, 1, 0, '[]', '[]', '{}', 'inferred', 0, 0)",
+    )
+    .bind(provider_id)
+    .bind(model)
     .execute(services.database.pool())
     .await
     .unwrap();

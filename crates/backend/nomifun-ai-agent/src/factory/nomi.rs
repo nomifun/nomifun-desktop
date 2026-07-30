@@ -355,6 +355,7 @@ pub(super) async fn build(
 
     let fields = super::provider_config::resolve_provider_fields_with_fallback(
         &deps.provider_repo,
+        &deps.provider_model_repo,
         &deps.encryption_key,
         provider_id,
         &model_id,
@@ -1105,20 +1106,10 @@ pub(crate) fn build_public_agent_prompt(runtime: &crate::factory::PublicAgentRun
 /// Map Nomi DB platform name to the nomi provider identifier.
 ///
 /// Mirrors the frontend `src/process/agent/nomi/envBuilder.ts` mapping.
-/// For `new-api` platform, per-model protocol overrides from `model_protocols`
-/// JSON take precedence.
-pub(crate) fn map_nomi_provider(
-    platform: &str,
-    model_id: &str,
-    model_protocols: Option<&str>,
-) -> String {
-    if platform == "new-api"
-        && let Some(protocols_json) = model_protocols
-        && let Ok(map) =
-            serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(protocols_json)
-        && let Some(serde_json::Value::String(protocol)) = map.get(model_id)
-        && protocol == "anthropic"
-    {
+/// For `new-api` platform, the model's per-row `protocol` override (from its
+/// `provider_models` row) takes precedence.
+pub(crate) fn map_nomi_provider(platform: &str, protocol: Option<&str>) -> String {
+    if platform == "new-api" && protocol == Some("anthropic") {
         return "anthropic".to_owned();
     }
 
@@ -1980,51 +1971,32 @@ mod tests {
 
     #[test]
     fn map_nomi_provider_known_platforms() {
-        assert_eq!(map_nomi_provider("anthropic", "m", None), "anthropic");
-        assert_eq!(map_nomi_provider("bedrock", "m", None), "bedrock");
-        assert_eq!(map_nomi_provider("gemini-vertex-ai", "m", None), "vertex");
+        assert_eq!(map_nomi_provider("anthropic", None), "anthropic");
+        assert_eq!(map_nomi_provider("bedrock", None), "bedrock");
+        assert_eq!(map_nomi_provider("gemini-vertex-ai", None), "vertex");
     }
 
     #[test]
     fn map_nomi_provider_custom_and_others_default_to_openai() {
-        assert_eq!(map_nomi_provider("custom", "gpt-4o", None), "openai");
-        assert_eq!(
-            map_nomi_provider("gemini", "gemini-2.5-pro", None),
-            "openai"
-        );
-        assert_eq!(map_nomi_provider("new-api", "m", None), "openai");
-        assert_eq!(map_nomi_provider("unknown", "m", None), "openai");
+        assert_eq!(map_nomi_provider("custom", None), "openai");
+        assert_eq!(map_nomi_provider("gemini", None), "openai");
+        assert_eq!(map_nomi_provider("new-api", None), "openai");
+        assert_eq!(map_nomi_provider("unknown", None), "openai");
     }
 
     #[test]
     fn map_nomi_provider_new_api_with_anthropic_protocol() {
-        let protocols = r#"{"claude-sonnet":"anthropic","gpt-4o":"openai"}"#;
         assert_eq!(
-            map_nomi_provider("new-api", "claude-sonnet", Some(protocols)),
+            map_nomi_provider("new-api", Some("anthropic")),
             "anthropic"
         );
-        assert_eq!(
-            map_nomi_provider("new-api", "gpt-4o", Some(protocols)),
-            "openai"
-        );
-        assert_eq!(
-            map_nomi_provider("new-api", "unknown-model", Some(protocols)),
-            "openai"
-        );
+        assert_eq!(map_nomi_provider("new-api", Some("openai")), "openai");
+        assert_eq!(map_nomi_provider("new-api", None), "openai");
     }
 
     #[test]
-    fn map_nomi_provider_new_api_with_invalid_json() {
-        assert_eq!(
-            map_nomi_provider("new-api", "m", Some("not json")),
-            "openai"
-        );
-    }
-
-    #[test]
-    fn map_nomi_provider_non_new_api_ignores_protocols() {
-        let protocols = r#"{"m":"anthropic"}"#;
-        assert_eq!(map_nomi_provider("custom", "m", Some(protocols)), "openai");
+    fn map_nomi_provider_non_new_api_ignores_protocol_override() {
+        assert_eq!(map_nomi_provider("custom", Some("anthropic")), "openai");
     }
 
     #[test]

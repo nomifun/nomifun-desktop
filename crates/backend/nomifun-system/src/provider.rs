@@ -22,8 +22,8 @@ use crate::provider_model::row_to_model_response;
 /// Business logic for model provider CRUD with API key encryption/masking.
 ///
 /// Reads project the per-model surface (`models` + the per-model maps +
-/// `models_detail`) from the authoritative `provider_models` rows; the legacy
-/// JSON map columns on `providers` are still dual-written but no longer read.
+/// `models_detail`) from the authoritative `provider_models` rows; migration
+/// 016 dropped the legacy providers columns, so the rows are the only store.
 #[derive(Clone)]
 pub struct ProviderService {
     repo: Arc<dyn IProviderRepository>,
@@ -196,9 +196,11 @@ impl ProviderService {
     ///
     /// - The new provider row copies platform/base_url/api_key ciphertext
     ///   (same encryption key — the source bytes are reused verbatim, no
-    ///   decrypt/re-encrypt), models JSON, capabilities, legacy maps,
-    ///   bedrock_config, is_full_url and enabled; `name` gets a " copy"
-    ///   suffix; sort_order appends after the current max.
+    ///   decrypt/re-encrypt), capabilities, bedrock_config, is_full_url and
+    ///   enabled; `name` gets a " copy" suffix; sort_order appends after the
+    ///   current max. The models array passed to the create is derived from
+    ///   the source `provider_models` rows (their order), since migration 016
+    ///   removed the legacy providers columns.
     /// - `provider_models` rows are copied field-for-field from the source
     ///   rows (tasks/traits/params/source/protocol/connection_role/
     ///   context_limit/description/enabled/sort_order). `health` /
@@ -227,6 +229,15 @@ impl ProviderService {
         let source_model_rows = self.provider_model_repo.list_for_provider(id).await?;
         let source_connections = connection_repo.list_for_provider(id).await?;
 
+        // The membership array for the create call comes straight from the
+        // authoritative source rows (already ordered by sort_order).
+        let source_models: Vec<&str> = source_model_rows
+            .iter()
+            .map(|row| row.model.as_str())
+            .collect();
+        let models_json = serde_json::to_string(&source_models)
+            .map_err(|e| AppError::Internal(format!("Failed to serialize clone models: {e}")))?;
+
         let clone_name = format!("{} copy", source.name.trim_end());
         let created = self
             .repo
@@ -238,15 +249,16 @@ impl ProviderService {
                 // Ciphertext copy: same encryption key, so re-encrypting would
                 // only mint a fresh nonce for identical plaintext.
                 api_key_encrypted: &source.api_key_encrypted,
-                models: &source.models,
+                models: &models_json,
                 enabled: source.enabled,
                 capabilities: &source.capabilities,
-                model_context_limits: source.model_context_limits.as_deref(),
-                model_protocols: source.model_protocols.as_deref(),
-                model_descriptions: source.model_descriptions.as_deref(),
-                model_enabled: source.model_enabled.as_deref(),
-                // Health is per-deployment state; keep it out of the clone's
-                // legacy column AND the dual-written rows.
+                // The per-model surface is copied row-for-row below from the
+                // authoritative source rows; no map params needed.
+                model_context_limits: None,
+                model_protocols: None,
+                model_descriptions: None,
+                model_enabled: None,
+                // Health is per-deployment state; keep it out of the clone.
                 model_health: None,
                 bedrock_config: source.bedrock_config.as_deref(),
                 is_full_url: source.is_full_url,
@@ -255,12 +267,11 @@ impl ProviderService {
             .await?;
         let new_id = created.provider_id.clone();
 
-        // The repo create's dual-write materialized rows for every model in
-        // the legacy array — but with placeholder profiles (tasks/traits '[]',
-        // params '{}', source 'inferred'). Overwrite each from the
-        // authoritative source row; a source row absent from the legacy array
-        // (created via /api/provider-models, which does not write the legacy
-        // column back) is inserted instead.
+        // The repo create materialized placeholder rows for every model in
+        // the membership array (tasks/traits '[]', params '{}', source
+        // 'inferred'). Overwrite each from the authoritative source row; a
+        // row the create did not materialize (defensive: a concurrent source
+        // mutation) is inserted instead.
         for row in &source_model_rows {
             let update = ProviderModelUpdate {
                 enabled: Some(row.enabled),
@@ -980,8 +991,8 @@ mod tests {
         assert!(svc.list().await.unwrap()[0].model_enabled.is_none());
 
         // Flip one provider_models row directly, bypassing the repository's
-        // dual-write, so the legacy providers.model_enabled column still says
-        // "all enabled". A row-projected read must reflect the row.
+        // map-param sync path entirely. A row-projected read must reflect
+        // the row.
         nomifun_db::sqlx::query(
             "UPDATE provider_models SET enabled = 0 WHERE provider_id = ? AND model = 'm2'",
         )
@@ -1972,11 +1983,11 @@ mod delete_guard_tests {
         let database = init_database_memory().await.unwrap();
         nomifun_db::sqlx::query(
             "INSERT INTO providers (\
-                provider_id, platform, name, base_url, api_key_encrypted, models, enabled,\
+                provider_id, platform, name, base_url, api_key_encrypted, enabled,\
                 capabilities, created_at, updated_at\
              ) VALUES (\
                 '0190f5fe-7c00-7a00-8000-000000000097', 'openai', 'Race provider', 'https://example.invalid',\
-                'encrypted', '[]', 1, '[]', 1, 1\
+                'encrypted', 1, '[]', 1, 1\
              )",
         )
         .execute(database.pool())

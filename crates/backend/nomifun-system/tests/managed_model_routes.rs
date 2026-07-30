@@ -25,10 +25,13 @@ async fn setup() -> (
 ) {
     let db = init_database_memory().await.unwrap();
     let provider_repo = Arc::new(SqliteProviderRepository::new(db.pool().clone()));
-    let (managed, server) =
-        start_and_provision_free_model(provider_repo.clone(), TEST_KEY)
-            .await
-            .unwrap();
+    let (managed, server) = start_and_provision_free_model(
+        provider_repo.clone(),
+        Arc::new(nomifun_db::SqliteProviderModelRepository::new(db.pool().clone())),
+        TEST_KEY,
+    )
+    .await
+    .unwrap();
     let http = reqwest::Client::new();
     let state = SystemRouterState {
         settings_service: SettingsService::new(Arc::new(

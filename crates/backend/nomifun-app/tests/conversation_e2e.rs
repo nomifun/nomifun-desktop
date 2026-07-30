@@ -45,13 +45,22 @@ fn create_body_with_extra(name: &str, extra: serde_json::Value) -> serde_json::V
 async fn seed_provider(services: &nomifun_app::AppServices, provider_id: &str, model: &str) {
     nomifun_db::sqlx::query(
         "INSERT INTO providers \
-         (provider_id, platform, name, base_url, api_key_encrypted, models, enabled, \
+         (provider_id, platform, name, base_url, api_key_encrypted, enabled, \
           capabilities, created_at, updated_at) \
-         VALUES (?, 'openai', ?, 'https://example.invalid', 'encrypted', ?, 1, '[]', 1, 1)",
+         VALUES (?, 'openai', ?, 'https://example.invalid', 'encrypted', 1, '[]', 1, 1)",
     )
     .bind(provider_id)
     .bind(format!("Provider {provider_id}"))
-    .bind(serde_json::json!([model]).to_string())
+    .execute(services.database.pool())
+    .await
+    .unwrap();
+    nomifun_db::sqlx::query(
+        "INSERT INTO provider_models \
+         (provider_id, model, enabled, sort_order, tasks, traits, params, source, created_at, updated_at) \
+         VALUES (?, ?, 1, 0, '[]', '[]', '{}', 'inferred', 1, 1)",
+    )
+    .bind(provider_id)
+    .bind(model)
     .execute(services.database.pool())
     .await
     .unwrap();

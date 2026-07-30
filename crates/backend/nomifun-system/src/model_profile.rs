@@ -211,7 +211,7 @@ where
 /// catalog list — the rows already exist via dual-write.
 ///
 /// Returns the number of rows backfilled.
-pub(crate) async fn seed_inferred_provider_models(
+pub async fn seed_inferred_provider_models(
     repo: &dyn IProviderModelRepository,
     provider_id: &str,
     platform: &str,

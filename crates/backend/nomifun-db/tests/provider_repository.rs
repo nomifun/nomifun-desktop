@@ -82,11 +82,21 @@ async fn create_returns_provider_with_generated_id() {
 
 #[tokio::test]
 async fn create_stores_json_fields_as_strings() {
-    let r = repo().await;
+    let db = init_database_memory().await.unwrap();
+    let r = SqliteProviderRepository::new(db.pool().clone());
     let p = r.create(sample_params()).await.unwrap();
 
-    assert_eq!(p.models, r#"["claude-sonnet-4-20250514"]"#);
     assert_eq!(p.capabilities, r#"[{"type":"text"}]"#);
+    // The models array param has no providers column since migration 016; it
+    // materializes as provider_models rows.
+    let models: Vec<String> = sqlx::query_scalar(
+        "SELECT model FROM provider_models WHERE provider_id = ? ORDER BY sort_order",
+    )
+    .bind(&p.provider_id)
+    .fetch_all(db.pool())
+    .await
+    .unwrap();
+    assert_eq!(models, vec!["claude-sonnet-4-20250514"]);
 }
 
 #[tokio::test]
@@ -148,9 +158,11 @@ async fn create_duplicate_canonical_caller_id_returns_conflict() {
 
 #[tokio::test]
 async fn create_with_all_optional_fields() {
-    let r = repo().await;
+    let db = init_database_memory().await.unwrap();
+    let r = SqliteProviderRepository::new(db.pool().clone());
     let p = r
         .create(CreateProviderParams {
+            models: r#"["m1"]"#,
             model_context_limits: Some(r#"{"m1":128000}"#),
             model_protocols: Some(r#"{"m1":"openai"}"#),
             model_descriptions: Some(r#"{"m1":"擅长前端"}"#),
@@ -162,11 +174,27 @@ async fn create_with_all_optional_fields() {
         .await
         .unwrap();
 
-    assert_eq!(p.model_protocols.as_deref(), Some(r#"{"m1":"openai"}"#));
-    assert_eq!(p.model_descriptions.as_deref(), Some(r#"{"m1":"擅长前端"}"#));
-    assert_eq!(p.model_enabled.as_deref(), Some(r#"{"m1":true}"#));
-    assert!(p.model_health.is_some());
     assert!(p.bedrock_config.is_some());
+    // The per-model map params landed on the m1 provider_models row.
+    let (enabled, context_limit, protocol, description, health): (
+        i64,
+        Option<i64>,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+    ) = sqlx::query_as(
+        "SELECT enabled, context_limit, protocol, description, health \
+         FROM provider_models WHERE provider_id = ? AND model = 'm1'",
+    )
+    .bind(&p.provider_id)
+    .fetch_one(db.pool())
+    .await
+    .unwrap();
+    assert_eq!(enabled, 1);
+    assert_eq!(context_limit, Some(128_000));
+    assert_eq!(protocol.as_deref(), Some("openai"));
+    assert_eq!(description.as_deref(), Some("擅长前端"));
+    assert_eq!(health.as_deref(), Some(r#"{"status":"healthy"}"#));
 }
 
 // -- Find by ID --

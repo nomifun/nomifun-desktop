@@ -1958,10 +1958,10 @@ mod tests {
         let provider_id = "0190f5fe-7c00-7a00-8000-000000000097";
         sqlx::query(
             "INSERT INTO providers (\
-                provider_id, platform, name, base_url, api_key_encrypted, models, enabled, \
+                provider_id, platform, name, base_url, api_key_encrypted, enabled, \
                 capabilities, created_at, updated_at\
              ) VALUES (?, 'openai', ?, 'https://example.invalid', \
-                       'encrypted', '[]', 1, '[]', 0, 0)",
+                       'encrypted', 1, '[]', 0, 0)",
         )
         .bind(provider_id)
         .bind(provider_id)

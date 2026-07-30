@@ -561,11 +561,20 @@ async fn installation_control_plane_uses_canonical_owner_identity() {
     // the skill subresource remains installation-owner only.
     sqlx::query(
         "INSERT INTO providers (\
-            provider_id, platform, name, base_url, api_key_encrypted, models, enabled, \
+            provider_id, platform, name, base_url, api_key_encrypted, enabled, \
             capabilities, created_at, updated_at\
          ) VALUES (?, 'openai', 'model-only-safe', \
                    'https://example.invalid', 'encrypted', \
-                   '[\"model-safe\"]', 1, '[]', 1, 1)",
+                   1, '[]', 1, 1)",
+    )
+    .bind("0190f5fe-7c00-7a00-8000-000000000015")
+    .execute(services.database.pool())
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO provider_models \
+         (provider_id, model, enabled, sort_order, tasks, traits, params, source, created_at, updated_at) \
+         VALUES (?, 'model-safe', 1, 0, '[]', '[]', '{}', 'inferred', 1, 1)",
     )
     .bind("0190f5fe-7c00-7a00-8000-000000000015")
     .execute(services.database.pool())

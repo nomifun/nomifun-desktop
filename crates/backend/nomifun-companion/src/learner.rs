@@ -35,6 +35,7 @@ pub trait CompanionCompleter: Send + Sync {
 /// Production completer: provider row → nomi Config → one-shot completion.
 pub struct LiveCompanionCompleter {
     pub provider_repo: Arc<dyn IProviderRepository>,
+    pub provider_model_repo: Arc<dyn nomifun_db::IProviderModelRepository>,
     pub encryption_key: [u8; 32],
     pub workspace: PathBuf,
 }
@@ -43,6 +44,7 @@ impl LiveCompanionCompleter {
     async fn resolve(&self, provider_id: &str, model: &str) -> Result<nomi_config::config::Config, AppError> {
         resolve_provider_config(
             &self.provider_repo,
+            &self.provider_model_repo,
             &self.encryption_key,
             provider_id,
             model,
