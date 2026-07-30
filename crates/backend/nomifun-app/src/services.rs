@@ -26,7 +26,6 @@ use nomifun_db::{
     SqliteProviderModelRepository, SqliteProviderRepository, SqliteRemoteAgentRepository,
     SqliteTerminalRepository, SqliteUserRepository,
 };
-#[cfg(feature = "browser-use")]
 use nomifun_db::{IClientPreferenceRepository, SqliteClientPreferenceRepository};
 use nomifun_realtime::{BroadcastEventBus, WebSocketManager};
 use nomifun_terminal::{TerminalEventEmitter, TerminalLifecycleServer, TerminalService};
@@ -2411,6 +2410,16 @@ impl AppServices {
         // lack one (multimodal model hub). Best-effort: never blocks boot on error.
         reconcile_model_profiles(&provider_repo_for_services, &provider_model_repo).await;
 
+        // One-time legacy speech-preference migration: pre-provider-catalog
+        // configs that still embed a raw openai/deepgram credential (and have
+        // no provider_id) are disabled and de-credentialed. Best-effort:
+        // never blocks boot on error.
+        {
+            let preference_repo =
+                SqliteClientPreferenceRepository::new(database.pool().clone());
+            migrate_legacy_speech_preference(&preference_repo).await;
+        }
+
         #[cfg(feature = "browser-use")]
         let browser_lane_provider_slot =
             nomifun_ai_agent::BrowserLaneClientProviderSlot::new();
@@ -2727,6 +2736,95 @@ async fn reconcile_model_profiles(
     if seeded > 0 {
         tracing::info!("model-profile reconcile: seeded {seeded} inferred profile(s)");
     }
+}
+
+/// Preference keys holding the speech-to-text tool config, in the order the
+/// shell reads them (`nomifun-shell` STT route: namespaced key first, then
+/// the pre-namespacing legacy fallback key).
+const SPEECH_PREFERENCE_KEYS: [&str; 2] = ["tools.speechToText", "speechToText"];
+
+/// One-time boot migration for pre-provider-catalog speech configs.
+///
+/// Legacy speech preferences embedded raw `openai`/`deepgram` credential
+/// blocks instead of referencing a catalog provider (`provider_id`). The
+/// invoke layer only executes catalog-backed models — the shell STT route
+/// already rejects such configs with a "re-select your speech provider"
+/// error — so a stored config that still carries an embedded credential but
+/// no `provider_id` is rewritten here: `enabled` is forced to `false` and the
+/// embedded blocks are removed. All other fields (`model`, `language`,
+/// `auto_send`, ...) are preserved so the user only has to re-select a
+/// provider in Settings.
+///
+/// Idempotent: after the rewrite no embedded credential remains, so the next
+/// boot leaves the value untouched. Credential-less `openai`/`deepgram`
+/// shells (the frontend historically persisted empty-key blocks for
+/// unconfigured providers) are NOT legacy and keep their existing
+/// "not configured" behavior; configs that already carry a `provider_id` are
+/// never touched. Best-effort — logs and returns on any error so boot never
+/// fails on this migration.
+async fn migrate_legacy_speech_preference<R>(preference_repo: &R)
+where
+    R: IClientPreferenceRepository + ?Sized,
+{
+    let rows = match preference_repo.get_by_keys(&SPEECH_PREFERENCE_KEYS).await {
+        Ok(rows) => rows,
+        Err(error) => {
+            tracing::warn!(
+                %error,
+                "legacy speech preference migration: could not read preferences; skipping"
+            );
+            return;
+        }
+    };
+    for row in rows {
+        let Some(rewritten) = rewrite_legacy_speech_preference(&row.value) else {
+            continue;
+        };
+        match preference_repo
+            .upsert_batch(&[(row.key.as_str(), rewritten.as_str())])
+            .await
+        {
+            Ok(()) => tracing::info!(
+                key = row.key.as_str(),
+                "legacy speech config disabled and its embedded credential removed; \
+                 re-select the speech provider in Settings to re-enable speech recognition"
+            ),
+            Err(error) => tracing::warn!(
+                key = row.key.as_str(),
+                %error,
+                "legacy speech preference migration: rewrite failed; value left untouched"
+            ),
+        }
+    }
+}
+
+/// Pure rewrite rule for [`migrate_legacy_speech_preference`].
+///
+/// Returns the replacement JSON when `value` is a legacy embedded-credential
+/// speech config — an object with no `provider_id` (absent or `null`) whose
+/// `openai` or `deepgram` block carries a non-empty `api_key` — and `None`
+/// when the stored value must be left untouched (already-migrated, catalog
+/// mode, credential-less shells, or anything unparseable).
+fn rewrite_legacy_speech_preference(value: &str) -> Option<String> {
+    let mut parsed: serde_json::Value = serde_json::from_str(value).ok()?;
+    let object = parsed.as_object_mut()?;
+    if object.get("provider_id").is_some_and(|id| !id.is_null()) {
+        return None;
+    }
+    let has_embedded_credential = ["openai", "deepgram"].iter().any(|block| {
+        object
+            .get(*block)
+            .and_then(|block| block.get("api_key"))
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|api_key| !api_key.trim().is_empty())
+    });
+    if !has_embedded_credential {
+        return None;
+    }
+    object.remove("openai");
+    object.remove("deepgram");
+    object.insert("enabled".to_owned(), serde_json::Value::Bool(false));
+    Some(parsed.to_string())
 }
 
 #[cfg(test)]
@@ -4164,5 +4262,154 @@ mod tests {
         assert_eq!(services.app_version, "9.9.9");
 
         services.database.close().await;
+    }
+
+    // -- legacy speech preference migration --
+
+    fn legacy_speech_preference() -> serde_json::Value {
+        serde_json::json!({
+            "enabled": true,
+            "provider": "openai",
+            "model": "whisper-1",
+            "language": "zh",
+            "auto_send": true,
+            "openai": {
+                "api_key": "sk-legacy-secret",
+                "base_url": "https://api.openai.com/v1",
+                "model": "whisper-1"
+            }
+        })
+    }
+
+    #[test]
+    fn rewrite_legacy_speech_preference_disables_and_strips_credentials() {
+        let rewritten =
+            rewrite_legacy_speech_preference(&legacy_speech_preference().to_string())
+                .expect("embedded-credential config without provider_id must be rewritten");
+        let rewritten: serde_json::Value = serde_json::from_str(&rewritten).unwrap();
+        assert_eq!(
+            rewritten,
+            serde_json::json!({
+                "enabled": false,
+                "provider": "openai",
+                "model": "whisper-1",
+                "language": "zh",
+                "auto_send": true
+            }),
+            "non-credential fields must be preserved verbatim"
+        );
+
+        // Idempotent: the rewritten value no longer matches the legacy shape.
+        assert_eq!(rewrite_legacy_speech_preference(&rewritten.to_string()), None);
+    }
+
+    #[test]
+    fn rewrite_legacy_speech_preference_handles_deepgram_and_null_provider_id() {
+        let value = serde_json::json!({
+            "enabled": true,
+            "provider": "deepgram",
+            "provider_id": null,
+            "deepgram": {"api_key": "dg-secret", "model": "nova-2"}
+        });
+        let rewritten = rewrite_legacy_speech_preference(&value.to_string())
+            .expect("null provider_id counts as absent");
+        let rewritten: serde_json::Value = serde_json::from_str(&rewritten).unwrap();
+        assert_eq!(rewritten["enabled"], serde_json::json!(false));
+        assert!(rewritten.get("deepgram").is_none());
+        assert!(rewritten.get("openai").is_none());
+    }
+
+    #[test]
+    fn rewrite_legacy_speech_preference_leaves_non_legacy_values_untouched() {
+        for value in [
+            // Catalog mode: provider_id present (even with a stale embedded block).
+            serde_json::json!({
+                "enabled": true,
+                "provider": "openai",
+                "provider_id": "0190f5fe-7c00-7a00-8000-000000000001",
+                "model": "whisper-1",
+                "openai": {"api_key": "sk-stale", "model": "whisper-1"}
+            })
+            .to_string(),
+            // Credential-less shell (frontend historically persisted empty keys).
+            serde_json::json!({
+                "enabled": true,
+                "provider": "openai",
+                "openai": {"api_key": "  ", "model": "whisper-1"}
+            })
+            .to_string(),
+            // No embedded blocks at all.
+            serde_json::json!({"enabled": false, "provider": "openai"}).to_string(),
+            // Unparseable / non-object values are never touched.
+            "not-json".to_string(),
+            serde_json::json!(["enabled"]).to_string(),
+        ] {
+            assert_eq!(
+                rewrite_legacy_speech_preference(&value),
+                None,
+                "value must be left untouched: {value}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn migrate_legacy_speech_preference_rewrites_both_keys_and_is_idempotent() {
+        let db = nomifun_db::init_database_memory().await.unwrap();
+        let repo = SqliteClientPreferenceRepository::new(db.pool().clone());
+
+        let legacy = legacy_speech_preference().to_string();
+        let unrelated = "\"dark\"";
+        repo.upsert_batch(&[
+            ("tools.speechToText", legacy.as_str()),
+            ("speechToText", legacy.as_str()),
+            ("theme", unrelated),
+        ])
+        .await
+        .unwrap();
+
+        migrate_legacy_speech_preference(&repo).await;
+
+        let read_value = |rows: &[nomifun_db::models::ClientPreference], key: &str| {
+            rows.iter()
+                .find(|row| row.key == key)
+                .map(|row| row.value.clone())
+                .unwrap_or_else(|| panic!("preference '{key}' must survive the migration"))
+        };
+        let rows = repo.get_all().await.unwrap();
+        for key in ["tools.speechToText", "speechToText"] {
+            let migrated: serde_json::Value =
+                serde_json::from_str(&read_value(&rows, key)).unwrap();
+            assert_eq!(migrated["enabled"], serde_json::json!(false), "{key}");
+            assert!(migrated.get("openai").is_none(), "{key} keeps no credential");
+            assert_eq!(migrated["model"], serde_json::json!("whisper-1"), "{key}");
+        }
+        assert_eq!(read_value(&rows, "theme"), unrelated);
+
+        // Second boot: no-op (values byte-identical after another pass).
+        migrate_legacy_speech_preference(&repo).await;
+        let rows_after = repo.get_all().await.unwrap();
+        for key in ["tools.speechToText", "speechToText", "theme"] {
+            assert_eq!(
+                read_value(&rows_after, key),
+                read_value(&rows, key),
+                "second migration pass must not rewrite '{key}'"
+            );
+        }
+
+        db.close().await;
+    }
+
+    #[tokio::test]
+    async fn migrate_legacy_speech_preference_is_a_noop_without_speech_keys() {
+        let db = nomifun_db::init_database_memory().await.unwrap();
+        let repo = SqliteClientPreferenceRepository::new(db.pool().clone());
+        repo.upsert_batch(&[("theme", "\"light\"")]).await.unwrap();
+
+        migrate_legacy_speech_preference(&repo).await;
+
+        let rows = repo.get_all().await.unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].key, "theme");
+        db.close().await;
     }
 }
