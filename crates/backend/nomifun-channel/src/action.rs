@@ -908,6 +908,7 @@ mod action_tests {
                 last_connected: None,
                 companion_id: None,
                 bot_key: None,
+                owner_domain: "companion".into(),
                 created_at: now_ms(),
                 updated_at: now_ms(),
             });
@@ -940,6 +941,7 @@ mod action_tests {
                 last_connected: row.last_connected,
                 companion_id: row.companion_id.clone(),
                 bot_key: row.bot_key.clone(),
+                owner_domain: row.owner_domain.clone(),
                 created_at: row.created_at,
                 updated_at: row.updated_at,
             };

@@ -30,6 +30,7 @@ async fn seed_telegram_channel(
         last_connected: None,
         companion_id: None,
         bot_key: None,
+        owner_domain: "companion".into(),
         created_at: now_ms(),
         updated_at: now_ms(),
         })

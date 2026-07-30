@@ -205,8 +205,10 @@ impl CustomerServiceService {
     // ── bindings ─────────────────────────────────────────────────────
 
     /// Full replacement (PUT) of one agent's channel-bot bindings. The caller
-    /// (route layer) must have validated the plugin ids against the channel
-    /// repository; a plugin bound elsewhere is stolen (同 bot 重绑替换).
+    /// (route layer) must have validated that every plugin id names a live
+    /// customer-service-domain bot; within the domain, a bot already bound to
+    /// another agent is re-bound to this one (同域内重绑替换). Companion-domain
+    /// bots are never bindable here (channel ownership is domain-exclusive).
     pub async fn replace_bindings(
         &self,
         cs_agent_id: &str,

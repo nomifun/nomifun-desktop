@@ -137,6 +137,7 @@ async fn unauthorized_user_gets_pairing_response() {
         last_connected: None,
         companion_id: None,
         bot_key: None,
+        owner_domain: "companion".into(),
         created_at: now_ms(),
         updated_at: now_ms(),
     })
@@ -390,6 +391,7 @@ async fn build_harness() -> Harness {
             last_connected: None,
             companion_id: None,
             bot_key: None,
+            owner_domain: "companion".into(),
             created_at: now_ms(),
             updated_at: now_ms(),
         })

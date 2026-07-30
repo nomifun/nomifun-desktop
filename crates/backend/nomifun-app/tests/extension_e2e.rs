@@ -620,6 +620,7 @@ async fn eq19_channel_status_merges_extension_meta_for_persisted_row() {
         last_connected: Some(now),
         companion_id: None,
         bot_key: None,
+        owner_domain: "companion".into(),
         created_at: now,
         updated_at: now,
         })

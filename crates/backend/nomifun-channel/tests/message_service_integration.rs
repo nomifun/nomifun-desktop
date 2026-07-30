@@ -686,6 +686,7 @@ async fn bind_channel_to_companion(
         last_connected: None,
         companion_id: Some(companion_id.to_owned()),
         bot_key: Some("42".to_owned()),
+        owner_domain: "companion".into(),
         created_at: now,
         updated_at: now,
     })
@@ -851,6 +852,7 @@ async fn create_plain_channel(repo: &Arc<SqliteChannelRepository>) -> String {
         last_connected: None,
         companion_id: None,
         bot_key: Some("43".to_owned()),
+        owner_domain: "companion".into(),
         created_at: now,
         updated_at: now,
     })
