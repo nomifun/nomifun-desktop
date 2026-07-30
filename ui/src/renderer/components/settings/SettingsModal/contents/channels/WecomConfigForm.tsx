@@ -11,6 +11,7 @@ import { Button, Empty, Input, Message, Spin, Tooltip } from '@arco-design/web-r
 import { CheckOne, CloseOne, Copy, Delete, Refresh } from '@icon-park/react';
 import React, { useCallback, useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
+import { buildEnablePluginRequest, findEnabledChannelStatus } from '@/renderer/components/channels/channelStatusSelection';
 import type { ChannelTarget } from './channelTarget';
 
 /**
@@ -166,11 +167,7 @@ const WecomConfigForm: React.FC<WecomConfigFormProps> = ({
           secret: sec,
         },
       };
-      const result = await channel.enablePlugin.invoke(
-        channelTarget
-          ? { plugin_id: channelTarget.channelPluginId, plugin_type: 'wecom', ...(channelTarget.companionId ? { companion_id: channelTarget.companionId } : {}), config }
-          : { plugin_type: 'wecom', config }
-      );
+      const result = await channel.enablePlugin.invoke(buildEnablePluginRequest('wecom', channelTarget, config));
       if (!result.success) {
         throw new Error(result.error || t('nomi.settings.remoteEnableFailed', { defaultValue: 'Failed to enable channel' }));
       }
@@ -178,12 +175,13 @@ const WecomConfigForm: React.FC<WecomConfigFormProps> = ({
       Message.success(t('settings.wecom.pluginEnabled', 'WeCom channel enabled'));
       const plugins = await channel.getPluginStatus.invoke();
       if (plugins) {
-        // Multi-plugin model: resolve by business UUID, or by owner after create.
-        const wecomPlugin = channelTarget
-          ? channelTarget.channelPluginId
-            ? plugins.find((p) => p.plugin_id === channelTarget.channelPluginId)
-            : plugins.find((p) => p.type === 'wecom' && p.companionId === channelTarget.companionId)
-          : plugins.find((p) => p.type === 'wecom');
+        // Multi-plugin model: resolve by the backend-returned business UUID, or by owner scope after create.
+        const wecomPlugin = findEnabledChannelStatus(plugins, {
+          platform: 'wecom',
+          enabledPluginId: result.plugin_id,
+          companionId: channelTarget?.companionId,
+          ownerDomain: channelTarget?.ownerDomain,
+        });
         onStatusChange(wecomPlugin || null);
       }
     } catch (error: unknown) {

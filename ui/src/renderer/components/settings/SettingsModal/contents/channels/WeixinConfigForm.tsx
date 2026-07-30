@@ -11,6 +11,7 @@ import { CheckOne, CloseOne, Copy, Delete, Refresh } from '@icon-park/react';
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { QRCodeSVG } from 'qrcode.react';
+import { buildEnablePluginRequest } from '@/renderer/components/channels/channelStatusSelection';
 import type { ChannelTarget } from './channelTarget';
 import {
   applyWeixinAuthorizedUserMutations,
@@ -284,16 +285,7 @@ const WeixinConfigForm: React.FC<WeixinConfigFormProps> = ({
     baseUrl?: string
   ) => {
     const config = buildWeixinEnableConfig(accountId, botToken, baseUrl);
-    const result = await channel.enablePlugin.invoke(
-      channelTarget
-        ? {
-            plugin_id: channelTarget.channelPluginId,
-            plugin_type: 'weixin',
-            ...(channelTarget.companionId ? { companion_id: channelTarget.companionId } : {}),
-            config,
-          }
-        : { plugin_type: 'weixin', config }
-    );
+    const result = await channel.enablePlugin.invoke(buildEnablePluginRequest('weixin', channelTarget, config));
     if (!result.success) {
       throw new Error(
         result.error ||

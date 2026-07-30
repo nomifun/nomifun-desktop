@@ -11,6 +11,7 @@ import { Button, Empty, Input, Message, Spin, Tooltip } from '@arco-design/web-r
 import { CheckOne, CloseOne, Copy, Delete, Refresh } from '@icon-park/react';
 import React, { useCallback, useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
+import { buildEnablePluginRequest, findEnabledChannelStatus } from '@/renderer/components/channels/channelStatusSelection';
 import type { ChannelTarget } from './channelTarget';
 
 /**
@@ -195,11 +196,7 @@ const DingTalkConfigForm: React.FC<DingTalkConfigFormProps> = ({
           client_secret: clientSecret.trim(),
         },
       };
-      const result = await channel.enablePlugin.invoke(
-        channelTarget
-          ? { plugin_id: channelTarget.channelPluginId, plugin_type: 'dingtalk', ...(channelTarget.companionId ? { companion_id: channelTarget.companionId } : {}), config }
-          : { plugin_type: 'dingtalk', config }
-      );
+      const result = await channel.enablePlugin.invoke(buildEnablePluginRequest('dingtalk', channelTarget, config));
       if (!result.success) {
         throw new Error(result.error || t('nomi.settings.remoteEnableFailed', { defaultValue: 'Failed to enable channel' }));
       }
@@ -207,12 +204,13 @@ const DingTalkConfigForm: React.FC<DingTalkConfigFormProps> = ({
       Message.success(t('settings.dingtalk.pluginEnabled', 'DingTalk bot enabled'));
       const plugins = await channel.getPluginStatus.invoke();
       if (plugins) {
-        // Multi-plugin model: resolve by business UUID, or by owner after create.
-        const dingtalkPlugin = channelTarget
-          ? channelTarget.channelPluginId
-            ? plugins.find((p) => p.plugin_id === channelTarget.channelPluginId)
-            : plugins.find((p) => p.type === 'dingtalk' && p.companionId === channelTarget.companionId)
-          : plugins.find((p) => p.type === 'dingtalk');
+        // Multi-plugin model: resolve by the backend-returned business UUID, or by owner scope after create.
+        const dingtalkPlugin = findEnabledChannelStatus(plugins, {
+          platform: 'dingtalk',
+          enabledPluginId: result.plugin_id,
+          companionId: channelTarget?.companionId,
+          ownerDomain: channelTarget?.ownerDomain,
+        });
         onStatusChange(dingtalkPlugin || null);
       }
     } catch (error: unknown) {

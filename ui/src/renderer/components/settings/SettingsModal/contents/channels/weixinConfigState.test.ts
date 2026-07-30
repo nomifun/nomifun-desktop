@@ -31,6 +31,7 @@ const status = (patch: Partial<IChannelPluginStatus> = {}): IChannelPluginStatus
   status: 'running',
   activeUsers: 0,
   hasToken: true,
+  owner_domain: 'companion',
   ...patch,
 });
 
