@@ -109,7 +109,7 @@ mod tests {
     use axum::Router;
     use axum::body::Body;
     use axum::http::{Request as HttpRequest, StatusCode};
-    use axum::routing::{get, post};
+    use axum::routing::post;
     use tower::ServiceExt;
 
     #[test]
