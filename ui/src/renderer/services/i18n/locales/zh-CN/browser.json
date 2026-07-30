@@ -108,6 +108,7 @@
     "capacityCounts": "{{active}} 个活动 · {{queued}} 个排队",
     "errorRecoverable": "此错误可恢复，浏览器管理器可能会重试该通道。",
     "errorTerminal": "此错误不可恢复，请查看错误后关闭该通道。",
+    "restartedNotice": "受管浏览器已重启，该通道已自动恢复，无需处理。",
     "sharedLiveIdentity": "共享实时身份",
     "queueState": {
       "queued": "排队中",
@@ -181,7 +182,8 @@
       "running": "运行中",
       "frozen": "已冻结",
       "stopping": "停止中",
-      "failed": "失败"
+      "failed": "失败",
+      "unknown": "未知"
     },
     "identity": {
       "primary": "主身份",

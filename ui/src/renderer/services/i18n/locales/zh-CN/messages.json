@@ -53,12 +53,15 @@
     "status": "{{target}}"
   },
   "turnProcessed": "已处理 {{duration}}",
-  "turnProcessing": "处理中 {{duration}}",
   "turnWaiting": "等待确认 {{duration}}",
-  "turnCanceled": "已取消 {{duration}}",
+  "turnCanceled": "你在 {{duration}} 后停止了",
   "turnProcess": {
     "expandAllThinkingProcess": "展开全部思考过程",
     "collapseAllThinkingProcess": "收起全部思考过程"
+  },
+  "turnLiveStep": {
+    "analyzing": "正在分析需求",
+    "composing": "正在整理回复"
   },
   "knowledgeWriteback": {
     "started": "正在准备回写知识库",
@@ -80,6 +83,15 @@
   "planProgress": "{{done}}/{{total}}",
   "fileChanges": "文件变更",
   "fileChangesCount": "{{count}} 个文件变更",
+  "turnDeliverables": {
+    "title": "已生成 {{count}} 个文件",
+    "showMore": "再显示 {{count}} 个文件",
+    "showLess": "收起",
+    "verified": "完整性已校验(SHA-256)",
+    "open": "打开",
+    "reveal": "在文件夹中显示",
+    "viewDiff": "查看改动"
+  },
   "conversationInProgress": "当前正在进行对话中...",
   "confirm": "确认",
   "canceledExecution": "已取消执行",

@@ -62,6 +62,13 @@ export interface ConversationContextValue {
   activeRequestMessageId?: MessageId;
 
   /**
+   * Set when the user stopped the latest turn in this session. Message
+   * rendering pins the tail disclosure to the stop moment ("you stopped
+   * after {duration}"). Session-local; cleared when a new turn starts.
+   */
+  stopNotice?: { stoppedAt: number } | null;
+
+  /**
    * Loaded skill names for this conversation (snapshot from conversation.extra.skills).
    * Surfaced inside the SendBox `+` menu so users can review/jump to active skills.
    */

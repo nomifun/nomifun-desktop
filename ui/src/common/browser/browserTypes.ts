@@ -66,7 +66,12 @@ export interface IBrowserLane {
   lane_id: string;
   lane_name?: string | null;
   lifecycle_state: BrowserLaneLifecycleState;
-  /** Epoch of the managed Browser Host currently serving this Lane. */
+  /**
+   * Epoch of the managed Browser Host currently serving this Lane. This is
+   * the only host linkage lane payloads carry: BrowserLaneDto serializes no
+   * host_id, so host resolution goes through the epoch (see
+   * matchBrowserLaneHost).
+   */
   browser_epoch?: number | null;
 
   conversation_id?: string | null;

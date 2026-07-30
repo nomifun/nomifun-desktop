@@ -486,30 +486,58 @@ pub struct CompanionThreads {
     pub skill_paths: Arc<nomifun_extension::SkillPaths>,
 }
 
+/// Resolve the authoritative effective skill set for one companion profile.
+///
+/// Fails closed: reconciliation callers must never treat a resolver failure
+/// as "no skills" — that empty set would strip every managed workspace link,
+/// wipe the frozen `extra.skills` snapshot and kill the live runtime. Three
+/// failure signals are distinguished from a genuinely empty configuration:
+/// - the builtin corpus dir is missing/unreadable (startup materialization
+///   failed, e.g. macOS packaging), so the resolver cannot see real skills;
+/// - `materialize_skills_for_agent` itself errors;
+/// - a non-empty configuration resolves to nothing (source tree transiently
+///   unreadable — resolve failures are silently skipped per name upstream).
+async fn effective_skill_names(
+    skill_paths: &nomifun_extension::SkillPaths,
+    profile: &CompanionProfileConfig,
+) -> Result<Vec<String>, AppError> {
+    if !skill_paths.builtin_skills_dir.is_dir() {
+        return Err(AppError::Internal(format!(
+            "builtin skills dir unavailable: {}",
+            skill_paths.builtin_skills_dir.display()
+        )));
+    }
+    let auto_names: Vec<String> = nomifun_extension::list_builtin_auto_skills(skill_paths)
+        .await?
+        .into_iter()
+        .map(|skill| skill.name)
+        .collect();
+    let configured = normalized_effective_skill_names(auto_names, &profile.skills);
+    let resolved = nomifun_extension::materialize_skills_for_agent(
+        skill_paths,
+        &profile.companion_id,
+        &configured,
+    )
+    .await?;
+    let names: Vec<String> = resolved.into_iter().map(|skill| skill.name).collect();
+    // Individual uninstalled names filtering out is normal (the UI keeps them
+    // as reversible "未安装" rows), but the whole set vanishing is not a
+    // configuration — it is the resolver failing to see the source tree.
+    if names.is_empty() && !configured.is_empty() {
+        return Err(AppError::Internal(format!(
+            "none of the {} configured companion skills resolved; treating as resolver failure",
+            configured.len()
+        )));
+    }
+    Ok(names)
+}
+
 impl CompanionThreads {
     async fn builtin_auto_skill_names(&self) -> Vec<String> {
         match nomifun_extension::list_builtin_auto_skills(&self.skill_paths).await {
             Ok(skills) => skills.into_iter().map(|skill| skill.name).collect(),
             Err(error) => {
                 tracing::warn!(error = %error, "list builtin auto skills for companion failed");
-                Vec::new()
-            }
-        }
-    }
-
-    async fn effective_skill_names(&self, profile: &CompanionProfileConfig) -> Vec<String> {
-        let auto_names = self.builtin_auto_skill_names().await;
-        let configured = normalized_effective_skill_names(auto_names, &profile.skills);
-        match nomifun_extension::materialize_skills_for_agent(
-            &self.skill_paths,
-            &profile.companion_id,
-            &configured,
-        )
-        .await
-        {
-            Ok(resolved) => resolved.into_iter().map(|skill| skill.name).collect(),
-            Err(error) => {
-                tracing::warn!(error = %error, companion_id = %profile.companion_id, "resolve companion skills failed");
                 Vec::new()
             }
         }
@@ -585,7 +613,9 @@ impl CompanionThreads {
     /// Reconcile the workspace links and immutable conversation skill snapshot
     /// for one existing companion thread. All failures are best-effort at this
     /// boundary; a profile patch must not become unusable because a stale
-    /// workspace or runtime is temporarily unavailable.
+    /// workspace or runtime is temporarily unavailable. Resolver failures abort
+    /// the whole reconciliation before anything destructive: an error-empty
+    /// skill set must never masquerade as an authoritative configuration.
     pub(crate) async fn reconcile_profile_skills(
         &self,
         profile: &CompanionProfileConfig,
@@ -598,7 +628,18 @@ impl CompanionThreads {
         else {
             return;
         };
-        let effective = self.effective_skill_names(profile).await;
+        let effective = match effective_skill_names(&self.skill_paths, profile).await {
+            Ok(effective) => effective,
+            Err(error) => {
+                tracing::warn!(
+                    error = %error,
+                    companion_id = %profile.companion_id,
+                    conversation_id,
+                    "resolve companion skills failed; skipping skill reconciliation"
+                );
+                return;
+            }
+        };
         if let Some(workspace) = response
             .extra
             .get("workspace")
@@ -730,7 +771,21 @@ impl CompanionThreads {
         }
         let workspace = workspace_dir.to_string_lossy().into_owned();
         let auto_skill_names = self.builtin_auto_skill_names().await;
-        let effective_skill_names = self.effective_skill_names(&profile).await;
+        // Minting must not hard-fail on a transient resolver error: a brand-new
+        // conversation has nothing to destroy, and the follow-up reconcile (and
+        // every later get_or_create) repairs the frozen snapshot once the
+        // resolver recovers.
+        let effective_skill_names = match effective_skill_names(&self.skill_paths, &profile).await {
+            Ok(names) => names,
+            Err(error) => {
+                tracing::warn!(
+                    error = %error,
+                    companion_id = %profile.companion_id,
+                    "resolve companion skills failed; creating thread without preset skills"
+                );
+                Vec::new()
+            }
+        };
 
         let req = CreateConversationRequest {
             r#type: nomifun_common::AgentType::Nomi,
@@ -1094,6 +1149,88 @@ impl CompanionMemorySink for CompanionStoreSink {
             out.push_str(&format!("- [{ts}|{}] {brief}\n", e.source));
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+mod skill_resolution_tests {
+    use super::*;
+    use crate::profile::CompanionSkillConfig;
+
+    fn skill_paths(root: &Path) -> nomifun_extension::SkillPaths {
+        // A present builtin corpus dir is the baseline healthy state: its
+        // absence is the exact macOS "startup materialization failed" signal
+        // that resolution must treat as an error, so tests opt out explicitly.
+        std::fs::create_dir_all(root.join("builtin-skills")).unwrap();
+        nomifun_extension::SkillPaths {
+            data_dir: root.to_path_buf(),
+            user_skills_dir: root.join("skills"),
+            cron_skills_dir: root.join("cron/skills"),
+            builtin_skills_dir: root.join("builtin-skills"),
+            builtin_rules_dir: root.join("builtin-rules"),
+            preset_rules_dir: root.join("preset-rules"),
+            preset_skills_dir: root.join("preset-skills"),
+        }
+    }
+
+    fn profile_with_enabled(enabled: &[&str]) -> CompanionProfileConfig {
+        let mut profile = CompanionProfileConfig::new("毛球", "ink", 1);
+        profile.skills = CompanionSkillConfig {
+            enabled: enabled.iter().map(|name| (*name).to_owned()).collect(),
+            disabled_auto: Vec::new(),
+        };
+        profile
+    }
+
+    #[tokio::test]
+    async fn missing_builtin_corpus_fails_closed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut paths = skill_paths(tmp.path());
+        paths.builtin_skills_dir = tmp.path().join("never-materialized");
+        let profile = profile_with_enabled(&[]);
+        let result = effective_skill_names(&paths, &profile).await;
+        assert!(result.is_err(), "unavailable builtin corpus must abort, got {result:?}");
+    }
+
+    #[tokio::test]
+    async fn resolver_error_propagates_instead_of_collapsing_to_empty() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut profile = profile_with_enabled(&["alpha"]);
+        // Non-canonical id (only reachable through a hand-built profile)
+        // drives materialize_skills_for_agent's validate_filename Err arm.
+        profile.companion_id = "../escape".into();
+        let result = effective_skill_names(&skill_paths(tmp.path()), &profile).await;
+        assert!(result.is_err(), "materialize error must propagate, got {result:?}");
+    }
+
+    #[tokio::test]
+    async fn losing_every_configured_skill_is_an_error_not_an_empty_set() {
+        // Skill source tree unavailable (nothing materialized on disk): every
+        // configured name silently fails to resolve. Pre-fix this returned an
+        // empty set that reconcile treated as authoritative — stripping all
+        // managed workspace links, wiping the frozen snapshot and killing the
+        // live runtime over a transient read failure.
+        let tmp = tempfile::tempdir().unwrap();
+        let profile = profile_with_enabled(&["alpha"]);
+        let result = effective_skill_names(&skill_paths(tmp.path()), &profile).await;
+        assert!(result.is_err(), "total resolution loss must abort, got {result:?}");
+    }
+
+    #[tokio::test]
+    async fn partial_resolution_keeps_installed_skills_without_error() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join("skills/alpha")).unwrap();
+        let profile = profile_with_enabled(&["alpha", "ghost"]);
+        let resolved = effective_skill_names(&skill_paths(tmp.path()), &profile).await.unwrap();
+        assert_eq!(resolved, vec!["alpha".to_owned()], "uninstalled names filter, installed ones stay");
+    }
+
+    #[tokio::test]
+    async fn genuinely_empty_configuration_resolves_to_empty() {
+        let tmp = tempfile::tempdir().unwrap();
+        let profile = profile_with_enabled(&[]);
+        let resolved = effective_skill_names(&skill_paths(tmp.path()), &profile).await.unwrap();
+        assert!(resolved.is_empty(), "an intentionally empty configuration is not an error");
     }
 }
 

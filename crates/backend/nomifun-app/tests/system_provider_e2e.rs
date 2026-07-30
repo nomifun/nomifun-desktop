@@ -218,7 +218,8 @@ async fn model_fetch_openai_with_auth() {
     let json = body_json(resp).await;
     let models = json["data"]["models"].as_array().unwrap();
     assert_eq!(models.len(), 2);
-    assert_eq!(models[0], "gpt-4o");
+    // v3 shape: fetched models are objects carrying id (+ optional name).
+    assert_eq!(models[0]["id"], "gpt-4o");
 }
 
 #[tokio::test]

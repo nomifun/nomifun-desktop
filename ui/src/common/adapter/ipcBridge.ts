@@ -5089,21 +5089,35 @@ export const browserSecret = {
 export interface IBrowserLoginStatus {
   /** Whether a visible login browser is currently open. */
   active: boolean;
-  /** Outcome code: 'opened' | 'already_open' | 'closed' | 'not_open' | 'launch_failed:<err>'. */
+  /** Outcome code: 'opened' | 'already_open' | 'queued' | 'closed' | 'not_open' | 'launch_failed:<err>'. */
   message?: string;
-  /** Whether close() captured the login state into the encrypted vault backup. */
+  /** Whether a fresh Primary-identity capture was committed to the encrypted vault
+   *  DURING this login session (the Hub advances its canonical identity generation
+   *  only after a successful capture + vault persist). NOT a close()-triggered
+   *  backup: a manual login that triggered no capture reports `false` even though
+   *  the persistent on-disk profile still retains the login for silent reuse. */
   saved: boolean;
+  /** Lane backing the login session; present while a session exists. */
+  lane_id?: string;
+  // NOTE: responses also carry `source` — the EFFECTIVE host-policy Chrome
+  // source ('managed' | 'system') the login browser actually uses.
 }
 
 /** 「登录我的浏览器」— open a visible browser bound to the shared profile so the user logs
- *  into their sites once; silent agent sessions then reuse the login. `source` mirrors
- *  agent.browserUse.source so the login browser uses the same binary. */
+ *  into their sites once; silent agent sessions then reuse the login. The request-body
+ *  `source` is IGNORED by the backend (kept only for wire compatibility): the trusted
+ *  Chrome source is host policy frozen at process start, and the response's `source`
+ *  field reports the effective value (a live agent.browserUse.source toggle only takes
+ *  effect after an app restart). */
 export const browserLogin = {
-  /** Open the visible login window (idempotent while already open). */
+  /** Open the visible login window (idempotent while already open; a 'queued'
+   *  outcome is foregrounded automatically once the Lane starts running). */
   open: httpPost<IBrowserLoginStatus, { source: 'managed' | 'system' }>('/api/browser/login/open'),
-  /** Close it (best-effort backs the login state up to the vault), returns final status. */
+  /** Close it, returns final status; `saved` reports whether a vault capture
+   *  actually happened during the session (see IBrowserLoginStatus.saved). */
   close: httpPost<IBrowserLoginStatus, void>('/api/browser/login/close'),
-  /** Poll whether a login window is currently open. */
+  /** Poll whether a login window is currently open. A pure read: it never
+   *  renews or revokes the underlying session. */
   status: httpGet<IBrowserLoginStatus, void>('/api/browser/login/status'),
 };
 

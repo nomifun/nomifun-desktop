@@ -205,7 +205,13 @@ async fn model_tier_without_freeform_policy_is_allowed() {
     seed_provider(&services, &provider_id, "m1").await;
     let conv = create_conversation(&mut app, &token, &csrf).await;
 
-    let settings = json!({ "backup_provider_id": provider_id, "default_steering_prompt": "" });
+    // IdmmSettings validates provider/model as a pair: a backup provider
+    // without its model is rejected at the DTO boundary.
+    let settings = json!({
+        "backup_provider_id": provider_id,
+        "backup_model": "m1",
+        "default_steering_prompt": ""
+    });
     let resp = app
         .clone()
         .oneshot(json_with_token("PUT", "/api/idmm/settings", settings, &token, &csrf))
@@ -589,11 +595,11 @@ async fn get_status_round_trips_persisted_config() {
 }
 
 #[tokio::test]
-async fn legacy_phase1_blob_disables_gracefully() {
-    // D3 back-compat at the HTTP layer: a Phase-1-shaped body (enabled/tier/
-    // rule/sidecar/steering_prompt) must not error — serde ignores the unknown
-    // fields and both watches deserialize to the default (disabled). The POST
-    // succeeds and the target reports `enabled: false`.
+async fn legacy_phase1_blob_is_rejected() {
+    // SetIdmmRequest's wire form is deny_unknown_fields: a Phase-1-shaped
+    // body (enabled/tier/rule/sidecar/steering_prompt) is rejected with 400
+    // instead of being silently reinterpreted, and the target stays
+    // unconfigured (enabled: false).
     let (mut app, services) = build_app().await;
     let (token, csrf) = setup_and_login(&mut app, &services, "admin", "StrongP@ss1").await;
     let conv = create_conversation(&mut app, &token, &csrf).await;
@@ -614,11 +620,18 @@ async fn legacy_phase1_blob_disables_gracefully() {
         .unwrap();
     assert_eq!(
         resp.status(),
-        StatusCode::OK,
-        "a legacy Phase-1 blob must deserialize to default (disabled), not error"
+        StatusCode::BAD_REQUEST,
+        "a legacy Phase-1 blob carries unknown fields and must be rejected"
     );
+
+    let resp = app
+        .clone()
+        .oneshot(get_with_token(&format!("/api/idmm/conversation/{conv}"), &token))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
     let j = body_json(resp).await;
-    assert_eq!(j["data"]["enabled"], false, "legacy blob → both watches default-disabled");
+    assert_eq!(j["data"]["enabled"], false, "a rejected blob must not configure the target");
 }
 
 #[tokio::test]

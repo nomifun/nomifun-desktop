@@ -29,7 +29,7 @@
 import type { AutoUpdateStatus } from '@/common/update/updateTypes';
 import { isTauriRuntime } from './tauriRuntime';
 import { tauriGetUpdaterInstallContext, tauriInstallUpdate } from './tauriShell';
-import { AUTO_INSTALL_UNSUPPORTED_ERROR } from './tauriUpdateInstall';
+import { installUpdateWithPreflight } from './tauriUpdateInstall';
 
 // Structural mirror of @tauri-apps/plugin-updater's public surface, so this
 // module type-checks without a static import (the plugin loads lazily).
@@ -198,18 +198,40 @@ export async function tauriUpdateDownload(emit: (s: AutoUpdateStatus) => void): 
  * Ask Rust to re-check and install the selected version, then relaunch on
  * platforms where installation returns. Windows exits inside the updater
  * plugin after its fail-closed pre-exit hook. No-op outside the desktop shell.
+ *
+ * Routed through installUpdateWithPreflight so its fail-closed guarantees are
+ * live: the unsupported-context preflight throws before anything runs, and a
+ * failure after installation has started (install or the macOS post-install
+ * relaunch) terminates the process instead of returning control to a renderer
+ * that may be sitting on top of a replaced app bundle.
  */
 export async function tauriUpdateInstallAndRelaunch(): Promise<void> {
   if (!isTauriRuntime()) return;
   if (!pendingUpdate) return;
-  const context = await tauriGetUpdaterInstallContext();
-  if (!context.autoInstallSupported) {
-    throw new Error(`${AUTO_INSTALL_UNSUPPORTED_ERROR}:${context.reason ?? 'metadata_unavailable'}`);
-  }
-
-  await tauriInstallUpdate(pendingUpdate.version);
-  const { relaunch } = await import('@tauri-apps/plugin-process');
-  await relaunch();
+  const version = pendingUpdate.version;
+  await installUpdateWithPreflight({
+    getContext: tauriGetUpdaterInstallContext,
+    // No renderer-held resource needs cleanup before the Rust-owned install
+    // today; the hook keeps the ordering contract (cleanup failure must
+    // prevent installation) wired for when one appears.
+    prepareShutdown: async () => {},
+    install: () => tauriInstallUpdate(version),
+    relaunch: async () => {
+      const { relaunch } = await import('@tauri-apps/plugin-process');
+      await relaunch();
+    },
+    fatalExit: async (failure) => {
+      console.error(
+        `[tauriUpdater] fatal ${failure.phase} failure after install started; exiting`,
+        failure.error
+      );
+      const { exit } = await import('@tauri-apps/plugin-process');
+      await exit(1);
+      // Unreachable when exit() succeeds; installUpdateWithPreflight also
+      // guards against an exit adapter that unexpectedly returns.
+      return new Promise<never>(() => {});
+    },
+  });
 }
 
 // ---------------------------------------------------------------------------

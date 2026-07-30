@@ -11,10 +11,23 @@ const source = readFileSync(new URL('./MessageText.tsx', import.meta.url), 'utf8
 const typographySource = readFileSync(new URL('../typography.ts', import.meta.url), 'utf8');
 
 describe('MessageText process action chrome', () => {
-  test('can hide the hover copy and timestamp row for process text', () => {
+  test('keeps copy and time visible while allowing active process text to hide the row', () => {
     expect(source.includes('hideActions?: boolean')).toBe(true);
-    expect(source.includes('const shouldShowActions = !hideActions && !isMobile;')).toBe(true);
-    expect(source.includes('{shouldShowActions && (')).toBe(true);
+    expect(source.includes('const shouldShowActions = !hideActions;')).toBe(true);
+    expect(source.includes("data-testid='message-copy-action'")).toBe(true);
+    expect(source.includes("fill='currentColor'")).toBe(true);
+    const copyButtonSource =
+      source.match(/const copyButton = \([\s\S]*?const canEdit =/)?.[0] ?? '';
+    expect(copyButtonSource.includes('opacity-0')).toBe(false);
+    expect(copyButtonSource.includes('pointer-events-none')).toBe(false);
+    expect(source.includes('text-t-secondary opacity-0 group-hover:opacity-100')).toBe(false);
+    expect(source.includes("className='text-12px leading-20px text-inherit select-none'")).toBe(true);
+  });
+
+  test('can render the unchanged message actions at the visual end of a turn', () => {
+    expect(source.includes('actionsOnly?: boolean')).toBe(true);
+    expect(source.includes('if (actionsOnly)')).toBe(true);
+    expect(source.includes('{actionsRow}')).toBe(true);
   });
 
   test('uses one body typography contract for plain text and markdown text', () => {

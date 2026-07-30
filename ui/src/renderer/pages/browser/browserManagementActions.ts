@@ -313,12 +313,24 @@ export const browserLaneHasActiveWork = (lane: IBrowserLane): boolean =>
 export const canForegroundBrowserLane = (lane: IBrowserLane): boolean =>
   lane.lifecycle_state === 'running' && lane.identity?.mode === 'primary';
 
+/**
+ * Backgrounding must not require `running`: a Primary lane that froze or is
+ * stopping/failed can still own a visible window, and re-hiding it is the only
+ * non-destructive recovery the management page offers.
+ */
+export const canBackgroundBrowserLane = (lane: IBrowserLane): boolean =>
+  lane.identity?.mode === 'primary';
+
 const runBrowserLaneVisibilityChange = async (
   lane: IBrowserLane,
   dependencies: BrowserLaneVisibilityDependencies,
   confirmationField: 'foregrounded' | 'backgrounded'
 ): Promise<void> => {
-  if (!canForegroundBrowserLane(lane)) return;
+  const permitted =
+    confirmationField === 'backgrounded'
+      ? canBackgroundBrowserLane(lane)
+      : canForegroundBrowserLane(lane);
+  if (!permitted) return;
 
   dependencies.setChangingVisibilityLaneId(lane.lane_id);
   try {

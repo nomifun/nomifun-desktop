@@ -455,6 +455,88 @@ async fn is_conversation_busy_reflects_active_turn_handle() {
     assert!(!stack.message_svc.is_conversation_busy(&sent.conversation_id).await);
 }
 
+/// A Conflict on an idle conversation is a real failure, not a concurrent
+/// turn — it must surface the underlying error so the user is not trapped in
+/// a "still being processed" loop (the reported WeChat bug: a knowledge
+/// workspace lease clash was presented as busy forever). Reusing an
+/// idempotency key with different content is a deterministic idle Conflict.
+#[tokio::test]
+async fn idle_conflict_surfaces_real_error_instead_of_busy() {
+    use nomifun_channel::error::ChannelError;
+
+    let db = init_database_memory().await.unwrap();
+    let stack = build_stack(db.pool().clone()).await;
+
+    let session = make_session(None);
+    let sent = stack
+        .message_svc
+        .send_to_agent(&session, "hello", PluginType::Telegram, "test:conflict-reuse")
+        .await
+        .unwrap();
+    wait_until_idle(&stack.conversation_svc, &sent.conversation_id).await;
+    assert!(!stack.message_svc.is_conversation_busy(&sent.conversation_id).await);
+
+    let bound_session = make_session(Some(sent.conversation_id.clone()));
+    let error = stack
+        .message_svc
+        .send_to_agent(
+            &bound_session,
+            "different content",
+            PluginType::Telegram,
+            "test:conflict-reuse",
+        )
+        .await
+        .unwrap_err();
+
+    match error {
+        ChannelError::MessageSendFailed(reason) => assert!(
+            reason.contains("idempotency key was reused"),
+            "the real Conflict reason must reach the user, got: {reason}"
+        ),
+        other => panic!(
+            "an idle-conversation Conflict must not be disguised as busy, got: {other:?}"
+        ),
+    }
+}
+
+/// A Conflict while the conversation really is working a turn is the
+/// turn-claim race — it must keep answering with the friendly busy notice.
+#[tokio::test]
+async fn active_turn_conflict_still_maps_to_busy() {
+    use nomifun_channel::error::ChannelError;
+
+    let db = init_database_memory().await.unwrap();
+    let stack = build_stack(db.pool().clone()).await;
+
+    let session = make_session(None);
+    let sent = stack
+        .message_svc
+        .send_to_agent(&session, "hello", PluginType::Telegram, "test:busy-conflict-first")
+        .await
+        .unwrap();
+    wait_until_idle(&stack.conversation_svc, &sent.conversation_id).await;
+
+    // Exactly what send_message does while a prompt is in flight.
+    let _turn_handle = stack.runtime.try_acquire_turn(&sent.conversation_id).unwrap();
+
+    let bound_session = make_session(Some(sent.conversation_id.clone()));
+    let error = stack
+        .message_svc
+        .send_to_agent(
+            &bound_session,
+            "second prompt",
+            PluginType::Telegram,
+            "test:busy-conflict-second",
+        )
+        .await
+        .unwrap_err();
+
+    assert!(
+        matches!(error, ChannelError::ConversationBusy),
+        "a concurrent-turn Conflict must keep the busy notice, got: {error:?}"
+    );
+}
+
 // ── Channel companion binding resolution + single-session routing ──────────────
 
 /// Profile stub: maps each companion id to a pre-seeded single-session

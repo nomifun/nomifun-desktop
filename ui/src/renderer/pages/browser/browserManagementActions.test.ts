@@ -12,6 +12,7 @@ import {
   browserInstallationWideCloseCopy,
   browserClosePartialFailureMessage,
   browserCloseResultIsUnconfirmed,
+  canBackgroundBrowserLane,
   canForegroundBrowserLane,
   browserLaneHasActiveWork,
   createBrowserManagementMutationGate,
@@ -237,6 +238,52 @@ describe('browser management actions', () => {
       'error:foreground failed',
       'busy:null',
     ]);
+  });
+
+  test('backgrounds a visible Primary lane even after it leaves running', async () => {
+    // A frozen/stopping Primary lane can still own a visible window (e.g.
+    // pressure-frozen after a user foreground). Backgrounding must stay
+    // available so the user can re-hide it without closing the lane.
+    for (const state of ['frozen', 'stopping', 'failed'] as const) {
+      const candidate = lane({ lifecycle_state: state, identity: { mode: 'primary' } });
+      expect(canForegroundBrowserLane(candidate)).toBe(false);
+      expect(canBackgroundBrowserLane(candidate)).toBe(true);
+
+      const calls: string[] = [];
+      await runBrowserLaneBackground(candidate, {
+        invoke: async ({ lane_id }) => {
+          calls.push(`background:${lane_id}`);
+          return { backgrounded: true, lane_id };
+        },
+        refresh: async () => {
+          calls.push('refresh');
+        },
+        setChangingVisibilityLaneId: (value) => calls.push(`busy:${value}`),
+        notifySuccess: (message) => calls.push(`success:${message}`),
+        notifyError: (message) => calls.push(`error:${message}`),
+        successMessage: 'headless',
+      });
+      expect(calls).toEqual([
+        'busy:lane-1',
+        'background:lane-1',
+        'refresh',
+        'success:headless',
+        'busy:null',
+      ]);
+    }
+
+    let invoked = false;
+    await runBrowserLaneBackground(lane({ identity: { mode: 'anonymous' } }), {
+      invoke: async () => {
+        invoked = true;
+      },
+      refresh: async () => {},
+      setChangingVisibilityLaneId: () => undefined,
+      notifySuccess: () => undefined,
+      notifyError: () => undefined,
+      successMessage: 'headless',
+    });
+    expect(invoked).toBe(false);
   });
 
   test('returns a foreground Primary lane to silent headless mode', async () => {

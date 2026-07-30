@@ -312,6 +312,8 @@
   "browserLoginClose": "完成——关闭 Lane",
   "browserLoginFailed": "无法打开托管的 Primary 登录 Lane，请检查浏览器平台容量后重试。",
   "browserLoginOpenedHint": "Primary 登录 Lane 已在浏览器平台中就绪。请在那里完成登录，结束后再回来关闭。",
+  "browserLoginQueuedHint": "登录 Lane 正在排队等待浏览器容量，窗口尚未打开。容量释放并成功前台显示后会再次提示。",
+  "browserLoginQueuedTimeout": "登录 Lane 排队等待超时，窗口未能打开。请检查浏览器平台容量后重试。",
   "browserSiteMemory": "站点记忆",
   "browserSiteMemoryDesc": "让智能体跨会话记住各站点的结构（稳定的元素线索），加速在熟悉站点上的重复任务。默认关闭——开启会把各站点的交互线索持久化到磁盘并注入智能体上下文（绝不存储密钥）。",
   "browserTakeover": "高风险操作需人工批准",

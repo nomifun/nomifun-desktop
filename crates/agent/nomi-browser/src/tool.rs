@@ -178,30 +178,9 @@ pub const OUT_OF_BAND_CONFIRMED_KEY: &str = "__out_of_band_confirmed";
 const ACT_TIMEOUT: Duration = Duration::from_secs(45);
 
 /// Fields whose authority belongs to the main-process runtime registry. They
-/// are never forwarded from model input to the Browser Platform.
-const TRUSTED_OWNER_INPUT_FIELDS: &[&str] = &[
-    "caller",
-    "caller_identity",
-    "user_id",
-    "conversation_id",
-    "runtime_instance_id",
-    "agent_id",
-    "companion_id",
-    "execution_id",
-    "step_id",
-    "attempt_id",
-    "remote_connection_id",
-    "owner_lease_id",
-    "capability_expires_at_ms",
-    "allowed_operations",
-    "identity_generation",
-    "browser_epoch",
-    "target_id",
-    "frame_id",
-    "ref_generation",
-    "cancellation_id",
-    "workspace_hint",
-];
+/// are never forwarded from model input to the Browser Platform. ONE shared
+/// list for every managed surface — see [`crate::TRUSTED_OWNER_INPUT_FIELDS`].
+use crate::TRUSTED_OWNER_INPUT_FIELDS;
 
 /// Identity selection belongs to the trusted host/crawl planner.  These
 /// fields are deliberately rejected (rather than silently stripped) at the
@@ -394,6 +373,20 @@ pub struct BrowserTool {
     /// `engine()` → falls back to `FirewallConfig::default()` (unrestricted egress,
     /// current behavior) when no secret source / no registered origins.
     firewall_override: Mutex<Option<nomi_browser_engine::FirewallConfig>>,
+    /// **F6 (裁决⑤ managed parity): the egress allowlist the shared managed HOST
+    /// actually enforces.** In managed-lane mode the engine was launched by
+    /// `ManagedBrowserHost` from the composition-root template, so this facade's
+    /// [`Self::firewall_override`] never reaches the engine; the allowlist that
+    /// gates egress is the one the host was LAUNCHED with. The platform adapter
+    /// records that launch-time value here at lane open. `secret:NAME` injection
+    /// on a managed facade ([`Self::managed_engine_injected`]) additionally
+    /// requires the current origin's eTLD+1 to be covered by this list — so a
+    /// plaintext credential is only ever injected while the firewall that is
+    /// supposed to contain it is genuinely enforced (fail-closed: `None` = the
+    /// host was launched without a vault-derived allowlist → never inject).
+    /// Standalone facades keep `None` and are unaffected (their engine firewall
+    /// derives from the same store snapshot they inject from).
+    pub(crate) managed_enforced_allow_etld1: Option<Vec<String>>,
     /// **F1-sec: 本会话的 tool-execution 审批闸是否被旁路**（`yolo || companion-forced-yolo ||
     /// auto_approve`，裁决⑧）。这是 redline 门 [`redline::enforce_redline`] 的关键入参——决定
     /// 「审批旁路会话里的不可逆动作」是否 hard-deny。
@@ -714,6 +707,9 @@ impl BrowserTool {
             // 传 per-pet 源；引擎首动作时从 vault 懒加载 store + 派生 allow_etld1。
             secret_source: None,
             firewall_override: Mutex::new(None),
+            // F6: standalone facades never carry a host-enforced allowlist; the
+            // platform adapter sets it when building managed lane facades.
+            managed_enforced_allow_etld1: None,
             // Default: a normal (non-bypassing) session. Bootstrap overrides this via
             // `with_policy` with `config.tools.auto_approve`. Tests set it directly.
             session_bypasses_approval: false,
@@ -795,6 +791,7 @@ impl BrowserTool {
             secret_store: Mutex::new(None),
             secret_source,
             firewall_override: Mutex::new(None),
+            managed_enforced_allow_etld1: None,
             session_bypasses_approval,
             runtime_mode,
             unrestricted_approval: config.unrestricted_approval,
@@ -1147,6 +1144,14 @@ impl BrowserTool {
         let t = Self::with_data_dir(data_dir, headful);
         *t.secret_store.lock().expect("secret_store poisoned") = Some(store);
         t
+    }
+
+    /// **F6 test seam**: inject a pre-populated [`SecretStore`] into an already
+    /// constructed (e.g. managed) facade so sibling-module tests can exercise
+    /// the origin/egress gates without going through a vault file on disk.
+    #[cfg(test)]
+    pub(crate) fn inject_secret_store_for_tests(&self, store: SecretStore) {
+        *self.secret_store.lock().expect("secret_store poisoned") = Some(store);
     }
 
     /// **P3-X2: lazily load the per-pet secret store + derive the firewall config**
@@ -1895,6 +1900,16 @@ impl BrowserTool {
             .and_then(|s| s.url.clone())
     }
 
+    /// **F6 recovery guidance** for the managed secret egress-allowlist gate,
+    /// embedded verbatim in the rejection produced by
+    /// [`Self::resolve_type_input`]. The platform adapter's `execute_act`
+    /// matches on this exact sentence to recognize the rejection class and
+    /// surface the actionable recovery path instead of its generic
+    /// managed-policy hint — keep producer and consumer using this one const.
+    pub(crate) const SECRET_EGRESS_ALLOWLIST_RECOVERY: &'static str =
+        "Close all browser lanes (browser_close_all) or restart the app so the \
+         browser relaunches with the updated allowlist, then retry.";
+
     /// **F1: resolve a `type`/`set_value` text into a [`TypeInput`]**, intercepting
     /// `secret:NAME` references (裁决⑦, the security-critical path).
     ///
@@ -1930,6 +1945,23 @@ impl BrowserTool {
         let resolved = guard.as_ref().and_then(|store| store.resolve(name, &origin));
         match resolved {
             Some(value) => {
+                // F6 (裁决⑤ shared truth): on a managed lane the egress firewall
+                // was fixed when the shared host LAUNCHED. Only inject when that
+                // actually-enforced allowlist covers this page's domain, so the
+                // credential can never land on a page whose egress the firewall
+                // is not restricting (e.g. a secret registered after the host
+                // started). Fail-closed with an explicit recovery path.
+                if self.managed_engine_injected
+                    && !self.managed_egress_allowlist_covers(&origin)
+                {
+                    return Err(ToolResult::error(format!(
+                        "Secret {name:?} cannot be injected: the shared browser is not \
+                         enforcing an egress allowlist that covers {origin:?} (it started \
+                         before this credential's domain was registered). The value was NOT \
+                         typed (fail-closed). {}",
+                        Self::SECRET_EGRESS_ALLOWLIST_RECOVERY
+                    )));
+                }
                 // SECURITY: the plaintext is carried only inside TypeInput::Secret
                 // (Debug-redacted) to the engine, which injects it via insertText.
                 // We do NOT log `value` here. Only the (non-secret) name is traced.
@@ -1960,6 +1992,25 @@ impl BrowserTool {
                  for this exact registrable domain."
             ))),
         }
+    }
+
+    /// **F6 (裁决⑤ managed parity)**: does the managed host's actually-enforced
+    /// egress allowlist ([`Self::managed_enforced_allow_etld1`]) cover `origin`'s
+    /// registrable domain? Entries and the origin are both normalized through
+    /// [`nomifun_secret::etld_plus_one`] — the same PSL machinery the engine's
+    /// `domain_policy` uses — so the answer matches what the firewall enforces.
+    /// `None` list / unparsable origin → `false` (fail-closed).
+    fn managed_egress_allowlist_covers(&self, origin: &str) -> bool {
+        let Some(enforced) = self.managed_enforced_allow_etld1.as_ref() else {
+            return false;
+        };
+        let Some(origin_e1) = nomifun_secret::etld_plus_one(origin) else {
+            return false;
+        };
+        enforced
+            .iter()
+            .filter_map(|entry| nomifun_secret::etld_plus_one(entry))
+            .any(|entry| entry == origin_e1)
     }
 
     /// **F1: parse the tool `input` into an [`ActSpec`]**, validating required
@@ -2850,11 +2901,19 @@ fn first_model_identity_field(input: &Value) -> Option<&'static str> {
 }
 
 fn managed_lane_id(input: &Value) -> Result<Option<BrowserLaneId>, BrowserPlatformError> {
-    input
-        .get("lane_id")
-        .and_then(Value::as_str)
-        .map(|value| BrowserLaneId::parse(value.to_string()))
-        .transpose()
+    // F55: parity with managed.rs — a typed-wrong lane_id (number/bool/object)
+    // is an explicit error, never a silent fallback to the caller's default
+    // Lane (which could execute the action against the wrong logged-in page).
+    match input.get("lane_id") {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(value)) => BrowserLaneId::parse(value.to_owned()).map(Some),
+        Some(_) => Err(BrowserPlatformError::new(
+            nomifun_browser_platform::BrowserErrorCode::LaneNotFound,
+            "`lane_id` must be a Lane handle string returned by the Browser Platform.",
+            false,
+            "Use a lane_id returned by browser_open, browser_fork, or browser_list.",
+        )),
+    }
 }
 
 async fn find_default_lane(
@@ -4138,18 +4197,32 @@ pub(crate) mod tests {
     async fn managed_tool_rejects_trusted_owner_fields_without_dispatch() {
         let client = Arc::new(FakeLaneClient::default());
         let tool = managed_tool(Arc::clone(&client));
-        let result = tool
-            .execute(json!({
-                "action": "navigate",
-                "url": "https://example.test/",
-                "user_id": "model-chosen-owner",
-            }))
-            .await;
+        // F23: the native surface must reject the SAME trusted-owner set the
+        // shared ManagedBrowserFacade rejects — including the surface/routing
+        // fields that used to be accepted only here (contract drift).
+        for (field, value) in [
+            ("user_id", json!("model-chosen-owner")),
+            ("surface", json!("gateway")),
+            ("browser_surface", json!("gateway")),
+            ("lane_key", json!("other-runtime/default")),
+        ] {
+            let result = tool
+                .execute(json!({
+                    "action": "navigate",
+                    "url": "https://example.test/",
+                    field: value,
+                }))
+                .await;
 
-        assert!(result.is_error);
-        assert!(result.content.contains("trusted host metadata"));
-        assert!(client.opens.lock().unwrap().is_empty());
-        assert!(client.operations.lock().unwrap().is_empty());
+            assert!(result.is_error, "`{field}` must be rejected");
+            assert!(
+                result.content.contains("trusted host metadata"),
+                "`{field}` rejection should explain the trust boundary: {}",
+                result.content
+            );
+            assert!(client.opens.lock().unwrap().is_empty());
+            assert!(client.operations.lock().unwrap().is_empty());
+        }
     }
 
     #[tokio::test]
@@ -4178,6 +4251,48 @@ pub(crate) mod tests {
             Some(7),
             "the f<frame-seq> prefix must not be treated as an observation generation"
         );
+    }
+
+    #[tokio::test]
+    async fn managed_non_string_lane_id_is_rejected_not_defaulted() {
+        // F55: a typed-wrong lane_id must never silently fall back to the
+        // default Lane (parity with ManagedBrowserFacade) — the action would
+        // otherwise execute against whatever page the default Lane is on.
+        let client = Arc::new(FakeLaneClient::default());
+        let tool = managed_tool(Arc::clone(&client));
+
+        for lane_id in [json!(12345), json!(true), json!({"id": "lane-1"})] {
+            let result = tool
+                .execute(json!({
+                    "action": "click",
+                    "ref": "f0e1",
+                    "lane_id": lane_id,
+                }))
+                .await;
+
+            assert!(result.is_error, "non-string lane_id must be an error");
+            assert!(
+                result.content.contains("must be a Lane handle string"),
+                "error should name the contract: {}",
+                result.content
+            );
+            assert!(
+                client.opens.lock().unwrap().is_empty(),
+                "an invalid handle must never open/use the default Lane"
+            );
+            assert!(client.operations.lock().unwrap().is_empty());
+        }
+
+        // Null and absent still mean "the caller's default Lane".
+        let ok = tool
+            .execute(json!({
+                "action": "navigate",
+                "url": "https://example.test/",
+                "lane_id": Value::Null,
+            }))
+            .await;
+        assert!(!ok.is_error, "{}", ok.content);
+        assert_eq!(client.opens.lock().unwrap().len(), 1);
     }
 
     #[test]
@@ -5936,6 +6051,94 @@ pub(crate) mod tests {
                 );
             }
         }
+    }
+
+    // ── F6 (裁决⑤ managed parity): managed facades only inject a secret when the
+    //    HOST-enforced egress allowlist covers the page's registrable domain ──
+
+    /// Build a managed-lane facade (as the platform adapter does) with a
+    /// populated store, the seeded snapshot origin, and an explicit
+    /// host-enforced allowlist state.
+    fn managed_secret_tool(enforced: Option<Vec<String>>) -> BrowserTool {
+        let mut t = managed_engine_tool(Arc::new(FakeRecordingEngine));
+        t.managed_enforced_allow_etld1 = enforced;
+        *t.secret_store.lock().unwrap() =
+            Some(store_with_secret("pw", "hunter2-PLAINTEXT", "example.com"));
+        seed_snapshot(&t, "f0e1", "textbox", "Password"); // url = shop.example.com
+        t
+    }
+
+    #[test]
+    fn managed_secret_injects_when_host_enforced_allowlist_covers_origin() {
+        let t = managed_secret_tool(Some(vec!["example.com".into()]));
+        match t.resolve_type_input("secret:pw") {
+            Ok(TypeInput::Secret(_)) => {}
+            other => panic!("covered origin must inject TypeInput::Secret, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn managed_secret_blocked_when_host_allowlist_misses_origin_and_does_not_leak() {
+        // The host launched BEFORE this credential's domain was registered:
+        // its enforced allowlist does not cover shop.example.com → fail-closed
+        // with a recovery path, never injecting into an un-firewalled page.
+        for enforced in [Some(vec![]), Some(vec!["other-bank.com".into()]), None] {
+            let t = managed_secret_tool(enforced.clone());
+            match t.resolve_type_input("secret:pw") {
+                Ok(ti) => panic!(
+                    "uncovered origin must be blocked (enforced={enforced:?}), got Ok({ti:?})"
+                ),
+                Err(tr) => {
+                    assert!(tr.is_error);
+                    assert!(
+                        !tr.content.contains("hunter2-PLAINTEXT"),
+                        "leaked plaintext: {}",
+                        tr.content
+                    );
+                    assert!(
+                        tr.content.contains("egress allowlist"),
+                        "block message should explain the enforcement gap: {}",
+                        tr.content
+                    );
+                    assert!(
+                        tr.content.contains("browser_close_all") || tr.content.contains("restart"),
+                        "block message should give a recovery path: {}",
+                        tr.content
+                    );
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn managed_prepare_act_enforces_host_allowlist_gate_end_to_end() {
+        // The platform adapter path (prepare_managed_act → build_act_spec →
+        // resolve_type_input) must hit the same gate: covered origin builds the
+        // spec, uncovered origin is rejected before any engine dispatch.
+        let covered = managed_secret_tool(Some(vec!["example.com".into()]));
+        covered
+            .prepare_managed_act("type", &json!({"ref": "f0e1", "text": "secret:pw"}), false)
+            .await
+            .expect("covered origin must build the managed act spec");
+
+        let uncovered = managed_secret_tool(Some(vec![]));
+        let error = uncovered
+            .prepare_managed_act("type", &json!({"ref": "f0e1", "text": "secret:pw"}), false)
+            .await
+            .expect_err("uncovered origin must fail closed");
+        assert!(!error.contains("hunter2-PLAINTEXT"), "leaked plaintext: {error}");
+        assert!(error.contains("egress allowlist"), "{error}");
+    }
+
+    #[test]
+    fn standalone_secret_injection_ignores_managed_enforcement_field() {
+        // Standalone facades derive the engine firewall from the same store
+        // snapshot they inject from — the managed gate must not apply.
+        let store = store_with_secret("pw", "hunter2-PLAINTEXT", "example.com");
+        let t = BrowserTool::with_secret_store(std::env::temp_dir().join("bt-f6-standalone"), false, store);
+        seed_snapshot(&t, "f0e1", "textbox", "Password");
+        assert!(t.managed_enforced_allow_etld1.is_none());
+        assert!(matches!(t.resolve_type_input("secret:pw"), Ok(TypeInput::Secret(_))));
     }
 
     #[test]

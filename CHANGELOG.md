@@ -5,6 +5,26 @@ notes at a high level rather than a complete historical log.
 
 ## Unreleased
 
+## v0.3.3 - 2026-07-30
+
+- Hardened the managed browser platform across lane/host lifecycle, startup,
+  restart, cleanup, ownership lineage, and same-site resource handling.
+- Improved turn execution UX with retry actions for failed turns, a live current
+  step strip, stop-moment status copy, and verified deliverables surfaced in the
+  conversation UI.
+- Tightened agent/channel reliability around forwarded browser tool-call
+  delivery, queued knowledge fetches, cleanup cancellation lineage, busy-turn
+  handling, skill resolution, and AutoWork knowledge-service wiring.
+- Fixed WeChat inbound pairing and configuration-status handling.
+- Added focused regression coverage for browser platform, gateway, app, UI, and
+  scripted browser/UI test lanes.
+- Packaging note: this Windows-first GitHub release publishes the Windows x64
+  installer and signed Tauri updater assets. macOS and Linux packages are not
+  part of this first publication and should be appended from native build
+  machines when available.
+- The Windows installer is updater-signed but not Authenticode-signed, so manual
+  downloads may show a SmartScreen or unknown-publisher warning.
+
 ## v0.3.0 - 2026-07-24
 
 - Rebuilt the persistence and identifier architecture around a v3 data

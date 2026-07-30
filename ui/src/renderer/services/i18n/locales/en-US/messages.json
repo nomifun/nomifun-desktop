@@ -53,12 +53,15 @@
     "status": "{{target}}"
   },
   "turnProcessed": "Processed {{duration}}",
-  "turnProcessing": "Processing {{duration}}",
   "turnWaiting": "Waiting for confirmation {{duration}}",
-  "turnCanceled": "Canceled {{duration}}",
+  "turnCanceled": "You stopped after {{duration}}",
   "turnProcess": {
     "expandAllThinkingProcess": "Expand all thinking process",
     "collapseAllThinkingProcess": "Collapse all thinking process"
+  },
+  "turnLiveStep": {
+    "analyzing": "Analyzing the request",
+    "composing": "Composing the reply"
   },
   "knowledgeWriteback": {
     "started": "Preparing knowledge write-back",
@@ -80,6 +83,15 @@
   "planProgress": "{{done}}/{{total}}",
   "fileChanges": "File Changes",
   "fileChangesCount": "{{count}} File Changes",
+  "turnDeliverables": {
+    "title": "Generated {{count}} files",
+    "showMore": "Show {{count}} more files",
+    "showLess": "Show less",
+    "verified": "Integrity verified (SHA-256)",
+    "open": "Open",
+    "reveal": "Reveal in folder",
+    "viewDiff": "View changes"
+  },
   "conversationInProgress": "A conversation is currently in progress...",
   "confirm": "Confirm",
   "canceledExecution": "Execution canceled",

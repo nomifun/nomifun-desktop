@@ -43,6 +43,11 @@ use common::{body_json, json_with_token, setup_and_login};
 struct BlockedOnConfirmationAgent {
     conversation_id: String,
     confirmed: Arc<Mutex<Vec<String>>>,
+    /// Held open but never sent to. The event stream must stay OPEN: the turn
+    /// pipeline treats stream closure as turn end, which finalizes the row as
+    /// `finished`, releases the active turn, and (correctly) strips the live
+    /// turn authority IDMM's pending lane requires (`has_live_turn_authority`).
+    events: tokio::sync::broadcast::Sender<AgentStreamEvent>,
 }
 
 #[async_trait::async_trait]
@@ -57,7 +62,12 @@ impl AgentRuntimeControl for BlockedOnConfirmationAgent {
         "/tmp/test"
     }
     fn status(&self) -> Option<ConversationStatus> {
-        None
+        // A confirmation-blocked runtime is still a RUNNING runtime. IDMM's
+        // pending_signal lane now fails closed unless the runtime itself
+        // reports Running (`has_live_turn_authority`, nomifun-idmm probe.rs):
+        // recovered confirmations must be backed by live turn authority, never
+        // by history. `None` here would make IDMM (correctly) refuse to act.
+        Some(ConversationStatus::Running)
     }
     fn is_transport_healthy(&self) -> bool {
         true
@@ -66,10 +76,13 @@ impl AgentRuntimeControl for BlockedOnConfirmationAgent {
         now_ms()
     }
     fn subscribe(&self) -> tokio::sync::broadcast::Receiver<AgentStreamEvent> {
-        // No live sender → the observe() live lane sees a closed stream, so the
-        // ONLY way IDMM can act is the on-arm pending_signal lane (the point).
-        let (tx, _) = tokio::sync::broadcast::channel(1);
-        tx.subscribe()
+        // OPEN but silent: the agent never emits a future event, so the
+        // observe() live lane never sees the confirmation and the ONLY way
+        // IDMM can act is the on-arm pending_signal lane (the point). The
+        // stream must not be CLOSED, though — closure is turn end under the
+        // unified turn pipeline, which would finalize the row (`finished`)
+        // and strip the live turn authority the pending lane requires.
+        self.events.subscribe()
     }
     async fn send_message(&self, _data: SendMessageData) -> Result<(), AgentSendError> {
         Ok(())
@@ -137,14 +150,26 @@ async fn build_app_blocked_on_confirmation() -> (axum::Router, AppServices, Arc<
             Ok(AgentRuntimeHandle::Mock(Arc::new(BlockedOnConfirmationAgent {
                 conversation_id: opts.conversation_id,
                 confirmed,
+                events: tokio::sync::broadcast::channel(8).0,
             })))
         })
     });
     let runtime_registry: Arc<dyn AgentRuntimeRegistry> = Arc::new(InMemoryAgentRuntimeRegistry::new(factory));
-    let services = AppServices::from_config(db, &AppConfig::default())
-        .await
-        .unwrap()
-        .with_agent_runtime_registry(runtime_registry);
+    // Isolated data/work dirs: `AppConfig::default()`'s relative dirs are shared
+    // on disk by every test binary running in the same cwd and litter the repo
+    // tree (same hazard already fixed for websocket_e2e / autowork e2e).
+    let isolated_root = tempfile::tempdir().unwrap().keep();
+    let services = AppServices::from_config(
+        db,
+        &AppConfig {
+            data_dir: isolated_root.join("data"),
+            work_dir: isolated_root.join("work"),
+            ..AppConfig::default()
+        },
+    )
+    .await
+    .unwrap()
+    .with_agent_runtime_registry(runtime_registry);
     let router = create_router(&services).await;
     (router, services, confirmed)
 }
@@ -176,6 +201,11 @@ async fn idmm_recovers_and_confirms_on_arm_pending_tool_confirmation() {
 
     // A plain desktop nomi conversation (no channel/companion markers, no
     // channel_chat_id → is_plain_desktop / not-routed → IDMM may auto-answer).
+    // The workspace must be a REAL directory: sending a turn now acquires the
+    // knowledge workspace binding authority, which canonicalizes the
+    // conversation workspace and 400s on a fictional path
+    // (nomifun-knowledge workspace_binding.rs, canonical_workspace_key).
+    let workspace = tempfile::tempdir().unwrap().keep().canonicalize().unwrap();
     let conv = {
         let body = json!({
             "type": "nomi",
@@ -185,7 +215,7 @@ async fn idmm_recovers_and_confirms_on_arm_pending_tool_confirmation() {
                 "model": "mock-model",
                 "use_model": null
             },
-            "extra": { "workspace": "/project" }
+            "extra": { "workspace": workspace.to_str().unwrap() }
         });
         let resp = app
             .clone()
@@ -230,11 +260,13 @@ async fn idmm_recovers_and_confirms_on_arm_pending_tool_confirmation() {
         ))
         .await
         .unwrap();
-    assert!(
-        resp.status().is_success(),
-        "send_message should accept the turn, got {}",
-        resp.status()
-    );
+    let send_status = resp.status();
+    if !send_status.is_success() {
+        panic!(
+            "send_message should accept the turn, got {send_status}: {}",
+            body_json(resp).await
+        );
+    }
 
     // Arming + pending_signal + inject happen on a detached task; poll for the
     // auto-confirm (no backoff on the on-arm pending decision, so it is prompt).
@@ -246,9 +278,27 @@ async fn idmm_recovers_and_confirms_on_arm_pending_tool_confirmation() {
         }
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     }
-    assert!(
-        answered,
-        "IDMM must recover the on-arm pending tool-confirmation and auto-confirm call_42 (decision watch was inert on pending confirmations); confirmed={:?}",
-        confirmed.lock().unwrap()
-    );
+    if !answered {
+        // Failure diagnostics: the row status + runtime summary + IDMM run
+        // state pinpoint which `has_live_turn_authority` link broke.
+        let conv_state = body_json(
+            app.clone()
+                .oneshot(common::get_with_token(&format!("/api/conversations/{conv}"), &token))
+                .await
+                .unwrap(),
+        )
+        .await;
+        let idmm_state = body_json(
+            app.clone()
+                .oneshot(common::get_with_token(&format!("/api/idmm/conversation/{conv}"), &token))
+                .await
+                .unwrap(),
+        )
+        .await;
+        panic!(
+            "IDMM must recover the on-arm pending tool-confirmation and auto-confirm call_42 \
+             (decision watch was inert on pending confirmations); confirmed={:?}; conv={conv_state}; idmm={idmm_state}",
+            confirmed.lock().unwrap()
+        );
+    }
 }

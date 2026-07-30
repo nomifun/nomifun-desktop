@@ -304,6 +304,29 @@
   color: var(--color-text-1);
 }
 
+.message-error-note__actions {
+  gap: 8px;
+}
+
+.message-error-note__retry {
+  box-sizing: border-box;
+  height: 28px;
+  border: 1px solid var(--color-border-2, #e5e6eb);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--color-text-2, #4e5969);
+  cursor: pointer;
+  font: inherit;
+  font-size: 12px;
+  line-height: 18px;
+  padding: 0 10px;
+}
+
+.message-error-note__retry:hover {
+  color: var(--color-text-1, #1d2129);
+  border-color: var(--color-text-4, #c9cdd4);
+}
+
 /* Mobile typography tuning: conversation readability */
 @media (max-width: 767px) {
   .message-error-note {
@@ -345,14 +368,6 @@
 
   .message-error-note__detail-body {
     max-height: 120px;
-  }
-
-  /* Vertical rhythm between consecutive messages on mobile.
-     Desktop reserves space for the hover-revealed copy/time row beneath each
-     bubble; that row is hidden on mobile, so add the spacing back here so
-     bubbles don't visually merge. */
-  .message-item {
-    margin-top: 16px !important;
   }
 
 }
@@ -660,6 +675,36 @@
 .turn-process-receipt__body [data-testid='message-permission-card'],
 .turn-process-receipt__body [data-testid='message-acp-permission-card'] {
   margin-bottom: 0;
+}
+
+/* ── Live current-step strip under the latest streaming reply ── */
+
+.turn-live-step .turn-process-receipt__label {
+  animation: turn-live-step-breathing 1.8s ease-in-out infinite;
+}
+
+.turn-live-step .turn-process-receipt--waiting {
+  color: var(--color-warning-6, #ff7d00);
+}
+
+.turn-live-step .turn-process-receipt--waiting .turn-process-receipt__label {
+  animation: none;
+}
+
+@keyframes turn-live-step-breathing {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.55;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .turn-live-step .turn-process-receipt__label {
+    animation: none;
+  }
 }
 
 .turn-process-trace {

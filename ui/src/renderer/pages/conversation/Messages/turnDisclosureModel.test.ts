@@ -828,3 +828,43 @@ describe('assignTurnIdsFromUserRequests', () => {
     expect(assigned.map((entry) => entry.turnId)).toEqual([ACP_ROOT_1, TURN_2, ACP_ROOT_1]);
   });
 });
+
+describe('stop notice', () => {
+  test('marks the closed tail turn canceled and pins endAt to the stop moment', () => {
+    const output = buildTurnDisclosureItems(
+      [item('u1', 'user', { createdAt: 1_000 }), item('p1', 'process', { createdAt: 2_000 })],
+      { tailClosed: true, stopNotice: { stoppedAt: 5_000 } }
+    );
+    const disclosure = output.find((entry) => entry.type === 'turn_disclosure');
+    expect(disclosure?.type).toBe('turn_disclosure');
+    if (disclosure?.type !== 'turn_disclosure') return;
+    expect(disclosure.state).toBe('canceled');
+    expect(disclosure.endAt).toBe(5_000);
+    expect(disclosure.running).toBe(false);
+    expect(disclosure.defaultCollapsed).toBe(true);
+  });
+
+  test('ignores a stop notice that predates the tail turn', () => {
+    const output = buildTurnDisclosureItems(
+      [item('u1', 'user', { createdAt: 1_000 }), item('p1', 'process', { createdAt: 2_000 })],
+      { tailClosed: true, stopNotice: { stoppedAt: 500 } }
+    );
+    const disclosure = output.find((entry) => entry.type === 'turn_disclosure');
+    expect(disclosure?.type).toBe('turn_disclosure');
+    if (disclosure?.type !== 'turn_disclosure') return;
+    expect(disclosure.state).toBe('completed');
+    expect(disclosure.endAt).toBe(2_000);
+  });
+
+  test('does not cancel a still-running tail turn', () => {
+    const output = buildTurnDisclosureItems(
+      [item('u1', 'user', { createdAt: 1_000 }), item('p1', 'process', { createdAt: 2_000, running: true })],
+      { tailClosed: false, stopNotice: { stoppedAt: 5_000 } }
+    );
+    const disclosure = output.find((entry) => entry.type === 'turn_disclosure');
+    expect(disclosure?.type).toBe('turn_disclosure');
+    if (disclosure?.type !== 'turn_disclosure') return;
+    expect(disclosure.state).toBe('running');
+    expect(disclosure.running).toBe(true);
+  });
+});

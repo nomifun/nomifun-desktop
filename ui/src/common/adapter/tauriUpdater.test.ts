@@ -23,7 +23,17 @@ describe('desktop updater security boundary', () => {
     expect(updaterSource.includes('install(): Promise<void>')).toBe(false);
     expect(updaterSource.includes('downloadAndInstall')).toBe(false);
     expect(updaterSource.includes('.install(')).toBe(false);
-    expect(updaterSource.includes('tauriInstallUpdate(pendingUpdate.version)')).toBe(true);
+    expect(updaterSource.includes('tauriInstallUpdate(version)')).toBe(true);
+  });
+
+  test('install goes through the fail-closed preflight/fatal-exit contract', () => {
+    // installUpdateWithPreflight owns ordering (preflight → cleanup → install →
+    // relaunch) and guarantees a fatal exit once install has started; the raw
+    // sequential call path must not come back.
+    expect(updaterSource.includes('installUpdateWithPreflight({')).toBe(true);
+    expect(updaterSource.includes('fatalExit')).toBe(true);
+    expect(updaterSource.includes('prepareShutdown')).toBe(true);
+    expect(/await\s+tauriInstallUpdate\(/.test(updaterSource)).toBe(false);
   });
 
   test('renderer adapter cannot invoke the removed pre-shutdown command', () => {

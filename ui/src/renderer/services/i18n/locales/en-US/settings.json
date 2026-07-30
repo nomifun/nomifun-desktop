@@ -312,6 +312,8 @@
   "browserLoginClose": "Done — close Lane",
   "browserLoginFailed": "Couldn't open the managed Primary login Lane. Check Browser Platform capacity and try again.",
   "browserLoginOpenedHint": "The Primary login lane is ready in Browser Platform. Sign in there, then return here when finished.",
+  "browserLoginQueuedHint": "The login lane is queued for browser capacity; no window is open yet. You'll be notified once it is promoted and brought to the foreground.",
+  "browserLoginQueuedTimeout": "The queued login lane timed out before a window could open. Check Browser Platform capacity and try again.",
   "browserSiteMemory": "Site memory",
   "browserSiteMemoryDesc": "Let the agent remember each site's structure across sessions (stable element hints) to speed up repeat tasks. Off by default — this persists per-site interaction hints to disk and feeds them into the agent's context. Secrets are never stored.",
   "browserTakeover": "Human approval for risky actions",
