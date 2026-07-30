@@ -2142,7 +2142,31 @@ export const webui = {
   changeUsername: httpPost<{ username: string }, { newUsername: string }>('/api/webui/change-username', (p) => ({
     new_username: p.newUsername,
   })),
-  resetPassword: httpPost<{ new_password: string }, void>('/api/webui/reset-password'),
+  /**
+   * Authenticated self-service credential changes for WebUI browser sessions.
+   * Unlike the local-trust `/api/webui/*` variants above (desktop shell only,
+   * possession = auth), these verify the CURRENT password and work for a
+   * remote login — docker users change the login without touching container
+   * parameters. `changePassword` rotates the JWT secret server-side: every
+   * session (including this one) is invalidated and the user must sign in
+   * again with the new password.
+   */
+  account: {
+    changePassword: httpPost<void, { currentPassword: string; newPassword: string }>(
+      '/api/auth/change-password',
+      (p) => ({
+        current_password: p.currentPassword,
+        new_password: p.newPassword,
+      })
+    ),
+    changeUsername: httpPost<{ username: string }, { currentPassword: string; newUsername: string }>(
+      '/api/auth/change-username',
+      (p) => ({
+        current_password: p.currentPassword,
+        new_username: p.newUsername,
+      })
+    ),
+  },
   generateQRToken: httpPost<{ token: string; expires_at_ms: number }, void>('/api/webui/generate-qr-token'),
   /**
    * Per-companion Remote access tokens (local-trust-gated; desktop shell only).

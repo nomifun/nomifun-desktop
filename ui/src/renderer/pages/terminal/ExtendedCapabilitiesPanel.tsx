@@ -14,6 +14,7 @@ import type { AutoWorkDraftValue } from '@/renderer/pages/conversation/component
 import IdmmControl from '@/renderer/pages/conversation/components/IdmmControl';
 import PlatformMcpRegisterPanel from './PlatformMcpRegisterPanel';
 import RegisterKnowledgeButton from './RegisterKnowledgeButton';
+import { isDesktopShell } from '@/renderer/utils/platform';
 import { isTerminalAutoworkCapable } from './detectFamily';
 
 interface ExtendedCapabilitiesPanelProps {
@@ -108,20 +109,28 @@ const ExtendedCapabilitiesPanel: React.FC<ExtendedCapabilitiesPanelProps> = ({
                 options={knowledgeBases.map((b) => ({ label: b.name, value: b.knowledge_base_id }))}
                 onChange={(v) => onKbIdsChange(v as string[])}
               />
-              <div className='mt-8px flex items-start justify-between gap-12px'>
-                <div className='min-w-0 flex-1 text-12px leading-16px text-t-tertiary'>
-                  {t('terminal.extended.knowledgeConnectNote', {
-                    defaultValue:
-                      '平台终端会自动注入；包装命令、自定义或外置终端可把无密钥命令注册到工作路径。',
-                  })}
-                </div>
-                <div className='shrink-0'>
-                  <RegisterKnowledgeButton cwd={cwd} command={command} />
-                </div>
-              </div>
-              <div className='mt-8px'>
-                <PlatformMcpRegisterPanel />
-              </div>
+              {/* External-CLI registration is a desktop-host operation (writes
+                  agent CLI configs on the backend machine); in WebUI browser
+                  mode the note + button + template panel all disappear
+                  (audit 2026-07-30, finding I). */}
+              {isDesktopShell() && (
+                <>
+                  <div className='mt-8px flex items-start justify-between gap-12px'>
+                    <div className='min-w-0 flex-1 text-12px leading-16px text-t-tertiary'>
+                      {t('terminal.extended.knowledgeConnectNote', {
+                        defaultValue:
+                          '平台终端会自动注入；包装命令、自定义或外置终端可把无密钥命令注册到工作路径。',
+                      })}
+                    </div>
+                    <div className='shrink-0'>
+                      <RegisterKnowledgeButton cwd={cwd} command={command} />
+                    </div>
+                  </div>
+                  <div className='mt-8px'>
+                    <PlatformMcpRegisterPanel />
+                  </div>
+                </>
+              )}
             </div>
           )}
 

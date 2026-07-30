@@ -11,7 +11,8 @@ use axum::{Extension, Router};
 use serde::Deserialize;
 
 use nomifun_api_types::{
-    ApiResponse, AuthStatusResponse, ChangePasswordRequest, LoginRequest, LoginResponse, PublicUser, QrLoginRequest,
+    ApiResponse, AuthStatusResponse, ChangePasswordRequest, ChangeUsernameRequest, ChangeUsernameResponse,
+    LoginRequest, LoginResponse, PublicUser, QrLoginRequest,
     RefreshResponse, RefreshTokenRequest, UserInfoResponse, WebuiChangePasswordRequest, WebuiChangeUsernameRequest,
     WebuiChangeUsernameResponse, WebuiGenerateQrTokenResponse, WebuiResetPasswordResponse, WsTokenResponse,
 };
@@ -171,6 +172,7 @@ pub fn auth_routes(state: AuthRouterState) -> Router {
         .route("/logout", post(logout_handler))
         .route("/api/auth/user", get(user_handler))
         .route("/api/auth/change-password", post(change_password_handler))
+        .route("/api/auth/change-username", post(change_username_handler))
         .route("/api/ws-token", get(ws_token_handler))
         .route_layer(from_fn_with_state(
             action_limiter.clone(),
@@ -583,6 +585,51 @@ async fn change_password_handler(
         .map_err(|e| AppError::Internal(format!("Database error: {e}")))?;
 
     Ok(Json(ApiResponse::message("Password changed successfully")))
+}
+
+// ---------------------------------------------------------------------------
+// POST /api/auth/change-username
+// ---------------------------------------------------------------------------
+
+/// Authenticated username change for remote (WebUI) sessions.
+///
+/// The local-only `/api/webui/change-username` trusts physical possession of
+/// the desktop and skips password verification; this variant serves docker/
+/// WebUI deployments where changing the login must not require editing
+/// container parameters, so it demands the current password instead
+/// (audit 2026-07-30, finding I). Sessions stay valid: the JWT carries the
+/// user id and lookups resolve the fresh username from the database.
+async fn change_username_handler(
+    State(state): State<AuthRouterState>,
+    Extension(current_user): Extension<CurrentUser>,
+    body: Result<Json<ChangeUsernameRequest>, JsonRejection>,
+) -> Result<Json<ApiResponse<ChangeUsernameResponse>>, AppError> {
+    let Json(req) = body.map_err(|e| AppError::BadRequest(e.to_string()))?;
+
+    let trimmed = req.new_username.trim().to_owned();
+    validate_username(&trimmed)?;
+
+    let user = state
+        .user_repo
+        .find_by_id(current_user.id.as_str())
+        .await
+        .map_err(|e| AppError::Internal(format!("Database error: {e}")))?
+        .ok_or_else(|| AppError::NotFound("User not found".into()))?;
+
+    let valid = verify_password_timed(&req.current_password, &user.password_hash).await?;
+    if !valid {
+        return Err(AppError::Unauthorized("Current password is incorrect".into()));
+    }
+
+    if user.username != trimmed {
+        state
+            .user_repo
+            .update_username(current_user.id.as_str(), &trimmed)
+            .await
+            .map_err(|e| AppError::Internal(format!("Database error: {e}")))?;
+    }
+
+    Ok(Json(ApiResponse::ok(ChangeUsernameResponse { username: trimmed })))
 }
 
 // ---------------------------------------------------------------------------

@@ -46,6 +46,25 @@ pub struct ChangePasswordRequest {
     pub new_password: String,
 }
 
+/// Change username request body for `POST /api/auth/change-username`.
+///
+/// Unlike the local-only `/api/webui/change-username`, this authenticated
+/// endpoint serves remote WebUI sessions, so it verifies the current
+/// password — a hijacked browser session alone must not be able to rotate
+/// the login identity.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ChangeUsernameRequest {
+    pub current_password: String,
+    pub new_username: String,
+}
+
+/// Response for `POST /api/auth/change-username`.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ChangeUsernameResponse {
+    pub username: String,
+}
+
 /// QR code login request body for `POST /api/auth/qr-login`.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
