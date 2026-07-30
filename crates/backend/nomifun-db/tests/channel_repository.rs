@@ -89,6 +89,7 @@ fn plugin_fixture(plugin_type: &str, bot_key: &str) -> NewChannelPluginRow {
         last_connected: None,
         companion_id: None,
         bot_key: Some(bot_key.into()),
+        owner_domain: nomifun_db::models::default_owner_domain(),
         created_at: now,
         updated_at: now,
     }

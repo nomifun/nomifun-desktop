@@ -57,6 +57,13 @@ pub trait IChannelRepository: Send + Sync {
     /// Returns all registered plugins.
     async fn get_all_plugins(&self) -> Result<Vec<ChannelPluginRow>, DbError>;
 
+    /// Returns registered plugins owned by one domain
+    /// (`companion` | `customer_service`).
+    async fn list_plugins_by_owner_domain(
+        &self,
+        owner_domain: &str,
+    ) -> Result<Vec<ChannelPluginRow>, DbError>;
+
     /// Returns a single plugin by business id, or `None` if not found.
     async fn get_plugin(&self, channel_plugin_id: &str) -> Result<Option<ChannelPluginRow>, DbError>;
 

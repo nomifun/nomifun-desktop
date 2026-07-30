@@ -23,6 +23,11 @@ pub struct ChannelPluginRow {
     /// Platform-level bot identity (lark app_id, telegram bot id, ...),
     /// extracted from credentials on enable/restore.
     pub bot_key: Option<String>,
+    /// Owning domain: `companion` (desktop companion pool, default) or
+    /// `customer_service` (customer-service self-managed pool). A
+    /// customer-service bot never carries a `companion_id` (DB trigger +
+    /// application validation).
+    pub owner_domain: String,
     pub created_at: TimestampMs,
     pub updated_at: TimestampMs,
 }
@@ -41,9 +46,23 @@ pub struct NewChannelPluginRow {
     pub last_connected: Option<TimestampMs>,
     pub companion_id: Option<String>,
     pub bot_key: Option<String>,
+    /// Owning domain (`companion` | `customer_service`). Defaults to the
+    /// legacy companion pool when omitted on the wire.
+    #[serde(default = "default_owner_domain")]
+    pub owner_domain: String,
     pub created_at: TimestampMs,
     pub updated_at: TimestampMs,
 }
+
+/// The legacy/default channel bot ownership domain.
+pub fn default_owner_domain() -> String {
+    CHANNEL_OWNER_DOMAIN_COMPANION.to_owned()
+}
+
+/// `channel_plugins.owner_domain` value for desktop-companion bots.
+pub const CHANNEL_OWNER_DOMAIN_COMPANION: &str = "companion";
+/// `channel_plugins.owner_domain` value for customer-service bots.
+pub const CHANNEL_OWNER_DOMAIN_CUSTOMER_SERVICE: &str = "customer_service";
 
 /// Row mapping for the `channel_users` table.
 ///
