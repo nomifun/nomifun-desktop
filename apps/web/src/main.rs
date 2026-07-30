@@ -25,6 +25,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use anyhow::{Context, Result};
+use axum::response::IntoResponse;
 use clap::Parser;
 use tower_http::services::{ServeDir, ServeFile};
 use tower_http::trace::TraceLayer;
@@ -96,6 +97,45 @@ fn env_flag(name: &str) -> bool {
             )
         })
         .unwrap_or(false)
+}
+
+/// True for request paths owned by the backend API/realtime surface.
+///
+/// An unmatched path under these prefixes must fail with a JSON 404, never
+/// fall through to the SPA's index.html: a 200 text/html response to an API
+/// client (stale tab after an image upgrade, typo'd endpoint) parses as
+/// `undefined` data and surfaces as silent empty views instead of a legible
+/// error (audit 2026-07-30, finding G).
+fn is_api_path(path: &str) -> bool {
+    path == "/api" || path.starts_with("/api/") || path == "/ws" || path.starts_with("/ws/")
+}
+
+/// SPA fallback service: serve static assets with an index.html fallback for
+/// client-routed paths, but answer unmatched API/realtime paths with the
+/// backend's structured JSON 404 envelope.
+fn spa_with_api_404(dist: &std::path::Path) -> axum::routing::MethodRouter {
+    use tower::ServiceExt as _;
+
+    let spa = ServeDir::new(dist)
+        .append_index_html_on_directories(true)
+        .fallback(ServeFile::new(dist.join("index.html")));
+
+    axum::routing::any(move |request: axum::extract::Request| {
+        let spa = spa.clone();
+        async move {
+            let path = request.uri().path();
+            if is_api_path(path) {
+                return nomifun_common::AppError::NotFound(format!("no API route matches {path}"))
+                    .into_response();
+            }
+            match spa.oneshot(request).await {
+                Ok(response) => response.into_response(),
+                // ServeDir's error type is Infallible; this arm is unreachable
+                // but keeps the signature honest if tower-http ever changes it.
+                Err(_) => axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+            }
+        }
+    })
 }
 
 fn validate_static_dist(args: &Args) -> Result<Option<nomifun_app::bootstrap::UiBuildManifest>> {
@@ -224,11 +264,7 @@ async fn serve(cli: nomifun_app::cli::Cli, merged_path: String, args: Args) -> R
 
     let mut app = nomifun_app::create_router(&services).await;
     if !args.api_only {
-        app = app.fallback_service(
-            ServeDir::new(&args.dist)
-                .append_index_html_on_directories(true)
-                .fallback(ServeFile::new(args.dist.join("index.html"))),
-        );
+        app = app.fallback_service(spa_with_api_404(&args.dist));
     }
     let app = app.layer(TraceLayer::new_for_http());
 
@@ -257,7 +293,16 @@ async fn serve(cli: nomifun_app::cli::Cli, merged_path: String, args: Args) -> R
         );
     }
     nomifun_app::bootstrap::announce_bound_port(&cli.data_dir, &args.host, actual_port);
-    if let Err(error) = axum::serve(listener, app).await {
+    // ConnectInfo gives the rate limiter each client's real peer address. Without
+    // it every browser in the deployment collapses into one shared "unknown"
+    // bucket: a single user's login failures 429-lock everyone out, and aggregate
+    // traffic trips the shared per-minute API quota (audit 2026-07-30, finding A).
+    if let Err(error) = axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .await
+    {
         return Err(services.cleanup_after_startup_failure(error.into()).await);
     }
 
@@ -271,6 +316,51 @@ async fn serve(cli: nomifun_app::cli::Cli, merged_path: String, args: Args) -> R
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn api_paths_are_classified_for_json_404() {
+        assert!(is_api_path("/api"));
+        assert!(is_api_path("/api/fs/browse"));
+        assert!(is_api_path("/ws"));
+        assert!(is_api_path("/ws/anything"));
+        assert!(!is_api_path("/"));
+        assert!(!is_api_path("/login"));
+        assert!(!is_api_path("/apiary")); // prefix must respect segment boundary
+        assert!(!is_api_path("/assets/index-abc123.js"));
+    }
+
+    #[tokio::test]
+    async fn unmatched_api_path_gets_json_404_not_index_html() {
+        use tower::ServiceExt;
+
+        // dist dir intentionally does not exist: the API branch must
+        // short-circuit before any filesystem access.
+        let service = spa_with_api_404(std::path::Path::new("/definitely/missing/dist"));
+        let app = axum::Router::new().fallback_service(service);
+
+        let response = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/api/does-not-exist")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), axum::http::StatusCode::NOT_FOUND);
+        let content_type = response
+            .headers()
+            .get(axum::http::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or_default()
+            .to_owned();
+        assert!(content_type.contains("application/json"), "got {content_type}");
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(json["success"], false);
+        assert_eq!(json["code"], "NOT_FOUND");
+    }
 
     #[test]
     fn api_only_flag_disables_static_spa_mode() {

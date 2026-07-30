@@ -294,14 +294,10 @@ function clearBrowserAuthArtifacts(): void {
     // Best-effort cleanup only.
   }
 
-  try {
-    if (typeof document !== 'undefined') {
-      document.cookie = `${CSRF_COOKIE_NAME}=; Path=/; Max-Age=0`;
-      document.cookie = `csrf-token=; Path=/; Max-Age=0`;
-    }
-  } catch {
-    // Best-effort cleanup only.
-  }
+  // The CSRF cookie is deliberately NOT cleared here: it is independent of
+  // the session (an anti-forgery nonce, not a credential), the backend
+  // re-issues it on every response, and deleting it while other requests are
+  // in flight cascades them into fresh CSRF 403s (audit 2026-07-30, finding B).
 }
 
 function emitAuthExpiredEvent(): void {
@@ -497,20 +493,6 @@ export async function httpRequest<T>(
 ): Promise<T> {
   const url = `${getBaseUrl()}${path}`;
   const safePath = redactSensitiveText(path);
-  const headers: Record<string, string> = {};
-
-  if (body !== undefined) {
-    headers['Content-Type'] = 'application/json';
-  }
-
-  // Trust (desktop) + CSRF (WebUI) headers — shared with the FileService upload XHR.
-  Object.assign(headers, buildBackendAuthHeaders(method));
-  if (options?.idempotencyKey !== undefined) {
-    headers['Idempotency-Key'] = options.idempotencyKey;
-  }
-  if (options?.initialOnly === true) {
-    headers['X-Nomifun-Initial-Delivery'] = '1';
-  }
 
   const isNoisyPath = NOISY_HTTP_FRAGMENTS.some((frag) => path.includes(frag));
   if (isDebugEnabled('debug:http') && !isNoisyPath) {
@@ -520,101 +502,153 @@ export async function httpRequest<T>(
     );
   }
 
-  // Optional client-side deadline (opt-in via options.timeoutMs). Aborts a
-  // request that outlives it so a hung/unreachable backend surfaces a legible
-  // error instead of the opaque platform network timeout minutes later.
-  const controller = options?.timeoutMs != null ? new AbortController() : undefined;
-  const timeoutHandle =
-    controller && options?.timeoutMs != null
-      ? setTimeout(() => controller.abort(), options.timeoutMs)
-      : undefined;
+  // At most two attempts: the second only for a CSRF-rejected mutation (see
+  // the retry condition below — the rejecting 403 re-seeds the csrf cookie,
+  // so one retry with freshly rebuilt headers succeeds).
+  for (let attempt = 0; ; attempt++) {
+    const headers: Record<string, string> = {};
 
-  let response: Response;
-  try {
-    response = await fetch(url, {
-      method,
-      headers,
-      body: body !== undefined ? JSON.stringify(body) : undefined,
-      signal: controller?.signal,
-      // Every GET issued through this bridge targets mutable application state
-      // (conversation history, settings, catalogs, runtime status, ...).  The
-      // same URL is intentionally reused when a view remounts, so allowing the
-      // host WebView's HTTP cache to satisfy it can resurrect a pre-mutation
-      // response.  WebKitGTK is particularly eager to reuse loopback GETs, but
-      // the contract must be identical on macOS WKWebView, Windows WebView2 and
-      // ordinary WebUI browsers: a bridge read always observes the backend.
-      cache: method.toUpperCase() === 'GET' ? 'no-store' : undefined,
-    });
-  } catch (e) {
-    // No HTTP response was produced: our own timeout abort, or a transport
-    // failure (backend unreachable / connection reset). WKWebView renders the
-    // latter as an opaque "TypeError: Load failed"; rethrow something the UI
-    // and logs can actually act on.
-    if (controller?.signal.aborted) {
-      throw new BackendRequestError(
-        'timeout',
-        `Backend ${method} ${safePath} timed out after ${options?.timeoutMs}ms; the backend may be busy or unreachable`
-      );
+    if (body !== undefined) {
+      headers['Content-Type'] = 'application/json';
     }
-    const detail = redactSensitiveText(e instanceof Error ? e.message : String(e));
-    throw new BackendRequestError(
-      'network',
-      `Backend ${method} ${safePath} failed: backend unreachable (${detail})`
-    );
-  } finally {
-    if (timeoutHandle !== undefined) clearTimeout(timeoutHandle);
-  }
 
-  if (!response.ok) {
-    // Read the body exactly once. A `Response` body is a one-shot stream, so
-    // calling `.json()` then `.text()` (e.g. as a parse fallback) throws
-    // "body stream already read". Many error responses have an empty or
-    // non-JSON body (axum-default 404/405, plain-text 5xx), so read text first
-    // and opportunistically parse it as JSON.
-    const rawText = await response.text();
-    let errorBody: unknown;
+    // Trust (desktop) + CSRF (WebUI) headers — shared with the FileService upload XHR.
+    // Rebuilt per attempt so a retry picks up a re-seeded csrf cookie.
+    Object.assign(headers, buildBackendAuthHeaders(method));
+    if (options?.idempotencyKey !== undefined) {
+      headers['Idempotency-Key'] = options.idempotencyKey;
+    }
+    if (options?.initialOnly === true) {
+      headers['X-Nomifun-Initial-Delivery'] = '1';
+    }
+
+    // Optional client-side deadline (opt-in via options.timeoutMs). Aborts a
+    // request that outlives it so a hung/unreachable backend surfaces a legible
+    // error instead of the opaque platform network timeout minutes later.
+    const controller = options?.timeoutMs != null ? new AbortController() : undefined;
+    const timeoutHandle =
+      controller && options?.timeoutMs != null
+        ? setTimeout(() => controller.abort(), options.timeoutMs)
+        : undefined;
+
+    let response: Response;
     try {
-      errorBody = rawText ? JSON.parse(rawText) : '';
-    } catch {
-      errorBody = rawText;
-    }
-    const authExpired = isAuthExpiredResponse(response.status, errorBody);
-    if (authExpired) {
-      handleHttpAuthExpired();
-    }
-    if (authExpired) {
-      if (isDebugEnabled('debug:http') && !isNoisyPath) {
-        console.debug(
-          `[httpBridge] ${method} ${safePath} → ${response.status} (auth-expired)`,
-          redactForLog(errorBody)
+      response = await fetch(url, {
+        method,
+        headers,
+        body: body !== undefined ? JSON.stringify(body) : undefined,
+        signal: controller?.signal,
+        // Every GET issued through this bridge targets mutable application state
+        // (conversation history, settings, catalogs, runtime status, ...).  The
+        // same URL is intentionally reused when a view remounts, so allowing the
+        // host WebView's HTTP cache to satisfy it can resurrect a pre-mutation
+        // response.  WebKitGTK is particularly eager to reuse loopback GETs, but
+        // the contract must be identical on macOS WKWebView, Windows WebView2 and
+        // ordinary WebUI browsers: a bridge read always observes the backend.
+        cache: method.toUpperCase() === 'GET' ? 'no-store' : undefined,
+      });
+    } catch (e) {
+      // No HTTP response was produced: our own timeout abort, or a transport
+      // failure (backend unreachable / connection reset). WKWebView renders the
+      // latter as an opaque "TypeError: Load failed"; rethrow something the UI
+      // and logs can actually act on.
+      if (controller?.signal.aborted) {
+        throw new BackendRequestError(
+          'timeout',
+          `Backend ${method} ${safePath} timed out after ${options?.timeoutMs}ms; the backend may be busy or unreachable`
         );
       }
-    } else if (options?.silentStatuses?.includes(response.status)) {
-      console.debug(
-        `[httpBridge] ${method} ${safePath} → ${response.status} (silenced)`,
-        redactForLog(errorBody)
+      const detail = redactSensitiveText(e instanceof Error ? e.message : String(e));
+      throw new BackendRequestError(
+        'network',
+        `Backend ${method} ${safePath} failed: backend unreachable (${detail})`
       );
-    } else {
-      console.error(`[httpBridge] ${method} ${safePath} → ${response.status}`, redactForLog(errorBody));
+    } finally {
+      if (timeoutHandle !== undefined) clearTimeout(timeoutHandle);
     }
-    throw new BackendHttpError({ method, path, status: response.status, body: errorBody });
-  }
 
-  if (isDebugEnabled('debug:http') && !isNoisyPath) {
-    console.debug(`[httpBridge] ${method} ${safePath} → ${response.status} OK`);
-  }
+    if (!response.ok) {
+      // Read the body exactly once. A `Response` body is a one-shot stream, so
+      // calling `.json()` then `.text()` (e.g. as a parse fallback) throws
+      // "body stream already read". Many error responses have an empty or
+      // non-JSON body (axum-default 404/405, plain-text 5xx), so read text first
+      // and opportunistically parse it as JSON.
+      const rawText = await response.text();
+      let errorBody: unknown;
+      try {
+        errorBody = rawText ? JSON.parse(rawText) : '';
+      } catch {
+        errorBody = rawText;
+      }
 
-  const contentType = response.headers.get('Content-Type');
-  if (!contentType?.includes('application/json')) {
-    return undefined as T;
-  }
+      // CSRF self-healing: the backend re-seeds the csrf cookie on the very
+      // 403 that rejected us, so exactly one retry with rebuilt headers can
+      // succeed. The rejected mutation never executed server-side, making the
+      // retry safe. Guarded to WebUI browser mode where the double-submit
+      // cookie applies (audit 2026-07-30, finding B).
+      const isCsrfRejection =
+        response.status === 403 && bodyStringField(errorBody, 'error').includes('CSRF token validation failed');
+      if (isCsrfRejection && attempt === 0 && isWebUiBrowserMode() && MUTATING_METHODS.has(method.toUpperCase())) {
+        console.warn(`[httpBridge] ${method} ${safePath} → 403 CSRF; retrying once with re-seeded token`);
+        continue;
+      }
 
-  const json = await response.json();
-  // Backend wraps in { success, data, ... } — unwrap when present
-  if (json && typeof json === 'object' && 'data' in json) {
-    return json.data as T;
+      const authExpired = isAuthExpiredResponse(response.status, errorBody);
+      if (authExpired) {
+        handleHttpAuthExpired();
+      }
+      if (authExpired) {
+        if (isDebugEnabled('debug:http') && !isNoisyPath) {
+          console.debug(
+            `[httpBridge] ${method} ${safePath} → ${response.status} (auth-expired)`,
+            redactForLog(errorBody)
+          );
+        }
+      } else if (options?.silentStatuses?.includes(response.status)) {
+        console.debug(
+          `[httpBridge] ${method} ${safePath} → ${response.status} (silenced)`,
+          redactForLog(errorBody)
+        );
+      } else {
+        console.error(`[httpBridge] ${method} ${safePath} → ${response.status}`, redactForLog(errorBody));
+      }
+      throw new BackendHttpError({ method, path, status: response.status, body: errorBody });
+    }
+
+    if (isDebugEnabled('debug:http') && !isNoisyPath) {
+      console.debug(`[httpBridge] ${method} ${safePath} → ${response.status} OK`);
+    }
+
+    const contentType = response.headers.get('Content-Type');
+    if (!contentType?.includes('application/json')) {
+      // A 2xx text/html answer to an API call is never data: it is the web
+      // host's SPA fallback (or a proxy error page) masquerading as success —
+      // e.g. a stale tab calling an endpoint that no longer exists after a
+      // server upgrade. Returning `undefined` here silently blanked views;
+      // fail legibly instead (audit 2026-07-30, finding G).
+      if (contentType?.includes('text/html')) {
+        console.error(`[httpBridge] ${method} ${safePath} → ${response.status} text/html (contract violation)`);
+        throw new BackendHttpError({
+          method,
+          path,
+          status: response.status,
+          body: {
+            error:
+              'Backend answered with an HTML page instead of JSON — the endpoint does not exist on this server build (reload the page after a server upgrade)',
+            code: 'NON_JSON_RESPONSE',
+          },
+        });
+      }
+      return undefined as T;
+    }
+
+    const json = await response.json();
+    // Backend wraps in { success, data, ... } — unwrap when present
+    if (json && typeof json === 'object' && 'data' in json) {
+      return json.data as T;
+    }
+    return json as T;
   }
-  return json as T;
 }
 
 // ---------------------------------------------------------------------------
@@ -771,11 +805,12 @@ function ensureWs(): void {
     // A non-zero attempt counter means we got here by reconnecting (the socket
     // had dropped and `scheduleWsReconnect` ran). Notify local listeners so a
     // live view can resync: the server only does a live fan-out with no replay,
-    // so every frame emitted while the socket was down was lost. Dispatch BEFORE
-    // resetting the counter. `ws.reconnected` is a synthetic local event name,
-    // never sent by the server.
+    // so every frame emitted while the socket was down was lost. NOTE: the
+    // attempt counter is NOT reset here — a socket that opens and is
+    // immediately closed again (expired session rejected post-handshake) must
+    // keep backing off; the counter resets on the first inbound frame instead.
+    // `ws.reconnected` is a synthetic local event name, never sent by the server.
     const wasReconnect = wsReconnectAttempt > 0;
-    wsReconnectAttempt = 0;
     if (wasReconnect) {
       const handlers = wsListeners.get('ws.reconnected');
       if (handlers) {
@@ -793,6 +828,16 @@ function ensureWs(): void {
   current.addEventListener('close', (e) => {
     console.debug('[ensureWs] CLOSED code=' + e.code + ' reason=' + e.reason);
     if (ws === current) ws = null;
+    // 1008 (policy violation) is an authentication rejection — the server
+    // uses 4408 for heartbeat timeouts, so 1008 here means the session is
+    // gone. Kick the app-level auth-expired flow (WebUI: clears artifacts,
+    // redirects to login) and jump the backoff to its ceiling so we keep only
+    // a slow background probe instead of a ~1s reconnect/403 storm
+    // (audit 2026-07-30, finding F).
+    if (e.code === 1008) {
+      handleHttpAuthExpired();
+      wsReconnectAttempt = Math.max(wsReconnectAttempt, 5);
+    }
     scheduleWsReconnect();
   });
 
@@ -804,8 +849,12 @@ function ensureWs(): void {
   current.addEventListener('message', (event: MessageEvent) => {
     // Any inbound frame — server heartbeat pings included — proves the peer
     // is still delivering data. Recorded before parsing so even a malformed
-    // frame counts as socket liveness.
+    // frame counts as socket liveness. A delivered frame is also the signal
+    // that this connection is healthy and authenticated, so the reconnect
+    // backoff resets here (not on 'open', which an auth-rejecting server
+    // reaches too before immediately closing).
     wsLastActivityAtMs = Date.now();
+    wsReconnectAttempt = 0;
     try {
       const msg = JSON.parse(event.data as string) as {
         name?: string;
