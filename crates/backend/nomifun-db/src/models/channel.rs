@@ -178,3 +178,42 @@ pub struct NewChannelPairingCodeRow {
     pub expires_at: TimestampMs,
     pub status: String,
 }
+
+/// Row mapping for the `channel_pending_prompts` table (spec D1).
+///
+/// One IM prompt that arrived while its bound conversation was busy and is
+/// waiting for the queue drain to deliver it FIFO. `state` transitions from
+/// `queued` to exactly one absorbing terminal:
+/// `delivered | expired | cancelled | failed`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, sqlx::FromRow)]
+pub struct ChannelPendingPromptRow {
+    pub prompt_id: String,
+    pub channel_plugin_id: String,
+    pub chat_id: String,
+    pub channel_session_id: String,
+    pub conversation_id: String,
+    pub text: String,
+    /// Idempotency key minted at enqueue time; the drain reuses it so the
+    /// eventual delivery rides the same at-most-once receipt the immediate
+    /// dispatch path would have used.
+    pub idempotency_key: String,
+    pub state: String,
+    /// Number of automatic retries already spent on this prompt (retryable
+    /// delivery failures only, capped by the drain).
+    pub attempts: i64,
+    pub queued_at: TimestampMs,
+    pub settled_at: Option<TimestampMs>,
+}
+
+/// Values accepted when enqueueing a `channel_pending_prompts` row. The
+/// repository owns `prompt_id`, `state`, `attempts` and `queued_at`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NewChannelPendingPromptRow {
+    pub channel_plugin_id: String,
+    pub chat_id: String,
+    pub channel_session_id: String,
+    pub conversation_id: String,
+    pub text: String,
+    pub idempotency_key: String,
+}
+

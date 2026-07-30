@@ -2804,10 +2804,16 @@ impl IConversationRepository for SqliteConversationRepository {
         }
 
         if receipt.status == "accepted" {
+            // Same extended-column write pattern as `complete_delivery_receipt`
+            // (spec D4): a dropped admission is a structured, retryable
+            // terminal outcome, not just free text.
             let settled = sqlx::query(
                 "UPDATE conversation_delivery_receipts \
                  SET status = 'completed', result_ok = 0, result_text = NULL, \
-                     result_error = ?, completed_at = MAX(created_at, updated_at, ?), \
+                     result_error = ?, \
+                     result_error_code = 'admission_abandoned', \
+                     result_error_retryable = 1, \
+                     completed_at = MAX(created_at, updated_at, ?), \
                      updated_at = MAX(created_at, updated_at, ?) \
                  WHERE operation_id = ? AND message_id = ? \
                    AND conversation_id = ? AND user_id = ? \
@@ -3393,6 +3399,84 @@ impl IConversationRepository for SqliteConversationRepository {
         .fetch_optional(&self.pool)
         .await?;
         Ok(receipt)
+    }
+
+    async fn register_notify(
+        &self,
+        operation_id: &str,
+        requester_conversation_id: &str,
+        now: i64,
+    ) -> Result<(), DbError> {
+        if operation_id.trim().is_empty() {
+            return Err(DbError::Conflict(
+                "delivery-notify registration requires an operation id".to_owned(),
+            ));
+        }
+        ConversationId::parse(requester_conversation_id).map_err(|error| {
+            DbError::Conflict(format!(
+                "delivery-notify requester conversation id is invalid: {error}"
+            ))
+        })?;
+        let inserted = sqlx::query(
+            "INSERT INTO conversation_delivery_notify \
+                (operation_id, requester_conversation_id, state, created_at) \
+             VALUES (?, ?, 'pending', ?) \
+             ON CONFLICT(operation_id) DO NOTHING",
+        )
+        .bind(operation_id)
+        .bind(requester_conversation_id)
+        .bind(now)
+        .execute(&self.pool)
+        .await?;
+        if inserted.rows_affected() == 1 {
+            return Ok(());
+        }
+        // Same-pair re-registration is an idempotent replay; a different
+        // requester reusing the operation identity is a conflict.
+        let existing: Option<String> = sqlx::query_scalar(
+            "SELECT requester_conversation_id FROM conversation_delivery_notify \
+             WHERE operation_id = ?",
+        )
+        .bind(operation_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        match existing.as_deref() {
+            Some(requester) if requester == requester_conversation_id => Ok(()),
+            _ => Err(DbError::Conflict(
+                "delivery-notify operation is already registered to another requester".to_owned(),
+            )),
+        }
+    }
+
+    async fn take_pending_notify(
+        &self,
+        operation_id: &str,
+        now: i64,
+    ) -> Result<Option<crate::models::ConversationDeliveryNotifyRow>, DbError> {
+        let row = sqlx::query_as::<_, crate::models::ConversationDeliveryNotifyRow>(
+            "UPDATE conversation_delivery_notify \
+             SET state = 'notified', settled_at = ? \
+             WHERE operation_id = ? AND state = 'pending' \
+             RETURNING operation_id, requester_conversation_id, state, created_at, settled_at",
+        )
+        .bind(now)
+        .bind(operation_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row)
+    }
+
+    async fn mark_notify_failed(&self, operation_id: &str, now: i64) -> Result<(), DbError> {
+        sqlx::query(
+            "UPDATE conversation_delivery_notify \
+             SET state = 'failed', settled_at = ? \
+             WHERE operation_id = ? AND state = 'notified'",
+        )
+        .bind(now)
+        .bind(operation_id)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
     }
 
     async fn project_assistant_message_with_receipt(

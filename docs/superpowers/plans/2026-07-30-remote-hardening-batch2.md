@@ -69,26 +69,26 @@ CREATE TABLE conversation_delivery_notify ( id INTEGER PRIMARY KEY AUTOINCREMENT
 
 ### Task 1: 迁移 016 + 两张表仓储（TDD）
 
-- [ ] Step 1：写迁移（上方 SQL，GLOB 照抄基线）；契约测试收录。
-- [ ] Step 2：channel 仓储：`enqueue_pending_prompt`（同 conversation queued 计数 ≥10 返回 QueueFull 错误）、`peek_next_queued(conversation_id)`、`settle_prompt(prompt_id, state)`、`expire_stale(before_ms) -> Vec<行>`、`cancel_chat_queue(plugin, chat)`。conversation 仓储：`register_notify`/`take_pending_notify(operation_id)`。内存库单测覆盖各态迁移与上限。commit。
+- [x] Step 1：写迁移（上方 SQL，GLOB 照抄基线）；契约测试收录。
+- [x] Step 2：channel 仓储：`enqueue_pending_prompt`（同 conversation queued 计数 ≥10 返回 QueueFull 错误）、`peek_next_queued(conversation_id)`、`settle_prompt(prompt_id, state)`、`expire_stale(before_ms) -> Vec<行>`、`cancel_chat_queue(plugin, chat)`。conversation 仓储：`register_notify`/`take_pending_notify(operation_id)`。内存库单测覆盖各态迁移与上限。commit。
 
 ### Task 2: 入队（message_loop）
 
-- [ ] Step 1：busy 两分支（per-chat 守卫 :527-538 与 ConversationBusy :560-566，以合并后实际代码为准）改为：入队成功 → 回"已排队（第 N 位）"提示；QueueFull → 回"排队已满，请稍后再发"。客服绑定 bot 不受影响（接缝在其之前）。
-- [ ] Step 2：文本命令「取消排队」→ `cancel_chat_queue` + 回执数量。集成测试：busy 时消息入队不丢、第 N 位计数正确、取消清空。commit。
+- [x] Step 1：busy 两分支（per-chat 守卫 :527-538 与 ConversationBusy :560-566，以合并后实际代码为准）改为：入队成功 → 回"已排队（第 N 位）"提示；QueueFull → 回"排队已满，请稍后再发"。客服绑定 bot 不受影响（接缝在其之前）。
+- [x] Step 2：文本命令「取消排队」→ `cancel_chat_queue` + 回执数量。集成测试：busy 时消息入队不丢、第 N 位计数正确、取消清空。commit。
 
 ### Task 3: 出队器（queue_drain）
 
-- [ ] Step 1：`QueueDrain::run` 后台任务：订阅 turn 完成信号（探索现状：优先复用进程内事件总线/realtime 广播的后端订阅面；找不到则 5s 轮询 `peek_next_queued` 兜底，选型写进代码注释与 commit message）→ 对该 conversation 取队头 → `send_to_agent` 全链路投递（新 idempotency key 用存量的）→ 成功 settle delivered；失败且 `result_error_retryable`（D 批1 字段）→ attempts+1 重试（30s/120s，≤2 次）→ 仍败 settle failed 并回真实错误文案给该 chat。
-- [ ] Step 2：启动时恢复：queued 且超 30 分钟 → expired 并给 chat 发放弃通知；其余照常等待。集成测试：turn 完成后队头自动投递、FIFO 顺序、retryable 重试封顶、过期通知。commit。
+- [x] Step 1：`QueueDrain::run` 后台任务：订阅 turn 完成信号（探索现状：优先复用进程内事件总线/realtime 广播的后端订阅面；找不到则 5s 轮询 `peek_next_queued` 兜底，选型写进代码注释与 commit message）→ 对该 conversation 取队头 → `send_to_agent` 全链路投递（新 idempotency key 用存量的）→ 成功 settle delivered；失败且 `result_error_retryable`（D 批1 字段）→ attempts+1 重试（30s/120s，≤2 次）→ 仍败 settle failed 并回真实错误文案给该 chat。
+- [x] Step 2：启动时恢复：queued 且超 30 分钟 → expired 并给 chat 发放弃通知；其余照常等待。集成测试：turn 完成后队头自动投递、FIFO 顺序、retryable 重试封顶、过期通知。commit。
 
 ### Task 4: notify_back 登记与回推
 
-- [ ] Step 1：conversation 定义 `TurnCompletionObserver`（Interfaces）并在 `release_and_complete_turn` 终结成功后（receipt completed 持久化之后）异步调用（spawn，绝不阻塞终结事务）；service 构造加 `Option<Arc<dyn TurnCompletionObserver>>`。
-- [ ] Step 2：gateway `nomi_send_to_conversation` 加 `notify_back`：true 且 caller 有 operation_id 时 `register_notify(operation_id, caller 的 companion 会话 id)`；caller 非会话上下文（无 requester conversation）时忽略并在返回注明。origin=="delivery-notify" 的 turn 中强制忽略 notify_back。
-- [ ] Step 3：nomifun-app 实现 observer：`take_pending_notify(operation_id)` 命中 → 组装回执文本（成功：结果摘要 result_text 截 1500 字符；失败：error code+text）→ `send_observed_background_message_with_idempotency_key`（幂等 key = `"delivery-notify:" + operation_id`，origin="delivery-notify"）投递给 requester 会话。伙伴会话若绑渠道，stream_relay 既有链路自动回传 IM——无需新码。
-- [ ] Step 4：集成测试：notify_back 下发→目标完成→伙伴会话收到回执消息（幂等：重复终结不重复投递）；防环：回执 turn 内再调 send 带 notify_back 不登记。commit。
+- [x] Step 1：conversation 定义 `TurnCompletionObserver`（Interfaces）并在 `release_and_complete_turn` 终结成功后（receipt completed 持久化之后）异步调用（spawn，绝不阻塞终结事务）；service 构造加 `Option<Arc<dyn TurnCompletionObserver>>`。
+- [x] Step 2：gateway `nomi_send_to_conversation` 加 `notify_back`：true 且 caller 有 operation_id 时 `register_notify(operation_id, caller 的 companion 会话 id)`；caller 非会话上下文（无 requester conversation）时忽略并在返回注明。origin=="delivery-notify" 的 turn 中强制忽略 notify_back。
+- [x] Step 3：nomifun-app 实现 observer：`take_pending_notify(operation_id)` 命中 → 组装回执文本（成功：结果摘要 result_text 截 1500 字符；失败：error code+text）→ `send_observed_background_message_with_idempotency_key`（幂等 key = `"delivery-notify:" + operation_id`，origin="delivery-notify"）投递给 requester 会话。伙伴会话若绑渠道，stream_relay 既有链路自动回传 IM——无需新码。
+- [x] Step 4：集成测试：notify_back 下发→目标完成→伙伴会话收到回执消息（幂等：重复终结不重复投递）；防环：回执 turn 内再调 send 带 notify_back 不登记。commit。
 
 ### Task 5: 回归
 
-- [ ] `cargo test -p nomifun-db -p nomifun-channel -p nomifun-conversation -p nomifun-gateway -p nomifun-app` + `cargo check --workspace` 全绿 → commit。
+- [x] `cargo test -p nomifun-db -p nomifun-channel -p nomifun-conversation -p nomifun-gateway -p nomifun-app` + `cargo check --workspace` 全绿 → commit。

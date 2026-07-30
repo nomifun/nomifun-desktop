@@ -216,6 +216,72 @@ impl ChannelMessageService {
         )
     }
 
+    // ── Busy-time pending prompt queue (spec D1) ─────────────────────
+
+    /// Persist a prompt that arrived while its conversation was busy. The
+    /// queue drain delivers it FIFO once the running turn completes.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn enqueue_busy_prompt(
+        &self,
+        channel_plugin_id: &str,
+        chat_id: &str,
+        channel_session_id: &str,
+        conversation_id: &str,
+        text: &str,
+        idempotency_key: &str,
+    ) -> Result<nomifun_db::PendingPromptEnqueue, ChannelError> {
+        let row = nomifun_db::models::NewChannelPendingPromptRow {
+            channel_plugin_id: channel_plugin_id.to_owned(),
+            chat_id: chat_id.to_owned(),
+            channel_session_id: channel_session_id.to_owned(),
+            conversation_id: conversation_id.to_owned(),
+            text: text.to_owned(),
+            idempotency_key: idempotency_key.to_owned(),
+        };
+        Ok(self
+            .repo
+            .enqueue_pending_prompt(&row, nomifun_common::now_ms())
+            .await?)
+    }
+
+    /// Clear every queued prompt of one `(plugin, chat)` scope (the IM
+    /// 「取消排队」 command). Returns how many prompts were cancelled.
+    pub async fn cancel_chat_queue(
+        &self,
+        channel_plugin_id: &str,
+        chat_id: &str,
+    ) -> Result<u64, ChannelError> {
+        Ok(self
+            .repo
+            .cancel_chat_queue(channel_plugin_id, chat_id, nomifun_common::now_ms())
+            .await?)
+    }
+
+    /// Read-only durable outcome of one keyed public turn — the drain's
+    /// retryable-failure classifier (spec D4 fields from batch 1).
+    pub async fn turn_outcome(
+        &self,
+        conversation_id: &str,
+        idempotency_key: &str,
+    ) -> Result<nomifun_conversation::PublicTurnDeliveryState, ChannelError> {
+        self.conversation_svc
+            .public_turn_delivery_state(&self.owner_user_id, conversation_id, idempotency_key)
+            .await
+            .map_err(|e| ChannelError::MessageSendFailed(e.to_string()))
+    }
+
+    /// Remote unlock (batch-1 handover gap): stop a conversation's current
+    /// turn as the installation owner after the channel user confirmed the
+    /// numbered stop decision. Same safe service path as the desktop stop
+    /// button (`POST /api/conversations/{id}/cancel`); deliberately NOT the
+    /// gateway matrix, which denies Destructive on the Channel surface.
+    pub async fn stop_conversation(&self, conversation_id: &str) -> Result<(), ChannelError> {
+        self.conversation_svc
+            .cancel(&self.owner_user_id, conversation_id, &self.runtime_registry)
+            .await
+            .map_err(|e| ChannelError::MessageSendFailed(e.to_string()))
+    }
+
     /// Submits a numbered-decision choice back through the confirm chain.
     ///
     /// `option_id` is sent as the bare `data` string accepted by
@@ -395,7 +461,7 @@ impl ChannelMessageService {
             // processed" loop.
             Err(error @ nomifun_common::AppError::Conflict(_)) => {
                 if self.is_conversation_busy(&conversation_id).await {
-                    return Err(ChannelError::ConversationBusy);
+                    return Err(ChannelError::ConversationBusy(conversation_id));
                 }
                 return Err(ChannelError::MessageSendFailed(error.to_string()));
             }
@@ -608,6 +674,14 @@ impl ChannelMessageService {
             AgentStreamEvent::Error(data) => Some(StreamAction::Error(data.message.clone())),
             AgentStreamEvent::Thinking(data) => Some(StreamAction::Thinking(data.content.clone())),
             AgentStreamEvent::ToolCall(data) => {
+                // Remote unlock (batch-1 handover gap): the gateway matrix
+                // denies nomi_stop_conversation on the Channel surface, so the
+                // channel takes over with its own numbered confirmation.
+                if let Some(target) = stop_denied_target(data) {
+                    return Some(StreamAction::StopDenied {
+                        target_conversation_id: target,
+                    });
+                }
                 // Verified Nomi/ACP artifacts are already durable workspace
                 // files. Preserve their receipts so the relay can upload the
                 // bytes (or explicitly report the path if upload/read fails).
@@ -895,6 +969,13 @@ pub enum StreamAction {
         prompt: String,
         options: Vec<crate::types::DecisionOption>,
     },
+    /// The companion's `nomi_stop_conversation` was denied by the gateway
+    /// matrix on the Channel surface (batch-1 handover gap). The relay
+    /// forwards the channel-owned numbered stop confirmation; on "确认" the
+    /// message loop cancels the target as owner.
+    StopDenied {
+        target_conversation_id: String,
+    },
     /// One or more workshop asset ids produced by a *completed* tool call
     /// (e.g. `nomi_workshop_get_task` `result_asset_ids`). The relay resolves
     /// each to bytes and sends it as media after the final text.
@@ -929,6 +1010,42 @@ fn apply_channel_agent_context(
             extra["companion_id"] = serde_json::Value::String(pid.to_owned());
         }
     }
+}
+
+/// Detects a gateway-denied `nomi_stop_conversation` tool call and extracts
+/// its target conversation id.
+///
+/// On the Channel surface the gateway matrix denies Destructive capabilities,
+/// answering either `'…' is not permitted on the Channel surface` (dispatch
+/// deny) or `session_capability_denied` (visibility filter). Both shapes ride
+/// the tool-call OUTPUT of a terminal event; the target id comes from the
+/// model-provided arguments (`args`, falling back to the raw `input` JSON).
+fn stop_denied_target(
+    data: &nomifun_ai_agent::protocol::events::ToolCallEventData,
+) -> Option<String> {
+    use nomifun_ai_agent::protocol::events::ToolCallStatus;
+    if !matches!(data.status, ToolCallStatus::Completed | ToolCallStatus::Error) {
+        return None;
+    }
+    if !data.name.ends_with("nomi_stop_conversation") {
+        return None;
+    }
+    let output = data.output.as_deref()?;
+    if !(output.contains("not permitted on the") || output.contains("session_capability_denied")) {
+        return None;
+    }
+    let from_args = data
+        .args
+        .get("conversation_id")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned);
+    from_args.or_else(|| {
+        data.input
+            .as_ref()
+            .and_then(|value| value.get("conversation_id"))
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned)
+    })
 }
 
 /// Maps a `nomifun_common::Confirmation` to a `Decision` action.
@@ -1534,6 +1651,92 @@ mod tests {
     }
 
     // ── process_stream_event → Decision ────────────────────────────────
+
+    #[test]
+    fn denied_stop_tool_call_produces_stop_denied_with_target() {
+        let target = "0190f5fe-7c00-7a00-8abc-012345678901";
+        for output in [
+            "{\"error\":\"'nomi_stop_conversation' is not permitted on the Channel surface\"}",
+            "{\"error\":\"session_capability_denied\",\"tool\":\"nomi_stop_conversation\"}",
+        ] {
+            let event = AgentStreamEvent::ToolCall(ToolCallEventData {
+                call_id: "c1".into(),
+                name: "mcp__nomi__nomi_stop_conversation".into(),
+                args: serde_json::json!({ "conversation_id": target }),
+                status: ToolCallStatus::Completed,
+                description: None,
+                input: None,
+                output: Some(output.into()),
+                artifacts: Vec::new(),
+                retry: None,
+            });
+            match ChannelMessageService::process_stream_event(&event) {
+                Some(StreamAction::StopDenied { target_conversation_id }) => {
+                    assert_eq!(target_conversation_id, target);
+                }
+                other => panic!("expected StopDenied for output {output:?}, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn denied_stop_target_falls_back_to_raw_input_json() {
+        let target = "0190f5fe-7c00-7a00-8abc-012345678902";
+        let event = AgentStreamEvent::ToolCall(ToolCallEventData {
+            call_id: "c1".into(),
+            name: "nomi_stop_conversation".into(),
+            args: serde_json::Value::Null,
+            status: ToolCallStatus::Error,
+            description: None,
+            input: Some(serde_json::json!({ "conversation_id": target })),
+            output: Some("'nomi_stop_conversation' is not permitted on the Channel surface".into()),
+            artifacts: Vec::new(),
+            retry: None,
+        });
+        match ChannelMessageService::process_stream_event(&event) {
+            Some(StreamAction::StopDenied { target_conversation_id }) => {
+                assert_eq!(target_conversation_id, target);
+            }
+            other => panic!("expected StopDenied, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn successful_or_unrelated_tool_calls_never_produce_stop_denied() {
+        // A SUCCESSFUL stop (allowed surface) keeps the plain tool-call action.
+        let event = AgentStreamEvent::ToolCall(ToolCallEventData {
+            call_id: "c1".into(),
+            name: "nomi_stop_conversation".into(),
+            args: serde_json::json!({ "conversation_id": "0190f5fe-7c00-7a00-8abc-012345678903" }),
+            status: ToolCallStatus::Completed,
+            description: None,
+            input: None,
+            output: Some("{\"result\":{\"stopped\":true}}".into()),
+            artifacts: Vec::new(),
+            retry: None,
+        });
+        assert!(matches!(
+            ChannelMessageService::process_stream_event(&event),
+            Some(StreamAction::ToolCall { .. })
+        ));
+
+        // Another denied tool must not be misread as a stop confirmation.
+        let event = AgentStreamEvent::ToolCall(ToolCallEventData {
+            call_id: "c2".into(),
+            name: "nomi_delete_conversation".into(),
+            args: serde_json::json!({ "conversation_id": "0190f5fe-7c00-7a00-8abc-012345678903" }),
+            status: ToolCallStatus::Completed,
+            description: None,
+            input: None,
+            output: Some("'nomi_delete_conversation' is not permitted on the Channel surface".into()),
+            artifacts: Vec::new(),
+            retry: None,
+        });
+        assert!(matches!(
+            ChannelMessageService::process_stream_event(&event),
+            Some(StreamAction::ToolCall { .. })
+        ));
+    }
 
     #[test]
     fn acp_permission_request_produces_decision() {

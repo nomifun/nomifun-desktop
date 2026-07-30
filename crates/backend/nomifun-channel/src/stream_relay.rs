@@ -446,6 +446,10 @@ impl ChannelStreamRelay {
                     Some(StreamAction::Decision { call_id, prompt, options }) => {
                         self.record_and_send_decision(call_id, prompt, options).await;
                     }
+                    // Denied remote stop: the channel owns the confirmation.
+                    Some(StreamAction::StopDenied { target_conversation_id }) => {
+                        self.record_and_send_stop_confirmation(target_conversation_id).await;
+                    }
                     Some(StreamAction::Finish) => {
                         let visible = strip_reasoning(&text_buffer, Stage::Final);
                         if !self.flush_artifacts(&artifacts, &mut artifact_seen).await {
@@ -664,6 +668,11 @@ impl ChannelStreamRelay {
                         decision_forwarded = true;
                         self.record_and_send_decision(call_id, prompt, options).await;
                     }
+                    // Denied remote stop: the channel owns the confirmation.
+                    Some(StreamAction::StopDenied { target_conversation_id }) => {
+                        decision_forwarded = true;
+                        self.record_and_send_stop_confirmation(target_conversation_id).await;
+                    }
                     Some(StreamAction::Finish) => {
                         if !self.flush_artifacts(&artifacts, &mut artifact_seen).await {
                             let error_msg = self.terminal_failure_message(
@@ -827,6 +836,40 @@ impl ChannelStreamRelay {
         self.pending.put(PendingDecision {
             conversation_id: self.config.conversation_id.clone(),
             call_id,
+            kind: crate::pending_decision::PendingDecisionKind::AgentConfirm,
+            prompt: prompt.clone(),
+            options: options.clone(),
+        });
+        let msg = ChannelMessageService::build_decision_message(&prompt, &options);
+        let _ = self
+            .sender
+            .send_message(&self.config.plugin_id, &self.config.chat_id, msg)
+            .await;
+    }
+
+    /// Records the channel-owned remote-stop confirmation (batch-1 handover
+    /// gap) and forwards it as the standard numbered list. On "1" the message
+    /// loop cancels the target as owner; on "2" it simply clears the entry.
+    async fn record_and_send_stop_confirmation(&self, target_conversation_id: String) {
+        let prompt = format!(
+            "确认停止会话 {target_conversation_id} 的当前任务？（远程停止需要你确认）"
+        );
+        let options = vec![
+            crate::types::DecisionOption {
+                option_id: "confirm-stop".to_owned(),
+                label: "确认停止".to_owned(),
+            },
+            crate::types::DecisionOption {
+                option_id: "cancel".to_owned(),
+                label: "取消".to_owned(),
+            },
+        ];
+        self.pending.put(PendingDecision {
+            conversation_id: self.config.conversation_id.clone(),
+            call_id: format!("channel-stop:{target_conversation_id}"),
+            kind: crate::pending_decision::PendingDecisionKind::StopConversation {
+                target_conversation_id,
+            },
             prompt: prompt.clone(),
             options: options.clone(),
         });

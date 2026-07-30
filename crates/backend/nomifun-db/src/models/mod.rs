@@ -37,14 +37,14 @@ pub use agent_execution::*;
 pub use agent_execution_template::*;
 pub use attachment::AttachmentRow;
 pub use channel::{
-    ChannelInboundReceiptRow, ChannelPairingCodeRow, ChannelPluginRow, ChannelSessionRow,
-    ChannelUserRow, NewChannelInboundReceiptRow, NewChannelPairingCodeRow, NewChannelPluginRow,
-    NewChannelSessionRow, NewChannelUserRow,
+    ChannelInboundReceiptRow, ChannelPairingCodeRow, ChannelPendingPromptRow, ChannelPluginRow,
+    ChannelSessionRow, ChannelUserRow, NewChannelInboundReceiptRow, NewChannelPairingCodeRow,
+    NewChannelPendingPromptRow, NewChannelPluginRow, NewChannelSessionRow, NewChannelUserRow,
 };
 pub use client_preference::ClientPreference;
 pub use companion_token::CompanionApiTokenRow;
 pub use connector_credential::ConnectorCredentialRow;
-pub use conversation::{ConversationDeliveryReceiptRow, ConversationRow};
+pub use conversation::{ConversationDeliveryNotifyRow, ConversationDeliveryReceiptRow, ConversationRow};
 pub use conversation_artifact::ConversationArtifactRow;
 pub use cron_job::CronJobRow;
 pub use cron_job_run::{CronJobRunRow, CronRunReservationRow};
