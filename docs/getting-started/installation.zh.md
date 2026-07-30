@@ -100,28 +100,28 @@ bun run build    # tauri build → 安装包 + 独立二进制
 
 ### 数据存放位置（桌面端）
 
-桌面应用把数据库与运行时文件存放在按用户区分的应用数据目录下，
-再拼接 `Nomi`：
+桌面应用把数据库与运行时文件存放在按用户区分的应用数据目录下：
 
 | 操作系统 | 默认路径 |
 | --- | --- |
-| Windows | `%LOCALAPPDATA%\NomiFun\Nomi`（例如 `C:\Users\<you>\AppData\Local\NomiFun\Nomi`） |
-| macOS | `~/Library/Application Support/NomiFun/Nomi` |
-| Linux | `$XDG_DATA_HOME/NomiFun/Nomi`（通常为 `~/.local/share/NomiFun/Nomi`） |
+| Windows | `%LOCALAPPDATA%\NomiFun`（例如 `C:\Users\<you>\AppData\Local\NomiFun`） |
+| macOS | `~/Library/Application Support/NomiFun` |
+| Linux | `$XDG_DATA_HOME/NomiFun`（通常为 `~/.local/share/NomiFun`） |
 
-启动前可通过 `NOMIFUN_DATA_DIR=<absolute path>` 覆盖——外壳会附加
-`/Nomi`，因此目录会变成 `$NOMIFUN_DATA_DIR/Nomi`。
+启动前可通过 `NOMIFUN_DATA_DIR=<absolute path>` 覆盖——所有宿主都
+按字面值把它当作数据根（不再附加 `/Nomi`）。
 
-> 旧版本默认使用 `<system temp>/nomifun-data/Nomi`，操作系统的临时目录
-> 清理可能在那里销毁用户数据。现在应用首次启动时会自动把这类旧安装
-> 搬迁到按用户区分的位置（一次性）：复制数据、改写数据库内的绝对路径，
-> 并把旧目录保留作备份。若搬迁无法完成，应用会先从旧目录启动，并在
-> 下次启动时重试。
+> 旧版本把数据存在 `NomiFun/Nomi` 下（更早为
+> `<system temp>/nomifun-data/Nomi`，操作系统的临时目录清理可能在
+> 那里销毁用户数据）。升级后首次启动时，一次性的自动迁移会把这类
+> 遗留数据集搬入新的数据根：迁移是抗崩溃的，数据库内的绝对路径会在
+> 搬迁后一次性改写；若迁移无法完成，会在下次启动时续跑（旧应用实例
+> 仍在运行时则推迟到下次启动）。
 
-> 提示：应用对用户呈现的名称统一为 `Nomi`——bundle 产品名
-> （`apps/desktop/tauri.conf.json`）、运行时窗口标题、数据文件夹都用
-> `Nomi`。内部标识符按设计仍保留旧的 `nomifun` 名（crate、`NOMIFUN_*`
-> 环境变量、`com.nomifun.*` bundle 标识符）。
+> 提示：应用对用户呈现的名称统一为 `NomiFun`——bundle 产品名
+> （`apps/desktop/tauri.conf.json`）、运行时窗口标题、发布产物与
+> 数据文件夹都用 `NomiFun`。内部标识符按设计仍保留旧的 `nomifun` 名
+> （crate、`NOMIFUN_*` 环境变量、`com.nomifun.*` bundle 标识符）。
 
 ## 从源码构建 Web 服务
 

@@ -16,6 +16,7 @@ pub mod knowledge_retrieval;
 pub mod knowledge_writeback;
 pub mod manager;
 pub mod nomi_session_persistence;
+pub mod one_shot;
 pub(crate) mod persistence;
 pub mod protocol;
 pub mod registry;
@@ -32,6 +33,7 @@ pub mod types;
 // become the single integration surface (see docs/specs/agent-extraction-checklist.md).
 pub use nomi_agent::companion_tools::CompanionMemorySink;
 pub use nomi_agent::companion_tools::{CompanionSkillSink, SkillListing};
+pub use nomi_agent::summon_tools::{SummonContextSink, SummonProposalSink};
 pub use nomi_agent::cron_tools::{CronJobSummary, CronSink};
 pub use nomi_agent::requirement_tools::RequirementSink;
 pub use nomi_config;
@@ -52,8 +54,9 @@ pub use factory::provider_config::{
     one_shot_completion, resolve_provider_config, streaming_completion, streaming_completion_kinded,
     streaming_completion_text_or_reasoning, user_message, DeltaKind,
 };
+pub use one_shot::{OneShotDeps, OneShotTool, OneShotTurnRequest, one_shot_handler, run_one_shot_turn};
 pub use factory::{
-    AgentFactoryDeps, CompanionPromptProvider, PublicAgentProvider, PublicAgentRuntime,
+    AgentFactoryDeps, CompanionPromptProvider, CompanionSummonProvider,
     build_agent_factory,
 };
 #[cfg(feature = "browser-use")]

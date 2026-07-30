@@ -261,7 +261,7 @@ async fn migration_16_drops_legacy_provider_model_columns_preserving_rows() {
 }
 
 #[tokio::test]
-async fn migration_17_drops_capabilities_preserving_rows() {
+async fn migration_21_drops_capabilities_preserving_rows() {
     let pool = SqlitePoolOptions::new()
         .max_connections(1)
         .connect("sqlite::memory:")
@@ -291,7 +291,7 @@ async fn migration_17_drops_capabilities_preserving_rows() {
         "providers.capabilities must still exist at migration 16"
     );
 
-    migrate_to(&pool, 17).await;
+    migrate_to(&pool, 21).await;
     let columns_at_17: Vec<String> =
         sqlx::query_scalar("SELECT name FROM pragma_table_info('providers')")
             .fetch_all(&pool)

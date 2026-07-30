@@ -693,6 +693,7 @@ impl KnowledgeService {
             );
         }
         let data_dir = std::fs::canonicalize(data_dir)
+            .map(|canonical| nomifun_common::paths::simplified(&canonical))
             .unwrap_or_else(|_| data_dir.to_path_buf());
         Self {
             repo,
@@ -1396,12 +1397,16 @@ impl KnowledgeService {
         // Persist one physical, Unicode path for both managed and external
         // roots. Lossy conversion would replace non-UTF-8 bytes with U+FFFD,
         // leaving a permanently broken registration and potentially merging
-        // unrelated lock identities.
-        let root = tokio::fs::canonicalize(&root).await.map_err(|error| {
-            AppError::BadRequest(format!(
-                "failed to resolve the physical knowledge directory: {error}"
-            ))
-        })?;
+        // unrelated lock identities. The Windows verbatim (`\\?\`) prefix is
+        // stripped so persisted roots stay comparable and presentable.
+        let root = tokio::fs::canonicalize(&root)
+            .await
+            .map(|canonical| nomifun_common::paths::simplified(&canonical))
+            .map_err(|error| {
+                AppError::BadRequest(format!(
+                    "failed to resolve the physical knowledge directory: {error}"
+                ))
+            })?;
         let root_path = root
             .to_str()
             .ok_or_else(|| {
@@ -1644,6 +1649,12 @@ impl KnowledgeService {
                     "failed to resolve managed knowledge root: {error}"
                 ))
             })?;
+            // Compare simplified spellings: rows written by older releases
+            // carry the Windows verbatim (`\\?\`) prefix while newer rows and
+            // the canonicalized parent may not (or vice versa).
+            let root = nomifun_common::paths::simplified(&root);
+            let managed_parent =
+                nomifun_common::paths::simplified(&managed_parent);
             if !root.starts_with(&managed_parent) || root == managed_parent {
                 return Err(AppError::Internal(format!(
                     "managed knowledge base {} has unsafe purge path '{}'",
@@ -4472,8 +4483,11 @@ impl KnowledgeService {
     fn workspace_overlaps_managed_root(&self, workspace: &Path) -> bool {
         let managed_lexical = self.data_dir.join(KB_MANAGED_REL_DIR);
         let managed = std::fs::canonicalize(&managed_lexical)
+            .map(|canonical| nomifun_common::paths::simplified(&canonical))
             .unwrap_or(managed_lexical);
-        let ws = std::fs::canonicalize(workspace).unwrap_or_else(|_| workspace.to_path_buf());
+        let ws = std::fs::canonicalize(workspace)
+            .map(|canonical| nomifun_common::paths::simplified(&canonical))
+            .unwrap_or_else(|_| workspace.to_path_buf());
         managed.starts_with(&ws) || ws.starts_with(&managed)
     }
 

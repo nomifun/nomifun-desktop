@@ -13,7 +13,7 @@ use nomifun_api_types::{
     TestPluginRequest, TestPluginResponse,
 };
 use nomifun_common::{
-    AppError, ChannelPluginId, CompanionId, ConversationId, PublicAgentId, UuidV7Error,
+    AppError, ChannelPluginId, CompanionId, ConversationId, UuidV7Error,
 };
 use nomifun_db::IChannelRepository;
 use nomifun_extension::{ExtensionRegistry, ResolvedChannelPlugin};
@@ -76,11 +76,7 @@ pub fn channel_routes(state: ChannelRouterState) -> Router {
         // Settings sync
         .route("/api/channel/settings/sync", post(sync_channel_settings))
         // Channel companion binding (persist + session reset in one step)
-        .route("/api/channel/settings/companion", post(set_channel_companion))
-        // 对外伙伴 (public agent) per-bot binding (persist + session reset in one
-        // step). Mirrors the per-bot companion binding; row-level mutually
-        // exclusive with it.
-        .route("/api/channel/settings/public-agent", post(set_channel_public_agent));
+        .route("/api/channel/settings/companion", post(set_channel_companion));
 
     // WeChat QR login starter (feature-gated). Lives in the authenticated
     // channel group — the QR lifecycle then streams over the WebSocket as
@@ -169,9 +165,10 @@ struct ChannelPluginStatusView {
     #[serde(skip_serializing_if = "Option::is_none")]
     companion_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    public_agent_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     bot_key: Option<String>,
+    /// Owning domain (`companion` | `customer_service`), used by the UI to
+    /// keep the two pools disjoint.
+    owner_domain: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     created_at: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -213,8 +210,8 @@ impl ChannelPluginStatusView {
             status: status.status,
             last_connected: status.last_connected,
             companion_id: status.companion_id,
-            public_agent_id: status.public_agent_id,
             bot_key: status.bot_key,
+            owner_domain: status.owner_domain,
             created_at: Some(status.created_at),
             updated_at: Some(status.updated_at),
             connected: status.connected,
@@ -297,24 +294,40 @@ async fn enable_plugin(
         }
     }
 
-    // A non-empty public_agent_id must name a LIVE public agent (validated
-    // against the roster, mirroring the companion check). Row-level mutual
-    // exclusivity (public agent clears companion) is applied in the manager.
-    if let Some(public_agent_id) = req.public_agent_id.as_deref() {
-        PublicAgentId::parse(public_agent_id)
-            .map_err(|error| AppError::BadRequest(format!("invalid public_agent_id: {error}")))?;
-        if let Some(profile) = &state.channel_agent_profile
-            && !profile.public_agent_exists(public_agent_id).await
-        {
-            return Err(AppError::BadRequest(format!("public agent '{public_agent_id}' not found")));
+    // Owner-domain validation (mutual exclusion, application layer): the
+    // domain enum must be known, a customer-service bot can never carry a
+    // companion binding, and an existing bot's domain is immutable.
+    if let Some(owner_domain) = req.owner_domain.as_deref() {
+        if !matches!(owner_domain, "companion" | "customer_service") {
+            return Err(AppError::BadRequest(format!(
+                "invalid owner_domain '{owner_domain}': expected 'companion' or 'customer_service'"
+            )));
         }
+        if owner_domain == "customer_service" && req.companion_id.is_some() {
+            return Err(AppError::BadRequest(
+                "customer-service channel bots cannot carry a companion binding".into(),
+            ));
+        }
+    }
+    if let Some(plugin_id) = req.plugin_id.as_deref()
+        && req.companion_id.is_some()
+        && let Some(row) = state
+            .repo
+            .get_plugin(plugin_id)
+            .await
+            .map_err(|e| AppError::Internal(e.to_string()))?
+        && row.owner_domain != "companion"
+    {
+        return Err(AppError::BadRequest(
+            "customer-service channel bots cannot carry a companion binding".into(),
+        ));
     }
 
     let spec = EnableChannelSpec {
         plugin_id: req.plugin_id.clone(),
         plugin_type: req.plugin_type.clone(),
         companion_id: req.companion_id.clone(),
-        public_agent_id: req.public_agent_id.clone(),
+        owner_domain: req.owner_domain.clone(),
     };
 
     match state
@@ -359,15 +372,6 @@ async fn already_bound_message(state: &ChannelRouterState, owner: &ChannelOwner)
             .map(|name| format!("伙伴「{name}」"))
             .unwrap_or_else(|| format!("伙伴「{id}」"));
             format!("此机器人已绑定{who}，请先在该伙伴处解绑或删除后再在此使用。")
-        }
-        ChannelOwner::PublicAgent(id) => {
-            let who = match profile {
-                Some(p) => p.public_agent_name(id).await,
-                None => None,
-            }
-            .map(|name| format!("对外伙伴「{name}」"))
-            .unwrap_or_else(|| format!("对外伙伴「{id}」"));
-            format!("此机器人已绑定{who}，请先在该对外伙伴处解绑或删除后再在此使用。")
         }
         ChannelOwner::Channel(id) => format!("此机器人已被渠道「{id}」占用。"),
     }
@@ -704,67 +708,6 @@ async fn set_channel_companion(
     Ok(Json(ApiResponse::ok(BridgeResponse {
         success: true,
         message: Some(format!("Companion binding updated for {platform_str}; sessions cleared")),
-        error: None,
-    })))
-}
-
-// ---------------------------------------------------------------------------
-// 对外伙伴 (public agent) per-bot binding handler
-// ---------------------------------------------------------------------------
-
-/// Request body for `POST /api/channel/settings/public-agent`.
-///
-/// Rebinds one bot channel's 对外伙伴 (public agent) — writes
-/// `channel_plugins.public_agent_id` and clears only that channel's sessions.
-/// `public_agent_id: None` clears the binding (unbinds). Mirrors
-/// the per-bot companion binding; row-level mutually exclusive with it.
-#[derive(Debug, Deserialize)]
-struct SetChannelPublicAgentRequest {
-    plugin_id: String,
-    #[serde(default)]
-    public_agent_id: Option<String>,
-}
-
-/// `POST /api/channel/settings/public-agent` — bind (or clear) the 对外伙伴
-/// (public agent) that serves a bot channel. A non-null id is validated against
-/// the live roster and, on success, clears that bot's companion binding (row-level
-/// mutual exclusivity, enforced in the repository layer). `null` unbinds.
-/// Clears the channel's sessions so the next inbound message recreates
-/// conversations under the new binding.
-async fn set_channel_public_agent(
-    State(state): State<ChannelRouterState>,
-    body: Result<Json<SetChannelPublicAgentRequest>, JsonRejection>,
-) -> Result<Json<ApiResponse<BridgeResponse>>, AppError> {
-    let Json(req) = body.map_err(|e| AppError::BadRequest(e.to_string()))?;
-
-    let plugin_id = req.plugin_id;
-    ChannelPluginId::parse(&plugin_id)
-        .map_err(|error| AppError::BadRequest(format!("invalid plugin_id: {error}")))?;
-
-    // Validate a binding against the live public-agent roster: a typo'd
-    // or already-deleted id must 400 here instead of being persisted. Clearing
-    // (`null`) needs no validation. Skipped when no profile is wired.
-    if let Some(public_agent_id) = req.public_agent_id.as_deref() {
-        PublicAgentId::parse(public_agent_id)
-            .map_err(|error| AppError::BadRequest(format!("invalid public_agent_id: {error}")))?;
-        if let Some(profile) = &state.channel_agent_profile
-            && !profile.public_agent_exists(public_agent_id).await
-        {
-            return Err(AppError::BadRequest(format!("public agent '{public_agent_id}' not found")));
-        }
-    }
-
-    let public_agent_id = req.public_agent_id.as_deref();
-    state
-        .manager
-        .rebind_channel_public_agent(&plugin_id, public_agent_id)
-        .await?;
-
-    Ok(Json(ApiResponse::ok(BridgeResponse {
-        success: true,
-        message: Some(format!(
-            "Public agent binding updated for channel {plugin_id}; channel sessions cleared"
-        )),
         error: None,
     })))
 }

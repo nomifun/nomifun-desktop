@@ -23,6 +23,15 @@ pub(super) async fn build(
     options: AgentRuntimeBuildOptions,
     ctx: FactoryContext,
 ) -> Result<AgentRuntimeHandle, AppError> {
+    // TODO(summon, spec 2026-07-29 §设计 B2): ACP sessions do not consume
+    // `extra.summon` yet. First-wave summon is nomi-native (factory/nomi.rs):
+    // per-turn memory snapshot via ContextContributor + read-only
+    // recall_memories / propose_companion_memory + manifest-owned skill
+    // materialization. For ACP the memory-snapshot section should follow the
+    // knowledge-prelude hook mechanism below, skills need the conversation
+    // layer's per-agent native_skills_dirs linking (not the nomi `.nomi/skills`
+    // manifest), and a companion-scoped recall must ride the gateway MCP bridge
+    // (owner ACP sessions today only get the unscoped nomi_memory_list).
     let mut config: AcpBuildExtra = serde_json::from_value(options.extra)
         .map_err(|e| AppError::BadRequest(format!("Invalid ACP build options: {e}")))?;
     config.user_id = Some(options.user_id.clone());

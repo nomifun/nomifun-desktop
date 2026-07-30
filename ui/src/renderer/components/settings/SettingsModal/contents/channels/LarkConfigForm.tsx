@@ -11,6 +11,7 @@ import { Button, Empty, Input, Message, Spin, Tooltip } from '@arco-design/web-r
 import { CheckOne, CloseOne, Copy, Delete, Down, Refresh } from '@icon-park/react';
 import React, { useCallback, useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
+import { buildEnablePluginRequest, findEnabledChannelStatus } from '@/renderer/components/channels/channelStatusSelection';
 import type { ChannelTarget } from './channelTarget';
 
 /**
@@ -206,11 +207,7 @@ const LarkConfigForm: React.FC<LarkConfigFormProps> = ({
           verification_token: verificationToken.trim() || undefined,
         },
       };
-      const result = await channel.enablePlugin.invoke(
-        channelTarget
-          ? { plugin_id: channelTarget.channelPluginId, plugin_type: 'lark', ...(channelTarget.publicAgentId ? { public_agent_id: channelTarget.publicAgentId } : { companion_id: channelTarget.companionId }), config }
-          : { plugin_type: 'lark', config }
-      );
+      const result = await channel.enablePlugin.invoke(buildEnablePluginRequest('lark', channelTarget, config));
       if (!result.success) {
         throw new Error(result.error || t('nomi.settings.remoteEnableFailed', { defaultValue: 'Failed to enable channel' }));
       }
@@ -218,12 +215,13 @@ const LarkConfigForm: React.FC<LarkConfigFormProps> = ({
       Message.success(t('settings.lark.pluginEnabled', 'Lark bot enabled'));
       const plugins = await channel.getPluginStatus.invoke();
       if (plugins) {
-        // Multi-plugin model: resolve by business UUID, or by owner after create.
-        const larkPlugin = channelTarget
-          ? channelTarget.channelPluginId
-            ? plugins.find((p) => p.plugin_id === channelTarget.channelPluginId)
-            : plugins.find((p) => p.type === 'lark' && p.companionId === channelTarget.companionId)
-          : plugins.find((p) => p.type === 'lark');
+        // Multi-plugin model: resolve by the backend-returned business UUID, or by owner scope after create.
+        const larkPlugin = findEnabledChannelStatus(plugins, {
+          platform: 'lark',
+          enabledPluginId: result.plugin_id,
+          companionId: channelTarget?.companionId,
+          ownerDomain: channelTarget?.ownerDomain,
+        });
         onStatusChange(larkPlugin || null);
       }
     } catch (error: unknown) {

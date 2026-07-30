@@ -70,8 +70,8 @@ async fn setup() -> (PairingService, Arc<dyn IChannelRepository>, Arc<MockBroadc
                 status: None,
                 last_connected: None,
                 companion_id: None,
-                public_agent_id: None,
                 bot_key: None,
+                owner_domain: "companion".into(),
                 created_at: now_ms(),
                 updated_at: now_ms(),
             })
@@ -438,8 +438,8 @@ async fn two_lark_bots_pair_independently() {
             status: None,
             last_connected: None,
             companion_id: None,
-            public_agent_id: None,
             bot_key: None,
+            owner_domain: "companion".into(),
             created_at: now_ms(),
             updated_at: now_ms(),
         })

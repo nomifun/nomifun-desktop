@@ -10,6 +10,7 @@ mod client_preference;
 pub mod conversation;
 pub mod creation_task;
 pub mod cron;
+pub mod customer_service;
 pub mod idmm_intervention;
 pub mod companion_token;
 pub mod knowledge;
@@ -34,6 +35,7 @@ mod sqlite_connector_credential;
 mod sqlite_conversation;
 mod sqlite_creation_task;
 mod sqlite_cron;
+mod sqlite_customer_service;
 mod sqlite_idmm_intervention;
 mod sqlite_companion_token;
 mod sqlite_knowledge;
@@ -64,7 +66,8 @@ pub use agent_execution::*;
 pub use agent_execution_template::*;
 pub use attachment::IAttachmentRepository;
 pub use channel::{
-    ChannelInboundClaim, IChannelRepository, SettleChannelInboundReceiptParams,
+    ChannelInboundClaim, IChannelRepository, PENDING_PROMPT_EXPIRY_MS,
+    PENDING_PROMPT_QUEUE_LIMIT, PendingPromptEnqueue, SettleChannelInboundReceiptParams,
 };
 pub use client_preference::IClientPreferenceRepository;
 pub(crate) use client_preference::{
@@ -108,6 +111,7 @@ pub use sqlite_connector_credential::SqliteConnectorCredentialRepository;
 pub use sqlite_conversation::SqliteConversationRepository;
 pub use sqlite_creation_task::SqliteCreationTaskRepository;
 pub use sqlite_cron::SqliteCronRepository;
+pub use sqlite_customer_service::SqliteCustomerServiceRepository;
 pub use sqlite_idmm_intervention::SqliteIdmmInterventionRepository;
 pub use sqlite_companion_token::SqliteCompanionTokenRepository;
 pub use sqlite_knowledge::SqliteKnowledgeRepository;

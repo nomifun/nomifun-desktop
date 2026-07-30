@@ -4,6 +4,9 @@
 //! submodules. All logic lives in the modules below.
 
 mod config;
+// Spec D2 delivery-notify observer (public so integration tests can drive
+// the full receipt loop without the whole app harness).
+pub mod delivery_notify;
 #[cfg(feature = "browser-use")]
 mod browser_mcp_server;
 #[cfg(feature = "browser-use")]

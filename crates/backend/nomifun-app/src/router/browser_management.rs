@@ -1706,6 +1706,10 @@ mod tests {
         let auth_state = AuthState {
             jwt_service: jwt,
             user_repo,
+            cookie_config: Arc::new(CookieConfig {
+                secure: false,
+                same_site: "Lax",
+            }),
         };
         let owner_state = InstanceOwnerState::new(Arc::from(user.user_id.as_str()));
         let cookie = Arc::new(CookieConfig {

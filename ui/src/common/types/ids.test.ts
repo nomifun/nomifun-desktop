@@ -25,7 +25,7 @@ import {
   parseOptionalEntityId,
   parsePresetId,
   parseProviderId,
-  parsePublicAgentAuditEntryId,
+  parseCsAgentId,
   parseRemoteAgentId,
   parseRequirementId,
   parseTerminalId,
@@ -130,7 +130,7 @@ describe('entity ids', () => {
     expect(parseFigureId('0190f5fe-7c00-7a00-8000-000000000001')).toBe(
       '0190f5fe-7c00-7a00-8000-000000000001',
     );
-    expect(parsePublicAgentAuditEntryId('0190f5fe-7c00-7a00-8000-000000000002')).toBe(
+    expect(parseCsAgentId('0190f5fe-7c00-7a00-8000-000000000002')).toBe(
       '0190f5fe-7c00-7a00-8000-000000000002',
     );
     expect(parseCompanionEvolutionFeedbackId('0190f5fe-7c00-7a00-8000-000000000003')).toBe(

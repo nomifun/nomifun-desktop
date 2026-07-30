@@ -8,12 +8,12 @@ import { describe, expect, test } from 'bun:test';
 import enCommon from './locales/en-US/common.json';
 import enConversation from './locales/en-US/conversation.json';
 import enNomi from './locales/en-US/nomi.json';
-import enPublicCompanion from './locales/en-US/publicCompanion.json';
+import enCustomerService from './locales/en-US/customerService.json';
 import enSettings from './locales/en-US/settings.json';
 import zhCommon from './locales/zh-CN/common.json';
 import zhConversation from './locales/zh-CN/conversation.json';
 import zhNomi from './locales/zh-CN/nomi.json';
-import zhPublicCompanion from './locales/zh-CN/publicCompanion.json';
+import zhCustomerService from './locales/zh-CN/customerService.json';
 import zhSettings from './locales/zh-CN/settings.json';
 
 type LocaleJson = Record<string, unknown>;
@@ -232,17 +232,13 @@ const NOMI_REMOTE_KEYS = [
   'settings.remoteEnableChannelHint',
 ] as const;
 
-const PUBLIC_COMPANION_CHANNEL_KEYS = [
-  'channels.title',
-  'channels.desc',
-  'channels.bindRow',
-  'channels.createBot',
-  'channels.bindConfirm',
-  'channels.unbindConfirm',
-  'channels.bindSuccess',
-  'channels.otherBots',
-  'channels.modelFollowsAgent',
-  'channels.footerHint',
+const CUSTOMER_SERVICE_KEYS = [
+  'title',
+  'subtitle',
+  'sections.bindings',
+  'bindings.hint',
+  'bindings.saved',
+  'notes.add',
 ] as const;
 
 const COMMON_KEYS = ['copySuccess', 'refresh', 'unknownUser', 'unit.minute_short'] as const;
@@ -298,8 +294,8 @@ function assertLocaleKeyParity(label: string, left: LocaleJson, right: LocaleJso
 }
 
 describe('channel configuration locale coverage', () => {
-  test('public companion locales keep matching key coverage', () => {
-    assertLocaleKeyParity('publicCompanion', enPublicCompanion, zhPublicCompanion);
+  test('customer service locales keep matching key coverage', () => {
+    assertLocaleKeyParity('customerService', enCustomerService, zhCustomerService);
   });
 
   test('settings channel forms have complete en-US copy', () => {
@@ -310,9 +306,9 @@ describe('channel configuration locale coverage', () => {
     assertStringKeys('zh-CN settings', zhSettings, CHANNEL_SETTINGS_KEYS);
   });
 
-  test('public companion channel surfaces have complete locale copy', () => {
-    assertStringKeys('en-US publicCompanion', enPublicCompanion, PUBLIC_COMPANION_CHANNEL_KEYS);
-    assertStringKeys('zh-CN publicCompanion', zhPublicCompanion, PUBLIC_COMPANION_CHANNEL_KEYS);
+  test('customer service surfaces have complete locale copy', () => {
+    assertStringKeys('en-US customerService', enCustomerService, CUSTOMER_SERVICE_KEYS);
+    assertStringKeys('zh-CN customerService', zhCustomerService, CUSTOMER_SERVICE_KEYS);
     assertStringKeys('en-US nomi', enNomi, NOMI_REMOTE_KEYS);
     assertStringKeys('zh-CN nomi', zhNomi, NOMI_REMOTE_KEYS);
     assertStringKeys('en-US common', enCommon, COMMON_KEYS);

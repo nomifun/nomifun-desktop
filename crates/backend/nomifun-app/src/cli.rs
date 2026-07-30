@@ -10,34 +10,66 @@ use clap::{Parser, Subcommand};
 
 /// The default data directory shared by all hosts built for the same channel
 /// (desktop shell, `nomifun-web`, the `nomicore` bin): the per-user
-/// application-data dir joined with `NomiFun/Nomi<channel-suffix>`. Stable
-/// builds use `Nomi`; dev builds use `Nomi-dev`. Extreme fallback when the OS
-/// reports no user dir: `<system temp>/nomifun-data/Nomi<channel-suffix>`.
+/// application-data dir joined with `NomiFun<channel-suffix>`. Stable builds
+/// use `NomiFun`; non-stable builds use a suffixed sibling such as
+/// `NomiFun-dev`. Extreme fallback when the OS reports no user dir:
+/// `<system temp>/nomifun-data<channel-suffix>`.
 ///
 /// Sharing within a channel is deliberate, while isolating non-stable channels
-/// prevents development loops from touching installed-app state. The
-/// `NOMIFUN_DATA_DIR` env / `--data-dir` flag remain the escape hatch for an
-/// explicitly selected directory. Concurrent use of one dir is prevented by
-/// the exclusive server lock (see `bootstrap::server_lock`).
+/// in sibling directories prevents development loops from touching
+/// installed-app state — and no channel ever nests inside the stable data
+/// root. The `NOMIFUN_DATA_DIR` env / `--data-dir` flag remain the escape
+/// hatch for an explicitly selected directory; the env value is the FINAL
+/// data root on every host (the desktop shell no longer appends anything).
+/// Concurrent use of one dir is prevented by the exclusive server lock (see
+/// `bootstrap::server_lock`).
 ///
-/// This is only the *unset* default — it does NOT consult `NOMIFUN_DATA_DIR`.
-/// Env semantics stay host-specific: the desktop shell appends `/Nomi` to the
-/// env value, web/nomicore take it literally (clap `env` binding).
+/// Installs created before this layout used `NomiFun/Nomi<channel-suffix>`
+/// (see [`legacy_default_data_dir`]); `bootstrap::data_root` migrates them
+/// forward on boot.
+///
+/// This is only the *unset* default — it does NOT consult `NOMIFUN_DATA_DIR`
+/// itself (clap's `env` binding and the desktop shell resolve the env).
 pub fn default_data_dir() -> PathBuf {
+    let leaf = vendor_leaf(&crate::channel::dir_suffix());
+    dirs::data_local_dir()
+        .map(|dir| dir.join(leaf))
+        .unwrap_or_else(|| {
+            std::env::temp_dir()
+                .join(fallback_leaf(&crate::channel::dir_suffix()))
+        })
+}
+
+/// The pre-0.3.4 default data directory for the active channel:
+/// `<app-data>/NomiFun/Nomi<channel-suffix>` (or the historic temp fallback
+/// `<system temp>/nomifun-data/Nomi<channel-suffix>`). Used only as the
+/// migration *source* by `bootstrap::data_root` and by the inherited-env
+/// sanitizer; never used for new datasets.
+pub fn legacy_default_data_dir() -> PathBuf {
+    let leaf = legacy_nomi_leaf(&crate::channel::dir_suffix());
     dirs::data_local_dir()
         .map(|dir| dir.join("NomiFun"))
         .unwrap_or_else(|| std::env::temp_dir().join("nomifun-data"))
-        .join(nomi_leaf(&crate::channel::dir_suffix()))
+        .join(leaf)
 }
 
-/// The data-dir leaf for the active build channel: `Nomi` on stable, `Nomi-dev`
-/// (etc.) on non-stable channels. The channel suffix attaches to the `Nomi`
-/// leaf — NOT to the `NomiFun` vendor segment — so a non-stable build lands in a
-/// sibling directory next to the production one (`…/NomiFun/Nomi-dev`), keeping
-/// dev state fully isolated from the installed app. Pure, for unit testing;
-/// only `default_data_dir`'s unset default uses it (explicit `NOMIFUN_DATA_DIR`
-/// is taken verbatim by clap, channel-agnostic).
-fn nomi_leaf(suffix: &str) -> String {
+/// The data-dir leaf for the active build channel: `NomiFun` on stable,
+/// `NomiFun-dev` (etc.) on non-stable channels. The channel suffix attaches to
+/// the vendor directory itself, so a non-stable build lands in a *sibling*
+/// directory next to the production one (`…/NomiFun-dev`) — never inside the
+/// stable `NomiFun` data root. Pure, for unit testing.
+fn vendor_leaf(suffix: &str) -> String {
+    format!("NomiFun{suffix}")
+}
+
+/// Temp-dir fallback leaf mirroring [`vendor_leaf`] channel isolation.
+fn fallback_leaf(suffix: &str) -> String {
+    format!("nomifun-data{suffix}")
+}
+
+/// The pre-0.3.4 leaf under the `NomiFun` vendor directory (`Nomi`,
+/// `Nomi-dev`, …). Retained only so the migration can find old datasets.
+fn legacy_nomi_leaf(suffix: &str) -> String {
     format!("Nomi{suffix}")
 }
 
@@ -204,29 +236,48 @@ mod tests {
         // (`env = "NOMIFUN_DATA_DIR"`) and is not exercised here to keep the
         // test independent of the ambient environment.
         let dir = super::default_data_dir();
-        let leaf = super::nomi_leaf(&crate::channel::dir_suffix());
-        let user_suffix = PathBuf::from("NomiFun").join(&leaf);
-        let fallback_suffix = PathBuf::from("nomifun-data").join(&leaf);
+        let user_leaf = super::vendor_leaf(&crate::channel::dir_suffix());
+        let fallback_leaf = super::fallback_leaf(&crate::channel::dir_suffix());
         assert!(
             dir.is_absolute(),
             "default data dir must be absolute, got {dir:?}"
         );
         assert!(
-            dir.ends_with(&user_suffix) || dir.ends_with(&fallback_suffix),
-            "default data dir should end with {user_suffix:?} (or {fallback_suffix:?}), got {dir:?}"
+            dir.ends_with(&user_leaf) || dir.ends_with(&fallback_leaf),
+            "default data dir should end with {user_leaf:?} (or {fallback_leaf:?}), got {dir:?}"
         );
     }
 
     #[test]
-    fn nomi_leaf_stable_is_plain_nomi() {
-        assert_eq!(super::nomi_leaf(""), "Nomi");
+    fn stable_data_root_is_plain_nomifun_vendor_dir() {
+        assert_eq!(super::vendor_leaf(""), "NomiFun");
+        assert_eq!(super::fallback_leaf(""), "nomifun-data");
     }
 
     #[test]
-    fn nomi_leaf_non_stable_attaches_suffix_to_nomi() {
-        // The channel suffix must land on the `Nomi` leaf, yielding a sibling of
-        // the production dir (`…/NomiFun/Nomi-dev`) — never on `NomiFun`.
-        assert_eq!(super::nomi_leaf("-dev"), "Nomi-dev");
+    fn non_stable_channels_get_sibling_vendor_dirs() {
+        // The channel suffix must attach to the vendor dir itself, yielding a
+        // SIBLING of the production dir (`…/NomiFun-dev`) — never a
+        // subdirectory inside the stable `NomiFun` data root.
+        assert_eq!(super::vendor_leaf("-dev"), "NomiFun-dev");
+        assert_eq!(super::vendor_leaf("-beta"), "NomiFun-beta");
+        assert_eq!(super::fallback_leaf("-dev"), "nomifun-data-dev");
+    }
+
+    #[test]
+    fn legacy_default_keeps_the_historic_nomi_leaf_for_migration() {
+        let legacy = super::legacy_default_data_dir();
+        let leaf = super::legacy_nomi_leaf(&crate::channel::dir_suffix());
+        assert!(
+            legacy.ends_with(std::path::Path::new("NomiFun").join(&leaf))
+                || legacy.ends_with(std::path::Path::new("nomifun-data").join(&leaf)),
+            "legacy default should end with NomiFun/{leaf}, got {legacy:?}"
+        );
+        assert_ne!(
+            legacy,
+            super::default_data_dir(),
+            "legacy and current defaults must differ so migration has a direction"
+        );
     }
 
     #[test]

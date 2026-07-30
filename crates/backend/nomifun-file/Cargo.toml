@@ -29,3 +29,5 @@ dirs.workspace = true
 tempfile = "3"
 base64.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+tower = { workspace = true, features = ["util"] }
+serde_urlencoded = "0.7"

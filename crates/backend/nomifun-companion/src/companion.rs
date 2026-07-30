@@ -25,9 +25,10 @@ use crate::managed_skills::{
     load_manifest, record_managed_entry, record_source_matches, remove_stale_managed_entries,
     save_manifest,
 };
+use crate::memory_search::{MemorySearchQuery, MemoryStatusFilter};
 use crate::profile::{CompanionProfileConfig, normalized_effective_skill_names};
 use crate::registry::CompanionRegistry;
-use crate::store::{CompanionThread, MEMORY_KINDS, MemoryFilter, MemoryScope, CompanionStore};
+use crate::store::{CompanionThread, MEMORY_KINDS, MemoryScope, CompanionStore};
 
 /// Per-companion runtime-state key holding that companion's active companion thread.
 pub(crate) const ACTIVE_THREAD_KEY: &str = "companion_active_thread";
@@ -132,7 +133,7 @@ pub async fn build_companion_system_prompt(
          但行事前遵守两条规则：\
          ① 任何创建类操作（会话/定时任务/需求等）之前，先用对应的 list 工具查重；已有同名或同义的项就不要重复创建，除非主人在本轮对话中明确要求再建一个。\
          ② 主人的请求缺少必要配置（如模型供应商/模型）时，先用列表类工具查可用项，自动选一个合理默认（比如第一个可用供应商）并告知主人，或用一句话向主人确认——不要带着空配置硬创建，也不要长篇追问。\n\
-         你还有三个专属记忆工具：recall_memories（搜你对主人的长期记忆）、save_memory（记住主人告诉你的重要事）、\
+         你还有三个专属记忆工具：recall_memories（搜你对主人的长期记忆；可一次传多个查询词 queries 扩大召回，翻旧事时带 include_archived 连归档一起搜）、save_memory（记住主人告诉你的重要事）、\
          list_recent_events（看主人最近的工作活动）。当主人提到值得长期记住的偏好/约定/计划时主动 save_memory，宁缺毋滥；\
          下面的记忆节选是开聊时的快照，拿不准时先 recall_memories 查最新。"
     );
@@ -153,6 +154,13 @@ pub async fn build_companion_system_prompt(
         system.push_str(
             "\n\n你还是整台 Nomi 桌面的总管家：用 nomi_* 工具可以查看/操作所有会话、定时任务、长期记忆和需求平台。\
              删除类操作先向主人复述目标确认后再执行。",
+        );
+        system.push_str(
+            "\n\n重型任务分流（召唤伙伴）：识别到重型 coding/工程类任务（改仓库代码、跑构建/测试、多文件重构、\
+             长时间自动化）时不要在本聊天里直接开干——先向主人提议「我开一个工作会话来做这件事」，征得同意后用 \
+             nomi_create_conversation 创建：主人给了项目路径就带 workpath；同时带 summon（companion_id 填你自己的 id，\
+             memory_ids 先用 recall_memories 按任务挑几条最相关的记忆 id，宁少勿滥），让工作会话装载你的技能与所选记忆\
+             （对它只读）。建好后用 nomi_send_to_conversation 把任务派过去，并告诉主人新会话入口。",
         );
     }
     if !profile.persona.custom.trim().is_empty() {
@@ -497,7 +505,7 @@ pub struct CompanionThreads {
 /// - `materialize_skills_for_agent` itself errors;
 /// - a non-empty configuration resolves to nothing (source tree transiently
 ///   unreadable — resolve failures are silently skipped per name upstream).
-async fn effective_skill_names(
+pub(crate) async fn effective_skill_names(
     skill_paths: &nomifun_extension::SkillPaths,
     profile: &CompanionProfileConfig,
 ) -> Result<Vec<String>, AppError> {
@@ -532,6 +540,89 @@ async fn effective_skill_names(
     Ok(names)
 }
 
+/// Materialize + link `skill_names` into `workspace/.nomi/skills` under
+/// manifest ownership (`managed-companion-skills.json`): entries the manifest
+/// owns but that are no longer desired are removed (only when ownership is
+/// proven — user-created skills are never touched), missing desired skills are
+/// linked and recorded. Best-effort: failures log and degrade. Shared by
+/// companion threads and the in-session summon track (`skill_names = []`
+/// unloads every manifest-owned entry, e.g. after 解除召唤). Returns the
+/// resolved desired skill names.
+pub(crate) async fn sync_managed_workspace_skills(
+    skill_paths: &nomifun_extension::SkillPaths,
+    conversation_id: &str,
+    workspace: &Path,
+    skill_names: &[String],
+) -> Vec<String> {
+    let nomi_dir = workspace.join(".nomi");
+    let skills_dir = nomi_dir.join("skills");
+    // Cleanup fast-path: nothing desired and nothing managed → leave the
+    // workspace untouched (never create `.nomi`/manifest files in ordinary
+    // work workspaces that were never summoned).
+    if skill_names.is_empty() && load_manifest(&nomi_dir).managed.is_empty() {
+        return Vec::new();
+    }
+    let resolved = match nomifun_extension::materialize_skills_for_agent(
+        skill_paths,
+        conversation_id,
+        skill_names,
+    )
+    .await
+    {
+        Ok(resolved) => resolved,
+        Err(error) => {
+            tracing::warn!(error = %error, conversation_id, "resolve companion workspace skills failed");
+            return Vec::new();
+        }
+    };
+
+    let old_manifest = load_manifest(&nomi_dir);
+    let desired: std::collections::HashSet<&str> = resolved
+        .iter()
+        .filter(|skill| {
+            old_manifest
+                .managed
+                .get(&skill.name)
+                .is_none_or(|record| record_source_matches(record, &skill.source_path))
+        })
+        .map(|skill| skill.name.as_str())
+        .collect();
+    let mut manifest = remove_stale_managed_entries(&skills_dir, &old_manifest, &desired);
+    let to_link: Vec<_> = resolved
+        .iter()
+        .filter(|skill| !skills_dir.join(&skill.name).exists())
+        .cloned()
+        .collect();
+    if let Err(error) = nomifun_extension::link_workspace_skills(
+        workspace,
+        &[".nomi/skills"],
+        &to_link,
+    )
+    .await
+    {
+        tracing::warn!(error = %error, conversation_id, "link companion workspace skills failed");
+    }
+    for skill in &to_link {
+        let target = skills_dir.join(&skill.name);
+        match record_managed_entry(&target, &skill.source_path) {
+            Ok(Some(record)) => {
+                manifest.managed.insert(skill.name.clone(), record);
+            }
+            Ok(None) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => tracing::warn!(
+                error = %error,
+                target = %target.display(),
+                "record managed companion skill failed"
+            ),
+        }
+    }
+    if let Err(error) = save_manifest(&nomi_dir, &manifest) {
+        tracing::warn!(error = %error, manifest = %nomi_dir.display(), "save companion skill manifest failed");
+    }
+    resolved.into_iter().map(|skill| skill.name).collect()
+}
+
 impl CompanionThreads {
     async fn builtin_auto_skill_names(&self) -> Vec<String> {
         match nomifun_extension::list_builtin_auto_skills(&self.skill_paths).await {
@@ -549,65 +640,8 @@ impl CompanionThreads {
         workspace: &Path,
         skill_names: &[String],
     ) {
-        let nomi_dir = workspace.join(".nomi");
-        let skills_dir = nomi_dir.join("skills");
-        let resolved = match nomifun_extension::materialize_skills_for_agent(
-            &self.skill_paths,
-            conversation_id,
-            skill_names,
-        )
-        .await
-        {
-            Ok(resolved) => resolved,
-            Err(error) => {
-                tracing::warn!(error = %error, conversation_id, "resolve companion workspace skills failed");
-                return;
-            }
-        };
-
-        let old_manifest = load_manifest(&nomi_dir);
-        let desired: std::collections::HashSet<&str> = resolved
-            .iter()
-            .filter(|skill| {
-                old_manifest
-                    .managed
-                    .get(&skill.name)
-                    .is_none_or(|record| record_source_matches(record, &skill.source_path))
-            })
-            .map(|skill| skill.name.as_str())
-            .collect();
-        let mut manifest = remove_stale_managed_entries(&skills_dir, &old_manifest, &desired);
-        let to_link: Vec<_> = resolved
-            .into_iter()
-            .filter(|skill| !skills_dir.join(&skill.name).exists())
-            .collect();
-        if let Err(error) = nomifun_extension::link_workspace_skills(
-            workspace,
-            &[".nomi/skills"],
-            &to_link,
-        )
-        .await
-        {
-            tracing::warn!(error = %error, conversation_id, "link companion workspace skills failed");
-        }
-        for skill in &to_link {
-            let target = skills_dir.join(&skill.name);
-            match record_managed_entry(&target, &skill.source_path) {
-                Ok(Some(record)) => {
-                    manifest.managed.insert(skill.name.clone(), record);
-                }
-                Ok(None) => {}
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                Err(error) => tracing::warn!(
-                    error = %error,
-                    target = %target.display(),
-                    "record managed companion skill failed"
-                ),
-            }
-        }
-        if let Err(error) = save_manifest(&nomi_dir, &manifest) {
-            tracing::warn!(error = %error, manifest = %nomi_dir.display(), "save companion skill manifest failed");
-        }
+        sync_managed_workspace_skills(&self.skill_paths, conversation_id, workspace, skill_names)
+            .await;
     }
 
     /// Reconcile the workspace links and immutable conversation skill snapshot
@@ -1054,30 +1088,34 @@ fn mirror_memory_to_nomi(dir: &std::path::Path, kind: &str, content: &str) -> st
 
 #[async_trait]
 impl CompanionMemorySink for CompanionStoreSink {
-    async fn recall(&self, conversation_id: &str, query: &str, kind: Option<&str>, include_archived: bool) -> Result<String, String> {
+    async fn recall(&self, conversation_id: &str, queries: &[String], kind: Option<&str>, include_archived: bool, limit: usize) -> Result<String, String> {
         // Scope recall to the owning companion: shared memories + this
         // companion's own private ones. Mirrors the prompt-injection scope so a
         // companion never recalls another's private memories.
         let scope_companion_id = self.xp_target(conversation_id).await;
-        let filter = MemoryFilter {
+        let companion_id = scope_companion_id
+            .as_deref()
+            .and_then(|id| nomifun_common::CompanionId::try_from(id).ok());
+        let query = MemorySearchQuery {
+            queries: queries.to_vec(),
             kind: kind.map(str::to_owned),
-            q: Some(query.to_owned()),
-            status: if include_archived { None } else { Some("active".into()) },
-            scope_companion_id,
-            limit: 20,
-            offset: 0,
+            scope: None,
+            status: if include_archived { MemoryStatusFilter::All } else { MemoryStatusFilter::Active },
+            companion_id,
+            limit: if limit == 0 { 20 } else { limit },
         };
-        let memories = self.store.list_memories(&filter).await.map_err(|e| e.to_string())?;
-        if memories.is_empty() {
+        let hits = self.store.search_memories(query).await.map_err(|e| e.to_string())?;
+        if hits.is_empty() {
             return Ok("没有找到相关记忆。".into());
         }
         let mut out = String::new();
-        for m in memories {
+        for hit in hits {
+            let m = &hit.memory;
             out.push_str(&format!(
-                "- [{}|{}|强度{:.0}%{}] {}\n",
+                "- [{}|{}|id:{}{}] {}\n",
                 format_date(m.created_at),
                 m.kind,
-                m.strength * 100.0,
+                m.memory_id,
                 if m.status == "archived" { "|已归档" } else { "" },
                 m.content
             ));
@@ -1324,10 +1362,17 @@ mod tests {
         assert!(other.contains("已保存"));
         assert_eq!(store.get_companion_state_i64(&default_companion, "xp").await.unwrap(), 5);
 
-        let hits = s.recall(&owned_conversation, "结论", None, false).await.unwrap();
+        let hits = s.recall(&owned_conversation, &["结论".into()], None, false, 20).await.unwrap();
         assert!(hits.contains("先结论后细节"));
-        let miss = s.recall(&owned_conversation, "不存在xyz", None, false).await.unwrap();
+        // Multi-query OR expansion hits either term; misses stay a friendly line.
+        let multi = s
+            .recall(&owned_conversation, &["不存在xyz".into(), "细节".into()], None, false, 20)
+            .await
+            .unwrap();
+        assert!(multi.contains("先结论后细节"));
+        let miss = s.recall(&owned_conversation, &["不存在xyz".into()], None, false, 20).await.unwrap();
         assert!(miss.contains("没有找到"));
+        assert!(s.recall(&owned_conversation, &[], None, false, 20).await.is_err(), "empty queries error");
 
         assert!(s.save(&owned_conversation, "bogus", "x", &[]).await.is_err());
         assert!(s.save(&owned_conversation, "task", "  ", &[]).await.is_err());
@@ -1548,17 +1593,48 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn sink_recall_output_carries_memory_dates() {
+    async fn local_prompt_routes_heavy_coding_to_summoned_work_sessions() {
+        // Spec §B6 反向分流: the LOCAL 总管家 proposes a summoned work session
+        // for heavy coding instead of doing it inline; the rule rides
+        // nomi_create_conversation's workpath + summon params and requires the
+        // owner's consent first. The paragraph must NOT leak into remote (IM)
+        // mode, whose hard no-proactive-dispatch rule stays authoritative.
+        let store = CompanionStore::open_memory().await.unwrap();
+        let profile = CompanionProfileConfig::new("毛球", "ink", 1);
+
+        let local = build_companion_system_prompt(&store, &profile, None, false).await;
+        assert!(local.contains("重型任务分流"), "local prompt carries the routing rule");
+        assert!(local.contains("nomi_create_conversation"));
+        assert!(local.contains("workpath"));
+        assert!(local.contains("summon"));
+        assert!(local.contains("征得同意"), "consent-first is part of the rule");
+
+        let remote = build_companion_system_prompt(&store, &profile, Some("telegram"), false).await;
+        assert!(!remote.contains("重型任务分流"), "routing rule must not leak into remote mode");
+        assert!(!remote.contains("workpath"));
+    }
+
+    #[tokio::test]
+    async fn sink_recall_output_carries_memory_dates_ids_and_archive_flag() {
         let dir = tempfile::tempdir().unwrap();
         let store = CompanionStore::open_memory().await.unwrap();
-        store
+        let m = store
             .insert_memory("task", "主人想做导出功能", &[], 0.8, "learn")
             .await
             .unwrap();
-        let s = sink(dir.path(), store, SharedCompanionConfig::default());
-        let hits = s.recall(&conversation_fixture(4), "导出", None, false).await.unwrap();
+        let s = sink(dir.path(), store.clone(), SharedCompanionConfig::default());
+        let hits = s.recall(&conversation_fixture(4), &["导出".into()], None, false, 20).await.unwrap();
         let today = format_date(nomifun_common::now_ms());
         assert!(hits.contains(&format!("[{today}|task|")), "recall lines must be dated: {hits}");
+        assert!(hits.contains(&format!("id:{}", m.memory_id)), "recall lines must carry the memory id: {hits}");
+
+        // Archived memories only surface with include_archived, flagged as such.
+        store.archive_memories(std::slice::from_ref(&m.memory_id)).await.unwrap();
+        let gone = s.recall(&conversation_fixture(4), &["导出".into()], None, false, 20).await.unwrap();
+        assert!(gone.contains("没有找到"));
+        let archived = s.recall(&conversation_fixture(4), &["导出".into()], None, true, 20).await.unwrap();
+        assert!(archived.contains("已归档"), "{archived}");
+        assert!(archived.contains("主人想做导出功能"));
     }
 
     #[tokio::test]

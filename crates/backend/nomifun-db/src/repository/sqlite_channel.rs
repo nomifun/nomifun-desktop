@@ -1,18 +1,18 @@
 use nomifun_common::{
     ChannelPluginId, ChannelSessionId, ChannelUserId, CompanionId, ConversationId,
-    MessageId, PublicAgentId, UserId,
+    MessageId, UserId,
 };
 use sqlx::{Sqlite, SqlitePool, Transaction};
 
 use crate::error::DbError;
 use crate::models::{
-    ChannelInboundReceiptRow, ChannelPairingCodeRow, ChannelPluginRow, ChannelSessionRow,
-    ChannelUserRow, NewChannelInboundReceiptRow, NewChannelPairingCodeRow, NewChannelPluginRow,
-    NewChannelSessionRow, NewChannelUserRow,
+    ChannelInboundReceiptRow, ChannelPairingCodeRow, ChannelPendingPromptRow, ChannelPluginRow,
+    ChannelSessionRow, ChannelUserRow, NewChannelInboundReceiptRow, NewChannelPairingCodeRow,
+    NewChannelPendingPromptRow, NewChannelPluginRow, NewChannelSessionRow, NewChannelUserRow,
 };
 use crate::repository::channel::{
-    ChannelInboundClaim, IChannelRepository, SettleChannelInboundReceiptParams,
-    UpdatePluginStatusParams,
+    ChannelInboundClaim, IChannelRepository, PendingPromptEnqueue,
+    SettleChannelInboundReceiptParams, UpdatePluginStatusParams,
 };
 
 /// SQLite-backed implementation of [`IChannelRepository`].
@@ -82,16 +82,10 @@ async fn lock_conversation(
     Ok(Some(conversation_id.into_string()))
 }
 
-fn canonical_plugin_binding_ids(
+fn canonical_plugin_companion_id(
     companion_id: Option<&str>,
-    public_agent_id: Option<&str>,
-) -> Result<(Option<String>, Option<String>), DbError> {
-    if companion_id.is_some() && public_agent_id.is_some() {
-        return Err(DbError::Conflict(
-            "channel plugin cannot bind both a companion and a public agent".into(),
-        ));
-    }
-    let companion_id = companion_id
+) -> Result<Option<String>, DbError> {
+    companion_id
         .map(|value| {
             CompanionId::parse(value)
                 .map(CompanionId::into_string)
@@ -101,19 +95,17 @@ fn canonical_plugin_binding_ids(
                     ))
                 })
         })
-        .transpose()?;
-    let public_agent_id = public_agent_id
-        .map(|value| {
-            PublicAgentId::parse(value)
-                .map(PublicAgentId::into_string)
-                .map_err(|error| {
-                    DbError::Conflict(format!(
-                        "channel plugin public_agent_id '{value}' is not a canonical UUIDv7: {error}"
-                    ))
-                })
-        })
-        .transpose()?;
-    Ok((companion_id, public_agent_id))
+        .transpose()
+}
+
+fn validate_owner_domain(owner_domain: &str) -> Result<(), DbError> {
+    match owner_domain {
+        crate::models::CHANNEL_OWNER_DOMAIN_COMPANION
+        | crate::models::CHANNEL_OWNER_DOMAIN_CUSTOMER_SERVICE => Ok(()),
+        _ => Err(DbError::Conflict(format!(
+            "channel plugin owner_domain '{owner_domain}' is not supported"
+        ))),
+    }
 }
 
 fn validate_agent_type(agent_type: &str, context: &str) -> Result<(), DbError> {
@@ -136,6 +128,20 @@ impl IChannelRepository for SqliteChannelRepository {
         Ok(rows)
     }
 
+    async fn list_plugins_by_owner_domain(
+        &self,
+        owner_domain: &str,
+    ) -> Result<Vec<ChannelPluginRow>, DbError> {
+        validate_owner_domain(owner_domain)?;
+        let rows = sqlx::query_as::<_, ChannelPluginRow>(
+            "SELECT * FROM channel_plugins WHERE owner_domain = ? ORDER BY created_at ASC",
+        )
+        .bind(owner_domain)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows)
+    }
+
     async fn get_plugin(
         &self,
         channel_plugin_id: &str,
@@ -151,14 +157,12 @@ impl IChannelRepository for SqliteChannelRepository {
 
     async fn create_plugin(&self, row: &NewChannelPluginRow) -> Result<ChannelPluginRow, DbError> {
         let channel_plugin_id = ChannelPluginId::new().into_string();
-        let (companion_id, public_agent_id) = canonical_plugin_binding_ids(
-            row.companion_id.as_deref(),
-            row.public_agent_id.as_deref(),
-        )?;
+        let companion_id = canonical_plugin_companion_id(row.companion_id.as_deref())?;
+        validate_owner_domain(&row.owner_domain)?;
         sqlx::query_as::<_, ChannelPluginRow>(
             "INSERT INTO channel_plugins \
                 (channel_plugin_id, type, name, enabled, config, status, last_connected, \
-                 companion_id, public_agent_id, bot_key, created_at, updated_at) \
+                 companion_id, bot_key, owner_domain, created_at, updated_at) \
              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
              RETURNING *",
         )
@@ -170,8 +174,8 @@ impl IChannelRepository for SqliteChannelRepository {
         .bind(&row.status)
         .bind(row.last_connected)
         .bind(&companion_id)
-        .bind(&public_agent_id)
         .bind(&row.bot_key)
+        .bind(&row.owner_domain)
         .bind(row.created_at)
         .bind(row.updated_at)
         .fetch_one(&self.pool)
@@ -183,6 +187,8 @@ impl IChannelRepository for SqliteChannelRepository {
                     row.bot_key.as_deref().unwrap_or("?"),
                     row.r#type
                 ))
+            } else if is_owner_domain_violation(&e) {
+                owner_domain_conflict()
             } else {
                 DbError::Query(e)
             }
@@ -196,15 +202,13 @@ impl IChannelRepository for SqliteChannelRepository {
                 row.channel_plugin_id
             ))
         })?;
-        let (companion_id, public_agent_id) = canonical_plugin_binding_ids(
-            row.companion_id.as_deref(),
-            row.public_agent_id.as_deref(),
-        )?;
+        let companion_id = canonical_plugin_companion_id(row.companion_id.as_deref())?;
+        validate_owner_domain(&row.owner_domain)?;
         let updated = sqlx::query_as::<_, ChannelPluginRow>(
             "UPDATE channel_plugins SET \
                 type = ?, name = ?, enabled = ?, config = ?, status = ?, \
-                last_connected = ?, companion_id = ?, public_agent_id = ?, \
-                bot_key = ?, updated_at = ? \
+                last_connected = ?, companion_id = ?, \
+                bot_key = ?, owner_domain = ?, updated_at = ? \
              WHERE channel_plugin_id = ? \
              RETURNING *",
         )
@@ -215,8 +219,8 @@ impl IChannelRepository for SqliteChannelRepository {
         .bind(&row.status)
         .bind(row.last_connected)
         .bind(&companion_id)
-        .bind(&public_agent_id)
         .bind(&row.bot_key)
+        .bind(&row.owner_domain)
         .bind(row.updated_at)
         .bind(&row.channel_plugin_id)
         .fetch_optional(&self.pool)
@@ -228,6 +232,8 @@ impl IChannelRepository for SqliteChannelRepository {
                     row.bot_key.as_deref().unwrap_or("?"),
                     row.r#type
                 ))
+            } else if is_owner_domain_violation(&e) {
+                owner_domain_conflict()
             } else {
                 DbError::Query(e)
             }
@@ -295,73 +301,25 @@ impl IChannelRepository for SqliteChannelRepository {
         channel_plugin_id: &str,
         companion_id: Option<&str>,
     ) -> Result<(), DbError> {
-        let companion_id = companion_id
-            .map(|value| {
-                CompanionId::parse(value)
-                    .map(CompanionId::into_string)
-                    .map_err(|error| {
-                        DbError::Conflict(format!(
-                            "channel plugin companion_id '{value}' is not a canonical UUIDv7: {error}"
-                        ))
-                    })
-            })
-            .transpose()?;
-        // Row-level mutual exclusivity: binding a companion (non-null) clears any
-        // public-agent binding on the same row. Clearing (`None`) leaves the
-        // public-agent binding untouched.
+        let companion_id = canonical_plugin_companion_id(companion_id)?;
         let result = sqlx::query(
             "UPDATE channel_plugins \
              SET companion_id = ?, \
-                 public_agent_id = CASE WHEN ? IS NOT NULL THEN NULL ELSE public_agent_id END, \
                  updated_at = ? \
              WHERE channel_plugin_id = ?",
         )
         .bind(companion_id.as_deref())
-        .bind(companion_id.as_deref())
         .bind(nomifun_common::now_ms())
         .bind(channel_plugin_id)
         .execute(&self.pool)
-        .await?;
-        if result.rows_affected() == 0 {
-            return Err(DbError::NotFound(format!(
-                "Plugin '{channel_plugin_id}' not found"
-            )));
-        }
-        Ok(())
-    }
-
-    async fn update_plugin_public_agent(
-        &self,
-        channel_plugin_id: &str,
-        public_agent_id: Option<&str>,
-    ) -> Result<(), DbError> {
-        let public_agent_id = public_agent_id
-            .map(|value| {
-                PublicAgentId::parse(value)
-                    .map(PublicAgentId::into_string)
-                    .map_err(|error| {
-                        DbError::Conflict(format!(
-                            "channel plugin public_agent_id '{value}' is not a canonical UUIDv7: {error}"
-                        ))
-                    })
-            })
-            .transpose()?;
-        // Row-level mutual exclusivity: binding a public agent (non-null) clears
-        // any companion binding on the same row. Clearing (`None`) leaves the
-        // companion binding untouched.
-        let result = sqlx::query(
-            "UPDATE channel_plugins \
-             SET public_agent_id = ?, \
-                 companion_id = CASE WHEN ? IS NOT NULL THEN NULL ELSE companion_id END, \
-                 updated_at = ? \
-             WHERE channel_plugin_id = ?",
-        )
-        .bind(public_agent_id.as_deref())
-        .bind(public_agent_id.as_deref())
-        .bind(nomifun_common::now_ms())
-        .bind(channel_plugin_id)
-        .execute(&self.pool)
-        .await?;
+        .await
+        .map_err(|e| {
+            if is_owner_domain_violation(&e) {
+                owner_domain_conflict()
+            } else {
+                DbError::Query(e)
+            }
+        })?;
         if result.rows_affected() == 0 {
             return Err(DbError::NotFound(format!(
                 "Plugin '{channel_plugin_id}' not found"
@@ -455,6 +413,14 @@ impl IChannelRepository for SqliteChannelRepository {
             .execute(&mut *tx)
             .await?;
         sqlx::query("DELETE FROM channel_pairing_codes WHERE channel_plugin_id = ?")
+            .bind(channel_plugin_id)
+            .execute(&mut *tx)
+            .await?;
+
+        // Deleting a bot releases its customer-service binding (Cascade):
+        // the binding is domain state of the customer-service crate, but the
+        // channel aggregate owns the plugin row lifecycle.
+        sqlx::query("DELETE FROM cs_channel_bindings WHERE channel_plugin_id = ?")
             .bind(channel_plugin_id)
             .execute(&mut *tx)
             .await?;
@@ -1245,6 +1211,199 @@ impl IChannelRepository for SqliteChannelRepository {
         .await?;
         Ok(result.rows_affected())
     }
+
+    // -- Busy-time pending prompt queue (spec D1) ---------------------
+
+    async fn enqueue_pending_prompt(
+        &self,
+        row: &NewChannelPendingPromptRow,
+        now: nomifun_common::TimestampMs,
+    ) -> Result<PendingPromptEnqueue, DbError> {
+        ChannelPluginId::parse(&row.channel_plugin_id).map_err(|error| {
+            DbError::Conflict(format!(
+                "pending prompt channel plugin id is invalid: {error}"
+            ))
+        })?;
+        ChannelSessionId::parse(&row.channel_session_id).map_err(|error| {
+            DbError::Conflict(format!(
+                "pending prompt channel session id is invalid: {error}"
+            ))
+        })?;
+        ConversationId::parse(&row.conversation_id).map_err(|error| {
+            DbError::Conflict(format!("pending prompt conversation id is invalid: {error}"))
+        })?;
+        if row.chat_id.trim().is_empty() || row.text.trim().is_empty() {
+            return Err(DbError::Conflict(
+                "pending prompt requires a chat id and non-empty text".to_owned(),
+            ));
+        }
+        if row.idempotency_key.trim().is_empty() {
+            return Err(DbError::Conflict(
+                "pending prompt requires an idempotency key".to_owned(),
+            ));
+        }
+
+        let mut tx = self.pool.begin().await?;
+        // The zero-row write upgrades this transaction to the SQLite writer
+        // before the cap read, so concurrent enqueues of the same conversation
+        // serialize and the COUNT + INSERT pair is atomic.
+        sqlx::query(
+            "UPDATE channel_pending_prompts SET state = state \
+             WHERE conversation_id = ? AND state = 'queued' AND 0",
+        )
+        .bind(&row.conversation_id)
+        .execute(&mut *tx)
+        .await?;
+        let queued: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM channel_pending_prompts \
+             WHERE conversation_id = ? AND state = 'queued'",
+        )
+        .bind(&row.conversation_id)
+        .fetch_one(&mut *tx)
+        .await?;
+        if queued >= crate::repository::channel::PENDING_PROMPT_QUEUE_LIMIT {
+            tx.rollback().await?;
+            return Ok(PendingPromptEnqueue::QueueFull);
+        }
+        let prompt_id = nomifun_common::ChannelPendingPromptId::new().into_string();
+        let inserted = sqlx::query_as::<_, ChannelPendingPromptRow>(
+            "INSERT INTO channel_pending_prompts \
+                (prompt_id, channel_plugin_id, chat_id, channel_session_id, conversation_id, \
+                 text, idempotency_key, state, attempts, queued_at) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, 'queued', 0, ?) \
+             RETURNING prompt_id, channel_plugin_id, chat_id, channel_session_id, \
+                       conversation_id, text, idempotency_key, state, attempts, \
+                       queued_at, settled_at",
+        )
+        .bind(&prompt_id)
+        .bind(&row.channel_plugin_id)
+        .bind(&row.chat_id)
+        .bind(&row.channel_session_id)
+        .bind(&row.conversation_id)
+        .bind(&row.text)
+        .bind(&row.idempotency_key)
+        .bind(now)
+        .fetch_one(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(PendingPromptEnqueue::Queued {
+            row: inserted,
+            position: queued + 1,
+        })
+    }
+
+    async fn peek_next_queued(
+        &self,
+        conversation_id: &str,
+    ) -> Result<Option<ChannelPendingPromptRow>, DbError> {
+        let row = sqlx::query_as::<_, ChannelPendingPromptRow>(
+            "SELECT prompt_id, channel_plugin_id, chat_id, channel_session_id, \
+                    conversation_id, text, idempotency_key, state, attempts, \
+                    queued_at, settled_at \
+             FROM channel_pending_prompts \
+             WHERE conversation_id = ? AND state = 'queued' \
+             ORDER BY id ASC LIMIT 1",
+        )
+        .bind(conversation_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row)
+    }
+
+    async fn settle_prompt(
+        &self,
+        prompt_id: &str,
+        state: &str,
+        now: nomifun_common::TimestampMs,
+    ) -> Result<(), DbError> {
+        if !matches!(state, "delivered" | "expired" | "cancelled" | "failed") {
+            return Err(DbError::Conflict(format!(
+                "pending prompt cannot settle into state '{state}'"
+            )));
+        }
+        let result = sqlx::query(
+            "UPDATE channel_pending_prompts \
+             SET state = ?, settled_at = ? \
+             WHERE prompt_id = ? AND state = 'queued'",
+        )
+        .bind(state)
+        .bind(now)
+        .bind(prompt_id)
+        .execute(&self.pool)
+        .await?;
+        if result.rows_affected() == 0 {
+            return Err(DbError::Conflict(format!(
+                "pending prompt '{prompt_id}' is not queued; terminal states are absorbing"
+            )));
+        }
+        Ok(())
+    }
+
+    async fn increment_prompt_attempts(&self, prompt_id: &str) -> Result<i64, DbError> {
+        let attempts: Option<i64> = sqlx::query_scalar(
+            "UPDATE channel_pending_prompts \
+             SET attempts = attempts + 1 \
+             WHERE prompt_id = ? AND state = 'queued' \
+             RETURNING attempts",
+        )
+        .bind(prompt_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        attempts.ok_or_else(|| {
+            DbError::Conflict(format!(
+                "pending prompt '{prompt_id}' is not queued; retries only apply to queued prompts"
+            ))
+        })
+    }
+
+    async fn expire_stale(
+        &self,
+        before_ms: nomifun_common::TimestampMs,
+        now: nomifun_common::TimestampMs,
+    ) -> Result<Vec<ChannelPendingPromptRow>, DbError> {
+        let rows = sqlx::query_as::<_, ChannelPendingPromptRow>(
+            "UPDATE channel_pending_prompts \
+             SET state = 'expired', settled_at = ? \
+             WHERE state = 'queued' AND queued_at < ? \
+             RETURNING prompt_id, channel_plugin_id, chat_id, channel_session_id, \
+                       conversation_id, text, idempotency_key, state, attempts, \
+                       queued_at, settled_at",
+        )
+        .bind(now)
+        .bind(before_ms)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows)
+    }
+
+    async fn cancel_chat_queue(
+        &self,
+        channel_plugin_id: &str,
+        chat_id: &str,
+        now: nomifun_common::TimestampMs,
+    ) -> Result<u64, DbError> {
+        let result = sqlx::query(
+            "UPDATE channel_pending_prompts \
+             SET state = 'cancelled', settled_at = ? \
+             WHERE channel_plugin_id = ? AND chat_id = ? AND state = 'queued'",
+        )
+        .bind(now)
+        .bind(channel_plugin_id)
+        .bind(chat_id)
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected())
+    }
+
+    async fn list_queued_conversations(&self) -> Result<Vec<String>, DbError> {
+        let rows: Vec<String> = sqlx::query_scalar(
+            "SELECT DISTINCT conversation_id FROM channel_pending_prompts \
+             WHERE state = 'queued' ORDER BY conversation_id",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows)
+    }
 }
 
 /// Checks whether a sqlx error indicates a UNIQUE constraint violation.
@@ -1253,6 +1412,23 @@ fn is_unique_violation(err: &sqlx::Error) -> bool {
         sqlx::Error::Database(db_err) => db_err.message().contains("UNIQUE constraint failed"),
         _ => false,
     }
+}
+
+/// Checks whether a sqlx error carries the owner-domain guard-trigger abort
+/// (migration 020: cs-domain bots must never carry a companion binding).
+fn is_owner_domain_violation(err: &sqlx::Error) -> bool {
+    match err {
+        sqlx::Error::Database(db_err) => db_err
+            .message()
+            .contains("customer-service channel bots cannot carry a companion binding"),
+        _ => false,
+    }
+}
+
+fn owner_domain_conflict() -> DbError {
+    DbError::Conflict(
+        "customer-service channel bots cannot carry a companion binding".to_owned(),
+    )
 }
 
 #[cfg(test)]
@@ -1278,8 +1454,8 @@ mod tests {
             status: None,
             last_connected: None,
             companion_id: None,
-            public_agent_id: None,
             bot_key: None,
+            owner_domain: crate::models::default_owner_domain(),
             created_at: now,
             updated_at: now,
         }
@@ -1445,8 +1621,8 @@ mod tests {
             status: Some("running".into()),
             last_connected: Some(now),
             companion_id: None,
-            public_agent_id: None,
             bot_key: None,
+            owner_domain: crate::models::default_owner_domain(),
             created_at: now,
             updated_at: now,
         };
@@ -1623,8 +1799,8 @@ mod tests {
             status: None,
             last_connected: None,
             companion_id: Some(companion.into()),
-            public_agent_id: None,
             bot_key: Some("cli_same_app".into()),
+            owner_domain: crate::models::default_owner_domain(),
             created_at: now,
             updated_at: now,
         };
@@ -1663,8 +1839,8 @@ mod tests {
                 status: None,
                 last_connected: None,
                 companion_id: None,
-                public_agent_id: None,
                 bot_key: Some(key.into()),
+                owner_domain: crate::models::default_owner_domain(),
                 created_at: now,
                 updated_at: now,
             })
@@ -1713,104 +1889,126 @@ mod tests {
         assert!(matches!(err, DbError::NotFound(_)));
     }
 
+    // -- Owner-domain tests (migration 020) ---------------------------------
+
+    fn cs_plugin(name: &str) -> NewChannelPluginRow {
+        NewChannelPluginRow {
+            name: name.into(),
+            owner_domain: crate::models::CHANNEL_OWNER_DOMAIN_CUSTOMER_SERVICE.into(),
+            ..sample_plugin()
+        }
+    }
+
     #[tokio::test]
-    async fn update_plugin_public_agent_roundtrip_and_clear() {
+    async fn create_plugin_defaults_to_companion_domain() {
         let (repo, _db) = setup().await;
         let plugin = repo.create_plugin(&sample_plugin()).await.unwrap();
-        let public_agent_id = PublicAgentId::new().into_string();
+        assert_eq!(plugin.owner_domain, "companion");
+    }
 
-        repo.update_plugin_public_agent(&plugin.channel_plugin_id, Some(&public_agent_id))
-            .await
-            .unwrap();
+    #[tokio::test]
+    async fn create_customer_service_plugin_roundtrips_domain() {
+        let (repo, _db) = setup().await;
+        let plugin = repo.create_plugin(&cs_plugin("CS Bot")).await.unwrap();
+        assert_eq!(plugin.owner_domain, "customer_service");
         assert_eq!(
             repo.get_plugin(&plugin.channel_plugin_id)
                 .await
                 .unwrap()
                 .unwrap()
-                .public_agent_id
-                .as_deref(),
-            Some(public_agent_id.as_str())
+                .owner_domain,
+            "customer_service"
         );
+    }
 
-        repo.update_plugin_public_agent(&plugin.channel_plugin_id, None)
-            .await
-            .unwrap();
+    #[tokio::test]
+    async fn create_plugin_rejects_unknown_owner_domain() {
+        let (repo, _db) = setup().await;
+        let mut plugin = sample_plugin();
+        plugin.owner_domain = "somebody_else".into();
+        let err = repo.create_plugin(&plugin).await.unwrap_err();
+        assert!(matches!(err, DbError::Conflict(_)));
+    }
+
+    #[tokio::test]
+    async fn create_customer_service_plugin_with_companion_is_rejected() {
+        let (repo, _db) = setup().await;
+        let mut plugin = cs_plugin("CS Bot");
+        plugin.companion_id = Some(CompanionId::new().into_string());
+        let err = repo.create_plugin(&plugin).await.unwrap_err();
         assert!(
-            repo.get_plugin(&plugin.channel_plugin_id)
-                .await
-                .unwrap()
-                .unwrap()
-                .public_agent_id
-                .is_none()
+            matches!(&err, DbError::Conflict(message) if message.contains("companion binding")),
+            "trigger must abort a cs-domain insert carrying companion_id: {err:?}"
         );
+    }
 
-        let missing_id = ChannelPluginId::new();
+    #[tokio::test]
+    async fn customer_service_plugin_cannot_gain_companion_binding() {
+        let (repo, _db) = setup().await;
+        let plugin = repo.create_plugin(&cs_plugin("CS Bot")).await.unwrap();
+        let companion_id = CompanionId::new().into_string();
+
+        // Direct binding write is aborted by the update guard trigger.
         let err = repo
-            .update_plugin_public_agent(missing_id.as_str(), Some(&public_agent_id))
+            .update_plugin_companion(&plugin.channel_plugin_id, Some(&companion_id))
             .await
             .unwrap_err();
-        assert!(matches!(err, DbError::NotFound(_)));
+        assert!(
+            matches!(&err, DbError::Conflict(message) if message.contains("companion binding")),
+            "update guard must abort: {err:?}"
+        );
+
+        // Full-row update carrying both is equally aborted.
+        let err = repo
+            .update_plugin(&ChannelPluginRow {
+                companion_id: Some(companion_id),
+                updated_at: nomifun_common::now_ms(),
+                ..plugin
+            })
+            .await
+            .unwrap_err();
+        assert!(matches!(err, DbError::Conflict(_)));
     }
 
-    /// A bot row serves EITHER a companion OR a public agent, never both:
-    /// setting one binding clears the other, in both directions.
     #[tokio::test]
-    async fn companion_and_public_agent_bindings_are_mutually_exclusive_on_a_row() {
+    async fn companion_plugin_cannot_switch_to_customer_service_while_bound() {
         let (repo, _db) = setup().await;
-        let plugin = repo.create_plugin(&sample_plugin()).await.unwrap();
-        let companion_1 = CompanionId::new().into_string();
-        let companion_2 = CompanionId::new().into_string();
-        let public_agent_1 = PublicAgentId::new().into_string();
-        let public_agent_2 = PublicAgentId::new().into_string();
+        let mut plugin = sample_plugin();
+        plugin.companion_id = Some(CompanionId::new().into_string());
+        let created = repo.create_plugin(&plugin).await.unwrap();
 
-        // Bind a companion, then bind a public agent → companion is cleared.
-        repo.update_plugin_companion(&plugin.channel_plugin_id, Some(&companion_1))
+        let err = repo
+            .update_plugin(&ChannelPluginRow {
+                owner_domain: crate::models::CHANNEL_OWNER_DOMAIN_CUSTOMER_SERVICE.into(),
+                updated_at: nomifun_common::now_ms(),
+                ..created
+            })
             .await
-            .unwrap();
-        repo.update_plugin_public_agent(&plugin.channel_plugin_id, Some(&public_agent_1))
-            .await
-            .unwrap();
-        let row = repo
-            .get_plugin(&plugin.channel_plugin_id)
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(row.public_agent_id.as_deref(), Some(public_agent_1.as_str()));
-        assert!(
-            row.companion_id.is_none(),
-            "binding a public agent must clear the companion"
-        );
-
-        // Bind a companion again → public agent is cleared.
-        repo.update_plugin_companion(&plugin.channel_plugin_id, Some(&companion_2))
-            .await
-            .unwrap();
-        let row = repo
-            .get_plugin(&plugin.channel_plugin_id)
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(row.companion_id.as_deref(), Some(companion_2.as_str()));
-        assert!(
-            row.public_agent_id.is_none(),
-            "binding a companion must clear the public agent"
-        );
-
-        // Clearing one binding does NOT touch the other.
-        repo.update_plugin_public_agent(&plugin.channel_plugin_id, Some(&public_agent_2))
-            .await
-            .unwrap();
-        repo.update_plugin_public_agent(&plugin.channel_plugin_id, None)
-            .await
-            .unwrap();
-        let row = repo
-            .get_plugin(&plugin.channel_plugin_id)
-            .await
-            .unwrap()
-            .unwrap();
-        assert!(row.public_agent_id.is_none());
-        assert!(row.companion_id.is_none());
+            .unwrap_err();
+        assert!(matches!(err, DbError::Conflict(_)));
     }
+
+    #[tokio::test]
+    async fn list_plugins_by_owner_domain_filters() {
+        let (repo, _db) = setup().await;
+        repo.create_plugin(&sample_plugin()).await.unwrap();
+        let cs = repo.create_plugin(&cs_plugin("CS Bot")).await.unwrap();
+
+        let companion_rows = repo.list_plugins_by_owner_domain("companion").await.unwrap();
+        assert_eq!(companion_rows.len(), 1);
+        assert_eq!(companion_rows[0].owner_domain, "companion");
+
+        let cs_rows = repo
+            .list_plugins_by_owner_domain("customer_service")
+            .await
+            .unwrap();
+        assert_eq!(cs_rows.len(), 1);
+        assert_eq!(cs_rows[0].channel_plugin_id, cs.channel_plugin_id);
+
+        let err = repo.list_plugins_by_owner_domain("bogus").await.unwrap_err();
+        assert!(matches!(err, DbError::Conflict(_)));
+    }
+
 
     #[tokio::test]
     async fn update_plugin_bot_key_backfills() {

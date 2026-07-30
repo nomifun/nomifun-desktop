@@ -209,7 +209,40 @@ async fn t12_2_csrf_blocks_post_without_token() {
     let (mut app, services) = build_app().await;
     let (token, _csrf) = setup_and_login(&mut app, &services, "admin", "StrongP@ss1").await;
 
-    // POST /logout without CSRF token → 403
+    // POST to a CSRF-guarded mutation without the token → 403
+    let req = Request::builder()
+        .method("POST")
+        .uri("/api/auth/change-password")
+        .header("authorization", format!("Bearer {token}"))
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    // The rejection must re-seed the CSRF cookie so the client can self-heal.
+    assert!(
+        resp.headers()
+            .get_all("set-cookie")
+            .iter()
+            .filter_map(|v| v.to_str().ok())
+            .any(|c| c.starts_with("nomifun-csrf-token=")),
+        "CSRF 403 must carry a re-seeded csrf cookie"
+    );
+    let json = body_json(resp).await;
+    assert!(
+        json["error"].as_str().unwrap_or("").contains("CSRF"),
+        "error message should mention CSRF"
+    );
+}
+
+#[tokio::test]
+async fn t12_2_logout_is_csrf_exempt() {
+    let (mut app, services) = build_app().await;
+    let (token, _csrf) = setup_and_login(&mut app, &services, "admin", "StrongP@ss1").await;
+
+    // Logout is idempotent and self-deauthorizing: it must succeed WITHOUT a
+    // CSRF token, otherwise a stale csrf cookie makes logout fail forever and
+    // the server-side session survives (audit 2026-07-30, finding C).
     let req = Request::builder()
         .method("POST")
         .uri("/logout")
@@ -218,12 +251,48 @@ async fn t12_2_csrf_blocks_post_without_token() {
         .unwrap();
     let resp = app.oneshot(req).await.unwrap();
 
-    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
-    let json = body_json(resp).await;
-    assert!(
-        json["error"].as_str().unwrap_or("").contains("CSRF"),
-        "error message should mention CSRF"
+    assert_eq!(resp.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn change_username_requires_correct_current_password() {
+    let (mut app, services) = build_app().await;
+    let (token, csrf) = setup_and_login(&mut app, &services, "admin", "StrongP@ss1").await;
+
+    // Wrong current password → 401, username unchanged.
+    let req = post_json_with_csrf(
+        "/api/auth/change-username",
+        r#"{"current_password":"WrongP@ss9","new_username":"renamed-admin"}"#,
+        &token,
+        &csrf,
     );
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+
+    // Correct current password → 200 with the new username echoed.
+    let req = post_json_with_csrf(
+        "/api/auth/change-username",
+        r#"{"current_password":"StrongP@ss1","new_username":"renamed-admin"}"#,
+        &token,
+        &csrf,
+    );
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let json = body_json(resp).await;
+    assert_eq!(json["data"]["username"], "renamed-admin");
+
+    // The session survives a rename (unlike a password change): the JWT keys
+    // on user id, and lookups resolve the fresh username.
+    let req = get_with_token("/api/auth/user", &token);
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let json = body_json(resp).await;
+    assert_eq!(json["user"]["username"], "renamed-admin");
+
+    // The new username signs in with the unchanged password.
+    let req = post_json_login("/login", r#"{"username":"renamed-admin","password":"StrongP@ss1"}"#);
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
 }
 
 #[tokio::test]

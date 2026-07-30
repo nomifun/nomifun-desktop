@@ -58,8 +58,9 @@ bun run serve:web
 `--insecure-no-auth`, so keep it on localhost or an isolated network.
 
 The Rust-backed development loops (`dev`, `dev:web`, and `build:fast`) use the
-`dev` build channel and therefore default to the `Nomi-dev` data directory.
-Production-style `serve:web` and release builds remain on the stable `Nomi`
+`dev` build channel and therefore default to the `NomiFun-dev` data directory
+(a sibling of the stable root, never nested inside it).
+Production-style `serve:web` and release builds remain on the stable `NomiFun`
 directory. Use `bun run seed:dev` when dev needs a snapshot of stable state.
 
 The desktop loop does **not** use the old Electron process model. The Tauri
@@ -127,9 +128,9 @@ prints a table to stdout.
 
 All hosts share the same unset default data directory:
 
-- Windows: `%LOCALAPPDATA%\NomiFun\Nomi`
-- macOS: `~/Library/Application Support/NomiFun/Nomi`
-- Linux: `$XDG_DATA_HOME/NomiFun/Nomi` or `~/.local/share/NomiFun/Nomi`
+- Windows: `%LOCALAPPDATA%\NomiFun`
+- macOS: `~/Library/Application Support/NomiFun`
+- Linux: `$XDG_DATA_HOME/NomiFun` or `~/.local/share/NomiFun`
 
 The data dir contains SQLite state, logs, Bun runtime cache, extension data,
 agent state, and other persistent local state. The backend takes an exclusive
@@ -143,13 +144,16 @@ NOMIFUN_DATA_DIR=/tmp/nomifun-dev bun run serve:web
 NOMIFUN_DATA_DIR=/tmp/nomifun-dev bun run dev
 ```
 
-Desktop app semantics append the channel-specific `Nomi` leaf; web and
-`nomicore` take the env value literally. See
+Every host — desktop, web, and `nomicore` — takes the env value literally as
+the final data root (no channel leaf is appended); the unset dev default is
+the `NomiFun-dev` sibling directory. See
 [`../reference/configuration.md`](../reference/configuration.md) before relying
 on this in automation.
 
-`NOMIFUN_WORK_DIR` controls where conversation workspaces are created. If unset,
-the backend falls back to the data dir.
+`NOMIFUN_WORK_DIR` controls where conversation workspaces are created. It ranks
+below the UI-selected workspace persisted in `dir-config.json`; inherited values
+that name a default data-root location or a directory that no longer exists are
+ignored. If unset, the backend falls back to the data dir.
 
 ## Logs
 

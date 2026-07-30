@@ -109,28 +109,30 @@ To test the updater scaffold, use `bun run build:updater`, which sets
 ### Where data lives (desktop)
 
 The desktop app stores its database and runtime files under the per-user
-application-data directory, joined with `Nomi`:
+application-data directory:
 
 | OS | Default path |
 | --- | --- |
-| Windows | `%LOCALAPPDATA%\NomiFun\Nomi` (e.g. `C:\Users\<you>\AppData\Local\NomiFun\Nomi`) |
-| macOS | `~/Library/Application Support/NomiFun/Nomi` |
-| Linux | `$XDG_DATA_HOME/NomiFun/Nomi` (usually `~/.local/share/NomiFun/Nomi`) |
+| Windows | `%LOCALAPPDATA%\NomiFun` (e.g. `C:\Users\<you>\AppData\Local\NomiFun`) |
+| macOS | `~/Library/Application Support/NomiFun` |
+| Linux | `$XDG_DATA_HOME/NomiFun` (usually `~/.local/share/NomiFun`) |
 
 Override with `NOMIFUN_DATA_DIR=<absolute path>` before launching — the
-shell appends `/Nomi`, so the dir becomes `$NOMIFUN_DATA_DIR/Nomi`.
+value is taken literally as the data root on every host (no `/Nomi`
+suffix appended).
 
-> Older builds defaulted to `<system temp>/nomifun-data/Nomi`, where OS temp
-> cleanup could destroy user data. On first launch the app now relocates such
-> a legacy install to the per-user location automatically (one-shot): data is
-> copied, absolute paths inside the database are rewritten, and the old
-> directory is kept as a backup. If the relocation cannot complete, the app
-> starts from the legacy directory and retries on the next launch.
+> Older builds stored data under `NomiFun/Nomi` (and, before that, under
+> `<system temp>/nomifun-data/Nomi`, where OS temp cleanup could destroy
+> user data). On the first boot after upgrading, a one-shot automatic
+> migration moves such a legacy dataset into the new root: the migration
+> is crash-safe, absolute paths inside the database are rewritten once
+> after the move, and if it cannot complete it resumes on the next launch
+> (it is deferred to the next launch if the old app instance is still
+> running).
 
 > Note: the app's user-facing name is `NomiFun` everywhere — the bundle
 > product name (`apps/desktop/tauri.conf.json`), the runtime window title,
-> and release artifacts. The data folder keeps its existing `/Nomi`
-> suffix for compatibility with current installs. Internal identifiers keep the legacy `nomifun`
+> release artifacts, and the data folder. Internal identifiers keep the legacy `nomifun`
 > name by design (crates, `NOMIFUN_*` env vars, the `com.nomifun.*`
 > bundle identifier).
 
