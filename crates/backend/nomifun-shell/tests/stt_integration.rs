@@ -1,591 +1,404 @@
-use nomifun_api_types::{
-    DeepgramSpeechToTextConfig, OpenAISpeechToTextConfig, SpeechToTextConfig, SpeechToTextProvider,
-};
-use nomifun_shell::{SttError, SttService};
-use wiremock::matchers::{body_string_contains, header, method, path};
+//! Black-box tests for `POST /api/stt`: real in-memory catalog + client
+//! preferences + wiremock provider behind the unified invoke layer.
+//!
+//! The execution protocol is decided by the invoke layer's platform routing —
+//! a deepgram-platform provider is hit at `/v1/listen` with `Authorization:
+//! Token …` even when the stored preference's `provider` enum guesses
+//! "openai" (the legacy name-guess is display-only now); everything else
+//! rides the OpenAI-compatible multipart `/v1/audio/transcriptions`.
+
+use std::sync::Arc;
+
+use axum::body::Body;
+use axum::http::{Request, StatusCode};
+use http_body_util::BodyExt;
+use serde_json::json;
+use tower::ServiceExt;
+use wiremock::matchers::{body_string_contains, header, method, path, query_param};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
-fn dummy_audio() -> Vec<u8> {
-    vec![0u8; 64]
-}
+use nomifun_db::{
+    CreateProviderParams, IProviderModelRepository, IProviderRepository, NewProviderModel,
+    SqliteProviderConnectionRepository, SqliteProviderModelRepository, SqliteProviderRepository,
+    init_database_memory,
+};
+use nomifun_model_invoke::{AdapterRegistry, ModelInvokeService, default_adapters};
+use nomifun_shell::{NoopSystemOpener, ShellRouterState, ShellService, SttService, shell_routes};
+use nomifun_system::{ClientPrefService, ProviderService};
 
-fn stt_service() -> SttService {
-    let client = reqwest::Client::builder()
-        .no_proxy()
-        .build()
-        .expect("test HTTP client should build");
-    SttService::new(client)
-}
+const TEST_KEY: [u8; 32] = [0x42; 32];
 
-// ---------------------------------------------------------------------------
-// ST-1: OpenAI transcription — success
-// ---------------------------------------------------------------------------
-#[tokio::test]
-async fn st1_openai_transcribe_success() {
-    let mock_server = MockServer::start().await;
+/// Real in-memory DB + production adapters + provider/preference services
+/// behind the shell router. The `Database` handle is forgotten (not dropped)
+/// so the in-memory pool stays alive for the test.
+async fn setup() -> (axum::Router, nomifun_db::SqlitePool) {
+    let db = init_database_memory().await.unwrap();
+    let pool = db.pool().clone();
+    std::mem::forget(db);
 
-    Mock::given(method("POST"))
-        .and(path("/v1/audio/transcriptions"))
-        .and(header("Authorization", "Bearer sk-test-key"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({ "text": "hello world" })))
-        .mount(&mock_server)
-        .await;
+    let invoke = Arc::new(ModelInvokeService::new(
+        Arc::new(SqliteProviderRepository::new(pool.clone())),
+        Arc::new(SqliteProviderModelRepository::new(pool.clone())),
+        Arc::new(SqliteProviderConnectionRepository::new(pool.clone())),
+        TEST_KEY,
+        reqwest::Client::new(),
+        AdapterRegistry::new(default_adapters()),
+    ));
 
-    let config = SpeechToTextConfig {
-        enabled: true,
-        provider: SpeechToTextProvider::Openai,
-        provider_id: None,
-        model: None,
-        language: None,
-        auto_send: None,
-        openai: Some(OpenAISpeechToTextConfig {
-            api_key: "sk-test-key".into(),
-            base_url: Some(mock_server.uri()),
-            is_full_url: false,
-            model: "whisper-1".into(),
-            language: None,
-            prompt: None,
-            temperature: None,
-        }),
-        deepgram: None,
+    let state = ShellRouterState {
+        shell_service: Arc::new(ShellService::new(Arc::new(NoopSystemOpener))),
+        stt_service: Arc::new(SttService::new(Some(invoke.clone()))),
+        client_pref_service: ClientPrefService::new(Arc::new(
+            nomifun_db::SqliteClientPreferenceRepository::new(pool.clone()),
+        )),
+        provider_service: Some(ProviderService::new(
+            Arc::new(SqliteProviderRepository::new(pool.clone())),
+            Arc::new(SqliteProviderModelRepository::new(pool.clone())),
+            TEST_KEY,
+        )),
+        model_invoke_service: Some(invoke),
     };
+    (shell_routes(state), pool)
+}
 
-    let result = stt_service()
-        .transcribe(dummy_audio(), "test.wav", "audio/wav", None, &config)
-        .await
-        .unwrap();
+/// Seed an enabled provider on `platform` whose base_url is the mock server
+/// (key decrypts to `sk-test`).
+async fn seed_provider(pool: &nomifun_db::SqlitePool, platform: &str, base_url: &str) -> String {
+    let repo = SqliteProviderRepository::new(pool.clone());
+    let encrypted = nomifun_common::encrypt_string("sk-test", &TEST_KEY).unwrap();
+    repo.create(CreateProviderParams {
+        provider_id: None,
+        platform,
+        name: "Wiremock Provider",
+        base_url,
+        api_key_encrypted: &encrypted,
+        models: "[]",
+        enabled: true,
+        capabilities: "[]",
+        model_context_limits: None,
+        model_protocols: None,
+        model_descriptions: None,
+        model_enabled: None,
+        model_health: None,
+        bedrock_config: None,
+        is_full_url: false,
+        sort_order: None,
+    })
+    .await
+    .unwrap()
+    .provider_id
+}
 
-    assert_eq!(result.text, "hello world");
-    assert_eq!(result.model, "whisper-1");
-    assert_eq!(result.provider, SpeechToTextProvider::Openai);
+async fn seed_model(pool: &nomifun_db::SqlitePool, provider_id: &str, model: &str, enabled: bool) {
+    let repo = SqliteProviderModelRepository::new(pool.clone());
+    repo.create(
+        provider_id,
+        &NewProviderModel {
+            model,
+            enabled,
+            sort_order: 0,
+            tasks: r#"["speech_recognition"]"#,
+            traits: "[]",
+            protocol: None,
+            params: "{}",
+            context_limit: None,
+            description: None,
+            source: "user",
+            health: None,
+        },
+    )
+    .await
+    .unwrap();
+}
+
+/// Store the `tools.speechToText` preference the route reads.
+async fn set_speech_pref(pool: &nomifun_db::SqlitePool, value: serde_json::Value) {
+    let service = ClientPrefService::new(Arc::new(
+        nomifun_db::SqliteClientPreferenceRepository::new(pool.clone()),
+    ));
+    let mut req = nomifun_api_types::UpdateClientPreferencesRequest::new();
+    req.insert("tools.speechToText".to_owned(), value);
+    service.update_preferences(req).await.unwrap();
+}
+
+fn stt_request() -> Request<Body> {
+    const BOUNDARY: &str = "nomifun-stt-invoke-test";
+    let body = format!(
+        "--{BOUNDARY}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"clip.wav\"\r\nContent-Type: audio/wav\r\n\r\nRIFFdata\r\n--{BOUNDARY}\r\nContent-Disposition: form-data; name=\"fileName\"\r\n\r\nclip.wav\r\n--{BOUNDARY}\r\nContent-Disposition: form-data; name=\"mimeType\"\r\n\r\naudio/wav\r\n--{BOUNDARY}--\r\n"
+    );
+    Request::builder()
+        .method("POST")
+        .uri("/api/stt")
+        .header("content-type", format!("multipart/form-data; boundary={BOUNDARY}"))
+        .body(Body::from(body))
+        .unwrap()
+}
+
+async fn body_json(resp: axum::response::Response) -> serde_json::Value {
+    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+    serde_json::from_slice(&bytes).unwrap()
 }
 
 // ---------------------------------------------------------------------------
-// ST-1b: StepFun versioned base — no duplicated /v1 + required response format
+// openai-compatible platform → multipart /v1/audio/transcriptions
 // ---------------------------------------------------------------------------
 #[tokio::test]
-async fn st1b_stepfun_versioned_base_uses_the_real_transcription_endpoint() {
-    let mock_server = MockServer::start().await;
-
+async fn stt_openai_platform_rides_invoke_multipart() {
+    let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/v1/audio/transcriptions"))
-        .and(header("Authorization", "Bearer sk-stepfun-key"))
+        .and(header("authorization", "Bearer sk-test"))
+        .and(body_string_contains("name=\"file\""))
         .and(body_string_contains("name=\"model\""))
-        .and(body_string_contains("step-asr"))
+        .and(body_string_contains("whisper-1"))
         .and(body_string_contains("name=\"response_format\""))
-        .and(body_string_contains("json"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({ "text": "阶跃转写成功" })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"text": "hello world"})))
         .expect(1)
-        .mount(&mock_server)
+        .mount(&server)
         .await;
 
-    let config = SpeechToTextConfig {
-        enabled: true,
-        provider: SpeechToTextProvider::Openai,
-        provider_id: None,
-        model: Some("step-asr".into()),
-        language: None,
-        auto_send: None,
-        openai: Some(OpenAISpeechToTextConfig {
-            api_key: "sk-stepfun-key".into(),
-            base_url: Some(format!("{}/v1", mock_server.uri())),
-            is_full_url: false,
-            model: "step-asr".into(),
-            language: None,
-            prompt: None,
-            temperature: None,
-        }),
-        deepgram: None,
-    };
+    let (app, pool) = setup().await;
+    let pid = seed_provider(&pool, "openai", &server.uri()).await;
+    seed_model(&pool, &pid, "whisper-1", true).await;
+    set_speech_pref(
+        &pool,
+        json!({"enabled": true, "provider": "openai", "provider_id": pid, "model": "whisper-1"}),
+    )
+    .await;
 
-    let result = stt_service()
-        .transcribe(dummy_audio(), "speech.wav", "audio/wav", None, &config)
-        .await
-        .unwrap();
-
-    assert_eq!(result.text, "阶跃转写成功");
-    assert_eq!(result.model, "step-asr");
+    let resp = app.oneshot(stt_request()).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = body_json(resp).await;
+    assert_eq!(body["success"], true);
+    assert_eq!(body["data"]["text"], "hello world");
+    assert_eq!(body["data"]["model"], "whisper-1");
+    assert_eq!(body["data"]["provider"], "openai");
 }
 
 // ---------------------------------------------------------------------------
-// ST-2: Deepgram transcription — success
+// deepgram platform → /v1/listen with Token auth, frontend guess ignored
 // ---------------------------------------------------------------------------
 #[tokio::test]
-async fn st2_deepgram_transcribe_success() {
-    let mock_server = MockServer::start().await;
-
+async fn stt_deepgram_platform_uses_token_header_despite_openai_guess() {
+    let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/v1/listen"))
-        .and(header("Authorization", "Token dg-test-key"))
-        .and(header("Content-Type", "audio/wav"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-            "metadata": {
-                "model_info": {
-                    "uuid-1": {
-                        "name": "2-general-nova",
-                        "version": "2024-01"
-                    }
-                }
-            },
-            "results": {
-                "channels": [{
-                    "detected_language": "en",
-                    "alternatives": [{
-                        "transcript": "hello deepgram"
-                    }]
-                }]
-            }
+        .and(header("authorization", "Token sk-test"))
+        .and(header("content-type", "audio/wav"))
+        .and(query_param("model", "nova-2"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "metadata": {"model_info": {"uuid-1": {"name": "2-general-nova"}}},
+            "results": {"channels": [{
+                "detected_language": "en",
+                "alternatives": [{"transcript": "hello deepgram"}]
+            }]}
         })))
-        .mount(&mock_server)
+        .expect(1)
+        .mount(&server)
         .await;
 
-    let config = SpeechToTextConfig {
-        enabled: true,
-        provider: SpeechToTextProvider::Deepgram,
-        provider_id: None,
-        model: None,
-        language: None,
-        auto_send: None,
-        openai: None,
-        deepgram: Some(DeepgramSpeechToTextConfig {
-            api_key: "dg-test-key".into(),
-            base_url: Some(mock_server.uri()),
-            model: "nova-2".into(),
-            language: None,
-            detect_language: Some(true),
-            punctuate: Some(true),
-            smart_format: Some(true),
-        }),
-    };
+    let (app, pool) = setup().await;
+    let pid = seed_provider(&pool, "deepgram", &server.uri()).await;
+    seed_model(&pool, &pid, "nova-2", true).await;
+    // The stored `provider` enum deliberately guesses WRONG ("openai"): the
+    // invoke layer's platform routing must ignore it and speak deepgram.
+    set_speech_pref(
+        &pool,
+        json!({"enabled": true, "provider": "openai", "provider_id": pid, "model": "nova-2"}),
+    )
+    .await;
 
-    let result = stt_service()
-        .transcribe(dummy_audio(), "test.wav", "audio/wav", None, &config)
-        .await
-        .unwrap();
-
-    assert_eq!(result.text, "hello deepgram");
-    assert_eq!(result.model, "2-general-nova");
-    assert_eq!(result.provider, SpeechToTextProvider::Deepgram);
-    assert_eq!(result.language.as_deref(), Some("en"));
+    let resp = app.oneshot(stt_request()).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = body_json(resp).await;
+    assert_eq!(body["success"], true);
+    assert_eq!(body["data"]["text"], "hello deepgram");
+    assert_eq!(body["data"]["model"], "2-general-nova");
+    // The wire enum reports the executed platform, not the stored guess.
+    assert_eq!(body["data"]["provider"], "deepgram");
+    assert_eq!(body["data"]["language"], "en");
 }
 
 // ---------------------------------------------------------------------------
-// ST-3: STT disabled
+// stored config language wins and rides the request
 // ---------------------------------------------------------------------------
 #[tokio::test]
-async fn st3_stt_disabled() {
-    let config = SpeechToTextConfig {
-        enabled: false,
-        provider: SpeechToTextProvider::Openai,
-        provider_id: None,
-        model: None,
-        language: None,
-        auto_send: None,
-        openai: None,
-        deepgram: None,
-    };
-
-    let result = stt_service()
-        .transcribe(dummy_audio(), "test.wav", "audio/wav", None, &config)
-        .await;
-
-    assert!(matches!(result, Err(SttError::Disabled)));
-}
-
-// ---------------------------------------------------------------------------
-// ST-4: STT config missing — treated as disabled at service layer
-//       (the handler reads from ClientPrefService; if key is absent, config
-//        will have enabled=false or we surface STT_DISABLED upstream)
-// ---------------------------------------------------------------------------
-
-// ---------------------------------------------------------------------------
-// ST-5: OpenAI missing API key
-// ---------------------------------------------------------------------------
-#[tokio::test]
-async fn st5_openai_empty_api_key() {
-    let config = SpeechToTextConfig {
-        enabled: true,
-        provider: SpeechToTextProvider::Openai,
-        provider_id: None,
-        model: None,
-        language: None,
-        auto_send: None,
-        openai: Some(OpenAISpeechToTextConfig {
-            api_key: String::new(),
-            base_url: None,
-            is_full_url: false,
-            model: "whisper-1".into(),
-            language: None,
-            prompt: None,
-            temperature: None,
-        }),
-        deepgram: None,
-    };
-
-    let result = stt_service()
-        .transcribe(dummy_audio(), "test.wav", "audio/wav", None, &config)
-        .await;
-
-    assert!(matches!(result, Err(SttError::OpenaiNotConfigured)));
-}
-
-#[tokio::test]
-async fn st5b_openai_config_section_missing() {
-    let config = SpeechToTextConfig {
-        enabled: true,
-        provider: SpeechToTextProvider::Openai,
-        provider_id: None,
-        model: None,
-        language: None,
-        auto_send: None,
-        openai: None,
-        deepgram: None,
-    };
-
-    let result = stt_service()
-        .transcribe(dummy_audio(), "test.wav", "audio/wav", None, &config)
-        .await;
-
-    assert!(matches!(result, Err(SttError::OpenaiNotConfigured)));
-}
-
-// ---------------------------------------------------------------------------
-// ST-6: Deepgram missing API key
-// ---------------------------------------------------------------------------
-#[tokio::test]
-async fn st6_deepgram_empty_api_key() {
-    let config = SpeechToTextConfig {
-        enabled: true,
-        provider: SpeechToTextProvider::Deepgram,
-        provider_id: None,
-        model: None,
-        language: None,
-        auto_send: None,
-        openai: None,
-        deepgram: Some(DeepgramSpeechToTextConfig {
-            api_key: String::new(),
-            base_url: None,
-            model: "nova-2".into(),
-            language: None,
-            detect_language: None,
-            punctuate: None,
-            smart_format: None,
-        }),
-    };
-
-    let result = stt_service()
-        .transcribe(dummy_audio(), "test.wav", "audio/wav", None, &config)
-        .await;
-
-    assert!(matches!(result, Err(SttError::DeepgramNotConfigured)));
-}
-
-#[tokio::test]
-async fn st6b_deepgram_config_section_missing() {
-    let config = SpeechToTextConfig {
-        enabled: true,
-        provider: SpeechToTextProvider::Deepgram,
-        provider_id: None,
-        model: None,
-        language: None,
-        auto_send: None,
-        openai: None,
-        deepgram: None,
-    };
-
-    let result = stt_service()
-        .transcribe(dummy_audio(), "test.wav", "audio/wav", None, &config)
-        .await;
-
-    assert!(matches!(result, Err(SttError::DeepgramNotConfigured)));
-}
-
-// ---------------------------------------------------------------------------
-// ST-7: OpenAI upstream API failure (401)
-// ---------------------------------------------------------------------------
-#[tokio::test]
-async fn st7_openai_upstream_failure() {
-    let mock_server = MockServer::start().await;
-
+async fn stt_config_language_is_forwarded() {
+    let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/v1/audio/transcriptions"))
-        .respond_with(ResponseTemplate::new(401).set_body_json(serde_json::json!({
-            "error": {
-                "message": "Incorrect API key provided",
-                "type": "invalid_request_error"
-            }
-        })))
-        .mount(&mock_server)
+        .and(body_string_contains("name=\"language\""))
+        .and(body_string_contains("zh"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"text": "你好"})))
+        .expect(1)
+        .mount(&server)
         .await;
 
-    let config = SpeechToTextConfig {
-        enabled: true,
-        provider: SpeechToTextProvider::Openai,
-        provider_id: None,
-        model: None,
-        language: None,
-        auto_send: None,
-        openai: Some(OpenAISpeechToTextConfig {
-            api_key: "sk-invalid".into(),
-            base_url: Some(mock_server.uri()),
-            is_full_url: false,
-            model: "whisper-1".into(),
-            language: None,
-            prompt: None,
-            temperature: None,
-        }),
-        deepgram: None,
-    };
+    let (app, pool) = setup().await;
+    let pid = seed_provider(&pool, "openai", &server.uri()).await;
+    seed_model(&pool, &pid, "whisper-1", true).await;
+    set_speech_pref(
+        &pool,
+        json!({"enabled": true, "provider": "openai", "provider_id": pid, "model": "whisper-1", "language": "zh"}),
+    )
+    .await;
 
-    let result = stt_service()
-        .transcribe(dummy_audio(), "test.wav", "audio/wav", None, &config)
-        .await;
-
-    match result {
-        Err(SttError::RequestFailed(msg)) => {
-            assert!(msg.contains("401"), "expected 401 in error: {msg}");
-        }
-        other => panic!("expected RequestFailed, got: {other:?}"),
-    }
+    let resp = app.oneshot(stt_request()).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = body_json(resp).await;
+    assert_eq!(body["data"]["text"], "你好");
+    assert_eq!(body["data"]["language"], "zh");
 }
 
 // ---------------------------------------------------------------------------
-// ST-7b: Deepgram upstream API failure (403)
+// catalog gating: disabled model keeps the legacy error shape
 // ---------------------------------------------------------------------------
 #[tokio::test]
-async fn st7b_deepgram_upstream_failure() {
-    let mock_server = MockServer::start().await;
+async fn stt_disabled_model_error_unchanged() {
+    let server = MockServer::start().await;
+    // No mock mounted: the catalog check must refuse before the wire.
+    let (app, pool) = setup().await;
+    let pid = seed_provider(&pool, "openai", &server.uri()).await;
+    seed_model(&pool, &pid, "whisper-1", false).await;
+    set_speech_pref(
+        &pool,
+        json!({"enabled": true, "provider": "openai", "provider_id": pid, "model": "whisper-1"}),
+    )
+    .await;
 
-    Mock::given(method("POST"))
-        .and(path("/v1/listen"))
-        .respond_with(ResponseTemplate::new(403).set_body_json(serde_json::json!({ "err_msg": "Invalid credentials" })))
-        .mount(&mock_server)
-        .await;
-
-    let config = SpeechToTextConfig {
-        enabled: true,
-        provider: SpeechToTextProvider::Deepgram,
-        provider_id: None,
-        model: None,
-        language: None,
-        auto_send: None,
-        openai: None,
-        deepgram: Some(DeepgramSpeechToTextConfig {
-            api_key: "dg-invalid".into(),
-            base_url: Some(mock_server.uri()),
-            model: "nova-2".into(),
-            language: None,
-            detect_language: None,
-            punctuate: None,
-            smart_format: None,
-        }),
-    };
-
-    let result = stt_service()
-        .transcribe(dummy_audio(), "test.wav", "audio/wav", None, &config)
-        .await;
-
-    match result {
-        Err(SttError::RequestFailed(msg)) => {
-            assert!(msg.contains("403"), "expected 403 in error: {msg}");
-        }
-        other => panic!("expected RequestFailed, got: {other:?}"),
-    }
+    let resp = app.oneshot(stt_request()).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    let body = body_json(resp).await;
+    assert_eq!(body["success"], false);
+    assert_eq!(body["code"], "STT_UNKNOWN");
+    assert!(
+        body["error"]
+            .as_str()
+            .unwrap()
+            .contains("selected speech model was not found or is disabled"),
+        "error: {}",
+        body["error"]
+    );
+    assert!(server.received_requests().await.unwrap().is_empty(), "must not reach the wire");
 }
 
 // ---------------------------------------------------------------------------
-// ST-10: languageHint passed to OpenAI
+// legacy embedded-credential configs are retired
 // ---------------------------------------------------------------------------
 #[tokio::test]
-async fn st10_openai_language_hint_passed() {
-    let mock_server = MockServer::start().await;
-
-    Mock::given(method("POST"))
-        .and(path("/v1/audio/transcriptions"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({ "text": "你好世界" })))
-        .mount(&mock_server)
-        .await;
-
-    let config = SpeechToTextConfig {
-        enabled: true,
-        provider: SpeechToTextProvider::Openai,
-        provider_id: None,
-        model: None,
-        language: None,
-        auto_send: None,
-        openai: Some(OpenAISpeechToTextConfig {
-            api_key: "sk-test".into(),
-            base_url: Some(mock_server.uri()),
-            is_full_url: false,
-            model: "whisper-1".into(),
-            language: Some("en".into()),
-            prompt: None,
-            temperature: None,
+async fn stt_legacy_embedded_config_is_rejected() {
+    let (app, pool) = setup().await;
+    set_speech_pref(
+        &pool,
+        json!({
+            "enabled": true,
+            "provider": "openai",
+            "openai": {"api_key": "sk-legacy", "model": "whisper-1"}
         }),
-        deepgram: None,
-    };
+    )
+    .await;
 
-    let result = stt_service()
-        .transcribe(dummy_audio(), "test.wav", "audio/wav", Some("zh"), &config)
-        .await
-        .unwrap();
-
-    assert_eq!(result.text, "你好世界");
-    assert_eq!(result.language.as_deref(), Some("zh"));
+    let resp = app.oneshot(stt_request()).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    let body = body_json(resp).await;
+    assert_eq!(body["success"], false);
+    assert_eq!(body["code"], "STT_UNKNOWN");
+    assert!(
+        body["error"].as_str().unwrap().contains("no longer supported"),
+        "error: {}",
+        body["error"]
+    );
 }
 
 // ---------------------------------------------------------------------------
-// ST-10b: languageHint passed to Deepgram
+// enabled without any provider selection → legacy "not configured" errors
 // ---------------------------------------------------------------------------
 #[tokio::test]
-async fn st10b_deepgram_language_hint_passed() {
-    let mock_server = MockServer::start().await;
+async fn stt_enabled_without_selection_is_not_configured() {
+    let (app, pool) = setup().await;
+    set_speech_pref(&pool, json!({"enabled": true, "provider": "deepgram"})).await;
 
-    Mock::given(method("POST"))
-        .and(path("/v1/listen"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-            "metadata": { "model_info": {} },
-            "results": {
-                "channels": [{
-                    "detected_language": "zh",
-                    "alternatives": [{ "transcript": "你好" }]
-                }]
-            }
-        })))
-        .mount(&mock_server)
-        .await;
-
-    let config = SpeechToTextConfig {
-        enabled: true,
-        provider: SpeechToTextProvider::Deepgram,
-        provider_id: None,
-        model: None,
-        language: None,
-        auto_send: None,
-        openai: None,
-        deepgram: Some(DeepgramSpeechToTextConfig {
-            api_key: "dg-test".into(),
-            base_url: Some(mock_server.uri()),
-            model: "nova-2".into(),
-            language: None,
-            detect_language: None,
-            punctuate: None,
-            smart_format: None,
-        }),
-    };
-
-    let result = stt_service()
-        .transcribe(dummy_audio(), "test.wav", "audio/wav", Some("zh"), &config)
-        .await
-        .unwrap();
-
-    assert_eq!(result.text, "你好");
-    assert_eq!(result.language.as_deref(), Some("zh"));
+    let resp = app.oneshot(stt_request()).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let body = body_json(resp).await;
+    assert_eq!(body["code"], "STT_DEEPGRAM_NOT_CONFIGURED");
 }
 
 // ---------------------------------------------------------------------------
-// Additional: OpenAI with all optional params (prompt, temperature)
+// an empty-key embedded shell is "nothing configured", NOT a retired legacy
+// credential — the NOT_CONFIGURED 400 family keeps firing
 // ---------------------------------------------------------------------------
 #[tokio::test]
-async fn openai_with_all_optional_params() {
-    let mock_server = MockServer::start().await;
+async fn stt_empty_key_embedded_shell_is_not_configured() {
+    let (app, pool) = setup().await;
+    set_speech_pref(
+        &pool,
+        json!({
+            "enabled": true,
+            "provider": "openai",
+            "openai": {"api_key": "", "model": "whisper-1"}
+        }),
+    )
+    .await;
 
+    let resp = app.oneshot(stt_request()).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let body = body_json(resp).await;
+    assert_eq!(body["code"], "STT_OPENAI_NOT_CONFIGURED");
+}
+
+// ---------------------------------------------------------------------------
+// disabled STT keeps the STT_DISABLED wire error
+// ---------------------------------------------------------------------------
+#[tokio::test]
+async fn stt_disabled_returns_stt_disabled() {
+    let (app, pool) = setup().await;
+    set_speech_pref(&pool, json!({"enabled": false, "provider": "openai"})).await;
+
+    let resp = app.oneshot(stt_request()).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let body = body_json(resp).await;
+    assert_eq!(body["success"], false);
+    assert_eq!(body["code"], "STT_DISABLED");
+}
+
+// ---------------------------------------------------------------------------
+// upstream failure maps to the legacy 502 STT_REQUEST_FAILED
+// ---------------------------------------------------------------------------
+#[tokio::test]
+async fn stt_upstream_401_maps_to_request_failed() {
+    let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/v1/audio/transcriptions"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({ "text": "technical terms test" })))
-        .mount(&mock_server)
-        .await;
-
-    let config = SpeechToTextConfig {
-        enabled: true,
-        provider: SpeechToTextProvider::Openai,
-        provider_id: None,
-        model: None,
-        language: None,
-        auto_send: Some(true),
-        openai: Some(OpenAISpeechToTextConfig {
-            api_key: "sk-full".into(),
-            base_url: Some(mock_server.uri()),
-            is_full_url: false,
-            model: "whisper-1".into(),
-            language: Some("en".into()),
-            prompt: Some("technical terms".into()),
-            temperature: Some(0.2),
-        }),
-        deepgram: None,
-    };
-
-    let result = stt_service()
-        .transcribe(dummy_audio(), "audio.m4a", "audio/mp4", None, &config)
-        .await
-        .unwrap();
-
-    assert_eq!(result.text, "technical terms test");
-    assert_eq!(result.model, "whisper-1");
-    assert_eq!(result.provider, SpeechToTextProvider::Openai);
-    assert_eq!(result.language.as_deref(), Some("en"));
-}
-
-// ---------------------------------------------------------------------------
-// Additional: Deepgram with all optional flags
-// ---------------------------------------------------------------------------
-#[tokio::test]
-async fn deepgram_with_all_optional_flags() {
-    let mock_server = MockServer::start().await;
-
-    Mock::given(method("POST"))
-        .and(path("/v1/listen"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-            "metadata": {
-                "model_info": {
-                    "id-1": { "name": "nova-2-general" }
-                }
-            },
-            "results": {
-                "channels": [{
-                    "detected_language": "fr",
-                    "alternatives": [{ "transcript": "bonjour" }]
-                }]
-            }
+        .respond_with(ResponseTemplate::new(401).set_body_json(json!({
+            "error": {"message": "Incorrect API key provided", "type": "invalid_request_error"}
         })))
-        .mount(&mock_server)
+        .mount(&server)
         .await;
 
-    let config = SpeechToTextConfig {
-        enabled: true,
-        provider: SpeechToTextProvider::Deepgram,
-        provider_id: None,
-        model: None,
-        language: None,
-        auto_send: None,
-        openai: None,
-        deepgram: Some(DeepgramSpeechToTextConfig {
-            api_key: "dg-full".into(),
-            base_url: Some(mock_server.uri()),
-            model: "nova-2".into(),
-            language: Some("fr".into()),
-            detect_language: Some(false),
-            punctuate: Some(true),
-            smart_format: Some(true),
-        }),
-    };
+    let (app, pool) = setup().await;
+    let pid = seed_provider(&pool, "openai", &server.uri()).await;
+    seed_model(&pool, &pid, "whisper-1", true).await;
+    set_speech_pref(
+        &pool,
+        json!({"enabled": true, "provider": "openai", "provider_id": pid, "model": "whisper-1"}),
+    )
+    .await;
 
-    let result = stt_service()
-        .transcribe(dummy_audio(), "test.ogg", "audio/ogg", None, &config)
-        .await
-        .unwrap();
-
-    assert_eq!(result.text, "bonjour");
-    assert_eq!(result.model, "nova-2-general");
-    assert_eq!(result.language.as_deref(), Some("fr"));
+    let resp = app.oneshot(stt_request()).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_GATEWAY);
+    let body = body_json(resp).await;
+    assert_eq!(body["code"], "STT_REQUEST_FAILED");
+    assert!(body["error"].as_str().unwrap().contains("401"), "error: {}", body["error"]);
 }
 
 // ---------------------------------------------------------------------------
-// SttError → AppError conversion (black-box integration test)
+// SttError → AppError conversion (unchanged legacy mapping)
 // ---------------------------------------------------------------------------
 #[test]
 fn stt_error_to_app_error_mapping() {
     use nomifun_common::AppError;
+    use nomifun_shell::SttError;
 
     let err: AppError = SttError::Disabled.into();
     assert!(matches!(err, AppError::BadRequest(_)));

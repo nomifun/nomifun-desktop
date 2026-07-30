@@ -31,11 +31,24 @@ fn build_state(db: &nomifun_db::Database) -> SystemRouterState {
     SystemRouterState {
         settings_service: SettingsService::new(Arc::new(SqliteSettingsRepository::new(db.pool().clone()))),
         client_pref_service: ClientPrefService::new(Arc::new(SqliteClientPreferenceRepository::new(db.pool().clone()))),
-        provider_service: ProviderService::new(provider_repo.clone(), TEST_ENCRYPTION_KEY),
-        model_fetch_service: ModelFetchService::new(provider_repo, TEST_ENCRYPTION_KEY, http_client.clone()),
+        provider_service: ProviderService::new(
+            provider_repo.clone(),
+            Arc::new(nomifun_db::SqliteProviderModelRepository::new(db.pool().clone())),
+            TEST_ENCRYPTION_KEY,
+        ),
+        provider_connection_service: nomifun_system::ProviderConnectionService::new(
+            std::sync::Arc::new(nomifun_db::SqliteProviderConnectionRepository::new(db.pool().clone())),
+            provider_repo.clone(),
+            TEST_ENCRYPTION_KEY,
+        ),
+        model_fetch_service: ModelFetchService::new(provider_repo.clone(), TEST_ENCRYPTION_KEY, http_client.clone()),
         model_profile_service: nomifun_system::ModelProfileService::new(std::sync::Arc::new(
-            nomifun_db::SqliteModelProfileRepository::new(db.pool().clone()),
+            nomifun_db::SqliteProviderModelRepository::new(db.pool().clone()),
         )),
+        provider_model_service: nomifun_system::ProviderModelService::new(
+            std::sync::Arc::new(nomifun_db::SqliteProviderModelRepository::new(db.pool().clone())),
+            provider_repo.clone(),
+        ),
         managed_model_service: None,
         protocol_detection_service: ProtocolDetectionService::new(http_client.clone()),
         version_check_service: VersionCheckService::new(http_client, "0.1.0".to_owned()),

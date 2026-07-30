@@ -9,11 +9,12 @@ use nomi_agent::output::OutputSink;
 use nomi_agent::output::null_sink::NullSink;
 use nomi_config::config::{CliArgs, Config};
 use nomifun_api_types::{
-    resolve_dispatch_target, HealthStatus, ModelTask, ProviderHealthCheckErrorKind,
-    ProviderHealthCheckRequest, ProviderHealthCheckResponse, RequestShape,
+    HealthStatus, ModelHealthStatus, ModelTask, ProviderHealthCheckErrorKind,
+    ProviderHealthCheckRequest, ProviderHealthCheckResponse,
 };
 use nomifun_common::{AppError, ProviderId};
-use nomifun_db::{IModelProfileRepository, IProviderRepository, models::Provider};
+use nomifun_db::{IProviderModelRepository, IProviderRepository, models::Provider};
+use nomifun_model_invoke::{ModelInvokeService, ModelRef};
 use regex::Regex;
 use tracing::{info, warn};
 
@@ -23,7 +24,6 @@ use crate::factory::nomi::{
 use crate::types::NomiResolvedConfig;
 
 const HEALTH_CHECK_TIMEOUT: Duration = Duration::from_secs(30);
-const MODALITY_PROBE_TIMEOUT: Duration = Duration::from_secs(60);
 const OPENAI_MODEL_PROBE_TIMEOUT: Duration = Duration::from_secs(10);
 const DEFAULT_OPENAI_BASE_URL: &str = "https://api.openai.com";
 const HEALTH_CHECK_PROMPT: &str = "Reply with exactly OK.";
@@ -31,23 +31,28 @@ const HEALTH_CHECK_MSG_ID: &str = "provider-health-check";
 
 pub struct ProviderHealthCheckService {
     provider_repo: Arc<dyn IProviderRepository>,
-    model_profile_repo: Arc<dyn IModelProfileRepository>,
+    provider_model_repo: Arc<dyn IProviderModelRepository>,
     encryption_key: [u8; 32],
     data_dir: PathBuf,
+    /// Unified invoke layer: non-chat modality probes ride
+    /// [`ModelInvokeService::probe`] (chat stays on the agent engine).
+    invoke: Arc<ModelInvokeService>,
 }
 
 impl ProviderHealthCheckService {
     pub fn new(
         provider_repo: Arc<dyn IProviderRepository>,
-        model_profile_repo: Arc<dyn IModelProfileRepository>,
+        provider_model_repo: Arc<dyn IProviderModelRepository>,
         encryption_key: [u8; 32],
         data_dir: PathBuf,
+        invoke: Arc<ModelInvokeService>,
     ) -> Self {
         Self {
             provider_repo,
-            model_profile_repo,
+            provider_model_repo,
             encryption_key,
             data_dir,
+            invoke,
         }
     }
 
@@ -81,7 +86,7 @@ impl ProviderHealthCheckService {
         // stored profile primary task > name/platform heuristic > Chat. This is
         // what makes image/tts/asr models probe their correct endpoint instead
         // of always hitting /chat/completions (the StepFun 404 root cause).
-        let profile = self.model_profile_repo.get(provider_id, model).await.ok().flatten();
+        let profile = self.provider_model_repo.get(provider_id, model).await.ok().flatten();
         let task = req
             .task
             .or_else(|| {
@@ -100,36 +105,75 @@ impl ProviderHealthCheckService {
 
         if task == ModelTask::Chat {
             let config = self.resolve_probe_config(&row, model)?;
-            if should_use_openai_model_probe(&row.platform, &config) {
-                return run_openai_model_probe(
+            let response = if should_use_openai_model_probe(&row.platform, &config) {
+                run_openai_model_probe(
                     persisted_provider_id,
                     row.platform,
                     model.to_owned(),
                     config.api_key,
                     config.base_url,
                 )
-                .await;
-            }
-            return run_probe(persisted_provider_id, row.platform, config).await;
+                .await?
+            } else {
+                run_probe(persisted_provider_id, row.platform, config).await?
+            };
+            persist_probe_outcome(self.provider_model_repo.as_ref(), &response).await;
+            return Ok(response);
         }
 
-        // Non-chat task: probe the correct endpoint via the dispatch resolver.
-        let params: serde_json::Value = profile
-            .as_ref()
-            .and_then(|p| serde_json::from_str(&p.params).ok())
-            .unwrap_or_else(|| serde_json::json!({}));
-        let api_key = nomifun_common::decrypt_string(&row.api_key_encrypted, &self.encryption_key)?;
-        run_modality_probe(
-            persisted_provider_id,
-            row.platform,
-            model.to_owned(),
-            task,
-            api_key,
-            row.base_url,
-            row.is_full_url,
-            params,
-        )
-        .await
+        // Non-chat task: probe the task's real endpoint through the unified
+        // invoke layer (resolution, minimal request and the 60 s cap live in
+        // `ModelInvokeService::probe`).
+        info!(
+            provider_id = %persisted_provider_id,
+            platform = %row.platform,
+            model = %model,
+            task = ?task,
+            "Modality health check started"
+        );
+        let model_ref =
+            ModelRef { provider_id: persisted_provider_id.clone(), model: model.to_owned() };
+        let response = match self.invoke.probe(&model_ref, task).await {
+            Ok(report) if report.healthy => healthy_response(
+                persisted_provider_id,
+                row.platform,
+                model.to_owned(),
+                Duration::from_millis(report.latency_ms),
+            ),
+            Ok(report) => {
+                let message =
+                    report.message.unwrap_or_else(|| "modality probe failed".to_owned());
+                // The invoke probe folds its own timeout into this message;
+                // surface it as the legacy timeout_stage so classify_error
+                // keeps reporting Timeout.
+                let timeout_stage =
+                    message.contains("modality probe timeout").then(|| "modality_probe".to_owned());
+                unhealthy_response(
+                    persisted_provider_id,
+                    row.platform,
+                    model.to_owned(),
+                    Duration::from_millis(report.latency_ms),
+                    message,
+                    timeout_stage,
+                )
+            }
+            // probe() only errs before touching the catalog or the wire (its
+            // chat guard — unreachable here since task != Chat). The endpoint's
+            // wire contract stays "200 + unhealthy", never an HTTP error, and
+            // that also keeps disabled provider/model rows probeable from the
+            // UI (they fold into an unhealthy report inside probe()).
+            Err(error) => unhealthy_response(
+                persisted_provider_id,
+                row.platform,
+                model.to_owned(),
+                Duration::ZERO,
+                error.to_string(),
+                None,
+            ),
+        };
+        log_health_check_result(&response);
+        persist_probe_outcome(self.provider_model_repo.as_ref(), &response).await;
+        Ok(response)
     }
 
     fn resolve_probe_config(
@@ -183,6 +227,56 @@ impl ProviderHealthCheckService {
             allowed_tools: Vec::new(),
             write_root: None,
 })
+    }
+}
+
+/// Persist one probe outcome onto the model's authoritative catalog row.
+///
+/// Serializes the wire [`ModelHealthStatus`] shape (the same struct Task 4's
+/// row→response projection parses back out of `provider_models.health`) and
+/// writes it via `set_health`, which also stamps `health_checked_at = now`.
+/// Best-effort by design: a persistence failure (or a probe for a model that
+/// has no catalog row) logs a warning and never fails the health request.
+pub(crate) async fn persist_probe_outcome(
+    repo: &dyn IProviderModelRepository,
+    response: &ProviderHealthCheckResponse,
+) {
+    let health = ModelHealthStatus {
+        status: response.status,
+        // `health_checked_at` is authoritative for observation time; keep the
+        // wire struct's own `last_check` mirror populated for UI parity.
+        last_check: Some(nomifun_common::now_ms()),
+        latency: Some(i64::try_from(response.elapsed_ms).unwrap_or(i64::MAX)),
+        error: response.message.clone(),
+    };
+    let json = match serde_json::to_string(&health) {
+        Ok(json) => json,
+        Err(error) => {
+            warn!(
+                provider_id = %response.provider_id,
+                model = %response.model,
+                %error,
+                "could not serialize probe outcome; skipping health write-back"
+            );
+            return;
+        }
+    };
+    match repo
+        .set_health(&response.provider_id, &response.model, Some(&json))
+        .await
+    {
+        Ok(true) => {}
+        Ok(false) => warn!(
+            provider_id = %response.provider_id,
+            model = %response.model,
+            "probe outcome not persisted: model has no provider_models row"
+        ),
+        Err(error) => warn!(
+            provider_id = %response.provider_id,
+            model = %response.model,
+            %error,
+            "probe outcome health write-back failed"
+        ),
     }
 }
 
@@ -379,140 +473,10 @@ async fn run_probe(
     }
 }
 
-/// Probe a non-chat model at its correct endpoint (resolved by task), sending
-/// the smallest valid request. Success = HTTP 2xx. For multipart tasks (image
-/// edit / speech recognition) the probe sends no file, so a plain
-/// "invalid_request" (missing file) still proves the model + endpoint are
-/// reachable and is treated as healthy.
-#[allow(clippy::too_many_arguments)]
-async fn run_modality_probe(
-    provider_id: String,
-    platform: String,
-    model: String,
-    task: ModelTask,
-    api_key: String,
-    base_url: String,
-    is_full_url: bool,
-    params: serde_json::Value,
-) -> Result<ProviderHealthCheckResponse, AppError> {
-    let started = Instant::now();
-    let target = resolve_dispatch_target(&platform, &base_url, is_full_url, task, &params);
-    let key = primary_api_key(&api_key);
-    let client = nomifun_net::http_client();
-
-    info!(
-        provider_id = %provider_id,
-        platform = %platform,
-        model = %model,
-        task = ?task,
-        url = %target.url,
-        "Modality health check started"
-    );
-
-    let send = async {
-        let rb = client.post(&target.url).bearer_auth(&key);
-        match target.shape {
-            RequestShape::Json => rb.json(&minimal_json_body(task, &model, &params)).send().await,
-            RequestShape::Multipart => rb.multipart(minimal_multipart_form(task, &model)).send().await,
-        }
-    };
-
-    let response = match tokio::time::timeout(MODALITY_PROBE_TIMEOUT, send).await {
-        Ok(Ok(resp)) => {
-            let status = resp.status();
-            if status.is_success() {
-                healthy_response(provider_id, platform, model, started.elapsed())
-            } else {
-                let body = truncate_body(&resp.text().await.unwrap_or_default());
-                let message = format!("Provider error: API error {}: {body}", status.as_u16());
-                let reachable_only = matches!(task, ModelTask::ImageEdit | ModelTask::SpeechRecognition)
-                    && classify_error(&message, false) == ProviderHealthCheckErrorKind::InvalidRequest;
-                if reachable_only {
-                    healthy_response(provider_id, platform, model, started.elapsed())
-                } else {
-                    unhealthy_response(provider_id, platform, model, started.elapsed(), message, None)
-                }
-            }
-        }
-        Ok(Err(error)) => unhealthy_response(
-            provider_id,
-            platform,
-            model,
-            started.elapsed(),
-            format!("Connection error: {error}"),
-            None,
-        ),
-        Err(_) => unhealthy_response(
-            provider_id,
-            platform,
-            model,
-            started.elapsed(),
-            format!("Modality probe timeout ({}s)", MODALITY_PROBE_TIMEOUT.as_secs()),
-            Some("modality_probe".into()),
-        ),
-    };
-    log_health_check_result(&response);
-    Ok(response)
-}
-
-/// The smallest valid JSON body for a task, overlaying known service-config
-/// params (image size/steps/etc.) so a provider requiring them still validates.
-fn minimal_json_body(task: ModelTask, model: &str, params: &serde_json::Value) -> serde_json::Value {
-    use serde_json::json;
-    match task {
-        ModelTask::ImageGeneration => {
-            let mut body =
-                json!({ "model": model, "prompt": "health check", "n": 1, "response_format": "b64_json" });
-            for key in ["size", "steps", "cfg_scale", "text_mode", "quality"] {
-                if let Some(v) = params.get(key) {
-                    body[key] = v.clone();
-                }
-            }
-            body
-        }
-        ModelTask::VideoGeneration => json!({ "model": model, "prompt": "health check" }),
-        ModelTask::SpeechSynthesis => json!({
-            "model": model,
-            "input": "hi",
-            "voice": params.get("voice").and_then(|v| v.as_str()).unwrap_or("alloy"),
-        }),
-        ModelTask::Embedding => json!({ "model": model, "input": "health check" }),
-        ModelTask::Rerank => json!({ "model": model, "query": "a", "documents": ["b"] }),
-        // Chat goes through the engine path; ImageEdit/SpeechRecognition are multipart.
-        _ => json!({ "model": model }),
-    }
-}
-
-/// Minimal multipart form for file-based tasks. The probe sends no file (a
-/// missing-file 400 still proves reachability), only the model (+ prompt).
-fn minimal_multipart_form(task: ModelTask, model: &str) -> reqwest::multipart::Form {
-    let mut form = reqwest::multipart::Form::new().text("model", model.to_string());
-    if matches!(task, ModelTask::ImageEdit) {
-        form = form.text("prompt", "health check");
-    }
-    form
-}
-
-/// First usable key from a (possibly comma/newline-separated multi-)key string.
-fn primary_api_key(raw: &str) -> String {
-    raw.split(['\n', ','])
-        .map(str::trim)
-        .find(|s| !s.is_empty())
-        .unwrap_or("")
-        .to_string()
-}
-
-fn truncate_body(body: &str) -> String {
-    const MAX_CHARS: usize = 500;
-    if body.chars().count() <= MAX_CHARS {
-        body.to_string()
-    } else {
-        let mut s: String = body.chars().take(MAX_CHARS).collect();
-        s.push('…');
-        s
-    }
-}
-
+/// Probe a non-chat model at its correct endpoint: since the P1 invoke
+/// redesign this rides [`ModelInvokeService::probe`] (see the non-chat branch
+/// of [`ProviderHealthCheckService::health_check`]); the minimal request
+/// bodies, the multipart missing-file tolerance and the 60 s cap live there.
 fn healthy_response(
     provider_id: String,
     platform: String,
@@ -632,11 +596,16 @@ pub(crate) fn classify_error(message: &str, is_timeout: bool) -> ProviderHealthC
     }
 
     let lower = message.to_lowercase();
+    // Upstream statuses arrive in two shapes: the engine/legacy "api error NNN"
+    // and the invoke layer's "provider returned NNN <reason>".
+    let mentions_status = |code: u16| {
+        lower.contains(&format!("api error {code}")) || lower.contains(&format!("provider returned {code}"))
+    };
     if lower.contains("invalid authorization header") || lower.contains("invalid x-api-key header")
     {
         return ProviderHealthCheckErrorKind::InvalidAuthorizationHeader;
     }
-    if lower.contains("rate limited") || lower.contains(" 429") || lower.contains("api error 429") {
+    if lower.contains("rate limited") || lower.contains(" 429") || mentions_status(429) {
         return ProviderHealthCheckErrorKind::RateLimited;
     }
     if lower.contains("insufficient_quota")
@@ -653,28 +622,36 @@ pub(crate) fn classify_error(message: &str, is_timeout: bool) -> ProviderHealthC
     {
         return ProviderHealthCheckErrorKind::AwsCredentials;
     }
-    if lower.contains("api error 401")
+    if mentions_status(401)
         || lower.contains("unauthorized")
         || lower.contains("invalid api key")
     {
         return ProviderHealthCheckErrorKind::Unauthorized;
     }
-    if lower.contains("api error 403") || lower.contains("forbidden") {
+    if mentions_status(403) || lower.contains("forbidden") {
         return ProviderHealthCheckErrorKind::Forbidden;
     }
-    if lower.contains("api error 404") || lower.contains("not found") {
+    if mentions_status(404) || lower.contains("not found") {
         return ProviderHealthCheckErrorKind::NotFound;
     }
-    if lower.contains("api error 400")
+    if mentions_status(400)
+        || mentions_status(422)
         || lower.contains("invalid_request")
         || lower.contains("invalid request")
     {
         return ProviderHealthCheckErrorKind::InvalidRequest;
     }
-    if lower.contains("connection error") || lower.contains("http error") {
+    if lower.contains("connection error")
+        || lower.contains("http error")
+        // InvokeError transport shapes: "Network: request failed: …" /
+        // "Timeout: request timed out: …" (the 60 s probe cap rides
+        // timeout_stage instead and never reaches this arm).
+        || lower.contains("request failed")
+        || lower.contains("request timed out")
+    {
         return ProviderHealthCheckErrorKind::ConnectionError;
     }
-    if lower.contains("api error") || lower.contains("provider error") {
+    if lower.contains("api error") || lower.contains("provider error") || lower.contains("provider returned") {
         return ProviderHealthCheckErrorKind::ApiError;
     }
 
@@ -682,7 +659,7 @@ pub(crate) fn classify_error(message: &str, is_timeout: bool) -> ProviderHealthC
 }
 
 pub(crate) fn extract_http_status(message: &str) -> Option<u16> {
-    let re = Regex::new(r"(?i)api error\s+(\d{3})").ok()?;
+    let re = Regex::new(r"(?i)(?:api error|provider returned)\s+(\d{3})").ok()?;
     re.captures(message)
         .and_then(|captures| captures.get(1))
         .and_then(|matched| matched.as_str().parse().ok())
@@ -881,6 +858,94 @@ mod tests {
         assert_eq!(response.http_status, Some(429));
     }
 
+    // -- modality probes through the invoke layer (health_check non-chat path) --
+
+    const TEST_KEY: [u8; 32] = [0x42; 32];
+
+    /// Real in-memory catalog + production invoke adapters behind the health
+    /// service — the ported equivalent of the old `run_modality_probe` tests,
+    /// now exercising the full `health_check` → `invoke.probe` path.
+    async fn setup_health_service() -> (
+        ProviderHealthCheckService,
+        nomifun_db::SqlitePool,
+        tempfile::TempDir,
+    ) {
+        let db = nomifun_db::init_database_memory().await.unwrap();
+        let pool = db.pool().clone();
+        std::mem::forget(db);
+        let temp = tempfile::tempdir().unwrap();
+        let invoke = Arc::new(ModelInvokeService::new(
+            Arc::new(nomifun_db::SqliteProviderRepository::new(pool.clone())),
+            Arc::new(nomifun_db::SqliteProviderModelRepository::new(pool.clone())),
+            Arc::new(nomifun_db::SqliteProviderConnectionRepository::new(pool.clone())),
+            TEST_KEY,
+            reqwest::Client::new(),
+            nomifun_model_invoke::AdapterRegistry::new(nomifun_model_invoke::default_adapters()),
+        ));
+        let service = ProviderHealthCheckService::new(
+            Arc::new(nomifun_db::SqliteProviderRepository::new(pool.clone())),
+            Arc::new(nomifun_db::SqliteProviderModelRepository::new(pool.clone())),
+            TEST_KEY,
+            temp.path().to_path_buf(),
+            invoke,
+        );
+        (service, pool, temp)
+    }
+
+    /// Seed an enabled provider (key decrypts to `sk-test`) + one model row.
+    async fn seed_catalog(
+        pool: &nomifun_db::SqlitePool,
+        platform: &str,
+        base_url: &str,
+        model: &str,
+        tasks: &str,
+        model_enabled: bool,
+    ) -> String {
+        use nomifun_db::{
+            CreateProviderParams, IProviderModelRepository, IProviderRepository, NewProviderModel,
+        };
+        let encrypted = nomifun_common::encrypt_string("sk-test", &TEST_KEY).unwrap();
+        let pid = nomifun_db::SqliteProviderRepository::new(pool.clone())
+            .create(CreateProviderParams {
+                provider_id: None,
+                platform,
+                name: "Wiremock Provider",
+                base_url,
+                api_key_encrypted: &encrypted,
+                models: "[]",
+                enabled: true,
+                capabilities: "[]",
+                model_context_limits: None,
+                model_protocols: None,
+                model_descriptions: None,
+                model_enabled: None,
+                model_health: None,
+                bedrock_config: None,
+                is_full_url: false,
+                sort_order: None,
+            })
+            .await
+            .unwrap()
+            .provider_id;
+        nomifun_db::SqliteProviderModelRepository::new(pool.clone())
+            .create(
+                &pid,
+                &NewProviderModel {
+                    model,
+                    enabled: model_enabled,
+                    sort_order: 0,
+                    tasks,
+                    traits: "[]",
+                    params: "{}",
+                    source: "user",
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        pid
+    }
+
     #[tokio::test]
     async fn modality_probe_image_generation_success_is_healthy() {
         use wiremock::matchers::{header, method, path};
@@ -896,21 +961,38 @@ mod tests {
             .mount(&server)
             .await;
 
-        let response = run_modality_probe(
-            "p1".to_owned(),
-            "stepfun-plan".to_owned(),
-            "step-image-edit-2".to_owned(),
-            ModelTask::ImageGeneration,
-            "sk-test".to_owned(),
-            server.uri(),
-            false,
-            serde_json::json!({}),
+        let (service, pool, _temp) = setup_health_service().await;
+        let pid = seed_catalog(
+            &pool,
+            "stepfun-plan",
+            &server.uri(),
+            "step-image-edit-2",
+            r#"["image_generation"]"#,
+            true,
         )
-        .await
-        .unwrap();
+        .await;
+
+        let response = service
+            .health_check(ProviderHealthCheckRequest {
+                provider_id: pid.clone(),
+                model: "step-image-edit-2".to_owned(),
+                task: Some(ModelTask::ImageGeneration),
+            })
+            .await
+            .unwrap();
 
         assert_eq!(response.status, HealthStatus::Healthy);
         assert_eq!(response.error_kind, None);
+        assert_eq!(response.platform, "stepfun-plan");
+
+        // The outcome lands on the model's catalog row (persist_probe_outcome).
+        use nomifun_db::IProviderModelRepository;
+        let row = nomifun_db::SqliteProviderModelRepository::new(pool.clone())
+            .get(&pid, "step-image-edit-2")
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(row.health_checked_at.is_some(), "probe outcome must be persisted");
     }
 
     #[tokio::test]
@@ -918,7 +1000,7 @@ mod tests {
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
 
-        // Reproduces the StepFun 404 shape — but now at the CORRECT image endpoint.
+        // Reproduces the StepFun 404 shape — at the CORRECT image endpoint.
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/v1/images/generations"))
@@ -928,41 +1010,200 @@ mod tests {
             .mount(&server)
             .await;
 
-        let response = run_modality_probe(
-            "p1".to_owned(),
-            "stepfun-plan".to_owned(),
-            "x".to_owned(),
-            ModelTask::ImageGeneration,
-            "sk-test".to_owned(),
-            server.uri(),
-            false,
-            serde_json::json!({}),
+        let (service, pool, _temp) = setup_health_service().await;
+        let pid = seed_catalog(
+            &pool,
+            "stepfun-plan",
+            &server.uri(),
+            "x",
+            r#"["image_generation"]"#,
+            true,
         )
-        .await
-        .unwrap();
+        .await;
+
+        let response = service
+            .health_check(ProviderHealthCheckRequest {
+                provider_id: pid,
+                model: "x".to_owned(),
+                task: Some(ModelTask::ImageGeneration),
+            })
+            .await
+            .unwrap();
 
         assert_eq!(response.status, HealthStatus::Unhealthy);
         assert_eq!(response.error_kind, Some(ProviderHealthCheckErrorKind::NotFound));
         assert_eq!(response.http_status, Some(404));
     }
 
-    #[test]
-    fn primary_api_key_takes_first_of_multi() {
-        assert_eq!(primary_api_key("k1,k2,k3"), "k1");
-        assert_eq!(primary_api_key("\n k1 \n k2 "), "k1");
-        assert_eq!(primary_api_key(""), "");
-    }
+    #[tokio::test]
+    async fn modality_probe_disabled_model_is_unhealthy_response_not_http_error() {
+        // Ledger note honored: invoke.probe refuses disabled rows, but the
+        // health endpoint's wire contract stays "200 + unhealthy" so the UI's
+        // health button keeps working on disabled rows.
+        let (service, pool, _temp) = setup_health_service().await;
+        let pid = seed_catalog(
+            &pool,
+            "openai",
+            "https://unused.example",
+            "gpt-image-1",
+            r#"["image_generation"]"#,
+            false,
+        )
+        .await;
 
-    #[test]
-    fn minimal_image_body_overlays_params() {
-        let body = minimal_json_body(
-            ModelTask::ImageGeneration,
-            "m",
-            &serde_json::json!({ "steps": 8, "text_mode": true }),
+        let response = service
+            .health_check(ProviderHealthCheckRequest {
+                provider_id: pid,
+                model: "gpt-image-1".to_owned(),
+                task: Some(ModelTask::ImageGeneration),
+            })
+            .await
+            .expect("disabled model must yield an unhealthy response, not an HTTP error");
+
+        assert_eq!(response.status, HealthStatus::Unhealthy);
+        assert!(
+            response.message.as_deref().unwrap_or_default().contains("model disabled"),
+            "message: {:?}",
+            response.message
         );
-        assert_eq!(body["prompt"], "health check");
-        assert_eq!(body["steps"], 8);
-        assert_eq!(body["text_mode"], true);
     }
 
+    #[test]
+    fn classify_error_understands_invoke_message_shapes() {
+        // The invoke layer reports upstream failures as "provider returned NNN …".
+        assert_eq!(
+            classify_error("ProviderError: provider returned 404 Not Found: nope", false),
+            ProviderHealthCheckErrorKind::NotFound
+        );
+        assert_eq!(
+            classify_error("InvalidParams: provider returned 400 Bad Request: nope", false),
+            ProviderHealthCheckErrorKind::InvalidRequest
+        );
+        assert_eq!(
+            classify_error("ProviderError: provider returned 500 Internal Server Error: boom", false),
+            ProviderHealthCheckErrorKind::ApiError
+        );
+        assert_eq!(
+            classify_error("Network: request failed: error sending request", false),
+            ProviderHealthCheckErrorKind::ConnectionError
+        );
+        assert_eq!(
+            extract_http_status("provider returned 404 Not Found: nope"),
+            Some(404)
+        );
+    }
+
+    // -- persist_probe_outcome --
+
+    const PROBE_PROVIDER: &str = "0190f5fe-7c00-7a00-8abc-012345678901";
+
+    async fn seed_provider_with_model(
+        db: &nomifun_db::Database,
+    ) -> nomifun_db::SqliteProviderModelRepository {
+        use nomifun_db::{CreateProviderParams, IProviderRepository, NewProviderModel};
+
+        nomifun_db::SqliteProviderRepository::new(db.pool().clone())
+            .create(CreateProviderParams {
+                provider_id: Some(PROBE_PROVIDER),
+                platform: "openai",
+                name: "P",
+                base_url: "https://x.test/v1",
+                api_key_encrypted: "enc",
+                models: "[]",
+                enabled: true,
+                capabilities: "[]",
+                model_context_limits: None,
+                model_protocols: None,
+                model_descriptions: None,
+                model_enabled: None,
+                model_health: None,
+                bedrock_config: None,
+                is_full_url: false,
+                sort_order: None,
+            })
+            .await
+            .unwrap();
+        let repo = nomifun_db::SqliteProviderModelRepository::new(db.pool().clone());
+        repo.create(
+            PROBE_PROVIDER,
+            &NewProviderModel {
+                model: "gpt-test",
+                enabled: true,
+                sort_order: 0,
+                tasks: r#"["chat"]"#,
+                traits: "[]",
+                params: "{}",
+                source: "inferred",
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        repo
+    }
+
+    #[tokio::test]
+    async fn persist_probe_outcome_stores_healthy_result() {
+        use nomifun_db::IProviderModelRepository;
+
+        let db = nomifun_db::init_database_memory().await.unwrap();
+        let repo = seed_provider_with_model(&db).await;
+        let response = ProviderHealthCheckResponse {
+            provider_id: PROBE_PROVIDER.to_owned(),
+            platform: "openai".to_owned(),
+            model: "gpt-test".to_owned(),
+            status: HealthStatus::Healthy,
+            elapsed_ms: 321,
+            message: None,
+            error_kind: None,
+            http_status: None,
+            timeout_stage: None,
+        };
+
+        persist_probe_outcome(&repo, &response).await;
+
+        let row = repo.get(PROBE_PROVIDER, "gpt-test").await.unwrap().unwrap();
+        assert!(row.health_checked_at.is_some(), "set_health stamps checked_at");
+        let health: ModelHealthStatus =
+            serde_json::from_str(row.health.as_deref().unwrap()).unwrap();
+        assert_eq!(health.status, HealthStatus::Healthy);
+        assert_eq!(health.latency, Some(321));
+        assert_eq!(health.error, None);
+        assert!(health.last_check.is_some());
+    }
+
+    #[tokio::test]
+    async fn persist_probe_outcome_stores_unhealthy_result_and_tolerates_missing_row() {
+        use nomifun_db::IProviderModelRepository;
+
+        let db = nomifun_db::init_database_memory().await.unwrap();
+        let repo = seed_provider_with_model(&db).await;
+        let response = unhealthy_response(
+            PROBE_PROVIDER.to_owned(),
+            "openai".to_owned(),
+            "gpt-test".to_owned(),
+            Duration::from_millis(45),
+            "Provider error: API error 429: Too Many Requests".to_owned(),
+            None,
+        );
+
+        persist_probe_outcome(&repo, &response).await;
+
+        let row = repo.get(PROBE_PROVIDER, "gpt-test").await.unwrap().unwrap();
+        let health: ModelHealthStatus =
+            serde_json::from_str(row.health.as_deref().unwrap()).unwrap();
+        assert_eq!(health.status, HealthStatus::Unhealthy);
+        assert_eq!(
+            health.error.as_deref(),
+            Some("Provider error: API error 429: Too Many Requests")
+        );
+
+        // A probe for an uncatalogued model must be a silent no-op, never an error.
+        let ghost = ProviderHealthCheckResponse {
+            model: "ghost-model".to_owned(),
+            ..response
+        };
+        persist_probe_outcome(&repo, &ghost).await;
+        assert!(repo.get(PROBE_PROVIDER, "ghost-model").await.unwrap().is_none());
+    }
 }

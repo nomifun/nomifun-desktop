@@ -604,9 +604,12 @@ mod tests {
             .unwrap();
 
         let provider_repo = Arc::new(SqliteProviderRepository::new(db.pool().clone()));
-        let provider_service =
-            nomifun_system::ProviderService::new(provider_repo.clone(), [0u8; 32])
-                .with_deletion_coordinator(Arc::new(coord));
+        let provider_service = nomifun_system::ProviderService::new(
+            provider_repo.clone(),
+            Arc::new(nomifun_db::SqliteProviderModelRepository::new(db.pool().clone())),
+            [0u8; 32],
+        )
+        .with_deletion_coordinator(Arc::new(coord));
         provider_service.delete(deleted_provider_id).await.unwrap();
 
         assert!(provider_repo.find_by_id(deleted_provider_id).await.unwrap().is_none());

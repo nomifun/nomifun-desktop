@@ -36,10 +36,13 @@ pub use models::{
     PresetTagBindingRow, PresetTagRow, PresetUserStateRow, PresetWriteParams,
     UpdatePresetTagParams, UpsertPresetStateParams,
 };
-pub use models::{ModelProfileRow, UpsertModelProfileParams};
 pub use models::{
     CsAgentRow, CsAuditEventRow, CsChannelBindingRow, CsDialogueRow, CsMessageRow, CsNoteRow,
     NewCsAgentRow,
+};
+pub use models::{
+    NewProviderModel, ProviderConnectionRow, ProviderModelRow, ProviderModelUpdate,
+    UpsertProviderConnectionParams,
 };
 pub use repository::channel::UpdatePluginStatusParams;
 pub use repository::customer_service::{
@@ -85,7 +88,8 @@ pub use repository::{
     IConversationRepository, ICronRepository, IIdmmInterventionRepository,
     IdmmActionReservationKey, IdmmActionReserveResult, IdmmActionSettleResult,
     IdmmActionSettlement, IdmmActionTurnIdentity, IKnowledgeRepository,
-    IMcpServerRepository, IModelProfileRepository, IOAuthTokenRepository, IProviderRepository,
+    IMcpServerRepository, IOAuthTokenRepository,
+    IProviderConnectionRepository, IProviderModelRepository, IProviderRepository,
     IRemoteAgentRepository, IRequirementRepository, ISettingsRepository, ISkillTagRepository,
     ITagSettingRepository, ITerminalRepository, IUserRepository, IWebhookRepository,
     ListRequirementsParams, RequirementClaim, RequirementClaimResolution,
@@ -98,7 +102,8 @@ pub use repository::{
     SqliteChannelRepository, SqliteClientPreferenceRepository, SqliteCompanionTokenRepository,
     SqliteConnectorCredentialRepository, SqliteConversationRepository, SqliteCronRepository,
     SqliteIdmmInterventionRepository, SqliteKnowledgeRepository, SqliteMcpServerRepository,
-    SqliteModelProfileRepository, SqliteOAuthTokenRepository, SqliteProviderRepository,
+    SqliteOAuthTokenRepository,
+    SqliteProviderConnectionRepository, SqliteProviderModelRepository, SqliteProviderRepository,
     SqliteRemoteAgentRepository, SqliteRequirementRepository, SqliteSettingsRepository,
     SqliteSkillTagRepository, SqliteTagSettingRepository, SqliteTerminalRepository,
     SqliteUserRepository, SqliteWebhookRepository, TerminalTurnAdmissionClaim,

@@ -5,7 +5,7 @@ use axum::http::{Request, StatusCode};
 use http_body_util::BodyExt;
 use nomifun_common::ProviderId;
 use nomifun_db::{
-    SqliteClientPreferenceRepository, SqliteModelProfileRepository,
+    SqliteClientPreferenceRepository, SqliteProviderModelRepository,
     SqliteProviderRepository, SqliteSettingsRepository, init_database_memory,
 };
 use nomifun_system::{
@@ -37,15 +37,28 @@ async fn setup() -> (
         client_pref_service: ClientPrefService::new(Arc::new(
             SqliteClientPreferenceRepository::new(db.pool().clone()),
         )),
-        provider_service: ProviderService::new(provider_repo.clone(), TEST_KEY),
+        provider_service: ProviderService::new(
+            provider_repo.clone(),
+            Arc::new(nomifun_db::SqliteProviderModelRepository::new(db.pool().clone())),
+            TEST_KEY,
+        ),
+        provider_connection_service: nomifun_system::ProviderConnectionService::new(
+            std::sync::Arc::new(nomifun_db::SqliteProviderConnectionRepository::new(db.pool().clone())),
+            provider_repo.clone(),
+            TEST_KEY,
+        ),
         model_fetch_service: ModelFetchService::new(
-            provider_repo,
+            provider_repo.clone(),
             TEST_KEY,
             http.clone(),
         ),
         model_profile_service: ModelProfileService::new(Arc::new(
-            SqliteModelProfileRepository::new(db.pool().clone()),
+            SqliteProviderModelRepository::new(db.pool().clone()),
         )),
+        provider_model_service: nomifun_system::ProviderModelService::new(
+            Arc::new(SqliteProviderModelRepository::new(db.pool().clone())),
+            provider_repo.clone(),
+        ),
         managed_model_service: Some(managed),
         protocol_detection_service: ProtocolDetectionService::new(http.clone()),
         version_check_service: VersionCheckService::new(http, "0.1.0".into()),
