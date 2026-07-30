@@ -9,6 +9,7 @@ import { Button, Message, Modal, Radio, Tooltip } from '@arco-design/web-react';
 import { LinkCloud } from '@icon-park/react';
 import { useTranslation } from 'react-i18next';
 import { ipcBridge } from '@/common';
+import { isDesktopShell } from '@renderer/utils/platform';
 import { detectFamily, type AgentFamily } from './detectFamily';
 
 interface RegisterKnowledgeButtonProps {
@@ -26,6 +27,11 @@ const FAMILY_OPTIONS: Array<{ value: AgentFamily; label: string }> = [
 /**
  * Registers only the stable command. No port, token, capability, or broker
  * endpoint is written to the target config.
+ *
+ * Desktop shell only: the backend endpoint is local-trust gated (it writes
+ * agent CLI config files on the backend host), so in WebUI browser mode this
+ * renders nothing instead of a button that is guaranteed to 403
+ * (audit 2026-07-30, finding I).
  */
 const RegisterKnowledgeButton: React.FC<RegisterKnowledgeButtonProps> = ({ cwd, command, compact }) => {
   const { t } = useTranslation();
@@ -33,6 +39,7 @@ const RegisterKnowledgeButton: React.FC<RegisterKnowledgeButtonProps> = ({ cwd, 
   const [family, setFamily] = useState<AgentFamily>(autoDetected ?? 'claude');
   const [loading, setLoading] = useState(false);
   const [visible, setVisible] = useState(false);
+  const desktopShell = isDesktopShell();
 
   React.useEffect(() => {
     if (autoDetected) setFamily(autoDetected);
@@ -106,6 +113,10 @@ const RegisterKnowledgeButton: React.FC<RegisterKnowledgeButtonProps> = ({ cwd, 
   const tooltip = cwdEmpty
     ? t('terminal.registerKnowledge.cwdRequired', { defaultValue: '请先选择工作目录' })
     : t('terminal.registerKnowledge.buttonCompact', { defaultValue: '接入知识库' });
+
+  if (!desktopShell) {
+    return null;
+  }
 
   return (
     <>

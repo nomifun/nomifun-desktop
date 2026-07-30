@@ -62,14 +62,21 @@ impl JwtService {
     /// Sign a new JWT for the given user. The token expires with the browser session cookie.
     pub fn sign(&self, user_id: &str, username: &str) -> Result<String, AuthError> {
         let now = now_secs()?;
-        let exp = now + TOKEN_EXPIRY.as_secs();
+        self.sign_with_window(user_id, username, now, now + TOKEN_EXPIRY.as_secs())
+    }
 
+    /// Sign a JWT with an explicit `iat`/`exp` window.
+    ///
+    /// Prefer [`sign`]. This exists so sliding-renewal logic and lifecycle
+    /// tests can mint tokens at a chosen point in their life (e.g. "already
+    /// past half-life") without waiting out real time.
+    pub fn sign_with_window(&self, user_id: &str, username: &str, iat: u64, exp: u64) -> Result<String, AuthError> {
         let user_id = UserId::parse(user_id)
             .map_err(|error| AuthError::TokenInvalid(format!("invalid user id: {error}")))?;
         let claims = TokenPayload {
             user_id,
             username: username.to_owned(),
-            iat: now,
+            iat,
             exp,
             iss: JWT_ISSUER.to_owned(),
             aud: JWT_AUDIENCE.to_owned(),
@@ -165,6 +172,38 @@ impl JwtService {
             .ok()
             .map(|data| data.claims.exp)
     }
+}
+
+/// True once a token is past half of its `iat → exp` lifetime.
+///
+/// The sliding-renewal trigger: renewing at half-life keeps an actively used
+/// session alive forever (each renewal restarts the 30-day window) while an
+/// abandoned session still dies at its natural `exp`. Renewing on *every*
+/// request would also work but re-signs and re-sets the cookie constantly;
+/// half-life bounds that to once per ~15 days per session
+/// (audit 2026-07-30, finding E).
+pub fn is_past_half_life(payload: &TokenPayload) -> bool {
+    let Ok(now) = now_secs() else {
+        return false;
+    };
+    if payload.exp <= payload.iat {
+        // Degenerate window (should not happen for tokens we signed): treat
+        // as renewable so the client gets a well-formed replacement.
+        return true;
+    }
+    let half_point = payload.iat + (payload.exp - payload.iat) / 2;
+    now >= half_point
+}
+
+/// Short, stable bucket key for a bearer/session token: a truncated SHA-256.
+///
+/// Used to key per-session rate-limit buckets without storing the token
+/// itself. 16 hex chars (64 bits) is plenty for bucketing — collisions only
+/// merge two sessions' quotas, never leak anything.
+pub(crate) fn token_bucket_key(token: &str) -> String {
+    let mut hash = token_hash(token);
+    hash.truncate(16);
+    hash
 }
 
 /// Resolve the JWT secret from available sources.
@@ -448,5 +487,63 @@ mod tests {
         let h = token_hash("test");
         assert_eq!(h.len(), 64);
         assert!(h.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    // -- sliding-renewal half-life -------------------------------------------
+
+    #[test]
+    fn fresh_token_is_not_past_half_life() {
+        let service = test_service();
+        let token = service.sign(TEST_USER_ID, "admin").unwrap();
+        let payload = service.verify(&token).unwrap();
+        assert!(!is_past_half_life(&payload));
+    }
+
+    #[test]
+    fn token_past_midpoint_is_renewable() {
+        let service = test_service();
+        let now = now_secs().unwrap();
+        // 20 days old, 10 days remaining: past the 15-day midpoint.
+        let token = service
+            .sign_with_window(TEST_USER_ID, "admin", now - 20 * 86400, now + 10 * 86400)
+            .unwrap();
+        let payload = service.verify(&token).unwrap();
+        assert!(is_past_half_life(&payload));
+    }
+
+    #[test]
+    fn token_just_before_midpoint_is_not_renewable() {
+        let service = test_service();
+        let now = now_secs().unwrap();
+        // 14 days old, 16 remaining: midpoint (15d) not reached yet.
+        let token = service
+            .sign_with_window(TEST_USER_ID, "admin", now - 14 * 86400, now + 16 * 86400)
+            .unwrap();
+        let payload = service.verify(&token).unwrap();
+        assert!(!is_past_half_life(&payload));
+    }
+
+    #[test]
+    fn sign_with_window_roundtrips_claims() {
+        let service = test_service();
+        let now = now_secs().unwrap();
+        let token = service
+            .sign_with_window(TEST_USER_ID, "admin", now - 100, now + 100)
+            .unwrap();
+        let payload = service.verify(&token).unwrap();
+        assert_eq!(payload.iat, now - 100);
+        assert_eq!(payload.exp, now + 100);
+    }
+
+    // -- rate-limit bucket key -------------------------------------------------
+
+    #[test]
+    fn token_bucket_key_is_short_stable_and_distinct() {
+        let k1 = token_bucket_key("session-token-1");
+        let k2 = token_bucket_key("session-token-1");
+        let k3 = token_bucket_key("session-token-2");
+        assert_eq!(k1, k2);
+        assert_ne!(k1, k3);
+        assert_eq!(k1.len(), 16);
     }
 }

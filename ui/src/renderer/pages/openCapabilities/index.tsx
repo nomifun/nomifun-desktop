@@ -380,37 +380,44 @@ const OpenCapabilitiesPage: React.FC = () => {
               />
             </section>
 
-            <section className='rd-12px border border-border-2 bg-fill-0 p-16px'>
-              <SectionHeader
-                icon={<Terminal theme='outline' size='18' fill='currentColor' />}
-                title={t('settings.openCapabilities.projectRegisterTitle', {
-                  defaultValue: '本地知识库 MCP 注册',
-                })}
-                description={t('settings.openCapabilities.projectRegisterDesc', {
-                  defaultValue:
-                    '配置只保存启动命令，不保存端口或凭据。外部 CLI 启动时由当前系统用户专属的本地安全通道按工作目录授权。',
-                })}
-              />
-              <div className='mt-14px grid grid-cols-1 gap-12px lg:grid-cols-[minmax(0,1fr)_auto] lg:items-end'>
-                <div>
-                  <div className='mb-6px text-13px font-500 text-t-primary'>
-                    {t('settings.openCapabilities.projectPath', { defaultValue: '目标项目' })}
+            {/* Local knowledge MCP registration writes agent CLI configs on
+                the BACKEND host — a desktop-shell capability. In WebUI browser
+                mode (docker) the whole section disappears: the buttons were
+                local-trust gated and 403'd on every click
+                (audit 2026-07-30, finding I). */}
+            {lifecycleSupported && (
+              <section className='rd-12px border border-border-2 bg-fill-0 p-16px'>
+                <SectionHeader
+                  icon={<Terminal theme='outline' size='18' fill='currentColor' />}
+                  title={t('settings.openCapabilities.projectRegisterTitle', {
+                    defaultValue: '本地知识库 MCP 注册',
+                  })}
+                  description={t('settings.openCapabilities.projectRegisterDesc', {
+                    defaultValue:
+                      '配置只保存启动命令，不保存端口或凭据。外部 CLI 启动时由当前系统用户专属的本地安全通道按工作目录授权。',
+                  })}
+                />
+                <div className='mt-14px grid grid-cols-1 gap-12px lg:grid-cols-[minmax(0,1fr)_auto] lg:items-end'>
+                  <div>
+                    <div className='mb-6px text-13px font-500 text-t-primary'>
+                      {t('settings.openCapabilities.projectPath', { defaultValue: '目标项目' })}
+                    </div>
+                    <WorkspaceFolderSelect
+                      value={cwd}
+                      onChange={setCwd}
+                      onClear={() => setCwd('')}
+                      placeholder={t('terminal.create.workspacePlaceholder')}
+                      recentLabel={t('terminal.create.recent')}
+                      chooseDifferentLabel={t('terminal.create.chooseFolder')}
+                    />
                   </div>
-                  <WorkspaceFolderSelect
-                    value={cwd}
-                    onChange={setCwd}
-                    onClear={() => setCwd('')}
-                    placeholder={t('terminal.create.workspacePlaceholder')}
-                    recentLabel={t('terminal.create.recent')}
-                    chooseDifferentLabel={t('terminal.create.chooseFolder')}
-                  />
+                  <RegisterKnowledgeButton cwd={cwd} command='claude' />
                 </div>
-                <RegisterKnowledgeButton cwd={cwd} command='claude' />
-              </div>
-              <div className='mt-14px'>
-                <GlobalKnowledgeRegistrationPanel />
-              </div>
-            </section>
+                <div className='mt-14px'>
+                  <GlobalKnowledgeRegistrationPanel />
+                </div>
+              </section>
+            )}
 
           </div>
         </Tabs.TabPane>

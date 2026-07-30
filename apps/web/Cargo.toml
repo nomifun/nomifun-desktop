@@ -15,16 +15,22 @@ static-webui = []
 [build-dependencies]
 serde_json.workspace = true
 
+[dev-dependencies]
+serde_json.workspace = true
+tempfile = "3"
+
 [dependencies]
 # The unified backend, consumed in-process as a library (no spawned binary).
 # P2 will expose nomifun_app's boot entry (init_environment / data layer /
 # AppServices) so this host can mount the real /api router. For now this host
 # serves the built SPA (ui/dist) and a health endpoint.
 nomifun-app.workspace = true
+nomifun-common.workspace = true
 nomifun-runtime.workspace = true
 
 tokio.workspace = true
 axum.workspace = true
+tower = { workspace = true, features = ["util"] }
 tower-http = { workspace = true, features = ["fs", "trace"] }
 tracing.workspace = true
 anyhow.workspace = true

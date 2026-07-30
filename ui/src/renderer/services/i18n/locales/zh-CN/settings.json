@@ -557,6 +557,8 @@
   "webui.passwordTooLong": "密码不能超过128个字符",
   "webui.passwordTooCommon": "密码过于常见，请选择更强的密码",
   "webui.passwordChanged": "密码修改成功",
+  "webui.passwordChangedRelogin": "密码修改成功，所有会话已失效，请用新密码重新登录",
+  "webui.currentPasswordIncorrect": "当前密码不正确",
   "webui.passwordChangeFailed": "密码修改失败",
   "webui.usernameChanged": "用户名修改成功",
   "webui.usernameChangeFailed": "用户名修改失败",

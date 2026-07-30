@@ -557,6 +557,8 @@
   "webui.passwordTooLong": "Password must be less than 128 characters long",
   "webui.passwordTooCommon": "Password is too common, please choose a stronger one",
   "webui.passwordChanged": "Password changed successfully",
+  "webui.passwordChangedRelogin": "Password changed. All sessions are now signed out — please sign in again with the new password.",
+  "webui.currentPasswordIncorrect": "Current password is incorrect",
   "webui.passwordChangeFailed": "Failed to change password",
   "webui.usernameChanged": "Username updated successfully",
   "webui.usernameChangeFailed": "Failed to update username",

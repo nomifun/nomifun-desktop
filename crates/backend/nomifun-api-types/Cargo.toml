@@ -7,3 +7,8 @@ edition.workspace = true
 nomifun-common.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+
+[dev-dependencies]
+# Mirrors axum's Query extractor deserializer so wire-contract tests exercise
+# exactly what the HTTP layer does with query strings.
+serde_urlencoded = "0.7"

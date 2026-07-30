@@ -87,22 +87,42 @@ const WebuiControlPanel: React.FC<WebuiControlPanelProps> = ({ mode = 'popover' 
   };
 
   // 提交新密码 / Submit new password
+  //
+  // Desktop shell: possession-based `/api/webui/change-password` (no current
+  // password). Browser (docker WebUI): authenticated `/api/auth/change-password`
+  // with current-password verification; the backend rotates the JWT secret, so
+  // every session dies and we route the user back to the login screen.
   const handleSetNewPassword = async () => {
     try {
       const values = await form.validate();
       setPasswordLoading(true);
 
-      // changePassword goes through httpBridge; on 4xx/5xx it throws
-      // BackendHttpError, caught below and translated via errorCodeMap.
-      await webui.changePassword.invoke({
-        newPassword: values.newPassword,
-      });
-      Message.success(t('settings.webui.passwordChanged'));
+      if (lifecycleSupported) {
+        await webui.changePassword.invoke({
+          newPassword: values.newPassword,
+        });
+      } else {
+        await webui.account.changePassword.invoke({
+          currentPassword: values.currentPassword,
+          newPassword: values.newPassword,
+        });
+      }
       setSetPasswordModalVisible(false);
       form.resetFields();
       // 改密后清除一次性明文（标题栏抽屉与本页同时收起）。
       // After a change, forget the one-time plaintext (hides it everywhere).
       clearInitialPassword();
+      if (lifecycleSupported) {
+        Message.success(t('settings.webui.passwordChanged'));
+      } else {
+        // All sessions (this one included) are now invalid — send the user to
+        // sign back in with the new password instead of letting the next API
+        // call bounce them with an opaque auth error.
+        Message.success(t('settings.webui.passwordChangedRelogin'));
+        setTimeout(() => {
+          window.location.hash = '/login';
+        }, 1200);
+      }
     } catch (error) {
       console.error('Set new password error:', error);
       const errorCodeMap: Record<string, string> = {
@@ -110,6 +130,10 @@ const WebuiControlPanel: React.FC<WebuiControlPanelProps> = ({ mode = 'popover' 
         PASSWORD_TOO_LONG: t('settings.webui.passwordTooLong'),
         PASSWORD_TOO_COMMON: t('settings.webui.passwordTooCommon'),
       };
+      if (isBackendHttpError(error) && error.status === 401) {
+        Message.error(t('settings.webui.currentPasswordIncorrect'));
+        return;
+      }
       const rawMsg =
         isBackendHttpError(error) && error.backendMessage
           ? error.backendMessage
@@ -129,11 +153,16 @@ const WebuiControlPanel: React.FC<WebuiControlPanelProps> = ({ mode = 'popover' 
       const values = await usernameForm.validate();
       setUsernameLoading(true);
 
-      // HTTP bridge: changeUsername returns { username: string } directly;
+      // HTTP bridge: both variants return { username: string } directly;
       // httpBridge throws BackendHttpError on 4xx/5xx — caught below.
-      const result = await webui.changeUsername.invoke({
-        newUsername: values.newUsername,
-      });
+      const result = lifecycleSupported
+        ? await webui.changeUsername.invoke({
+            newUsername: values.newUsername,
+          })
+        : await webui.account.changeUsername.invoke({
+            currentPassword: values.currentPassword,
+            newUsername: values.newUsername,
+          });
       const nextUsername = result?.username ?? values.newUsername.trim();
       Message.success(t('settings.webui.usernameChanged'));
       setSetUsernameModalVisible(false);
@@ -141,6 +170,10 @@ const WebuiControlPanel: React.FC<WebuiControlPanelProps> = ({ mode = 'popover' 
       setUsernameOverride(nextUsername);
     } catch (error) {
       console.error('Set new username error:', error);
+      if (isBackendHttpError(error) && error.status === 401) {
+        Message.error(t('settings.webui.currentPasswordIncorrect'));
+        return;
+      }
       const fallback = t('settings.webui.usernameChangeFailed');
       const msg = isBackendHttpError(error) && error.backendMessage ? error.backendMessage : fallback;
       Message.error(msg);
@@ -501,6 +534,15 @@ const WebuiControlPanel: React.FC<WebuiControlPanelProps> = ({ mode = 'popover' 
         size='small'
       >
         <Form form={usernameForm} layout='vertical' className='pt-16px'>
+          {!lifecycleSupported && (
+            <Form.Item
+              label={t('settings.webui.currentPassword')}
+              field='currentPassword'
+              rules={[{ required: true, message: t('settings.webui.currentPasswordRequired') }]}
+            >
+              <Input.Password placeholder={t('settings.webui.currentPasswordPlaceholder')} />
+            </Form.Item>
+          )}
           <Form.Item
             label={t('settings.webui.newUsername')}
             field='newUsername'
@@ -554,6 +596,15 @@ const WebuiControlPanel: React.FC<WebuiControlPanelProps> = ({ mode = 'popover' 
         size='small'
       >
         <Form form={form} layout='vertical' className='pt-16px'>
+          {!lifecycleSupported && (
+            <Form.Item
+              label={t('settings.webui.currentPassword')}
+              field='currentPassword'
+              rules={[{ required: true, message: t('settings.webui.currentPasswordRequired') }]}
+            >
+              <Input.Password placeholder={t('settings.webui.currentPasswordPlaceholder')} />
+            </Form.Item>
+          )}
           <Form.Item
             label={t('settings.webui.newPassword')}
             field='newPassword'
