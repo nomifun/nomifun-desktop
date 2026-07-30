@@ -7,7 +7,8 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Select, Tooltip } from '@arco-design/web-react';
-import { useModelProviderList, useProvidersQuery } from '@renderer/hooks/agent/useModelProviderList';
+import { useProvidersQuery } from '@renderer/hooks/agent/useModelProviderList';
+import { useModelsForTask } from '@/renderer/hooks/agent/useModelsForTask';
 import type { ProviderId } from '@/common/types/ids';
 import type { useCompanion } from './useNomi';
 import { useModelSelectorProviderLabel } from '@/renderer/hooks/agent/useModelSelectorProviderLabel';
@@ -33,7 +34,8 @@ interface Props {
 const CompanionModelControl: React.FC<Props> = ({ companion }) => {
   const { t } = useTranslation();
   const { profile, patchCompanion } = companion;
-  const { getAvailableModels } = useModelProviderList();
+  // 对话主模型清单来自统一 catalog resolve（task='chat'，无名称启发式）。
+  const { groups: chatGroups } = useModelsForTask('chat');
   const { data: rawProviders } = useProvidersQuery();
   const providerLabel = useModelSelectorProviderLabel();
   const [draftProviderId, setDraftProviderId] = useState<ProviderId | null>(null);
@@ -52,15 +54,15 @@ const CompanionModelControl: React.FC<Props> = ({ companion }) => {
   );
 
   const availableModels = useMemo(
-    () => (currentProvider ? getAvailableModels(currentProvider) : []),
-    [currentProvider, getAvailableModels]
+    () =>
+      currentProvider
+        ? (chatGroups.find((group) => group.provider.id === currentProvider.id)?.models ?? [])
+        : [],
+    [chatGroups, currentProvider]
   );
 
   // 是否至少有一个供应商提供可用于对话的文本模型。
-  const anyChatModel = useMemo(
-    () => enabledProviders.some((p) => getAvailableModels(p).length > 0),
-    [enabledProviders, getAvailableModels]
-  );
+  const anyChatModel = chatGroups.length > 0;
 
   if (!profile) return null;
 

@@ -10,7 +10,7 @@ import { Button, InputNumber, Message, Select, Spin, Switch, Table, Tag } from '
 import { ipcBridge } from '@/common';
 import type { ICompanionLearnRun } from '@/common/adapter/ipcBridge';
 import type { ProviderId } from '@/common/types/ids';
-import { useModelProviderList } from '@renderer/hooks/agent/useModelProviderList';
+import { useModelsForTask } from '@renderer/hooks/agent/useModelsForTask';
 import type { useCompanionShared } from '../useNomi';
 import { useModelSelectorProviderLabel } from '@/renderer/hooks/agent/useModelSelectorProviderLabel';
 
@@ -30,7 +30,9 @@ interface Props {
 const LearnTab: React.FC<Props> = ({ shared }) => {
   const { t } = useTranslation();
   const { sharedConfig, patchSharedConfig } = shared;
-  const { providers, getAvailableModels } = useModelProviderList();
+  // 学习模型做对话补全 —— 供应商/模型清单来自统一 chat catalog（后端 resolve）。
+  const { groups: chatGroups } = useModelsForTask('chat');
+  const providers = useMemo(() => chatGroups.map((group) => group.provider), [chatGroups]);
   const providerLabel = useModelSelectorProviderLabel();
   const [runs, setRuns] = useState<ICompanionLearnRun[]>([]);
   const [running, setRunning] = useState(false);
@@ -43,6 +45,10 @@ const LearnTab: React.FC<Props> = ({ shared }) => {
   const currentProvider = useMemo(
     () => providers.find((p) => p.id === draftProviderId),
     [draftProviderId, providers]
+  );
+  const currentProviderModels = useMemo(
+    () => chatGroups.find((group) => group.provider.id === draftProviderId)?.models ?? [],
+    [chatGroups, draftProviderId]
   );
 
   const refreshRuns = useCallback(() => {
@@ -146,7 +152,7 @@ const LearnTab: React.FC<Props> = ({ shared }) => {
               }
             }}
           >
-            {(currentProvider ? getAvailableModels(currentProvider) : []).map((m) => (
+            {(currentProvider ? currentProviderModels : []).map((m) => (
               <Select.Option key={m} value={m}>
                 {m}
               </Select.Option>

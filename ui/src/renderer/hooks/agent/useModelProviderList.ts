@@ -1,17 +1,18 @@
 import { ipcBridge } from '@/common';
 import { GOOGLE_AUTH_PROVIDER_ID } from '@/common/config/constants';
 import type { IProvider } from '@/common/config/storage';
-import { useCallback, useEffect, useMemo, useRef } from 'react';
+import { useCallback, useMemo } from 'react';
 import useSWR, { type SWRConfiguration } from 'swr';
 import { useGoogleAuthModels } from './useGoogleAuthModels';
-import { hasSpecificModelCapability } from '@/renderer/utils/model/modelCapabilities';
 import { orderModelSelectorProviders } from './modelSelectorProviderOrdering';
 
 export interface ModelProviderListResult {
+  /** Enabled providers in selector order — provider METADATA only. Which
+   * models a surface may list comes from `useModelsForTask` (catalog resolve);
+   * the old name-heuristic `getAvailableModels` filter is gone. */
   providers: IProvider[];
   configuredProviders: IProvider[];
   isLoading: boolean;
-  getAvailableModels: (provider: IProvider) => string[];
   formatModelLabel: (provider: { platform?: string } | undefined, modelName?: string) => string;
 }
 
@@ -34,45 +35,15 @@ export const useProvidersQuery = () => {
 };
 
 /**
- * Shared hook that builds the provider list (including Google Auth)
- * and exposes helpers consumed by both conversation and channel settings.
+ * Shared hook that builds the provider list (including Google Auth) and
+ * exposes provider metadata/label helpers. Task-capable MODEL lists are
+ * resolved by `useModelsForTask` against the backend catalog — this hook
+ * deliberately no longer filters models by capability name heuristics.
  */
 export const useModelProviderList = (): ModelProviderListResult => {
   const { isGoogleAuth, isLoading: isGoogleAuthLoading } = useGoogleAuthModels();
 
   const { data: modelConfig, isLoading: isProvidersLoading } = useProvidersQuery();
-
-  // Mutable cache for available-model filtering
-  const available_modelsCacheRef = useRef(new Map<string, string[]>());
-
-  // 当 modelConfig 变化时清除缓存
-  useEffect(() => {
-    available_modelsCacheRef.current.clear();
-  }, [modelConfig]);
-
-  const getAvailableModels = useCallback((provider: IProvider): string[] => {
-    // 包含 model_enabled 状态到缓存 key 中
-    const model_enabledKey = provider.model_enabled ? JSON.stringify(provider.model_enabled) : 'all-enabled';
-    const cacheKey = `${provider.id}-${(provider.models || []).join(',')}-${model_enabledKey}`;
-    const cache = available_modelsCacheRef.current;
-    if (cache.has(cacheKey)) {
-      return cache.get(cacheKey)!;
-    }
-    const result: string[] = [];
-    for (const modelName of provider.models || []) {
-      // 检查模型是否被禁用（默认为启用）
-      const isModelEnabled = provider.model_enabled?.[modelName] !== false;
-      if (!isModelEnabled) continue;
-
-      const functionCalling = hasSpecificModelCapability(provider, modelName, 'function_calling');
-      const excluded = hasSpecificModelCapability(provider, modelName, 'excludeFromPrimary');
-      if ((functionCalling === true || functionCalling === undefined) && excluded !== true) {
-        result.push(modelName);
-      }
-    }
-    cache.set(cacheKey, result);
-    return result;
-  }, []);
 
   const configuredProviders = useMemo(() => {
     const list: IProvider[] = Array.isArray(modelConfig) ? modelConfig : [];
@@ -93,11 +64,11 @@ export const useModelProviderList = (): ModelProviderListResult => {
   }, [isGoogleAuth, modelConfig]);
 
   const providers = useMemo(() => {
-    // 过滤掉被禁用的 provider（默认为启用）
-    const list = configuredProviders.filter((p) => p.enabled !== false);
-    // 过滤掉没有可用模型的 provider
-    return orderModelSelectorProviders(list.filter((p) => getAvailableModels(p).length > 0));
-  }, [configuredProviders, getAvailableModels]);
+    // 过滤掉被禁用的 provider（默认为启用）。
+    // 注意：不再按「是否有可用模型」过滤 —— 模型级别的可用性由
+    // useModelsForTask（后端 catalog resolve）决定，空组不会被渲染。
+    return orderModelSelectorProviders(configuredProviders.filter((p) => p.enabled !== false));
+  }, [configuredProviders]);
 
   const formatModelLabel = useCallback((_provider: { platform?: string } | undefined, modelName?: string) => {
     if (!modelName) return '';
@@ -112,7 +83,6 @@ export const useModelProviderList = (): ModelProviderListResult => {
     // failed provider request as an authoritative empty catalog and purge every
     // persisted model reference.
     isLoading: isProvidersLoading || isGoogleAuthLoading || !Array.isArray(modelConfig),
-    getAvailableModels,
     formatModelLabel,
   };
 };

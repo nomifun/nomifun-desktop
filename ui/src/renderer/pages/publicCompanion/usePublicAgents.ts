@@ -7,7 +7,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import { ipcBridge } from '@/common';
 import type { IPublicAgent, IPublicAgentPatch } from '@/common/adapter/ipcBridge';
-import { useModelProviderList } from '@renderer/hooks/agent/useModelProviderList';
+import { useModelsForTask } from '@renderer/hooks/agent/useModelsForTask';
 import type { PublicAgentId } from '@/common/types/ids';
 
 /**
@@ -19,7 +19,8 @@ import type { PublicAgentId } from '@/common/types/ids';
 export const usePublicAgents = () => {
   const [agents, setAgents] = useState<IPublicAgent[]>([]);
   const [loading, setLoading] = useState(true);
-  const { providers, getAvailableModels } = useModelProviderList();
+  // 开箱即用的默认模型种子来自统一 chat catalog（后端 resolve）。
+  const { groups: chatGroups } = useModelsForTask('chat');
 
   const refresh = useCallback(async () => {
     setLoading(true);
@@ -41,12 +42,13 @@ export const usePublicAgents = () => {
     async (name: string): Promise<IPublicAgent> => {
       const created = await ipcBridge.publicAgent.create.invoke({ name });
       // 开箱即用: seed the new agent's model from the machine's first available
-      // provider/model so it can answer strangers immediately (the owner can
-      // change it under 身份 & 话术). Best-effort — a missing model just means
-      // the owner must pick one in the console before the agent can serve.
+      // chat-capable provider/model so it can answer strangers immediately (the
+      // owner can change it under 身份 & 话术). Best-effort — a missing model
+      // just means the owner must pick one in the console before serving.
       if (!created.model?.provider_id) {
-        const provider = providers[0];
-        const model = provider ? (getAvailableModels(provider)[0] ?? '') : '';
+        const firstGroup = chatGroups[0];
+        const provider = firstGroup?.provider;
+        const model = firstGroup?.models[0] ?? '';
         if (provider && model) {
           try {
             await ipcBridge.publicAgent.patch.invoke({
@@ -61,7 +63,7 @@ export const usePublicAgents = () => {
       await refresh();
       return created;
     },
-    [providers, getAvailableModels, refresh]
+    [chatGroups, refresh]
   );
 
   return { agents, loading, refresh, create };

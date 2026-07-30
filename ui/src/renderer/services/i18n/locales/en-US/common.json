@@ -61,6 +61,7 @@
   "deleteFailed": "Failed to delete",
   "default": "Default",
   "defaultModel": "Default Model",
+  "modelUnavailableHint": "The selected model is no longer available. Please pick another one.",
   "escToCancel": "esc to cancel",
   "create": "Create",
   "createSuccess": "Created successfully",

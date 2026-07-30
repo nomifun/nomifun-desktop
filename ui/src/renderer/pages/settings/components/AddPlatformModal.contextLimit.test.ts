@@ -27,10 +27,11 @@ describe('AddPlatformModal context window control', () => {
     expect(addModelSource.includes('<ContextLimitSelect')).toBe(true);
     expect(addModelSource.includes('model_context_limits')).toBe(true);
     expect(modelListSource.includes('ModelContextLimitEditor')).toBe(true);
-    expect(modelListSource.includes('model_context_limits')).toBe(true);
-    expect(modelListSource.includes('newModelContextLimits')).toBe(true);
-    expect(modelListSource.includes('model_context_limits: next')).toBe(true);
-    expect(modelListSource.includes('model_context_limits: newModelContextLimits')).toBe(true);
+    // Context limit persists through the row-level API (tri-state: null clears),
+    // not the legacy whole-provider model_context_limits map PUT.
+    expect(modelListSource.includes('context_limit: value && value > 0 ? value : null')).toBe(true);
+    expect(modelListSource.includes('newModelContextLimits')).toBe(false);
+    expect(modelListSource.includes('model_context_limits: next')).toBe(false);
     expect(modelListSource.includes('model_context_limits: Object.keys(next).length > 0 ? next : undefined')).toBe(
       false
     );
