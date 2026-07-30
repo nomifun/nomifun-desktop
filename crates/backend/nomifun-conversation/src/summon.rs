@@ -210,7 +210,7 @@ impl ConversationService {
         Self::terminate_runtime_with_proof(
             &self.runtime_registry,
             &row.conversation_id,
-            AgentKillReason::AgentErrorRecovery,
+            AgentKillReason::ConfigurationChanged,
             operation,
         )
         .await?;
