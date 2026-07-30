@@ -61,6 +61,12 @@ struct SendToConversationParams {
     /// background task prompts, like AutoWork does).
     #[serde(default)]
     hidden: Option<bool>,
+    /// When true (default false), you will automatically receive a completion
+    /// receipt message in YOUR conversation once the target finishes this
+    /// task — use it for fire-and-forget delegation instead of polling
+    /// nomi_conversation_status.
+    #[serde(default)]
+    notify_back: Option<bool>,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -355,6 +361,40 @@ async fn send(deps: Arc<GatewayDeps>, ctx: CallerCtx, p: SendToConversationParam
             "error": "missing_idempotency_key: conversation send requires an authenticated operation identity"
         });
     };
+    // Spec D2: register the completion receipt BEFORE the send — a fast
+    // target turn may otherwise complete before the registration lands and
+    // the observer would find nothing to take. An orphaned registration from
+    // a failed send is inert (nothing ever completes that operation).
+    let mut notify_note: Option<&'static str> = None;
+    if p.notify_back.unwrap_or(false) {
+        match ctx.conversation_id.as_ref() {
+            None => {
+                notify_note =
+                    Some("notify_back ignored: the caller has no conversation to notify");
+            }
+            Some(requester) => {
+                match deps
+                    .conversation_service
+                    .register_delivery_notify(&user_id, &id, operation_id, requester.as_str())
+                    .await
+                {
+                    Ok(nomifun_conversation::DeliveryNotifyRegistration::Registered) => {
+                        notify_note = Some(
+                            "notify_back registered: you will receive a receipt message when the target finishes",
+                        );
+                    }
+                    Ok(
+                        nomifun_conversation::DeliveryNotifyRegistration::RefusedDeliveryNotifyOrigin,
+                    ) => {
+                        notify_note = Some(
+                            "notify_back ignored: a delivery-notify receipt turn cannot register further receipts (loop guard)",
+                        );
+                    }
+                    Err(e) => return error_value(e),
+                }
+            }
+        }
+    }
     let req = SendMessageRequest {
         content: p.content,
         files: vec![],
@@ -381,6 +421,7 @@ async fn send(deps: Arc<GatewayDeps>, ctx: CallerCtx, p: SendToConversationParam
             "result_ok": delivery.result_ok,
             "result_text": delivery.result_text,
             "result_error": delivery.result_error,
+            "notify_back": notify_note,
             "note": "message accepted; the target session processes it asynchronously — use nomi_conversation_status to follow progress"
         })),
         Err(AppError::Conflict(m)) => json!({
@@ -710,7 +751,7 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
         CapabilityMeta::new(
             "nomi_send_to_conversation",
             "conversation",
-            "Inject a message (or a hidden task prompt) into another session.",
+            "Inject a message (or a hidden task prompt) into another session. Set notify_back=true to automatically receive a completion receipt in your own conversation when the target finishes.",
             DangerTier::Write,
         ),
         send,
@@ -903,6 +944,39 @@ mod tests {
                 json!({"conversation_id": "conversation-1"})
             )
             .is_err()
+        );
+    }
+
+    #[test]
+    fn send_params_accept_optional_notify_back() {
+        let params: SendToConversationParams = serde_json::from_value(json!({
+            "conversation_id": "0190f5fe-7c00-7a00-8abc-012345678901",
+            "content": "do the thing",
+            "notify_back": true
+        }))
+        .unwrap();
+        assert_eq!(params.notify_back, Some(true));
+
+        // Default stays off.
+        let params: SendToConversationParams = serde_json::from_value(json!({
+            "conversation_id": "0190f5fe-7c00-7a00-8abc-012345678901",
+            "content": "do the thing"
+        }))
+        .unwrap();
+        assert_eq!(params.notify_back, None);
+
+        // The registered capability schema exposes the field.
+        let mut caps = Vec::new();
+        register(&mut caps);
+        let cap = caps
+            .iter()
+            .find(|cap| cap.meta.name == "nomi_send_to_conversation")
+            .expect("nomi_send_to_conversation must be registered");
+        assert!(
+            cap.input_schema["properties"]
+                .as_object()
+                .unwrap()
+                .contains_key("notify_back")
         );
     }
 

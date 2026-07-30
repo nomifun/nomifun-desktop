@@ -12,6 +12,23 @@ use std::sync::{Arc, Mutex};
 
 use crate::types::DecisionOption;
 
+/// What resolving the pending decision means.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PendingDecisionKind {
+    /// A blocking agent decision (permission / confirmation): the numbered
+    /// reply is submitted back through `ConversationService::confirm`.
+    AgentConfirm,
+    /// Channel-owned remote-stop confirmation (batch-1 handover gap): the
+    /// companion's `nomi_stop_conversation` was denied by the gateway matrix
+    /// on the Channel surface, so the channel asks the user directly. On
+    /// "确认" the message loop cancels the target as owner via
+    /// `ConversationService::cancel` — the same safe path as the desktop
+    /// stop button, never through the gateway matrix.
+    StopConversation {
+        target_conversation_id: String,
+    },
+}
+
 /// A blocking decision awaiting the channel user's numbered reply.
 ///
 /// `prompt` is retained so a non-numeric reply can re-render the same
@@ -20,6 +37,7 @@ use crate::types::DecisionOption;
 pub struct PendingDecision {
     pub conversation_id: String,
     pub call_id: String,
+    pub kind: PendingDecisionKind,
     pub prompt: String,
     pub options: Vec<DecisionOption>,
 }
@@ -76,6 +94,7 @@ mod tests {
         PendingDecision {
             conversation_id: conversation_id.into(),
             call_id: call_id.into(),
+            kind: PendingDecisionKind::AgentConfirm,
             prompt: "Proceed?".into(),
             options: vec![opt("a", "Allow"), opt("b", "Deny")],
         }

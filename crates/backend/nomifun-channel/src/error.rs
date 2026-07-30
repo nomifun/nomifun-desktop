@@ -76,10 +76,12 @@ pub enum ChannelError {
     /// The bound conversation is already running a turn. For companion sessions
     /// (now shared by the desktop bubble, chat tab, and every IM chat) a
     /// concurrent turn surfaces as a turn-claim `Conflict`; the message loop
-    /// answers the user with the friendly "still processing" notice rather than
-    /// a raw error.
-    #[error("conversation busy")]
-    ConversationBusy,
+    /// enqueues the prompt into the busy-time queue (spec D1) instead of
+    /// dropping it. Carries the resolved conversation id so the queue entry
+    /// targets the conversation the turn actually raced on (the companion
+    /// shared session, which may differ from the pre-bind session pointer).
+    #[error("conversation busy: {0}")]
+    ConversationBusy(String),
 
     /// A companion is bound to this channel but has no chat model configured, so
     /// its single session can't be created. The message loop relays this as a
@@ -113,7 +115,7 @@ impl From<ChannelError> for AppError {
             ChannelError::DecryptionFailed(msg) => AppError::Internal(msg),
             ChannelError::PlatformApi(msg) => AppError::BadGateway(msg),
             ChannelError::MessageSendFailed(msg) => AppError::Internal(msg),
-            ChannelError::ConversationBusy => AppError::Conflict("conversation busy".into()),
+            ChannelError::ConversationBusy(_) => AppError::Conflict("conversation busy".into()),
             ChannelError::CompanionNotReady(msg) => AppError::BadRequest(msg),
             ChannelError::Database(db_err) => AppError::from(db_err),
             ChannelError::Json(e) => AppError::Internal(format!("JSON error: {e}")),

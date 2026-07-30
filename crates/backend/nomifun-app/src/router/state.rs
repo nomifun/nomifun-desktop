@@ -140,6 +140,12 @@ pub struct ChannelMessageLoopComponents {
     pub confirm_rx: tokio::sync::mpsc::Receiver<(String, String)>,
     pub manager: Arc<nomifun_channel::manager::ChannelManager>,
     pub plugin_factory: Arc<nomifun_channel::manager::PluginFactory>,
+    /// Busy-time prompt queue drain (spec D1). The caller spawns
+    /// `queue_drain.run(event_bus.subscribe_user())` next to the message loop.
+    pub queue_drain: nomifun_channel::queue_drain::QueueDrain,
+    /// Shared channel message service (pending-decision store + asset
+    /// resolver for the delivery-notify observer's IM relay).
+    pub message_service: Arc<nomifun_channel::message_service::ChannelMessageService>,
 }
 
 #[derive(Debug, Default)]
@@ -1006,7 +1012,17 @@ pub async fn build_channel_state(
 
     let message_loop = nomifun_channel::message_loop::ChannelMessageLoop::new(
         action_executor,
-        message_service,
+        Arc::clone(&message_service),
+        Arc::clone(&session_manager),
+        manager.clone() as Arc<dyn nomifun_channel::stream_relay::ChannelSender>,
+    );
+
+    // Busy-time prompt queue drain (spec D1): delivers queued prompts FIFO on
+    // turn completion, consuming the same realtime bus the conversation
+    // service broadcasts `turn.completed` through.
+    let queue_drain = nomifun_channel::queue_drain::QueueDrain::new(
+        repo.clone(),
+        Arc::clone(&message_service),
         Arc::clone(&session_manager),
         manager.clone() as Arc<dyn nomifun_channel::stream_relay::ChannelSender>,
     );
@@ -1028,6 +1044,8 @@ pub async fn build_channel_state(
         confirm_rx,
         manager,
         plugin_factory,
+        queue_drain,
+        message_service,
     };
 
     (state, components)

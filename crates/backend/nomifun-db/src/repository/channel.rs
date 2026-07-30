@@ -2,9 +2,9 @@ use nomifun_common::TimestampMs;
 
 use crate::error::DbError;
 use crate::models::{
-    ChannelInboundReceiptRow, ChannelPairingCodeRow, ChannelPluginRow, ChannelSessionRow,
-    ChannelUserRow, NewChannelInboundReceiptRow, NewChannelPairingCodeRow, NewChannelPluginRow,
-    NewChannelSessionRow, NewChannelUserRow,
+    ChannelInboundReceiptRow, ChannelPairingCodeRow, ChannelPendingPromptRow, ChannelPluginRow,
+    ChannelSessionRow, ChannelUserRow, NewChannelInboundReceiptRow, NewChannelPairingCodeRow,
+    NewChannelPendingPromptRow, NewChannelPluginRow, NewChannelSessionRow, NewChannelUserRow,
 };
 
 /// Result of atomically claiming a provider-owned inbound event.
@@ -14,6 +14,19 @@ pub enum ChannelInboundClaim {
     Owner(ChannelInboundReceiptRow),
     /// The same immutable event was already admitted. No side effect may run.
     Replay(ChannelInboundReceiptRow),
+}
+
+/// Outcome of enqueueing one busy-time channel prompt (spec D1).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PendingPromptEnqueue {
+    /// The prompt was persisted; `position` is its 1-based place in the
+    /// conversation's queued FIFO (so the channel can answer "第 N 位").
+    Queued {
+        row: ChannelPendingPromptRow,
+        position: i64,
+    },
+    /// The conversation already has the maximum number of queued prompts.
+    QueueFull,
 }
 
 impl ChannelInboundClaim {
@@ -200,6 +213,89 @@ pub trait IChannelRepository: Send + Sync {
     /// Creates a pairing code and returns its SQLite-assigned id.
     async fn create_pairing(&self, row: &NewChannelPairingCodeRow) -> Result<ChannelPairingCodeRow, DbError>;
 
+    // ── Busy-time pending prompt queue (spec D1) ─────────────────────
+    //
+    // Default implementations fail closed so repositories/mocks that never
+    // queue prompts (tests, alternative stores) need no changes.
+
+    /// Persist one busy-time prompt. Returns [`PendingPromptEnqueue::QueueFull`]
+    /// when the conversation already has [`PENDING_PROMPT_QUEUE_LIMIT`] queued
+    /// rows; otherwise the inserted row plus its 1-based FIFO position.
+    async fn enqueue_pending_prompt(
+        &self,
+        _row: &NewChannelPendingPromptRow,
+        _now: TimestampMs,
+    ) -> Result<PendingPromptEnqueue, DbError> {
+        Err(DbError::Conflict(
+            "channel pending prompts are not supported by this repository".to_owned(),
+        ))
+    }
+
+    /// The oldest still-queued prompt of a conversation (FIFO head), if any.
+    async fn peek_next_queued(
+        &self,
+        _conversation_id: &str,
+    ) -> Result<Option<ChannelPendingPromptRow>, DbError> {
+        Err(DbError::Conflict(
+            "channel pending prompts are not supported by this repository".to_owned(),
+        ))
+    }
+
+    /// Settle a queued prompt into one absorbing terminal state
+    /// (`delivered | expired | cancelled | failed`). Settling an already
+    /// settled prompt is a Conflict; the terminal state never changes.
+    async fn settle_prompt(
+        &self,
+        _prompt_id: &str,
+        _state: &str,
+        _now: TimestampMs,
+    ) -> Result<(), DbError> {
+        Err(DbError::Conflict(
+            "channel pending prompts are not supported by this repository".to_owned(),
+        ))
+    }
+
+    /// Increment the retry counter of a still-queued prompt and return the new
+    /// value. Used by the drain's bounded retryable-failure retries.
+    async fn increment_prompt_attempts(&self, _prompt_id: &str) -> Result<i64, DbError> {
+        Err(DbError::Conflict(
+            "channel pending prompts are not supported by this repository".to_owned(),
+        ))
+    }
+
+    /// Mark every queued prompt older than `before_ms` as `expired` and return
+    /// the expired rows so the caller can notify their chats.
+    async fn expire_stale(
+        &self,
+        _before_ms: TimestampMs,
+        _now: TimestampMs,
+    ) -> Result<Vec<ChannelPendingPromptRow>, DbError> {
+        Err(DbError::Conflict(
+            "channel pending prompts are not supported by this repository".to_owned(),
+        ))
+    }
+
+    /// Cancel every queued prompt of one `(plugin, chat)` scope (the IM
+    /// 「取消排队」 command). Returns how many prompts were cancelled.
+    async fn cancel_chat_queue(
+        &self,
+        _channel_plugin_id: &str,
+        _chat_id: &str,
+        _now: TimestampMs,
+    ) -> Result<u64, DbError> {
+        Err(DbError::Conflict(
+            "channel pending prompts are not supported by this repository".to_owned(),
+        ))
+    }
+
+    /// Conversations that still have at least one queued prompt (startup
+    /// recovery sweep).
+    async fn list_queued_conversations(&self) -> Result<Vec<String>, DbError> {
+        Err(DbError::Conflict(
+            "channel pending prompts are not supported by this repository".to_owned(),
+        ))
+    }
+
     /// Returns all pairing codes with status = 'pending'.
     async fn get_pending_pairings(&self) -> Result<Vec<ChannelPairingCodeRow>, DbError>;
 
@@ -222,3 +318,11 @@ pub struct UpdatePluginStatusParams {
     pub last_connected: Option<TimestampMs>,
     pub enabled: Option<bool>,
 }
+
+/// Maximum number of `queued` prompts one conversation may hold (spec D1:
+/// 每 chat 队列上限 10 — enforced per conversation, which upper-bounds every
+/// chat riding it).
+pub const PENDING_PROMPT_QUEUE_LIMIT: i64 = 10;
+
+/// How long a queued prompt may wait before the drain expires it (spec D1).
+pub const PENDING_PROMPT_EXPIRY_MS: i64 = 30 * 60 * 1000;
