@@ -60,8 +60,14 @@
   },
   "bindings": {
     "saved": "Bindings updated",
-    "noBots": "No channel bots yet. Connect one under Desktop Companion → Remote Connect or channel settings first.",
-    "companionBound": "Bound to a companion",
+    "domainHint": "Customer service uses its own channel bots, fully independent from desktop companions' channels.",
+    "noBots": "No customer-service channel bots yet — create one here; it will be bound to this agent automatically.",
+    "createBot": "Create channel bot",
+    "createTitle": "New customer-service channel bot",
+    "pickPlatform": "Pick a channel platform",
+    "boundToOther": "Bound to: {{name}}",
+    "unbound": "Unbound",
+    "autoBound": "Created and bound to this agent automatically",
     "hint": "Once bound, every inbound message on that bot is served by this agent (strangers need no pairing code)."
   },
   "notes": {

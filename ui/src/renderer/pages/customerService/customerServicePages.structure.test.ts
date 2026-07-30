@@ -10,6 +10,7 @@ import { describe, expect, test } from 'bun:test';
 const rosterSource = readFileSync(new URL('./index.tsx', import.meta.url), 'utf8');
 const detailSource = readFileSync(new URL('./CsAgentDetailPage.tsx', import.meta.url), 'utf8');
 const createSource = readFileSync(new URL('./CreateCsAgentModal.tsx', import.meta.url), 'utf8');
+const botsSectionSource = readFileSync(new URL('./CsChannelBotsSection.tsx', import.meta.url), 'utf8');
 
 describe('customer service pages structure', () => {
   test('roster navigates by cs_agent_id business id', () => {
@@ -25,9 +26,28 @@ describe('customer service pages structure', () => {
     }
   });
 
-  test('detail page manages bindings via the full-replacement PUT contract', () => {
-    expect(detailSource.includes('ipcBridge.customerService.replaceBindings.invoke')).toBe(true);
-    expect(detailSource.includes('channel_plugin_ids: next')).toBe(true);
+  test('detail page delegates channel-bot management to the self-closed section', () => {
+    expect(detailSource.includes('CsChannelBotsSection')).toBe(true);
+    // The old cross-domain shared pool (raw getPluginStatus consumption) is gone.
+    expect(detailSource.includes('channel.getPluginStatus')).toBe(false);
+    expect(detailSource.includes('companionBound')).toBe(false);
+  });
+
+  test('bots section manages bindings via the full-replacement PUT contract', () => {
+    expect(botsSectionSource.includes('ipcBridge.customerService.replaceBindings.invoke')).toBe(true);
+    expect(botsSectionSource.includes('channel_plugin_ids:')).toBe(true);
+  });
+
+  test('bots section is a customer-service-domain self-closed loop', () => {
+    // Only cs-domain bots are listed; companion bots never enter the pool.
+    expect(botsSectionSource.includes('selectCsChannelBots')).toBe(true);
+    // In-page creation reuses the shared platform config machinery, addressed
+    // to the customer-service domain and never carrying a companion binding.
+    expect(botsSectionSource.includes('PlatformConfigBody')).toBe(true);
+    expect(botsSectionSource.includes("ownerDomain: 'customer_service'")).toBe(true);
+    expect(botsSectionSource.includes('companionId')).toBe(false);
+    // A bot created inside the modal is adopted and auto-bound to this agent.
+    expect(botsSectionSource.includes('findNewlyCreatedCsBot')).toBe(true);
   });
 
   test('detail page exposes notes CRUD against the notes REST surface', () => {

@@ -10,6 +10,7 @@ import { Button, Empty, Input, Message, Spin, Tooltip } from '@arco-design/web-r
 import { CheckOne, CloseOne, Delete, Refresh } from '@icon-park/react';
 import React, { useCallback, useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
+import { buildEnablePluginRequest, findEnabledChannelStatus } from '@/renderer/components/channels/channelStatusSelection';
 import type { ChannelTarget } from './channelTarget';
 
 interface NostrConfigFormProps {
@@ -77,14 +78,19 @@ const NostrConfigForm: React.FC<NostrConfigFormProps> = ({ pluginStatus, channel
 
   const handleAutoEnable = async () => {
     const config = { credentials: { nostr_private_key: privateKey.trim(), nostr_relays: relays.trim() } };
-    const result = await channel.enablePlugin.invoke(channelTarget ? { plugin_id: channelTarget.channelPluginId, plugin_type: 'nostr', ...(channelTarget.companionId ? { companion_id: channelTarget.companionId } : {}), config } : { plugin_type: 'nostr', config });
+    const result = await channel.enablePlugin.invoke(buildEnablePluginRequest('nostr', channelTarget, config));
     if (!result.success) {
       throw new Error(result.error || t('nomi.settings.remoteEnableFailed', { defaultValue: 'Failed to enable channel' }));
     }
     Message.success(t('settings.nostr.pluginEnabled', 'Nostr bot enabled'));
     const plugins = await channel.getPluginStatus.invoke();
     if (plugins) {
-      const row = channelTarget ? (channelTarget.channelPluginId ? plugins.find((p) => p.plugin_id === channelTarget.channelPluginId) : plugins.find((p) => p.type === 'nostr' && p.companionId === channelTarget.companionId)) : plugins.find((p) => p.type === 'nostr');
+      const row = findEnabledChannelStatus(plugins, {
+        platform: 'nostr',
+        enabledPluginId: result.plugin_id,
+        companionId: channelTarget?.companionId,
+        ownerDomain: channelTarget?.ownerDomain,
+      });
       onStatusChange(row || null);
     }
   };
