@@ -207,8 +207,14 @@ pub fn auth_routes(state: AuthRouterState) -> Router {
 
 async fn login_handler(
     State(state): State<AuthRouterState>,
+    headers: HeaderMap,
     body: Result<Json<LoginRequest>, JsonRejection>,
 ) -> Result<Response, AppError> {
+    // Fail loudly BEFORE credential checks when this deployment issues Secure
+    // cookies but the page came over plain HTTP — the browser would silently
+    // drop the session cookie and the user would loop on the login screen.
+    state.cookie_config.reject_plaintext_login_when_secure(&headers)?;
+
     let Json(req) = body.map_err(|e| AppError::BadRequest(e.to_string()))?;
 
     // Input length validation (per API spec)
@@ -339,8 +345,13 @@ async fn status_handler(
 /// 409 from the first boot.
 async fn setup_handler(
     State(state): State<AuthRouterState>,
+    headers: HeaderMap,
     body: Result<Json<LoginRequest>, JsonRejection>,
 ) -> Result<Response, AppError> {
+    // Same Secure-cookie trap as login: refuse a plain-HTTP browser setup
+    // before it creates an admin whose session cookie can never stick.
+    state.cookie_config.reject_plaintext_login_when_secure(&headers)?;
+
     // One-time only: refuse once any real (non-empty-password) user exists.
     let has_users = state
         .user_repo
@@ -635,8 +646,12 @@ async fn ws_token_handler(
 
 async fn qr_login_handler(
     State(state): State<AuthRouterState>,
+    headers: HeaderMap,
     body: Result<Json<QrLoginRequest>, JsonRejection>,
 ) -> Result<Response, AppError> {
+    // Same Secure-cookie trap as login (finding D).
+    state.cookie_config.reject_plaintext_login_when_secure(&headers)?;
+
     let Json(req) = body.map_err(|e| AppError::BadRequest(e.to_string()))?;
 
     // Validate and consume QR token (one-time use)

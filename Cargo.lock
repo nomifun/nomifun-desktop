@@ -6389,6 +6389,7 @@ dependencies = [
  "nomifun-common",
  "nomifun-runtime",
  "serde_json",
+ "tempfile",
  "tokio",
  "tower",
  "tower-http",

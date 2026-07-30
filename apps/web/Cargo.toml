@@ -17,6 +17,7 @@ serde_json.workspace = true
 
 [dev-dependencies]
 serde_json.workspace = true
+tempfile = "3"
 
 [dependencies]
 # The unified backend, consumed in-process as a library (no spawned binary).
