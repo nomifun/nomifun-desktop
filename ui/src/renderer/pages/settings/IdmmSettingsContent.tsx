@@ -11,6 +11,7 @@ import { ipcBridge } from '@/common';
 import { isHandledAuthExpiredHttpError } from '@/common/adapter/httpBridge';
 import type { IIdmmSettings } from '@/common/adapter/ipcBridge';
 import { useProvidersQuery } from '@renderer/hooks/agent/useModelProviderList';
+import { useModelsForTask } from '@/renderer/hooks/agent/useModelsForTask';
 import type { ProviderId } from '@/common/types/ids';
 import { useModelSelectorProviderLabel } from '@/renderer/hooks/agent/useModelSelectorProviderLabel';
 
@@ -38,10 +39,13 @@ const IdmmSettingsContent: React.FC = () => {
     [providers, providerLabel]
   );
 
+  // 备用模型做对话补全 —— 只列 chat-capable 模型（统一 catalog resolve；此前
+  // 列出 provider 的全部模型，首次获得任务过滤）。
+  const { groups: chatGroups } = useModelsForTask('chat');
   const modelOptions = useMemo(() => {
-    const p = (providers ?? []).find((x) => x.id === settings.backup_provider_id);
-    return (p?.models ?? []).map((m) => ({ label: m, value: m }));
-  }, [providers, settings.backup_provider_id]);
+    const group = chatGroups.find((g) => g.provider.id === settings.backup_provider_id);
+    return (group?.models ?? []).map((m) => ({ label: m, value: m }));
+  }, [chatGroups, settings.backup_provider_id]);
 
   const save = async () => {
     setSaving(true);

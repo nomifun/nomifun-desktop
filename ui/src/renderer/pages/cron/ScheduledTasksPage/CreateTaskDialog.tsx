@@ -20,7 +20,7 @@ import { getFullAutoMode } from '@renderer/utils/model/agentModes';
 import type { TProviderWithModel } from '@/common/config/storage';
 import type { ConversationId, ProviderId } from '@/common/types/ids';
 import { type AcpModelInfo } from '@/common/types/platform/acpTypes';
-import { useModelProviderList } from '@renderer/hooks/agent/useModelProviderList';
+import { useModelsForTask } from '@renderer/hooks/agent/useModelsForTask';
 import GuidModelSelector from '@renderer/pages/guid/components/GuidModelSelector';
 import { WorkspaceFolderSelect } from '@renderer/components/workspace';
 import { DETECTED_AGENTS_SWR_KEY, fetchDetectedAgents, type AgentMetadata } from '@renderer/utils/model/agentTypes';
@@ -144,7 +144,8 @@ const CreateTaskDialog: React.FC<CreateTaskDialogProps> = ({
   const [form] = Form.useForm();
   const [submitting, setSubmitting] = useState(false);
   const { cliAgents, presets: presetPresets } = useConversationAgents();
-  const { providers, getAvailableModels } = useModelProviderList();
+  // Chat-capable catalog groups (backend resolve; task='chat').
+  const { groups: chatGroups } = useModelsForTask('chat');
   const [frequency, setFrequency] = useState<FrequencyType>('manual');
   const [time, setTime] = useState('09:00');
   const [weekday, setWeekday] = useState('MON');
@@ -268,32 +269,33 @@ const CreateTaskDialog: React.FC<CreateTaskDialogProps> = ({
 
   const isGeminiMode = resolvedBackend === 'gemini' || resolvedBackend === 'nomi';
 
-  const nomiProviders = useMemo(
-    () => providers.filter((p) => !p.platform?.toLowerCase().includes('gemini-with-google-auth')),
-    [providers]
+  const nomiGroups = useMemo(
+    () => chatGroups.filter((g) => !g.provider.platform?.toLowerCase().includes('gemini-with-google-auth')),
+    [chatGroups]
   );
-  const hasNomiProvider = nomiProviders.length > 0;
+  const hasNomiProvider = nomiGroups.length > 0;
 
-  const filteredProviders = useMemo(
-    () => (resolvedBackend === 'nomi' ? nomiProviders : providers),
-    [resolvedBackend, providers, nomiProviders]
+  const filteredGroups = useMemo(
+    () => (resolvedBackend === 'nomi' ? nomiGroups : chatGroups),
+    [resolvedBackend, chatGroups, nomiGroups]
   );
+  const filteredProviders = useMemo(() => filteredGroups.map((g) => g.provider), [filteredGroups]);
 
   const geminiCurrentModel = useMemo<TProviderWithModel | undefined>(() => {
     if (resolvedBackend !== 'nomi' || !model) return undefined;
     if (providerId) {
-      const byId = filteredProviders.find((p) => p.id === providerId);
-      if (byId && getAvailableModels(byId).includes(model)) {
-        return { ...byId, use_model: model } as TProviderWithModel;
+      const byId = filteredGroups.find((g) => g.provider.id === providerId);
+      if (byId && byId.models.includes(model)) {
+        return { ...byId.provider, use_model: model } as TProviderWithModel;
       }
     }
-    for (const p of filteredProviders) {
-      if (getAvailableModels(p).includes(model)) {
-        return { ...p, use_model: model } as TProviderWithModel;
+    for (const g of filteredGroups) {
+      if (g.models.includes(model)) {
+        return { ...g.provider, use_model: model } as TProviderWithModel;
       }
     }
     return undefined;
-  }, [resolvedBackend, model, providerId, filteredProviders, getAvailableModels]);
+  }, [resolvedBackend, model, providerId, filteredGroups]);
 
   const handleGeminiModelSelect = useCallback(async (selection: TProviderWithModel) => {
     setProviderId(selection.id);
@@ -319,15 +321,12 @@ const CreateTaskDialog: React.FC<CreateTaskDialogProps> = ({
 
   useEffect(() => {
     if (resolvedBackend !== 'nomi' || model) return;
-    for (const provider of nomiProviders) {
-      const models = getAvailableModels(provider);
-      if (models.length > 0) {
-        setProviderId(provider.id);
-        setModelId(models[0]);
-        return;
-      }
+    const firstGroup = nomiGroups[0];
+    if (firstGroup && firstGroup.models.length > 0) {
+      setProviderId(firstGroup.provider.id);
+      setModelId(firstGroup.models[0]);
     }
-  }, [resolvedBackend, model, nomiProviders, getAvailableModels]);
+  }, [resolvedBackend, model, nomiGroups]);
 
   // 指定会话：复用一个已存在的会话。该会话的执行 Agent 与项目（workspace）在创建时
   // 已固化，因此这里不再展示 / 不再要求配置这两项（仅新建模式下可选此模式）。

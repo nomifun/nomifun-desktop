@@ -1,6 +1,7 @@
 import type { IProvider, TProviderWithModel } from '@/common/config/storage';
 import { useModelProviderList } from '@/renderer/hooks/agent/useModelProviderList';
-import { useCallback, useEffect, useState } from 'react';
+import { useModelsForTask } from '@/renderer/hooks/agent/useModelsForTask';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 
 export interface GoogleModelSelection {
   current_model?: TProviderWithModel;
@@ -27,7 +28,19 @@ export const useGoogleModelSelection = ({
     setCurrentModel(initialModel);
   }, [initialModel?.id, initialModel?.use_model]);
 
-  const { providers, getAvailableModels, formatModelLabel } = useModelProviderList();
+  const { formatModelLabel } = useModelProviderList();
+  // Chat-capable models from the unified catalog resolve (no name heuristics).
+  const { groups } = useModelsForTask('chat');
+
+  const providers = useMemo(() => groups.map((group) => group.provider), [groups]);
+  const modelsByProvider = useMemo(
+    () => new Map(groups.map((group) => [group.provider.id, group.models])),
+    [groups]
+  );
+  const getAvailableModels = useCallback(
+    (provider: IProvider): string[] => modelsByProvider.get(provider.id) ?? [],
+    [modelsByProvider]
+  );
 
   const handleSelectModel = useCallback(
     async (provider: IProvider, modelName: string) => {

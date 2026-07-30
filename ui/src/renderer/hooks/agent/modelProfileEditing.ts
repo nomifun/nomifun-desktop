@@ -14,18 +14,34 @@ export const MODEL_TASK_ORDER: ModelTask[] = [
   'rerank',
 ];
 
-export const editableModelTasks = (profile?: ModelProfile): ModelTask[] => {
-  if (profile?.source !== 'user') return [];
-  return profile.tasks ?? [];
-};
+/** Display order of trait options in model profile editors. */
+export const MODEL_TRAIT_ORDER: ModelTrait[] = [
+  'vision_input',
+  'function_calling',
+  'reasoning',
+  'web_search',
+];
 
-export const editableModelTraits = (profile?: ModelProfile): ModelTrait[] => {
-  if (profile?.source !== 'user') return [];
-  return profile.traits ?? [];
-};
+/**
+ * Tasks shown in editors. Inferred profiles are VISIBLE (pre-checked with a
+ * "system inferred" hint); saving converts them to `source='user'`.
+ */
+export const editableModelTasks = (profile?: ModelProfile): ModelTask[] => profile?.tasks ?? [];
 
-export const visibleModelTaskBadges = (profile?: ModelProfile): ModelTask[] =>
-  editableModelTasks(profile).filter((task) => task !== 'chat');
+/** Traits shown in editors — same visibility rule as {@link editableModelTasks}. */
+export const editableModelTraits = (profile?: ModelProfile): ModelTrait[] => profile?.traits ?? [];
+
+/** Whether the profile is a system-inferred (not yet user-confirmed) one. */
+export const isInferredModelProfile = (profile?: ModelProfile): boolean => profile?.source === 'inferred';
+
+/**
+ * Model-row badges show ALL tasks including chat (chat renders as a small
+ * neutral tag, non-chat tasks colored).
+ */
+export const visibleModelTaskBadges = (profile?: ModelProfile): ModelTask[] => editableModelTasks(profile);
+
+/** Primary task of a profile — what the health probe should exercise. */
+export const primaryModelTask = (profile?: ModelProfile): ModelTask | undefined => profile?.tasks?.[0];
 
 export const buildModelProfileUpsertRequest = (
   providerId: ProviderId,

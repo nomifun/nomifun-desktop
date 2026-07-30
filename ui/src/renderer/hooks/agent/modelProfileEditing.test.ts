@@ -6,6 +6,8 @@ import {
   buildModelProfileUpsertRequest,
   editableModelTasks,
   editableModelTraits,
+  isInferredModelProfile,
+  primaryModelTask,
   visibleModelTaskBadges,
 } from './modelProfileEditing';
 
@@ -22,20 +24,29 @@ const profile = (source: ModelProfile['source'], tasks: ModelProfile['tasks'], t
 });
 
 describe('model profile editing helpers', () => {
-  test('treats inferred profiles as empty user-editable categories', () => {
-    const inferred = profile('inferred', ['video_generation']);
+  test('shows inferred profiles pre-checked so the user can confirm them', () => {
+    const inferred = profile('inferred', ['video_generation'], ['reasoning']);
 
-    expect(editableModelTasks(inferred)).toEqual([]);
-    expect(editableModelTraits(inferred)).toEqual([]);
-    expect(visibleModelTaskBadges(inferred)).toEqual([]);
+    expect(editableModelTasks(inferred)).toEqual(['video_generation']);
+    expect(editableModelTraits(inferred)).toEqual(['reasoning']);
+    expect(visibleModelTaskBadges(inferred)).toEqual(['video_generation']);
+    expect(isInferredModelProfile(inferred)).toBe(true);
+    expect(isInferredModelProfile(profile('user', ['chat']))).toBe(false);
+    expect(isInferredModelProfile(undefined)).toBe(false);
   });
 
-  test('uses user-selected tasks as the only visible category badges', () => {
+  test('badges include every task, chat included', () => {
     const user = profile('user', ['chat', 'image_generation', 'video_generation'], ['vision_input']);
 
     expect(editableModelTasks(user)).toEqual(['chat', 'image_generation', 'video_generation']);
     expect(editableModelTraits(user)).toEqual(['vision_input']);
-    expect(visibleModelTaskBadges(user)).toEqual(['image_generation', 'video_generation']);
+    expect(visibleModelTaskBadges(user)).toEqual(['chat', 'image_generation', 'video_generation']);
+  });
+
+  test('resolves the primary task for health probing', () => {
+    expect(primaryModelTask(profile('inferred', ['speech_recognition', 'chat']))).toBe('speech_recognition');
+    expect(primaryModelTask(profile('user', []))).toBeUndefined();
+    expect(primaryModelTask(undefined)).toBeUndefined();
   });
 
   test('persists an empty user profile instead of falling back to a default task', () => {
