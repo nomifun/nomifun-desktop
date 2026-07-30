@@ -964,8 +964,6 @@
     "agentExecution": "协作任务"
   },
   "healthCheck": "健康检测",
-  "clearStatus": "清除状态",
-  "healthStatusCleared": "健康状态已清除",
   "latency": "延迟",
   "customAcpAgent": "自定义 ACP 代理",
   "addCustomAgent": "添加",

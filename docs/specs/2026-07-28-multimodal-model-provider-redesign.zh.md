@@ -1,7 +1,7 @@
 # 多供应商 · 多模态模型管理与协议适配重构设计（v2）
 
 - 日期：2026-07-28（v2 修订）
-- 状态：设计定稿；P0 已实施（分支 dev/model-catalog-p0-20260728，见 §6 P0 实施偏差记录与 docs/handoffs/2026-07-28-model-catalog-p0.md）；P1 已实施（分支 dev/model-catalog-p1-20260729，见 §6 P1 实施偏差记录与 docs/handoffs/2026-07-29-model-invoke-p1.md）；P2 已实施（分支 dev/model-catalog-p2-20260729，见 §6 P2 实施偏差记录与 docs/handoffs/2026-07-29-model-catalog-p2.md）
+- 状态：设计定稿；P0 已实施（分支 dev/model-catalog-p0-20260728，见 §6 P0 实施偏差记录与 docs/handoffs/2026-07-28-model-catalog-p0.md）；P1 已实施（分支 dev/model-catalog-p1-20260729，见 §6 P1 实施偏差记录与 docs/handoffs/2026-07-29-model-invoke-p1.md）；P2 已实施（分支 dev/model-catalog-p2-20260729，见 §6 P2 实施偏差记录与 docs/handoffs/2026-07-29-model-catalog-p2.md）；P3 已实施（分支 dev/model-catalog-p3-20260730，见 §6 P3 实施偏差记录与 docs/handoffs/2026-07-30-model-catalog-p3.md）
 - 范围：供应商/模型配置与管理、模型能力打标、各模态调用链、外部协议适配层、前端模型选择交互
 - 调研方式：四路并行代码审查（配置数据模型 / 对话链路协议抽象 / 前端管理与选择 UI / 多模态调用链路）+ 10 家供应商 × 6 模态的真实协议差异调研（附录 C）+ 适配层抽取的 crate 依赖摸底。关键结论均带 `file:line` 或来源 URL。
 
@@ -459,6 +459,17 @@ pub enum JobStatus { Pending, Running, Succeeded, Failed, Canceled }  // 词表�
 
 ### P3 扩展与清理
 minimax/zhipu/elevenlabs 按需适配器；会话内文生图工具直调 invoke 并删三套遗留栈与 `ModelType` 旧词表、TS 启发式；`TProviderWithModel` 引用化完成；Embedding/Rerank 首个消费者（知识库向量化立项即用）。
+
+#### P3 实施偏差记录（2026-07-30，分支 dev/model-catalog-p3-20260730，迁移 017）
+
+与上文设计的有意偏差（来源：P3 计划、SDD ledger 与 task-1/2/345 报告）：
+
+1. **rerank / realtime 不做（YAGNI 决议）**：上文 P3 行内的 rerank 消费者与 §7 的 realtime 模态本期均未实施——全仓无产品消费者（知识库向量化未立项、无实时语音入口）。rerank 路由表声明保留，调用得到诚实的 `NoAdapter`（P1 偏差 7 延续）；realtime 需要 WS 传输通道，属 P4 既定项。首个消费者立项时按 §7 扩展指南补齐。
+2. **两处记录在案的 wire 行为变化（服务端 health/capabilities 收口）**：① `Create/UpdateProviderRequest.model_health` 接受但忽略——服务端探针是 `provider_models.health` 的唯一写方（反伪造收口；P2 偏差 3 的关闭动作）。附带 UI 变化：设置页"清除状态"按钮及其 `clearAllHealthData` 整 map PUT 随之删除（服务端忽略后该功能已成 no-op；行级"清除健康状态"能力如需恢复须走行级 API，暂无产品诉求）。② `capabilities` 请求字段接受但忽略、响应恒 `[]`（迁移 017 已物理删列，字段仅为 wire 兼容保留）；FE 的 `IProvider.capabilities` 与 `ModelCapability`/`ModelType` 旧词表类型一并删除。另一处顺带语义变化：探针请求本身传输层失败（IPC 异常）时不再有任何 unhealthy 落库（原 FE 兜底写路径已删、服务端未收到探针）——"探不到 ≠ 不健康"，裁定可接受。
+3. **volc.tts_v3 / minimax.t2a 依据差异矩阵实现，标注需真实调用校准**：两适配器（及 dashscope.images 的 size 词表）按附录 C 差异矩阵的 ※ 中置信度条目落地，代码注释标注"接入时需真实调用校准"——volc.tts_v3 的 `req_params` body 形状与 JSON-lines 聚合词表、minimax 的 `voice_setting`/`audio_setting` 缺省省略语义均以 wiremock 快照锁定当前理解，未经真实供应商调用验证。
+4. **minimax 需连接档案携带 `extra.group_id`**：`minimax.t2a` 路由走 default 连接，而 resolver 给 default 连接的 `extra` 恒为 `{}`——用户须为模型行设置 `connection_role` 指向携带 `extra.group_id` 的连接档案，否则得到可行动的 Config 错误（提示补 group_id）。设计事实而非缺陷：路由表不含 role，由行级覆盖表达（计划如此裁定）。
+5. **多 key 轮换为进程内每调用顺序尝试**：`send_with_rotation` 对 401/403/429 依 `api_keys` 存储顺序换 key 重试（每 key 一次，全败返回最后一个响应交原分类路径→Auth/RateLimited）；仅作用于单 key 型 scheme（Bearer/TokenHeader/HeaderKey/QueryKey），MultiHeader（volc 四头）与 <2 key 单发不变；传输错误不轮换。计划中"可选"的成功 index 进程内 LRU 未做；per-key 健康/冷却持久化仍列 P4 候选（§8-2）。签名偏差：助手收 `Fn() -> Result<RequestBuilder>` 闭包（reqwest builder/multipart Form 不可克隆，须每次重建），非计划草图的 `build(&str)`。顺带行为差：`primary_secret` 对 `api_keys` 首个空串条目不再报错（取第一个非空 key）。
+6. **ts-rs 覆盖 provider 新域 15 类型；老 `providerApi.ts` 手写镜像保留**：cargo test 即生成器（复用 `export_binding_if_changed` 模式），15 个类型（ModelTask/ModelTrait/ProfileSource、HealthStatus/ModelHealthStatus/CloneProviderRequest、ProviderModel 四请求响应、ProviderConnection 两型、CatalogModelRef/ResolveModels 请求响应）生成到 `ui/src/common/protocolBindings/`，FE 侧 `providerModel.ts`/`providerConnection.ts`/`storage.ts` 相应类型改纯 re-export。**保留手写**的是 `providerApi.ts` 的 `ProviderResponse`/Create/Update 镜像：这些类型仍承载 legacy map 兼容字段且 FE 刻意不 1:1 镜像 wire（`provider_id`↔`id` 双形状、vestigial `capabilities` 不镜像、`ProviderId` branding）——迁 ts-rs 应与 legacy map 字段退役同批做，避免把过渡形状固化进生成契约。生成形状裁定：双 Option 三态字段生成 `x?: T | null`（absent=keep/null=clear），单 Option 请求字段刻意生成 `x?: T` 无 `| null`（serde 对其 null≡absent，沿用原镜像的更窄意图型）；`serde_json::Value`→`unknown`、i64→`number`（普通 JSON number 非 bigint），均有形状断言测试锁定。
 
 ### P4 长期收敛（可选）
 WS 传输通道实施（实时语音任务类型）；chat 传输基座下沉 shared crate；平台注册表外置热更新（hub 下发 overlay）。
