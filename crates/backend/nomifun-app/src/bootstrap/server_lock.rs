@@ -282,7 +282,7 @@ fn acquire_server_lock_with_timeout(data_dir: &Path, timeout: Duration) -> Resul
             );
         }
     }
-    let data_dir_identity = std::fs::canonicalize(data_dir)
+    let data_dir_identity = nomifun_common::paths::canonicalize_simplified(data_dir)
         .with_context(|| format!("failed to resolve data dir {}", data_dir.display()))?;
     let data_dir_file_identity = file_system_identity(&data_dir_identity)
         .with_context(|| format!("failed to identify data dir {}", data_dir_identity.display()))?;

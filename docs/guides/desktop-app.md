@@ -86,16 +86,16 @@ The shell ships `tauri-plugin-autostart` so the renderer can opt the app into "l
 
 ## Where data is stored
 
-The installed desktop app persists the SQLite database, agent state, logs, and the Bun runtime cache under the stable per-user application-data directory — **`%LOCALAPPDATA%\NomiFun\Nomi`** on Windows, **`~/Library/Application Support/NomiFun/Nomi`** on macOS, **`$XDG_DATA_HOME/NomiFun/Nomi`** on Linux (resolved by `nomifun_app::cli::default_data_dir()`). Hosts on the same build channel share a default; development scripts use the isolated `Nomi-dev` sibling instead. Use `bun run seed:dev` when dev needs a copy of stable state.
+The installed desktop app persists the SQLite database, agent state, logs, and the Bun runtime cache under the stable per-user application-data directory — **`%LOCALAPPDATA%\NomiFun`** on Windows, **`~/Library/Application Support/NomiFun`** on macOS, **`$XDG_DATA_HOME/NomiFun`** on Linux (resolved by `nomifun_app::cli::default_data_dir()`). Hosts on the same build channel share a default; development scripts use the isolated `NomiFun-dev` sibling instead. Use `bun run seed:dev` when dev needs a copy of stable state.
 
-Set `NOMIFUN_DATA_DIR=<absolute path>` before launching the app and the data dir becomes `$NOMIFUN_DATA_DIR/Nomi`. The backend takes an exclusive `server.lock` on the data dir at startup; if it fails to start — for example because another instance already holds the directory — the desktop shell shows a native error dialog and exits.
+Set `NOMIFUN_DATA_DIR=<absolute path>` before launching the app and that path **is** the data dir — the value is taken literally on every host, with no `/Nomi` suffix. The backend takes an exclusive `server.lock` on the data dir at startup; if it fails to start — for example because another instance already holds the directory — the desktop shell shows a native error dialog and exits.
 
-> Older builds defaulted to `<system temp>/nomifun-data/Nomi`. An install found there is relocated to the per-user location automatically on launch (one-shot): data is copied, absolute paths stored in the database are rewritten, and the legacy directory is kept as a backup. Regenerable caches (the extracted Bun runtime, logs, browser profile, …) are not carried over — they rebuild on first use.
+> Older builds stored data under `NomiFun/Nomi` (dev: `NomiFun/Nomi-dev`; before that, `<system temp>/nomifun-data/Nomi`). On the first boot after upgrading, a one-shot automatic migration moves such a legacy dataset into the new root. The migration is crash-safe and resumes on the next boot if interrupted; if the old app instance is still running it is deferred to the next launch. Absolute paths stored in the database (knowledge-base roots, terminal cwds, custom workspaces) are rewritten once after the move.
 
 To start fresh, **quit the app** and delete that directory. To migrate, copy the directory to a new machine.
 
 ```text
-~/Library/Application Support/NomiFun/Nomi/    # macOS (see paths above for Windows/Linux)
+~/Library/Application Support/NomiFun/    # macOS (see paths above for Windows/Linux)
 ├── nomifun-backend.db        # SQLite state (conversations, settings, sessions, …)
 ├── logs/                     # nomicore.log
 ├── companion/                # companions + the shared memory hub

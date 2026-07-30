@@ -192,13 +192,14 @@ cookie 的情况下加载。如果你的反向代理剥掉了 URL 路径段，�
   卷，或将宿主目录 `chown` 到正确的 UID。
 
 桌面外壳的默认数据目录是**按用户的应用数据目录**（Windows 上是
-`%LOCALAPPDATA%\NomiFun\Nomi`，macOS 上是
-`~/Library/Application Support/NomiFun/Nomi`，Linux 上是
-`$XDG_DATA_HOME/NomiFun/Nomi`），它天然对启动应用的用户可写。设置
-`NOMIFUN_DATA_DIR=<absolute path>` 后目录会变成
-`$NOMIFUN_DATA_DIR/Nomi`。位于 `<system temp>/nomifun-data/Nomi` 的
-遗留安装会在启动时被自动搬迁到新默认位置（旧目录保留为备份）；若
-搬迁未能完成，应用会继续从遗留目录启动，并在下次启动时重试。
+`%LOCALAPPDATA%\NomiFun`，macOS 上是
+`~/Library/Application Support/NomiFun`，Linux 上是
+`$XDG_DATA_HOME/NomiFun`），它天然对启动应用的用户可写。设置
+`NOMIFUN_DATA_DIR=<absolute path>` 后，该路径即按字面值作为数据
+根——任何宿主都不附加 `/Nomi` 后缀。位于 `NomiFun/Nomi`（或更早的
+`<system temp>/nomifun-data/Nomi`）的遗留安装会在升级后首次启动时
+被自动迁移到新默认位置；迁移是抗崩溃的，未能完成时会在下次启动
+续跑（若旧应用实例仍在运行，则推迟到下次启动）。
 
 ### `data directory ... is already in use by another running NomiFun backend`（数据目录被占用）
 

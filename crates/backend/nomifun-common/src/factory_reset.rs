@@ -700,12 +700,14 @@ fn canonical_data_dir(data_dir: &Path) -> Result<PathBuf, AppError> {
             data_dir.display()
         )));
     }
-    fs::canonicalize(data_dir).map_err(|error| {
-        AppError::Internal(format!(
-            "canonicalize dataset root {}: {error}",
-            data_dir.display()
-        ))
-    })
+    fs::canonicalize(data_dir)
+        .map(|canonical| crate::paths::simplified(&canonical))
+        .map_err(|error| {
+            AppError::Internal(format!(
+                "canonicalize dataset root {}: {error}",
+                data_dir.display()
+            ))
+        })
 }
 
 fn canonical_work_dir(work_dir: &Path) -> Result<PathBuf, AppError> {
@@ -726,12 +728,14 @@ fn canonical_existing_work_dir(work_dir: &Path) -> Result<PathBuf, AppError> {
             work_dir.display()
         )));
     }
-    fs::canonicalize(work_dir).map_err(|error| {
-        AppError::Internal(format!(
-            "canonicalize managed work directory {}: {error}",
-            work_dir.display()
-        ))
-    })
+    fs::canonicalize(work_dir)
+        .map(|canonical| crate::paths::simplified(&canonical))
+        .map_err(|error| {
+            AppError::Internal(format!(
+                "canonicalize managed work directory {}: {error}",
+                work_dir.display()
+            ))
+        })
 }
 
 fn work_root_owner_path(canonical_work: &Path) -> PathBuf {
@@ -889,12 +893,24 @@ fn read_work_root_binding(
     Ok(Some(binding))
 }
 
+/// Compare two durable marker spellings of canonical paths, tolerating the
+/// Windows verbatim (`\\?\`) prefix on either side (see
+/// [`crate::paths::paths_equivalent`]). Empty values never match.
+fn stored_paths_equivalent(a: &str, b: &str) -> bool {
+    !a.is_empty()
+        && !b.is_empty()
+        && crate::paths::paths_equivalent(Path::new(a), Path::new(b))
+}
+
 fn owner_matches(
     owner: &WorkRootOwner,
     canonical_data: &Path,
     generation: &str,
 ) -> bool {
-    owner.data_root == canonical_data.display().to_string()
+    // Spelling-tolerant: markers written by older releases stored the
+    // Windows verbatim (`\\?\`) canonical form; current code stores the
+    // simplified form. Both refer to the same directory.
+    crate::paths::stored_path_matches(&owner.data_root, canonical_data)
         && owner.generation == generation
 }
 
@@ -904,8 +920,8 @@ fn binding_matches(
     canonical_work: &Path,
     generation: &str,
 ) -> bool {
-    binding.data_root == canonical_data.display().to_string()
-        && binding.work_root == canonical_work.display().to_string()
+    crate::paths::stored_path_matches(&binding.data_root, canonical_data)
+        && crate::paths::stored_path_matches(&binding.work_root, canonical_work)
         && binding.generation == generation
 }
 
@@ -921,7 +937,7 @@ pub fn require_data_root_not_owned_as_external_work(
 ) -> Result<(), AppError> {
     let canonical_data = canonical_data_dir(data_dir)?;
     if let Some(owner) = read_work_root_owner(&canonical_data)?
-        && owner.data_root != canonical_data.display().to_string()
+        && !crate::paths::stored_path_matches(&owner.data_root, &canonical_data)
     {
         return Err(AppError::Conflict(format!(
             "data directory {} is reserved as the external work root of another NomiFun dataset",
@@ -962,7 +978,7 @@ fn ensure_v3_work_root_owner_with_policy(
     let path = work_root_owner_path(&canonical_work);
 
     if let Some(existing) = read_work_root_owner(&canonical_work)? {
-        if existing.data_root != desired.data_root {
+        if !crate::paths::stored_path_matches(&existing.data_root, &canonical_data) {
             return Err(AppError::Conflict(format!(
                 "work directory {} is already owned by another NomiFun data root",
                 canonical_work.display()
@@ -1206,8 +1222,10 @@ pub fn ensure_v3_work_root_binding(
                 })?;
             if receipt.contract_version != V3_DATASET_CONTRACT_VERSION
                 || receipt.generation != generation
-                || receipt.work_root
-                    != canonical_work.display().to_string()
+                || !crate::paths::stored_path_matches(
+                    &receipt.work_root,
+                    &canonical_work,
+                )
             {
                 return Err(AppError::Conflict(
                     "finalized receipt does not match the requested work-root binding"
@@ -1456,7 +1474,7 @@ pub fn require_safe_work_dir_change_target(
         )));
     }
     if let Some(owner) = read_work_root_owner(&canonical_work)?
-        && owner.data_root != canonical_data.display().to_string()
+        && !crate::paths::stored_path_matches(&owner.data_root, &canonical_data)
     {
         return Err(AppError::Conflict(format!(
             "work-dir change target {} is owned by another NomiFun data root",
@@ -1565,8 +1583,7 @@ fn validate_completed_plan_replay_identity(
         ));
     }
     let canonical_data = canonical_data_dir(data_dir)?;
-    let canonical_data_string = canonical_data.display().to_string();
-    if plan.data_dir != canonical_data_string {
+    if !crate::paths::stored_path_matches(&plan.data_dir, &canonical_data) {
         return Err(AppError::Internal(
             "completed reset plan replay belongs to a different data directory"
                 .into(),
@@ -1583,7 +1600,7 @@ fn validate_completed_plan_replay_identity(
         ));
     }
     if plan.reason == DatasetResetReason::WorkDirChange
-        && plan.work_dir == canonical_data_string
+        && crate::paths::stored_path_matches(&plan.work_dir, &canonical_data)
     {
         return Err(AppError::Internal(
             "completed work-dir change replay cannot target its data root"
@@ -1621,7 +1638,7 @@ fn validate_completed_plan_replay_identity(
             )
         })
         .collect::<Vec<_>>();
-    if plan.work_dir != canonical_data_string {
+    if !crate::paths::stored_path_matches(&plan.work_dir, &canonical_data) {
         expected_roots.push((
             ManagedRootBase::WorkDir,
             MANAGED_WORKSPACES_DIR,
@@ -2214,7 +2231,7 @@ pub fn repair_finalized_legacy_v1_work_dir(
     }
     let work_dir = read_strict_work_dir_config(&retired_path)?;
     let canonical_work = canonical_existing_work_dir(&work_dir)?;
-    if canonical_work.display().to_string() != receipt.work_root {
+    if !crate::paths::stored_path_matches(&receipt.work_root, &canonical_work) {
         return Err(AppError::Internal(
             "retired work-dir config does not match its v3 generation binding".into(),
         ));
@@ -2442,16 +2459,18 @@ fn validate_plan(
             plan.generation
         ))
     })?;
-    if plan.data_dir != canonical_data_dir(data_dir)?.display().to_string() {
+    if !crate::paths::stored_path_matches(
+        &plan.data_dir,
+        &canonical_data_dir(data_dir)?,
+    ) {
         return Err(AppError::Internal(
             "v3 dataset reset plan belongs to a different data directory".into(),
         ));
     }
-    if plan.work_dir
-        != canonical_existing_work_dir(work_dir)?
-            .display()
-            .to_string()
-    {
+    if !crate::paths::stored_path_matches(
+        &plan.work_dir,
+        &canonical_existing_work_dir(work_dir)?,
+    ) {
         return Err(AppError::Internal(
             "v3 dataset reset plan belongs to a different managed work directory".into(),
         ));
@@ -2998,8 +3017,9 @@ pub fn arm_v3_dataset_reset(
         if let Some(request) = active_request.as_ref() {
             if request.version != RESET_REQUEST_VERSION
                 || request.origin != request_origin_for_reason(reason)
-                || request.work_dir.as_deref()
-                    != Some(canonical_work_string.as_str())
+                || !request.work_dir.as_deref().is_some_and(|requested| {
+                    crate::paths::stored_path_matches(requested, &canonical_work)
+                })
             {
                 return Err(AppError::Conflict(
                     "active reset request does not authorize the requested reset plan"
@@ -3615,9 +3635,11 @@ pub fn apply_pending_v3_dataset_reset(
                     let retired_work = canonical_existing_work_dir(
                         &read_strict_work_dir_config(&destination)?,
                     )?;
-                    if active_work.display().to_string() != plan.work_dir
-                        || retired_work.display().to_string()
-                            != plan.work_dir
+                    if !crate::paths::stored_path_matches(&plan.work_dir, &active_work)
+                        || !crate::paths::stored_path_matches(
+                            &plan.work_dir,
+                            &retired_work,
+                        )
                     {
                         return Err(AppError::Internal(
                             "active and retired v1 work-dir configs do not both match the reset plan"
@@ -3841,14 +3863,14 @@ pub fn write_v3_single_root_lifecycle_for_atomic_install(
                 "atomic-install destination has no final component".into(),
             )
         })?;
-    let canonical_parent = fs::canonicalize(destination_parent).map_err(
-        |error| {
+    let canonical_parent = fs::canonicalize(destination_parent)
+        .map(|canonical| crate::paths::simplified(&canonical))
+        .map_err(|error| {
             AppError::Internal(format!(
                 "canonicalize atomic-install destination parent {}: {error}",
                 destination_parent.display()
             ))
-        },
-    )?;
+        })?;
     let canonical_staging = canonical_data_dir(staging_data_dir)?;
     if canonical_staging.parent() != Some(canonical_parent.as_path()) {
         return Err(AppError::Internal(
@@ -3973,7 +3995,7 @@ pub fn finalize_v3_dataset_reset(
         .map_err(|error| AppError::Internal(format!("invalid v3 dataset receipt: {error}")))?;
     if receipt.contract_version != V3_DATASET_CONTRACT_VERSION
         || receipt.generation != plan.generation
-        || receipt.work_root != plan.work_dir
+        || !stored_paths_equivalent(&receipt.work_root, &plan.work_dir)
         || !receipt.work_root_binding_required
     {
         return Err(AppError::Internal(
@@ -3998,7 +4020,7 @@ pub fn finalize_v3_dataset_reset(
                 &data_dir.join(crate::dir_config::DIR_CONFIG_FILE),
             )?,
         )?;
-        if configured_work.display().to_string() != plan.work_dir {
+        if !crate::paths::stored_path_matches(&plan.work_dir, &configured_work) {
             return Err(AppError::Internal(
                 "cannot finalize work-dir change before dir-config is durably bound to the reset plan"
                     .into(),
@@ -4125,7 +4147,7 @@ pub fn inspect_v3_dataset_bootstrap_binding(
         return Ok(DatasetReceiptStatus::Invalid);
     }
     let canonical_work = canonical_existing_work_dir(work_dir)?;
-    if binding.work_root != canonical_work.display().to_string() {
+    if !crate::paths::stored_path_matches(&binding.work_root, &canonical_work) {
         return Ok(DatasetReceiptStatus::WorkRootMismatch);
     }
     Ok(DatasetReceiptStatus::Current)
@@ -4186,7 +4208,7 @@ pub fn inspect_v3_dataset_receipt(
         return Ok(DatasetReceiptStatus::Invalid);
     }
     let canonical_work = canonical_existing_work_dir(work_dir)?;
-    if receipt.work_root != canonical_work.display().to_string() {
+    if !crate::paths::stored_path_matches(&receipt.work_root, &canonical_work) {
         return Ok(DatasetReceiptStatus::WorkRootMismatch);
     }
     Ok(DatasetReceiptStatus::Current)
@@ -4240,7 +4262,7 @@ pub fn finalized_v3_work_dir(
         ));
     }
     let canonical_work = canonical_existing_work_dir(&work_dir)?;
-    if canonical_work.display().to_string() != receipt.work_root
+    if !crate::paths::stored_path_matches(&receipt.work_root, &canonical_work)
         || inspect_v3_dataset_receipt(data_dir, &canonical_work)?
             != DatasetReceiptStatus::Current
     {
@@ -4565,9 +4587,10 @@ pub fn prepare_v3_dataset(
         } else {
             if let Some(requested_work_dir) = &request.work_dir {
                 let canonical_work = canonical_work_dir(work_dir)?;
-                if canonical_work.display().to_string()
-                    != *requested_work_dir
-                {
+                if !crate::paths::stored_path_matches(
+                    requested_work_dir,
+                    &canonical_work,
+                ) {
                     return Err(AppError::Internal(
                         "resolved work root does not match the pending v3 reset request"
                             .into(),
@@ -4822,7 +4845,7 @@ pub fn requested_v3_reset_work_dir(
         return Ok(None);
     };
     let canonical = canonical_existing_work_dir(Path::new(&work_dir))?;
-    if canonical.display().to_string() != work_dir {
+    if !crate::paths::stored_path_matches(&work_dir, &canonical) {
         return Err(AppError::Internal(
             "v3 dataset reset request work_dir is not canonical".into(),
         ));
@@ -4865,7 +4888,12 @@ fn reset_request_matches_plan(
         && request.operation_id == plan.operation_id
         && request.requested_at == plan.requested_at
         && request.origin == request_origin_for_reason(plan.reason)
-        && request.work_dir.as_deref() == Some(plan.work_dir.as_str())
+        && request
+            .work_dir
+            .as_deref()
+            .is_some_and(|work_dir| {
+                stored_paths_equivalent(work_dir, &plan.work_dir)
+            })
 }
 
 fn validate_active_reset_request_against_plan(
@@ -4981,8 +5009,10 @@ fn read_completed_automatic_legacy_retirement(
             ))
         })?;
     completed.validate()?;
-    if completed.data_dir != canonical_data_dir(data_dir)?.display().to_string()
-    {
+    if !crate::paths::stored_path_matches(
+        &completed.data_dir,
+        &canonical_data_dir(data_dir)?,
+    ) {
         return Err(AppError::Conflict(
             "automatic legacy retirement marker belongs to a different data root"
                 .into(),
@@ -5046,8 +5076,8 @@ fn write_completed_automatic_legacy_retirement(
                     })?;
             if existing.operation_id == completed.operation_id
                 && existing.generation == completed.generation
-                && existing.data_dir == completed.data_dir
-                && existing.work_dir == completed.work_dir
+                && stored_paths_equivalent(&existing.data_dir, &completed.data_dir)
+                && stored_paths_equivalent(&existing.work_dir, &completed.work_dir)
                 && existing.reason == completed.reason
                 && existing.requested_at == completed.requested_at
             {
@@ -5113,7 +5143,7 @@ fn write_completed_reset_request(
             existing.validate()?;
             if existing.operation_id == completed.operation_id
                 && existing.origin == completed.origin
-                && existing.work_dir == completed.work_dir
+                && stored_paths_equivalent(&existing.work_dir, &completed.work_dir)
                 && existing.generation == completed.generation
                 && existing.requested_at == completed.requested_at
             {
@@ -5167,8 +5197,9 @@ fn completed_reset_matches_request(
     completed.validate()?;
     if completed.operation_id != request.operation_id
         || Some(completed.origin) != request.origin
-        || request.work_dir.as_deref()
-            != Some(completed.work_dir.as_str())
+        || !request.work_dir.as_deref().is_some_and(|work_dir| {
+            stored_paths_equivalent(work_dir, &completed.work_dir)
+        })
         || completed.requested_at != request.requested_at
     {
         return Err(AppError::Conflict(
@@ -5570,6 +5601,221 @@ fn rename_with_retry(source: &Path, destination: &Path) -> std::io::Result<()> {
         }
     }
     unreachable!("rename retry loop returns on every iteration")
+}
+
+// ── Data-root relocation rebinding ──────────────────────────────────
+//
+// The default on-disk layout moved from `NomiFun/Nomi<suffix>` to the sibling
+// `NomiFun<suffix>` root. After `bootstrap::data_root` physically moves the
+// dataset, the durable lifecycle markers still carry absolute path STRINGS
+// naming the old root: the receipt/bootstrap `work_root`, the data-side
+// binding `data_root`/`work_root`, the work-root owner `data_root` (in the
+// data root itself for the default internal work root, or in an external
+// work root), and the dir-config `work_dir`. Left stale, every one of them
+// fails the fail-closed identity checks above and bricks the boot.
+
+/// Rewrite every durable lifecycle marker that still names `old_data_root`
+/// after the dataset physically moved into `new_data_dir`.
+///
+/// Values naming other locations (an external work root, for example) are
+/// left untouched — except that an external work root's *owner marker* has
+/// its `data_root` re-pointed at the new root, because that marker is what
+/// lets the moved dataset keep its claim on the external workspace.
+///
+/// Idempotent: values already naming the new root are skipped, so a crashed
+/// migration may safely re-run this. Returns human-readable warnings for
+/// conditions that were tolerated (for boot notes); hard I/O or parse
+/// failures on an existing marker are errors, because booting with a
+/// half-rebound marker set would fail closed anyway.
+pub fn rebind_data_root_after_relocation(
+    new_data_dir: &Path,
+    old_data_root: &Path,
+) -> Result<Vec<String>, AppError> {
+    let canonical_new = canonical_data_dir(new_data_dir)?;
+    let new_string = crate::paths::marker_string(&canonical_new);
+    let old_matches = |stored: &str| {
+        !stored.is_empty()
+            && crate::paths::paths_equivalent(Path::new(stored), old_data_root)
+    };
+    let mut warnings = Vec::new();
+    let mut external_work_roots: Vec<PathBuf> = Vec::new();
+    let mut note_external = |stored: &str, external: &mut Vec<PathBuf>| {
+        let path = PathBuf::from(stored);
+        if !stored.is_empty()
+            && !crate::paths::paths_equivalent(&path, old_data_root)
+            && !crate::paths::paths_equivalent(&path, &canonical_new)
+            && !external
+                .iter()
+                .any(|known| crate::paths::paths_equivalent(known, &path))
+        {
+            external.push(path);
+        }
+    };
+
+    // dataset-v3.json (finalized receipt).
+    let receipt_path = receipt_path(&canonical_new);
+    match read_bounded_regular_file(&receipt_path, MAX_CONTROL_FILE_BYTES) {
+        Ok(bytes) => {
+            let mut receipt: DatasetReceipt = serde_json::from_slice(&bytes)
+                .map_err(|error| {
+                    AppError::Internal(format!(
+                        "invalid v3 receipt during relocation rebind: {error}"
+                    ))
+                })?;
+            note_external(&receipt.work_root, &mut external_work_roots);
+            if old_matches(&receipt.work_root) {
+                receipt.work_root = new_string.clone();
+                let bytes = serde_json::to_vec_pretty(&receipt).map_err(|error| {
+                    AppError::Internal(format!(
+                        "serialize rebound v3 receipt: {error}"
+                    ))
+                })?;
+                write_atomic(&receipt_path, &bytes).map_err(|error| {
+                    AppError::Internal(format!(
+                        "rebind v3 receipt {}: {error}",
+                        receipt_path.display()
+                    ))
+                })?;
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(AppError::Internal(format!(
+                "read v3 receipt during relocation rebind {}: {error}",
+                receipt_path.display()
+            )));
+        }
+    }
+
+    // .dataset-v3.bootstrap.json (unfinished bootstrap binding).
+    let bootstrap_path = bootstrap_binding_path(&canonical_new);
+    match read_bounded_regular_file(&bootstrap_path, MAX_CONTROL_FILE_BYTES) {
+        Ok(bytes) => {
+            let mut binding: DatasetBootstrapBinding =
+                serde_json::from_slice(&bytes).map_err(|error| {
+                    AppError::Internal(format!(
+                        "invalid v3 bootstrap binding during relocation rebind: {error}"
+                    ))
+                })?;
+            note_external(&binding.work_root, &mut external_work_roots);
+            if old_matches(&binding.work_root) {
+                binding.work_root = new_string.clone();
+                let bytes =
+                    serde_json::to_vec_pretty(&binding).map_err(|error| {
+                        AppError::Internal(format!(
+                            "serialize rebound v3 bootstrap binding: {error}"
+                        ))
+                    })?;
+                write_atomic(&bootstrap_path, &bytes).map_err(|error| {
+                    AppError::Internal(format!(
+                        "rebind v3 bootstrap binding {}: {error}",
+                        bootstrap_path.display()
+                    ))
+                })?;
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(AppError::Internal(format!(
+                "read v3 bootstrap binding during relocation rebind {}: {error}",
+                bootstrap_path.display()
+            )));
+        }
+    }
+
+    // .nomifun-work-root-binding.json (data-side binding).
+    if let Some(mut binding) = read_work_root_binding(&canonical_new)? {
+        note_external(&binding.work_root, &mut external_work_roots);
+        let mut changed = false;
+        if old_matches(&binding.data_root) {
+            binding.data_root = new_string.clone();
+            changed = true;
+        }
+        if old_matches(&binding.work_root) {
+            binding.work_root = new_string.clone();
+            changed = true;
+        }
+        if changed {
+            let path = work_root_binding_path(&canonical_new);
+            let bytes = serde_json::to_vec_pretty(&binding).map_err(|error| {
+                AppError::Internal(format!(
+                    "serialize rebound work-root binding: {error}"
+                ))
+            })?;
+            write_atomic(&path, &bytes).map_err(|error| {
+                AppError::Internal(format!(
+                    "rebind work-root binding {}: {error}",
+                    path.display()
+                ))
+            })?;
+        }
+    }
+
+    // dir-config.json (persisted UI work-dir choice).
+    match crate::dir_config::checked_persisted_work_dir(&canonical_new) {
+        Ok(Some(work_dir)) => {
+            note_external(
+                &work_dir.display().to_string(),
+                &mut external_work_roots,
+            );
+            if crate::paths::paths_equivalent(&work_dir, old_data_root) {
+                crate::dir_config::set_work_dir(&canonical_new, &canonical_new)?;
+            }
+        }
+        Ok(None) => {}
+        Err(error) => {
+            // A malformed dir-config keeps its own dedicated repair path
+            // (lifecycle-proof repair); relocation must not overwrite it.
+            warnings.push(format!(
+                "relocation left an unreadable dir-config for the normal repair path: {error}"
+            ));
+        }
+    }
+
+    // Work-root owner markers. The internal owner moved together with the
+    // dataset; an external work root keeps its own marker in place.
+    let mut owner_roots = vec![canonical_new.clone()];
+    owner_roots.extend(external_work_roots);
+    for work_root in owner_roots {
+        let canonical_work = if crate::paths::paths_equivalent(
+            &work_root,
+            &canonical_new,
+        ) {
+            canonical_new.clone()
+        } else {
+            match canonical_existing_work_dir(&work_root) {
+                Ok(canonical) => canonical,
+                Err(error) => {
+                    warnings.push(format!(
+                        "external work root {} was not reachable during relocation rebind: {error}",
+                        work_root.display()
+                    ));
+                    continue;
+                }
+            }
+        };
+        let Some(mut owner) = read_work_root_owner(&canonical_work)? else {
+            continue;
+        };
+        if !old_matches(&owner.data_root) {
+            continue;
+        }
+        owner.data_root = new_string.clone();
+        let path = work_root_owner_path(&canonical_work);
+        let bytes = serde_json::to_vec_pretty(&owner).map_err(|error| {
+            AppError::Internal(format!(
+                "serialize rebound work-root owner: {error}"
+            ))
+        })?;
+        write_atomic(&path, &bytes).map_err(|error| {
+            AppError::Internal(format!(
+                "rebind work-root owner {}: {error}",
+                path.display()
+            ))
+        })?;
+    }
+
+    Ok(warnings)
 }
 
 #[cfg(test)]
@@ -6182,7 +6428,8 @@ mod tests {
     fn finalized_v1_reset_repairs_only_the_retired_work_dir_config() {
         let data = tempfile::tempdir().unwrap();
         let work = tempfile::tempdir().unwrap();
-        let canonical_work = fs::canonicalize(work.path()).unwrap();
+        let canonical_work =
+            crate::paths::canonicalize_simplified(work.path()).unwrap();
         crate::dir_config::set_work_dir(data.path(), work.path()).unwrap();
         touch(&data.path().join(DB_FILE));
         let plan = arm_v3_dataset_reset(
@@ -6293,7 +6540,8 @@ mod tests {
         let data = tempfile::tempdir().unwrap();
         let old_work = tempfile::tempdir().unwrap();
         let new_work = tempfile::tempdir().unwrap();
-        let canonical_new_work = fs::canonicalize(new_work.path()).unwrap();
+        let canonical_new_work =
+            crate::paths::canonicalize_simplified(new_work.path()).unwrap();
         crate::dir_config::set_work_dir(data.path(), old_work.path()).unwrap();
         touch(&data.path().join(DB_FILE));
         let old_generation = Uuid::now_v7().to_string();

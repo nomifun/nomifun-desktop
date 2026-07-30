@@ -15,6 +15,7 @@ mod hooks;
 mod id;
 mod scoped_auth;
 mod pagination;
+pub mod paths;
 pub mod provider_lifecycle;
 pub mod provider_usage;
 mod timestamp;

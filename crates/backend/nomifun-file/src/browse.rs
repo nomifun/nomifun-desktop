@@ -59,7 +59,12 @@ pub fn default_browse_roots() -> Vec<PathBuf> {
 
     let mut canonical: Vec<PathBuf> = roots
         .into_iter()
-        .filter_map(|p| fs::canonicalize(&p).ok().or(Some(p)))
+        .filter_map(|p| {
+            fs::canonicalize(&p)
+                .map(|canonical| nomifun_common::paths::simplified(&canonical))
+                .ok()
+                .or(Some(p))
+        })
         .collect();
     canonical.sort();
     canonical.dedup();
@@ -120,13 +125,20 @@ pub fn resolve_browse_path(raw: &str, allowed_roots: &[PathBuf]) -> Result<PathB
     }
 
     let expanded = expand_tilde(raw.trim());
-    let canonical = fs::canonicalize(&expanded).map_err(|e| match e.kind() {
-        std::io::ErrorKind::NotFound => AppError::NotFound(format!("path not found: {}", raw)),
-        _ => AppError::BadRequest(format!("cannot resolve path '{}': {}", raw, e)),
-    })?;
+    // Simplified spelling (no Windows `\\?\` prefix): the resolved value goes
+    // straight into API responses (`current_path`, entry paths) and back into
+    // subsequent browse requests.
+    let canonical = fs::canonicalize(&expanded)
+        .map(|canonical| nomifun_common::paths::simplified(&canonical))
+        .map_err(|e| match e.kind() {
+            std::io::ErrorKind::NotFound => AppError::NotFound(format!("path not found: {}", raw)),
+            _ => AppError::BadRequest(format!("cannot resolve path '{}': {}", raw, e)),
+        })?;
 
     let allowed = allowed_roots.iter().any(|root| match fs::canonicalize(root) {
-        Ok(canonical_root) => canonical.starts_with(&canonical_root),
+        Ok(canonical_root) => {
+            canonical.starts_with(nomifun_common::paths::simplified(&canonical_root))
+        }
         Err(_) => false,
     });
 
@@ -249,7 +261,9 @@ fn navigation_hints(dir: &Path, allowed_roots: &[PathBuf]) -> (Option<String>, b
     }
 
     let parent_allowed = allowed_roots.iter().any(|root| match fs::canonicalize(root) {
-        Ok(canonical_root) => parent.starts_with(&canonical_root),
+        Ok(canonical_root) => {
+            parent.starts_with(nomifun_common::paths::simplified(&canonical_root))
+        }
         Err(_) => false,
     });
 

@@ -56,8 +56,9 @@ bun run serve:web
 或隔离网络。
 
 带 Rust 后端的开发入口（`dev`、`dev:web`、`build:fast`）统一使用 `dev`
-构建 channel，因此默认数据目录是 `Nomi-dev`。生产形态的 `serve:web` 和
-release 构建仍使用 stable 的 `Nomi` 目录。开发环境需要复现 stable 状态时，
+构建 channel，因此默认数据目录是 `NomiFun-dev`（stable 根的同级目录，
+永远不嵌套在其内部）。生产形态的 `serve:web` 和
+release 构建仍使用 stable 的 `NomiFun` 目录。开发环境需要复现 stable 状态时，
 可运行 `bun run seed:dev`。
 
 桌面循环已经不是旧 Electron 模型。Tauri shell 直接链接 `nomifun-app`，在进程内
@@ -123,9 +124,9 @@ cargo run -p nomifun-app --bin nomicore -- doctor
 
 所有 host 未显式覆盖时共享同一个默认数据目录：
 
-- Windows：`%LOCALAPPDATA%\NomiFun\Nomi`
-- macOS：`~/Library/Application Support/NomiFun/Nomi`
-- Linux：`$XDG_DATA_HOME/NomiFun/Nomi` 或 `~/.local/share/NomiFun/Nomi`
+- Windows：`%LOCALAPPDATA%\NomiFun`
+- macOS：`~/Library/Application Support/NomiFun`
+- Linux：`$XDG_DATA_HOME/NomiFun` 或 `~/.local/share/NomiFun`
 
 数据目录包含 SQLite、日志、Bun runtime cache、extension 数据和 agent 状态。
 后端启动时会先拿 `{data_dir}/server.lock` 独占锁，避免两个活跃后端同时写同一
@@ -138,11 +139,14 @@ NOMIFUN_DATA_DIR=/tmp/nomifun-dev bun run serve:web
 NOMIFUN_DATA_DIR=/tmp/nomifun-dev bun run dev
 ```
 
-桌面端会追加 channel 对应的 `Nomi` leaf；Web host 和 `nomicore` 按 env 值字面
-使用。自动化脚本依赖这个行为前，请先读
+所有 host——桌面、Web、`nomicore`——都按 env 值字面使用，作为最终数据根
+（不再追加 channel 对应的叶目录）；未设置时 dev 默认是同级的
+`NomiFun-dev`。自动化脚本依赖这个行为前，请先读
 [`../reference/configuration.zh.md`](../reference/configuration.zh.md)。
 
-`NOMIFUN_WORK_DIR` 控制会话工作区位置；未设置时回退到数据目录。
+`NOMIFUN_WORK_DIR` 控制会话工作区位置。它的优先级低于 UI 中选择并持久化在
+`dir-config.json` 的工作区；继承到的值若指向默认数据根位置或已不存在的目录
+会被忽略。未设置时回退到数据目录。
 
 ## 日志
 

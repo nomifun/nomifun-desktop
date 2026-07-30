@@ -78,7 +78,31 @@ pub(crate) fn resolve_work_dir(
         .filter(|s| !s.is_empty())
         .map(PathBuf::from)
     {
-        return Ok(from_env);
+        // The env tier is the weakest source precisely because it can be a
+        // stale self-export inherited across a relaunch/auto-update. Two
+        // guards keep such residue from rebinding the work root:
+        //  * a value naming a known default location (current default,
+        //    legacy default, or the historical double-append junk) is the
+        //    previous boot's own export — the data-dir fallback below
+        //    resolves to the same effective root on a healthy install;
+        //  * a value whose directory no longer exists (e.g. the legacy root
+        //    that a layout migration just drained) would only fail the boot
+        //    a few lines later.
+        if super::data_root::is_known_default_location(&from_env) {
+            tracing::warn!(
+                target: "boot",
+                work_dir = %from_env.display(),
+                "ignoring inherited NOMIFUN_WORK_DIR naming a default data-root location; using the data-dir fallback"
+            );
+        } else if !from_env.is_dir() {
+            tracing::warn!(
+                target: "boot",
+                work_dir = %from_env.display(),
+                "ignoring inherited NOMIFUN_WORK_DIR pointing at a missing directory; using the data-dir fallback"
+            );
+        } else {
+            return Ok(from_env);
+        }
     }
     Ok(data_dir.to_path_buf())
 }
@@ -162,6 +186,60 @@ mod tests {
         let _ = std::fs::remove_dir_all(&data_dir);
     }
 
+    /// The env tier accepts only values that are neither a self-exported
+    /// default location nor a dangling directory. This is the single test in
+    /// this binary that mutates `NOMIFUN_WORK_DIR` (no other test reaches the
+    /// env tier), and it restores the previous value before returning.
+    #[test]
+    fn env_tier_ignores_default_locations_and_missing_directories() {
+        let data_dir = temp_data_dir("env-tier");
+        let custom_work = temp_data_dir("env-tier-custom");
+        let previous = std::env::var_os("NOMIFUN_WORK_DIR");
+        let restore = |previous: &Option<std::ffi::OsString>| {
+            // SAFETY: test-scoped, single-threaded mutation window.
+            unsafe {
+                match previous {
+                    Some(value) => std::env::set_var("NOMIFUN_WORK_DIR", value),
+                    None => std::env::remove_var("NOMIFUN_WORK_DIR"),
+                }
+            }
+        };
+        let run = std::panic::catch_unwind(|| {
+            // A stale self-export naming the legacy default location must not
+            // rebind the work root; the data-dir fallback wins.
+            // SAFETY: see above.
+            unsafe {
+                std::env::set_var(
+                    "NOMIFUN_WORK_DIR",
+                    crate::cli::legacy_default_data_dir(),
+                );
+            }
+            assert_eq!(resolve_work_dir(None, &data_dir).unwrap(), data_dir);
+
+            // A value whose directory no longer exists (the migration drained
+            // it) falls back instead of failing the boot later.
+            unsafe {
+                std::env::set_var(
+                    "NOMIFUN_WORK_DIR",
+                    data_dir.join("no-longer-exists"),
+                );
+            }
+            assert_eq!(resolve_work_dir(None, &data_dir).unwrap(), data_dir);
+
+            // A genuine user-chosen existing directory is honored verbatim.
+            unsafe {
+                std::env::set_var("NOMIFUN_WORK_DIR", &custom_work);
+            }
+            assert_eq!(resolve_work_dir(None, &data_dir).unwrap(), custom_work);
+        });
+        restore(&previous);
+        let _ = std::fs::remove_dir_all(&data_dir);
+        let _ = std::fs::remove_dir_all(&custom_work);
+        if let Err(panic) = run {
+            std::panic::resume_unwind(panic);
+        }
+    }
+
     #[test]
     fn cli_flag_wins_over_persisted_config() {
         let data_dir = temp_data_dir("cliwins");
@@ -218,10 +296,10 @@ mod tests {
         let data = tempfile::tempdir().unwrap();
         let first_work = tempfile::tempdir().unwrap();
         let first_work_path =
-            std::fs::canonicalize(first_work.path()).unwrap();
+            nomifun_common::paths::canonicalize_simplified(first_work.path()).unwrap();
         let second_work = tempfile::tempdir().unwrap();
         let second_work_path =
-            std::fs::canonicalize(second_work.path()).unwrap();
+            nomifun_common::paths::canonicalize_simplified(second_work.path()).unwrap();
         std::fs::write(data.path().join("nomifun-backend.db"), b"old")
             .unwrap();
 
@@ -340,10 +418,10 @@ mod tests {
         let data = tempfile::tempdir().unwrap();
         let first_work = tempfile::tempdir().unwrap();
         let first_work_path =
-            std::fs::canonicalize(first_work.path()).unwrap();
+            nomifun_common::paths::canonicalize_simplified(first_work.path()).unwrap();
         let second_work = tempfile::tempdir().unwrap();
         let second_work_path =
-            std::fs::canonicalize(second_work.path()).unwrap();
+            nomifun_common::paths::canonicalize_simplified(second_work.path()).unwrap();
         dir_config::set_work_dir(data.path(), &first_work_path).unwrap();
         std::fs::write(data.path().join("nomifun-backend.db"), b"old")
             .unwrap();
