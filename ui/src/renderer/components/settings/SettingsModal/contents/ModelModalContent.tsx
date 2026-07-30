@@ -865,35 +865,6 @@ const ModelModalContent: React.FC = () => {
     }
   };
 
-  const clearAllHealthData = () => {
-    if (!data) return;
-    const nextArray: IProvider[] = data.map((platform: IProvider) =>
-      isManagedModelProvider(platform)
-        ? platform
-        : {
-            ...platform,
-            model_health: undefined as IProvider['model_health'],
-          }
-    );
-    void mutate(nextArray, false);
-
-    Promise.all(
-      editableProviders.map((platform) => ipcBridge.mode.updateProvider.invoke({ provider_id: platform.id, model_health: {} }))
-    )
-      .then(() => {
-        void mutate();
-        Message.success({
-          content: t('settings.healthStatusCleared'),
-          duration: 2000,
-        });
-      })
-      .catch((error) => {
-        void mutate();
-        console.error('Failed to clear health status:', error);
-        message.error(t('settings.saveModelConfigFailed'));
-      });
-  };
-
   const [addPlatformModalCtrl, addPlatformModalContext] = AddPlatformModal.useModal({
     async onSubmit(platform) {
       await updatePlatform(platform, () => {
@@ -949,15 +920,6 @@ const ModelModalContent: React.FC = () => {
             )}
           </div>
           <div className='flex items-center gap-8px flex-wrap'>
-            <Button
-              type='outline'
-              shape='round'
-              size='small'
-              onClick={clearAllHealthData}
-              className='rd-100px border-1 border-solid border-[var(--color-border-2)] h-34px px-14px text-t-secondary hover:text-t-primary'
-            >
-              {t('settings.clearStatus')}
-            </Button>
             <Button
               type='outline'
               shape='round'

@@ -25,8 +25,10 @@ describe('model health probe persistence', () => {
     // modelRowsFor backfills legacy-map health only for row-less providers.
     expect(source.includes('const model_health = row.health;')).toBe(true);
     expect(source.includes('row.health ?? platform.model_health')).toBe(false);
-    // 清除状态 still clears the legacy map via provider PUT (documented legacy
-    // write path, untouched this round).
-    expect(source.includes('model_health: {} }')).toBe(true);
+    // The "清除状态" bulk-clear button is gone: the server ignores client
+    // model_health writes (P3 T1), so its `updateProvider({ model_health: {} })`
+    // PUT became a no-op and the whole handler was removed.
+    expect(source.includes('clearAllHealthData')).toBe(false);
+    expect(source.includes('model_health: {} }')).toBe(false);
   });
 });
