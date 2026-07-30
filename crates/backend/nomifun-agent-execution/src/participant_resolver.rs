@@ -14,23 +14,25 @@ use nomifun_common::{
 };
 #[cfg(test)]
 use nomifun_common::generate_id;
-use nomifun_db::{IProviderRepository, NewAgentExecutionParticipant};
+use nomifun_db::{IProviderModelRepository, IProviderRepository, NewAgentExecutionParticipant};
 use nomifun_preset::PresetService;
-use serde_json::Value;
 
 #[derive(Clone)]
 pub(crate) struct ParticipantResolver {
     provider_repo: Arc<dyn IProviderRepository>,
+    provider_model_repo: Arc<dyn IProviderModelRepository>,
     preset_service: Arc<PresetService>,
 }
 
 impl ParticipantResolver {
     pub fn new(
         provider_repo: Arc<dyn IProviderRepository>,
+        provider_model_repo: Arc<dyn IProviderModelRepository>,
         preset_service: Arc<PresetService>,
     ) -> Self {
         Self {
             provider_repo,
+            provider_model_repo,
             preset_service,
         }
     }
@@ -46,6 +48,22 @@ impl ParticipantResolver {
             .list()
             .await
             .map_err(|error| AppError::Internal(format!("list model providers: {error}")))?;
+        // The per-model catalog (membership/enabled/description) lives on
+        // provider_models rows since migration 016; `list()` returns them
+        // ordered by (provider_id, sort_order, model).
+        let model_rows = self
+            .provider_model_repo
+            .list()
+            .await
+            .map_err(|error| AppError::Internal(format!("list provider models: {error}")))?;
+        let mut rows_by_provider: HashMap<&str, Vec<&nomifun_db::ProviderModelRow>> =
+            HashMap::new();
+        for row in &model_rows {
+            rows_by_provider
+                .entry(row.provider_id.as_str())
+                .or_default()
+                .push(row);
+        }
         let mut catalog = HashMap::new();
         let mut catalog_order = Vec::new();
         for provider in providers.iter().filter(|provider| provider.enabled) {
@@ -54,54 +72,21 @@ impl ParticipantResolver {
                     "enabled provider has a non-canonical persisted id".to_owned(),
                 ));
             }
-            let models: Vec<String> = serde_json::from_str(&provider.models).map_err(|error| {
-                AppError::Internal(format!(
-                    "provider {} has invalid persisted models: {error}",
-                    provider.provider_id
-                ))
-            })?;
-            let enabled: serde_json::Map<String, Value> = provider
-                .model_enabled
-                .as_deref()
-                .map(serde_json::from_str)
-                .transpose()
-                .map_err(|error| {
-                    AppError::Internal(format!(
-                        "provider {} has invalid persisted model_enabled: {error}",
-                        provider.provider_id
-                    ))
-                })?
-                .unwrap_or_default();
-            let descriptions: HashMap<String, String> = provider
-                .model_descriptions
-                .as_deref()
-                .map(serde_json::from_str)
-                .transpose()
-                .map_err(|error| {
-                    AppError::Internal(format!(
-                        "provider {} has invalid persisted model_descriptions: {error}",
-                        provider.provider_id
-                    ))
-                })?
-                .unwrap_or_default();
-            if enabled.values().any(|value| !value.is_boolean()) {
-                return Err(AppError::Internal(format!(
-                    "provider {} has a non-boolean model_enabled value",
-                    provider.provider_id
-                )));
-            }
-            for raw_model in models {
-                let model = raw_model.trim().to_owned();
-                if model.is_empty() || model != raw_model {
+            let Some(provider_rows) = rows_by_provider.get(provider.provider_id.as_str()) else {
+                continue;
+            };
+            for row in provider_rows {
+                let model = row.model.trim().to_owned();
+                if model.is_empty() || model != row.model {
                     return Err(AppError::Internal(format!(
                         "provider {} has an invalid persisted model id",
                         provider.provider_id
                     )));
                 }
-                if enabled.get(&model).and_then(Value::as_bool).unwrap_or(true) {
-                    let key = (provider.provider_id.clone(), model.clone());
+                if row.enabled {
+                    let key = (provider.provider_id.clone(), model);
                     if catalog
-                        .insert(key.clone(), descriptions.get(&model).cloned())
+                        .insert(key.clone(), row.description.clone())
                         .is_none()
                     {
                         catalog_order.push(ExecutionModelRef {

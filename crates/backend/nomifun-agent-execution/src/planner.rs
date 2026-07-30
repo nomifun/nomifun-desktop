@@ -19,8 +19,7 @@ use nomifun_common::{
     AgentStepMode, AgentToolPolicy, AppError, ExecutionStepKind, ProviderId, ProviderWithModel,
     StepFailurePolicy,
 };
-use nomifun_db::IProviderRepository;
-use nomifun_db::models::Provider;
+use nomifun_db::{IProviderModelRepository, IProviderRepository, ProviderModelRow};
 
 use crate::event_publisher::{AgentExecutionEventPublisher, LeadThinkingKind, LeadThinkingPhase};
 
@@ -194,6 +193,7 @@ pub(crate) trait PlanProducer: Send + Sync {
 
 pub(crate) struct LlmPlanProducer {
     provider_repo: Arc<dyn IProviderRepository>,
+    provider_model_repo: Arc<dyn IProviderModelRepository>,
     encryption_key: [u8; 32],
     workspace: PathBuf,
     lead: Option<ProviderWithModel>,
@@ -202,12 +202,14 @@ pub(crate) struct LlmPlanProducer {
 impl LlmPlanProducer {
     pub fn new(
         provider_repo: Arc<dyn IProviderRepository>,
+        provider_model_repo: Arc<dyn IProviderModelRepository>,
         encryption_key: [u8; 32],
         workspace: impl Into<PathBuf>,
         lead: Option<ProviderWithModel>,
     ) -> Self {
         Self {
             provider_repo,
+            provider_model_repo,
             encryption_key,
             workspace: workspace.into(),
             lead,
@@ -230,6 +232,7 @@ impl LlmPlanProducer {
         let model = lead.use_model.as_deref().unwrap_or(&lead.model);
         let config = resolve_provider_config(
             &self.provider_repo,
+            &self.provider_model_repo,
             &self.encryption_key,
             &lead.provider_id,
             model,
@@ -259,8 +262,8 @@ impl PlanProducer for LlmPlanProducer {
         participants: &[ExecutionParticipant],
         sink: Option<&LeadThinkingSink>,
     ) -> Result<PlannedExecution, AppError> {
-        let descriptions = match self.provider_repo.list().await {
-            Ok(providers) => build_description_map(&providers, participants),
+        let descriptions = match self.provider_model_repo.list().await {
+            Ok(rows) => build_description_map(&rows, participants),
             Err(error) => {
                 tracing::warn!(%error, "planning without provider model descriptions");
                 HashMap::new()
@@ -361,14 +364,20 @@ const ADJUST_SYSTEM: &str = r#"You are revising an existing AgentExecution from 
 type DescriptionMap = HashMap<(String, String), String>;
 
 fn build_description_map(
-    providers: &[Provider],
+    model_rows: &[ProviderModelRow],
     participants: &[ExecutionParticipant],
 ) -> DescriptionMap {
-    let by_id: HashMap<&str, &Provider> = providers
+    // Per-model descriptions live on the provider_models rows (migration 016).
+    let by_key: HashMap<(&str, &str), &str> = model_rows
         .iter()
-        .map(|provider| (provider.provider_id.as_str(), provider))
+        .filter_map(|row| {
+            let description = row.description.as_deref().map(str::trim)?;
+            (!description.is_empty()).then_some((
+                (row.provider_id.as_str(), row.model.as_str()),
+                description,
+            ))
+        })
         .collect();
-    let mut decoded: HashMap<&str, HashMap<String, String>> = HashMap::new();
     let mut descriptions = HashMap::new();
     for participant in participants {
         let (Some(provider_id), Some(model)) = (
@@ -377,22 +386,10 @@ fn build_description_map(
         ) else {
             continue;
         };
-        let table = decoded.entry(provider_id).or_insert_with(|| {
-            by_id
-                .get(provider_id)
-                .and_then(|provider| provider.model_descriptions.as_deref())
-                .and_then(|raw| serde_json::from_str(raw).ok())
-                .unwrap_or_default()
-        });
-        if let Some(description) = table
-            .get(model)
-            .map(String::as_str)
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-        {
+        if let Some(description) = by_key.get(&(provider_id, model)) {
             descriptions.insert(
                 (provider_id.to_owned(), model.to_owned()),
-                description.to_owned(),
+                (*description).to_owned(),
             );
         }
     }

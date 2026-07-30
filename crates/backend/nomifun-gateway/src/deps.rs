@@ -46,6 +46,9 @@ pub struct GatewayDeps {
     pub terminal_service: Arc<TerminalService>,
     /// Main-db provider rows: model listing + the nomi model resolution chain.
     pub provider_repo: Arc<dyn IProviderRepository>,
+    /// Authoritative per-model rows (membership + enabled flags) backing the
+    /// provider summaries since migration 016 dropped the legacy columns.
+    pub provider_model_repo: Arc<dyn nomifun_db::IProviderModelRepository>,
     /// IDMM supervision config (same instance as `/api/idmm` so save also
     /// arms/stops the live supervisor).
     pub idmm_service: Arc<IdmmService>,

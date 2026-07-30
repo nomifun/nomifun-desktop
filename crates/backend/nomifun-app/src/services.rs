@@ -1789,6 +1789,8 @@ impl AppServices {
 
         let remote_agent_repo = Arc::new(SqliteRemoteAgentRepository::new(database.pool().clone()));
         let provider_repo = Arc::new(SqliteProviderRepository::new(database.pool().clone()));
+        let provider_model_repo: Arc<dyn IProviderModelRepository> =
+            Arc::new(SqliteProviderModelRepository::new(database.pool().clone()));
         // Start the stable managed-model loopback supply and provision its
         // provider projection before any model-profile reconciliation or agent
         // factory construction. A seed catalog makes a fresh install usable
@@ -1796,6 +1798,7 @@ impl AppServices {
         let (managed_model_service, managed_model_server) =
             nomifun_system::start_and_provision_free_model_with_preferences(
                 provider_repo.clone(),
+                provider_model_repo.clone(),
                 Some(Arc::new(nomifun_db::SqliteClientPreferenceRepository::new(
                     database.pool().clone(),
                 ))),
@@ -1803,8 +1806,6 @@ impl AppServices {
             )
             .await
             .map_err(|e| anyhow::anyhow!("Failed to provision NomiFun free model service: {e}"))?;
-        let provider_model_repo: Arc<dyn IProviderModelRepository> =
-            Arc::new(SqliteProviderModelRepository::new(database.pool().clone()));
         // Refresh immediately, then about every six hours with jitter. Failed
         // attempts retain the current catalog and use capped exponential
         // backoff. Successful refreshes atomically seed profiles for any newly
@@ -2041,6 +2042,7 @@ impl AppServices {
         // `provider_repo` is moved into `build_agent_factory` below — clone.
         knowledge_service.set_completer(Arc::new(nomifun_ai_agent::LiveKnowledgeCompleter {
             provider_repo: provider_repo.clone() as Arc<dyn nomifun_db::IProviderRepository>,
+            provider_model_repo: provider_model_repo.clone(),
             encryption_key,
             workspace: data_dir.clone(),
         }));
@@ -2229,6 +2231,7 @@ impl AppServices {
         // is best-effort and never blocks a launch.
         terminal_service.with_title_completer(Arc::new(nomifun_ai_agent::LiveTerminalTitleCompleter {
             provider_repo: provider_repo.clone(),
+            provider_model_repo: provider_model_repo.clone(),
             encryption_key,
             workspace: data_dir.clone(),
         }));
@@ -2274,6 +2277,7 @@ impl AppServices {
         let companion_completer: Arc<dyn nomifun_companion::learner::CompanionCompleter> =
             Arc::new(nomifun_companion::learner::LiveCompanionCompleter {
                 provider_repo: provider_repo.clone() as Arc<dyn nomifun_db::IProviderRepository>,
+                provider_model_repo: provider_model_repo.clone(),
                 encryption_key,
                 workspace: data_dir.clone(),
             });
@@ -2416,6 +2420,7 @@ impl AppServices {
             skill_manager: AcpSkillManager::new(skill_paths.clone()),
             remote_agent_repo,
             provider_repo,
+            provider_model_repo: provider_model_repo.clone(),
             encryption_key,
             agent_registry: agent_registry.clone(),
             acp_agent_service: acp_agent_service.clone(),
@@ -2685,11 +2690,12 @@ where
 }
 
 /// Ensure every provider catalog model has an authoritative capability
-/// profile on its [`nomifun_db::ProviderModelRow`]. Missing rows are seeded
-/// and unprofiled dual-write rows (`tasks == "[]"`, `source == "inferred"`)
-/// are backfilled from the name/platform heuristic; existing profiles (incl.
-/// user overrides) are left untouched. Best-effort — logs and returns on any
-/// error so boot never fails on profile reconciliation.
+/// profile on its [`nomifun_db::ProviderModelRow`]. Since migration 016 the
+/// rows ARE the catalog, so this is a pure backfill pass: unprofiled
+/// membership rows (`tasks == "[]"`, `source == "inferred"`) get tasks/traits
+/// from the name/platform heuristic; existing profiles (incl. user overrides)
+/// are left untouched. Best-effort — logs and returns on any error so boot
+/// never fails on profile reconciliation.
 async fn reconcile_model_profiles(
     provider_repo: &Arc<dyn IProviderRepository>,
     provider_model_repo: &Arc<dyn IProviderModelRepository>,
@@ -2703,12 +2709,10 @@ async fn reconcile_model_profiles(
     };
     let mut seeded = 0usize;
     for provider in &providers {
-        let models: Vec<String> = serde_json::from_str(&provider.models).unwrap_or_default();
-        match nomifun_system::seed_missing_inferred_profiles(
+        match nomifun_system::seed_inferred_provider_models(
             provider_model_repo.as_ref(),
             &provider.provider_id,
             &provider.platform,
-            &models,
         )
         .await
         {

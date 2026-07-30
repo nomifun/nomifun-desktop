@@ -65,10 +65,12 @@ impl SqliteProviderRepository {
     }
 }
 
-/// The five legacy per-model JSON map columns that dual-write mirrors into
-/// typed `provider_models` columns. Profile columns (`tasks`, `traits`,
+/// The five per-model map params whose entries are translated into typed
+/// `provider_models` columns. Since migration 016 these maps exist ONLY as
+/// wire-compat inputs — the matching providers columns are gone, so this
+/// translation is the single write path. Profile columns (`tasks`, `traits`,
 /// `params`, `source`) and `connection_role` are intentionally absent: they
-/// are owned by the new-table writers and are NEVER touched by dual-write.
+/// are owned by the new-table writers and are NEVER touched by this sync.
 #[derive(Clone, Copy, Debug)]
 enum ModelMapColumn {
     Enabled,
@@ -168,7 +170,7 @@ impl ModelMapColumn {
     }
 }
 
-/// Dual-write rule 2b (map replacement): applying a legacy per-model map to
+/// Map-replacement rule 2b: applying a per-model map param to
 /// `provider_models` uses whole-map replacement semantics for that column
 /// across ALL of the provider's rows — a model missing from the map has the
 /// column reset to its default (enabled → 1, others → NULL), exactly matching
@@ -202,16 +204,16 @@ async fn apply_provider_model_map_tx(
     Ok(())
 }
 
-/// Dual-write rules 1 and 2a (membership): mirror the legacy `models` JSON
-/// array into `provider_models` rows inside the caller's transaction.
+/// Membership rules 1 and 2a: translate the `models` JSON array param into
+/// `provider_models` rows inside the caller's transaction.
 ///
 /// - Models present in the array get a row; a new row takes its mirrored
 ///   columns (enabled/protocol/context_limit/description/health) from the
-///   effective per-model maps, plus tasks/traits '[]', params '{}',
-///   source 'inferred', and `sort_order` = array index.
+///   per-model map params of the same call, plus tasks/traits '[]',
+///   params '{}', source 'inferred', and `sort_order` = array index.
 /// - Existing rows keep every column except `sort_order`/`updated_at` — the
 ///   profile columns (tasks/traits/params/source) and `connection_role` are
-///   NEVER touched by dual-write.
+///   NEVER touched by this sync.
 /// - Rows whose model is no longer in the array are deleted.
 async fn sync_provider_model_membership_tx(
     transaction: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
@@ -298,16 +300,16 @@ async fn sync_provider_model_membership_tx(
     Ok(())
 }
 
-/// Dual-write orchestrator shared by `create` and `update`: keeps
-/// `provider_models` rows in sync with the legacy `models` array and the five
-/// per-model JSON map columns, inside the caller's providers transaction.
-/// Direction is legacy → new only.
+/// Row-sync orchestrator shared by `create` and `update`: since migration 016
+/// this is the ONLY write path for the per-model surface — the `models` array
+/// and five per-model map params are translated into `provider_models` row
+/// operations inside the caller's providers transaction.
 ///
-/// `maps` carries, per mirrored column, the *effective* map JSON after this
-/// write (merged column value; `None` = empty map) and whether the caller
-/// supplied that map param in this call:
-/// - the effective map always feeds mirrored columns of freshly inserted
-///   membership rows, so a re-added model picks up retained map entries;
+/// `maps` carries, per mirrored column, the map JSON supplied by this call
+/// (`None` = not supplied / empty) and whether the caller supplied that map
+/// param in this call:
+/// - a supplied map feeds mirrored columns of freshly inserted membership
+///   rows of the same call;
 /// - `replace = true` additionally applies whole-map replacement for that
 ///   column across ALL rows (see [`apply_provider_model_map_tx`]); with
 ///   `replace = false` existing rows keep their current column value.
@@ -319,9 +321,12 @@ async fn sync_provider_model_membership_tx(
 /// 2. update: `models` `Some` syncs membership (insert new, delete removed,
 ///    re-index survivors); a map param `Some(...)` is a whole-map replacement
 ///    for that column over ALL rows (`Some(None)` = empty map → all defaults);
-///    a map param `None` leaves the column of existing rows untouched.
+///    a map param `None` leaves the column of existing rows untouched. A
+///    model (re-)added to membership without the matching map param in the
+///    same call starts from the column defaults — rows are the only store,
+///    so values from a prior membership do not survive removal.
 ///    Profile columns (tasks/traits/params/source) and connection_role are
-///    never written by dual-write.
+///    never written by this sync.
 /// 3. delete cascades are handled directly in [`IProviderRepository::delete`].
 async fn sync_provider_models_tx(
     transaction: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
@@ -409,25 +414,17 @@ impl IProviderRepository for SqliteProviderRepository {
 
         sqlx::query(
             "INSERT INTO providers \
-                (provider_id, platform, name, base_url, api_key_encrypted, models, enabled, \
-                 capabilities, model_context_limits, model_protocols, model_descriptions, \
-                 model_enabled, model_health, bedrock_config, is_full_url, sort_order, created_at, updated_at) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (provider_id, platform, name, base_url, api_key_encrypted, enabled, \
+                 capabilities, bedrock_config, is_full_url, sort_order, created_at, updated_at) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(&provider_id)
         .bind(params.platform)
         .bind(params.name)
         .bind(params.base_url)
         .bind(params.api_key_encrypted)
-        .bind(params.models)
         .bind(params.enabled)
         .bind(params.capabilities)
-        .bind(params.model_context_limits.unwrap_or("{}"))
-        .bind(params.model_protocols)
-        // model_descriptions is NOT NULL DEFAULT '{}'; coalesce None → '{}'.
-        .bind(params.model_descriptions.unwrap_or("{}"))
-        .bind(params.model_enabled)
-        .bind(params.model_health)
         .bind(params.bedrock_config)
         .bind(params.is_full_url)
         .bind(sort_order)
@@ -442,10 +439,10 @@ impl IProviderRepository for SqliteProviderRepository {
             _ => DbError::Query(e),
         })?;
 
-        // Dual-write: mirror the models array + per-model maps into
-        // provider_models rows in the same transaction. Every row is a fresh
-        // insert seeded from the map params, so no whole-map replacement
-        // pass is needed (replace = false).
+        // Translate the models array + per-model map params into
+        // provider_models rows in the same transaction (the only per-model
+        // store). Every row is a fresh insert seeded from the map params, so
+        // no whole-map replacement pass is needed (replace = false).
         sync_provider_models_tx(
             &mut transaction,
             &provider_id,
@@ -482,14 +479,8 @@ impl IProviderRepository for SqliteProviderRepository {
             name: params.name.to_string(),
             base_url: params.base_url.to_string(),
             api_key_encrypted: params.api_key_encrypted.to_string(),
-            models: params.models.to_string(),
             enabled: params.enabled,
             capabilities: params.capabilities.to_string(),
-            model_context_limits: params.model_context_limits.map(String::from),
-            model_protocols: params.model_protocols.map(String::from),
-            model_descriptions: params.model_descriptions.map(String::from),
-            model_enabled: params.model_enabled.map(String::from),
-            model_health: params.model_health.map(String::from),
             bedrock_config: params.bedrock_config.map(String::from),
             is_full_url: params.is_full_url,
             sort_order,
@@ -504,16 +495,16 @@ impl IProviderRepository for SqliteProviderRepository {
             .await?
             .ok_or_else(|| DbError::NotFound(format!("Provider '{id}' not found")))?;
 
-        // Capture dual-write inputs before params is consumed by the merge.
+        // Capture the row-sync inputs before params is consumed by the merge.
         // `models: None` keeps membership; a map param of `None` keeps that
         // column on existing rows; `Some(None)` clears the map (all rows
         // reset to the column default); `Some(Some(json))` replaces it.
         let models_json = params.models;
-        let replace_enabled = params.model_enabled.is_some();
-        let replace_protocols = params.model_protocols.is_some();
-        let replace_limits = params.model_context_limits.is_some();
-        let replace_descriptions = params.model_descriptions.is_some();
-        let replace_health = params.model_health.is_some();
+        let map_enabled = params.model_enabled;
+        let map_protocols = params.model_protocols;
+        let map_limits = params.model_context_limits;
+        let map_descriptions = params.model_descriptions;
+        let map_health = params.model_health;
 
         let merged = merge_update(existing, params);
 
@@ -521,24 +512,16 @@ impl IProviderRepository for SqliteProviderRepository {
         sqlx::query(
             "UPDATE providers SET \
                 platform = ?, name = ?, base_url = ?, api_key_encrypted = ?, \
-                models = ?, enabled = ?, capabilities = ?, \
-                model_context_limits = ?, model_protocols = ?, model_descriptions = ?, model_enabled = ?, \
-                model_health = ?, bedrock_config = ?, is_full_url = ?, sort_order = ?, updated_at = ? \
+                enabled = ?, capabilities = ?, bedrock_config = ?, \
+                is_full_url = ?, sort_order = ?, updated_at = ? \
              WHERE provider_id = ?",
         )
         .bind(&merged.platform)
         .bind(&merged.name)
         .bind(&merged.base_url)
         .bind(&merged.api_key_encrypted)
-        .bind(&merged.models)
         .bind(merged.enabled)
         .bind(&merged.capabilities)
-        .bind(merged.model_context_limits.as_deref().unwrap_or("{}"))
-        .bind(&merged.model_protocols)
-        // model_descriptions is NOT NULL DEFAULT '{}'; coalesce None → '{}'.
-        .bind(merged.model_descriptions.as_deref().unwrap_or("{}"))
-        .bind(&merged.model_enabled)
-        .bind(&merged.model_health)
         .bind(&merged.bedrock_config)
         .bind(merged.is_full_url)
         .bind(merged.sort_order)
@@ -547,10 +530,10 @@ impl IProviderRepository for SqliteProviderRepository {
         .execute(&mut *transaction)
         .await?;
 
-        // Dual-write: sync provider_models in the same transaction. The
-        // effective (merged) map values seed mirrored columns for any newly
-        // inserted membership row; whole-map replacement runs only for map
-        // params the caller actually supplied.
+        // Sync provider_models in the same transaction (the only per-model
+        // store). Map values supplied by this call seed mirrored columns for
+        // any newly inserted membership row; whole-map replacement runs only
+        // for map params the caller actually supplied.
         sync_provider_models_tx(
             &mut transaction,
             id,
@@ -558,28 +541,28 @@ impl IProviderRepository for SqliteProviderRepository {
             [
                 (
                     ModelMapColumn::Enabled,
-                    merged.model_enabled.as_deref(),
-                    replace_enabled,
+                    map_enabled.flatten(),
+                    map_enabled.is_some(),
                 ),
                 (
                     ModelMapColumn::Protocol,
-                    merged.model_protocols.as_deref(),
-                    replace_protocols,
+                    map_protocols.flatten(),
+                    map_protocols.is_some(),
                 ),
                 (
                     ModelMapColumn::ContextLimit,
-                    merged.model_context_limits.as_deref(),
-                    replace_limits,
+                    map_limits.flatten(),
+                    map_limits.is_some(),
                 ),
                 (
                     ModelMapColumn::Description,
-                    merged.model_descriptions.as_deref(),
-                    replace_descriptions,
+                    map_descriptions.flatten(),
+                    map_descriptions.is_some(),
                 ),
                 (
                     ModelMapColumn::Health,
-                    merged.model_health.as_deref(),
-                    replace_health,
+                    map_health.flatten(),
+                    map_health.is_some(),
                 ),
             ],
             merged.updated_at,
@@ -837,6 +820,10 @@ fn is_unique_violation(err: &dyn sqlx::error::DatabaseError) -> bool {
 }
 
 /// Merge partial update params into an existing provider, returning a new instance.
+///
+/// Only the providers-row fields participate; the per-model params (`models`
+/// + the five maps) have no row storage since migration 016 and are consumed
+/// by `sync_provider_models_tx` instead.
 fn merge_update(existing: Provider, params: UpdateProviderParams<'_>) -> Provider {
     let now = nomifun_common::now_ms();
     Provider {
@@ -849,24 +836,8 @@ fn merge_update(existing: Provider, params: UpdateProviderParams<'_>) -> Provide
             .api_key_encrypted
             .unwrap_or(&existing.api_key_encrypted)
             .to_string(),
-        models: params.models.unwrap_or(&existing.models).to_string(),
         enabled: params.enabled.unwrap_or(existing.enabled),
         capabilities: params.capabilities.unwrap_or(&existing.capabilities).to_string(),
-        model_context_limits: params
-            .model_context_limits
-            .map_or(existing.model_context_limits, |v| v.map(String::from)),
-        model_protocols: params
-            .model_protocols
-            .map_or(existing.model_protocols, |v| v.map(String::from)),
-        model_descriptions: params
-            .model_descriptions
-            .map_or(existing.model_descriptions, |v| v.map(String::from)),
-        model_enabled: params
-            .model_enabled
-            .map_or(existing.model_enabled, |v| v.map(String::from)),
-        model_health: params
-            .model_health
-            .map_or(existing.model_health, |v| v.map(String::from)),
         bedrock_config: params
             .bedrock_config
             .map_or(existing.bedrock_config, |v| v.map(String::from)),
@@ -930,8 +901,6 @@ mod tests {
         assert_eq!(p.base_url, "https://api.anthropic.com");
         assert_eq!(p.api_key_encrypted, "encrypted_key_data");
         assert!(p.enabled);
-        assert!(p.model_context_limits.is_none());
-        assert!(p.model_protocols.is_none());
         assert!(p.bedrock_config.is_none());
         assert!(p.created_at > 0);
         assert_eq!(p.created_at, p.updated_at);
@@ -995,13 +964,22 @@ mod tests {
 
     #[tokio::test]
     async fn create_then_find_by_id() {
-        let (repo, _db) = setup().await;
+        let (repo, db) = setup().await;
         let created = repo.create(sample_params()).await.unwrap();
 
         let found = repo.find_by_id(&created.provider_id).await.unwrap().unwrap();
         assert_eq!(found.provider_id, created.provider_id);
         assert_eq!(found.platform, "anthropic");
-        assert_eq!(found.models, r#"["claude-sonnet-4-20250514"]"#);
+        // The models array param materialized as provider_models rows (the
+        // only per-model store since migration 016).
+        let models: Vec<String> = sqlx::query_scalar(
+            "SELECT model FROM provider_models WHERE provider_id = ? ORDER BY sort_order",
+        )
+        .bind(&created.provider_id)
+        .fetch_all(db.pool())
+        .await
+        .unwrap();
+        assert_eq!(models, vec!["claude-sonnet-4-20250514"]);
     }
 
     #[tokio::test]
@@ -1083,16 +1061,33 @@ mod tests {
 
     #[tokio::test]
     async fn update_optional_json_fields() {
-        let (repo, _db) = setup().await;
-        let created = repo.create(sample_params()).await.unwrap();
-        assert!(created.model_protocols.is_none());
+        let (repo, db) = setup().await;
+        let created = repo
+            .create(CreateProviderParams {
+                models: r#"["m1"]"#,
+                ..sample_params()
+            })
+            .await
+            .unwrap();
+        assert!(created.bedrock_config.is_none());
 
-        // Set optional field
+        let protocol_of_m1 = || async {
+            sqlx::query_scalar::<_, Option<String>>(
+                "SELECT protocol FROM provider_models WHERE provider_id = ? AND model = 'm1'",
+            )
+            .bind(&created.provider_id)
+            .fetch_one(db.pool())
+            .await
+            .unwrap()
+        };
+
+        // Set optional fields: the protocol map applies to the model row, the
+        // bedrock config persists on the providers row.
         let updated = repo
             .update(
                 &created.provider_id,
                 UpdateProviderParams {
-                    model_protocols: Some(Some(r#"{"model1":"openai"}"#)),
+                    model_protocols: Some(Some(r#"{"m1":"openai"}"#)),
                     bedrock_config: Some(Some(r#"{"region":"us-east-1"}"#)),
                     ..Default::default()
                 },
@@ -1100,10 +1095,10 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(updated.model_protocols.as_deref(), Some(r#"{"model1":"openai"}"#));
+        assert_eq!(protocol_of_m1().await.as_deref(), Some("openai"));
         assert_eq!(updated.bedrock_config.as_deref(), Some(r#"{"region":"us-east-1"}"#));
 
-        // Clear optional field
+        // Clear the protocol map: the row's column resets to NULL.
         let cleared = repo
             .update(
                 &created.provider_id,
@@ -1115,7 +1110,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(cleared.model_protocols.is_none());
+        assert!(protocol_of_m1().await.is_none());
         // bedrock_config should still be set
         assert!(cleared.bedrock_config.is_some());
     }

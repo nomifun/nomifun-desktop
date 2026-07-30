@@ -849,9 +849,9 @@ mod tests {
             .unwrap();
         nomifun_db::sqlx::query(
             "INSERT INTO providers \
-             (provider_id, platform, name, base_url, api_key_encrypted, models, enabled, capabilities, created_at, updated_at) \
+             (provider_id, platform, name, base_url, api_key_encrypted, enabled, capabilities, created_at, updated_at) \
              VALUES ('0190f5fe-7c00-7a00-8abc-012345678901', 'openai', 'encrypted', \
-                     'https://example.invalid', 'ciphertext', '[]', 1, '[]', 1, 1)",
+                     'https://example.invalid', 'ciphertext', 1, '[]', 1, 1)",
         )
         .execute(database.pool())
         .await

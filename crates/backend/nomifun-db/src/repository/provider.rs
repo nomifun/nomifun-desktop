@@ -24,6 +24,13 @@ pub trait IProviderRepository: Send + Sync {
 }
 
 /// Parameters for creating a new provider.
+///
+/// `models` and the five per-model map params (`model_context_limits`,
+/// `model_protocols`, `model_descriptions`, `model_enabled`, `model_health`)
+/// are wire-compat INPUTS only: migration 016 dropped the matching providers
+/// columns, so these params feed exclusively the `provider_models` row sync
+/// (`sync_provider_models_tx`) — one row per `models` entry, mirrored columns
+/// seeded from the maps. They are never persisted on the providers row.
 #[derive(Debug)]
 pub struct CreateProviderParams<'a> {
     /// Optional caller-supplied stable business ID.
@@ -49,6 +56,13 @@ pub struct CreateProviderParams<'a> {
 /// Parameters for updating an existing provider.
 ///
 /// All fields are optional; `None` means "keep the current value".
+///
+/// Like [`CreateProviderParams`], `models` and the five per-model map params
+/// are wire-compat INPUTS that only drive the `provider_models` row sync:
+/// `models: Some` replaces membership (insert new rows, delete removed,
+/// re-index survivors); a map param `Some(...)` is a whole-map replacement of
+/// that mirrored column across ALL rows (`Some(None)` = empty map → column
+/// defaults); a map param `None` leaves existing rows untouched.
 #[derive(Debug, Default)]
 pub struct UpdateProviderParams<'a> {
     pub platform: Option<&'a str>,

@@ -12,11 +12,10 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use nomifun_common::AppError;
-use nomifun_db::IProviderRepository;
+use nomifun_db::{IProviderModelRepository, IProviderRepository};
 use nomifun_terminal::TerminalTitleCompleter;
 
 use crate::factory::provider_config::{one_shot_completion, resolve_provider_config, user_message};
-use crate::knowledge_completer::first_enabled_model;
 
 /// The reply is a single short line; a tiny budget keeps the call cheap and
 /// prevents a runaway model from emitting a paragraph instead of a title.
@@ -34,6 +33,7 @@ the SAME language as the input (Chinese input → Chinese title). Output only th
 /// Provider-backed terminal title generator.
 pub struct LiveTerminalTitleCompleter {
     pub provider_repo: Arc<dyn IProviderRepository>,
+    pub provider_model_repo: Arc<dyn IProviderModelRepository>,
     pub encryption_key: [u8; 32],
     pub workspace: PathBuf,
 }
@@ -41,19 +41,16 @@ pub struct LiveTerminalTitleCompleter {
 impl LiveTerminalTitleCompleter {
     /// First enabled provider (creation order) + its first enabled model.
     async fn resolve_default_model(&self) -> Result<(String, String), AppError> {
-        let providers = self
-            .provider_repo
-            .list()
-            .await
-            .map_err(|e| AppError::Internal(format!("failed to list providers: {e}")))?;
-        for provider in providers.iter().filter(|p| p.enabled) {
-            if let Some(model) = first_enabled_model(&provider.models, provider.model_enabled.as_deref()) {
-                return Ok((provider.provider_id.clone(), model));
-            }
-        }
-        Err(AppError::Conflict(
-            "terminal auto-title unavailable: no enabled provider/model is configured".into(),
-        ))
+        crate::knowledge_completer::resolve_default_model(
+            &self.provider_repo,
+            &self.provider_model_repo,
+        )
+        .await
+        .ok_or_else(|| {
+            AppError::Conflict(
+                "terminal auto-title unavailable: no enabled provider/model is configured".into(),
+            )
+        })
     }
 }
 
@@ -63,6 +60,7 @@ impl TerminalTitleCompleter for LiveTerminalTitleCompleter {
         let (provider_id, model) = self.resolve_default_model().await?;
         let cfg = resolve_provider_config(
             &self.provider_repo,
+            &self.provider_model_repo,
             &self.encryption_key,
             &provider_id,
             &model,

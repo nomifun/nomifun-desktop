@@ -15,7 +15,7 @@ use nomifun_api_types::{ExecutionModelPool, ExecutionModelRef, HealthStatus, Mod
 use nomifun_common::{
     AgentKillReason, AgentType, AppError, ConversationStatus, ErrorChain, ProviderWithModel, now_ms,
 };
-use nomifun_db::{ConversationRowUpdate, UpdateProviderParams};
+use nomifun_db::ConversationRowUpdate;
 use nomifun_ai_agent::{AgentRuntimeHandle, AgentRuntimeRegistry};
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
@@ -90,56 +90,45 @@ impl ConversationService {
         if let Some(override_cfg) = read_conversation_failover_override(extra_json) {
             return Some(override_cfg);
         }
-        let (_, client_prefs) = self.failover_deps()?;
+        let (_, _, client_prefs) = self.failover_deps()?;
         Some(get_global_failover_config(&client_prefs).await)
     }
 
-    /// 把失败模型的 `model_health[model]` 标 `Unhealthy`(read-改-write,保留其余
-    /// 模型的健康记录)。fail-open:任何一步出错只 warn 不致命 —— 标记是尽力而为的
-    /// 加分项,不能拖垮故障转移本身。
+    /// 把失败模型的 `provider_models` 行健康标 `Unhealthy`(行级 `set_health`,
+    /// 其余模型的健康记录天然不受影响)。fail-open:任何一步出错只 warn 不致命 ——
+    /// 标记是尽力而为的加分项,不能拖垮故障转移本身。
     async fn stamp_model_unhealthy(&self, failed: &ProviderWithModel) {
-        let Some((provider_repo, _)) = self.failover_deps() else {
+        let Some((_, provider_model_repo, _)) = self.failover_deps() else {
             return;
         };
-        let provider = match provider_repo.find_by_id(&failed.provider_id).await {
-            Ok(Some(provider)) => provider,
-            Ok(None) => {
-                warn!(provider_id = %failed.provider_id, "Failover stamp-unhealthy skipped: provider row missing");
-                return;
-            }
-            Err(e) => {
-                warn!(error = %ErrorChain(&e), provider_id = %failed.provider_id, "Failover stamp-unhealthy: failed to load provider");
-                return;
-            }
+        let health = ModelHealthStatus {
+            status: HealthStatus::Unhealthy,
+            last_check: Some(now_ms()),
+            latency: None,
+            error: Some("model_failover: provider fault on live turn".into()),
         };
-
-        let mut health: std::collections::HashMap<String, ModelHealthStatus> = provider
-            .model_health
-            .as_deref()
-            .and_then(|s| serde_json::from_str(s).ok())
-            .unwrap_or_default();
-        health.insert(
-            failed.model.clone(),
-            ModelHealthStatus {
-                status: HealthStatus::Unhealthy,
-                last_check: Some(now_ms()),
-                latency: None,
-                error: Some("model_failover: provider fault on live turn".into()),
-            },
-        );
         let serialized = match serde_json::to_string(&health) {
             Ok(s) => s,
             Err(e) => {
-                warn!(error = %ErrorChain(&e), "Failover stamp-unhealthy: serialize model_health failed");
+                warn!(error = %ErrorChain(&e), "Failover stamp-unhealthy: serialize model health failed");
                 return;
             }
         };
-        let params = UpdateProviderParams {
-            model_health: Some(Some(serialized.as_str())),
-            ..Default::default()
-        };
-        if let Err(e) = provider_repo.update(&failed.provider_id, params).await {
-            warn!(error = %ErrorChain(&e), provider_id = %failed.provider_id, "Failover stamp-unhealthy: provider update failed");
+        match provider_model_repo
+            .set_health(&failed.provider_id, &failed.model, Some(serialized.as_str()))
+            .await
+        {
+            Ok(true) => {}
+            Ok(false) => {
+                warn!(
+                    provider_id = %failed.provider_id,
+                    model = %failed.model,
+                    "Failover stamp-unhealthy skipped: provider model row missing"
+                );
+            }
+            Err(e) => {
+                warn!(error = %ErrorChain(&e), provider_id = %failed.provider_id, "Failover stamp-unhealthy: health write failed");
+            }
         }
     }
 
@@ -206,7 +195,7 @@ impl ConversationService {
         if cancellation.is_cancelled() {
             return None;
         }
-        let Some((provider_repo, _)) = self.failover_deps() else {
+        let Some((provider_repo, provider_model_repo, _)) = self.failover_deps() else {
             return None;
         };
         let conv_id = conversation_id;
@@ -263,12 +252,20 @@ impl ConversationService {
                 return None;
             }
         };
+        // 每模型 enabled / health 只在 provider_models 行上(迁移 016)。
+        let model_rows = match provider_model_repo.list().await {
+            Ok(rows) => rows,
+            Err(e) => {
+                warn!(error = %ErrorChain(&e), conversation_id, "Failover skipped: failed to list provider models");
+                return None;
+            }
+        };
         if cancellation.is_cancelled() {
             return None;
         }
 
         // 队列耗尽 / 无可用候选 → None(调用方回落到原始错误)。
-        let picked = next_failover_model(&config.queue, &failed, tried, &providers)?;
+        let picked = next_failover_model(&config.queue, &failed, tried, &providers, &model_rows)?;
 
         // 写 conversation.model(origin 标记:非用户编辑)。这正是 spec §5.5 锚定的
         // 「改模型 + 终止 runtime → 下次 send 重建」形状,只是这里立刻重建。
