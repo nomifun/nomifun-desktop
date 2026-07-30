@@ -7,13 +7,15 @@
 use serde::{Deserialize, Serialize};
 
 /// Response never echoes credentials back; `has_credentials` signals presence.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, ts_rs::TS)]
+#[ts(export_to = "../../../../ui/src/common/protocolBindings/")]
 pub struct ProviderConnectionResponse {
     pub connection_id: String,
     #[serde(deserialize_with = "crate::serde_util::deserialize_provider_id")]
     pub provider_id: String,
     pub role: String,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub label: Option<String>,
     pub base_url: String,
     pub auth_scheme: String,
@@ -21,27 +23,37 @@ pub struct ProviderConnectionResponse {
     #[serde(default)]
     pub is_full_url: bool,
     #[serde(default)]
+    #[ts(type = "unknown")]
     pub extra: serde_json::Value,
+    #[ts(type = "number")]
     pub created_at: i64,
+    #[ts(type = "number")]
     pub updated_at: i64,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+// Request DTO: `#[serde(default)]` fields may be omitted by the client → `?`.
+#[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export_to = "../../../../ui/src/common/protocolBindings/")]
 #[serde(deny_unknown_fields)]
 pub struct UpsertProviderConnectionRequest {
     pub role: String,
     #[serde(default)]
+    #[ts(optional = nullable)]
     pub label: Option<String>,
     pub base_url: String,
     #[serde(default = "default_bearer")]
+    #[ts(optional = nullable)]
     pub auth_scheme: String,
     /// Write-only structured credentials (shape depends on auth_scheme),
     /// encrypted at rest. `None` on update keeps the stored credentials.
     #[serde(default)]
+    #[ts(optional = nullable, type = "unknown")]
     pub credentials: Option<serde_json::Value>,
     #[serde(default)]
+    #[ts(optional = nullable)]
     pub is_full_url: bool,
     #[serde(default)]
+    #[ts(optional = nullable, type = "unknown")]
     pub extra: Option<serde_json::Value>,
 }
 fn default_bearer() -> String { "bearer".into() }

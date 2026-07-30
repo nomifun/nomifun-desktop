@@ -21,7 +21,7 @@ use serde_json::{Value, json};
 use crate::adapter::ProtocolAdapter;
 use crate::call::ResolvedCall;
 use crate::error::{InvokeError, InvokeErrorKind};
-use crate::transport::{decode_b64, error_from_response, net_err};
+use crate::transport::{decode_b64, error_from_response, post_json, post_multipart};
 use crate::types::{
     ImageEditRequest, ImageGenRequest, ProducedAsset, ProducedData, TaskOutcome, TaskRequest, TaskResult,
 };
@@ -81,8 +81,7 @@ async fn submit_generations(
         }
     }
 
-    let rb = http.post(&url).timeout(REQUEST_TIMEOUT).json(&body);
-    let resp = call.connection.auth.apply(rb)?.send().await.map_err(net_err)?;
+    let resp = post_json(http, &url, REQUEST_TIMEOUT, &call.connection.auth, &body).await?;
     if !resp.status().is_success() {
         return Err(error_from_response(resp).await);
     }
@@ -107,30 +106,34 @@ async fn submit_edits(
     // Single image → `image`; multiple → `image[]` (gpt-image-1 multi-ref).
     let image_field = if images.len() == 1 { "image" } else { "image[]" };
 
-    let mut form = Form::new()
-        .text("model", call.model.clone())
-        .text("prompt", req.prompt.clone())
-        .text("n", req.count.to_string());
-    if let Some(size) = &req.size {
-        form = form.text("size", size.clone());
-    }
-    for (idx, input) in images.iter().enumerate() {
-        let part = Part::bytes(input.bytes.clone())
-            .file_name(format!("image_{idx}.{}", ext_for_mime(&input.mime)))
-            .mime_str(&input.mime)
-            .map_err(|e| InvokeError::new(InvokeErrorKind::InvalidParams, format!("invalid image mime: {e}")))?;
-        form = form.part(image_field, part);
-    }
-    if let Some(mask) = req.inputs.iter().find(|i| i.role == "mask") {
-        let part = Part::bytes(mask.bytes.clone())
-            .file_name("mask.png")
-            .mime_str(&mask.mime)
-            .map_err(|e| InvokeError::new(InvokeErrorKind::InvalidParams, format!("invalid mask mime: {e}")))?;
-        form = form.part("mask", part);
-    }
+    // Built per attempt: multipart forms cannot be cloned, and rotation may
+    // need to resend.
+    let build_form = || -> Result<Form, InvokeError> {
+        let mut form = Form::new()
+            .text("model", call.model.clone())
+            .text("prompt", req.prompt.clone())
+            .text("n", req.count.to_string());
+        if let Some(size) = &req.size {
+            form = form.text("size", size.clone());
+        }
+        for (idx, input) in images.iter().enumerate() {
+            let part = Part::bytes(input.bytes.clone())
+                .file_name(format!("image_{idx}.{}", ext_for_mime(&input.mime)))
+                .mime_str(&input.mime)
+                .map_err(|e| InvokeError::new(InvokeErrorKind::InvalidParams, format!("invalid image mime: {e}")))?;
+            form = form.part(image_field, part);
+        }
+        if let Some(mask) = req.inputs.iter().find(|i| i.role == "mask") {
+            let part = Part::bytes(mask.bytes.clone())
+                .file_name("mask.png")
+                .mime_str(&mask.mime)
+                .map_err(|e| InvokeError::new(InvokeErrorKind::InvalidParams, format!("invalid mask mime: {e}")))?;
+            form = form.part("mask", part);
+        }
+        Ok(form)
+    };
 
-    let rb = http.post(&url).timeout(REQUEST_TIMEOUT).multipart(form);
-    let resp = call.connection.auth.apply(rb)?.send().await.map_err(net_err)?;
+    let resp = post_multipart(http, &url, REQUEST_TIMEOUT, &call.connection.auth, build_form).await?;
     if !resp.status().is_success() {
         return Err(error_from_response(resp).await);
     }

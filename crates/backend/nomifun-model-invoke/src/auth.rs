@@ -26,6 +26,18 @@ pub enum AuthScheme {
 }
 
 impl AuthScheme {
+    /// Whether the scheme draws on the `api_keys` ARRAY and is therefore
+    /// eligible for multi-key rotation
+    /// ([`crate::transport::send_with_rotation`]). [`AuthScheme::MultiHeader`]
+    /// credentials are one named-field object (not a key list) — single-shot;
+    /// the same will hold for any future body-embedded scheme.
+    pub fn rotates(&self) -> bool {
+        match self {
+            Self::Bearer | Self::TokenHeader | Self::HeaderKey(_) | Self::QueryKey(_) => true,
+            Self::MultiHeader(_) => false,
+        }
+    }
+
     /// Parse the persisted scheme vocabulary:
     /// `"bearer" | "token" | "header_key:<name>" | "query_key:<param>" | "volc_voice"`.
     ///
@@ -72,50 +84,74 @@ pub struct AuthMaterial {
 }
 
 impl AuthMaterial {
-    /// The single secret used by `bearer`/`token`/`header_key`/`query_key`
-    /// schemes: `credentials["api_keys"][0]`, falling back to a bare
-    /// `{"api_key": "..."}` shape. (`providers` 行 default 连接 stores
-    /// `{"api_keys": [first comma/newline-separated key]}`.)
-    pub fn primary_secret(&self) -> Result<String, InvokeError> {
-        let from_list = self
+    /// Every rotation-eligible secret, in stored order: the full
+    /// `credentials["api_keys"]` array (each entry trimmed, blanks dropped),
+    /// falling back to a bare `{"api_key": "..."}` shape when the array is
+    /// absent/empty. (`providers` 行 default 连接 stores
+    /// `{"api_keys": [first comma/newline-separated key]}` — one entry;
+    /// named connection profiles may store the whole list.)
+    pub fn secrets(&self) -> Vec<String> {
+        let from_list: Vec<String> = self
             .credentials
             .get("api_keys")
             .and_then(|v| v.as_array())
-            .and_then(|keys| keys.first())
-            .and_then(|v| v.as_str());
-        let bare = self.credentials.get("api_key").and_then(|v| v.as_str());
-        from_list
-            .or(bare)
+            .map(|keys| {
+                keys.iter()
+                    .filter_map(|v| v.as_str())
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_string)
+                    .collect()
+            })
+            .unwrap_or_default();
+        if !from_list.is_empty() {
+            return from_list;
+        }
+        self.credentials
+            .get("api_key")
+            .and_then(|v| v.as_str())
             .map(str::trim)
             .filter(|s| !s.is_empty())
-            .map(str::to_string)
-            .ok_or_else(|| {
-                InvokeError::config(
-                    "connection credentials carry no api key (expected {\"api_keys\": [..]} or {\"api_key\": ..})",
-                )
-            })
+            .map(|s| vec![s.to_string()])
+            .unwrap_or_default()
     }
 
-    /// Attach the credentials to an outgoing request per the scheme.
-    pub fn apply(&self, rb: reqwest::RequestBuilder) -> Result<reqwest::RequestBuilder, InvokeError> {
+    /// The single secret used by `bearer`/`token`/`header_key`/`query_key`
+    /// schemes: the first entry of [`AuthMaterial::secrets`].
+    pub fn primary_secret(&self) -> Result<String, InvokeError> {
+        self.secrets().into_iter().next().ok_or_else(|| {
+            InvokeError::config(
+                "connection credentials carry no api key (expected {\"api_keys\": [..]} or {\"api_key\": ..})",
+            )
+        })
+    }
+
+    /// Attach ONE specific secret per the (single-key) scheme. The rotation
+    /// helper ([`crate::transport::send_with_rotation`]) drives this with each
+    /// entry of [`AuthMaterial::secrets`] in turn; [`AuthMaterial::apply`]
+    /// drives it with the primary secret. [`AuthScheme::MultiHeader`] does not
+    /// take a single secret — calling this with it is a config error.
+    pub(crate) fn apply_with_secret(
+        &self,
+        rb: reqwest::RequestBuilder,
+        secret: &str,
+    ) -> Result<reqwest::RequestBuilder, InvokeError> {
         use reqwest::header::AUTHORIZATION;
         match &self.scheme {
-            AuthScheme::Bearer => {
-                let value = header_value(&format!("Bearer {}", self.primary_secret()?))?;
-                Ok(rb.header(AUTHORIZATION, value))
+            AuthScheme::Bearer => Ok(rb.header(AUTHORIZATION, header_value(&format!("Bearer {secret}"))?)),
+            AuthScheme::TokenHeader => Ok(rb.header(AUTHORIZATION, header_value(&format!("Token {secret}"))?)),
+            AuthScheme::HeaderKey(name) => Ok(rb.header(header_name(name)?, header_value(secret)?)),
+            AuthScheme::QueryKey(param) => Ok(rb.query(&[(param.as_str(), secret)])),
+            AuthScheme::MultiHeader(_) => {
+                Err(InvokeError::config("multi-header auth does not take a single secret"))
             }
-            AuthScheme::TokenHeader => {
-                let value = header_value(&format!("Token {}", self.primary_secret()?))?;
-                Ok(rb.header(AUTHORIZATION, value))
-            }
-            AuthScheme::HeaderKey(name) => {
-                let value = header_value(&self.primary_secret()?)?;
-                Ok(rb.header(header_name(name)?, value))
-            }
-            AuthScheme::QueryKey(param) => {
-                let secret = self.primary_secret()?;
-                Ok(rb.query(&[(param.as_str(), secret.as_str())]))
-            }
+        }
+    }
+
+    /// Attach the credentials to an outgoing request per the scheme
+    /// (single-key schemes use the primary secret).
+    pub fn apply(&self, rb: reqwest::RequestBuilder) -> Result<reqwest::RequestBuilder, InvokeError> {
+        match &self.scheme {
             AuthScheme::MultiHeader(pairs) => {
                 let mut rb = rb;
                 for (header, field) in pairs {
@@ -133,6 +169,10 @@ impl AuthMaterial {
                     rb = rb.header(header_name(header)?, header_value(value)?);
                 }
                 Ok(rb)
+            }
+            _ => {
+                let secret = self.primary_secret()?;
+                self.apply_with_secret(rb, &secret)
             }
         }
     }
@@ -214,6 +254,54 @@ mod tests {
             let err = m.primary_secret().unwrap_err();
             assert_eq!(err.kind, InvokeErrorKind::Config, "credentials {empty}");
         }
+    }
+
+    #[test]
+    fn secrets_returns_full_trimmed_key_list_with_bare_fallback() {
+        let m = material(AuthScheme::Bearer, json!({"api_keys": [" sk-1 ", "", "sk-2"]}));
+        assert_eq!(m.secrets(), vec!["sk-1".to_string(), "sk-2".to_string()]);
+
+        // Bare api_key only counts when the array is absent/empty.
+        let bare = material(AuthScheme::Bearer, json!({"api_key": " sk-raw "}));
+        assert_eq!(bare.secrets(), vec!["sk-raw".to_string()]);
+        let both = material(AuthScheme::Bearer, json!({"api_keys": ["sk-a"], "api_key": "sk-b"}));
+        assert_eq!(both.secrets(), vec!["sk-a".to_string()]);
+
+        for empty in [json!({}), json!({"api_keys": []}), json!({"api_keys": ["", "  "]}), json!({"api_key": " "})] {
+            let m = material(AuthScheme::Bearer, empty.clone());
+            assert!(m.secrets().is_empty(), "credentials {empty}");
+        }
+    }
+
+    #[test]
+    fn rotation_eligibility_covers_array_key_schemes_only() {
+        assert!(AuthScheme::Bearer.rotates());
+        assert!(AuthScheme::TokenHeader.rotates());
+        assert!(AuthScheme::HeaderKey("x-goog-api-key".into()).rotates());
+        assert!(AuthScheme::QueryKey("key".into()).rotates());
+        assert!(!AuthScheme::parse("volc_voice").unwrap().rotates());
+    }
+
+    #[test]
+    fn apply_with_secret_attaches_the_given_key_per_scheme() {
+        let creds = json!({"api_keys": ["sk-1", "sk-2"]});
+        let build = |m: &AuthMaterial, secret: &str| {
+            let rb = reqwest::Client::new().get("https://example.test/x");
+            m.apply_with_secret(rb, secret).expect("apply_with_secret").build().expect("build")
+        };
+        let bearer = material(AuthScheme::Bearer, creds.clone());
+        assert_eq!(build(&bearer, "sk-2").headers().get("authorization").unwrap(), "Bearer sk-2");
+        let token = material(AuthScheme::TokenHeader, creds.clone());
+        assert_eq!(build(&token, "sk-2").headers().get("authorization").unwrap(), "Token sk-2");
+        let header = material(AuthScheme::HeaderKey("xi-api-key".into()), creds.clone());
+        assert_eq!(build(&header, "sk-2").headers().get("xi-api-key").unwrap(), "sk-2");
+        let query = material(AuthScheme::QueryKey("key".into()), creds.clone());
+        assert_eq!(build(&query, "sk-2").url().query(), Some("key=sk-2"));
+
+        // MultiHeader has no single-secret form.
+        let multi = material(AuthScheme::parse("volc_voice").unwrap(), json!({"app_key": "a"}));
+        let rb = reqwest::Client::new().get("https://example.test/x");
+        assert_eq!(multi.apply_with_secret(rb, "sk-2").unwrap_err().kind, InvokeErrorKind::Config);
     }
 
     #[test]
