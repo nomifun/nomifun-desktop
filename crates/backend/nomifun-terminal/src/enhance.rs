@@ -184,6 +184,12 @@ fn is_bare_key_safe(name: &str) -> bool {
 /// base config stay the source of truth — relocating CODEX_HOME would strand
 /// the login. Each value is TOML (strings quoted, arrays as TOML arrays); codex
 /// parses dotted-path `-c` values as TOML (`codex --help`).
+///
+/// codex spawns MCP stdio children with a WHITELIST environment (HOME/PATH/…),
+/// NOT the parent env — so each server's scoped env vars are forwarded by NAME
+/// through `env_vars` (codex's documented per-server passthrough list). Only
+/// names go into argv; the secret values ride the PTY process environment and
+/// codex copies them into the child by name at spawn.
 fn codex_mcp_argv(enh: &TerminalLaunchEnhancement) -> Vec<String> {
     let mut argv = Vec::new();
     for s in &enh.mcp_servers {
@@ -196,13 +202,21 @@ fn codex_mcp_argv(enh: &TerminalLaunchEnhancement) -> Vec<String> {
         argv.push(format!("{base}.command={}", toml_str(&s.command)));
         argv.push("-c".to_owned());
         argv.push(format!("{base}.args={}", toml_str_array(&s.args)));
+        if !s.env.is_empty() {
+            let mut names: Vec<String> = s.env.keys().cloned().collect();
+            names.sort();
+            argv.push("-c".to_owned());
+            argv.push(format!("{base}.env_vars={}", toml_str_array(&names)));
+        }
     }
     argv
 }
 
 /// Merge scoped bridge environments deterministically. These values are placed
-/// in the PTY process environment so MCP subprocesses inherit them naturally;
-/// secrets therefore never appear in Claude config files or Codex argv.
+/// in the PTY process environment so secrets never appear in Claude config
+/// files or Codex argv. Claude passes its full env to MCP stdio children;
+/// codex filters to a whitelist, so `codex_mcp_argv` additionally forwards
+/// each var BY NAME via `mcp_servers.<name>.env_vars`.
 fn mcp_process_env(enh: &TerminalLaunchEnhancement) -> Vec<(String, String)> {
     let mut merged = BTreeMap::new();
     for server in &enh.mcp_servers {
@@ -494,17 +508,33 @@ mod tests {
     fn codex_renderer_emits_c_overrides_preserving_user_config() {
         let enh = TerminalLaunchEnhancement { mcp_servers: vec![sample_kb_server()], lifecycle: None };
         let argv = codex_mcp_argv(&enh);
-        // 形如 -c mcp_servers.nomifun-knowledge.command="..." -c ...args=[...]
+        // 形如 -c mcp_servers.nomifun-knowledge.command="..." -c ...args=[...] -c ...env_vars=[...]
         let joined = argv.join(" ");
         assert!(joined.contains(r#"-c mcp_servers.nomifun-knowledge.command="/opt/nomi/nomicore""#));
         assert!(joined.contains(r#"mcp_servers.nomifun-knowledge.args=["mcp-knowledge-stdio"]"#));
         assert!(!joined.contains("scoped-bootstrap"));
-        assert!(!joined.contains("NOMI_KB_MCP_CAPABILITY"));
-        // 每个 override 前都有独立的 -c (command + args = 2)
-        assert_eq!(argv.iter().filter(|a| *a == "-c").count(), 2);
+        // codex spawns MCP children with a whitelist environment, so the
+        // capability env var must be forwarded BY NAME via env_vars. Only the
+        // name may appear in argv — never the value.
+        assert!(joined.contains(r#"mcp_servers.nomifun-knowledge.env_vars=["NOMI_KB_MCP_CAPABILITY"]"#));
+        // 每个 override 前都有独立的 -c (command + args + env_vars = 3)
+        assert_eq!(argv.iter().filter(|a| *a == "-c").count(), 3);
         assert!(!joined.contains("CODEX_HOME"));
         // Loose KB_IDS must never appear; scope lives in signed claims.
         assert!(!joined.contains("KB_MCP_KB_IDS"), "kb_ids must not be baked");
+    }
+
+    #[test]
+    fn codex_renderer_omits_env_vars_for_envless_server() {
+        let server = McpServerSpec {
+            name: "plain".into(),
+            command: "/bin/echo".into(),
+            args: vec![],
+            env: HashMap::new(),
+        };
+        let enh = TerminalLaunchEnhancement { mcp_servers: vec![server], lifecycle: None };
+        let joined = codex_mcp_argv(&enh).join(" ");
+        assert!(!joined.contains("env_vars"), "no env → no whitelist override: {joined}");
     }
 
     #[test]

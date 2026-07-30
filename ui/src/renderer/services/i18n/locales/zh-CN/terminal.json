@@ -101,7 +101,7 @@
     "launch": "启动"
   },
   "knowledge": {
-    "applyAfterRelaunch": "更改将在重新启动会话后生效。"
+    "applyLiveNote": "挂载与回写变更对当前会话即时生效；若会话启动时未注入知识检索工具（如 gemini 或自定义命令），需重启会话后工具方可用。"
   },
   "newConversation": "新建会话",
   "action": {

@@ -18,8 +18,9 @@ use crate::error::TerminalError;
 #[derive(Debug, Clone)]
 pub struct TerminalDescription {
     pub user_id: String,
-    /// Working directory the PTY was launched in. Consumers probe it for the
-    /// `.nomi/knowledge/README.md` contract file to prepend knowledge guidance.
+    /// Working directory the PTY was launched in. Knowledge mounts + the
+    /// `.nomi/knowledge/README.md` contract live under it, kept in sync with
+    /// the workpath binding at spawn and on every binding change.
     pub cwd: String,
     /// The stored launch program (the `command` column; `$SHELL` sentinel for a
     /// plain shell). With `args` + `backend`, lets the AutoWork gate resolve the

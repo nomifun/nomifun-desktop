@@ -480,7 +480,7 @@ const TerminalSessionContent: React.FC<{ sessionId: TerminalId }> = ({ sessionId
           <div className='flex items-center gap-8px shrink-0'>
             <KnowledgeControl
               target={{ kind: 'terminal', id: sessionId }}
-              applyNote={t('terminal.knowledge.applyAfterRelaunch')}
+              applyNote={t('terminal.knowledge.applyLiveNote')}
               footer={
                 // External-CLI registration footer is desktop-host-only
                 // (audit 2026-07-30, finding I).

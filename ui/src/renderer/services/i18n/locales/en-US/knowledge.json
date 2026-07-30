@@ -107,6 +107,7 @@
     "eagernessConservative": "Conservative (recommended)",
     "eagernessConservativeHint": "Restrained: persist only knowledge with clear long-term value; when in doubt, skip it. Filters out trivial, one-off, and redundant material.",
     "enabledOk": "Knowledge mounting enabled — takes effect on the next message",
+    "enabledOkTerminal": "Knowledge mounting enabled — applies to this terminal session immediately",
     "hint": "Mount knowledge bases into this session: they appear under .nomi/knowledge/ in the workspace as an extended knowledge source.",
     "label": "Knowledge",
     "modeDirect": "Direct",
