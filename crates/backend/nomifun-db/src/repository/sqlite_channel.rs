@@ -98,6 +98,16 @@ fn canonical_plugin_companion_id(
         .transpose()
 }
 
+fn validate_owner_domain(owner_domain: &str) -> Result<(), DbError> {
+    match owner_domain {
+        crate::models::CHANNEL_OWNER_DOMAIN_COMPANION
+        | crate::models::CHANNEL_OWNER_DOMAIN_CUSTOMER_SERVICE => Ok(()),
+        _ => Err(DbError::Conflict(format!(
+            "channel plugin owner_domain '{owner_domain}' is not supported"
+        ))),
+    }
+}
+
 fn validate_agent_type(agent_type: &str, context: &str) -> Result<(), DbError> {
     match agent_type {
         "acp" | "openclaw-gateway" | "nanobot" | "remote" | "nomi" => Ok(()),
@@ -118,6 +128,20 @@ impl IChannelRepository for SqliteChannelRepository {
         Ok(rows)
     }
 
+    async fn list_plugins_by_owner_domain(
+        &self,
+        owner_domain: &str,
+    ) -> Result<Vec<ChannelPluginRow>, DbError> {
+        validate_owner_domain(owner_domain)?;
+        let rows = sqlx::query_as::<_, ChannelPluginRow>(
+            "SELECT * FROM channel_plugins WHERE owner_domain = ? ORDER BY created_at ASC",
+        )
+        .bind(owner_domain)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows)
+    }
+
     async fn get_plugin(
         &self,
         channel_plugin_id: &str,
@@ -134,11 +158,12 @@ impl IChannelRepository for SqliteChannelRepository {
     async fn create_plugin(&self, row: &NewChannelPluginRow) -> Result<ChannelPluginRow, DbError> {
         let channel_plugin_id = ChannelPluginId::new().into_string();
         let companion_id = canonical_plugin_companion_id(row.companion_id.as_deref())?;
+        validate_owner_domain(&row.owner_domain)?;
         sqlx::query_as::<_, ChannelPluginRow>(
             "INSERT INTO channel_plugins \
                 (channel_plugin_id, type, name, enabled, config, status, last_connected, \
-                 companion_id, bot_key, created_at, updated_at) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
+                 companion_id, bot_key, owner_domain, created_at, updated_at) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
              RETURNING *",
         )
         .bind(channel_plugin_id)
@@ -150,6 +175,7 @@ impl IChannelRepository for SqliteChannelRepository {
         .bind(row.last_connected)
         .bind(&companion_id)
         .bind(&row.bot_key)
+        .bind(&row.owner_domain)
         .bind(row.created_at)
         .bind(row.updated_at)
         .fetch_one(&self.pool)
@@ -161,6 +187,8 @@ impl IChannelRepository for SqliteChannelRepository {
                     row.bot_key.as_deref().unwrap_or("?"),
                     row.r#type
                 ))
+            } else if is_owner_domain_violation(&e) {
+                owner_domain_conflict()
             } else {
                 DbError::Query(e)
             }
@@ -175,11 +203,12 @@ impl IChannelRepository for SqliteChannelRepository {
             ))
         })?;
         let companion_id = canonical_plugin_companion_id(row.companion_id.as_deref())?;
+        validate_owner_domain(&row.owner_domain)?;
         let updated = sqlx::query_as::<_, ChannelPluginRow>(
             "UPDATE channel_plugins SET \
                 type = ?, name = ?, enabled = ?, config = ?, status = ?, \
                 last_connected = ?, companion_id = ?, \
-                bot_key = ?, updated_at = ? \
+                bot_key = ?, owner_domain = ?, updated_at = ? \
              WHERE channel_plugin_id = ? \
              RETURNING *",
         )
@@ -191,6 +220,7 @@ impl IChannelRepository for SqliteChannelRepository {
         .bind(row.last_connected)
         .bind(&companion_id)
         .bind(&row.bot_key)
+        .bind(&row.owner_domain)
         .bind(row.updated_at)
         .bind(&row.channel_plugin_id)
         .fetch_optional(&self.pool)
@@ -202,6 +232,8 @@ impl IChannelRepository for SqliteChannelRepository {
                     row.bot_key.as_deref().unwrap_or("?"),
                     row.r#type
                 ))
+            } else if is_owner_domain_violation(&e) {
+                owner_domain_conflict()
             } else {
                 DbError::Query(e)
             }
@@ -280,7 +312,14 @@ impl IChannelRepository for SqliteChannelRepository {
         .bind(nomifun_common::now_ms())
         .bind(channel_plugin_id)
         .execute(&self.pool)
-        .await?;
+        .await
+        .map_err(|e| {
+            if is_owner_domain_violation(&e) {
+                owner_domain_conflict()
+            } else {
+                DbError::Query(e)
+            }
+        })?;
         if result.rows_affected() == 0 {
             return Err(DbError::NotFound(format!(
                 "Plugin '{channel_plugin_id}' not found"
@@ -1375,6 +1414,23 @@ fn is_unique_violation(err: &sqlx::Error) -> bool {
     }
 }
 
+/// Checks whether a sqlx error carries the owner-domain guard-trigger abort
+/// (migration 019: cs-domain bots must never carry a companion binding).
+fn is_owner_domain_violation(err: &sqlx::Error) -> bool {
+    match err {
+        sqlx::Error::Database(db_err) => db_err
+            .message()
+            .contains("customer-service channel bots cannot carry a companion binding"),
+        _ => false,
+    }
+}
+
+fn owner_domain_conflict() -> DbError {
+    DbError::Conflict(
+        "customer-service channel bots cannot carry a companion binding".to_owned(),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     const MISSING_ID: &str = "0190f5fe-7c00-7a00-8000-000000000999";
@@ -1399,6 +1455,7 @@ mod tests {
             last_connected: None,
             companion_id: None,
             bot_key: None,
+            owner_domain: crate::models::default_owner_domain(),
             created_at: now,
             updated_at: now,
         }
@@ -1565,6 +1622,7 @@ mod tests {
             last_connected: Some(now),
             companion_id: None,
             bot_key: None,
+            owner_domain: crate::models::default_owner_domain(),
             created_at: now,
             updated_at: now,
         };
@@ -1742,6 +1800,7 @@ mod tests {
             last_connected: None,
             companion_id: Some(companion.into()),
             bot_key: Some("cli_same_app".into()),
+            owner_domain: crate::models::default_owner_domain(),
             created_at: now,
             updated_at: now,
         };
@@ -1781,6 +1840,7 @@ mod tests {
                 last_connected: None,
                 companion_id: None,
                 bot_key: Some(key.into()),
+                owner_domain: crate::models::default_owner_domain(),
                 created_at: now,
                 updated_at: now,
             })
@@ -1827,6 +1887,126 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, DbError::NotFound(_)));
+    }
+
+    // -- Owner-domain tests (migration 019) ---------------------------------
+
+    fn cs_plugin(name: &str) -> NewChannelPluginRow {
+        NewChannelPluginRow {
+            name: name.into(),
+            owner_domain: crate::models::CHANNEL_OWNER_DOMAIN_CUSTOMER_SERVICE.into(),
+            ..sample_plugin()
+        }
+    }
+
+    #[tokio::test]
+    async fn create_plugin_defaults_to_companion_domain() {
+        let (repo, _db) = setup().await;
+        let plugin = repo.create_plugin(&sample_plugin()).await.unwrap();
+        assert_eq!(plugin.owner_domain, "companion");
+    }
+
+    #[tokio::test]
+    async fn create_customer_service_plugin_roundtrips_domain() {
+        let (repo, _db) = setup().await;
+        let plugin = repo.create_plugin(&cs_plugin("CS Bot")).await.unwrap();
+        assert_eq!(plugin.owner_domain, "customer_service");
+        assert_eq!(
+            repo.get_plugin(&plugin.channel_plugin_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .owner_domain,
+            "customer_service"
+        );
+    }
+
+    #[tokio::test]
+    async fn create_plugin_rejects_unknown_owner_domain() {
+        let (repo, _db) = setup().await;
+        let mut plugin = sample_plugin();
+        plugin.owner_domain = "somebody_else".into();
+        let err = repo.create_plugin(&plugin).await.unwrap_err();
+        assert!(matches!(err, DbError::Conflict(_)));
+    }
+
+    #[tokio::test]
+    async fn create_customer_service_plugin_with_companion_is_rejected() {
+        let (repo, _db) = setup().await;
+        let mut plugin = cs_plugin("CS Bot");
+        plugin.companion_id = Some(CompanionId::new().into_string());
+        let err = repo.create_plugin(&plugin).await.unwrap_err();
+        assert!(
+            matches!(&err, DbError::Conflict(message) if message.contains("companion binding")),
+            "trigger must abort a cs-domain insert carrying companion_id: {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn customer_service_plugin_cannot_gain_companion_binding() {
+        let (repo, _db) = setup().await;
+        let plugin = repo.create_plugin(&cs_plugin("CS Bot")).await.unwrap();
+        let companion_id = CompanionId::new().into_string();
+
+        // Direct binding write is aborted by the update guard trigger.
+        let err = repo
+            .update_plugin_companion(&plugin.channel_plugin_id, Some(&companion_id))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(&err, DbError::Conflict(message) if message.contains("companion binding")),
+            "update guard must abort: {err:?}"
+        );
+
+        // Full-row update carrying both is equally aborted.
+        let err = repo
+            .update_plugin(&ChannelPluginRow {
+                companion_id: Some(companion_id),
+                updated_at: nomifun_common::now_ms(),
+                ..plugin
+            })
+            .await
+            .unwrap_err();
+        assert!(matches!(err, DbError::Conflict(_)));
+    }
+
+    #[tokio::test]
+    async fn companion_plugin_cannot_switch_to_customer_service_while_bound() {
+        let (repo, _db) = setup().await;
+        let mut plugin = sample_plugin();
+        plugin.companion_id = Some(CompanionId::new().into_string());
+        let created = repo.create_plugin(&plugin).await.unwrap();
+
+        let err = repo
+            .update_plugin(&ChannelPluginRow {
+                owner_domain: crate::models::CHANNEL_OWNER_DOMAIN_CUSTOMER_SERVICE.into(),
+                updated_at: nomifun_common::now_ms(),
+                ..created
+            })
+            .await
+            .unwrap_err();
+        assert!(matches!(err, DbError::Conflict(_)));
+    }
+
+    #[tokio::test]
+    async fn list_plugins_by_owner_domain_filters() {
+        let (repo, _db) = setup().await;
+        repo.create_plugin(&sample_plugin()).await.unwrap();
+        let cs = repo.create_plugin(&cs_plugin("CS Bot")).await.unwrap();
+
+        let companion_rows = repo.list_plugins_by_owner_domain("companion").await.unwrap();
+        assert_eq!(companion_rows.len(), 1);
+        assert_eq!(companion_rows[0].owner_domain, "companion");
+
+        let cs_rows = repo
+            .list_plugins_by_owner_domain("customer_service")
+            .await
+            .unwrap();
+        assert_eq!(cs_rows.len(), 1);
+        assert_eq!(cs_rows[0].channel_plugin_id, cs.channel_plugin_id);
+
+        let err = repo.list_plugins_by_owner_domain("bogus").await.unwrap_err();
+        assert!(matches!(err, DbError::Conflict(_)));
     }
 
 
