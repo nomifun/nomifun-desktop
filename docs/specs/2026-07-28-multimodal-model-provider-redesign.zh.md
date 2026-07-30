@@ -1,7 +1,7 @@
 # 多供应商 · 多模态模型管理与协议适配重构设计（v2）
 
 - 日期：2026-07-28（v2 修订）
-- 状态：设计定稿；P0 已实施（分支 dev/model-catalog-p0-20260728，见 §6 P0 实施偏差记录与 docs/handoffs/2026-07-28-model-catalog-p0.md）；P1 已实施（分支 dev/model-catalog-p1-20260729，见 §6 P1 实施偏差记录与 docs/handoffs/2026-07-29-model-invoke-p1.md）
+- 状态：设计定稿；P0 已实施（分支 dev/model-catalog-p0-20260728，见 §6 P0 实施偏差记录与 docs/handoffs/2026-07-28-model-catalog-p0.md）；P1 已实施（分支 dev/model-catalog-p1-20260729，见 §6 P1 实施偏差记录与 docs/handoffs/2026-07-29-model-invoke-p1.md）；P2 已实施（分支 dev/model-catalog-p2-20260729，见 §6 P2 实施偏差记录与 docs/handoffs/2026-07-29-model-catalog-p2.md）
 - 范围：供应商/模型配置与管理、模型能力打标、各模态调用链、外部协议适配层、前端模型选择交互
 - 调研方式：四路并行代码审查（配置数据模型 / 对话链路协议抽象 / 前端管理与选择 UI / 多模态调用链路）+ 10 家供应商 × 6 模态的真实协议差异调研（附录 C）+ 适配层抽取的 crate 依赖摸底。关键结论均带 `file:line` 或来源 URL。
 
@@ -442,6 +442,20 @@ pub enum JobStatus { Pending, Running, Succeeded, Failed, Canceled }  // 词表�
 
 ### P2 前端统一（修复"选错模型"）
 选择器统一走 resolve（含 task 过滤接入默认模型/IDMM/故障转移）；管理页连接档案区 + 模型实体行 + Inferred 确认；ts-rs 契约；发送链路 vision 守门；dashscope 系适配器。
+
+#### P2 实施偏差记录（2026-07-30，分支 dev/model-catalog-p2-20260729，迁移 016）
+
+与上文设计的有意偏差（来源：计划 Self-Review、SDD ledger 与各任务报告），除注明者外计划在 P3 消化：
+
+1. **`providers.capabilities` 列保留至 P3**：迁移 016 删除了 6 个 legacy per-model map 列，但 `capabilities`（provider 级旧词表 `ModelType`/`ModelCapability`）有意保留——前端唯一实际消费者随 T4/T5 的启发式清场移除后，该列成为纯写入死数据（wire 上仍收发）。本期不删的理由：避免同一发版窗口对 providers 表做第二次 ALTER；列删除与 `ModelType` 旧词表退役一并列为 P3 收缩项。
+2. **legacy STT 偏好一次性迁移 = disable + 去凭证，非静默转换**：boot 时（`nomifun-app/src/services.rs::migrate_legacy_speech_preference`）读 `tools.speechToText` 与旧键 `speechToText`，对"无 provider_id 且内嵌 openai/deepgram 块携带非空 api_key"的 P1 已退役形态：置 `enabled: false`、删除内嵌凭证块、其余字段保留，`tracing::info!` 引导用户在设置中重选供应商。**不**尝试把内嵌凭证自动转换成目录 provider（凭证归属/域名语义无法可靠推断）；幂等（二次启动无内嵌凭证即不触碰）；空 key 壳与已有 provider_id 的配置一律不动。
+3. **心跳健康持久化仍走 legacy `model_health` map PUT 写路径**：行级 `provider_models.health` 由服务端探针权威写入（P0 已落地，本期 `stamp_model_unhealthy` 也改为行级 `set_health`），但设置页心跳把探针结果回写时仍使用 `updateProvider({model_health})` 整 map 兼容写（fetch-latest-then-merge）。该 map 参数 wire 上继续接受并驱动行同步，行为正确但残留读改写窗口；UI 切行级写 + 关闭 PUT 兼容路径留到 P3。
+4. **dashscope 系适配器推迟 P3**：上文 P2 行内的"dashscope 系适配器"未实施——P2 计划裁定按需适配器（dashscope/minimax/volc.tts_v3）统一记 P3 入口；路由表已声明的任务在适配器缺席时得到诚实的 `NoAdapter` typed 错误（P1 偏差 7/8 的延续）。
+5. **ts-rs 契约生成未管线化，交付为手写镜像 + serde 钉测**：provider/connection/model 域的 TS 类型（`ui/src/common/types/provider/providerModel.ts`、`providerConnection.ts`）为手工转写，带"keep in sync"指针注释与 wire key 集钉测（round-trip/tri-state/deny_unknown_fields 安全性）；ts-rs 自动生成管线列 P3。另：`mode.updateProvider` 桥接层防御性剥除 `models_detail`（否则整 spread 的读改写调用点会因后端 `deny_unknown_fields` 全部 400）。
+6. **行绑定存储的三处语义变化（T2 裁定 Accept）**：① 重新加入 membership 的模型若同调用未带对应 map 参数，从列默认值起步（双写期会继承残留 legacy map 条目）；② 托管免费模型服务对"当前目录缺席模型"的 per-model 禁用开关不再跨重启持久（无行可承载；进程内仍保留）；③ 故障转移候选无行时视为"未禁用/健康未知"（与旧缺 map 条目语义一致，fail-open），供应商存在性仍是硬门。
+7. **管理页 Add/Edit 弹窗仍走整 provider map PUT**：模型行内编辑（启用/上下文/描述/协议/高级抽屉/排序/删除）已切行级 `/api/provider-models`，但 AddModelModal/AddPlatformModal/EditModeModal 的 membership 新增仍发整 map 更新（wire 兼容参数，驱动行同步）——按任务范围保留，P3 可随 map 参数退役一并收敛。
+8. **chat 平台表化省略 compat 列**：T6 的 `PLATFORM_CHAT_RULES` 常量表（14 行 + 默认行，220 行行为快照字节级锁定）未按草图携带 per-platform compat 覆盖列——现状所有 compat 覆盖均由 URL 规则或 host 门控规则完全决定，该列在全部行上恒为 None（死配置）；后续需要时增列是加法变更。new-api per-model protocol 特例与 `is_full_url` 早退保持逐字。
+9. **选择器首次过滤带来的可见收紧（设计内，此处披露）**：IDMM 备用/旁路模型与故障转移候选选择器首次获得 chat 任务过滤——已保存的非 chat 模型值不被清除、继续生效，但不再被重新提供（failover 草稿中显示"(不可用)"）；guid 模型选择原先包含"禁用中的供应商"（潜在 bug），resolve 单源后被排除。
 
 ### P3 扩展与清理
 minimax/zhipu/elevenlabs 按需适配器；会话内文生图工具直调 invoke 并删三套遗留栈与 `ModelType` 旧词表、TS 启发式；`TProviderWithModel` 引用化完成；Embedding/Rerank 首个消费者（知识库向量化立项即用）。
