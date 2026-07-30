@@ -10,7 +10,7 @@ import { ipcBridge } from '@/common';
 import type { IMcpRegisterTemplate } from '@/common/adapter/ipcBridge';
 import CopyIconButton from '@/renderer/components/base/CopyIconButton';
 import NomiCollapse from '@/renderer/components/base/NomiCollapse';
-import { isWindows } from '@/renderer/utils/platform';
+import { isDesktopShell, isWindows } from '@/renderer/utils/platform';
 
 const PlatformMcpRegisterPanel: React.FC = () => {
   const { t } = useTranslation();
@@ -26,6 +26,13 @@ const PlatformMcpRegisterPanel: React.FC = () => {
       .then(setTemplate)
       .catch(() => setError(true));
   }, [fetched]);
+
+  // Desktop shell only: the template embeds commands and paths that exist on
+  // the BACKEND host. In WebUI browser mode (docker) those point inside the
+  // container and would only mislead (audit 2026-07-30, finding I).
+  if (!isDesktopShell()) {
+    return null;
+  }
 
   return (
     <NomiCollapse

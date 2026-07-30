@@ -255,6 +255,47 @@ async fn t12_2_logout_is_csrf_exempt() {
 }
 
 #[tokio::test]
+async fn change_username_requires_correct_current_password() {
+    let (mut app, services) = build_app().await;
+    let (token, csrf) = setup_and_login(&mut app, &services, "admin", "StrongP@ss1").await;
+
+    // Wrong current password → 401, username unchanged.
+    let req = post_json_with_csrf(
+        "/api/auth/change-username",
+        r#"{"current_password":"WrongP@ss9","new_username":"renamed-admin"}"#,
+        &token,
+        &csrf,
+    );
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+
+    // Correct current password → 200 with the new username echoed.
+    let req = post_json_with_csrf(
+        "/api/auth/change-username",
+        r#"{"current_password":"StrongP@ss1","new_username":"renamed-admin"}"#,
+        &token,
+        &csrf,
+    );
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let json = body_json(resp).await;
+    assert_eq!(json["data"]["username"], "renamed-admin");
+
+    // The session survives a rename (unlike a password change): the JWT keys
+    // on user id, and lookups resolve the fresh username.
+    let req = get_with_token("/api/auth/user", &token);
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let json = body_json(resp).await;
+    assert_eq!(json["user"]["username"], "renamed-admin");
+
+    // The new username signs in with the unchanged password.
+    let req = post_json_login("/login", r#"{"username":"renamed-admin","password":"StrongP@ss1"}"#);
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+}
+
+#[tokio::test]
 async fn t12_2_csrf_allows_post_with_valid_token() {
     let (mut app, services) = build_app().await;
     let (token, csrf) = setup_and_login(&mut app, &services, "admin", "StrongP@ss1").await;

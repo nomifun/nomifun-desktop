@@ -86,8 +86,8 @@ pub use preset::{
     SetPresetStateRequest, SkillBinding, UpdatePresetRequest, UpdatePresetTagRequest,
 };
 pub use auth::{
-    AuthStatusResponse, ChangePasswordRequest, LoginRequest, LoginResponse, PublicUser,
-    QrLoginRequest, RefreshResponse, RefreshTokenRequest, UserInfoResponse,
+    AuthStatusResponse, ChangePasswordRequest, ChangeUsernameRequest, ChangeUsernameResponse, LoginRequest,
+    LoginResponse, PublicUser, QrLoginRequest, RefreshResponse, RefreshTokenRequest, UserInfoResponse,
     WebuiChangePasswordRequest, WebuiChangeUsernameRequest, WebuiChangeUsernameResponse,
     WebuiGenerateQrTokenResponse, WebuiResetPasswordResponse, WsTokenResponse,
 };
