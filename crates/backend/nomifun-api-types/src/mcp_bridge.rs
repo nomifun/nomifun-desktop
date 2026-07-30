@@ -309,20 +309,28 @@ impl KnowledgeMcpConfig {
         )
     }
 
+    /// Issue a terminal-session capability. Unlike conversation/external
+    /// issuance there is no `allow_write` switch: the signed tool list always
+    /// carries all three knowledge tools, because a terminal's write authority
+    /// is resolved LIVE from its workpath binding at every dispatch (the
+    /// binding can change while the PTY runs, and the frozen claims of an
+    /// already-launched CLI child cannot be re-issued without a relaunch).
+    /// The dispatch layer fails writes closed when the live policy is
+    /// disabled, in both directions — enabling AND revoking take effect
+    /// immediately.
     pub fn issue_for_terminal(
         &self,
         user_id: &str,
         terminal_id: &str,
         workspace_path: &str,
         kb_ids: &[KnowledgeBaseId],
-        allow_write: bool,
     ) -> Result<KnowledgeMcpChildConfig, LoopbackCapabilityError> {
         self.issue(
             user_id,
             LoopbackSessionBinding::terminal(terminal_id),
             workspace_path,
             kb_ids,
-            allow_write,
+            true,
         )
     }
 
@@ -1096,23 +1104,35 @@ mod tests {
     #[test]
     fn knowledge_child_binds_workspace_bases_and_write_scope() {
         let cfg = knowledge_config(41235, "/bin/nomicore");
-        let readonly = cfg
+        let terminal = cfg
             .issue_for_terminal(
                 TEST_USER_ID,
                 "0190f5fe-7c00-7a00-8abc-012345678901",
                 "/workspace",
                 &[kb_id(KB_B), kb_id(KB_A)],
-                false,
             )
             .unwrap();
         assert_eq!(
-            readonly.bootstrap.access.claims.scope.kb_ids,
+            terminal.bootstrap.access.claims.scope.kb_ids,
             vec![kb_id(KB_A), kb_id(KB_B)]
         );
         assert_eq!(
-            readonly.bootstrap.access.claims.scope.workspace_path,
+            terminal.bootstrap.access.claims.scope.workspace_path,
             "/workspace"
         );
+        // Terminal capabilities always sign all three tools; write authority
+        // is enforced live per dispatch from the workpath binding.
+        assert!(terminal
+            .bootstrap
+            .access
+            .claims
+            .allows(KNOWLEDGE_WRITE_TOOL));
+
+        // Conversation issuance keeps the allow_write switch (its runtime is
+        // recycled on binding changes, so frozen claims stay accurate).
+        let readonly = cfg
+            .issue_for_conversation(TEST_USER_ID, "0190f5fe-7c00-7a00-8abc-012345678901", "/workspace", &[kb_id(KB_A)], false)
+            .unwrap();
         assert!(!readonly
             .bootstrap
             .access

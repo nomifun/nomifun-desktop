@@ -652,6 +652,17 @@ pub struct KnowledgeService {
     /// references; this application-layer lock closes the check-then-persist
     /// race for new `extra.source.credentialRef` values.
     credential_reference_lock: AsyncMutex<()>,
+    /// Additional backend-managed workspace roots (beyond `data_dir`) whose
+    /// paths map to the `__default__` workpath key — late-wired with the
+    /// terminal work dir so this service and the terminal service derive the
+    /// SAME binding key for the same cwd (they historically diverged:
+    /// terminal used its work_dir, live resolvers here used data_dir).
+    extra_managed_roots: RwLock<Vec<PathBuf>>,
+    /// In-process observer invoked after a binding row is persisted (in
+    /// addition to the UI WebSocket event). Late-wired by the app layer to
+    /// re-sync live terminal workspaces (README/mounts) so binding changes
+    /// take effect without a PTY relaunch. `(target_kind, canonical_key)`.
+    binding_changed_hook: RwLock<Option<Arc<dyn Fn(&str, &str) + Send + Sync>>>,
 }
 
 /// One source entry's fetched-and-condensed body, ready to be slugged and
@@ -711,7 +722,61 @@ impl KnowledgeService {
             cred_repo: RwLock::new(None),
             cred_key: RwLock::new(None),
             credential_reference_lock: AsyncMutex::new(()),
+            extra_managed_roots: RwLock::new(Vec::new()),
+            binding_changed_hook: RwLock::new(None),
         }
+    }
+
+    /// Register an additional backend-managed workspace root (e.g. the
+    /// terminal work dir). Paths under any registered root resolve to the
+    /// `__default__` workpath key in this service's live cwd resolvers,
+    /// matching the key the owning subsystem writes bindings under.
+    ///
+    /// Deliberately NOT canonicalized: the terminal service compares its raw
+    /// configured `work_dir` prefix (`session_workpath_key(cwd, work_dir)`),
+    /// so the exact same value must be registered here for the two
+    /// derivations to agree byte-for-byte.
+    pub fn add_managed_root(&self, root: &Path) {
+        if root.as_os_str().is_empty() {
+            return;
+        }
+        if let Ok(mut guard) = self.extra_managed_roots.write() {
+            if !guard.iter().any(|r| r == root) {
+                guard.push(root.to_path_buf());
+            }
+        }
+    }
+
+    /// Late-wire the in-process binding-change observer (app layer only).
+    pub fn set_binding_changed_hook(&self, hook: Arc<dyn Fn(&str, &str) + Send + Sync>) {
+        if let Ok(mut guard) = self.binding_changed_hook.write() {
+            *guard = Some(hook);
+        }
+    }
+
+    /// The workpath key a cwd resolves to for THIS installation: `__default__`
+    /// when the path sits under `data_dir` or any registered managed root,
+    /// otherwise its normalized literal key. This is the single derivation the
+    /// live MCP resolvers use, kept aligned with the terminal service's
+    /// `session_workpath_key(cwd, work_dir)` via [`Self::add_managed_root`].
+    fn workpath_key_for_cwd(&self, cwd: &str) -> String {
+        use crate::workpath::{DEFAULT_WORKPATH_KEY, session_workpath_key};
+        if cwd.trim().is_empty() {
+            return DEFAULT_WORKPATH_KEY.to_owned();
+        }
+        let path = std::path::Path::new(cwd);
+        let key = session_workpath_key(path, &self.data_dir);
+        if key == DEFAULT_WORKPATH_KEY {
+            return key;
+        }
+        if let Ok(roots) = self.extra_managed_roots.read() {
+            for root in roots.iter() {
+                if session_workpath_key(path, root) == DEFAULT_WORKPATH_KEY {
+                    return DEFAULT_WORKPATH_KEY.to_owned();
+                }
+            }
+        }
+        key
     }
 
     /// Replace the URL fetcher. Accepts any [`PageFetcher`] (tests pass a
@@ -3958,6 +4023,18 @@ impl KnowledgeService {
             "channel_write_enabled": binding.channel_write_enabled,
             "kb_ids": binding.kb_ids,
         }));
+        // In-process observer (late-wired by the app layer): lets live
+        // terminal workspaces re-sync mounts/README immediately instead of
+        // waiting for a PTY relaunch. Runs after persistence so observers
+        // always read back the new row.
+        let hook = self
+            .binding_changed_hook
+            .read()
+            .ok()
+            .and_then(|guard| guard.clone());
+        if let Some(hook) = hook {
+            hook(kind, &target_id);
+        }
         Ok(binding)
     }
 
@@ -4447,13 +4524,9 @@ impl KnowledgeService {
         &self,
         cwd: &str,
     ) -> (Vec<KnowledgeBaseId>, KnowledgeBinding, String) {
-        use crate::workpath::{DEFAULT_WORKPATH_KEY, WORKPATH_BINDING_KIND, session_workpath_key};
+        use crate::workpath::{DEFAULT_WORKPATH_KEY, WORKPATH_BINDING_KIND};
 
-        let key = if cwd.trim().is_empty() {
-            DEFAULT_WORKPATH_KEY.to_owned()
-        } else {
-            session_workpath_key(std::path::Path::new(cwd), &self.data_dir)
-        };
+        let key = self.workpath_key_for_cwd(cwd);
         if key == DEFAULT_WORKPATH_KEY {
             return (self.all_base_ids().await, KnowledgeBinding::default(), key);
         }
@@ -4462,6 +4535,29 @@ impl KnowledgeService {
             binding.kb_ids.clone()
         } else {
             self.all_base_ids().await
+        };
+        (bound, binding, key)
+    }
+
+    /// Live knowledge scope for a TERMINAL session's workspace: the binding
+    /// row is the single source of truth at CALL time, with no all-bases
+    /// convenience fallback — a terminal whose binding is disabled or empty
+    /// honestly has nothing mounted. Unlike the write-context resolver above,
+    /// the `__default__` sentinel also reads its real binding row, because
+    /// the terminal create-time picker persists exactly there for
+    /// backend-managed workspaces. Returns `(kb_ids, binding, workpath_key)`.
+    pub async fn resolve_terminal_scope_for_cwd(
+        &self,
+        cwd: &str,
+    ) -> (Vec<KnowledgeBaseId>, KnowledgeBinding, String) {
+        use crate::workpath::WORKPATH_BINDING_KIND;
+
+        let key = self.workpath_key_for_cwd(cwd);
+        let binding = self.get_binding(WORKPATH_BINDING_KIND, &key).await.unwrap_or_default();
+        let bound = if binding.enabled {
+            binding.kb_ids.clone()
+        } else {
+            Vec::new()
         };
         (bound, binding, key)
     }
@@ -8785,6 +8881,70 @@ mod tests {
 
     use crate::testutil::{MemRepo, NoopBroadcaster, make_service};
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// `set_binding` must invoke the late-wired in-process hook AFTER
+    /// persistence (the observer re-reads the row), with the canonical key.
+    #[tokio::test]
+    async fn set_binding_fires_in_process_hook_with_canonical_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let service = Arc::new(make_service(&dir.path().join("data")));
+        let seen: Arc<StdMutex<Vec<(String, String)>>> = Arc::new(StdMutex::new(Vec::new()));
+        let sink = seen.clone();
+        service.set_binding_changed_hook(Arc::new(move |kind, key| {
+            sink.lock().unwrap().push((kind.to_owned(), key.to_owned()));
+        }));
+        // Trailing slash must land on the canonical (stripped) key.
+        service
+            .set_binding("workpath", "/Users/a/proj/", KnowledgeBinding {
+                enabled: true,
+                writeback: true,
+                ..KnowledgeBinding::default()
+            })
+            .await
+            .unwrap();
+        let events = seen.lock().unwrap().clone();
+        assert_eq!(events, vec![("workpath".to_owned(), "/Users/a/proj".to_owned())]);
+        // The hook observed a persisted row.
+        let binding = service.get_binding("workpath", "/Users/a/proj").await.unwrap();
+        assert!(binding.enabled && binding.writeback);
+    }
+
+    /// The live cwd resolvers must map a cwd under a registered extra managed
+    /// root (the terminal work_dir) to the same `__default__` row the terminal
+    /// service binds against — the historic work_dir/data_dir divergence.
+    #[tokio::test]
+    async fn terminal_scope_resolution_honors_extra_managed_roots() {
+        let dir = tempfile::tempdir().unwrap();
+        let service = Arc::new(make_service(&dir.path().join("data")));
+        let kb = service.create_base("库", "", None, None).await.unwrap().knowledge_base_id;
+        let work_dir = dir.path().join("terminal-work");
+        service.add_managed_root(&work_dir);
+        service
+            .set_binding(
+                crate::workpath::WORKPATH_BINDING_KIND,
+                crate::workpath::DEFAULT_WORKPATH_KEY,
+                KnowledgeBinding {
+                    enabled: true,
+                    kb_ids: vec![kb.clone()],
+                    ..KnowledgeBinding::default()
+                },
+            )
+            .await
+            .unwrap();
+
+        let cwd = work_dir.join("session-1");
+        let (ids, binding, key) =
+            service.resolve_terminal_scope_for_cwd(&cwd.to_string_lossy()).await;
+        assert_eq!(key, crate::workpath::DEFAULT_WORKPATH_KEY);
+        assert_eq!(ids, vec![kb.clone()]);
+        assert!(binding.enabled);
+
+        // Custom cwd outside every managed root → literal key; nothing bound
+        // there yet → honest empty scope (no all-bases convenience).
+        let (ids, _, key) = service.resolve_terminal_scope_for_cwd("/Users/x/custom").await;
+        assert_eq!(key, "/Users/x/custom");
+        assert!(ids.is_empty(), "unbound terminal workspace must resolve empty, got {ids:?}");
+    }
 
     /// Branches on the system prompt: overview calls get strict JSON,
     /// snapshot-compression calls get plain markdown.

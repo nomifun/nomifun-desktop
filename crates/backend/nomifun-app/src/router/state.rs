@@ -1081,6 +1081,38 @@ pub fn build_terminal_state(services: &AppServices) -> TerminalRouterState {
     services
         .terminal_service
         .with_knowledge_service(services.knowledge_service.clone());
+    // Key-derivation parity: register the terminal work dir as a managed root
+    // so the knowledge service's live cwd resolvers (MCP search/read/write
+    // dispatch) map a default-workpath terminal to the SAME `__default__`
+    // binding row the terminal itself binds/mounts against. Without this the
+    // two sides derive different keys for a cwd under work_dir (historic
+    // work_dir vs data_dir divergence).
+    services
+        .knowledge_service
+        .add_managed_root(services.terminal_service.work_dir());
+    // Live binding propagation: when a workpath knowledge binding is
+    // persisted (session-header KnowledgeControl / gateway tool), re-sync the
+    // mounts + README of every live terminal on that workpath immediately.
+    // The MCP capability needs no re-issue — terminal dispatch resolves the
+    // live binding per call. Weak reference: the knowledge singleton must not
+    // keep the terminal singleton alive.
+    {
+        let terminal_service = Arc::downgrade(&services.terminal_service);
+        services
+            .knowledge_service
+            .set_binding_changed_hook(Arc::new(move |kind: &str, key: &str| {
+                if kind != nomifun_knowledge::WORKPATH_BINDING_KIND {
+                    return;
+                }
+                let Some(terminal_service) = terminal_service.upgrade() else {
+                    return;
+                };
+                let key = key.to_owned();
+                tokio::spawn(async move {
+                    terminal_service.resync_workpath_knowledge(&key).await;
+                });
+            }));
+    }
     // Clear the terminal-domain owner of any requirement this terminal owned;
     // the ownership boundary has no FK cascade (spec §9.B). Mirror of the
     // conversation delete hook.
