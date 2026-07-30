@@ -5529,6 +5529,7 @@ dependencies = [
  "nomifun-common",
  "serde",
  "serde_json",
+ "serde_urlencoded",
 ]
 
 [[package]]
@@ -5968,8 +5969,10 @@ dependencies = [
  "reqwest 0.12.28",
  "serde",
  "serde_json",
+ "serde_urlencoded",
  "tempfile",
  "tokio",
+ "tower",
  "tower-http",
  "tracing",
  "zip 2.4.2",

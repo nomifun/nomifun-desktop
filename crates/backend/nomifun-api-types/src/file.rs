@@ -146,8 +146,12 @@ pub struct CancelZipRequest {
 /// root), `browse` is a WebUI-only host-file picker: it lists a single
 /// directory level, surfaces navigation hints (`can_go_up`, `parent_path`),
 /// and on Windows supports a `__ROOT__` sentinel for the drive-list screen.
+///
+/// Uses camelCase on the wire (`showFiles`) to match the Express-era contract
+/// the frontend `DirectorySelectionModal` sends — same as the response DTOs
+/// below. The snake_case form stays accepted via alias.
 #[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct BrowseDirectoryQuery {
     /// Directory to list. Empty string means "use default" (Windows: drive
     /// list; Unix: current working directory). `"__ROOT__"` on Windows is
@@ -156,7 +160,7 @@ pub struct BrowseDirectoryQuery {
     pub path: Option<String>,
     /// When true, include regular files in the response. Defaults to false
     /// (directories only).
-    #[serde(default)]
+    #[serde(default, alias = "show_files")]
     pub show_files: Option<String>,
 }
 
@@ -352,6 +356,38 @@ pub struct SnapshotCompareResponse {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    // -- Wire-contract tests: GET /api/fs/browse query string ---------------
+    //
+    // These deserialize with serde_urlencoded — the same deserializer axum's
+    // `Query` extractor uses — so they exercise exactly what the HTTP layer
+    // sees. The WebUI `DirectorySelectionModal` sends camelCase params
+    // (`showFiles`), the Express-era contract this endpoint replaces.
+
+    #[test]
+    fn browse_query_accepts_webui_camelcase_wire_format() {
+        let q: BrowseDirectoryQuery = serde_urlencoded::from_str("path=%2Ftmp&showFiles=true")
+            .expect("the WebUI picker sends `showFiles`; the query contract must accept it");
+        assert_eq!(q.path.as_deref(), Some("/tmp"));
+        assert_eq!(q.show_files.as_deref(), Some("true"));
+    }
+
+    #[test]
+    fn browse_query_accepts_legacy_snake_case_alias() {
+        let q: BrowseDirectoryQuery = serde_urlencoded::from_str("path=%2Ftmp&show_files=1")
+            .expect("legacy snake_case form stays accepted");
+        assert_eq!(q.show_files.as_deref(), Some("1"));
+    }
+
+    #[test]
+    fn browse_query_accepts_empty_and_path_only_requests() {
+        let empty: BrowseDirectoryQuery = serde_urlencoded::from_str("").unwrap();
+        assert!(empty.path.is_none());
+        assert!(empty.show_files.is_none());
+
+        let path_only: BrowseDirectoryQuery = serde_urlencoded::from_str("path=").unwrap();
+        assert_eq!(path_only.path.as_deref(), Some(""));
+    }
 
     // -- Request deserialization tests --
 
