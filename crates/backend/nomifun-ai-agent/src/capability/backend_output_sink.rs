@@ -570,12 +570,14 @@ fn capture_path_fingerprint(path: &Path) -> Result<ArtifactPathFingerprint, Stri
 /// The content may carry a soft-warning prefix, so we start from the first '{'.
 fn parse_plan_entries(content: &str) -> Option<Vec<serde_json::Value>> {
     let start = content.find('{')?;
-    let v: serde_json::Value = serde_json::from_str(&content[start..]).ok()?;
+    let mut v: serde_json::Value = serde_json::from_str(&content[start..]).ok()?;
     if v.get("kind").and_then(|k| k.as_str()) != Some("plan_update") {
         return None;
     }
-    let entries = v.get("entries")?.as_array()?.clone();
-    Some(entries)
+    match v.get_mut("entries").map(serde_json::Value::take) {
+        Some(serde_json::Value::Array(entries)) => Some(entries),
+        _ => None,
+    }
 }
 
 impl BackendOutputSink {
@@ -1045,6 +1047,22 @@ impl BackendOutputSink {
         Ok(verified)
     }
 
+    /// Consume the short-lived per-result context stored by the
+    /// `*_with_context` call path. Every terminal path must drain this map so
+    /// a later result reusing the id cannot inherit stale args/retry metadata.
+    fn take_tool_result_context(&self, call_id: &str) -> Option<ToolTerminalContext> {
+        match self.tool_result_contexts.lock() {
+            Ok(mut contexts) => contexts.remove(call_id),
+            Err(poisoned) => {
+                tracing::warn!(
+                    error = %poisoned,
+                    "Tool-result context lock was poisoned while settling a result"
+                );
+                poisoned.into_inner().remove(call_id)
+            }
+        }
+    }
+
     fn emit_terminal_tool_result(
         &self,
         call_id: String,
@@ -1053,16 +1071,7 @@ impl BackendOutputSink {
         content: &str,
         artifacts: Vec<PersistedArtifact>,
     ) {
-        let explicit_context = match self.tool_result_contexts.lock() {
-            Ok(mut contexts) => contexts.remove(&call_id),
-            Err(poisoned) => {
-                tracing::warn!(
-                    error = %poisoned,
-                    "Tool-result context lock was poisoned while settling a result"
-                );
-                poisoned.into_inner().remove(&call_id)
-            }
-        };
+        let explicit_context = self.take_tool_result_context(&call_id);
         let active_context = self.active_tool_call(&call_id).map(|active| ToolTerminalContext {
             args: active.args,
             input: active.input,
@@ -1461,29 +1470,6 @@ impl OutputSink for BackendOutputSink {
     }
 
     fn emit_tool_result(&self, tool_use_id: &str, name: &str, is_error: bool, content: &str) {
-        // update_plan special case: emit a Plan event so the frontend renders
-        // the checklist (MessagePlan) instead of a raw JSON tool card.
-        if name == "update_plan"
-            && !is_error
-            && let Some(entries) = parse_plan_entries(content)
-        {
-            let Some(call_id) = Self::internal_call_id(tool_use_id) else {
-                tracing::error!(
-                    tool = name,
-                    "Cannot emit update_plan result with empty or non-canonical tool_use_id"
-                );
-                return;
-            };
-            self.forget_active_tool_call(&call_id);
-            let _ = self.event_tx.send(AgentStreamEvent::Plan(PlanEventData {
-                session_id: Some("update_plan".to_string()),
-                source_call_id: Some(call_id),
-                entries,
-            }));
-            return;
-        }
-        // Unparsable update_plan output falls through to a normal tool result.
-
         let _ = self.emit_tool_result_with_images_and_artifact_identity(
             tool_use_id,
             name,
@@ -1538,10 +1524,45 @@ impl OutputSink for BackendOutputSink {
                 contract,
                 "tool result has an empty or non-canonical call id",
             );
+            tracing::error!(
+                tool = name,
+                "Cannot emit tool result with empty or non-canonical tool_use_id"
+            );
             return ToolMediaDelivery::Failed {
                 error: "tool result has no canonical call id; artifact was not written".to_owned(),
             };
         };
+
+        // update_plan special case: emit a Plan event so the frontend renders
+        // the checklist (MessagePlan) instead of a raw JSON tool card. This
+        // lives in the shared result funnel so every emit_tool_result* path —
+        // legacy, with-images, and the engine's with-context path — projects
+        // the plan identically. Unparsable output falls through to a normal
+        // tool result, and a result carrying inline images is never a plan
+        // declaration: it keeps the funnel's fail-closed artifact accounting.
+        if name == "update_plan"
+            && !is_error
+            && images.is_empty()
+            && let Some(entries) = parse_plan_entries(content)
+        {
+            // Settle the full call lifecycle exactly like a terminal tool
+            // result: drain the per-result context, fail any artifact
+            // obligation (a plan declaration never delivers artifacts, and a
+            // Running obligation would otherwise error the whole turn at
+            // finish_artifact_delivery_turn), and forget the active call.
+            let _ = self.take_tool_result_context(&call_id);
+            self.fail_artifact_obligation(
+                &call_id,
+                "update_plan projected a plan checklist; it does not deliver artifacts",
+            );
+            self.forget_active_tool_call(&call_id);
+            let _ = self.event_tx.send(AgentStreamEvent::Plan(PlanEventData {
+                session_id: Some("update_plan".to_string()),
+                source_call_id: Some(call_id),
+                entries,
+            }));
+            return ToolMediaDelivery::Unmanaged;
+        }
 
         // Failed tools may return diagnostic images. They remain transient
         // model context: never persist or publish them as successful artifacts.
@@ -3367,6 +3388,166 @@ mod tests {
         let (sink, mut rx) = make_sink();
         sink.emit_tool_result("call_1", "update_plan", false, "not json");
         assert!(matches!(rx.try_recv().unwrap(), AgentStreamEvent::ToolCall(_)));
+    }
+
+    #[test]
+    fn update_plan_result_via_context_path_emits_plan_event() {
+        // The engine's real tool-result path is
+        // emit_tool_result_with_images_and_context; a successful update_plan
+        // arriving there must project a Plan event exactly like the legacy
+        // emit_tool_result path, or the frontend checklist never renders.
+        let (sink, mut rx) = make_sink();
+        let content = r#"{"kind":"plan_update","explanation":null,"entries":[{"content":"a","status":"completed"},{"content":"b","status":"in_progress"}]}"#;
+        let context = ToolCallExecutionContext {
+            input: serde_json::json!({"plan":[{"step":"a","status":"completed"},{"step":"b","status":"in_progress"}]}),
+            retry: ToolCallRetryContext {
+                retry_group_id: "call_plan_1".to_owned(),
+                attempt_no: 1,
+                retry_of_call_id: None,
+            },
+        };
+        sink.emit_tool_call_with_context(
+            "call_plan_1",
+            "update_plan",
+            "update_plan",
+            r#"{"plan":[{"step":"a","status":"completed"},{"step":"b","status":"in_progress"}]}"#,
+            &context,
+        );
+        assert!(matches!(rx.try_recv().unwrap(), AgentStreamEvent::ToolCall(_)));
+
+        sink.emit_tool_result_with_images_and_context(
+            "call_plan_1",
+            "update_plan",
+            "update_plan",
+            false,
+            content,
+            &[],
+            &context,
+        );
+        match rx.try_recv().unwrap() {
+            AgentStreamEvent::Plan(data) => {
+                assert_eq!(data.session_id.as_deref(), Some("update_plan"));
+                assert_eq!(data.source_call_id.as_deref(), Some("nomi-call_plan_1"));
+                assert_eq!(data.entries.len(), 2);
+                assert_eq!(data.entries[1]["status"], "in_progress");
+            }
+            other => panic!("expected Plan, got {other:?}"),
+        }
+
+        // The short-lived result context stored by the context path must be
+        // drained: a later result reusing the id may not inherit its args.
+        // Checked before any lifecycle truncation, which would clear the
+        // whole context map and make this assertion vacuous.
+        sink.emit_tool_result("call_plan_1", "update_plan", true, "late result");
+        match rx.try_recv().unwrap() {
+            AgentStreamEvent::ToolCall(data) => {
+                assert_eq!(data.args, serde_json::Value::Null);
+                assert!(data.retry.is_none());
+            }
+            other => panic!("expected ToolCall, got {other:?}"),
+        }
+
+        // The plan result must settle the active call so no synthetic
+        // recovery frame is emitted at a later lifecycle boundary.
+        sink.truncate_active_tool_calls_for_auto_continue("max_tokens");
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn update_plan_result_via_images_path_emits_plan_event() {
+        let (sink, mut rx) = make_sink();
+        let content = "[progress] Plan updated.\n{\"kind\":\"plan_update\",\"explanation\":null,\"entries\":[{\"content\":\"a\",\"status\":\"in_progress\"}]}";
+        sink.emit_tool_result_with_images("call_plan_2", "update_plan", false, content, &[]);
+        match rx.try_recv().unwrap() {
+            AgentStreamEvent::Plan(data) => {
+                assert_eq!(data.source_call_id.as_deref(), Some("nomi-call_plan_2"));
+                assert_eq!(data.entries.len(), 1);
+            }
+            other => panic!("expected Plan, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn update_plan_error_via_context_path_stays_a_tool_error() {
+        let (sink, mut rx) = make_sink();
+        let context = ToolCallExecutionContext {
+            input: serde_json::json!({"plan":"nope"}),
+            retry: ToolCallRetryContext {
+                retry_group_id: "call_plan_3".to_owned(),
+                attempt_no: 1,
+                retry_of_call_id: None,
+            },
+        };
+        sink.emit_tool_result_with_images_and_context(
+            "call_plan_3",
+            "update_plan",
+            "update_plan",
+            true,
+            "update_plan: invalid arguments",
+            &[],
+            &context,
+        );
+        match rx.try_recv().unwrap() {
+            AgentStreamEvent::ToolCall(data) => {
+                assert_eq!(data.status, ToolCallStatus::Error);
+            }
+            other => panic!("expected ToolCall, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn update_plan_with_inline_images_keeps_fail_closed_artifact_accounting() {
+        // A plan declaration never carries media. If a result named
+        // update_plan arrives with inline images, it must not short-circuit
+        // into a Plan event: the funnel's fail-closed artifact path owns it.
+        let (sink, mut rx) = make_sink();
+        let content = r#"{"kind":"plan_update","explanation":null,"entries":[{"content":"a","status":"in_progress"}]}"#;
+        let delivery = sink.emit_tool_result_with_images(
+            "call_plan_img",
+            "update_plan",
+            false,
+            content,
+            &[ToolImage {
+                media_type: "image/png".into(),
+                data: "bytes".into(),
+            }],
+        );
+        assert!(matches!(delivery, ToolMediaDelivery::Failed { .. }));
+        match rx.try_recv().unwrap() {
+            AgentStreamEvent::ToolCall(data) => {
+                assert_eq!(data.status, ToolCallStatus::Error);
+            }
+            other => panic!("expected fail-closed ToolCall, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn update_plan_settles_a_stray_artifact_obligation_instead_of_leaking_running() {
+        // A stray artifact-path key in update_plan args registers an
+        // obligation at call time. The plan projection must settle it as
+        // failed (a plan never delivers artifacts) rather than leave it
+        // Running, which would report the misleading "ended without a
+        // verified artifact receipt" at turn end.
+        let (sink, mut rx) = make_sink();
+        sink.begin_artifact_delivery_turn();
+        sink.emit_tool_call(
+            "call_plan_stray",
+            "update_plan",
+            r#"{"plan":[{"step":"a","status":"in_progress"}],"output_path":"foo.png"}"#,
+        );
+        assert!(matches!(rx.try_recv().unwrap(), AgentStreamEvent::ToolCall(_)));
+
+        let content = r#"{"kind":"plan_update","explanation":null,"entries":[{"content":"a","status":"in_progress"}]}"#;
+        sink.emit_tool_result("call_plan_stray", "update_plan", false, content);
+        assert!(matches!(rx.try_recv().unwrap(), AgentStreamEvent::Plan(_)));
+
+        let sealed = sink.finish_artifact_delivery_turn();
+        let error = sealed.expect_err("a stray artifact declaration must fail closed");
+        assert!(
+            error.contains("does not deliver artifacts"),
+            "expected the explicit plan-projection reason, got: {error}"
+        );
+        assert!(!error.contains("ended without a verified artifact receipt"));
     }
 
     // -- citation reflow ------------------------------------------------------
