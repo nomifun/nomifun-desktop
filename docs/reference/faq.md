@@ -33,7 +33,7 @@ In the **data directory**. Its location depends on which host you are running:
 
 - **Desktop**: defaults to the **per-user application-data dir** — `%LOCALAPPDATA%\NomiFun` on Windows, `~/Library/Application Support/NomiFun` on macOS, `$XDG_DATA_HOME/NomiFun` (usually `~/.local/share/NomiFun`) on Linux. Set `NOMIFUN_DATA_DIR=<absolute path>` and that path **is** the data dir — the value is taken literally on every host, no `/Nomi` suffix. Older builds stored data under `NomiFun/Nomi` (and before that `<system temp>/nomifun-data/Nomi`); an existing legacy dataset is migrated to the new location automatically on the first boot after upgrading (one-shot, crash-safe, resumed next boot if interrupted).
 - **Web (`nomifun-web`)**: whatever you pass to `--data-dir` (or `NOMIFUN_DATA_DIR`), taken literally. With neither set it defaults to the **same per-user dir as the desktop app**, so a dev `bun run serve:web` and the installed app see one shared state.
-- **Docker**: the named volume defined in the compose file (`nomifun-data` mounted at `/data`).
+- **Docker**: the named volume you mount to `/data` (for example `nomifun-data:/data`).
 
 The data directory contains the SQLite database (`nomifun-backend.db*`), per-agent state, the Bun cache, log files, and any embedded extension data. Back it up like a database. Because every host defaults to the same directory, the backend guards it with an exclusive `server.lock` — a second backend instance on the same data dir fails fast instead of corrupting state.
 
@@ -77,16 +77,17 @@ For lighter-weight remote access from a phone or another laptop without spinning
 
 ## Are there prebuilt installers?
 
-Not yet. Desktop bundles can be built locally, macOS Developer ID signing is
-scripted through `bun run build:signed`, and updater artifacts can be generated
-with `bun run build:updater`; there is not yet an official public release
-channel or registry-backed installer feed. Until then, the supported install
-paths are:
+Desktop bundles can be built locally, macOS Developer ID signing is scripted
+through `bun run build:signed`, and updater artifacts can be generated with
+`bun run build:updater`. For the Web server, the official Docker Hub image is
+available as
+[`nomifun/nomifun-web`](https://hub.docker.com/repository/docker/nomifun/nomifun-web).
+The supported install paths are:
 
 - **Desktop**: `bun install && bun run build:ui && cargo run -p nomifun-desktop` (or `cargo build --release -p nomifun-desktop`).
-- **Server**: build from source (`cargo build --release -p nomifun-web`) or `docker compose up -d --build`.
+- **Server**: run `nomifun/nomifun-web:v0.3.4`, build from source (`cargo build --release -p nomifun-web`), or build locally with `docker compose up -d --build`.
 
-When prebuilt installers ship, they will be linked from the project README and the [getting-started guide](../getting-started/).
+Published artifacts are linked from the project README and the [getting-started guide](../getting-started/).
 
 ## I lost my admin password
 

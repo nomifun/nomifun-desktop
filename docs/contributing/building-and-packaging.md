@@ -16,7 +16,7 @@ deployment, see [`../guides/web-server-deployment.md`](../guides/web-server-depl
 | Tauri desktop bundles | Built by `bun run build` for the current OS. |
 | macOS Developer ID signing + notarization | Supported through `bun run build:signed` when local Apple signing credentials are configured. |
 | Tauri updater artifacts | `bun run build:updater` emits updater `.sig` files; production endpoint/key management still needs release setup. |
-| Docker / Compose | Local image and compose stack are supported; no public registry image is promised here. |
+| Docker / Compose | Official Docker Hub image [`nomifun/nomifun-web`](https://hub.docker.com/repository/docker/nomifun/nomifun-web) is available; local image and compose builds remain supported. |
 | Native Linux + systemd | Unit and README live under `packaging/linux/`. |
 | Windows signing | Requires an external code-signing certificate; not configured by this repository. |
 
@@ -115,6 +115,10 @@ The updater scaffold exists, but a production release still needs:
 See [`apps/desktop/updater/README.md`](../../apps/desktop/updater/README.md).
 
 ## Docker
+
+Published runtime image:
+[`nomifun/nomifun-web`](https://hub.docker.com/repository/docker/nomifun/nomifun-web).
+The command below builds the image locally from the current checkout.
 
 ```bash
 docker compose up -d --build
