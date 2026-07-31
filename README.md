@@ -318,6 +318,59 @@ bun run build:ui && bun run serve:web
 
 **Docker (self-host the server)**
 
+The official image is published on Docker Hub:
+[`nomifun/nomifun-web`](https://hub.docker.com/repository/docker/nomifun/nomifun-web).
+The examples below use the published `v0.3.4` tag; replace it with a newer
+Docker Hub tag when one is available.
+
+```bash
+# Pull and run the official image.
+docker run -d \
+  --name nomifun-web \
+  --restart unless-stopped \
+  -p 8787:8787 \
+  -v nomifun-data:/data \
+  nomifun/nomifun-web:v0.3.4
+# then open http://<server-ip>:8787 and create the first admin
+```
+
+For unattended or internet-facing deployments, pre-seed the first admin before
+the port is reachable:
+
+```bash
+docker run -d \
+  --name nomifun-web \
+  --restart unless-stopped \
+  -p 8787:8787 \
+  -v nomifun-data:/data \
+  -e NOMIFUN_ADMIN_USERNAME=admin \
+  -e NOMIFUN_ADMIN_PASSWORD='change-me-to-something-strong' \
+  nomifun/nomifun-web:v0.3.4
+```
+
+Compose can use the same official image:
+
+```yaml
+services:
+  nomifun:
+    image: nomifun/nomifun-web:v0.3.4
+    restart: unless-stopped
+    ports:
+      - "8787:8787"
+    volumes:
+      - nomifun-data:/data
+    environment:
+      NOMIFUN_ADMIN_USERNAME: admin
+      NOMIFUN_ADMIN_PASSWORD: "change-me-to-something-strong"
+      # Set to "true" when NomiFun is behind an HTTPS reverse proxy.
+      NOMIFUN_HTTPS: "false"
+
+volumes:
+  nomifun-data:
+```
+
+If you prefer to build the image locally from this repo:
+
 ```bash
 docker compose up -d --build
 # then open http://<server-ip>:8787  —  pair with the bundled Caddyfile for TLS
