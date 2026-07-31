@@ -70,8 +70,9 @@
   },
   "skillsMarket": {
     "title": "技能市场",
-    "description": "浏览 ClawHub 与 SkillHub 当前榜单，并把经过检查的安装草稿交给 Nomi。",
+    "description": "浏览 ClawHub、LoopHub 与 SkillHub 当前榜单，并把经过检查的安装草稿交给 Nomi。",
     "syncSuccess": "技能市场已更新",
+    "syncKeptCache": "未获取到新榜单，已保留本地缓存。",
     "syncEmpty": "未采集到榜单数据。",
     "syncError": "更新技能市场失败",
     "openMarketFailed": "无法打开技能市场",
@@ -82,6 +83,69 @@
     "noDescription": "暂无描述。",
     "lastUpdated": "上次更新：{{time}}",
     "openInBrowser": "在浏览器中打开市场"
+  },
+  "market": {
+    "syncSuccess": "市场已更新",
+    "syncKeptCache": "未获取到新数据，已保留本地缓存。",
+    "syncEmpty": "未获取到市场数据。",
+    "syncError": "更新市场失败",
+    "openFailed": "无法打开市场",
+    "noSearchMatch": "{{source}} 中未找到与“{{query}}”相关的条目。",
+    "lastUpdated": "上次更新：{{time}}",
+    "openInBrowser": "打开市场",
+    "requiresApi": "需 API",
+    "noApi": "免 API"
+  },
+  "presetsPage": {
+    "libraryTab": "已安装设定",
+    "marketTab": "设定市场"
+  },
+  "presetMarket": {
+    "title": "设定市场",
+    "description": "浏览 SkillHub 专家包，并一键添加为可复用的 Nomi 设定。",
+    "addSuccess": "专家包与技能已添加。",
+    "addSkipped": "专家包已存在。",
+    "addFailed": "添加专家包失败。",
+    "skillInstallFailed": "专家包的 {{count}} 个技能均安装失败：{{skills}}。",
+    "partialSkillInstall": "专家包已添加，但 {{count}} 个技能安装失败：{{skills}}。",
+    "stateUpdateFailed": "专家包已添加，但未能启用自动选择。",
+    "searchPlaceholder": "搜索专家包...",
+    "empty": "点击刷新获取专家包列表。"
+  },
+  "mcpMarket": {
+    "title": "MCP 市场",
+    "description": "浏览 SkillHub MCP 与 MCP World 热门服务，并直接导入 MCP 配置。",
+    "configMissing": "未找到可导入的 MCP 配置。",
+    "addFailed": "添加 MCP 服务失败。",
+    "importedDisabled": "已导入 {{count}} 个 MCP 服务（默认停用）。启用或测试前请先检查其命令与配置。",
+    "confirmTitle": "导入前请检查 MCP 服务",
+    "confirmIntro": "该配置来自外部市场，服务将以停用状态导入；确认前请仔细检查以下内容。",
+    "confirmStdioWarning": "Stdio 服务在启用或测试后会在本机执行命令，请仅启用你信任的命令。",
+    "confirmOk": "以停用状态导入",
+    "confirmCommand": "命令",
+    "confirmArgs": "参数",
+    "confirmEnvKeys": "环境变量",
+    "confirmUrl": "URL",
+    "confirmHeaderKeys": "Header 键",
+    "searchPlaceholder": "搜索 MCP 服务...",
+    "empty": "点击刷新获取 MCP 市场列表。"
+  },
+  "mcpPage": {
+    "installedMcpTab": "已安装MCP",
+    "mcpMarketTab": "MCP市场",
+    "installedPluginsTab": "已安装插件",
+    "pluginMarketTab": "插件市场"
+  },
+  "plugins": {
+    "installedTitle": "已安装插件",
+    "installedDescription": "当前应用已加载的 Nomi 扩展与插件包。",
+    "emptyInstalled": "暂未发现已安装插件。",
+    "stateEnabled": "已启用",
+    "stateDisabled": "已停用",
+    "marketTitle": "插件市场",
+    "marketDescription": "浏览 ClawHub 插件，并生成安装草稿供确认。",
+    "searchPlaceholder": "搜索插件...",
+    "emptyMarket": "点击刷新获取插件市场列表。"
   },
   "agentSkillImport": {
     "title": "从 Agent 导入",
@@ -791,6 +855,7 @@
   "mcpJsonBareServerError": "请将 MCP 服务配置放在顶层 \"mcpServers\" 对象中，或在数组项中添加 \"name\"。",
   "mcpJsonUrlRequiredError": "HTTP 和 SSE MCP 服务必须提供非空 \"url\"。",
   "mcpJsonStdioCommandRequiredError": "Stdio MCP 服务必须提供非空 \"command\"。",
+  "mcpGetApi": "获取 API",
   "mcpTestConnection": "检测MCP可用状态",
   "mcpTestConnectionSuccess": "连接测试成功",
   "mcpConnected": "可用",
@@ -1352,7 +1417,7 @@
   },
   "mcpHub": {
     "title": "MCP",
-    "subtitle": "注册、导入并管理 MCP 服务器配置。",
+    "subtitle": "管理已安装 MCP、MCP 市场、已安装插件与插件市场。",
     "railTitle": "MCP"
   },
   "openCapabilities": {

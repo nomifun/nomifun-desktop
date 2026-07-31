@@ -282,7 +282,7 @@ pub struct SkillMarketSyncRequest {
 pub struct SkillMarketItemResponse {
     /// Stable source-local id, e.g. `clawhub:owner/skill`.
     pub id: String,
-    /// Source slug: `clawhub` or `skillhub`.
+    /// Source slug, e.g. `clawhub`, `loophub`, `skillhub_mcp`, or `mcpworld`.
     pub source: String,
     pub rank: usize,
     pub name: String,
@@ -307,6 +307,59 @@ pub struct SkillMarketSyncResponse {
     pub items: Vec<SkillMarketItemResponse>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub errors: Vec<String>,
+}
+
+/// Request body for resolving a market MCP entry into importable MCP JSON.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct SkillMarketMcpConfigRequest {
+    pub source: String,
+    pub id: String,
+    pub url: String,
+}
+
+/// Response for a resolved market MCP config.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SkillMarketMcpConfigResponse {
+    pub config_json: serde_json::Value,
+}
+
+/// Request body for resolving a SkillHub expert package entry.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct SkillMarketPackageRequest {
+    pub source: String,
+    pub id: String,
+    pub url: String,
+}
+
+/// Response for a resolved expert package that can be imported as a user preset.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SkillMarketPackageResponse {
+    pub name: String,
+    pub description: String,
+    pub instructions: String,
+    #[serde(default)]
+    pub skill_slugs: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub avatar: Option<String>,
+}
+
+/// One failed child skill install while importing a SkillHub expert package.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SkillMarketPackageInstallError {
+    pub skill_slug: String,
+    pub error: String,
+}
+
+/// Response for installing the skills behind a SkillHub expert package.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SkillMarketPackageInstallResponse {
+    pub package: SkillMarketPackageResponse,
+    #[serde(default)]
+    pub installed_skill_names: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub errors: Vec<SkillMarketPackageInstallError>,
 }
 
 #[cfg(test)]
@@ -754,5 +807,57 @@ mod tests {
         assert_eq!(json["items"][0]["install_command"], "openclaw skills install @owner/demo");
         assert!(json["items"][0].get("installCommand").is_none());
         assert!(json.get("errors").is_none());
+    }
+
+    #[test]
+    fn test_skill_market_mcp_config_response_serializes_snake_case() {
+        let req = SkillMarketMcpConfigRequest {
+            source: "mcpworld".into(),
+            id: "mcpworld:c7897f8abf0350fbbf5a7fccc3e79bb8".into(),
+            url: "https://www.mcpworld.com/zh/detail/c7897f8abf0350fbbf5a7fccc3e79bb8".into(),
+        };
+        let req_json = serde_json::to_value(&req).unwrap();
+        assert_eq!(req_json["source"], "mcpworld");
+        assert!(req_json.get("sourceUrl").is_none());
+
+        let resp = SkillMarketMcpConfigResponse {
+            config_json: json!({
+                "mcpServers": {
+                    "playwright": {
+                        "command": "npx",
+                        "args": ["@playwright/mcp@latest"]
+                    }
+                }
+            }),
+        };
+        let json = serde_json::to_value(&resp).unwrap();
+        assert!(json["config_json"].get("mcpServers").is_some());
+        assert!(json.get("configJson").is_none());
+    }
+
+    #[test]
+    fn test_skill_market_package_install_response_serializes_snake_case() {
+        let resp = SkillMarketPackageInstallResponse {
+            package: SkillMarketPackageResponse {
+                name: "Test Automation".into(),
+                description: "Testing workflow package".into(),
+                instructions: "# Test Automation".into(),
+                skill_slugs: vec!["superpowers-tdd".into()],
+                avatar: None,
+            },
+            installed_skill_names: vec!["superpowers-tdd".into(), "test-case-generator".into()],
+            errors: vec![SkillMarketPackageInstallError {
+                skill_slug: "missing-skill".into(),
+                error: "download failed".into(),
+            }],
+        };
+
+        let json = serde_json::to_value(&resp).unwrap();
+        assert_eq!(
+            json["installed_skill_names"],
+            serde_json::json!(["superpowers-tdd", "test-case-generator"])
+        );
+        assert!(json.get("installedSkillNames").is_none());
+        assert_eq!(json["errors"][0]["skill_slug"], "missing-skill");
     }
 }

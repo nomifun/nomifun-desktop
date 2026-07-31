@@ -219,7 +219,9 @@ pub use skill::{
     MaterializeSkillsResponse, MaterializedSkillRef, NamedPathResponse, ReadPresetRuleRequest,
     ReadBuiltinResourceRequest, ReadSkillInfoRequest, ReadSkillInfoResponse,
     RemoveExternalPathRequest, ScanForSkillsRequest, ScanForSkillsResponse, ScannedSkillResponse,
-    SetSkillTagsRequest, SkillListItemResponse, SkillMarketItemResponse, SkillMarketSyncRequest,
+    SetSkillTagsRequest, SkillListItemResponse, SkillMarketItemResponse, SkillMarketMcpConfigRequest,
+    SkillMarketMcpConfigResponse, SkillMarketPackageInstallError, SkillMarketPackageInstallResponse,
+    SkillMarketPackageRequest, SkillMarketPackageResponse, SkillMarketSyncRequest,
     SkillMarketSyncResponse, SkillPathsResponse, SkillSourceResponse, WritePresetRuleRequest,
 };
 pub use system::{
