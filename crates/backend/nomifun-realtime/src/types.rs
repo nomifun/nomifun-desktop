@@ -43,6 +43,11 @@ pub enum WebSocketCloseCode {
     /// 4408 — application code: heartbeat timeout (liveness, NOT auth).
     /// Clients should simply reconnect.
     HeartbeatTimeout = 4408,
+    /// 4409 — application code: the token bound at handshake aged out while
+    /// the HTTP session may still be alive via sliding renewal. Clients
+    /// should reconnect with fresh credentials; this is NOT an
+    /// authentication failure/logout signal.
+    TokenAged = 4409,
 }
 
 impl WebSocketCloseCode {
@@ -74,7 +79,10 @@ pub const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(30);
 pub const HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// Bounded capacity of the per-connection outbound message channel.
-pub const PER_CONNECTION_BUFFER: usize = 64;
+///
+/// Sized for streaming bursts (per-chunk terminal/agent output) over slow
+/// links; overflow still disconnects the client for a durable resync.
+pub const PER_CONNECTION_BUFFER: usize = 256;
 
 #[cfg(test)]
 mod tests {
@@ -121,15 +129,16 @@ mod tests {
     fn close_code_values() {
         assert_eq!(WebSocketCloseCode::NormalClosure.as_u16(), 1000);
         assert_eq!(WebSocketCloseCode::PolicyViolation.as_u16(), 1008);
-        // 4408 sits in the RFC 6455 private-use range (4000-4999); browser
-        // clients treat it as "reconnect", never as "session expired".
+        // 4408/4409 sit in the RFC 6455 private-use range (4000-4999); browser
+        // clients treat them as "reconnect", never as "session expired".
         assert_eq!(WebSocketCloseCode::HeartbeatTimeout.as_u16(), 4408);
+        assert_eq!(WebSocketCloseCode::TokenAged.as_u16(), 4409);
     }
 
     #[test]
     fn constants() {
         assert_eq!(HEARTBEAT_INTERVAL, Duration::from_secs(30));
         assert_eq!(HEARTBEAT_TIMEOUT, Duration::from_secs(60));
-        assert_eq!(PER_CONNECTION_BUFFER, 64);
+        assert_eq!(PER_CONNECTION_BUFFER, 256);
     }
 }
