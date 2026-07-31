@@ -81,19 +81,19 @@ describe('Guid composer entry strip polish', () => {
     expect(css.includes('.entrySkillFooter')).toBe(false);
   });
 
-  test('renders the shared collaboration policy before the preset picker', () => {
+  test('removes the duplicate preset entry while keeping the shared collaboration policy', () => {
     const source = readSource(new URL('./ComposerEntryStrip.tsx', import.meta.url));
 
     expect(source.includes('collaborationPolicyNode?: React.ReactNode')).toBe(true);
     const defaultState = source.slice(source.indexOf('// --- Default state ---'));
     const policyPos = defaultState.indexOf('{collaborationPolicyNode}');
-    const presetPickerPos = defaultState.indexOf('onClick={onChoosePreset}');
     expect(policyPos).toBeGreaterThan(-1);
-    expect(presetPickerPos).toBeGreaterThan(-1);
-    expect(policyPos).toBeLessThan(presetPickerPos);
+    expect(defaultState.includes('onChoosePreset')).toBe(false);
+    expect(defaultState.includes('guid.entry.usePreset')).toBe(false);
+    expect(defaultState.includes('{skillsEntry}')).toBe(true);
   });
 
-  test('offers the summon-companion entry to the left of the preset picker', () => {
+  test('offers the summon-companion entry before the Skills entry', () => {
     const source = readSource(new URL('./ComposerEntryStrip.tsx', import.meta.url));
 
     // Optional entry: the Guid page only wires it for nomi-typed launches.
@@ -110,9 +110,10 @@ describe('Guid composer entry strip polish', () => {
 
     const defaultState = source.slice(source.indexOf('// --- Default state ---'));
     const summonPos = defaultState.indexOf('{summonEntry}');
-    const presetPickerPos = defaultState.indexOf('onClick={onChoosePreset}');
+    const skillsPos = defaultState.indexOf('{skillsEntry}');
     expect(summonPos).toBeGreaterThan(-1);
-    expect(summonPos).toBeLessThan(presetPickerPos);
+    expect(skillsPos).toBeGreaterThan(-1);
+    expect(summonPos).toBeLessThan(skillsPos);
   });
 
   test('collapses entry labels to icons and expands them inline on desktop hover', () => {

@@ -844,10 +844,6 @@ const GuidPage: React.FC = () => {
                   isPresetAgent={agentSelection.is_presetAgent}
                   presetLabel={heroTitle !== t('conversation.welcome.title') ? heroTitle : undefined}
                   presetAvatar={selectedPresetAvatar ?? undefined}
-                  onChoosePreset={() => {
-                    setDrawerMode('preset');
-                    setDrawerOpen(true);
-                  }}
                   onAdjustSkills={handleOpenSkillsDrawer}
                   onFree={() => {
                     agentSelection.setSelectedAgentKey(agentSelection.defaultAgentKey);
