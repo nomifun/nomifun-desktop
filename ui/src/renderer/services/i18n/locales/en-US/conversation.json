@@ -196,7 +196,7 @@
       },
       "USER_AGENT_HANDSHAKE_TIMEOUT": {
         "title": "Agent handshake timed out",
-        "body": "The selected agent did not finish its startup handshake in time. Check whether it is still starting or blocked, then retry."
+        "body": "The selected agent did not finish its startup handshake in time. The first launch may need to download the agent runtime (tens of MB) — check your network/proxy, then retry; retrying resumes cleanly."
       },
       "USER_AGENT_ACP_INIT_FAILED": {
         "title": "Agent protocol initialization failed",

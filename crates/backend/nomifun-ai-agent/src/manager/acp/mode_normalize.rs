@@ -7,27 +7,40 @@ pub(super) fn normalize_requested_mode(metadata: &AgentMetadata, mode: &str) -> 
     }
 
     // Nomi persists the legacy aliases `yolo` / `yoloNoSandbox` while
-    // ACP backends expect their native mode id (e.g. `full-access` for
-    // Codex). Resolution is data-driven: the mapping lives on each
+    // ACP backends expect their native mode id (e.g. `agent-full-access`
+    // for Codex). Resolution is data-driven: the mapping lives on each
     // catalog row's top-level `yolo_id` column. Backends without a
     // `yolo_id` have no equivalent, so the alias passes through
     // unchanged and `session/set_mode` gets the caller's original
     // value.
-    if matches!(trimmed, "yolo" | "yoloNoSandbox")
+    let resolved = if matches!(trimmed, "yolo" | "yoloNoSandbox")
         && let Some(native) = metadata.yolo_id.as_deref()
     {
-        return native.to_owned();
+        native
+    } else {
+        trimmed
+    };
+
+    // Codex mode-id lineage. The bridge swap (migration 022, from the
+    // archived @zed-industries/codex-acp to @agentclientprotocol/codex-acp)
+    // renamed the native session modes:
+    //     read-only   -> read-only          (unchanged)
+    //     auto        -> agent
+    //     full-access -> agent-full-access
+    // Persisted sessions/config — and rows whose `yolo_id` still carries the
+    // pre-022 value — may present any historical alias (`default`/`autoEdit`
+    // predate even the old bridge), so fold the whole lineage onto the
+    // current native ids AFTER yolo resolution. Keyed on the vendor backend
+    // label rather than re-introducing an AcpBackend enum variant.
+    if matches!(metadata.backend.as_deref(), Some("codex")) {
+        match resolved {
+            "default" | "autoEdit" | "auto" | "agent" => return "agent".to_owned(),
+            "full-access" | "agent-full-access" => return "agent-full-access".to_owned(),
+            _ => {}
+        }
     }
 
-    // Codex has legacy `default`/`autoEdit` aliases that map to its
-    // native `auto` mode. Keep the mapping data-driven by keying on the
-    // vendor backend label rather than re-introducing an AcpBackend
-    // enum variant.
-    if matches!(metadata.backend.as_deref(), Some("codex")) && matches!(trimmed, "default" | "autoEdit") {
-        return "auto".to_owned();
-    }
-
-    trimmed.to_owned()
+    resolved.to_owned()
 }
 
 /// Whether the agent resumes a session by calling `session/new` again
@@ -92,6 +105,7 @@ mod tests {
     #[test]
     fn normalize_requested_mode_passes_through_non_yolo_modes() {
         let meta = metadata_with_yolo_id(Some("full-access"));
+        // Non-codex rows: aliases flow through untouched.
         assert_eq!(normalize_requested_mode(&meta, "default"), "default");
         assert_eq!(normalize_requested_mode(&meta, "read-only"), "read-only");
         assert_eq!(
@@ -124,19 +138,42 @@ mod tests {
         assert_eq!(normalize_requested_mode(&gemini_like, "yolo"), "yolo");
     }
 
-    /// Codex's legacy `default` / `autoEdit` aliases should rewrite to
-    /// its native `auto` mode when the row's backend label is "codex".
-    /// Other backends must leave `default` / `autoEdit` untouched.
+    /// The codex mode lineage folds onto the CURRENT bridge's native ids
+    /// (post-022 swap): legacy `default`/`autoEdit` and the old bridge's
+    /// `auto` all become `agent`; the old bridge's `full-access` becomes
+    /// `agent-full-access`. Other backends must leave these untouched.
     #[test]
-    fn normalize_requested_mode_rewrites_codex_default_and_auto_edit() {
-        let mut codex_meta = metadata_with_yolo_id(Some("full-access"));
+    fn normalize_requested_mode_folds_codex_mode_lineage() {
+        let mut codex_meta = metadata_with_yolo_id(Some("agent-full-access"));
         codex_meta.backend = Some("codex".into());
-        assert_eq!(normalize_requested_mode(&codex_meta, "default"), "auto");
-        assert_eq!(normalize_requested_mode(&codex_meta, "autoEdit"), "auto");
+        assert_eq!(normalize_requested_mode(&codex_meta, "default"), "agent");
+        assert_eq!(normalize_requested_mode(&codex_meta, "autoEdit"), "agent");
+        assert_eq!(normalize_requested_mode(&codex_meta, "auto"), "agent");
+        assert_eq!(normalize_requested_mode(&codex_meta, "agent"), "agent");
+        assert_eq!(
+            normalize_requested_mode(&codex_meta, "full-access"),
+            "agent-full-access"
+        );
+        assert_eq!(
+            normalize_requested_mode(&codex_meta, "agent-full-access"),
+            "agent-full-access"
+        );
+        assert_eq!(normalize_requested_mode(&codex_meta, "read-only"), "read-only");
+        // yolo aliases go through the yolo_id column (migrated value).
+        assert_eq!(normalize_requested_mode(&codex_meta, "yolo"), "agent-full-access");
+
+        // A codex row whose yolo_id still carries the pre-022 value (e.g. a
+        // DB where the migration's UPDATE filter didn't match because the
+        // row was edited) resolves yolo to the old "full-access" — the
+        // lineage fold must still land on the new id.
+        let mut stale_codex = metadata_with_yolo_id(Some("full-access"));
+        stale_codex.backend = Some("codex".into());
+        assert_eq!(normalize_requested_mode(&stale_codex, "yolo"), "agent-full-access");
 
         let other = metadata_with_yolo_id(None);
         assert_eq!(normalize_requested_mode(&other, "default"), "default");
         assert_eq!(normalize_requested_mode(&other, "autoEdit"), "autoEdit");
+        assert_eq!(normalize_requested_mode(&other, "full-access"), "full-access");
     }
 
     #[test]

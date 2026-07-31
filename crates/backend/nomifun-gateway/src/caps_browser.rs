@@ -266,7 +266,9 @@ fn describe_pending(action: &str, args: &Value) -> String {
 fn caller_bypasses_browser_approval(ctx: &CallerCtx) -> bool {
     matches!(
         ctx.session_mode.as_deref().map(str::trim),
-        Some("yolo" | "yoloNoSandbox" | "full-access" | "bypassPermissions")
+        // `agent-full-access` = codex bridge (@agentclientprotocol) native id;
+        // `full-access` = its pre-022 predecessor, kept for persisted sessions.
+        Some("yolo" | "yoloNoSandbox" | "full-access" | "agent-full-access" | "bypassPermissions")
     )
 }
 

@@ -55,8 +55,35 @@ use agent_client_protocol::schema::{
     SetSessionModeRequest, SetSessionModelRequest,
 };
 
-/// Timeout for the ACP initialize handshake (seconds).
-const INIT_TIMEOUT_SECS: u64 = 30;
+/// Default timeout for the ACP initialize handshake (seconds).
+///
+/// Deliberately generous: builtin ACP rows spawn through `bun x <pkg>@<ver>`,
+/// and on a cold bunx cache (fresh data dir, cleaned temp dir, or bun's 24h
+/// registry re-validation) the FIRST initialize must wait out a package
+/// download tens of MB in size. A 30s budget raced that download and, worse,
+/// killing the child mid-install could leave the bunx cache wedged so every
+/// retry failed the same way. The child-exit race in `AcpAgentManager::new`
+/// still surfaces real startup crashes immediately — this ceiling only bounds
+/// the "process alive but not answering" case.
+const INIT_TIMEOUT_SECS_DEFAULT: u64 = 120;
+
+/// Environment override for the initialize-handshake timeout (seconds).
+/// Operators on very slow networks can raise it without a rebuild.
+const INIT_TIMEOUT_ENV: &str = "NOMIFUN_ACP_INIT_TIMEOUT_SECS";
+
+/// Resolve the initialize-handshake timeout, honouring the env override.
+/// Values below 10s are clamped up — a sub-10s budget cannot cover even a
+/// warm `bun x` exec on a loaded machine and only produces flaky failures.
+fn init_timeout_secs() -> u64 {
+    static CACHED: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    *CACHED.get_or_init(|| {
+        std::env::var(INIT_TIMEOUT_ENV)
+            .ok()
+            .and_then(|raw| raw.trim().parse::<u64>().ok())
+            .map(|secs| secs.max(10))
+            .unwrap_or(INIT_TIMEOUT_SECS_DEFAULT)
+    })
+}
 
 /// A pending permission request from the agent, awaiting user decision.
 pub struct PermissionRequest {
@@ -158,11 +185,10 @@ impl AcpProtocol {
         ));
 
         // Wait for init to complete with timeout.
-        let init_response = tokio::time::timeout(std::time::Duration::from_secs(INIT_TIMEOUT_SECS), init_rx)
+        let timeout_secs = init_timeout_secs();
+        let init_response = tokio::time::timeout(std::time::Duration::from_secs(timeout_secs), init_rx)
             .await
-            .map_err(|_| AcpError::InitTimeout {
-                timeout_secs: INIT_TIMEOUT_SECS,
-            })?
+            .map_err(|_| AcpError::InitTimeout { timeout_secs })?
             .map_err(|_| AcpError::Disconnected {
                 exit_code: None,
                 signal: None,

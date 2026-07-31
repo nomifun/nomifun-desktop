@@ -192,6 +192,11 @@ impl AgentSendError {
                 resolution(AgentErrorResolutionKind::Retry, None),
             ),
             AppError::BadGateway(_) => classify_upstream_detail(&detail),
+            // Registry admission refusals (build-failure cooldown, crash-loop
+            // pause, conversation-busy) surface as Conflict. Route them
+            // through the text classifier so the card carries an honest
+            // wait-and-retry state instead of the send-feedback catch-all.
+            AppError::Conflict(_) => classify_upstream_detail(&detail),
             _ => Self::new(
                 "The upstream Agent failed while handling the request",
                 AgentErrorCode::UnknownUpstreamError,
@@ -430,6 +435,32 @@ fn classify_agent_lifecycle(lower: &str) -> Option<ClassifiedError> {
             false,
             AgentErrorResolutionKind::CheckAgentInstallation,
         ));
+    }
+    // Registry pacing states: the runtime registry refuses a build during
+    // the escalating cooldown after repeated startup failures, or pauses
+    // respawn to break a crash loop. Both are transient wait-and-retry
+    // conditions on the user agent — never a send-feedback condition.
+    if lower.contains("failed to start repeatedly") && lower.contains("cooling down") {
+        return Some(ClassifiedError {
+            message: "The selected Agent failed to start repeatedly and is cooling down",
+            code: AgentErrorCode::UserAgentStartupFailed,
+            ownership: AgentErrorOwnership::UserAgent,
+            retryable: true,
+            feedback_recommended: false,
+            resolution_kind: AgentErrorResolutionKind::Retry,
+            resolution_target: None,
+        });
+    }
+    if lower.contains("paused to break a crash loop") {
+        return Some(ClassifiedError {
+            message: "The selected Agent is crash-looping and respawn is paused",
+            code: AgentErrorCode::UserAgentStartupFailed,
+            ownership: AgentErrorOwnership::UserAgent,
+            retryable: true,
+            feedback_recommended: false,
+            resolution_kind: AgentErrorResolutionKind::Retry,
+            resolution_target: None,
+        });
     }
 
     None
@@ -1089,6 +1120,27 @@ mod tests {
         );
     }
 
+    /// The manager now appends an allowlist-filtered stderr extract to the
+    /// InitTimeout detail ("…; agent stderr: …"). Even when that extract
+    /// contains provider-classifier keywords (timeout / dns / network /
+    /// download progress), the handshake-timeout classification must win —
+    /// `classify_agent_lifecycle` runs before `classify_provider_api`.
+    #[test]
+    fn handshake_timeout_classification_survives_appended_stderr_extract() {
+        for detail in [
+            "Bad gateway: Initialize handshake timed out after 120s; agent stderr: Resolving dependencies",
+            "Bad gateway: Initialize handshake timed out after 120s; agent stderr: dns error: connection timeout",
+            "Bad gateway: Initialize handshake timed out after 120s; agent stderr: error sending request over network",
+        ] {
+            assert_classification(
+                detail,
+                AgentErrorCode::UserAgentHandshakeTimeout,
+                AgentErrorOwnership::UserAgent,
+                AgentErrorResolutionKind::ReconnectAgent,
+            );
+        }
+    }
+
     #[test]
     fn classifies_mid_session_cli_exit_as_agent_disconnected() {
         // Mid-session ACP CLI exit (e.g. Claude Code) surfaces as -32603 with
@@ -1381,5 +1433,50 @@ mod tests {
             AgentErrorOwnership::Nomifun,
             AgentErrorResolutionKind::WaitForCurrentResponse,
         );
+    }
+
+    /// Registry admission refusals surface as `AppError::Conflict` and must
+    /// classify to honest wait-and-retry states — not the send-feedback
+    /// catch-all (UNKNOWN_UPSTREAM_ERROR) they previously fell into.
+    #[test]
+    fn classifies_registry_pacing_conflicts_as_retryable_agent_states() {
+        for (detail, expected_fragment) in [
+            (
+                "The agent for conversation 0190 failed to start repeatedly and is cooling down. \
+                 Try again in 27s (see the previous startup error for the underlying cause).",
+                "cooling down",
+            ),
+            (
+                "Agent for conversation 0190 crashed 3 times within 60s and is paused to break a \
+                 crash loop. Resolve the underlying failure (see the agent's exit code/signal in \
+                 the logs), then try again shortly.",
+                "crash-looping",
+            ),
+        ] {
+            let err = AgentSendError::from_app_error(AppError::Conflict(detail.into()));
+            assert_eq!(
+                err.code(),
+                Some(AgentErrorCode::UserAgentStartupFailed),
+                "detail: {detail}"
+            );
+            assert_eq!(err.ownership(), Some(AgentErrorOwnership::UserAgent));
+            assert_eq!(err.stream_error().retryable, Some(true));
+            assert_eq!(err.stream_error().feedback_recommended, Some(false));
+            assert_eq!(
+                err.stream_error().resolution.map(|value| value.kind),
+                Some(AgentErrorResolutionKind::Retry)
+            );
+            assert!(
+                err.stream_error().message.contains(expected_fragment),
+                "message must name the state, got: {}",
+                err.stream_error().message
+            );
+        }
+        // The conversation-busy Conflict also classifies now that Conflict
+        // routes through the detail classifier.
+        let err = AgentSendError::from_app_error(AppError::Conflict(
+            "Conversation is already processing a message".into(),
+        ));
+        assert_eq!(err.code(), Some(AgentErrorCode::NomifunConversationBusy));
     }
 }
