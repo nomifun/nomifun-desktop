@@ -11287,7 +11287,8 @@ async fn send_message_turn_writeback_runs_after_system_continuation_final_answer
         .expect("knowledge.writeback should be broadcast");
     assert!(
         first_writeback_idx < turn_idx,
-        "turn completion must remain behind durable turn-final knowledge writeback"
+        "the durable write-back start intent must be published before turn completion; \
+         the terminal state itself is detached and may land after it"
     );
     let final_writeback_idx = events
         .iter()
@@ -11362,11 +11363,10 @@ async fn send_message_turn_writeback_runs_after_system_continuation_final_answer
 }
 
 #[tokio::test]
-async fn stop_during_slow_turn_writeback_keeps_exact_turn_fenced_until_child_quiesces() {
+async fn slow_turn_writeback_completes_turn_immediately_and_never_blocks_next_send() {
     const USER_ID: &str = SQLITE_TEST_OWNER;
     const FIRST_KEY: &str = "slow-turn-final-writeback-first";
     const SECOND_KEY: &str = "slow-turn-final-writeback-second";
-    const STOP_RACE_KEY: &str = "slow-turn-final-writeback-stop-race";
 
     let database = init_database_memory().await.unwrap();
     nomifun_db::sqlx::query(
@@ -11506,174 +11506,37 @@ async fn stop_during_slow_turn_writeback_keeps_exact_turn_fenced_until_child_qui
     tokio::time::timeout(Duration::from_secs(2), completer.wait_started())
         .await
         .expect("turn-final writeback should start");
-    let first_writeback_msg_id = broadcaster
-        .take_events()
-        .into_iter()
+
+    // The turn must complete and release immediately after the model
+    // terminal, while the detached knowledge write-back is still blocked
+    // inside its completer call.
+    wait_for_turn_released(&svc, &conv.conversation_id).await;
+
+    let mut observed_events = Vec::new();
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            observed_events.extend(broadcaster.take_events());
+            if observed_events.iter().any(|event| event.name == "turn.completed") {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("turn.completed must be published while the writeback is still running");
+    let first_writeback_msg_id = observed_events
+        .iter()
         .find(|event| {
             event.name == "knowledge.writeback" && event.data["status"] == "started"
         })
         .and_then(|event| event.data["msg_id"].as_str().map(ToOwned::to_owned))
         .expect("first writeback started event should identify its assistant row");
 
-    let second_req: SendMessageRequest = serde_json::from_value(json!({ "content": "second" })).unwrap();
-    let second = svc
-        .send_message_with_idempotency_key(
-            USER_ID,
-            &conv.conversation_id,
-            SECOND_KEY,
-            second_req,
-            &runtime_registry_dyn,
-        )
-        .await;
-
-    assert!(
-        matches!(second, Err(AppError::Conflict(_))),
-        "slow turn-final writeback must retain exact turn ownership: {second:?}"
-    );
-    let running = svc.runtime_summary_for(&conv.conversation_id).await;
-    assert!(running.is_processing);
-    assert!(!running.can_send_message);
-    assert_eq!(
-        repo.get(&conv.conversation_id)
-            .await
-            .unwrap()
-            .unwrap()
-            .status
-            .as_deref(),
-        Some("running")
-    );
-    assert!(
-        !broadcaster
-            .take_events()
-            .into_iter()
-            .any(|event| event.name == "turn.completed"),
-        "turn.completed must not precede writeback terminal persistence"
-    );
-
-    // Elapsed time has no authority to fabricate a terminal result or release
-    // the exact turn while the real knowledge worker is still alive.
-    tokio::time::sleep(Duration::from_millis(5_200)).await;
-    let events_before_release = broadcaster.take_events();
-    assert!(
-        !events_before_release.iter().any(|event| {
-            event.name == "knowledge.writeback"
-                && event.data["msg_id"].as_str()
-                    == Some(first_writeback_msg_id.as_str())
-                && event.data["status"] == "interrupted"
-        }),
-        "crossing the old five-second grace must not fabricate an interrupted terminal"
-    );
-
-    let cancel_task = {
-        let service = svc.clone();
-        let conversation_id = conv.conversation_id.clone();
-        let runtime_registry = Arc::clone(&runtime_registry_dyn);
-        tokio::spawn(async move {
-            service
-                .cancel(USER_ID, &conversation_id, &runtime_registry)
-                .await
-        })
-    };
-    tokio::time::timeout(Duration::from_secs(2), async {
-        while runtime_registry.termination_count() == 0 {
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .expect("stop should prove backend teardown while writeback remains blocked");
-    assert!(
-        !cancel_task.is_finished(),
-        "backend exit alone must not bypass the tracked writeback fence"
-    );
-
-    assert_eq!(
-        repo.get(&conv.conversation_id)
-            .await
-            .unwrap()
-            .unwrap()
-            .status
-            .as_deref(),
-        Some("running"),
-        "stop must retain durable Running until writeback publication quiesces"
-    );
-    let operation_id = format!(
-        "public-turn:v1:{USER_ID}:{}:{FIRST_KEY}",
-        conv.conversation_id
-    );
-    let accepted = repo
-        .get_delivery_receipt(USER_ID, &conv.conversation_id, &operation_id)
-        .await
-        .unwrap()
-        .expect("the blocked exact turn must retain its durable receipt");
-    assert_eq!(accepted.status, "accepted");
-    let events_during_stop = broadcaster.take_events();
-    assert!(
-        !events_during_stop
-            .iter()
-            .any(|event| event.name == "turn.completed"),
-        "stop must not publish completion while its writeback child is active"
-    );
-
-    let stop_race = tokio::time::timeout(
-        Duration::from_secs(2),
-        svc.send_message_with_idempotency_key(
-            USER_ID,
-            &conv.conversation_id,
-            STOP_RACE_KEY,
-            serde_json::from_value(json!({ "content": "must stay fenced" })).unwrap(),
-            &runtime_registry_dyn,
-        ),
-    )
-    .await
-    .expect("the stop tombstone should reject a successor without waiting");
-    assert!(
-        matches!(stop_race, Err(AppError::Conflict(_))),
-        "a replacement send must remain fenced while stop awaits writeback: {stop_race:?}"
-    );
-
-    completer.release();
-    tokio::time::timeout(Duration::from_secs(6), cancel_task)
-    .await
-    .expect("stop should finish after the real writeback terminal")
-    .expect("stop task should not panic")
-    .expect("stop should finalize the exact generation");
-
-    let mut terminal_events = events_during_stop;
-    terminal_events.extend(broadcaster.take_events());
-    let writeback_index = terminal_events
-        .iter()
-        .position(|event| {
-            event.name == "knowledge.writeback"
-                && event.data["msg_id"].as_str() == Some(first_writeback_msg_id.as_str())
-                && event.data["status"] == "failed"
-        })
-        .unwrap_or_else(|| {
-            panic!(
-                "released writeback should reach its real terminal state: {:?}",
-                terminal_events
-                    .iter()
-                    .filter(|event| event.name == "knowledge.writeback")
-                    .map(|event| (
-                        event.data["msg_id"].as_str(),
-                        event.data["status"].as_str(),
-                        event.data["retryable"].as_bool(),
-                    ))
-                    .collect::<Vec<_>>()
-            )
-        });
-    let completion_index = terminal_events
-        .iter()
-        .position(|event| event.name == "turn.completed")
-        .expect("stop should publish one completion after durable closure");
-    assert!(
-        writeback_index < completion_index,
-        "knowledge writeback terminal must precede turn.completed"
-    );
-    let failed = &terminal_events[writeback_index];
-    assert_eq!(failed.data["retryable"], true);
-    wait_for_turn_released(&svc, &conv.conversation_id).await;
     let idle = svc.runtime_summary_for(&conv.conversation_id).await;
-    assert!(!idle.is_processing);
+    assert!(
+        !idle.is_processing,
+        "a blocked detached writeback must not keep the conversation processing"
+    );
     assert!(idle.can_send_message);
     assert_eq!(
         repo.get(&conv.conversation_id)
@@ -11682,15 +11545,70 @@ async fn stop_during_slow_turn_writeback_keeps_exact_turn_fenced_until_child_qui
             .unwrap()
             .status
             .as_deref(),
-        Some("finished")
+        Some("finished"),
+        "the turn must durably finish while the writeback worker is still alive"
+    );
+    let operation_id = format!(
+        "public-turn:v1:{USER_ID}:{}:{FIRST_KEY}",
+        conv.conversation_id
     );
     let completed_receipt = repo
         .get_delivery_receipt(USER_ID, &conv.conversation_id, &operation_id)
         .await
         .unwrap()
-        .expect("stop must settle the accepted exact-turn receipt");
+        .expect("the completed exact turn must settle its durable receipt");
     assert_eq!(completed_receipt.status, "completed");
-    assert_eq!(completed_receipt.result_ok, Some(false));
+    assert_eq!(completed_receipt.result_ok, Some(true));
+
+    // A live detached run must project as running (not interrupted): the
+    // in-flight run guard is what keeps the read-time orphan projection
+    // truthful while the worker is still blocked.
+    let projected = svc
+        .get_message(USER_ID, &conv.conversation_id, &first_writeback_msg_id)
+        .await
+        .expect("assistant message must stay readable during a live writeback");
+    let projected_status = projected.content["knowledge_writeback"]["status"]
+        .as_str()
+        .expect("live writeback state should be present on the assistant row")
+        .to_owned();
+    assert!(
+        matches!(projected_status.as_str(), "started" | "extracting" | "writing"),
+        "a live detached writeback must not be projected as interrupted: {projected_status}"
+    );
+
+    // The next ordinary user message is admitted and runs to completion
+    // while the previous turn's writeback is still blocked.
+    let second_req: SendMessageRequest = serde_json::from_value(json!({ "content": "second" })).unwrap();
+    svc.send_message_with_idempotency_key(
+        USER_ID,
+        &conv.conversation_id,
+        SECOND_KEY,
+        second_req,
+        &runtime_registry_dyn,
+    )
+    .await
+    .expect("a blocked detached writeback must never fence the next send");
+    wait_for_turn_released(&svc, &conv.conversation_id).await;
+
+    completer.release();
+
+    // The released worker publishes its real (failed, retryable) terminal
+    // long after the owning turn completed — completion never waited for it.
+    let failed = tokio::time::timeout(Duration::from_secs(6), async {
+        loop {
+            if let Some(event) = broadcaster.take_events().into_iter().find(|event| {
+                event.name == "knowledge.writeback"
+                    && event.data["msg_id"].as_str() == Some(first_writeback_msg_id.as_str())
+                    && event.data["status"] == "failed"
+            }) {
+                break event;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("released writeback should reach its real terminal state");
+    assert_eq!(failed.data["retryable"], true);
 
     let stored = repo
         .get_message(&conv.conversation_id, &first_writeback_msg_id)
@@ -14455,6 +14373,21 @@ async fn view_warmup_of_finished_writeback_session_never_builds_or_reconciles_mo
         Some("finished"),
         "the exact keyed finalizer, not a generic status shortcut, must close the aggregate"
     );
+
+    // The turn-final write-back is detached from turn completion; wait for its
+    // durable terminal before asserting the mutated mount content it produces.
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if broadcaster.take_events().into_iter().any(|event| {
+                event.name == "knowledge.writeback" && event.data["status"] == "written"
+            }) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("detached turn-final writeback should reach its written terminal");
 
     let mutated_plan = knowledge
         .prepare_mounts_for_session(&workpath_key, &workspace)
