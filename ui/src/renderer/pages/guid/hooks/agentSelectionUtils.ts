@@ -24,16 +24,11 @@ export async function savePreferredMode(agentKey: string, mode: string): Promise
   }
 }
 
-/** Save preferred model ID to the agent's acp.config key */
-export async function savePreferredModelId(agentKey: string, model_id: string): Promise<void> {
-  try {
-    const config = configService.get('acp.config');
-    const backendConfig = config?.[agentKey as string] || {};
-    await configService.set('acp.config', { ...config, [agentKey]: { ...backendConfig, preferredModelId: model_id } });
-  } catch {
-    /* silent */
-  }
-}
+// NOTE: the former `savePreferredModelId` helper was removed on purpose:
+// ACP model choices are session-scoped. New conversations must initialize
+// from the agent CLI's local default config, so nothing may persist a
+// cross-conversation "preferred model" for ACP backends anymore. Stored
+// `acp.config[backend].preferredModelId` values from older builds are inert.
 
 /** Save default nomi provider/model so the Guid page restores it next session. */
 export async function saveNomiDefaultModel(provider_id: ProviderId, use_model: string): Promise<void> {

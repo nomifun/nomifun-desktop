@@ -10,7 +10,6 @@ import { isBackendHttpError } from '@/common/adapter/httpBridge';
 import type { IResponseMessage } from '@/common/adapter/ipcBridge';
 import type { TChatConversation } from '@/common/config/storage';
 import type { AcpModelInfo } from '@/common/types/platform/acpTypes';
-import { savePreferredModelId } from '@/renderer/pages/guid/hooks/agentSelectionUtils';
 import { DETECTED_AGENTS_SWR_KEY, fetchDetectedAgents, type AgentMetadata } from '@/renderer/utils/model/agentTypes';
 import { useCallback, useEffect, useMemo, useRef } from 'react';
 import useSWR, { mutate as mutateGlobal } from 'swr';
@@ -447,10 +446,11 @@ export const useAcpModelInfo = ({
         }
         onSelectModelSuccess?.(model_id);
 
-        // Persist only after the active ACP session accepts the model switch.
-        if (backend) {
-          void savePreferredModelId(backend, model_id);
-        }
+        // Session-scoped persistence ONLY: the conversation's extra keeps the
+        // switch alive across runtime rebuilds of THIS conversation. The
+        // switch is deliberately NOT saved as a global per-backend preference
+        // — new sessions must initialize from the CLI's own local default
+        // config, not from whatever model was last picked elsewhere.
         await ipcBridge.conversation.update.invoke({
           conversation_id: conversation_id,
           updates: { extra: { current_model_id: model_id } as TChatConversation['extra'] },

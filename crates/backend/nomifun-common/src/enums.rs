@@ -63,7 +63,7 @@ impl AgentType {
         match self {
             AgentType::Acp => match backend {
                 Some("claude") | Some("codebuddy") => "bypassPermissions",
-                Some("codex") => "full-access",
+                Some("codex") => "agent-full-access",
                 Some("opencode") => "build",
                 Some("cursor") => "agent",
                 _ => "yolo",
@@ -388,7 +388,7 @@ mod tests {
 
     #[test]
     fn agent_type_full_auto_mode_id_supports_non_acp_agents() {
-        assert_eq!(AgentType::Acp.full_auto_mode_id(Some("codex")), "full-access");
+        assert_eq!(AgentType::Acp.full_auto_mode_id(Some("codex")), "agent-full-access");
         assert_eq!(AgentType::Acp.full_auto_mode_id(Some("claude")), "bypassPermissions");
         assert_eq!(AgentType::Acp.full_auto_mode_id(Some("gemini")), "yolo");
         assert_eq!(AgentType::Acp.full_auto_mode_id(None), "yolo");

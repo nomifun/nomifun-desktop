@@ -3,6 +3,7 @@ mod agent_close;
 pub mod agent_event_tracker;
 pub mod agent_reconcile;
 mod agent_session_flow;
+mod bunx_recovery;
 pub mod catalog_forwarder;
 mod codex_sandbox;
 pub mod hooks;

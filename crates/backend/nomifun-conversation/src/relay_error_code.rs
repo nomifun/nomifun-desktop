@@ -33,6 +33,34 @@ pub fn fixed_failure(code: &'static str) -> Option<(String, bool)> {
     Some((code.to_owned(), fixed_code_retryable(code)))
 }
 
+/// Classify a runtime-BUILD failure (factory/spawn/handshake) into the same
+/// structured code the chat error card carries, instead of the flat
+/// `preparation_failed`. Channel retry logic and Mac-side receipt debugging
+/// can then distinguish `user_agent_handshake_timeout` from
+/// `user_agent_not_installed` etc. without parsing `result_error` text.
+///
+/// Runs the error through `AgentSendError`'s classifier — the exact mapping
+/// used for the persisted `tips` card — so the receipt and the card always
+/// agree. Unclassifiable errors (the catch-all `UNKNOWN_UPSTREAM_ERROR`
+/// bucket) keep the legacy `preparation_failed` code: for a build-phase
+/// failure that generic bucket carries no signal, while `preparation_failed`
+/// at least names the phase.
+pub fn classified_preparation_failure(
+    err: &nomifun_common::AppError,
+) -> Option<(String, bool)> {
+    let stream_error =
+        nomifun_ai_agent::AgentSendError::from_app_error_ref(err).into_stream_error();
+    match stream_error.code {
+        Some(code) if code != AgentErrorCode::UnknownUpstreamError => Some((
+            agent_error_code_token(code),
+            stream_error
+                .retryable
+                .unwrap_or(fixed_code_retryable(PREPARATION_FAILED)),
+        )),
+        _ => fixed_failure(PREPARATION_FAILED),
+    }
+}
+
 /// Map a terminal relay outcome (+ the final assistant text) to the
 /// structured receipt error columns.
 ///
@@ -155,5 +183,37 @@ mod tests {
                 "retryability contract for {code}"
             );
         }
+    }
+
+    /// Build-phase failures carry the classified code on the receipt: the
+    /// exact classifier the chat error card uses, so both surfaces agree.
+    #[test]
+    fn classified_preparation_failure_carries_handshake_timeout_code() {
+        let err = nomifun_common::AppError::BadGateway(
+            "Initialize handshake timed out after 120s".into(),
+        );
+        assert_eq!(
+            classified_preparation_failure(&err),
+            Some(("user_agent_handshake_timeout".into(), true))
+        );
+
+        let err = nomifun_common::AppError::BadGateway(
+            "Agent process exited before initialize handshake completed (exit code 1)".into(),
+        );
+        assert_eq!(
+            classified_preparation_failure(&err),
+            Some(("user_agent_handshake_failed".into(), true))
+        );
+    }
+
+    /// Unclassifiable build failures keep the legacy phase code so receipt
+    /// consumers keying on `preparation_failed` still see build failures.
+    #[test]
+    fn classified_preparation_failure_falls_back_to_preparation_failed() {
+        let err = nomifun_common::AppError::BadGateway("agent exploded mysteriously".into());
+        assert_eq!(
+            classified_preparation_failure(&err),
+            Some((PREPARATION_FAILED.to_owned(), true))
+        );
     }
 }

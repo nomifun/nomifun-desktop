@@ -627,9 +627,10 @@ mod tests {
             .get("0190f5fe-7c00-7a00-8000-000000000102")
             .await
             .unwrap();
-        // Legacy Nomi yolo aliases resolve to Codex's native
-        // `full-access` mode via the catalog row.
-        assert_eq!(codex.yolo_id.as_deref(), Some("full-access"));
+        // Legacy Nomi yolo aliases resolve to the codex bridge's native
+        // full-access mode via the catalog row (agent-full-access since the
+        // migration-022 swap to @agentclientprotocol/codex-acp).
+        assert_eq!(codex.yolo_id.as_deref(), Some("agent-full-access"));
     }
 
     #[tokio::test]

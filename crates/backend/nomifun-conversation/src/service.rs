@@ -8473,7 +8473,11 @@ impl ConversationService {
                         false,
                         None,
                         Some(&receipt_error),
-                        relay_error_code::fixed_failure(relay_error_code::PREPARATION_FAILED),
+                        // Classified build-failure code (e.g.
+                        // user_agent_handshake_timeout) so receipt consumers
+                        // don't have to parse result_error text; falls back
+                        // to preparation_failed for unclassifiable errors.
+                        relay_error_code::classified_preparation_failure(&err),
                     );
                     service
                         .release_and_complete_turn(
@@ -8543,7 +8547,9 @@ impl ConversationService {
                     false,
                     None,
                     Some(&receipt_error),
-                    relay_error_code::fixed_failure(relay_error_code::PREPARATION_FAILED),
+                    // Preparation touches the agent (resume/set_mode/clear):
+                    // carry the classified code when one applies.
+                    relay_error_code::classified_preparation_failure(&err),
                 );
                 service
                     .release_and_complete_turn(
