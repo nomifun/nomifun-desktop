@@ -11,10 +11,11 @@ it today:
 - [Docker / Docker Compose](#docker--docker-compose) — the same web server,
   containerised.
 
-> **Official pre-built installers are not yet published.** Desktop bundles,
-> macOS signing, updater artifacts, Docker, and native Linux service files can
-> be built locally; there is not yet an official public release channel. Until
-> then, every install path below builds from source. See
+> **Desktop and native service packaging still depends on the release channel.**
+> The Web server can be built from source, and the official Docker image is
+> published as
+> [`nomifun/nomifun-web`](https://hub.docker.com/repository/docker/nomifun/nomifun-web).
+> See
 > [`../contributing/building-and-packaging.md`](../contributing/building-and-packaging.md)
 > for the current packaging notes.
 
@@ -202,11 +203,41 @@ notes — see
 
 ## Docker / Docker Compose
 
-The repository ships a multi-stage `Dockerfile` and a `docker-compose.yml`
-that produce a **headless** (no GUI) image: SPA + `nomifun-web` + `bun` on
-`debian:bookworm-slim`.
+The official Docker Hub image is
+[`nomifun/nomifun-web`](https://hub.docker.com/repository/docker/nomifun/nomifun-web).
+It is a **headless** (no GUI) image: SPA + `nomifun-web` + `bun` on
+`debian:bookworm-slim`. The repository also ships a multi-stage `Dockerfile`
+and a `docker-compose.yml` for local source builds. The examples below use the
+published `v0.3.4` tag; replace it with a newer Docker Hub tag when one is
+available.
 
-### Quick start with Compose
+### Quick start with the official image
+
+```bash
+docker run -d \
+  --name nomifun-web \
+  --restart unless-stopped \
+  -p 8787:8787 \
+  -v nomifun-data:/data \
+  nomifun/nomifun-web:v0.3.4
+# then open http://<server-ip>:8787
+```
+
+To close the first-run setup window before the service is reachable, pre-seed
+the first admin:
+
+```bash
+docker run -d \
+  --name nomifun-web \
+  --restart unless-stopped \
+  -p 8787:8787 \
+  -v nomifun-data:/data \
+  -e NOMIFUN_ADMIN_USERNAME=admin \
+  -e NOMIFUN_ADMIN_PASSWORD='change-me-to-something-strong' \
+  nomifun/nomifun-web:v0.3.4
+```
+
+### Build locally with Compose
 
 From the repo root:
 

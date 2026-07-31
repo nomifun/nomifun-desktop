@@ -98,7 +98,12 @@ The pre-seed is **idempotent** — once an admin exists, the env vars are ignore
 
 ## Docker
 
-The repo ships a multi-stage `Dockerfile` and a `docker-compose.yml`. The image:
+The official Docker Hub image is
+[`nomifun/nomifun-web`](https://hub.docker.com/repository/docker/nomifun/nomifun-web).
+Use it when you want to deploy without a source checkout. The repo also ships a
+multi-stage `Dockerfile` and a `docker-compose.yml` for local source builds. The
+examples below use the published `v0.3.4` tag; replace it with a newer Docker
+Hub tag when one is available. The image:
 
 1. Builds the SPA with Bun.
 2. Compiles `nomifun-web` from the workspace.
@@ -106,7 +111,32 @@ The repo ships a multi-stage `Dockerfile` and a `docker-compose.yml`. The image:
 
 It exposes port `8787` and uses `/data` as the data volume.
 
-### Compose
+### Official image
+
+```bash
+docker run -d \
+  --name nomifun-web \
+  --restart unless-stopped \
+  -p 8787:8787 \
+  -v nomifun-data:/data \
+  nomifun/nomifun-web:v0.3.4
+# then open http://<server-ip>:8787 and create the first admin
+```
+
+For unattended or internet-facing deployments, pre-seed the first admin:
+
+```bash
+docker run -d \
+  --name nomifun-web \
+  --restart unless-stopped \
+  -p 8787:8787 \
+  -v nomifun-data:/data \
+  -e NOMIFUN_ADMIN_USERNAME=admin \
+  -e NOMIFUN_ADMIN_PASSWORD='change-me-to-something-strong' \
+  nomifun/nomifun-web:v0.3.4
+```
+
+### Build locally with Compose
 
 ```bash
 docker compose up -d --build
