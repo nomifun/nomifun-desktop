@@ -84,20 +84,26 @@ interface CronJobEventHandlers {
 }
 
 /**
- * Subscribe to cron job events with unified cleanup
+ * Subscribe to cron job events with unified cleanup.
+ *
+ * WebSocket delivery has no replay: any gap (reconnect, server lag resync)
+ * may have dropped cron job events, so `onResync` reloads the caller's
+ * durable snapshot after every reconnect.
  */
-function useCronJobSubscription(handlers: CronJobEventHandlers) {
+function useCronJobSubscription(handlers: CronJobEventHandlers, onResync?: () => void | Promise<void>) {
   useEffect(() => {
     const unsubCreate = ipcBridge.cron.onJobCreated.on(handlers.onJobCreated);
     const unsubUpdate = ipcBridge.cron.onJobUpdated.on(handlers.onJobUpdated);
     const unsubRemove = ipcBridge.cron.onJobRemoved.on(handlers.onJobRemoved);
+    const unsubReconnected = onResync ? ipcBridge.conversation.reconnected.on(() => void onResync()) : undefined;
 
     return () => {
       unsubCreate();
       unsubUpdate();
       unsubRemove();
+      unsubReconnected?.();
     };
-  }, [handlers.onJobCreated, handlers.onJobUpdated, handlers.onJobRemoved]);
+  }, [handlers.onJobCreated, handlers.onJobUpdated, handlers.onJobRemoved, onResync]);
 }
 
 /**
@@ -154,7 +160,7 @@ export function useCronJobs(conversation_id?: ConversationId) {
     [conversation_id]
   );
 
-  useCronJobSubscription(eventHandlers);
+  useCronJobSubscription(eventHandlers, fetchJobs);
 
   // Actions (without local state updates, rely on events)
   const actions = useCronJobActions();
@@ -217,7 +223,7 @@ export function useAllCronJobs() {
     []
   );
 
-  useCronJobSubscription(eventHandlers);
+  useCronJobSubscription(eventHandlers, fetchJobs);
 
   // Actions with local state updates
   const handleJobUpdated = useCallback((cron_job_id: CronJobId, job: ICronJob) => {
@@ -373,17 +379,7 @@ export function useCronJobsMap() {
     []
   );
 
-  useEffect(() => {
-    const unsubCreate = ipcBridge.cron.onJobCreated.on(eventHandlers.onJobCreated);
-    const unsubUpdate = ipcBridge.cron.onJobUpdated.on(eventHandlers.onJobUpdated);
-    const unsubRemove = ipcBridge.cron.onJobRemoved.on(eventHandlers.onJobRemoved);
-
-    return () => {
-      unsubCreate();
-      unsubUpdate();
-      unsubRemove();
-    };
-  }, [eventHandlers]);
+  useCronJobSubscription(eventHandlers, fetchAllJobs);
 
   // Helper functions
   const hasJobsForConversation = useCallback(
@@ -505,7 +501,8 @@ export function useCronJobRuns(cron_job_id: CronJobId | undefined) {
     void fetchRuns();
   }, [fetchRuns]);
 
-  // Refetch when this job executes.
+  // Refetch when this job executes. WebSocket delivery has no replay: also
+  // reload the run history after any gap (reconnect, server lag resync).
   useEffect(() => {
     if (!cron_job_id) return;
     const unsubExecuted = ipcBridge.cron.onJobExecuted.on((data) => {
@@ -513,8 +510,10 @@ export function useCronJobRuns(cron_job_id: CronJobId | undefined) {
         void fetchRuns();
       }
     });
+    const unsubReconnected = ipcBridge.conversation.reconnected.on(() => void fetchRuns());
     return () => {
       unsubExecuted();
+      unsubReconnected();
     };
   }, [cron_job_id, fetchRuns]);
 

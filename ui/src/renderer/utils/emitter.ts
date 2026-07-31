@@ -53,6 +53,12 @@ interface EventTypes {
   'terminal.list.refresh': void;
   // 会话删除事件 / Conversation deletion event
   'conversation.deleted': [ConversationId];
+  // 权威回合落定事件（本地合成）:HTTP GET 轮询确认运行时已空闲后发出,
+  // 让转录在所有 WS 帧丢失时也能重新加载。
+  // Authoritative turn settle (local synthetic): emitted once the HTTP
+  // GET-poll fallback confirms the runtime is idle, so the transcript
+  // reloads even when every WebSocket frame was lost.
+  'conversation.turn.settled': [ConversationId];
   // 预览面板事件 / Preview panel events
   'preview.open': [
     { content: string; contentType: PreviewContentType; metadata?: { title?: string; file_name?: string } },

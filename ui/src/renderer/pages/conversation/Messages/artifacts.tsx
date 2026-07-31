@@ -73,24 +73,40 @@ export const ConversationArtifactProvider: React.FC<React.PropsWithChildren<{ co
     []
   );
 
+  const loadArtifacts = useCallback(
+    (isCurrent: () => boolean) =>
+      ipcBridge.conversation.listArtifacts
+        .invoke({ conversation_id })
+        .then((items) => {
+          if (!isCurrent()) return;
+          // Merge instead of replace: an artifactStream frame that arrived on
+          // the new socket while this GET was in flight is NEWER than the
+          // snapshot the GET read — replacing would make its card vanish.
+          setArtifacts((current) => upsertArtifacts(current, items));
+        })
+        .catch((error) => {
+          console.error('[ConversationArtifactProvider] Failed to load artifacts:', error);
+        }),
+    [conversation_id]
+  );
+
+  // Initial durable snapshot + gap recovery under one lifecycle: WebSocket
+  // delivery has no replay, so any gap (reconnect, server lag resync) may
+  // have dropped artifactStream events and must reload the snapshot.
   useEffect(() => {
     let alive = true;
     setArtifacts([]);
 
-    void ipcBridge.conversation.listArtifacts
-      .invoke({ conversation_id })
-      .then((items) => {
-        if (!alive) return;
-        setArtifacts(upsertArtifacts([], items));
-      })
-      .catch((error) => {
-        console.error('[ConversationArtifactProvider] Failed to load artifacts:', error);
-      });
+    void loadArtifacts(() => alive);
+    const offReconnected = ipcBridge.conversation.reconnected.on(() => {
+      void loadArtifacts(() => alive);
+    });
 
     return () => {
       alive = false;
+      offReconnected();
     };
-  }, [conversation_id]);
+  }, [loadArtifacts]);
 
   useEffect(() => {
     if (!conversation_id) return;

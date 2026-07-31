@@ -202,7 +202,7 @@ async fn heartbeat_sends_ping_and_keeps_healthy_connections() {
 }
 
 #[tokio::test]
-async fn heartbeat_closes_expired_token_with_auth_expired_event() {
+async fn heartbeat_closes_aged_token_with_token_aged_close_only() {
     let mgr = WebSocketManager::new();
     let (tx, mut rx) = new_client_tx();
     mgr.add_client("user".into(), "bad-token".into(), tx);
@@ -210,30 +210,21 @@ async fn heartbeat_closes_expired_token_with_auth_expired_event() {
     let expired_authenticator: TokenAuthenticator = Arc::new(|_| None);
     let handle = mgr.start_heartbeat(expired_authenticator);
 
-    // Expect auth-expired event
-    let msg1 = tokio::time::timeout(Duration::from_secs(2), rx.recv())
-        .await
-        .expect("timeout")
-        .expect("closed");
-
-    match msg1 {
-        WsOutbound::Text(text) => {
-            let parsed: serde_json::Value = serde_json::from_str(&text).unwrap();
-            assert_eq!(parsed["name"], "auth-expired");
-            assert!(parsed["data"]["message"].is_string());
-        }
-        other => panic!("expected auth-expired, got {other:?}"),
-    }
-
-    // Expect close frame
-    let msg2 = tokio::time::timeout(Duration::from_secs(1), rx.recv())
+    // Only a TokenAged close, no auth-expired text frame: cookie sliding
+    // renewal means the HTTP session may still be alive, so the heartbeat
+    // must not emit a logout signal. A genuinely dead session is rejected
+    // at the next handshake with 1008.
+    let msg = tokio::time::timeout(Duration::from_secs(2), rx.recv())
         .await
         .expect("timeout")
         .expect("closed");
 
     assert_eq!(
-        msg2,
-        WsOutbound::Close(WebSocketCloseCode::PolicyViolation, "token expired".into())
+        msg,
+        WsOutbound::Close(
+            WebSocketCloseCode::TokenAged,
+            "handshake token aged out; reconnect".into()
+        )
     );
 
     // Connection should be removed

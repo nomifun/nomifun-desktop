@@ -51,25 +51,50 @@ export function usePendingConfirmationsRecovery(conversation_id: ConversationId,
     if (!enabled || !conversation_id) return;
     let cancelled = false;
 
-    void ipcBridge.conversation.confirmation.list
-      .invoke({ conversation_id })
-      .then((confirmations) => {
-        if (cancelled) return;
-        updateMessageList((list) => {
-          let next = list;
-          for (const confirmation of confirmations ?? []) {
-            if (hasPermissionMessageForCallId(next, confirmation.call_id)) continue;
-            next = next.concat(buildPendingConfirmationMessage(conversation_id, confirmation));
-          }
-          return next;
+    const recoverPendingConfirmations = () => {
+      void ipcBridge.conversation.confirmation.list
+        .invoke({ conversation_id })
+        .then((confirmations) => {
+          if (cancelled) return;
+          const pending = confirmations ?? [];
+          const pendingCallIds = new Set(pending.map((confirmation) => confirmation.call_id));
+          updateMessageList((list) => {
+            // The fetched set is the authoritative pending list. A recovery-
+            // created card (id prefixed `confirmation:`) whose confirmation is
+            // no longer pending was resolved while delivery was gapped — its
+            // `confirmation.remove` event is lost forever, so drop it here.
+            // Stream-created permission cards keep their own lifecycle: they
+            // may be newer than this snapshot (raised while the fetch was in
+            // flight) and must not be judged by it.
+            let next = list.filter((message) => {
+              if (message.type !== 'permission') return true;
+              if (!message.id.startsWith('confirmation:')) return true;
+              const callId = message.content?.call_id;
+              return callId ? pendingCallIds.has(callId) : true;
+            });
+            for (const confirmation of pending) {
+              if (hasPermissionMessageForCallId(next, confirmation.call_id)) continue;
+              next = next.concat(buildPendingConfirmationMessage(conversation_id, confirmation));
+            }
+            return next;
+          });
+        })
+        .catch((error) => {
+          console.warn('[pending-confirmations] failed to recover pending confirmations', {
+            conversation_id,
+            error: errorMessage(error),
+          });
         });
-      })
-      .catch((error) => {
-        console.warn('[pending-confirmations] failed to recover pending confirmations', {
-          conversation_id,
-          error: errorMessage(error),
-        });
-      });
+    };
+
+    recoverPendingConfirmations();
+
+    // WebSocket delivery has no replay: a confirmation raised while delivery
+    // was gapped never arrives as an event, so re-run the durable recovery
+    // fetch after every reconnect.
+    const offReconnected = ipcBridge.conversation.reconnected.on(() => {
+      recoverPendingConfirmations();
+    });
 
     const off = ipcBridge.conversation.confirmation.remove.on((event) => {
       if (event.conversation_id !== conversation_id) return;
@@ -78,6 +103,7 @@ export function usePendingConfirmationsRecovery(conversation_id: ConversationId,
 
     return () => {
       cancelled = true;
+      offReconnected();
       off();
     };
   }, [conversation_id, enabled, updateMessageList]);
