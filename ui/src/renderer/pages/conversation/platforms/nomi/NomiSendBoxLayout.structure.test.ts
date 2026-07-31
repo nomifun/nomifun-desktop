@@ -85,13 +85,43 @@ describe('Nomi sendbox control layout', () => {
     expect(chatSource.includes('sameModelRefs(collaborators, collaboratorReconciliation.retained)')).toBe(true);
   });
 
-  test('keeps the compact collaboration policy trigger icon-only in the conversation toolbar', () => {
+  test('keeps the compact collaboration policy icon ready for inline hover expansion', () => {
     const source = readSource(
       new URL('../../../../components/collaboration/CollaborationPolicyControl.tsx', import.meta.url),
     );
 
     expect(source.includes("data-testid='collaboration-policy-control'")).toBe(true);
     expect(source.includes("shape={compact ? 'circle' : 'round'}")).toBe(true);
+    expect(source.includes("compact ? 'nomi-sendbox-policy-btn' : ''")).toBe(true);
+    expect(source.includes("className='sendbox-responsive-label'")).toBe(true);
     expect(/\{compact && active &&\s*<span className=\{styles\.triggerStatus\}/.test(source)).toBe(true);
+  });
+
+  test('collapses text pills to icons and expands their labels inline on desktop hover', () => {
+    const sendBoxSource = readSource(new URL('./NomiSendBox.tsx', import.meta.url));
+    const modelSource = readSource(new URL('./NomiModelSelector.tsx', import.meta.url));
+    const sendBoxCss = readSource(new URL('../../../../components/chat/SendBox/sendbox.css', import.meta.url));
+    const collaboratorSource = readSource(new URL('../../../guid/components/GuidCollaboratorSelector.tsx', import.meta.url));
+    const modeSource = readSource(new URL('../../../../components/agent/AgentModeSelector.tsx', import.meta.url));
+    const summonSource = readSource(new URL('../../components/SummonPanel/index.tsx', import.meta.url));
+
+    expect(sendBoxSource.includes('sendbox-responsive-config-group')).toBe(true);
+    expect(sendBoxCss.includes('container-name: sendbox-config')).toBe(true);
+    expect(sendBoxCss.includes('@container sendbox-config (max-width: 560px)')).toBe(true);
+    expect(sendBoxCss.includes('.sendbox-responsive-label')).toBe(true);
+    expect(sendBoxCss.includes('max-width 160ms ease')).toBe(true);
+    expect(sendBoxCss.includes('@media (hover: hover) and (pointer: fine)')).toBe(true);
+    expect(sendBoxCss.includes('.nomi-sendbox-model-btn:hover')).toBe(true);
+    expect(sendBoxCss.includes('display: inline-flex !important')).toBe(true);
+
+    for (const source of [modelSource, collaboratorSource, modeSource]) {
+      expect(source.includes('<Tooltip')).toBe(false);
+      expect(source.includes('sendbox-responsive-label')).toBe(true);
+      expect(source.includes('aria-label=')).toBe(true);
+    }
+    const summonControlSource = summonSource.slice(summonSource.indexOf('const SummonControl'));
+    expect(summonControlSource.includes('<Tooltip')).toBe(false);
+    expect(summonSource.includes('sendbox-responsive-label')).toBe(true);
+    expect(summonSource.includes("className='nomi-sendbox-summon-btn'")).toBe(true);
   });
 });

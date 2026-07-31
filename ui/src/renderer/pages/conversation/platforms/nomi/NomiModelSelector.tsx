@@ -10,7 +10,7 @@ import { usePreviewContext } from '@/renderer/pages/conversation/Preview';
 import { useLayoutContext } from '@/renderer/hooks/context/LayoutContext';
 import { getModelDisplayLabel } from '@/renderer/utils/model/agentLogo';
 import { iconColors } from '@/renderer/styles/colors';
-import { Button, Dropdown, Menu, Tooltip } from '@arco-design/web-react';
+import { Button, Dropdown, Menu } from '@arco-design/web-react';
 import { Brain, Down } from '@icon-park/react';
 import React from 'react';
 import { useTranslation } from 'react-i18next';
@@ -37,24 +37,25 @@ const NomiModelSelector: React.FC<{
 
   if (disabled || !selection) {
     return (
-      <Tooltip content={t('conversation.welcome.modelSwitchNotSupported')} position='top'>
-        <Button
-          className={classNames(
-            'sendbox-model-btn header-model-btn min-w-0',
-            compact ? '!max-w-[120px]' : '!max-w-[280px]',
-            isMobileHeaderCompact && '!max-w-[160px]',
-            className
-          )}
-          shape='round'
-          size='small'
-          style={{ cursor: 'default' }}
-        >
-          <span className='flex items-center gap-6px min-w-0'>
-            {renderLogo()}
-            <span className='block truncate min-w-0'>{t('conversation.welcome.useCliModel')}</span>
+      <Button
+        className={classNames(
+          'sendbox-model-btn header-model-btn min-w-0',
+          compact ? '!max-w-[120px]' : '!max-w-[280px]',
+          isMobileHeaderCompact && '!max-w-[160px]',
+          className
+        )}
+        shape='round'
+        size='small'
+        style={{ cursor: 'default' }}
+        aria-label={t('conversation.welcome.useCliModel')}
+      >
+        <span className='flex items-center gap-6px min-w-0'>
+          {renderLogo()}
+          <span className='sendbox-responsive-label block truncate min-w-0'>
+            {t('conversation.welcome.useCliModel')}
           </span>
-        </Button>
-      </Tooltip>
+        </span>
+      </Button>
     );
   }
 
@@ -109,11 +110,17 @@ const NomiModelSelector: React.FC<{
         )}
         shape='round'
         size='small'
+        aria-label={label}
       >
         <span className='flex items-center gap-6px min-w-0'>
           {renderLogo()}
-          <span className='block truncate min-w-0'>{label}</span>
-          <Down theme='outline' size={12} fill={iconColors.secondary} className='shrink-0' />
+          <span className='sendbox-responsive-label block truncate min-w-0'>{label}</span>
+          <Down
+            theme='outline'
+            size={12}
+            fill={iconColors.secondary}
+            className='sendbox-responsive-chevron shrink-0'
+          />
         </span>
       </Button>
     </Dropdown>
