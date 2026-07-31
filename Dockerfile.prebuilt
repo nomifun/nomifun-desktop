@@ -1,0 +1,44 @@
+# syntax=docker/dockerfile:1
+
+# Runtime-only image for locally prebuilt artifacts.
+# Build it through:
+#   bun run docker:prebuilt -- --tag nomifun/nomifun-web:v0.3.4
+
+ARG BUN_IMAGE="oven/bun:1"
+ARG RUNTIME_IMAGE="ubuntu:26.04"
+
+FROM ${BUN_IMAGE} AS bun-base
+
+FROM ${RUNTIME_IMAGE}
+
+ARG APT_MIRROR=""
+ARG NOMIFUN_VERSION=""
+
+RUN if [ -n "$APT_MIRROR" ]; then \
+      for f in /etc/apt/sources.list /etc/apt/sources.list.d/*.list /etc/apt/sources.list.d/*.sources; do \
+        [ -f "$f" ] && sed -i -E "s|https?://deb.debian.org|$APT_MIRROR|g; s|https?://security.debian.org|$APT_MIRROR|g; s|https?://archive.ubuntu.com/ubuntu|$APT_MIRROR|g; s|https?://security.ubuntu.com/ubuntu|$APT_MIRROR|g" "$f" || true; \
+      done; \
+    fi
+RUN apt-get -o Acquire::Retries=5 update \
+    && apt-get -o Acquire::Retries=5 install -y --no-install-recommends \
+        ca-certificates git liblzma5 ripgrep zlib1g \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=bun-base /usr/local/bin/bun /usr/local/bin/bun
+COPY --chmod=755 nomifun-web /usr/local/bin/nomifun-web
+COPY web /opt/nomifun/web
+
+LABEL org.opencontainers.image.title="nomifun-web" \
+      org.opencontainers.image.version="${NOMIFUN_VERSION}"
+
+ENV NOMIFUN_WEB_HOST=0.0.0.0 \
+    NOMIFUN_WEB_PORT=8787 \
+    NOMIFUN_DATA_DIR=/data \
+    NOMIFUN_WEB_DIST=/opt/nomifun/web \
+    SHELL=/bin/bash
+
+VOLUME /data
+EXPOSE 8787
+HEALTHCHECK --interval=30s --timeout=5s --start-period=40s --retries=3 \
+  CMD bun -e "fetch('http://127.0.0.1:'+(process.env.NOMIFUN_WEB_PORT||'8787')+'/').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+CMD ["nomifun-web"]

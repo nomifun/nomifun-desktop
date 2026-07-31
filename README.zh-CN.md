@@ -320,6 +320,9 @@ bun run build:ui && bun run serve:web
 ```bash
 docker compose up -d --build
 # 然后打开 http://<服务器IP>:8787  —  配合自带的 Caddyfile 启用 TLS
+
+# 已有 ui/dist 和 target/release/nomifun-web 时的快路径：
+bun run docker:prebuilt -- --tag nomifun/nomifun-web:v0.3.4 --build-missing --sudo
 ```
 
 详见 [`docs/getting-started/installation.zh.md`](docs/getting-started/installation.zh.md) 与 [`docs/guides/web-server-deployment.zh.md`](docs/guides/web-server-deployment.zh.md)。
