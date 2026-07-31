@@ -1109,7 +1109,14 @@ export const dialog = {
 // File System — routed to /api/fs/* and /api/skills/*
 // ---------------------------------------------------------------------------
 
-export type SkillMarketSource = 'clawhub' | 'skillhub';
+export type SkillMarketSource =
+  | 'clawhub'
+  | 'skillhub'
+  | 'loophub'
+  | 'skillhub_mcp'
+  | 'mcpworld'
+  | 'clawhub_plugins'
+  | 'skillhub_packages';
 
 export interface ISkillMarketItem {
   id: string;
@@ -1129,6 +1136,24 @@ export interface ISkillMarketSyncResponse {
   fetched_at: number;
   items: ISkillMarketItem[];
   errors?: string[];
+}
+
+export interface ISkillMarketMcpConfigResponse {
+  config_json: unknown;
+}
+
+export interface ISkillMarketPackageResponse {
+  name: string;
+  description: string;
+  instructions: string;
+  skill_slugs: string[];
+  avatar?: string;
+}
+
+export interface ISkillMarketPackageInstallResponse {
+  package: ISkillMarketPackageResponse;
+  installed_skill_names: string[];
+  errors?: Array<{ skill_slug: string; error: string }>;
 }
 
 export const fs = {
@@ -1228,6 +1253,14 @@ export const fs = {
   syncSkillMarketRankings: httpPost<ISkillMarketSyncResponse, { sources?: SkillMarketSource[] }>(
     '/api/skills/market/rankings/sync'
   ),
+  resolveSkillMarketMcpConfig: httpPost<
+    ISkillMarketMcpConfigResponse,
+    { source: SkillMarketSource; id: string; url: string }
+  >('/api/skills/market/mcp/config'),
+  installSkillMarketPackage: httpPost<
+    ISkillMarketPackageInstallResponse,
+    { source: SkillMarketSource; id: string; url: string }
+  >('/api/skills/market/package/install'),
 };
 
 // ---------------------------------------------------------------------------

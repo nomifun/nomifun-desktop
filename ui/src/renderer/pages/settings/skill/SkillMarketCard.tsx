@@ -1,7 +1,7 @@
 import type { PresetTag } from '@/common/types/agent/presetTypes';
 import type { ISkillMarketItem } from '@/common/adapter/ipcBridge';
 import { getAvatarColorClass, normalizeTestId } from './skillPresentation';
-import { translateMarketDescription } from './skillMarket';
+import { marketSourceLabel, translateMarketDescription } from './skillMarket';
 import { Button, Tag } from '@arco-design/web-react';
 import { Plus } from '@icon-park/react';
 import React from 'react';
@@ -19,11 +19,16 @@ const MAX_VISIBLE_TAGS = 4;
 const resolveTagLabel = (tag: PresetTag, localeKey: string): string => tag.label_i18n?.[localeKey] || tag.label;
 
 const MarketSourceBadge: React.FC<{ source: ISkillMarketItem['source'] }> = ({ source }) => {
-  const label = source === 'clawhub' ? 'ClawHub' : 'SkillHub';
-  const className =
-    source === 'clawhub'
-      ? '!bg-primary-1 !text-primary-6'
-      : '!bg-[rgba(var(--success-6),0.1)] !text-[rgb(var(--success-6))]';
+  const label = marketSourceLabel(source);
+  const className = {
+    clawhub: '!bg-primary-1 !text-primary-6',
+    loophub: '!bg-[rgba(var(--warning-6),0.12)] !text-[rgb(var(--warning-7))]',
+    skillhub: '!bg-[rgba(var(--success-6),0.1)] !text-[rgb(var(--success-6))]',
+    skillhub_mcp: '!bg-[rgba(var(--arcoblue-6),0.1)] !text-[rgb(var(--arcoblue-6))]',
+    mcpworld: '!bg-[rgba(var(--purple-6),0.1)] !text-[rgb(var(--purple-6))]',
+    clawhub_plugins: '!bg-[rgba(var(--orange-6),0.12)] !text-[rgb(var(--orange-7))]',
+    skillhub_packages: '!bg-[rgba(var(--cyan-6),0.1)] !text-[rgb(var(--cyan-7))]',
+  }[source];
 
   return (
     <Tag
@@ -39,10 +44,12 @@ const MarketSourceBadge: React.FC<{ source: ISkillMarketItem['source'] }> = ({ s
 const SkillMarketCard: React.FC<SkillMarketCardProps> = ({ item, tagByKey, localeKey, onAdd }) => {
   const { t } = useTranslation();
   const testId = normalizeTestId(item.id);
+  const requiresApiKey = item.tags?.includes('requires_api_key') ?? false;
+  const noApiKey = item.tags?.includes('no_api_key') ?? false;
   const resolvedTags = [...(item.audience_tags ?? []), ...(item.scenario_tags ?? [])]
     .map((key) => tagByKey.get(key))
     .filter((tag): tag is PresetTag => Boolean(tag));
-  const rawTags = (item.tags ?? []).filter((tag) => !tagByKey.has(tag));
+  const rawTags = (item.tags ?? []).filter((tag) => !tagByKey.has(tag) && tag !== 'requires_api_key' && tag !== 'no_api_key');
   const visibleResolvedTags = resolvedTags.slice(0, MAX_VISIBLE_TAGS);
   const visibleRawTags = resolvedTags.length === 0 ? rawTags.slice(0, MAX_VISIBLE_TAGS) : [];
   const totalTagCount = resolvedTags.length > 0 ? resolvedTags.length : rawTags.length;
@@ -85,6 +92,16 @@ const SkillMarketCard: React.FC<SkillMarketCardProps> = ({ item, tagByKey, local
               {item.name}
             </span>
             <MarketSourceBadge source={item.source} />
+            {requiresApiKey && (
+              <Tag size='small' bordered={false} className='!bg-[rgba(var(--warning-6),0.12)] !text-[rgb(var(--warning-7))] !rounded-6px !text-10px'>
+                {t('settings.market.requiresApi', { defaultValue: 'Needs API' })}
+              </Tag>
+            )}
+            {!requiresApiKey && noApiKey && (
+              <Tag size='small' bordered={false} className='!bg-[rgba(var(--success-6),0.1)] !text-[rgb(var(--success-6))] !rounded-6px !text-10px'>
+                {t('settings.market.noApi', { defaultValue: 'No API' })}
+              </Tag>
+            )}
           </div>
           {item.stats && <div className='mt-2px text-11px text-[var(--color-text-3)] truncate'>{item.stats}</div>}
         </div>

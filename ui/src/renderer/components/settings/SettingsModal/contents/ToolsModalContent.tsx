@@ -290,6 +290,31 @@ const ModalMcpManagementSection: React.FC<{
 const ToolsModalContent: React.FC = () => {
   const [mcpMessage, mcpMessageContext] = useArcoMessage({ maxCount: 10 });
   const { mcpServers, extensionMcpServers, saveMcpServers, setMcpServers } = useMcpServers();
+  return (
+    <ToolsModalContentWithState
+      mcpMessage={mcpMessage}
+      mcpMessageContext={mcpMessageContext}
+      mcpServers={mcpServers}
+      extensionMcpServers={extensionMcpServers}
+      saveMcpServers={saveMcpServers}
+      setMcpServers={setMcpServers}
+    />
+  );
+};
+
+/**
+ * State-injected variant so hosts that already own the MCP server state (e.g.
+ * the /mcp hub page with its market tabs) can share one `useMcpServers`
+ * instance across tabs instead of double-fetching.
+ */
+export const ToolsModalContentWithState: React.FC<{
+  mcpMessage: MessageInstance;
+  mcpMessageContext: React.ReactNode;
+  mcpServers: IMcpServer[];
+  extensionMcpServers: ExtensionMcpServerContribution[];
+  setMcpServers: React.Dispatch<React.SetStateAction<IMcpServer[]>>;
+  saveMcpServers: (serversOrUpdater: IMcpServer[] | ((prev: IMcpServer[]) => IMcpServer[])) => Promise<void>;
+}> = ({ mcpMessage, mcpMessageContext, mcpServers, extensionMcpServers, saveMcpServers, setMcpServers }) => {
   const viewMode = useSettingsViewMode();
   const isPageMode = viewMode === 'page';
 

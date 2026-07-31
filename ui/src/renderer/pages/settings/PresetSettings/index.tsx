@@ -20,6 +20,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useLocation, useSearchParams } from 'react-router-dom';
+import { Tabs } from '@arco-design/web-react';
 import { useArcoMessage } from '@/renderer/utils/ui/useArcoMessage';
 import coworkSvg from '@/renderer/assets/icons/cowork.svg';
 import NomiScrollArea from '@/renderer/components/base/NomiScrollArea';
@@ -31,12 +32,16 @@ import PresetListPanel from './PresetListPanel';
 import DeletePresetModal from './DeletePresetModal';
 import SkillConfirmModals from './SkillConfirmModals';
 import TagManagementModal from './TagManagementModal';
+import PresetPackageMarketSettings from './PresetPackageMarketSettings';
 
 type PresetNavigationState = {
   openPresetId?: string;
   openPresetEditor?: boolean;
 };
 const OPEN_PRESET_EDITOR_INTENT_KEY = 'guid.openPresetEditorIntent';
+type PresetSettingsTab = 'library' | 'market';
+const isPresetSettingsTab = (value: string | null): value is PresetSettingsTab =>
+  value === 'library' || value === 'market';
 
 const PresetSettings: React.FC = () => {
   const { t } = useTranslation();
@@ -45,12 +50,25 @@ const PresetSettings: React.FC = () => {
   const [searchParams, setSearchParams] = useSearchParams();
   const navigationState = (location.state as PresetNavigationState | null) ?? null;
   const highlightId = searchParams.get('highlight');
+  const tabParam = searchParams.get('tab');
+  const activeTab: PresetSettingsTab = isPresetSettingsTab(tabParam) ? tabParam : 'library';
 
   const handleHighlightConsumed = useCallback(() => {
     const next = new URLSearchParams(searchParams);
     next.delete('highlight');
     setSearchParams(next, { replace: true });
   }, [searchParams, setSearchParams]);
+
+  const handleTabChange = useCallback(
+    (key: string) => {
+      if (!isPresetSettingsTab(key)) return;
+      const next = new URLSearchParams(searchParams);
+      if (key === 'library') next.delete('tab');
+      else next.set('tab', key);
+      setSearchParams(next, { replace: true });
+    },
+    [searchParams, setSearchParams]
+  );
   const avatarImageMap: Record<string, string> = useMemo(
     () => ({
       'cowork.svg': coworkSvg,
@@ -131,8 +149,16 @@ const PresetSettings: React.FC = () => {
       maxWidthClass='md:max-w-1200px'
     >
       {messageContext}
-    <div className='flex flex-col h-full w-full'>
-      <NomiScrollArea className='flex-1 min-h-0 pb-16px scrollbar-hide' disableOverflow>
+      <Tabs
+        activeTab={activeTab}
+        onChange={handleTabChange}
+        type='line'
+        lazyload
+        className='flex flex-col flex-1 min-h-0 [&>.arco-tabs-content]:pt-0'
+      >
+        <Tabs.TabPane key='library' title={t('settings.presetsPage.libraryTab', { defaultValue: 'Installed Presets' })}>
+          <div className='flex flex-col h-full w-full'>
+            <NomiScrollArea className='flex-1 min-h-0 pb-16px scrollbar-hide' disableOverflow>
         <PresetListPanel
           presets={presets}
           localeKey={localeKey}
@@ -236,20 +262,25 @@ const PresetSettings: React.FC = () => {
           setSelectedSkills={editor.setSelectedSkills}
           message={message}
         />
-      </NomiScrollArea>
+            </NomiScrollArea>
 
-      <TagManagementModal
-        visible={tagModalVisible}
-        onClose={() => setTagModalVisible(false)}
-        audienceTags={tags.audienceTags}
-        scenarioTags={tags.scenarioTags}
-        localeKey={localeKey}
-        onCreate={tags.createTag}
-        onRename={tags.renameTag}
-        onDelete={tags.deleteTag}
-        message={message}
-      />
-    </div>
+            <TagManagementModal
+              visible={tagModalVisible}
+              onClose={() => setTagModalVisible(false)}
+              audienceTags={tags.audienceTags}
+              scenarioTags={tags.scenarioTags}
+              localeKey={localeKey}
+              onCreate={tags.createTag}
+              onRename={tags.renameTag}
+              onDelete={tags.deleteTag}
+              message={message}
+            />
+          </div>
+        </Tabs.TabPane>
+        <Tabs.TabPane key='market' title={t('settings.presetsPage.marketTab', { defaultValue: 'Preset Market' })}>
+          <PresetPackageMarketSettings onImported={loadPresets} />
+        </Tabs.TabPane>
+      </Tabs>
     </HubPageShell>
   );
 };
