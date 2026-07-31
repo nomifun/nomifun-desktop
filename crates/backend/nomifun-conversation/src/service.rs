@@ -3508,20 +3508,14 @@ impl ConversationService {
             }
         };
 
-        // A model turn is not durably complete while one of its detached
-        // knowledge write-back workers can still publish to the filesystem or
-        // persist a terminal message state.  The exact completion/preparation
-        // fences above exclude successor admission while this activity fence
-        // drains.  Reconcile every quiesced attempt without a total timeout
-        // before committing Conversation Finished or its delivery receipt.
-        await_turn_writeback_quiesced(conversation_id).await;
-        reconcile_quiesced_writebacks_until_resolved(
-            Arc::clone(&self.conversation_repo),
-            Some(Arc::clone(&self.user_events)),
-            user_id,
-            conversation_id,
-        )
-        .await;
+        // Detached knowledge write-back workers are deliberately NOT awaited
+        // here: a model turn is durably complete once its transcript and
+        // delivery receipt settle, while the turn-final write-back continues
+        // in the background under its own per-message run guard. Lifecycle
+        // owners that must not race a late knowledge publication
+        // (stop/reset/delete/clear/edit) cancel and drain those workers
+        // explicitly — cancel_and_wait_for_turn_writebacks followed by the
+        // quiesce/reconcile pair — before their own durable finalization.
 
         // There is deliberately no total business timeout here.  Every
         // individual database attempt is bounded by the repository/SQLite
@@ -9115,68 +9109,72 @@ impl ConversationService {
                 return;
             }
 
-            // Knowledge write-back is part of the authoritative turn. A
-            // Conversation is not Finished, its receipt is not Completed, and
-            // a replacement turn cannot be admitted until this post-model
-            // work has durably reached a terminal write-back state.
+            // Turn-final knowledge write-back is deliberately detached from
+            // the authoritative turn: the Conversation Finishes and its
+            // receipt completes immediately after the model terminal, while
+            // the write-back continues in the background under its own
+            // per-message run guard. The guard keeps read-time orphan
+            // projection truthful and lets stop/reset/delete/clear/edit
+            // cancel and drain the worker, and the durable "started" intent
+            // is persisted before the turn finalizes so a crash always
+            // leaves a reconcilable, retryable state behind.
             if let Some((
                 knowledge_service,
-                mut request,
+                request,
                 msg_id,
                 final_text,
                 session_model,
             )) = final_turn_writeback
             {
-                let attempt = TurnWritebackAttempt::new(
-                    Arc::clone(&repo),
-                    Arc::clone(&user_events),
-                    user_id_owned.clone(),
-                    conv_id.clone(),
-                    msg_id,
-                    source_user_message_id,
-                    request.scope.clone(),
-                    final_text.clone(),
-                    Vec::new(),
-                    Vec::new(),
-                    1,
-                );
-                let writeback_result = match service
-                    .resolve_turn_writeback_model(session_model.as_ref())
-                    .await
-                {
-                    Ok(model) => {
-                        request.model = model;
-                        request.cancellation = Some(turn_token.clone());
-                        AssertUnwindSafe(run_turn_writeback_report(
-                            knowledge_service,
-                            request,
-                            final_text,
-                            attempt,
-                        ))
-                        .catch_unwind()
-                        .await
+                if let Some(guard) = service.try_start_turn_writeback(&conv_id, &msg_id) {
+                    let attempt = TurnWritebackAttempt::new(
+                        Arc::clone(&repo),
+                        Arc::clone(&user_events),
+                        user_id_owned.clone(),
+                        conv_id.clone(),
+                        msg_id,
+                        source_user_message_id,
+                        request.scope.clone(),
+                        final_text.clone(),
+                        Vec::new(),
+                        Vec::new(),
+                        1,
+                    );
+                    match attempt.emit_started_intent().await {
+                        Ok(()) => {
+                            // No workspace binding lease is carried: the
+                            // write-back publishes through knowledge-base
+                            // storage roots rather than the conversation's
+                            // mount namespace, and holding a mounted-signature
+                            // lease here would turn a later binding change
+                            // into a user-visible Conflict while the
+                            // background worker drains.
+                            service.spawn_turn_writeback(
+                                knowledge_service,
+                                request,
+                                session_model,
+                                final_text,
+                                attempt,
+                                guard,
+                                None,
+                            );
+                        }
+                        Err(error) => {
+                            warn!(
+                                conversation_id = %conv_id,
+                                error = %error,
+                                "Skipping turn-final knowledge write-back; its durable start intent could not be persisted"
+                            );
+                        }
                     }
-                    Err(writeback_error) => AssertUnwindSafe(
-                        finish_turn_writeback_failure(attempt, writeback_error),
-                    )
-                    .catch_unwind()
-                    .await,
-                };
-                match writeback_result {
-                    Ok(Ok(())) => {}
-                    Ok(Err(writeback_error)) => {
-                        error!(
-                            conversation_id = %conv_id,
-                            error = %ErrorChain(&writeback_error),
-                            "Knowledge write-back did not reach durable terminal state; retaining turn ownership"
-                        );
-                        // The current write-back owner retries terminal state
-                        // persistence internally. This branch is deliberately
-                        // fail-closed for future error variants.
-                        turn_token.cancelled().await;
-                        return;
-                    }
-                    Err(panic) => std::panic::resume_unwind(panic),
+                } else {
+                    // A concurrent owner for this exact message can only be a
+                    // manual retry admitted against a stale projection; that
+                    // run already owns the message's write-back state.
+                    warn!(
+                        conversation_id = %conv_id,
+                        "Skipping turn-final knowledge write-back; another write-back run already owns this message"
+                    );
                 }
             }
 
