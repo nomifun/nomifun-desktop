@@ -5,6 +5,9 @@
  */
 
 import type { ProviderModelResponse } from '@/common/types/provider/providerModel';
+import type { ModelTask } from '@/common/protocolBindings/ModelTask';
+import type { ModelTrait } from '@/common/protocolBindings/ModelTrait';
+import type { ProfileSource } from '@/common/protocolBindings/ProfileSource';
 import type { SpeechToTextConfig } from '@/common/types/provider/speech';
 import type { PresetReference, ResolvedPresetSnapshot } from '@/common/types/agent/presetTypes';
 import type {
@@ -416,45 +419,15 @@ export type IChatConversationRefer = {
   'chat.history': TChatConversation[];
 };
 
-export type ModelType =
-  | 'text' // 文本对话
-  | 'vision' // 视觉理解
-  | 'function_calling' // 工具调用
-  | 'image_generation' // 图像生成
-  | 'video_generation' // 视频生成
-  | 'web_search' // 网络搜索
-  | 'reasoning' // 推理模型
-  | 'embedding' // 嵌入模型
-  | 'rerank' // 重排序模型
-  | 'excludeFromPrimary'; // 排除：不适合作为主力模型
-
-export type ModelCapability = {
-  type: ModelType;
-  /**
-   * 是否为用户手动选择，如果为true，则表示用户手动选择了该类型，否则表示用户手动禁止了该模型；如果为undefined，则表示使用默认值。
-   * 后端按 snake_case 序列化为 `is_user_selected`（见 crates/backend/nomifun-api-types/src/provider.rs 的 ModelCapability，无 rename），此处须与线名一致。
-   */
-  is_user_selected?: boolean;
-};
-
 /**
- * 统一多模态能力词表 —— 镜像 crates/backend/nomifun-api-types/src/model_task.rs。
+ * 统一多模态能力词表 —— ts-rs 生成契约的 re-export（生成源
+ * crates/backend/nomifun-api-types/src/model_task.rs，由
+ * `cargo test -p nomifun-api-types` 重新生成到 @/common/protocolBindings/）。
  * ModelTask 决定端点/请求体；ModelTrait 是同一任务内的细化（主要修饰 chat）。
- * 无 ts-rs：改动须同步 Rust 与此处。
  */
-export type ModelTask =
-  | 'chat'
-  | 'image_generation'
-  | 'image_edit'
-  | 'video_generation'
-  | 'speech_synthesis'
-  | 'speech_recognition'
-  | 'embedding'
-  | 'rerank';
-
-export type ModelTrait = 'vision_input' | 'function_calling' | 'reasoning' | 'web_search';
-
-export type ProfileSource = 'inferred' | 'user';
+export type { ModelTask } from '@/common/protocolBindings/ModelTask';
+export type { ModelTrait } from '@/common/protocolBindings/ModelTrait';
+export type { ProfileSource } from '@/common/protocolBindings/ProfileSource';
 
 /** 权威 per-model 能力档案（键 (provider_id, model)）。 */
 export interface ModelProfile {
@@ -474,10 +447,6 @@ export interface IProvider {
   base_url: string;
   api_key: string;
   models: string[];
-  /**
-   * 模型能力标签列表。打了标签就是支持，没打就是不支持
-   */
-  capabilities?: ModelCapability[];
   /**
    * 每个模型的上下文窗口限制。映射模型名称到 token 数。
    * Per-model context window limits. Maps model name to token count.

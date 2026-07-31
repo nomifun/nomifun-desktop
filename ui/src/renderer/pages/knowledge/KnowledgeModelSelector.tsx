@@ -10,6 +10,7 @@ import { useNavigate } from 'react-router-dom';
 import { Button, Dropdown, Menu } from '@arco-design/web-react';
 import { Brain, Down, Plus } from '@icon-park/react';
 import { configService } from '@/common/config/configService';
+import { modelHealthOf } from '@/common/utils/providerModels';
 import { useConfig } from '@/renderer/hooks/config/useConfig';
 import { iconColors } from '@/renderer/styles/colors';
 import { useModelsForTask } from '@/renderer/hooks/agent/useModelsForTask';
@@ -117,7 +118,7 @@ const KnowledgeModelSelector: React.FC<KnowledgeModelSelectorProps> = ({
             return (
               <Menu.ItemGroup title={providerLabel(provider)} key={provider.id}>
                 {models.map((modelName) => {
-                  const healthStatus = provider.model_health?.[modelName]?.status || 'unknown';
+                  const healthStatus = modelHealthOf(provider, modelName)?.status || 'unknown';
                   const healthColor =
                     healthStatus === 'healthy'
                       ? 'bg-green-500'

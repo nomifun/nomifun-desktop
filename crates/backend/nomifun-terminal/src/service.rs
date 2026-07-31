@@ -31,8 +31,11 @@ use crate::types::{
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 struct TerminalKnowledgeScope {
+    /// Spawn-time snapshot of the workspace's bound base ids, signed into the
+    /// child capability for audit. Terminal dispatch resolves the LIVE
+    /// binding per call, so this is not the runtime authority; write access
+    /// is likewise policy-resolved live (no allow_write here).
     kb_ids: Vec<KnowledgeBaseId>,
-    allow_write: bool,
 }
 
 /// Locale keys whose presence in a create request means the caller explicitly
@@ -476,11 +479,16 @@ impl TerminalService {
         }
     }
 
-    /// Build the launch enhancement for a spawn: knowledge_search MCP when bases
-    /// are mounted AND the MCP server is wired; requirement MCP when the requirement
-    /// server is wired (unconditional —scoped by terminal_id + owner_kind);
-    /// lifecycle hooks when the lifecycle server is wired. Empty otherwise (honest
-    /// no-op).
+    /// Build the launch enhancement for a spawn: knowledge_search MCP whenever
+    /// the MCP server is wired (unconditional, mirroring the requirement MCP's
+    /// D2 always-inject verdict — `apply_enhancement` only renders MCP servers
+    /// for known agent CLIs, so shell/unknown CLIs never receive it). The
+    /// terminal knowledge scope in the signed capability is a spawn-time
+    /// snapshot; the dispatch layer resolves the live workpath binding per
+    /// call, so a binding created or edited AFTER launch takes effect without
+    /// a relaunch. Requirement MCP when the requirement server is wired;
+    /// lifecycle hooks when the lifecycle server is wired. Empty otherwise
+    /// (honest no-op).
     fn build_enhancement(
         &self,
         knowledge_scope: &TerminalKnowledgeScope,
@@ -494,7 +502,7 @@ impl TerminalService {
     ) {
         let mut enh = crate::enhance::TerminalLaunchEnhancement::default();
         let mut leases = LoopbackCapabilityLeaseSet::new();
-        if !knowledge_scope.kb_ids.is_empty()
+        if !workspace_path.trim().is_empty()
             && let Some(cfg) = self.knowledge_mcp_config()
         {
             use nomifun_api_types::KnowledgeMcpConfig as K;
@@ -503,7 +511,6 @@ impl TerminalService {
                 terminal_id,
                 workspace_path,
                 &knowledge_scope.kb_ids,
-                knowledge_scope.allow_write,
             ) {
                 Ok(child) => {
                     let env = std::collections::HashMap::from([(
@@ -1073,6 +1080,14 @@ impl TerminalService {
         self.knowledge.read().ok().and_then(|g| g.clone())
     }
 
+    /// The backend-managed default workspace root terminals are created under.
+    /// Exposed so the app layer can register it with the knowledge service's
+    /// live cwd resolvers (`add_managed_root`) — both sides must derive the
+    /// same workpath key for the same cwd.
+    pub fn work_dir(&self) -> &std::path::Path {
+        &self.work_dir
+    }
+
     /// Persist the create-time knowledge selection. Best-effort: a missing
     /// knowledge service or a failed write only warns.
     ///
@@ -1112,9 +1127,11 @@ impl TerminalService {
 
     /// Sync this terminal's bound knowledge bases into `{cwd}/.nomi/knowledge/`
     /// and materialize the standalone README contract next to the mounts.
-    /// Returns the mounted base ids + write permission that are signed into the
-    /// per-child capability. The README's `has_search_tool` claim is honest: it only
-    /// asserts the tool exists when the MCP is launch-injected —true for
+    /// Returns the mounted base ids that are signed into the per-child
+    /// capability as the spawn-time snapshot (dispatch resolves the live
+    /// binding per call; write access is policy-resolved live, so no write
+    /// flag is returned). The README's `has_search_tool` claim is honest: it
+    /// only asserts the tool exists when the MCP is launch-injected —true for
     /// Claude/Codex (including wrappers like `stepcode claude`). Gemini has no
     /// secure launch-time injection mechanism, so it is false there.
     /// Never blocks the launch —failures degrade to warnings.
@@ -1195,7 +1212,38 @@ impl TerminalService {
                 .iter()
                 .map(|m| m.knowledge_base_id.clone())
                 .collect(),
-            allow_write: outcome.writeback,
+        }
+    }
+
+    /// Re-sync `.nomi/knowledge` mounts + README for every LIVE terminal whose
+    /// workspace resolves to `changed_key` — invoked (via the app-layer hook)
+    /// when a workpath knowledge binding is persisted, so the on-disk contract
+    /// tracks the binding without a PTY relaunch. The MCP capability needs no
+    /// re-issue: terminal dispatch resolves the live binding per call.
+    /// Best-effort per terminal; failures only warn.
+    pub async fn resync_workpath_knowledge(&self, changed_key: &str) {
+        let live_ids: Vec<String> = self.live.iter().map(|e| e.key().clone()).collect();
+        for id in live_ids {
+            let row = match self.repo.get_by_id(&id).await {
+                Ok(Some(row)) => row,
+                Ok(None) => continue,
+                Err(error) => {
+                    warn!(terminal_id = %id, %error, "binding resync: terminal row lookup failed");
+                    continue;
+                }
+            };
+            let wp_key = nomifun_knowledge::session_workpath_key(
+                std::path::Path::new(&row.cwd),
+                &self.work_dir,
+            );
+            if wp_key != changed_key {
+                continue;
+            }
+            let args = crate::types::parse_args(&row.args);
+            let _ = self
+                .sync_knowledge_workspace(&id, &row.cwd, &row.command, &args)
+                .await;
+            info!(terminal_id = %id, workpath = changed_key, "knowledge binding change re-synced into live terminal workspace");
         }
     }
 
@@ -2066,9 +2114,12 @@ impl TerminalService {
         let (cols, rows) = validate_stored_pty_size(row.cols, row.rows)?;
         let args = crate::types::parse_args(&row.args);
         let env = process_env_from_persisted(row.env.as_deref());
-        // Re-sync knowledge mounts + README on every relaunch: this is the
-        // documented moment a binding change (via KnowledgeControl) takes
-        // effect for a terminal session.
+        // Re-sync knowledge mounts + README on every relaunch. Binding
+        // changes already reach a LIVE terminal through the binding-change
+        // hook (`resync_workpath_knowledge`) and live MCP dispatch; the
+        // relaunch re-sync additionally refreshes the signed capability
+        // snapshot and (re)injects the MCP bridge for sessions that launched
+        // without it.
         let kb_ids = self
             .sync_knowledge_workspace(&id, &row.cwd, &row.command, &args)
             .await;
@@ -6098,18 +6149,22 @@ mod tests {
         assert_eq!(svc.knowledge_mcp_config().map(|c| c.port()), Some(51123));
     }
 
-    /// Three-way gate of `build_enhancement`:
-    /// 1. empty kb_ids → no enhancement (no MCP server).
-    /// 2. kb_ids present but no `knowledge_mcp_config` wired → no enhancement.
+    /// Three-way gate of `build_enhancement` (post live-binding fix):
+    /// 1. empty kb_ids with config wired → STILL injected (always-inject, D2
+    ///    precedent): the live dispatch resolves the binding per call, so a
+    ///    base bound after launch works without relaunch.
+    /// 2. no `knowledge_mcp_config` wired → no enhancement.
     /// 3. kb_ids present AND config wired → exactly one `McpServerSpec` with
-    ///    PORT+TOKEN env (no KB_IDS —scope resolved at runtime by bridge's cwd).
+    ///    the capability env (no KB_IDS —live scope resolved at dispatch).
+    /// 4. empty workspace path → no knowledge injection (capability scope
+    ///    requires a non-empty workspace identity).
     #[tokio::test]
     async fn build_enhancement_three_way_gate() {
         use nomifun_api_types::KnowledgeMcpConfig as K;
         let (svc, _bc) = service();
         let terminal_id = nomifun_common::TerminalId::new();
 
-        // Case 1: empty kb_ids → always empty regardless of config.
+        // Case 1: empty kb_ids + config wired → knowledge MCP IS injected.
         svc.with_knowledge_mcp_config(
             knowledge_mcp_config(51123, "nomicore"),
             std::env::temp_dir(),
@@ -6121,11 +6176,12 @@ mod tests {
             1,
             "/workspace",
         );
-        assert!(
-            enh.mcp_servers.is_empty(),
-            "empty kb_ids must yield no MCP servers"
+        assert_eq!(
+            enh.mcp_servers.len(),
+            1,
+            "empty kb_ids must still inject the knowledge MCP (live binding resolution)"
         );
-        assert!(leases.is_empty());
+        assert_eq!(leases.len(), 1);
 
         // Case 2: kb_ids present but NO knowledge_mcp_config wired → empty.
         let (svc2, _bc2) = service(); // fresh service, config NOT wired
@@ -6133,7 +6189,6 @@ mod tests {
         let (enh, leases) = svc2.build_enhancement(
             &TerminalKnowledgeScope {
                 kb_ids: vec![KnowledgeBaseId::new()],
-                allow_write: false,
             },
             TEST_USER_ID,
             &terminal_id2,
@@ -6146,11 +6201,24 @@ mod tests {
         );
         assert!(leases.is_empty());
 
+        // Case 4: empty workspace path → no knowledge injection.
+        let (enh, leases) = svc.build_enhancement(
+            &TerminalKnowledgeScope::default(),
+            TEST_USER_ID,
+            &terminal_id,
+            2,
+            "  ",
+        );
+        assert!(
+            enh.mcp_servers.is_empty(),
+            "blank workspace identity must not issue a capability"
+        );
+        assert!(leases.is_empty());
+
         // Case 3: kb_ids present AND config wired → one McpServerSpec.
         let (enh, leases) = svc.build_enhancement(
             &TerminalKnowledgeScope {
                 kb_ids: vec![KnowledgeBaseId::new(), KnowledgeBaseId::new()],
-                allow_write: false,
             },
             TEST_USER_ID,
             &terminal_id,
@@ -6359,7 +6427,6 @@ mod tests {
         let (enh, leases) = svc.build_enhancement(
             &TerminalKnowledgeScope {
                 kb_ids: vec![KnowledgeBaseId::new()],
-                allow_write: true,
             },
             TEST_USER_ID,
             &terminal_id,

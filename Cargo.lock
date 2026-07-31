@@ -5530,6 +5530,7 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_urlencoded",
+ "ts-rs",
 ]
 
 [[package]]

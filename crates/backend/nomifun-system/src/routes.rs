@@ -6,8 +6,8 @@ use axum::routing::{delete, get, patch, post};
 use std::path::PathBuf;
 
 use nomifun_api_types::{
-    ApiResponse, ClientPreferencesResponse, CreateProviderModelRequest, CreateProviderRequest,
-    DetectProtocolRequest,
+    ApiResponse, ClientPreferencesResponse, CloneProviderRequest, CreateProviderModelRequest,
+    CreateProviderRequest, DetectProtocolRequest,
     FetchModelsAnonymousRequest, FetchModelsRequest, FetchModelsResponse, ManagedModel,
     ManagedModelHealthBatchResult,
     ManagedModelHealthResult, ManagedModelServiceStatus, ModelProfile, ModelProfileKeyRequest,
@@ -253,14 +253,20 @@ async fn delete_provider(
 /// as-is), every `provider_models` profile row (minus per-deployment health)
 /// and every connection profile. Replaces the frontend clone, which lost the
 /// per-model rows keyed by the old provider_id.
+///
+/// The JSON body is optional: a missing body (or one without a usable
+/// `name`) falls back to the default `"{source name} copy"` clone name; a
+/// trimmed non-empty `name` wins.
 async fn clone_provider(
     State(state): State<SystemRouterState>,
     Path(provider_id): Path<String>,
+    body: Option<Json<CloneProviderRequest>>,
 ) -> Result<(StatusCode, Json<ApiResponse<ProviderResponse>>), AppError> {
+    let req = body.map(|Json(req)| req).unwrap_or_default();
     let connection_repo = state.provider_connection_service.repository();
     let provider = state
         .provider_service
-        .clone_provider(&provider_id, &connection_repo)
+        .clone_provider(&provider_id, req.name.as_deref(), &connection_repo)
         .await?;
     Ok((StatusCode::CREATED, Json(ApiResponse::ok(provider))))
 }

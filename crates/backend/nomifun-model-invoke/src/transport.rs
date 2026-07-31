@@ -1,17 +1,121 @@
 //! Shared HTTP transport helpers (ported from
 //! `nomifun-creation/src/adapters/mod.rs`, retyped onto [`InvokeError`]):
-//! network-error mapping, non-2xx classification, capped body reads and
-//! base64 en/decoding.
+//! network-error mapping, non-2xx classification, capped body reads, base64 /
+//! hex en/decoding — plus the shared send family ([`post_json`] /
+//! [`post_multipart`] / [`post_raw`] / [`get_request`] over
+//! [`send_with_rotation`]) that gives every adapter multi-key rotation on
+//! 401/403/429 for free.
+
+use std::time::Duration;
 
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
 
+use crate::auth::AuthMaterial;
 use crate::error::{InvokeError, InvokeErrorKind};
 
 /// Map a reqwest transport error onto [`InvokeError`]
 /// (timeout → [`InvokeErrorKind::Timeout`], else [`InvokeErrorKind::Network`]).
 pub fn net_err(e: reqwest::Error) -> InvokeError {
     InvokeError::network(&e)
+}
+
+/// HTTP statuses that mean "this key was refused / throttled" — the rotation
+/// trigger set: 401/403 (auth) and 429 (rate limit).
+fn is_rotation_status(status: reqwest::StatusCode) -> bool {
+    matches!(status.as_u16(), 401 | 403 | 429)
+}
+
+/// Send a request, rotating through the connection's stored key list on
+/// 401/403/429.
+///
+/// `build` constructs a FRESH un-authenticated [`reqwest::RequestBuilder`] per
+/// attempt (builders are consumed by `send`, and multipart bodies cannot be
+/// cloned). Rotation applies only to array-key schemes
+/// ([`crate::auth::AuthScheme::rotates`]) with 2+ stored keys: each key gets
+/// exactly one attempt, in stored order, and the FIRST response outside the
+/// rotation trigger set (success or any other failure) is returned. When every
+/// key is refused, the last response is returned for the caller to classify —
+/// adapters keep their existing `error_from_response` handling. Non-rotating
+/// schemes (MultiHeader) and single-key credentials are a plain single send.
+/// Transport errors are never rotated (they are not key-specific).
+pub(crate) async fn send_with_rotation<F>(auth: &AuthMaterial, build: F) -> Result<reqwest::Response, InvokeError>
+where
+    F: Fn() -> Result<reqwest::RequestBuilder, InvokeError>,
+{
+    let secrets = if auth.scheme.rotates() { auth.secrets() } else { Vec::new() };
+    if secrets.len() < 2 {
+        // Single-shot path: `apply` also surfaces the canonical Config error
+        // for empty credentials.
+        return auth.apply(build()?)?.send().await.map_err(net_err);
+    }
+    let last = secrets.len() - 1;
+    for (idx, secret) in secrets.iter().enumerate() {
+        let resp = auth.apply_with_secret(build()?, secret)?.send().await.map_err(net_err)?;
+        if idx < last && is_rotation_status(resp.status()) {
+            continue; // this key was refused/throttled — try the next one
+        }
+        return Ok(resp);
+    }
+    unreachable!("rotation loop always returns on the last key")
+}
+
+/// `POST url` with a JSON body through key rotation.
+pub(crate) async fn post_json(
+    http: &reqwest::Client,
+    url: &str,
+    timeout: Duration,
+    auth: &AuthMaterial,
+    body: &serde_json::Value,
+) -> Result<reqwest::Response, InvokeError> {
+    send_with_rotation(auth, || Ok(http.post(url).timeout(timeout).json(body))).await
+}
+
+/// `POST url` with a multipart body through key rotation. `make_form` builds
+/// a fresh [`reqwest::multipart::Form`] per attempt (forms are not cloneable).
+pub(crate) async fn post_multipart<F>(
+    http: &reqwest::Client,
+    url: &str,
+    timeout: Duration,
+    auth: &AuthMaterial,
+    make_form: F,
+) -> Result<reqwest::Response, InvokeError>
+where
+    F: Fn() -> Result<reqwest::multipart::Form, InvokeError>,
+{
+    send_with_rotation(auth, || Ok(http.post(url).timeout(timeout).multipart(make_form()?))).await
+}
+
+/// `POST url` with a raw binary body (+ `Content-Type` + query string) through
+/// key rotation (Deepgram-style upload).
+pub(crate) async fn post_raw(
+    http: &reqwest::Client,
+    url: &str,
+    timeout: Duration,
+    auth: &AuthMaterial,
+    content_type: &str,
+    query: &[(&str, String)],
+    body: &[u8],
+) -> Result<reqwest::Response, InvokeError> {
+    send_with_rotation(auth, || {
+        Ok(http
+            .post(url)
+            .timeout(timeout)
+            .header(reqwest::header::CONTENT_TYPE, content_type)
+            .query(query)
+            .body(body.to_vec()))
+    })
+    .await
+}
+
+/// `GET url` through key rotation (status polls / content downloads).
+pub(crate) async fn get_request(
+    http: &reqwest::Client,
+    url: &str,
+    timeout: Duration,
+    auth: &AuthMaterial,
+) -> Result<reqwest::Response, InvokeError> {
+    send_with_rotation(auth, || Ok(http.get(url).timeout(timeout))).await
 }
 
 /// Longest Retry-After we are willing to honor (seconds).
@@ -95,14 +199,30 @@ pub fn encode_b64(b: &[u8]) -> String {
     BASE64.encode(b)
 }
 
+/// Decode a HEX-encoded payload (MiniMax t2a returns audio as a hex string,
+/// not base64). Tolerates surrounding whitespace; rejects odd length and
+/// non-hex digits.
+pub fn decode_hex(s: &str) -> Option<Vec<u8>> {
+    let s = s.trim();
+    if s.len() % 2 != 0 {
+        return None;
+    }
+    (0..s.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(s.get(i..i + 2)?, 16).ok())
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use std::time::Duration;
 
-    use wiremock::matchers::{method, path};
+    use serde_json::json;
+    use wiremock::matchers::{header, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     use super::*;
+    use crate::auth::{AuthMaterial, AuthScheme};
 
     async fn respond(template: ResponseTemplate) -> reqwest::Response {
         let server = MockServer::start().await;
@@ -115,6 +235,223 @@ mod tests {
         assert_eq!(decode_b64(&encode_b64(b"hello")).unwrap(), b"hello");
         assert_eq!(decode_b64(" aGVsbG8= ").unwrap(), b"hello");
         assert!(decode_b64("!!not base64!!").is_none());
+    }
+
+    #[test]
+    fn hex_decodes_valid_and_rejects_malformed() {
+        assert_eq!(decode_hex("68656c6c6f").unwrap(), b"hello");
+        // Uppercase digits and surrounding whitespace tolerated.
+        assert_eq!(decode_hex(" 48490A ").unwrap(), b"HI\n");
+        assert_eq!(decode_hex("").unwrap(), Vec::<u8>::new());
+        for bad in ["abc", "zz", "0g", "6 8"] {
+            assert!(decode_hex(bad).is_none(), "input {bad:?}");
+        }
+    }
+
+    // -- multi-key rotation -----------------------------------------------------
+
+    fn bearer(keys: &[&str]) -> AuthMaterial {
+        AuthMaterial { scheme: AuthScheme::Bearer, credentials: json!({ "api_keys": keys }) }
+    }
+
+    /// Mount a 401 for `Bearer <bad>` and a 200 for `Bearer <good>` on POST /r.
+    async fn rotation_server(bad: &str, good: &str) -> MockServer {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/r"))
+            .and(header("authorization", format!("Bearer {bad}")))
+            .respond_with(ResponseTemplate::new(401).set_body_string("bad key"))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/r"))
+            .and(header("authorization", format!("Bearer {good}")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"ok": true})))
+            .mount(&server)
+            .await;
+        server
+    }
+
+    #[tokio::test]
+    async fn rotation_first_key_401_second_key_succeeds() {
+        let server = rotation_server("sk-bad", "sk-good").await;
+        let auth = bearer(&["sk-bad", "sk-good"]);
+        let url = format!("{}/r", server.uri());
+
+        let resp = post_json(&reqwest::Client::new(), &url, Duration::from_secs(5), &auth, &json!({"p": 1}))
+            .await
+            .unwrap();
+        assert_eq!(resp.status().as_u16(), 200);
+
+        // Two requests, each carrying a DIFFERENT Authorization header.
+        let requests = server.received_requests().await.unwrap();
+        assert_eq!(requests.len(), 2);
+        let auth_of = |i: usize| requests[i].headers.get("authorization").unwrap().to_str().unwrap().to_string();
+        assert_eq!(auth_of(0), "Bearer sk-bad");
+        assert_eq!(auth_of(1), "Bearer sk-good");
+    }
+
+    #[tokio::test]
+    async fn rotation_403_and_429_also_trigger_next_key() {
+        for status in [403u16, 429] {
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .and(path("/r"))
+                .and(header("authorization", "Bearer sk-1"))
+                .respond_with(ResponseTemplate::new(status))
+                .expect(1)
+                .mount(&server)
+                .await;
+            Mock::given(method("POST"))
+                .and(path("/r"))
+                .and(header("authorization", "Bearer sk-2"))
+                .respond_with(ResponseTemplate::new(200))
+                .expect(1)
+                .mount(&server)
+                .await;
+            let auth = bearer(&["sk-1", "sk-2"]);
+            let url = format!("{}/r", server.uri());
+            let resp =
+                post_json(&reqwest::Client::new(), &url, Duration::from_secs(5), &auth, &json!({})).await.unwrap();
+            assert_eq!(resp.status().as_u16(), 200, "trigger status {status}");
+        }
+    }
+
+    #[tokio::test]
+    async fn rotation_all_keys_fail_returns_last_response_classified_as_auth() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/r"))
+            .respond_with(ResponseTemplate::new(401).set_body_string("every key is bad"))
+            .expect(3)
+            .mount(&server)
+            .await;
+
+        let auth = bearer(&["sk-1", "sk-2", "sk-3"]);
+        let url = format!("{}/r", server.uri());
+        let resp =
+            post_json(&reqwest::Client::new(), &url, Duration::from_secs(5), &auth, &json!({})).await.unwrap();
+        assert_eq!(resp.status().as_u16(), 401, "last refusal is surfaced");
+        // The caller-side classification (every adapter's error path) → Auth.
+        let err = error_from_response(resp).await;
+        assert_eq!(err.kind, InvokeErrorKind::Auth);
+        assert!(err.message.contains("every key is bad"), "message: {}", err.message);
+        assert_eq!(server.received_requests().await.unwrap().len(), 3, "one attempt per key");
+    }
+
+    #[tokio::test]
+    async fn rotation_non_trigger_failure_does_not_rotate() {
+        // A 500 is not key-specific: no second attempt.
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/r"))
+            .respond_with(ResponseTemplate::new(500).set_body_string("boom"))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let auth = bearer(&["sk-1", "sk-2"]);
+        let url = format!("{}/r", server.uri());
+        let resp =
+            post_json(&reqwest::Client::new(), &url, Duration::from_secs(5), &auth, &json!({})).await.unwrap();
+        assert_eq!(resp.status().as_u16(), 500);
+        assert_eq!(server.received_requests().await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn rotation_multi_header_scheme_is_single_shot() {
+        // MultiHeader credentials are one named-field object — a 401 must NOT
+        // trigger any second attempt.
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/r"))
+            .respond_with(ResponseTemplate::new(401).set_body_string("denied"))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let auth = AuthMaterial {
+            scheme: AuthScheme::parse("volc_voice").unwrap(),
+            credentials: json!({
+                "app_key": "a", "access_key": "b", "resource_id": "r",
+                // Even a stray api_keys array must not induce rotation here.
+                "api_keys": ["k1", "k2"],
+            }),
+        };
+        let url = format!("{}/r", server.uri());
+        let resp =
+            post_json(&reqwest::Client::new(), &url, Duration::from_secs(5), &auth, &json!({})).await.unwrap();
+        assert_eq!(resp.status().as_u16(), 401);
+        let requests = server.received_requests().await.unwrap();
+        assert_eq!(requests.len(), 1, "MultiHeader must not rotate");
+        assert_eq!(requests[0].headers.get("X-Api-App-Key").unwrap(), "a");
+    }
+
+    #[tokio::test]
+    async fn rotation_single_key_is_single_shot_and_empty_keys_is_config_error() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/r"))
+            .respond_with(ResponseTemplate::new(401))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let url = format!("{}/r", server.uri());
+        let resp = post_json(&reqwest::Client::new(), &url, Duration::from_secs(5), &bearer(&["sk-only"]), &json!({}))
+            .await
+            .unwrap();
+        assert_eq!(resp.status().as_u16(), 401);
+        assert_eq!(server.received_requests().await.unwrap().len(), 1);
+
+        // No keys at all: the canonical Config error, no request sent.
+        let none = AuthMaterial { scheme: AuthScheme::Bearer, credentials: json!({}) };
+        let err = post_json(&reqwest::Client::new(), &url, Duration::from_secs(5), &none, &json!({}))
+            .await
+            .unwrap_err();
+        assert_eq!(err.kind, InvokeErrorKind::Config);
+    }
+
+    #[tokio::test]
+    async fn rotation_query_key_rotates_query_param() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/q"))
+            .and(wiremock::matchers::query_param("key", "q-1"))
+            .respond_with(ResponseTemplate::new(429))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/q"))
+            .and(wiremock::matchers::query_param("key", "q-2"))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let auth = AuthMaterial {
+            scheme: AuthScheme::QueryKey("key".into()),
+            credentials: json!({"api_keys": ["q-1", "q-2"]}),
+        };
+        let url = format!("{}/q", server.uri());
+        let resp = get_request(&reqwest::Client::new(), &url, Duration::from_secs(5), &auth).await.unwrap();
+        assert_eq!(resp.status().as_u16(), 200);
+    }
+
+    #[tokio::test]
+    async fn rotation_rebuilds_multipart_form_per_attempt() {
+        let server = rotation_server("mk-bad", "mk-good").await;
+        let auth = bearer(&["mk-bad", "mk-good"]);
+        let url = format!("{}/r", server.uri());
+        let resp = post_multipart(&reqwest::Client::new(), &url, Duration::from_secs(5), &auth, || {
+            Ok(reqwest::multipart::Form::new().text("field", "value"))
+        })
+        .await
+        .unwrap();
+        assert_eq!(resp.status().as_u16(), 200);
+        let requests = server.received_requests().await.unwrap();
+        assert_eq!(requests.len(), 2);
+        for req in &requests {
+            let body = String::from_utf8_lossy(&req.body);
+            assert!(body.contains("name=\"field\""), "each attempt carries a full form");
+        }
     }
 
     #[tokio::test]

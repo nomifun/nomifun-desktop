@@ -65,19 +65,20 @@ impl SqliteProviderRepository {
     }
 }
 
-/// The five per-model map params whose entries are translated into typed
+/// The four per-model map params whose entries are translated into typed
 /// `provider_models` columns. Since migration 016 these maps exist ONLY as
 /// wire-compat inputs — the matching providers columns are gone, so this
 /// translation is the single write path. Profile columns (`tasks`, `traits`,
 /// `params`, `source`) and `connection_role` are intentionally absent: they
 /// are owned by the new-table writers and are NEVER touched by this sync.
+/// `health` is also absent since P3: the server-side probe
+/// (`IProviderModelRepository::set_health`) is the only health writer.
 #[derive(Clone, Copy, Debug)]
 enum ModelMapColumn {
     Enabled,
     Protocol,
     ContextLimit,
     Description,
-    Health,
 }
 
 impl ModelMapColumn {
@@ -87,7 +88,6 @@ impl ModelMapColumn {
             Self::Protocol => "model_protocols",
             Self::ContextLimit => "model_context_limits",
             Self::Description => "model_descriptions",
-            Self::Health => "model_health",
         }
     }
 
@@ -108,9 +108,6 @@ impl ModelMapColumn {
             Self::Description => {
                 "UPDATE provider_models SET description = NULL, updated_at = ? \
                  WHERE provider_id = ?"
-            }
-            Self::Health => {
-                "UPDATE provider_models SET health = NULL, updated_at = ? WHERE provider_id = ?"
             }
         }
     }
@@ -134,17 +131,13 @@ impl ModelMapColumn {
                 "UPDATE provider_models SET description = ?, updated_at = ? \
                  WHERE provider_id = ? AND model = ?"
             }
-            Self::Health => {
-                "UPDATE provider_models SET health = ?, updated_at = ? \
-                 WHERE provider_id = ? AND model = ?"
-            }
         }
     }
 
     /// Converts one JSON map entry into the typed bind for this column,
     /// mirroring migration 014's backfill semantics: enabled coerces to a
     /// boolean (default true), protocol/description store string atoms,
-    /// context_limit stores an integer, health stores minified JSON text.
+    /// context_limit stores an integer.
     fn to_bind(self, value: &serde_json::Value) -> crate::repository::bind::BindValue {
         use crate::repository::bind::BindValue;
         match self {
@@ -162,10 +155,6 @@ impl ModelMapColumn {
                     .as_i64()
                     .or_else(|| value.as_f64().map(|v| v as i64)),
             ),
-            Self::Health => BindValue::OptStr(match value {
-                serde_json::Value::Null => None,
-                other => Some(other.to_string()),
-            }),
         }
     }
 }
@@ -208,9 +197,10 @@ async fn apply_provider_model_map_tx(
 /// `provider_models` rows inside the caller's transaction.
 ///
 /// - Models present in the array get a row; a new row takes its mirrored
-///   columns (enabled/protocol/context_limit/description/health) from the
-///   per-model map params of the same call, plus tasks/traits '[]',
-///   params '{}', source 'inferred', and `sort_order` = array index.
+///   columns (enabled/protocol/context_limit/description) from the per-model
+///   map params of the same call, plus tasks/traits '[]', params '{}',
+///   source 'inferred', `health` NULL (only the server probe writes health),
+///   and `sort_order` = array index.
 /// - Existing rows keep every column except `sort_order`/`updated_at` — the
 ///   profile columns (tasks/traits/params/source) and `connection_role` are
 ///   NEVER touched by this sync.
@@ -259,7 +249,6 @@ async fn sync_provider_model_membership_tx(
         let mut protocol = BindValue::OptStr(None);
         let mut context_limit = BindValue::OptI64(None);
         let mut description = BindValue::OptStr(None);
-        let mut health = BindValue::OptStr(None);
         for (column, map, _) in maps {
             if let Some(value) = map.get(model.as_str()) {
                 let bind = column.to_bind(value);
@@ -268,7 +257,6 @@ async fn sync_provider_model_membership_tx(
                     ModelMapColumn::Protocol => protocol = bind,
                     ModelMapColumn::ContextLimit => context_limit = bind,
                     ModelMapColumn::Description => description = bind,
-                    ModelMapColumn::Health => health = bind,
                 }
             }
         }
@@ -276,8 +264,8 @@ async fn sync_provider_model_membership_tx(
         let mut query = sqlx::query(
             "INSERT INTO provider_models \
                 (provider_id, model, enabled, sort_order, tasks, traits, protocol, \
-                 params, context_limit, description, source, health, created_at, updated_at) \
-             VALUES (?, ?, ?, ?, '[]', '[]', ?, '{}', ?, ?, 'inferred', ?, ?, ?) \
+                 params, context_limit, description, source, created_at, updated_at) \
+             VALUES (?, ?, ?, ?, '[]', '[]', ?, '{}', ?, ?, 'inferred', ?, ?) \
              ON CONFLICT(provider_id, model) DO UPDATE SET \
                 sort_order = excluded.sort_order, \
                 updated_at = excluded.updated_at",
@@ -289,7 +277,6 @@ async fn sync_provider_model_membership_tx(
         query = bind_value(query, &protocol);
         query = bind_value(query, &context_limit);
         query = bind_value(query, &description);
-        query = bind_value(query, &health);
         query
             .bind(now)
             .bind(now)
@@ -302,8 +289,9 @@ async fn sync_provider_model_membership_tx(
 
 /// Row-sync orchestrator shared by `create` and `update`: since migration 016
 /// this is the ONLY write path for the per-model surface — the `models` array
-/// and five per-model map params are translated into `provider_models` row
-/// operations inside the caller's providers transaction.
+/// and four per-model map params are translated into `provider_models` row
+/// operations inside the caller's providers transaction. Health has no map
+/// param anymore: the server probe (`set_health`) is the only health writer.
 ///
 /// `maps` carries, per mirrored column, the map JSON supplied by this call
 /// (`None` = not supplied / empty) and whether the caller supplied that map
@@ -316,8 +304,8 @@ async fn sync_provider_model_membership_tx(
 ///
 /// Behavior spec:
 /// 1. create: one row per `models` entry; enabled/protocol/context_limit/
-///    description/health from the corresponding map params; tasks/traits
-///    '[]', params '{}', source 'inferred', sort_order = array index.
+///    description from the corresponding map params; tasks/traits '[]',
+///    params '{}', source 'inferred', health NULL, sort_order = array index.
 /// 2. update: `models` `Some` syncs membership (insert new, delete removed,
 ///    re-index survivors); a map param `Some(...)` is a whole-map replacement
 ///    for that column over ALL rows (`Some(None)` = empty map → all defaults);
@@ -325,14 +313,14 @@ async fn sync_provider_model_membership_tx(
 ///    model (re-)added to membership without the matching map param in the
 ///    same call starts from the column defaults — rows are the only store,
 ///    so values from a prior membership do not survive removal.
-///    Profile columns (tasks/traits/params/source) and connection_role are
-///    never written by this sync.
+///    Profile columns (tasks/traits/params/source), `connection_role` and
+///    `health` are never written by this sync.
 /// 3. delete cascades are handled directly in [`IProviderRepository::delete`].
 async fn sync_provider_models_tx(
     transaction: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
     provider_id: &str,
     models_json: Option<&str>,
-    maps: [(ModelMapColumn, Option<&str>, bool); 5],
+    maps: [(ModelMapColumn, Option<&str>, bool); 4],
     now: i64,
 ) -> Result<(), DbError> {
     // A map is only consulted when seeding freshly inserted membership rows
@@ -415,8 +403,8 @@ impl IProviderRepository for SqliteProviderRepository {
         sqlx::query(
             "INSERT INTO providers \
                 (provider_id, platform, name, base_url, api_key_encrypted, enabled, \
-                 capabilities, bedrock_config, is_full_url, sort_order, created_at, updated_at) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                 bedrock_config, is_full_url, sort_order, created_at, updated_at) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(&provider_id)
         .bind(params.platform)
@@ -424,7 +412,6 @@ impl IProviderRepository for SqliteProviderRepository {
         .bind(params.base_url)
         .bind(params.api_key_encrypted)
         .bind(params.enabled)
-        .bind(params.capabilities)
         .bind(params.bedrock_config)
         .bind(params.is_full_url)
         .bind(sort_order)
@@ -460,7 +447,6 @@ impl IProviderRepository for SqliteProviderRepository {
                     params.model_descriptions,
                     false,
                 ),
-                (ModelMapColumn::Health, params.model_health, false),
             ],
             now,
         )
@@ -480,7 +466,6 @@ impl IProviderRepository for SqliteProviderRepository {
             base_url: params.base_url.to_string(),
             api_key_encrypted: params.api_key_encrypted.to_string(),
             enabled: params.enabled,
-            capabilities: params.capabilities.to_string(),
             bedrock_config: params.bedrock_config.map(String::from),
             is_full_url: params.is_full_url,
             sort_order,
@@ -504,7 +489,6 @@ impl IProviderRepository for SqliteProviderRepository {
         let map_protocols = params.model_protocols;
         let map_limits = params.model_context_limits;
         let map_descriptions = params.model_descriptions;
-        let map_health = params.model_health;
 
         let merged = merge_update(existing, params);
 
@@ -512,7 +496,7 @@ impl IProviderRepository for SqliteProviderRepository {
         sqlx::query(
             "UPDATE providers SET \
                 platform = ?, name = ?, base_url = ?, api_key_encrypted = ?, \
-                enabled = ?, capabilities = ?, bedrock_config = ?, \
+                enabled = ?, bedrock_config = ?, \
                 is_full_url = ?, sort_order = ?, updated_at = ? \
              WHERE provider_id = ?",
         )
@@ -521,7 +505,6 @@ impl IProviderRepository for SqliteProviderRepository {
         .bind(&merged.base_url)
         .bind(&merged.api_key_encrypted)
         .bind(merged.enabled)
-        .bind(&merged.capabilities)
         .bind(&merged.bedrock_config)
         .bind(merged.is_full_url)
         .bind(merged.sort_order)
@@ -558,11 +541,6 @@ impl IProviderRepository for SqliteProviderRepository {
                     ModelMapColumn::Description,
                     map_descriptions.flatten(),
                     map_descriptions.is_some(),
-                ),
-                (
-                    ModelMapColumn::Health,
-                    map_health.flatten(),
-                    map_health.is_some(),
                 ),
             ],
             merged.updated_at,
@@ -822,7 +800,7 @@ fn is_unique_violation(err: &dyn sqlx::error::DatabaseError) -> bool {
 /// Merge partial update params into an existing provider, returning a new instance.
 ///
 /// Only the providers-row fields participate; the per-model params (`models`
-/// + the five maps) have no row storage since migration 016 and are consumed
+/// + the four maps) have no row storage since migration 016 and are consumed
 /// by `sync_provider_models_tx` instead.
 fn merge_update(existing: Provider, params: UpdateProviderParams<'_>) -> Provider {
     let now = nomifun_common::now_ms();
@@ -837,7 +815,6 @@ fn merge_update(existing: Provider, params: UpdateProviderParams<'_>) -> Provide
             .unwrap_or(&existing.api_key_encrypted)
             .to_string(),
         enabled: params.enabled.unwrap_or(existing.enabled),
-        capabilities: params.capabilities.unwrap_or(&existing.capabilities).to_string(),
         bedrock_config: params
             .bedrock_config
             .map_or(existing.bedrock_config, |v| v.map(String::from)),
@@ -871,12 +848,10 @@ mod tests {
             api_key_encrypted: "encrypted_key_data",
             models: r#"["claude-sonnet-4-20250514"]"#,
             enabled: true,
-            capabilities: r#"[{"type":"text"}]"#,
             model_context_limits: None,
             model_protocols: None,
             model_descriptions: None,
             model_enabled: None,
-            model_health: None,
             bedrock_config: None,
             is_full_url: false,
             sort_order: None,
@@ -1143,12 +1118,10 @@ mod tests {
                 api_key_encrypted: "enc",
                 models: r#"["a","b"]"#,
                 enabled: true,
-                capabilities: "[]",
                 model_context_limits: Some(r#"{"a":100}"#),
                 model_protocols: None,
                 model_descriptions: None,
                 model_enabled: Some(r#"{"b":false}"#),
-                model_health: None,
                 bedrock_config: None,
                 is_full_url: false,
                 sort_order: None,
@@ -1177,12 +1150,10 @@ mod tests {
                 api_key_encrypted: "enc",
                 models: r#"["a","b"]"#,
                 enabled: true,
-                capabilities: "[]",
                 model_context_limits: None,
                 model_protocols: None,
                 model_descriptions: None,
                 model_enabled: None,
-                model_health: None,
                 bedrock_config: None,
                 is_full_url: false,
                 sort_order: None,
@@ -1234,12 +1205,10 @@ mod tests {
                 api_key_encrypted: "enc",
                 models: r#"["a","b"]"#,
                 enabled: true,
-                capabilities: "[]",
                 model_context_limits: Some(r#"{"a":100,"b":200}"#),
                 model_protocols: Some(r#"{"a":"openai"}"#),
                 model_descriptions: None,
                 model_enabled: Some(r#"{"b":false}"#),
-                model_health: None,
                 bedrock_config: None,
                 is_full_url: false,
                 sort_order: None,

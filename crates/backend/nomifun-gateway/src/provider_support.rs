@@ -329,7 +329,6 @@ mod tests {
             base_url: String::new(),
             api_key_encrypted: String::new(),
             enabled: true,
-            capabilities: "[]".into(),
             bedrock_config: None,
             is_full_url: false,
             sort_order: 0,

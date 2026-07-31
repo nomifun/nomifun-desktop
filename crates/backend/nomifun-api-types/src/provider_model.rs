@@ -9,32 +9,47 @@ use crate::provider::ModelHealthStatus;
 
 /// One authoritative per-model catalog entry, projected from a
 /// `provider_models` row. Identity is `(provider_id, model)`.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+//
+// ts-rs annotations mirror the serde wire truth: `skip_serializing_if`
+// optionals emit `x?: T`; i64 timestamps/counters emit `number` (this API
+// serializes plain JSON numbers, not bigints); opaque JSON emits `unknown`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, ts_rs::TS)]
+#[ts(export_to = "../../../../ui/src/common/protocolBindings/")]
 pub struct ProviderModelResponse {
     #[serde(deserialize_with = "crate::serde_util::deserialize_provider_id")]
     pub provider_id: String,
     pub model: String,
     pub enabled: bool,
+    #[ts(type = "number")]
     pub sort_order: i64,
     pub tasks: Vec<ModelTask>,
     pub traits: Vec<ModelTrait>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub protocol: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub connection_role: Option<String>,
     #[serde(default)]
+    #[ts(type = "unknown")]
     pub params: serde_json::Value,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional, type = "number")]
     pub context_limit: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub description: Option<String>,
     #[serde(default)]
     pub source: ProfileSource,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub health: Option<ModelHealthStatus>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional, type = "number")]
     pub health_checked_at: Option<i64>,
+    #[ts(type = "number")]
     pub created_at: i64,
+    #[ts(type = "number")]
     pub updated_at: i64,
 }
 
@@ -44,7 +59,13 @@ pub struct ProviderModelResponse {
 /// heuristic profile ([`crate::derive_tasks_and_traits`]) with
 /// `source = inferred`; a non-empty `tasks` is an explicit user profile
 /// (`source = user`).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+// Request DTO: every `#[serde(default)]` field may be omitted by the client,
+// so the binding marks it `?`. Plain `#[ts(optional)]` unwraps the Option
+// (null ≡ absent ≡ unset here, so the binding does not advertise `| null`);
+// non-Option defaulted fields use `optional = nullable`, the no-unwrap form
+// (their TS type carries no null — it only adds the `?`).
+#[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export_to = "../../../../ui/src/common/protocolBindings/")]
 #[serde(deny_unknown_fields)]
 pub struct CreateProviderModelRequest {
     #[serde(deserialize_with = "crate::serde_util::deserialize_provider_id")]
@@ -52,22 +73,31 @@ pub struct CreateProviderModelRequest {
     #[serde(deserialize_with = "crate::serde_util::deserialize_model_name")]
     pub model: String,
     #[serde(default = "crate::provider_model::default_true")]
+    #[ts(optional = nullable)]
     pub enabled: bool,
     #[serde(default)]
+    #[ts(optional = nullable)]
     pub tasks: Vec<ModelTask>,
     #[serde(default)]
+    #[ts(optional = nullable)]
     pub traits: Vec<ModelTrait>,
     #[serde(default)]
+    #[ts(optional)]
     pub protocol: Option<String>,
     #[serde(default)]
+    #[ts(optional)]
     pub connection_role: Option<String>,
     #[serde(default)]
+    #[ts(optional, type = "unknown")]
     pub params: Option<serde_json::Value>,
     #[serde(default)]
+    #[ts(optional, type = "number")]
     pub context_limit: Option<i64>,
     #[serde(default)]
+    #[ts(optional)]
     pub description: Option<String>,
     #[serde(default)]
+    #[ts(optional, type = "number")]
     pub sort_order: Option<i64>,
 }
 
@@ -79,7 +109,14 @@ pub(crate) fn default_true() -> bool {
 ///
 /// Nullable columns use double-Option: field absent = keep, `null` = clear,
 /// value = set.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+// Request DTO with tri-state (double-Option) nullable columns: those emit
+// `x?: T | null` — absent = keep, null = clear, value = set (plain
+// `#[ts(optional)]` unwraps ONE Option level, leaving the inner `Option<T>`'s
+// `T | null`). Non-tri-state fields emit plain `x?: T` — null there would
+// just mean "keep", same as omitting the field, so the binding deliberately
+// reserves `| null` for the fields where null CLEARS.
+#[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export_to = "../../../../ui/src/common/protocolBindings/")]
 #[serde(deny_unknown_fields)]
 pub struct UpdateProviderModelRequest {
     #[serde(deserialize_with = "crate::serde_util::deserialize_provider_id")]
@@ -87,44 +124,54 @@ pub struct UpdateProviderModelRequest {
     #[serde(deserialize_with = "crate::serde_util::deserialize_model_name")]
     pub model: String,
     #[serde(default)]
+    #[ts(optional)]
     pub enabled: Option<bool>,
     #[serde(default)]
+    #[ts(optional, type = "number")]
     pub sort_order: Option<i64>,
     #[serde(default)]
+    #[ts(optional)]
     pub tasks: Option<Vec<ModelTask>>,
     #[serde(default)]
+    #[ts(optional)]
     pub traits: Option<Vec<ModelTrait>>,
     #[serde(
         default,
         deserialize_with = "crate::serde_util::deserialize_double_option",
         skip_serializing_if = "Option::is_none"
     )]
+    #[ts(optional)]
     pub protocol: Option<Option<String>>,
     #[serde(
         default,
         deserialize_with = "crate::serde_util::deserialize_double_option",
         skip_serializing_if = "Option::is_none"
     )]
+    #[ts(optional)]
     pub connection_role: Option<Option<String>>,
     #[serde(default)]
+    #[ts(optional, type = "unknown")]
     pub params: Option<serde_json::Value>,
     #[serde(
         default,
         deserialize_with = "crate::serde_util::deserialize_double_option",
         skip_serializing_if = "Option::is_none"
     )]
+    #[ts(optional, type = "number | null")]
     pub context_limit: Option<Option<i64>>,
     #[serde(
         default,
         deserialize_with = "crate::serde_util::deserialize_double_option",
         skip_serializing_if = "Option::is_none"
     )]
+    #[ts(optional)]
     pub description: Option<Option<String>>,
 }
 
 /// Body identifying one row by its composite natural key
 /// (`POST /api/provider-models/delete`).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export_to = "../../../../ui/src/common/protocolBindings/")]
 #[serde(deny_unknown_fields)]
 pub struct ProviderModelKeyRequest {
     #[serde(deserialize_with = "crate::serde_util::deserialize_provider_id")]

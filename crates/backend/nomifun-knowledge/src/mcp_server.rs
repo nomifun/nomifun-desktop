@@ -234,9 +234,29 @@ async fn handle_tool_request(
         return finish(json!({"error": "knowledge service unavailable"}));
     };
 
-    let kb_ids = &claims.scope.kb_ids;
     let workspace_path = &claims.scope.workspace_path;
     let args = body.get("args").cloned().unwrap_or(Value::Null);
+
+    // Terminal sessions resolve their kb scope LIVE from the workspace's
+    // workpath binding at every dispatch: the signed kb_ids are only the
+    // spawn-time snapshot, and a binding edited while the PTY runs (the
+    // session header's KnowledgeControl) must take effect without a relaunch.
+    // This stays inside the signed trust boundary — the capability still pins
+    // user + terminal + workspace_path, and the binding row is server-side
+    // state of that same workspace. Conversation and external-process
+    // sessions keep their issuance-time scope (conversations are re-issued on
+    // every binding change by the runtime recycler; external broker sessions
+    // deliberately keep their connect-time scope).
+    let is_terminal_session =
+        claims.session.kind == nomifun_common::LoopbackSessionKind::Terminal;
+    let (kb_ids, live_terminal_binding): (Vec<KnowledgeBaseId>, Option<(KnowledgeBinding, String)>) =
+        if is_terminal_session {
+            let (live_ids, binding, wp_key) =
+                service.resolve_terminal_scope_for_cwd(workspace_path).await;
+            (live_ids, Some((binding, wp_key)))
+        } else {
+            (claims.scope.kb_ids.clone(), None)
+        };
 
     match tool {
         "knowledge_search" => {
@@ -248,27 +268,48 @@ async fn handle_tool_request(
                 .unwrap_or(8)
                 .clamp(1, 20);
             info!(tool, kb_ids = kb_ids.len(), workspace = %workspace_path, "Knowledge MCP: dispatching tool");
-            finish(dispatch_search(&service, kb_ids, &query, limit).await)
+            if kb_ids.is_empty() {
+                return finish(no_bases_bound_error());
+            }
+            finish(dispatch_search(&service, &kb_ids, &query, limit).await)
         }
         "knowledge_read" => {
             let handle = args.get("handle").and_then(Value::as_str).unwrap_or("").trim().to_string();
             info!(tool, kb_ids = kb_ids.len(), workspace = %workspace_path, "Knowledge MCP: dispatching tool");
-            finish(dispatch_read(&service, kb_ids, &handle).await)
+            if kb_ids.is_empty() {
+                return finish(no_bases_bound_error());
+            }
+            finish(dispatch_read(&service, &kb_ids, &handle).await)
         }
         "knowledge_write" => {
-            let (resolved_kb_ids, binding, wp_key) = service
-                .resolve_write_context_for_cwd(workspace_path)
-                .await;
-            let bound_kb_ids: Vec<KnowledgeBaseId> = resolved_kb_ids
-                .into_iter()
-                .filter(|id| kb_ids.contains(id))
-                .collect();
+            let (bound_kb_ids, binding, wp_key) = match live_terminal_binding {
+                // Terminal: the live binding IS the write scope — no
+                // intersection with the spawn-time snapshot, so bases bound
+                // after launch become writable immediately (and unbinding
+                // revokes immediately). resolve_write_policy fails closed
+                // when the live binding has write-back off.
+                Some((binding, wp_key)) => (kb_ids.clone(), binding, wp_key),
+                None => {
+                    let (resolved_kb_ids, binding, wp_key) = service
+                        .resolve_write_context_for_cwd(workspace_path)
+                        .await;
+                    let signed = &claims.scope.kb_ids;
+                    let bound: Vec<KnowledgeBaseId> = resolved_kb_ids
+                        .into_iter()
+                        .filter(|id| signed.contains(id))
+                        .collect();
+                    (bound, binding, wp_key)
+                }
+            };
             let write_scope = claims
                 .session
                 .conversation_id
                 .clone()
                 .unwrap_or_else(|| opaque_workpath_write_scope(&wp_key));
             info!(tool, kb_ids = bound_kb_ids.len(), workspace = %workspace_path, "Knowledge MCP: dispatching tool");
+            if bound_kb_ids.is_empty() {
+                return finish(no_bases_bound_error());
+            }
             finish(dispatch_write(&service, &bound_kb_ids, &binding, &write_scope, &args).await)
         }
         _ => {
@@ -276,6 +317,16 @@ async fn handle_tool_request(
             finish(json!({"error": format!("unknown tool: {tool}")}))
         }
     }
+}
+
+/// Honest tool result for a session whose workspace currently has no enabled
+/// knowledge binding (live resolution). Guides the model instead of failing
+/// with an opaque empty search.
+fn no_bases_bound_error() -> Value {
+    json!({
+        "error": "no knowledge bases are currently bound to this workspace; \
+                  ask the user to mount one via the session's knowledge control"
+    })
 }
 
 fn opaque_workpath_write_scope(workpath_key: &str) -> String {
@@ -970,5 +1021,186 @@ mod tests {
         assert_eq!(status, 200);
         assert!(resp.get("result").is_some(), "expected result, got {resp}");
         assert_eq!(svc.read_file(&info.knowledge_base_id, "notes.md").await.unwrap().content, "NEW");
+    }
+
+    // ── Terminal sessions: live binding resolution (no relaunch needed) ──
+
+    const TEST_TERMINAL_ID: &str = "0190f5fe-7c00-7a00-8000-0000000000a1";
+
+    fn terminal_child<I: AsRef<str>>(
+        server: &KnowledgeMcpServer,
+        workspace: &str,
+        kb_ids: &[I],
+    ) -> nomifun_api_types::KnowledgeMcpChildConfig {
+        let kb_ids = kb_ids
+            .iter()
+            .map(|id| KnowledgeBaseId::parse(id.as_ref()).expect("canonical knowledge-base test ID"))
+            .collect::<Vec<_>>();
+        server
+            .issuer_config("/bin/nomicore".into())
+            .issue_for_terminal(TEST_OWNER_ID, TEST_TERMINAL_ID, workspace, &kb_ids)
+            .unwrap()
+    }
+
+    /// The incident shape: a terminal spawned BEFORE any base was bound (its
+    /// signed kb snapshot is empty), then the user mounts a base via the
+    /// session header. Search must pick up the live binding on the SAME
+    /// capability — no relaunch.
+    #[tokio::test]
+    async fn terminal_search_resolves_live_binding_after_mount() {
+        let (server, svc, _tmp) = start_wired_server().await;
+        let info = svc.create_base("python基础", "", None, None).await.unwrap();
+        let root = svc.data_dir().join("knowledge").join(info.knowledge_base_id.as_str());
+        std::fs::write(root.join("list.md"), "# 列表\npython 列表推导式\n").unwrap();
+        let ws = "/Users/test/wp-terminal-live";
+        let child = terminal_child(&server, ws, &[] as &[String]);
+
+        // Before any binding exists: honest "nothing bound" error.
+        let (status, resp) = post_tool(&server, &child.bootstrap.access.token, &child.bootstrap.access.claims, json!({
+            "tool": "knowledge_search", "args": { "query": "列表推导式" }
+        }))
+        .await;
+        assert_eq!(status, 200);
+        assert!(
+            resp.get("error").and_then(Value::as_str).unwrap_or("").contains("no knowledge bases"),
+            "unbound workspace must say so: {resp}"
+        );
+
+        // Bind while the "PTY" (capability) is live — the 13:27 POST.
+        svc.set_binding(
+            crate::workpath::WORKPATH_BINDING_KIND,
+            &crate::workpath::workpath_key(ws),
+            KnowledgeBinding {
+                enabled: true,
+                kb_ids: vec![info.knowledge_base_id.clone()],
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+        // Same capability, no relaunch: search now hits the mounted base.
+        let (status, resp) = post_tool(&server, &child.bootstrap.access.token, &child.bootstrap.access.claims, json!({
+            "tool": "knowledge_search", "args": { "query": "列表推导式" }
+        }))
+        .await;
+        assert_eq!(status, 200);
+        let result = resp.get("result").and_then(Value::as_str).unwrap_or_else(|| panic!("{resp}"));
+        assert!(result.contains("list.md"), "live binding must be searchable: {result}");
+    }
+
+    /// Write-back toggled ON while the terminal runs: the same capability
+    /// (whose spawn-time binding had writeback off) must start accepting
+    /// knowledge_write — and toggling OFF must refuse again immediately.
+    #[tokio::test]
+    async fn terminal_write_follows_live_writeback_policy_both_directions() {
+        let (server, svc, _tmp) = start_wired_server().await;
+        let info = svc.create_base("库", "", None, None).await.unwrap();
+        svc.write_file(&info.knowledge_base_id, "terms.md", "ORIGINAL").await.unwrap();
+        let ws = "/Users/test/wp-terminal-writeback";
+        let key = crate::workpath::workpath_key(ws);
+        // Spawn-time state: bound but read-only (the incident README said
+        // "Write-back is DISABLED").
+        svc.set_binding(
+            crate::workpath::WORKPATH_BINDING_KIND,
+            &key,
+            KnowledgeBinding {
+                enabled: true,
+                writeback: false,
+                kb_ids: vec![info.knowledge_base_id.clone()],
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let child = terminal_child(&server, ws, std::slice::from_ref(&info.knowledge_base_id));
+        let write_body = || json!({
+            "tool": "knowledge_write",
+            "args": { "handle": encode_doc_handle(&info.knowledge_base_id, "terms.md"), "content": "PROPOSED" }
+        });
+
+        // Terminal claims always carry knowledge_write (no 403); the live
+        // policy refuses while write-back is off.
+        let (status, resp) = post_tool(&server, &child.bootstrap.access.token, &child.bootstrap.access.claims, write_body()).await;
+        assert_eq!(status, 200, "write tool must be in scope for terminals: {resp}");
+        assert!(
+            resp.get("error").and_then(Value::as_str).unwrap_or("").contains("write-back is disabled"),
+            "live policy must refuse while writeback is off: {resp}"
+        );
+
+        // The 13:27 change: writeback on (staged). Same capability now writes.
+        svc.set_binding(
+            crate::workpath::WORKPATH_BINDING_KIND,
+            &key,
+            KnowledgeBinding {
+                enabled: true,
+                writeback: true,
+                writeback_mode: "staged".into(),
+                kb_ids: vec![info.knowledge_base_id.clone()],
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let (status, resp) = post_tool(&server, &child.bootstrap.access.token, &child.bootstrap.access.claims, write_body()).await;
+        assert_eq!(status, 200);
+        let r = resp.get("result").unwrap_or_else(|| panic!("staged write must succeed live: {resp}"));
+        assert_eq!(r.get("staged").and_then(Value::as_bool), Some(true));
+        assert_eq!(svc.read_file(&info.knowledge_base_id, "terms.md").await.unwrap().content, "ORIGINAL");
+
+        // Revoke: writeback back off — refusal is immediate too.
+        svc.set_binding(
+            crate::workpath::WORKPATH_BINDING_KIND,
+            &key,
+            KnowledgeBinding {
+                enabled: true,
+                writeback: false,
+                kb_ids: vec![info.knowledge_base_id.clone()],
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let (status, resp) = post_tool(&server, &child.bootstrap.access.token, &child.bootstrap.access.claims, write_body()).await;
+        assert_eq!(status, 200);
+        assert!(resp.get("error").is_some(), "revocation must be immediate: {resp}");
+    }
+
+    /// Conversation sessions keep issuance-time semantics: a read-only
+    /// conversation capability still gets 403 for knowledge_write even after
+    /// the workpath binding enables write-back (its runtime is recycled and
+    /// re-issued on binding changes instead).
+    #[tokio::test]
+    async fn conversation_capability_write_gate_stays_frozen() {
+        let (server, svc, _tmp) = start_wired_server().await;
+        let info = svc.create_base("库", "", None, None).await.unwrap();
+        svc.write_file(&info.knowledge_base_id, "terms.md", "x").await.unwrap();
+        let ws = "/Users/test/wp-conv-frozen";
+        let child = conversation_child(
+            &server,
+            TEST_CONVERSATION_ID,
+            ws,
+            std::slice::from_ref(&info.knowledge_base_id),
+            false,
+        );
+        svc.set_binding(
+            crate::workpath::WORKPATH_BINDING_KIND,
+            &crate::workpath::workpath_key(ws),
+            KnowledgeBinding {
+                enabled: true,
+                writeback: true,
+                writeback_mode: "staged".into(),
+                kb_ids: vec![info.knowledge_base_id.clone()],
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let (status, _) = post_tool(&server, &child.bootstrap.access.token, &child.bootstrap.access.claims, json!({
+            "tool": "knowledge_write",
+            "args": { "handle": encode_doc_handle(&info.knowledge_base_id, "terms.md"), "content": "y" }
+        }))
+        .await;
+        assert_eq!(status, 403, "read-only conversation capability must stay frozen");
     }
 }

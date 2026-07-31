@@ -7,7 +7,7 @@
 import React, { useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Form, Input, InputNumber, Message, Modal, Select } from '@arco-design/web-react';
-import { useModelProviderList } from '@renderer/hooks/agent/useModelProviderList';
+import { useModelsForTask } from '@renderer/hooks/agent/useModelsForTask';
 import { useKnowledgeBaseOptions } from './useKnowledgeBaseOptions';
 import type { ICsAgent, ICsAgentPatch } from '@/common/adapter/ipcBridge';
 import type { KnowledgeBaseId, ProviderId } from '@/common/types/ids';
@@ -27,14 +27,16 @@ const CreateCsAgentModal: React.FC<Props> = ({ visible, onClose, onCreated, crea
   const { t } = useTranslation();
   const [form] = Form.useForm();
   const [submitting, setSubmitting] = useState(false);
-  const { providers, getAvailableModels } = useModelProviderList();
+  // Task-filtered catalog (chat): providers with at least one chat-capable model.
+  const { groups: chatGroups } = useModelsForTask('chat');
+  const providers = useMemo(() => chatGroups.map((g) => g.provider), [chatGroups]);
   const { options: kbOptions } = useKnowledgeBaseOptions();
   const [providerId, setProviderId] = useState<ProviderId | undefined>(undefined);
 
   const modelOptions = useMemo(() => {
-    const provider = providers.find((p) => p.id === providerId);
-    return provider ? getAvailableModels(provider) : [];
-  }, [providers, providerId, getAvailableModels]);
+    const group = chatGroups.find((g) => g.provider.id === providerId);
+    return group ? group.models : [];
+  }, [chatGroups, providerId]);
 
   const handleSubmit = async () => {
     const values = await form.validate();

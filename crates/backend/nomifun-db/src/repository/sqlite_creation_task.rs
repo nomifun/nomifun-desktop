@@ -473,9 +473,9 @@ mod tests {
         sqlx::query(
             "INSERT INTO providers \
                 (provider_id, platform, name, base_url, api_key_encrypted, enabled, \
-                 capabilities, created_at, updated_at) \
+                 created_at, updated_at) \
              VALUES (?, 'openai', 'Creation Test Provider', \
-                 'https://example.invalid', 'encrypted', 1, '[]', 0, 0)",
+                 'https://example.invalid', 'encrypted', 1, 0, 0)",
         )
         .bind(&provider_id)
         .execute(db.pool())

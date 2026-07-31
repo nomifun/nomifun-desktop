@@ -58,7 +58,8 @@ describe('customer service pages structure', () => {
   });
 
   test('create modal reuses the shared model and knowledge catalogs', () => {
-    expect(createSource.includes('useModelProviderList')).toBe(true);
+    // Chat-filtered catalog hook (P3): the model list comes from resolve, not raw provider rows.
+    expect(createSource.includes('useModelsForTask')).toBe(true);
     expect(createSource.includes('useKnowledgeBaseOptions')).toBe(true);
     expect(createSource.includes("max={64}")).toBe(true);
   });
