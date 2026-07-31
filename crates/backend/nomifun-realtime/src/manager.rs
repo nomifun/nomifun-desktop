@@ -193,7 +193,9 @@ impl WebSocketManager {
     ///
     /// Every `HEARTBEAT_INTERVAL` (30s), iterates all connections:
     /// 1. Timeout check — closes connections with no pong for `HEARTBEAT_TIMEOUT`
-    /// 2. Token expiry — validates token and sends `auth-expired` if invalid
+    /// 2. Token expiry — validates the handshake token and closes with
+    ///    `TokenAged` (4409) if it no longer resolves to the same user;
+    ///    the client reconnects with fresh credentials (NOT a logout)
     /// 3. Sends a `ping` message with current timestamp
     ///
     /// Returns a `JoinHandle` — abort it to stop the heartbeat loop.
@@ -278,14 +280,15 @@ fn heartbeat_tick(
 
         // 2. Token expiry
         if (token_authenticator)(&client.token).as_deref() != Some(client.user_id.as_str()) {
-            info!(%conn_id, "token expired, closing connection");
-            let auth_expired = WebSocketMessage::new("auth-expired", json!({"message": "Token expired"}));
-            if let Ok(text) = serde_json::to_string(&auth_expired) {
-                let _ = client.tx.try_send(WsOutbound::Text(text));
-            }
+            info!(%conn_id, "handshake token aged out, closing connection for re-handshake");
+            // No auth-expired text frame here: HTTP cookie sliding renewal
+            // means the browser session is often still alive even though the
+            // token bound at handshake aged out. TokenAged (4409) tells the
+            // client to reconnect with fresh credentials; a genuinely dead
+            // session is rejected at the next handshake with 1008.
             let force_close = client.tx.try_send(WsOutbound::Close(
-                WebSocketCloseCode::PolicyViolation,
-                "token expired".into(),
+                WebSocketCloseCode::TokenAged,
+                "handshake token aged out; reconnect".into(),
             )).is_err();
             to_remove.push((conn_id, force_close));
             continue;
@@ -626,21 +629,19 @@ mod tests {
         // Connection should be removed
         assert_eq!(connections.len(), 0);
 
-        // Should have received auth-expired event then close
-        let msg1 = rx.try_recv().unwrap();
-        match msg1 {
-            WsOutbound::Text(text) => {
-                let parsed: serde_json::Value = serde_json::from_str(&text).unwrap();
-                assert_eq!(parsed["name"], "auth-expired");
-            }
-            _ => panic!("expected auth-expired Text"),
-        }
-
-        let msg2 = rx.try_recv().unwrap();
+        // Only a TokenAged close: the handshake token aged out but the HTTP
+        // session may still be alive via sliding renewal, so no auth-expired
+        // text frame (that would be read as a logout signal by clients). A
+        // genuinely dead session is rejected at the next handshake with 1008.
+        let msg = rx.try_recv().unwrap();
         assert_eq!(
-            msg2,
-            WsOutbound::Close(WebSocketCloseCode::PolicyViolation, "token expired".into())
+            msg,
+            WsOutbound::Close(
+                WebSocketCloseCode::TokenAged,
+                "handshake token aged out; reconnect".into()
+            )
         );
+        assert!(rx.try_recv().is_err(), "no auth-expired frame before the close");
     }
 
     #[test]
@@ -733,11 +734,14 @@ mod tests {
         heartbeat_tick(&connections, &remapped);
 
         assert!(connections.is_empty());
-        assert!(matches!(rx.try_recv(), Ok(WsOutbound::Text(_))));
         assert_eq!(
             rx.try_recv().unwrap(),
-            WsOutbound::Close(WebSocketCloseCode::PolicyViolation, "token expired".into())
+            WsOutbound::Close(
+                WebSocketCloseCode::TokenAged,
+                "handshake token aged out; reconnect".into()
+            )
         );
+        assert!(rx.try_recv().is_err(), "no auth-expired frame before the close");
     }
 
     #[test]

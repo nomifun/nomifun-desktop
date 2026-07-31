@@ -35,6 +35,7 @@ import {
 } from '@/common/chat/chatLib';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { createContext } from '@renderer/utils/ui/createContext';
+import { addEventListener } from '@/renderer/utils/emitter';
 import { isAuthoritativeCompletionRuntimeIdle } from '../platforms/authoritativeTurnLifecyclePolicy';
 
 const [useMessageList, MessageListProvider, useUpdateMessageList] = createContext([] as TMessage[]);
@@ -1171,6 +1172,20 @@ export const useMessageLstCache = (key: ConversationId, opts?: { windowed?: bool
     return ipcBridge.conversation.reconnected.on(() => {
       void loadMessages().catch((error) => {
         console.warn('[useMessageLstCache] Failed to refresh messages after WebSocket reconnect:', error);
+      });
+    });
+  }, [key, loadMessages]);
+
+  // The HTTP GET-poll fallback announces an authoritative idle settle locally
+  // (conversation.turn.settled) when it detects a completed turn whose WS
+  // frames were all lost. Reload the transcript window so the final assistant
+  // message appears without a remount/manual refresh.
+  useEffect(() => {
+    if (!key) return;
+    return addEventListener('conversation.turn.settled', (settledConversationId) => {
+      if (settledConversationId !== key) return;
+      void loadMessages().catch((error) => {
+        console.warn('[useMessageLstCache] Failed to refresh messages after turn settle:', error);
       });
     });
   }, [key, loadMessages]);

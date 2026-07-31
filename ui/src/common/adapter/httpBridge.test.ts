@@ -5,6 +5,7 @@
  */
 
 import { describe, expect, test } from 'bun:test';
+import * as httpBridgeModule from './httpBridge';
 import {
   AUTH_EXPIRED_EVENT,
   httpPost,
@@ -14,6 +15,7 @@ import {
   isHandledAuthExpiredHttpError,
   redactSensitiveText,
   wsEmitter,
+  wsMappedEmitter,
 } from './httpBridge';
 
 const realFetch = globalThis.fetch;
@@ -616,6 +618,291 @@ describe('httpRequest client deadline + network-failure diagnosis', () => {
     } finally {
       globalThis.fetch = realFetch;
       console.error = realConsoleError;
+    }
+  });
+});
+
+describe('httpBridge WebSocket resilience', () => {
+  class ResilienceFakeWebSocket {
+    static readonly CONNECTING = 0;
+    static readonly OPEN = 1;
+    static readonly CLOSING = 2;
+    static readonly CLOSED = 3;
+    static instances: ResilienceFakeWebSocket[] = [];
+
+    readyState = ResilienceFakeWebSocket.CONNECTING;
+    readonly sent: string[] = [];
+    private readonly listeners = new Map<string, Array<(event: unknown) => void>>();
+
+    constructor(..._args: unknown[]) {
+      ResilienceFakeWebSocket.instances.push(this);
+    }
+
+    addEventListener(type: string, listener: (event: unknown) => void) {
+      const listeners = this.listeners.get(type) ?? [];
+      listeners.push(listener);
+      this.listeners.set(type, listeners);
+    }
+
+    send(data: string) {
+      this.sent.push(data);
+    }
+
+    close() {
+      this.readyState = ResilienceFakeWebSocket.CLOSED;
+    }
+
+    dispatch(type: string, event: unknown) {
+      if (type === 'open') this.readyState = ResilienceFakeWebSocket.OPEN;
+      if (type === 'close') this.readyState = ResilienceFakeWebSocket.CLOSED;
+      for (const listener of this.listeners.get(type) ?? []) {
+        listener(event);
+      }
+    }
+  }
+
+  type ResilienceHarness = {
+    scheduledReconnects: Array<() => void>;
+    scheduledIntervals: Array<() => void>;
+    instances: ResilienceFakeWebSocket[];
+    cleanup: (unsubscribers: Array<() => void>) => void;
+  };
+
+  function installResilienceHarness(): ResilienceHarness {
+    const realSetTimeout = globalThis.setTimeout;
+    const realClearTimeout = globalThis.clearTimeout;
+    const realSetInterval = globalThis.setInterval;
+    const realClearInterval = globalThis.clearInterval;
+
+    const scheduledReconnects: Array<() => void> = [];
+    const scheduledIntervals: Array<() => void> = [];
+
+    installBrowserGlobals({
+      location: {
+        protocol: 'http:',
+        host: 'localhost:25808',
+        pathname: '/sessions',
+        hash: '',
+      } as Location,
+    });
+    ResilienceFakeWebSocket.instances = [];
+    globalThis.WebSocket = ResilienceFakeWebSocket as unknown as typeof WebSocket;
+    globalThis.setTimeout = ((callback: () => void) => {
+      scheduledReconnects.push(callback);
+      return scheduledReconnects.length as unknown as ReturnType<typeof setTimeout>;
+    }) as typeof setTimeout;
+    globalThis.clearTimeout = (() => {}) as typeof clearTimeout;
+    globalThis.setInterval = ((callback: () => void) => {
+      scheduledIntervals.push(callback);
+      return scheduledIntervals.length as unknown as ReturnType<typeof setInterval>;
+    }) as typeof setInterval;
+    globalThis.clearInterval = (() => {}) as typeof clearInterval;
+
+    return {
+      scheduledReconnects,
+      scheduledIntervals,
+      instances: ResilienceFakeWebSocket.instances,
+      cleanup: (unsubscribers: Array<() => void>) => {
+        for (const unsubscribe of unsubscribers) unsubscribe();
+        for (const socket of ResilienceFakeWebSocket.instances) {
+          socket.dispatch('close', { code: 1000, reason: 'test cleanup' });
+          socket.close();
+        }
+        globalThis.setTimeout = realSetTimeout;
+        globalThis.clearTimeout = realClearTimeout;
+        globalThis.setInterval = realSetInterval;
+        globalThis.clearInterval = realClearInterval;
+        restoreWebSocketGlobal();
+        restoreBrowserGlobals();
+      },
+    };
+  }
+
+  /** Open a throwaway socket once so a delivery-gap flag left over from an
+   * earlier test's cleanup close cannot leak into this test's counters. */
+  function drainDeliveryGap(harness: ResilienceHarness, unsubscribers: Array<() => void>) {
+    unsubscribers.push(wsEmitter<unknown>('drain.gap').on(() => {}));
+    const socket = harness.instances.at(-1);
+    if (!socket) throw new Error('drain subscription did not create a socket');
+    socket.dispatch('open', {});
+    return socket;
+  }
+
+  test('a delivery gap spanning a zero-listener window still fires ws.reconnected on reopen', () => {
+    const harness = installResilienceHarness();
+    const unsubscribers: Array<() => void> = [];
+    try {
+      const socket1 = drainDeliveryGap(harness, unsubscribers);
+
+      // The socket drops while a route transition has unmounted every listener.
+      socket1.dispatch('close', { code: 1006, reason: 'network lost' });
+      for (const unsubscribe of unsubscribers.splice(0)) unsubscribe();
+
+      // Remount: a fresh subscription creates a fresh socket. The reopen must
+      // still announce the delivery gap even though the attempt counter was
+      // reset by the zero-listener window.
+      let reconnected = 0;
+      unsubscribers.push(wsEmitter<undefined>('ws.reconnected').on(() => { reconnected += 1; }));
+      const socket2 = harness.instances.at(-1);
+      if (!socket2 || socket2 === socket1) throw new Error('resubscribe did not create a fresh socket');
+      socket2.dispatch('open', {});
+
+      expect(reconnected).toBe(1);
+    } finally {
+      harness.cleanup(unsubscribers);
+    }
+  });
+
+  test('close 4409 (token aged) reconnects without the auth-expired logout flow', () => {
+    const harness = installResilienceHarness();
+    const unsubscribers: Array<() => void> = [];
+    try {
+      const socket1 = drainDeliveryGap(harness, unsubscribers);
+      let reconnected = 0;
+      unsubscribers.push(wsEmitter<undefined>('ws.reconnected').on(() => { reconnected += 1; }));
+
+      const reconnectsBefore = harness.scheduledReconnects.length;
+      socket1.dispatch('close', { code: 4409, reason: 'handshake token aged out; reconnect' });
+
+      const location = (globalThis as { window?: { location: { hash: string } } }).window!.location;
+      expect(location.hash).toBe('');
+      expect(harness.scheduledReconnects.length).toBe(reconnectsBefore + 1);
+
+      harness.scheduledReconnects.at(-1)?.();
+      const socket2 = harness.instances.at(-1);
+      if (!socket2 || socket2 === socket1) throw new Error('4409 close did not lead to a fresh socket');
+      socket2.dispatch('open', {});
+      expect(reconnected).toBe(1);
+    } finally {
+      harness.cleanup(unsubscribers);
+    }
+  });
+
+  test('the liveness watchdog recycles a silent OPEN socket and resyncs on reopen', () => {
+    const harness = installResilienceHarness();
+    const unsubscribers: Array<() => void> = [];
+    const realDateNow = Date.now;
+    try {
+      const base = 1_700_000_000_000;
+      Date.now = () => base;
+      const socket1 = drainDeliveryGap(harness, unsubscribers);
+      // Last inbound frame at t=base.
+      socket1.dispatch('message', { data: JSON.stringify({ name: 'noop.frame', data: {} }) });
+      let reconnected = 0;
+      unsubscribers.push(wsEmitter<undefined>('ws.reconnected').on(() => { reconnected += 1; }));
+
+      expect(harness.scheduledIntervals.length).toBeGreaterThan(0);
+
+      // Fresh socket: a watchdog tick inside the threshold must not recycle.
+      Date.now = () => base + 30_000;
+      for (const tick of harness.scheduledIntervals) tick();
+      expect(harness.instances.at(-1)).toBe(socket1);
+
+      // Silent for longer than the stale threshold: the watchdog must recycle
+      // the wedged socket and schedule a reconnect even though no close event
+      // ever reaches the browser.
+      Date.now = () => base + 80_000;
+      const reconnectsBefore = harness.scheduledReconnects.length;
+      for (const tick of harness.scheduledIntervals) tick();
+      expect(socket1.readyState).toBe(ResilienceFakeWebSocket.CLOSED);
+      expect(harness.scheduledReconnects.length).toBeGreaterThan(reconnectsBefore);
+
+      harness.scheduledReconnects.at(-1)?.();
+      const socket2 = harness.instances.at(-1);
+      if (!socket2 || socket2 === socket1) throw new Error('watchdog recycle did not create a fresh socket');
+      socket2.dispatch('open', {});
+      expect(reconnected).toBe(1);
+    } finally {
+      Date.now = realDateNow;
+      harness.cleanup(unsubscribers);
+    }
+  });
+
+  test('a server sync.resync-required frame triggers ws.reconnected after a jittered delay without rebuilding the socket', () => {
+    const harness = installResilienceHarness();
+    const unsubscribers: Array<() => void> = [];
+    try {
+      const socket1 = drainDeliveryGap(harness, unsubscribers);
+      let reconnected = 0;
+      unsubscribers.push(wsEmitter<undefined>('ws.reconnected').on(() => { reconnected += 1; }));
+
+      const socketsBefore = harness.instances.length;
+      const timersBefore = harness.scheduledReconnects.length;
+      const frame = { data: JSON.stringify({ name: 'sync.resync-required', data: { scope: 'all', skipped: 3 } }) };
+      socket1.dispatch('message', frame);
+      // The server broadcasts this to every client at once: the recovery must
+      // be deferred behind a jitter timer, and repeated frames inside the
+      // window must coalesce into one pending dispatch.
+      socket1.dispatch('message', frame);
+      expect(reconnected).toBe(0);
+      expect(harness.scheduledReconnects.length).toBe(timersBefore + 1);
+
+      harness.scheduledReconnects.at(-1)?.();
+      expect(reconnected).toBe(1);
+      expect(harness.instances.length).toBe(socketsBefore);
+    } finally {
+      harness.cleanup(unsubscribers);
+    }
+  });
+
+  test('visibility recovery recycles a dead socket immediately with a resync on reopen', () => {
+    const harness = installResilienceHarness();
+    const unsubscribers: Array<() => void> = [];
+    try {
+      const recover = (httpBridgeModule as { __handleVisibilityRecovery?: () => void }).__handleVisibilityRecovery;
+      expect(typeof recover).toBe('function');
+
+      const socket1 = drainDeliveryGap(harness, unsubscribers);
+      let reconnected = 0;
+      unsubscribers.push(wsEmitter<undefined>('ws.reconnected').on(() => { reconnected += 1; }));
+
+      // The tab was hidden while the socket died without a close event ever
+      // being dispatched to our handlers (e.g. the renderer was frozen).
+      socket1.readyState = ResilienceFakeWebSocket.CLOSED;
+      recover!();
+
+      const socket2 = harness.instances.at(-1);
+      if (!socket2 || socket2 === socket1) throw new Error('visibility recovery did not create a fresh socket');
+      socket2.dispatch('open', {});
+      expect(reconnected).toBe(1);
+    } finally {
+      harness.cleanup(unsubscribers);
+    }
+  });
+
+  test('isWsStale flags only sockets silent past the threshold', () => {
+    const isWsStale = (httpBridgeModule as { isWsStale?: (now: number, last: number | null) => boolean }).isWsStale;
+    expect(typeof isWsStale).toBe('function');
+    expect(isWsStale!(100_000, null)).toBe(false);
+    expect(isWsStale!(100_000, 90_000)).toBe(false);
+    expect(isWsStale!(200_000, 100_000)).toBe(true);
+  });
+
+  test('transform failures are logged (rate-limited) instead of silently dropping the event class', () => {
+    const harness = installResilienceHarness();
+    const unsubscribers: Array<() => void> = [];
+    const realConsoleWarn = console.warn;
+    const warnCalls: unknown[][] = [];
+    console.warn = (...args: unknown[]) => {
+      warnCalls.push(args);
+    };
+    try {
+      const socket1 = drainDeliveryGap(harness, unsubscribers);
+      unsubscribers.push(
+        wsMappedEmitter<unknown, unknown>('bad.map', () => {
+          throw new Error('malformed payload');
+        }).on(() => {})
+      );
+
+      const frame = { data: JSON.stringify({ name: 'bad.map', data: { id: 'x' } }) };
+      socket1.dispatch('message', frame);
+      socket1.dispatch('message', frame);
+
+      const badMapWarns = warnCalls.filter((args) => args.some((a) => String(a).includes('bad.map')));
+      expect(badMapWarns.length).toBe(1);
+    } finally {
+      console.warn = realConsoleWarn;
+      harness.cleanup(unsubscribers);
     }
   });
 });
