@@ -21,7 +21,9 @@ use serde_json::{Value, json};
 use crate::adapter::ProtocolAdapter;
 use crate::call::ResolvedCall;
 use crate::error::{InvokeError, InvokeErrorKind};
-use crate::transport::{MAX_ARTIFACT_BYTES, error_from_response, net_err, read_body_capped};
+use crate::transport::{
+    MAX_ARTIFACT_BYTES, error_from_response, get_request, post_multipart, read_body_capped,
+};
 use crate::types::{
     JobHandle, ProducedAsset, ProducedData, TaskOutcome, TaskRequest, TaskResult, VideoGenRequest,
 };
@@ -55,9 +57,10 @@ impl ProtocolAdapter for OpenAiVideosAdapter {
         };
         let url = call.dispatch_target().url;
 
-        let form = build_submit_form(&call.model, req)?;
-        let rb = http.post(&url).timeout(SUBMIT_TIMEOUT).multipart(form);
-        let resp = call.connection.auth.apply(rb)?.send().await.map_err(net_err)?;
+        let resp = post_multipart(http, &url, SUBMIT_TIMEOUT, &call.connection.auth, || {
+            build_submit_form(&call.model, req)
+        })
+        .await?;
         if !resp.status().is_success() {
             return Err(error_from_response(resp).await);
         }
@@ -83,8 +86,7 @@ impl ProtocolAdapter for OpenAiVideosAdapter {
     ) -> Result<TaskOutcome, InvokeError> {
         let base = video_base(call);
         let status_url = format!("{base}/{}", job.remote_id);
-        let rb = http.get(&status_url).timeout(POLL_TIMEOUT);
-        let resp = call.connection.auth.apply(rb)?.send().await.map_err(net_err)?;
+        let resp = get_request(http, &status_url, POLL_TIMEOUT, &call.connection.auth).await?;
         if !resp.status().is_success() {
             return Err(error_from_response(resp).await);
         }
@@ -100,8 +102,7 @@ impl ProtocolAdapter for OpenAiVideosAdapter {
             VideoStatus::Failed(msg) => Err(InvokeError::new(InvokeErrorKind::JobFailed, msg)),
             VideoStatus::Completed => {
                 let content_url = format!("{base}/{}/content", job.remote_id);
-                let rb = http.get(&content_url).timeout(CONTENT_TIMEOUT);
-                let resp = call.connection.auth.apply(rb)?.send().await.map_err(net_err)?;
+                let resp = get_request(http, &content_url, CONTENT_TIMEOUT, &call.connection.auth).await?;
                 if !resp.status().is_success() {
                     return Err(error_from_response(resp).await);
                 }

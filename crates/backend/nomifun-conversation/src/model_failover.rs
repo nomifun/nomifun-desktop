@@ -235,7 +235,6 @@ mod tests {
             base_url: "https://example.com".into(),
             api_key_encrypted: "x".into(),
             enabled,
-            capabilities: "[]".into(),
             bedrock_config: None,
             is_full_url: false,
             sort_order: 0,

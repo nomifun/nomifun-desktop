@@ -182,7 +182,7 @@ pub async fn build_companion_system_prompt(
          - 动作序列：nomi_knowledge_create_base 建库（可直接带 urls，snapshot 模式会在后台抓快照并生成梗概，\
          立即返回不必等待、切勿重复建库）→ \
          nomi_knowledge_write_file 写入你整理好的 markdown → nomi_knowledge_autogen 刷新梗概 → \
-         nomi_knowledge_set_binding 把库绑定到目标会话/终端/你自己（kind=\"companion\"）。绑定变更在目标下次任务启动时生效。\n\
+         nomi_knowledge_set_binding 把库绑定到目标会话/终端/你自己（kind=\"companion\"）。绑定变更对运行中的终端会话即时生效，其余目标在下次任务启动时生效。\n\
          - 分工边界：全局记忆（nomi_memory_*）只放轻量的个人事实与偏好；知识库放成体系、可检索的领域资料。闲聊琐事不要建库。",
     );
     // 终端操作能力（本地会话；远程 IM 走 PROFILE_LITE，无 terminal 域，不注入）。

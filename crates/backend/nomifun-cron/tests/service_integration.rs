@@ -795,9 +795,9 @@ async fn setup_with_conv_repo() -> (
         sqlx::query(
             "INSERT INTO providers (\
                 provider_id, platform, name, base_url, api_key_encrypted, enabled, \
-                capabilities, created_at, updated_at\
+                created_at, updated_at\
              ) VALUES (?, 'openai', ?, 'https://example.invalid', 'encrypted', \
-                       1, '[]', 1, 1)",
+                       1, 1, 1)",
         )
         .bind(provider_id)
         .bind(name)
@@ -1756,10 +1756,10 @@ async fn cj1_private_job_events_are_scoped_to_each_conversation_owner() {
     sqlx::query(
         "INSERT INTO providers (\
             provider_id, platform, name, base_url, api_key_encrypted, enabled, \
-            capabilities, created_at, updated_at\
+            created_at, updated_at\
          ) VALUES ('0190f5fe-7c00-7a00-8000-000000000008', 'openai', 'multiuser', \
                    'https://example.invalid', 'encrypted', \
-                   1, '[]', 1, 1)",
+                   1, 1, 1)",
     )
         .execute(&pool)
         .await

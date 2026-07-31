@@ -315,7 +315,12 @@ const KnowledgeControl: React.FC<KnowledgeControlProps> = ({ target, draft, disa
     try {
       await ipcBridge.knowledge.setBinding.invoke({ kind, target_id: id, ...next });
       if (next.enabled !== binding.enabled) {
-        Message.success(next.enabled ? t('knowledge.control.enabledOk') : t('knowledge.control.disabledOk'));
+        // Terminal workpath bindings re-sync into the live PTY workspace
+        // immediately (backend binding hook); conversation targets apply on
+        // the next message — two different promises, two toasts.
+        const enabledKey =
+          target?.kind === 'terminal' ? 'knowledge.control.enabledOkTerminal' : 'knowledge.control.enabledOk';
+        Message.success(next.enabled ? t(enabledKey) : t('knowledge.control.disabledOk'));
       }
     } catch (e) {
       Message.error(String(e));

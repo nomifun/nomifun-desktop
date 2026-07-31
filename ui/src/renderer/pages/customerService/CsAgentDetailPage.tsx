@@ -25,7 +25,7 @@ import { Delete, Headset, Left, Plus } from '@icon-park/react';
 import { ipcBridge } from '@/common';
 import type { ICsNote } from '@/common/adapter/ipcBridge';
 import { parseCsAgentId, type CsAgentId, type KnowledgeBaseId, type ProviderId } from '@/common/types/ids';
-import { useModelProviderList } from '@renderer/hooks/agent/useModelProviderList';
+import { useModelsForTask } from '@renderer/hooks/agent/useModelsForTask';
 import CsChannelBotsSection from './CsChannelBotsSection';
 import { useCsAgent } from './useCsAgents';
 import { useKnowledgeBaseOptions } from './useKnowledgeBaseOptions';
@@ -62,7 +62,9 @@ const CsAgentDetailPage: React.FC = () => {
   }, [params.cs_agent_id]);
 
   const { agent, loading, patch, reload } = useCsAgent(csAgentId);
-  const { providers, getAvailableModels } = useModelProviderList();
+  // Task-filtered catalog (chat): providers with at least one chat-capable model.
+  const { groups: chatGroups } = useModelsForTask('chat');
+  const providers = useMemo(() => chatGroups.map((g) => g.provider), [chatGroups]);
   const { options: kbOptions } = useKnowledgeBaseOptions();
 
   // ── identity draft (explicit save; text fields shouldn't PATCH per keystroke) ──
@@ -166,7 +168,7 @@ const CsAgentDetailPage: React.FC = () => {
   }
 
   const provider = providers.find((p) => p.id === agent.provider_id);
-  const modelOptions = provider ? getAvailableModels(provider) : [];
+  const modelOptions = chatGroups.find((g) => g.provider.id === agent.provider_id)?.models ?? [];
 
   return (
     <div className='w-full min-h-full box-border overflow-y-auto px-16px py-20px'>

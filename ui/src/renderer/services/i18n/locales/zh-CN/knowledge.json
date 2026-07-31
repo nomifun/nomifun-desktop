@@ -107,6 +107,7 @@
     "eagernessConservative": "保守型（推荐）",
     "eagernessConservativeHint": "克制回写：只写模型判断确有长期价值的知识，拿不准就不写，过滤掉琐碎、临时、重复的内容。",
     "enabledOk": "知识库挂载已开启，下次发送消息时生效",
+    "enabledOkTerminal": "知识库挂载已开启，对当前终端会话即时生效",
     "hint": "为本会话挂载知识库：内容会以软链方式出现在工作区 .nomi/knowledge/ 下，作为拓展知识来源。",
     "label": "知识库",
     "modeDirect": "直接回血",

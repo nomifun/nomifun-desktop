@@ -55,7 +55,6 @@ export const useModelProviderList = (): ModelProviderListResult => {
         base_url: '',
         api_key: '',
         model: [],
-        capabilities: [{ type: 'text' }, { type: 'vision' }, { type: 'function_calling' }],
         enabled: true, // Google Auth provider 始终启用
       } as unknown as IProvider;
       return [googleProvider, ...list];

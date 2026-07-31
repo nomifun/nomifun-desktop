@@ -1708,9 +1708,9 @@ async fn preset_resolved_nomi_model_does_not_bypass_explicit_template_authority(
         nomifun_db::sqlx::query(
             "INSERT INTO providers (\
                 provider_id, platform, name, base_url, api_key_encrypted, enabled, \
-                capabilities, created_at, updated_at\
+                created_at, updated_at\
              ) VALUES (?, 'openai', ?, 'https://example.invalid', \
-                       'encrypted', 1, '[]', 1, 1)",
+                       'encrypted', 1, 1, 1)",
         )
         .bind(provider_id)
         .bind(provider_id)
@@ -2829,9 +2829,9 @@ async fn delete_rejects_soft_deleted_execution_attempt_transcript() {
     nomifun_db::sqlx::query(
         "INSERT INTO providers (\
             provider_id, platform, name, base_url, api_key_encrypted, enabled, \
-            capabilities, created_at, updated_at\
+            created_at, updated_at\
          ) VALUES (?1, 'openai', 'test', 'https://example.invalid', \
-                   'encrypted', 1, '[]', 1, 1)",
+                   'encrypted', 1, 1, 1)",
     )
     .bind(PROVIDER_ID_1)
     .execute(database.pool())
@@ -7560,9 +7560,9 @@ async fn agent_execution_admission_cutpoint_fixture(
     nomifun_db::sqlx::query(
         "INSERT INTO providers (\
             provider_id, platform, name, base_url, api_key_encrypted, enabled, \
-            capabilities, created_at, updated_at\
+            created_at, updated_at\
          ) VALUES (?1, 'openai', 'test', 'https://example.invalid', \
-                   'encrypted', 1, '[]', 1, 1)",
+                   'encrypted', 1, 1, 1)",
     )
     .bind(PROVIDER_ID_1)
     .execute(database.pool())
@@ -11372,9 +11372,9 @@ async fn slow_turn_writeback_completes_turn_immediately_and_never_blocks_next_se
     nomifun_db::sqlx::query(
         "INSERT INTO providers (\
             provider_id, platform, name, base_url, api_key_encrypted, enabled, \
-            capabilities, created_at, updated_at\
+            created_at, updated_at\
          ) VALUES (?1, 'openai', 'writeback fixture', 'https://example.invalid', \
-                   'encrypted', 1, '[]', 1, 1)",
+                   'encrypted', 1, 1, 1)",
     )
     .bind(PROVIDER_ID_1)
     .execute(database.pool())
@@ -13701,9 +13701,9 @@ async fn edit_resubmit_rebuilds_a_missing_terminal_runtime_before_rewind() {
     nomifun_db::sqlx::query(
         "INSERT INTO providers (\
             provider_id, platform, name, base_url, api_key_encrypted, enabled, \
-            capabilities, created_at, updated_at\
+            created_at, updated_at\
          ) VALUES (?1, 'openai', 'edit fixture', 'https://example.invalid', \
-                   'encrypted', 1, '[]', 1, 1)",
+                   'encrypted', 1, 1, 1)",
     )
     .bind(PROVIDER_ID_1)
     .execute(database.pool())
@@ -13881,9 +13881,9 @@ async fn edit_rewind_then_transcript_delete_failure_quarantines_runtime_before_f
     nomifun_db::sqlx::query(
         "INSERT INTO providers (\
             provider_id, platform, name, base_url, api_key_encrypted, enabled, \
-            capabilities, created_at, updated_at\
+            created_at, updated_at\
          ) VALUES (?1, 'openai', 'edit fixture', 'https://example.invalid', \
-                   'encrypted', 1, '[]', 1, 1)",
+                   'encrypted', 1, 1, 1)",
     )
     .bind(PROVIDER_ID_1)
     .execute(database.pool())
@@ -15429,7 +15429,6 @@ fn test_provider(id: &str, models: &[&str]) -> (Provider, Vec<nomifun_db::Provid
         base_url: "https://example.com".into(),
         api_key_encrypted: "x".into(),
         enabled: true,
-        capabilities: "[]".into(),
         bedrock_config: None,
         is_full_url: false,
         sort_order: 0,

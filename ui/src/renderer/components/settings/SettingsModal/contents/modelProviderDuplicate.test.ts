@@ -22,4 +22,13 @@ describe('model provider duplicate action', () => {
     expect(source.includes('<Copy theme')).toBe(true);
     expect(source.indexOf('icon={<Write size')).toBeLessThan(source.indexOf('<Copy theme'));
   });
+
+  test('sends a localized copy name with the clone request', () => {
+    const source = readSource(new URL('./ModelModalContent.tsx', import.meta.url));
+
+    // The clone body carries "<source name> <localized suffix>" so the copy is
+    // named in the user's language instead of the backend default.
+    expect(source.includes("t('settings.providerCopySuffix'")).toBe(true);
+    expect(/name: `\$\{platform\.name\} \$\{t\('settings\.providerCopySuffix'/.test(source)).toBe(true);
+  });
 });

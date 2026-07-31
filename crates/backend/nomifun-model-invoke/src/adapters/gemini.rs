@@ -36,7 +36,7 @@ use crate::adapter::ProtocolAdapter;
 use crate::adapters::has_endpoint_override;
 use crate::call::{ResolvedCall, ResolvedConnection};
 use crate::error::{InvokeError, InvokeErrorKind};
-use crate::transport::{decode_b64, encode_b64, error_from_response, net_err};
+use crate::transport::{decode_b64, encode_b64, error_from_response, post_json};
 use crate::types::{
     ChatTextRequest, InputAsset, ProducedAsset, ProducedData, TaskOutcome, TaskRequest, TaskResult,
 };
@@ -77,8 +77,7 @@ async fn post_generate_content(
     url: &str,
     body: &Value,
 ) -> Result<Value, InvokeError> {
-    let rb = http.post(url).timeout(REQUEST_TIMEOUT).json(body);
-    let resp = call.connection.auth.apply(rb)?.send().await.map_err(net_err)?;
+    let resp = post_json(http, url, REQUEST_TIMEOUT, &call.connection.auth, body).await?;
     if !resp.status().is_success() {
         return Err(error_from_response(resp).await);
     }

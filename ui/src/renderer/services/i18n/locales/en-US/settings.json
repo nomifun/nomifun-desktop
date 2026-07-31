@@ -965,8 +965,6 @@
     "agentExecution": "Collaborative task"
   },
   "healthCheck": "Health Check",
-  "clearStatus": "Clear status",
-  "healthStatusCleared": "Health status cleared",
   "latency": "Latency",
   "customAcpAgent": "Custom ACP Agents",
   "addCustomAgent": "Add",

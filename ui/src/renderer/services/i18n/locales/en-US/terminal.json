@@ -101,7 +101,7 @@
     "launch": "Launch"
   },
   "knowledge": {
-    "applyAfterRelaunch": "Changes take effect after the session is relaunched."
+    "applyLiveNote": "Mount and write-back changes apply to this session immediately. If the session launched without the knowledge retrieval tools (e.g. gemini or a custom command), relaunch it to inject them."
   },
   "newConversation": "New Conversation",
   "action": {

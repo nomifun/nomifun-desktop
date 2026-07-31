@@ -148,7 +148,6 @@ pub(crate) mod tests {
             base_url: String::new(),
             api_key_encrypted: String::new(),
             enabled,
-            capabilities: "[]".into(),
             bedrock_config: None,
             is_full_url: false,
             sort_order: 0,

@@ -44,12 +44,10 @@ fn sample_params() -> CreateProviderParams<'static> {
         api_key_encrypted: "enc_key_data",
         models: r#"["claude-sonnet-4-20250514"]"#,
         enabled: true,
-        capabilities: r#"[{"type":"text"}]"#,
         model_context_limits: None,
         model_protocols: None,
         model_descriptions: None,
         model_enabled: None,
-        model_health: None,
         bedrock_config: None,
         is_full_url: false,
         sort_order: None,
@@ -86,7 +84,6 @@ async fn create_stores_json_fields_as_strings() {
     let r = SqliteProviderRepository::new(db.pool().clone());
     let p = r.create(sample_params()).await.unwrap();
 
-    assert_eq!(p.capabilities, r#"[{"type":"text"}]"#);
     // The models array param has no providers column since migration 016; it
     // materializes as provider_models rows.
     let models: Vec<String> = sqlx::query_scalar(
@@ -167,7 +164,6 @@ async fn create_with_all_optional_fields() {
             model_protocols: Some(r#"{"m1":"openai"}"#),
             model_descriptions: Some(r#"{"m1":"擅长前端"}"#),
             model_enabled: Some(r#"{"m1":true}"#),
-            model_health: Some(r#"{"m1":{"status":"healthy"}}"#),
             bedrock_config: Some(r#"{"region":"us-east-1"}"#),
             ..sample_params()
         })
@@ -194,7 +190,10 @@ async fn create_with_all_optional_fields() {
     assert_eq!(context_limit, Some(128_000));
     assert_eq!(protocol.as_deref(), Some("openai"));
     assert_eq!(description.as_deref(), Some("擅长前端"));
-    assert_eq!(health.as_deref(), Some(r#"{"status":"healthy"}"#));
+    assert!(
+        health.is_none(),
+        "create never seeds health; the server probe (set_health) is the only writer"
+    );
 }
 
 // -- Find by ID --

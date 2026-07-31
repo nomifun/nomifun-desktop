@@ -20,7 +20,7 @@ use serde_json::{Value, json};
 use crate::adapter::ProtocolAdapter;
 use crate::call::ResolvedCall;
 use crate::error::{InvokeError, InvokeErrorKind};
-use crate::transport::{error_from_response, net_err};
+use crate::transport::{error_from_response, post_json};
 use crate::types::{ChatTextRequest, TaskOutcome, TaskRequest, TaskResult};
 
 /// Text generation is usually fast; reasoning models can be slower.
@@ -49,8 +49,7 @@ impl ProtocolAdapter for OpenAiChatTextAdapter {
         let url = call.dispatch_target().url;
         let body = build_chat_body(&call.model, req);
 
-        let rb = http.post(&url).timeout(REQUEST_TIMEOUT).json(&body);
-        let resp = call.connection.auth.apply(rb)?.send().await.map_err(net_err)?;
+        let resp = post_json(http, &url, REQUEST_TIMEOUT, &call.connection.auth, &body).await?;
         if !resp.status().is_success() {
             return Err(error_from_response(resp).await);
         }

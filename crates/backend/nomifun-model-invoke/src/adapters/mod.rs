@@ -19,9 +19,13 @@
 //! - [`ark`] — Volcengine Ark `/api/v3` image generation (`"ark.images"`) and
 //!   async video tasks (`"ark.video_jobs"`).
 //! - [`volc_voice`] — Volcengine speech domain (openspeech) file ASR
-//!   (`"volc.asr_file"`, rides the `"voice"` connection profile).
-//!
-//! Later tasks append the volc TTS adapter to [`default_adapters`].
+//!   (`"volc.asr_file"`) and v3 大模型 TTS (`"volc.tts_v3"`), both riding the
+//!   `"voice"` connection profile.
+//! - [`dashscope`] — Alibaba DashScope forced-async image generation
+//!   (`"dashscope.images"`) and sync embeddings (`"dashscope.embeddings"`),
+//!   input/parameters wrapper protocol.
+//! - [`minimax`] — MiniMax sync TTS (`"minimax.t2a"`, hex audio + GroupId
+//!   query).
 
 use std::sync::Arc;
 
@@ -42,8 +46,10 @@ pub(crate) fn has_endpoint_override(params: &serde_json::Value) -> bool {
 }
 
 pub mod ark;
+pub mod dashscope;
 pub mod deepgram;
 pub mod gemini;
+pub mod minimax;
 pub mod openai_audio;
 pub mod openai_chat_text;
 pub mod openai_embeddings;
@@ -68,6 +74,10 @@ pub fn default_adapters() -> Vec<Arc<dyn ProtocolAdapter>> {
         Arc::new(ark::ArkImagesAdapter),
         Arc::new(ark::ArkVideoJobsAdapter),
         Arc::new(volc_voice::VolcAsrFileAdapter),
+        Arc::new(volc_voice::VolcTtsV3Adapter),
+        Arc::new(dashscope::DashScopeImagesAdapter),
+        Arc::new(dashscope::DashScopeEmbeddingsAdapter),
+        Arc::new(minimax::MiniMaxT2aAdapter),
     ]
 }
 
@@ -129,10 +139,16 @@ mod tests {
             ("ark.images", ModelTask::ImageGeneration),
             ("ark.video_jobs", ModelTask::VideoGeneration),
             ("volc.asr_file", ModelTask::SpeechRecognition),
+            ("volc.tts_v3", ModelTask::SpeechSynthesis),
+            ("dashscope.images", ModelTask::ImageGeneration),
+            ("dashscope.embeddings", ModelTask::Embedding),
+            ("minimax.t2a", ModelTask::SpeechSynthesis),
         ] {
             let adapter = registry.get(protocol, task).expect("registered + supported");
             assert_eq!(adapter.id(), protocol);
         }
+        // The P3 target set: 16 adapters in the default assembly.
+        assert_eq!(default_adapters().len(), 16);
         // Tasks outside an adapter's declared support are refused.
         assert!(registry.get("openai.images", ModelTask::Chat).is_err());
         assert!(registry.get("openai.videos", ModelTask::ImageGeneration).is_err());
@@ -147,5 +163,10 @@ mod tests {
         assert!(registry.get("ark.images", ModelTask::ImageEdit).is_err());
         assert!(registry.get("ark.video_jobs", ModelTask::ImageGeneration).is_err());
         assert!(registry.get("volc.asr_file", ModelTask::SpeechSynthesis).is_err());
+        assert!(registry.get("volc.tts_v3", ModelTask::SpeechRecognition).is_err());
+        // dashscope.images serves ImageGeneration only (no edit endpoint mapped).
+        assert!(registry.get("dashscope.images", ModelTask::ImageEdit).is_err());
+        assert!(registry.get("dashscope.embeddings", ModelTask::Chat).is_err());
+        assert!(registry.get("minimax.t2a", ModelTask::SpeechRecognition).is_err());
     }
 }

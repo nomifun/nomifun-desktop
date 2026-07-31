@@ -32,7 +32,6 @@ const response = (provider_id: string): ProviderResponse => ({
   api_key: 'sk-test',
   models: ['gpt-4o'],
   enabled: true,
-  capabilities: [],
   model_context_limits: { 'gpt-4o': 128_000 },
   is_full_url: false,
   sort_order: 0,

@@ -3,11 +3,13 @@ use serde::{Deserialize, Serialize};
 
 /// Row mapping for the `providers` table.
 ///
-/// JSON fields (capabilities, bedrock_config) are stored as TEXT in SQLite
-/// and deserialized by the service layer. The per-model surface (membership,
-/// enabled, protocol, context limit, description, health) lives exclusively
-/// on `provider_models` rows since migration 016 dropped the legacy `models`
-/// array and the five per-model JSON map columns.
+/// JSON fields (bedrock_config) are stored as TEXT in SQLite and deserialized
+/// by the service layer. The per-model surface (membership, enabled,
+/// protocol, context limit, description, health) lives exclusively on
+/// `provider_models` rows since migration 016 dropped the legacy `models`
+/// array and the five per-model JSON map columns; migration 017 dropped the
+/// provider-level `capabilities` column (the wire field is retired and
+/// always `[]`).
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct Provider {
     pub id: i64,
@@ -17,8 +19,6 @@ pub struct Provider {
     pub base_url: String,
     pub api_key_encrypted: String,
     pub enabled: bool,
-    /// JSON array of capability objects.
-    pub capabilities: String,
     /// JSON object: Bedrock-specific configuration.
     pub bedrock_config: Option<String>,
     /// When true, base_url is treated as a complete endpoint URL.
