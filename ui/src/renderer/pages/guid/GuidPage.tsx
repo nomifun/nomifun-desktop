@@ -674,6 +674,7 @@ const GuidPage: React.FC = () => {
       runtimeType={effectiveAgentType}
       delegationPolicy={delegationPolicy}
       decisionPolicy={decisionPolicy}
+      className='guid-entry-policy-btn'
       onChange={(next) => {
         setDelegationPolicy(next.delegationPolicy);
         setDecisionPolicy(next.decisionPolicy);

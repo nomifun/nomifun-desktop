@@ -10,7 +10,7 @@ import { modelHealthOf } from '@/common/utils/providerModels';
 import { iconColors } from '@/renderer/styles/colors';
 import { getModelDisplayLabel } from '@/renderer/utils/model/agentLogo';
 import type { AcpModelInfo } from '../types';
-import { Button, Dropdown, Menu, Tooltip } from '@arco-design/web-react';
+import { Button, Dropdown, Menu } from '@arco-design/web-react';
 import { Brain, Down, Plus } from '@icon-park/react';
 import React from 'react';
 import { useTranslation } from 'react-i18next';
@@ -167,11 +167,22 @@ const GuidModelSelector: React.FC<GuidModelSelectorProps> = ({
           </Menu>
         }
       >
-        <Button className={'sendbox-model-btn guid-config-btn'} shape='round' size='small' data-testid='guid-model-selector'>
+        <Button
+          className={'sendbox-model-btn guid-config-btn'}
+          shape='round'
+          size='small'
+          data-testid='guid-model-selector'
+          aria-label={geminiButtonLabel}
+        >
           <span className='flex items-center gap-6px min-w-0'>
             <Brain theme='outline' size='14' fill={iconColors.secondary} className='shrink-0' />
-            <span className='truncate'>{geminiButtonLabel}</span>
-            <Down theme='outline' size='12' fill={iconColors.secondary} className='shrink-0' />
+            <span className='sendbox-responsive-label truncate'>{geminiButtonLabel}</span>
+            <Down
+              theme='outline'
+              size='12'
+              fill={iconColors.secondary}
+              className='sendbox-responsive-chevron shrink-0'
+            />
           </span>
         </Button>
       </Dropdown>
@@ -215,11 +226,21 @@ const GuidModelSelector: React.FC<GuidModelSelectorProps> = ({
             </Menu>
           }
         >
-          <Button className={'sendbox-model-btn guid-config-btn'} shape='round' size='small'>
+          <Button
+            className={'sendbox-model-btn guid-config-btn'}
+            shape='round'
+            size='small'
+            aria-label={acpButtonLabel}
+          >
             <span className='flex items-center gap-6px min-w-0'>
               <Brain theme='outline' size='14' fill={iconColors.secondary} className='shrink-0' />
-              <span>{acpButtonLabel}</span>
-              <Down theme='outline' size='12' fill={iconColors.secondary} className='shrink-0' />
+              <span className='sendbox-responsive-label'>{acpButtonLabel}</span>
+              <Down
+                theme='outline'
+                size='12'
+                fill={iconColors.secondary}
+                className='sendbox-responsive-chevron shrink-0'
+              />
             </span>
           </Button>
         </Dropdown>
@@ -227,32 +248,35 @@ const GuidModelSelector: React.FC<GuidModelSelectorProps> = ({
     }
 
     return (
-      <Tooltip content={t('conversation.welcome.modelSwitchNotSupported')} position='top'>
-        <Button
-          className={'sendbox-model-btn guid-config-btn'}
-          shape='round'
-          size='small'
-          style={{ cursor: 'default' }}
-        >
-          <span className='flex items-center gap-6px min-w-0'>
-            <Brain theme='outline' size='14' fill={iconColors.secondary} className='shrink-0' />
-            <span>{acpButtonLabel}</span>
-          </span>
-        </Button>
-      </Tooltip>
+      <Button
+        className={'sendbox-model-btn guid-config-btn'}
+        shape='round'
+        size='small'
+        style={{ cursor: 'default' }}
+        aria-label={acpButtonLabel}
+      >
+        <span className='flex items-center gap-6px min-w-0'>
+          <Brain theme='outline' size='14' fill={iconColors.secondary} className='shrink-0' />
+          <span className='sendbox-responsive-label'>{acpButtonLabel}</span>
+        </span>
+      </Button>
     );
   }
 
   // Fallback: no model switching
   return (
-    <Tooltip content={t('conversation.welcome.modelSwitchNotSupported')} position='top'>
-      <Button className={'sendbox-model-btn guid-config-btn'} shape='round' size='small' style={{ cursor: 'default' }}>
-        <span className='flex items-center gap-6px min-w-0'>
-          <Brain theme='outline' size='14' fill={iconColors.secondary} className='shrink-0' />
-          <span>{defaultModelLabel}</span>
-        </span>
-      </Button>
-    </Tooltip>
+    <Button
+      className={'sendbox-model-btn guid-config-btn'}
+      shape='round'
+      size='small'
+      style={{ cursor: 'default' }}
+      aria-label={defaultModelLabel}
+    >
+      <span className='flex items-center gap-6px min-w-0'>
+        <Brain theme='outline' size='14' fill={iconColors.secondary} className='shrink-0' />
+        <span className='sendbox-responsive-label'>{defaultModelLabel}</span>
+      </span>
+    </Button>
   );
 };
 

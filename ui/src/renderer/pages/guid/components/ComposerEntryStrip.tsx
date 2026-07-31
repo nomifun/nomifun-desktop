@@ -147,19 +147,19 @@ const ComposerEntryStrip: React.FC<ComposerEntryStripProps> = ({
     ) : null;
 
   // --- Skills entry (shared in both states) ---
+  const skillsAriaLabel =
+    skillCount > 0
+      ? t('guid.entry.skillsAdjustAria', {
+          count: skillCount,
+          defaultValue: '调整本次会话已启用的 {{count}} 个 Skills',
+        })
+      : t('guid.entry.skills', { defaultValue: '使用 Skills' });
   const skillsButton = (
     <button
       type='button'
       className={`${styles.entryButton} ${styles.entryButtonInteractive}`}
       onClick={onAdjustSkills}
-      aria-label={
-        skillCount > 0
-          ? t('guid.entry.skillsAdjustAria', {
-              count: skillCount,
-              defaultValue: '调整本次会话已启用的 {{count}} 个 Skills',
-            })
-          : t('guid.entry.skills', { defaultValue: '使用 Skills' })
-      }
+      aria-label={skillsAriaLabel}
     >
       <Lightning theme='outline' size={15} strokeWidth={3} />
       <span className={styles.entryButtonText}>{skillsLabel}</span>
@@ -201,6 +201,7 @@ const ComposerEntryStrip: React.FC<ComposerEntryStripProps> = ({
   );
 
   // --- Summon companion entry (optional; nomi launches only) ---
+  const summonLabel = summonedCompanionName || t('conversation.summon.button');
   const summonEntry = onSummonCompanion ? (
     <button
       type='button'
@@ -210,14 +211,14 @@ const ComposerEntryStrip: React.FC<ComposerEntryStripProps> = ({
       data-testid='guid-summon-entry'
     >
       <EveryUser theme='outline' size={15} fill='currentColor' />
-      <span className={styles.entryButtonText}>
-        {summonedCompanionName || t('conversation.summon.button')}
-      </span>
+      <span className={styles.entryButtonText}>{summonLabel}</span>
     </button>
   ) : null;
 
   // --- Preset selected state ---
   if (isPresetAgent) {
+    const activePresetLabel = presetLabel || t('guid.entry.usePreset', { defaultValue: '使用设定' });
+
     return (
       <div className={styles.entryStrip}>
         {collaborationPolicyNode}
@@ -227,9 +228,7 @@ const ComposerEntryStrip: React.FC<ComposerEntryStripProps> = ({
         {/* Persona token */}
         <span className={`${styles.entryButton} ${styles.entryButtonActive} ${styles.entryPersonaButton}`}>
           <span className={styles.entryAvatar}>{renderAvatar()}</span>
-          <span className={styles.entryButtonText}>
-            {presetLabel || t('guid.entry.usePreset', { defaultValue: '使用设定' })}
-          </span>
+          <span className={styles.entryButtonText}>{activePresetLabel}</span>
           <button
             type='button'
             className={styles.entryDismiss}
@@ -246,9 +245,16 @@ const ComposerEntryStrip: React.FC<ComposerEntryStripProps> = ({
         {skillsEntry}
 
         {/* Right: back to free */}
-        <button type='button' className={styles.entryBackButton} onClick={onFree}>
+        <button
+          type='button'
+          className={styles.entryBackButton}
+          onClick={onFree}
+          aria-label={t('guid.entry.backToFree', { defaultValue: '自由发挥' })}
+        >
           <span>↩</span>
-          <span>{t('guid.entry.backToFree', { defaultValue: '自由发挥' })}</span>
+          <span className={styles.entryButtonText}>
+            {t('guid.entry.backToFree', { defaultValue: '自由发挥' })}
+          </span>
         </button>
       </div>
     );
@@ -266,6 +272,7 @@ const ComposerEntryStrip: React.FC<ComposerEntryStripProps> = ({
         type='button'
         className={`${styles.entryButton} ${styles.entryButtonInteractive}`}
         onClick={onChoosePreset}
+        aria-label={t('guid.entry.usePreset', { defaultValue: '使用设定' })}
       >
         <Robot theme='outline' size={15} fill='currentColor' />
         <span className={styles.entryButtonText}>{t('guid.entry.usePreset', { defaultValue: '使用设定' })}</span>

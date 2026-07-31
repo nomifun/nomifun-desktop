@@ -979,7 +979,10 @@ const NomiSendBox: React.FC<{
         }
         rightTools={
           hideModeSelector ? undefined : (
-            <div className='flex items-center gap-2 min-w-0' data-testid='nomi-sendbox-config-group'>
+            <div
+              className='sendbox-responsive-config-group flex flex-1 items-center justify-end gap-2 min-w-0'
+              data-testid='nomi-sendbox-config-group'
+            >
               {hasContextUsage && <ContextUsageRing used={tokenUsage?.context_tokens} max={tokenUsage?.context_window} />}
               <NomiModelSelector selection={modelSelection} className='nomi-sendbox-model-btn' />
               {/* 召唤伙伴（设计 B5）：仅普通工作会话可见 —— 伙伴/客服等锁定面
