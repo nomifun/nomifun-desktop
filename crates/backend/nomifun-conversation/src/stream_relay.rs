@@ -1056,13 +1056,36 @@ impl TurnWritebackAttempt {
         )
         .await
         .map_err(|error| format!("failed to persist write-back intent: {error}"))
-        .and_then(|outcome| match outcome {
+        .and_then(Self::require_intent_outcome)
+    }
+
+    /// Persist AND broadcast the durable "started" intent. The detached
+    /// turn-final path publishes the running chip before its owning turn
+    /// completes; the worker's own "started" emit then lands as an ignored
+    /// duplicate instead of a second projection.
+    pub(crate) async fn emit_started_intent(&self) -> Result<(), String> {
+        self.emit(turn_writeback_running_state(
+            "started",
+            &self.attempt_id,
+            self.attempt_generation,
+            self.started_at,
+            self.started_at,
+            &self.prior_written,
+            &self.prior_failures,
+        ))
+        .await
+        .map_err(|error| format!("failed to persist write-back intent: {error}"))
+        .and_then(Self::require_intent_outcome)
+    }
+
+    fn require_intent_outcome(outcome: TurnWritebackPersistOutcome) -> Result<(), String> {
+        match outcome {
             TurnWritebackPersistOutcome::Committed
             | TurnWritebackPersistOutcome::IgnoredDuplicate => Ok(()),
             other => Err(format!(
                 "write-back intent was rejected by the monotonic state fence: {other:?}"
             )),
-        })
+        }
     }
 
     pub(crate) fn owner_guard(&self, reason: &'static str) -> TurnWritebackOwnerGuard {
