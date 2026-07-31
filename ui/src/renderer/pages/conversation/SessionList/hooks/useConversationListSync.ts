@@ -269,6 +269,10 @@ const initializeConversationListSyncStore = () => {
   refreshConversations();
 
   addEventListener('chat.history.refresh', refreshConversations);
+  // WebSocket delivery has no replay: any gap (reconnect, server lag resync)
+  // may have dropped conversation.listChanged frames (delete/create while
+  // offline), so reload the durable conversation snapshot.
+  ipcBridge.conversation.reconnected.on(() => refreshConversations());
   ipcBridge.conversation.listChanged.on((event) => {
     if (event.action === 'deleted') {
       activeTurnIdsState.delete(event.conversation_id);
