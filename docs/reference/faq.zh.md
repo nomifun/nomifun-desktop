@@ -53,8 +53,7 @@ Web 宿主与之相反：默认要求登录。两者的差异是有意的——�
   `NOMIFUN_DATA_DIR`）的任何位置，按字面值生效。两者都未设置时，
   默认与桌面应用是**同一个按用户目录**，因此开发中的
   `bun run serve:web` 与已安装的应用看到的是同一份状态。
-- **Docker**：compose 文件中定义的命名卷（`nomifun-data`，挂载到
-  `/data`）。
+- **Docker**：你挂载到 `/data` 的命名卷（例如 `nomifun-data:/data`）。
 
 数据目录里有 SQLite 数据库（`nomifun-backend.db*`）、各智能体状态、
 Bun 缓存、日志文件，以及任何嵌入式扩展数据。请像对待数据库一样备份
@@ -122,17 +121,19 @@ Apache-2.0 条款下使用、修改、再分发，并将代码打包——包括
 
 ## 有预构建安装包吗？
 
-还没有官方公开发布渠道。桌面包可以本地构建，macOS Developer ID 签名已通过
-`bun run build:signed` 脚本接好，updater 产物可用 `bun run build:updater`
-生成；但还没有官方 installer feed 或公开 registry。当前受支持的安装路径是：
+桌面包可以本地构建，macOS Developer ID 签名已通过 `bun run build:signed`
+脚本接好，updater 产物可用 `bun run build:updater` 生成。Web 服务已提供
+官方 Docker Hub 镜像
+[`nomifun/nomifun-web`](https://hub.docker.com/repository/docker/nomifun/nomifun-web)。
+当前受支持的安装路径是：
 
 - **桌面端**：`bun install && bun run build:ui && cargo run -p
   nomifun-desktop`（或 `cargo build --release -p nomifun-desktop`）。
-- **服务端**：从源码构建（`cargo build --release -p nomifun-web`）
-  或 `docker compose up -d --build`。
+- **服务端**：运行 `nomifun/nomifun-web:v0.3.4`、从源码构建
+  （`cargo build --release -p nomifun-web`），或用
+  `docker compose up -d --build` 本地构建。
 
-预构建安装包发布后，会从项目 README 与
-[新手入门指南](../getting-started/) 链接出来。
+已发布的制品会从项目 README 与 [新手入门指南](../getting-started/) 链接出来。
 
 ## 我把管理员密码搞丢了
 
