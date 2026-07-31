@@ -1444,6 +1444,89 @@ button.guidResourceCard:focus-visible {
   font-weight: 800;
 }
 
+/* Skill rows stay as one compact, two-line unit at every drawer width. Keep
+   these overrides after the shared card rules so the preset layout cannot
+   re-enable wrapping through the cascade. */
+.drawerSkillCard {
+  box-sizing: border-box;
+  grid-template-columns: 40px minmax(0, 1fr) 20px;
+  gap: 10px;
+  align-items: center;
+  min-height: 58px;
+  padding: 8px 12px;
+}
+
+.drawerSkillCard::before {
+  display: none;
+}
+
+.drawerSkillCard .drawerCardStatus {
+  position: static;
+  justify-self: end;
+  box-sizing: border-box;
+  width: 20px;
+  height: 20px;
+}
+
+.drawerSkillCard .drawerIconTile {
+  box-sizing: border-box;
+  width: 40px;
+  height: 40px;
+  border-radius: 10px;
+}
+
+.drawerSkillCard .drawerCardBody {
+  overflow: hidden;
+  padding-right: 0;
+}
+
+.drawerSkillTitleRow {
+  height: 20px;
+  flex-wrap: nowrap;
+  gap: 6px;
+  overflow: hidden;
+}
+
+.drawerSkillTitleRow .drawerCardTitle {
+  flex: 0 1 auto;
+  line-height: 20px;
+}
+
+.drawerSkillTitleRow .drawerBadge {
+  box-sizing: border-box;
+  flex: 0 0 auto;
+  height: 20px;
+  min-height: 20px;
+}
+
+.drawerSkillMetaRow {
+  height: 20px;
+  flex: 1 1 auto;
+  flex-wrap: nowrap;
+  gap: 5px;
+  min-width: 0;
+  margin-top: 0;
+  overflow: hidden;
+}
+
+.drawerSkillMetaRow .drawerTagChip {
+  box-sizing: border-box;
+  flex: 0 0 auto;
+  height: 20px;
+  min-height: 20px;
+}
+
+.drawerSkillDescription {
+  display: block;
+  height: 17px;
+  margin-top: 3px;
+  overflow: hidden;
+  line-height: 17px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  -webkit-line-clamp: 1;
+}
+
 .drawerCallAction {
   display: inline-flex;
   align-items: center;

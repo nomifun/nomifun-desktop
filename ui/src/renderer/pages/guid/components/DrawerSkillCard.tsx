@@ -61,12 +61,51 @@ const DrawerSkillCard: React.FC<DrawerSkillCardProps> = ({
       aria-checked={checked}
       className={[
         styles.drawerCard,
+        styles.drawerSkillCard,
         checked ? styles.drawerCardSelected : '',
       ].filter(Boolean).join(' ')}
       onClick={() => onToggle(skill.name, isAuto)}
       onKeyDown={handleKeyDown}
     >
-      {/* Checkbox indicator */}
+      {/* Avatar initials */}
+      <div className={styles.drawerIconTile}>
+        {initials}
+      </div>
+
+      {/* Body */}
+      <div className={styles.drawerCardBody}>
+        <div className={[styles.drawerCardTitleRow, styles.drawerSkillTitleRow].join(' ')}>
+          <h4 className={styles.drawerCardTitle} title={display.name}>{display.name}</h4>
+          <span className={[styles.drawerBadge, styles.drawerBadgeMuted].join(' ')}>
+            {sourceLabel}
+          </span>
+          {isAuto && (
+            <span className={[styles.drawerBadge, styles.drawerBadgeSuccess].join(' ')}>
+              {t('guid.drawer.autoInject', { defaultValue: '自动注入' })}
+            </span>
+          )}
+
+          {/* Tag chips share the title line to keep each card compact. */}
+          {resolvedTags.length > 0 ? (
+            <div className={[styles.drawerMetaRow, styles.drawerSkillMetaRow].join(' ')}>
+              {resolvedTags.map((tag) => (
+                <span key={tag.key} className={styles.drawerTagChip}>
+                  {tag.label_i18n?.[localeKey] || tag.label}
+                </span>
+              ))}
+            </div>
+          ) : null}
+        </div>
+
+        <p
+          className={[styles.drawerDescription, styles.drawerSkillDescription].join(' ')}
+          title={display.description}
+        >
+          {display.description}
+        </p>
+      </div>
+
+      {/* Fixed right-side checkbox indicator */}
       <span
         className={[
           styles.drawerCardStatus,
@@ -76,39 +115,6 @@ const DrawerSkillCard: React.FC<DrawerSkillCardProps> = ({
       >
         {checked && <CheckSmall theme='filled' size={13} fill='currentColor' />}
       </span>
-
-      {/* Avatar initials */}
-      <div className={styles.drawerIconTile}>
-        {initials}
-      </div>
-
-      {/* Body */}
-      <div className={styles.drawerCardBody}>
-        <div className={styles.drawerCardTitleRow}>
-          <h4 className={styles.drawerCardTitle}>{display.name}</h4>
-          <span className={[styles.drawerBadge, styles.drawerBadgeMuted].join(' ')}>
-            {sourceLabel}
-          </span>
-          {isAuto && (
-            <span className={[styles.drawerBadge, styles.drawerBadgeSuccess].join(' ')}>
-              {t('guid.drawer.autoInject', { defaultValue: '自动注入' })}
-            </span>
-          )}
-        </div>
-
-        <p className={styles.drawerDescription}>{display.description}</p>
-
-        {/* Tag chips */}
-        {resolvedTags.length > 0 ? (
-          <div className={styles.drawerMetaRow}>
-            {resolvedTags.map((tag) => (
-              <span key={tag.key} className={styles.drawerTagChip}>
-                {tag.label_i18n?.[localeKey] || tag.label}
-              </span>
-            ))}
-          </div>
-        ) : null}
-      </div>
     </div>
   );
 };

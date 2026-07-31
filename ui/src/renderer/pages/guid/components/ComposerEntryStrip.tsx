@@ -19,7 +19,6 @@ export interface ComposerEntryStripProps {
   isPresetAgent: boolean;
   presetLabel?: string;
   presetAvatar?: { kind: 'image' | 'emoji' | 'icon'; value?: string };
-  onChoosePreset: () => void;
   onAdjustSkills: () => void;
   onFree: () => void;
   localeKey: string;
@@ -42,7 +41,6 @@ const ComposerEntryStrip: React.FC<ComposerEntryStripProps> = ({
   isPresetAgent,
   presetLabel,
   presetAvatar,
-  onChoosePreset,
   onAdjustSkills,
   onFree,
   localeKey,
@@ -266,17 +264,6 @@ const ComposerEntryStrip: React.FC<ComposerEntryStripProps> = ({
       {collaborationPolicyNode}
 
       {summonEntry}
-
-      {/* Choose preset */}
-      <button
-        type='button'
-        className={`${styles.entryButton} ${styles.entryButtonInteractive}`}
-        onClick={onChoosePreset}
-        aria-label={t('guid.entry.usePreset', { defaultValue: '使用设定' })}
-      >
-        <Robot theme='outline' size={15} fill='currentColor' />
-        <span className={styles.entryButtonText}>{t('guid.entry.usePreset', { defaultValue: '使用设定' })}</span>
-      </button>
 
       {/* Skills */}
       {skillsEntry}
