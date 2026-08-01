@@ -97,6 +97,7 @@ impl KnowledgeMcpServer {
 
         let app = axum::Router::new()
             .route("/tool", axum::routing::post(handle_tool_request))
+            .route("/context", axum::routing::post(handle_context_request))
             .route(
                 LOOPBACK_CAPABILITY_RENEW_PATH,
                 axum::routing::post(handle_capability_renew),
@@ -327,6 +328,73 @@ fn no_bases_bound_error() -> Value {
         "error": "no knowledge bases are currently bound to this workspace; \
                   ask the user to mount one via the session's knowledge control"
     })
+}
+
+/// Compact mount metadata for the stdio bridge's MCP `initialize`
+/// instructions (RC-5: the on-disk README was never surfaced to the model, so
+/// the bridge asks for the CURRENT scope at startup and renders it into the
+/// one channel every MCP host shows the model). Same authentication as
+/// `/tool`; the response carries only base names/descriptions — no paths, no
+/// ids, no secrets. Terminal sessions resolve the binding LIVE (identical to
+/// dispatch); conversation/external sessions describe their signed scope.
+async fn handle_context_request(
+    State(state): State<KbMcpState>,
+    headers: axum::http::HeaderMap,
+    Json(body): Json<Value>,
+) -> impl IntoResponse {
+    let presented_token = headers
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .unwrap_or("");
+    let claims: KnowledgeCapabilityClaims = match body
+        .get("session")
+        .cloned()
+        .and_then(|value| serde_json::from_value::<KnowledgeCapabilityClaims>(value).ok())
+    {
+        Some(claims)
+            if state
+                .issuer
+                .verify_access(KNOWLEDGE_CAPABILITY_DOMAIN, &claims, presented_token)
+                .is_ok()
+                && claims.scope.validate().is_ok() => claims,
+        _ => {
+            warn!("Knowledge MCP: rejected invalid context request");
+            return (StatusCode::UNAUTHORIZED, Json(json!({"error": "unauthorized"})))
+                .into_response();
+        }
+    };
+    let Some(service) = state.service.read().await.upgrade() else {
+        return finish(json!({"error": "knowledge service unavailable"}));
+    };
+
+    let is_terminal_session =
+        claims.session.kind == nomifun_common::LoopbackSessionKind::Terminal;
+    let (kb_ids, write_enabled) = if is_terminal_session {
+        let (ids, binding, _) = service
+            .resolve_terminal_scope_for_cwd(&claims.scope.workspace_path)
+            .await;
+        (ids, binding.writeback)
+    } else {
+        (
+            claims.scope.kb_ids.clone(),
+            claims.allows(nomifun_api_types::KNOWLEDGE_WRITE_TOOL),
+        )
+    };
+
+    let mut mounted = Vec::with_capacity(kb_ids.len());
+    for id in &kb_ids {
+        match service.get_base_info(id.as_str()).await {
+            Ok(info) => mounted.push(json!({
+                "name": info.name,
+                "description": info.description,
+            })),
+            // A bound base that no longer exists is skipped, mirroring the
+            // mount engine — the instructions must not advertise it.
+            Err(_) => continue,
+        }
+    }
+    finish(json!({"result": {"mounted": mounted, "write_enabled": write_enabled}}))
 }
 
 fn opaque_workpath_write_scope(workpath_key: &str) -> String {
@@ -1164,6 +1232,74 @@ mod tests {
         let (status, resp) = post_tool(&server, &child.bootstrap.access.token, &child.bootstrap.access.claims, write_body()).await;
         assert_eq!(status, 200);
         assert!(resp.get("error").is_some(), "revocation must be immediate: {resp}");
+    }
+
+    async fn post_context(
+        server: &KnowledgeMcpServer,
+        token: &str,
+        claims: &KnowledgeCapabilityClaims,
+    ) -> (u16, Value) {
+        let mut body = json!({});
+        body["session"] = serde_json::to_value(claims).unwrap();
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+        let resp = client
+            .post(format!("http://127.0.0.1:{}/context", server.http_port()))
+            .header("Authorization", format!("Bearer {token}"))
+            .json(&body)
+            .send()
+            .await
+            .expect("request");
+        let status = resp.status().as_u16();
+        (status, resp.json::<Value>().await.expect("json"))
+    }
+
+    /// `/context` (the bridge's initialize-instructions source) resolves a
+    /// TERMINAL session's mounts LIVE: base names + write state track the
+    /// binding row, an unbound workspace reports an empty set, and a missing
+    /// or forged capability is rejected.
+    #[tokio::test]
+    async fn context_route_reports_live_terminal_mounts() {
+        let (server, svc, _tmp) = start_wired_server().await;
+        let info = svc.create_base("python基础", "Python 入门", None, None).await.unwrap();
+        let ws = "/Users/test/wp-context";
+        let child = terminal_child(&server, ws, &[] as &[String]);
+
+        // Unbound → empty mounted set (bridge renders no instructions).
+        let (status, resp) =
+            post_context(&server, &child.bootstrap.access.token, &child.bootstrap.access.claims).await;
+        assert_eq!(status, 200);
+        assert_eq!(resp["result"]["mounted"].as_array().map(Vec::len), Some(0), "{resp}");
+
+        // Bind + enable write-back → live names and write state, same capability.
+        svc.set_binding(
+            crate::workpath::WORKPATH_BINDING_KIND,
+            &crate::workpath::workpath_key(ws),
+            KnowledgeBinding {
+                enabled: true,
+                writeback: true,
+                writeback_mode: "staged".into(),
+                kb_ids: vec![info.knowledge_base_id.clone()],
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let (status, resp) =
+            post_context(&server, &child.bootstrap.access.token, &child.bootstrap.access.claims).await;
+        assert_eq!(status, 200);
+        assert_eq!(resp["result"]["mounted"][0]["name"], "python基础", "{resp}");
+        assert_eq!(resp["result"]["mounted"][0]["description"], "Python 入门", "{resp}");
+        assert_eq!(resp["result"]["write_enabled"], true, "{resp}");
+        assert!(
+            resp["result"]["mounted"][0].get("root_path").is_none()
+                && resp["result"]["mounted"][0].get("kb_id").is_none(),
+            "context must not leak paths or ids: {resp}"
+        );
+
+        // Forged bearer token fails closed.
+        let (status, _) =
+            post_context(&server, "forged", &child.bootstrap.access.claims).await;
+        assert_eq!(status, 401);
     }
 
     /// Conversation sessions keep issuance-time semantics: a read-only

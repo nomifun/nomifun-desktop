@@ -753,6 +753,34 @@ impl KnowledgeService {
         key
     }
 
+    /// The workpath key a TERMINAL session's cwd resolves to. Must agree
+    /// byte-for-byte with the terminal service's
+    /// `session_workpath_key(cwd, work_dir)` — the registered managed roots
+    /// (the terminal work dirs) take precedence, and `data_dir` is only the
+    /// safety-net fallback while NO root has been registered. Checking
+    /// `data_dir` first (like the conversation derivation above) would map a
+    /// custom terminal cwd under `data_dir` to `__default__` when
+    /// `work_dir != data_dir`, while the terminal binds/mounts under the
+    /// literal key — live tools would then consult the wrong binding row.
+    fn terminal_workpath_key_for_cwd(&self, cwd: &str) -> String {
+        use crate::workpath::{DEFAULT_WORKPATH_KEY, session_workpath_key, workpath_key};
+        if cwd.trim().is_empty() {
+            return DEFAULT_WORKPATH_KEY.to_owned();
+        }
+        let path = std::path::Path::new(cwd);
+        if let Ok(roots) = self.extra_managed_roots.read()
+            && !roots.is_empty()
+        {
+            for root in roots.iter() {
+                if session_workpath_key(path, root) == DEFAULT_WORKPATH_KEY {
+                    return DEFAULT_WORKPATH_KEY.to_owned();
+                }
+            }
+            return workpath_key(cwd);
+        }
+        session_workpath_key(path, &self.data_dir)
+    }
+
     /// Replace the URL fetcher. Accepts any [`PageFetcher`] (tests pass a
     /// loopback-permitting [`HttpFetcher`]; the production rendering backend
     /// late-wires its `BrowserFetcher`), wrapping it in the `Arc<dyn …>` the
@@ -3560,6 +3588,18 @@ impl KnowledgeService {
         validate_kind(kind)?;
         let target_id = canonical_target_id(kind, target_id)?;
         self.repo.delete_binding(kind, &target_id).await?;
+        // Same observer contract as set_binding: a deleted row is a binding
+        // change (live terminal workspaces must drop their mounts + README
+        // instead of keeping them until the next relaunch). Fires after
+        // persistence; observers reading back see the default (disabled) row.
+        let hook = self
+            .binding_changed_hook
+            .read()
+            .ok()
+            .and_then(|guard| guard.clone());
+        if let Some(hook) = hook {
+            hook(kind, &target_id);
+        }
         Ok(())
     }
 
@@ -4066,7 +4106,7 @@ impl KnowledgeService {
     ) -> (Vec<KnowledgeBaseId>, KnowledgeBinding, String) {
         use crate::workpath::WORKPATH_BINDING_KIND;
 
-        let key = self.workpath_key_for_cwd(cwd);
+        let key = self.terminal_workpath_key_for_cwd(cwd);
         let binding = self.get_binding(WORKPATH_BINDING_KIND, &key).await.unwrap_or_default();
         let bound = if binding.enabled {
             binding.kb_ids.clone()
@@ -8152,6 +8192,69 @@ mod tests {
         let (ids, _, key) = service.resolve_terminal_scope_for_cwd("/Users/x/custom").await;
         assert_eq!(key, "/Users/x/custom");
         assert!(ids.is_empty(), "unbound terminal workspace must resolve empty, got {ids:?}");
+    }
+
+    /// With a terminal work root registered, TERMINAL live resolution must key
+    /// by that root alone: a custom terminal cwd that happens to live under
+    /// `data_dir` (work_dir ≠ data_dir) binds/mounts under its LITERAL key on
+    /// the terminal side, so live dispatch must read the same row — not the
+    /// `__default__` row the conversation-side data_dir mapping would pick.
+    #[tokio::test]
+    async fn terminal_scope_keys_by_registered_work_root_not_data_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let data_dir = dir.path().join("data");
+        let service = Arc::new(make_service(&data_dir));
+        let kb = service.create_base("库", "", None, None).await.unwrap().knowledge_base_id;
+        service.add_managed_root(&dir.path().join("terminal-work"));
+
+        // The terminal side derives session_workpath_key(cwd, work_dir) →
+        // literal key for this cwd, and persists the binding there.
+        let cwd = data_dir.join("user-picked-dir");
+        let literal_key = crate::workpath::workpath_key(&cwd.to_string_lossy());
+        service
+            .set_binding(
+                crate::workpath::WORKPATH_BINDING_KIND,
+                &literal_key,
+                KnowledgeBinding {
+                    enabled: true,
+                    kb_ids: vec![kb.clone()],
+                    ..KnowledgeBinding::default()
+                },
+            )
+            .await
+            .unwrap();
+
+        let (ids, _, key) =
+            service.resolve_terminal_scope_for_cwd(&cwd.to_string_lossy()).await;
+        assert_eq!(key, literal_key, "terminal resolution must not fall back to data_dir mapping");
+        assert_eq!(ids, vec![kb]);
+    }
+
+    /// `delete_binding` is a binding change like any other: the in-process
+    /// hook must fire so live terminal workspaces drop stale mounts + README
+    /// immediately instead of keeping them until the next relaunch.
+    #[tokio::test]
+    async fn delete_binding_fires_in_process_hook() {
+        let dir = tempfile::tempdir().unwrap();
+        let service = Arc::new(make_service(&dir.path().join("data")));
+        service
+            .set_binding("workpath", "/Users/a/proj", KnowledgeBinding {
+                enabled: true,
+                ..KnowledgeBinding::default()
+            })
+            .await
+            .unwrap();
+        let seen: Arc<StdMutex<Vec<(String, String)>>> = Arc::new(StdMutex::new(Vec::new()));
+        let sink = seen.clone();
+        service.set_binding_changed_hook(Arc::new(move |kind, key| {
+            sink.lock().unwrap().push((kind.to_owned(), key.to_owned()));
+        }));
+        service.delete_binding("workpath", "/Users/a/proj/").await.unwrap();
+        let events = seen.lock().unwrap().clone();
+        assert_eq!(events, vec![("workpath".to_owned(), "/Users/a/proj".to_owned())]);
+        // Observer read-back sees the default (disabled) row.
+        let binding = service.get_binding("workpath", "/Users/a/proj").await.unwrap();
+        assert!(!binding.enabled);
     }
 
     /// Branches on the system prompt: overview calls get strict JSON,
