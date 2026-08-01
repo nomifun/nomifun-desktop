@@ -94,6 +94,30 @@ const CollaborationPolicyControl: React.FC<CollaborationPolicyControlProps> = ({
   );
 
   const active = delegationPolicy !== 'disabled';
+  const trigger = (
+    <Button
+      type={compact ? 'text' : 'secondary'}
+      shape={compact ? 'circle' : 'round'}
+      size='small'
+      className={[styles.trigger, compact ? 'nomi-sendbox-policy-btn' : '', className].filter(Boolean).join(' ')}
+      aria-label={t('collaboration.policy.open', {
+        defaultValue: '协作策略',
+      })}
+      aria-pressed={active}
+      data-testid='collaboration-policy-control'
+    >
+      <span className='inline-flex items-center gap-5px'>
+        <EveryUser theme='outline' size='15' fill='currentColor' strokeWidth={3} />
+        <span className='sendbox-responsive-label'>
+          {t('collaboration.policy.button', {
+            defaultValue: active ? '协作已启用' : '协作已关闭',
+          })}
+        </span>
+        {compact && active && <span className={styles.triggerStatus} aria-hidden='true' />}
+      </span>
+    </Button>
+  );
+
   return (
     <Popover
       className={styles.popover}
@@ -103,29 +127,7 @@ const CollaborationPolicyControl: React.FC<CollaborationPolicyControlProps> = ({
       getPopupContainer={() => document.body}
       unmountOnExit
     >
-      <Button
-        type={compact ? 'text' : 'secondary'}
-        shape={compact ? 'circle' : 'round'}
-        size='small'
-        className={[styles.trigger, className].filter(Boolean).join(' ')}
-        aria-label={t('collaboration.policy.open', {
-          defaultValue: '协作策略',
-        })}
-        aria-pressed={active}
-        data-testid='collaboration-policy-control'
-      >
-        <span className='inline-flex items-center gap-5px'>
-          <EveryUser theme='outline' size='15' fill='currentColor' strokeWidth={3} />
-          {!compact && (
-            <span>
-              {t('collaboration.policy.button', {
-                defaultValue: active ? '协作已启用' : '协作已关闭',
-              })}
-            </span>
-          )}
-          {compact && active && <span className={styles.triggerStatus} aria-hidden='true' />}
-        </span>
-      </Button>
+      {trigger}
     </Popover>
   );
 };

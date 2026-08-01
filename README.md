@@ -318,9 +318,65 @@ bun run build:ui && bun run serve:web
 
 **Docker (self-host the server)**
 
+The official image is published on Docker Hub:
+[`nomifun/nomifun-web`](https://hub.docker.com/repository/docker/nomifun/nomifun-web).
+The examples below use the published `v0.3.4` tag; replace it with a newer
+Docker Hub tag when one is available.
+
+```bash
+# Pull and run the official image.
+docker run -d \
+  --name nomifun-web \
+  --restart unless-stopped \
+  -p 8787:8787 \
+  -v nomifun-data:/data \
+  nomifun/nomifun-web:v0.3.4
+# then open http://<server-ip>:8787 and create the first admin
+```
+
+For unattended or internet-facing deployments, pre-seed the first admin before
+the port is reachable:
+
+```bash
+docker run -d \
+  --name nomifun-web \
+  --restart unless-stopped \
+  -p 8787:8787 \
+  -v nomifun-data:/data \
+  -e NOMIFUN_ADMIN_USERNAME=admin \
+  -e NOMIFUN_ADMIN_PASSWORD='change-me-to-something-strong' \
+  nomifun/nomifun-web:v0.3.4
+```
+
+Compose can use the same official image:
+
+```yaml
+services:
+  nomifun:
+    image: nomifun/nomifun-web:v0.3.4
+    restart: unless-stopped
+    ports:
+      - "8787:8787"
+    volumes:
+      - nomifun-data:/data
+    environment:
+      NOMIFUN_ADMIN_USERNAME: admin
+      NOMIFUN_ADMIN_PASSWORD: "change-me-to-something-strong"
+      # Set to "true" when NomiFun is behind an HTTPS reverse proxy.
+      NOMIFUN_HTTPS: "false"
+
+volumes:
+  nomifun-data:
+```
+
+If you prefer to build the image locally from this repo:
+
 ```bash
 docker compose up -d --build
 # then open http://<server-ip>:8787  —  pair with the bundled Caddyfile for TLS
+
+# Fast path when ui/dist and target/release/nomifun-web are already built:
+bun run docker:prebuilt -- --tag nomifun/nomifun-web:v0.3.4 --build-missing --sudo
 ```
 
 See [`docs/getting-started/installation.md`](docs/getting-started/installation.md) and [`docs/guides/web-server-deployment.md`](docs/guides/web-server-deployment.md) for details.
@@ -428,6 +484,7 @@ fails on the webkit2gtk link — build on the target architecture's machine/cont
 | `bun run release:win` | 一键 Windows 发版：自动判定追加/首发；首发用 -Version 打版本号 + -NotesFile/-Notes 建 Release；-DryRun 只预检 |
 | `bun run release:linux` | 一键 Linux 发版：自动判定追加/首发；首发用 -Version 打版本号 + -NotesFile/-Notes 建 Release；-DryRun 只预检 |
 | `bun run build:ui` | 前端生产构建 → ui/dist |
+| `bun run docker:prebuilt` | 用已有 ui/dist + nomifun-web release 二进制快速构建 Docker 运行时镜像 |
 | **运行（组装好的应用）** | |
 | `bun run serve:web` | 启动 Web 服务器，托管已构建的前端 |
 | **测试** | |

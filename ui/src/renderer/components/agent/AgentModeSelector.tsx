@@ -318,6 +318,7 @@ const AgentModeSelector: React.FC<AgentModeSelectorProps> = ({
           shape='round'
           size='small'
           onClick={canInteract ? () => !isLoading && setDropdownVisible((visible) => !visible) : undefined}
+          aria-label={compactLabel}
           style={{
             opacity: isLoading ? 0.6 : 1,
             transition: 'opacity 0.2s',
@@ -327,8 +328,10 @@ const AgentModeSelector: React.FC<AgentModeSelectorProps> = ({
           <span className='flex items-center gap-6px min-w-0 leading-none'>
             {compactLeadingIcon && <span className='shrink-0 inline-flex items-center'>{compactLeadingIcon}</span>}
             {showLogoInCompact && <span className='shrink-0 inline-flex items-center'>{renderLogo()}</span>}
-            <MarqueePillLabel>{compactLabel}</MarqueePillLabel>
-            {canInteract && <Down size={12} className='text-t-tertiary shrink-0' />}
+            <span className='sendbox-responsive-label inline-flex min-w-0 overflow-hidden'>
+              <MarqueePillLabel>{compactLabel}</MarqueePillLabel>
+            </span>
+            {canInteract && <Down size={12} className='sendbox-responsive-chevron text-t-tertiary shrink-0' />}
           </span>
         </Button>
       </span>

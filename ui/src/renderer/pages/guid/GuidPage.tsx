@@ -673,6 +673,7 @@ const GuidPage: React.FC = () => {
       runtimeType={effectiveAgentType}
       delegationPolicy={delegationPolicy}
       decisionPolicy={decisionPolicy}
+      className='guid-entry-policy-btn'
       onChange={(next) => {
         setDelegationPolicy(next.delegationPolicy);
         setDecisionPolicy(next.decisionPolicy);
@@ -842,10 +843,6 @@ const GuidPage: React.FC = () => {
                   isPresetAgent={agentSelection.is_presetAgent}
                   presetLabel={heroTitle !== t('conversation.welcome.title') ? heroTitle : undefined}
                   presetAvatar={selectedPresetAvatar ?? undefined}
-                  onChoosePreset={() => {
-                    setDrawerMode('preset');
-                    setDrawerOpen(true);
-                  }}
                   onAdjustSkills={handleOpenSkillsDrawer}
                   onFree={() => {
                     agentSelection.setSelectedAgentKey(agentSelection.defaultAgentKey);

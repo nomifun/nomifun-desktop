@@ -192,11 +192,17 @@ const GuidCollaboratorSelector: React.FC<GuidCollaboratorSelectorProps> = ({
         size='small'
         disabled={isLoading}
         data-testid='guid-collaborator-selector'
+        aria-label={label}
       >
         <span className='flex items-center gap-6px min-w-0'>
           <Branch theme='outline' size='14' fill={iconColors.secondary} className='shrink-0' />
-          <span className='truncate'>{label}</span>
-          <Down theme='outline' size='12' fill={iconColors.secondary} className='shrink-0' />
+          <span className='sendbox-responsive-label truncate'>{label}</span>
+          <Down
+            theme='outline'
+            size='12'
+            fill={iconColors.secondary}
+            className='sendbox-responsive-chevron shrink-0'
+          />
         </span>
       </Button>
     </Dropdown>
