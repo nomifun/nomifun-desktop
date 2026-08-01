@@ -49,6 +49,51 @@ fn sql_tokens(sql: &str) -> Vec<String> {
         .collect()
 }
 
+/// Two migration files sharing one version number brick every database open:
+/// sqlx applies whichever sorts first, the second one's bookkeeping INSERT
+/// violates the `_sqlx_migrations.version` primary key, and the startup retry
+/// then reports `VersionMismatch` forever (observed live: the 022 collision
+/// released in v0.3.5). sqlx itself never validates this, so the repo must.
+/// This guard existed once (52d4a8a0) and was lost in the v3 refactor — keep it.
+#[test]
+fn migration_file_versions_are_unique() {
+    let migrations_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("migrations");
+    let mut files_by_version = std::collections::BTreeMap::<String, Vec<String>>::new();
+
+    for entry in std::fs::read_dir(&migrations_dir).unwrap() {
+        let path = entry.unwrap().path();
+        if path.extension().and_then(|ext| ext.to_str()) != Some("sql") {
+            continue;
+        }
+
+        let file_name = path.file_name().and_then(|name| name.to_str()).unwrap();
+        let (version, _) = file_name.split_once('_').unwrap_or_else(|| {
+            panic!("migration file {file_name} must start with a numeric version")
+        });
+        assert!(
+            !version.is_empty() && version.chars().all(|ch| ch.is_ascii_digit()),
+            "migration file {file_name} must start with a numeric version"
+        );
+        files_by_version
+            .entry(version.trim_start_matches('0').to_owned())
+            .or_default()
+            .push(file_name.to_owned());
+    }
+
+    let duplicates = files_by_version
+        .into_iter()
+        .filter_map(|(version, files)| {
+            (files.len() > 1).then(|| format!("{version}: {}", files.join(", ")))
+        })
+        .collect::<Vec<_>>();
+
+    assert!(
+        duplicates.is_empty(),
+        "migration versions must be unique; duplicates: {}",
+        duplicates.join("; ")
+    );
+}
+
 async fn owner_id(pool: &sqlx::SqlitePool) -> String {
     sqlx::query_scalar(
         "SELECT owner_user_id FROM installation_identity \

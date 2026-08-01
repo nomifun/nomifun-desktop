@@ -93,8 +93,21 @@ pub async fn run_knowledge_stdio() -> ExitCode {
         claims.expires_at_unix_secs,
     );
 
+    // RC-5: the on-disk README contract is never surfaced to the model by the
+    // host CLIs, so the ONE channel every MCP host does surface — the
+    // `initialize` result's `instructions` — must carry the mount state.
+    // Fetched once at startup from the backend's live binding resolution;
+    // failure degrades to no instructions (today's behavior), never blocks.
+    let instructions = match client.post_json("/context", serde_json::json!({})).await {
+        Ok(body) => render_instructions(&body),
+        Err(error) => {
+            eprintln!("[mcp-knowledge-stdio] context fetch failed (no instructions): {error}");
+            None
+        }
+    };
+
     let lifecycle = client.clone();
-    let server = KnowledgeStdioServer { client };
+    let server = KnowledgeStdioServer { client, instructions };
 
     let transport = transport::io::stdio();
     let exit = match server.serve(transport).await {
@@ -120,6 +133,77 @@ pub async fn run_knowledge_stdio() -> ExitCode {
 #[derive(Clone)]
 struct KnowledgeStdioServer {
     client: super::stdio_common::ScopedBridgeClient<KnowledgeCapabilityScope>,
+    /// MCP `initialize` instructions rendered from the backend's live mount
+    /// state at bridge startup; `None` when nothing is mounted or the fetch
+    /// failed. Startup-frozen by protocol — the text therefore anchors live
+    /// truth to the tools themselves ("call knowledge_search"), which resolve
+    /// the binding per call.
+    instructions: Option<String>,
+}
+
+/// Render the `/context` response into <2KB of initialize-instructions.
+/// Returns `None` for an empty mount set: an unmounted workspace must not pay
+/// prompt cost, and the tools already report the unbound state honestly.
+fn render_instructions(context: &serde_json::Value) -> Option<String> {
+    let result = context.get("result")?;
+    let mounted = result.get("mounted")?.as_array()?;
+    if mounted.is_empty() {
+        return None;
+    }
+    let mut names = Vec::with_capacity(mounted.len());
+    for base in mounted {
+        let name = base.get("name").and_then(serde_json::Value::as_str)?.trim();
+        if name.is_empty() {
+            continue;
+        }
+        let description = base
+            .get("description")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("")
+            .trim();
+        // Budget: names always fit; a description is a short topic hint only.
+        if description.is_empty() {
+            names.push(name.to_owned());
+        } else {
+            let mut hint = description.chars().take(120).collect::<String>();
+            if hint.len() < description.len() {
+                hint.push('…');
+            }
+            names.push(format!("{name} — {hint}"));
+        }
+    }
+    if names.is_empty() {
+        return None;
+    }
+    let write_enabled = result
+        .get("write_enabled")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+    let write_line = if write_enabled {
+        "Write-back is enabled: when you produce reusable knowledge, persist it with knowledge_write."
+    } else {
+        "Write-back is currently disabled; knowledge_write reports honestly if the user enables it later."
+    };
+    let mut out = format!(
+        "Curated knowledge bases are mounted into this session. Call knowledge_search FIRST, \
+         before answering from memory, whenever the task touches a topic they may cover; read \
+         full documents with knowledge_read. {write_line}\n\nMounted at session start:\n"
+    );
+    for name in &names {
+        out.push_str("- ");
+        out.push_str(name);
+        out.push('\n');
+    }
+    out.push_str(
+        "\nThe mounted set can change during the session; the tools always resolve the CURRENT \
+         binding, and ./.nomi/knowledge/README.md is kept in sync with it.",
+    );
+    // Claude Code caps combined server instructions around 2KB — stay under it.
+    if out.len() > 1900 {
+        out.truncate(1900);
+        out.push('…');
+    }
+    Some(out)
 }
 
 fn validate_knowledge_claims(
@@ -209,6 +293,14 @@ impl KnowledgeStdioServer {
 
 #[rmcp::tool_handler(router = Self::tool_router())]
 impl rmcp::ServerHandler for KnowledgeStdioServer {
+    // Hand-written (suppresses the macro default, which ships NO
+    // instructions): the initialize result is the only guidance channel
+    // every MCP host surfaces to the model — claude injects it into context,
+    // codex renders it as the tool namespace description.
+    fn get_info(&self) -> rmcp::model::ServerInfo {
+        server_info_with_instructions(self.instructions.clone())
+    }
+
     async fn list_tools(
         &self,
         _request: Option<rmcp::model::PaginatedRequestParams>,
@@ -251,6 +343,22 @@ fn capability_request_error(error: String) -> rmcp::ErrorData {
         format!("knowledge capability is no longer valid: {error}"),
         None,
     )
+}
+
+/// The `initialize` result: tools capability + optional mount instructions.
+/// Kept as a free function so tests can pin the shape without a live client.
+fn server_info_with_instructions(instructions: Option<String>) -> rmcp::model::ServerInfo {
+    let mut info = rmcp::model::ServerInfo::new(
+        rmcp::model::ServerCapabilities::builder()
+            .enable_tools()
+            .build(),
+    )
+    .with_server_info(rmcp::model::Implementation::new(
+        "nomifun-knowledge",
+        env!("CARGO_PKG_VERSION"),
+    ));
+    info.instructions = instructions;
+    info
 }
 
 fn forwarded_tool_result(outcome: ForwardToolOutcome) -> CallToolResult {
@@ -338,6 +446,61 @@ mod tests {
         assert_eq!(body["args"]["handle"], "kdoc_abc");
         assert!(body.get("cwd").is_none());
         assert!(body.get("kb_ids").is_none(), "scope is server-resolved: {body}");
+    }
+
+    #[test]
+    fn instructions_render_mounts_and_write_state() {
+        let ctx = serde_json::json!({"result": {"mounted": [
+            {"name": "python基础", "description": "Python 入门与最佳实践"},
+            {"name": "运维手册", "description": ""},
+        ], "write_enabled": true}});
+        let out = render_instructions(&ctx).expect("mounted bases must render");
+        assert!(out.contains("knowledge_search FIRST"), "retrieval-first framing: {out}");
+        assert!(out.contains("python基础 — Python 入门与最佳实践"), "{out}");
+        assert!(out.contains("- 运维手册\n"), "description-less base renders bare: {out}");
+        assert!(out.contains("persist it with knowledge_write"), "write-on guidance: {out}");
+        assert!(out.contains(".nomi/knowledge/README.md"), "live-truth anchor: {out}");
+        assert!(out.len() <= 1901, "must stay under the claude 2KB instructions cap");
+    }
+
+    #[test]
+    fn instructions_absent_when_nothing_mounted_or_malformed() {
+        let empty = serde_json::json!({"result": {"mounted": [], "write_enabled": false}});
+        assert_eq!(render_instructions(&empty), None, "no mounts → no prompt cost");
+        assert_eq!(render_instructions(&serde_json::json!({"error": "x"})), None);
+        let blank = serde_json::json!({"result": {"mounted": [{"name": "  "}]}});
+        assert_eq!(render_instructions(&blank), None, "blank names must not render");
+    }
+
+    #[test]
+    fn instructions_write_disabled_stays_honest() {
+        let ctx = serde_json::json!({"result": {"mounted": [
+            {"name": "kb", "description": "d"}
+        ], "write_enabled": false}});
+        let out = render_instructions(&ctx).unwrap();
+        assert!(out.contains("currently disabled"), "{out}");
+        assert!(!out.contains("persist it with knowledge_write"), "{out}");
+    }
+
+    #[test]
+    fn instructions_truncate_oversized_descriptions() {
+        let long = "很".repeat(4000);
+        let ctx = serde_json::json!({"result": {"mounted": (0..8).map(|i| serde_json::json!({
+            "name": format!("库{i}"), "description": long,
+        })).collect::<Vec<_>>(), "write_enabled": false}});
+        let out = render_instructions(&ctx).unwrap();
+        assert!(out.len() <= 1904, "hard cap must hold, got {}", out.len());
+    }
+
+    #[test]
+    fn get_info_carries_instructions_and_tools_capability() {
+        // The macro would ship instructions: None; the hand-written get_info
+        // must surface the rendered text while keeping the tools capability.
+        let info = server_info_with_instructions(Some("mounted: 库".into()));
+        assert_eq!(info.instructions.as_deref(), Some("mounted: 库"));
+        assert!(info.capabilities.tools.is_some(), "tools capability must survive the override");
+        let none = server_info_with_instructions(None);
+        assert_eq!(none.instructions, None, "unmounted sessions ship no instructions");
     }
 
     #[test]
