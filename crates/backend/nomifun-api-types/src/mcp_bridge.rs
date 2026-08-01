@@ -318,6 +318,16 @@ impl KnowledgeMcpConfig {
     /// The dispatch layer fails writes closed when the live policy is
     /// disabled, in both directions — enabling AND revoking take effect
     /// immediately.
+    ///
+    /// Deliberate trade-off: this makes the capability in the PTY environment
+    /// a STANDING credential whose effective authority grows when the user
+    /// later binds bases or enables write-back — without a re-issuance event.
+    /// Anything that can read the terminal's process environment could hold
+    /// the token until PTY exit and use whatever the live binding then
+    /// allows. Accepted because the alternative (freeze + relaunch) is
+    /// exactly the incident this design fixed; the token never leaves the
+    /// loopback + signed-claims trust boundary, and server-side policy is the
+    /// single enforcement point.
     pub fn issue_for_terminal(
         &self,
         user_id: &str,

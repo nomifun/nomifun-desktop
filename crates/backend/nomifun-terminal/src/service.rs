@@ -286,6 +286,16 @@ pub struct TerminalService {
     /// Accumulates the FIRST line of user input per terminal (until newline / a
     /// 200-char cap) —the title source. Dropped once a title is set.
     first_input: Arc<DashMap<String, String>>,
+    /// Per-workspace serialization of `sync_knowledge_workspace` (keyed by the
+    /// raw cwd string). The binding row is read at the START of a sync; two
+    /// unordered syncs of one workspace (binding-change resync racing another
+    /// resync or a spawn's own sync) could otherwise interleave so a sync
+    /// carrying an OLDER binding overwrites a NEWER unbind with stale
+    /// mounts + README. Holding this lock across the whole read→mount→README
+    /// transaction makes the last writer always reflect the latest persisted
+    /// row. Entries are tiny and bounded by the number of distinct
+    /// workspaces this process ever synced.
+    knowledge_sync_locks: Arc<DashMap<String, Arc<tokio::sync::Mutex<()>>>>,
 }
 
 impl TerminalService {
@@ -317,6 +327,7 @@ impl TerminalService {
             title_completer: Arc::new(std::sync::RwLock::new(None)),
             titled: Arc::new(DashMap::new()),
             first_input: Arc::new(DashMap::new()),
+            knowledge_sync_locks: Arc::new(DashMap::new()),
         }
     }
 
@@ -716,7 +727,13 @@ impl TerminalService {
         }
 
         let kb_ids = self
-            .sync_knowledge_workspace(id.as_str(), &req.cwd, &req.command, &req.args)
+            .sync_knowledge_workspace(
+                id.as_str(),
+                &req.cwd,
+                &req.command,
+                &req.args,
+                req.backend.as_deref(),
+            )
             .await;
 
         if let Err(error) = self.spawn_pty(
@@ -1088,6 +1105,25 @@ impl TerminalService {
         &self.work_dir
     }
 
+    /// The canonical workpath binding key for a terminal session's cwd — the
+    /// SAME derivation `bind_knowledge` / `sync_knowledge_workspace` /
+    /// `resync_workpath_knowledge` use. Exposed so callers that address
+    /// knowledge by terminal id (the gateway's `nomi_knowledge_set_binding`)
+    /// land on the `('workpath', key)` row the mounts, live MCP dispatch, and
+    /// the binding-change resync hook actually read — a `('terminal', id)`
+    /// row has no reader and would be a silent no-op.
+    pub async fn knowledge_workpath_key(&self, id: &str) -> Result<String, TerminalError> {
+        let row = self
+            .repo
+            .get_by_id(id)
+            .await?
+            .ok_or_else(|| TerminalError::NotFound(id.to_string()))?;
+        Ok(nomifun_knowledge::session_workpath_key(
+            std::path::Path::new(&row.cwd),
+            &self.work_dir,
+        ))
+    }
+
     /// Persist the create-time knowledge selection. Best-effort: a missing
     /// knowledge service or a failed write only warns.
     ///
@@ -1131,9 +1167,10 @@ impl TerminalService {
     /// capability as the spawn-time snapshot (dispatch resolves the live
     /// binding per call; write access is policy-resolved live, so no write
     /// flag is returned). The README's `has_search_tool` claim is honest: it
-    /// only asserts the tool exists when the MCP is launch-injected —true for
-    /// Claude/Codex (including wrappers like `stepcode claude`). Gemini has no
-    /// secure launch-time injection mechanism, so it is false there.
+    /// only asserts the tool exists when the MCP is launch-injected — true
+    /// for every resolved agent family (claude/codex/gemini, including
+    /// wrappers like `stepcode claude` and declared backends), false for
+    /// shell/unknown CLIs.
     /// Never blocks the launch —failures degrade to warnings.
     async fn sync_knowledge_workspace(
         &self,
@@ -1141,10 +1178,21 @@ impl TerminalService {
         cwd: &str,
         command: &str,
         args: &[String],
+        declared_backend: Option<&str>,
     ) -> TerminalKnowledgeScope {
         let Some(ks) = self.knowledge_service() else {
             return TerminalKnowledgeScope::default();
         };
+        // Serialize per workspace so the binding read below and the
+        // mount+README writes commit as one ordered transaction — an
+        // unordered older sync must not overwrite a newer one (see the
+        // `knowledge_sync_locks` field docs).
+        let sync_lock = self
+            .knowledge_sync_locks
+            .entry(cwd.to_owned())
+            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+            .clone();
+        let _sync_guard = sync_lock.lock().await;
         let id_str = id.to_string();
         // Workpath-only (session-list unification spec §7): the binding
         // belongs to the workspace path, never the terminal session.
@@ -1167,16 +1215,18 @@ impl TerminalService {
             return TerminalKnowledgeScope::default();
         }
         // Determine whether the knowledge_search MCP tool will ACTUALLY be
-        // launch-injected for this terminal. The tool is injected only when
-        // (a) the MCP config is wired and (b) the CLI resolves to Claude or
-        // Codex (including wrappers like `stepcode claude`). Gemini and unknown
-        // CLIs cannot receive a session-bound capability at launch, so false.
+        // launch-injected for this terminal — the SAME family resolution
+        // `apply_enhancement` uses at spawn, including the persisted declared
+        // backend (a wrapper launch like `stepcode` with backend='codex' gets
+        // the tool). Diverging from the injector here made the README
+        // contradict the injected reality in both directions. All three agent
+        // families now have a renderer (claude --mcp-config, codex -c
+        // overrides, gemini system-defaults settings); shell/unknown CLIs
+        // resolve to None and honestly get the file-read contract.
         let (program, prog_args) = crate::types::resolve_command(command, args);
         let tool_available = self.knowledge_mcp_config().is_some()
-            && matches!(
-                crate::enhance::resolve_agent_family(&program, &prog_args, None),
-                Some(crate::enhance::AgentCli::Claude) | Some(crate::enhance::AgentCli::Codex)
-            );
+            && crate::enhance::resolve_agent_family(&program, &prog_args, declared_backend)
+                .is_some();
 
         if let Some(readme) = nomifun_knowledge::build_knowledge_context(
             &outcome.mounts,
@@ -1241,7 +1291,13 @@ impl TerminalService {
             }
             let args = crate::types::parse_args(&row.args);
             let _ = self
-                .sync_knowledge_workspace(&id, &row.cwd, &row.command, &args)
+                .sync_knowledge_workspace(
+                    &id,
+                    &row.cwd,
+                    &row.command,
+                    &args,
+                    row.backend.as_deref(),
+                )
                 .await;
             info!(terminal_id = %id, workpath = changed_key, "knowledge binding change re-synced into live terminal workspace");
         }
@@ -1910,7 +1966,7 @@ impl TerminalService {
         let args = crate::types::parse_args(&row.args);
         let env = process_env_from_persisted(row.env.as_deref());
         let kb_ids = self
-            .sync_knowledge_workspace(id, &row.cwd, &row.command, &args)
+            .sync_knowledge_workspace(id, &row.cwd, &row.command, &args, row.backend.as_deref())
             .await;
         // Persist every fallible async preflight before the synchronous spawn.
         // Once a live handle is inserted there is no later await at which request
@@ -2121,7 +2177,7 @@ impl TerminalService {
         // snapshot and (re)injects the MCP bridge for sessions that launched
         // without it.
         let kb_ids = self
-            .sync_knowledge_workspace(&id, &row.cwd, &row.command, &args)
+            .sync_knowledge_workspace(&id, &row.cwd, &row.command, &args, row.backend.as_deref())
             .await;
 
         if let Some(pty_epoch) = self.live.get(&id).map(|handle| handle.epoch()) {
@@ -2265,7 +2321,7 @@ impl TerminalService {
         // Re-sync knowledge mounts for the cwd (same contract as `relaunch`); a
         // shell never gets MCP/tool injection (apply_enhancement no-ops for it).
         let kb_ids = self
-            .sync_knowledge_workspace(&id, &row.cwd, crate::types::SHELL_SENTINEL, &[])
+            .sync_knowledge_workspace(&id, &row.cwd, crate::types::SHELL_SENTINEL, &[], None)
             .await;
 
         if let Some(pty_epoch) = self.live.get(&id).map(|handle| handle.epoch()) {
@@ -2558,6 +2614,17 @@ impl TerminalDriver for TerminalService {
             mode: row.mode,
             last_status: row.last_status,
         }))
+    }
+
+    async fn knowledge_mounted(&self, id: &str) -> bool {
+        let Some(ks) = self.knowledge_service() else {
+            return false;
+        };
+        let Ok(Some(row)) = self.repo.get_by_id(id).await else {
+            return false;
+        };
+        let (kb_ids, _, _) = ks.resolve_terminal_scope_for_cwd(&row.cwd).await;
+        !kb_ids.is_empty()
     }
 
     async fn read_autowork(&self, id: &str) -> Result<Option<String>, TerminalError> {
@@ -3762,6 +3829,41 @@ mod tests {
             defer_spawn: false,
             knowledge_base_ids: None,
         }
+    }
+
+    /// The gateway's terminal-target binding translation: a default-workpath
+    /// terminal (cwd under work_dir) resolves to the `__default__` sentinel, a
+    /// custom cwd to its literal normalized key — byte-identical to what
+    /// `bind_knowledge` / `sync_knowledge_workspace` derive, so a gateway
+    /// `set_binding kind=terminal` lands on the row terminals actually read.
+    #[tokio::test]
+    async fn knowledge_workpath_key_matches_bind_derivation() {
+        let (svc, _events, _repo) = service_with_repo();
+        let mut request = req("unused-deferred-command", &[]);
+        request.defer_spawn = true; // no real PTY needed; the row is enough
+        let default_wp = svc.create(TEST_USER_ID, request).await.unwrap();
+        assert_eq!(
+            svc.knowledge_workpath_key(&default_wp.terminal_id).await.unwrap(),
+            nomifun_knowledge::DEFAULT_WORKPATH_KEY,
+        );
+
+        // Outside the work_dir (the fixture's work_dir IS temp_dir, so a
+        // /tmp tempdir would map to __default__): use a crate-local tempdir.
+        let custom_dir = tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR")).unwrap();
+        let mut request = req("unused-deferred-command", &[]);
+        request.defer_spawn = true;
+        request.cwd = format!("{}/", custom_dir.path().to_string_lossy());
+        let custom = svc.create(TEST_USER_ID, request).await.unwrap();
+        assert_eq!(
+            svc.knowledge_workpath_key(&custom.terminal_id).await.unwrap(),
+            nomifun_knowledge::workpath_key(&custom_dir.path().to_string_lossy()),
+            "custom cwd must resolve to its canonical literal key (trailing slash stripped)"
+        );
+
+        assert!(
+            svc.knowledge_workpath_key("t-missing").await.is_err(),
+            "unknown terminal id must be NotFound, never a guessed key"
+        );
     }
 
     #[tokio::test]

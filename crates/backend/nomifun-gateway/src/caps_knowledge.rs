@@ -139,6 +139,32 @@ struct SetBindingParams {
 
 // ── shared pure helpers (also used by caps_terminal's bind-on-create) ─────
 
+/// The persisted binding row a gateway target addresses: `(kind, target_id)`.
+///
+/// Terminal targets are TRANSLATED to their workpath row. The terminal
+/// knowledge surface (mounts, README, live MCP dispatch, the binding-change
+/// resync hook) reads ONLY `('workpath', key)` rows — a `('terminal', id)` row
+/// has no reader, so writing one would be a silent no-op that looks exactly
+/// like the "UI says mounted but nothing works" incident from the agent's seat.
+async fn resolve_binding_row(
+    deps: &GatewayDeps,
+    kind: KnowledgeBindingTargetKind,
+    target_id: CanonicalEntityId,
+) -> Result<(&'static str, String), Value> {
+    let target_id = parse_binding_target(kind, target_id)?;
+    match kind {
+        KnowledgeBindingTargetKind::Terminal => deps
+            .terminal_service
+            .knowledge_workpath_key(&target_id)
+            .await
+            .map(|key| (nomifun_knowledge::WORKPATH_BINDING_KIND, key))
+            .map_err(|error| json!({ "error": format!("terminal target_id: {error}") })),
+        KnowledgeBindingTargetKind::Conversation | KnowledgeBindingTargetKind::Companion => {
+            Ok((kind.as_str(), target_id))
+        }
+    }
+}
+
 fn parse_binding_target(
     kind: KnowledgeBindingTargetKind,
     target_id: CanonicalEntityId,
@@ -381,9 +407,8 @@ async fn fetch_url(_deps: Arc<GatewayDeps>, p: FetchUrlParams) -> Value {
 }
 
 async fn get_binding(deps: Arc<GatewayDeps>, p: GetBindingParams) -> Value {
-    let kind = p.kind.as_str();
-    let target_id = match parse_binding_target(p.kind, p.target_id) {
-        Ok(target_id) => target_id,
+    let (kind, target_id) = match resolve_binding_row(&deps, p.kind, p.target_id).await {
+        Ok(row) => row,
         Err(error) => return error,
     };
     match deps.knowledge_service.get_binding(kind, &target_id).await {
@@ -393,9 +418,19 @@ async fn get_binding(deps: Arc<GatewayDeps>, p: GetBindingParams) -> Value {
 }
 
 async fn set_binding(deps: Arc<GatewayDeps>, p: SetBindingParams) -> Value {
-    let kind = p.kind.as_str();
-    let target_id = match parse_binding_target(p.kind, p.target_id) {
-        Ok(target_id) => target_id,
+    let effect_note = match p.kind {
+        // Terminal rows resolve to the workpath key, whose set_binding hook
+        // re-syncs live terminals immediately; live MCP dispatch re-reads the
+        // binding per call.
+        KnowledgeBindingTargetKind::Terminal => {
+            "binding saved on the terminal's workpath; live terminals on it re-sync immediately"
+        }
+        KnowledgeBindingTargetKind::Conversation | KnowledgeBindingTargetKind::Companion => {
+            "binding saved; the target picks the bases up at its NEXT task start"
+        }
+    };
+    let (kind, target_id) = match resolve_binding_row(&deps, p.kind, p.target_id).await {
+        Ok(row) => row,
         Err(error) => return error,
     };
     let mut binding = match deps.knowledge_service.get_binding(kind, &target_id).await {
@@ -427,8 +462,7 @@ async fn set_binding(deps: Arc<GatewayDeps>, p: SetBindingParams) -> Value {
     match deps.knowledge_service.set_binding(kind, &target_id, binding).await {
         Ok(binding) => ok(json!({
             "binding": binding,
-            "note": "binding saved; a live terminal on this workpath re-syncs immediately, \
-                     other targets pick the bases up at their NEXT task start"
+            "note": effect_note
         })),
         Err(e) => json!({ "error": e.to_string() }),
     }

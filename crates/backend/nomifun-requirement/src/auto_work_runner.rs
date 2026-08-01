@@ -2833,12 +2833,16 @@ async fn inject_and_wait_terminal(
         .service
         .plan_attachments_for_prompt(&req.requirement_id, None)
         .await?;
+    // Live per-turn knowledge state (RC-5): the hint is included only when the
+    // workspace actually has bases mounted at THIS turn's start.
+    let knowledge_mounted = driver.knowledge_mounted(terminal_id).await;
     let prompt = build_terminal_requirement_prompt(
         tag,
         req,
         claim_generation,
         claim_token,
         &attachment_plan.attachments,
+        knowledge_mounted,
     );
 
     let scope = TerminalTurnAdmissionScope {
