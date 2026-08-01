@@ -74,6 +74,15 @@ pub trait TerminalDriver: Send + Sync {
     /// Lightweight metadata for gating + ownership. `Ok(None)` if the row is gone.
     async fn describe(&self, id: &str) -> Result<Option<TerminalDescription>, TerminalError>;
 
+    /// Whether the terminal's workspace currently has an enabled knowledge
+    /// binding with at least one base — resolved LIVE (same source as MCP
+    /// dispatch), so an AutoWork prompt can carry an honest retrieval hint.
+    /// Defaults to `false`: a driver without knowledge wiring must not claim
+    /// mounts it cannot see.
+    async fn knowledge_mounted(&self, _id: &str) -> bool {
+        false
+    }
+
     /// Read the raw AutoWork config JSON blob for a terminal (`None` if unset).
     async fn read_autowork(&self, id: &str) -> Result<Option<String>, TerminalError>;
 

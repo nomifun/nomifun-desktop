@@ -174,6 +174,89 @@ fn claude_mcp_argv(enh: &TerminalLaunchEnhancement, session_dir: &Path) -> std::
     ])
 }
 
+/// Render the enhancement as a gemini system-DEFAULTS settings file in
+/// `session_dir` and return the env additions that activate it. Verified
+/// against gemini-cli 0.53.1 (2026-07-31, local probe):
+///
+/// - `GEMINI_CLI_SYSTEM_DEFAULTS_PATH` points the lowest-precedence settings
+///   layer at a session-private file — user/workspace settings still override
+///   per-key (`mcpServers` merges shallowly by server name), and the user's
+///   real system settings are untouched.
+/// - `mcpServers.<name>.env` values support `$VAR` expansion from the parent
+///   process environment, and the expanded value reaches the spawned MCP
+///   child — so the capability token rides ONLY the PTY env (via
+///   `mcp_process_env`), never this file.
+/// - gemini's own folder-trust dialog gates stdio MCP servers in untrusted
+///   folders. That is the CLI's consent UX; the platform deliberately does
+///   NOT set `GEMINI_CLI_TRUST_WORKSPACE` to bypass it.
+///
+/// If the machine has a real system-defaults file (admin-managed), its content
+/// is merged in first and only the platform's `nomifun-*` server keys are
+/// overlaid, so overriding the path does not drop admin configuration.
+fn gemini_mcp_env(
+    enh: &TerminalLaunchEnhancement,
+    session_dir: &Path,
+) -> std::io::Result<Vec<(String, String)>> {
+    let mut doc = read_real_gemini_system_defaults().unwrap_or_else(|| serde_json::json!({}));
+    if !doc.is_object() {
+        doc = serde_json::json!({});
+    }
+    let servers = doc
+        .as_object_mut()
+        .expect("checked object above")
+        .entry("mcpServers")
+        .or_insert_with(|| serde_json::json!({}));
+    if !servers.is_object() {
+        *servers = serde_json::json!({});
+    }
+    let servers = servers.as_object_mut().expect("normalized to object above");
+    for s in &enh.mcp_servers {
+        // `$NAME` placeholders: gemini expands these from the PTY process
+        // environment at settings load; the secret value stays out of the file.
+        let env: serde_json::Map<String, serde_json::Value> = {
+            let mut names: Vec<&String> = s.env.keys().collect();
+            names.sort();
+            names
+                .into_iter()
+                .map(|name| (name.clone(), serde_json::Value::String(format!("${name}"))))
+                .collect()
+        };
+        servers.insert(
+            s.name.clone(),
+            serde_json::json!({
+                "command": s.command,
+                "args": s.args,
+                "env": env,
+            }),
+        );
+    }
+    std::fs::create_dir_all(session_dir)?;
+    let path = session_dir.join("gemini-system-defaults.json");
+    let bytes = serde_json::to_vec_pretty(&doc)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+    std::fs::write(&path, bytes)?;
+
+    let mut env = vec![(
+        "GEMINI_CLI_SYSTEM_DEFAULTS_PATH".to_owned(),
+        utf8_cli_path(&path, "Gemini system-defaults settings path")?,
+    )];
+    env.extend(mcp_process_env(enh));
+    Ok(env)
+}
+
+/// The OS's standard gemini system-defaults file, when an admin installed one.
+fn read_real_gemini_system_defaults() -> Option<serde_json::Value> {
+    let path = if cfg!(target_os = "macos") {
+        Path::new("/Library/Application Support/GeminiCli/system-defaults.json").to_path_buf()
+    } else if cfg!(windows) {
+        Path::new(r"C:\ProgramData\gemini-cli\system-defaults.json").to_path_buf()
+    } else {
+        Path::new("/etc/gemini-cli/system-defaults.json").to_path_buf()
+    };
+    let bytes = std::fs::read(path).ok()?;
+    serde_json::from_slice(&bytes).ok()
+}
+
 /// TOML bare-key-safe server name (so `mcp_servers.<name>.x` is a valid dotted key).
 fn is_bare_key_safe(name: &str) -> bool {
     !name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
@@ -431,8 +514,20 @@ pub fn apply_enhancement(
             }
         }
         Some(AgentCli::Gemini) => {
-            // Gemini has no secure launch-flag injection mechanism. A standalone
-            // config cannot obtain session-bound claims, so this is an honest no-op.
+            // MCP injection via a session-private system-DEFAULTS settings
+            // file (lowest-precedence layer; user/workspace settings still
+            // win per key). Secrets ride the PTY env through `$VAR`
+            // placeholders — see `gemini_mcp_env`. gemini's own folder-trust
+            // consent still gates the servers; the platform never bypasses it.
+            // Lifecycle hooks are NOT rendered: wiring them is gated on local
+            // verification of gemini's hook semantics (>= 0.49) — tracked
+            // follow-up, not a silent capability claim.
+            if !enh.mcp_servers.is_empty() {
+                match gemini_mcp_env(enh, session_dir) {
+                    Ok(extra_env) => env_additions.extend(extra_env),
+                    Err(e) => tracing::warn!(error = %e, "gemini settings write failed; launching without knowledge tool"),
+                }
+            }
         }
         None => {} // unknown CLI: no injection (honest)
     }
@@ -911,10 +1006,32 @@ mod tests {
         let (out, _env) = apply_enhancement("stepcode", vec!["frob".into()], &enh, dir.path(), None);
         assert_eq!(out, vec!["frob".to_owned()], "unknown wrapper must not inject");
 
-        // Gemini via declared → no launch injection (honest: no flag renderer)
-        let (out, _env) = apply_enhancement("stepcode", vec!["claude".into()], &enh, dir.path(), Some("gemini"));
-        // Gemini = no-op for launch injection, args are unchanged
-        assert_eq!(out, vec!["claude".to_owned()], "gemini declared must not inject launch flags");
+        // Gemini via declared → system-defaults settings injection (no argv changes)
+        let (out, env) = apply_enhancement("stepcode", vec!["claude".into()], &enh, dir.path(), Some("gemini"));
+        assert_eq!(out, vec!["claude".to_owned()], "gemini injection must not touch argv");
+        let env: HashMap<_, _> = env.into_iter().collect();
+        let settings_path = env
+            .get("GEMINI_CLI_SYSTEM_DEFAULTS_PATH")
+            .expect("gemini declared must point at a session settings file");
+        let doc: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(settings_path).unwrap()).unwrap();
+        let srv = &doc["mcpServers"]["nomifun-knowledge"];
+        assert_eq!(srv["command"], "/opt/nomi/nomicore");
+        assert_eq!(srv["args"][0], "mcp-knowledge-stdio");
+        // $VAR placeholder only — the secret value must never be on disk.
+        assert_eq!(srv["env"]["NOMI_KB_MCP_CAPABILITY"], "$NOMI_KB_MCP_CAPABILITY");
+        assert!(
+            !std::fs::read_to_string(settings_path).unwrap().contains("scoped-bootstrap"),
+            "capability value must not be written to the settings file"
+        );
+        // The real value rides the PTY env.
+        assert_eq!(
+            env.get("NOMI_KB_MCP_CAPABILITY").map(String::as_str),
+            Some("scoped-bootstrap")
+        );
+        // The platform must not silently pre-trust the workspace — gemini's
+        // own folder-trust consent stays in charge.
+        assert!(!env.contains_key("GEMINI_CLI_TRUST_WORKSPACE"));
     }
 
     #[test]
