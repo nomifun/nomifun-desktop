@@ -19,6 +19,7 @@ which.workspace = true
 [dev-dependencies]
 tempfile.workspace = true
 serial_test.workspace = true
+serde_json.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
 
 [target.'cfg(unix)'.dependencies]

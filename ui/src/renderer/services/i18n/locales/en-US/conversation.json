@@ -138,6 +138,10 @@
       "unknown_upstream": "Upstream"
     },
     "codes": {
+      "INTERRUPTED_BY_RESTART": {
+        "title": "Task interrupted by app exit",
+        "body": "The app exited while this task was still running, so it could not finish. The conversation is available again — resend the request to retry."
+      },
       "PROVIDER_UNAVAILABLE": {
         "title": "No model available",
         "body": "No usable model provider is configured. Add and enable one in Models & Agent, then retry."

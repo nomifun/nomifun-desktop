@@ -18,13 +18,18 @@ pub const TURN_CANCELLED: &str = "turn_cancelled";
 pub const OWNER_TASK_EXITED: &str = "owner_task_exited";
 pub const ADMISSION_REJECTED: &str = "admission_rejected";
 pub const PREPARATION_FAILED: &str = "preparation_failed";
+/// A durable Running turn settled by restart-orphan recovery: the owning
+/// process exited before any terminal outcome was written, and boot-time
+/// terminal proof later closed the generation. Retryable — the request never
+/// produced a result, so resending it is safe once the row is finished.
+pub const INTERRUPTED_BY_RESTART: &str = "interrupted_by_restart";
 const UNKNOWN_UPSTREAM_ERROR: &str = "unknown_upstream_error";
 
 /// Retryability of the fixed lifecycle codes, per the D4 contract.
 pub const fn fixed_code_retryable(code: &str) -> bool {
     matches!(
         code.as_bytes(),
-        b"channel_closed" | b"owner_task_exited" | b"preparation_failed"
+        b"channel_closed" | b"owner_task_exited" | b"preparation_failed" | b"interrupted_by_restart"
     )
 }
 
@@ -176,6 +181,7 @@ mod tests {
             (OWNER_TASK_EXITED, true),
             (ADMISSION_REJECTED, false),
             (PREPARATION_FAILED, true),
+            (INTERRUPTED_BY_RESTART, true),
         ] {
             assert_eq!(
                 fixed_code_retryable(code),
