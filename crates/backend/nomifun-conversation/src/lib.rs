@@ -19,6 +19,7 @@ pub mod skill_snapshot;
 pub mod state;
 pub mod stream_relay;
 pub mod runtime_options;
+pub mod terminal_proof;
 
 pub use response_middleware::{
     CronCommand, CronCommandResult, CronCreateParams, CronUpdateParams, ICronService, MessageMiddleware,

@@ -72,6 +72,17 @@ impl CliAgentProcess {
         };
         info!(pid, command = %preview, "CLI process spawned (SDK mode)");
 
+        // Capture the exact identity token (pid + platform start key) while we
+        // still own the Child. Failure downgrades restart-orphan recovery to
+        // fail-closed retention; it must never gate the spawn itself.
+        let identity = match nomi_process_runtime::capture_child_identity(&child) {
+            Ok(identity) => Some(identity),
+            Err(error) => {
+                warn!(pid, error = %error, "Failed to capture exact process identity at spawn; durable registry entry will fail closed");
+                None
+            }
+        };
+
         let stdout = match child.stdout.take() {
             Some(stdout) => stdout,
             None => {
@@ -155,6 +166,7 @@ impl CliAgentProcess {
             stdout: Mutex::new(Some(stdout)),
             pid,
             process_group_id: tracked_process_group_id(pid),
+            identity,
             event_tx,
             force_kill_tx,
             exit_rx,

@@ -5,6 +5,7 @@ pub mod companion_token_routes;
 pub(crate) mod browser_management;
 #[cfg(feature = "browser-use")]
 pub(crate) mod browser_login;
+mod boot_terminal_proof;
 mod computer_permissions;
 mod health;
 mod model_failover;

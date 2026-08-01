@@ -119,6 +119,10 @@ pub struct CliAgentProcess {
     /// Process group ID captured at spawn time so teardown can still target
     /// the whole tree after the direct child exits.
     process_group_id: Option<u32>,
+    /// Exact process identity (pid + platform start key) captured at spawn.
+    /// `None` when the platform probe failed — identity is an upgrade for
+    /// restart-orphan recovery, never a spawn gate.
+    identity: Option<nomi_process_runtime::ExactProcessIdentity>,
     /// Broadcast sender for parsed stdout events (JSON-lines mode only).
     #[allow(dead_code)] // Part of the complete CliProcess API; used in JSON-lines mode via subscribe()
     event_tx: broadcast::Sender<serde_json::Value>,
@@ -316,6 +320,14 @@ impl CliAgentProcess {
     /// Get the cached process group ID captured when the child was spawned.
     pub fn process_group_id(&self) -> Option<u32> {
         self.process_group_id
+    }
+
+    /// Get the exact process identity captured when the child was spawned.
+    ///
+    /// `None` means the spawn-time probe failed; durable registry entries
+    /// written without it fail closed at boot (retained, never killed).
+    pub fn identity(&self) -> Option<&nomi_process_runtime::ExactProcessIdentity> {
+        self.identity.as_ref()
     }
 
     /// Wait for the process to exit (blocks until exit or cancellation).

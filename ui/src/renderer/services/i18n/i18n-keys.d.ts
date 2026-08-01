@@ -672,6 +672,8 @@ export type I18nKey =
   | 'common.viewMoreLines'
   | 'common.website'
   | 'common.workspace'
+  | 'conversation.agentError.codes.INTERRUPTED_BY_RESTART.body'
+  | 'conversation.agentError.codes.INTERRUPTED_BY_RESTART.title'
   | 'conversation.agentError.codes.NOMIFUN_CONVERSATION_BUSY.body'
   | 'conversation.agentError.codes.NOMIFUN_CONVERSATION_BUSY.title'
   | 'conversation.agentError.codes.NOMIFUN_INTERNAL_ERROR.body'
