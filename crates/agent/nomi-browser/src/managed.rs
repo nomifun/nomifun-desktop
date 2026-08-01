@@ -6,7 +6,7 @@
 //! Agent, Gateway, and ACP/stdio surfaces one owner-scoped Lane contract.
 
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
@@ -163,24 +163,15 @@ impl ManagedBrowserFacade {
             })));
         }
 
-        let canonical = match action {
-            "open" => "browser_open",
-            "fork" => "browser_fork",
-            "list" => "browser_list",
-            "status" => "browser_status",
-            "close" => "browser_close",
-            "close_all" => "browser_close_all",
-            "crawl_many" => "browser_crawl_many",
-            other => other,
-        };
+        let canonical = canonical_browser_action(action);
 
         match canonical {
             "browser_open" => self.open(input, false).await,
             "browser_fork" => self.open(input, true).await,
-            "browser_list" => self.list().await,
+            "browser_list" => list_lanes(self.client.as_ref()).await,
             "browser_status" => self.status(input).await,
             "browser_close" => self.close(input).await,
-            "browser_close_all" => self.close_all().await,
+            "browser_close_all" => close_all_lanes(self.client.as_ref()).await,
             "browser_crawl_many" => self.crawl_many(input).await,
             existing if is_existing_browser_action(existing) => {
                 self.execute_existing(existing, input).await
@@ -198,48 +189,15 @@ impl ManagedBrowserFacade {
     }
 
     async fn open(&self, input: &Value, fork: bool) -> ToolResult {
-        let generated_name;
-        let lane_name = match input.get("lane_name").and_then(Value::as_str) {
-            Some(name) => Some(name),
-            None if fork => {
-                let sequence = MANAGED_LANE_SEQUENCE.fetch_add(1, Ordering::AcqRel) + 1;
-                generated_name = format!("fork-{sequence}");
-                Some(generated_name.as_str())
-            }
-            None => None,
-        };
-        let workspace_hint = self
-            .workspace_dir
-            .as_ref()
-            .map(|path| path.to_string_lossy().into_owned());
-        match self
-            .client
-            .open(lane_name, BrowserIdentityMode::Primary, workspace_hint)
-            .await
-        {
-            Ok(outcome) => {
-                let lane = outcome.lane();
-                ToolResult::text(pretty_json(&json!({
-                    "ok": true,
-                    "action": if fork { "browser_fork" } else { "browser_open" },
-                    "lane": public_lane_json(lane),
-                    "queued": matches!(outcome, OpenLaneOutcome::Queued { .. }),
-                    "next_action": lane_next_action(lane),
-                })))
-            }
-            Err(error) => platform_error_result("Opening a browser Lane failed", error),
-        }
-    }
-
-    async fn list(&self) -> ToolResult {
-        match self.client.list().await {
-            Ok(lanes) => ToolResult::text(pretty_json(&json!({
-                "ok": true,
-                "action": "browser_list",
-                "lanes": lanes.iter().map(public_lane_json).collect::<Vec<_>>(),
-            }))),
-            Err(error) => platform_error_result("Listing browser Lanes failed", error),
-        }
+        open_lane(
+            self.client.as_ref(),
+            self.workspace_dir.as_deref(),
+            &MANAGED_LANE_SEQUENCE,
+            input,
+            fork,
+            "Opening a browser Lane failed",
+        )
+        .await
     }
 
     async fn status(&self, input: &Value) -> ToolResult {
@@ -252,15 +210,7 @@ impl ManagedBrowserFacade {
             }
             Err(error) => return platform_error_result("Resolving the browser Lane failed", error),
         };
-        match self.client.status(&lane_id).await {
-            Ok(lane) => ToolResult::text(pretty_json(&json!({
-                "ok": true,
-                "action": "browser_status",
-                "lane": public_lane_json(&lane),
-                "next_action": lane_next_action(&lane),
-            }))),
-            Err(error) => platform_error_result("Reading browser Lane status failed", error),
-        }
+        lane_status(self.client.as_ref(), &lane_id).await
     }
 
     async fn close(&self, input: &Value) -> ToolResult {
@@ -268,91 +218,18 @@ impl ManagedBrowserFacade {
             Ok(lane_id) => lane_id,
             Err(error) => return platform_error_result("Resolving the browser Lane failed", error),
         };
-        let Some(lane_id) = lane_id else {
-            return ToolResult::text(pretty_json(&json!({
-                "ok": true,
-                "action": "browser_close",
-                "closed": 0,
-                "already_closed": true,
-            })));
-        };
-        match self.client.close(&lane_id).await {
-            Ok(result) => ToolResult::text(pretty_json(&json!({
-                "ok": true,
-                "action": "browser_close",
-                "lane_id": lane_id.as_str(),
-                "closed": result.closed,
-                "already_closed": result.already_closed,
-            }))),
-            Err(error) => platform_error_result("Closing the browser Lane failed", error),
-        }
-    }
-
-    async fn close_all(&self) -> ToolResult {
-        match self.client.close_all().await {
-            Ok(result) => ToolResult::text(pretty_json(&json!({
-                "ok": true,
-                "action": "browser_close_all",
-                "closed": result.closed,
-                "already_closed": result.already_closed,
-            }))),
-            Err(error) => platform_error_result("Closing browser Lanes failed", error),
-        }
+        close_lane(self.client.as_ref(), lane_id).await
     }
 
     async fn execute_existing(&self, action: &str, input: &Value) -> ToolResult {
-        let lane = match self.resolve_running_lane(input).await {
-            Ok(lane) => lane,
-            Err(error) => return platform_error_result("Resolving the browser Lane failed", error),
-        };
-        if lane.lifecycle_state != LaneLifecycleState::Running {
-            return lane_operation_not_dispatched_result(action, &lane);
-        }
-
-        let operation = BrowserOperation {
-            kind: operation_kind(action),
-            action: action.to_owned(),
-            input: sanitize_operation_input(input),
-            expected_browser_epoch: input
-                .get("expected_browser_epoch")
-                .or_else(|| input.get("browser_epoch"))
-                .and_then(Value::as_u64),
-            target_id: None,
-            frame_id: None,
-            // `f<seq>e<n>` embeds a frame sequence, not the observation
-            // generation. Bind ref-bearing operations to the Hub's
-            // authoritative lane snapshot instead of parsing the ref text.
-            ref_generation: input
-                .get("ref")
-                .and_then(Value::as_str)
-                .is_some()
-                .then_some(lane.ref_generation),
-            may_modify_identity: action_may_modify_identity(action, input),
-        };
-        match self.client.execute(&lane.lane_id, operation).await {
-            Ok(result) => {
-                let latest = self.client.status(&lane.lane_id).await.ok();
-                operation_result(action, &lane.lane_id, result, latest.as_ref())
-            }
-            Err(error) => platform_error_result("Browser Lane operation failed", error),
-        }
-    }
-
-    async fn resolve_running_lane(
-        &self,
-        input: &Value,
-    ) -> Result<BrowserLaneSnapshot, BrowserPlatformError> {
-        if let Some(lane_id) = managed_lane_id(input)? {
-            return self.client.status(&lane_id).await;
-        }
-        let workspace_hint = self
-            .workspace_dir
-            .as_ref()
-            .map(|path| path.to_string_lossy().into_owned());
-        self.client
-            .open(None, BrowserIdentityMode::Primary, workspace_hint)
-            .await
-            .map(|outcome| outcome.lane().clone())
+        execute_existing_operation(
+            self.client.as_ref(),
+            self.workspace_dir.as_deref(),
+            action,
+            input,
+            true,
+        )
+        .await
     }
 
     async fn resolve_lane_id(
@@ -364,12 +241,8 @@ impl ManagedBrowserFacade {
             self.client.status(&lane_id).await?;
             return Ok(Some(lane_id));
         }
-        Ok(self
-            .client
-            .list()
+        Ok(find_default_lane(self.client.as_ref())
             .await?
-            .into_iter()
-            .find(|lane| lane.lane_key.lane_name == "default")
             .map(|lane| lane.lane_id))
     }
 
@@ -381,6 +254,226 @@ impl ManagedBrowserFacade {
         )
         .await
     }
+}
+
+/// Shared open/fork dispatch for every managed surface.
+///
+/// Only the platform-error `context` differs per surface (the native tool
+/// reports fork failures as "Forking a browser Lane failed"; the facade uses
+/// one open context for both), so the caller resolves it. `lane_sequence`
+/// stays caller-owned: the facade shares one process-wide counter while each
+/// native `BrowserTool` names forks from its own counter.
+pub(crate) async fn open_lane(
+    client: &dyn BrowserLaneClientPort,
+    workspace_dir: Option<&Path>,
+    lane_sequence: &AtomicU64,
+    input: &Value,
+    fork: bool,
+    context: &str,
+) -> ToolResult {
+    let generated_name;
+    let lane_name = match input.get("lane_name").and_then(Value::as_str) {
+        Some(name) => Some(name),
+        None if fork => {
+            let sequence = lane_sequence.fetch_add(1, Ordering::AcqRel) + 1;
+            generated_name = format!("fork-{sequence}");
+            Some(generated_name.as_str())
+        }
+        None => None,
+    };
+    let workspace_hint = workspace_dir.map(|path| path.to_string_lossy().into_owned());
+    match client
+        // Model-facing open/fork always uses the trusted live Primary
+        // identity. The model may choose only the logical lane name;
+        // identity policy is resolved by the host/Hub.
+        .open(lane_name, BrowserIdentityMode::Primary, workspace_hint)
+        .await
+    {
+        Ok(outcome) => {
+            let lane = outcome.lane();
+            ToolResult::text(pretty_json(&json!({
+                "ok": true,
+                "action": if fork { "browser_fork" } else { "browser_open" },
+                "lane": public_lane_json(lane),
+                "queued": matches!(outcome, OpenLaneOutcome::Queued { .. }),
+                "next_action": lane_next_action(lane),
+            })))
+        }
+        Err(error) => platform_error_result(context, error),
+    }
+}
+
+/// Map the short model-facing aliases (`open`, `fork`, …) onto the canonical
+/// `browser_*` management action names. Existing page-level actions pass
+/// through unchanged. Shared by every managed dispatcher.
+pub(crate) fn canonical_browser_action(action: &str) -> &str {
+    match action {
+        "open" => "browser_open",
+        "fork" => "browser_fork",
+        "list" => "browser_list",
+        "status" => "browser_status",
+        "close" => "browser_close",
+        "close_all" => "browser_close_all",
+        "crawl_many" => "browser_crawl_many",
+        other => other,
+    }
+}
+
+/// Shared `browser_list` dispatch for every managed surface.
+pub(crate) async fn list_lanes(client: &dyn BrowserLaneClientPort) -> ToolResult {
+    match client.list().await {
+        Ok(lanes) => ToolResult::text(pretty_json(&json!({
+            "ok": true,
+            "action": "browser_list",
+            "lanes": lanes.iter().map(public_lane_json).collect::<Vec<_>>(),
+        }))),
+        Err(error) => platform_error_result("Listing browser Lanes failed", error),
+    }
+}
+
+/// Shared `browser_status` tail for every managed surface. Lane-id resolution
+/// (and its per-surface error contexts / missing-default shapes) stays with
+/// the caller; this renders the authoritative snapshot.
+pub(crate) async fn lane_status(
+    client: &dyn BrowserLaneClientPort,
+    lane_id: &BrowserLaneId,
+) -> ToolResult {
+    match client.status(lane_id).await {
+        Ok(lane) => ToolResult::text(pretty_json(&json!({
+            "ok": true,
+            "action": "browser_status",
+            "lane": public_lane_json(&lane),
+            "next_action": lane_next_action(&lane),
+        }))),
+        Err(error) => platform_error_result("Reading browser Lane status failed", error),
+    }
+}
+
+/// Shared `browser_close` tail for every managed surface. `None` means no
+/// Lane was resolved: closing nothing is a success (already closed).
+pub(crate) async fn close_lane(
+    client: &dyn BrowserLaneClientPort,
+    lane_id: Option<BrowserLaneId>,
+) -> ToolResult {
+    let Some(lane_id) = lane_id else {
+        return ToolResult::text(pretty_json(&json!({
+            "ok": true,
+            "action": "browser_close",
+            "closed": 0,
+            "already_closed": true,
+        })));
+    };
+    match client.close(&lane_id).await {
+        Ok(result) => ToolResult::text(pretty_json(&json!({
+            "ok": true,
+            "action": "browser_close",
+            "lane_id": lane_id.as_str(),
+            "closed": result.closed,
+            "already_closed": result.already_closed,
+        }))),
+        Err(error) => platform_error_result("Closing the browser Lane failed", error),
+    }
+}
+
+/// Shared `browser_close_all` dispatch for every managed surface.
+pub(crate) async fn close_all_lanes(client: &dyn BrowserLaneClientPort) -> ToolResult {
+    match client.close_all().await {
+        Ok(result) => ToolResult::text(pretty_json(&json!({
+            "ok": true,
+            "action": "browser_close_all",
+            "closed": result.closed,
+            "already_closed": result.already_closed,
+        }))),
+        Err(error) => platform_error_result("Closing browser Lanes failed", error),
+    }
+}
+
+/// The owner-scoped Lane named `default`, if one exists.
+pub(crate) async fn find_default_lane(
+    client: &dyn BrowserLaneClientPort,
+) -> Result<Option<BrowserLaneSnapshot>, BrowserPlatformError> {
+    Ok(client
+        .list()
+        .await?
+        .into_iter()
+        .find(|lane| lane.lane_key.lane_name == "default"))
+}
+
+/// Shared dispatch of an existing (page-level) browser action for every
+/// managed surface: resolve the target Lane (an explicit owner-scoped
+/// `lane_id`, else open/reuse the default Lane), require it to be running,
+/// sanitize the model input into a [`BrowserOperation`], execute, and render
+/// the result envelope.
+///
+/// `merge_legacy_output` selects the envelope shape: the shared facade merges
+/// the operation output's fields into the top level (legacy transport
+/// compatibility) and marks screenshots `captured`; the native Agent tool
+/// keeps the plain `output` envelope with no merge.
+pub(crate) async fn execute_existing_operation(
+    client: &dyn BrowserLaneClientPort,
+    workspace_dir: Option<&Path>,
+    action: &str,
+    input: &Value,
+    merge_legacy_output: bool,
+) -> ToolResult {
+    let lane = match resolve_running_lane(client, workspace_dir, input).await {
+        Ok(lane) => lane,
+        Err(error) => return platform_error_result("Resolving the browser Lane failed", error),
+    };
+    if lane.lifecycle_state != LaneLifecycleState::Running {
+        return lane_operation_not_dispatched_result(action, &lane);
+    }
+
+    let operation = BrowserOperation {
+        kind: operation_kind(action),
+        action: action.to_owned(),
+        input: sanitize_operation_input(input),
+        expected_browser_epoch: input
+            .get("expected_browser_epoch")
+            .or_else(|| input.get("browser_epoch"))
+            .and_then(Value::as_u64),
+        // Target/frame ownership is selected by the Lane driver. Model
+        // input is never allowed to override these routing fields.
+        target_id: None,
+        frame_id: None,
+        // `f<seq>e<n>` embeds a frame sequence, not the observation
+        // generation. Bind ref-bearing operations to the authoritative
+        // Lane snapshot instead of parsing the model-visible ref text.
+        ref_generation: input
+            .get("ref")
+            .and_then(Value::as_str)
+            .is_some()
+            .then_some(lane.ref_generation),
+        may_modify_identity: action_may_modify_identity(action, input),
+    };
+    match client.execute(&lane.lane_id, operation).await {
+        Ok(result) => {
+            let latest = client.status(&lane.lane_id).await.ok();
+            operation_result(
+                action,
+                &lane.lane_id,
+                result,
+                latest.as_ref(),
+                merge_legacy_output,
+            )
+        }
+        Err(error) => platform_error_result("Browser Lane operation failed", error),
+    }
+}
+
+async fn resolve_running_lane(
+    client: &dyn BrowserLaneClientPort,
+    workspace_dir: Option<&Path>,
+    input: &Value,
+) -> Result<BrowserLaneSnapshot, BrowserPlatformError> {
+    if let Some(lane_id) = managed_lane_id(input)? {
+        return client.status(&lane_id).await;
+    }
+    let workspace_hint = workspace_dir.map(|path| path.to_string_lossy().into_owned());
+    client
+        .open(None, BrowserIdentityMode::Primary, workspace_hint)
+        .await
+        .map(|outcome| outcome.lane().clone())
 }
 
 /// Convert the shared dispatcher result to the loopback/Gateway envelope.
@@ -1682,11 +1775,16 @@ pub(crate) fn lane_next_action(lane: &BrowserLaneSnapshot) -> &'static str {
     }
 }
 
+/// Render an executed operation's result envelope. `merge_legacy_output`
+/// additionally mirrors the output's fields at the top level and marks
+/// screenshots `captured` — the loopback/Gateway transport shape. The native
+/// Agent tool passes `false` and keeps the plain `output` envelope.
 fn operation_result(
     action: &str,
     lane_id: &BrowserLaneId,
     result: BrowserOperationResult,
     lane: Option<&BrowserLaneSnapshot>,
+    merge_legacy_output: bool,
 ) -> ToolResult {
     let mut output = result.output;
     let mut images = Vec::new();
@@ -1715,7 +1813,7 @@ fn operation_result(
     // Keep the legacy transport shape usable while adding the cross-entry
     // Lane metadata: existing consumers may still read `/result/text`,
     // `/result/yaml`, `/result/final_url`, etc. New consumers can use `output`.
-    if let Some(envelope) = envelope.as_object_mut() {
+    if merge_legacy_output && let Some(envelope) = envelope.as_object_mut() {
         match &output {
             Value::Object(fields) => {
                 for (key, value) in fields {
@@ -2113,6 +2211,7 @@ mod tests {
                 ..Default::default()
             },
             None,
+            true,
         );
         let value: Value = serde_json::from_str(&result.content).unwrap();
         assert_eq!(value["text"], "Navigated");
