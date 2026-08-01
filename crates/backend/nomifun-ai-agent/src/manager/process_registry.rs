@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use nomi_process_runtime::ExactProcessIdentity;
 use nomifun_common::{AgentType, AppError, ErrorChain};
 use serde::{Deserialize, Serialize};
 use tracing::warn;
@@ -25,18 +26,29 @@ pub(crate) struct RegisteredAgentProcess {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub command_preview: Option<String>,
     pub registered_at_ms: u64,
+    /// Exact-identity token (pid + platform start key) captured at spawn.
+    /// v1 entries deserialize as `None`; without it the boot reaper cannot
+    /// prove a live pid is the recorded instance, so such entries fail
+    /// closed (retained, never killed).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub identity: Option<ExactProcessIdentity>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-struct ProcessRegistry {
-    version: u32,
-    processes: Vec<RegisteredAgentProcess>,
+pub(crate) struct ProcessRegistry {
+    pub(crate) version: u32,
+    pub(crate) processes: Vec<RegisteredAgentProcess>,
 }
 
 impl Default for ProcessRegistry {
     fn default() -> Self {
         Self {
-            version: 1,
+            // v2 adds the optional per-entry `identity` token. The read path
+            // deliberately ignores `version`: v1 files parse with
+            // `identity: None`, and old binaries reading v2 files drop the
+            // unknown field and fail closed — so gating on the number would
+            // only add a way to reject files we can already handle.
+            version: 2,
             processes: Vec::new(),
         }
     }
@@ -71,6 +83,7 @@ pub(crate) fn register_session_process(
         backend,
         command_preview,
         registered_at_ms: now_ms(),
+        identity: process.identity().cloned(),
     };
 
     register_agent_process(data_dir, entry).map_err(|e| {
@@ -142,7 +155,7 @@ pub(crate) fn unregister_agent_process(data_dir: &Path, pid: u32) -> io::Result<
     })
 }
 
-fn read_registry_file(path: &Path) -> io::Result<ProcessRegistry> {
+pub(crate) fn read_registry_file(path: &Path) -> io::Result<ProcessRegistry> {
     match fs::read_to_string(path) {
         Ok(contents) => serde_json::from_str(&contents).map_err(|e| {
             io::Error::new(
@@ -155,7 +168,7 @@ fn read_registry_file(path: &Path) -> io::Result<ProcessRegistry> {
     }
 }
 
-fn write_registry_file(path: &Path, registry: &ProcessRegistry) -> io::Result<()> {
+pub(crate) fn write_registry_file(path: &Path, registry: &ProcessRegistry) -> io::Result<()> {
     let payload = serde_json::to_vec_pretty(registry).map_err(|e| {
         io::Error::new(
             io::ErrorKind::InvalidData,
@@ -351,7 +364,7 @@ fn sync_registry_parent(_parent: &Path) -> io::Result<()> {
     Ok(())
 }
 
-fn with_registry_lock<T>(f: impl FnOnce() -> io::Result<T>) -> io::Result<T> {
+pub(crate) fn with_registry_lock<T>(f: impl FnOnce() -> io::Result<T>) -> io::Result<T> {
     let _guard = REGISTRY_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
     f()
 }
@@ -395,6 +408,7 @@ mod tests {
             backend: Some("codex".into()),
             command_preview: Some("codex-acp".into()),
             registered_at_ms: 123,
+            identity: None,
         };
 
         register_agent_process(dir.path(), entry.clone()).unwrap();
@@ -456,6 +470,46 @@ mod tests {
         assert_no_registry_temps(dir.path());
     }
 
+    #[test]
+    fn v2_entry_round_trips_identity_through_serde() {
+        let mut entry = test_process(77);
+        entry.identity = Some(ExactProcessIdentity {
+            pid: 77,
+            start_time_epoch_seconds: 1_722_400_000,
+            platform_start_key: 133_663_000_000_000_000,
+            executable: Some(PathBuf::from("C:/tools/codex-acp.exe")),
+        });
+        let registry = ProcessRegistry {
+            version: 2,
+            processes: vec![entry],
+        };
+
+        let json = serde_json::to_string(&registry).unwrap();
+        let parsed: ProcessRegistry = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, registry);
+    }
+
+    #[test]
+    fn v1_registry_json_parses_with_identity_none() {
+        // Hand-written v1 payload: no `identity` field, version 1. Must parse
+        // (read path ignores version) and fail closed with `identity: None`.
+        let json = r#"{
+            "version": 1,
+            "processes": [{
+                "pid": 4242,
+                "conversation_id": "conv-legacy",
+                "agent_type": "acp",
+                "registered_at_ms": 99
+            }]
+        }"#;
+        let parsed: ProcessRegistry = serde_json::from_str(json).unwrap();
+        assert_eq!(parsed.processes.len(), 1);
+        let entry = &parsed.processes[0];
+        assert_eq!(entry.pid, 4242);
+        assert_eq!(entry.conversation_id, "conv-legacy");
+        assert_eq!(entry.identity, None);
+    }
+
     fn test_process(pid: u32) -> RegisteredAgentProcess {
         RegisteredAgentProcess {
             pid,
@@ -465,6 +519,7 @@ mod tests {
             backend: Some("codex".into()),
             command_preview: Some(format!("codex-acp-{pid}")),
             registered_at_ms: u64::from(pid),
+            identity: None,
         }
     }
 

@@ -9,6 +9,7 @@ mod command_builder;
 mod io;
 mod outcome;
 mod platform;
+mod recovery;
 mod registry;
 mod request;
 mod supervisor;
@@ -22,6 +23,10 @@ pub use io::{OutputBuffer, OutputObserver};
 pub use outcome::{
     CleanupReport, EncodingMetadata, ProcessEvent, ProcessOutcome, OutputChunk, OutputCursor,
     OutputSnapshot, OutputStream, ProcessSnapshot, ProcessState, SessionId, SpawnFailure,
+};
+pub use recovery::{
+    ExactProcessIdentity, OrphanTerminationOutcome, capture_child_identity,
+    probe_process_identity, same_recorded_process, terminate_verified_orphan,
 };
 pub use request::{
     CommandSpec, ProcessError, ProcessOwner, ProcessPolicy, ProcessRequest,

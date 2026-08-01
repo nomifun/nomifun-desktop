@@ -1527,6 +1527,8 @@ async fn exact_stop_for_a_cannot_finalize_active_b_from_another_service() {
             captured_a.epoch,
             captured_a.active_operation_id.as_deref(),
             "late stop A",
+            None,
+            None,
             now + 3,
         )
         .await
@@ -1544,6 +1546,60 @@ async fn exact_stop_for_a_cannot_finalize_active_b_from_another_service() {
         .unwrap()
         .unwrap();
     assert_eq!(b_receipt.status, "accepted");
+}
+
+#[tokio::test]
+async fn exact_cancelled_finalization_writes_structured_error_code() {
+    let (repo, _db) = setup().await;
+    let mut conversation = make_conversation("stop-structured-code");
+    conversation.conversation_id = repo.create(&conversation).await.unwrap();
+    let now = nomifun_common::now_ms();
+    let operation_id = "turn:stop-structured-code";
+    repo.claim_turn_delivery_receipt_and_admit(
+        USER_ID,
+        &conversation.conversation_id,
+        operation_id,
+        r#"{"content":"A"}"#,
+        0,
+        now,
+    )
+    .await
+    .unwrap();
+    let captured = repo
+        .get_turn_admission_state(USER_ID, &conversation.conversation_id)
+        .await
+        .unwrap();
+    assert_eq!(
+        repo.finalize_exact_cancelled_turn_generation(
+            USER_ID,
+            &conversation.conversation_id,
+            captured.epoch,
+            captured.active_operation_id.as_deref(),
+            "interrupted by backend restart",
+            Some("interrupted_by_restart"),
+            Some(true),
+            now + 1,
+        )
+        .await
+        .unwrap(),
+        TurnLifecycleTransition::Committed
+    );
+    let receipt = repo
+        .get_delivery_receipt(USER_ID, &conversation.conversation_id, operation_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(receipt.status, "completed");
+    assert_eq!(receipt.result_ok, Some(false));
+    assert_eq!(
+        receipt.result_error.as_deref(),
+        Some("interrupted by backend restart")
+    );
+    assert_eq!(
+        receipt.result_error_code.as_deref(),
+        Some("interrupted_by_restart")
+    );
+    assert_eq!(receipt.result_error_retryable, Some(true));
 }
 
 #[tokio::test]
@@ -1634,6 +1690,8 @@ async fn exact_stop_repairs_finished_edit_reservations_and_partial_admissions() 
                 expected_epoch,
                 Some(&operation_id),
                 "interrupted edit/resubmit",
+                None,
+                None,
                 nomifun_common::now_ms() + 2,
             )
             .await
@@ -1851,6 +1909,8 @@ async fn missing_exact_receipt_quarantines_running_and_finished_active_generatio
                 state.epoch,
                 Some(&operation_id),
                 "cannot prove old work stopped",
+                None,
+                None,
                 nomifun_common::now_ms() + 2,
             )
             .await,

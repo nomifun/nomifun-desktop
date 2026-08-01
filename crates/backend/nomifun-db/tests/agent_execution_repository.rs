@@ -1811,6 +1811,8 @@ async fn late_attempt_custodian_cannot_touch_successor_conversation_generation()
                 admitted_a.epoch,
                 Some(&operation_a),
                 "generation A was cancelled",
+                None,
+                None,
                 nomifun_common::now_ms(),
             )
             .await

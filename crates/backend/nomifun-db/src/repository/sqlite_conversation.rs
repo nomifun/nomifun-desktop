@@ -1491,6 +1491,8 @@ impl IConversationRepository for SqliteConversationRepository {
         expected_admission_epoch: i64,
         expected_active_operation_id: Option<&str>,
         reason: &str,
+        result_error_code: Option<&str>,
+        result_error_retryable: Option<bool>,
         completed_at: TimestampMs,
     ) -> Result<TurnLifecycleTransition, DbError> {
         if expected_admission_epoch < 0 || reason.trim().is_empty() {
@@ -1539,12 +1541,16 @@ impl IConversationRepository for SqliteConversationRepository {
             let settled = sqlx::query(
                 "UPDATE conversation_delivery_receipts \
                  SET status = 'completed', result_ok = 0, result_text = NULL, \
-                     result_error = ?, completed_at = MAX(created_at, updated_at, ?), \
+                     result_error = ?, result_error_code = ?, \
+                     result_error_retryable = ?, \
+                     completed_at = MAX(created_at, updated_at, ?), \
                      updated_at = MAX(created_at, updated_at, ?) \
                  WHERE operation_id = ? AND conversation_id = ? AND user_id = ? \
                    AND kind = 'turn' AND status = 'accepted'",
             )
             .bind(reason)
+            .bind(result_error_code)
+            .bind(result_error_retryable)
             .bind(completed_at)
             .bind(completed_at)
             .bind(&receipt.operation_id)
@@ -1671,12 +1677,16 @@ impl IConversationRepository for SqliteConversationRepository {
                 sqlx::query(
                     "UPDATE conversation_delivery_receipts \
                      SET status = 'completed', result_ok = 0, result_text = NULL, \
-                         result_error = ?, completed_at = MAX(created_at, updated_at, ?), \
+                         result_error = ?, result_error_code = ?, \
+                         result_error_retryable = ?, \
+                         completed_at = MAX(created_at, updated_at, ?), \
                          updated_at = MAX(created_at, updated_at, ?) \
                      WHERE conversation_id = ? AND user_id = ? \
                        AND kind = 'turn' AND status = 'accepted'",
                 )
                 .bind(reason)
+                .bind(result_error_code)
+                .bind(result_error_retryable)
                 .bind(completed_at)
                 .bind(completed_at)
                 .bind(conversation_id)
