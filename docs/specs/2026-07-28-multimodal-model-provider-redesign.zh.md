@@ -1,7 +1,7 @@
 # 多供应商 · 多模态模型管理与协议适配重构设计（v2）
 
 - 日期：2026-07-28（v2 修订）
-- 状态：设计定稿；P0 已实施（分支 dev/model-catalog-p0-20260728，见 §6 P0 实施偏差记录与 docs/handoffs/2026-07-28-model-catalog-p0.md）；P1 已实施（分支 dev/model-catalog-p1-20260729，见 §6 P1 实施偏差记录与 docs/handoffs/2026-07-29-model-invoke-p1.md）；P2 已实施（分支 dev/model-catalog-p2-20260729，见 §6 P2 实施偏差记录与 docs/handoffs/2026-07-29-model-catalog-p2.md）；P3 已实施（分支 dev/model-catalog-p3-20260730，见 §6 P3 实施偏差记录与 docs/handoffs/2026-07-30-model-catalog-p3.md）
+- 状态：设计定稿；P0 已实施（分支 dev/model-catalog-p0-20260728，见 §6 P0 实施偏差记录）；P1 已实施（分支 dev/model-catalog-p1-20260729，见 §6 P1 实施偏差记录）；P2 已实施（分支 dev/model-catalog-p2-20260729，见 §6 P2 实施偏差记录）；P3 已实施（分支 dev/model-catalog-p3-20260730，见 §6 P3 实施偏差记录）
 - 范围：供应商/模型配置与管理、模型能力打标、各模态调用链、外部协议适配层、前端模型选择交互
 - 调研方式：四路并行代码审查（配置数据模型 / 对话链路协议抽象 / 前端管理与选择 UI / 多模态调用链路）+ 10 家供应商 × 6 模态的真实协议差异调研（附录 C）+ 适配层抽取的 crate 依赖摸底。关键结论均带 `file:line` 或来源 URL。
 

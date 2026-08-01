@@ -1,5 +1,4 @@
 use std::fmt;
-use std::path::PathBuf;
 use std::str::FromStr;
 
 use chrono::{DateTime, Utc};
@@ -101,26 +100,6 @@ pub struct MemoryFrontmatter {
     /// memory (absent in legacy files). Skipped on serialize when `None`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_used: Option<DateTime<Utc>>,
-}
-
-// ---------------------------------------------------------------------------
-// Header (lightweight metadata returned by directory scans)
-// ---------------------------------------------------------------------------
-
-/// Lightweight metadata for a memory file, extracted without reading
-/// the full body. Used by directory scans and manifest formatting.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct MemoryHeader {
-    /// Filename (without directory), e.g. `user_role.md`.
-    pub filename: String,
-    /// Full path to the file.
-    pub file_path: PathBuf,
-    /// Last modification time.
-    pub mtime: DateTime<Utc>,
-    /// One-line description from frontmatter (may be absent).
-    pub description: Option<String>,
-    /// Memory type from frontmatter (may be absent).
-    pub memory_type: Option<MemoryType>,
 }
 
 // ---------------------------------------------------------------------------

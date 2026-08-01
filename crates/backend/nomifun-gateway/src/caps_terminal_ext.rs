@@ -169,11 +169,6 @@ async fn authorize_terminal(
     ctx: &CallerCtx,
     terminal_id: &str,
 ) -> Result<(), Value> {
-    if nomifun_common::UserId::parse(ctx.user_id.as_str()).is_err() {
-        return Err(json!({
-            "error": "missing caller user identity in signed Gateway capability"
-        }));
-    }
     let conversation_id = match ctx.conversation_id.as_deref() {
         Some(id) if nomifun_common::ConversationId::parse(id).is_ok() => id,
         _ => {

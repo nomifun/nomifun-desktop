@@ -14,9 +14,10 @@ use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
 use tracing::{debug, error, info, warn};
 
-use crate::constants::{MATRIX_MAX_RECONNECT_ATTEMPTS, MATRIX_MAX_RECONNECT_DELAY, MATRIX_MESSAGE_LIMIT};
+use crate::constants::{MATRIX_MESSAGE_LIMIT, RECONNECT_MAX_ATTEMPTS, RECONNECT_MAX_DELAY};
 use crate::error::ChannelError;
 use crate::plugin::{ChannelPlugin, PluginCallbacks, SharedPluginStatus, mark_error_on_unexpected_exit};
+use crate::plugins::util::{backoff_delay, truncate_message};
 use crate::types::{
     BotInfo, MessageContentType, PluginConfig, PluginStatus, PluginType,
     UnifiedIncomingMessage, UnifiedMessageContent, UnifiedOutgoingMessage, UnifiedUser,
@@ -317,7 +318,7 @@ impl ChannelPlugin for MatrixPlugin {
 /// Background task that continuously long-polls `/sync` for new events.
 ///
 /// Mirrors the Telegram plugin's poll loop structure: exponential backoff on
-/// errors up to `MATRIX_MAX_RECONNECT_ATTEMPTS`, then exits with
+/// errors up to `RECONNECT_MAX_ATTEMPTS`, then exits with
 /// `mark_error_on_unexpected_exit`.
 async fn sync_loop(
     api: Arc<MatrixApi>,
@@ -368,12 +369,12 @@ async fn sync_loop(
                     "Matrix sync error"
                 );
 
-                if consecutive_errors >= MATRIX_MAX_RECONNECT_ATTEMPTS {
+                if consecutive_errors >= RECONNECT_MAX_ATTEMPTS {
                     error!("Matrix max reconnect attempts reached, stopping sync loop");
                     break;
                 }
 
-                let backoff = backoff_delay(consecutive_errors);
+                let backoff = backoff_delay(consecutive_errors, RECONNECT_MAX_DELAY);
                 tokio::select! {
                     _ = tokio::time::sleep(backoff) => {}
                     _ = shutdown_rx.changed() => {
@@ -480,21 +481,6 @@ async fn handle_timeline_event(
     }
 }
 
-/// Calculate exponential backoff delay, capped at the configured maximum.
-fn backoff_delay(attempt: u32) -> Duration {
-    let delay_secs = 2u64.saturating_pow(attempt).min(MATRIX_MAX_RECONNECT_DELAY.as_secs());
-    Duration::from_secs(delay_secs)
-}
-
-/// Truncate a message to the platform limit, appending "..." if truncated.
-fn truncate_message(text: &str, limit: usize) -> String {
-    if text.len() <= limit {
-        return text.to_string();
-    }
-    let truncated: String = text.chars().take(limit - 3).collect();
-    format!("{truncated}...")
-}
-
 /// Extract the localpart from a Matrix user ID (`@localpart:server` → `localpart`).
 fn extract_localpart(mxid: &str) -> String {
     let without_sigil = mxid.strip_prefix('@').unwrap_or(mxid);
@@ -541,42 +527,7 @@ mod tests {
 
     // -- truncate_message -----------------------------------------------------
 
-    #[test]
-    fn truncate_within_limit() {
-        assert_eq!(truncate_message("Hello", 100), "Hello");
-    }
-
-    #[test]
-    fn truncate_at_limit() {
-        assert_eq!(truncate_message("abc", 3), "abc");
-    }
-
-    #[test]
-    fn truncate_exceeds_limit() {
-        let result = truncate_message("Hello, world!", 10);
-        assert_eq!(result, "Hello, ...");
-    }
-
-    #[test]
-    fn truncate_unicode() {
-        let result = truncate_message("你好世界测试", 5);
-        assert_eq!(result, "你好...");
-    }
-
     // -- backoff_delay --------------------------------------------------------
-
-    #[test]
-    fn backoff_exponential() {
-        assert_eq!(backoff_delay(1), Duration::from_secs(2));
-        assert_eq!(backoff_delay(2), Duration::from_secs(4));
-        assert_eq!(backoff_delay(3), Duration::from_secs(8));
-    }
-
-    #[test]
-    fn backoff_capped() {
-        assert_eq!(backoff_delay(5), Duration::from_secs(30));
-        assert_eq!(backoff_delay(10), Duration::from_secs(30));
-    }
 
     // -- MatrixPlugin constructor ---------------------------------------------
 

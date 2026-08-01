@@ -21,7 +21,7 @@
 已跑过 v0.3.5 的机器上 22 已提交为两个文件之一（read_dir 顺序不定）：
 - 22=codex_acp（与重命名后一致）→ 自愈：023 作为新迁移正常补跑。
 - 22=drop_connector → 仍会 `VersionMismatch(22)`。修复版需在发布说明中告知重置数据集
-  （repo 的迁移重编号既定策略，见 `2026-07-30-model-catalog-p3.md` 尾注）；未实现 checksum 改写自愈。
+  （repo 的迁移重编号既定策略，见 Git 历史中 `2026-07-30-model-catalog-p3.md` 尾注）；未实现 checksum 改写自愈。
 
 **发布动作建议：尽快出 v0.3.5.x/v0.3.6 热修，并考虑下架/替换 v0.3.5 安装包与 updater latest.json。**
 

@@ -51,7 +51,7 @@ over HTTP; no parallel execution-event family exists.
 
 Rust commands currently registered by the desktop shell include:
 
-- `check_for_updates`
+- `install_update`
 - `sync_companion_windows`
 - `webui_get_status`
 - `webui_start`

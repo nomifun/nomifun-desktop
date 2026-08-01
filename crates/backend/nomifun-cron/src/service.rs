@@ -29,7 +29,7 @@ use crate::error::CronError;
 use crate::executor::{ExecutionResult, JobExecutor};
 use crate::scheduler::{CronScheduler, compute_next_run, validate_schedule};
 use crate::skill_file::{
-    CRON_SKILL_DIR_PREFIX, CRON_SKILLS_REL_DIR, build_skill_content, delete_skill_file,
+    CRON_SKILLS_REL_DIR, build_skill_content, delete_skill_file,
     validate_skill_content, write_raw_skill_file,
 };
 use crate::types::{
@@ -1205,10 +1205,7 @@ impl CronService {
             let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
                 continue;
             };
-            let Some(job_id) = name.strip_prefix(CRON_SKILL_DIR_PREFIX) else {
-                continue;
-            };
-            let Ok(job_id) = CronJobId::parse(job_id) else {
+            let Ok(job_id) = CronJobId::parse(&name) else {
                 match tokio::fs::remove_dir_all(entry.path()).await {
                     Ok(()) => removed += 1,
                     Err(error) => {
@@ -1250,29 +1247,6 @@ impl CronService {
         if removed > 0 {
             info!(removed, "Removed unauthorized or orphan cron skill directories");
         }
-    }
-
-    /// Compatibility entry point for direct callers. Production timers call
-    /// [`Self::tick_occurrence`] with the revision and planned time captured
-    /// when the timer was installed.
-    pub async fn tick(&self, expected_user_id: &str, job_id: &str) {
-        let Ok(Some(row)) = self
-            .repo
-            .get_by_cron_job_id_for_scheduler(job_id)
-            .await
-        else {
-            return;
-        };
-        let Some(planned_at_ms) = row.next_run_at else {
-            return;
-        };
-        self.tick_occurrence(
-            expected_user_id,
-            job_id,
-            row.schedule_revision,
-            planned_at_ms,
-        )
-        .await;
     }
 
     /// Admit and execute one exact installed-schedule occurrence.

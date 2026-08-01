@@ -205,10 +205,6 @@ impl Registry {
         self.by_name.len()
     }
 
-    pub fn is_empty(&self) -> bool {
-        self.by_name.is_empty()
-    }
-
     /// The tools visible on a surface: everything except the hard-denied set.
     /// Confirm-gated tools ARE listed (they are usable with `confirm=true`);
     /// passing `confirmed = true` to [`decide`] collapses `Confirm → Allow`, so
@@ -255,10 +251,6 @@ impl Registry {
 
     pub fn tool_visible(&self, surface: Surface, name: &str) -> bool {
         self.tool_visible_for_caller(surface, None, true, name)
-    }
-
-    pub fn tool_visible_for(&self, surface: Surface, domains: &[&str], name: &str) -> bool {
-        self.tool_visible_for_caller(surface, Some(domains), true, name)
     }
 
     pub fn tool_visible_for_caller(

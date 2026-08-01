@@ -10,7 +10,7 @@
 use std::sync::Arc;
 
 use nomifun_api_types::IdmmTargetKind;
-use nomifun_common::{CronJobId, ProviderId, RequirementId};
+use nomifun_common::{CronJobId, RequirementId};
 use nomifun_cron::types::cron_job_to_response;
 use schemars::JsonSchema;
 use serde::Deserialize;
@@ -20,7 +20,7 @@ use crate::caps_idmm::{
     parse_target_id as parse_idmm_target_id, verify_target as verify_idmm_target,
 };
 use crate::deps::{CallerCtx, GatewayDeps};
-use crate::id_schema::{CanonicalEntityId, SessionTargetKind};
+use crate::id_schema::{CanonicalEntityId, ModelRefParam, SessionTargetKind};
 use crate::registry::{Capability, CapabilityMeta, DangerTier, Surface};
 use crate::server::ok;
 
@@ -213,22 +213,13 @@ struct IdmmGetSettingsParams {
 struct IdmmSetSettingsParams {
     /// Backup provider/model pair. Omit to leave unchanged.
     #[serde(default)]
-    backup_model: Option<IdmmBackupModelParam>,
+    backup_model: Option<ModelRefParam>,
     /// Explicitly clear the backup pair.
     #[serde(default)]
     clear_backup_model: bool,
     /// Default steering prompt injected into new IDMM supervision configs.
     #[serde(default)]
     default_steering_prompt: Option<String>,
-}
-
-#[derive(Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-struct IdmmBackupModelParam {
-    #[schemars(schema_with = "crate::id_schema::canonical_uuid_v7_schema")]
-    provider_id: ProviderId,
-    #[serde(deserialize_with = "deserialize_model_name")]
-    model: String,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -241,19 +232,6 @@ struct IdmmClearLogParams {
 }
 
 // --- Helpers ---------------------------------------------------------------
-
-fn deserialize_model_name<'de, D>(deserializer: D) -> Result<String, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    let value = String::deserialize(deserializer)?;
-    if value.is_empty() || value.trim() != value {
-        return Err(serde::de::Error::custom(
-            "model must be a non-empty trimmed natural key",
-        ));
-    }
-    Ok(value)
-}
 
 // --- Handlers --------------------------------------------------------------
 
@@ -274,9 +252,6 @@ async fn idmm_get_log(deps: Arc<GatewayDeps>, ctx: CallerCtx, p: IdmmGetLogParam
 }
 
 async fn idmm_get_activity(deps: Arc<GatewayDeps>, ctx: CallerCtx, p: IdmmGetActivityParams) -> Value {
-    if nomifun_common::UserId::parse(ctx.user_id.as_str()).is_err() {
-        return json!({"error": "missing caller user identity"});
-    }
     let limit = p.limit.unwrap_or(50).clamp(1, 500);
     match deps.idmm_service.recent_activity(ctx.user_id.as_str(), limit).await {
         Ok(records) => ok(records),

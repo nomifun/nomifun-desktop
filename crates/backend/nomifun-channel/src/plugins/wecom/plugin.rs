@@ -27,8 +27,10 @@ use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
 use tracing::{debug, error, info, warn};
 
+use crate::constants::{RECONNECT_MAX_ATTEMPTS, RECONNECT_MAX_DELAY};
 use crate::error::ChannelError;
 use crate::plugin::{ChannelPlugin, PluginCallbacks, SharedPluginStatus, mark_error_on_unexpected_exit};
+use crate::plugins::util::backoff_delay;
 use crate::types::{BotInfo, PluginConfig, PluginStatus, PluginType, UnifiedIncomingMessage, UnifiedOutgoingMessage};
 
 use super::types::{
@@ -36,12 +38,6 @@ use super::types::{
     build_ping_frame, build_send_msg_frame, build_subscribe_frame, decode_event_type, decode_msg_callback,
     parse_envelope,
 };
-
-/// Maximum reconnect attempts before the loop gives up and flips to `Error`.
-const MAX_RECONNECT_ATTEMPTS: u32 = 10;
-
-/// Maximum backoff delay between reconnection attempts.
-const MAX_RECONNECT_DELAY: Duration = Duration::from_secs(30);
 
 /// How long a seen `msgid` is remembered for dedup.
 const DEDUP_TTL: Duration = Duration::from_secs(600);
@@ -285,11 +281,11 @@ async fn ws_loop(
             Err(e) => {
                 consecutive_errors += 1;
                 warn!(error = %e, consecutive_errors, "WeCom WS connection error");
-                if consecutive_errors >= MAX_RECONNECT_ATTEMPTS {
+                if consecutive_errors >= RECONNECT_MAX_ATTEMPTS {
                     error!("WeCom max reconnect attempts reached");
                     break;
                 }
-                let delay = backoff_delay(consecutive_errors);
+                let delay = backoff_delay(consecutive_errors, RECONNECT_MAX_DELAY);
                 tokio::select! {
                     _ = tokio::time::sleep(delay) => {}
                     _ = shutdown_rx.changed() => break,
@@ -504,11 +500,6 @@ fn now_secs() -> i64 {
         .unwrap_or(0)
 }
 
-fn backoff_delay(attempt: u32) -> Duration {
-    let delay_secs = 2u64.saturating_pow(attempt).min(MAX_RECONNECT_DELAY.as_secs());
-    Duration::from_secs(delay_secs)
-}
-
 /// TLS connector pinned to HTTP/1.1 ALPN (WebSocket upgrade is incompatible
 /// with h2). Copied from the Lark plugin's connector.
 fn build_ws_tls_connector() -> Result<tokio_tungstenite::Connector, ChannelError> {
@@ -552,13 +543,6 @@ mod tests {
         assert!(plugin.last_error().is_none());
         assert_eq!(plugin.plugin_type(), PluginType::Wecom);
         assert_eq!(plugin.active_user_count(), 0);
-    }
-
-    #[test]
-    fn backoff_is_exponential_and_capped() {
-        assert_eq!(backoff_delay(1), Duration::from_secs(2));
-        assert_eq!(backoff_delay(3), Duration::from_secs(8));
-        assert_eq!(backoff_delay(10), Duration::from_secs(30));
     }
 
     #[test]

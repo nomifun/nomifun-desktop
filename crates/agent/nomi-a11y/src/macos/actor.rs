@@ -592,14 +592,6 @@ fn do_invoke(
 ) -> Result<Effect, A11yError> {
     let r = match target {
         Target::Ref(r) => *r,
-        Target::Selector(_) => {
-            return Err(A11yError::Unsupported {
-                capability: "selector targeting".to_string(),
-                hint: "Resolve a selector against the latest observe() result and act by [ref]; \
-                       direct selector actuation is not yet implemented."
-                    .to_string(),
-            })
-        }
         Target::Pixel { .. } => {
             return Err(A11yError::Unsupported {
                 capability: "pixel targeting".to_string(),

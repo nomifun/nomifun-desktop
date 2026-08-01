@@ -374,17 +374,6 @@ fn tc_7_1_command_failed_message_contains_pattern() {
     );
 }
 
-// TC-7.2: McpBlocked 消息
-#[test]
-fn tc_7_2_mcp_blocked_message() {
-    let err = ShellExecutionError::McpBlocked;
-    let msg = err.to_string();
-    assert!(
-        msg.to_lowercase().contains("mcp") || msg.to_lowercase().contains("blocked"),
-        "McpBlocked message should mention MCP or blocked: {msg}"
-    );
-}
-
 // TC-7.3: Error 实现 Debug
 #[test]
 fn tc_7_3_error_debug_format() {

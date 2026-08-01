@@ -12,9 +12,7 @@ nomi-types.workspace = true
 tracing.workspace    = true
 thiserror.workspace  = true
 serde.workspace      = true
-serde_json.workspace = true
 image.workspace      = true
-base64.workspace     = true
 
 # --- macOS backend: Accessibility (AXUIElement) + CoreGraphics actuation +
 #     AppKit (NSRunningApplication focus) + Vision (OCR/text fusion). macOS only. ---

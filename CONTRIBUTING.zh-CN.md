@@ -118,7 +118,6 @@ cargo check --workspace
 
 ### Rust 与后端
 
-- Rust 改动提交前运行 `cargo fmt`。
 - 共享 Rust 依赖统一走根目录 [Cargo.toml](Cargo.toml) 的 workspace dependency。
 - 后端功能代码放进拥有它的 `nomifun-*` crate。`nomifun-app` 主要负责组合、启动、router glue，不要堆业务逻辑。
 - 后端 crate 需要 agent 类型时，通常通过 `nomifun-ai-agent::{nomi_config, nomi_types, RequirementSink}`。新增 backend -> `nomi-*` 直连依赖必须写清理由，通常还要 feature-gated。

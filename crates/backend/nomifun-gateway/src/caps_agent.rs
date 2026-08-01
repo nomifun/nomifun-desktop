@@ -20,12 +20,13 @@ use nomifun_api_types::{
     BehaviorPolicy, CustomAgentAdvancedOverrides, CustomAgentUpsertRequest, ModelFailoverConfig,
     ProviderHealthCheckRequest, TestRemoteAgentConnectionRequest, TryConnectCustomAgentRequest,
 };
-use nomifun_common::{AgentId, ProviderId, ProviderWithModel, RemoteAgentId};
+use nomifun_common::{AgentId, ProviderId, RemoteAgentId};
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::deps::GatewayDeps;
+use crate::id_schema::ModelRefParam;
 use crate::registry::{Capability, CapabilityMeta, DangerTier, Surface};
 use crate::server::ok;
 
@@ -52,7 +53,7 @@ struct AgentProviderHealthCheckParams {
     #[schemars(schema_with = "crate::id_schema::canonical_uuid_v7_schema")]
     provider_id: ProviderId,
     /// Model name to probe (must be enabled on the provider).
-    #[serde(deserialize_with = "deserialize_model_name")]
+    #[serde(deserialize_with = "crate::id_schema::deserialize_model_name")]
     model: String,
 }
 
@@ -333,43 +334,11 @@ struct ModelFailoverSetParams {
     stamp_unhealthy: bool,
 }
 
-#[derive(Debug, Clone, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-struct ModelRefParam {
-    #[schemars(schema_with = "crate::id_schema::canonical_uuid_v7_schema")]
-    provider_id: ProviderId,
-    #[serde(deserialize_with = "deserialize_model_name")]
-    model: String,
-}
-
-impl From<ModelRefParam> for ProviderWithModel {
-    fn from(value: ModelRefParam) -> Self {
-        Self {
-            provider_id: value.provider_id.into_string(),
-            model: value.model,
-            use_model: None,
-        }
-    }
-}
-
 fn default_max_switches() -> u32 {
     4
 }
 fn default_stamp_unhealthy() -> bool {
     true
-}
-
-fn deserialize_model_name<'de, D>(deserializer: D) -> Result<String, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    let value = String::deserialize(deserializer)?;
-    if value.is_empty() || value.trim() != value {
-        return Err(serde::de::Error::custom(
-            "model must be a non-empty trimmed natural key",
-        ));
-    }
-    Ok(value)
 }
 
 // ── handlers ──────────────────────────────────────────────────────────────

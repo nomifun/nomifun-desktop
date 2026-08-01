@@ -29,9 +29,6 @@ mime_guess.workspace = true
 # with the workspace's `png`, `default-features = false` inherited). No root
 # Cargo.toml change.
 image = { workspace = true, features = ["jpeg", "gif", "webp"] }
-# Canvas export (.zip: canvas.json + manifest.json + referenced asset files) and
-# import. Deflate compression rides the workspace `zip`'s default features.
-zip.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

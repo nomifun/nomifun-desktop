@@ -3504,6 +3504,9 @@ impl LifecycleJob {
             &mut lifecycle_error,
         )?;
         let watchdog_status = watchdog_status.expect("watchdog status was established");
+        // Consumed only by the macOS sandbox EPERM-acceptance branch below; on
+        // Linux the final host group seal failure is always fatal.
+        #[cfg(target_os = "macos")]
         let watchdog_sealed_group = quiescing_seen && was_killed_by_group_sigkill(watchdog_status);
         if !was_killed_by_group_sigkill(watchdog_status) {
             lifecycle_error.get_or_insert_with(|| {
@@ -3980,6 +3983,10 @@ fn seal_process_group(pgid: libc::pid_t) -> io::Result<bool> {
 /// Seal a process group while an exact, unreaped direct child still anchors
 /// membership in that group. The anchor is normally the group leader, but the
 /// child-process watchdog is also safe after it has joined the owned group.
+///
+/// `anchor_pid` is only consulted on macOS, where EPERM from a zombie-only
+/// group must be distinguished from a live unsignalable member.
+#[cfg_attr(not(target_os = "macos"), allow(unused_variables))]
 fn seal_process_group_anchored_by(
     pgid: libc::pid_t,
     anchor_pid: libc::pid_t,

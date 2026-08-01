@@ -70,10 +70,6 @@ impl ProcessSpawner for HttpMockSpawner {
         Ok(())
     }
 
-    async fn is_officecli_installed(&self) -> bool {
-        true
-    }
-
     async fn check_update(&self, _doc_type: DocType) -> Result<(), OfficeError> {
         Ok(())
     }
@@ -97,10 +93,6 @@ impl ProcessSpawner for TcpOnlySpawner {
 
     async fn install_officecli(&self) -> Result<(), OfficeError> {
         Ok(())
-    }
-
-    async fn is_officecli_installed(&self) -> bool {
-        true
     }
 
     async fn check_update(&self, _doc_type: DocType) -> Result<(), OfficeError> {

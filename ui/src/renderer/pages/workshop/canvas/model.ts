@@ -163,9 +163,6 @@ export const KIND_META: Record<WorkshopNodeKind, KindMeta> = {
   },
 };
 
-/** Placeholder kinds not yet interactive (M8). */
-export const PLACEHOLDER_KINDS: WorkshopNodeKind[] = ['loop', 'compare', 'output', 'group'];
-
 /** Padding a group node wraps around its members (title-bar top, uniform sides/bottom). */
 export const GROUP_PADDING = { top: 40, side: 18, bottom: 18 } as const;
 

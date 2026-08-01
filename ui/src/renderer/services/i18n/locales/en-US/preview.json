@@ -120,10 +120,7 @@
     "downloadHtml": "Download HTML file",
     "copyElementHtml": "Copy element HTML",
     "viewElementInfo": "View element info",
-    "printedToConsole": "Element info logged to console",
-    "inspectElement": "Inspect element",
-    "inspectElementEnable": "Enable element inspector",
-    "inspectElementDisable": "Disable element inspector"
+    "printedToConsole": "Element info logged to console"
   },
   "ppt": {
     "loading": "Starting PPT preview...",

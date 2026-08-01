@@ -1056,8 +1056,8 @@ impl BrowserSessionHub {
     }
 
     /// Revokes one exact owner lease and closes only the lanes that carry that
-    /// lease. This is the capability-scoped counterpart to `close_runtime`,
-    /// which remains reserved for trusted runtime lifecycle teardown.
+    /// lease. This capability-scoped path is how runtime lifecycle teardown
+    /// reclaims Lanes (runtime kill/drop revokes the owner lease).
     pub async fn close_owner_lease(
         &self,
         lease_id: &crate::OwnerLeaseId,
@@ -4130,14 +4130,6 @@ impl BrowserSessionHub {
                 );
             }
         }
-    }
-
-    pub async fn close_runtime(
-        &self,
-        runtime_instance_id: &str,
-    ) -> Result<CloseResult, BrowserPlatformError> {
-        self.close_matching(|lane| lane.caller.runtime_instance_id == runtime_instance_id)
-            .await
     }
 
     pub async fn close_conversation(

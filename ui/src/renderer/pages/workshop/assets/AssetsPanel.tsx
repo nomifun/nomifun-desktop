@@ -26,7 +26,7 @@
  * asset library (M4).
  */
 
-import React, { useCallback, useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Button, Modal, Select, Spin } from '@arco-design/web-react';
 import { Close, Delete, FileText, Platte, Search, Upload } from '@icon-park/react';
@@ -43,6 +43,8 @@ import AssetCard from './AssetCard';
 import AssetDetailModal from './AssetDetailModal';
 import AssetEditModal from './AssetEditModal';
 import CreateTextAssetModal from './CreateTextAssetModal';
+import { SegmentedKindFilter, UploadTray } from './AssetLibraryControls';
+import { useAssetDropUpload } from './useAssetDropUpload';
 
 export interface AssetsPanelProps {
   /** Canvas the panel is opened from (used to scope "insert" actions). */
@@ -52,124 +54,6 @@ export interface AssetsPanelProps {
   /** Called when the user picks "insert into canvas" on an asset. */
   onInsertAsset: (asset: WorkshopAsset) => void;
 }
-
-// ─── Segmented kind filter ────────────────────────────────────────────────────
-
-const KIND_SEGMENTS: AssetKindFilter[] = ['all', 'image', 'video', 'text'];
-
-const SegmentedKindFilter: React.FC<{
-  value: AssetKindFilter;
-  onChange: (v: AssetKindFilter) => void;
-  labelOf: (k: AssetKindFilter) => string;
-}> = ({ value, onChange, labelOf }) => (
-  <div className='flex items-center gap-2px rounded-9px border border-solid border-[var(--color-border-2)] bg-[var(--color-fill-1)] p-2px'>
-    {KIND_SEGMENTS.map((k) => {
-      const active = value === k;
-      return (
-        <div
-          key={k}
-          role='button'
-          tabIndex={0}
-          onClick={() => onChange(k)}
-          onKeyDown={(e) => {
-            if (e.key === 'Enter' || e.key === ' ') {
-              e.preventDefault();
-              onChange(k);
-            }
-          }}
-          className={[
-            'flex-1 select-none rounded-7px px-2px py-4px text-center text-12px font-500 cursor-pointer transition-all duration-120',
-            active
-              ? 'bg-[var(--color-bg-2)] text-[var(--color-text-1)] shadow-[0_1px_4px_rgba(0,0,0,0.1)]'
-              : 'text-[var(--color-text-3)] hover:text-[var(--color-text-1)]',
-          ].join(' ')}
-        >
-          {labelOf(k)}
-        </div>
-      );
-    })}
-  </div>
-);
-
-// ─── Upload tray ──────────────────────────────────────────────────────────────
-
-const UploadTray: React.FC<{
-  uploads: ReturnType<typeof useAssetLibrary>['uploads'];
-  onCancel: (localId: string) => void;
-  onClearDone: () => void;
-  t: ReturnType<typeof useTranslation>['t'];
-}> = ({ uploads, onCancel, onClearDone, t }) => {
-  if (uploads.length === 0) return null;
-  const hasFinished = uploads.some((u) => u.status !== 'uploading');
-  return (
-    <div className='flex flex-col gap-6px border-b border-solid border-[var(--color-border-2)] bg-[var(--color-fill-1)] px-14px py-10px'>
-      <div className='flex items-center justify-between'>
-        <span className='text-11px font-600 uppercase tracking-wide text-[var(--color-text-4)]'>
-          {t('workshopAssets.upload.queue', { defaultValue: '上传队列' })}
-        </span>
-        {hasFinished && (
-          <div
-            role='button'
-            tabIndex={0}
-            onClick={onClearDone}
-            onKeyDown={(e) => {
-              if (e.key === 'Enter' || e.key === ' ') {
-                e.preventDefault();
-                onClearDone();
-              }
-            }}
-            className='text-11px text-[var(--color-text-3)] cursor-pointer hover:text-[var(--color-text-1)]'
-          >
-            {t('workshopAssets.upload.clearDone', { defaultValue: '清除已完成' })}
-          </div>
-        )}
-      </div>
-      {uploads.map((u) => (
-        <div key={u.localId} className='flex items-center gap-8px'>
-          <div className='min-w-0 flex-1'>
-            <div className='flex items-center justify-between gap-8px'>
-              <span className='truncate text-12px text-[var(--color-text-2)]'>{u.fileName}</span>
-              <span
-                className={[
-                  'shrink-0 text-11px font-600',
-                  u.status === 'error' ? 'text-[rgb(var(--danger-6))]' : 'text-[var(--color-text-3)]',
-                ].join(' ')}
-              >
-                {u.status === 'error'
-                  ? t(`workshopAssets.upload.${u.error ?? 'failed'}`, { defaultValue: '上传失败' })
-                  : `${u.percent}%`}
-              </span>
-            </div>
-            <div className='mt-4px h-4px w-full overflow-hidden rounded-full bg-[var(--color-fill-3)]'>
-              <div
-                className={[
-                  'h-full rounded-full transition-all duration-200',
-                  u.status === 'error' ? 'bg-[rgb(var(--danger-6))]' : 'bg-[rgb(var(--primary-6))]',
-                ].join(' ')}
-                style={{ width: `${u.status === 'error' ? 100 : u.percent}%` }}
-              />
-            </div>
-          </div>
-          <div
-            role='button'
-            tabIndex={0}
-            title={t('workshopAssets.upload.cancel', { defaultValue: '取消上传' })}
-            onClick={() => onCancel(u.localId)}
-            onKeyDown={(e) => {
-              if (e.key === 'Enter' || e.key === ' ') {
-                e.preventDefault();
-                onCancel(u.localId);
-              }
-            }}
-            className='grid h-22px w-22px shrink-0 place-items-center rounded-6px text-[var(--color-text-3)] cursor-pointer hover:bg-[var(--color-fill-2)] hover:text-[var(--color-text-1)]'
-          >
-            <Close theme='outline' size={13} strokeWidth={3} />
-          </div>
-        </div>
-      ))}
-    </div>
-  );
-};
 
 // ─── Panel ──────────────────────────────────────────────────────────────────
 
@@ -182,10 +66,18 @@ const AssetsPanel: React.FC<AssetsPanelProps> = ({ open, onClose, onInsertAsset 
   const [editAsset, setEditAsset] = useState<WorkshopAsset | null>(null);
   const [creatingText, setCreatingText] = useState(false);
 
-  const fileInputRef = useRef<HTMLInputElement | null>(null);
-  const scrollRef = useRef<HTMLDivElement | null>(null);
-  const [dragActive, setDragActive] = useState(false);
-  const dragDepth = useRef(0);
+  const {
+    fileInputRef,
+    scrollRef,
+    dragActive,
+    openFilePicker,
+    onFileInputChange,
+    onDragEnter,
+    onDragOver,
+    onDragLeave,
+    onDrop,
+    onScroll,
+  } = useAssetDropUpload(lib, { scrollThreshold: 260 });
 
   // Keep mounted through the slide-out transition, then unmount (stops fetches).
   const [mounted, setMounted] = useState(open);
@@ -213,60 +105,6 @@ const AssetsPanel: React.FC<AssetsPanelProps> = ({ open, onClose, onInsertAsset 
     window.addEventListener('keydown', onKey, true);
     return () => window.removeEventListener('keydown', onKey, true);
   }, [open, anyModalOpen, onClose]);
-
-  // ─── Upload wiring ──────────────────────────────────────────────────────────
-  const openFilePicker = useCallback(() => fileInputRef.current?.click(), []);
-
-  const onFileInputChange = useCallback(
-    (e: React.ChangeEvent<HTMLInputElement>) => {
-      const files = Array.from(e.target.files ?? []);
-      if (files.length) lib.startUploads(files);
-      e.target.value = '';
-    },
-    [lib]
-  );
-
-  const isFileDrag = (e: React.DragEvent) => Array.from(e.dataTransfer.types).includes('Files');
-
-  const onDragEnter = useCallback((e: React.DragEvent) => {
-    if (!isFileDrag(e)) return;
-    dragDepth.current += 1;
-    setDragActive(true);
-  }, []);
-
-  const onDragOver = useCallback((e: React.DragEvent) => {
-    if (!isFileDrag(e)) return;
-    e.preventDefault();
-    e.dataTransfer.dropEffect = 'copy';
-  }, []);
-
-  const onDragLeave = useCallback((e: React.DragEvent) => {
-    if (!isFileDrag(e)) return;
-    dragDepth.current -= 1;
-    if (dragDepth.current <= 0) {
-      dragDepth.current = 0;
-      setDragActive(false);
-    }
-  }, []);
-
-  const onDrop = useCallback(
-    (e: React.DragEvent) => {
-      if (!isFileDrag(e)) return;
-      e.preventDefault();
-      dragDepth.current = 0;
-      setDragActive(false);
-      const files = Array.from(e.dataTransfer.files);
-      if (files.length) lib.startUploads(files);
-    },
-    [lib]
-  );
-
-  // ─── Infinite scroll ────────────────────────────────────────────────────────
-  const onScroll = useCallback(() => {
-    const el = scrollRef.current;
-    if (!el || lib.loadingMore || !lib.hasMore) return;
-    if (el.scrollTop + el.clientHeight >= el.scrollHeight - 260) lib.loadMore();
-  }, [lib]);
 
   // ─── Actions ────────────────────────────────────────────────────────────────
   const handleInsert = useCallback(
@@ -398,7 +236,7 @@ const AssetsPanel: React.FC<AssetsPanelProps> = ({ open, onClose, onInsertAsset 
           />
         </div>
 
-        <SegmentedKindFilter value={lib.kind} onChange={lib.setKind} labelOf={kindLabel} />
+        <SegmentedKindFilter value={lib.kind} onChange={lib.setKind} labelOf={kindLabel} variant='drawer' />
 
         <div className='flex items-center gap-8px'>
           <div className='min-w-0 flex-1'>
@@ -443,7 +281,7 @@ const AssetsPanel: React.FC<AssetsPanelProps> = ({ open, onClose, onInsertAsset 
         onChange={onFileInputChange}
       />
 
-      <UploadTray uploads={lib.uploads} onCancel={lib.cancelUpload} onClearDone={lib.clearFinishedUploads} t={t} />
+      <UploadTray uploads={lib.uploads} onCancel={lib.cancelUpload} onClearDone={lib.clearFinishedUploads} t={t} variant='drawer' />
 
       {/* Body */}
       <div ref={scrollRef} onScroll={onScroll} className='relative min-h-0 flex-1 overflow-y-auto px-14px py-14px'>

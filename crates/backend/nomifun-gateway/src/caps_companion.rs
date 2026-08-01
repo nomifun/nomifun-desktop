@@ -8,31 +8,19 @@
 
 use std::sync::Arc;
 
-use nomifun_common::{CompanionId, CompanionSuggestionId, FigureId, ProviderId};
+use nomifun_common::{CompanionId, CompanionSuggestionId, FigureId};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::deps::GatewayDeps;
+use crate::id_schema::ModelRefParam;
 use crate::registry::{Capability, CapabilityMeta, DangerTier, Surface};
 use crate::server::ok;
 
 const DEFAULT_SUGGESTION_LIMIT: i64 = 20;
 
 // ── param structs (single source: schema + runtime) ──────────────────────
-
-fn deserialize_model_name<'de, D>(deserializer: D) -> Result<String, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    let value = String::deserialize(deserializer)?;
-    if value.is_empty() || value.trim() != value {
-        return Err(serde::de::Error::custom(
-            "model must be a non-empty trimmed natural key",
-        ));
-    }
-    Ok(value)
-}
 
 fn deserialize_present<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
 where
@@ -67,15 +55,6 @@ where
         })
         .transpose()?;
     Ok(Some(value))
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-struct CompanionModelRefParam {
-    #[schemars(schema_with = "crate::id_schema::canonical_uuid_v7_schema")]
-    provider_id: ProviderId,
-    #[serde(deserialize_with = "deserialize_model_name")]
-    model: String,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
@@ -246,7 +225,7 @@ struct CompanionProfilePatch {
         skip_serializing_if = "Option::is_none",
         deserialize_with = "deserialize_optional_nullable"
     )]
-    model: Option<Option<CompanionModelRefParam>>,
+    model: Option<Option<ModelRefParam>>,
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
@@ -330,7 +309,7 @@ struct SharedLearnPatch {
     )]
     interval_minutes: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "deserialize_optional_nullable")]
-    model: Option<Option<CompanionModelRefParam>>,
+    model: Option<Option<ModelRefParam>>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
@@ -349,7 +328,7 @@ struct SharedEvolvePatch {
     )]
     interval_minutes: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "deserialize_optional_nullable")]
-    model: Option<Option<CompanionModelRefParam>>,
+    model: Option<Option<ModelRefParam>>,
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",

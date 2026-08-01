@@ -11,9 +11,6 @@ use crate::types::McpServerTransport;
 /// Timeout for detect/list operations (30 seconds).
 pub const DETECT_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// Timeout for install/remove operations (5 seconds).
-pub const MUTATE_TIMEOUT: Duration = Duration::from_secs(5);
-
 /// Check whether a CLI binary is available on `$PATH`.
 ///
 /// Uses `nomifun_runtime::resolve_command_path` so the lookup respects
@@ -94,29 +91,12 @@ pub async fn run_cli_strict(program: &str, args: &[&str], timeout: Duration) -> 
 }
 
 /// Strip ANSI escape codes from CLI output.
+///
+/// Shared byte-level implementation from `nomifun_common::ansi`; also strips
+/// OSC sequences, `\r` and C0 controls (except newline), which is strictly
+/// safer for line-oriented `mcp list` output parsing.
 pub fn strip_ansi(input: &str) -> String {
-    // Matches: ESC[ ... m  (SGR sequences) and other CSI sequences.
-    let mut result = String::with_capacity(input.len());
-    let mut chars = input.chars().peekable();
-
-    while let Some(ch) = chars.next() {
-        if ch == '\x1b' {
-            // Consume the '[' and everything until a letter in @ ..~ range.
-            if chars.peek() == Some(&'[') {
-                chars.next(); // consume '['
-                while let Some(&c) = chars.peek() {
-                    chars.next();
-                    if c.is_ascii_alphabetic() || c == '~' || c == '@' {
-                        break;
-                    }
-                }
-            }
-        } else {
-            result.push(ch);
-        }
-    }
-
-    result
+    nomifun_common::ansi::strip_ansi(input.as_bytes())
 }
 
 /// Normalize a CLI-reported MCP status string by stripping leading symbols
@@ -155,26 +135,16 @@ pub fn parse_standard_list_output(output: &str) -> Vec<DetectedServer> {
 /// Expected pattern:
 /// `[✓|✗] <name>: <command_or_url> (<transport_type>) - <Status>`
 fn parse_standard_list_line(line: &str) -> Option<DetectedServer> {
-    // Must start with a check/cross mark (Unicode or ASCII fallback)
-    let rest = if line.starts_with('\u{2713}') || line.starts_with('\u{2717}') {
-        &line[3..] // UTF-8 multibyte ✓/✗
-    } else if line.starts_with("✓") || line.starts_with("✗") {
-        // Already handled above via char check
-        return parse_standard_list_line_inner(line);
-    } else {
+    // Must start with a check/cross mark
+    if !line.starts_with('✓') && !line.starts_with('✗') {
         return None;
-    };
+    }
 
-    parse_standard_list_line_inner_rest(rest.trim())
+    // Skip the UTF-8 multibyte ✓/✗ (3 bytes each)
+    parse_standard_list_line_rest(line[3..].trim())
 }
 
-fn parse_standard_list_line_inner(line: &str) -> Option<DetectedServer> {
-    // Skip the leading mark character
-    let rest = line.trim_start_matches(|c: char| !c.is_alphanumeric() && c != '_' && c != '-');
-    parse_standard_list_line_inner_rest(rest)
-}
-
-fn parse_standard_list_line_inner_rest(rest: &str) -> Option<DetectedServer> {
+fn parse_standard_list_line_rest(rest: &str) -> Option<DetectedServer> {
     // Find "name: command_or_url (type) - Status"
     let status_sep = rest.rfind(" - ")?;
     let status = normalize_detection_status(&rest[status_sep + 3..]);
@@ -226,21 +196,6 @@ fn parse_standard_list_line_inner_rest(rest: &str) -> Option<DetectedServer> {
             Some(status)
         },
     })
-}
-
-/// Build `--env "KEY=VALUE"` argument pairs for CLI commands.
-pub fn build_env_args(env: &HashMap<String, String>, flag: &str) -> Vec<String> {
-    env.iter()
-        .flat_map(|(k, v)| [flag.to_owned(), format!("{k}={v}")])
-        .collect()
-}
-
-/// Build `--header "Key: Value"` or `-H "Key: Value"` argument pairs.
-pub fn build_header_args(headers: &HashMap<String, String>, flag: &str) -> Vec<String> {
-    headers
-        .iter()
-        .flat_map(|(k, v)| [flag.to_owned(), format!("{k}: {v}")])
-        .collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -378,32 +333,5 @@ Some footer text";
         let output = "✓ srv: cmd (websocket) - Connected";
         let servers = parse_standard_list_output(output);
         assert!(servers.is_empty());
-    }
-
-    #[test]
-    fn build_env_args_produces_pairs() {
-        let mut env = HashMap::new();
-        env.insert("K1".into(), "V1".into());
-        let args = build_env_args(&env, "--env");
-        assert_eq!(args.len(), 2);
-        assert_eq!(args[0], "--env");
-        assert_eq!(args[1], "K1=V1");
-    }
-
-    #[test]
-    fn build_env_args_empty() {
-        let env = HashMap::new();
-        let args = build_env_args(&env, "--env");
-        assert!(args.is_empty());
-    }
-
-    #[test]
-    fn build_header_args_produces_pairs() {
-        let mut headers = HashMap::new();
-        headers.insert("Authorization".into(), "Bearer tok".into());
-        let args = build_header_args(&headers, "--header");
-        assert_eq!(args.len(), 2);
-        assert_eq!(args[0], "--header");
-        assert_eq!(args[1], "Authorization: Bearer tok");
     }
 }

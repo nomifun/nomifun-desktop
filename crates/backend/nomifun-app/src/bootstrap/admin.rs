@@ -4,7 +4,7 @@
 //! (non-`--local`) mode: every request needs a valid session. A brand-new data
 //! dir seeds only the canonical installation owner with an EMPTY password hash, so
 //! `has_users()` is false and there is no in-band HTTP endpoint to create the
-//! first admin — the `/api/webui/*` and `/api/auth/internal/*` setup routes are
+//! first admin — the `/api/webui/*` setup routes are
 //! gated to local mode (`ensure_local_mode`).
 //!
 //! Two paths resolve this:

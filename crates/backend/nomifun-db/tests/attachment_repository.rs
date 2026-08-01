@@ -67,19 +67,15 @@ async fn insert_list_get_delete_roundtrip() {
     assert_eq!(listed[1].attachment_id, attachment_2);
 
     let got = repo
-        .get_by_attachment_id(&attachment_1)
+        .get_by_id(inserted_1.id)
         .await
         .unwrap()
         .expect("attachment exists");
-    assert_eq!(got.id, inserted_1.id);
+    assert_eq!(got.attachment_id, attachment_1);
     assert_eq!(got.file_name, "one.png");
     assert_eq!(
         got.rel_path,
         format!("attachments/{requirement_1}/{attachment_1}.png")
-    );
-    assert_eq!(
-        repo.get_by_id(inserted_1.id).await.unwrap().unwrap().attachment_id,
-        attachment_1
     );
 
     assert!(repo.delete(inserted_1.id).await.unwrap());
@@ -88,7 +84,6 @@ async fn insert_list_get_delete_roundtrip() {
         "second delete is a no-op"
     );
     assert!(repo.get_by_id(inserted_1.id).await.unwrap().is_none());
-    assert!(repo.get_by_attachment_id(&attachment_1).await.unwrap().is_none());
     assert_eq!(
         repo.list_for_requirement(&requirement_1)
             .await

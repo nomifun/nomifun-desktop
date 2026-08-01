@@ -8,10 +8,9 @@ use std::path::Path;
 
 use nomifun_extension::external_paths::ExternalPathsManager;
 use nomifun_extension::skill_service::{
-    NamedPath, SkillPaths, delete_preset_rule, delete_preset_skill, delete_skill,
-    detect_and_count_external_skills, export_skill_with_symlink, import_skill, import_skill_with_symlink,
-    list_available_skills, read_preset_rule, read_preset_skill, read_builtin_rule, read_builtin_skill,
-    read_skill_info, resolve_skill_paths, scan_for_skills, write_preset_rule, write_preset_skill,
+    NamedPath, SkillPaths, delete_skill, detect_and_count_external_skills, export_skill_with_symlink, import_skill,
+    import_skill_with_symlink, list_available_skills, read_builtin_rule, read_builtin_skill, read_skill_info,
+    resolve_skill_paths, scan_for_skills,
 };
 use tempfile::TempDir;
 
@@ -296,118 +295,9 @@ async fn rm1_read_builtin_skill() {
     assert_eq!(content, "# TDD Workflow");
 }
 
-/// RM-2: Read preset rule with locale fallback.
-#[tokio::test]
-async fn rm2_preset_rule_locale_fallback() {
-    let tmp = TempDir::new().unwrap();
-    let paths = make_paths(tmp.path());
-
-    // Write both default and locale-specific
-    write_preset_rule(&paths, "abc123", "Default rule", None)
-        .await
-        .unwrap();
-    write_preset_rule(&paths, "abc123", "中文规则", Some("zh-CN"))
-        .await
-        .unwrap();
-
-    // 1. Matching locale → locale-specific content
-    let content = read_preset_rule(&paths, "abc123", Some("zh-CN")).await.unwrap();
-    assert_eq!(content, "中文规则");
-
-    // 2. Non-matching locale → fallback to default
-    let content = read_preset_rule(&paths, "abc123", Some("en-US")).await.unwrap();
-    assert_eq!(content, "Default rule");
-
-    // 3. No locale → default
-    let content = read_preset_rule(&paths, "abc123", None).await.unwrap();
-    assert_eq!(content, "Default rule");
-
-    // 4. Not found → empty string
-    let content = read_preset_rule(&paths, "missing", None).await.unwrap();
-    assert!(content.is_empty());
-}
-
-/// RM-3: Write preset rule.
-#[tokio::test]
-async fn rm3_write_preset_rule() {
-    let tmp = TempDir::new().unwrap();
-    let paths = make_paths(tmp.path());
-
-    let result = write_preset_rule(&paths, "abc123", "New rule content", Some("en-US"))
-        .await
-        .unwrap();
-    assert!(result);
-
-    // Verify file created
-    let file = paths.preset_rules_dir.join("abc123.en-US.md");
-    assert!(file.exists());
-    let content = std::fs::read_to_string(file).unwrap();
-    assert_eq!(content, "New rule content");
-}
-
-/// RM-4: Delete preset rule (all locales).
-#[tokio::test]
-async fn rm4_delete_preset_rule_all_locales() {
-    let tmp = TempDir::new().unwrap();
-    let paths = make_paths(tmp.path());
-
-    write_preset_rule(&paths, "abc123", "Default", None).await.unwrap();
-    write_preset_rule(&paths, "abc123", "Chinese", Some("zh-CN"))
-        .await
-        .unwrap();
-    write_preset_rule(&paths, "abc123", "English", Some("en-US"))
-        .await
-        .unwrap();
-
-    let deleted = delete_preset_rule(&paths, "abc123").await.unwrap();
-    assert!(deleted);
-
-    // Verify all versions removed
-    let content = read_preset_rule(&paths, "abc123", None).await.unwrap();
-    assert!(content.is_empty());
-    let content = read_preset_rule(&paths, "abc123", Some("zh-CN")).await.unwrap();
-    assert!(content.is_empty());
-    let content = read_preset_rule(&paths, "abc123", Some("en-US")).await.unwrap();
-    assert!(content.is_empty());
-}
-
-/// RM-5: Read preset skill with locale fallback (same as RM-2 pattern).
-#[tokio::test]
-async fn rm5_preset_skill_locale_fallback() {
-    let tmp = TempDir::new().unwrap();
-    let paths = make_paths(tmp.path());
-
-    write_preset_skill(&paths, "abc123", "Default skill", None)
-        .await
-        .unwrap();
-    write_preset_skill(&paths, "abc123", "English skill", Some("en-US"))
-        .await
-        .unwrap();
-
-    let content = read_preset_skill(&paths, "abc123", Some("en-US")).await.unwrap();
-    assert_eq!(content, "English skill");
-
-    let content = read_preset_skill(&paths, "abc123", Some("fr-FR")).await.unwrap();
-    assert_eq!(content, "Default skill");
-}
-
-/// RM-6: Write and delete preset skill.
-#[tokio::test]
-async fn rm6_write_and_delete_preset_skill() {
-    let tmp = TempDir::new().unwrap();
-    let paths = make_paths(tmp.path());
-
-    write_preset_skill(&paths, "abc123", "Content", None).await.unwrap();
-    write_preset_skill(&paths, "abc123", "Locale", Some("zh-CN"))
-        .await
-        .unwrap();
-
-    let deleted = delete_preset_skill(&paths, "abc123").await.unwrap();
-    assert!(deleted);
-
-    let content = read_preset_skill(&paths, "abc123", None).await.unwrap();
-    assert!(content.is_empty());
-}
+// RM-2..RM-6 (file-based preset rule/skill CRUD) were removed together with
+// the skill_service preset file fallback: preset rule/skill content lives in
+// the DB (`preset.instructions`) behind `PresetRuleDispatcher`.
 
 // ===========================================================================
 // CP — Custom External Paths
@@ -573,39 +463,4 @@ async fn security_builtin_read_path_traversal() {
     assert!(read_builtin_rule(&paths, "../secret.md").await.is_err());
     assert!(read_builtin_skill(&paths, "../../etc/passwd").await.is_err());
     assert!(read_builtin_rule(&paths, "").await.is_err());
-}
-
-/// Verify preset CRUD functions block path traversal in preset_id.
-#[tokio::test]
-async fn security_preset_crud_path_traversal_id() {
-    let tmp = TempDir::new().unwrap();
-    let paths = make_paths(tmp.path());
-
-    // read
-    assert!(read_preset_rule(&paths, "../escape", None).await.is_err());
-    assert!(read_preset_skill(&paths, "foo/bar", None).await.is_err());
-
-    // write
-    assert!(write_preset_rule(&paths, "../escape", "x", None).await.is_err());
-    assert!(write_preset_skill(&paths, "foo\\bar", "x", None).await.is_err());
-
-    // delete
-    assert!(delete_preset_rule(&paths, "../escape").await.is_err());
-    assert!(delete_preset_skill(&paths, "a/b").await.is_err());
-}
-
-/// Verify preset read/write functions block path traversal in locale.
-#[tokio::test]
-async fn security_preset_crud_path_traversal_locale() {
-    let tmp = TempDir::new().unwrap();
-    let paths = make_paths(tmp.path());
-
-    assert!(read_preset_rule(&paths, "valid", Some("../bad")).await.is_err());
-    assert!(
-        write_preset_rule(&paths, "valid", "x", Some("../../evil"))
-            .await
-            .is_err()
-    );
-    assert!(read_preset_skill(&paths, "valid", Some("a/b")).await.is_err());
-    assert!(write_preset_skill(&paths, "valid", "x", Some("a\\b")).await.is_err());
 }

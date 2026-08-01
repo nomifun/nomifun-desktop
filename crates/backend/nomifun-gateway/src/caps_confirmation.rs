@@ -49,9 +49,6 @@ fn confirm_data(option: &str) -> Value {
 }
 
 async fn list(deps: Arc<GatewayDeps>, ctx: CallerCtx, p: ListConfirmationsParams) -> Value {
-    if nomifun_common::UserId::parse(ctx.user_id.as_str()).is_err() {
-        return json!({"error": "missing caller user identity"});
-    }
     let id = p.conversation_id.into_string();
     let confs = match deps
         .conversation_service
@@ -79,9 +76,6 @@ async fn list(deps: Arc<GatewayDeps>, ctx: CallerCtx, p: ListConfirmationsParams
 }
 
 async fn resolve(deps: Arc<GatewayDeps>, ctx: CallerCtx, p: ResolveConfirmationParams) -> Value {
-    if nomifun_common::UserId::parse(ctx.user_id.as_str()).is_err() {
-        return json!({"error": "missing caller user identity"});
-    }
     let id = p.conversation_id.into_string();
 
     // Self-confirmation guard: an agent may not resolve a decision in its own
@@ -209,11 +203,5 @@ mod tests {
             .into_string();
         let allowed = ctx.conversation_id.as_ref().is_none_or(|caller| id != caller.as_str());
         assert!(allowed, "a caller without a conversation must bypass the guard");
-    }
-
-    #[test]
-    fn default_context_has_a_canonical_user_identity() {
-        let ctx = CallerCtx::default();
-        assert!(UserId::parse(ctx.user_id.as_str()).is_ok());
     }
 }

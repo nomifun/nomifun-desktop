@@ -130,55 +130,6 @@ impl ExecutionConversationBoundary for NoExecutionConversationBoundary {
     ) -> Result<bool, AppError> {
         Ok(false)
     }
-
-    async fn claim_attempt_turn_receipt(
-        &self,
-        _owner_id: &str,
-        _conversation_id: &str,
-        _operation_id: &str,
-        _candidate_message_id: &str,
-        _kind: &str,
-        _request_payload: &str,
-        _authority: &AgentExecutionTurnAuthority,
-        _expected_admission_epoch: i64,
-        _now: i64,
-    ) -> Result<ConversationDeliveryReceiptClaim, AppError> {
-        Err(AppError::Conflict(
-            "Agent Execution turn authority is unavailable in this process".to_owned(),
-        ))
-    }
-
-    async fn abandon_exact_attempt_turn_admission(
-        &self,
-        _owner_id: &str,
-        _conversation_id: &str,
-        _operation_id: &str,
-        _candidate_message_id: &str,
-        _request_payload: &str,
-        _authority: &AgentExecutionTurnAuthority,
-        _expected_admitted_epoch: i64,
-        _reason: &str,
-        _completed_at: i64,
-    ) -> Result<TurnLifecycleTransition, AppError> {
-        Err(AppError::Conflict(
-            "Agent Execution turn authority is unavailable in this process".to_owned(),
-        ))
-    }
-
-    async fn validate_attempt_turn_effect(
-        &self,
-        _owner_id: &str,
-        _conversation_id: &str,
-        _operation_id: &str,
-        _kind: &str,
-        _request_payload: &str,
-        _authority: &AgentExecutionTurnAuthority,
-        _now: i64,
-    ) -> Result<ConversationDeliveryReceiptRow, AppError> {
-        Err(AppError::Conflict(
-            "Agent Execution turn authority is unavailable in this process".to_owned(),
-        ))
-    }
 }
 
 /// SQLite/repository adapter kept outside `ConversationService` so the service

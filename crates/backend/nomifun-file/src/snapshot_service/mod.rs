@@ -14,7 +14,7 @@ use nomifun_common::{AppError, FileChangeOperation};
 use crate::types::{CompareResult, SnapshotInfo, SnapshotMode};
 
 use helpers::{
-    SNAPSHOT_DIR_PREFIX, WorkspaceState, build_info, discard_single_file, init_snapshot_repo, list_branches, open_repo,
+    SNAPSHOT_DIR_PREFIX, WorkspaceState, build_info, discard_single_file, init_snapshot_repo, open_repo,
     parse_statuses, read_baseline, reset_single_file, resolve_workspace, snapshot_guard, stage_all_with_deletions,
     stage_single_file, temp_repo_path, unstage_all_files, unstage_single_file,
 };
@@ -221,17 +221,6 @@ impl crate::traits::ISnapshotService for SnapshotService {
         Ok(info)
     }
 
-    async fn get_info(&self, workspace: &str) -> Result<SnapshotInfo, AppError> {
-        let state = get_state(&self.workspaces, workspace)?;
-
-        tokio::task::spawn_blocking(move || {
-            let repo = open_repo(&state)?;
-            Ok(build_info(state.mode, &repo))
-        })
-        .await
-        .map_err(|e| AppError::Internal(format!("Blocking task failed: {}", e)))?
-    }
-
     async fn compare(&self, workspace: &str) -> Result<CompareResult, AppError> {
         let state = get_state(&self.workspaces, workspace)?;
 
@@ -330,17 +319,6 @@ impl crate::traits::ISnapshotService for SnapshotService {
         tokio::task::spawn_blocking(move || {
             let repo = open_repo(&state)?;
             reset_single_file(&repo, &state.workspace_path, &fp, operation)
-        })
-        .await
-        .map_err(|e| AppError::Internal(format!("Blocking task failed: {}", e)))?
-    }
-
-    async fn get_branches(&self, workspace: &str) -> Result<Vec<String>, AppError> {
-        let state = get_state(&self.workspaces, workspace)?;
-
-        tokio::task::spawn_blocking(move || {
-            let repo = open_repo(&state)?;
-            list_branches(&repo)
         })
         .await
         .map_err(|e| AppError::Internal(format!("Blocking task failed: {}", e)))?

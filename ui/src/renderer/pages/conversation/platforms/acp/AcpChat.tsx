@@ -20,11 +20,16 @@ import { usePendingConfirmationsRecovery } from '@renderer/pages/conversation/Me
 import { useAutoTitle } from '@/renderer/hooks/chat/useAutoTitle';
 import HOC from '@renderer/utils/ui/HOC';
 import LocalImageView from '@renderer/components/media/LocalImageView';
-import React, { useEffect } from 'react';
-import AcpE2EStreamInjector from './AcpE2EStreamInjector';
+import React, { Suspense, useEffect } from 'react';
 import AcpSendBox from './AcpSendBox';
 import { useAcpInitialMessage } from './useAcpInitialMessage';
 import { useAcpMessage } from './useAcpMessage';
+
+// E2E 压测注入器仅在 dev 构建挂载，动态 import 使其不进入生产 bundle
+// E2E stream injector is mounted in dev builds only; the dynamic import keeps
+// it out of production bundles (the dead branch is eliminated at build time)
+const AcpE2EStreamInjector =
+  process.env.NODE_ENV === 'development' ? React.lazy(() => import('./AcpE2EStreamInjector')) : null;
 
 const AcpChat: React.FC<{
   conversation_id: ConversationId;
@@ -95,7 +100,11 @@ const AcpChat: React.FC<{
           <FlexFullContainer>
             <MessageList className='flex-1' emptySlot={emptySlot} />
           </FlexFullContainer>
-          <AcpE2EStreamInjector conversationId={conversation_id} />
+          {AcpE2EStreamInjector && (
+            <Suspense fallback={null}>
+              <AcpE2EStreamInjector conversationId={conversation_id} />
+            </Suspense>
+          )}
           {!readOnly && !hideSendBox && (
             <AcpSendBox
               conversation_id={conversation_id}

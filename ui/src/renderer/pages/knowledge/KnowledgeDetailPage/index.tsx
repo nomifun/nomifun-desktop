@@ -20,7 +20,6 @@ import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { parseKnowledgeBaseId } from '@/common/types/ids';
 import { useTranslation } from 'react-i18next';
-import type { TFunction } from 'i18next';
 import {
   Badge,
   Button,
@@ -39,7 +38,6 @@ import {
 } from '@arco-design/web-react';
 import {
   Delete,
-  Earth,
   EditTwo,
   FileText,
   FolderOpen,
@@ -73,6 +71,7 @@ import KnowledgeModelSelector, { useKnowledgeAutogenModel } from '../KnowledgeMo
 import InboxReviewPanel from '../InboxReviewPanel';
 import KnowledgeConsumersSection from '../KnowledgeConsumersSection';
 import TagPicker from '../CreateStudio/TagPicker';
+import { getKindConfig, KindIcon, type KindConfig } from '../knowledgeKind';
 import {
   buildKnowledgeSearchTree,
   isKnowledgePathWithin,
@@ -88,68 +87,11 @@ import {
 type TabKey = 'docs' | 'inbox' | 'use' | 'set';
 const ALL_TABS: TabKey[] = ['docs', 'inbox', 'use', 'set'];
 
-// ─── Kind config (mirrors KnowledgeCard — intentionally duplicated to avoid
-//     circular deps; will be extracted to shared module in future cleanup) ────────
-
-type KindConfig = {
-  label: string;
-  bgClass: string;
-  textClass: string;
-  borderClass: string;
-  iconBg: string;
-  iconBorder: string;
-  iconColor: string;
-};
-
-function getKindConfig(kind: IKnowledgeBase['kind'], t: TFunction): KindConfig {
-  switch (kind) {
-    case 'local':
-      return {
-        label: t('knowledge.card.kindLocal', { defaultValue: '本地文件夹' }),
-        bgClass: 'bg-[rgba(var(--primary-6),0.1)]',
-        textClass: 'text-[var(--color-text-1)]',
-        borderClass: 'border-[rgba(var(--primary-6),0.3)]',
-        iconBg: 'rgba(var(--primary-6),0.1)',
-        iconBorder: 'rgba(var(--primary-6),0.3)',
-        iconColor: 'rgb(var(--primary-5))',
-      };
-    case 'web':
-      return {
-        label: t('knowledge.card.kindWeb', { defaultValue: '网页' }),
-        bgClass: 'bg-[rgba(var(--success-6),0.1)]',
-        textClass: 'text-[var(--color-text-1)]',
-        borderClass: 'border-[rgba(var(--success-6),0.3)]',
-        iconBg: 'rgba(var(--success-6),0.1)',
-        iconBorder: 'rgba(var(--success-6),0.3)',
-        iconColor: 'rgb(var(--success-5))',
-      };
-    case 'blank':
-    default:
-      return {
-        label: t('knowledge.card.kindBlank', { defaultValue: '空白' }),
-        bgClass: 'bg-fill-2',
-        textClass: 'text-[var(--color-text-2)]',
-        borderClass: 'border-[var(--color-border-2)]',
-        iconBg: 'var(--color-fill-2)',
-        iconBorder: 'var(--color-border-2)',
-        iconColor: 'var(--color-text-2)',
-      };
-  }
-}
+// ─── Kind config (shared with KnowledgeCard via ../knowledgeKind) ──────────────
 
 /** Kind icon in a rounded square (52px for detail header, bigger than card). */
 function DetailKindIcon({ kind, config }: { kind: IKnowledgeBase['kind']; config: KindConfig }) {
-  const iconProps = { theme: 'outline' as const, size: 22, strokeWidth: 3 };
-  return (
-    <div
-      className='w-52px h-52px rounded-14px flex-none grid place-items-center border border-solid'
-      style={{ background: config.iconBg, borderColor: config.iconBorder, color: config.iconColor }}
-    >
-      {kind === 'local' && <FolderOpen {...iconProps} />}
-      {kind === 'web' && <Earth {...iconProps} />}
-      {kind === 'blank' && <EditTwo {...iconProps} />}
-    </div>
-  );
+  return <KindIcon kind={kind} config={config} size={22} containerClass='w-52px h-52px rounded-14px' />;
 }
 
 function collectKnowledgeDirKeys(nodes: IKnowledgeTreeEntry[]): string[] {
@@ -825,7 +767,7 @@ const KnowledgeDetailPage: React.FC = () => {
   };
 
   // ─── Computed ───────────────────────────────────────────────────────────────
-  const kindConfig = base ? getKindConfig(base.kind, t) : null;
+  const kindConfig = base ? getKindConfig(base.kind, t, 'neutral') : null;
   const pendingCount = base?.pending_inbox ?? inboxItems.length;
 
   const displayedTreeData = useMemo(

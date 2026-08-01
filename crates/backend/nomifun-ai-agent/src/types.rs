@@ -168,11 +168,6 @@ pub struct NomiResolvedConfig {
     /// Enable Browser tools backed by a main-process `BrowserLaneClient`.
     /// This runtime never owns Chromium or a browser profile.
     pub browser_use: bool,
-    /// Deprecated compatibility field retained for downstream config
-    /// constructors. Browser management is status-only and Primary always
-    /// uses the external managed window, so production code sets this to
-    /// `false` and the engine must not use it to select a private/headless Host.
-    pub browser_silent: bool,
     /// **浏览器来源 LIVE 值**（Browser Host 可执行文件偏好，与 silent 正交）。`"managed"` =
     /// 内置/下载 CfT；`"system"`（默认）= 系统 Chrome/Edge 本体优先（未探到回退 managed）。
     /// 工厂经 `read_string_pref` LIVE 读 `agent.browserUse.source`（host_default=`"system"`）。

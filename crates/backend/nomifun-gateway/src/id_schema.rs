@@ -1,7 +1,8 @@
 use std::borrow::Cow;
 
+use nomifun_common::{ProviderId, ProviderWithModel};
 use schemars::{JsonSchema, Schema, SchemaGenerator};
-use serde::{Deserialize, Deserializer};
+use serde::{Deserialize, Deserializer, Serialize};
 
 const UUID_V7_PATTERN: &str =
     "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$";
@@ -76,6 +77,44 @@ impl JsonSchema for CanonicalEntityId {
 
     fn json_schema(_generator: &mut SchemaGenerator) -> Schema {
         uuid_v7_schema("Canonical lowercase hyphenated UUIDv7.")
+    }
+}
+
+/// Reject empty / untrimmed model natural keys at deserialization time.
+pub(crate) fn deserialize_model_name<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = String::deserialize(deserializer)?;
+    if value.is_empty() || value.trim() != value {
+        return Err(serde::de::Error::custom(
+            "model must be a non-empty trimmed natural key",
+        ));
+    }
+    Ok(value)
+}
+
+/// A `{ provider_id, model }` pair — the shared shape every capability domain
+/// uses to reference a concrete model on a provider. Each domain keeps its own
+/// `From<ModelRefParam>` conversion into its service type.
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ModelRefParam {
+    /// Provider id (canonical UUIDv7 from the providers catalog).
+    #[schemars(schema_with = "canonical_uuid_v7_schema")]
+    pub(crate) provider_id: ProviderId,
+    /// Model id/name available on that provider.
+    #[serde(deserialize_with = "deserialize_model_name")]
+    pub(crate) model: String,
+}
+
+impl From<ModelRefParam> for ProviderWithModel {
+    fn from(value: ModelRefParam) -> Self {
+        Self {
+            provider_id: value.provider_id.into_string(),
+            model: value.model,
+            use_model: None,
+        }
     }
 }
 

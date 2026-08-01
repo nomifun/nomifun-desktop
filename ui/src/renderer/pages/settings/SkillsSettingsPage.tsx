@@ -51,7 +51,7 @@ const SkillsSettingsPage: React.FC = () => {
           key='library'
           title={t('settings.skillsPage.libraryTab', { defaultValue: 'Installed Skills' })}
         >
-          <SkillsHubSettings withWrapper={false} />
+          <SkillsHubSettings />
         </Tabs.TabPane>
         <Tabs.TabPane key='market' title={t('settings.skillsPage.marketTab', { defaultValue: 'Skill Market' })}>
           <SkillMarketSettings />

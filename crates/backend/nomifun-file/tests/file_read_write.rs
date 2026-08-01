@@ -1,6 +1,6 @@
 //! Integration tests for file read/write operations (task 7.4).
 //!
-//! These tests exercise `read_file`, `read_file_buffer`, and `write_file`
+//! These tests exercise `read_file` and `write_file`
 //! through the `IFileService` trait, including path validation, 256 MB size
 //! limit, non-existent file handling, and contentUpdate event broadcast.
 
@@ -192,23 +192,6 @@ async fn read_file_rejects_directory() {
 }
 
 #[tokio::test]
-async fn read_file_buffer_with_extra_workspace_root() {
-    let sandbox = tempfile::tempdir().unwrap();
-    let workspace = tempfile::tempdir().unwrap();
-    let file = workspace.path().join("outside.bin");
-    let bytes = vec![1, 2, 3, 4];
-    fs::write(&file, &bytes).unwrap();
-
-    let svc = make_service(sandbox.path());
-    let result = svc
-        .read_file_buffer(file.to_str().unwrap(), Some(workspace.path()))
-        .await
-        .unwrap();
-
-    assert_eq!(result.as_deref(), Some(bytes.as_slice()));
-}
-
-#[tokio::test]
 async fn read_file_nonexistent_inside_workspace_prefix_returns_none() {
     let sandbox = tempfile::tempdir().unwrap();
     let workspace = tempfile::tempdir().unwrap();
@@ -221,44 +204,6 @@ async fn read_file_nonexistent_inside_workspace_prefix_returns_none() {
         .unwrap();
 
     assert!(result.is_none());
-}
-
-// -----------------------------------------------------------------------
-// readFileBuffer
-// -----------------------------------------------------------------------
-
-#[tokio::test]
-async fn read_file_buffer_normal() {
-    let dir = tempfile::tempdir().unwrap();
-    let file = dir.path().join("data.bin");
-    let data: Vec<u8> = vec![0x00, 0xFF, 0x42, 0x89, 0x50];
-    fs::write(&file, &data).unwrap();
-
-    let svc = make_service(dir.path());
-    let result = svc.read_file_buffer(file.to_str().unwrap(), None).await.unwrap();
-
-    assert_eq!(result.as_deref(), Some(data.as_slice()));
-}
-
-#[tokio::test]
-async fn read_file_buffer_nonexistent_returns_none() {
-    let dir = tempfile::tempdir().unwrap();
-    let fake = dir.path().join("missing.bin");
-
-    let svc = make_service(dir.path());
-    let result = svc.read_file_buffer(fake.to_str().unwrap(), None).await.unwrap();
-
-    assert!(result.is_none());
-}
-
-#[tokio::test]
-async fn read_file_buffer_path_traversal_rejected() {
-    let dir = tempfile::tempdir().unwrap();
-
-    let svc = make_service(dir.path());
-    let result = svc.read_file_buffer("../../etc/passwd", None).await;
-
-    assert!(result.is_err());
 }
 
 // -----------------------------------------------------------------------
@@ -441,23 +386,6 @@ async fn read_after_write_roundtrip() {
     // Read back
     let read_result = svc.read_file(file.to_str().unwrap(), None).await.unwrap();
     assert_eq!(read_result.as_deref(), Some(content));
-}
-
-#[tokio::test]
-async fn read_buffer_after_write_roundtrip() {
-    let dir = tempfile::tempdir().unwrap();
-    let file = dir.path().join("roundtrip.bin");
-    let data: Vec<u8> = vec![0x01, 0x02, 0x03, 0xFF, 0xFE];
-
-    let svc = make_service(dir.path());
-    let ws = dir.path().to_str().unwrap();
-
-    svc.write_file("owner-a", file.to_str().unwrap(), &data, ws)
-        .await
-        .unwrap();
-
-    let read_result = svc.read_file_buffer(file.to_str().unwrap(), None).await.unwrap();
-    assert_eq!(read_result.as_deref(), Some(data.as_slice()));
 }
 
 // -----------------------------------------------------------------------

@@ -84,7 +84,6 @@ pub fn parse_skill_fields(
         execution_context,
         agent: frontmatter.agent.clone(),
         effort,
-        shell: frontmatter.shell.clone(),
         paths,
         hooks_raw,
         source,

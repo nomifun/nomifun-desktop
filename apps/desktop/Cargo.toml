@@ -46,6 +46,9 @@ keepawake = "0.6"
 
 tokio.workspace = true
 serde.workspace = true
+# Required at compile time by `tauri::generate_context!` — the codegen emits
+# `serde_json::...` tokens into this crate (verified: removing it breaks the
+# `generated_tauri_context` expansion in main.rs).
 serde_json.workspace = true
 anyhow.workspace = true
 tracing.workspace = true

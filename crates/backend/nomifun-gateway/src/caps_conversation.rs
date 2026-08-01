@@ -12,7 +12,7 @@ use nomifun_api_types::{
     UpdateConversationRequest,
 };
 use nomifun_common::{
-    AgentId, AgentType, AppError, CompanionId, ConversationId, ProviderId, ProviderWithModel,
+    AgentId, AgentType, AppError, CompanionId, ConversationId, ProviderWithModel,
     RemoteAgentId,
 };
 use schemars::JsonSchema;
@@ -20,6 +20,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::deps::{CallerCtx, GatewayDeps};
+use crate::id_schema::ModelRefParam;
 use crate::provider_support;
 use crate::registry::{Capability, CapabilityMeta, DangerTier, Surface};
 use crate::server::ok;
@@ -106,7 +107,7 @@ struct CreateConversationParams {
     /// Exact provider/model pair for a nomi session. Omit to auto-resolve:
     /// your own companion model → first configured provider.
     #[serde(default)]
-    model: Option<ConversationModelRefParam>,
+    model: Option<ModelRefParam>,
     /// Registered remote-agent business id. Required when agent_type is "remote".
     #[serde(default)]
     #[schemars(schema_with = "crate::id_schema::optional_canonical_uuid_v7_schema")]
@@ -138,7 +139,7 @@ struct UpdateConversationParams {
     pinned: Option<bool>,
     /// Exact replacement provider/model pair (nomi conversations only).
     #[serde(default)]
-    model: Option<ConversationModelRefParam>,
+    model: Option<ModelRefParam>,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -163,44 +164,8 @@ struct StopConversationParams {
 #[serde(deny_unknown_fields)]
 struct WhoamiParams {}
 
-#[derive(Debug, Clone, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-struct ConversationModelRefParam {
-    #[schemars(schema_with = "crate::id_schema::canonical_uuid_v7_schema")]
-    provider_id: ProviderId,
-    #[serde(deserialize_with = "deserialize_model_name")]
-    model: String,
-}
-
-impl From<ConversationModelRefParam> for ProviderWithModel {
-    fn from(value: ConversationModelRefParam) -> Self {
-        Self {
-            provider_id: value.provider_id.into_string(),
-            model: value.model,
-            use_model: None,
-        }
-    }
-}
-
-fn deserialize_model_name<'de, D>(deserializer: D) -> Result<String, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    let value = String::deserialize(deserializer)?;
-    if value.is_empty() || value.trim() != value {
-        return Err(serde::de::Error::custom(
-            "model must be a non-empty trimmed natural key",
-        ));
-    }
-    Ok(value)
-}
-
 fn error_value(e: AppError) -> Value {
     json!({ "error": e.to_string() })
-}
-
-fn require_user(ctx: &CallerCtx) -> Result<&str, Value> {
-    Ok(ctx.user_id.as_str())
 }
 
 fn require_companion_creator(ctx: &CallerCtx) -> Result<(), Value> {
@@ -218,10 +183,7 @@ fn require_companion_creator(ctx: &CallerCtx) -> Result<(), Value> {
 }
 
 async fn list(deps: Arc<GatewayDeps>, ctx: CallerCtx, p: ListConversationsParams) -> Value {
-    let user_id = match require_user(&ctx) {
-        Ok(u) => u,
-        Err(e) => return e,
-    };
+    let user_id = ctx.user_id.as_str();
     let query = ListConversationsQuery {
         limit: Some(p.limit.unwrap_or(DEFAULT_LIST_LIMIT)),
         ..Default::default()
@@ -287,10 +249,7 @@ fn stuck_assessment(
 }
 
 async fn status(deps: Arc<GatewayDeps>, ctx: CallerCtx, p: ConversationStatusParams) -> Value {
-    let user_id = match require_user(&ctx) {
-        Ok(u) => u,
-        Err(e) => return e,
-    };
+    let user_id = ctx.user_id.as_str();
     let id = p.conversation_id.as_str();
     let conv = match deps.conversation_service.get(user_id, id).await {
         Ok(c) => c,
@@ -348,10 +307,7 @@ async fn status(deps: Arc<GatewayDeps>, ctx: CallerCtx, p: ConversationStatusPar
 }
 
 async fn send(deps: Arc<GatewayDeps>, ctx: CallerCtx, p: SendToConversationParams) -> Value {
-    let user_id = match require_user(&ctx) {
-        Ok(u) => u.to_owned(),
-        Err(e) => return e,
-    };
+    let user_id = ctx.user_id.as_str().to_owned();
     let id = p.conversation_id.into_string();
     if ctx.conversation_id.as_ref().is_some_and(|caller| id == caller.as_str()) {
         return json!({ "error": "self_injection_forbidden: you cannot send a message into your own conversation" });
@@ -470,10 +426,8 @@ fn summon_extra_value(summon: &CreateSummonParams, summoned_at: i64) -> Result<V
 async fn create(deps: Arc<GatewayDeps>, ctx: CallerCtx, p: CreateConversationParams) -> Value {
     if let Err(error) = require_companion_creator(&ctx) {
         return error;
-    }    let user_id = match require_user(&ctx) {
-        Ok(u) => u.to_owned(),
-        Err(e) => return e,
-    };
+    }
+    let user_id = ctx.user_id.as_str().to_owned();
     let agent_type_str = p.agent_type.unwrap_or_else(|| "nomi".to_owned());
     if agent_type_str == "terminal" {
         return json!({
@@ -594,10 +548,7 @@ async fn whoami(_deps: Arc<GatewayDeps>, ctx: CallerCtx, _p: WhoamiParams) -> Va
 }
 
 async fn update(deps: Arc<GatewayDeps>, ctx: CallerCtx, p: UpdateConversationParams) -> Value {
-    let user_id = match require_user(&ctx) {
-        Ok(u) => u.to_owned(),
-        Err(e) => return e,
-    };
+    let user_id = ctx.user_id.as_str().to_owned();
     let id = p.conversation_id.into_string();
     if p.name.is_none() && p.pinned.is_none() && p.model.is_none() {
         return json!({ "error": "nothing to update: provide at least one of name / pinned / model" });
@@ -640,10 +591,7 @@ async fn update(deps: Arc<GatewayDeps>, ctx: CallerCtx, p: UpdateConversationPar
 }
 
 async fn delete(deps: Arc<GatewayDeps>, ctx: CallerCtx, p: DeleteConversationParams) -> Value {
-    let user_id = match require_user(&ctx) {
-        Ok(u) => u.to_owned(),
-        Err(e) => return e,
-    };
+    let user_id = ctx.user_id.as_str().to_owned();
     let id = p.conversation_id.into_string();
     if ctx.conversation_id.as_ref().is_some_and(|caller| id == caller.as_str()) {
         return json!({ "error": "self_deletion_forbidden: you cannot delete your own conversation" });
@@ -661,10 +609,7 @@ fn stop_outcome(previous_status: &str) -> (bool, &str) {
 }
 
 async fn stop(deps: Arc<GatewayDeps>, ctx: CallerCtx, p: StopConversationParams) -> Value {
-    let user_id = match require_user(&ctx) {
-        Ok(u) => u.to_owned(),
-        Err(e) => return e,
-    };
+    let user_id = ctx.user_id.as_str().to_owned();
     let id = p.conversation_id.into_string();
     if ctx.conversation_id.as_ref().is_some_and(|caller| id == caller.as_str()) {
         return json!({ "error": "self_stop_forbidden: stopping your own conversation would cancel the turn you are answering from; ask the owner to stop it from the desktop" });

@@ -42,8 +42,8 @@ mod webhook;
 mod websocket;
 
 pub use acp::{
-    AcpHealthCheckRequest, AcpHealthCheckResponse, AgentModeResponse, DetectCliRequest,
-    DetectCliResponse, GetModelInfoResponse, ModelInfoEntry, ModelInfoPayload, ProbeModelRequest,
+    AcpHealthCheckRequest, AcpHealthCheckResponse, AgentModeResponse,
+    GetModelInfoResponse, ModelInfoEntry, ModelInfoPayload,
     SetModeRequest, SetModelRequest, SideQuestionRequest, SideQuestionResponse,
     TryConnectCustomAgentRequest, TryConnectCustomAgentResponse, WorkspaceBrowseQuery,
     WorkspaceEntry,
@@ -125,15 +125,15 @@ pub use custom_agent::{
 };
 pub use extension::{
     DisableExtensionRequest, EnableExtensionRequest, ExtensionSummaryResponse, GetI18nRequest,
-    GetPermissionsRequest, GetRiskLevelRequest, HubExtensionListItem, HubExtensionListResponse,
+    GetPermissionsRequest, GetRiskLevelRequest, HubExtensionListItem,
     HubOperationResponse, HubUpdateInfo, InstallExtensionRequest, PermissionDetailResponse,
     PermissionSummaryResponse,
 };
 pub use file::{
     BrowseDirectoryQuery, BrowseDirectoryResponse, BrowseEntry, CancelZipRequest, CopyFilesRequest,
-    CopyFilesResponse, CreateTempFileRequest, DirOrFileResponse, FetchRemoteImageRequest,
+    CopyFilesResponse, FetchRemoteImageRequest,
     FileChangeInfoResponse, FileMetadataResponse, FileWatchRequest, GetFileMetadataRequest,
-    GetFilesByDirRequest, GetImageBase64Request, ListWorkspaceFilesRequest, ReadFileBufferRequest,
+    GetImageBase64Request, ListWorkspaceFilesRequest,
     ReadFileRequest, RemoveEntryRequest, RenameRequest, RenameResponse, SnapshotBaselineRequest,
     SnapshotCompareResponse, SnapshotDiscardRequest, SnapshotInfoResponse, SnapshotMode,
     SnapshotStageRequest, SnapshotWorkspaceRequest, WorkspaceFlatFileResponse,
@@ -175,9 +175,8 @@ pub use model_task::{
     ModelTask, ModelTrait, ProfileSource,
 };
 pub use office::{
-    is_preview_capability, CellCoord, CellRange, ConversionResultDto, ConversionTarget, DetectStarOfficeRequest,
-    DocumentConversionRequest, DocumentConversionResponse, ExcelSheetData, ExcelSheetImage,
-    ExcelWorkbookData, GetSnapshotContentRequest, ListSnapshotsRequest, PptJsonData, PptSlideData,
+    is_preview_capability, DetectStarOfficeRequest,
+    GetSnapshotContentRequest, ListSnapshotsRequest,
     PreviewHistoryTargetDto, PreviewSnapshotInfoDto, PreviewState, PreviewStatusEvent,
     PreviewUrlResponse, SaveSnapshotRequest, SnapshotContentResponse, StarOfficeDetectResponse,
     StartPreviewRequest, StopPreviewRequest, PREVIEW_CAPABILITY_BYTES, PREVIEW_CAPABILITY_HEX_LEN,
@@ -214,7 +213,7 @@ pub use shell::{
     ToolType, TtsApiRequest,
 };
 pub use skill::{
-    AddExternalPathRequest, BuiltinAutoSkillResponse, DeleteSkillRequest, ExportSkillRequest,
+    AddExternalPathRequest, BuiltinAutoSkillResponse, ExportSkillRequest,
     ExternalSkillSourceResponse, ImportSkillRequest, ImportSkillResponse, MaterializeSkillsRequest,
     MaterializeSkillsResponse, MaterializedSkillRef, NamedPathResponse, ReadPresetRuleRequest,
     ReadBuiltinResourceRequest, ReadSkillInfoRequest, ReadSkillInfoResponse,

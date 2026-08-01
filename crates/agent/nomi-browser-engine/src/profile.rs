@@ -360,6 +360,8 @@ thread_local! {
     static OWNERSHIP_COMMIT_BARRIER_HOOK:
         std::cell::RefCell<Option<Box<dyn FnOnce(&Path, &Path)>>> =
         std::cell::RefCell::new(None);
+    // 消费点（marker-last 最终 rmdir 前的屏障）与设置点都只在 Windows 测试路径。
+    #[cfg(windows)]
     static FINAL_PROFILE_RMDIR_BARRIER_HOOK:
         std::cell::RefCell<Option<Box<dyn FnOnce(&Path)>>> =
         std::cell::RefCell::new(None);
@@ -386,7 +388,7 @@ fn run_ownership_commit_barrier_hook(
     });
 }
 
-#[cfg(test)]
+#[cfg(all(test, windows))]
 fn run_final_profile_rmdir_barrier_hook(profile_dir: &Path) {
     FINAL_PROFILE_RMDIR_BARRIER_HOOK.with(|hook| {
         if let Some(hook) = hook.borrow_mut().take() {
@@ -713,6 +715,10 @@ impl ProfileOperationClaim {
     /// only when the caller supplies the same final component below that exact
     /// canonical parent. Existing symlinks/junctions, files, or a directory
     /// resolving anywhere else fail closed.
+    ///
+    /// 仅被 Windows 启动重试路径（`restore_ephemeral_profile_for_retry`）与其
+    /// 跨平台单测使用，故与之同门：`cfg(any(windows, test))`。
+    #[cfg(any(windows, test))]
     fn restore_exact_directory(&self, profile_dir: &Path) -> Result<(), String> {
         match std::fs::symlink_metadata(profile_dir) {
             Ok(metadata) => {
@@ -1485,6 +1491,10 @@ fn cleanup_unmarked_ephemeral_profile_under_launch_claim(
 /// Restore an ephemeral profile removed by a completed first launch attempt,
 /// then re-run the normal ownership preflight under the same still-held OS
 /// claim.
+///
+/// 唯一生产调用点在 `launch.rs` 的 `#[cfg(windows)]` 启动重试分支；跨平台单测
+/// 直接调用它，故门为 `cfg(any(windows, test))` 而非删除。
+#[cfg(any(windows, test))]
 pub(crate) fn restore_ephemeral_profile_for_retry(
     profile_dir: &Path,
     claim: &ProfileLaunchClaim,
@@ -3551,6 +3561,9 @@ fn remove_ephemeral_profile_contents_marker_last_unix(
     }
 }
 
+/// 仅被 `#[cfg(windows)]` 版 `remove_ephemeral_profile_contents_marker_last`
+/// 使用（unix 走 `remove_unix_profile_entry_tree`），故同门。
+#[cfg(windows)]
 fn remove_ephemeral_entry_tree_no_follow(
     path: &Path,
     depth: usize,
@@ -4782,22 +4795,6 @@ fn confirm_process_tree_absent(expected: &ProcessIdentity) -> Result<bool, Strin
     Ok(false)
 }
 
-/// Compatibility shim for older callers. `max_age` is intentionally ignored:
-/// recovery is ownership-marker based and never deletes by mtime.
-pub fn gc_stale_profiles(profiles_root: &Path, _max_age: Duration) {
-    let report = recover_owned_profiles(
-        profiles_root,
-        ProfileRecoveryMode::DeleteEphemeralProfile,
-    );
-    if report.failures > 0 || report.profiles_preserved > 0 {
-        tracing::warn!(
-            target: "nomi_browser_engine::profile",
-            summary = %report.safety_summary(),
-            "browser profile compatibility recovery preserved unverified data"
-        );
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -5938,18 +5935,6 @@ mod tests {
         assert_eq!(report.markers_scanned, 1);
         assert_eq!(report.failures, 1);
         assert_eq!(control.terminate_calls, 0);
-    }
-
-    #[test]
-    fn compatibility_gc_ignores_mtime_and_preserves_unmarked_directories() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let root = tmp.path().join("profiles");
-        let unmarked = root.join("old-but-unowned");
-        std::fs::create_dir_all(&unmarked).unwrap();
-
-        gc_stale_profiles(&root, Duration::ZERO);
-
-        assert!(unmarked.exists(), "mtime must never authorize deletion");
     }
 
     #[test]

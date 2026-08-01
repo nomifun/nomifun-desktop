@@ -1,14 +1,11 @@
 //! Shared callback-data encoding for interactive buttons across channels.
 //!
-//! Channels that support inline buttons (Telegram, Discord, Slack, Mattermost)
+//! Channels that support inline buttons (Telegram, Discord, Slack, QQ Bot)
 //! encode an [`ActionButton`] into a compact `custom_id`/`callback_data` string
 //! `"category:action"` or `"category:action:k=v,k=v"`, and decode the reverse
 //! when the user clicks. The `category` prefix mirrors the routing in
 //! `ActionExecutor` so the decoded [`crate::types::UnifiedAction`] lands in the
 //! right handler group.
-//!
-//! Telegram predates this module and keeps its own private copy; Discord and the
-//! later channels share this one.
 
 use std::collections::HashMap;
 

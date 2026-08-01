@@ -3,10 +3,9 @@ use crate::shell::{
     ShellExecutionError, execute_shell_commands_with_shell,
 };
 use crate::substitution::substitute_arguments;
-use crate::types::{ExecutionContext, SkillMetadata};
+use crate::types::SkillMetadata;
 use nomi_types::agent::{AgentInvocationInput, AgentInvocationRunner, AgentToolPolicy};
 use nomi_config::shell::SupervisedShell;
-use std::path::PathBuf;
 
 /// Prepare skill content for inline execution.
 ///
@@ -15,17 +14,8 @@ use std::path::PathBuf;
 /// 2. Perform variable substitution (arguments + env vars).
 /// 3. Execute any embedded shell commands (skipped for MCP skills).
 ///
-/// The `session_id` is `None` in Phase 3; it will be wired in Phase 6.
-pub async fn prepare_inline_content(
-    skill: &SkillMetadata,
-    args: Option<&str>,
-    session_id: Option<&str>,
-    cwd: &str,
-) -> Result<String, ShellExecutionError> {
-    let shell = SupervisedShell::standalone(PathBuf::from(cwd));
-    prepare_inline_content_with_shell(skill, args, session_id, cwd, &shell).await
-}
-
+/// Runs shell commands through the caller-provided `shell` so turn
+/// cancellation can fence every command.
 pub async fn prepare_inline_content_with_shell(
     skill: &SkillMetadata,
     args: Option<&str>,
@@ -67,22 +57,6 @@ fn normalize_path_separators(path: &str) -> String {
     }
 }
 
-/// Check whether a skill can be executed in inline mode.
-///
-/// Returns an error if the skill requires fork execution context.
-/// Retained for test compatibility — SkillTool no longer calls this directly;
-/// it uses an inline/fork match branch instead.
-pub fn check_execution_context(skill: &SkillMetadata) -> Result<(), String> {
-    if skill.execution_context == ExecutionContext::Fork {
-        return Err(format!(
-            "Skill '{}' requires fork execution context, \
-             which requires fork support. This function only validates inline context.",
-            skill.name
-        ));
-    }
-    Ok(())
-}
-
 /// Execute a fork-mode skill through an isolated delegated Agent.
 ///
 /// Steps:
@@ -90,25 +64,9 @@ pub fn check_execution_context(skill: &SkillMetadata) -> Result<(), String> {
 /// 2. Build one AgentInvocationInput from skill metadata.
 /// 3. Invoke the shared one-Agent primitive and await its result.
 /// 4. Return the delegated Agent's output text, or an error string on failure.
-pub async fn execute_fork(
-    skill: &SkillMetadata,
-    args: Option<&str>,
-    session_id: Option<&str>,
-    cwd: &str,
-    invocation_runner: &dyn AgentInvocationRunner,
-) -> Result<String, String> {
-    let shell = SupervisedShell::standalone(PathBuf::from(cwd));
-    execute_fork_with_shell(
-        skill,
-        args,
-        session_id,
-        cwd,
-        invocation_runner,
-        &shell,
-    )
-    .await
-}
-
+///
+/// Runs shell commands through the caller-provided `shell` so turn
+/// cancellation can fence every command.
 pub async fn execute_fork_with_shell(
     skill: &SkillMetadata,
     args: Option<&str>,
@@ -152,6 +110,18 @@ pub async fn execute_fork_with_shell(
 mod tests {
     use super::*;
     use crate::types::{ExecutionContext, LoadedFrom, SkillMetadata, SkillSource};
+    use std::path::PathBuf;
+
+    /// Test helper: run `prepare_inline_content_with_shell` with a standalone shell.
+    async fn prepare_inline_content(
+        skill: &SkillMetadata,
+        args: Option<&str>,
+        session_id: Option<&str>,
+        cwd: &str,
+    ) -> Result<String, ShellExecutionError> {
+        let shell = SupervisedShell::standalone(PathBuf::from(cwd));
+        prepare_inline_content_with_shell(skill, args, session_id, cwd, &shell).await
+    }
 
     fn make_skill(content: &str, skill_root: Option<&str>) -> SkillMetadata {
         SkillMetadata {
@@ -170,7 +140,6 @@ mod tests {
             execution_context: ExecutionContext::Inline,
             agent: None,
             effort: None,
-            shell: None,
             paths: Vec::new(),
             hooks_raw: None,
             source: SkillSource::User,
@@ -230,20 +199,6 @@ mod tests {
             .unwrap();
         assert!(result.contains("Session: sess-abc"));
     }
-
-    #[test]
-    fn test_check_execution_context_inline_ok() {
-        let skill = make_skill("", None);
-        assert!(check_execution_context(&skill).is_ok());
-    }
-
-    #[test]
-    fn test_check_execution_context_fork_err() {
-        let mut skill = make_skill("", None);
-        skill.execution_context = ExecutionContext::Fork;
-        let err = check_execution_context(&skill).unwrap_err();
-        assert!(err.contains("fork execution context"));
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -254,6 +209,18 @@ mod tests {
 mod supplemental_tests {
     use super::*;
     use crate::types::{ExecutionContext, LoadedFrom, SkillMetadata, SkillSource};
+    use std::path::PathBuf;
+
+    /// Test helper: run `prepare_inline_content_with_shell` with a standalone shell.
+    async fn prepare_inline_content(
+        skill: &SkillMetadata,
+        args: Option<&str>,
+        session_id: Option<&str>,
+        cwd: &str,
+    ) -> Result<String, ShellExecutionError> {
+        let shell = SupervisedShell::standalone(PathBuf::from(cwd));
+        prepare_inline_content_with_shell(skill, args, session_id, cwd, &shell).await
+    }
 
     fn make_skill_full(
         name: &str,
@@ -278,7 +245,6 @@ mod supplemental_tests {
             execution_context: context,
             agent: None,
             effort: None,
-            shell: None,
             paths: Vec::new(),
             hooks_raw: None,
             source: SkillSource::User,
@@ -366,30 +332,6 @@ mod supplemental_tests {
             .await
             .unwrap();
         assert_eq!(result, "Find main in codebase");
-    }
-
-    // TC-10.x: fork context check
-    #[test]
-    fn tc_10_x_check_context_fork_returns_err() {
-        let skill = make_skill_full("fork-skill", "body", None, vec![], ExecutionContext::Fork);
-        let result = check_execution_context(&skill);
-        assert!(result.is_err());
-        let msg = result.unwrap_err();
-        assert!(msg.contains("fork-skill"));
-        assert!(msg.contains("fork execution context"));
-    }
-
-    // TC-10.x: inline context check returns Ok
-    #[test]
-    fn tc_10_x_check_context_inline_returns_ok() {
-        let skill = make_skill_full(
-            "inline-skill",
-            "body",
-            None,
-            vec![],
-            ExecutionContext::Inline,
-        );
-        assert!(check_execution_context(&skill).is_ok());
     }
 
     // -----------------------------------------------------------------------
@@ -513,16 +455,30 @@ mod supplemental_tests {
 
 #[cfg(test)]
 mod phase7_tests {
+    use std::path::PathBuf;
     use std::sync::Mutex;
 
     use async_trait::async_trait;
 
-    use super::execute_fork;
+    use super::execute_fork_with_shell;
     use crate::types::{EffortLevel, ExecutionContext, LoadedFrom, SkillMetadata, SkillSource};
+    use nomi_config::shell::SupervisedShell;
     use nomi_types::message::TokenUsage;
     use nomi_types::agent::{
         AgentInvocationInput, AgentInvocationOutput, AgentInvocationRunner,
     };
+
+    /// Test helper: run `execute_fork_with_shell` with a standalone shell.
+    async fn execute_fork(
+        skill: &SkillMetadata,
+        args: Option<&str>,
+        session_id: Option<&str>,
+        cwd: &str,
+        invocation_runner: &dyn AgentInvocationRunner,
+    ) -> Result<String, String> {
+        let shell = SupervisedShell::standalone(PathBuf::from(cwd));
+        execute_fork_with_shell(skill, args, session_id, cwd, invocation_runner, &shell).await
+    }
 
     // ---------------------------------------------------------------------------
     // Mock runner captures the unified input and returns a preset output.
@@ -595,7 +551,6 @@ mod phase7_tests {
             execution_context: ExecutionContext::Fork,
             agent: None,
             effort: None,
-            shell: None,
             paths: Vec::new(),
             hooks_raw: None,
             source: SkillSource::User,

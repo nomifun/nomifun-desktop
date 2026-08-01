@@ -10,7 +10,8 @@ import { DeleteFour, DownloadOne, Erase, Info, Lock, Pic, PreviewOpen, SaveOne, 
 import { useTranslation } from 'react-i18next';
 import type { ImageEditorMode } from '../../editor';
 import { useCanvasNode } from '../CanvasNodeContext';
-import { isImageFile, pickFiles, useWorkshopMedia } from '../media';
+import { isImageFile, pickFiles } from '../media';
+import { useWorkshopObjectUrl } from '../../assets/useWorkshopMedia';
 import type { ImageFlowNode } from '../model';
 import { KIND_META } from '../model';
 import { HoverToolbar, NodeCard, NodeHandles, ResizeFrame, ToolButton, UploadPlaceholder } from './nodeShared';
@@ -25,7 +26,7 @@ const EDIT_MODES: { mode: ImageEditorMode; labelKey: string; fallback: string }[
 function ImageNodeImpl({ id, data, selected }: NodeProps<ImageFlowNode>) {
   const { t } = useTranslation();
   const api = useCanvasNode();
-  const media = useWorkshopMedia(data.assetId);
+  const media = useWorkshopObjectUrl(data.assetId);
   const [hover, setHover] = useState(false);
   const [editOpen, setEditOpen] = useState(false);
 

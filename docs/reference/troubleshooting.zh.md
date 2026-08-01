@@ -67,7 +67,7 @@ host 参数必须能被解析为 IP 地址（`127.0.0.1`、`0.0.0.0`、某个具
 该端点会用恒定时间的 bcrypt 比对存储的哈希。如果你怀疑数据损坏：
 停止服务、备份数据目录，通过 `installation_identity.owner_user_id` 找到
 安装所有者，然后查看该用户的 `password_hash` 列。可以做精细的修复（在本地模式下使用
-`/api/auth/internal/users/{id}/password`），但最简单的路径是从备份
+`POST /api/webui/reset-password`），但最简单的路径是从备份
 恢复或重新初始化。
 
 ### 用一个含糊的校验错误拒绝"用户名/密码"
@@ -160,7 +160,7 @@ nomicore doctor
 
 `/api/star-office/detect` 路由会在系统中探测 LibreOffice。Office 预览
 功能（`/api/word-preview/*`、`/api/excel-preview/*`、
-`/api/ppt-preview/*`、`/api/document/convert`）需要 LibreOffice 才能
+`/api/ppt-preview/*`）需要 LibreOffice 才能
 渲染文档。
 
 - Linux：`apt install libreoffice`（或同等发行版命令）。

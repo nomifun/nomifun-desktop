@@ -329,7 +329,7 @@ pub async fn build_backend_for_fixture_headful_with_downloads(
 }
 
 // 构造参数随安全配置增长（download/full_power/persistent/firewall/egress/storage/dns_resolver）；
-// 与 build_backend / from_launched 同源的已知取舍（见 cdp.rs 的 too_many_arguments allow + EngineRuntimeParams TODO）。
+// 与 from_launched 同源的已知取舍（见 cdp.rs 的 too_many_arguments allow + EngineRuntimeParams TODO）。
 #[allow(clippy::too_many_arguments)]
 async fn build_backend_for_fixture_inner(
     profile: &str,

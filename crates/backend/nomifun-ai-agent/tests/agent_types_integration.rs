@@ -13,7 +13,6 @@ use nomifun_ai_agent::manager::nomi::NomiAgentManager;
 use nomifun_ai_agent::runtime_registry::AgentRuntimeFactory;
 use nomifun_ai_agent::types::{AgentRuntimeBuildOptions, NomiResolvedConfig, SendMessageData};
 use nomifun_ai_agent::*;
-use nomifun_ai_agent::{SkillIndex, build_system_instructions_with_skills_index};
 use nomifun_common::{AgentKillReason, AgentType, ConversationStatus, TimestampMs, now_ms};
 use serde_json::json;
 use std::sync::atomic::{AtomicI64, Ordering};
@@ -115,7 +114,6 @@ fn make_nomi_config() -> NomiResolvedConfig {
         bedrock_config: None,
         computer_use: false,
         browser_use: false,
-        browser_silent: false,
         browser_source: "managed".to_owned(),
         browser_full_power: false,
         browser_persistent_login: false,
@@ -285,36 +283,6 @@ async fn workspace_browse_reads_directory() {
         .collect();
     assert!(file_names.contains(&"Cargo.toml"));
     assert!(file_names.contains(&"README.md"));
-}
-
-// ---------------------------------------------------------------------------
-// build_system_instructions_with_skills_index (M-16 fix)
-// ---------------------------------------------------------------------------
-
-#[test]
-fn build_system_instructions_with_skills_index_empty() {
-    let result = build_system_instructions_with_skills_index("Base prompt", &[]);
-    assert_eq!(result, "Base prompt");
-}
-
-#[test]
-fn build_system_instructions_with_skills_index_appends_index() {
-    let skills = vec![
-        SkillIndex {
-            name: "review".into(),
-            description: "Code review".into(),
-        },
-        SkillIndex {
-            name: "debug".into(),
-            description: "Debugging".into(),
-        },
-    ];
-    let result = build_system_instructions_with_skills_index("You are an AI assistant.", &skills);
-    assert!(result.starts_with("You are an AI assistant."));
-    assert!(result.contains("## Available Skills"));
-    assert!(result.contains("- **review**: Code review"));
-    assert!(result.contains("- **debug**: Debugging"));
-    assert!(result.contains("[LOAD_SKILL: skill-name]"));
 }
 
 // ---------------------------------------------------------------------------

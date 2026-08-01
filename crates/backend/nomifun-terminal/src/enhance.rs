@@ -96,13 +96,6 @@ pub fn resolve_agent_family(
     args.iter().find_map(|a| family_from_stem(a))
 }
 
-/// Resolve a launch program (absolute path or bare name) to a known agent CLI
-/// by its lowercased file stem. Thin wrapper over `resolve_agent_family` for
-/// call sites that only have the program (no args / no declared backend).
-pub fn detect_agent_cli(program: &str) -> Option<AgentCli> {
-    resolve_agent_family(program, &[], None)
-}
-
 impl AgentCli {
     /// Whether this CLI family has a lifecycle-hook renderer (Stop → TurnEnd)
     /// in `apply_enhancement`. Terminal AutoWork requires this: it is the ONLY
@@ -564,16 +557,22 @@ mod tests {
     }
 
     #[test]
-    fn detect_agent_cli_by_stem_case_and_path_insensitive() {
-        assert_eq!(detect_agent_cli("claude"), Some(AgentCli::Claude));
-        assert_eq!(detect_agent_cli("/usr/local/bin/claude"), Some(AgentCli::Claude));
-        assert_eq!(detect_agent_cli("codex"), Some(AgentCli::Codex));
-        assert_eq!(detect_agent_cli("/Users/u/.bun/bin/Codex"), Some(AgentCli::Codex));
-        assert_eq!(detect_agent_cli("gemini"), Some(AgentCli::Gemini));
+    fn resolve_agent_family_by_stem_case_and_path_insensitive() {
+        assert_eq!(resolve_agent_family("claude", &[], None), Some(AgentCli::Claude));
+        assert_eq!(
+            resolve_agent_family("/usr/local/bin/claude", &[], None),
+            Some(AgentCli::Claude)
+        );
+        assert_eq!(resolve_agent_family("codex", &[], None), Some(AgentCli::Codex));
+        assert_eq!(
+            resolve_agent_family("/Users/u/.bun/bin/Codex", &[], None),
+            Some(AgentCli::Codex)
+        );
+        assert_eq!(resolve_agent_family("gemini", &[], None), Some(AgentCli::Gemini));
         // Unknown / shells / near-misses → None (honest: no injection).
-        assert_eq!(detect_agent_cli("/bin/bash"), None);
-        assert_eq!(detect_agent_cli("claude-helper"), None);
-        assert_eq!(detect_agent_cli(""), None);
+        assert_eq!(resolve_agent_family("/bin/bash", &[], None), None);
+        assert_eq!(resolve_agent_family("claude-helper", &[], None), None);
+        assert_eq!(resolve_agent_family("", &[], None), None);
     }
 
     #[test]

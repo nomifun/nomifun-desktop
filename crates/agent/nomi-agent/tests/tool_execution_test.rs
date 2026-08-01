@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use common::{MockTool, auto_approve_confirmer};
 use nomi_agent::tool_execution::{
-    ProviderToolAuthority, execute_tool_calls, execute_tool_calls_with_approval,
+    ProviderToolAuthority, execute_tool_calls_scoped, execute_tool_calls_with_approval,
 };
 use nomi_compact::CompactionLevel;
 use nomi_config::hooks::{HookDef, HookEngine, HooksConfig};
@@ -89,10 +89,11 @@ async fn test_execute_single_tool_call() {
     let tool_calls = vec![make_tool_use("call-1", "echo")];
     let confirmer = auto_approve_confirmer();
 
-    let results = execute_tool_calls(
+    let results = execute_tool_calls_scoped(
         &registry,
         &tool_calls,
         &ProviderToolAuthority::from_request_tools(&registry.to_tool_defs()),
+        "",
         &confirmer,
         None,
         CompactionLevel::Off,
@@ -130,10 +131,11 @@ async fn test_execute_concurrent_safe_tools() {
     ];
     let confirmer = auto_approve_confirmer();
 
-    let results = execute_tool_calls(
+    let results = execute_tool_calls_scoped(
         &registry,
         &tool_calls,
         &ProviderToolAuthority::from_request_tools(&registry.to_tool_defs()),
+        "",
         &confirmer,
         None,
         CompactionLevel::Off,
@@ -174,10 +176,11 @@ async fn test_execute_non_concurrent_tools_sequential() {
     ];
     let confirmer = auto_approve_confirmer();
 
-    let results = execute_tool_calls(
+    let results = execute_tool_calls_scoped(
         &registry,
         &tool_calls,
         &ProviderToolAuthority::from_request_tools(&registry.to_tool_defs()),
+        "",
         &confirmer,
         None,
         CompactionLevel::Off,
@@ -219,10 +222,11 @@ async fn test_execute_non_concurrent_tools_stops_after_error() {
     ];
     let confirmer = auto_approve_confirmer();
 
-    let results = execute_tool_calls(
+    let results = execute_tool_calls_scoped(
         &registry,
         &tool_calls,
         &ProviderToolAuthority::from_request_tools(&registry.to_tool_defs()),
+        "",
         &confirmer,
         None,
         CompactionLevel::Off,
@@ -308,10 +312,11 @@ async fn test_unknown_tool_returns_error() {
     let tool_calls = vec![make_tool_use("id-x", "nonexistent_tool")];
     let confirmer = auto_approve_confirmer();
 
-    let results = execute_tool_calls(
+    let results = execute_tool_calls_scoped(
         &registry,
         &tool_calls,
         &ProviderToolAuthority::from_request_tools(&registry.to_tool_defs()),
+        "",
         &confirmer,
         None,
         CompactionLevel::Off,
@@ -345,10 +350,11 @@ async fn test_tool_error_returns_error_result() {
     let tool_calls = vec![make_tool_use("id-fail", "fail_tool")];
     let confirmer = auto_approve_confirmer();
 
-    let results = execute_tool_calls(
+    let results = execute_tool_calls_scoped(
         &registry,
         &tool_calls,
         &ProviderToolAuthority::from_request_tools(&registry.to_tool_defs()),
+        "",
         &confirmer,
         None,
         CompactionLevel::Off,
@@ -385,10 +391,11 @@ async fn test_pre_hook_blocks_tool() {
     let tool_calls = vec![make_tool_use("id-blocked", "echo")];
     let confirmer = auto_approve_confirmer();
 
-    let results = execute_tool_calls(
+    let results = execute_tool_calls_scoped(
         &registry,
         &tool_calls,
         &ProviderToolAuthority::from_request_tools(&registry.to_tool_defs()),
+        "",
         &confirmer,
         Some(&mut hook_engine),
         CompactionLevel::Off,
@@ -432,10 +439,11 @@ async fn test_post_hook_runs_after_tool() {
     let tool_calls = vec![make_tool_use("id-post", "echo")];
     let confirmer = auto_approve_confirmer();
 
-    let results = execute_tool_calls(
+    let results = execute_tool_calls_scoped(
         &registry,
         &tool_calls,
         &ProviderToolAuthority::from_request_tools(&registry.to_tool_defs()),
+        "",
         &confirmer,
         Some(&mut hook_engine),
         CompactionLevel::Off,
@@ -469,10 +477,11 @@ async fn test_tool_result_truncation() {
     let tool_calls = vec![make_tool_use("id-big", "big_tool")];
     let confirmer = auto_approve_confirmer();
 
-    let results = execute_tool_calls(
+    let results = execute_tool_calls_scoped(
         &registry,
         &tool_calls,
         &ProviderToolAuthority::from_request_tools(&registry.to_tool_defs()),
+        "",
         &confirmer,
         None,
         CompactionLevel::Off,

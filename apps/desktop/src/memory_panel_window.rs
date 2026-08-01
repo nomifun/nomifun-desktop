@@ -19,6 +19,7 @@ pub struct PhysicalRect {
 }
 
 impl PhysicalRect {
+    #[cfg(test)]
     pub fn new(x: i32, y: i32, width: u32, height: u32) -> Self {
         Self { x, y, width, height }
     }
@@ -38,6 +39,7 @@ struct MemoryPanelSession {
     rect: Option<PhysicalRect>,
 }
 
+#[cfg(test)]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MemoryPanelSessionSnapshot {
     pub request_id: Option<String>,
@@ -67,6 +69,7 @@ impl MemoryPanelWindowState {
         self.0.lock().map(|state| state.request_id.as_deref() == Some(request_id) && state.owner_companion_id.as_deref() == Some(owner_companion_id) && state.rect.is_some()).unwrap_or(false)
     }
 
+    #[cfg(test)]
     pub fn is_empty(&self) -> bool {
         self.0.lock().map(|state| state.request_id.is_none()).unwrap_or(false)
     }
@@ -110,6 +113,7 @@ impl MemoryPanelWindowState {
         invalid
     }
 
+    #[cfg(test)]
     pub fn snapshot(&self) -> MemoryPanelSessionSnapshot {
         self.0.lock().map(|state| MemoryPanelSessionSnapshot { request_id: state.request_id.clone(), owner_companion_id: state.owner_companion_id.clone(), rect: state.rect }).unwrap_or(MemoryPanelSessionSnapshot { request_id: None, owner_companion_id: None, rect: None })
     }

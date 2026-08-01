@@ -873,29 +873,7 @@ fn sample_browser_resources(
 }
 
 #[cfg(feature = "browser-use")]
-const BROWSER_INVENTORY_EVENT_NAME: &str = "browser.inventory.changed";
-#[cfg(feature = "browser-use")]
-const BROWSER_INVENTORY_RESYNC_CHANGE_KIND: &str = "resync_required";
-
-/// Build a protocol-compatible invalidation event for a lossy inventory hop.
-///
-/// This intentionally carries no synthetic `sequence`: only the Hub owns that
-/// counter, and inventing one here could hide a real gap. Existing clients
-/// already refresh on every inventory event; newer clients can use the
-/// additive marker to explicitly classify the refresh as a full resync.
-#[cfg(feature = "browser-use")]
-fn browser_inventory_resync_event(
-    skipped: u64,
-) -> nomifun_api_types::WebSocketMessage<serde_json::Value> {
-    nomifun_api_types::WebSocketMessage::new(
-        BROWSER_INVENTORY_EVENT_NAME,
-        serde_json::json!({
-            "change_kind": BROWSER_INVENTORY_RESYNC_CHANGE_KIND,
-            "resync_required": true,
-            "skipped": skipped,
-        }),
-    )
-}
+use crate::browser_inventory_events::{BROWSER_INVENTORY_EVENT_NAME, browser_inventory_resync_event};
 
 #[cfg(feature = "browser-use")]
 async fn forward_browser_inventory_events(
@@ -1145,13 +1123,6 @@ impl RetainedAppServicesConstructionError {
         }
     }
 
-    pub(crate) async fn retry_cleanup(&self) -> anyhow::Result<()> {
-        match &self.authority {
-            Some(authority) => authority.cleanup().await,
-            None => Ok(()),
-        }
-    }
-
     pub(crate) fn into_parts(
         self,
     ) -> (
@@ -1331,7 +1302,9 @@ async fn finish_startup_cleanup(
 pub(crate) struct RetainedStartupCleanupError {
     error: anyhow::Error,
     cleanup_error: anyhow::Error,
-    authority: Arc<StartupCleanupAuthority>,
+    /// Held only for RAII retention: keeps the cleanup authority (and the
+    /// resources it guards) alive while this error propagates.
+    _authority: Arc<StartupCleanupAuthority>,
 }
 
 impl RetainedStartupCleanupError {
@@ -1343,26 +1316,8 @@ impl RetainedStartupCleanupError {
         Self {
             error,
             cleanup_error,
-            authority,
+            _authority: authority,
         }
-    }
-
-    pub(crate) fn authority(&self) -> Arc<StartupCleanupAuthority> {
-        Arc::clone(&self.authority)
-    }
-
-    pub(crate) async fn retry_cleanup(&self) -> anyhow::Result<()> {
-        self.authority.cleanup().await
-    }
-
-    pub(crate) fn into_parts(
-        self,
-    ) -> (
-        anyhow::Error,
-        anyhow::Error,
-        Arc<StartupCleanupAuthority>,
-    ) {
-        (self.error, self.cleanup_error, self.authority)
     }
 }
 
@@ -3461,7 +3416,10 @@ mod tests {
             let event: nomifun_api_types::WebSocketMessage<serde_json::Value> =
                 serde_json::from_str(&text).unwrap();
             assert_eq!(event.name, BROWSER_INVENTORY_EVENT_NAME);
-            assert_eq!(event.data["change_kind"], BROWSER_INVENTORY_RESYNC_CHANGE_KIND);
+            assert_eq!(
+                event.data["change_kind"],
+                crate::browser_inventory_events::BROWSER_INVENTORY_RESYNC_CHANGE_KIND
+            );
             assert_eq!(event.data["resync_required"], true);
             assert_eq!(event.data["skipped"], 1);
             assert!(event.data.get("sequence").is_none());

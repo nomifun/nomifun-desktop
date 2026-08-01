@@ -701,6 +701,7 @@ async fn create_engine_drop_reaps_hidden_host_runtime_and_allows_stable_relaunch
 async fn managed_host_real_chromium_acceptance_matrix() {
     let mut fixture = LocalFixture::start().await;
     let temp = tempfile::tempdir().unwrap();
+    #[cfg_attr(not(windows), allow(unused_variables))]
     let primary_profile = temp.path().join("primary-profile");
     let primary_host = Arc::new(
         ManagedBrowserHost::launch(managed_config(temp.path(), "primary-profile", false))
@@ -877,6 +878,7 @@ async fn managed_host_real_chromium_acceptance_matrix() {
 
     // Anonymous is a separate ephemeral host/profile.  Prove both directions:
     // it cannot read Primary, and a cookie it writes never flows to Primary.
+    #[cfg_attr(not(windows), allow(unused_variables))]
     let anonymous_profile = temp.path().join("anonymous-profile");
     let anonymous_host = Arc::new(
         ManagedBrowserHost::launch(managed_config(temp.path(), "anonymous-profile", true))
@@ -1082,6 +1084,7 @@ async fn managed_host_sixteen_lane_real_chromium_acceptance() {
 
     let temp = tempfile::tempdir().unwrap();
     let profile_name = "sixteen-lane-profile";
+    #[cfg_attr(not(windows), allow(unused_variables))]
     let profile = temp.path().join(profile_name);
     let host = Arc::new(
         ManagedBrowserHost::launch(managed_config(temp.path(), profile_name, false))

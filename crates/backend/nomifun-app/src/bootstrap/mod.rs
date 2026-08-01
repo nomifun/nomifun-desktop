@@ -30,7 +30,6 @@ pub use environment::{
 pub(crate) use environment::{
     acquire_distinct_work_root_lock, acquire_work_root_lock,
 };
-pub(crate) use relocation::rewrite_relocated_paths;
 pub use server_lock::{BootServerLockAuthority, SERVER_LOCK_FILE, ServerLock};
 pub use webui_dist::{
     UI_BUILD_MANIFEST_FILE, UI_BUILD_MANIFEST_SCHEMA, UiBuildManifest, ui_api_contract_version,

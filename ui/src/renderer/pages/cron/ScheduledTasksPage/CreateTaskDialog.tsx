@@ -8,9 +8,9 @@ import React, { useState, useMemo, useEffect, useCallback } from 'react';
 import useSWR from 'swr';
 import { useTranslation } from 'react-i18next';
 import { Form, Input, Select, Message, TimePicker, Radio, Switch } from '@arco-design/web-react';
-import ModalWrapper from '@renderer/components/base/ModalWrapper';
 import { Robot } from '@icon-park/react';
 import { ipcBridge } from '@/common';
+import NomiModal from '@renderer/components/base/NomiModal';
 import type { ICreateCronJobParams, ICronAgentConfig, ICronJob } from '@/common/adapter/ipcBridge';
 import { useConversationAgents } from '@renderer/pages/conversation/hooks/useConversationAgents';
 import { resolveAgentLogo } from '@renderer/utils/model/agentLogo';
@@ -691,7 +691,7 @@ const CreateTaskDialog: React.FC<CreateTaskDialogProps> = ({
   ) : null;
 
   return (
-    <ModalWrapper
+    <NomiModal
       title={isEditMode ? t('cron.page.editTask') : t('cron.page.createTask')}
       visible={visible}
       onCancel={onClose}
@@ -876,7 +876,7 @@ const CreateTaskDialog: React.FC<CreateTaskDialogProps> = ({
           )}
         </Form>
       </div>
-    </ModalWrapper>
+    </NomiModal>
   );
 };
 

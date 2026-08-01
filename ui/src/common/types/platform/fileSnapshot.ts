@@ -19,7 +19,7 @@ export type CompareResult = {
   unstaged: FileChangeInfo[];
 };
 
-/** Snapshot metadata returned by init and getInfo */
+/** Snapshot metadata returned by init */
 export type SnapshotInfo = {
   mode: 'git-repo' | 'snapshot' | 'disabled';
   branch: string | null;

@@ -14,6 +14,7 @@ use tracing::info;
 use crate::constants::DISCORD_MESSAGE_LIMIT;
 use crate::error::ChannelError;
 use crate::plugin::{ChannelPlugin, PluginCallbacks, SharedPluginStatus};
+use crate::plugins::util::truncate_message;
 use crate::plugins::callback::format_callback_data;
 use crate::types::{BotInfo, PluginConfig, PluginStatus, PluginType, UnifiedOutgoingMessage};
 
@@ -141,7 +142,6 @@ impl ChannelPlugin for DiscordPlugin {
             token,
             self_bot_id,
             callbacks.message_tx,
-            callbacks.confirm_tx,
             self.status.clone(),
             shutdown_rx,
         )));
@@ -283,15 +283,6 @@ fn build_components(message: &UnifiedOutgoingMessage) -> Option<Vec<ActionRow>> 
     if rows.is_empty() { None } else { Some(rows) }
 }
 
-/// Truncate text at a char boundary to `limit`, appending "..." if cut.
-fn truncate_message(text: &str, limit: usize) -> String {
-    if text.chars().count() <= limit {
-        return text.to_string();
-    }
-    let truncated: String = text.chars().take(limit.saturating_sub(3)).collect();
-    format!("{truncated}...")
-}
-
 /// Discord custom_id is capped at 100 chars; truncate defensively.
 fn truncate_custom_id(id: &str) -> String {
     if id.len() <= CUSTOM_ID_LIMIT {
@@ -394,21 +385,6 @@ mod tests {
         let comps = build_create_message_request(&m).components.unwrap();
         assert_eq!(comps.len(), 5); // max 5 rows
         assert_eq!(comps[0].components.len(), 5); // max 5 buttons/row
-    }
-
-    #[test]
-    fn truncate_respects_limit() {
-        assert_eq!(truncate_message("short", 2000), "short");
-        let long = "a".repeat(2100);
-        let out = truncate_message(&long, 2000);
-        assert_eq!(out.chars().count(), 2000);
-        assert!(out.ends_with("..."));
-    }
-
-    #[test]
-    fn truncate_unicode_boundary() {
-        let text = "你好世界测试";
-        assert_eq!(truncate_message(text, 4), "你...");
     }
 
     #[test]

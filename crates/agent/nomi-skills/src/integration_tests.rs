@@ -10,18 +10,30 @@ use std::fs;
 use std::path::Path;
 use tempfile::TempDir;
 
-use crate::conditional::ConditionalSkillManager;
 use crate::context_modifier::ContextModifier;
-use crate::executor::prepare_inline_content;
+use crate::executor::prepare_inline_content_with_shell;
 use crate::hooks::{parse_skill_hooks, to_hook_defs};
 use crate::loader::load_skills_from_dir;
 use crate::permissions::{SkillPermission, SkillPermissionChecker};
 use crate::prompt::format_skills_within_budget;
+use crate::shell::ShellExecutionError;
 use crate::types::{EffortLevel, ExecutionContext, LoadedFrom, SkillMetadata, SkillSource};
+use nomi_config::shell::SupervisedShell;
 
 // ---------------------------------------------------------------------------
 // Shared helpers
 // ---------------------------------------------------------------------------
+
+/// Test helper: run `prepare_inline_content_with_shell` with a standalone shell.
+async fn prepare_inline_content(
+    skill: &SkillMetadata,
+    args: Option<&str>,
+    session_id: Option<&str>,
+    cwd: &str,
+) -> Result<String, ShellExecutionError> {
+    let shell = SupervisedShell::standalone(std::path::PathBuf::from(cwd));
+    prepare_inline_content_with_shell(skill, args, session_id, cwd, &shell).await
+}
 
 /// Build a minimal SkillMetadata with sensible defaults.
 fn make_skill(name: &str, content: &str) -> SkillMetadata {
@@ -41,7 +53,6 @@ fn make_skill(name: &str, content: &str) -> SkillMetadata {
         execution_context: ExecutionContext::Inline,
         agent: None,
         effort: None,
-        shell: None,
         paths: Vec::new(),
         hooks_raw: None,
         source: SkillSource::User,
@@ -246,68 +257,6 @@ fn tc_e2e_4d_permission_ask_fallback() {
         matches!(result, SkillPermission::Ask { .. }),
         "should fall through to Ask, got: {result:?}"
     );
-}
-
-// ---------------------------------------------------------------------------
-// TC-E2E-5a: Conditional activation — dormant when path does not match
-// AC-8: skill with paths: ["*.rs"] stays dormant when context file is *.py
-// ---------------------------------------------------------------------------
-
-#[test]
-fn tc_e2e_5a_conditional_dormant_on_mismatch() {
-    let mut manager = ConditionalSkillManager::new();
-    let mut skill = make_skill("rs-skill", "Rust only");
-    skill.paths = vec!["*.rs".to_string()];
-
-    let unconditional = manager.partition_skills(vec![skill]);
-
-    // Skill should be dormant — not in unconditional list
-    assert!(
-        unconditional.is_empty(),
-        "conditional skill should not be in unconditional list"
-    );
-    assert_eq!(manager.dormant_count(), 1, "skill should be dormant");
-
-    // Activate with a Python file — should NOT match
-    let activated = manager.activate_for_paths(&["/project/main.py"], "/project");
-    assert!(
-        activated.is_empty(),
-        "*.rs skill should not activate for .py file"
-    );
-    assert!(
-        manager.get_activated("rs-skill").is_none(),
-        "skill should remain dormant"
-    );
-    assert!(
-        manager.get_all_activated().is_empty(),
-        "no skills should be in active list"
-    );
-}
-
-// ---------------------------------------------------------------------------
-// TC-E2E-5b: Conditional activation — becomes active when path matches
-// AC-8: skill with paths: ["*.rs"] activates when context file is *.rs
-// ---------------------------------------------------------------------------
-
-#[test]
-fn tc_e2e_5b_conditional_active_on_match() {
-    let mut manager = ConditionalSkillManager::new();
-    let mut skill = make_skill("rs-skill", "Rust only");
-    skill.paths = vec!["*.rs".to_string()];
-
-    let unconditional = manager.partition_skills(vec![skill]);
-    assert!(unconditional.is_empty(), "skill should start dormant");
-
-    // Activate with a Rust file — should match
-    let activated = manager.activate_for_paths(&["/project/main.rs"], "/project");
-    assert_eq!(activated.len(), 1, "skill should be activated");
-    assert!(
-        manager.get_activated("rs-skill").is_some(),
-        "skill should be in activated map"
-    );
-    let active_list = manager.get_all_activated();
-    assert_eq!(active_list.len(), 1, "one skill should be in active list");
-    assert_eq!(active_list[0].name, "rs-skill");
 }
 
 // ---------------------------------------------------------------------------
@@ -871,74 +820,6 @@ fn wb_2d_permission_exact_rule_no_partial_match() {
     assert!(rule.matches("commit"));
     assert!(!rule.matches("commit-amend"));
     assert!(!rule.matches("my:commit"));
-}
-
-// ---------------------------------------------------------------------------
-// WB-3: conditional — activated_names persists across clear_dormant [白盒]
-// ---------------------------------------------------------------------------
-
-#[test]
-fn wb_3a_activated_names_persist_after_clear_dormant() {
-    let mut manager = ConditionalSkillManager::new();
-    let mut skill = make_skill("rs-skill", "body");
-    skill.paths = vec!["*.rs".to_string()];
-
-    manager.partition_skills(vec![skill.clone()]);
-    manager.activate_for_paths(&["/project/main.rs"], "/project");
-    assert!(manager.get_activated("rs-skill").is_some());
-
-    // clear_dormant should not remove activated_names
-    manager.clear_dormant();
-
-    // Re-partition with same skill — it should go to unconditional since it was activated
-    let unconditional = manager.partition_skills(vec![skill]);
-    assert_eq!(
-        unconditional.len(),
-        1,
-        "previously activated skill should be unconditional after reload"
-    );
-}
-
-#[test]
-fn wb_3b_reset_all_clears_everything() {
-    let mut manager = ConditionalSkillManager::new();
-    let mut skill = make_skill("sk", "body");
-    skill.paths = vec!["*.ts".to_string()];
-    manager.partition_skills(vec![skill.clone()]);
-    manager.activate_for_paths(&["/project/app.ts"], "/project");
-
-    manager.reset_all();
-
-    assert_eq!(manager.dormant_count(), 0);
-    assert!(manager.get_all_activated().is_empty());
-
-    // After reset, same skill should be dormant again
-    let unconditional = manager.partition_skills(vec![skill]);
-    assert!(
-        unconditional.is_empty(),
-        "after reset, skill should be dormant again"
-    );
-}
-
-#[test]
-fn wb_3c_dormant_count_reflects_state() {
-    let mut manager = ConditionalSkillManager::new();
-    assert_eq!(manager.dormant_count(), 0);
-
-    let mut s1 = make_skill("s1", "b");
-    s1.paths = vec!["*.rs".to_string()];
-    let mut s2 = make_skill("s2", "b");
-    s2.paths = vec!["*.ts".to_string()];
-
-    manager.partition_skills(vec![s1, s2]);
-    assert_eq!(manager.dormant_count(), 2);
-
-    manager.activate_for_paths(&["/p/f.rs"], "/p");
-    assert_eq!(
-        manager.dormant_count(),
-        1,
-        "one skill activated, one still dormant"
-    );
 }
 
 // ---------------------------------------------------------------------------

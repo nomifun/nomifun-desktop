@@ -218,22 +218,6 @@ export function updateTreeForRename(
 }
 
 /**
- * Recursively collect all file paths from tree items
- */
-export function collectFilePaths(items: IDirOrFile[]): string[] {
-  const paths: string[] = [];
-  for (const item of items) {
-    if (item.isFile && item.fullPath) {
-      paths.push(item.fullPath);
-    }
-    if (item.children && item.children.length > 0) {
-      paths.push(...collectFilePaths(item.children));
-    }
-  }
-  return paths;
-}
-
-/**
  * If there's only one root directory with children, return its children directly.
  * Used to hide root directory when Toolbar serves as first-level directory.
  */

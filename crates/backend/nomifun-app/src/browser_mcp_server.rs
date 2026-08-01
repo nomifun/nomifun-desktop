@@ -77,6 +77,7 @@ impl BrowserMcpShutdownStatus {
         ]))
     }
 
+    #[cfg(test)]
     fn timeout_result(&self, wait: Duration) -> Result<(), String> {
         // The flight may have completed between `timeout` firing and this
         // snapshot. Prefer the cached terminal result over manufacturing an
@@ -231,6 +232,7 @@ async fn wait_for_browser_mcp_shutdown(
     }
 }
 
+#[cfg(test)]
 async fn wait_for_browser_mcp_ingress(
     mut completion: tokio::sync::watch::Receiver<BrowserMcpShutdownStatus>,
 ) -> Result<(), String> {
@@ -399,6 +401,7 @@ impl BrowserMcpLifecycle {
         wait_for_browser_mcp_shutdown(self.completion.subscribe()).await
     }
 
+    #[cfg(test)]
     async fn wait_for_stop_for(&self, wait: Duration) -> Result<(), String> {
         self.begin_stop();
         let completion = self.completion.subscribe();
@@ -604,18 +607,20 @@ impl BrowserMcpServer {
         result
     }
 
+    /// Consuming async shutdown convenience for owners that no longer need the
+    /// server handle.
+    #[cfg(test)]
+    pub(crate) async fn shutdown(self) -> Result<(), String> {
+        self.stop_and_wait().await
+    }
+
+    #[cfg(test)]
     async fn stop_and_wait_for(&self, wait: Duration) -> Result<(), String> {
         let result = self.lifecycle.wait_for_stop_for(wait).await;
         if let Err(error) = &result {
             warn!(%error, "Browser MCP async shutdown did not finish cleanly");
         }
         result
-    }
-
-    /// Consuming async shutdown convenience for owners that no longer need the
-    /// server handle.
-    pub(crate) async fn shutdown(self) -> Result<(), String> {
-        self.stop_and_wait().await
     }
 
     fn stop(&self) {

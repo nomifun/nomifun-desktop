@@ -360,7 +360,7 @@ mod tests {
         assert_eq!(bound.0.data.as_ref().unwrap().len(), 1);
 
         // Same-domain re-bind moves the bot from A to B.
-        put_bindings(&state, &agent_b, vec![cs_bot.clone()]).await.unwrap();
+        let _ = put_bindings(&state, &agent_b, vec![cs_bot.clone()]).await.unwrap();
         assert!(state.service.list_bindings(&agent_a).await.unwrap().is_empty());
         assert_eq!(
             state

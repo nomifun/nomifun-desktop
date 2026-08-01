@@ -168,14 +168,12 @@ async fn setup() -> (ChannelManager, Arc<dyn IChannelRepository>, Arc<MockBroadc
     let repo: Arc<dyn IChannelRepository> = Arc::new(SqliteChannelRepository::new(db.pool().clone()));
     let bc = Arc::new(MockBroadcaster::new());
     let (msg_tx, _msg_rx) = mpsc::channel(16);
-    let (confirm_tx, _confirm_rx) = mpsc::channel(16);
     let mgr = ChannelManager::new(
         repo.clone(),
         bc.clone(),
         OWNER_ID,
         test_key(),
         msg_tx,
-        confirm_tx,
     );
     // Keep db alive by leaking — test process exits anyway
     std::mem::forget(db);

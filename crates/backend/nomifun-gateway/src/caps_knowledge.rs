@@ -13,7 +13,7 @@ use nomifun_common::KnowledgeBaseId;
 use nomifun_common::{CompanionId, ConversationId, TerminalId};
 use nomifun_knowledge::source_url::truncate_to_bytes;
 use nomifun_knowledge::{
-    KnowledgeBinding, UrlFetcher, WriteRequest, WriteSurface, WriteTargetSpec, resolve_write_policy,
+    HttpFetcher, KnowledgeBinding, WriteRequest, WriteSurface, WriteTargetSpec, resolve_write_policy,
 };
 use schemars::JsonSchema;
 use serde::Deserialize;
@@ -273,7 +273,7 @@ fn parse_url_source(urls: Option<Vec<String>>, mode: Option<&str>) -> Result<Opt
     }))
 }
 
-async fn fetch_url_with(fetcher: &UrlFetcher, url: &str) -> Value {
+async fn fetch_url_with(fetcher: &HttpFetcher, url: &str) -> Value {
     match fetcher.fetch_page(url).await {
         Ok(page) => {
             let capped = page.markdown.len() > FETCH_URL_MAX_BYTES;
@@ -403,7 +403,7 @@ async fn autogen(deps: Arc<GatewayDeps>, p: AutogenParams) -> Value {
 }
 
 async fn fetch_url(_deps: Arc<GatewayDeps>, p: FetchUrlParams) -> Value {
-    fetch_url_with(&UrlFetcher::default(), &p.url).await
+    fetch_url_with(&HttpFetcher::default(), &p.url).await
 }
 
 async fn get_binding(deps: Arc<GatewayDeps>, p: GetBindingParams) -> Value {

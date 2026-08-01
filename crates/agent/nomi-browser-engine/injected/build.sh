@@ -14,7 +14,9 @@
 #   @protocol/*   -> vendor/protocol/src/*   （channels.d.ts 是 type-only，编译期擦除）
 #
 # 关键 config（照搬 PW utils/generate_injected.js + 我们的混合架构需要）：
-#   --bundle              内联触达的 @isomorphic 子集（不抽子集，整包 vendor，esbuild tree-shake）
+#   --bundle              内联触达的 @isomorphic 子集（整包 vendor + esbuild tree-shake；
+#                         例外：trace viewer 与 codegen recorder 两个与 InjectedScript
+#                         无关的子树已从 vendor/ 剪除，升级换源后需重新剪除，见 NOTICE）
 #   --format=iife         单 IIFE，注入到 Chromium isolated world 时整体 eval
 #   --global-name=...     IIFE 返回值挂到该全局，注入后 `new <global>.InjectedScript(...)`
 #   --target=es2019       与 PW 一致

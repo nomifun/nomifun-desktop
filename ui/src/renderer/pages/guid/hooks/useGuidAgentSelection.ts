@@ -93,7 +93,6 @@ function resolveDefaultMode(backend: string | undefined, agents: AgentMetadata[]
 
 type UseGuidAgentSelectionOptions = {
   modelList: IProvider[];
-  isGoogleAuth: boolean;
   localeKey: string;
   resetPreset?: boolean;
   /** Pre-select a specific agent by key (e.g. from "Go to Chat" deep-links). */
@@ -107,7 +106,6 @@ type UseGuidAgentSelectionOptions = {
  */
 export const useGuidAgentSelection = ({
   modelList,
-  isGoogleAuth,
   localeKey: _localeKey,
   resetPreset,
   preselectAgentKey,
@@ -178,7 +176,6 @@ export const useGuidAgentSelection = ({
 
   const { isMainAgentAvailable, getEffectiveAgentType } = useAgentAvailability({
     modelList,
-    isGoogleAuth,
     availableAgents,
     resolvePresetAgentType,
   });

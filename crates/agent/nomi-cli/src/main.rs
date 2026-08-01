@@ -9,11 +9,10 @@ use nomi_agent::output::OutputSink;
 use nomi_agent::output::protocol_sink::ProtocolSink;
 use nomi_agent::output::terminal::TerminalSink;
 use nomi_agent::session;
-use nomi_config::auth;
 use nomi_config::config::{self, CliArgs, Config, McpServerConfig, TransportType};
 use nomi_mcp::manager::McpManager;
 use nomi_mcp::tool_proxy::register_single_server_tools;
-use nomi_protocol::commands::{ApprovalScope, ProtocolCommand};
+use nomi_protocol::commands::ProtocolCommand;
 use nomi_protocol::events::ProtocolEvent;
 use nomi_protocol::reader::spawn_stdin_reader;
 use nomi_protocol::writer::{ProtocolEmitter, ProtocolWriter};
@@ -120,14 +119,6 @@ struct Cli {
     #[arg(long)]
     skills_path: bool,
 
-    /// Login with Anthropic account (OAuth device flow)
-    #[arg(long)]
-    login: bool,
-
-    /// Logout (remove saved OAuth credentials)
-    #[arg(long)]
-    logout: bool,
-
     /// Output compaction level: off, safe (default), full
     #[arg(long)]
     compaction: Option<String>,
@@ -172,18 +163,6 @@ async fn main() -> anyhow::Result<()> {
     // Handle --init-config
     if cli.init_config {
         return config::init_config();
-    }
-
-    // Handle --login / --logout
-    if cli.login || cli.logout {
-        let oauth = auth::OAuthManager::new(auth::AuthConfig::default());
-        if cli.login {
-            oauth.login().await?;
-            eprintln!("Login successful! You can now use nomi without --api-key.");
-        } else {
-            oauth.logout()?;
-        }
-        return Ok(());
     }
 
     let terminal = Arc::new(TerminalSink::new(cli.no_color));
@@ -643,11 +622,7 @@ async fn run_json_stream_mode(
         };
 
         match cmd {
-            ProtocolCommand::Message {
-                msg_id,
-                content,
-                files: _,
-            } => {
+            ProtocolCommand::Message { msg_id, content } => {
                 let mut stopped = false;
                 let mut pending_config: Option<PendingConfig> = None;
                 let mut mode_changed = false;
@@ -679,8 +654,10 @@ async fn run_json_stream_mode(
                             }
                             Some(sub_cmd) = cmd_rx.recv() => {
                                 match sub_cmd {
-                                    ProtocolCommand::ToolApprove { call_id, scope: _ } => {
-                                        approval_manager.resolve(&call_id, ToolApprovalResult::Approved);
+                                    ProtocolCommand::ToolApprove { call_id, scope } => {
+                                        // approve() records ApprovalScope::Always as a per-category grant
+                                        // before resolving; resolve() alone would drop the scope.
+                                        approval_manager.approve(&call_id, scope);
                                     }
                                     ProtocolCommand::ToolDeny { call_id, reason } => {
                                         approval_manager.resolve(&call_id, ToolApprovalResult::Denied { reason });
@@ -752,10 +729,9 @@ async fn run_json_stream_mode(
                 break;
             }
             ProtocolCommand::ToolApprove { call_id, scope } => {
-                if matches!(scope, ApprovalScope::Always) {
-                    // Auto-approve all future calls of this tool's category
-                }
-                approval_manager.resolve(&call_id, ToolApprovalResult::Approved);
+                // approve() records ApprovalScope::Always as a per-category grant
+                // before resolving; resolve() alone would drop the scope.
+                approval_manager.approve(&call_id, scope);
             }
             ProtocolCommand::ToolDeny { call_id, reason } => {
                 approval_manager.resolve(&call_id, ToolApprovalResult::Denied { reason });

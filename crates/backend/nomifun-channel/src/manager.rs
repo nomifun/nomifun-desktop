@@ -46,8 +46,6 @@ pub struct ChannelManager {
     /// Sender for incoming messages from all plugins, stamped with their
     /// channel UUIDv7. The `ChannelMessageLoop` holds the receiving end.
     message_tx: mpsc::Sender<ChannelIncoming>,
-    /// Sender for tool confirmation callbacks from all plugins.
-    confirm_tx: mpsc::Sender<(String, String)>,
 }
 
 /// Factory function type for creating plugin instances.
@@ -75,16 +73,6 @@ pub struct EnableChannelSpec {
     pub plugin_type: Option<String>,
     pub companion_id: Option<String>,
     pub owner_domain: Option<String>,
-}
-
-impl EnableChannelSpec {
-    /// Convenience constructor for creating a row by platform type.
-    pub fn legacy(plugin_type: &str) -> Self {
-        Self {
-            plugin_type: Some(plugin_type.to_owned()),
-            ..Default::default()
-        }
-    }
 }
 
 /// Tunables for the plugin health watchdog.
@@ -188,14 +176,12 @@ impl ChannelManager {
     /// - `user_events`: owner-scoped event sink for status updates
     /// - `encryption_key`: 32-byte AES-256-GCM key for credential encryption
     /// - `message_tx`: Channel sender for routing incoming messages
-    /// - `confirm_tx`: Channel sender for tool confirmation callbacks
     pub fn new(
         repo: Arc<dyn IChannelRepository>,
         user_events: Arc<dyn UserEventSink>,
         owner_id: impl Into<Arc<str>>,
         encryption_key: [u8; 32],
         message_tx: mpsc::Sender<ChannelIncoming>,
-        confirm_tx: mpsc::Sender<(String, String)>,
     ) -> Self {
         Self {
             repo,
@@ -204,7 +190,6 @@ impl ChannelManager {
             encryption_key,
             plugins: DashMap::new(),
             message_tx,
-            confirm_tx,
         }
     }
 
@@ -822,11 +807,7 @@ impl ChannelManager {
 
         // Create throwaway channels for the test
         let (msg_tx, _msg_rx) = mpsc::channel(1);
-        let (confirm_tx, _confirm_rx) = mpsc::channel(1);
-        let callbacks = PluginCallbacks {
-            message_tx: msg_tx,
-            confirm_tx,
-        };
+        let callbacks = PluginCallbacks { message_tx: msg_tx };
 
         plugin.initialize(config, callbacks).await?;
 
@@ -1145,10 +1126,7 @@ impl ChannelManager {
                 }
             }
         });
-        PluginCallbacks {
-            message_tx: tx,
-            confirm_tx: self.confirm_tx.clone(),
-        }
+        PluginCallbacks { message_tx: tx }
     }
 
     /// Stops and removes an active plugin instance.
@@ -1817,14 +1795,12 @@ mod tests {
         let repo = Arc::new(MockRepo::new());
         let broadcaster = Arc::new(MockBroadcaster::new());
         let (msg_tx, msg_rx) = mpsc::channel(16);
-        let (confirm_tx, _confirm_rx) = mpsc::channel(16);
         let mgr = ChannelManager::new(
             repo.clone(),
             broadcaster.clone(),
             OWNER_ID,
             test_key(),
             msg_tx,
-            confirm_tx,
         );
         (mgr, repo, broadcaster, msg_rx)
     }

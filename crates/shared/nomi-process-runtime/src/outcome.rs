@@ -156,22 +156,3 @@ pub enum ProcessOutcome {
         cleanup: CleanupReport,
     },
 }
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum ProcessEvent {
-    Output {
-        seq: u64,
-        stream: OutputStream,
-        bytes: Vec<u8>,
-        text: String,
-        encoding: EncodingMetadata,
-    },
-    StateChanged {
-        seq: u64,
-        state: ProcessState,
-    },
-    OutputDropped {
-        seq: u64,
-        bytes: u64,
-    },
-}

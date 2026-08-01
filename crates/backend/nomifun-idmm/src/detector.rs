@@ -4,13 +4,8 @@
 //!  * `TerminalDetector` — feeds raw PTY bytes through the shared
 //!    `AnsiLineScanner` and classifies completed lines via built-in pattern
 //!    sets (provider-error signatures / decision prompts / recommended option).
-//!
-//! Self-echo guard: injected wake/answer text is tagged by the probe with a
-//! zero-width marker prefix; lines bearing it are skipped so an injection's own
-//! echo cannot be re-detected as a fresh stall.
 
 use std::collections::VecDeque;
-use std::sync::{Arc, Mutex};
 
 use nomifun_api_types::{AgentErrorOwnership, AgentStreamErrorData};
 use nomifun_terminal::AnsiLineScanner;
@@ -444,12 +439,6 @@ fn has_choice_reply_intent(low: &str) -> bool {
 pub struct TerminalDetector {
     scanner: AnsiLineScanner,
     recent: VecDeque<String>,
-    /// Text IDMM recently injected into this PTY, shared with `TerminalProbe`.
-    /// A completed output line equal to a pending entry is the echo of our own
-    /// injection (the CLI echoing the keystrokes we sent) — skip it and pop the
-    /// entry so it cannot be re-detected as a fresh stall. Replaces the old
-    /// zero-width-tag scheme, which corrupted the bytes the CLI actually read.
-    recent_injections: Arc<Mutex<VecDeque<String>>>,
 }
 
 impl Default for TerminalDetector {
@@ -465,35 +454,6 @@ impl TerminalDetector {
         Self {
             scanner: AnsiLineScanner::new(),
             recent: VecDeque::new(),
-            recent_injections: Arc::new(Mutex::new(VecDeque::new())),
-        }
-    }
-
-    /// Construct sharing a `recent_injections` queue with the probe, so lines
-    /// echoing IDMM's own injected answers/nudges are skipped.
-    pub fn with_echo_guard(recent_injections: Arc<Mutex<VecDeque<String>>>) -> Self {
-        Self {
-            scanner: AnsiLineScanner::new(),
-            recent: VecDeque::new(),
-            recent_injections,
-        }
-    }
-
-    /// Whether a completed line is the echo of a recently-injected answer/nudge.
-    /// Pops the matched entry so each injection only suppresses one echo line.
-    fn is_injection_echo(&self, line: &str) -> bool {
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            return false;
-        }
-        let Ok(mut pending) = self.recent_injections.lock() else {
-            return false;
-        };
-        if let Some(pos) = pending.iter().position(|e| e == trimmed) {
-            pending.remove(pos);
-            true
-        } else {
-            false
         }
     }
 
@@ -501,11 +461,6 @@ impl TerminalDetector {
     pub fn feed(&mut self, bytes: &[u8]) -> Vec<SessionSignal> {
         let mut out = Vec::new();
         for line in self.scanner.feed(bytes) {
-            // Self-echo guard: skip lines that echo our own injection.
-            if self.is_injection_echo(&line) {
-                self.push_recent(line);
-                continue;
-            }
             let low = line.to_lowercase();
             if PROVIDER_ERROR_SIGS.iter().any(|s| low.contains(s)) {
                 out.push(SessionSignal::ProviderError {
@@ -614,19 +569,6 @@ mod tests {
     fn plain_output_no_signal() {
         let mut d = TerminalDetector::new();
         assert!(d.feed(b"compiling module foo\nok\n").is_empty());
-    }
-
-    #[test]
-    fn self_echo_guard_skips_injected_lines() {
-        let recent = Arc::new(Mutex::new(VecDeque::new()));
-        recent.lock().unwrap().push_back("do you want to proceed? (y/n)".to_string());
-        let mut d = TerminalDetector::with_echo_guard(recent);
-        // The echoed injection (equal to a pending entry) is skipped, not detected.
-        assert!(d.feed(b"do you want to proceed? (y/n)\n").is_empty());
-        // The entry was consumed, so a genuine later prompt IS detected.
-        let sigs = d.feed(b"do you want to proceed? (y/n)\n");
-        assert_eq!(sigs.len(), 1);
-        assert!(matches!(sigs[0], SessionSignal::Decision(_)));
     }
 
     #[test]

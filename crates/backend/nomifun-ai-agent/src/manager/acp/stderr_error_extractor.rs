@@ -46,27 +46,13 @@ const ERROR_KEYWORDS: &[&str] = &[
 
 const MAX_MESSAGE_CHARS: usize = 240;
 
-/// Strip ANSI CSI escape sequences (`\u{1b}[...m` and similar) from `s`.
+/// Strip ANSI escape sequences from `s`.
 ///
-/// Minimal implementation — handles the SGR (`m`) terminator that `tracing`'s
-/// ANSI subscriber uses. Other CSI commands (cursor moves etc.) are stripped
-/// the same way as long as they end in `[A-Za-z]`.
+/// Shared byte-level implementation from `nomifun_common::ansi`; strips CSI
+/// (including the SGR sequences `tracing`'s ANSI subscriber emits), OSC, `\r`
+/// and C0 controls (except newline).
 fn strip_ansi(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    let mut iter = s.chars().peekable();
-    while let Some(c) = iter.next() {
-        if c == '\u{1b}' && matches!(iter.peek(), Some('[')) {
-            iter.next(); // consume '['
-            for ch in iter.by_ref() {
-                if ch.is_ascii_alphabetic() {
-                    break;
-                }
-            }
-        } else {
-            out.push(c);
-        }
-    }
-    out
+    nomifun_common::ansi::strip_ansi(s.as_bytes())
 }
 
 /// Extract the user-relevant message tail from a single stripped tracing line.

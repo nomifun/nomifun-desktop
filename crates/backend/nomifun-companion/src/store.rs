@@ -1853,22 +1853,6 @@ impl CompanionStore {
         }
     }
 
-    /// Atomic XP increment (single upsert — concurrent callers never lose a
-    /// delta to read-modify-write interleaving). Returns the new total.
-    pub async fn add_xp(&self, delta: i64) -> Result<i64, AppError> {
-        let row = sqlx::query(
-            "INSERT INTO companion_state(state_key, value) VALUES('xp', ?)
-             ON CONFLICT(state_key) DO UPDATE SET value = CAST(CAST(value AS INTEGER) + ? AS TEXT)
-             RETURNING CAST(value AS INTEGER) AS xp",
-        )
-        .bind(delta.to_string())
-        .bind(delta)
-        .fetch_one(&self.pool)
-        .await
-        .map_err(db_err)?;
-        Ok(row.get("xp"))
-    }
-
     // ----- per-companion state kv (companion_runtime_state) -----
 
     pub async fn get_companion_state(&self, companion_id: &str, key: &str) -> Result<Option<String>, AppError> {
@@ -2143,11 +2127,7 @@ impl CompanionStore {
         rows.iter().map(row_to_memory).collect()
     }
 
-    pub async fn list_memory_page(&self, filter: &MemoryFilter) -> Result<MemoryPage, AppError> {
-        self.list_memory_page_sorted(filter, MemoryListSort::Default).await
-    }
-
-    /// `list_memory_page` with an explicit sort order (the REST list endpoint's
+    /// One page of memories with an explicit sort order (the REST list endpoint's
     /// `sort` param on the non-FTS path; the FTS path ranks in `search_memories`).
     pub async fn list_memory_page_sorted(&self, filter: &MemoryFilter, sort: MemoryListSort) -> Result<MemoryPage, AppError> {
         if let Some(companion_id) = filter.scope_companion_id.as_deref() {
@@ -3224,26 +3204,6 @@ impl CompanionStore {
         Ok(row.is_some())
     }
 
-    /// Rename and/or bump the activity clock of a thread.
-    pub async fn touch_companion_thread(&self, conversation_id: &str, title: Option<&str>) -> Result<(), AppError> {
-        validate_conversation_id(conversation_id, "companion thread conversation_id")?;
-        let result = sqlx::query(
-            "UPDATE companion_threads SET title = COALESCE(?, title), updated_at = ? WHERE conversation_id = ?",
-        )
-        .bind(title)
-        .bind(now_ms())
-        .bind(conversation_id)
-        .execute(&self.pool)
-        .await
-        .map_err(db_err)?;
-        if result.rows_affected() == 0 {
-            return Err(AppError::NotFound(format!(
-                "companion thread '{conversation_id}' not found"
-            )));
-        }
-        Ok(())
-    }
-
     pub async fn delete_companion_thread(&self, conversation_id: &str) -> Result<(), AppError> {
         validate_conversation_id(conversation_id, "companion thread conversation_id")?;
         sqlx::query("DELETE FROM companion_threads WHERE conversation_id = ?")
@@ -3802,14 +3762,6 @@ impl CompanionStore {
             }
         }
         Ok(None)
-    }
-
-    pub async fn find_skill_name_collision(
-        &self,
-        companion_id: &str,
-        skill_name: &str,
-    ) -> Result<Option<CompanionSkill>, AppError> {
-        self.find_owned_skill_by_name(companion_id, skill_name).await
     }
 
     /// Bump a skill's version (on evolve-in-place).

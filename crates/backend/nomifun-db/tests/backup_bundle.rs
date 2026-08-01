@@ -10,10 +10,10 @@ use nomifun_common::{
 use nomifun_db::backup_bundle::{
     BACKUP_FORMAT_VERSION, BACKUP_SCHEMA, BUNDLE_DATA_DIR, BUNDLE_WORK_DIR, BackupCoverageKind,
     BackupCoverageRoot, BackupError, BackupObjectGraph, BackupSource, COMPANION_DIR,
-    DATABASE_FILE, DATASET_RECEIPT_FILE, ENCRYPTION_KEY_FILE, ImportMode,
+    DATABASE_FILE, DATASET_RECEIPT_FILE, ENCRYPTION_KEY_FILE,
     MANAGED_WORKSPACES_DIR, MANIFEST_FILE, STORAGE_GENERATION_FILE,
-    PortableCatalog, PortableEntity, PortableGraph, create_backup_bundle,
-    create_backup_bundle_with_sources, restore_backup_bundle, verify_backup_bundle,
+    create_backup_bundle,
+    create_backup_bundle_with_sources, restore_backup_data_dir, verify_backup_bundle,
 };
 use nomifun_db::init_database;
 use serde_json::json;
@@ -35,241 +35,6 @@ const REQUIRED_PORTABLE_DIRECTORY_ROOTS: &[&str] = &[
     "preset-avatars",
     "extensions",
 ];
-
-fn entity(
-    entity_type: &str,
-    entity_id: String,
-    payload: serde_json::Value,
-    references: impl IntoIterator<Item = (&'static str, String)>,
-) -> PortableEntity {
-    PortableEntity {
-        entity_type: entity_type.to_owned(),
-        entity_id,
-        payload,
-        references: references
-            .into_iter()
-            .map(|(pointer, target)| (pointer.to_owned(), json!(target)))
-            .collect(),
-    }
-}
-
-fn conversation_graph() -> (PortableGraph, String, String) {
-    let conversation_id = ConversationId::new().into_string();
-    let message_id = generate_id();
-    let graph = PortableGraph {
-        entities: vec![
-            entity(
-                "conversation",
-                conversation_id.clone(),
-                json!({"name": "portable conversation"}),
-                [],
-            ),
-            entity(
-                "message",
-                message_id.clone(),
-                json!({
-                    "conversation_id": conversation_id,
-                    "content": {"text": "hello"}
-                }),
-                [("/conversation_id", conversation_id.clone())],
-            ),
-        ],
-    };
-    (graph, conversation_id, message_id)
-}
-
-#[test]
-fn restore_and_merge_preserve_ids_and_are_idempotent() {
-    let (graph, conversation_id, message_id) = conversation_graph();
-    let mut catalog = PortableCatalog::default();
-
-    let restored = catalog.import(&graph, ImportMode::Restore).unwrap();
-    assert_eq!(restored.inserted, 2);
-    assert_eq!(restored.skipped_identical, 0);
-    assert!(restored.remap.is_empty());
-    assert!(catalog.get(&conversation_id).is_some());
-    assert_eq!(
-        catalog.get(&message_id).unwrap().references["/conversation_id"],
-        json!(conversation_id)
-    );
-
-    let merged = catalog.import(&graph, ImportMode::Merge).unwrap();
-    assert_eq!(merged.inserted, 0);
-    assert_eq!(merged.skipped_identical, 2);
-    assert_eq!(catalog.len(), 2);
-}
-
-#[test]
-fn restore_and_merge_reject_same_id_with_different_content_atomically() {
-    let (graph, conversation_id, _) = conversation_graph();
-    let mut catalog = PortableCatalog::default();
-    catalog.import(&graph, ImportMode::Restore).unwrap();
-
-    let mut conflicting = graph.clone();
-    conflicting.entities[0].payload = json!({"name": "different content"});
-    let before = catalog.clone();
-    let error = catalog
-        .import(&conflicting, ImportMode::Merge)
-        .expect_err("same ID with divergent content must fail");
-    assert!(matches!(
-        error,
-        BackupError::Conflict { entity_id, .. } if entity_id == conversation_id
-    ));
-    assert_eq!(catalog, before, "conflicting merge must be all-or-nothing");
-}
-
-#[test]
-fn clone_preserves_business_ids_and_fails_on_existing_catalog_collision() {
-    let (graph, conversation_id, message_id) = conversation_graph();
-    let mut catalog = PortableCatalog::default();
-    let cloned = catalog.import(&graph, ImportMode::Clone).unwrap();
-    assert_eq!(cloned.inserted, 2);
-    assert!(cloned.remap.is_empty());
-    assert!(catalog.get(&conversation_id).is_some());
-    assert!(catalog.get(&message_id).is_some());
-    assert_eq!(
-        catalog.get(&message_id).unwrap().references["/conversation_id"],
-        json!(conversation_id)
-    );
-    assert_eq!(
-        catalog.get(&message_id).unwrap().payload["conversation_id"],
-        json!(conversation_id)
-    );
-
-    let before = catalog.clone();
-    let error = catalog
-        .import(&graph, ImportMode::Clone)
-        .expect_err("clone collision must fail closed");
-    assert!(matches!(error, BackupError::Conflict { entity_id, .. } if entity_id == conversation_id));
-    assert_eq!(catalog, before);
-}
-
-#[test]
-fn clone_preserves_declared_arrays_and_nested_reference_objects() {
-    let conversation_id = ConversationId::new().into_string();
-    let first_message_id = generate_id();
-    let second_message_id = generate_id();
-    let conversation_payload = json!({
-        "lead_message_id": first_message_id,
-        "message_ids": [first_message_id, second_message_id],
-        "relations": {
-            "lead": first_message_id,
-            "alternates": [second_message_id]
-        }
-    });
-    let graph = PortableGraph {
-        entities: vec![
-            PortableEntity {
-                entity_type: "conversation".into(),
-                entity_id: conversation_id.clone(),
-                payload: conversation_payload.clone(),
-                references: [
-                    (
-                        "/lead_message_id".into(),
-                        conversation_payload["lead_message_id"].clone(),
-                    ),
-                    (
-                        "/message_ids".into(),
-                        conversation_payload["message_ids"].clone(),
-                    ),
-                    (
-                        "/relations".into(),
-                        conversation_payload["relations"].clone(),
-                    ),
-                ]
-                .into_iter()
-                .collect(),
-            },
-            entity(
-                "message",
-                first_message_id.clone(),
-                json!({"conversation_id": conversation_id}),
-                [("/conversation_id", conversation_id.clone())],
-            ),
-            entity(
-                "message",
-                second_message_id.clone(),
-                json!({"conversation_id": conversation_id}),
-                [("/conversation_id", conversation_id.clone())],
-            ),
-        ],
-    };
-
-    let mut catalog = PortableCatalog::default();
-    let cloned = catalog.import(&graph, ImportMode::Clone).unwrap();
-    assert!(cloned.remap.is_empty());
-    let cloned_conversation = catalog.get(&conversation_id).unwrap();
-    assert_eq!(
-        cloned_conversation.payload["message_ids"],
-        json!([first_message_id, second_message_id])
-    );
-    assert_eq!(
-        cloned_conversation.payload["relations"],
-        json!({
-            "lead": first_message_id,
-            "alternates": [second_message_id]
-        })
-    );
-    for new_message_id in [&first_message_id, &second_message_id] {
-        assert_eq!(
-            catalog.get(new_message_id).unwrap().payload["conversation_id"],
-            json!(conversation_id)
-        );
-    }
-}
-
-#[test]
-fn clone_rejects_undeclared_or_mismatched_reference_pointer_atomically() {
-    let (mut graph, conversation_id, message_id) = conversation_graph();
-    graph.entities[1]
-        .references
-        .insert("/missing".into(), json!(conversation_id));
-    let mut catalog = PortableCatalog::default();
-    let before = catalog.clone();
-    let error = catalog
-        .import(&graph, ImportMode::Clone)
-        .expect_err("missing declared reference pointer must fail");
-    assert!(matches!(error, BackupError::InvalidGraph(_)));
-    assert_eq!(catalog, before);
-    assert!(catalog.get(&message_id).is_none());
-}
-
-#[test]
-fn portable_graph_rejects_legacy_prefixed_business_ids() {
-    let bare_id = generate_id();
-    let graph = PortableGraph {
-        entities: vec![entity(
-            "conversation",
-            format!("conv_{bare_id}"),
-            json!({"name": "legacy"}),
-            [],
-        )],
-    };
-
-    let error = PortableCatalog::default()
-        .import(&graph, ImportMode::Restore)
-        .expect_err("v3 graph imports must reject prefixed IDs");
-    assert!(matches!(error, BackupError::InvalidGraph(_)));
-}
-
-#[test]
-fn portable_entity_wire_format_rejects_legacy_generic_id_fields() {
-    let error = serde_json::from_value::<PortableEntity>(json!({
-        "entity_type": "conversation",
-        "id_prefix": "conv",
-        "id": generate_id(),
-        "entity_id": generate_id(),
-        "payload": {},
-        "references": {}
-    }))
-    .expect_err("v3 entities must not accept the v2 id_prefix field");
-    let message = error.to_string();
-    assert!(
-        message.contains("unknown field")
-            && (message.contains("`id`") || message.contains("`id_prefix`")),
-        "legacy generic wire fields must be rejected, got: {message}"
-    );
-}
 
 #[tokio::test]
 async fn bundle_manifest_captures_generation_graph_checksum_and_wal_snapshot() {
@@ -655,11 +420,7 @@ async fn data_and_work_root_overlap_captures_conversations_once_through_work_nam
     }));
     assert_eq!(verify_backup_bundle(&bundle).unwrap(), manifest);
 
-    restore_backup_bundle(
-        &bundle,
-        &destination.join("nomifun-backend.db"),
-        &destination.join(STORAGE_GENERATION_FILE),
-    )
+    restore_backup_data_dir(&bundle, &destination)
     .await
     .unwrap();
     assert_eq!(
@@ -788,11 +549,7 @@ async fn pre_work_root_owner_v2_coverage_remains_verifiable_and_restorable() {
             })
     );
 
-    let outcome = restore_backup_bundle(
-        &bundle,
-        &destination.join("nomifun-backend.db"),
-        &destination.join(STORAGE_GENERATION_FILE),
-    )
+    let outcome = restore_backup_data_dir(&bundle, &destination)
     .await
     .unwrap();
     assert!(
@@ -874,7 +631,7 @@ async fn offline_restore_preserves_entity_ids_and_rotates_dataset_generation() {
     .await
     .unwrap();
 
-    let outcome = restore_backup_bundle(&bundle, &restored_database, &restored_generation)
+    let outcome = restore_backup_data_dir(&bundle, restored_database.parent().unwrap())
         .await
         .unwrap();
     assert_eq!(
@@ -917,7 +674,7 @@ async fn offline_restore_preserves_entity_ids_and_rotates_dataset_generation() {
     restored.close().await;
 
     assert!(
-        restore_backup_bundle(&bundle, &restored_database, &restored_generation)
+        restore_backup_data_dir(&bundle, restored_database.parent().unwrap())
             .await
             .is_err(),
         "offline restore must never overwrite an existing dataset"
@@ -1044,11 +801,7 @@ async fn restore_rebuilds_technical_ids_and_preserves_registered_business_id_ref
     .unwrap();
     database.close().await;
 
-    restore_backup_bundle(
-        &bundle,
-        &destination.join("nomifun-backend.db"),
-        &destination.join(STORAGE_GENERATION_FILE),
-    )
+    restore_backup_data_dir(&bundle, &destination)
     .await
     .unwrap();
 
@@ -1237,11 +990,7 @@ async fn complete_restore_is_atomic_and_materializes_all_portable_domains() {
     .unwrap();
     database.close().await;
 
-    let outcome = restore_backup_bundle(
-        &bundle,
-        &destination.join("nomifun-backend.db"),
-        &destination.join("storage-generation"),
-    )
+    let outcome = restore_backup_data_dir(&bundle, &destination)
     .await
     .unwrap();
     assert_eq!(
@@ -1309,11 +1058,7 @@ async fn complete_restore_is_atomic_and_materializes_all_portable_domains() {
     std::fs::write(corrupt_bundle.join(DATABASE_FILE), b"corrupt").unwrap();
     let untouched = dir.path().join("untouched");
     assert!(
-        restore_backup_bundle(
-            &corrupt_bundle,
-            &untouched.join("nomifun-backend.db"),
-            &untouched.join("storage-generation"),
-        )
+        restore_backup_data_dir(&corrupt_bundle, &untouched)
         .await
         .is_err()
     );
@@ -1354,11 +1099,7 @@ async fn restore_rejects_valid_sqlite_with_wrong_schema_after_checksum_rewrite()
     verify_backup_bundle(&bundle).expect("file-level checksums should now be internally valid");
 
     let destination = dir.path().join("must-stay-absent");
-    let error = restore_backup_bundle(
-        &bundle,
-        &destination.join("nomifun-backend.db"),
-        &destination.join("storage-generation"),
-    )
+    let error = restore_backup_data_dir(&bundle, &destination)
     .await
     .unwrap_err();
     assert!(
@@ -1399,11 +1140,7 @@ async fn restore_rejects_missing_installation_identity_after_checksum_rewrite() 
     verify_backup_bundle(&bundle).unwrap();
 
     let destination = dir.path().join("must-stay-absent");
-    let error = restore_backup_bundle(
-        &bundle,
-        &destination.join("nomifun-backend.db"),
-        &destination.join("storage-generation"),
-    )
+    let error = restore_backup_data_dir(&bundle, &destination)
     .await
     .unwrap_err();
     assert!(format!("{error}").contains("exactly one row"));
@@ -1463,11 +1200,7 @@ async fn restore_rejects_noncanonical_row_ids_after_checksum_rewrite() {
     rewrite_database_manifest_entry(&bundle);
 
     let destination = dir.path().join("must-stay-absent");
-    let error = restore_backup_bundle(
-        &bundle,
-        &destination.join("nomifun-backend.db"),
-        &destination.join("storage-generation"),
-    )
+    let error = restore_backup_data_dir(&bundle, &destination)
     .await
     .unwrap_err();
     assert!(
@@ -1526,11 +1259,7 @@ async fn restore_rejects_noncanonical_external_owner_ids_after_checksum_rewrite(
     rewrite_database_manifest_entry(&bundle);
 
     let destination = dir.path().join("must-stay-absent");
-    let error = restore_backup_bundle(
-        &bundle,
-        &destination.join("nomifun-backend.db"),
-        &destination.join("storage-generation"),
-    )
+    let error = restore_backup_data_dir(&bundle, &destination)
     .await
     .unwrap_err();
     assert!(
@@ -1635,11 +1364,7 @@ async fn symlink_sources_and_broken_link_destinations_fail_closed_without_stagin
     let destination = dir.path().join("restore-link");
     symlink(&broken_target, &destination).unwrap();
     assert!(
-        restore_backup_bundle(
-            &bundle,
-            &destination.join("nomifun-backend.db"),
-            &destination.join("storage-generation"),
-        )
+        restore_backup_data_dir(&bundle, &destination)
         .await
         .is_err()
     );

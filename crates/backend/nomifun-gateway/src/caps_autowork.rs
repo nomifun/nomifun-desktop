@@ -83,9 +83,6 @@ async fn build_state(deps: &GatewayDeps, kind: AutoWorkTargetKind, target_id: &s
 }
 
 async fn set(deps: Arc<GatewayDeps>, ctx: CallerCtx, p: SetAutoworkParams) -> Value {
-    if nomifun_common::UserId::parse(ctx.user_id.as_str()).is_err() {
-        return json!({ "error": "missing caller user identity" });
-    }
     let kind = AutoWorkTargetKind::from(p.kind);
     let target_id = match parse_target_id(kind, p.target_id.into_string()) {
         Ok(target_id) => target_id,
@@ -141,9 +138,6 @@ async fn set(deps: Arc<GatewayDeps>, ctx: CallerCtx, p: SetAutoworkParams) -> Va
 }
 
 async fn get(deps: Arc<GatewayDeps>, ctx: CallerCtx, p: GetAutoworkParams) -> Value {
-    if nomifun_common::UserId::parse(ctx.user_id.as_str()).is_err() {
-        return json!({ "error": "missing caller user identity" });
-    }
     let kind = AutoWorkTargetKind::from(p.kind);
     let target_id = match parse_target_id(kind, p.target_id.into_string()) {
         Ok(target_id) => target_id,

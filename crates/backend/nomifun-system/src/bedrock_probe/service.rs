@@ -18,10 +18,9 @@ pub struct ConnectionTestService;
 impl ConnectionTestService {
     /// Create a new `ConnectionTestService`.
     ///
-    /// The `_http_client` parameter is retained for API compatibility but is
-    /// currently unused — Bedrock uses its own AWS SDK HTTP client and no
-    /// other connection types live on this service.
-    pub fn new(_http_client: reqwest::Client) -> Self {
+    /// Bedrock uses its own AWS SDK HTTP client, so no dependencies are
+    /// needed here.
+    pub fn new() -> Self {
         Self
     }
 
@@ -229,13 +228,5 @@ mod tests {
     #[test]
     fn test_default_bedrock_test_model() {
         assert!(DEFAULT_BEDROCK_TEST_MODEL.starts_with("anthropic.claude"));
-    }
-
-    // -- ConnectionTestService construction --
-
-    #[test]
-    fn test_service_construction() {
-        let client = reqwest::Client::new();
-        let _service = ConnectionTestService::new(client);
     }
 }

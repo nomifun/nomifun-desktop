@@ -11,34 +11,27 @@ import React, { useCallback } from 'react';
 import { useTranslation } from 'react-i18next';
 
 type FeedbackButtonProps = {
-  /** Pre-selects the module in the feedback modal (see FEEDBACK_MODULES tags). */
-  module?: string;
-  /** Extra Sentry tags attached to the feedback event. */
-  feedbackTags?: Record<string, string>;
-  /** Extra structured context attached to the feedback event. */
-  feedbackExtra?: Record<string, unknown>;
   /** Additional classes appended to the default pill styling. */
   className?: string;
 };
 
 /**
  * Inline feedback chip shown near error messages — styled as a compact pill
- * consistent with Nomi's existing Mention/Agent pill patterns. Click
- * auto-captures the current window and opens the feedback modal with the
- * relevant module preselected; the user only needs to describe the issue.
+ * consistent with Nomi's existing Mention/Agent pill patterns. Click opens
+ * the contact panel with the official feedback channels.
  */
-const FeedbackButton: React.FC<FeedbackButtonProps> = ({ module, feedbackTags, feedbackExtra, className }) => {
+const FeedbackButton: React.FC<FeedbackButtonProps> = ({ className }) => {
   const { t } = useTranslation();
   const { openFeedback } = useFeedback();
 
   const handleClick = useCallback(
     (event: React.MouseEvent<HTMLElement>) => {
       event.stopPropagation();
-      openFeedback({ module, autoScreenshot: true, tags: feedbackTags, extra: feedbackExtra }).catch((err) => {
+      openFeedback().catch((err) => {
         console.error('[FeedbackButton] Failed to open feedback:', err);
       });
     },
-    [feedbackExtra, feedbackTags, module, openFeedback]
+    [openFeedback]
   );
 
   return (

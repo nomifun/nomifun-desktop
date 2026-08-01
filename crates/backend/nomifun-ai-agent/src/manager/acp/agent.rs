@@ -754,11 +754,6 @@ impl AcpAgentManager {
     pub fn agent_id(&self) -> &str {
         &self.params.metadata.agent_id
     }
-
-    /// Whether the configured agent supports side questions.
-    pub fn supports_side_question(&self) -> bool {
-        self.params.metadata.behavior_policy.supports_side_question
-    }
 }
 
 impl AcpAgentManager {

@@ -5,6 +5,11 @@ notes at a high level rather than a complete historical log.
 
 ## Unreleased
 
+- Knowledge-base imports and companion (memory/companion bundle) imports now
+  enforce zip-bomb limits: at most 256 MB of cumulative decompressed data and
+  20,000 entries per archive. Oversized import bundles fail instead of
+  exhausting disk/memory.
+
 - `NOMIFUN_DATA_DIR` is now taken literally as the final data root on **every**
   host — the desktop shell no longer appends `/Nomi` to the env value, matching
   `nomifun-web` and `nomicore`. This fixes the 0.3.2 → 0.3.3 Windows

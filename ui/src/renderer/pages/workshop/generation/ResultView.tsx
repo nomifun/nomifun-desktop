@@ -15,7 +15,7 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { FileText, Return, TransferData } from '@icon-park/react';
-import { useWorkshopMedia } from '../canvas/media';
+import { useWorkshopObjectUrl } from '../assets/useWorkshopMedia';
 import type { WorkshopGeneratorBatch } from '../types';
 import type { GenMode } from './genTypes';
 import { loadWorkshopText } from './pipeline';
@@ -104,7 +104,7 @@ const MediaResult: React.FC<{ mode: 'image' | 'video'; assetId: AssetId; index: 
   total,
 }) => {
   const { t } = useTranslation();
-  const media = useWorkshopMedia(assetId);
+  const media = useWorkshopObjectUrl(assetId);
   return (
     <div
       data-workshop-result-id={assetId}
@@ -138,7 +138,7 @@ const MediaResult: React.FC<{ mode: 'image' | 'video'; assetId: AssetId; index: 
 /** Synthesized speech playback — an inline audio player per produced asset. */
 const AudioResult: React.FC<{ assetId: AssetId; index: number; total: number }> = ({ assetId, index, total }) => {
   const { t } = useTranslation();
-  const media = useWorkshopMedia(assetId);
+  const media = useWorkshopObjectUrl(assetId);
   return (
     <div
       data-workshop-result-id={assetId}

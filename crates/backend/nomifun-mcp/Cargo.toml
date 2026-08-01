@@ -11,7 +11,6 @@ nomifun-db.workspace = true
 nomifun-api-types.workspace = true
 nomifun-net.workspace = true
 async-trait.workspace = true
-dashmap.workspace = true
 axum.workspace = true
 dirs.workspace = true
 thiserror.workspace = true

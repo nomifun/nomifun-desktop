@@ -27,8 +27,7 @@ use crate::store::{
 
 pub fn companion_routes(state: CompanionRouterState) -> Router {
     Router::new()
-        .route("/api/companion/config", get(get_config).put(update_config).patch(patch_config))
-        .route("/api/companion/status", get(status))
+        .route("/api/companion/config", get(get_config).patch(patch_config))
         .route("/api/companion/companions", get(list_companions).post(create_companion))
         .route(
             "/api/companion/companions/{companion_id}",
@@ -120,15 +119,6 @@ async fn get_config(
     Ok(Json(ApiResponse::ok(state.service.get_config().await)))
 }
 
-async fn update_config(
-    State(state): State<CompanionRouterState>,
-    Extension(_user): Extension<CurrentUser>,
-    body: Result<Json<SharedCompanionConfig>, JsonRejection>,
-) -> Result<Json<ApiResponse<SharedCompanionConfig>>, AppError> {
-    let Json(config) = body.map_err(|e| AppError::BadRequest(e.to_string()))?;
-    Ok(Json(ApiResponse::ok(state.service.update_config(config).await?)))
-}
-
 async fn patch_config(
     State(state): State<CompanionRouterState>,
     Extension(_user): Extension<CurrentUser>,
@@ -136,13 +126,6 @@ async fn patch_config(
 ) -> Result<Json<ApiResponse<SharedCompanionConfig>>, AppError> {
     let Json(patch) = body.map_err(|e| AppError::BadRequest(e.to_string()))?;
     Ok(Json(ApiResponse::ok(state.service.patch_config(patch).await?)))
-}
-
-async fn status(
-    State(state): State<CompanionRouterState>,
-    Extension(_user): Extension<CurrentUser>,
-) -> Result<Json<ApiResponse<CompanionStatus>>, AppError> {
-    Ok(Json(ApiResponse::ok(state.service.status().await?)))
 }
 
 /// Build an optional [`MemoryScope`] from wire parts without accepting empty-ID

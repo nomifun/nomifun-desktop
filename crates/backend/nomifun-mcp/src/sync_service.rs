@@ -1,13 +1,11 @@
 use std::sync::Arc;
 
-use dashmap::DashMap;
 use nomifun_api_types::{DetectedMcpServerEntry, DetectedMcpServerResponse};
-use nomifun_common::McpSource;
-use nomifun_db::IMcpServerRepository;
 use tokio::sync::Mutex;
 use tracing::warn;
 
 use crate::adapter::{DetectedServer, McpAgentAdapter};
+use crate::adapters::cli_helpers::normalize_detection_status;
 use crate::error::McpError;
 
 /// Discovers MCP configuration currently installed in external Agent CLIs.
@@ -18,15 +16,13 @@ use crate::error::McpError;
 pub struct McpSyncService {
     adapters: Arc<Vec<Arc<dyn McpAgentAdapter>>>,
     service_lock: Arc<Mutex<()>>,
-    agent_locks: Arc<DashMap<McpSource, Arc<Mutex<()>>>>,
 }
 
 impl McpSyncService {
-    pub fn new(_repo: Arc<dyn IMcpServerRepository>, adapters: Vec<Arc<dyn McpAgentAdapter>>) -> Self {
+    pub fn new(adapters: Vec<Arc<dyn McpAgentAdapter>>) -> Self {
         Self {
             adapters: Arc::new(adapters),
             service_lock: Arc::new(Mutex::new(())),
-            agent_locks: Arc::new(DashMap::new()),
         }
     }
 
@@ -39,8 +35,6 @@ impl McpSyncService {
 
         let mut results = Vec::new();
         for adapter in self.adapters.iter() {
-            let _agent_guard = self.agent_lock(adapter.source()).await;
-
             let installed = adapter.is_installed().await.unwrap_or(false);
             if !installed {
                 continue;
@@ -66,19 +60,10 @@ impl McpSyncService {
 
         Ok(results)
     }
-
-    async fn agent_lock(&self, source: McpSource) -> tokio::sync::OwnedMutexGuard<()> {
-        let lock = self
-            .agent_locks
-            .entry(source)
-            .or_insert_with(|| Arc::new(Mutex::new(())))
-            .clone();
-        lock.lock_owned().await
-    }
 }
 
 fn detected_to_response(detected: DetectedServer) -> DetectedMcpServerEntry {
-    let normalized_skip_reason = detected.import_skip_reason.as_deref().map(normalize_import_skip_reason);
+    let normalized_skip_reason = detected.import_skip_reason.as_deref().map(normalize_detection_status);
     let importable = detected.importable || normalized_skip_reason.as_deref() == Some("Connected");
 
     DetectedMcpServerEntry {
@@ -91,23 +76,11 @@ fn detected_to_response(detected: DetectedServer) -> DetectedMcpServerEntry {
     }
 }
 
-fn normalize_import_skip_reason(reason: &str) -> String {
-    reason
-        .trim()
-        .trim_start_matches(|c: char| {
-            matches!(c, '✓' | '✗' | '!' | '•' | '-' | '*' | '✔' | '✘' | ':' | '[' | ']') || c.is_whitespace()
-        })
-        .trim()
-        .to_owned()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::types::McpServerTransport;
-    use nomifun_common::TimestampMs;
-    use nomifun_db::models::McpServerRow;
-    use nomifun_db::{CreateMcpServerParams, DbError, UpdateMcpServerParams};
+    use nomifun_common::McpSource;
     use std::collections::HashMap;
     use std::sync::Mutex as StdMutex;
 
@@ -148,61 +121,6 @@ mod tests {
             }
             Ok(self.servers.lock().unwrap().clone())
         }
-
-        async fn install_server(&self, _name: &str, _transport: &McpServerTransport) -> Result<(), McpError> {
-            unreachable!("write-to-CLI is no longer supported")
-        }
-
-        async fn remove_server(&self, _name: &str) -> Result<(), McpError> {
-            unreachable!("write-to-CLI is no longer supported")
-        }
-    }
-
-    #[derive(Debug)]
-    struct MockRepo;
-
-    #[async_trait::async_trait]
-    impl IMcpServerRepository for MockRepo {
-        async fn list(&self) -> Result<Vec<McpServerRow>, DbError> {
-            Ok(Vec::new())
-        }
-
-        async fn find_by_id(&self, _mcp_server_id: &str) -> Result<Option<McpServerRow>, DbError> {
-            Ok(None)
-        }
-
-        async fn find_by_name(&self, _name: &str) -> Result<Option<McpServerRow>, DbError> {
-            Ok(None)
-        }
-
-        async fn create(&self, _params: CreateMcpServerParams<'_>) -> Result<McpServerRow, DbError> {
-            unimplemented!("not needed for detection tests")
-        }
-
-        async fn update(&self, _mcp_server_id: &str, _params: UpdateMcpServerParams<'_>) -> Result<McpServerRow, DbError> {
-            unimplemented!("not needed for detection tests")
-        }
-
-        async fn delete(&self, _mcp_server_id: &str) -> Result<(), DbError> {
-            unimplemented!("not needed for detection tests")
-        }
-
-        async fn batch_upsert(&self, _params_list: &[CreateMcpServerParams<'_>]) -> Result<Vec<McpServerRow>, DbError> {
-            unimplemented!("not needed for detection tests")
-        }
-
-        async fn update_status(
-            &self,
-            _mcp_server_id: &str,
-            _status: &str,
-            _last_connected: Option<TimestampMs>,
-        ) -> Result<(), DbError> {
-            unimplemented!("not needed for detection tests")
-        }
-
-        async fn update_tools(&self, _mcp_server_id: &str, _tools: Option<&str>) -> Result<(), DbError> {
-            unimplemented!("not needed for detection tests")
-        }
     }
 
     fn stdio_transport() -> McpServerTransport {
@@ -211,10 +129,6 @@ mod tests {
             args: vec!["-y".into(), "@test/server".into()],
             env: HashMap::new(),
         }
-    }
-
-    fn make_service(adapters: Vec<Arc<dyn McpAgentAdapter>>) -> McpSyncService {
-        McpSyncService::new(Arc::new(MockRepo), adapters)
     }
 
     #[tokio::test]
@@ -230,7 +144,7 @@ mod tests {
         let adapter_b = Arc::new(MockAdapter::new(McpSource::Gemini, false));
         let adapter_c = Arc::new(MockAdapter::new(McpSource::Qwen, true).with_existing(vec![]));
 
-        let svc = make_service(vec![adapter_a, adapter_b, adapter_c]);
+        let svc = McpSyncService::new(vec![adapter_a, adapter_b, adapter_c]);
         let configs = svc.get_agent_configs().await.unwrap();
 
         assert_eq!(configs.len(), 2);
@@ -256,7 +170,7 @@ mod tests {
 
     #[tokio::test]
     async fn get_agent_configs_no_adapters() {
-        let svc = make_service(vec![]);
+        let svc = McpSyncService::new(vec![]);
         let configs = svc.get_agent_configs().await.unwrap();
         assert!(configs.is_empty());
     }

@@ -70,7 +70,7 @@ pub use vault::{
 pub use acquire::ChromeSource;
 pub use launch::{BrowserHostLaunchMode, build_chrome_args_for_mode};
 pub use host::{
-    LaneEngineConfig, LaneId, ManagedBrowserHost, ManagedBrowserHostReplacement, TargetOwnership,
+    LaneEngineConfig, LaneId, ManagedBrowserHost, TargetOwnership,
     TargetRoute,
 };
 
@@ -144,7 +144,7 @@ pub struct EngineConfig {
     /// 同范式；产品 ON 仅由 factory 的 host_default=true 实现，不在代码 Default 里）。
     pub evaluate_persistent_login: bool,
     /// **P3-G1 注入链：出口防火墙配置**（裁决①）。引擎构造期灌入 [`crate::firewall::FirewallConfig`]，
-    /// 经 `build_backend` → `from_launched` → [`crate::backend::cdp::spawn_fetch_firewall_loop`] 透传
+    /// 经 `from_launched` / `from_host` → [`crate::backend::cdp::spawn_fetch_firewall_loop`] 透传
     /// （**不再硬编码 `FirewallConfig::default()`**）。`Default` = `FirewallConfig::default()`（IP 封禁开
     /// 与跨域 POST 门控检测开）——默认即现行为，零回归。**域名 allowlist（`allow_etld1`/`deny_etld1`）
     /// 的真值注入是 D1 的活**（上层从 secret 的 per-pet `allowed_origins` 灌真策略，⑤共用真值）；G1 只打通
@@ -466,7 +466,7 @@ mod tests {
     #[test]
     fn engine_config_accepts_custom_firewall() {
         // 注入一个**与 default 不同**的 firewall（关掉跨域 POST 门控）→ 字段如实保留。
-        // 证明 EngineConfig 能承载注入值（链路下游透传由 build_backend 集成测试验）。
+        // 证明 EngineConfig 能承载注入值（链路下游透传由引擎集成测试验）。
         let custom = crate::firewall::FirewallConfig {
             block_private_ips: true,
             gate_cross_origin_post: false,

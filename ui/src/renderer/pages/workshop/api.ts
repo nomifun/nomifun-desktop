@@ -37,7 +37,6 @@ import type {
   CreationTask,
   ListAssetsQuery,
   ListAssetsResponse,
-  ListTasksQuery,
   PatchAssetBody,
   PatchCanvasBody,
   PutDocResponse,
@@ -378,13 +377,6 @@ export function uploadAsset(file: File, hooks: UploadAssetHooks = {}): Promise<W
 /** Submit a generation task. */
 export async function createTask(body: CreateTaskBody): Promise<CreationTask> {
   return normalizeCreationTask(await httpRequest<CreationTask>('POST', '/api/creation/tasks', body));
-}
-
-/** List generation tasks, optionally scoped to a canvas / status. */
-export async function listTasks(query: ListTasksQuery = {}): Promise<CreationTask[]> {
-  const qs = queryString({ canvas_id: query.canvas_id, status: query.status, limit: query.limit });
-  const res = await httpRequest<{ tasks: CreationTask[] }>('GET', `/api/creation/tasks${qs}`);
-  return (res?.tasks ?? []).map(normalizeCreationTask);
 }
 
 /** Fetch a single generation task. */

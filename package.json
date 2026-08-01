@@ -37,8 +37,6 @@
     "check:process-runtime-boundary": "bun scripts/check-process-runtime-boundary.mjs",
     "check:browser-platform-boundary": "bun scripts/check-browser-platform-boundary.mjs",
     "check:agent-vocabulary": "bun scripts/check-agent-vocabulary.mjs",
-    "fmt": "cargo fmt",
-    "fmt:check": "cargo fmt --check",
     "gen:i18n": "bun scripts/generate-i18n-types.mjs",
     "clean": "bun scripts/prune-build.mjs --release",
     "seed:dev": "bun scripts/seed-dev-from-prod.mjs",

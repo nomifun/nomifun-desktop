@@ -1,8 +1,8 @@
 import { Button, Checkbox, Collapse, Message, Radio, Switch, Tabs, Tag } from '@arco-design/web-react';
 import { useArcoMessage } from '@/renderer/utils/ui/useArcoMessage';
 import React, { useState } from 'react';
-import StepsWrapper from '@/renderer/components/base/StepsWrapper';
-import ModalWrapper from '@/renderer/components/base/ModalWrapper';
+import NomiModal from '@/renderer/components/base/NomiModal';
+import NomiSteps from '@/renderer/components/base/NomiSteps';
 import { Check } from '@icon-park/react';
 
 const ComponentsShowcase: React.FC = () => {
@@ -133,17 +133,17 @@ const ComponentsShowcase: React.FC = () => {
       {/* Steps */}
       <section className='space-y-4'>
         <h2 className='text-xl font-semibold'>Steps - 步骤条</h2>
-        <StepsWrapper current={currentStep} size='small'>
-          <StepsWrapper.Step
+        <NomiSteps current={currentStep} size='small'>
+          <NomiSteps.Step
             title='步骤一'
             icon={currentStep > 1 ? <Check theme='filled' size={16} fill='#165dff' /> : undefined}
           />
-          <StepsWrapper.Step
+          <NomiSteps.Step
             title='步骤二'
             icon={currentStep > 2 ? <Check theme='filled' size={16} fill='#165dff' /> : undefined}
           />
-          <StepsWrapper.Step title='步骤三' />
-        </StepsWrapper>
+          <NomiSteps.Step title='步骤三' />
+        </NomiSteps>
         <div className='flex gap-2 mt-4'>
           <Button onClick={() => setCurrentStep(Math.max(1, currentStep - 1))} disabled={currentStep === 1}>
             上一步
@@ -164,7 +164,7 @@ const ComponentsShowcase: React.FC = () => {
         <Button type='primary' onClick={() => setModalVisible(true)}>
           打开自定义 Modal
         </Button>
-        <ModalWrapper
+        <NomiModal
           title='自定义模态框标题'
           visible={modalVisible}
           onCancel={() => setModalVisible(false)}
@@ -178,10 +178,10 @@ const ComponentsShowcase: React.FC = () => {
           }
         >
           <div className='p-6'>
-            <p>这是使用 ModalWrapper 封装的自定义模态框。</p>
+            <p>这是使用 NomiModal 封装的自定义模态框。</p>
             <p className='mt-2 text-t-secondary'>特性：圆角 12px、自定义关闭按钮、主题背景色。</p>
           </div>
-        </ModalWrapper>
+        </NomiModal>
       </section>
     </div>
   );

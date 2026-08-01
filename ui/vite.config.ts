@@ -52,10 +52,6 @@ ${components.map((k: string) => `const ${k.trim()} = IconParkHOC(_${k.trim()})`)
 
 const src = resolve(__dirname, 'src');
 
-// NOTE (P1): the renderer/common reaches `electron` in 6 sites under
-// src/common/adapter and src/common/platform. The Tauri shim (P1) replaces
-// those with a Tauri-invoke transport + a `window.__backendPort` init script.
-// Until then a browser/Tauri build of those paths will fail to resolve 'electron'.
 export default defineConfig(({ mode }) => {
   // WebUI dev mode (`vite --mode webdev`, driven by the UI `dev:web` script and
   // the root `dev:webui` one-click). The SPA is served by Vite (with HMR) but the
@@ -101,7 +97,6 @@ export default defineConfig(({ mode }) => {
         '@': src,
         '@common': resolve(src, 'common'),
         '@renderer': resolve(src, 'renderer'),
-        '@xterm/headless': resolve(src, 'common/utils/shims/xterm-headless.ts'),
       },
       extensions: ['.ts', '.tsx', '.js', '.json'],
     },

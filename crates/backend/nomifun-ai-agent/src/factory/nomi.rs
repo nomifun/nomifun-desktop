@@ -549,9 +549,6 @@ pub(super) async fn build(
     // Browser management is status-only. Primary Chromium is always shown in
     // its managed external window; historical embedded/headless/silent values
     // are frontend migration inputs only and never affect runtime headlessness.
-    // Keep this compatibility field false until the resolved config schema can
-    // remove it without breaking downstream constructors.
-    let browser_silent_default = false;
     // Browser Host 可执行文件来源偏好（与 silent 正交）。host_default="system"，优先系统安装
     // 的 Chrome/Edge，未探测到时回退 managed。该值不授予 runtime 所有权：主进程
     // BrowserSessionHub 统一创建/共享 Host，Primary 使用应用管理的稳定 profile，Crawl 使用临时 profile。
@@ -656,8 +653,6 @@ pub(super) async fn build(
         bedrock_config: fields.bedrock_config,
         computer_use: overrides.computer_use.unwrap_or(computer_use_default),
         browser_use: browser_use_enabled,
-        // 仅用于兼容旧配置结构；产品模式固定为外置受管窗口，因此始终为 false。
-        browser_silent: browser_silent_default,
         // Browser Host 可执行文件来源偏好；BrowserSessionHub 仍是唯一 owner。
         browser_source: browser_source_default,
         // F1-sec: 全权模式 LIVE 值（无 per-session override，纯 client_preferences 全局开关）。

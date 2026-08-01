@@ -21,8 +21,6 @@ import {
   mcpServerUiKey,
   type ExtensionMcpServerContribution,
 } from '@/renderer/hooks/mcp/extensionCatalog';
-import classNames from 'classnames';
-import { useSettingsViewMode } from '../settingsViewContext';
 
 type MessageInstance = Required<ReturnType<typeof Message.useMessage>[0]>;
 
@@ -32,8 +30,7 @@ const ModalMcpManagementSection: React.FC<{
   extensionMcpServers: ExtensionMcpServerContribution[];
   setMcpServers: React.Dispatch<React.SetStateAction<IMcpServer[]>>;
   saveMcpServers: (serversOrUpdater: IMcpServer[] | ((prev: IMcpServer[]) => IMcpServer[])) => Promise<void>;
-  isPageMode?: boolean;
-}> = ({ message, mcpServers, extensionMcpServers, setMcpServers, saveMcpServers, isPageMode }) => {
+}> = ({ message, mcpServers, extensionMcpServers, setMcpServers, saveMcpServers }) => {
   const { t } = useTranslation();
   const { oauthStatus, loggingIn, checkOAuthStatus, markLoginRequired, clearLoginRequired, login } = useMcpOAuth();
   const visibleMcpServers = useMemo(() => mcpServers, [mcpServers]);
@@ -219,10 +216,7 @@ const ModalMcpManagementSection: React.FC<{
             {t('settings.mcpNoServersFound')}
           </div>
         ) : (
-          <NomiScrollArea
-            className={classNames('max-h-360px', isPageMode && 'max-h-none')}
-            disableOverflow={isPageMode}
-          >
+          <NomiScrollArea className='max-h-360px max-h-none' disableOverflow>
             <div className='space-y-12px'>
               {visibleMcpServers.map((server) => {
                 const uiKey = mcpServerUiKey(server.mcp_server_id);
@@ -315,26 +309,19 @@ export const ToolsModalContentWithState: React.FC<{
   setMcpServers: React.Dispatch<React.SetStateAction<IMcpServer[]>>;
   saveMcpServers: (serversOrUpdater: IMcpServer[] | ((prev: IMcpServer[]) => IMcpServer[])) => Promise<void>;
 }> = ({ mcpMessage, mcpMessageContext, mcpServers, extensionMcpServers, saveMcpServers, setMcpServers }) => {
-  const viewMode = useSettingsViewMode();
-  const isPageMode = viewMode === 'page';
-
   return (
     <div className='flex flex-col h-full w-full'>
       {mcpMessageContext}
 
-      <NomiScrollArea className='flex-1 min-h-0 pb-16px' disableOverflow={isPageMode}>
+      <NomiScrollArea className='flex-1 min-h-0 pb-16px' disableOverflow>
         <div className='px-[12px] md:px-[32px] py-[24px] bg-2 rd-12px md:rd-16px flex flex-col min-h-0 border border-border-2'>
-          <NomiScrollArea
-            className={classNames('h-full', isPageMode && 'overflow-visible')}
-            disableOverflow={isPageMode}
-          >
+          <NomiScrollArea className='h-full overflow-visible' disableOverflow>
             <ModalMcpManagementSection
               message={mcpMessage}
               mcpServers={mcpServers}
               extensionMcpServers={extensionMcpServers}
               setMcpServers={setMcpServers}
               saveMcpServers={saveMcpServers}
-              isPageMode={isPageMode}
             />
           </NomiScrollArea>
         </div>

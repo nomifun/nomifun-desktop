@@ -9,7 +9,6 @@ use std::{
 };
 
 use tokio::sync::watch;
-use uuid::Uuid;
 
 use crate::{ProcessOutcome, ProcessOwner, SessionId, supervisor::Session};
 
@@ -231,30 +230,6 @@ impl Registry {
             return Err(LookupError::OwnerMismatch);
         }
         Ok(Arc::clone(&entry.session))
-    }
-
-    pub(crate) fn heartbeat_invocation(&self, invocation_id: Uuid, now: Instant) -> usize {
-        let sessions = {
-            let mut state = self
-                .state
-                .lock()
-                .expect("process registry lock is poisoned");
-            state
-                .active
-                .values_mut()
-                .filter_map(|entry| {
-                    if entry.owner.invocation_id != invocation_id {
-                        return None;
-                    }
-                    renew_entry(entry, now);
-                    Some(Arc::clone(&entry.session))
-                })
-                .collect::<Vec<_>>()
-        };
-        for session in &sessions {
-            session.touch_at(now);
-        }
-        sessions.len()
     }
 
     pub(crate) fn touch_session(&self, session_id: SessionId, now: Instant) -> bool {

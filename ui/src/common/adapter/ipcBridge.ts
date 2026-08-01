@@ -115,7 +115,6 @@ import type {
   ProviderConnectionResponse,
   UpsertProviderConnectionRequest,
 } from '../types/provider/providerConnection';
-import type { SpeechToTextRequest, SpeechToTextResult } from '../types/provider/speech';
 import type {
   TAdoptExecutionStepOutput,
   TAdjustAgentExecution,
@@ -882,18 +881,6 @@ export interface IStartOnBootStatus {
   platform: string;
 }
 
-/** Hardware acceleration / GPU recovery status — see process/utils/gpuRecovery */
-export type IGpuOverride = 'force-on' | 'force-off';
-
-export interface IGpuStatus {
-  /** User-set override; null means follow auto-recovery */
-  userOverride: IGpuOverride | null;
-  /** Whether auto-recovery has disabled hardware acceleration after repeated crashes */
-  autoDisabled: boolean;
-  crashCount: number;
-  lastCrashAt: number | null;
-}
-
 export type IRendererLogLevel = 'info' | 'warn' | 'error';
 
 export interface IRendererLogEntry {
@@ -977,25 +964,6 @@ export const application = {
     },
     { success: false }
   ),
-  // DEGRADE_STUB: no GPU-process recovery hooks in Tauri's webview.
-  getGpuStatus: stubShellProvider<IBridgeResponse<IGpuStatus>, void>({
-    success: true,
-    data: {
-      userOverride: null,
-      autoDisabled: false,
-      crashCount: 0,
-      lastCrashAt: null,
-    },
-  }),
-  setGpuOverride: stubShellProvider<IBridgeResponse<IGpuStatus>, { override: IGpuOverride | null }>({
-    success: true,
-    data: {
-      userOverride: null,
-      autoDisabled: false,
-      crashCount: 0,
-      lastCrashAt: null,
-    },
-  }),
   // DEGRADE_STUB: renderer-log piping to the shell; the in-process backend owns log files.
   writeRendererLog: stubShellProvider<void, IRendererLogEntry>(undefined),
   logStream: noopEmitter<{
@@ -1155,7 +1123,6 @@ export interface ISkillMarketPackageInstallResponse {
 }
 
 export const fs = {
-  getFilesByDir: httpPost<Array<IDirOrFile>, { dir: string; root: string }>('/api/fs/dir'),
   listWorkspaceFiles: withResponseMap(
     httpPost<Array<RawWorkspaceFlatFile>, { root: string }>('/api/fs/list'),
     fromBackendWorkspaceFlatFiles
@@ -1163,8 +1130,6 @@ export const fs = {
   getImageBase64: httpPost<string | null, { path: string; workspace?: string }>('/api/fs/image-base64'),
   fetchRemoteImage: httpPost<string, { url: string }>('/api/fs/fetch-remote-image'),
   readFile: httpPost<string | null, { path: string; workspace?: string }>('/api/fs/read'),
-  readFileBuffer: httpPost<string | null, { path: string; workspace?: string }>('/api/fs/read-buffer'),
-  createTempFile: httpPost<string, { file_name: string }>('/api/fs/temp'),
   writeFile: httpPost<boolean, { path: string; data: string }>('/api/fs/write'),
   createZip: httpPost<
     boolean,
@@ -1261,25 +1226,6 @@ export const fs = {
   >('/api/skills/market/package/install'),
 };
 
-// ---------------------------------------------------------------------------
-// Speech to Text — routed to backend
-// ---------------------------------------------------------------------------
-
-export const speechToText = {
-  transcribe: httpPost<SpeechToTextResult, SpeechToTextRequest>('/api/stt'),
-};
-
-// ---------------------------------------------------------------------------
-// File Watch — routed to /api/fs/watch/*
-// ---------------------------------------------------------------------------
-
-export const fileWatch = {
-  startWatch: httpPost<void, { file_path: string }>('/api/fs/watch/start'),
-  stopWatch: httpPost<void, { file_path: string }>('/api/fs/watch/stop'),
-  stopAllWatches: httpPost<void, void>('/api/fs/watch/stop-all'),
-  fileChanged: wsEmitter<{ file_path: string; event_type: string }>('fileWatch.fileChanged'),
-};
-
 // Workspace Office file watch
 export const workspaceOfficeWatch = {
   start: httpPost<void, { workspace: string }>('/api/fs/office-watch/start'),
@@ -1308,9 +1254,6 @@ export const fileSnapshot = {
     fromBackendCompareResult
   ),
   getBaselineContent: httpPost<string | null, { workspace: string; file_path: string }>('/api/fs/snapshot/baseline'),
-  getInfo: httpPost<import('@/common/types/platform/fileSnapshot').SnapshotInfo, { workspace: string }>(
-    '/api/fs/snapshot/info'
-  ),
   dispose: httpPost<void, { workspace: string }>('/api/fs/snapshot/dispose'),
   stageFile: httpPost<void, { workspace: string; file_path: string }>('/api/fs/snapshot/stage'),
   stageAll: httpPost<void, { workspace: string }>('/api/fs/snapshot/stage-all'),
@@ -1332,53 +1275,6 @@ export const fileSnapshot = {
       operation: import('@/common/types/platform/fileSnapshot').FileChangeOperation;
     }
   >('/api/fs/snapshot/reset'),
-  getBranches: httpPost<string[], { workspace: string }>('/api/fs/snapshot/branches'),
-};
-
-// ---------------------------------------------------------------------------
-// Google Auth — stubbed (Electron-native OAuth flow)
-// ---------------------------------------------------------------------------
-
-export const googleAuth = {
-  status: stubProvider<IBridgeResponse<{ account: string }>, { proxy?: string }>('googleAuth.status', {
-    success: false,
-    msg: 'Google Auth not available in backend mode',
-  }),
-};
-
-// ---------------------------------------------------------------------------
-// Google subscription status (Google OAuth provider path, used by nomi)
-// ---------------------------------------------------------------------------
-
-export const google = {
-  subscriptionStatus: httpGet<
-    {
-      isSubscriber: boolean;
-      tier?: string;
-      lastChecked: number;
-      message?: string;
-    },
-    { proxy?: string }
-  >('/api/google/subscription-status'),
-};
-
-// ---------------------------------------------------------------------------
-// Bedrock connection test
-// ---------------------------------------------------------------------------
-
-export const bedrock = {
-  testConnection: httpPost<
-    { msg?: string },
-    {
-      bedrock_config: {
-        auth_method: 'accessKey' | 'profile';
-        region: string;
-        access_key_id?: string;
-        secret_access_key?: string;
-        profile?: string;
-      };
-    }
-  >('/api/bedrock/test-connection'),
 };
 
 // ---------------------------------------------------------------------------
@@ -2032,17 +1928,6 @@ export const preview = {
       file_name?: string;
     };
   }>('preview.open'),
-};
-
-// ---------------------------------------------------------------------------
-// Document conversion
-// ---------------------------------------------------------------------------
-
-export const document = {
-  convert: httpPost<
-    import('../types/office/conversion').DocumentConversionResponse,
-    import('../types/office/conversion').DocumentConversionRequest
-  >('/api/document/convert'),
 };
 
 // ---------------------------------------------------------------------------

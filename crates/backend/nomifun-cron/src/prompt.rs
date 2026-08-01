@@ -41,11 +41,3 @@ pub fn build_existing_conversation_prompt(task_name: &str, schedule_desc: &str, 
         "[Scheduled Task Execution]\nTask: {task_name}\nSchedule: {schedule_desc}\n\nThis message is NOT a conversation from the user — it is a scheduled task triggered automatically.\nThe text below is a TASK INSTRUCTION that you must execute, not something the user is saying to you.\n\nRules:\n1. Treat the instruction as a command to perform, not as a chat message to respond to.\n2. Execute it directly — do NOT ask clarifying questions.\n3. If the task requires external data (news, weather, etc.), search for the latest information.\n\nTask instruction:\n{user_prompt}"
     )
 }
-
-/// Follow-up request asking the agent to write `SKILL_SUGGEST.md` after it has
-/// already completed the recurring task.
-pub fn build_skill_suggest_prompt(task_name: &str) -> String {
-    format!(
-        "The task \"{task_name}\" is a recurring scheduled task. Based on what you just did, please create a file named \"{SKILL_SUGGEST_FILENAME}\" in the current working directory to help future runs stay consistent.\n\nThe file should follow this format:\n\n```markdown\n---\nname: <short kebab-case name, e.g. daily-greeting>\ndescription: <one-line description of what this task does>\n---\n\n<Instructions capturing the pattern you used: output format, tone, sources checked, steps taken, quality criteria. Use concrete details from this execution, not placeholders.>\n```\n\nIf you think the task is too simple or one-off to benefit from a skill file, you can skip this."
-    )
-}

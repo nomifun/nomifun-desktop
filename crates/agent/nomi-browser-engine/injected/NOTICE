@@ -26,6 +26,13 @@ What is vendored
                            imported type-only (`import type ... from
                            '@protocol/channels'`) and erased at build time.
 
+Pruned subtrees: `vendor/isomorphic/trace/` (trace viewer) and
+`vendor/injected/src/recorder/` (codegen recorder) are removed from the
+vendored copy — both are structurally unrelated to InjectedScript and
+unreachable from the bundle entry. `vendor/isomorphic/index.ts` had its
+`./trace/*` re-exports dropped accordingly. When upgrading the vendored
+sources, re-prune these subtrees after copying from upstream.
+
 Most vendored source files retain their original Apache-2.0 license header
 (Copyright (c) Microsoft Corporation). The following carry their own (preserved
 verbatim) third-party license headers:
@@ -33,9 +40,8 @@ verbatim) third-party license headers:
   https://github.com/tabatkins/parse-css.
 - `vendor/injected/src/clock.ts` — BSD-3-Clause (Christian Johansen / sinonjs),
   with Microsoft modifications.
-- `vendor/injected/src/recorder/clipPaths.ts` — MIT (Copyright (c) Microsoft).
 - `vendor/isomorphic/stackTrace.ts` — MIT (Isaac Z. Schlueter et al.).
-(clock.ts / clipPaths.ts / stackTrace.ts are not reachable from the
+(clock.ts / stackTrace.ts are not reachable from the
 `injectedScript.ts` entry and are tree-shaken out of `dist/injected.js`; they
 are vendored only because the package is vendored whole.)
 
@@ -49,12 +55,17 @@ attribution banner at its head. Do not edit it by hand; regenerate via
 
 The bundle fixes `browserName='chromium'` at InjectedScript construction time
 (see `src/injected.rs`); Playwright's WebKit/Firefox runtime branches are thus
-dead-at-runtime. We vendor the package whole rather than hand-pruning, to keep
-upstream upgrades tractable.
+dead-at-runtime. We vendor the packages whole (minus the pruned trace viewer
+and codegen recorder subtrees noted above) rather than hand-pruning file by
+file, to keep upstream upgrades tractable.
 
 Modifications
 -------------
-The vendored `.ts` sources are unmodified from upstream. The only transformation
+The vendored `.ts` sources are unmodified from upstream, except:
+- `vendor/isomorphic/trace/` and `vendor/injected/src/recorder/` are removed
+  (see "Pruned subtrees" above);
+- `vendor/isomorphic/index.ts` drops the `./trace/*` re-export lines.
+The only other transformation
 is the esbuild bundling step in `build.sh` (path-alias resolution mirroring
 Playwright's tsconfig `paths`, CSS-as-text loader, IIFE wrapping with a global
 name). A copy of the Apache-2.0 license text accompanies the repository.

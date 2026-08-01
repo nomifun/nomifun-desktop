@@ -39,7 +39,7 @@ NomiFun runs under one of three auth policies, decided at startup:
 - Authentication and CSRF are turned off entirely. Every request acts as the
   installation owner recorded in the database.
 - A permissive CORS layer is added so the desktop WebView (and tooling) can call the API freely.
-- Local-only routes such as `/api/auth/internal/*` and `/api/webui/*` become reachable.
+- Local-only routes such as `/api/webui/*` become reachable.
 
 The trust boundary in local mode is the network — only ever expose it on loopback or a fully trusted private network. The web host loudly logs a warning if `--insecure-no-auth` is combined with a non-loopback bind.
 
@@ -56,7 +56,7 @@ Each group is owned by a specific crate. The base path is the actual URL prefix 
 |---|---|---|---|
 | Health | `/health` | public | [`router/health.rs`](../../crates/backend/nomifun-app/src/router/health.rs) |
 | Auth — login / setup / status / refresh | `/login`, `/logout`, `/api/auth/*`, `/api/ws-token`, `/qr-login` | mixed (login/setup/qr-login: public; rest: authenticated) | [`nomifun-auth/src/routes.rs`](../../crates/backend/nomifun-auth/src/routes.rs) |
-| Auth — local-only admin/internal | `/api/webui/*`, `/api/auth/internal/*` | local mode only | same as above |
+| Auth — local-only admin/internal | `/api/webui/*` | local mode only | same as above |
 | Conversations | `/api/conversations/*`, `/api/messages/search` | authenticated | [`nomifun-conversation/src/routes.rs`](../../crates/backend/nomifun-conversation/src/routes.rs), [`routes_aux.rs`](../../crates/backend/nomifun-conversation/src/routes_aux.rs) |
 | Agents (local CLI agents) | `/api/agents/*` | authenticated | [`nomifun-ai-agent/src/routes/agent.rs`](../../crates/backend/nomifun-ai-agent/src/routes/agent.rs) |
 | Remote agents | `/api/remote-agents/*` | authenticated | [`nomifun-ai-agent/src/routes/remote.rs`](../../crates/backend/nomifun-ai-agent/src/routes/remote.rs) |
@@ -79,7 +79,7 @@ Each group is owned by a specific crate. The base path is the actual URL prefix 
 | Browser-use secrets | `/api/browser-secrets/*` | authenticated | [`nomifun-secret/src/routes.rs`](../../crates/backend/nomifun-secret/src/routes.rs) |
 | Browser platform management (Agent-only managed browser) | `/api/browser/*` | authenticated; state-changing HTTP requests are CSRF-protected; installation-owner-only routes are separately gated | [`router/browser_management.rs`](../../crates/backend/nomifun-app/src/router/browser_management.rs), [`router/browser_login.rs`](../../crates/backend/nomifun-app/src/router/browser_login.rs) |
 | Filesystem | `/api/fs/*` | authenticated | [`nomifun-file/src/routes.rs`](../../crates/backend/nomifun-file/src/routes.rs) |
-| Office preview | `/api/word-preview/*`, `/api/excel-preview/*`, `/api/ppt-preview/*`, `/api/document/convert`, `/api/preview-history/*`, `/api/star-office/detect` | authenticated | [`nomifun-office/src/routes.rs`](../../crates/backend/nomifun-office/src/routes.rs) |
+| Office preview | `/api/word-preview/*`, `/api/excel-preview/*`, `/api/ppt-preview/*`, `/api/preview-history/*`, `/api/star-office/detect` | authenticated | [`nomifun-office/src/routes.rs`](../../crates/backend/nomifun-office/src/routes.rs) |
 | Office iframe proxies | `/api/ppt-proxy/*`, `/api/office-watch-proxy/*` | public (serve iframe content; no auth) | same as above |
 | Settings + providers + system info | `/api/settings`, `/api/providers/*`, `/api/system/*` | authenticated | [`nomifun-system/src/routes.rs`](../../crates/backend/nomifun-system/src/routes.rs) |
 | Global model failover queue | `/api/agent/model-failover` | authenticated | [`router/model_failover.rs`](../../crates/backend/nomifun-app/src/router/model_failover.rs) |
@@ -188,7 +188,7 @@ viewer-input transport.
 
 - Authentication: a JWT obtained from `GET /api/ws-token`, sent in the WebSocket `Sec-WebSocket-Protocol` header (or `Authorization`). Invalid or expired token → server sends an `auth-expired` event and closes with code `1008`. No token at all → close with `1008`, reason `"no token provided"`.
 - After a successful upgrade, every message is a JSON object with a `type` and a `payload`. Messages are pushed by the server when domain events occur (a new agent token, a terminal byte, a requirement transition); clients usually do not need to send anything back. The server multiplexes a single `BroadcastEventBus` to every connected client.
-- Heartbeats: ping every 30s, timeout at 60s (`HEARTBEAT_INTERVAL_MS` / `HEARTBEAT_TIMEOUT_MS`).
+- Heartbeats: ping every 30s, timeout at 60s (`HEARTBEAT_INTERVAL` / `HEARTBEAT_TIMEOUT` in `nomifun-realtime`).
 - Close codes: `1000` for a normal close, `1008` for policy violations (auth failure, invalid token).
 
 The set of `type` values is open-ended — extensions and feature modules emit their own. Treat unknown types as forward-compatible: ignore them.

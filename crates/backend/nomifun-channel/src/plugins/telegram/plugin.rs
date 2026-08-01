@@ -6,11 +6,13 @@ use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
 use tracing::{debug, error, info, warn};
 
-use crate::constants::{TELEGRAM_MAX_RECONNECT_ATTEMPTS, TELEGRAM_MAX_RECONNECT_DELAY, TELEGRAM_MESSAGE_LIMIT};
+use crate::constants::{RECONNECT_MAX_ATTEMPTS, RECONNECT_MAX_DELAY, TELEGRAM_MESSAGE_LIMIT};
 use crate::error::ChannelError;
 use crate::plugin::{ChannelPlugin, PluginCallbacks, SharedPluginStatus, mark_error_on_unexpected_exit};
+use crate::plugins::callback::{format_callback_data, parse_callback_data};
+use crate::plugins::util::{backoff_delay, truncate_message};
 use crate::types::{
-    ActionButton, ActionCategory, ActionContext, BotInfo, MessageContentType, ParseMode, PluginConfig, PluginStatus,
+    ActionContext, BotInfo, MessageContentType, ParseMode, PluginConfig, PluginStatus,
     PluginType, UnifiedAction, UnifiedAttachment, UnifiedIncomingMessage, UnifiedMessageContent,
     UnifiedOutgoingMessage, UnifiedUser,
 };
@@ -60,15 +62,6 @@ impl Default for TelegramPlugin {
 impl TelegramPlugin {
     pub fn new() -> Self {
         Self::default()
-    }
-
-    /// Construct with a custom watermark store (tests / future DI).
-    #[allow(dead_code)]
-    pub fn with_watermark_store(store: Arc<dyn WatermarkStore>) -> Self {
-        Self {
-            watermark_store: store,
-            ..Self::default()
-        }
     }
 }
 
@@ -150,7 +143,6 @@ impl ChannelPlugin for TelegramPlugin {
         self.poll_handle = Some(tokio::spawn(poll_loop(
             api,
             callbacks.message_tx,
-            callbacks.confirm_tx,
             self.status.clone(),
             shutdown_rx,
             bot_id,
@@ -298,7 +290,7 @@ impl ChannelPlugin for TelegramPlugin {
 /// Background task that continuously polls Telegram for updates.
 ///
 /// Implements exponential backoff on errors, up to
-/// `TELEGRAM_MAX_RECONNECT_ATTEMPTS` consecutive failures.
+/// `RECONNECT_MAX_ATTEMPTS` consecutive failures.
 ///
 /// Deduplication: Telegram only confirms updates when the next `getUpdates`
 /// carries an advanced offset, so a restart between "batch dispatched" and
@@ -312,7 +304,6 @@ impl ChannelPlugin for TelegramPlugin {
 async fn poll_loop(
     api: Arc<TelegramApi>,
     message_tx: mpsc::Sender<UnifiedIncomingMessage>,
-    confirm_tx: mpsc::Sender<(String, String)>,
     status: SharedPluginStatus,
     mut shutdown_rx: watch::Receiver<bool>,
     bot_id: String,
@@ -361,7 +352,7 @@ async fn poll_loop(
                     }
 
                     if let Some(cb) = update.callback_query {
-                        handle_callback_query(&api, &cb, &message_tx, &confirm_tx).await;
+                        handle_callback_query(&api, &cb, &message_tx).await;
                     } else if let Some(msg) = update.message {
                         handle_message(&msg, &message_tx).await;
                     }
@@ -387,12 +378,12 @@ async fn poll_loop(
                     "Telegram poll error"
                 );
 
-                if consecutive_errors >= TELEGRAM_MAX_RECONNECT_ATTEMPTS {
+                if consecutive_errors >= RECONNECT_MAX_ATTEMPTS {
                     error!("Telegram max reconnect attempts reached, stopping poll loop");
                     break;
                 }
 
-                let backoff = backoff_delay(consecutive_errors);
+                let backoff = backoff_delay(consecutive_errors, RECONNECT_MAX_DELAY);
                 tokio::select! {
                     _ = tokio::time::sleep(backoff) => {}
                     _ = shutdown_rx.changed() => {
@@ -413,12 +404,6 @@ async fn poll_loop(
     debug!("Telegram poll loop exited");
 }
 
-/// Calculate exponential backoff delay, capped at the configured maximum.
-fn backoff_delay(attempt: u32) -> Duration {
-    let delay_secs = 2u64.saturating_pow(attempt).min(TELEGRAM_MAX_RECONNECT_DELAY.as_secs());
-    Duration::from_secs(delay_secs)
-}
-
 // ---------------------------------------------------------------------------
 // Update handlers
 // ---------------------------------------------------------------------------
@@ -432,7 +417,6 @@ async fn handle_callback_query(
     api: &TelegramApi,
     cb: &TgCallbackQuery,
     message_tx: &mpsc::Sender<UnifiedIncomingMessage>,
-    confirm_tx: &mpsc::Sender<(String, String)>,
 ) {
     // A callback query ID is Telegram's stable native event identity.  Never
     // acknowledge, confirm, or enqueue an event that cannot participate in
@@ -444,18 +428,6 @@ async fn handle_callback_query(
 
     let data = cb.data.as_deref().unwrap_or("");
     let parsed = parse_callback_data(data);
-
-    // Check if this is a tool confirmation callback (system.confirm:callId=X,value=Y)
-    if let Some(action) = &parsed
-        && action.action == "system.confirm"
-        && let Some(params) = &action.params
-    {
-        let call_id = params.get("callId").cloned().unwrap_or_default();
-        let value = params.get("value").cloned().unwrap_or_default();
-        if !call_id.is_empty() {
-            let _ = confirm_tx.send((call_id, value)).await;
-        }
-    }
 
     let chat_id = cb.message.as_ref().map(|m| m.chat.id).unwrap_or(cb.from.id);
 
@@ -642,52 +614,6 @@ fn extract_content(msg: &TgMessage) -> (MessageContentType, String, Option<Vec<U
 }
 
 // ---------------------------------------------------------------------------
-// Callback data parsing
-// ---------------------------------------------------------------------------
-
-/// Parsed callback data from an inline keyboard button.
-struct ParsedCallback {
-    category: ActionCategory,
-    action: String,
-    params: Option<std::collections::HashMap<String, String>>,
-}
-
-/// Parse callback_data string `"category:action"` or `"category:action:k=v,k=v"`.
-fn parse_callback_data(data: &str) -> Option<ParsedCallback> {
-    let parts: Vec<&str> = data.splitn(3, ':').collect();
-    if parts.len() < 2 {
-        return None;
-    }
-
-    let category = match parts[0] {
-        "platform" => ActionCategory::Platform,
-        "system" => ActionCategory::System,
-        "chat" => ActionCategory::Chat,
-        _ => return None,
-    };
-
-    let action = parts[1].to_string();
-
-    let params = if parts.len() == 3 && !parts[2].is_empty() {
-        let mut map = std::collections::HashMap::new();
-        for pair in parts[2].split(',') {
-            if let Some((k, v)) = pair.split_once('=') {
-                map.insert(k.to_string(), v.to_string());
-            }
-        }
-        if map.is_empty() { None } else { Some(map) }
-    } else {
-        None
-    };
-
-    Some(ParsedCallback {
-        category,
-        action,
-        params,
-    })
-}
-
-// ---------------------------------------------------------------------------
 // Reply markup builders
 // ---------------------------------------------------------------------------
 
@@ -750,42 +676,6 @@ fn build_keyboard_markup(msg: &UnifiedOutgoingMessage) -> Option<ReplyMarkup> {
     }))
 }
 
-/// Derive the category prefix from an action name.
-///
-/// The mapping follows the `ActionCategory` routing in `ActionExecutor`:
-///   - `system.confirm` → `"chat"` (routed to `handle_chat_action`)
-///   - `pairing.*` → `"platform"`
-///   - `chat.*` / `action.*` → `"chat"`
-///   - everything else (`session.*`, `help.*`, `settings.*`, `agent.*`, `system.*`) → `"system"`
-fn action_category_prefix(action: &str) -> &'static str {
-    // Full-name overrides first: `system.confirm` is handled by
-    // `handle_chat_action` in ActionExecutor despite the "system." prefix.
-    if action == "system.confirm" {
-        return "chat";
-    }
-    let prefix = action.split('.').next().unwrap_or("");
-    match prefix {
-        "pairing" => "platform",
-        "chat" | "action" => "chat",
-        _ => "system",
-    }
-}
-
-/// Encode an ActionButton into callback_data format:
-/// `"category:action"` or `"category:action:k=v,k=v"`.
-///
-/// This is the inverse of [`parse_callback_data`].
-fn format_callback_data(btn: &ActionButton) -> String {
-    let category = action_category_prefix(&btn.action);
-    match &btn.params {
-        Some(params) if !params.is_empty() => {
-            let encoded: Vec<String> = params.iter().map(|(k, v)| format!("{k}={v}")).collect();
-            format!("{category}:{}:{}", btn.action, encoded.join(","))
-        }
-        _ => format!("{category}:{}", btn.action),
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -795,16 +685,6 @@ fn parse_chat_id(chat_id: &str) -> Result<i64, ChannelError> {
     chat_id
         .parse::<i64>()
         .map_err(|_| ChannelError::InvalidConfig(format!("Invalid chat_id: {chat_id}")))
-}
-
-/// Truncate a message to the platform limit, appending "..." if truncated.
-fn truncate_message(text: &str, limit: usize) -> String {
-    if text.len() <= limit {
-        return text.to_string();
-    }
-    // Truncate at char boundary, leave room for "..."
-    let truncated: String = text.chars().take(limit - 3).collect();
-    format!("{truncated}...")
 }
 
 /// Build display name from first + last name.
@@ -839,13 +719,12 @@ fn chrono_now() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashMap;
+    use crate::types::ActionButton;
 
     #[tokio::test]
-    async fn blank_callback_id_fails_before_confirm_or_enqueue() {
+    async fn blank_callback_id_fails_before_enqueue() {
         let api = TelegramApi::new(Client::new(), "unused-test-token");
         let (message_tx, mut message_rx) = mpsc::channel(1);
-        let (confirm_tx, mut confirm_rx) = mpsc::channel(1);
         let callback = TgCallbackQuery {
             id: " \t".into(),
             from: super::super::types::TgUser {
@@ -859,40 +738,9 @@ mod tests {
             data: Some("system:system.confirm:callId=call-1,value=yes".into()),
         };
 
-        handle_callback_query(&api, &callback, &message_tx, &confirm_tx).await;
+        handle_callback_query(&api, &callback, &message_tx).await;
 
         assert!(message_rx.try_recv().is_err());
-        assert!(confirm_rx.try_recv().is_err());
-    }
-
-    // -- truncate_message ---------------------------------------------------
-
-    #[test]
-    fn truncate_within_limit() {
-        let text = "Hello, world!";
-        assert_eq!(truncate_message(text, 100), "Hello, world!");
-    }
-
-    #[test]
-    fn truncate_at_limit() {
-        let text = "abc";
-        assert_eq!(truncate_message(text, 3), "abc");
-    }
-
-    #[test]
-    fn truncate_exceeds_limit() {
-        let text = "Hello, world!";
-        let result = truncate_message(text, 10);
-        assert_eq!(result, "Hello, ...");
-        assert!(result.len() <= 10);
-    }
-
-    #[test]
-    fn truncate_unicode() {
-        let text = "你好世界测试文本";
-        let result = truncate_message(text, 5);
-        // chars().take(2) = "你好", then "..."
-        assert_eq!(result, "你好...");
     }
 
     // -- parse_chat_id ------------------------------------------------------
@@ -920,170 +768,6 @@ mod tests {
     #[test]
     fn display_name_full() {
         assert_eq!(build_display_name("Alice", Some("Smith")), "Alice Smith");
-    }
-
-    // -- parse_callback_data ------------------------------------------------
-
-    #[test]
-    fn parse_callback_category_action() {
-        let result = parse_callback_data("system:session.new").unwrap();
-        assert_eq!(result.category, ActionCategory::System);
-        assert_eq!(result.action, "session.new");
-        assert!(result.params.is_none());
-    }
-
-    #[test]
-    fn parse_callback_with_params() {
-        let result = parse_callback_data("system:system.confirm:callId=abc,value=yes").unwrap();
-        assert_eq!(result.category, ActionCategory::System);
-        assert_eq!(result.action, "system.confirm");
-        let params = result.params.unwrap();
-        assert_eq!(params.get("callId").unwrap(), "abc");
-        assert_eq!(params.get("value").unwrap(), "yes");
-    }
-
-    #[test]
-    fn parse_callback_invalid() {
-        assert!(parse_callback_data("invalid").is_none());
-        assert!(parse_callback_data("unknown:action").is_none());
-    }
-
-    #[test]
-    fn parse_callback_platform_category() {
-        let result = parse_callback_data("platform:pairing.show").unwrap();
-        assert_eq!(result.category, ActionCategory::Platform);
-        assert_eq!(result.action, "pairing.show");
-    }
-
-    #[test]
-    fn parse_callback_chat_category() {
-        let result = parse_callback_data("chat:chat.send").unwrap();
-        assert_eq!(result.category, ActionCategory::Chat);
-        assert_eq!(result.action, "chat.send");
-    }
-
-    // -- format_callback_data -----------------------------------------------
-
-    #[test]
-    fn format_callback_no_params() {
-        let btn = ActionButton {
-            label: "Test".into(),
-            action: "help.show".into(),
-            params: None,
-        };
-        assert_eq!(format_callback_data(&btn), "system:help.show");
-    }
-
-    #[test]
-    fn format_callback_with_params() {
-        let mut params = HashMap::new();
-        params.insert("agentType".into(), "acp".into());
-        let btn = ActionButton {
-            label: "Test".into(),
-            action: "agent.select".into(),
-            params: Some(params),
-        };
-        let result = format_callback_data(&btn);
-        assert!(result.starts_with("system:agent.select:"));
-        assert!(result.contains("agentType=acp"));
-    }
-
-    #[test]
-    fn format_callback_chat_category() {
-        let btn = ActionButton {
-            label: "Regen".into(),
-            action: "chat.regenerate".into(),
-            params: None,
-        };
-        assert_eq!(format_callback_data(&btn), "chat:chat.regenerate");
-    }
-
-    #[test]
-    fn format_callback_platform_category() {
-        let btn = ActionButton {
-            label: "Pair".into(),
-            action: "pairing.show".into(),
-            params: None,
-        };
-        assert_eq!(format_callback_data(&btn), "platform:pairing.show");
-    }
-
-    // -- action_category_prefix ------------------------------------------------
-
-    #[test]
-    fn category_prefix_mapping() {
-        assert_eq!(action_category_prefix("pairing.show"), "platform");
-        assert_eq!(action_category_prefix("pairing.refresh"), "platform");
-        assert_eq!(action_category_prefix("chat.send"), "chat");
-        assert_eq!(action_category_prefix("chat.regenerate"), "chat");
-        assert_eq!(action_category_prefix("action.copy"), "chat");
-        assert_eq!(action_category_prefix("session.new"), "system");
-        assert_eq!(action_category_prefix("help.show"), "system");
-        assert_eq!(action_category_prefix("agent.select"), "system");
-        assert_eq!(action_category_prefix("system.confirm"), "chat");
-        assert_eq!(action_category_prefix("settings.show"), "system");
-    }
-
-    // -- roundtrip format ↔ parse ----------------------------------------------
-
-    #[test]
-    fn roundtrip_no_params() {
-        let btn = ActionButton {
-            label: "Help".into(),
-            action: "help.show".into(),
-            params: None,
-        };
-        let encoded = format_callback_data(&btn);
-        let parsed = parse_callback_data(&encoded).expect("should parse");
-        assert_eq!(parsed.category, ActionCategory::System);
-        assert_eq!(parsed.action, "help.show");
-        assert!(parsed.params.is_none());
-    }
-
-    #[test]
-    fn roundtrip_with_params() {
-        let btn = ActionButton {
-            label: "Confirm".into(),
-            action: "system.confirm".into(),
-            params: Some(HashMap::from([
-                ("callId".into(), "abc123".into()),
-                ("value".into(), "yes".into()),
-            ])),
-        };
-        let encoded = format_callback_data(&btn);
-        let parsed = parse_callback_data(&encoded).expect("should parse");
-        // system.confirm is routed to handle_chat_action, so category is Chat
-        assert_eq!(parsed.category, ActionCategory::Chat);
-        assert_eq!(parsed.action, "system.confirm");
-        let params = parsed.params.expect("should have params");
-        assert_eq!(params.get("callId").unwrap(), "abc123");
-        assert_eq!(params.get("value").unwrap(), "yes");
-    }
-
-    #[test]
-    fn roundtrip_chat_action() {
-        let btn = ActionButton {
-            label: "Regen".into(),
-            action: "chat.regenerate".into(),
-            params: None,
-        };
-        let encoded = format_callback_data(&btn);
-        let parsed = parse_callback_data(&encoded).expect("should parse");
-        assert_eq!(parsed.category, ActionCategory::Chat);
-        assert_eq!(parsed.action, "chat.regenerate");
-    }
-
-    #[test]
-    fn roundtrip_platform_action() {
-        let btn = ActionButton {
-            label: "Refresh".into(),
-            action: "pairing.refresh".into(),
-            params: None,
-        };
-        let encoded = format_callback_data(&btn);
-        let parsed = parse_callback_data(&encoded).expect("should parse");
-        assert_eq!(parsed.category, ActionCategory::Platform);
-        assert_eq!(parsed.action, "pairing.refresh");
     }
 
     // -- format_parse_mode --------------------------------------------------
@@ -1303,23 +987,6 @@ mod tests {
         let (content_type, text, _) = extract_content(&msg);
         assert_eq!(content_type, MessageContentType::Document);
         assert_eq!(text, "My report");
-    }
-
-    // -- backoff_delay ------------------------------------------------------
-
-    #[test]
-    fn backoff_exponential() {
-        assert_eq!(backoff_delay(1), Duration::from_secs(2));
-        assert_eq!(backoff_delay(2), Duration::from_secs(4));
-        assert_eq!(backoff_delay(3), Duration::from_secs(8));
-        assert_eq!(backoff_delay(4), Duration::from_secs(16));
-    }
-
-    #[test]
-    fn backoff_capped() {
-        // 2^5 = 32, capped to 30
-        assert_eq!(backoff_delay(5), Duration::from_secs(30));
-        assert_eq!(backoff_delay(10), Duration::from_secs(30));
     }
 
     // -- TelegramPlugin constructor -----------------------------------------

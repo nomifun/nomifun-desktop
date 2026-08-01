@@ -8,6 +8,7 @@ pub(crate) mod browser_login;
 mod boot_terminal_proof;
 mod computer_permissions;
 mod health;
+mod knowledge_registration;
 mod model_failover;
 mod routes;
 mod state;

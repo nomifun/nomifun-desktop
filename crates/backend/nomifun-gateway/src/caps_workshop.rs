@@ -25,19 +25,6 @@ use crate::deps::{CallerCtx, GatewayDeps};
 use crate::registry::{Capability, CapabilityMeta, DangerTier};
 use crate::server::ok;
 
-fn deserialize_model_name<'de, D>(deserializer: D) -> Result<String, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    let value = String::deserialize(deserializer)?;
-    if value.is_empty() || value.trim() != value {
-        return Err(serde::de::Error::custom(
-            "model must be a non-empty trimmed natural key",
-        ));
-    }
-    Ok(value)
-}
-
 /// Max chars of prompt/caption/text folded into a node summary.
 const SUMMARY_TEXT_MAX: usize = 120;
 /// Max nodes/edges emitted in a canvas summary. A valid canvas doc (≤ 8 MB) can
@@ -106,7 +93,7 @@ struct GenerateParams {
     #[schemars(schema_with = "crate::id_schema::canonical_uuid_v7_schema")]
     provider_id: ProviderId,
     /// Model id/name available on that provider.
-    #[serde(deserialize_with = "deserialize_model_name")]
+    #[serde(deserialize_with = "crate::id_schema::deserialize_model_name")]
     model: String,
     /// Capability: `t2i` | `i2i` | `inpaint` | `t2v` | `i2v` | `v2v` | `tts` | `text`.
     capability: String,

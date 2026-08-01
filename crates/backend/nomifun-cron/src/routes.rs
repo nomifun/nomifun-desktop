@@ -110,10 +110,7 @@ async fn run_now(
     let key = value
         .to_str()
         .map_err(|_| AppError::BadRequest("Idempotency-Key must be valid ASCII".to_owned()))?;
-    if key.is_empty()
-        || key.len() > 128
-        || !key.bytes().all(|byte| (0x21..=0x7e).contains(&byte))
-    {
+    if !nomifun_common::is_visible_ascii_key(key, 128) {
         return Err(AppError::BadRequest(
             "Idempotency-Key must contain 1..=128 visible ASCII bytes".to_owned(),
         ));

@@ -189,26 +189,13 @@ impl LagResyncCoalescer {
     /// marker-aware clients on the second.
     fn broadcast_resync(&self, skipped: u64) {
         self.ws_manager
-            .broadcast_all(browser_inventory_resync_event(skipped));
+            .broadcast_all(crate::browser_inventory_events::browser_inventory_resync_event(skipped));
         self.ws_manager
             .broadcast_all(nomifun_api_types::WebSocketMessage::new(
                 "sync.resync-required",
                 serde_json::json!({"scope": "all", "skipped": skipped}),
             ));
     }
-}
-
-fn browser_inventory_resync_event(
-    skipped: u64,
-) -> nomifun_api_types::WebSocketMessage<serde_json::Value> {
-    nomifun_api_types::WebSocketMessage::new(
-        "browser.inventory.changed",
-        serde_json::json!({
-            "change_kind": "resync_required",
-            "resync_required": true,
-            "skipped": skipped,
-        }),
-    )
 }
 
 /// Apply the two installation-control-plane gates in the only valid order:
@@ -324,8 +311,6 @@ pub async fn create_router(services: &AppServices) -> Router {
         // REST, model tools and boot recovery share the same public facade and
         // therefore one scheduler handle map and one durable state machine.
         agent_execution_engine: states.agent_execution.clone(),
-        // Presets: same resolver singleton as `/api/presets` and companion apply.
-        preset_service: states.preset.service.clone(),
         // Gateway is only an adapter to the one process-wide browser hub. An
         // unsupported/degraded host leaves this as `None`; it never creates a
         // fallback BrowserTool/Chromium owner inside the Gateway.
@@ -350,7 +335,7 @@ pub async fn create_router(services: &AppServices) -> Router {
     tokio::spawn(
         channel_components
             .message_loop
-            .run(channel_components.message_rx, channel_components.confirm_rx),
+            .run(channel_components.message_rx),
     );
     // Start the busy-time queue drain (spec D1): it consumes `turn.completed`
     // envelopes from the same in-process bus the conversation service

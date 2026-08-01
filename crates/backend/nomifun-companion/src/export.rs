@@ -10,9 +10,11 @@
 //!   are collected by the frontend; this crate never touches the knowledge
 //!   domain, and binding reconstruction after import is the frontend's job).
 //!
-//! Import mirrors the knowledge importer's hardening: component-sanitized
-//! entry paths (zip-slip), symlink rejection, a strict entry whitelist, and a
-//! manifest format/kind/version gate before anything is written. v3 packages
+//! Import uses the shared `nomifun_common::zip_safe` hardening (also used by
+//! the knowledge/skill importers): component-sanitized entry paths
+//! (zip-slip), symlink rejection, decompression-bomb caps, a strict entry
+//! whitelist, and a manifest format/kind/version gate before anything is
+//! written. v3 packages
 //! are accepted only at exactly version 3; payload JSON uses closed schemas.
 //! Memory import is staged and committed in one SQLite transaction. Event files
 //! use no-clobber publication and an existing same-name file is idempotent only
@@ -20,9 +22,9 @@
 
 use std::collections::HashSet;
 use std::io::Write;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 
-use nomifun_common::{AppError, TimestampMs, now_ms};
+use nomifun_common::{AppError, TimestampMs, now_ms, zip_safe};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -788,7 +790,9 @@ fn sha256_bytes(bytes: &[u8]) -> String {
 /// Blocking extraction with validation. Only the documented package entries
 /// are accepted (`manifest.json`, `memories.jsonl`, `learn_runs.jsonl`,
 /// `state.json`, `companion.json`, `knowledge_refs.json`, `events/*.jsonl`); every
-/// entry path is sanitized (zip-slip) and symlink entries are rejected.
+/// entry path is sanitized (zip-slip), symlink entries are rejected, and
+/// decompression-bomb caps (entry count + cumulative actually-written bytes)
+/// bound the extraction.
 /// Returns the manifest `kind` after the format/version checks passed.
 fn extract_zip_validated(archive_path: &Path, destination: &Path) -> Result<String, AppError> {
     let file = std::fs::File::open(archive_path)
@@ -796,6 +800,10 @@ fn extract_zip_validated(archive_path: &Path, destination: &Path) -> Result<Stri
     let mut archive =
         zip::ZipArchive::new(file).map_err(|_| AppError::BadRequest("不是 NomiFun 导出包".into()))?;
 
+    let mut budget = zip_safe::ZipExtractionBudget::default();
+    budget
+        .check_entry_count(archive.len())
+        .map_err(|e| AppError::BadRequest(e.to_string()))?;
     let mut seen_entries = HashSet::new();
     for index in 0..archive.len() {
         let mut entry = archive
@@ -846,8 +854,11 @@ fn extract_zip_validated(archive_path: &Path, destination: &Path) -> Result<Stri
         }
         let mut output = std::fs::File::create(&output_path)
             .map_err(|e| AppError::Internal(format!("failed to extract file: {e}")))?;
-        std::io::copy(&mut entry, &mut output)
+        let written = std::io::copy(&mut entry, &mut output)
             .map_err(|e| AppError::Internal(format!("failed to extract file: {e}")))?;
+        budget
+            .record_written(written)
+            .map_err(|e| AppError::BadRequest(e.to_string()))?;
     }
 
     let manifest_bytes = std::fs::read(destination.join("manifest.json"))
@@ -900,41 +911,18 @@ fn validate_manifest(manifest: &ExportManifest, destination: &Path) -> Result<St
     Ok(kind)
 }
 
-/// Sanitize a zip entry name into a safe relative path (same policy as the
-/// knowledge/skill importers): no backslashes, no absolute paths, no
-/// `..`/prefix components.
+/// Sanitize a zip entry name into a safe relative path via the shared
+/// [`nomifun_common::zip_safe`] hardening. Companion bundles use the strict
+/// colon policy — every `':'` byte is rejected, portably covering Windows
+/// drive prefixes ("C:/…") which parse as `Component::Prefix` only on
+/// Windows. (Our own exporter never writes a `':'` into an entry name.)
 fn safe_zip_entry_path(name: &str) -> Result<PathBuf, AppError> {
-    let invalid = || AppError::BadRequest(format!("非法压缩包条目: {name}"));
-    // Backslashes and colons are rejected at the byte level: a Windows drive
-    // prefix ("C:/…") parses as `Component::Prefix` only on Windows — on
-    // Unix it is a plain `Normal` component, so a byte check is the only
-    // portable way to hold the no-drive-prefix policy on every platform.
-    // (Our own exporter never writes either byte into an entry name.)
-    if name.is_empty() || name.contains('\\') || name.contains(':') {
-        return Err(invalid());
-    }
-    let path = Path::new(name);
-    if path.is_absolute() {
-        return Err(invalid());
-    }
-    let mut safe_path = PathBuf::new();
-    for component in path.components() {
-        match component {
-            Component::Normal(part) => safe_path.push(part),
-            Component::CurDir => {}
-            _ => return Err(invalid()),
-        }
-    }
-    if safe_path.as_os_str().is_empty() {
-        return Err(invalid());
-    }
-    Ok(safe_path)
+    zip_safe::safe_zip_entry_path(name, zip_safe::ZipColonPolicy::RejectAll)
+        .ok_or_else(|| AppError::BadRequest(format!("非法压缩包条目: {name}")))
 }
 
 fn reject_zip_symlink(entry: &zip::read::ZipFile<'_>, name: &str) -> Result<(), AppError> {
-    if let Some(mode) = entry.unix_mode()
-        && mode & 0o170000 == 0o120000
-    {
+    if zip_safe::zip_entry_is_symlink(entry.unix_mode()) {
         return Err(AppError::BadRequest(format!("非法压缩包条目: {name}")));
     }
     Ok(())

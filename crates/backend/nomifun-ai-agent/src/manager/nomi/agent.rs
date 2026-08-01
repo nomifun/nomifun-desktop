@@ -527,9 +527,8 @@ impl NomiAgentManager {
         config.tools.browser.visual_fallback = config_extra.browser_visual_fallback;
         config.tools.browser.unrestricted_approval = config_extra.browser_unrestricted_approval;
         // Browser is status-only: Primary runs in the external managed window.
-        // `browser_silent` remains in the resolved config solely for old
-        // constructors and is deliberately ignored here. BrowserSessionHub
-        // owns every Host/profile; this runtime never creates a private one.
+        // BrowserSessionHub owns every Host/profile; this runtime never
+        // creates a private/headless one.
         config.tools.browser.headless = false;
         config.tools.browser.source = config_extra.browser_source.clone();
 
@@ -2626,7 +2625,6 @@ mod tests {
             bedrock_config: None,
             computer_use: false,
             browser_use: false,
-            browser_silent: false,
             browser_source: "managed".to_owned(),
             browser_full_power: false,
             browser_persistent_login: false,

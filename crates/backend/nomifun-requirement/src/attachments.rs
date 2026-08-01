@@ -775,38 +775,6 @@ impl AttachmentStore {
                 attachment_stage_error("reconcile durable attachment delete", error)
             })
     }
-
-    /// Compatibility wrapper around the fail-closed plan/activate primitive.
-    /// Workspace activation failures become missing prompt entries; they never
-    /// change the preflighted prompt to an absolute-path fallback.
-    pub async fn stage_for_prompt(
-        &self,
-        req_id: &str,
-        workspace: Option<&Path>,
-    ) -> Vec<PromptAttachment> {
-        let plan = match self.plan_for_prompt(req_id, workspace).await {
-            Ok(plan) => plan,
-            Err(error) => {
-                warn!(%error, req_id, "failed to build a safe attachment staging plan");
-                return Vec::new();
-            }
-        };
-        if let Err(error) = self.activate_prompt_plan(&plan).await {
-            warn!(%error, req_id, "attachment staging activation failed closed");
-            return plan
-                .attachments
-                .into_iter()
-                .map(|mut attachment| {
-                    if !attachment.missing {
-                        attachment.path.clear();
-                        attachment.missing = true;
-                    }
-                    attachment
-                })
-                .collect();
-        }
-        plan.attachments
-    }
 }
 
 async fn run_prepared_delete_reconciliation(
@@ -3226,45 +3194,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn stage_for_prompt_uses_canonical_disk_name_and_never_falls_back() {
-        let (store, data_dir, upload_root) = store().await;
-        let a = put_upload(upload_root.path(), "a.png", b"x");
-        let rows = store
-            .ingest(REQ_1, &[NewAttachmentRef { source_path: a, file_name: "图片.png".into() }], None)
-            .await
-            .unwrap();
-        // Workspace staging always uses the canonical attachment ID, never the
-        // user-controlled display name.
-        let ws = tempfile::tempdir().unwrap();
-        let staged = store.stage_for_prompt(REQ_1, Some(ws.path())).await;
-        assert_eq!(staged.len(), 1);
-        assert!(!staged[0].missing);
-        assert_eq!(
-            staged[0].path,
-            format!(
-                "./{WORKSPACE_STAGE_REL_DIR}/{REQ_1}/{}.png",
-                rows[0].attachment_id
-            )
-        );
-        assert!(
-            ws.path()
-                .join(staged[0].path.trim_start_matches("./"))
-                .exists()
-        );
-        assert!(ws.path().join(".nomi/requirement-attachments/.gitignore").exists());
-        // No workspace uses the verified physical original path.
-        let staged = store.stage_for_prompt(REQ_1, None).await;
-        assert_eq!(
-            PathBuf::from(&staged[0].path),
-            std::fs::canonicalize(data_dir.path().join(&rows[0].rel_path)).unwrap()
-        );
-        // A vanished original is represented as missing, never as a stale path.
-        std::fs::remove_file(data_dir.path().join(&rows[0].rel_path)).unwrap();
-        let staged = store.stage_for_prompt(REQ_1, Some(ws.path())).await;
-        assert!(staged[0].missing);
-    }
-
-    #[tokio::test]
     async fn prompt_plan_is_read_only_and_activation_preserves_exact_paths() {
         let (store, _data_dir, upload_root) = store().await;
         let source = put_upload(upload_root.path(), "planned.png", b"planned");
@@ -3463,11 +3392,6 @@ mod tests {
                 .plan_for_prompt(REQ_1, Some(workspace.path()))
                 .await
                 .is_err()
-        );
-        let legacy = store.stage_for_prompt(REQ_1, Some(workspace.path())).await;
-        assert!(
-            legacy.is_empty(),
-            "legacy wrapper must fail closed, not reveal an absolute fallback"
         );
         assert!(!workspace.path().join(".nomi").exists());
         assert!(

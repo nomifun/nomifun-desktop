@@ -2,33 +2,16 @@
 //! themselves live in `nomifun_api_types::idmm`; this module adds runtime logic
 //! over them.
 
-use nomifun_api_types::{AgentErrorCode, IdmmConfig, WatchTier};
+use nomifun_api_types::{IdmmConfig, WatchTier};
 use nomifun_common::ProviderId;
 
 /// Classify an `AgentErrorCode` as a provider fault IDMM should supervise
 /// (i.e. a single-vendor failure a backup model or a retry might overcome).
-pub fn is_provider_fault(code: AgentErrorCode) -> bool {
-    use AgentErrorCode::*;
-    matches!(
-        code,
-        UserLlmProviderAuthFailed
-            | UserLlmProviderPermissionDenied
-            | UserLlmProviderBillingRequired
-            | UserLlmProviderConfigError
-            | UserLlmProviderModelNotFound
-            | UserLlmProviderUnsupportedModel
-            | UserLlmProviderEndpointNotFound
-            | UserLlmProviderInvalidRequest
-            | UserLlmProviderInvalidToolSchema
-            | UserLlmProviderContextTooLarge
-            | UserLlmProviderRateLimited
-            | UserLlmProviderTimeout
-            | UserLlmProviderNetworkError
-            | UserLlmProviderEmptyResponse
-            | UserLlmProviderGatewayError
-            | UnknownUpstreamError
-    )
-}
+///
+/// Single source of truth lives in `nomifun-conversation` (the failover seam,
+/// which this crate already depends on); re-exported here so IDMM callers keep
+/// their `crate::config::is_provider_fault` path.
+pub use nomifun_conversation::model_failover::is_provider_fault;
 
 /// Validate a config for the given backup resolvability. Returns `Err(reason)`
 /// to map to a 400 / inline UI error.
@@ -219,15 +202,6 @@ mod tests {
         };
         assert!(validate(&cfg, false).is_ok());
         assert!(validate(&cfg, true).is_ok());
-    }
-
-    #[test]
-    fn is_provider_fault_covers_known_codes() {
-        assert!(is_provider_fault(AgentErrorCode::UserLlmProviderEndpointNotFound));
-        assert!(is_provider_fault(AgentErrorCode::UserLlmProviderGatewayError));
-        assert!(is_provider_fault(AgentErrorCode::UserLlmProviderRateLimited));
-        assert!(!is_provider_fault(AgentErrorCode::UserAgentNotInstalled));
-        assert!(!is_provider_fault(AgentErrorCode::NomifunConversationBusy));
     }
 
     #[test]

@@ -385,6 +385,9 @@ async fn load_user_mcp_servers(
 /// Convert an `McpServerRow` into the SDK `McpServer` shape used by
 /// `NewSessionRequest::mcp_servers`. Returns an error string when
 /// `transport_config` is malformed or required fields are missing.
+///
+/// Parses `transport_config` leniently (unknown keys tolerated, non-string
+/// env/header values dropped) so legacy persisted rows keep injecting.
 fn row_to_sdk_mcp_server(row: &McpServerRow) -> Result<McpServer, String> {
     let value: serde_json::Value = serde_json::from_str(&row.transport_config)
         .map_err(|e| format!("invalid transport_config JSON: {e}"))?;
@@ -395,7 +398,6 @@ fn row_to_sdk_mcp_server(row: &McpServerRow) -> Result<McpServer, String> {
                 .get("command")
                 .and_then(|v| v.as_str())
                 .ok_or_else(|| "stdio: missing command".to_owned())?;
-            let resolved_command = resolve_stdio_command(command);
             let args: Vec<String> = value
                 .get("args")
                 .and_then(|v| v.as_array())
@@ -405,65 +407,25 @@ fn row_to_sdk_mcp_server(row: &McpServerRow) -> Result<McpServer, String> {
                         .collect()
                 })
                 .unwrap_or_default();
-            let env: Vec<EnvVariable> = value
-                .get("env")
-                .and_then(|v| v.as_object())
-                .map(|obj| {
-                    let mut entries: Vec<(String, String)> = obj
-                        .iter()
-                        .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_owned())))
-                        .collect();
-                    // Sort for deterministic ordering across runs.
-                    entries.sort_by(|a, b| a.0.cmp(&b.0));
-                    entries
-                        .into_iter()
-                        .map(|(k, v)| EnvVariable::new(k, v))
-                        .collect()
-                })
-                .unwrap_or_default();
-
-            let stdio = McpServerStdio::new(row.name.clone(), resolved_command)
-                .args(args)
-                .env(env);
-            Ok(McpServer::Stdio(stdio))
+            let env = json_string_entries(value.get("env"));
+            Ok(build_stdio_server(&row.name, command, args, env))
         }
         "http" | "streamable_http" => {
             let url = value
                 .get("url")
                 .and_then(|v| v.as_str())
                 .ok_or_else(|| "http: missing url".to_owned())?;
-            let headers = parse_headers(value.get("headers"));
-            Ok(McpServer::Http(
-                McpServerHttp::new(row.name.clone(), url).headers(headers),
-            ))
+            Ok(build_http_server(&row.name, url, json_string_entries(value.get("headers"))))
         }
         "sse" => {
             let url = value
                 .get("url")
                 .and_then(|v| v.as_str())
                 .ok_or_else(|| "sse: missing url".to_owned())?;
-            let headers = parse_headers(value.get("headers"));
-            Ok(McpServer::Sse(
-                McpServerSse::new(row.name.clone(), url).headers(headers),
-            ))
+            Ok(build_sse_server(&row.name, url, json_string_entries(value.get("headers"))))
         }
         other => Err(format!("unknown transport type: {other}")),
     }
-}
-
-fn parse_headers(value: Option<&serde_json::Value>) -> Vec<HttpHeader> {
-    let Some(obj) = value.and_then(|v| v.as_object()) else {
-        return Vec::new();
-    };
-    let mut entries: Vec<(String, String)> = obj
-        .iter()
-        .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_owned())))
-        .collect();
-    entries.sort_by(|a, b| a.0.cmp(&b.0));
-    entries
-        .into_iter()
-        .map(|(k, v)| HttpHeader::new(k, v))
-        .collect()
 }
 
 fn session_server_to_sdk_mcp_server(server: &SessionMcpServer) -> Result<McpServer, String> {
@@ -472,55 +434,76 @@ fn session_server_to_sdk_mcp_server(server: &SessionMcpServer) -> Result<McpServ
             if command.is_empty() {
                 return Err("stdio: missing command".to_owned());
             }
-            let mut entries: Vec<(String, String)> =
-                env.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
-            entries.sort_by(|a, b| a.0.cmp(&b.0));
-            let env = entries
-                .into_iter()
-                .map(|(k, v)| EnvVariable::new(k, v))
-                .collect();
-            Ok(McpServer::Stdio(
-                McpServerStdio::new(server.name.clone(), resolve_stdio_command(command))
-                    .args(args.clone())
-                    .env(env),
-            ))
+            let env = env.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+            Ok(build_stdio_server(&server.name, command, args.clone(), env))
         }
         SessionMcpTransport::Http { url, headers }
         | SessionMcpTransport::StreamableHttp { url, headers } => {
             if url.is_empty() {
                 return Err("http: missing url".to_owned());
             }
-            let mut entries: Vec<(String, String)> = headers
-                .iter()
-                .map(|(k, v)| (k.clone(), v.clone()))
-                .collect();
-            entries.sort_by(|a, b| a.0.cmp(&b.0));
-            let headers = entries
-                .into_iter()
-                .map(|(k, v)| HttpHeader::new(k, v))
-                .collect();
-            Ok(McpServer::Http(
-                McpServerHttp::new(server.name.clone(), url).headers(headers),
-            ))
+            let headers = headers.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+            Ok(build_http_server(&server.name, url, headers))
         }
         SessionMcpTransport::Sse { url, headers } => {
             if url.is_empty() {
                 return Err("sse: missing url".to_owned());
             }
-            let mut entries: Vec<(String, String)> = headers
-                .iter()
-                .map(|(k, v)| (k.clone(), v.clone()))
-                .collect();
-            entries.sort_by(|a, b| a.0.cmp(&b.0));
-            let headers = entries
-                .into_iter()
-                .map(|(k, v)| HttpHeader::new(k, v))
-                .collect();
-            Ok(McpServer::Sse(
-                McpServerSse::new(server.name.clone(), url).headers(headers),
-            ))
+            let headers = headers.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+            Ok(build_sse_server(&server.name, url, headers))
         }
     }
+}
+
+// ── Shared SDK McpServer construction ───────────────────────────────────────
+// Both converters above normalize into (name, transport parts) and build the
+// identical SDK shapes here, with the same sorted-env/sorted-headers
+// determinism and the same stdio command resolution.
+
+/// Extract string-valued entries from a JSON object (non-string values are
+/// silently dropped — lenient legacy-row parsing).
+fn json_string_entries(value: Option<&serde_json::Value>) -> Vec<(String, String)> {
+    value
+        .and_then(|v| v.as_object())
+        .map(|obj| {
+            obj.iter()
+                .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_owned())))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Sort entries by key for deterministic ordering across runs.
+fn sorted_entries(mut entries: Vec<(String, String)>) -> Vec<(String, String)> {
+    entries.sort_by(|a, b| a.0.cmp(&b.0));
+    entries
+}
+
+fn build_stdio_server(name: &str, command: &str, args: Vec<String>, env: Vec<(String, String)>) -> McpServer {
+    let env: Vec<EnvVariable> = sorted_entries(env)
+        .into_iter()
+        .map(|(k, v)| EnvVariable::new(k, v))
+        .collect();
+    McpServer::Stdio(
+        McpServerStdio::new(name.to_owned(), resolve_stdio_command(command))
+            .args(args)
+            .env(env),
+    )
+}
+
+fn sorted_headers(headers: Vec<(String, String)>) -> Vec<HttpHeader> {
+    sorted_entries(headers)
+        .into_iter()
+        .map(|(k, v)| HttpHeader::new(k, v))
+        .collect()
+}
+
+fn build_http_server(name: &str, url: &str, headers: Vec<(String, String)>) -> McpServer {
+    McpServer::Http(McpServerHttp::new(name.to_owned(), url).headers(sorted_headers(headers)))
+}
+
+fn build_sse_server(name: &str, url: &str, headers: Vec<(String, String)>) -> McpServer {
+    McpServer::Sse(McpServerSse::new(name.to_owned(), url).headers(sorted_headers(headers)))
 }
 
 fn resolve_stdio_command(command: &str) -> String {

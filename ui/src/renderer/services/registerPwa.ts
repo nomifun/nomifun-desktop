@@ -18,13 +18,12 @@ function isPwaRegistrationSupported(): boolean {
     return false;
   }
 
-  // Never run a service worker inside the bundled desktop shell — Electron OR
-  // Tauri. The desktop serves its frontend from local embedded assets, so a SW
-  // adds no offline value; worse, its cache-first shell pins a stale index.html
-  // and asset hashes across rebuilds, which surfaces as a white screen after the
+  // Never run a service worker inside the bundled desktop shell. The desktop
+  // serves its frontend from local embedded assets, so a SW adds no offline
+  // value; worse, its cache-first shell pins a stale index.html and asset
+  // hashes across rebuilds, which surfaces as a white screen after the
   // embedded frontend changes. Keyed on isDesktopShell() (the __backendPort
-  // signal common to both shells), NOT isElectronDesktop() — under Tauri the
-  // latter is false, which is exactly how the SW slipped into the Tauri build.
+  // signal).
   if (isDesktopShell()) {
     return false;
   }

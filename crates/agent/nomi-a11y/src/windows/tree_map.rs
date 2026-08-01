@@ -18,11 +18,11 @@
 //! live UIA session; the COM reads in the actor are exercised by the `winsmoke`
 //! example instead.
 //!
-//! It is intentionally Windows-local rather than routed through the neutral
-//! `tree::flatten_interactable`: every emitted entry must map back to its live
-//! `UIElement` handle for `invoke`, which the neutral `UiNode` cannot carry, the
-//! off-screen-park filtering is UIA-specific, and the neutral layer has no
-//! multi-window / semantic-tree concept. It reuses the neutral `normalize_role`
+//! It is intentionally Windows-local rather than routed through a neutral
+//! tree model: every emitted entry must map back to its live `UIElement`
+//! handle for `invoke`, the off-screen-park filtering is UIA-specific, and
+//! the neutral layer has no multi-window / semantic-tree concept. It reuses
+//! the neutral `normalize_role`
 //! so role names stay consistent across platforms.
 
 use std::collections::HashMap;

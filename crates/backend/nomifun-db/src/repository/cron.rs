@@ -55,15 +55,6 @@ pub struct ReserveCronRunParams {
     pub now: TimestampMs,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SettleCronRunParams {
-    pub cron_job_run_id: String,
-    pub status: String,
-    pub conversation_id: Option<String>,
-    pub result_error: Option<String>,
-    pub now: TimestampMs,
-}
-
 /// One exact Cron run settlement plus its aggregate summary projection.
 ///
 /// SQLite applies every field below in the same transaction that changes the
@@ -218,19 +209,6 @@ pub trait ICronRepository: Send + Sync {
         let _ = (user_id, cron_job_run_id, conversation_id, now);
         Err(DbError::Init(
             "Cron repository does not implement run-conversation attachment".to_owned(),
-        ))
-    }
-
-    /// Atomically settle a reservation and append its prunable presentation
-    /// history row. `true` identifies the sole settlement leader.
-    async fn settle_run(
-        &self,
-        user_id: &str,
-        params: &SettleCronRunParams,
-    ) -> Result<bool, DbError> {
-        let _ = (user_id, params);
-        Err(DbError::Init(
-            "Cron repository does not implement durable run settlement".to_owned(),
         ))
     }
 

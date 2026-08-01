@@ -38,8 +38,6 @@ pub trait ProcessSpawner: Send + Sync {
 
     async fn install_officecli(&self) -> Result<(), OfficeError>;
 
-    async fn is_officecli_installed(&self) -> bool;
-
     async fn check_update(&self, doc_type: DocType) -> Result<(), OfficeError>;
 }
 
@@ -491,12 +489,6 @@ impl ProcessSpawner for DefaultProcessSpawner {
         Ok(())
     }
 
-    async fn is_officecli_installed(&self) -> bool {
-        let mut builder = CmdBuilder::clean_cli("officecli");
-        builder.arg("--version");
-        builder.output().await.is_ok_and(|o| o.status.success())
-    }
-
     async fn check_update(&self, _doc_type: DocType) -> Result<(), OfficeError> {
         let mut builder = CmdBuilder::clean_cli("npm");
         builder.args(["outdated", "-g", "officecli"]);
@@ -630,10 +622,6 @@ mod tests {
             self.install_count.fetch_add(1, Ordering::SeqCst);
             self.installed.store(true, Ordering::SeqCst);
             Ok(())
-        }
-
-        async fn is_officecli_installed(&self) -> bool {
-            self.installed.load(Ordering::SeqCst)
         }
 
         async fn check_update(&self, _doc_type: DocType) -> Result<(), OfficeError> {

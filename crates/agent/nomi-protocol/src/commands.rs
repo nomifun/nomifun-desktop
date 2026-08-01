@@ -10,8 +10,6 @@ pub enum ProtocolCommand {
     Message {
         msg_id: String,
         content: String,
-        #[serde(default)]
-        files: Vec<String>,
     },
     Stop,
     ToolApprove {

@@ -132,9 +132,7 @@ pub fn render_transcript(turns: &[TranscriptTurn], max_chars_per_line: usize) ->
 
 #[cfg(test)]
 pub(crate) mod test_util {
-    //! Shared test stub. Constructed by `engine.rs` tests (P-C); the
-    //! `dead_code` allow keeps the P-A-only build clean before that lands.
-    #![allow(dead_code)]
+    //! Shared test stub, constructed by `engine.rs` tests.
     use super::*;
     use std::sync::Arc;
     use tokio::sync::Mutex;
@@ -148,9 +146,6 @@ pub(crate) mod test_util {
     impl StubTranscript {
         pub fn with(turns: Vec<TranscriptTurn>) -> Self {
             Self { turns: Some(turns), seen: Arc::new(Mutex::new(Vec::new())) }
-        }
-        pub fn missing() -> Self {
-            Self { turns: None, seen: Arc::new(Mutex::new(Vec::new())) }
         }
     }
 

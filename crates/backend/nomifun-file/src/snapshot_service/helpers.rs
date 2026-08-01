@@ -642,25 +642,6 @@ fn checkout_path_from_head(repo: &Repository, rel_path: &str) -> Result<(), AppE
     Ok(())
 }
 
-/// List all branch names in the repository.
-pub(super) fn list_branches(repo: &Repository) -> Result<Vec<String>, AppError> {
-    let branches = repo
-        .branches(Some(git2::BranchType::Local))
-        .map_err(|e| AppError::Internal(format!("Failed to list branches: {}", e)))?;
-
-    let mut names = Vec::new();
-    for branch_result in branches {
-        let (branch, _) = branch_result.map_err(|e| AppError::Internal(format!("Failed to read branch: {}", e)))?;
-        if let Some(name) = branch
-            .name()
-            .map_err(|e| AppError::Internal(format!("Failed to get branch name: {}", e)))?
-        {
-            names.push(name.to_string());
-        }
-    }
-    Ok(names)
-}
-
 // ---------------------------------------------------------------------------
 // Unit tests
 // ---------------------------------------------------------------------------
@@ -1127,44 +1108,6 @@ mod tests {
         assert!(tmp.path().join("a.txt").exists());
         let content = std::fs::read_to_string(tmp.path().join("a.txt")).unwrap();
         assert_eq!(content, "content");
-    }
-
-    // -- list_branches --
-
-    #[test]
-    fn list_branches_returns_default_branch() {
-        let tmp = tempfile::tempdir().unwrap();
-        let repo = Repository::init(tmp.path()).unwrap();
-
-        let mut index = repo.index().unwrap();
-        let tree_oid = index.write_tree().unwrap();
-        let tree = repo.find_tree(tree_oid).unwrap();
-        let sig = Signature::now("test", "test@test.com").unwrap();
-        repo.commit(Some("HEAD"), &sig, &sig, "init", &tree, &[]).unwrap();
-
-        let branches = list_branches(&repo).unwrap();
-        assert_eq!(branches.len(), 1);
-    }
-
-    #[test]
-    fn list_branches_includes_created_branch() {
-        let tmp = tempfile::tempdir().unwrap();
-        let repo = Repository::init(tmp.path()).unwrap();
-
-        let mut index = repo.index().unwrap();
-        let tree_oid = index.write_tree().unwrap();
-        let tree = repo.find_tree(tree_oid).unwrap();
-        let sig = Signature::now("test", "test@test.com").unwrap();
-        let commit_oid = repo.commit(Some("HEAD"), &sig, &sig, "init", &tree, &[]).unwrap();
-        let commit = repo.find_commit(commit_oid).unwrap();
-
-        repo.branch("feature-a", &commit, false).unwrap();
-        repo.branch("feature-b", &commit, false).unwrap();
-
-        let branches = list_branches(&repo).unwrap();
-        assert_eq!(branches.len(), 3); // default + feature-a + feature-b
-        assert!(branches.contains(&"feature-a".to_string()));
-        assert!(branches.contains(&"feature-b".to_string()));
     }
 
     // -- snapshot_guard --

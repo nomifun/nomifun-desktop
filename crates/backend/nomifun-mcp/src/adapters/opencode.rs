@@ -34,8 +34,7 @@ use crate::types::McpServerTransport;
 /// ```
 ///
 /// Opencode config files may contain JSON comments (JSONC), so we
-/// strip comments before parsing and preserve the original structure
-/// when writing back.
+/// strip comments before parsing.
 pub struct OpencodeAdapter;
 
 #[async_trait::async_trait]
@@ -61,81 +60,6 @@ impl McpAgentAdapter for OpencodeAdapter {
 
         let root = parse_jsonc(&content)?;
         parse_mcp_field(&root)
-    }
-
-    async fn install_server(&self, name: &str, transport: &McpServerTransport) -> Result<(), McpError> {
-        let path = config_file_path().ok_or_else(|| McpError::AgentNotInstalled("opencode".into()))?;
-
-        let mut root = if path.exists() {
-            let content = tokio::fs::read_to_string(&path)
-                .await
-                .map_err(|e| McpError::AgentOperationFailed(format!("failed to read {}: {e}", path.display())))?;
-            parse_jsonc(&content)?
-        } else {
-            // Ensure directory exists
-            if let Some(parent) = path.parent() {
-                tokio::fs::create_dir_all(parent)
-                    .await
-                    .map_err(|e| McpError::AgentOperationFailed(format!("failed to create dir: {e}")))?;
-            }
-            serde_json::json!({})
-        };
-
-        let mcp = root
-            .as_object_mut()
-            .ok_or_else(|| McpError::AgentOperationFailed("config root is not an object".into()))?
-            .entry("mcp")
-            .or_insert_with(|| serde_json::json!({}));
-
-        let mcp_obj = mcp
-            .as_object_mut()
-            .ok_or_else(|| McpError::AgentOperationFailed("mcp field is not an object".into()))?;
-
-        mcp_obj.insert(name.to_owned(), transport_to_json(transport));
-
-        let output = serde_json::to_string_pretty(&root)
-            .map_err(|e| McpError::AgentOperationFailed(format!("failed to serialize config: {e}")))?;
-
-        tokio::fs::write(&path, output)
-            .await
-            .map_err(|e| McpError::AgentOperationFailed(format!("failed to write {}: {e}", path.display())))?;
-
-        Ok(())
-    }
-
-    async fn remove_server(&self, name: &str) -> Result<(), McpError> {
-        let path = config_file_path().ok_or_else(|| McpError::AgentNotInstalled("opencode".into()))?;
-
-        if !path.exists() {
-            return Ok(());
-        }
-
-        let content = tokio::fs::read_to_string(&path)
-            .await
-            .map_err(|e| McpError::AgentOperationFailed(format!("failed to read {}: {e}", path.display())))?;
-
-        let mut root = parse_jsonc(&content)?;
-
-        let removed = root
-            .as_object_mut()
-            .and_then(|obj| obj.get_mut("mcp"))
-            .and_then(|mcp| mcp.as_object_mut())
-            .map(|mcp_obj| mcp_obj.remove(name).is_some())
-            .unwrap_or(false);
-
-        if !removed {
-            // Idempotent: not found is fine
-            return Ok(());
-        }
-
-        let output = serde_json::to_string_pretty(&root)
-            .map_err(|e| McpError::AgentOperationFailed(format!("failed to serialize config: {e}")))?;
-
-        tokio::fs::write(&path, output)
-            .await
-            .map_err(|e| McpError::AgentOperationFailed(format!("failed to write {}: {e}", path.display())))?;
-
-        Ok(())
     }
 }
 
@@ -299,43 +223,6 @@ fn parse_headers(config: &serde_json::Value) -> HashMap<String, String> {
                 .collect()
         })
         .unwrap_or_default()
-}
-
-/// Convert a `McpServerTransport` to a JSON value for writing to config.
-fn transport_to_json(transport: &McpServerTransport) -> serde_json::Value {
-    match transport {
-        McpServerTransport::Stdio { command, args, env } => {
-            let mut obj = serde_json::json!({
-                "type": "stdio",
-                "command": command,
-                "args": args,
-            });
-            if !env.is_empty() {
-                obj["env"] = serde_json::json!(env);
-            }
-            obj
-        }
-        McpServerTransport::Sse { url, headers } => {
-            let mut obj = serde_json::json!({
-                "type": "sse",
-                "url": url,
-            });
-            if !headers.is_empty() {
-                obj["headers"] = serde_json::json!(headers);
-            }
-            obj
-        }
-        McpServerTransport::Http { url, headers } => {
-            let mut obj = serde_json::json!({
-                "type": "http",
-                "url": url,
-            });
-            if !headers.is_empty() {
-                obj["headers"] = serde_json::json!(headers);
-            }
-            obj
-        }
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -544,63 +431,6 @@ mod tests {
         let servers = parse_mcp_field(&root).unwrap();
         assert_eq!(servers.len(), 1);
         assert!(matches!(servers[0].transport, McpServerTransport::Stdio { .. }));
-    }
-
-    // -- transport_to_json ----------------------------------------------------
-
-    #[test]
-    fn stdio_to_json_roundtrip() {
-        let transport = McpServerTransport::Stdio {
-            command: "npx".into(),
-            args: vec!["-y".into(), "@test/srv".into()],
-            env: HashMap::from([("K".into(), "V".into())]),
-        };
-        let json = transport_to_json(&transport);
-        let server = parse_server_entry("test", &json).unwrap();
-        assert_eq!(server.transport, transport);
-    }
-
-    #[test]
-    fn http_to_json_roundtrip() {
-        let transport = McpServerTransport::Http {
-            url: "https://example.com/mcp".into(),
-            headers: HashMap::from([("Authorization".into(), "Bearer tok".into())]),
-        };
-        let json = transport_to_json(&transport);
-        let server = parse_server_entry("test", &json).unwrap();
-        assert_eq!(server.transport, transport);
-    }
-
-    #[test]
-    fn sse_to_json_roundtrip() {
-        let transport = McpServerTransport::Sse {
-            url: "https://example.com/sse".into(),
-            headers: HashMap::new(),
-        };
-        let json = transport_to_json(&transport);
-        let server = parse_server_entry("test", &json).unwrap();
-        assert_eq!(server.transport, transport);
-    }
-
-    #[test]
-    fn stdio_to_json_omits_empty_env() {
-        let transport = McpServerTransport::Stdio {
-            command: "node".into(),
-            args: vec![],
-            env: HashMap::new(),
-        };
-        let json = transport_to_json(&transport);
-        assert!(json.get("env").is_none());
-    }
-
-    #[test]
-    fn http_to_json_omits_empty_headers() {
-        let transport = McpServerTransport::Http {
-            url: "https://x.com".into(),
-            headers: HashMap::new(),
-        };
-        let json = transport_to_json(&transport);
-        assert!(json.get("headers").is_none());
     }
 
     // -- parse_jsonc ----------------------------------------------------------

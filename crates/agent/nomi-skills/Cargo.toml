@@ -19,15 +19,9 @@ tokio.workspace        = true
 futures.workspace      = true
 async-trait.workspace  = true
 thiserror.workspace    = true
-glob.workspace         = true
 dirs.workspace         = true
 regex.workspace        = true
-notify.workspace       = true
 unicode-width.workspace = true
-
-[target.'cfg(unix)'.dependencies]
-libc.workspace = true
-
 
 [dev-dependencies]
 nomi-mcp = { workspace = true, features = ["test-utils"] }

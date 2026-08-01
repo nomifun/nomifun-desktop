@@ -170,15 +170,6 @@ impl AgentRuntimeRegistry for MockAgentRuntimeRegistry {
         Ok(())
     }
 
-    fn terminate_and_wait(
-        &self,
-        conversation_id: &str,
-        reason: Option<AgentKillReason>,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> {
-        let _ = self.terminate(conversation_id, reason);
-        Box::pin(std::future::ready(()))
-    }
-
     fn terminate_and_wait_result(
         &self,
         conversation_id: &str,

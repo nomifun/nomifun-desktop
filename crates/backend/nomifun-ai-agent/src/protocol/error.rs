@@ -217,19 +217,6 @@ impl std::fmt::Display for AcpError {
 }
 
 impl AcpError {
-    /// Whether the caller may retry the operation.
-    #[allow(dead_code)] // Will be used once retry logic is wired into the send path.
-    pub(crate) fn is_retryable(&self) -> bool {
-        matches!(
-            self,
-            AcpError::SpawnFailed { .. }
-                | AcpError::StartupCrash { .. }
-                | AcpError::Disconnected { .. }
-                | AcpError::AgentInternal { .. }
-                | AcpError::InitTimeout { .. }
-        )
-    }
-
     /// Convert an SDK [`Error`](SdkError) into an [`AcpError`].
     ///
     /// Mapping is by [`ErrorCode`], never by message text. The single
@@ -485,55 +472,6 @@ mod tests {
             display: "API Error: Internal server error".into(),
         };
         assert_eq!(reason.user_facing_message(), "API Error: Internal server error");
-    }
-
-    #[test]
-    fn retryable_variants() {
-        assert!(
-            AcpError::SpawnFailed {
-                message: "not found".into()
-            }
-            .is_retryable()
-        );
-        assert!(
-            AcpError::StartupCrash {
-                exit_code: Some(1),
-                signal: None,
-                stderr: String::new(),
-            }
-            .is_retryable()
-        );
-        assert!(
-            AcpError::Disconnected {
-                exit_code: None,
-                signal: Some("SIGKILL".into()),
-                stderr: String::new(),
-            }
-            .is_retryable()
-        );
-        assert!(
-            AcpError::AgentInternal {
-                message: "oops".into(),
-                code: -32603,
-                data: None,
-            }
-            .is_retryable()
-        );
-        assert!(AcpError::InitTimeout { timeout_secs: 30 }.is_retryable());
-    }
-
-    #[test]
-    fn non_retryable_variants() {
-        assert!(!AcpError::AuthRequired.is_retryable());
-        assert!(
-            !AcpError::SessionNotFound {
-                session_id: "s1".into()
-            }
-            .is_retryable()
-        );
-        assert!(!AcpError::MethodNotFound { method: "foo".into() }.is_retryable());
-        assert!(!AcpError::InvalidParams { message: "bad".into() }.is_retryable());
-        assert!(!AcpError::NotConnected.is_retryable());
     }
 
     #[test]

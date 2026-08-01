@@ -36,7 +36,7 @@ use nomifun_cron::events::CronEventEmitter;
 use nomifun_cron::executor::JobExecutor;
 use nomifun_cron::scheduler::CronScheduler;
 use nomifun_cron::service::CronService;
-use nomifun_cron::skill_file::{has_skill_file, write_raw_skill_file};
+use nomifun_cron::skill_file::{CRON_SKILLS_REL_DIR, SKILL_FILE_NAME, write_raw_skill_file};
 use nomifun_cron::types::JobStatus;
 
 const TEST_USER_ID: &str = "0190f5fe-7c00-7a00-8000-000000000001";
@@ -72,6 +72,20 @@ async fn init_database_memory() -> Result<nomifun_db::Database, nomifun_db::DbEr
         nomifun_common::UserId::parse(TEST_USER_ID.to_owned()).expect("canonical fixture owner"),
     )
     .await
+}
+
+/// Disk-level assertion helper: whether a saved SKILL.md exists for `job_id`
+/// under the canonical cron skills directory.
+async fn has_skill_file(data_dir: &std::path::Path, job_id: &str) -> std::io::Result<bool> {
+    let path = data_dir
+        .join(CRON_SKILLS_REL_DIR)
+        .join(job_id)
+        .join(SKILL_FILE_NAME);
+    match tokio::fs::metadata(path).await {
+        Ok(metadata) => Ok(metadata.is_file()),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(err) => Err(err),
+    }
 }
 
 // ── Test infrastructure ────────────────────────────────────────────
@@ -130,13 +144,6 @@ impl nomifun_ai_agent::runtime_registry::AgentRuntimeRegistry for StubAgentRunti
         _: Option<nomifun_common::AgentKillReason>,
     ) -> Result<(), nomifun_common::AppError> {
         Ok(())
-    }
-    fn terminate_and_wait(
-        &self,
-        _: &str,
-        _: Option<nomifun_common::AgentKillReason>,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> {
-        Box::pin(std::future::ready(()))
     }
     fn terminate_and_wait_result(
         &self,
@@ -1311,7 +1318,7 @@ async fn existing_conversation_binding_failure_compensates_updated_cron_job() {
 
 #[tokio::test]
 async fn cron_crud_run_history_and_skill_boundaries_are_owner_scoped() {
-    let (svc, _, _) = setup().await;
+    let (svc, repo, _) = setup().await;
     // This boundary test does not exercise a Conversation binding. Keep the
     // aggregate unbound so its result depends only on Cron ownership and host
     // capability ordering, not on the StubConvRepo's fixed `u1` fixture.
@@ -1384,7 +1391,18 @@ async fn cron_crud_run_history_and_skill_boundaries_are_owner_scoped() {
     // Scheduler callbacks capture the owner at timer installation.  A stale
     // callback (for example after delete/recreate) must not execute the row
     // merely because the opaque job id still exists.
-    svc.tick(foreign, &job.cron_job_id).await;
+    let row = repo
+        .get_by_cron_job_id_for_scheduler(&job.cron_job_id)
+        .await
+        .unwrap()
+        .expect("installed job row");
+    svc.tick_occurrence(
+        foreign,
+        &job.cron_job_id,
+        row.schedule_revision,
+        row.next_run_at.expect("enabled schedule has a planned occurrence"),
+    )
+    .await;
     assert!(matches!(
         svc.remove_job(foreign, &job.cron_job_id).await,
         Err(nomifun_cron::error::CronError::JobNotFound(_))

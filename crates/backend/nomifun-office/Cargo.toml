@@ -13,8 +13,6 @@ nomi-process-runtime.workspace = true
 axum.workspace = true
 tokio.workspace = true
 reqwest.workspace = true
-which.workspace = true
-calamine.workspace = true
 sha1.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -27,5 +25,4 @@ hex.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
-rust_xlsxwriter.workspace = true
 tokio = { workspace = true, features = ["test-util"] }

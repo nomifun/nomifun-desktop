@@ -104,15 +104,3 @@ export const isTextFile = (file_path: string): boolean => {
   const contentType = getContentTypeByExtension(file_path);
   return ['markdown', 'html', 'code'].includes(contentType);
 };
-
-/**
- * 检查文件是否为 Office 文档类型
- * Check if file is an Office document type
- *
- * @param file_path - 文件路径 / File path
- * @returns 是否为 Office 文档 / Whether it's an Office document
- */
-export const isOfficeFile = (file_path: string): boolean => {
-  const contentType = getContentTypeByExtension(file_path);
-  return ['word', 'excel', 'ppt'].includes(contentType);
-};

@@ -38,7 +38,6 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 CONF="apps/desktop/tauri.conf.json"
 DIST="$ROOT/dist/desktop"
-ENV_FILE="$ROOT/apps/desktop/signing/.env.signing"
 
 # ── 解析参数:架构选择/开关归本脚本,未知 --xxx 起原样透传给 tauri build ─────
 SELECT=()
@@ -98,93 +97,19 @@ for t in "${TRIPLES[@]}"; do
   fi
 done
 
-# ── 签名:加载本地密钥并做基本校验(逻辑与 build:signed 对齐) ───────────────────
+# ── 签名:加载本地密钥并做基本校验(公共库,与 build:signed 共用一份实现) ────────
+# shellcheck source=lib/mac-signing.sh
+source "$SCRIPT_DIR/lib/mac-signing.sh"
+
 HAS_NOTARY=0
 if [[ "$SIGNED" -eq 1 ]]; then
-  if [[ ! -f "$ENV_FILE" ]]; then
-    cat >&2 <<EOF
-❌ 找不到本地签名配置: $ENV_FILE
-
-请先创建它(不会入库):
-  cp apps/desktop/signing/.env.signing.example apps/desktop/signing/.env.signing
-然后按文件内注释 / apps/desktop/signing/README.md 填入你的签名 + 公证信息。
-EOF
-    exit 1
-  fi
-
-  # set -a 让 source 进来的变量自动 export 给子进程(tauri build 据此自动签名)
-  set -a
-  # shellcheck disable=SC1090
-  source "$ENV_FILE"
-  set +a
-
-  # notarytool 要求 .p8 用绝对路径;相对仓库根的路径补成绝对路径
-  if [[ -n "${APPLE_API_KEY_PATH:-}" && "${APPLE_API_KEY_PATH:0:1}" != "/" ]]; then
-    export APPLE_API_KEY_PATH="$ROOT/$APPLE_API_KEY_PATH"
-  fi
-
-  if [[ -z "${APPLE_SIGNING_IDENTITY:-}" && -z "${APPLE_CERTIFICATE:-}" ]]; then
-    echo "❌ 既没设 APPLE_SIGNING_IDENTITY,也没设 APPLE_CERTIFICATE,无法签名。" >&2
-    exit 1
-  fi
-
-  if [[ -n "${APPLE_API_KEY:-}" && -n "${APPLE_API_ISSUER:-}" && -n "${APPLE_API_KEY_PATH:-}" ]]; then
-    HAS_NOTARY=1
-    if [[ ! -f "$APPLE_API_KEY_PATH" ]]; then
-      echo "❌ 找不到 App Store Connect API Key: $APPLE_API_KEY_PATH" >&2
-      exit 1
-    fi
-    if [[ "$APPLE_API_KEY_PATH" != *.p8 ]]; then
-      echo "❌ APPLE_API_KEY_PATH 必须指向 AuthKey_*.p8,当前是: $APPLE_API_KEY_PATH" >&2
-      exit 1
-    fi
-  elif [[ -n "${APPLE_ID:-}" && -n "${APPLE_PASSWORD:-}" && -n "${APPLE_TEAM_ID:-}" ]]; then
-    HAS_NOTARY=1
-  fi
-  if [[ "$HAS_NOTARY" -eq 0 ]]; then
-    echo "⚠️  未配置公证(notarization)变量:会签名但不公证。" >&2
-    echo "    别人下载后仍会被 Gatekeeper 拦(提示「无法验证开发者」)。" >&2
-  fi
+  load_signing_env "$ROOT"
+  require_signing_identity
+  detect_notary
 
   echo "▶ 签名身份: ${APPLE_SIGNING_IDENTITY:-(用 .p12: APPLE_CERTIFICATE)}"
   [[ "$HAS_NOTARY" -eq 1 ]] && echo "▶ 公证: 已启用,每个 target 构建后自动提交 Apple 并 staple"
 fi
-
-submit_for_notarization() {
-  local artifact="$1"
-  if [[ -n "${APPLE_API_KEY:-}" && -n "${APPLE_API_ISSUER:-}" && -n "${APPLE_API_KEY_PATH:-}" ]]; then
-    xcrun notarytool submit "$artifact" \
-      --key "$APPLE_API_KEY_PATH" \
-      --key-id "$APPLE_API_KEY" \
-      --issuer "$APPLE_API_ISSUER" \
-      --wait
-  else
-    xcrun notarytool submit "$artifact" \
-      --apple-id "$APPLE_ID" \
-      --password "$APPLE_PASSWORD" \
-      --team-id "$APPLE_TEAM_ID" \
-      --wait
-  fi
-}
-
-# 对指定目录下的 DMG 逐个公证 + staple(仅在 --signed 且配了公证时执行)
-notarize_dmg_dir() {
-  local dmg_dir="$1"
-  if [[ "$(uname -s)" != "Darwin" || "$HAS_NOTARY" -eq 0 || ! -d "$dmg_dir" ]]; then
-    return
-  fi
-  while IFS= read -r -d '' dmg; do
-    if xcrun stapler validate "$dmg" >/dev/null 2>&1; then
-      echo "▶ DMG 已有公证票据: $dmg"
-      continue
-    fi
-    echo "▶ 公证 DMG: $dmg"
-    submit_for_notarization "$dmg"
-    echo "▶ Staple DMG: $dmg"
-    xcrun stapler staple "$dmg"
-    xcrun stapler validate "$dmg"
-  done < <(find "$dmg_dir" -maxdepth 1 -type f -name '*.dmg' -print0)
-}
 
 mkdir -p "$DIST"
 

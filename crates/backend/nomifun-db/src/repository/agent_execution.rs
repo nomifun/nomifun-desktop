@@ -9,8 +9,8 @@ use nomifun_common::{
 use crate::error::DbError;
 use crate::models::{
     AgentExecutionAttemptDetailRow, AgentExecutionDetailRows,
-    AgentExecutionEventRow, AgentExecutionParticipantRow, AgentExecutionRow,
-    AgentExecutionStepDependencyRow, AgentExecutionStepDetailRow, AgentExecutionStepRow,
+    AgentExecutionEventRow, AgentExecutionRow,
+    AgentExecutionStepDetailRow, AgentExecutionStepRow,
     ConversationDeliveryReceiptRow, ConversationExecutionLinkRow,
 };
 use crate::repository::conversation::{
@@ -470,11 +470,6 @@ pub trait IAgentExecutionRepository: Send + Sync {
         expected_expires_at: i64,
     ) -> Result<Option<AgentExecutionRow>, DbError>;
 
-    async fn list_participants(
-        &self,
-        user_id: &str,
-        execution_id: &str,
-    ) -> Result<Vec<AgentExecutionParticipantRow>, DbError>;
     /// Atomically applies a complete new active graph revision. Active attempts
     /// belonging to omitted steps are cancelled/interrupted in the same
     /// transaction; historical rows are superseded, never deleted.
@@ -530,16 +525,6 @@ pub trait IAgentExecutionRepository: Send + Sync {
         execution_id: &str,
         step_id: &str,
     ) -> Result<Option<AgentExecutionStepDetailRow>, DbError>;
-    async fn list_steps(
-        &self,
-        user_id: &str,
-        execution_id: &str,
-    ) -> Result<Vec<AgentExecutionStepRow>, DbError>;
-    async fn list_dependencies(
-        &self,
-        user_id: &str,
-        execution_id: &str,
-    ) -> Result<Vec<AgentExecutionStepDependencyRow>, DbError>;
     /// Scheduler-only lifecycle transition. Semantic step fields are absent
     /// from this boundary by construction; user edits replace the immutable
     /// snapshot through `reconcile_plan`.
@@ -744,12 +729,6 @@ pub trait IAgentExecutionRepository: Send + Sync {
         step_id: &str,
         attempt_id: &str,
     ) -> Result<Option<AgentExecutionAttemptDetailRow>, DbError>;
-    async fn list_attempts(
-        &self,
-        user_id: &str,
-        execution_id: &str,
-        step_id: Option<&str>,
-    ) -> Result<Vec<AgentExecutionAttemptDetailRow>, DbError>;
 
     async fn list_conversation_links(
         &self,

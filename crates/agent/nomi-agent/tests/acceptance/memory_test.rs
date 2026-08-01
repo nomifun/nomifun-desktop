@@ -4,9 +4,9 @@
 // and prompt building work together correctly. No LLM API calls are needed.
 
 use nomi_agent::context::{SystemPromptCache, build_system_prompt};
-use nomi_memory::index::{append_index_entry, remove_index_entry};
+use nomi_memory::index::append_index_entry;
 use nomi_memory::paths::ENTRYPOINT_NAME;
-use nomi_memory::store::{delete_memory, write_memory};
+use nomi_memory::store::write_memory;
 use nomi_memory::types::{MemoryEntry, MemoryType};
 
 /// TC-A1-01: Memory injection into system prompt.
@@ -75,8 +75,8 @@ fn memory_injection_into_system_prompt() {
 ///   1. write_memory()     -> create the file
 ///   2. append_index_entry() -> add to MEMORY.md
 ///   3. build_system_prompt() -> verify the content appears
-///   4. delete_memory()    -> remove the file
-///   5. remove_index_entry() -> clean the index
+///   4. remove the file from disk
+///   5. rewrite MEMORY.md without the entry line
 ///   6. build_system_prompt() -> verify the content is gone
 #[test]
 fn memory_full_lifecycle() {
@@ -150,7 +150,7 @@ fn memory_full_lifecycle() {
 
     // -- Phase 4: Delete the memory file --------------------------------------
 
-    delete_memory(&entry_path).unwrap();
+    std::fs::remove_file(&entry_path).unwrap();
     assert!(
         !entry_path.exists(),
         "memory file should be removed from disk"
@@ -158,7 +158,13 @@ fn memory_full_lifecycle() {
 
     // -- Phase 5: Remove the entry from the MEMORY.md index -------------------
 
-    remove_index_entry(&index_path, &entry_filename).unwrap();
+    let index_without_entry: String = std::fs::read_to_string(&index_path)
+        .unwrap()
+        .lines()
+        .filter(|line| !line.contains(&entry_filename))
+        .map(|line| format!("{line}\n"))
+        .collect();
+    std::fs::write(&index_path, index_without_entry).unwrap();
 
     let index_after = std::fs::read_to_string(&index_path).unwrap();
     assert!(

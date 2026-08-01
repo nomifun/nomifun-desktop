@@ -6,9 +6,9 @@ use nomifun_common::AppError;
 use nomifun_terminal::AgentCli;
 use serde::{Deserialize, Serialize};
 
-use crate::commands::mcp_register_template::{RegisterTemplate, knowledge_register_template};
-use crate::commands::register_knowledge::{RegisterOutcome, register_into_workpath};
-use crate::commands::register_knowledge_global::{
+use super::knowledge_registration::mcp_register_template::{RegisterTemplate, knowledge_register_template};
+use super::knowledge_registration::register_knowledge::{RegisterOutcome, register_into_workpath};
+use super::knowledge_registration::register_knowledge_global::{
     UnregisterOutcome, is_registered_global, register_global, unregister_global,
 };
 

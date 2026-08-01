@@ -6,9 +6,10 @@ use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
 use tracing::{debug, error, info, warn};
 
-use crate::constants::DINGTALK_MESSAGE_LIMIT;
+use crate::constants::{DINGTALK_MESSAGE_LIMIT, RECONNECT_MAX_ATTEMPTS, RECONNECT_MAX_DELAY};
 use crate::error::ChannelError;
 use crate::plugin::{ChannelPlugin, PluginCallbacks, SharedPluginStatus, mark_error_on_unexpected_exit};
+use crate::plugins::util::{backoff_delay, truncate_message};
 use crate::types::{
     ActionCategory, ActionContext, BotInfo, MessageContentType, OutgoingMessageType, PluginConfig, PluginStatus,
     PluginType, UnifiedAction, UnifiedIncomingMessage, UnifiedMessageContent, UnifiedOutgoingMessage, UnifiedUser,
@@ -21,12 +22,6 @@ use super::types::{
     StreamingWriteRequest, SystemEvent, UpdateCardRequest, build_open_space_id, decode_chat_id, encode_chat_id,
     format_dingtalk_callback, parse_dingtalk_callback,
 };
-
-/// Maximum reconnect attempts before giving up.
-const MAX_RECONNECT_ATTEMPTS: u32 = 10;
-
-/// Maximum backoff delay between reconnection attempts.
-const MAX_RECONNECT_DELAY: Duration = Duration::from_secs(30);
 
 /// DingTalk standard AI card template ID.
 const AI_CARD_TEMPLATE_ID: &str = "382e4302-551d-4880-bf29-a30acfab2e71.schema";
@@ -121,7 +116,6 @@ impl ChannelPlugin for DingtalkPlugin {
         self.ws_handle = Some(tokio::spawn(ws_stream_loop(
             api_clone,
             callbacks.message_tx,
-            callbacks.confirm_tx,
             self.status.clone(),
             shutdown_rx,
         )));
@@ -395,11 +389,10 @@ fn generate_guid() -> String {
 /// Background task that maintains a WebSocket Stream connection to DingTalk.
 ///
 /// On disconnect, implements exponential backoff reconnection up to
-/// `MAX_RECONNECT_ATTEMPTS`.
+/// `RECONNECT_MAX_ATTEMPTS`.
 async fn ws_stream_loop(
     api: Arc<DingtalkApi>,
     message_tx: mpsc::Sender<UnifiedIncomingMessage>,
-    confirm_tx: mpsc::Sender<(String, String)>,
     status: SharedPluginStatus,
     mut shutdown_rx: watch::Receiver<bool>,
 ) {
@@ -421,11 +414,11 @@ async fn ws_stream_loop(
             Err(e) => {
                 consecutive_errors += 1;
                 warn!(error = %e, consecutive_errors, "DingTalk stream registration failed");
-                if consecutive_errors >= MAX_RECONNECT_ATTEMPTS {
+                if consecutive_errors >= RECONNECT_MAX_ATTEMPTS {
                     error!("DingTalk max reconnect attempts reached");
                     break;
                 }
-                let delay = backoff_delay(consecutive_errors);
+                let delay = backoff_delay(consecutive_errors, RECONNECT_MAX_DELAY);
                 tokio::select! {
                     _ = tokio::time::sleep(delay) => continue,
                     _ = shutdown_rx.changed() => break,
@@ -437,7 +430,7 @@ async fn ws_stream_loop(
 
         info!(url = %ws_url, "Connecting to DingTalk WebSocket Stream");
 
-        match connect_and_listen(&ws_url, &message_tx, &confirm_tx, &mut shutdown_rx).await {
+        match connect_and_listen(&ws_url, &message_tx, &mut shutdown_rx).await {
             Ok(()) => {
                 debug!("DingTalk WS connection closed cleanly");
                 break;
@@ -449,11 +442,11 @@ async fn ws_stream_loop(
                     consecutive_errors,
                     "DingTalk WS connection error"
                 );
-                if consecutive_errors >= MAX_RECONNECT_ATTEMPTS {
+                if consecutive_errors >= RECONNECT_MAX_ATTEMPTS {
                     error!("DingTalk max reconnect attempts reached");
                     break;
                 }
-                let delay = backoff_delay(consecutive_errors);
+                let delay = backoff_delay(consecutive_errors, RECONNECT_MAX_DELAY);
                 tokio::select! {
                     _ = tokio::time::sleep(delay) => {}
                     _ = shutdown_rx.changed() => break,
@@ -503,7 +496,6 @@ fn build_ws_tls_connector() -> Result<tokio_tungstenite::Connector, ChannelError
 async fn connect_and_listen(
     ws_url: &str,
     message_tx: &mpsc::Sender<UnifiedIncomingMessage>,
-    confirm_tx: &mpsc::Sender<(String, String)>,
     shutdown_rx: &mut watch::Receiver<bool>,
 ) -> Result<(), ChannelError> {
     use futures_util::{SinkExt, StreamExt};
@@ -527,7 +519,6 @@ async fn connect_and_listen(
                         if let Some(ack) = handle_stream_frame(
                             &text,
                             message_tx,
-                            confirm_tx,
                         ).await {
                             let ack_json = serde_json::to_string(&ack)
                                 .unwrap_or_default();
@@ -570,7 +561,6 @@ async fn connect_and_listen(
 async fn handle_stream_frame(
     text: &str,
     message_tx: &mpsc::Sender<UnifiedIncomingMessage>,
-    confirm_tx: &mpsc::Sender<(String, String)>,
 ) -> Option<StreamAck> {
     let frame: StreamFrame = match serde_json::from_str(text) {
         Ok(f) => f,
@@ -622,7 +612,7 @@ async fn handle_stream_frame(
                     handle_bot_message(data_str, &message_id, message_tx).await;
                 }
                 "/v1.0/card/instances/callback" => {
-                    handle_card_action(data_str, &message_id, message_tx, confirm_tx).await;
+                    handle_card_action(data_str, &message_id, message_tx).await;
                 }
                 _ => {
                     debug!(topic, "DingTalk unhandled callback topic");
@@ -729,7 +719,6 @@ async fn handle_card_action(
     data_str: &str,
     frame_message_id: &str,
     message_tx: &mpsc::Sender<UnifiedIncomingMessage>,
-    confirm_tx: &mpsc::Sender<(String, String)>,
 ) {
     let stable_event_id = frame_message_id.trim();
     if stable_event_id.is_empty() {
@@ -759,18 +748,6 @@ async fn handle_card_action(
         .unwrap_or_default();
 
     let parsed = parse_dingtalk_callback(&action_str);
-
-    // Check if this is a tool confirmation
-    if let Some((_, ref action, ref params)) = parsed
-        && action == "system.confirm"
-        && let Some(p) = params
-    {
-        let call_id = p.get("callId").cloned().unwrap_or_default();
-        let value = p.get("value").cloned().unwrap_or_default();
-        if !call_id.is_empty() {
-            let _ = confirm_tx.send((call_id, value)).await;
-        }
-    }
 
     let user_id = cb.user_id.clone().unwrap_or_default();
     let chat_id = match cb.open_conversation_id.as_deref() {
@@ -873,21 +850,6 @@ fn build_ack(message_id: &str) -> StreamAck {
     }
 }
 
-/// Truncate a message to the platform limit, appending "..." if truncated.
-fn truncate_message(text: &str, limit: usize) -> String {
-    if text.len() <= limit {
-        return text.to_string();
-    }
-    let truncated: String = text.chars().take(limit - 3).collect();
-    format!("{truncated}...")
-}
-
-/// Calculate exponential backoff delay, capped at the maximum.
-fn backoff_delay(attempt: u32) -> Duration {
-    let delay_secs = 2u64.saturating_pow(attempt).min(MAX_RECONNECT_DELAY.as_secs());
-    Duration::from_secs(delay_secs)
-}
-
 /// Current unix timestamp in seconds.
 fn chrono_now() -> i64 {
     std::time::SystemTime::now()
@@ -906,42 +868,7 @@ mod tests {
 
     // -- truncate_message ---------------------------------------------------
 
-    #[test]
-    fn truncate_within_limit() {
-        assert_eq!(truncate_message("Hello", 100), "Hello");
-    }
-
-    #[test]
-    fn truncate_at_limit() {
-        assert_eq!(truncate_message("abc", 3), "abc");
-    }
-
-    #[test]
-    fn truncate_exceeds_limit() {
-        let result = truncate_message("Hello, world!", 10);
-        assert_eq!(result, "Hello, ...");
-    }
-
-    #[test]
-    fn truncate_unicode() {
-        let result = truncate_message("你好世界测试文本", 5);
-        assert_eq!(result, "你好...");
-    }
-
     // -- backoff_delay ------------------------------------------------------
-
-    #[test]
-    fn backoff_exponential() {
-        assert_eq!(backoff_delay(1), Duration::from_secs(2));
-        assert_eq!(backoff_delay(2), Duration::from_secs(4));
-        assert_eq!(backoff_delay(3), Duration::from_secs(8));
-    }
-
-    #[test]
-    fn backoff_capped() {
-        assert_eq!(backoff_delay(5), Duration::from_secs(30));
-        assert_eq!(backoff_delay(10), Duration::from_secs(30));
-    }
 
     // -- extract_message_content --------------------------------------------
 
@@ -1157,7 +1084,6 @@ mod tests {
     #[tokio::test]
     async fn handle_stream_frame_system_ping_returns_ack() {
         let (msg_tx, _msg_rx) = tokio::sync::mpsc::channel(16);
-        let (confirm_tx, _confirm_rx) = tokio::sync::mpsc::channel(16);
 
         let ping_frame = serde_json::json!({
             "type": "SYSTEM",
@@ -1169,7 +1095,7 @@ mod tests {
             "data": "{}"
         });
 
-        let result = handle_stream_frame(&ping_frame.to_string(), &msg_tx, &confirm_tx).await;
+        let result = handle_stream_frame(&ping_frame.to_string(), &msg_tx).await;
 
         assert!(result.is_some(), "SYSTEM ping should return an ack");
         let ack = result.unwrap();
@@ -1180,7 +1106,6 @@ mod tests {
     #[tokio::test]
     async fn handle_stream_frame_system_connected_returns_none() {
         let (msg_tx, _msg_rx) = tokio::sync::mpsc::channel(16);
-        let (confirm_tx, _confirm_rx) = tokio::sync::mpsc::channel(16);
 
         let connected_frame = serde_json::json!({
             "type": "SYSTEM",
@@ -1188,7 +1113,7 @@ mod tests {
             "data": "{\"code\":200,\"message\":\"OK\"}"
         });
 
-        let result = handle_stream_frame(&connected_frame.to_string(), &msg_tx, &confirm_tx).await;
+        let result = handle_stream_frame(&connected_frame.to_string(), &msg_tx).await;
 
         assert!(result.is_none(), "Non-ping SYSTEM frames should not return ack");
     }
@@ -1198,7 +1123,6 @@ mod tests {
     #[tokio::test]
     async fn handle_stream_frame_callback_emits_message() {
         let (msg_tx, mut msg_rx) = tokio::sync::mpsc::channel(16);
-        let (confirm_tx, _confirm_rx) = tokio::sync::mpsc::channel(16);
 
         let callback_frame = serde_json::json!({
             "type": "CALLBACK",
@@ -1218,7 +1142,7 @@ mod tests {
             }).to_string()
         });
 
-        let result = handle_stream_frame(&callback_frame.to_string(), &msg_tx, &confirm_tx).await;
+        let result = handle_stream_frame(&callback_frame.to_string(), &msg_tx).await;
 
         assert!(result.is_some());
         let ack = result.unwrap();
@@ -1236,7 +1160,6 @@ mod tests {
     #[tokio::test]
     async fn handle_stream_frame_callback_falls_back_to_frame_message_id() {
         let (msg_tx, mut msg_rx) = tokio::sync::mpsc::channel(16);
-        let (confirm_tx, _confirm_rx) = tokio::sync::mpsc::channel(16);
 
         let callback_frame = serde_json::json!({
             "type": "CALLBACK",
@@ -1253,7 +1176,7 @@ mod tests {
             }).to_string()
         });
 
-        handle_stream_frame(&callback_frame.to_string(), &msg_tx, &confirm_tx).await;
+        handle_stream_frame(&callback_frame.to_string(), &msg_tx).await;
 
         let msg = msg_rx.try_recv().unwrap();
         assert_eq!(msg.id, "cb_fallback_001");
@@ -1262,7 +1185,6 @@ mod tests {
     #[tokio::test]
     async fn handle_stream_frame_callback_without_any_stable_id_is_dropped() {
         let (msg_tx, mut msg_rx) = tokio::sync::mpsc::channel(16);
-        let (confirm_tx, _confirm_rx) = tokio::sync::mpsc::channel(16);
 
         let callback_frame = serde_json::json!({
             "type": "CALLBACK",
@@ -1278,15 +1200,14 @@ mod tests {
             }).to_string()
         });
 
-        handle_stream_frame(&callback_frame.to_string(), &msg_tx, &confirm_tx).await;
+        handle_stream_frame(&callback_frame.to_string(), &msg_tx).await;
 
         assert!(msg_rx.try_recv().is_err());
     }
 
     #[tokio::test]
-    async fn handle_stream_frame_card_action_emits_confirm() {
+    async fn handle_stream_frame_card_action_emits_message() {
         let (msg_tx, mut msg_rx) = tokio::sync::mpsc::channel(16);
-        let (confirm_tx, mut confirm_rx) = tokio::sync::mpsc::channel(16);
 
         let card_frame = serde_json::json!({
             "type": "CALLBACK",
@@ -1302,20 +1223,16 @@ mod tests {
             }).to_string()
         });
 
-        let result = handle_stream_frame(&card_frame.to_string(), &msg_tx, &confirm_tx).await;
+        let result = handle_stream_frame(&card_frame.to_string(), &msg_tx).await;
 
         assert!(result.is_some());
 
-        let (call_id, value) = confirm_rx.try_recv().unwrap();
-        assert_eq!(call_id, "call_123");
-        assert_eq!(value, "yes");
         assert_eq!(msg_rx.try_recv().unwrap().id, "cb_card_001");
     }
 
     #[tokio::test]
     async fn handle_stream_frame_card_without_frame_id_is_dropped() {
         let (msg_tx, mut msg_rx) = tokio::sync::mpsc::channel(16);
-        let (confirm_tx, mut confirm_rx) = tokio::sync::mpsc::channel(16);
 
         let card_frame = serde_json::json!({
             "type": "CALLBACK",
@@ -1329,10 +1246,9 @@ mod tests {
             }).to_string()
         });
 
-        handle_stream_frame(&card_frame.to_string(), &msg_tx, &confirm_tx).await;
+        handle_stream_frame(&card_frame.to_string(), &msg_tx).await;
 
         assert!(msg_rx.try_recv().is_err());
-        assert!(confirm_rx.try_recv().is_err());
     }
 
     // -- DingtalkPlugin constructor -----------------------------------------

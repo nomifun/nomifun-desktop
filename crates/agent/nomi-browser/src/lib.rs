@@ -6,9 +6,7 @@ pub mod approval;
 pub mod extract;
 pub mod managed;
 pub mod platform_adapter;
-pub mod recording;
 pub mod redline;
-pub mod replay;
 pub mod site_memory;
 pub mod takeover;
 pub mod tool;
@@ -22,7 +20,6 @@ pub use platform_adapter::{
     ManagedLanePolicyDecorator,
 };
 pub use nomifun_browser_platform::BrowserLaneClient;
-pub use recording::{RecordedStep, Recording};
 pub use redline::{accname_is_irreversible, classify_action, enforce_redline, ActionContext, ApprovalTier};
 pub use tool::{BrowserSecretSource, BrowserTool, OUT_OF_BAND_CONFIRMED_KEY};
 

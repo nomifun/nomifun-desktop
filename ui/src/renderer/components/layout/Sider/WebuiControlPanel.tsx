@@ -9,6 +9,7 @@ import { shell, webui } from '@/common/adapter/ipcBridge';
 import { isBackendHttpError } from '@/common/adapter/httpBridge';
 import NomiModal from '@/renderer/components/base/NomiModal';
 import { useWebuiServer } from '@/renderer/hooks/context/WebuiServerContext';
+import { copyText } from '@/renderer/utils/ui/clipboard';
 import { Button, Form, Input, Message, Select, Switch, Tooltip } from '@arco-design/web-react';
 import { Copy, Earth, EditTwo, Info, Refresh } from '@icon-park/react';
 import React, { Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react';
@@ -61,8 +62,9 @@ const WebuiControlPanel: React.FC<WebuiControlPanelProps> = ({ mode = 'popover' 
 
   // 复制内容 / Copy content
   const handleCopy = (text: string) => {
-    void navigator.clipboard.writeText(text);
-    Message.success(t('common.copySuccess'));
+    copyText(text)
+      .then(() => Message.success(t('common.copySuccess')))
+      .catch((error) => console.error('[WebuiControlPanel] Copy failed:', error));
   };
 
   // Use `||` (not `??`) so an empty-string username from a not-yet-populated

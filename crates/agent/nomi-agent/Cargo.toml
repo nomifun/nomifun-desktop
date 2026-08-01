@@ -46,10 +46,8 @@ anyhow.workspace      = true
 thiserror.workspace   = true
 glob.workspace        = true
 chrono.workspace      = true
-dirs.workspace        = true
 crossterm.workspace   = true
 is-terminal.workspace = true
-uuid.workspace        = true
 
 
 [dev-dependencies]

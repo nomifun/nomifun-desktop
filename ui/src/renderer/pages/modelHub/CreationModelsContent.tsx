@@ -13,7 +13,6 @@ import { LinkCloud, MagicWand, Pic, Platte, VideoTwo } from '@icon-park/react';
 import { useProvidersQuery } from '@/renderer/hooks/agent/useModelProviderList';
 import NomiScrollArea from '@/renderer/components/base/NomiScrollArea';
 import SegmentedTabs, { type SegmentedTabItem } from '@/renderer/components/base/SegmentedTabs';
-import { useSettingsViewMode } from '@/renderer/components/settings/SettingsModal/settingsViewContext';
 import {
   type CreationCapability,
   filterCreationModels,
@@ -43,8 +42,6 @@ const CAP_META: Record<CreationCapability, { icon: React.ReactNode; color: strin
 const CreationModelsContent: React.FC = () => {
   const { t } = useTranslation();
   const navigate = useNavigate();
-  const viewMode = useSettingsViewMode();
-  const isPageMode = viewMode === 'page';
   const { data } = useProvidersQuery();
   const { entries } = useCreationModels();
   const [filter, setFilter] = useState<Filter>('all');
@@ -121,7 +118,7 @@ const CreationModelsContent: React.FC = () => {
       </div>
 
       {/* Content */}
-      <NomiScrollArea className='flex-1 min-h-0' disableOverflow={isPageMode}>
+      <NomiScrollArea className='flex-1 min-h-0' disableOverflow>
         {groups.length === 0 ? (
           <div className='flex flex-col items-center justify-center py-48px text-center'>
             <MagicWand theme='outline' size='44' className='text-t-tertiary mb-14px' />

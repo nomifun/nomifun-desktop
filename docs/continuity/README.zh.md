@@ -6,7 +6,9 @@ all-targets check、UI typecheck/check/production build 已通过，workspace
 全量测试和真实桌面 reset/发布矩阵仍未关闭）
 
 本目录是跨账号、跨平台、跨工作区的唯一接力入口。任何接手本专项的
-开发者先阅读本文件和 `00-current-state.md`，再阅读当前工作流的 brief。
+开发者先阅读本文件，再阅读当前工作流的 brief。（早期 v2 快照、目标架构
+草案、reset 执行计划与 ID-001…ID-005 决策记录已按文档政策移除，见 Git
+历史。）
 
 本目录不是仓库级全局开发规范入口。当前强制规则请阅读
 [数据与标识符规范](../contributing/data-and-identifier-standards.zh.md) 和
@@ -109,8 +111,8 @@ Canvas 文档内部 node/edge 的 `id` 属于文档结构，不是表技术主�
 
 “清空数据库”不能只删除主 SQLite 文件，否则旧 companion、Workshop、
 attachments、knowledge、public-agent、skills、浏览器缓存和 workspace
-可能继续携带旧 ID。必须按 `decisions/ID-004-v3-hard-reset.md` 对整个
-受管数据集执行同一代际重置。
+可能继续携带旧 ID。必须按 ID-004（v3 全数据集硬重置决策，记录见 Git
+历史）对整个受管数据集执行同一代际重置。
 
 ### 关于统一自增 `id`
 
@@ -145,19 +147,13 @@ repository/service 在事务中验证、维护删除策略，并通过索引和 
 
 | 文件 | 内容 | 状态 |
 | --- | --- | --- |
-| `00-current-state.md` | legacy v2 快照、历史提交、已知风险、v3 审计上下文 | `LEGACY SNAPSHOT` |
-| `01-target-id-architecture.zh.md` | 目标 ID / schema / API 架构 | `ACCEPTED` |
-| `02-table-classification.zh.md` | v3 baseline 的 64 张表逐表分类与目标键 | `V3 BASELINE CLASSIFICATION` |
-| `03-v3-reset-execution-plan.zh.md` | v3 切换、hard reset、并发分工与回滚 | `ACCEPTED PLAN / IMPLEMENTED` |
 | `04-verification-gates.zh.md` | 低耗时验证、编译策略、完成门禁 | `ACCEPTED / WORKSPACE CHECK VERIFIED` |
-| `05-handoff-template.md` | 跨账号/平台交接模板 | `TEMPLATE` |
 | `06-open-questions.zh.md` | 实施证据与发布前检查表 | `IMPLEMENTATION AUDIT` |
 | `07-browser-platform-handoff.zh.md` | Browser Platform 已完成范围、剩余 TODO、验证顺序与可复制启动 Prompt | `CORE VERIFIED / FOLLOW-UP OPEN` |
-| `decisions/ID-001-current-v2.md` | 对旧 UUIDv7 硬契约的决策结论 | `SUPERSEDED` |
-| `decisions/ID-002-layered-id-v3.md` | 新分层 ID 架构决策 | `ACCEPTED` |
-| `decisions/ID-003-bare-uuidv7.md` | 无前缀、固定结构 UUIDv7 决策 | `ACCEPTED` |
-| `decisions/ID-004-v3-hard-reset.md` | 新版本不兼容历史数据的全数据集硬重置 | `ACCEPTED` |
-| `decisions/ID-005-logical-references-autoincrement.md` | 全表自增主键与逻辑外键 | `ACCEPTED` |
+
+历史文档（v2 快照 `00-current-state.md`、目标架构 `01`、逐表分类 `02`、
+reset 执行计划 `03`、交接模板 `05`、决策记录 `decisions/ID-001`—`ID-005`）
+已随 v3 落地移除，需要时查 Git 历史。
 
 ## 明确禁止的执行方式
 
@@ -181,8 +177,8 @@ repository/service 在事务中验证、维护删除策略，并通过索引和 
 ```bash
 git status --short
 git rev-parse HEAD
-sed -n '1,240p' docs/continuity/00-current-state.md
-sed -n '1,260p' docs/continuity/01-target-id-architecture.zh.md
+sed -n '1,200p' docs/continuity/06-open-questions.zh.md
+sed -n '1,200p' docs/continuity/04-verification-gates.zh.md
 ```
 
 核心架构决策已经接受。继续实施或宣称完成前，仍必须以只读 inventory、

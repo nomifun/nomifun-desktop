@@ -83,9 +83,6 @@ fn is_duplicate_job(existing_name: &str, existing_message: &str, new_name: &str,
 }
 
 async fn list(deps: Arc<GatewayDeps>, ctx: CallerCtx, p: CronListParams) -> Value {
-    if nomifun_common::UserId::parse(ctx.user_id.as_str()).is_err() {
-        return json!({ "error": "missing caller user identity" });
-    }
     let query = ListCronJobsQuery {
         conversation_id: p.conversation_id.map(ConversationId::into_string),
     };
@@ -96,9 +93,6 @@ async fn list(deps: Arc<GatewayDeps>, ctx: CallerCtx, p: CronListParams) -> Valu
 }
 
 async fn create(deps: Arc<GatewayDeps>, ctx: CallerCtx, p: CronCreateParams) -> Value {
-    if nomifun_common::UserId::parse(ctx.user_id.as_str()).is_err() {
-        return json!({ "error": "missing caller user identity" });
-    }
     let target_conversation_id = p
         .conversation_id
         .map(ConversationId::into_string)

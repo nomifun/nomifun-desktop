@@ -13,7 +13,6 @@ use tokio::sync::broadcast;
 use tracing::{debug, info, warn};
 
 use crate::channel_settings::{ChannelSettingsService, resolved_model_to_provider};
-use crate::constants::{STREAM_THROTTLE_INTERVAL, TOOL_CONFIRM_TIMEOUT};
 use crate::error::ChannelError;
 use crate::types::{OutgoingMessageType, PluginType, UnifiedOutgoingMessage};
 
@@ -870,16 +869,6 @@ impl ChannelMessageService {
             reply_to_message_id: None,
             silent: None,
         }
-    }
-
-    /// Returns the stream throttle interval for editMessage calls.
-    pub fn throttle_interval() -> std::time::Duration {
-        STREAM_THROTTLE_INTERVAL
-    }
-
-    /// Returns the tool confirmation timeout duration.
-    pub fn confirm_timeout() -> std::time::Duration {
-        TOOL_CONFIRM_TIMEOUT
     }
 
     /// Build the `extra` JSON for channel conversations.
@@ -1908,24 +1897,6 @@ mod tests {
         assert!(text.contains("1. Allow"), "first option numbered: {text}");
         assert!(text.contains("2. Deny"), "second option numbered: {text}");
         assert!(text.contains("回复编号"), "reply-by-number hint present: {text}");
-    }
-
-    // ── throttle & timeout constants ───────────────────────────────────
-
-    #[test]
-    fn throttle_interval_is_500ms() {
-        assert_eq!(
-            ChannelMessageService::throttle_interval(),
-            std::time::Duration::from_millis(500)
-        );
-    }
-
-    #[test]
-    fn confirm_timeout_is_15s() {
-        assert_eq!(
-            ChannelMessageService::confirm_timeout(),
-            std::time::Duration::from_secs(15)
-        );
     }
 
     // ── build_channel_extra ───────────────────────────────────────────

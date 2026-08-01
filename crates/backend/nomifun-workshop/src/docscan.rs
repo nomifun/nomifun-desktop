@@ -1,10 +1,10 @@
-//! Durable-reference validation and rewriting over a workshop canvas doc.
+//! Durable-reference validation over a workshop canvas doc.
 //!
 //! Node payload semantics remain frontend-owned. The backend nevertheless owns
 //! the durable identity envelope (UUIDv7 nodes, UUIDv7 edges, and declared node
-//! references) and must find asset references for export/import/GC.
+//! references) and must find asset references for GC.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::BTreeSet;
 
 use nomifun_common::{ProviderId, WorkshopAssetId, WorkshopEdgeId, WorkshopNodeId};
 use serde_json::Value;
@@ -178,35 +178,10 @@ fn asset_id_from_mention(mention: &str) -> Option<&str> {
     Some(id)
 }
 
-/// Rewrite every asset id in `doc` in place using `remap` (old id → new id).
-/// Strings not present in the map are left untouched. Used on import, where
-/// every referenced asset is re-registered under a fresh id.
-pub(crate) fn remap_asset_ids(doc: &mut Value, remap: &HashMap<String, String>) {
-    match doc {
-        Value::String(s) => {
-            if let Some(new_id) = remap.get(s.as_str()) {
-                *s = new_id.clone();
-            } else if let Some(old_id) = asset_id_from_mention(s)
-                && let Some(new_id) = remap.get(old_id)
-            {
-                let kind = s
-                    .strip_prefix("asset:")
-                    .and_then(|rest| rest.split_once(':'))
-                    .map(|(kind, _)| kind)
-                    .expect("validated asset mention");
-                *s = format!("asset:{kind}:{new_id}");
-            }
-        }
-        Value::Array(items) => items.iter_mut().for_each(|i| remap_asset_ids(i, remap)),
-        Value::Object(map) => map.values_mut().for_each(|i| remap_asset_ids(i, remap)),
-        _ => {}
-    }
-}
-
 /// Validate the durable identity envelope of a frontend-owned canvas doc.
 ///
 /// This deliberately does not duplicate the complete frontend schema. It only
-/// owns identity fields that cross persistence/export/import boundaries, plus
+/// owns identity fields that cross persistence boundaries, plus
 /// referential integrity among those fields.
 pub(crate) fn validate_canvas_doc_ids(doc: &Value) -> Result<usize, String> {
     let object = doc
@@ -301,65 +276,6 @@ pub(crate) fn validate_canvas_doc_ids(doc: &Value) -> Result<usize, String> {
     }
 
     Ok(nodes.len())
-}
-
-/// Give every durable document entity a fresh identity when importing a canvas
-/// as a clone, and rewrite every declared node reference through one remap.
-pub(crate) fn remap_canvas_doc_ids_for_clone(doc: &mut Value) -> Result<(), String> {
-    validate_canvas_doc_ids(doc)?;
-
-    let mut node_remap = HashMap::new();
-    for node in doc["nodes"].as_array().expect("validated nodes array") {
-        let old_id = node["id"].as_str().expect("validated node id");
-        node_remap.insert(old_id.to_string(), WorkshopNodeId::new().into_string());
-    }
-
-    for node in doc["nodes"].as_array_mut().expect("validated nodes array") {
-        let object = node.as_object_mut().expect("validated node object");
-        let old_id = object["id"].as_str().expect("validated node id").to_string();
-        object.insert(
-            "id".to_string(),
-            Value::String(node_remap[&old_id].clone()),
-        );
-        if let Some(group_id) = object
-            .get("groupId")
-            .and_then(Value::as_str)
-            .map(str::to_string)
-        {
-            *object.get_mut("groupId").expect("groupId exists") =
-                Value::String(node_remap[&group_id].clone());
-        }
-        if let Some(mentions) = object
-            .get_mut("data")
-            .and_then(Value::as_object_mut)
-            .and_then(|data| data.get_mut("mentions"))
-            .and_then(Value::as_array_mut)
-        {
-            for mention in mentions {
-                let Some(old_reference) = mention.as_str().and_then(|value| value.strip_prefix("node:")) else {
-                    continue;
-                };
-                *mention = Value::String(format!("node:{}", node_remap[old_reference]));
-            }
-        }
-    }
-
-    for edge in doc["edges"].as_array_mut().expect("validated edges array") {
-        let object = edge.as_object_mut().expect("validated edge object");
-        object.insert(
-            "id".to_string(),
-            Value::String(WorkshopEdgeId::new().into_string()),
-        );
-        for field in ["from", "to"] {
-            let old_reference = object[field]
-                .as_str()
-                .expect("validated edge node reference")
-                .to_string();
-            object.insert(field.to_string(), Value::String(node_remap[&old_reference].clone()));
-        }
-    }
-
-    validate_canvas_doc_ids(doc).map(|_| ())
 }
 
 #[cfg(test)]
@@ -501,60 +417,11 @@ mod tests {
     }
 
     #[test]
-    fn remap_rewrites_only_known_ids() {
-        let mut doc = sample_doc();
-        let remap: HashMap<String, String> = [
-            (
-                "0190f5fe-7c00-7a00-8000-000000000081".to_string(),
-                "0190f5fe-7c00-7a00-8000-000000000091".to_string(),
-            ),
-            (
-                "0190f5fe-7c00-7a00-8000-000000000082".to_string(),
-                "0190f5fe-7c00-7a00-8000-000000000092".to_string(),
-            ),
-            (
-                "0190f5fe-7c00-7a00-8000-000000000083".to_string(),
-                "0190f5fe-7c00-7a00-8000-000000000093".to_string(),
-            ),
-            (
-                "0190f5fe-7c00-7a00-8000-000000000084".to_string(),
-                "0190f5fe-7c00-7a00-8000-000000000094".to_string(),
-            ),
-        ]
-        .into_iter()
-        .collect();
-        remap_asset_ids(&mut doc, &remap);
-        let refs = collect_asset_refs(&doc);
-        let got: Vec<&str> = refs.iter().map(String::as_str).collect();
-        assert_eq!(
-            got,
-            vec![
-                "0190f5fe-7c00-7a00-8000-000000000091",
-                "0190f5fe-7c00-7a00-8000-000000000092",
-                "0190f5fe-7c00-7a00-8000-000000000093",
-                "0190f5fe-7c00-7a00-8000-000000000094"
-            ]
-        );
-        assert_eq!(
-            doc["nodes"][1]["data"]["mentions"][0].as_str(),
-            Some("asset:image:0190f5fe-7c00-7a00-8000-000000000092")
-        );
-        assert_eq!(
-            doc["nodes"][1]["data"]["mentions"][1].as_str(),
-            Some("asset:video:0190f5fe-7c00-7a00-8000-000000000093")
-        );
-        assert_eq!(
-            doc["nodes"][1]["data"]["mentions"][2].as_str(),
-            Some("asset:text:0190f5fe-7c00-7a00-8000-000000000094")
-        );
-    }
-
-    #[test]
-    fn validates_and_remaps_the_complete_document_identity_envelope() {
+    fn validates_the_complete_document_identity_envelope() {
         let group_id = WorkshopNodeId::new().into_string();
         let member_id = WorkshopNodeId::new().into_string();
         let edge_id = WorkshopEdgeId::new().into_string();
-        let mut doc = json!({
+        let doc = json!({
             "nodes": [
                 {"id": group_id},
                 {"id": member_id, "groupId": group_id, "data": {
@@ -563,21 +430,6 @@ mod tests {
             ],
             "edges": [{"id": edge_id, "from": group_id, "to": member_id}]
         });
-        assert_eq!(validate_canvas_doc_ids(&doc), Ok(2));
-
-        remap_canvas_doc_ids_for_clone(&mut doc).unwrap();
-        let new_group_id = doc["nodes"][0]["id"].as_str().unwrap();
-        let new_member_id = doc["nodes"][1]["id"].as_str().unwrap();
-        assert_ne!(new_group_id, group_id);
-        assert_ne!(new_member_id, member_id);
-        assert_eq!(doc["nodes"][1]["groupId"].as_str(), Some(new_group_id));
-        assert_eq!(doc["edges"][0]["from"].as_str(), Some(new_group_id));
-        assert_eq!(doc["edges"][0]["to"].as_str(), Some(new_member_id));
-        let expected_mention = format!("node:{new_group_id}");
-        assert_eq!(
-            doc["nodes"][1]["data"]["mentions"][0].as_str(),
-            Some(expected_mention.as_str())
-        );
         assert_eq!(validate_canvas_doc_ids(&doc), Ok(2));
     }
 

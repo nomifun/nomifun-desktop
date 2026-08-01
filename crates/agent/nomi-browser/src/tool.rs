@@ -35,17 +35,18 @@ use nomi_tools::Tool;
 use nomi_types::tool::{JsonSchema, ToolResult};
 use nomifun_browser_platform::{
     BrowserIdentityMode, BrowserLaneClient, BrowserLaneId, BrowserLaneSnapshot, BrowserOperation,
-    BrowserOperationKind, BrowserOperationResult, BrowserPlatformError, LaneLifecycleState,
-    OpenLaneOutcome,
+    BrowserOperationResult, BrowserPlatformError, LaneLifecycleState, OpenLaneOutcome,
 };
 #[cfg(test)]
-use nomifun_browser_platform::CloseResult;
+use nomifun_browser_platform::{BrowserOperationKind, CloseResult};
 use nomifun_secret::SecretStore;
 
 use crate::extract::{self, ExtractModel, ExtractModelRef, ExtractSchema};
 use crate::managed::{
-    BrowserLaneClientPort, execute_crawl_many_input, lane_next_action,
-    lane_operation_not_dispatched_result,
+    BrowserLaneClientPort, action_may_modify_identity, execute_crawl_many_input,
+    first_model_identity_field, first_trusted_owner_field, is_existing_browser_action,
+    lane_next_action, lane_operation_not_dispatched_result, managed_lane_id, operation_kind,
+    platform_error_result, pretty_json, public_lane_json, sanitize_operation_input,
 };
 use crate::redline::{self, ActionContext, ApprovalTier};
 
@@ -177,23 +178,11 @@ pub const OUT_OF_BAND_CONFIRMED_KEY: &str = "__out_of_band_confirmed";
 /// abort（page.close/frame.detach）由引擎内部订阅，优先于本 deadline（progress.rs biased race）。
 const ACT_TIMEOUT: Duration = Duration::from_secs(45);
 
-/// Fields whose authority belongs to the main-process runtime registry. They
-/// are never forwarded from model input to the Browser Platform. ONE shared
-/// list for every managed surface — see [`crate::TRUSTED_OWNER_INPUT_FIELDS`].
-use crate::TRUSTED_OWNER_INPUT_FIELDS;
-
-/// Identity selection belongs to the trusted host/crawl planner.  These
-/// fields are deliberately rejected (rather than silently stripped) at the
-/// model-facing managed boundary so a newly-added browser action cannot
-/// accidentally turn a model hint into an identity policy.
-const MODEL_IDENTITY_INPUT_FIELDS: &[&str] = &[
-    "identity",
-    "identity_mode",
-    "authenticated",
-    "auth_identity",
-    "profile",
-    "account",
-];
+/// Fields whose authority belongs to the main-process runtime registry are
+/// never forwarded from model input to the Browser Platform. The single shared
+/// owner list is [`crate::TRUSTED_OWNER_INPUT_FIELDS`]; the identity-policy
+/// counterpart is [`crate::managed::MODEL_IDENTITY_INPUT_FIELDS`]. Both are
+/// enforced through the shared `crate::managed` helpers imported above.
 
 const DESCRIPTION: &str = "Drive a managed Chromium browser via the Chrome DevTools Protocol \
 (in-process, self-hosted — no external browser, no Playwright/Node). Use this to open web pages, \
@@ -489,10 +478,6 @@ pub struct BrowserTool {
     /// behavior). Injected by bootstrap (desktop: event + `ToolApprovalManager`) / gateway
     /// (GW2 `nomi_browser_confirm` channel) via [`Self::with_approval_gate`].
     approval_gate: crate::approval::BrowserApprovalGateRef,
-    /// **P7C: active recording** (record & replay). When `Some`, every successful
-    /// `do_act` appends a [`crate::recording::RecordedStep`] to the recording.
-    /// Started/stopped via [`Self::start_recording`]/[`Self::stop_recording`].
-    recording: Mutex<Option<crate::recording::Recording>>,
     /// **P7A: site memory** (cross-session site structure memory). When `Some`, every
     /// successful non-secret `do_act` records a [`crate::site_memory::SiteMemoryEntry`]
     /// keyed by eTLD+1; `do_observe` attaches remembered hints as untrusted suggestions.
@@ -734,11 +719,7 @@ impl BrowserTool {
             must_re_observe: AtomicBool::new(false),
             // Takeover controller: default OFF (fail-closed). Irreversible actions
             // stay Blocked unless a client-pref enables takeover.
-            takeover_controller: crate::takeover::TakeoverController::new(
-                Duration::from_secs(120), // 2 min default timeout for human action
-            ),
-            // P7C: no active recording by default.
-            recording: Mutex::new(None),
+            takeover_controller: crate::takeover::TakeoverController::new(),
             // P7A: no site memory by default (graceful degradation). Bootstrap/factory
             // injects a store via `.with_site_memory(...)`.
             site_memory: None,
@@ -800,8 +781,7 @@ impl BrowserTool {
             extract_model: None,
             known_secret_values: Arc::new(std::sync::Mutex::new(HashSet::new())),
             must_re_observe: AtomicBool::new(false),
-            takeover_controller: crate::takeover::TakeoverController::new(Duration::from_secs(120)),
-            recording: Mutex::new(None),
+            takeover_controller: crate::takeover::TakeoverController::new(),
             site_memory: None,
             visual_fallback_enabled: false,
             visual_locator: None,
@@ -1011,40 +991,6 @@ impl BrowserTool {
     /// Access the takeover controller (read-only).
     pub fn takeover_controller(&self) -> &crate::takeover::TakeoverController {
         &self.takeover_controller
-    }
-
-    // ── P7C: Recording ──────────────────────────────────────────────────────
-
-    /// Start recording browser actions. Returns `true` if recording was started
-    /// (not already active). While recording is active, every successful `do_act`
-    /// appends a step to the recording.
-    pub fn start_recording(&self) {
-        let url = self.current_origin().unwrap_or_default();
-        let mut guard = self.recording.lock().expect("recording poisoned");
-        if guard.is_none() {
-            *guard = Some(crate::recording::Recording::new(url));
-        }
-    }
-
-    /// Stop recording and return the completed recording. Returns `None` if
-    /// recording was not active.
-    pub fn stop_recording(&self) -> Option<crate::recording::Recording> {
-        self.recording.lock().expect("recording poisoned").take()
-    }
-
-    /// Whether recording is currently active.
-    pub fn is_recording(&self) -> bool {
-        self.recording.lock().expect("recording poisoned").is_some()
-    }
-
-    /// Append a recorded step (called after a successful act, if recording is active).
-    fn record_step(&self, action: &str, input: &Value, selector: Option<String>) {
-        let mut guard = self.recording.lock().expect("recording poisoned");
-        if let Some(ref mut rec) = *guard {
-            let url = self.current_origin().unwrap_or_default();
-            let step = crate::recording::RecordedStep::from_action(action, input, selector, url);
-            rec.push(step);
-        }
     }
 
     /// **P7A: record a site-memory entry** after a successful non-secret action.
@@ -1659,7 +1605,7 @@ impl BrowserTool {
         let operation = BrowserOperation {
             kind: operation_kind(action),
             action: action.to_string(),
-            input: sanitize_managed_operation_input(input),
+            input: sanitize_operation_input(input),
             expected_browser_epoch: input
                 .get("expected_browser_epoch")
                 .or_else(|| input.get("browser_epoch"))
@@ -2235,13 +2181,6 @@ impl BrowserTool {
             Ok(result) => {
                 let verify = render_verify_note(&result.effect);
                 if result.success {
-                    // P7C: if recording is active, append a step (selector is None at
-                    // facade level — real selector generation requires engine internals
-                    // and is wired in the e2e path via generate_selector).
-                    if self.is_recording() {
-                        self.record_step(action, input, None);
-                    }
-
                     // P7A: site-memory — record successful action's element descriptor.
                     // Skip if the action carried a secret (locked invariant: no secret stored).
                     if let Some(ref store) = self.site_memory
@@ -2505,7 +2444,6 @@ impl BrowserTool {
     /// 放行（交 approval pipeline 正常审批，由 [`Self::category_for`] 返 [`ToolCategory::Irreversible`] 触发）。
     ///
     /// 返 `Some(ToolResult::error)` = 被拦（调用方直接返该错误，不 dispatch）；`None` = 放行。
-    #[cfg_attr(not(test), allow(dead_code))]
     fn redline_gate(&self, action: &str, input: &Value) -> Option<ToolResult> {
         let ctx = self.build_action_context(input);
         let tier = redline::classify_action(action, &ctx);
@@ -2528,12 +2466,14 @@ impl BrowserTool {
     /// **P7D: redline gate with takeover integration** (async).
     ///
     /// When the redline gate would block (irreversible + bypass + not confirmed) AND
-    /// takeover is enabled, attempts a human takeover:
-    /// 1. Requests takeover via [`crate::takeover::TakeoverController`].
-    /// 2. Awaits the resolution (or timeout).
-    /// 3. Passes `resolution.to_confirmed()` to `enforce_redline`.
-    /// 4. If confirmed: sets `must_re_observe` (user may have navigated) and returns None (proceeds).
-    /// 5. Otherwise: returns the Blocked error (fail-closed).
+    /// takeover is enabled, asks for out-of-band human approval:
+    /// 1. Requests approval via the injected [`crate::approval::BrowserApprovalGate`]
+    ///    (which owns notify + await + timeout + fail-closed). Without a gate,
+    ///    [`crate::takeover::TakeoverController::resolve_without_ui`] fail-closes
+    ///    immediately.
+    /// 2. Passes `resolution.to_confirmed()` to `enforce_redline`.
+    /// 3. If confirmed: sets `must_re_observe` (user may have navigated) and returns None (proceeds).
+    /// 4. Otherwise: returns the Blocked error (fail-closed).
     ///
     /// When takeover is disabled (default), falls through to the sync `redline_gate`.
     async fn redline_gate_with_takeover(&self, action: &str, input: &Value) -> Option<ToolResult> {
@@ -2578,8 +2518,9 @@ impl BrowserTool {
 
         // Phase D: prefer the injected approval gate (desktop event + ToolApprovalManager,
         // or gateway GW2 confirm). It owns notify + await + timeout + fail-closed. Without a
-        // gate, fall back to the TakeoverController's handle/future — whose handle has no UI
-        // to resolve it, so it fail-closes (preserving exact pre-Phase-D behavior).
+        // gate there is no UI able to resolve a takeover, so fail closed IMMEDIATELY
+        // (same Blocked outcome as pre-Phase-D, without holding the action open for a
+        // timeout). Tests inject a predetermined outcome via the force_resolution seam.
         let confirmed = if let Some(gate) = &self.approval_gate {
             // Phase 3: attach a current-page preview so a SILENT (headless) session can still
             // show the user what they're approving (no visible window needed). Best-effort:
@@ -2604,13 +2545,9 @@ impl BrowserTool {
             };
             gate.request_approval(ask).await.is_approved()
         } else {
-            let reason = crate::takeover::TakeoverReason::IrreversibleAction {
-                action: action.to_string(),
-                description,
-            };
-            let (_handle, future) = self.takeover_controller.request(reason).split();
-            // No UI bridge for the handle → resolves to Cancelled/TimedOut (fail-closed).
-            future.resolve().await.to_confirmed()
+            // No gate → no UI can resolve the request: immediate fail-closed
+            // (Unavailable), or the test seam's forced resolution.
+            self.takeover_controller.resolve_without_ui().to_confirmed()
         };
 
         tracing::info!(
@@ -2884,38 +2821,6 @@ impl BrowserTool {
     }
 }
 
-fn first_trusted_owner_field(input: &Value) -> Option<&'static str> {
-    let object = input.as_object()?;
-    TRUSTED_OWNER_INPUT_FIELDS
-        .iter()
-        .copied()
-        .find(|field| object.contains_key(*field))
-}
-
-fn first_model_identity_field(input: &Value) -> Option<&'static str> {
-    let object = input.as_object()?;
-    MODEL_IDENTITY_INPUT_FIELDS
-        .iter()
-        .copied()
-        .find(|field| object.contains_key(*field))
-}
-
-fn managed_lane_id(input: &Value) -> Result<Option<BrowserLaneId>, BrowserPlatformError> {
-    // F55: parity with managed.rs — a typed-wrong lane_id (number/bool/object)
-    // is an explicit error, never a silent fallback to the caller's default
-    // Lane (which could execute the action against the wrong logged-in page).
-    match input.get("lane_id") {
-        None | Some(Value::Null) => Ok(None),
-        Some(Value::String(value)) => BrowserLaneId::parse(value.to_owned()).map(Some),
-        Some(_) => Err(BrowserPlatformError::new(
-            nomifun_browser_platform::BrowserErrorCode::LaneNotFound,
-            "`lane_id` must be a Lane handle string returned by the Browser Platform.",
-            false,
-            "Use a lane_id returned by browser_open, browser_fork, or browser_list.",
-        )),
-    }
-}
-
 async fn find_default_lane(
     client: &dyn BrowserLaneClientPort,
 ) -> Result<Option<BrowserLaneSnapshot>, BrowserPlatformError> {
@@ -2924,199 +2829,6 @@ async fn find_default_lane(
         .await?
         .into_iter()
         .find(|lane| lane.lane_key.lane_name == "default"))
-}
-
-fn is_existing_browser_action(action: &str) -> bool {
-    matches!(
-        action,
-        "navigate"
-            | "observe"
-            | "screenshot"
-            | "capabilities"
-            | "get_page_text"
-            | "search_page"
-            | "find_elements"
-            | "get_dropdown_options"
-            | "cursor"
-            | "tabs"
-            | "wait"
-            | "wait_for"
-            | "get_console_logs"
-            | "get_page_errors"
-            | "get_network_log"
-            | "click"
-            | "hover"
-            | "type"
-            | "set_value"
-            | "select_option"
-            | "press_key"
-            | "scroll"
-            | "scroll_to_text"
-            | "upload_file"
-            | "download"
-            | "save_as_pdf"
-            | "extract"
-            | "switch_frame"
-            | "switch_tab"
-            | "close_tab"
-            | "open_link_new_tab"
-            | "back"
-            | "forward"
-            | "reload"
-            | "evaluate"
-    )
-}
-
-fn operation_kind(action: &str) -> BrowserOperationKind {
-    match action {
-        "navigate" | "back" | "forward" | "reload" => BrowserOperationKind::Navigate,
-        "observe" | "get_page_text" | "search_page" | "find_elements"
-        | "get_dropdown_options" | "cursor" => BrowserOperationKind::Observe,
-        "screenshot" => BrowserOperationKind::Screenshot,
-        "tabs" | "switch_tab" | "close_tab" | "open_link_new_tab" => {
-            BrowserOperationKind::Tabs
-        }
-        "download" | "save_as_pdf" => BrowserOperationKind::Download,
-        "get_console_logs" | "get_page_errors" | "get_network_log" | "evaluate" => {
-            BrowserOperationKind::Debug
-        }
-        "capabilities" => BrowserOperationKind::Manage,
-        _ => BrowserOperationKind::Act,
-    }
-}
-
-fn action_may_modify_identity(action: &str, input: &Value) -> bool {
-    match action {
-        "navigate" | "back" | "forward" | "reload" | "open_link_new_tab" => {
-            input_declares_stateful_request(input)
-        }
-        "click"
-        | "type"
-        | "set_value"
-        | "select_option"
-        | "press_key"
-        | "upload_file"
-        | "evaluate" => true,
-        "observe"
-        | "screenshot"
-        | "capabilities"
-        | "get_page_text"
-        | "search_page"
-        | "find_elements"
-        | "get_dropdown_options"
-        | "cursor"
-        | "tabs"
-        | "wait"
-        | "wait_for"
-        | "get_console_logs"
-        | "get_page_errors"
-        | "get_network_log"
-        | "hover"
-        | "scroll"
-        | "scroll_to_text"
-        | "download"
-        | "save_as_pdf"
-        | "extract"
-        | "switch_frame"
-        | "switch_tab"
-        | "close_tab" => false,
-        _ => true,
-    }
-}
-
-fn input_declares_stateful_request(input: &Value) -> bool {
-    input
-        .get("method")
-        .and_then(Value::as_str)
-        .is_some_and(|method| {
-            !method.eq_ignore_ascii_case("get") && !method.eq_ignore_ascii_case("head")
-        })
-        || input
-            .get("submits_form")
-            .and_then(Value::as_bool)
-            .unwrap_or(false)
-}
-
-fn sanitize_managed_operation_input(input: &Value) -> Value {
-    let mut sanitized = input.as_object().cloned().unwrap_or_default();
-    sanitized.remove("lane_id");
-    sanitized.remove("lane_name");
-    sanitized.remove("expected_browser_epoch");
-    sanitized.remove(OUT_OF_BAND_CONFIRMED_KEY);
-    for field in TRUSTED_OWNER_INPUT_FIELDS {
-        sanitized.remove(*field);
-    }
-    Value::Object(sanitized)
-}
-
-fn public_lane_json(lane: &BrowserLaneSnapshot) -> Value {
-    let tabs = lane
-        .tabs
-        .iter()
-        .map(|tab| {
-            json!({
-                "tab_id": tab.tab_id,
-                "title": tab.title,
-                "url": tab.url,
-                "active": tab.active,
-                "crashed": tab.crashed,
-            })
-        })
-        .collect::<Vec<_>>();
-    let queue = lane.queue.as_ref().map(|queue| {
-        json!({
-            "position": queue.position,
-            "recommended_concurrency": queue.recommended_concurrency,
-            "owner_active": queue.owner_active,
-            "owner_queued": queue.owner_queued,
-            "global_active": queue.global_active,
-            "global_queued": queue.global_queued,
-            "retry_delay_ms": queue.retry_delay_ms,
-            "reason_code": queue.reason_code,
-        })
-    });
-    json!({
-        "lane_id": lane.lane_id.as_str(),
-        "lane_name": lane.lane_key.lane_name,
-        "identity_mode": lane.identity_mode,
-        "identity_generation": lane.identity_generation,
-        "lifecycle_state": lane.lifecycle_state,
-        "browser_epoch": lane.browser_epoch,
-        "tabs": tabs,
-        "active_tab_id": lane.active_tab_id,
-        "ref_generation": lane.ref_generation,
-        "queue": queue,
-        "recommended_concurrency": lane
-            .queue
-            .as_ref()
-            .map(|queue| queue.recommended_concurrency),
-        "recoverable": lane.recoverable,
-        "error_code": lane.error_code,
-        "error_message": lane.error_message,
-    })
-}
-
-fn public_platform_error_json(error: &BrowserPlatformError) -> Value {
-    json!({
-        "code": error.code,
-        "message": error.message,
-        "retryable": error.retryable,
-        "next_action": error.next_action,
-        "lane_id": error.lane_id.as_ref().map(BrowserLaneId::as_str),
-        "metadata": error.metadata,
-    })
-}
-
-fn platform_error_result(context: &str, error: BrowserPlatformError) -> ToolResult {
-    ToolResult::error(pretty_json(&json!({
-        "ok": false,
-        "context": context,
-        "error": public_platform_error_json(&error),
-    })))
-}
-
-fn pretty_json(value: &Value) -> String {
-    serde_json::to_string_pretty(value).unwrap_or_else(|_| value.to_string())
 }
 
 fn managed_operation_result(
@@ -6983,7 +6695,7 @@ pub(crate) mod tests {
         }
     }
 
-    // ── P7C recording tests ─────────────────────────────────────────────────
+    // ── Fake-engine fixture tests ───────────────────────────────────────────
 
     /// A minimal fake engine that returns a successful ActResult for any action.
     struct FakeRecordingEngine;
@@ -7078,36 +6790,6 @@ pub(crate) mod tests {
             tool.engine.lock().unwrap().as_ref(),
             Some(Err(error)) if error == "managed engine failed"
         ));
-    }
-
-    #[tokio::test]
-    async fn do_act_appends_step_when_recording() {
-        let t = tool();
-        // Inject a fake engine that succeeds on any act.
-        *t.engine.lock().unwrap() = Some(Ok(Arc::new(FakeRecordingEngine)));
-        // Seed a snapshot so current_origin is known and the ref resolves.
-        seed_snapshot(&t, "f0e1", "button", "Go");
-
-        // Not recording yet → no step appended.
-        let result = t.execute(json!({"action": "click", "ref": "f0e1"})).await;
-        assert!(!result.is_error, "action should succeed: {}", result.content);
-        assert!(!t.is_recording());
-
-        // Start recording.
-        t.start_recording();
-        assert!(t.is_recording());
-
-        // Act while recording → step appended.
-        let result = t.execute(json!({"action": "click", "ref": "f0e1"})).await;
-        assert!(!result.is_error, "action should succeed: {}", result.content);
-
-        // Stop and get the recording.
-        let rec = t.stop_recording().expect("should have a recording");
-        assert_eq!(rec.steps.len(), 1, "exactly one step should be recorded");
-        assert_eq!(rec.steps[0].action, "click");
-        assert_eq!(rec.steps[0].args["ref"], "f0e1");
-        // Selector is None at facade level (engine internals not accessible here).
-        assert_eq!(rec.steps[0].selector, None);
     }
 
     // ── P7A site-memory wiring tests ────────────────────────────────────────

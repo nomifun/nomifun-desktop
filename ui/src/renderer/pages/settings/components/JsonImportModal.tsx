@@ -7,6 +7,7 @@ import { json } from '@codemirror/lang-json';
 import { Link } from '@icon-park/react';
 import { useThemeContext } from '@/renderer/hooks/context/ThemeContext';
 import NomiModal from '@/renderer/components/base/NomiModal';
+import { copyText } from '@/renderer/utils/ui/clipboard';
 import { parseMcpJsonImport } from '../ToolsSettings/mcpJsonImport';
 import { toImportableMcpServer } from '../ToolsSettings/mcpImportUtils';
 import { getMcpApiKeyUrl } from '@/renderer/hooks/mcp/mcpAuthConfig';
@@ -267,33 +268,16 @@ const JsonImportModal: React.FC<JsonImportModalProps> = ({ visible, server, onCa
                 type='outline'
                 className='absolute top-2 right-2 z-10'
                 onClick={() => {
-                  const copyToClipboard = async () => {
-                    try {
-                      if (navigator.clipboard && window.isSecureContext) {
-                        await navigator.clipboard.writeText(jsonInput);
-                      } else {
-                        // Fallback to legacy method 降级到传统方法
-                        const textArea = document.createElement('textarea');
-                        textArea.value = jsonInput;
-                        textArea.style.position = 'fixed';
-                        textArea.style.left = '-9999px';
-                        textArea.style.top = '-9999px';
-                        document.body.appendChild(textArea);
-                        textArea.focus();
-                        textArea.select();
-                        document.execCommand('copy');
-                        document.body.removeChild(textArea);
-                      }
+                  void copyText(jsonInput)
+                    .then(() => {
                       setCopyStatus('success');
                       setTimeout(() => setCopyStatus('idle'), 2000);
-                    } catch (err) {
+                    })
+                    .catch((err) => {
                       console.error('Copy failed 复制失败:', err);
                       setCopyStatus('error');
                       setTimeout(() => setCopyStatus('idle'), 2000);
-                    }
-                  };
-
-                  void copyToClipboard();
+                    });
                 }}
                 style={{
                   backdropFilter: 'blur(4px)',

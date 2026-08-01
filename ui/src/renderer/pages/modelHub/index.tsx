@@ -11,7 +11,6 @@ import classNames from 'classnames';
 import { HeadsetOne, LinkCloud, SettingTwo, Platte, Lightning } from '@icon-park/react';
 import ContentSider from '@/renderer/components/layout/ContentSider';
 import SegmentedTabs, { type SegmentedTabItem } from '@/renderer/components/base/SegmentedTabs';
-import { SettingsViewModeProvider } from '@/renderer/components/settings/SettingsModal/settingsViewContext';
 import { useLayoutContext } from '@/renderer/hooks/context/LayoutContext';
 import { useResizableSplit } from '@/renderer/hooks/ui/useResizableSplit';
 import { useContainerWidth } from '@/renderer/hooks/ui/useContainerWidth';
@@ -131,16 +130,14 @@ const ModelHubPage: React.FC = () => {
   if (isMobile) {
     const segmentedItems: SegmentedTabItem[] = sections.map((s) => ({ key: s.key, label: s.label, icon: s.icon }));
     return (
-      <SettingsViewModeProvider value='page'>
-        <div className='w-full min-h-full box-border overflow-y-auto px-16px py-16px'>
-          <div className='text-20px font-600 text-t-primary leading-tight'>{t('settings.modelHub.title')}</div>
-          <div className='mt-4px mb-14px text-12px leading-18px text-t-secondary'>{t('settings.modelHub.subtitle')}</div>
-          <div className='mb-16px'>
-            <SegmentedTabs items={segmentedItems} activeKey={section} onChange={handleSectionChange} size='sm' />
-          </div>
-          {content}
+      <div className='w-full min-h-full box-border overflow-y-auto px-16px py-16px'>
+        <div className='text-20px font-600 text-t-primary leading-tight'>{t('settings.modelHub.title')}</div>
+        <div className='mt-4px mb-14px text-12px leading-18px text-t-secondary'>{t('settings.modelHub.subtitle')}</div>
+        <div className='mb-16px'>
+          <SegmentedTabs items={segmentedItems} activeKey={section} onChange={handleSectionChange} size='sm' />
         </div>
-      </SettingsViewModeProvider>
+        {content}
+      </div>
     );
   }
 
@@ -216,9 +213,7 @@ const ModelHubPage: React.FC = () => {
         aria-labelledby={`model-hub-tab-${section}`}
         ref={paneRef}
       >
-        <SettingsViewModeProvider value='page'>
-          <div className={classNames('mx-auto w-full max-w-1100px box-border py-32px', panePadX)}>{content}</div>
-        </SettingsViewModeProvider>
+        <div className={classNames('mx-auto w-full max-w-1100px box-border py-32px', panePadX)}>{content}</div>
       </div>
     </div>
   );

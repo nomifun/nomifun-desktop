@@ -4,12 +4,11 @@
 //! - AU-1/AU-2: Unauthenticated access rejected
 //! - SH-1..SH-7: Snapshot CRUD (save, list, get-content, not-found, trim, isolation, target combos)
 //! - SO-1/SO-2: Star Office detection (no service available)
-//! - DC-1/DC-4/DC-9: Document conversion (Excel→JSON, file not found, invalid target)
 //! - RP-2/RP-4: Proxy SSRF protection (inactive port rejected)
 //! - WP-4: Word preview start when officecli not available
 //!
 //! Items requiring real officecli or mock HTTP backends (WP-1..3, WP-5..6, EP-1..2,
-//! PP-1..3, RP-1/RP-3, RP-5..7, SO-5..6, DC-5..8) are tested at the service
+//! PP-1..3, RP-1/RP-3, RP-5..7, SO-5..6) are tested at the service
 //! integration level in `nomifun-office/tests/`.
 
 use std::sync::Arc;
@@ -22,7 +21,7 @@ use common::{body_json, get_request, json_with_token, setup_and_login};
 
 use nomifun_app::{AppConfig, AppServices, build_module_states, create_router_with_states};
 use nomifun_office::{
-    ConversionService, OfficeRouterState, OfficecliWatchManager, ProxyService, SnapshotService, StarOfficeDetector,
+    OfficeRouterState, OfficecliWatchManager, ProxyService, SnapshotService, StarOfficeDetector,
 };
 
 // ── Helpers ──────────────────────────────────────────────────────────
@@ -76,9 +75,6 @@ fn build_test_office_state(data_dir: &std::path::Path, allowed_roots: Vec<std::p
         async fn install_officecli(&self) -> Result<(), OfficeError> {
             Err(OfficeError::InstallFailed("not available in test".into()))
         }
-        async fn is_officecli_installed(&self) -> bool {
-            false
-        }
         async fn check_update(&self, _doc_type: DocType) -> Result<(), OfficeError> {
             Ok(())
         }
@@ -100,14 +96,12 @@ fn build_test_office_state(data_dir: &std::path::Path, allowed_roots: Vec<std::p
 
     let snapshot = Arc::new(SnapshotService::new(data_dir));
     let detector = Arc::new(StarOfficeDetector::local());
-    let conversion = Arc::new(ConversionService::new(None));
     let proxy = Arc::new(ProxyService::new(wm.clone()));
 
     OfficeRouterState {
         watch_manager: wm,
         snapshot_service: snapshot,
         star_office_detector: detector,
-        conversion_service: conversion,
         proxy_service: proxy,
         allowed_roots,
     }
@@ -140,7 +134,6 @@ async fn au2_unauthenticated_all_office_endpoints() {
         "/api/preview-history/list",
         "/api/preview-history/save",
         "/api/star-office/detect",
-        "/api/document/convert",
     ];
 
     for endpoint in endpoints {
@@ -519,93 +512,6 @@ async fn so2_detect_with_preferred_url() {
     assert!(json["data"]["url"].is_null());
 }
 
-// ── DC-1: Excel → JSON ──────────────────────────────────────────────
-
-#[tokio::test]
-async fn dc1_excel_to_json() {
-    let (mut app, services, tmp) = build_office_app().await;
-    let (token, csrf) = setup_and_login(&mut app, &services, "admin", "pass123").await;
-
-    let xlsx_path = tmp.path().join("test.xlsx");
-    create_test_xlsx(&xlsx_path);
-
-    let body = json!({
-        "file_path": xlsx_path.to_str().unwrap(),
-        "to": "excel-json"
-    });
-    let req = json_with_token("POST", "/api/document/convert", body, &token, &csrf);
-    let resp = app.clone().oneshot(req).await.unwrap();
-
-    assert_eq!(resp.status(), StatusCode::OK);
-    let json = body_json(resp).await;
-    assert_eq!(json["success"], true);
-    assert_eq!(json["data"]["to"], "excel-json");
-    assert_eq!(json["data"]["result"]["success"], true);
-
-    let sheets = json["data"]["result"]["data"]["sheets"].as_array().unwrap();
-    assert!(!sheets.is_empty());
-    assert!(sheets[0]["name"].is_string());
-    assert!(sheets[0]["data"].is_array());
-}
-
-// ── DC-4: Excel → JSON (file not found) ─────────────────────────────
-
-#[tokio::test]
-async fn dc4_excel_file_not_found() {
-    let (mut app, services, _tmp) = build_office_app().await;
-    let (token, csrf) = setup_and_login(&mut app, &services, "admin", "pass123").await;
-
-    let body = json!({
-        "file_path": "/nonexistent/file.xlsx",
-        "to": "excel-json"
-    });
-    let req = json_with_token("POST", "/api/document/convert", body, &token, &csrf);
-    let resp = app.clone().oneshot(req).await.unwrap();
-
-    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
-    let json = body_json(resp).await;
-    assert_eq!(json["code"], "BAD_REQUEST");
-}
-
-#[tokio::test]
-async fn dc5_document_convert_rejects_outside_sandbox() {
-    let sandbox = tempfile::tempdir().unwrap();
-    let outside = tempfile::tempdir().unwrap();
-    let xlsx_path = outside.path().join("test.xlsx");
-    create_test_xlsx(&xlsx_path);
-
-    let (mut app, services, _tmp) = build_office_app_with_roots(vec![sandbox.path().to_path_buf()]).await;
-    let (token, csrf) = setup_and_login(&mut app, &services, "admin", "pass123").await;
-
-    let body = json!({
-        "file_path": xlsx_path.to_str().unwrap(),
-        "to": "excel-json"
-    });
-    let req = json_with_token("POST", "/api/document/convert", body, &token, &csrf);
-    let resp = app.clone().oneshot(req).await.unwrap();
-
-    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
-    let json = body_json(resp).await;
-    assert_eq!(json["code"], "PATH_OUTSIDE_SANDBOX");
-}
-
-// ── DC-9: Invalid conversion target ─────────────────────────────────
-
-#[tokio::test]
-async fn dc9_invalid_conversion_target() {
-    let (mut app, services, _tmp) = build_office_app().await;
-    let (token, csrf) = setup_and_login(&mut app, &services, "admin", "pass123").await;
-
-    let body = json!({
-        "file_path": "/path/to/file.txt",
-        "to": "invalid"
-    });
-    let req = json_with_token("POST", "/api/document/convert", body, &token, &csrf);
-    let resp = app.clone().oneshot(req).await.unwrap();
-
-    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
-}
-
 // ── RP-2: PPT proxy SSRF protection ─────────────────────────────────
 
 #[tokio::test]
@@ -650,18 +556,4 @@ async fn office_watch_proxy_root_path_returns_non_404() {
     let resp = app.oneshot(req).await.unwrap();
 
     assert_eq!(resp.status(), StatusCode::FORBIDDEN);
-}
-
-// ── Test utilities ──────────────────────────────────────────────────
-
-fn create_test_xlsx(path: &std::path::Path) {
-    use rust_xlsxwriter::Workbook;
-
-    let mut workbook = Workbook::new();
-    let worksheet = workbook.add_worksheet();
-    worksheet.write_string(0, 0, "Name").unwrap();
-    worksheet.write_string(0, 1, "Age").unwrap();
-    worksheet.write_string(1, 0, "Alice").unwrap();
-    worksheet.write_number(1, 1, 30.0).unwrap();
-    workbook.save(path).unwrap();
 }

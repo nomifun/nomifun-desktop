@@ -2505,10 +2505,6 @@ impl AgentExecutionEngine {
         Ok(())
     }
 
-    pub fn is_active(&self, execution_id: &str) -> bool {
-        self.scheduler.is_active(execution_id)
-    }
-
     fn spawn_initial_plan(&self, owner_id: String, execution_id: String) {
         let engine = self.clone();
         tokio::spawn(async move {

@@ -41,11 +41,11 @@ Arco 自带的 `body[arco-theme='dark']` 暗色切换就被压制了——暗色
 | 品牌 | `--brand` `--brand-light` `--brand-hover` `--color-brand-fill` `--color-brand-bg` |
 | 品牌色阶 | `--aou-1..10`（亮模式 1 最浅→10 最深；暗模式反转） |
 | 背景 | `--bg-base` `--bg-1` `--bg-2` `--bg-3` `--bg-4` `--bg-5` `--bg-6` `--bg-8` `--bg-9` `--bg-10` `--color-bg-1..4`(与 bg-1..4 同值) `--bg-hover` `--bg-active` |
-| 填充 | `--fill` `--color-fill` `--fill-0` `--fill-white-to-black` `--dialog-fill-0` `--inverse` |
+| 填充 | `--fill-0` `--dialog-fill-0` |
 | 文字 | `--text-primary` `--text-secondary` `--text-disabled` `--text-0` `--text-white` |
-| 边框 | `--border-base` `--border-light` `--border-special` |
+| 边框 | `--border-base` `--border-light` |
 | 语义 | `--success` `--warning` `--danger` `--info` |
-| 组件 | `--message-user-bg`(用户气泡) `--message-tips-bg` `--workspace-btn-bg` `--color-guid-agent-bar`(首页 Agent 条) `--sider-section-title-color`(侧栏分组标题，仅暗色需要) |
+| 组件 | `--message-tips-bg` `--color-guid-agent-bar`(首页 Agent 条) `--sider-section-title-color`(侧栏分组标题，仅暗色需要) |
 | 终端 | `--terminal-surface-bg`(保持深色，xterm 画布恒深) `--terminal-border` |
 
 ## B. Arco token（亮/暗各一份，必须在含 `body` 的选择器组里）
@@ -88,8 +88,8 @@ Arco 自带的 `body[arco-theme='dark']` 暗色切换就被压制了——暗色
 2. **不要给每条消息外层套主题背景**：禁止在预设主题里给 `.message-item` 添加
    `background` / `background-color` / `backdrop-filter` / 玻璃边框等大容器样式。
    `.message-item` 是消息列表每条消息的外层排版容器，不是真正的消息气泡。给它加背景会形成
-   “每条消息一块浅白底/大卡片”的突兀感。消息气泡颜色应通过 `--message-user-bg`、
-   `--message-tips-bg` 或具体消息组件自身样式控制。
+   “每条消息一块浅白底/大卡片”的突兀感。消息气泡颜色应通过 `--message-tips-bg`
+   或具体消息组件自身样式控制。
 3. **主题点缀不要扩大到结构容器**：如果需要装饰工作区按钮、侧栏或面板，选择器必须指向真实目标
    （例如 `.workspace-btn`、`.layout-sider`、`.arco-modal`），不要把同一组样式同时打到
    `.message-item` 这类通用排版节点上。

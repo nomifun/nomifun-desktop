@@ -18,7 +18,6 @@ import {
   RobotOne,
 } from '@icon-park/react';
 import NomiScrollArea from '@/renderer/components/base/NomiScrollArea';
-import { useSettingsViewMode } from '@/renderer/components/settings/SettingsModal/settingsViewContext';
 import { useArcoMessage } from '@/renderer/utils/ui/useArcoMessage';
 import type {
   ManagedModelHealthResult,
@@ -72,8 +71,6 @@ const healthDotClass = (status: ManagedModelHealthResult['status'] | 'checking')
  */
 const FreeModelsContent: React.FC = () => {
   const { t } = useTranslation();
-  const viewMode = useSettingsViewMode();
-  const isPageMode = viewMode === 'page';
   const [message, messageContext] = useArcoMessage();
   const {
     status,
@@ -254,7 +251,7 @@ const FreeModelsContent: React.FC = () => {
         </div>
       </div>
 
-      <NomiScrollArea className='flex-1 min-h-0' disableOverflow={isPageMode}>
+      <NomiScrollArea className='flex-1 min-h-0' disableOverflow>
         {isLoading ? (
           <div className='flex flex-col gap-12px py-4px'>
             {[0, 1, 2].map((item) => (

@@ -75,10 +75,6 @@ impl ProcessSpawner for TestSpawner {
         Ok(())
     }
 
-    async fn is_officecli_installed(&self) -> bool {
-        self.installed.load(Ordering::SeqCst)
-    }
-
     async fn check_update(&self, _doc_type: DocType) -> Result<(), OfficeError> {
         Ok(())
     }

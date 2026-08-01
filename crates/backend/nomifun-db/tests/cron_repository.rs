@@ -15,7 +15,7 @@ use nomifun_common::now_ms;
 use nomifun_db::models::{CronJobRow, CronJobRunRow};
 use nomifun_db::{
     AdvanceCronOccurrenceParams, DbError, FinalizeCronRunOutcome, FinalizeCronRunParams,
-    ICronRepository, ReserveCronRunParams, SettleCronRunParams, SqliteCronRepository,
+    ICronRepository, ReserveCronRunParams, SqliteCronRepository,
     UpdateCronJobParams,
 };
 
@@ -125,20 +125,15 @@ async fn settle_scheduled_occurrence(
     repository: &dyn ICronRepository,
     cron_job_run_id: &str,
 ) {
-    assert!(
+    assert_eq!(
         repository
-            .settle_run(
+            .finalize_run_with_job_projection(
                 INSTALLATION_OWNER,
-                &SettleCronRunParams {
-                    cron_job_run_id: cron_job_run_id.to_owned(),
-                    status: "ok".to_owned(),
-                    conversation_id: None,
-                    result_error: None,
-                    now: now_ms(),
-                },
+                &successful_run_projection(cron_job_run_id, None, now_ms()),
             )
             .await
             .unwrap(),
+        FinalizeCronRunOutcome::Applied,
         "fixture must be the sole settlement leader"
     );
 }
@@ -805,33 +800,23 @@ async fn durable_scheduled_occurrence_has_one_non_prunable_identity() {
         .await
         .unwrap();
     assert_eq!(attached.conversation_id.as_deref(), Some(CONV_1));
-    assert!(
-        r.settle_run(
+    assert_eq!(
+        r.finalize_run_with_job_projection(
             INSTALLATION_OWNER,
-            &SettleCronRunParams {
-                cron_job_run_id: first_run_id.clone(),
-                status: "ok".to_owned(),
-                conversation_id: Some(CONV_1.to_owned()),
-                result_error: None,
-                now: now_ms(),
-            },
+            &successful_run_projection(&first_run_id, Some(CONV_1), now_ms()),
         )
         .await
-        .unwrap()
+        .unwrap(),
+        FinalizeCronRunOutcome::Applied
     );
-    assert!(
-        !r.settle_run(
+    assert_eq!(
+        r.finalize_run_with_job_projection(
             INSTALLATION_OWNER,
-            &SettleCronRunParams {
-                cron_job_run_id: first_run_id.clone(),
-                status: "ok".to_owned(),
-                conversation_id: Some(CONV_1.to_owned()),
-                result_error: None,
-                now: now_ms() + 1,
-            },
+            &successful_run_projection(&first_run_id, Some(CONV_1), now_ms() + 1),
         )
         .await
-        .unwrap()
+        .unwrap(),
+        FinalizeCronRunOutcome::AlreadyApplied
     );
     assert_eq!(
         r.list_runs_by_job(INSTALLATION_OWNER, &job_id, 7)

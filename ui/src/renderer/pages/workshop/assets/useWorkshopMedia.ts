@@ -9,6 +9,11 @@
  * asset's binary to a memoised object URL for use in `<img>` / `<video>`.
  * Every workshop surface loads binaries through the gated `/files/{id}`
  * endpoint via this path — a bare `<img src>` cannot carry the auth headers.
+ *
+ * The single hook serves both the asset-library surfaces (thumb/enabled) and
+ * the canvas nodes; the return type is a discriminated union so `url` narrows
+ * to `string` behind a `status === 'ready'` check, while `{ url, status }`
+ * destructuring keeps working (`url: string | null`).
  */
 
 import { useEffect, useState } from 'react';
@@ -18,16 +23,16 @@ import { loadWorkshopMedia } from '../lib/media';
 
 export type WorkshopMediaStatus = 'idle' | 'loading' | 'ready' | 'error';
 
-export interface WorkshopMediaState {
-  url: string | null;
-  status: WorkshopMediaStatus;
-}
+export type WorkshopMediaState =
+  | { status: Exclude<WorkshopMediaStatus, 'ready'>; url: null }
+  | { status: 'ready'; url: string };
 
 /**
  * Load an asset's object URL. Pass `thumb` for the small preview and `enabled`
  * to defer the fetch (e.g. until a card scrolls into view or a modal opens).
  * Re-fetches when the asset id / thumb flag changes; the underlying cache
- * dedupes concurrent and repeat requests.
+ * dedupes concurrent and repeat requests (cache busting after a binary swap is
+ * `revokeWorkshopMedia`'s job).
  */
 export function useWorkshopObjectUrl(
   assetId: AssetId | null | undefined,

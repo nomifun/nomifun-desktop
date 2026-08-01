@@ -32,10 +32,6 @@ pub trait IFileService: Send + Sync {
     /// Files larger than 256 MB are rejected.
     async fn read_file(&self, path: &str, extra_root: Option<&Path>) -> Result<Option<String>, AppError>;
 
-    /// Read a file as raw bytes. Returns `None` if the file does not exist.
-    /// Files larger than 256 MB are rejected.
-    async fn read_file_buffer(&self, path: &str, extra_root: Option<&Path>) -> Result<Option<Vec<u8>>, AppError>;
-
     /// Write `data` to `path`. On success, emits a
     /// `fileStream.contentUpdate` event with `operation = write`.
     async fn write_file(
@@ -64,15 +60,11 @@ pub trait IFileService: Send + Sync {
     /// Rename a file or directory. Returns the new absolute path.
     async fn rename_entry(&self, path: &str, new_name: &str) -> Result<String, AppError>;
 
-    /// Create an empty temporary file and return its absolute path.
-    async fn create_temp_file(&self, file_name: &str) -> Result<String, AppError>;
-
     /// Write `data` to a temporary file and return its absolute path.
     ///
     /// When `conversation_id` is provided, the file is placed under a
     /// per-conversation sub-directory (`<tmp>/nomifun/<conversation_id>/`);
-    /// otherwise the shared `<tmp>/nomifun/` directory is used (same as
-    /// [`create_temp_file`](Self::create_temp_file)).
+    /// otherwise the shared `<tmp>/nomifun/` directory is used.
     ///
     /// `file_name` must not contain path separators or traversal patterns.
     async fn create_upload_file(
@@ -211,9 +203,6 @@ pub trait ISnapshotService: Send + Sync {
     /// Auto-detects `git-repo` or `snapshot` mode.
     async fn init(&self, workspace: &str) -> Result<SnapshotInfo, AppError>;
 
-    /// Get the current snapshot mode and branch info.
-    async fn get_info(&self, workspace: &str) -> Result<SnapshotInfo, AppError>;
-
     /// Compare workspace state against the baseline.
     /// Returns staged and unstaged changes.
     async fn compare(&self, workspace: &str) -> Result<CompareResult, AppError>;
@@ -249,9 +238,6 @@ pub trait ISnapshotService: Send + Sync {
         file_path: &str,
         operation: FileChangeOperation,
     ) -> Result<(), AppError>;
-
-    /// List git branches (git-repo mode only).
-    async fn get_branches(&self, workspace: &str) -> Result<Vec<String>, AppError>;
 
     /// Clean up snapshot resources.
     /// For snapshot mode, deletes the temporary git repository.

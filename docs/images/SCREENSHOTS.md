@@ -105,8 +105,6 @@ see notes).
 | `channels-02-pairing.png` | `#/nomi?tab=remote` (connect) | web | Channel connect / settings dialog | guides/channels | live |
 | `mcp-01-capabilities.png` | `#/mcp` | web | MCP page | guides/mcp-and-skills | live |
 | `mcp-03-skills.png` | `#/skills` | web | Skills library | guides/mcp-and-skills | refresh required |
-| `presets-01-list.png` | `#/presets` | web | Preset list (builtin library) | guides/presets | refresh required |
-| `presets-02-editor.png` | `#/presets` (edit) | web | Preset editor drawer | guides/presets | refresh required |
 | `webserver-02-first-run-setup.png` | `#/login` (no admin) | web (auth) | First-run admin setup | guides/web-server-deployment | live |
 
 ## Not screenshots (rendered as commands / diagrams)

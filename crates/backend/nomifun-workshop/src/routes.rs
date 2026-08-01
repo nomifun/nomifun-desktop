@@ -1,6 +1,6 @@
 //! `/api/workshop/*` route handlers (contract §3.1/§3.2). The management surface
-//! (list/create/patch/delete, doc read/write, upload, export/import, gc,
-//! agent-ops) is owner-only — mounted behind the app's authenticated router
+//! (list/create/patch/delete, doc read/write, upload, agent-ops) is
+//! owner-only — mounted behind the app's authenticated router
 //! (same auth extractor as the knowledge routes). The multipart upload route
 //! raises the body limit to [`MAX_ASSET_BYTES`]; every other route rides the
 //! app's default limit.
@@ -37,12 +37,10 @@ use crate::service::{AssetPatch, AssetQuery, NewAssetUpload, NewTextAsset};
 use crate::state::WorkshopRouterState;
 
 pub fn workshop_routes(state: WorkshopRouterState) -> Router {
-    // The asset upload + canvas import routes carry their own (larger) body
-    // limit. Disable the app's global `DefaultBodyLimit` on them, then cap at
-    // MAX_ASSET_BYTES.
+    // The asset upload route carries its own (larger) body limit. Disable the
+    // app's global `DefaultBodyLimit` on it, then cap at MAX_ASSET_BYTES.
     let upload_router = Router::new()
         .route("/api/workshop/assets/upload", post(upload_asset))
-        .route("/api/workshop/canvases/import", post(import_canvas))
         .layer(DefaultBodyLimit::disable())
         .layer(RequestBodyLimitLayer::new(MAX_ASSET_BYTES))
         .with_state(state.clone());
@@ -54,7 +52,6 @@ pub fn workshop_routes(state: WorkshopRouterState) -> Router {
             get(get_canvas).patch(patch_canvas).delete(delete_canvas),
         )
         .route("/api/workshop/canvases/{canvas_id}/doc", axum::routing::put(put_doc))
-        .route("/api/workshop/canvases/{canvas_id}/export", get(export_canvas))
         .route(
             "/api/workshop/canvases/{canvas_id}/pending-ops",
             get(get_pending_ops),
@@ -63,7 +60,6 @@ pub fn workshop_routes(state: WorkshopRouterState) -> Router {
             "/api/workshop/canvases/{canvas_id}/pending-ops/ack",
             post(ack_pending_ops),
         )
-        .route("/api/workshop/gc", post(run_gc))
         .route("/api/workshop/assets", get(list_assets).post(create_text_asset))
         .route(
             "/api/workshop/assets/{asset_id}",
@@ -244,70 +240,6 @@ async fn delete_canvas(
 ) -> Result<StatusCode, AppError> {
     state.service.delete_canvas(canvas_id.as_str()).await?;
     Ok(StatusCode::NO_CONTENT)
-}
-
-// ── export / import / gc ─────────────────────────────────────────────────────
-
-async fn export_canvas(
-    State(state): State<WorkshopRouterState>,
-    Extension(_user): Extension<CurrentUser>,
-    Path(canvas_id): Path<WorkshopCanvasId>,
-) -> Result<Response, AppError> {
-    let zip = state.service.export_canvas(canvas_id.as_str()).await?;
-    let filename = format!("workshop-canvas-{canvas_id}.zip");
-    Ok((
-        [
-            (header::CONTENT_TYPE, "application/zip".to_string()),
-            (header::CONTENT_DISPOSITION, format!("attachment; filename=\"{filename}\"")),
-        ],
-        Body::from(zip),
-    )
-        .into_response())
-}
-
-async fn import_canvas(
-    State(state): State<WorkshopRouterState>,
-    Extension(_user): Extension<CurrentUser>,
-    multipart: Multipart,
-) -> Result<impl IntoResponse, AppError> {
-    let bytes = extract_single_file(multipart).await?;
-    let meta = state.service.import_canvas(bytes).await?;
-    Ok((StatusCode::CREATED, Json(ApiResponse::ok(meta))))
-}
-
-/// Pull the `file` field bytes out of a multipart body (the import zip).
-async fn extract_single_file(mut multipart: Multipart) -> Result<Vec<u8>, AppError> {
-    while let Some(field) = multipart
-        .next_field()
-        .await
-        .map_err(|e| AppError::BadRequest(format!("multipart error: {e}")))?
-    {
-        if field.name() == Some("file") {
-            return Ok(field
-                .bytes()
-                .await
-                .map_err(|e| AppError::BadRequest(format!("failed to read file: {e}")))?
-                .to_vec());
-        }
-    }
-    Err(AppError::BadRequest("missing 'file' field".into()))
-}
-
-#[derive(serde::Serialize)]
-struct GcResponse {
-    orphan_rows_deleted: usize,
-    orphan_files_deleted: usize,
-}
-
-async fn run_gc(
-    State(state): State<WorkshopRouterState>,
-    Extension(_user): Extension<CurrentUser>,
-) -> Result<Json<ApiResponse<GcResponse>>, AppError> {
-    let stats = state.service.gc().await?;
-    Ok(Json(ApiResponse::ok(GcResponse {
-        orphan_rows_deleted: stats.orphan_rows_deleted,
-        orphan_files_deleted: stats.orphan_files_deleted,
-    })))
 }
 
 /// AUTH-EXEMPT (mounted on [`workshop_public_routes`]): no `CurrentUser`

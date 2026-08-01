@@ -146,38 +146,6 @@ pub fn append_index_entry(path: &Path, title: &str, filename: &str, summary: &st
 }
 
 // ---------------------------------------------------------------------------
-// Remove
-// ---------------------------------------------------------------------------
-
-/// Remove the index entry that references `filename`.
-///
-/// Scans the index for any line containing `(filename)` and removes it.
-/// Idempotent — silently succeeds if the file doesn't exist or the
-/// entry is not found.
-pub fn remove_index_entry(path: &Path, filename: &str) -> Result<()> {
-    let content = match fs::read_to_string(path) {
-        Ok(c) => c,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(e) => return Err(e.into()),
-    };
-
-    let needle = format!("({filename})");
-    let filtered: Vec<&str> = content
-        .lines()
-        .filter(|line| !line.contains(&needle))
-        .collect();
-
-    // Preserve trailing newline if original had one
-    let mut result = filtered.join("\n");
-    if !result.is_empty() {
-        result.push('\n');
-    }
-
-    fs::write(path, result)?;
-    Ok(())
-}
-
-// ---------------------------------------------------------------------------
 // Internal helpers
 // ---------------------------------------------------------------------------
 
@@ -438,59 +406,6 @@ mod tests {
 
         append_index_entry(&path, "Test", "test.md", "testing").unwrap();
         assert!(path.exists());
-    }
-
-    // -- remove entry (unit-level, using temp files) --------------------------
-
-    #[test]
-    fn remove_existing_entry() {
-        let tmp = tempfile::tempdir().unwrap();
-        let path = tmp.path().join("MEMORY.md");
-        fs::write(
-            &path,
-            "- [A](a.md) \u{2014} first\n- [B](b.md) \u{2014} second\n- [C](c.md) \u{2014} third\n",
-        )
-        .unwrap();
-
-        remove_index_entry(&path, "b.md").unwrap();
-
-        let content = fs::read_to_string(&path).unwrap();
-        assert_eq!(
-            content,
-            "- [A](a.md) \u{2014} first\n- [C](c.md) \u{2014} third\n"
-        );
-    }
-
-    #[test]
-    fn remove_nonexistent_entry_is_noop() {
-        let tmp = tempfile::tempdir().unwrap();
-        let path = tmp.path().join("MEMORY.md");
-        let original = "- [A](a.md) \u{2014} first\n";
-        fs::write(&path, original).unwrap();
-
-        remove_index_entry(&path, "nonexistent.md").unwrap();
-
-        let content = fs::read_to_string(&path).unwrap();
-        assert_eq!(content, original);
-    }
-
-    #[test]
-    fn remove_from_nonexistent_file_is_ok() {
-        let path = Path::new("/nonexistent/MEMORY.md");
-        // Should not error
-        remove_index_entry(path, "anything.md").unwrap();
-    }
-
-    #[test]
-    fn remove_last_entry_leaves_empty() {
-        let tmp = tempfile::tempdir().unwrap();
-        let path = tmp.path().join("MEMORY.md");
-        fs::write(&path, "- [A](a.md) \u{2014} only\n").unwrap();
-
-        remove_index_entry(&path, "a.md").unwrap();
-
-        let content = fs::read_to_string(&path).unwrap();
-        assert_eq!(content, "");
     }
 
     // -- read_index (unit-level) ----------------------------------------------

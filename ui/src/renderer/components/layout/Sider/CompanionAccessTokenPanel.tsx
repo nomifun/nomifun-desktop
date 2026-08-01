@@ -8,6 +8,7 @@ import { companion as companionApi, webui } from '@/common/adapter/ipcBridge';
 import type { ICompanionWithStatus } from '@/common/adapter/ipcBridge';
 import { isBackendHttpError } from '@/common/adapter/httpBridge';
 import { useArcoMessage } from '@/renderer/utils/ui/useArcoMessage';
+import { copyText } from '@/renderer/utils/ui/clipboard';
 import { Alert, Button, Popconfirm, Select, Spin, Tooltip } from '@arco-design/web-react';
 import { Caution, CheckOne, Copy, Delete, Key, Robot } from '@icon-park/react';
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
@@ -108,8 +109,9 @@ const CompanionAccessTokenPanel: React.FC = () => {
 
   const handleCopy = useCallback(
     (text: string) => {
-      void navigator.clipboard.writeText(text);
-      message.success(t('common.copySuccess'));
+      copyText(text)
+        .then(() => message.success(t('common.copySuccess')))
+        .catch((error) => console.error('[CompanionAccessToken] Copy failed:', error));
     },
     [message, t]
   );

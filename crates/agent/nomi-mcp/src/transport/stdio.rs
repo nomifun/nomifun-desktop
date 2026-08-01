@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -13,9 +13,7 @@ use tokio::sync::{Mutex, watch};
 use tokio_util::sync::CancellationToken;
 
 use super::{McpError, McpTransport};
-use crate::protocol::{
-    ClientCapabilities, ClientInfo, InitializeParams, JsonRpcRequest, JsonRpcResponse,
-};
+use crate::protocol::{InitializeParams, JsonRpcRequest, JsonRpcResponse};
 
 /// Maximum number of automatic respawns within [`RESPAWN_WINDOW`] before the
 /// transport gives up and surfaces a hard error. Without a ceiling a server
@@ -220,7 +218,6 @@ impl Drop for ConnectionOwner {
 pub struct StdioTransport {
     conn: Arc<Mutex<Option<Connection>>>,
     spec: SpawnSpec,
-    next_id: AtomicU64,
     /// Respawn bookkeeping: count within the current window + window start.
     respawn_state: Mutex<RespawnState>,
     /// Absorbing close authority. Set before waiting for request/respawn locks
@@ -241,43 +238,20 @@ struct RespawnState {
 }
 
 impl StdioTransport {
-    /// Spawn a child process and return the transport.
-    ///
-    /// `init_params` are retained so a respawn can replay the `initialize`
-    /// handshake without the manager's involvement.
-    pub async fn spawn(
+    /// Spawn a child process with the default handshake params and a private
+    /// cleanup registry. Test-only convenience: production spawning goes
+    /// through [`Self::spawn_with_cleanup_registry`] (see `McpManager`).
+    #[cfg(test)]
+    async fn spawn(
         command: &str,
         args: &[String],
         env: &HashMap<String, String>,
-    ) -> Result<Self, McpError> {
-        // Default handshake params; the manager normally drives `initialize`
-        // itself on first connect, but a respawn must be self-contained.
-        let init_params = InitializeParams {
-            protocol_version: "2025-03-26".to_string(),
-            capabilities: ClientCapabilities {
-                tools: Some(serde_json::json!({})),
-            },
-            client_info: ClientInfo {
-                name: "nomi".to_string(),
-                version: "0.3.0".to_string(),
-            },
-        };
-        Self::spawn_with_init(command, args, env, init_params).await
-    }
-
-    /// Spawn with explicit handshake params (kept for the respawn path and for
-    /// callers that want to control the `initialize` payload).
-    pub async fn spawn_with_init(
-        command: &str,
-        args: &[String],
-        env: &HashMap<String, String>,
-        init_params: InitializeParams,
     ) -> Result<Self, McpError> {
         Self::spawn_with_cleanup_registry(
             command,
             args,
             env,
-            init_params,
+            crate::protocol::default_init_params(),
             ConnectionCleanupRegistry::new(),
         )
         .await
@@ -300,7 +274,6 @@ impl StdioTransport {
         Ok(Self {
             conn: Arc::new(Mutex::new(Some(conn))),
             spec,
-            next_id: AtomicU64::new(1),
             respawn_state: Mutex::new(RespawnState::default()),
             closed: AtomicBool::new(false),
             closing: CancellationToken::new(),
@@ -368,11 +341,6 @@ impl StdioTransport {
         kill_result?;
         cleanup_result?;
         Ok(())
-    }
-
-    /// Get the next request ID
-    pub fn next_id(&self) -> u64 {
-        self.next_id.fetch_add(1, Ordering::Relaxed)
     }
 
     /// Serialize and write a JSON-RPC message to the child's stdin (one line +
@@ -748,6 +716,7 @@ fn is_handshake_method(method: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::protocol::{ClientCapabilities, ClientInfo};
     #[cfg(not(windows))]
     use serde_json::json;
 

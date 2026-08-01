@@ -382,24 +382,6 @@ pub struct ManagedBrowserHost {
     default_lane_config: LaneEngineConfig,
 }
 
-/// Result of an explicit process-mode replacement.
-///
-/// The old Host has been synchronously shut down before `host` is launched,
-/// so the two Chromium processes never concurrently own the stable profile.
-/// `fresh_observe_required` is always true because CDP identifiers and refs
-/// cannot survive a Chromium process boundary.
-pub struct ManagedBrowserHostReplacement {
-    pub host: ManagedBrowserHost,
-    pub previous_epoch: u64,
-}
-
-impl ManagedBrowserHostReplacement {
-    /// A process replacement always invalidates target/frame/ref state.
-    pub const fn fresh_observe_required(&self) -> bool {
-        true
-    }
-}
-
 impl ManagedBrowserHost {
     /// Launch exactly one managed Chromium process and establish its single CDP
     /// connection.  No page/lane is created until [`Self::open_lane`].
@@ -442,33 +424,6 @@ impl ManagedBrowserHost {
             epoch: NEXT_EPOCH.fetch_add(1, Ordering::Relaxed),
             shutdown: AtomicBool::new(false),
             default_lane_config,
-        })
-    }
-
-    /// Authoritatively replace this Host with one in `mode`.
-    ///
-    /// This is the low-level seam for a trusted Headless→Headful foreground
-    /// transition (and the reverse transition when hiding again). It performs
-    /// the only safe order for a shared profile: close/cancel every old Lane,
-    /// prove the old process tree has stopped, then launch the replacement.
-    /// No Lane is silently recreated and no old target is retained. The
-    /// caller must rebuild its logical Lane inventory/URLs and require a fresh
-    /// observe before accepting Agent operations.
-    ///
-    /// If replacement launch fails, the old Host remains stopped and the
-    /// error is returned; this method never reports a successful transition
-    /// without a live replacement Host.
-    pub async fn replace_in_mode(
-        &self,
-        config: EngineConfig,
-        mode: BrowserHostLaunchMode,
-    ) -> Result<ManagedBrowserHostReplacement, BrowserError> {
-        let previous_epoch = self.epoch;
-        self.shutdown().await?;
-        let host = Self::launch_in_mode(config, mode).await?;
-        Ok(ManagedBrowserHostReplacement {
-            host,
-            previous_epoch,
         })
     }
 

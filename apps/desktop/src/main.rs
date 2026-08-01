@@ -308,23 +308,6 @@ fn default_data_dir() -> PathBuf {
     nomifun_app::bootstrap::resolve_startup_data_root(requested)
 }
 
-/// Updater scaffold: ask the configured update endpoint whether a newer signed
-/// release is available. Invoked from the renderer via
-/// `invoke("check_for_updates")`. Returns the new version string, or `null` if
-/// up to date. Inert until `plugins.updater.endpoints` in tauri.conf.json serves
-/// a valid `latest.json` signed with the project key
-/// (see apps/desktop/updater/README.md).
-#[tauri::command]
-async fn check_for_updates(app: tauri::AppHandle) -> Result<Option<String>, String> {
-    use tauri_plugin_updater::UpdaterExt;
-    let updater = app.updater().map_err(|e| e.to_string())?;
-    match updater.check().await {
-        Ok(Some(update)) => Ok(Some(update.version)),
-        Ok(None) => Ok(None),
-        Err(e) => Err(e.to_string()),
-    }
-}
-
 /// Install the exact update version selected by the renderer through a
 /// Rust-owned updater handle. The renderer may check/download for progress, but
 /// it is never allowed to invoke the plugin's raw install commands.
@@ -716,6 +699,7 @@ impl StartupCleanup {
         }
     }
 
+    #[cfg(test)]
     fn is_verified(&self) -> bool {
         matches!(self, Self::NotStarted | Self::FailedVerified)
     }
@@ -1827,6 +1811,7 @@ fn show_main_window(app: &tauri::AppHandle) {
     }
 }
 
+#[cfg(any(test, target_os = "macos"))]
 fn should_show_main_window_for_macos_reopen(_has_visible_windows: bool) -> bool {
     true
 }
@@ -2482,7 +2467,6 @@ fn main() -> std::process::ExitCode {
         .manage(Arc::new(ExitCoordinator::default()))
         .manage(memory_panel_window::MemoryPanelWindowState::default())
         .invoke_handler(tauri::generate_handler![
-            check_for_updates,
             install_update,
             companion_pointer::get_companion_local_pointer,
             updater_install_context::get_updater_install_context,

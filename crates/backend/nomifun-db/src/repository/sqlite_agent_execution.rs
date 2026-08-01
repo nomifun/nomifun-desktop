@@ -2351,24 +2351,6 @@ impl IAgentExecutionRepository for SqliteAgentExecutionRepository {
         .await?)
     }
 
-    async fn list_participants(
-        &self,
-        user_id: &str,
-        execution_id: &str,
-    ) -> Result<Vec<AgentExecutionParticipantRow>, DbError> {
-        Ok(sqlx::query_as::<_, AgentExecutionParticipantRow>(
-            "SELECT participant.* FROM agent_execution_participants participant \
-             JOIN agent_executions execution ON execution.execution_id = participant.execution_id \
-             WHERE participant.execution_id = ? AND participant.retired_in_revision IS NULL \
-               AND execution.user_id = ? AND execution.deleted_at IS NULL \
-             ORDER BY participant.sort_order, participant.id",
-        )
-        .bind(execution_id)
-        .bind(user_id)
-        .fetch_all(&self.pool)
-        .await?)
-    }
-
     async fn reconcile_plan(
         &self,
         user_id: &str,
@@ -3250,44 +3232,6 @@ impl IAgentExecutionRepository for SqliteAgentExecutionRepository {
         let detail = load_step_detail_tx(&mut tx, user_id, execution_id, step_id).await?;
         tx.commit().await?;
         Ok(detail)
-    }
-
-    async fn list_steps(
-        &self,
-        user_id: &str,
-        execution_id: &str,
-    ) -> Result<Vec<AgentExecutionStepRow>, DbError> {
-        Ok(sqlx::query_as::<_, AgentExecutionStepRow>(
-            "SELECT step.* FROM agent_execution_steps step \
-             JOIN agent_executions execution ON execution.execution_id = step.execution_id \
-             WHERE step.execution_id = ? AND execution.user_id = ? \
-               AND execution.deleted_at IS NULL \
-               AND step.superseded_in_revision IS NULL \
-             ORDER BY step.created_at, step.id",
-        )
-        .bind(execution_id)
-        .bind(user_id)
-        .fetch_all(&self.pool)
-        .await?)
-    }
-
-    async fn list_dependencies(
-        &self,
-        user_id: &str,
-        execution_id: &str,
-    ) -> Result<Vec<AgentExecutionStepDependencyRow>, DbError> {
-        Ok(sqlx::query_as::<_, AgentExecutionStepDependencyRow>(
-            "SELECT dependency.* FROM agent_execution_step_dependencies dependency \
-             JOIN agent_executions execution ON execution.execution_id = dependency.execution_id \
-             WHERE dependency.execution_id = ? AND execution.user_id = ? \
-               AND execution.deleted_at IS NULL \
-               AND dependency.superseded_in_revision IS NULL \
-             ORDER BY dependency.blocker_step_id, dependency.blocked_step_id",
-        )
-        .bind(execution_id)
-        .bind(user_id)
-        .fetch_all(&self.pool)
-        .await?)
     }
 
     async fn transition_step_status(
@@ -4880,30 +4824,6 @@ impl IAgentExecutionRepository for SqliteAgentExecutionRepository {
             .find(|detail| detail.attempt.attempt_id == attempt_id);
         tx.commit().await?;
         Ok(row)
-    }
-
-    async fn list_attempts(
-        &self,
-        user_id: &str,
-        execution_id: &str,
-        step_id: Option<&str>,
-    ) -> Result<Vec<AgentExecutionAttemptDetailRow>, DbError> {
-        let mut tx = self.pool.begin().await?;
-        let owned: i64 = sqlx::query_scalar(
-            "SELECT EXISTS(SELECT 1 FROM agent_executions \
-             WHERE execution_id = ? AND user_id = ? AND deleted_at IS NULL)",
-        )
-        .bind(execution_id)
-        .bind(user_id)
-        .fetch_one(&mut *tx)
-        .await?;
-        let rows = if owned == 0 {
-            Vec::new()
-        } else {
-            attempt_details_tx(&mut tx, execution_id, step_id).await?
-        };
-        tx.commit().await?;
-        Ok(rows)
     }
 
     async fn list_conversation_links(

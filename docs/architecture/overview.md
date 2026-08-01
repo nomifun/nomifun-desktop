@@ -9,7 +9,7 @@ custom protocol.
 
 This document is the map. The sibling documents drill into the parts:
 
-- [`backend-crates.md`](backend-crates.md) — the 32 `nomifun-*` backend crates.
+- [`backend-crates.md`](backend-crates.md) — the 34 `nomifun-*` backend crates.
 - [`agent-engine.md`](agent-engine.md) — the 15 `nomi-*` agent crates.
 - [`agent-execution.zh.md`](agent-execution.zh.md) — the unified persistent AgentExecution model.
 - [`frontend.md`](frontend.md) — the React SPA, adapter layer, routing.
@@ -51,7 +51,7 @@ This document is the map. The sibling documents drill into the parts:
                           │                       │
                           ▼                       ▼
               ┌─────────────────────┐   ┌─────────────────────┐
-              │  nomifun-* (32)     │   │  nomi-* (15)         │
+              │  nomifun-* (34)     │   │  nomi-* (15)         │
               │  backend crates     │◀─▶│  agent engine crates │
               │  data, auth, MCP,   │   │  via the SEAM:       │
               │  conversation, etc. │   │  nomifun-ai-agent     │
@@ -107,7 +107,7 @@ on disk, not just in package names:
 | Folder | Purpose | Crate prefix | Count |
 | --- | --- | --- | --- |
 | `crates/agent/` | AI engine — providers, tools, sessions, MCP, skills, computer/browser use | `nomi-*` | 15 |
-| `crates/backend/` | The HTTP/WS server, data, auth, features, public capability gateway | `nomifun-*` | 32 |
+| `crates/backend/` | The HTTP/WS server, data, auth, features, public capability gateway | `nomifun-*` | 34 |
 | `crates/shared/` | Cross-layer utilities used by both groups | mixed | 3 |
 
 The agent group is **self-contained** — no `nomi-*` crate references any
@@ -127,7 +127,7 @@ nomifun-tauri/
 │   └─ web/       nomifun-web      (standalone server: /api + SPA on one port)
 ├─ crates/
 │   ├─ agent/     15 nomi-* crates  → see agent-engine.md
-│   ├─ backend/   32 nomifun-* crates → see backend-crates.md
+│   ├─ backend/   34 nomifun-* crates → see backend-crates.md
 │   └─ shared/    3 shared crates
 ├─ ui/            React 19 + Vite 6 + Arco + UnoCSS  → see frontend.md
 └─ docs/

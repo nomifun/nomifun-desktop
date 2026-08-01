@@ -526,11 +526,6 @@ impl IPresetRepository for SqlitePresetRepository {
         tx.commit().await?;
         Ok(result.rows_affected() > 0)
     }
-
-    async fn list_rows(&self) -> Result<Vec<PresetRow>, DbError> {
-        Ok(sqlx::query_as::<_, PresetRow>("SELECT * FROM presets ORDER BY updated_at DESC")
-            .fetch_all(&self.pool).await?)
-    }
 }
 
 #[async_trait::async_trait]

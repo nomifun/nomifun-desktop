@@ -11,9 +11,10 @@ use std::time::Duration;
 use tokio::sync::{mpsc, watch};
 use tracing::{debug, error, info, warn};
 
-use crate::constants::{DISCORD_MAX_RECONNECT_ATTEMPTS, DISCORD_MAX_RECONNECT_DELAY};
+use crate::constants::{RECONNECT_MAX_ATTEMPTS, RECONNECT_MAX_DELAY};
 use crate::error::ChannelError;
 use crate::plugin::{SharedPluginStatus, mark_error_on_unexpected_exit};
+use crate::plugins::util::backoff_delay;
 use crate::plugins::callback::parse_callback_data;
 use crate::types::{
     ActionContext, MessageContentType, PluginType, UnifiedAction, UnifiedAttachment, UnifiedIncomingMessage,
@@ -30,13 +31,11 @@ use super::types::{
 const GATEWAY_URL: &str = "wss://gateway.discord.gg/?v=10&encoding=json";
 
 /// Background task: maintain the Discord gateway connection with reconnects.
-#[allow(clippy::too_many_arguments)]
 pub(super) async fn run_gateway(
     api: Arc<DiscordApi>,
     token: String,
     self_bot_id: String,
     message_tx: mpsc::Sender<UnifiedIncomingMessage>,
-    confirm_tx: mpsc::Sender<(String, String)>,
     status: SharedPluginStatus,
     mut shutdown_rx: watch::Receiver<bool>,
 ) {
@@ -48,7 +47,7 @@ pub(super) async fn run_gateway(
             break;
         }
 
-        match connect_once(&api, &token, &self_bot_id, &message_tx, &confirm_tx, &mut shutdown_rx).await {
+        match connect_once(&api, &token, &self_bot_id, &message_tx, &mut shutdown_rx).await {
             Ok(()) => {
                 // Clean close (shutdown / server RECONNECT). Reset backoff.
                 consecutive_errors = 0;
@@ -59,11 +58,11 @@ pub(super) async fn run_gateway(
             Err(e) => {
                 consecutive_errors += 1;
                 warn!(error = %e, consecutive_errors, "Discord gateway error");
-                if consecutive_errors >= DISCORD_MAX_RECONNECT_ATTEMPTS {
+                if consecutive_errors >= RECONNECT_MAX_ATTEMPTS {
                     error!("Discord max reconnect attempts reached, stopping gateway loop");
                     break;
                 }
-                let backoff = backoff_delay(consecutive_errors);
+                let backoff = backoff_delay(consecutive_errors, RECONNECT_MAX_DELAY);
                 tokio::select! {
                     _ = tokio::time::sleep(backoff) => {}
                     _ = shutdown_rx.changed() => break,
@@ -76,19 +75,12 @@ pub(super) async fn run_gateway(
     debug!("Discord gateway loop exited");
 }
 
-/// Exponential backoff capped at `DISCORD_MAX_RECONNECT_DELAY`.
-fn backoff_delay(attempt: u32) -> Duration {
-    let secs = 2u64.saturating_pow(attempt).min(DISCORD_MAX_RECONNECT_DELAY.as_secs());
-    Duration::from_secs(secs)
-}
-
 /// A single gateway connection: HELLO → IDENTIFY → heartbeat + dispatch.
 async fn connect_once(
     api: &Arc<DiscordApi>,
     token: &str,
     self_bot_id: &str,
     message_tx: &mpsc::Sender<UnifiedIncomingMessage>,
-    confirm_tx: &mpsc::Sender<(String, String)>,
     shutdown_rx: &mut watch::Receiver<bool>,
 ) -> Result<(), ChannelError> {
     use futures_util::{SinkExt, StreamExt};
@@ -178,7 +170,7 @@ async fn connect_once(
                                     "INTERACTION_CREATE" => {
                                         match serde_json::from_value::<InteractionCreate>(payload.d) {
                                             Ok(interaction) => {
-                                                handle_interaction(api, &interaction, message_tx, confirm_tx).await;
+                                                handle_interaction(api, &interaction, message_tx).await;
                                             }
                                             Err(e) => warn!(error = %e, "Discord INTERACTION_CREATE parse failed"),
                                         }
@@ -242,14 +234,13 @@ async fn handle_interaction(
     api: &Arc<DiscordApi>,
     interaction: &InteractionCreate,
     message_tx: &mpsc::Sender<UnifiedIncomingMessage>,
-    confirm_tx: &mpsc::Sender<(String, String)>,
 ) {
     if interaction.interaction_type != INTERACTION_TYPE_MESSAGE_COMPONENT {
         return;
     }
     // The interaction snowflake is the durable provider event identity.  A
-    // blank ID must fail closed before Discord ACK, tool confirmation, or
-    // message-loop enqueue side effects.
+    // blank ID must fail closed before Discord ACK or message-loop enqueue
+    // side effects.
     if interaction.id.trim().is_empty() {
         warn!("Ignoring Discord component interaction without a provider interaction ID");
         return;
@@ -262,18 +253,6 @@ async fn handle_interaction(
     let Some(unified) = normalize_interaction(interaction) else {
         return;
     };
-
-    // Tool-confirmation buttons (system.confirm) also feed confirm_tx.
-    if let Some(action) = &unified.action
-        && action.action == "system.confirm"
-        && let Some(params) = &action.params
-    {
-        let call_id = params.get("callId").cloned().unwrap_or_default();
-        let value = params.get("value").cloned().unwrap_or_default();
-        if !call_id.is_empty() {
-            let _ = confirm_tx.send((call_id, value)).await;
-        }
-    }
 
     let _ = message_tx.send(unified).await;
 }
@@ -578,7 +557,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn blank_interaction_id_fails_before_ack_confirm_or_enqueue() {
+    async fn blank_interaction_id_fails_before_ack_or_enqueue() {
         let interaction = InteractionCreate {
             id: " \n".into(),
             token: "tok".into(),
@@ -593,20 +572,11 @@ mod tests {
         };
         let api = Arc::new(DiscordApi::new(reqwest::Client::new(), "unused-test-token"));
         let (message_tx, mut message_rx) = mpsc::channel(1);
-        let (confirm_tx, mut confirm_rx) = mpsc::channel(1);
 
-        handle_interaction(&api, &interaction, &message_tx, &confirm_tx).await;
+        handle_interaction(&api, &interaction, &message_tx).await;
 
         assert!(normalize_interaction(&interaction).is_none());
         assert!(message_rx.try_recv().is_err());
-        assert!(confirm_rx.try_recv().is_err());
-    }
-
-    #[test]
-    fn backoff_is_exponential_and_capped() {
-        assert_eq!(backoff_delay(1), Duration::from_secs(2));
-        assert_eq!(backoff_delay(3), Duration::from_secs(8));
-        assert_eq!(backoff_delay(10), Duration::from_secs(30)); // capped
     }
 
     #[test]

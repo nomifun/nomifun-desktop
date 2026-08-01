@@ -603,31 +603,24 @@ impl AgentRuntimeHandle {
         }
     }
 
-    /// Dispatch a side-question to the agent. **Placeholder** — matches
-    /// the current `AgentService::handle_side_question` behaviour: ACP
-    /// agents whose behavior_policy enables side-questions return a stub
-    /// "ok" response, everyone else returns `unsupported`.
+    /// Dispatch a side-question to the agent.
+    ///
+    /// No backend implements side-questions yet, so every variant honestly
+    /// reports `unsupported` (the UI surfaces this as a warning toast). The
+    /// previous ACP branch returned a hardcoded fake-success answer for
+    /// `supports_side_question` agents, presenting a placeholder string to the
+    /// user as a real reply; that path was removed rather than shipped.
     pub async fn handle_side_question(&self, req: SideQuestionRequest) -> Result<SideQuestionResponse, AppError> {
         if req.question.trim().is_empty() {
             return Err(AppError::BadRequest("question must not be empty".into()));
         }
         match self {
-            Self::Acp(m) => {
-                if !m.supports_side_question() {
-                    return Ok(SideQuestionResponse {
-                        status: "unsupported".into(),
-                        answer: None,
-                    });
-                }
+            Self::Acp(_) | Self::Nomi(_) | Self::OpenClaw(_) | Self::Nanobot(_) | Self::Remote(_) => {
                 Ok(SideQuestionResponse {
-                    status: "ok".into(),
-                    answer: Some("Side question support will be fully wired in app integration phase.".into()),
+                    status: "unsupported".into(),
+                    answer: None,
                 })
             }
-            Self::Nomi(_) | Self::OpenClaw(_) | Self::Nanobot(_) | Self::Remote(_) => Ok(SideQuestionResponse {
-                status: "unsupported".into(),
-                answer: None,
-            }),
             #[cfg(any(test, feature = "test-support"))]
             Self::Mock(m) => m.handle_side_question(req).await,
         }

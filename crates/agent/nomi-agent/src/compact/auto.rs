@@ -55,21 +55,27 @@ pub enum CompactError {
 
 // ── Trigger check ───────────────────────────────────────────────────────────
 
-/// Check if autocompact should trigger based on the token watermark.
+/// Token threshold at which autocompact triggers.
 ///
 /// When `autocompact_threshold_pct` is set, threshold = context_window * pct / 100.
 /// Otherwise falls back to: `threshold = context_window - output_reserve - autocompact_buffer`
+pub fn autocompact_threshold(config: &CompactConfig) -> usize {
+    if let Some(pct) = config.autocompact_threshold_pct {
+        config.context_window * pct as usize / 100
+    } else {
+        config
+            .context_window
+            .saturating_sub(config.output_reserve)
+            .saturating_sub(config.autocompact_buffer)
+    }
+}
+
+/// Check if autocompact should trigger based on the token watermark.
 pub fn should_autocompact(last_input_tokens: u64, config: &CompactConfig) -> bool {
     if !config.enabled {
         return false;
     }
-    let threshold = if let Some(pct) = config.autocompact_threshold_pct {
-        config.context_window * pct as usize / 100
-    } else {
-        let effective_window = config.context_window.saturating_sub(config.output_reserve);
-        effective_window.saturating_sub(config.autocompact_buffer)
-    };
-    last_input_tokens as usize >= threshold
+    last_input_tokens as usize >= autocompact_threshold(config)
 }
 
 // ── Core autocompact ────────────────────────────────────────────────────────

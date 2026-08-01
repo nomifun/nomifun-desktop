@@ -120,10 +120,7 @@ impl GatewayStdioServer {
                 None,
             ));
         };
-        if value.is_empty()
-            || value.len() > 128
-            || !value.bytes().all(|byte| (0x21..=0x7e).contains(&byte))
-        {
+        if !nomifun_common::is_visible_ascii_key(value, 128) {
             return Err(rmcp::ErrorData::invalid_request(
                 format!(
                     "MCP _meta.{EXECUTION_OPERATION_META_KEY} must contain 1..=128 visible ASCII bytes"

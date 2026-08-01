@@ -59,7 +59,6 @@ async fn test_app_with_local(local: bool) -> (Router, TestContext) {
         jwt_service,
         user_repo,
         qr_token_store,
-        installation_owner,
         _db: db,
     };
     (app, ctx)
@@ -70,7 +69,6 @@ struct TestContext {
     jwt_service: Arc<JwtService>,
     user_repo: Arc<dyn IUserRepository>,
     qr_token_store: Arc<QrTokenStore>,
-    installation_owner: String,
     _db: nomifun_db::Database,
 }
 
@@ -146,10 +144,6 @@ async fn login(app: &mut Router, username: &str, password: &str) -> (String, Str
     let token = json["token"].as_str().unwrap().to_owned();
     let user_id = json["user"]["user_id"].as_str().unwrap().to_owned();
     (token, user_id)
-}
-
-fn json_post_anonymous(uri: &str, body: &str) -> Request<Body> {
-    json_post(uri, body)
 }
 
 // ===========================================================================
@@ -802,61 +796,3 @@ async fn qr_login_page_checks_app_shell_before_redirecting() {
     );
 }
 
-// ===========================================================================
-// T12. Local-only internal user routes
-// ===========================================================================
-
-#[tokio::test]
-async fn t12_1_internal_user_routes_forbidden_outside_local_mode() {
-    let (app, _ctx) = test_app().await;
-
-    let resp = app
-        .oneshot(get_anonymous("/api/auth/internal/users/system"))
-        .await
-        .unwrap();
-
-    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
-}
-
-#[tokio::test]
-async fn t12_2_internal_user_routes_work_in_local_mode() {
-    let (app, ctx) = test_app_with_local(true).await;
-    create_test_user(&ctx, "admin", "StrongP@ss1").await;
-
-    let system_resp = app
-        .clone()
-        .oneshot(get_anonymous("/api/auth/internal/users/system"))
-        .await
-        .unwrap();
-    assert_eq!(system_resp.status(), StatusCode::OK);
-    let system_json = body_json(system_resp).await;
-    assert_eq!(system_json["data"]["user_id"], ctx.installation_owner);
-
-    let user_resp = app
-        .clone()
-        .oneshot(get_anonymous("/api/auth/internal/users/by-username/admin"))
-        .await
-        .unwrap();
-    assert_eq!(user_resp.status(), StatusCode::OK);
-    let user_json = body_json(user_resp).await;
-    let user_id = user_json["data"]["user_id"].as_str().unwrap().to_owned();
-
-    let update_resp = app
-        .clone()
-        .oneshot(json_post_anonymous(
-            &format!("/api/auth/internal/users/{user_id}/username"),
-            r#"{"username":"renamed-admin"}"#,
-        ))
-        .await
-        .unwrap();
-    assert_eq!(update_resp.status(), StatusCode::OK);
-
-    let renamed_resp = app
-        .oneshot(get_anonymous("/api/auth/internal/users/by-username/renamed-admin"))
-        .await
-        .unwrap();
-    assert_eq!(renamed_resp.status(), StatusCode::OK);
-    let renamed_json = body_json(renamed_resp).await;
-    assert_eq!(renamed_json["data"]["user_id"], user_id);
-    assert_eq!(renamed_json["data"]["username"], "renamed-admin");
-}

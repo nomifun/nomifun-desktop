@@ -8,8 +8,6 @@ import { Divider, Typography, Button } from '@arco-design/web-react';
 import { Download, Github, Refresh, Right } from '@icon-park/react';
 import React, { useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import classNames from 'classnames';
-import { useSettingsViewMode } from '../settingsViewContext';
 import { isDesktopShell, openExternalUrl } from '@/renderer/utils/platform';
 import { httpGet } from '@/common/adapter/httpBridge';
 import { NOMIFUN_PUBLIC_LINKS } from './FeedbackReportModal';
@@ -26,8 +24,6 @@ type LinkItem =
 
 const AboutModalContent: React.FC = () => {
   const { t } = useTranslation();
-  const viewMode = useSettingsViewMode();
-  const isPageMode = viewMode === 'page';
   // The in-app updater only runs in the bundled desktop shell (Tauri); the WebUI
   // browser has no updater, so the check-update entry is shell-gated.
   const isDesktop = isDesktopShell();
@@ -104,10 +100,7 @@ const AboutModalContent: React.FC = () => {
     <div className='flex flex-col h-full w-full'>
       {/* Content Area */}
       <div
-        className={classNames(
-          'flex-1 min-h-0 overflow-y-auto overflow-x-hidden px-24px',
-          isPageMode && 'px-0 overflow-visible'
-        )}
+        className='flex-1 min-h-0 overflow-y-auto overflow-x-hidden px-24px px-0 overflow-visible'
       >
         <div className='flex flex-col max-w-500px mx-auto'>
           {/* App Info Section */}

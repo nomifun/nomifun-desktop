@@ -141,7 +141,7 @@ pub async fn trust_resolve_middleware(State(state): State<TrustState>, mut reque
 }
 
 /// Route-layer middleware that rejects any request not granted local trust.
-/// Applied to the `/api/webui/*` and `/api/auth/internal/*` credential routes
+/// Applied to the `/api/webui/*` credential routes
 /// (which sit in the otherwise-public group with no auth middleware).
 pub async fn require_local_trust_middleware(request: Request, next: Next) -> Result<Response, AppError> {
     if request.extensions().get::<LocalTrusted>().is_some() {

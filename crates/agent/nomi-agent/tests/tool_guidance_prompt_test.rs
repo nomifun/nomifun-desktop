@@ -25,7 +25,6 @@ fn make_skill(name: &str, description: &str) -> SkillMetadata {
         execution_context: ExecutionContext::Inline,
         agent: None,
         effort: None,
-        shell: None,
         paths: vec![],
         hooks_raw: None,
         source: SkillSource::User,

@@ -188,11 +188,6 @@ impl WebhookService {
         }
     }
 
-    pub async fn list_tag_settings(&self) -> Result<Vec<TagSetting>, AppError> {
-        let rows = self.tag_settings.list_all().await?;
-        Ok(rows.iter().map(tag_setting_to_dto).collect())
-    }
-
     pub async fn upsert_tag_setting(&self, tag: &str, req: UpsertTagSettingRequest) -> Result<TagSetting, AppError> {
         if tag.trim().is_empty() {
             return Err(AppError::BadRequest("tag must not be empty".into()));

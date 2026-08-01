@@ -176,9 +176,11 @@ async fn running_attempt_fixture() -> RunningAttemptFixture {
     let conversation_repo = SqliteConversationRepository::new(db.pool().clone());
     let created = create_execution(&execution_repo).await;
     let participant_id = execution_repo
-        .list_participants(OWNER_ID, &created.execution_id)
+        .get_execution_detail(OWNER_ID, &created.execution_id)
         .await
-        .unwrap()[0]
+        .unwrap()
+        .expect("execution exists")
+        .participants[0]
         .participant_id
         .clone();
     let step_id = nomifun_common::generate_id();
@@ -357,9 +359,11 @@ async fn agent_execution_from_row_models_match_every_baseline_column() {
     let conversations = SqliteConversationRepository::new(db.pool().clone());
     let created = create_execution(&repository).await;
     let participant_id = repository
-        .list_participants(OWNER_ID, &created.execution_id)
+        .get_execution_detail(OWNER_ID, &created.execution_id)
         .await
         .unwrap()
+        .expect("execution exists")
+        .participants
         .first()
         .unwrap()
         .participant_id
@@ -501,9 +505,11 @@ async fn agent_execution_business_ids_are_uuidv7_and_dependencies_use_them() {
     let repository = SqliteAgentExecutionRepository::new(db.pool().clone());
     let created = create_execution(&repository).await;
     let participant_id = repository
-        .list_participants(OWNER_ID, &created.execution_id)
+        .get_execution_detail(OWNER_ID, &created.execution_id)
         .await
-        .unwrap()[0]
+        .unwrap()
+        .expect("execution exists")
+        .participants[0]
         .participant_id
         .clone();
     let first_step_id = nomifun_common::generate_id();

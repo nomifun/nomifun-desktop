@@ -62,19 +62,6 @@ impl IAttachmentRepository for SqliteAttachmentRepository {
         Ok(row)
     }
 
-    async fn get_by_attachment_id(
-        &self,
-        attachment_id: &str,
-    ) -> Result<Option<AttachmentRow>, DbError> {
-        let row = sqlx::query_as::<_, AttachmentRow>(
-            "SELECT * FROM attachments WHERE attachment_id = ?",
-        )
-        .bind(attachment_id)
-        .fetch_optional(&self.pool)
-        .await?;
-        Ok(row)
-    }
-
     async fn list_for_requirement(
         &self,
         requirement_id: &str,

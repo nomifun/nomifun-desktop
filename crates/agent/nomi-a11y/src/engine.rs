@@ -5,8 +5,6 @@ use serde::{Deserialize, Serialize};
 
 use nomi_types::tool::ToolImage;
 
-use crate::selector::Selector;
-
 /// Monotonic snapshot generation. A `ref` (index into a snapshot's element
 /// list) is only valid against the generation it was produced in; backends use
 /// this to reject stale references instead of acting on a moved element.
@@ -128,14 +126,12 @@ pub struct Snapshot {
     pub window_title: Option<String>,
 }
 
-/// How the model addresses an element. Three mutually-exclusive modes, shared
+/// How the model addresses an element. Two mutually-exclusive modes, shared
 /// with the browser tool's contract.
 #[derive(Debug, Clone)]
 pub enum Target {
     /// A `[ref]` from the most recent snapshot.
     Ref(u32),
-    /// A deterministic selector (`role:Button && name:Save`).
-    Selector(Selector),
     /// Last-resort absolute screen coordinates (pixel fallback).
     Pixel { x: i32, y: i32 },
 }

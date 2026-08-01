@@ -942,11 +942,6 @@ impl CompanionService {
             .ok_or_else(|| AppError::NotFound(format!("figure '{figure_id}' not found")))
     }
 
-    /// Rename a library figure. Unknown id → 404.
-    pub async fn rename_figure(&self, figure_id: &str, name: &str) -> Result<crate::figures::FigureMeta, AppError> {
-        self.update_figure(figure_id, crate::figures::FigureUpdate { name: Some(name.to_owned()), head_box: None, size_tier: None }).await
-    }
-
     /// Update editable library-figure metadata. Framing/size changes are synced
     /// into active custom companions that reference the library figure.
     pub async fn update_figure(
@@ -1047,27 +1042,6 @@ impl CompanionService {
 
     pub async fn get_config(&self) -> SharedCompanionConfig {
         self.config.read().await.clone()
-    }
-
-    pub async fn update_config(&self, new_config: SharedCompanionConfig) -> Result<SharedCompanionConfig, AppError> {
-        let _provider_guard = if let Some(barrier) = self.provider_lifecycle.as_ref() {
-            Some(barrier.read().await)
-        } else {
-            None
-        };
-        self.validate_shared_provider_models(&new_config).await?;
-        self.validate_default_companion_reference(&new_config).await?;
-        {
-            // Hold the write lock across the disk save so two full-config
-            // writers can't interleave save/update and diverge disk vs memory.
-            let mut cfg = self.config.write().await;
-            new_config
-                .save(&self.shared_dir)
-                .map_err(|e| AppError::Internal(format!("save shared companion config: {e}")))?;
-            *cfg = new_config.clone();
-        }
-        self.emitter.emit_shared_config_updated(&new_config);
-        Ok(new_config)
     }
 
     /// RFC 7396-style partial update: merge `patch` over the current shared
@@ -1229,10 +1203,6 @@ impl CompanionService {
 
     pub async fn list_memories(&self, filter: &MemoryFilter) -> Result<Vec<CompanionMemory>, AppError> {
         self.store.list_memories(filter).await
-    }
-
-    pub async fn list_memory_page(&self, filter: &MemoryFilter) -> Result<MemoryPage, AppError> {
-        self.store.list_memory_page(filter).await
     }
 
     /// Non-FTS list with an explicit sort (the REST `sort` param without `q`).
@@ -1594,20 +1564,10 @@ impl CompanionService {
         .map(|_| ())
     }
 
-    /// List a companion's skills for the UI (active/draft/archived). Each row gets its
+    /// List one page of companion skills for the UI. Only skills on the selected page
+    /// have their SKILL.md frontmatter read from disk. Each row gets its
     /// SKILL.md `description` read from disk. A missing or malformed durable
     /// body is a side-store integrity failure, not an empty description.
-    pub async fn list_companion_skills(
-        &self,
-        companion_id: &str,
-        include_shared: bool,
-    ) -> Result<Vec<CompanionSkillView>, AppError> {
-        let skills = self.store.list_skills(companion_id, include_shared).await?;
-        Ok(self.skill_views(skills).await?)
-    }
-
-    /// List one page of companion skills for the UI. Only skills on the selected page
-    /// have their SKILL.md frontmatter read from disk.
     pub async fn list_companion_skill_page(
         &self,
         companion_id: &str,
@@ -2320,7 +2280,7 @@ mod tests {
             })
             .await
             .unwrap();
-        assert!(svc.list_companion_skills(&cid, false).await.is_err());
+        assert!(svc.list_companion_skill_page(&cid, false, None, 100, 0).await.is_err());
     }
 
     #[tokio::test]
@@ -2618,19 +2578,16 @@ mod tests {
         assert_eq!(b.seq, 2);
         svc.delete_companion(&b.companion_id).await.unwrap();
 
-        // A full-object PUT of the shared config (the route body simply has
-        // no watermark field — it lives in the registry's own state file)…
-        let put = SharedCompanionConfig {
-            default_companion_id: Some(a.companion_id.clone()),
-            ..SharedCompanionConfig::default()
-        };
-        svc.update_config(put).await.unwrap();
-        // …and a merge patch.
-        svc.patch_config(serde_json::json!({"learn": {"enabled": true}}))
-            .await
-            .unwrap();
+        // A merge patch of the shared config (the patch body simply has no
+        // watermark field — it lives in the registry's own state file)…
+        svc.patch_config(serde_json::json!({
+            "default_companion_id": a.companion_id.clone(),
+            "learn": {"enabled": true},
+        }))
+        .await
+        .unwrap();
 
-        // Neither write path can hand out the deleted companion's number again.
+        // …cannot hand out the deleted companion's number again.
         let c = svc.create_companion("丙", "mochi").await.unwrap();
         assert_eq!(c.seq, 3);
 
