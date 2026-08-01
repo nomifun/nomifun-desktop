@@ -1,7 +1,7 @@
 //! [`ModelInvokeService`] — the invoke layer's entry point: catalog
 //! repositories + credential decryption key + shared HTTP client + the
 //! protocol adapter registry. This module carries the constructor and the
-//! invoke / poll / probe orchestration; the catalog resolution pipeline they
+//! invoke / poll / probe flows; the catalog resolution pipeline they
 //! all share lives in [`crate::resolve`].
 
 use std::sync::Arc;

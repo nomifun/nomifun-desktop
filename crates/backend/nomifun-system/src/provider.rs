@@ -88,9 +88,8 @@ impl ProviderService {
         let model_descriptions_json = serialize_opt(&req.model_descriptions, "model_descriptions")?;
         let model_enabled_json = serialize_opt(&req.model_enabled, "model_enabled")?;
         let bedrock_json = serialize_opt(&req.bedrock_config, "bedrock_config")?;
-        // `req.capabilities` and `req.model_health` are accepted-and-ignored
-        // since P3: the capabilities column was dropped in migration 021 and
-        // the server-side probe is the only health writer.
+        // `req.model_health` is accepted-and-ignored since P3: the
+        // server-side probe is the only health writer.
         let params = CreateProviderParams {
             provider_id: req.provider_id.as_deref(),
             platform: &req.platform,
@@ -133,9 +132,8 @@ impl ProviderService {
         let model_enabled_json = serialize_opt(&req.model_enabled, "model_enabled")?;
         let bedrock_json = serialize_opt(&req.bedrock_config, "bedrock_config")?;
 
-        // `req.capabilities` and `req.model_health` are accepted-and-ignored
-        // since P3: the capabilities column was dropped in migration 021 and
-        // the server-side probe is the only health writer — a PUT can no
+        // `req.model_health` is accepted-and-ignored since P3: the
+        // server-side probe is the only health writer — a PUT can no
         // longer overwrite probe-written row health.
         let params = UpdateProviderParams {
             platform: req.platform.as_deref(),
@@ -485,9 +483,6 @@ impl ProviderService {
             api_key,
             models,
             enabled: row.enabled,
-            // Retired: providers.capabilities was dropped in migration 021;
-            // the wire field stays for shape compat and is always empty.
-            capabilities: Vec::new(),
             model_context_limits: (!model_context_limits.is_empty()).then_some(model_context_limits),
             model_protocols: (!model_protocols.is_empty()).then_some(model_protocols),
             model_descriptions: (!model_descriptions.is_empty()).then_some(model_descriptions),
@@ -672,7 +667,6 @@ mod tests {
             api_key: "sk-ant-api03-test1234".into(),
             models: vec!["claude-sonnet-4-20250514".into()],
             enabled: true,
-            capabilities: vec![],
             model_context_limits: None,
             model_protocols: None,
             model_descriptions: None,
@@ -1235,42 +1229,7 @@ mod tests {
         assert!(cleared.model_context_limits.is_none());
     }
 
-    // -- P3: capabilities retired + client health writes closed --
-
-    #[tokio::test]
-    async fn create_and_update_ignore_capabilities_and_respond_empty() {
-        let svc = setup().await;
-        let created = svc
-            .create(CreateProviderRequest {
-                capabilities: vec![nomifun_api_types::ModelCapability {
-                    capability_type: nomifun_api_types::ModelType::Vision,
-                    is_user_selected: Some(true),
-                }],
-                ..sample_create_request()
-            })
-            .await
-            .unwrap();
-        assert!(
-            created.capabilities.is_empty(),
-            "capabilities is retired (column dropped in migration 021) and must project []"
-        );
-
-        let updated = svc
-            .update(
-                &created.provider_id,
-                UpdateProviderRequest {
-                    capabilities: Some(vec![nomifun_api_types::ModelCapability {
-                        capability_type: nomifun_api_types::ModelType::Text,
-                        is_user_selected: None,
-                    }]),
-                    ..Default::default()
-                },
-            )
-            .await
-            .unwrap();
-        assert!(updated.capabilities.is_empty());
-        assert!(svc.list().await.unwrap()[0].capabilities.is_empty());
-    }
+    // -- P3: client health writes closed --
 
     #[tokio::test]
     async fn update_ignores_model_health_map_keeping_probe_written_row_health() {

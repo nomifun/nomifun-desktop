@@ -287,7 +287,7 @@ async fn sync_provider_model_membership_tx(
     Ok(())
 }
 
-/// Row-sync orchestrator shared by `create` and `update`: since migration 016
+/// Row-sync coordinator shared by `create` and `update`: since migration 016
 /// this is the ONLY write path for the per-model surface — the `models` array
 /// and four per-model map params are translated into `provider_models` row
 /// operations inside the caller's providers transaction. Health has no map

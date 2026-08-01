@@ -110,7 +110,6 @@ mod tests {
             api_key: "k".into(),
             models: models.iter().map(|s| s.to_string()).collect(),
             enabled: true,
-            capabilities: vec![],
             model_context_limits: None,
             model_protocols: None,
             model_descriptions: None,

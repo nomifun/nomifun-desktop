@@ -268,12 +268,12 @@ async fn import_skillhub_skill_archive(
 }
 
 // ---------------------------------------------------------------------------
-// Child slug extraction (skillSlugs field + frontmatter orchestration)
+// Child slug extraction (skillSlugs field + frontmatter children)
 // ---------------------------------------------------------------------------
 
 fn package_skill_slugs(package: &serde_json::Value, instructions: &str) -> Vec<String> {
     let mut slugs = json_string_array(package.get("skillSlugs"), 80);
-    slugs.extend(frontmatter_orchestration_child_slugs(instructions));
+    slugs.extend(frontmatter_child_slugs(instructions));
     normalize_package_skill_slugs(slugs)
 }
 
@@ -318,7 +318,7 @@ fn is_package_metadata_field(value: &str) -> bool {
     FIELDS.iter().any(|field| value.eq_ignore_ascii_case(field))
 }
 
-fn frontmatter_orchestration_child_slugs(markdown: &str) -> Vec<String> {
+fn frontmatter_child_slugs(markdown: &str) -> Vec<String> {
     let Some(frontmatter) = markdown_frontmatter(markdown) else {
         return Vec::new();
     };

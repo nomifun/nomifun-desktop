@@ -19,7 +19,7 @@ import WorkspaceToolRail, {
   type WorkspacePanelMetaDetail,
   type WorkspaceToolRailCollaboration,
 } from './WorkspaceToolRail';
-import { useContainerWidth } from '@/renderer/pages/conversation/hooks/useContainerWidth';
+import { useContainerWidth } from '@/renderer/hooks/ui/useContainerWidth';
 import { useLayoutConstraints } from '@/renderer/pages/conversation/hooks/useLayoutConstraints';
 import { usePreviewAutoCollapse } from '@/renderer/pages/conversation/hooks/usePreviewAutoCollapse';
 import { useTitleRename } from '@/renderer/pages/conversation/hooks/useTitleRename';
@@ -162,7 +162,9 @@ const ChatLayoutInner: React.FC<ChatLayoutProps> = (props) => {
     : undefined;
 
   // --- Hook B: container width ---
-  const { containerRef, containerWidth } = useContainerWidth();
+  const { ref: containerRef, width: containerWidth } = useContainerWidth<HTMLDivElement>({
+    fallbackToWindowWidth: true,
+  });
 
   // --- Hook C: title rename ---
   const { editingTitle, setEditingTitle, titleDraft, setTitleDraft, renameLoading, canRenameTitle, submitTitleRename } =
