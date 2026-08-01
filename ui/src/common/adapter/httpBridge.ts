@@ -771,6 +771,183 @@ let wsReconnectTimer: ReturnType<typeof setTimeout> | null = null;
 let wsReconnectAttempt = 0;
 let wsLastActivityAtMs: number | null = null;
 
+/**
+ * Close code the backend uses when the token bound at the WS handshake aged
+ * out while the HTTP cookie session may still be alive via sliding renewal.
+ * Reconnecting picks up the refreshed cookie; this is NOT an authentication
+ * failure and must never trigger the logout flow. Mirrors
+ * `crates/backend/nomifun-realtime/src/types.rs` `WebSocketCloseCode::TokenAged`.
+ */
+const WS_CLOSE_TOKEN_AGED = 4409;
+
+/**
+ * The backend heartbeats every connection at least every 30s, so a socket
+ * with no inbound frame for ~2.5 heartbeat periods is wedged half-open (NAT
+ * eviction, container restart without RST, sleep/wake) — the OS will report
+ * OPEN indefinitely and no close event will ever fire.
+ */
+const WS_STALE_THRESHOLD_MS = 75_000;
+/** A CONNECTING handshake that outlives this is abandoned and retried. */
+const WS_CONNECT_TIMEOUT_MS = 30_000;
+const WS_WATCHDOG_INTERVAL_MS = 15_000;
+
+/**
+ * True after any observed connection loss (close event, constructor throw,
+ * watchdog/visibility recycle, server lag resync) until the recovery signal
+ * has been delivered. Deliberately NOT cleared when the last listener
+ * unsubscribes: a gap spanning a zero-listener window (route transition)
+ * must still resync the views mounted after it.
+ */
+let wsHadDeliveryGap = false;
+let wsConnectStartedAtMs: number | null = null;
+let wsWatchdogTimer: ReturnType<typeof setInterval> | null = null;
+
+/** Pure staleness predicate for the liveness watchdog (exported for tests). */
+export function isWsStale(nowMs: number, lastActivityAtMs: number | null): boolean {
+  return lastActivityAtMs != null && nowMs - lastActivityAtMs > WS_STALE_THRESHOLD_MS;
+}
+
+/**
+ * A listener or payload transform throwing must be diagnosable — a silent
+ * drop turns one malformed field into an invisible, permanent dead event
+ * class. Rate-limited per (kind, event) so a streaming event cannot flood.
+ */
+const wsFailureWarnAtMs = new Map<string, number>();
+function warnWsHandlerFailure(kind: 'listener' | 'transform', eventName: string, error: unknown): void {
+  const key = `${kind}:${eventName}`;
+  const now = Date.now();
+  const last = wsFailureWarnAtMs.get(key) ?? 0;
+  if (now - last < 60_000) return;
+  wsFailureWarnAtMs.set(key, now);
+  console.warn(`[httpBridge] ${kind} for ${eventName} threw; events of this class may be dropped`, error);
+}
+
+/**
+ * Deliver the synthetic local recovery signal. `ws.reconnected` is never sent
+ * by the server; stores subscribe to it to reload their durable snapshots
+ * after any delivery gap (the server does live fan-out with no replay).
+ */
+function dispatchLocalReconnected(): void {
+  const handlers = wsListeners.get('ws.reconnected');
+  if (!handlers) return;
+  for (const h of [...handlers]) {
+    try {
+      h(undefined);
+    } catch (error) {
+      warnWsHandlerFailure('listener', 'ws.reconnected', error);
+    }
+  }
+}
+
+/**
+ * Abandon the current socket and start a fresh connection lifecycle. Used
+ * when no close event can be trusted to arrive (wedged half-open socket,
+ * stuck handshake, tab returning to foreground with a dead socket).
+ *
+ * `immediate` skips the backoff: a user-visible foreground return deserves an
+ * instant attempt, while background watchdog recycles go through the normal
+ * reconnect schedule.
+ */
+function recycleWs(reason: string, options?: { immediate?: boolean }): void {
+  const current = ws;
+  wsHadDeliveryGap = true;
+  ws = null;
+  wsConnectStartedAtMs = null;
+  if (current) {
+    console.warn(`[ensureWs] recycling websocket (${reason})`);
+    try {
+      current.close();
+    } catch {
+      /* a wedged socket may refuse to close */
+    }
+  }
+  if (options?.immediate) {
+    if (wsReconnectTimer) {
+      clearTimeout(wsReconnectTimer);
+      wsReconnectTimer = null;
+    }
+    wsReconnectAttempt = 0;
+    ensureWs();
+    return;
+  }
+  scheduleWsReconnect();
+}
+
+/**
+ * Pending jittered recovery for a server-requested resync. The server
+ * broadcasts `sync.resync-required` to every connected client at once (event
+ * bus lag is instance-global), so the recovery refetch fan-out is deferred
+ * behind a short random delay — N clients must not stampede the backend at
+ * the exact moment it is already too loaded to drain its bus — and repeated
+ * frames inside the window coalesce into one recovery.
+ */
+let wsResyncDispatchTimer: ReturnType<typeof setTimeout> | null = null;
+const WS_RESYNC_JITTER_MAX_MS = 2_000;
+
+function scheduleResyncDispatch(): void {
+  if (wsResyncDispatchTimer !== null) return;
+  wsResyncDispatchTimer = setTimeout(() => {
+    wsResyncDispatchTimer = null;
+    dispatchLocalReconnected();
+  }, Math.floor(Math.random() * WS_RESYNC_JITTER_MAX_MS));
+}
+
+/**
+ * Liveness watchdog: the client is otherwise purely reactive (it only ever
+ * replies to server pings), so a silent network break leaves readyState OPEN
+ * forever and every realtime view frozen until a manual refresh. Runs only
+ * while listeners exist — same lifecycle as the reconnect timer.
+ */
+function ensureWsWatchdog(): void {
+  if (wsWatchdogTimer !== null || typeof setInterval === 'undefined') return;
+  wsWatchdogTimer = setInterval(() => {
+    if (wsListeners.size === 0 || !ws) return;
+    const now = Date.now();
+    const stuckConnecting =
+      ws.readyState === WebSocket.CONNECTING &&
+      wsConnectStartedAtMs != null &&
+      now - wsConnectStartedAtMs > WS_CONNECT_TIMEOUT_MS;
+    const staleOpen = ws.readyState === WebSocket.OPEN && isWsStale(now, wsLastActivityAtMs);
+    if (stuckConnecting) {
+      recycleWs('handshake timeout');
+    } else if (staleOpen) {
+      recycleWs('no inbound frames past stale threshold');
+    }
+  }, WS_WATCHDOG_INTERVAL_MS);
+}
+
+function stopWsWatchdog(): void {
+  if (wsWatchdogTimer !== null) {
+    clearInterval(wsWatchdogTimer);
+    wsWatchdogTimer = null;
+  }
+}
+
+/**
+ * Foreground recovery: browsers throttle background tabs, and a socket that
+ * died while the tab was hidden may never surface a close event. On return
+ * to the foreground, recycle a dead or silent socket immediately instead of
+ * waiting out the backoff. Exported for tests (the production registration
+ * below additionally gates on `visibilityState === 'visible'`).
+ */
+export function __handleVisibilityRecovery(): void {
+  if (wsListeners.size === 0) return;
+  const now = Date.now();
+  const needsRecycle =
+    ws == null ||
+    ws.readyState === WebSocket.CLOSED ||
+    ws.readyState === WebSocket.CLOSING ||
+    (ws.readyState === WebSocket.OPEN && isWsStale(now, wsLastActivityAtMs));
+  if (!needsRecycle) return;
+  recycleWs('foreground return with dead or silent socket', { immediate: true });
+}
+
+if (typeof document !== 'undefined' && typeof document.addEventListener === 'function') {
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible') __handleVisibilityRecovery();
+  });
+}
+
 function ensureWs(): void {
   if (typeof window === 'undefined') {
     console.debug('[ensureWs] skipped: no window');
@@ -793,50 +970,59 @@ function ensureWs(): void {
     ws = trustSecret ? new WebSocket(url, [trustSecret]) : new WebSocket(url);
   } catch (e) {
     console.error('[ensureWs] WebSocket constructor threw:', e);
+    wsHadDeliveryGap = true;
     scheduleWsReconnect();
     return;
   }
 
+  wsConnectStartedAtMs = Date.now();
   const current = ws;
 
   current.addEventListener('open', () => {
+    // A recycled (abandoned) socket may still surface events; only the
+    // current connection owns shared lifecycle state.
+    if (ws !== current) return;
     console.debug('[ensureWs] CONNECTED');
     wsLastActivityAtMs = Date.now();
-    // A non-zero attempt counter means we got here by reconnecting (the socket
-    // had dropped and `scheduleWsReconnect` ran). Notify local listeners so a
-    // live view can resync: the server only does a live fan-out with no replay,
-    // so every frame emitted while the socket was down was lost. NOTE: the
-    // attempt counter is NOT reset here — a socket that opens and is
-    // immediately closed again (expired session rejected post-handshake) must
-    // keep backing off; the counter resets on the first inbound frame instead.
-    // `ws.reconnected` is a synthetic local event name, never sent by the server.
-    const wasReconnect = wsReconnectAttempt > 0;
-    if (wasReconnect) {
-      const handlers = wsListeners.get('ws.reconnected');
-      if (handlers) {
-        for (const h of [...handlers]) {
-          try {
-            h(undefined);
-          } catch {
-            /* never crash listener */
-          }
-        }
-      }
+    wsConnectStartedAtMs = null;
+    // A pending delivery-gap flag means frames were (possibly) lost since the
+    // last healthy connection: the server only does live fan-out with no
+    // replay, so notify local listeners to resync their durable snapshots.
+    // NOTE: the reconnect attempt counter is NOT reset here — a socket that
+    // opens and is immediately closed again (expired session rejected
+    // post-handshake) must keep backing off; the counter resets on the first
+    // inbound frame instead. `ws.reconnected` is a synthetic local event
+    // name, never sent by the server.
+    if (wsHadDeliveryGap) {
+      wsHadDeliveryGap = false;
+      dispatchLocalReconnected();
     }
   });
 
   current.addEventListener('close', (e) => {
+    if (ws !== current) return;
     console.debug('[ensureWs] CLOSED code=' + e.code + ' reason=' + e.reason);
-    if (ws === current) ws = null;
+    ws = null;
+    wsConnectStartedAtMs = null;
+    // Any close is a delivery gap: frames emitted until the reconnect
+    // completes are lost and must be recovered by a snapshot reload.
+    wsHadDeliveryGap = true;
     // 1008 (policy violation) is an authentication rejection — the server
-    // uses 4408 for heartbeat timeouts, so 1008 here means the session is
-    // gone. Kick the app-level auth-expired flow (WebUI: clears artifacts,
-    // redirects to login) and jump the backoff to its ceiling so we keep only
-    // a slow background probe instead of a ~1s reconnect/403 storm
-    // (audit 2026-07-30, finding F).
+    // uses 4408 for heartbeat timeouts and 4409 for an aged handshake token,
+    // so 1008 here means the session is gone. Kick the app-level auth-expired
+    // flow (WebUI: clears artifacts, redirects to login) and jump the backoff
+    // to its ceiling so we keep only a slow background probe instead of a
+    // ~1s reconnect/403 storm (audit 2026-07-30, finding F).
+    // 4409 (WS_CLOSE_TOKEN_AGED) deliberately takes the plain reconnect path:
+    // the next handshake presents the slid session cookie, and a genuinely
+    // dead session is re-rejected there with 1008.
     if (e.code === 1008) {
       handleHttpAuthExpired();
       wsReconnectAttempt = Math.max(wsReconnectAttempt, 5);
+    } else if (e.code === WS_CLOSE_TOKEN_AGED) {
+      // Reconnect promptly: the refreshed cookie authenticates the next
+      // handshake without any user-visible interruption.
+      wsReconnectAttempt = 0;
     }
     scheduleWsReconnect();
   });
@@ -847,6 +1033,7 @@ function ensureWs(): void {
   });
 
   current.addEventListener('message', (event: MessageEvent) => {
+    if (ws !== current) return;
     // Any inbound frame — server heartbeat pings included — proves the peer
     // is still delivering data. Recorded before parsing so even a malformed
     // frame counts as socket liveness. A delivered frame is also the signal
@@ -875,6 +1062,16 @@ function ensureWs(): void {
         }
         return;
       }
+      if (eventName === 'sync.resync-required') {
+        // The server's event bus lagged and dropped an unknown set of
+        // envelopes for this user. The socket itself is healthy, so reuse
+        // the reconnect recovery pipeline without rebuilding it: stores
+        // subscribed to `ws.reconnected` reload their durable snapshots
+        // after a jittered delay (see scheduleResyncDispatch).
+        console.warn('[httpBridge] server requested a resync (event bus lagged)', payload);
+        scheduleResyncDispatch();
+        return;
+      }
       if (isDebugEnabled('debug:ws') && eventName && !NOISY_WS_EVENTS.has(eventName)) {
         console.debug('[WS:msg]', eventName, JSON.stringify(payload).slice(0, 200));
       }
@@ -884,8 +1081,8 @@ function ensureWs(): void {
           for (const h of handlers) {
             try {
               h(payload);
-            } catch {
-              /* never crash listener */
+            } catch (error) {
+              warnWsHandlerFailure('listener', eventName, error);
             }
           }
         }
@@ -948,6 +1145,7 @@ export function wsEmitter<Params = undefined>(eventName: string): EmitterLike<Pa
       const cb = callback as WsCallback;
       wsListeners.get(eventName)!.add(cb);
       ensureWs();
+      ensureWsWatchdog();
       return () => {
         const listeners = wsListeners.get(eventName);
         listeners?.delete(cb);
@@ -959,7 +1157,12 @@ export function wsEmitter<Params = undefined>(eventName: string): EmitterLike<Pa
             clearTimeout(wsReconnectTimer);
             wsReconnectTimer = null;
           }
+          if (wsResyncDispatchTimer) {
+            clearTimeout(wsResyncDispatchTimer);
+            wsResyncDispatchTimer = null;
+          }
           wsReconnectAttempt = 0;
+          stopWsWatchdog();
         }
       };
     },
@@ -975,7 +1178,17 @@ export function wsMappedEmitter<Params = undefined, Raw = Params>(
   return {
     on: (callback: (params: Params) => void) => {
       return (inner.on as (callback: (raw: Raw) => void) => () => void)((raw) => {
-        callback(transform(raw));
+        // Run the transform outside the subscriber call so a payload the
+        // decoder rejects is logged as a transform failure (one malformed
+        // field must not become an invisible dead event class).
+        let mapped: Params;
+        try {
+          mapped = transform(raw);
+        } catch (error) {
+          warnWsHandlerFailure('transform', eventName, error);
+          return;
+        }
+        callback(mapped);
       });
     },
     emit: (() => {}) as EmitterLike<Params>['emit'],

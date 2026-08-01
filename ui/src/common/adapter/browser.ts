@@ -242,6 +242,23 @@ const win = window as CustomWindow;
 
   connect();
 
+  // A 1008/auth-expired close parks this socket (shouldReconnect = false)
+  // until the login flow runs — but the sliding session cookie may have been
+  // renewed (or the user re-authenticated in another tab) while this tab was
+  // hidden. When the tab returns to the foreground off the login route,
+  // resume reconnecting: a genuinely dead session is simply re-rejected at
+  // the next handshake, while a live one restores realtime delivery without
+  // requiring a manual page refresh.
+  if (typeof document !== 'undefined' && typeof document.addEventListener === 'function') {
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState !== 'visible' || shouldReconnect) return;
+      if (window.location.pathname === '/login' || window.location.hash.includes('/login')) return;
+      shouldReconnect = true;
+      reconnectDelay = 500;
+      connect();
+    });
+  }
+
   // Expose reconnection control for login flow
   win.__websocketReconnect = () => {
     shouldReconnect = true;

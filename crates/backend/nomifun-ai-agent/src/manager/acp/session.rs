@@ -309,6 +309,15 @@ impl AcpSession {
         Some(model)
     }
 
+    /// Unconditionally drop the desired model (no advertised-list check).
+    /// Used to roll back a failed `set_model` so the rejected intent is not
+    /// re-applied by the next reconcile pass. Emits `DesiredModelChanged`
+    /// only implicitly through the next successful selection — a rollback
+    /// restores the pre-call state and needs no persistence echo of its own.
+    pub fn clear_desired_model(&mut self) {
+        self.desired.model_id = None;
+    }
+
     /// Set a user's desired config selection.
     pub fn set_desired_config(&mut self, key: ConfigKey, value: ConfigValue) {
         let changed = self.desired.config_selections.get(&key) != Some(&value);

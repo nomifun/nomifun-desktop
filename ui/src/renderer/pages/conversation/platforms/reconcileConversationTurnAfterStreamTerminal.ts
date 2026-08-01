@@ -1,6 +1,7 @@
 import type { ConversationId } from '@/common/types/ids';
 import { getConversationOrNull } from '@/renderer/pages/conversation/utils/conversationCache';
 import { getConversationRuntimeAuthority } from '@/renderer/pages/conversation/utils/conversationRuntime';
+import { emitter } from '@/renderer/utils/emitter';
 
 export const TERMINAL_RECONCILE_DELAYS_MS = [120, 400, 1_200, 3_000, 8_000, 16_000] as const;
 export const TERMINAL_RECONCILE_QUERY_TIMEOUT_MS = 3_000;
@@ -67,6 +68,10 @@ export const reconcileConversationTurnAfterStreamTerminal = async (
       }
       if (runtimeAuthority === 'unknown') continue;
       onIdle();
+      // Announce the authoritative settle locally so durable projections (the
+      // transcript window) reload even when every WebSocket frame of the turn
+      // was lost. onIdle only lowers the spinner; it does not refetch.
+      emitter.emit('conversation.turn.settled', conversationId);
       return true;
     } catch (error) {
       console.warn('[conversation-turn-lifecycle] Failed to reconcile terminal stream:', error);

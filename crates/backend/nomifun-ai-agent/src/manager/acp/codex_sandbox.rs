@@ -29,7 +29,11 @@ pub(super) enum CodexSandboxSyncOutcome {
 
 pub(super) fn sandbox_mode_for_requested_mode(mode: Option<&str>) -> CodexSandboxMode {
     match mode.map(str::trim) {
-        Some("full-access" | "yoloNoSandbox") => CodexSandboxMode::DangerFullAccess,
+        // `agent-full-access` is the current bridge's native id
+        // (@agentclientprotocol/codex-acp); `full-access` is the old
+        // @zed-industries bridge's id and survives in persisted sessions;
+        // `yoloNoSandbox` is the legacy Nomi alias.
+        Some("agent-full-access" | "full-access" | "yoloNoSandbox") => CodexSandboxMode::DangerFullAccess,
         _ => CodexSandboxMode::WorkspaceWrite,
     }
 }
@@ -402,10 +406,12 @@ mod tests {
 
     #[test]
     fn full_access_maps_to_danger_full_access() {
-        assert_eq!(
-            sandbox_mode_for_requested_mode(Some("full-access")).as_str(),
-            "danger-full-access"
-        );
+        for mode in ["agent-full-access", "full-access", "yoloNoSandbox"] {
+            assert_eq!(
+                sandbox_mode_for_requested_mode(Some(mode)).as_str(),
+                "danger-full-access"
+            );
+        }
     }
 
     #[test]
@@ -414,6 +420,7 @@ mod tests {
             None,
             Some(""),
             Some("auto"),
+            Some("agent"),
             Some("read-only"),
             Some("default"),
         ] {

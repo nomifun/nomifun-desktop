@@ -109,7 +109,94 @@ where
         return Vec::new();
     };
 
+    // A dead LOCAL proxy (a stopped clash/surge still registered in the OS
+    // proxy settings) would be forwarded verbatim and stall every network
+    // call the child makes — e.g. `bun x` package downloads hanging until the
+    // ACP handshake timeout. Loopback endpoints answer a TCP connect
+    // instantly when alive and refuse instantly when dead, so probe them and
+    // fall back to a direct connection when the proxy provably isn't there.
+    // Remote proxies are NOT probed (DNS/latency would penalize every spawn).
+    if let Some(dead) = first_unreachable_loopback_proxy(&config) {
+        warn!(
+            proxy = %dead,
+            "Detected system proxy is unreachable; not forwarding proxy env to agent child"
+        );
+        return Vec::new();
+    }
+
     proxy_env_from_config(&config, &configured_names, &process_names)
+}
+
+/// TCP-connect budget for the loopback proxy liveness probe. Loopback
+/// connects resolve in microseconds either way; the cap only guards against
+/// pathological local firewalls silently dropping SYNs.
+const LOOPBACK_PROBE_TIMEOUT: Duration = Duration::from_millis(400);
+
+/// Return the first configured proxy URL that points at a loopback endpoint
+/// which does not accept TCP connections. `None` means "no provably-dead
+/// local proxy" — remote or unparsable endpoints are treated as alive.
+fn first_unreachable_loopback_proxy(config: &SystemProxyConfig) -> Option<String> {
+    let mut checked: HashSet<String> = HashSet::new();
+    for url in [
+        config.http_proxy.as_deref(),
+        config.https_proxy.as_deref(),
+        config.all_proxy.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        if !checked.insert(url.to_owned()) {
+            continue;
+        }
+        let candidates = loopback_socket_addrs(url);
+        if candidates.is_empty() {
+            continue;
+        }
+        // Alive if ANY candidate accepts — `localhost` may resolve to either
+        // stack, so a v6-only proxy must not be declared dead via 127.0.0.1.
+        let alive = candidates
+            .iter()
+            .any(|addr| std::net::TcpStream::connect_timeout(addr, LOOPBACK_PROBE_TIMEOUT).is_ok());
+        if !alive {
+            return Some(url.to_owned());
+        }
+    }
+    None
+}
+
+/// Parse `scheme://host:port` and return probe addresses ONLY when the host
+/// is a loopback literal (`127.x.x.x`, `localhost`, `::1`). Anything else —
+/// remote hosts, missing ports, unparsable URLs — yields an empty list so the
+/// caller skips probing rather than blocking on DNS. `localhost` expands to
+/// both stacks because the actual proxy may listen on only one of them.
+fn loopback_socket_addrs(proxy_url: &str) -> Vec<std::net::SocketAddr> {
+    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+
+    let endpoint = proxy_url
+        .split_once("://")
+        .map(|(_, rest)| rest)
+        .unwrap_or(proxy_url);
+    let Some(endpoint) = endpoint.split(['/', '?']).next() else {
+        return Vec::new();
+    };
+    let Some((host, Some(port))) = split_proxy_endpoint(endpoint.trim()) else {
+        return Vec::new();
+    };
+
+    let host = host.trim_start_matches('[').trim_end_matches(']');
+    let ips: Vec<IpAddr> = if host.eq_ignore_ascii_case("localhost") {
+        vec![IpAddr::V4(Ipv4Addr::LOCALHOST), IpAddr::V6(Ipv6Addr::LOCALHOST)]
+    } else if let Ok(v4) = host.parse::<Ipv4Addr>() {
+        vec![IpAddr::V4(v4)]
+    } else if let Ok(v6) = host.parse::<Ipv6Addr>() {
+        vec![IpAddr::V6(v6)]
+    } else {
+        return Vec::new();
+    };
+    ips.into_iter()
+        .filter(|ip| ip.is_loopback())
+        .map(|ip| SocketAddr::new(ip, port))
+        .collect()
 }
 
 fn system_proxy_config() -> Option<SystemProxyConfig> {
@@ -985,7 +1072,8 @@ fn normalize_proxy_scheme(scheme: &str, default_scheme: &str) -> String {
     }
 }
 
-#[cfg(any(test, target_os = "windows", target_os = "linux"))]
+// Ungated: pure parsing, also used by the loopback proxy-liveness probe on
+// every platform (macOS included), not just the Windows/Linux detectors.
 fn split_proxy_endpoint(endpoint: &str) -> Option<(&str, Option<u16>)> {
     let endpoint = endpoint.trim();
     if endpoint.is_empty() {
@@ -1134,6 +1222,69 @@ mod tests {
     }
 
     #[test]
+    fn loopback_socket_addrs_only_accepts_loopback_hosts_with_ports() {
+        assert_eq!(
+            loopback_socket_addrs("http://127.0.0.1:7890"),
+            vec!["127.0.0.1:7890".parse::<std::net::SocketAddr>().unwrap()]
+        );
+        // `localhost` expands to BOTH stacks — a proxy listening only on ::1
+        // must not be declared dead by a failed v4 connect (and vice versa).
+        assert_eq!(
+            loopback_socket_addrs("socks5h://localhost:1080"),
+            vec![
+                "127.0.0.1:1080".parse::<std::net::SocketAddr>().unwrap(),
+                "[::1]:1080".parse::<std::net::SocketAddr>().unwrap(),
+            ]
+        );
+        assert_eq!(
+            loopback_socket_addrs("http://[::1]:7890"),
+            vec!["[::1]:7890".parse::<std::net::SocketAddr>().unwrap()]
+        );
+        // Remote hosts must NOT be probed (would block on DNS / latency).
+        assert!(loopback_socket_addrs("http://proxy.corp.example:8080").is_empty());
+        assert!(loopback_socket_addrs("http://10.0.0.2:8080").is_empty());
+        // No port → nothing to probe.
+        assert!(loopback_socket_addrs("http://127.0.0.1").is_empty());
+        assert!(loopback_socket_addrs("").is_empty());
+    }
+
+    #[test]
+    fn unreachable_loopback_proxy_is_detected_and_reachable_one_passes() {
+        // Reachable: bind an ephemeral listener and point the proxy at it.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind ephemeral");
+        let live_port = listener.local_addr().unwrap().port();
+        let live = SystemProxyConfig {
+            http_proxy: Some(format!("http://127.0.0.1:{live_port}")),
+            https_proxy: Some(format!("http://127.0.0.1:{live_port}")),
+            all_proxy: None,
+            no_proxy: None,
+        };
+        assert_eq!(first_unreachable_loopback_proxy(&live), None);
+
+        // Unreachable: close the listener, the port now refuses connections.
+        drop(listener);
+        let dead = SystemProxyConfig {
+            http_proxy: Some(format!("http://127.0.0.1:{live_port}")),
+            https_proxy: None,
+            all_proxy: None,
+            no_proxy: None,
+        };
+        assert_eq!(
+            first_unreachable_loopback_proxy(&dead),
+            Some(format!("http://127.0.0.1:{live_port}"))
+        );
+
+        // Remote proxies are never probed → never reported dead.
+        let remote = SystemProxyConfig {
+            http_proxy: Some("http://proxy.corp.example:8080".to_owned()),
+            https_proxy: None,
+            all_proxy: None,
+            no_proxy: None,
+        };
+        assert_eq!(first_unreachable_loopback_proxy(&remote), None);
+    }
+
+    #[test]
     fn proxy_env_from_config_respects_existing_names() {
         let config = SystemProxyConfig {
             http_proxy: Some("http://127.0.0.1:7892".to_owned()),
@@ -1162,6 +1313,11 @@ mod tests {
         };
         if config.http_proxy.is_none() && config.https_proxy.is_none() && config.all_proxy.is_none()
         {
+            return;
+        }
+        // A dead local proxy now deliberately suppresses forwarding — skip
+        // the live assertion in that state instead of failing the suite.
+        if first_unreachable_loopback_proxy(&config).is_some() {
             return;
         }
 

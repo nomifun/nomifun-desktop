@@ -24,6 +24,9 @@ use crate::orphan_recovery::{
     RunningOrphanDisposition, running_orphan_disposition,
 };
 use crate::relay_error_code;
+use crate::terminal_proof::{
+    OrphanProofRequirement, TerminalProofDecision, TurnTerminalProofProvider,
+};
 use nomifun_api_types::{
     ApprovalCheckResponse, CloneConversationRequest, ConfirmRequest, ConfirmationListResponse,
     ConversationArtifactListResponse, ConversationArtifactResponse, ConversationListResponse,
@@ -1083,6 +1086,12 @@ pub struct ConversationService {
     /// ConversationService; isolated tests must opt into the explicit no-op
     /// implementation instead of silently omitting this authority.
     execution_conversation_boundary: Arc<dyn ExecutionConversationBoundary>,
+    /// Boot-scoped exact terminal-proof authority (same post-construction
+    /// slot pattern as `cron_service`). Installed by `nomifun-app` after the
+    /// server-lock authority is validated and the durable agent-process
+    /// registry has been reaped; `None` (default / tests / hosts without the
+    /// lock) keeps every restart-orphan seam fail-closed exactly as before.
+    terminal_proof_provider: Arc<RwLock<Option<Arc<dyn TurnTerminalProofProvider>>>>,
 }
 
 // ── Construction & Dependency Injection ──────────────────────────────
@@ -2206,6 +2215,7 @@ impl ConversationService {
             failover_provider_model_repo: Arc::new(RwLock::new(None)),
             failover_client_prefs: Arc::new(RwLock::new(None)),
             execution_conversation_boundary,
+            terminal_proof_provider: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -2240,6 +2250,25 @@ impl ConversationService {
         if let Ok(mut guard) = self.preset_service.write() {
             *guard = Some(service);
         }
+    }
+
+    /// Install the boot-scoped exact terminal-proof authority (spec:
+    /// `unproven_running_generation_error`). Only the host that validated the
+    /// exclusive server-lock authority and reaped the durable agent-process
+    /// registry may call this; installing a provider without that evidence
+    /// would let a liveness heuristic finalize a generation that can still
+    /// produce effects.
+    pub fn with_terminal_proof_provider(&self, provider: Arc<dyn TurnTerminalProofProvider>) {
+        if let Ok(mut guard) = self.terminal_proof_provider.write() {
+            *guard = Some(provider);
+        }
+    }
+
+    fn terminal_proof_provider(&self) -> Option<Arc<dyn TurnTerminalProofProvider>> {
+        self.terminal_proof_provider
+            .read()
+            .ok()
+            .and_then(|guard| guard.clone())
     }
 
     /// Register the IDMM supervision hook (post-construction, same pattern as
@@ -3275,9 +3304,10 @@ impl ConversationService {
     /// that the exact prior authority observed the cancellation nor that its
     /// complete descendant tree is empty. Consequently this seam deliberately
     /// contains no runtime teardown, writeback settlement, lifecycle CAS, or
-    /// completion broadcast. A future recovery implementation must introduce
-    /// a persisted exact terminal-proof protocol rather than enabling a backend
-    /// in a static allow-list.
+    /// completion broadcast. Recovery happens exclusively through the
+    /// boot/background reconciliation seams, which consult the installed
+    /// [`TurnTerminalProofProvider`] (persisted exact terminal-proof protocol)
+    /// before finalizing; request-facing guards always fail closed here.
     fn unproven_running_generation_error(&self, row: &ConversationRow) -> AppError {
         let conversation_id = row.conversation_id.as_str();
         if self.runtime_state.has_active_turn(conversation_id) {
@@ -3286,12 +3316,203 @@ impl ConversationService {
             );
         }
         match running_orphan_disposition(&row.r#type) {
-            Ok(RunningOrphanDisposition::ExternalTerminalProofRequired) => AppError::Conflict(
+            // Every disposition is quarantined at request seams: proof can
+            // only be presented by the recovery seams below, never by a send.
+            Ok(_) => AppError::Conflict(
                 "Conversation has a durable running turn whose exact Agent terminal state is not proven"
                     .to_owned(),
             ),
             Err(error) => error,
         }
+    }
+
+    /// Attempt to finalize one orphaned durable generation under the
+    /// persisted exact terminal-proof protocol.
+    ///
+    /// The caller must hold the per-Conversation preparation gate and must
+    /// have re-read `row`/`admission` under it, with no process-local turn
+    /// owner. Returns `Ok(true)` only after the full healing sequence is
+    /// durable: orphaned knowledge write-backs settled, the accepted receipt
+    /// completed as a structured `interrupted_by_restart` failure, the
+    /// aggregate CASed `running -> finished` (epoch+1, owner cleared), an
+    /// error tips row persisted, and `turn.completed` projected. `Ok(false)`
+    /// means no proof covers this generation and the caller must keep the
+    /// quarantine exactly as before.
+    async fn try_finalize_proven_orphan_generation(
+        &self,
+        user_id: &str,
+        row: &ConversationRow,
+        admission: &ConversationTurnAdmissionState,
+    ) -> Result<bool, AppError> {
+        let conversation_id = row.conversation_id.as_str();
+        let Some(provider) = self.terminal_proof_provider() else {
+            return Ok(false);
+        };
+        let requirement = match running_orphan_disposition(&row.r#type)? {
+            RunningOrphanDisposition::LocalContainedAuthority => {
+                OrphanProofRequirement::LocalContainedAuthority
+            }
+            RunningOrphanDisposition::RegisteredLocalProcessTree => {
+                OrphanProofRequirement::RegisteredLocalProcessTree
+            }
+            RunningOrphanDisposition::RegisteredGatewayAuthorityRequired => {
+                OrphanProofRequirement::RegisteredGatewayAuthority
+            }
+            // Work may continue outside this machine; no local provider can
+            // vouch for it.
+            RunningOrphanDisposition::ExternalTerminalProofRequired => return Ok(false),
+        };
+        let decision = provider
+            .prove_orphan_generation_terminal(
+                user_id,
+                conversation_id,
+                requirement,
+                admission.epoch,
+                admission.active_operation_id.as_deref(),
+            )
+            .await;
+        let evidence = match decision {
+            TerminalProofDecision::Proven { evidence } => evidence,
+            TerminalProofDecision::Unproven { reason } => {
+                info!(
+                    conversation_id,
+                    agent_type = %row.r#type,
+                    reason,
+                    "Restart-orphan generation stays quarantined without terminal proof"
+                );
+                return Ok(false);
+            }
+        };
+
+        // The prior generation is provably terminal, so its detached
+        // knowledge write-back workers are gone too: settle their durable
+        // running states before the lifecycle CAS, mirroring the stop path.
+        // The in-memory activity fence is empty at boot but must still be
+        // awaited for the background-seam caller.
+        await_turn_writeback_quiesced(conversation_id).await;
+        reconcile_quiesced_writebacks_until_resolved(
+            Arc::clone(&self.conversation_repo),
+            Some(Arc::clone(&self.user_events)),
+            user_id,
+            conversation_id,
+        )
+        .await;
+
+        let transition = self
+            .conversation_repo
+            .finalize_exact_cancelled_turn_generation(
+                user_id,
+                conversation_id,
+                admission.epoch,
+                admission.active_operation_id.as_deref(),
+                "interrupted: the application exited before this turn reached a terminal state",
+                Some(relay_error_code::INTERRUPTED_BY_RESTART),
+                Some(relay_error_code::fixed_code_retryable(
+                    relay_error_code::INTERRUPTED_BY_RESTART,
+                )),
+                now_ms(),
+            )
+            .await?;
+        match transition {
+            TurnLifecycleTransition::Committed => {}
+            // A previous healer (or the crash-cutpoint repair) already closed
+            // this generation; nothing further to surface.
+            TurnLifecycleTransition::AlreadyApplied => {
+                info!(
+                    conversation_id,
+                    evidence, "Restart-orphan generation was already terminal during healing"
+                );
+                return Ok(true);
+            }
+            // The persisted generation moved while healing; fail closed and
+            // let the next reconciliation re-read authority from scratch.
+            TurnLifecycleTransition::Stale => {
+                warn!(
+                    conversation_id,
+                    "Restart-orphan healing observed a stale generation; retaining quarantine"
+                );
+                return Ok(false);
+            }
+        }
+
+        info!(
+            conversation_id,
+            agent_type = %row.r#type,
+            admission_epoch = admission.epoch,
+            operation_id = admission.active_operation_id.as_deref(),
+            evidence,
+            "Healed restart-orphan Conversation turn with persisted terminal proof"
+        );
+        self.surface_restart_interrupted_turn(user_id, row).await;
+        Ok(true)
+    }
+
+    /// Post-heal user surfaces: a persisted error tips row (so the transcript
+    /// explains the missing assistant reply on reload) and the linearized
+    /// `turn.completed` projection (so mounted views re-enable sending).
+    /// Both are best-effort: the durable finalization above is already the
+    /// authoritative outcome.
+    async fn surface_restart_interrupted_turn(&self, user_id: &str, row: &ConversationRow) {
+        let conversation_id = row.conversation_id.as_str();
+        let tip_id = Self::mint_msg_id();
+        let tip = MessageRow {
+            id: 0,
+            message_id: tip_id.clone(),
+            conversation_id: conversation_id.to_owned(),
+            msg_id: Some(tip_id),
+            r#type: "tips".into(),
+            content: serde_json::json!({
+                "content": "应用在任务执行中途退出，本次任务已中断。会话已恢复可用，可重新发送该请求。",
+                "type": "error",
+                "source": "interrupted_by_restart",
+                // Tips-content contract: the top-level code and the nested
+                // structured card both carry the SCREAMING token, which is the
+                // i18n key `conversation.agentError.codes.<CODE>` (the receipt
+                // column keeps the snake_case D4 token separately).
+                "code": "INTERRUPTED_BY_RESTART",
+                "error": {
+                    "message": "应用在任务执行中途退出，本次任务已中断。会话已恢复可用，可重新发送该请求。",
+                    "code": "INTERRUPTED_BY_RESTART",
+                    "retryable": true,
+                },
+            })
+            .to_string(),
+            position: Some("center".into()),
+            status: Some("error".into()),
+            hidden: false,
+            created_at: now_ms(),
+        };
+        if let Err(error) = self.conversation_repo.insert_message(&tip).await {
+            warn!(
+                conversation_id,
+                error = %ErrorChain(&error),
+                "Failed to persist restart-interruption tip after healing"
+            );
+        }
+
+        let (companion, companion_id, channel_platform) =
+            match companion_context_from_extra(&row.extra) {
+                Ok(context) => context,
+                Err(error) => {
+                    warn!(
+                        conversation_id,
+                        error = %ErrorChain(&error),
+                        "Healed Conversation has malformed companion context; projecting defaults"
+                    );
+                    (false, None, None)
+                }
+            };
+        StreamRelay::broadcast_turn_completed_with_context(
+            &self.user_events,
+            user_id,
+            conversation_id,
+            None,
+            Some(self.final_completion_runtime(conversation_id)),
+            companion,
+            companion_id,
+            None,
+            channel_platform,
+        );
     }
 
     /// Settle one exact accepted public background delivery after a process
@@ -3385,6 +3606,16 @@ impl ConversationService {
         if self.runtime_state.has_active_turn(conversation_id) {
             return Ok(BackgroundTurnReconciliationDisposition::LiveExactOwnerWait);
         }
+        // No local owner survives for this exact accepted generation. Present
+        // the persisted terminal proof; healing settles the receipt as a
+        // structured retryable failure, so consumers re-read the durable
+        // outcome instead of waiting forever on an owner that cannot exist.
+        if self
+            .try_finalize_proven_orphan_generation(user_id, &row, &admission)
+            .await?
+        {
+            return Ok(BackgroundTurnReconciliationDisposition::ReconciledOrTerminalReRead);
+        }
         let _ = running_orphan_disposition(&row.r#type);
         Ok(BackgroundTurnReconciliationDisposition::ExternalProofRequiredFailClosed)
     }
@@ -3395,8 +3626,10 @@ impl ConversationService {
     /// per-Conversation preparation gate; the caller's enumeration is only a
     /// hint. Retained Agent Execution transcripts are skipped for their
     /// engine-owned recovery path and exact terminal rows are harmless no-ops.
-    /// Every unresolved `Running`, or `Finished + active_operation=A`, row is
-    /// quarantined until a durable terminal proof exists.
+    /// An unresolved `Running`, or `Finished + active_operation=A`, row is
+    /// healed as a structured `interrupted_by_restart` failure when the
+    /// installed [`TurnTerminalProofProvider`] proves the prior generation
+    /// terminal, and stays quarantined otherwise.
     pub async fn reconcile_locally_quiescent_orphan_on_boot(
         &self,
         user_id: &str,
@@ -3442,6 +3675,15 @@ impl ConversationService {
             ));
         }
         lease.ensure_active()?;
+        if self.runtime_state.has_active_turn(conversation_id) {
+            return Err(self.unproven_running_generation_error(&row));
+        }
+        if self
+            .try_finalize_proven_orphan_generation(user_id, &row, &admission)
+            .await?
+        {
+            return Ok(QuiescentOrphanReconciliation::Reconciled);
+        }
         Err(self.unproven_running_generation_error(&row))
     }
 
@@ -5301,12 +5543,12 @@ impl ConversationService {
         // quarantine. With no exact in-memory turn owner, a durable Running
         // row may still have descendants executing under the prior process.
         // Reject before installing the deletion tombstone or removing any
-        // transcript/receipt rows.
+        // transcript/receipt rows. Every disposition quarantines here: proof
+        // is presented only through the boot/background recovery seams.
         if existing.status.as_deref() == Some("running")
             && !self.runtime_state.has_active_turn(id)
-            && running_orphan_disposition(&existing.r#type)?
-                == RunningOrphanDisposition::ExternalTerminalProofRequired
         {
+            let _ = running_orphan_disposition(&existing.r#type)?;
             return Err(AppError::Conflict(
                 "Conversation has an unproven running turn from a prior process; deletion requires exact process-empty proof"
                     .to_owned(),
@@ -8473,7 +8715,11 @@ impl ConversationService {
                         false,
                         None,
                         Some(&receipt_error),
-                        relay_error_code::fixed_failure(relay_error_code::PREPARATION_FAILED),
+                        // Classified build-failure code (e.g.
+                        // user_agent_handshake_timeout) so receipt consumers
+                        // don't have to parse result_error text; falls back
+                        // to preparation_failed for unclassifiable errors.
+                        relay_error_code::classified_preparation_failure(&err),
                     );
                     service
                         .release_and_complete_turn(
@@ -8543,7 +8789,9 @@ impl ConversationService {
                     false,
                     None,
                     Some(&receipt_error),
-                    relay_error_code::fixed_failure(relay_error_code::PREPARATION_FAILED),
+                    // Preparation touches the agent (resume/set_mode/clear):
+                    // carry the classified code when one applies.
+                    relay_error_code::classified_preparation_failure(&err),
                 );
                 service
                     .release_and_complete_turn(
@@ -11186,6 +11434,10 @@ impl ConversationService {
                             expected_generation.epoch,
                             expected_generation.active_operation_id.as_deref(),
                             durable_reason,
+                            Some(relay_error_code::TURN_CANCELLED),
+                            Some(relay_error_code::fixed_code_retryable(
+                                relay_error_code::TURN_CANCELLED,
+                            )),
                             now_ms(),
                         )
                         .await
@@ -11388,11 +11640,10 @@ impl ConversationService {
             // backend's complete descendant tree is empty merely because its
             // registry has no exact active owner. Keep the receipt/aggregate
             // untouched and do not install a stop tombstone or user-cancel
-            // stamp until a backend presents queryable exact terminal proof.
-            if conversation.status.as_deref() == Some("running")
-                && running_orphan_disposition(&conversation.r#type)?
-                    == RunningOrphanDisposition::ExternalTerminalProofRequired
-            {
+            // stamp; only the boot/background recovery seams may present
+            // queryable exact terminal proof.
+            if conversation.status.as_deref() == Some("running") {
+                let _ = running_orphan_disposition(&conversation.r#type)?;
                 drop(user_cancel_preflight);
                 return Err(AppError::Conflict(
                     "Conversation has an unproven running turn from a prior process; stop cannot finalize it without exact process-empty proof"

@@ -825,6 +825,8 @@ impl IConversationRepository for MockRepo {
         expected_admission_epoch: i64,
         expected_active_operation_id: Option<&str>,
         _reason: &str,
+        result_error_code: Option<&str>,
+        result_error_retryable: Option<bool>,
         completed_at: TimestampMs,
     ) -> Result<TurnLifecycleTransition, DbError> {
         if let Some(operation_id) = expected_active_operation_id {
@@ -863,6 +865,8 @@ impl IConversationRepository for MockRepo {
                 receipt.result_ok = Some(false);
                 receipt.result_text = None;
                 receipt.result_error = Some(_reason.to_owned());
+                receipt.result_error_code = result_error_code.map(str::to_owned);
+                receipt.result_error_retryable = result_error_retryable;
                 receipt.updated_at = receipt.updated_at.max(completed_at);
                 receipt.completed_at =
                     Some(completed_at.max(receipt.created_at));
@@ -8796,6 +8800,300 @@ async fn boot_reconcile_treats_exact_terminal_generation_as_noop_without_buildin
         "an absorbing terminal generation is read-only during boot"
     );
 }
+
+/// Test-side terminal-proof authority: proves the exact generation it was
+/// armed with and records every consultation.
+struct StubTerminalProofProvider {
+    proves: Mutex<HashMap<String, (i64, Option<String>)>>,
+    consultations: Mutex<Vec<(String, crate::terminal_proof::OrphanProofRequirement)>>,
+}
+
+impl StubTerminalProofProvider {
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            proves: Mutex::new(HashMap::new()),
+            consultations: Mutex::new(Vec::new()),
+        })
+    }
+
+    fn arm(&self, conversation_id: &str, epoch: i64, operation_id: Option<&str>) {
+        self.proves.lock().unwrap().insert(
+            conversation_id.to_owned(),
+            (epoch, operation_id.map(str::to_owned)),
+        );
+    }
+
+    fn consultations(&self) -> Vec<(String, crate::terminal_proof::OrphanProofRequirement)> {
+        self.consultations.lock().unwrap().clone()
+    }
+}
+
+#[async_trait::async_trait]
+impl crate::terminal_proof::TurnTerminalProofProvider for StubTerminalProofProvider {
+    async fn prove_orphan_generation_terminal(
+        &self,
+        _user_id: &str,
+        conversation_id: &str,
+        requirement: crate::terminal_proof::OrphanProofRequirement,
+        admission_epoch: i64,
+        active_operation_id: Option<&str>,
+    ) -> crate::terminal_proof::TerminalProofDecision {
+        self.consultations
+            .lock()
+            .unwrap()
+            .push((conversation_id.to_owned(), requirement));
+        match self.proves.lock().unwrap().get(conversation_id) {
+            Some((epoch, operation))
+                if *epoch == admission_epoch
+                    && operation.as_deref() == active_operation_id =>
+            {
+                crate::terminal_proof::TerminalProofDecision::Proven {
+                    evidence: "stub terminal proof".to_owned(),
+                }
+            }
+            _ => crate::terminal_proof::TerminalProofDecision::Unproven {
+                reason: "stub provider was not armed for this generation".to_owned(),
+            },
+        }
+    }
+}
+
+#[tokio::test]
+async fn boot_reconcile_heals_proven_orphan_as_interrupted_failure() {
+    for (index, backend) in [
+        AgentType::Nomi.serde_name(),
+        AgentType::Acp.serde_name(),
+        AgentType::Nanobot.serde_name(),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let key = format!("boot-heal-proven-{index}");
+        let (service, repo, slow_registry, runtime_registry, database, conversation_id) =
+            background_reconciliation_fixture(
+                &key,
+                Arc::new(crate::NoExecutionConversationBoundary),
+            )
+            .await;
+        nomifun_db::sqlx::query(
+            "UPDATE conversations SET type = ? WHERE conversation_id = ? AND user_id = ?",
+        )
+        .bind(backend)
+        .bind(&conversation_id)
+        .bind(SQLITE_TEST_OWNER)
+        .execute(database.pool())
+        .await
+        .unwrap();
+        let (operation_id, _, _, admitted_epoch) =
+            claim_background_turn_for_test(repo.as_ref(), &conversation_id, &key).await;
+
+        let provider = StubTerminalProofProvider::new();
+        provider.arm(&conversation_id, admitted_epoch, Some(&operation_id));
+        service.with_terminal_proof_provider(provider.clone());
+
+        assert_eq!(
+            service
+                .reconcile_locally_quiescent_orphan_on_boot(
+                    SQLITE_TEST_OWNER,
+                    &conversation_id,
+                    &runtime_registry,
+                )
+                .await
+                .unwrap(),
+            QuiescentOrphanReconciliation::Reconciled,
+            "{backend}"
+        );
+
+        // The healed generation is a durable, structured interrupted failure.
+        let row = repo.get(&conversation_id).await.unwrap().unwrap();
+        assert_eq!(row.status.as_deref(), Some("finished"), "{backend}");
+        let admission = repo
+            .get_turn_admission_state(SQLITE_TEST_OWNER, &conversation_id)
+            .await
+            .unwrap();
+        assert_eq!(admission.epoch, admitted_epoch + 1, "{backend}");
+        assert!(admission.active_operation_id.is_none(), "{backend}");
+        let receipt = repo
+            .get_delivery_receipt(SQLITE_TEST_OWNER, &conversation_id, &operation_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(receipt.status, "completed", "{backend}");
+        assert_eq!(receipt.result_ok, Some(false), "{backend}");
+        assert_eq!(
+            receipt.result_error_code.as_deref(),
+            Some(crate::relay_error_code::INTERRUPTED_BY_RESTART),
+            "{backend}"
+        );
+        assert_eq!(receipt.result_error_retryable, Some(true), "{backend}");
+
+        // Healing never constructs a runtime; it surfaces a persisted tips
+        // row and re-opens sending on next admission.
+        assert_eq!(slow_registry.build_calls(), 0, "{backend}");
+        let messages = repo
+            .get_messages(&conversation_id, 1, 50, SortOrder::Asc)
+            .await
+            .unwrap();
+        assert!(
+            messages.items.iter().any(|message| {
+                message.r#type == "tips"
+                    && message.status.as_deref() == Some("error")
+                    && message
+                        .content
+                        .contains(crate::relay_error_code::INTERRUPTED_BY_RESTART)
+            }),
+            "{backend}: healed turn must persist an interrupted-by-restart tip"
+        );
+
+        // Idempotent replay: the healed generation is terminal, so a second
+        // boot pass is a read-only no-op.
+        assert_eq!(
+            service
+                .reconcile_locally_quiescent_orphan_on_boot(
+                    SQLITE_TEST_OWNER,
+                    &conversation_id,
+                    &runtime_registry,
+                )
+                .await
+                .unwrap(),
+            QuiescentOrphanReconciliation::AlreadyTerminal,
+            "{backend}"
+        );
+
+        // A fresh admission works after healing: the conversation is usable.
+        let (_, _, _, next_epoch) =
+            claim_background_turn_for_test(repo.as_ref(), &conversation_id, "post-heal").await;
+        assert_eq!(next_epoch, admitted_epoch + 2, "{backend}");
+    }
+}
+
+#[tokio::test]
+async fn boot_reconcile_keeps_remote_backend_quarantined_even_with_provider() {
+    const KEY: &str = "boot-remote-stays-quarantined";
+    let (service, repo, _slow_registry, runtime_registry, database, conversation_id) =
+        background_reconciliation_fixture(
+            KEY,
+            Arc::new(crate::NoExecutionConversationBoundary),
+        )
+        .await;
+    nomifun_db::sqlx::query(
+        "UPDATE conversations SET type = ? WHERE conversation_id = ? AND user_id = ?",
+    )
+    .bind(AgentType::Remote.serde_name())
+    .bind(&conversation_id)
+    .bind(SQLITE_TEST_OWNER)
+    .execute(database.pool())
+    .await
+    .unwrap();
+    let (operation_id, _, _, admitted_epoch) =
+        claim_background_turn_for_test(repo.as_ref(), &conversation_id, KEY).await;
+
+    let provider = StubTerminalProofProvider::new();
+    provider.arm(&conversation_id, admitted_epoch, Some(&operation_id));
+    service.with_terminal_proof_provider(provider.clone());
+
+    service
+        .reconcile_locally_quiescent_orphan_on_boot(
+            SQLITE_TEST_OWNER,
+            &conversation_id,
+            &runtime_registry,
+        )
+        .await
+        .expect_err("remote work cannot be proven terminal locally");
+    assert!(
+        provider.consultations().is_empty(),
+        "an external-execution backend must never consult a local proof provider"
+    );
+    let row = repo.get(&conversation_id).await.unwrap().unwrap();
+    assert_eq!(row.status.as_deref(), Some("running"));
+    let receipt = repo
+        .get_delivery_receipt(SQLITE_TEST_OWNER, &conversation_id, &operation_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(receipt.status, "accepted");
+}
+
+#[tokio::test]
+async fn boot_reconcile_stays_quarantined_when_proof_generation_mismatches() {
+    const KEY: &str = "boot-heal-generation-mismatch";
+    let (service, repo, _slow_registry, runtime_registry, _database, conversation_id) =
+        background_reconciliation_fixture(
+            KEY,
+            Arc::new(crate::NoExecutionConversationBoundary),
+        )
+        .await;
+    let (operation_id, _, _, admitted_epoch) =
+        claim_background_turn_for_test(repo.as_ref(), &conversation_id, KEY).await;
+
+    // Armed for a *different* generation: the provider must refuse and the
+    // sweep must keep the fail-closed Conflict.
+    let provider = StubTerminalProofProvider::new();
+    provider.arm(&conversation_id, admitted_epoch + 1, Some(&operation_id));
+    service.with_terminal_proof_provider(provider);
+
+    service
+        .reconcile_locally_quiescent_orphan_on_boot(
+            SQLITE_TEST_OWNER,
+            &conversation_id,
+            &runtime_registry,
+        )
+        .await
+        .expect_err("a generation outside the boot-frozen snapshot must stay quarantined");
+    let row = repo.get(&conversation_id).await.unwrap().unwrap();
+    assert_eq!(row.status.as_deref(), Some("running"));
+    let receipt = repo
+        .get_delivery_receipt(SQLITE_TEST_OWNER, &conversation_id, &operation_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(receipt.status, "accepted");
+}
+
+#[tokio::test]
+async fn background_reconcile_heals_proven_orphan_and_reports_terminal_reread() {
+    const KEY: &str = "background-heal-proven";
+    let (service, repo, slow_registry, runtime_registry, _database, conversation_id) =
+        background_reconciliation_fixture(
+            KEY,
+            Arc::new(crate::NoExecutionConversationBoundary),
+        )
+        .await;
+    let (operation_id, _, _, admitted_epoch) =
+        claim_background_turn_for_test(repo.as_ref(), &conversation_id, KEY).await;
+
+    let provider = StubTerminalProofProvider::new();
+    provider.arm(&conversation_id, admitted_epoch, Some(&operation_id));
+    service.with_terminal_proof_provider(provider);
+
+    assert_eq!(
+        service
+            .reconcile_quiescent_running_turn_for_background(
+                SQLITE_TEST_OWNER,
+                &conversation_id,
+                KEY,
+                &runtime_registry,
+            )
+            .await
+            .unwrap(),
+        BackgroundTurnReconciliationDisposition::ReconciledOrTerminalReRead
+    );
+    let receipt = repo
+        .get_delivery_receipt(SQLITE_TEST_OWNER, &conversation_id, &operation_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(receipt.status, "completed");
+    assert_eq!(receipt.result_ok, Some(false));
+    assert_eq!(
+        receipt.result_error_code.as_deref(),
+        Some(crate::relay_error_code::INTERRUPTED_BY_RESTART)
+    );
+    let row = repo.get(&conversation_id).await.unwrap().unwrap();
+    assert_eq!(row.status.as_deref(), Some("finished"));
+    assert_eq!(slow_registry.build_calls(), 0);
+}
+
 
 async fn wait_for_public_admission_terminal(
     repo: &SqliteConversationRepository,

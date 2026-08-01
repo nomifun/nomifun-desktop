@@ -39,6 +39,8 @@ export function useRequirements(params: IListRequirementsParams) {
   // Live updates: any create/update/status/delete invalidates the current view.
   // tagPaused also affects status/visibility (a paused tag's needs_review item
   // may have just appeared), so refresh on that too.
+  // WebSocket delivery has no replay: any gap (reconnect, server lag resync)
+  // may have dropped requirements events, so reload the durable snapshot.
   useEffect(() => {
     const unsubs = [
       ipcBridge.requirements.onCreated.on(() => void refresh()),
@@ -46,6 +48,7 @@ export function useRequirements(params: IListRequirementsParams) {
       ipcBridge.requirements.onStatusChanged.on(() => void refresh()),
       ipcBridge.requirements.onDeleted.on(() => void refresh()),
       ipcBridge.requirements.onTagPaused.on(() => void refresh()),
+      ipcBridge.conversation.reconnected.on(() => void refresh()),
     ];
     return () => unsubs.forEach((u) => u());
   }, [refresh]);
@@ -83,6 +86,8 @@ export function useRequirementTags() {
       ipcBridge.requirements.onStatusChanged.on(() => void refresh()),
       ipcBridge.requirements.onDeleted.on(() => void refresh()),
       ipcBridge.requirements.onTagPaused.on(() => void refresh()),
+      // WebSocket delivery has no replay: reload tag counts after any gap.
+      ipcBridge.conversation.reconnected.on(() => void refresh()),
     ];
     return () => unsubs.forEach((u) => u());
   }, [refresh]);

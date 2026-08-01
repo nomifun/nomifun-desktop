@@ -6,28 +6,50 @@
 
 /**
  * Default Codex model list maintained by Nomi.
- * These are known models that Codex CLI supports.
- * Validation is done by Codex CLI itself — Nomi only passes the model name.
  *
- * The first entry is used as the default when the user hasn't made a selection.
+ * PRE-HANDSHAKE FALLBACK ONLY: shown on the Guid page before the backend has
+ * ever observed a codex session (agent_metadata.handshake.available_models is
+ * still NULL). After the first session the persisted handshake catalog wins.
+ * Validation is done by the codex bridge itself — Nomi only passes the id.
+ *
+ * Ids mirror what @agentclientprotocol/codex-acp@1.1.7 (bundled codex 0.145)
+ * advertises: `<model>[<reasoning effort>]`. Keep this list SHORT — it is a
+ * bootstrap hint, not a catalog.
+ *
+ * NOTE: deliberately no "first entry = default" semantics anymore. The
+ * session's initial model comes from the user's local codex config
+ * (CODEX_HOME config.toml), not from this list; entries here are only what
+ * the user can explicitly pick before the first handshake.
  */
 export const DEFAULT_CODEX_MODELS: Array<{ id: string; label: string; description: string }> = [
-  { id: 'gpt-5.3-codex', label: 'gpt-5.3-codex', description: 'Latest frontier agentic coding model' },
-  { id: 'gpt-5.4', label: 'gpt-5.4', description: 'Latest frontier agentic coding model' },
-  { id: 'gpt-5.2-codex', label: 'gpt-5.2-codex', description: 'Frontier agentic coding model' },
   {
-    id: 'gpt-5.1-codex-max',
-    label: 'gpt-5.1-codex-max',
-    description: 'Codex-optimized flagship for deep and fast reasoning',
+    id: 'gpt-5.6-sol[medium]',
+    label: 'GPT-5.6-Sol (medium)',
+    description: 'Latest frontier agentic coding model',
   },
   {
-    id: 'gpt-5.2',
-    label: 'gpt-5.2',
-    description: 'Latest frontier model with improvements across knowledge, reasoning and coding',
+    id: 'gpt-5.6-sol[high]',
+    label: 'GPT-5.6-Sol (high)',
+    description: 'Latest frontier agentic coding model, deeper reasoning',
   },
   {
-    id: 'gpt-5.1-codex-mini',
-    label: 'gpt-5.1-codex-mini',
-    description: 'Optimized for codex. Cheaper, faster, but less capable',
+    id: 'gpt-5.6-terra[medium]',
+    label: 'GPT-5.6-Terra (medium)',
+    description: 'Balanced agentic coding model for everyday work',
+  },
+  {
+    id: 'gpt-5.6-luna[medium]',
+    label: 'GPT-5.6-Luna (medium)',
+    description: 'Fast and affordable agentic coding model',
+  },
+  {
+    id: 'gpt-5.5[high]',
+    label: 'GPT-5.5 (high)',
+    description: 'Frontier model for complex coding, research, and real-world work',
+  },
+  {
+    id: 'gpt-5.2[medium]',
+    label: 'GPT-5.2 (medium)',
+    description: 'Optimized for professional work and long-running agents',
   },
 ];

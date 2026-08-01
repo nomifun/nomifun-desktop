@@ -1,6 +1,7 @@
 //! Agent runtime lifecycle, per-conversation runtime registration, and skill management.
 pub(crate) mod runtime_state;
 pub mod artifact_store;
+pub mod boot_process_reaper;
 pub mod runtime_handle;
 // Rendering page-fetch adapter for knowledge URL sources. The implementation
 // consumes the application-owned Browser Session Hub and keeps the knowledge
@@ -40,6 +41,9 @@ pub use nomi_config;
 pub use nomi_types;
 
 pub use runtime_state::AgentRuntimeState;
+pub use boot_process_reaper::{
+    AgentProcessReapReport, ConversationProcessReapVerdict, reap_orphan_agent_processes,
+};
 #[cfg(any(test, feature = "test-support"))]
 pub use runtime_handle::MockAgentRuntime;
 pub use runtime_handle::{

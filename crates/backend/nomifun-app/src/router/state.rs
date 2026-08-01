@@ -296,14 +296,77 @@ where
     summary
 }
 
+/// Freeze the exact set of unsettled turn generations before any work
+/// producer starts. Only generations in this snapshot may ever be proven
+/// terminal by [`crate::router::boot_terminal_proof::BootTerminalProofProvider`]:
+/// everything admitted later belongs to the current process.
+///
+/// Transient enumeration errors retry with the same classification/backoff as
+/// the sweep below; giving up on one flaky page would silently disable the
+/// terminal-proof provider for the entire boot.
+async fn snapshot_boot_frozen_orphan_generations(
+    conversation_repo: &Arc<dyn nomifun_db::IConversationRepository>,
+) -> Result<
+    std::collections::HashMap<
+        String,
+        crate::router::boot_terminal_proof::FrozenOrphanGeneration,
+    >,
+    AppError,
+> {
+    let mut frozen = std::collections::HashMap::new();
+    let mut after_conversation_id: Option<String> = None;
+    let mut retry_delay = Duration::from_millis(25);
+    loop {
+        let page = match conversation_repo
+            .list_unsettled_turn_admissions(
+                after_conversation_id.as_deref(),
+                MAX_UNSETTLED_TURN_ADMISSION_PAGE_SIZE,
+            )
+            .await
+            .map_err(AppError::from)
+        {
+            Ok(page) => page,
+            Err(error) if boot_reconciliation_error_is_retryable(&error) => {
+                tracing::error!(
+                    after_conversation_id = after_conversation_id.as_deref(),
+                    error = %error,
+                    "startup terminal-proof snapshot enumeration failed transiently; retrying"
+                );
+                tokio::time::sleep(retry_delay).await;
+                retry_delay = (retry_delay * 2).min(Duration::from_secs(2));
+                continue;
+            }
+            Err(error) => return Err(error),
+        };
+        if page.is_empty() {
+            break;
+        }
+        for admission in page {
+            after_conversation_id = Some(admission.conversation.conversation_id.clone());
+            frozen.insert(
+                admission.conversation.conversation_id,
+                crate::router::boot_terminal_proof::FrozenOrphanGeneration {
+                    user_id: admission.conversation.user_id,
+                    admission_epoch: admission.admission_epoch,
+                    active_operation_id: admission.active_operation_id,
+                },
+            );
+        }
+    }
+    Ok(frozen)
+}
+
 /// Reconcile every durable Conversation turn authority before any subsystem
 /// capable of producing work is started.
 ///
 /// The repository enumeration is only a hint. `ConversationService` re-reads
-/// the exact row/receipt/admission under its preparation gate. Every current
-/// backend without durable, queryable process-tree termination proof is
-/// deliberately quarantined. Retained Agent Execution transcripts stay with
-/// their owning engine, while already-terminal rows are harmless no-ops.
+/// the exact row/receipt/admission under its preparation gate. A backend
+/// whose generation is covered by the boot terminal-proof provider (frozen
+/// unsettled snapshot + reaped durable process registry, under the retained
+/// server-lock authority) is healed as an `interrupted_by_restart` failure;
+/// everything else stays quarantined. Retained Agent Execution transcripts
+/// stay with their owning engine, while already-terminal rows are harmless
+/// no-ops.
 async fn reconcile_unsettled_conversation_turns_before_background_work(
     services: &AppServices,
     conversation_service: &ConversationService,
@@ -322,6 +385,34 @@ async fn reconcile_unsettled_conversation_turns_before_background_work(
                 "startup Conversation orphan reconciliation skipped: retained server-lock authority could not be revalidated"
             );
             return BootConversationReconciliationSummary::default();
+        }
+    }
+
+    // Persisted exact terminal-proof protocol, boot side. Ordering matters:
+    // (1) reap the durable agent-process registry (verify-by-identity, kill
+    // survivors with proof); (2) freeze the unsettled-generation snapshot;
+    // (3) only then install the proof provider consulted by the sweep below.
+    // The lock authority above guarantees no other backend owns this data
+    // dir, and nothing that produces work has started yet, so the snapshot
+    // exactly names the dead process's generations.
+    let reap_report =
+        nomifun_ai_agent::reap_orphan_agent_processes(&services.data_dir).await;
+    match snapshot_boot_frozen_orphan_generations(&services.conversation_repo).await {
+        Ok(frozen) => {
+            conversation_service.with_terminal_proof_provider(
+                crate::router::boot_terminal_proof::BootTerminalProofProvider::new(
+                    frozen,
+                    reap_report,
+                ),
+            );
+        }
+        Err(error) => {
+            // Without the frozen snapshot no generation can prove; the sweep
+            // then quarantines exactly as before this protocol existed.
+            tracing::error!(
+                error = %error,
+                "startup terminal-proof snapshot failed; restart orphans stay quarantined"
+            );
         }
     }
 
