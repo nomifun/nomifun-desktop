@@ -38,7 +38,6 @@ import {
   Tree,
 } from '@arco-design/web-react';
 import {
-  ApiApp,
   Delete,
   Earth,
   EditTwo,
@@ -53,7 +52,6 @@ import {
   Plus,
   Refresh,
   Search,
-  SettingOne,
   SettingTwo,
   Upload,
 } from '@icon-park/react';
@@ -73,10 +71,8 @@ import {
 import { useKnowledgeTags } from '../useKnowledgeTags';
 import KnowledgeModelSelector, { useKnowledgeAutogenModel } from '../KnowledgeModelSelector';
 import InboxReviewPanel from '../InboxReviewPanel';
-import KnowledgeConnectorDrawer from '../KnowledgeConnectorDrawer';
 import KnowledgeConsumersSection from '../KnowledgeConsumersSection';
 import TagPicker from '../CreateStudio/TagPicker';
-import { FEISHU_KNOWLEDGE_CREATION_ENABLED } from '../CreateStudio/sourceTypes';
 import {
   buildKnowledgeSearchTree,
   isKnowledgePathWithin,
@@ -127,16 +123,6 @@ function getKindConfig(kind: IKnowledgeBase['kind'], t: TFunction): KindConfig {
         iconBorder: 'rgba(var(--success-6),0.3)',
         iconColor: 'rgb(var(--success-5))',
       };
-    case 'feishu':
-      return {
-        label: t('knowledge.card.kindFeishu', { defaultValue: '飞书' }),
-        bgClass: 'bg-[rgba(var(--warning-6),0.12)]',
-        textClass: 'text-[var(--color-text-1)]',
-        borderClass: 'border-[rgba(var(--warning-6),0.3)]',
-        iconBg: 'rgba(var(--warning-6),0.12)',
-        iconBorder: 'rgba(var(--warning-6),0.3)',
-        iconColor: 'rgb(var(--warning-5))',
-      };
     case 'blank':
     default:
       return {
@@ -161,7 +147,6 @@ function DetailKindIcon({ kind, config }: { kind: IKnowledgeBase['kind']; config
     >
       {kind === 'local' && <FolderOpen {...iconProps} />}
       {kind === 'web' && <Earth {...iconProps} />}
-      {kind === 'feishu' && <SettingOne {...iconProps} />}
       {kind === 'blank' && <EditTwo {...iconProps} />}
     </div>
   );
@@ -194,10 +179,9 @@ interface SettingsTabProps {
   allTags: IKnowledgeTag[];
   createTag: (label: string) => Promise<IKnowledgeTag>;
   onRefresh: () => void;
-  onConnectorOpen: () => void;
 }
 
-const SettingsTab: React.FC<SettingsTabProps> = ({ base, allTags, createTag, onRefresh, onConnectorOpen }) => {
+const SettingsTab: React.FC<SettingsTabProps> = ({ base, allTags, createTag, onRefresh }) => {
   const { t } = useTranslation();
   const navigate = useNavigate();
 
@@ -244,20 +228,6 @@ const SettingsTab: React.FC<SettingsTabProps> = ({ base, allTags, createTag, onR
     try {
       const summary = await ipcBridge.knowledge.refreshSource.invoke({ knowledge_base_id: base.knowledge_base_id });
       notifySourceFetchResult(t, summary, t('knowledge.source.refreshOk', { defaultValue: '刷新完成，获取 {{fetched}} 条', fetched: summary.fetched }));
-      onRefresh();
-    } catch (e) {
-      Message.error(knowledgeErrorText(e));
-    } finally {
-      setSourceLoading(false);
-    }
-  };
-
-  const handleSyncSource = async () => {
-    if (sourceLoading) return;
-    setSourceLoading(true);
-    try {
-      const summary = await ipcBridge.knowledge.syncSource.invoke({ knowledge_base_id: base.knowledge_base_id });
-      notifySourceFetchResult(t, summary, t('knowledge.source.syncOk', { defaultValue: '同步完成，获取 {{fetched}} 条', fetched: summary.fetched }));
       onRefresh();
     } catch (e) {
       Message.error(knowledgeErrorText(e));
@@ -361,7 +331,6 @@ const SettingsTab: React.FC<SettingsTabProps> = ({ base, allTags, createTag, onR
           {' · '}
           {base.kind === 'local' && t('knowledge.card.kindLocal', { defaultValue: '本地文件夹' })}
           {base.kind === 'web' && t('knowledge.card.kindWeb', { defaultValue: '网页' })}
-          {base.kind === 'feishu' && t('knowledge.card.kindFeishu', { defaultValue: '飞书' })}
           {base.kind === 'blank' && t('knowledge.card.kindBlank', { defaultValue: '空白' })}
         </label>
 
@@ -390,26 +359,6 @@ const SettingsTab: React.FC<SettingsTabProps> = ({ base, allTags, createTag, onR
               onClick={() => void handleRefreshSource()}
             >
               {t('knowledge.detail.settings.refreshSource', { defaultValue: '刷新' })}
-            </Button>
-          </div>
-        )}
-
-        {base.kind === 'feishu' && (
-          <div className='flex items-center gap-9px'>
-            <Button
-              icon={<Refresh theme='outline' size='14' />}
-              loading={sourceLoading}
-              onClick={() => void handleSyncSource()}
-            >
-              {t('knowledge.detail.settings.syncSource', { defaultValue: '同步' })}
-            </Button>
-            <Button
-              icon={<ApiApp theme='outline' size='14' />}
-              disabled={!FEISHU_KNOWLEDGE_CREATION_ENABLED}
-              className={classNames(!FEISHU_KNOWLEDGE_CREATION_ENABLED && 'cursor-not-allowed opacity-50')}
-              onClick={FEISHU_KNOWLEDGE_CREATION_ENABLED ? onConnectorOpen : undefined}
-            >
-              {t('knowledge.detail.settings.connector', { defaultValue: '连接器' })}
             </Button>
           </div>
         )}
@@ -541,16 +490,10 @@ const KnowledgeDetailPage: React.FC = () => {
   const [renameName, setRenameName] = useState('');
   const [autogenLoading, setAutogenLoading] = useState(false);
   const [refreshingSource, setRefreshingSource] = useState(false);
-  const [connectorVisible, setConnectorVisible] = useState(false);
   const [treeData, setTreeData] = useState<IKnowledgeTreeEntry[]>([]);
   const [expandedTreeKeys, setExpandedTreeKeys] = useState<string[]>([]);
   const [selectedFolderPath, setSelectedFolderPath] = useState('');
   const [selectedTreeKey, setSelectedTreeKey] = useState<string | null>(null);
-
-  const handleConnectorOpen = useCallback(() => {
-    if (!FEISHU_KNOWLEDGE_CREATION_ENABLED) return;
-    setConnectorVisible(true);
-  }, []);
   const [fileSearch, setFileSearch] = useState('');
   const isTreeSearch = fileSearch.trim().length > 0;
 
@@ -1028,19 +971,6 @@ const KnowledgeDetailPage: React.FC = () => {
                   <Menu.Item key='openFolder' onClick={() => void handleOpenFolder()}>
                     {t('knowledge.actions.openFolder', { defaultValue: '打开文件夹' })}
                   </Menu.Item>
-                  <Menu.Item
-                    key='connector'
-                    disabled={!FEISHU_KNOWLEDGE_CREATION_ENABLED}
-                    className={classNames(!FEISHU_KNOWLEDGE_CREATION_ENABLED && 'cursor-not-allowed opacity-50')}
-                    onClick={() => {
-                      if (FEISHU_KNOWLEDGE_CREATION_ENABLED) setConnectorVisible(true);
-                    }}
-                  >
-                    <span className='inline-flex items-center gap-6px'>
-                      <ApiApp theme='outline' size='14' />
-                      {t('knowledge.detail.connector', { defaultValue: '连接器' })}
-                    </span>
-                  </Menu.Item>
                   <Menu.Item key='delete' className='!text-[rgb(var(--danger-6))]' onClick={() => setTab('set')}>
                     {t('knowledge.detail.delete', { defaultValue: '删除知识库' })}
                   </Menu.Item>
@@ -1510,23 +1440,12 @@ const KnowledgeDetailPage: React.FC = () => {
                   allTags={allTags}
                   createTag={createTag}
                   onRefresh={refresh}
-                  onConnectorOpen={handleConnectorOpen}
                 />
               )}
             </div>
           </Tabs.TabPane>
         </Tabs>
       </div>
-
-      {/* ─── Connector drawer (preserved) ──────────────────────────────────── */}
-      {base ? (
-        <KnowledgeConnectorDrawer
-          visible={connectorVisible}
-          onClose={() => setConnectorVisible(false)}
-          base={base}
-          onChanged={() => void refresh()}
-        />
-      ) : null}
 
       {/* ─── New file modal (preserved) ────────────────────────────────────── */}
       <Modal

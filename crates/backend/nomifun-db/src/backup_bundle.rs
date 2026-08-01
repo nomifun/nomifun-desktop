@@ -55,7 +55,6 @@ const PRESERVE_BUSINESS_ID_REFERENCES: &[(&str, &str)] = &[
 ];
 
 const PRESERVE_BUSINESS_ID_JSON_REFERENCES: &[(&str, &str, &str)] = &[
-    ("knowledge_bases", "extra", "$.source.credentialRef"),
     ("workshop_assets", "origin", "$.creation_task_id"),
 ];
 

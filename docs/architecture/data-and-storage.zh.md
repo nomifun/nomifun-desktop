@@ -55,7 +55,7 @@ NomiFun 把状态保存在三个地方：一个 SQLite 数据库（一切结构�
 `template_participant_id`；Channel Plugin、User、Session 分别使用
 `channel_plugin_id`、`channel_user_id`、`channel_session_id`。这七类字段都是
 裸标准 UUIDv7 业务 ID，不是本地整数身份。同一规则也适用于 MCP Server、
-Webhook、Connector Credential、Creation Task、Conversation Artifact 和
+Webhook、Creation Task、Conversation Artifact 和
 IDMM Intervention。
 
 - `Database` —— 持有 `sqlx::SqlitePool` 与 v3 baseline schema 状态。通过

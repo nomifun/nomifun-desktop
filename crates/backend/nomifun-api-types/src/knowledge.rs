@@ -1,4 +1,4 @@
-use nomifun_common::{ConnectorCredentialId, KnowledgeBaseId};
+use nomifun_common::KnowledgeBaseId;
 use serde::{Deserialize, Serialize};
 
 /// A live (URL-backed) source attached to a knowledge base. Snapshots of
@@ -38,8 +38,7 @@ pub enum KnowledgeSourceMode {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct KnowledgeSource {
-    /// Source kind discriminator; `"url"` is the only kind today (connector
-    /// kinds like `feishu`/`notion` are design-stage).
+    /// Source kind discriminator; `"url"` is the only kind today.
     #[serde(default = "default_source_kind")]
     pub kind: String,
     pub mode: KnowledgeSourceMode,
@@ -51,61 +50,10 @@ pub struct KnowledgeSource {
     /// sources too and stamps this field once an entry succeeds.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_fetched_at: Option<i64>,
-    /// **P3 connector**: reference to a `connector_credentials` row (never a
-    /// secret). Present for connector-backed sources (`kind != "url"`).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub credential_ref: Option<ConnectorCredentialId>,
-    /// Connector-specific scope (e.g. a Feishu wiki space `{ "space_id": .. }`).
-    /// Opaque to the core; interpreted by the connector.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub scope: Option<serde_json::Value>,
-    /// Connector sync state (cursor + interval + last outcome). `None` for URL
-    /// sources.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub sync: Option<ConnectorSyncState>,
 }
 
 fn default_source_kind() -> String {
     "url".to_owned()
-}
-
-/// Wire-safe summary of a stored connector credential. **Never** carries the
-/// secret payload — only the fields the UI needs to list/pick credentials.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct ConnectorCredentialSummary {
-    pub credential_id: ConnectorCredentialId,
-    /// Connector discriminator: "feishu", "notion", …
-    pub kind: String,
-    pub name: String,
-    pub created_at: i64,
-}
-
-/// Persisted sync state for a connector-backed knowledge base (lives in
-/// `extra.source.sync`). All fields `#[serde(default)]` for back-compat.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ConnectorSyncState {
-    /// Optional periodic-sync interval (minutes); `None` = manual only.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub interval_minutes: Option<u32>,
-    /// Last successful sync (epoch ms, local wall-clock). For display only.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub last_sync_at: Option<i64>,
-    /// Remote high-water-mark: the max document `edit_time` (epoch ms, the
-    /// REMOTE's clock) successfully synced so far. This — not `last_sync_at` —
-    /// is the incremental filter watermark fed back on the next run. Keeping
-    /// them separate avoids clock-skew misses: a local `now_ms()` watermark can
-    /// exceed the remote `edit_time` of docs edited near sync time and skip
-    /// them forever. `None` on legacy rows falls back to `last_sync_at`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub watermark: Option<i64>,
-    /// Connector-specific opaque cursor carried across runs.
-    #[serde(default)]
-    pub cursor: serde_json::Value,
-    /// Last sync error message, if the most recent run failed.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub last_error: Option<String>,
 }
 
 /// A knowledge base mounted into a session workspace. Carried in
@@ -183,101 +131,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn connector_credential_summary_uses_named_id_and_rejects_legacy_id() {
-        let credential_id = ConnectorCredentialId::new();
-        let credential = serde_json::json!({
-            "credentialId": credential_id,
-            "kind": "feishu",
-            "name": "tenant",
-            "createdAt": 1
-        });
-        let summary: ConnectorCredentialSummary =
-            serde_json::from_value(credential).expect("named credential id should deserialize");
-        assert_eq!(summary.credential_id, credential_id);
-        let wire = serde_json::to_value(summary).unwrap();
-        assert_eq!(wire["credentialId"], credential_id.as_str());
-        assert!(wire.get("id").is_none(), "legacy generic id must stay off the wire: {wire}");
-
-        let legacy = serde_json::json!({
-            "id": credential_id,
-            "kind": "feishu",
-            "name": "tenant",
-            "createdAt": 1
-        });
-        assert!(serde_json::from_value::<ConnectorCredentialSummary>(legacy).is_err());
-    }
-
-    #[test]
-    fn connector_credential_ids_reject_noncanonical_values() {
-        let valid = ConnectorCredentialId::new();
-        for invalid in [
-            serde_json::json!(7),
-            serde_json::json!("7"),
-            serde_json::json!("550e8400-e29b-41d4-a716-446655440000"),
-            serde_json::json!(valid.as_str().to_ascii_uppercase()),
-            serde_json::json!(format!("conn_{valid}")),
-        ] {
-            let summary = serde_json::json!({
-                "credentialId": invalid,
-                "kind": "feishu",
-                "name": "tenant",
-                "createdAt": 1
-            });
-            assert!(
-                serde_json::from_value::<ConnectorCredentialSummary>(summary).is_err()
-            );
-        }
-
-        let generic_id = serde_json::json!({
-            "id": valid,
-            "kind": "feishu",
-            "name": "tenant",
-            "createdAt": 1
-        });
-        assert!(serde_json::from_value::<ConnectorCredentialSummary>(generic_id).is_err());
-    }
-
-    #[test]
-    fn knowledge_source_credential_ref_rejects_legacy_and_noncanonical_ids() {
-        let valid = ConnectorCredentialId::new();
-        let valid_source = serde_json::json!({
-            "kind": "feishu",
-            "mode": "snapshot",
-            "credentialRef": valid,
-            "scope": { "space_id": "space" }
-        });
-        assert!(
-            serde_json::from_value::<KnowledgeSource>(valid_source).is_ok()
-        );
-
-        for invalid in [
-            serde_json::json!(7),
-            serde_json::json!("7"),
-            serde_json::json!("550e8400-e29b-41d4-a716-446655440000"),
-            serde_json::json!(valid.as_str().to_ascii_uppercase()),
-            serde_json::json!(format!("conn_{valid}")),
-        ] {
-            let source = serde_json::json!({
-                "kind": "feishu",
-                "mode": "snapshot",
-                "credentialRef": invalid,
-                "scope": { "space_id": "space" }
-            });
-            assert!(serde_json::from_value::<KnowledgeSource>(source).is_err());
-        }
-
-        for generic_key in ["id", "credential_id", "credential_ref"] {
-            let source = serde_json::json!({
-                "kind": "feishu",
-                "mode": "snapshot",
-                generic_key: valid,
-                "scope": { "space_id": "space" }
-            });
-            assert!(serde_json::from_value::<KnowledgeSource>(source).is_err());
-        }
-    }
-
-    #[test]
     fn knowledge_mount_info_uses_named_id_and_rejects_legacy_id() {
         let knowledge_base_id = KnowledgeBaseId::new();
         let mount = serde_json::json!({
@@ -315,9 +168,6 @@ mod tests {
                 rendered: false,
             }],
             last_fetched_at: Some(1_770_000_000_000),
-            credential_ref: None,
-            scope: None,
-            sync: None,
         };
         let v = serde_json::to_value(&source).unwrap();
         assert_eq!(v["kind"], "url");

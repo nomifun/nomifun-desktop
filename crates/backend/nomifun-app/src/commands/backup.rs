@@ -203,7 +203,6 @@ async fn database_contains_encrypted_values(database: &nomifun_db::Database) -> 
         "SELECT EXISTS(SELECT 1 FROM providers WHERE api_key_encrypted <> '' LIMIT 1)",
         "SELECT EXISTS(SELECT 1 FROM channel_plugins WHERE config <> '' LIMIT 1)",
         "SELECT EXISTS(SELECT 1 FROM remote_agents WHERE auth_token IS NOT NULL OR device_public_key IS NOT NULL OR device_private_key IS NOT NULL OR device_token IS NOT NULL LIMIT 1)",
-        "SELECT EXISTS(SELECT 1 FROM connector_credentials WHERE payload_encrypted <> '' LIMIT 1)",
         "SELECT EXISTS(SELECT 1 FROM oauth_tokens WHERE access_token <> '' OR refresh_token IS NOT NULL LIMIT 1)",
     ];
     for query in PROBES {

@@ -50,7 +50,6 @@ const UNCONDITIONAL_UUIDV7_BUSINESS_IDS: &[(&str, &str)] = &[
     ("requirements", "requirement_id"),
     ("mcp_servers", "mcp_server_id"),
     ("webhooks", "webhook_id"),
-    ("connector_credentials", "credential_id"),
     ("creation_tasks", "creation_task_id"),
     ("conversation_artifacts", "conversation_artifact_id"),
     ("idmm_action_reservations", "reservation_id"),
@@ -120,7 +119,7 @@ async fn every_product_table_has_one_integer_autoincrement_row_primary_key() {
     .await
     .expect("tables");
 
-    assert_eq!(tables.len(), 79);
+    assert_eq!(tables.len(), 78);
     for table in tables {
         let columns = sqlx::query(&format!("PRAGMA table_info(\"{table}\")"))
             .fetch_all(pool)
@@ -552,13 +551,6 @@ async fn remaining_product_business_ids_reject_duplicates_and_non_uuid_values() 
              (webhook_id, name, url, created_at, updated_at) \
              VALUES (?, ?, 'https://example.invalid/hook', 1, 1)",
         ),
-        (
-            "connector_credentials",
-            "credential_id",
-            "INSERT INTO connector_credentials \
-             (credential_id, kind, name, payload_encrypted, created_at, updated_at) \
-             VALUES (?, 'contract', ?, 'ciphertext', 1, 1)",
-        ),
     ];
     for (table, column, statement) in cases {
         let id = nomifun_common::generate_id();
@@ -916,34 +908,6 @@ async fn remaining_uuid_logical_links_and_json_registry_enforce_text_values() {
     .await
     .expect("UUID task origin");
 
-    let credential_id = nomifun_common::generate_id();
-    sqlx::query(
-        "INSERT INTO connector_credentials \
-         (credential_id, kind, name, payload_encrypted, created_at, updated_at) \
-         VALUES (?, 'contract', 'knowledge credential', 'ciphertext', 1, 1)",
-    )
-    .bind(&credential_id)
-    .execute(pool)
-    .await
-    .expect("credential");
-    sqlx::query(
-        "INSERT INTO knowledge_bases \
-         (knowledge_base_id, name, root_path, extra, created_at, updated_at) \
-         VALUES (?, 'credential knowledge', '/tmp/credential-knowledge', ?, 1, 1)",
-    )
-    .bind(nomifun_common::generate_id())
-    .bind(
-        serde_json::json!({
-            "source": {
-                "kind": "contract",
-                "credentialRef": credential_id
-            }
-        })
-        .to_string(),
-    )
-    .execute(pool)
-    .await
-    .expect("UUID credential reference");
 
     let task_value_type: String = sqlx::query_scalar(
         "SELECT typeof(json_extract(origin, '$.creation_task_id')) \
@@ -1014,15 +978,6 @@ async fn remaining_uuid_logical_links_and_json_registry_enforce_text_values() {
             "{label} must be rejected"
         );
     }
-    let credential_value_type: String = sqlx::query_scalar(
-        "SELECT typeof(json_extract(extra, '$.source.credentialRef')) \
-         FROM knowledge_bases WHERE json_extract(extra, '$.source.credentialRef') = ?",
-    )
-    .bind(&credential_id)
-    .fetch_one(pool)
-    .await
-    .expect("knowledge credential JSON value");
-    assert_eq!(credential_value_type, "text");
 }
 
 #[tokio::test]

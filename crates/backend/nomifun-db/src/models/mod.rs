@@ -6,7 +6,6 @@ mod attachment;
 mod channel;
 mod client_preference;
 mod companion_token;
-mod connector_credential;
 mod conversation;
 mod conversation_artifact;
 mod cron_job;
@@ -46,7 +45,6 @@ pub use channel::{
 };
 pub use client_preference::ClientPreference;
 pub use companion_token::CompanionApiTokenRow;
-pub use connector_credential::ConnectorCredentialRow;
 pub use conversation::{ConversationDeliveryNotifyRow, ConversationDeliveryReceiptRow, ConversationRow};
 pub use conversation_artifact::ConversationArtifactRow;
 pub use cron_job::CronJobRow;

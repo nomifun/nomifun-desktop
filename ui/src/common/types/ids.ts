@@ -59,7 +59,6 @@ export type EntityKind =
   | 'conversation-artifact'
   | 'mcp-server'
   | 'idmm-intervention'
-  | 'connector-credential'
   | 'requirement'
   | 'persisted-artifact'
   | 'user'
@@ -111,7 +110,6 @@ export type ChannelSessionId = EntityId<'channel-session'>;
 export type AttachmentId = EntityId<'attachment'>;
 export type PreviewSnapshotId = EntityId<'preview-snapshot'>;
 export type PersistedArtifactId = EntityId<'persisted-artifact'>;
-export type ConnectorCredentialId = EntityId<'connector-credential'>;
 export type IdmmInterventionId = EntityId<'idmm-intervention'>;
 export type UserId = EntityId<'user'>;
 export type CanvasId = EntityId<'canvas'>;
@@ -241,8 +239,6 @@ export const parsePreviewSnapshotId = (value: unknown): PreviewSnapshotId =>
   parseEntityId('preview-snapshot', value);
 export const parsePersistedArtifactId = (value: unknown): PersistedArtifactId =>
   parseEntityId('persisted-artifact', value);
-export const parseConnectorCredentialId = (value: unknown): ConnectorCredentialId =>
-  parseEntityId('connector-credential', value);
 export const parseIdmmInterventionId = (value: unknown): IdmmInterventionId =>
   parseEntityId('idmm-intervention', value);
 export const parseUserId = (value: unknown): UserId => parseEntityId('user', value);

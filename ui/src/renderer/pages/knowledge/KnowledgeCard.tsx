@@ -15,7 +15,7 @@
 import React from 'react';
 import { useTranslation } from 'react-i18next';
 import type { TFunction } from 'i18next';
-import { Delete, Earth, EditTwo, FolderOpen, LinkOne, SettingOne } from '@icon-park/react';
+import { Delete, Earth, EditTwo, FolderOpen, LinkOne } from '@icon-park/react';
 import type { IKnowledgeBase, IKnowledgeTag } from '@/common/adapter/ipcBridge';
 import { formatSize } from './useKnowledge';
 
@@ -51,7 +51,6 @@ type KindConfig = {
  * - blank = neutral/gray (fill-2 / text-2)
  * - local = primary (blue)
  * - web = success (green)
- * - feishu = warning (orange)
  */
 function getKindConfig(kind: IKnowledgeBase['kind'], t: TFunction): KindConfig {
   switch (kind) {
@@ -74,16 +73,6 @@ function getKindConfig(kind: IKnowledgeBase['kind'], t: TFunction): KindConfig {
         iconBg: 'rgba(var(--success-6),0.1)',
         iconBorder: 'rgba(var(--success-6),0.3)',
         iconColor: 'rgb(var(--success-5))',
-      };
-    case 'feishu':
-      return {
-        label: t('knowledge.card.kindFeishu', { defaultValue: '飞书' }),
-        bgClass: 'bg-[rgba(var(--warning-6),0.12)]',
-        textClass: 'text-[rgb(var(--warning-5))]',
-        borderClass: 'border-[rgba(var(--warning-6),0.3)]',
-        iconBg: 'rgba(var(--warning-6),0.12)',
-        iconBorder: 'rgba(var(--warning-6),0.3)',
-        iconColor: 'rgb(var(--warning-5))',
       };
     case 'blank':
     default:
@@ -115,13 +104,12 @@ function KindIcon({ kind, config }: { kind: IKnowledgeBase['kind']; config: Kind
     >
       {kind === 'local' && <FolderOpen {...iconProps} />}
       {kind === 'web' && <Earth {...iconProps} />}
-      {kind === 'feishu' && <SettingOne {...iconProps} />}
       {kind === 'blank' && <EditTwo {...iconProps} />}
     </div>
   );
 }
 
-/** Source-mode status badges (live/snapshot/sync interval). */
+/** Source-mode status badges (live/snapshot). */
 function StatusBadges({
   base,
   t,
@@ -159,27 +147,6 @@ function StatusBadges({
           className='inline-flex items-center rounded-6px px-8px py-2px text-10px font-600 border border-solid border-[var(--color-border-2)] text-[var(--color-text-2)] bg-fill-2'
         >
           {t('knowledge.card.modeSnapshot', { defaultValue: '快照' })}
-        </span>
-      );
-    }
-
-    // Feishu sync interval badge
-    if (base.source.sync?.intervalMinutes) {
-      const interval = base.source.sync.intervalMinutes;
-      let label: string;
-      if (interval <= 60) {
-        label = t('knowledge.card.syncHourly', { defaultValue: '每小时同步' });
-      } else if (interval <= 1440) {
-        label = t('knowledge.card.syncDaily', { defaultValue: '每天同步' });
-      } else {
-        label = t('knowledge.card.syncWeekly', { defaultValue: '每周同步' });
-      }
-      badges.push(
-        <span
-          key='sync'
-          className='inline-flex items-center rounded-6px px-8px py-2px text-10px font-600 border border-solid border-[var(--color-border-2)] text-[var(--color-text-2)] bg-fill-2'
-        >
-          {label}
         </span>
       );
     }

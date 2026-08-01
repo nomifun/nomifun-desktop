@@ -20,7 +20,6 @@ describe('named resource wire IDs', () => {
       '{ terminal_id: TerminalId }',
       '{ provider_id: ProviderId }',
       '{ knowledge_base_id: KnowledgeBaseId }',
-      '{ credential_id: ConnectorCredentialId }',
     ]) {
       expect(bridgeSource.includes(expected)).toBe(true);
     }
@@ -37,17 +36,9 @@ describe('named resource wire IDs', () => {
       '/api/terminals/${p.id}',
       '/api/providers/${p.id}',
       '/api/knowledge/bases/${p.id}',
-      '/api/knowledge/connectors/credentials/${p.credentialId}',
       '/api/model-services/free/models/${encodeURIComponent(p.id)}',
     ]) {
       expect(bridgeSource.includes(legacy)).toBe(false);
     }
-    expect(
-      bridgeSource.includes(
-        'connector credential wire payload must use credentialId, not generic id'
-      )
-    ).toBe(true);
-    expect(bridgeSource.includes('credentialId: parseConnectorCredentialId')).toBe(true);
-    expect(bridgeSource.includes('parseConnectorCredentialId(base.source.credentialRef)')).toBe(true);
   });
 });

@@ -32,7 +32,6 @@ pub(crate) const PRODUCT_TABLES: &[&str] = &[
     "channel_users",
     "client_preferences",
     "companion_access_token",
-    "connector_credentials",
     "conversation_artifacts",
     "conversation_creation_keys",
     "conversation_delivery_notify",
@@ -110,7 +109,6 @@ const UUIDV7_BUSINESS_COLUMNS: &[(&str, &str)] = &[
     ("channel_pending_prompts", "prompt_id"),
     ("channel_sessions", "channel_session_id"),
     ("channel_users", "channel_user_id"),
-    ("connector_credentials", "credential_id"),
     ("conversation_artifacts", "conversation_artifact_id"),
     ("conversations", "conversation_id"),
     ("creation_tasks", "creation_task_id"),
@@ -177,7 +175,6 @@ const NON_REFERENCE_ID_COLUMNS: &[(&str, &str)] = &[
     ("channel_sessions", "chat_id"),
     ("channel_users", "channel_user_id"),
     ("channel_users", "platform_user_id"),
-    ("connector_credentials", "credential_id"),
     ("conversation_artifacts", "conversation_artifact_id"),
     ("conversation_delivery_notify", "operation_id"),
     ("conversation_delivery_receipts", "conversation_id"),
@@ -791,11 +788,6 @@ pub(crate) const JSON_LOGICAL_REFERENCES: &[JsonLogicalReference] = &[
         "cron_jobs", "agent_config", "$.provider_id (agent_type=nomi)",
         "SELECT json_extract(agent_config, '$.provider_id') AS value FROM cron_jobs WHERE agent_type = 'nomi' AND agent_config IS NOT NULL" =>
         "providers", "provider_id", "idx_cron_jobs_nomi_provider_id", Restrict, RequireParent
-    ),
-    json_text_ref!(
-        "knowledge_bases", "extra", "$.source.credentialRef",
-        "SELECT json_extract(extra, '$.source.credentialRef') AS value FROM knowledge_bases WHERE json_extract(extra, '$.source.credentialRef') IS NOT NULL" =>
-        "connector_credentials", "credential_id", "idx_knowledge_bases_extra_credential_ref", Restrict, RequireParent
     ),
     json_text_ref!(
         "workshop_assets", "origin", "$.provider_id",
@@ -2684,72 +2676,5 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(unchanged, "succeeded");
-    }
-
-    #[tokio::test]
-    async fn json_business_reference_audit_rejects_integer_credential_ids() {
-        let database = init_database_memory().await.expect("database");
-        let pool = database.pool();
-        let provider_id = nomifun_common::generate_id();
-        sqlx::query(
-            "INSERT INTO providers \
-             (provider_id, platform, name, base_url, api_key_encrypted, created_at, updated_at) \
-             VALUES (?, 'contract', 'JSON audit provider', 'https://example.invalid', '', 1, 1)",
-        )
-        .bind(&provider_id)
-        .execute(pool)
-        .await
-        .expect("provider");
-        sqlx::query(
-            "INSERT INTO creation_tasks \
-             (creation_task_id, provider_id, model, capability, params, status, submitted_at) \
-             VALUES (?, ?, 'model', 'text', '{}', 'queued', 1)",
-        )
-        .bind(nomifun_common::generate_id())
-        .bind(&provider_id)
-        .execute(pool)
-        .await
-        .expect("creation task");
-        sqlx::query(
-            "INSERT INTO connector_credentials \
-             (credential_id, kind, name, payload_encrypted, created_at, updated_at) \
-             VALUES (?, 'contract', 'JSON audit credential', 'ciphertext', 1, 1)",
-        )
-        .bind(nomifun_common::generate_id())
-        .execute(pool)
-        .await
-        .expect("credential");
-        assert!(
-            sqlx::query(
-                "INSERT INTO workshop_assets \
-                 (asset_id, kind, title, origin, created_at, updated_at) \
-                 VALUES (?, 'image', 'legacy integer task reference', \
-                         '{\"task_id\":1}', 1, 1)",
-            )
-            .bind(nomifun_common::generate_id())
-            .execute(pool)
-            .await
-            .is_err(),
-            "legacy origin.task_id must be rejected by the v3 schema"
-        );
-        sqlx::query(
-            "INSERT INTO knowledge_bases \
-             (knowledge_base_id, name, root_path, extra, created_at, updated_at) \
-             VALUES (?, 'invalid integer credential reference', '/tmp/invalid-credential-ref', \
-                     '{\"source\":{\"credentialRef\":1}}', 1, 1)",
-        )
-        .bind(nomifun_common::generate_id())
-        .execute(pool)
-        .await
-        .expect("invalid JSON fixture");
-
-        let findings = audit_logical_reference_orphans(pool)
-            .await
-            .expect("JSON reference audit");
-        assert!(findings.iter().any(|finding| {
-            finding.child_table == "knowledge_bases"
-                && finding.child_column == "extra:$.source.credentialRef"
-                && finding.count == 1
-        }));
     }
 }

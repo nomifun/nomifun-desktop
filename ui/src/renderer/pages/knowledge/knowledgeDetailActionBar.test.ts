@@ -54,12 +54,11 @@ describe('Knowledge detail document action bar', () => {
     expect(detailSource.includes("aria-label={t('common.more'")).toBe(true);
   });
 
-  test('disables connector entries while Feishu knowledge creation is disabled', () => {
-    expect(detailSource.includes('FEISHU_KNOWLEDGE_CREATION_ENABLED')).toBe(true);
-    expect(detailSource.includes("disabled={!FEISHU_KNOWLEDGE_CREATION_ENABLED}")).toBe(true);
-    expect(detailSource.includes("!FEISHU_KNOWLEDGE_CREATION_ENABLED && 'cursor-not-allowed opacity-50'")).toBe(true);
-    expect(detailSource.includes("onClick={() => setConnectorVisible(true)}")).toBe(false);
-    expect(detailSource.includes("onConnectorOpen={() => setConnectorVisible(true)}")).toBe(false);
+  test('carries no Feishu connector UI (removed integration; only the create-flow placeholder remains)', () => {
+    expect(detailSource.includes('FEISHU_KNOWLEDGE_CREATION_ENABLED')).toBe(false);
+    expect(detailSource.includes('KnowledgeConnectorDrawer')).toBe(false);
+    expect(detailSource.includes('setConnectorVisible')).toBe(false);
+    expect(detailSource.includes('syncSource')).toBe(false);
   });
 
   test('uses theme-aware contrast for detail badges, active tabs, and settings fields', () => {

@@ -104,7 +104,7 @@ Participant use `participant_id`, `step_id`, `attempt_id`, and
 `template_participant_id`. Channel Plugin, User, and Session use
 `channel_plugin_id`, `channel_user_id`, and `channel_session_id`. All seven
 are bare canonical UUIDv7 business IDs, not local integer identities. The same
-rule applies to MCP servers, webhooks, connector credentials, creation tasks,
+rule applies to MCP servers, webhooks, creation tasks,
 conversation artifacts, and IDMM interventions.
 
 - `Database` — owns the `sqlx::SqlitePool` and the v3 baseline schema state.

@@ -229,10 +229,6 @@ define_entity_id!(
     KnowledgeBindingId
 );
 define_entity_id!(
-    /// Globally unique connector-credential identifier.
-    ConnectorCredentialId
-);
-define_entity_id!(
     /// Globally unique attachment identifier.
     AttachmentId
 );

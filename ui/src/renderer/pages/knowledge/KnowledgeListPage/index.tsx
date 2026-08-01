@@ -41,6 +41,7 @@ import KnowledgeCard from '../KnowledgeCard';
 import KnowledgeTagFilterBar, { type KnowledgeKind, type KnowledgeSort } from '../KnowledgeTagFilterBar';
 import KnowledgeTagManagementModal from '../KnowledgeTagManagementModal';
 import CreateStudio from '../CreateStudio';
+import type { StudioInitialKind } from '../CreateStudio/sourceTypes';
 
 // ─── Filter pure function ────────────────────────────────────────────────────
 
@@ -152,10 +153,10 @@ const KnowledgeListPage: React.FC = () => {
   // ─── CreateStudio state ─────────────────────────────────────────────────────
 
   const [studioVisible, setStudioVisible] = useState(false);
-  const [studioInitialKind, setStudioInitialKind] = useState<KnowledgeKind | undefined>(undefined);
+  const [studioInitialKind, setStudioInitialKind] = useState<StudioInitialKind | undefined>(undefined);
 
   const openStudio = (initialKind?: KnowledgeKindShortcut) => {
-    setStudioInitialKind(initialKind as KnowledgeKind | undefined);
+    setStudioInitialKind(initialKind);
     setStudioVisible(true);
   };
 

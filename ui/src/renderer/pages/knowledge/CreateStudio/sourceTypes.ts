@@ -7,10 +7,18 @@
 import type { KnowledgeKind } from '../KnowledgeTagFilterBar';
 
 /**
- * Extends KnowledgeKind with 'import' for the migration entry in the type rail.
- * 'import' is not a persistent base kind — it's a creation source path only.
+ * Kinds the create flow can be opened with: the persistent base kinds plus
+ * 'feishu', which only exists as a disabled third-party placeholder in the
+ * type rail / empty state (no backend integration).
  */
-export type StudioSourceType = KnowledgeKind | 'import';
+export type StudioInitialKind = KnowledgeKind | 'feishu';
+
+/**
+ * Extends the initial kinds with 'import' for the migration entry in the type
+ * rail. 'import' is not a persistent base kind — it's a creation source path
+ * only.
+ */
+export type StudioSourceType = StudioInitialKind | 'import';
 
 export const FEISHU_KNOWLEDGE_CREATION_ENABLED = false;
 
@@ -22,7 +30,7 @@ export type StudioSourceConfigValidation =
   | { ok: true }
   | { ok: false; messageKey: 'knowledge.studio.feishuDisabled' | 'knowledge.studio.localFolderRequired' };
 
-export function normalizeStudioInitialKind(initialKind?: KnowledgeKind): StudioSourceType {
+export function normalizeStudioInitialKind(initialKind?: StudioInitialKind): StudioSourceType {
   if (initialKind === 'feishu' && !FEISHU_KNOWLEDGE_CREATION_ENABLED) return 'blank';
   return initialKind ?? 'blank';
 }

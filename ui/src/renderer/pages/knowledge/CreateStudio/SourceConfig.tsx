@@ -11,26 +11,22 @@
  * - blank: informational note (no config needed)
  * - local: folder path selector
  * - web: snapshot/realtime segment + dynamic URL rows
- * - feishu: credential select + space ID + sync interval
  * - import: zip file selector
  *
  * Controlled: accepts `value` / `onChange` from parent (index.tsx holds state).
  * Theme variables only; no hard-coded semantic colors.
  */
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback } from 'react';
 import { useTranslation } from 'react-i18next';
-import { Button, Input, Message, Select, Switch } from '@arco-design/web-react';
+import { Button, Input, Message, Switch } from '@arco-design/web-react';
 import { Close, FolderOpen, Info } from '@icon-park/react';
 import { ipcBridge } from '@/common';
-import type { IConnectorCredentialSummary } from '@/common/adapter/ipcBridge';
 import { isDesktopShell } from '@renderer/utils/platform';
 import type { StudioSourceType } from './sourceTypes';
-import type { ConnectorCredentialId } from '@/common/types/ids';
 
 // ─── Value Shape ────────────────────────────────────────────────────────────
 
 export type UrlMode = 'snapshot' | 'live';
-export type SyncInterval = 'manual' | 'hourly' | 'daily';
 
 export interface UrlEntry {
   url: string;
@@ -44,10 +40,6 @@ export interface SourceConfigValue {
   urlMode?: UrlMode;
   urlEntries?: UrlEntry[];
   browserRender?: boolean;
-  /** feishu */
-  credentialId?: ConnectorCredentialId;
-  spaceId?: string;
-  syncInterval?: SyncInterval;
   /** import */
   importPath?: string;
 }
@@ -304,12 +296,6 @@ const SourceConfig: React.FC<SourceConfigProps> = ({ sourceType, value, onChange
     );
   }
 
-  // ─── Feishu ───────────────────────────────────────────────────────────────
-
-  if (sourceType === 'feishu') {
-    return <FeishuConfig value={value} onChange={update} />;
-  }
-
   // ─── Import ───────────────────────────────────────────────────────────────
 
   if (sourceType === 'import') {
@@ -367,204 +353,6 @@ const SourceConfig: React.FC<SourceConfigProps> = ({ sourceType, value, onChange
   }
 
   return null;
-};
-
-// ─── Feishu Sub-component ───────────────────────────────────────────────────
-
-interface FeishuConfigInternalProps {
-  value: SourceConfigValue;
-  onChange: (patch: Partial<SourceConfigValue>) => void;
-}
-
-const FeishuConfig: React.FC<FeishuConfigInternalProps> = ({ value, onChange }) => {
-  const { t } = useTranslation();
-  const [creds, setCreds] = useState<IConnectorCredentialSummary[]>([]);
-  const [loading, setLoading] = useState(false);
-
-  // Inline credential creation state
-  const [showCreateForm, setShowCreateForm] = useState(false);
-  const [credName, setCredName] = useState('');
-  const [credAppId, setCredAppId] = useState('');
-  const [credAppSecret, setCredAppSecret] = useState('');
-  const [credCreating, setCredCreating] = useState(false);
-
-  const syncInterval = value.syncInterval ?? 'manual';
-
-  const refreshCreds = useCallback(async () => {
-    setLoading(true);
-    try {
-      const all = await ipcBridge.knowledge.listCredentials.invoke();
-      setCreds(all.filter((c) => c.kind === 'feishu'));
-    } catch {
-      // Silently fail — the select will be empty
-    } finally {
-      setLoading(false);
-    }
-  }, []);
-
-  useEffect(() => {
-    void refreshCreds();
-  }, [refreshCreds]);
-
-  const handleCreateCredential = async () => {
-    const trimName = credName.trim();
-    const trimAppId = credAppId.trim();
-    const trimAppSecret = credAppSecret.trim();
-    if (!trimName || !trimAppId || !trimAppSecret) {
-      Message.warning(t('knowledge.studio.feishuCredFormRequired', { defaultValue: '请填写完整的凭证信息' }));
-      return;
-    }
-    setCredCreating(true);
-    try {
-      const created = await ipcBridge.knowledge.createCredential.invoke({
-        kind: 'feishu',
-        name: trimName,
-        payload: { app_id: trimAppId, app_secret: trimAppSecret },
-      });
-      // Refresh list and auto-select the new credential
-      await refreshCreds();
-      onChange({ credentialId: created.credentialId });
-      // Reset form
-      setShowCreateForm(false);
-      setCredName('');
-      setCredAppId('');
-      setCredAppSecret('');
-      Message.success(t('knowledge.studio.feishuCredCreated', { defaultValue: '凭证创建成功' }));
-    } catch (e) {
-      Message.error(String(e));
-    } finally {
-      setCredCreating(false);
-    }
-  };
-
-  const handleCreateNew = () => {
-    setShowCreateForm(true);
-  };
-
-  return (
-    <div className={sourcePanelClass}>
-      <div className={sourceTitleClass}>
-        {t('knowledge.studio.srcTitleFeishu', { defaultValue: '来源 · 飞书知识空间' })}
-      </div>
-
-      {/* Credential select */}
-      <div>
-        <label className={sourceLabelClass}>
-          {t('knowledge.studio.feishuCredential', { defaultValue: '连接凭证' })}
-        </label>
-        <div className='flex gap-9px'>
-          <Select
-            className={`${sourceInputClass} flex-1`}
-            placeholder={t('knowledge.studio.feishuCredPlaceholder', { defaultValue: '选择一个已保存的飞书应用凭证…' })}
-            value={value.credentialId}
-            onChange={(v: ConnectorCredentialId | undefined) => onChange({ credentialId: v })}
-            loading={loading}
-            allowClear
-            renderFormat={(_option, val) => {
-              const cred = creds.find((c) => c.credentialId === val);
-              return cred ? cred.name : '';
-            }}
-          >
-            {creds.map((c) => (
-              <Select.Option key={c.credentialId} value={c.credentialId}>
-                <div className='flex flex-col py-2px'>
-                  <span className='text-13px text-[var(--color-text-1)]'>{c.name}</span>
-                  <span className='text-11px text-[var(--color-text-3)]'>
-                    {t('knowledge.studio.feishuCredId', { defaultValue: 'ID' })}: {c.credentialId.slice(0, 8)}…
-                  </span>
-                </div>
-              </Select.Option>
-            ))}
-          </Select>
-          <Button className={sourceButtonClass} onClick={handleCreateNew}>
-            ＋ {t('knowledge.studio.feishuNewCred', { defaultValue: '新增凭证' })}
-          </Button>
-        </div>
-        <div className='mt-6px text-11px text-[var(--color-text-3)]'>
-          {t('knowledge.studio.feishuCredHint', {
-            defaultValue: '凭证 = 飞书自建应用的 App ID / Secret，提交时服务端会校验并 AES 加密存储。',
-          })}
-        </div>
-
-        {/* Inline credential creation form */}
-        {showCreateForm && (
-          <div className='mt-10px space-y-8px rounded-14px bg-[var(--color-fill-1)] p-12px shadow-[inset_0_0_0_1px_rgba(0,0,0,0.035)]'>
-            <div className='text-12px font-600 text-[var(--color-text-2)]'>
-              {t('knowledge.studio.feishuNewCredTitle', { defaultValue: '新增飞书凭证' })}
-            </div>
-            <Input
-              size='small'
-              className={sourceInputClass}
-              placeholder={t('knowledge.studio.feishuCredName', { defaultValue: '凭证名称（如：产品部飞书）' })}
-              value={credName}
-              onChange={(v) => setCredName(v)}
-            />
-            <Input
-              size='small'
-              className={sourceInputClass}
-              placeholder='App ID'
-              value={credAppId}
-              onChange={(v) => setCredAppId(v)}
-            />
-            <Input.Password
-              size='small'
-              className={sourceInputClass}
-              placeholder='App Secret'
-              value={credAppSecret}
-              onChange={(v) => setCredAppSecret(v)}
-            />
-            <div className='flex gap-8px'>
-              <Button
-                size='small'
-                type='primary'
-                loading={credCreating}
-                onClick={() => void handleCreateCredential()}
-              >
-                {t('knowledge.studio.feishuCredSubmit', { defaultValue: '验证并保存' })}
-              </Button>
-              <Button size='small' onClick={() => setShowCreateForm(false)}>
-                {t('knowledge.studio.feishuCredCancel', { defaultValue: '取消' })}
-              </Button>
-            </div>
-          </div>
-        )}
-      </div>
-
-      {/* Space ID */}
-      <div>
-        <label className={sourceLabelClass}>
-          {t('knowledge.studio.feishuSpaceId', { defaultValue: '知识空间 ID' })}
-        </label>
-        <Input
-          className={sourceInputClass}
-          placeholder={t('knowledge.studio.feishuSpaceIdPlaceholder', { defaultValue: '飞书 Wiki 空间的 space_id' })}
-          value={value.spaceId ?? ''}
-          onChange={(v) => onChange({ spaceId: v })}
-        />
-      </div>
-
-      {/* Sync interval segment */}
-      <div>
-        <label className={sourceLabelClass}>
-          {t('knowledge.studio.feishuSyncFreq', { defaultValue: '同步频率' })}
-        </label>
-        <div className={segmentGroupClass}>
-          {(['manual', 'hourly', 'daily'] as SyncInterval[]).map((interval) => (
-            <button
-              key={interval}
-              type='button'
-              className={`${segmentButtonBaseClass} ${syncInterval === interval ? segmentButtonActiveClass : segmentButtonIdleClass}`}
-              onClick={() => onChange({ syncInterval: interval })}
-            >
-              {interval === 'manual' && t('knowledge.studio.feishuManual', { defaultValue: '仅手动' })}
-              {interval === 'hourly' && t('knowledge.studio.feishuHourly', { defaultValue: '每小时' })}
-              {interval === 'daily' && t('knowledge.studio.feishuDaily', { defaultValue: '每天' })}
-            </button>
-          ))}
-        </div>
-      </div>
-    </div>
-  );
 };
 
 export default SourceConfig;
