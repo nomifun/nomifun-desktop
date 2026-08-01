@@ -28,7 +28,7 @@ import { seedConversationCache } from '@/renderer/pages/conversation/utils/conve
 import type { PendingConversation } from '@/renderer/pages/conversation/components/ConversationShell/PendingConversationContext';
 import { planGuidEntry, isAutoWorkEntry } from './autoWorkEntry';
 import type { AutoWorkDraftValue } from '@/renderer/pages/conversation/components/AutoWorkControl';
-import type { AcpModelInfo, AvailableAgent, EffectiveAgentInfo } from '../types';
+import type { AvailableAgent, EffectiveAgentInfo } from '../types';
 import type {
   TDecisionPolicy,
   TDelegationPolicy,
@@ -56,7 +56,7 @@ export type GuidSendDeps = {
   selectedAgentInfo: AvailableAgent | undefined;
   selectedMode: string;
   selectedAcpModel: string | null;
-  currentAcpCachedModelInfo: AcpModelInfo | null;
+
   current_model: TProviderWithModel | undefined;
 
   // Agent helpers
@@ -130,7 +130,6 @@ export const useGuidSend = (deps: GuidSendDeps): GuidSendResult => {
     selectedAgentInfo,
     selectedMode,
     selectedAcpModel,
-    currentAcpCachedModelInfo,
     current_model,
     findAgentByKey,
     getEffectiveAgentType,
@@ -424,7 +423,13 @@ export const useGuidSend = (deps: GuidSendDeps): GuidSendResult => {
         custom_workspace: isCustomWorkspace,
         is_preset,
         session_mode: selectedMode,
-        current_model_id: selectedAcpModel || currentAcpCachedModelInfo?.current_model_id || undefined,
+        // Only an EXPLICIT user pick (or a preset preference resolved into
+        // selectedAcpModel) travels with the new conversation. Falling back
+        // to the cached handshake model here would pin the session to a
+        // possibly-stale snapshot and override the agent CLI's local default
+        // config — model initialization must follow the CLI default unless
+        // the user chose otherwise.
+        current_model_id: selectedAcpModel || undefined,
         extra: {
           default_files: files,
           exclude_auto_inject_skills: excludeBuiltinSkills,
@@ -479,7 +484,6 @@ export const useGuidSend = (deps: GuidSendDeps): GuidSendResult => {
     selectedAgentInfo,
     selectedMode,
     selectedAcpModel,
-    currentAcpCachedModelInfo,
     current_model,
     findAgentByKey,
     getEffectiveAgentType,

@@ -19,6 +19,7 @@ import HorizontalFileList from '@/renderer/components/media/HorizontalFileList';
 import { useAcpModelInfo } from '@/renderer/hooks/agent/useAcpModelInfo';
 import { useAgentModesForBackend } from '@/renderer/hooks/agent/useAgentModesForBackend';
 import { savePreferredMode } from '@/renderer/pages/guid/hooks/agentSelectionUtils';
+import { normalizeCodexMode } from '@/common/types/codex/codexModes';
 import { useAutoTitle } from '@/renderer/hooks/chat/useAutoTitle';
 import { getSendBoxDraftHook, type FileOrFolderItem } from '@/renderer/hooks/chat/useSendBoxDraft';
 import { createSetUploadFile, useSendBoxFiles } from '@/renderer/hooks/chat/useSendBoxFiles';
@@ -106,7 +107,11 @@ const AcpSendBox: React.FC<{
   agent_name?: string;
   workspacePath?: string;
   messageState: UseAcpMessageReturn;
-}> = ({ conversation_id, backend, initialModelId, session_mode, agent_name, workspacePath, messageState }) => {
+}> = ({ conversation_id, backend, initialModelId, session_mode: rawSessionMode, agent_name, workspacePath, messageState }) => {
+  // Fold codex's historical mode ids (auto/full-access -> agent/agent-full-access)
+  // so conversations persisted before the bridge swap render and mutate against
+  // ids the current bridge and mode lists actually use.
+  const session_mode = backend === 'codex' ? normalizeCodexMode(rawSessionMode) : rawSessionMode;
   const {
     running,
     hasHydratedRunningState,

@@ -282,6 +282,20 @@ const RESTART_WINDOW_MS: i64 = 60_000;
 /// zero-delay respawn cannot re-enter the same crashing operation instantly.
 const RESTART_BASE_BACKOFF_MS: u64 = 500;
 const RESTART_MAX_BACKOFF_MS: u64 = 8_000;
+
+/// Cooldown after the SECOND consecutive factory-build failure (ms), doubled
+/// per further failure and capped at [`BUILD_FAILURE_COOLDOWN_MAX_MS`].
+/// The first failure imposes no cooldown — a user reading the error card and
+/// clicking retry must not be told to wait — but automated senders (channels,
+/// cron, AutoWork) that hammer a conversation whose agent cannot even finish
+/// its startup handshake reach failure #2 immediately and get paced instead
+/// of burning a fresh CLI spawn + full handshake timeout per message.
+const BUILD_FAILURE_COOLDOWN_BASE_MS: i64 = 30_000;
+const BUILD_FAILURE_COOLDOWN_MAX_MS: i64 = 120_000;
+/// A build-failure streak is forgotten after this much time without another
+/// failure, so yesterday's incident never delays today's first message.
+const BUILD_FAILURE_RESET_MS: i64 = 600_000;
+
 const MAX_CACHED_LIFECYCLE_GATES: usize = 256;
 const BROKEN_RUNTIME_TEARDOWN_GRACE: std::time::Duration = std::time::Duration::from_secs(7);
 
@@ -291,6 +305,20 @@ struct RestartRecord {
     count: u32,
     /// When the current window began (`now_ms`).
     window_start_ms: i64,
+}
+
+/// Consecutive factory-build failures for a conversation. Unlike
+/// [`RestartRecord`] (crash-evictions of a RUNNING agent, fixed window),
+/// build failures are tracked as a streak keyed on the LAST failure: a
+/// single handshake timeout already takes minutes, so a fixed 60s window
+/// would reset between every two failures and the breaker would never
+/// engage for exactly the failure mode it exists to pace.
+#[derive(Clone, Copy)]
+struct BuildFailureRecord {
+    /// Consecutive failures without an intervening success.
+    consecutive: u32,
+    /// When the most recent failure was recorded (`now_ms`).
+    last_failure_ms: i64,
 }
 
 /// Crash-loop governor for agent (re)builds.
@@ -312,6 +340,11 @@ struct RestartRecord {
 #[derive(Default)]
 struct RestartGovernor {
     records: DashMap<String, RestartRecord>,
+    /// Factory-build failure streaks (see [`BuildFailureRecord`]). Kept
+    /// separate from crash records: a failed build never produced a process
+    /// to crash, and its pacing policy (streak cooldown) differs from the
+    /// crash policy (windowed budget + pre-spawn backoff).
+    build_failures: DashMap<String, BuildFailureRecord>,
 }
 
 impl RestartGovernor {
@@ -360,10 +393,67 @@ impl RestartGovernor {
     /// Drop all crash bookkeeping for a conversation (definitive teardown).
     fn forget(&self, conversation_id: &str) {
         self.records.remove(conversation_id);
+        self.build_failures.remove(conversation_id);
     }
 
     fn clear(&self) {
         self.records.clear();
+        self.build_failures.clear();
+    }
+
+    /// Record a factory-build failure at `now_ms`; returns the streak length.
+    /// A failure after [`BUILD_FAILURE_RESET_MS`] of quiet starts a new streak.
+    fn record_build_failure(&self, conversation_id: &str, now_ms: i64) -> u32 {
+        let mut rec = self
+            .build_failures
+            .entry(conversation_id.to_owned())
+            .or_insert(BuildFailureRecord {
+                consecutive: 0,
+                last_failure_ms: now_ms,
+            });
+        if now_ms - rec.last_failure_ms > BUILD_FAILURE_RESET_MS {
+            rec.consecutive = 1;
+        } else {
+            rec.consecutive += 1;
+        }
+        rec.last_failure_ms = now_ms;
+        rec.consecutive
+    }
+
+    /// Forget the build-failure streak after a successful build.
+    fn record_build_success(&self, conversation_id: &str) {
+        self.build_failures.remove(conversation_id);
+    }
+
+    /// Decide whether a fresh factory build may start at `now_ms`.
+    ///
+    /// - `Ok(())` — no recent failure streak (or the streak's cooldown has
+    ///   elapsed); build immediately.
+    /// - `Err(remaining_ms)` — the conversation's last builds failed
+    ///   back-to-back and the escalating cooldown has not elapsed yet.
+    ///   Callers refuse fast instead of burning another spawn + handshake.
+    fn build_gate(&self, conversation_id: &str, now_ms: i64) -> Result<(), i64> {
+        let Some(rec) = self.build_failures.get(conversation_id) else {
+            return Ok(());
+        };
+        if now_ms - rec.last_failure_ms > BUILD_FAILURE_RESET_MS {
+            return Ok(());
+        }
+        // First failure: retry freely. From the second consecutive failure
+        // onward: 30s, 60s, 120s (capped).
+        if rec.consecutive < 2 {
+            return Ok(());
+        }
+        let exponent = (rec.consecutive - 2).min(8);
+        let cooldown = BUILD_FAILURE_COOLDOWN_BASE_MS
+            .saturating_mul(1i64 << exponent)
+            .min(BUILD_FAILURE_COOLDOWN_MAX_MS);
+        let elapsed = now_ms - rec.last_failure_ms;
+        if elapsed >= cooldown {
+            Ok(())
+        } else {
+            Err(cooldown - elapsed)
+        }
     }
 }
 
@@ -983,7 +1073,48 @@ impl InMemoryAgentRuntimeRegistry {
         }
 
         let factory = self.factory.clone();
-        let build = slot.get_or_try_init(|| async move { factory(options).await });
+        // Build-failure streak accounting lives INSIDE the init closure so it
+        // is exact under single-flight: when a failed init lets the next
+        // queued waiter run its own attempt, each real factory run is counted
+        // once, refusals during the cooldown are counted never, and the gate
+        // check itself races nothing (the closure runs serially per slot).
+        let governor = Arc::clone(&self.governor);
+        let gated_conversation_id = conversation_id.to_owned();
+        let build = slot.get_or_try_init(|| async move {
+            // When the last builds failed back-to-back (e.g. the agent CLI
+            // cannot finish its startup handshake), refuse fast during the
+            // escalating cooldown instead of burning another CLI spawn +
+            // full handshake timeout per message.
+            if let Err(remaining_ms) = governor.build_gate(&gated_conversation_id, now_ms()) {
+                let retry_in_secs = ((remaining_ms + 999) / 1000).max(1);
+                warn!(
+                    conversation_id = %gated_conversation_id,
+                    remaining_ms, "Refusing agent build during build-failure cooldown"
+                );
+                return Err(AppError::Conflict(format!(
+                    "The agent for conversation {gated_conversation_id} failed to start repeatedly \
+                     and is cooling down. Try again in {retry_in_secs}s (see the previous startup \
+                     error for the underlying cause)."
+                )));
+            }
+            match factory(options).await {
+                Ok(runtime) => {
+                    governor.record_build_success(&gated_conversation_id);
+                    Ok(runtime)
+                }
+                Err(error) => {
+                    let streak =
+                        governor.record_build_failure(&gated_conversation_id, now_ms());
+                    warn!(
+                        conversation_id = %gated_conversation_id,
+                        consecutive_build_failures = streak,
+                        error = %ErrorChain(&error),
+                        "Agent runtime build failed"
+                    );
+                    Err(error)
+                }
+            }
+        });
         tokio::pin!(build);
         let build_result = if let Some(cancellation) = cancellation.as_ref() {
             tokio::select! {
@@ -2096,10 +2227,119 @@ mod tests {
 
         // First call fails, slot stays empty.
         assert!(registry.get_or_create_runtime("conv-1", make_runtime_options("conv-1")).await.is_err());
-        // Second call retries and succeeds.
+        // Second call retries and succeeds — the FIRST build failure never
+        // imposes a cooldown (manual user retries stay free).
         let h = registry.get_or_create_runtime("conv-1", make_runtime_options("conv-1")).await.unwrap();
         assert_eq!(h.conversation_id(), "conv-1");
         assert_eq!(registry.active_runtime_count(), 1);
+    }
+
+    /// From the second consecutive build failure onward, further builds are
+    /// refused fast (Conflict) during an escalating cooldown instead of
+    /// re-running the factory — the pacing that stops automated senders from
+    /// burning a full CLI spawn + handshake timeout per message when the
+    /// agent cannot start at all. A success clears the streak.
+    #[tokio::test]
+    async fn build_failure_streak_cools_down_then_recovers() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        let calls_for_factory = Arc::clone(&calls);
+        // Fails twice, then succeeds.
+        let factory: AgentRuntimeFactory = Arc::new(move |opts: AgentRuntimeBuildOptions| {
+            let calls = Arc::clone(&calls_for_factory);
+            async move {
+                let n = calls.fetch_add(1, Ordering::SeqCst);
+                if n < 2 {
+                    Err(AppError::BadGateway("initialize handshake timed out".into()))
+                } else {
+                    Ok(mock_runtime(MockAgent::new(&opts.conversation_id, None)))
+                }
+            }
+            .boxed()
+        });
+        let registry = InMemoryAgentRuntimeRegistry::new(factory);
+
+        // Failure #1: factory ran, no cooldown yet.
+        assert!(registry.get_or_create_runtime("conv-cd", make_runtime_options("conv-cd")).await.is_err());
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        // Failure #2: factory ran again (first failure is retry-free).
+        assert!(registry.get_or_create_runtime("conv-cd", make_runtime_options("conv-cd")).await.is_err());
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+
+        // Attempt #3 within the cooldown: refused FAST, factory NOT run,
+        // error names the cooldown.
+        let Err(refused) = registry
+            .get_or_create_runtime("conv-cd", make_runtime_options("conv-cd"))
+            .await
+        else {
+            panic!("cooldown must refuse the third immediate attempt");
+        };
+        assert_eq!(calls.load(Ordering::SeqCst), 2, "factory must not run during cooldown");
+        assert!(
+            refused.to_string().contains("cooling down"),
+            "refusal must explain the cooldown, got: {refused}"
+        );
+
+        // After the cooldown elapses the build runs and succeeds; the streak
+        // is cleared so a later failure starts over at "retry-free".
+        registry
+            .governor
+            .build_failures
+            .get_mut("conv-cd")
+            .expect("streak record present")
+            .last_failure_ms -= BUILD_FAILURE_COOLDOWN_BASE_MS + 1;
+        let h = registry
+            .get_or_create_runtime("conv-cd", make_runtime_options("conv-cd"))
+            .await
+            .expect("build must proceed after the cooldown");
+        assert_eq!(h.conversation_id(), "conv-cd");
+        assert!(
+            registry.governor.build_failures.get("conv-cd").is_none(),
+            "a successful build must clear the failure streak"
+        );
+    }
+
+    #[test]
+    fn build_failure_governor_escalates_and_resets() {
+        let governor = RestartGovernor::default();
+        let t0 = 1_000_000i64;
+
+        // No record → free.
+        assert!(governor.build_gate("c", t0).is_ok());
+
+        // Failure #1 → still free.
+        assert_eq!(governor.record_build_failure("c", t0), 1);
+        assert!(governor.build_gate("c", t0 + 1).is_ok());
+
+        // Failure #2 → 30s cooldown.
+        assert_eq!(governor.record_build_failure("c", t0 + 10), 2);
+        let remaining = governor.build_gate("c", t0 + 10 + 1).expect_err("cooldown engaged");
+        assert!(remaining > 0 && remaining <= BUILD_FAILURE_COOLDOWN_BASE_MS);
+        assert!(governor.build_gate("c", t0 + 10 + BUILD_FAILURE_COOLDOWN_BASE_MS).is_ok());
+
+        // Failure #3 → 60s; failure #4 → 120s (capped thereafter).
+        assert_eq!(governor.record_build_failure("c", t0 + 100), 3);
+        let remaining = governor.build_gate("c", t0 + 100 + 1).expect_err("cooldown engaged");
+        assert!(remaining > BUILD_FAILURE_COOLDOWN_BASE_MS && remaining <= 2 * BUILD_FAILURE_COOLDOWN_BASE_MS);
+        assert_eq!(governor.record_build_failure("c", t0 + 200), 4);
+        let remaining = governor.build_gate("c", t0 + 200 + 1).expect_err("cooldown engaged");
+        assert!(remaining <= BUILD_FAILURE_COOLDOWN_MAX_MS);
+        assert_eq!(governor.record_build_failure("c", t0 + 300), 5);
+        let remaining = governor.build_gate("c", t0 + 300 + 1).expect_err("cooldown engaged");
+        assert!(remaining <= BUILD_FAILURE_COOLDOWN_MAX_MS, "cooldown must cap");
+
+        // A quiet period longer than the reset window forgets the streak.
+        let later = t0 + 300 + BUILD_FAILURE_RESET_MS + 1;
+        assert!(governor.build_gate("c", later).is_ok());
+        assert_eq!(governor.record_build_failure("c", later), 1, "streak restarts after reset window");
+
+        // Success clears; forget clears.
+        governor.record_build_success("c");
+        assert!(governor.build_failures.get("c").is_none());
+        governor.record_build_failure("c", later);
+        governor.forget("c");
+        assert!(governor.build_failures.get("c").is_none());
     }
 
     #[tokio::test]

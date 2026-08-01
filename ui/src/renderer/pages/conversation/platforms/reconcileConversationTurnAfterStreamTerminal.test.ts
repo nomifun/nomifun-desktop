@@ -1,6 +1,8 @@
 import { describe, expect, test } from 'bun:test';
 import type { TChatConversation } from '@/common/config/storage';
+import type { ConversationId } from '@/common/types/ids';
 import { parseConversationId, parseMessageId } from '@/common/types/ids';
+import { emitter } from '@/renderer/utils/emitter';
 import {
   TERMINAL_RECONCILE_DELAYS_MS,
   reconcileConversationTurnAfterAcceptedReplay,
@@ -122,5 +124,55 @@ describe('terminal stream runtime reconciliation', () => {
     expect(result).toBe(true);
     expect(processingCalls).toBe(1);
     expect(idleCalls).toBe(1);
+  });
+
+  test('a successful idle reconciliation announces conversation.turn.settled', async () => {
+    const settled: ConversationId[] = [];
+    const onSettled = (settledConversationId: ConversationId) => {
+      settled.push(settledConversationId);
+    };
+    emitter.on('conversation.turn.settled', onSettled);
+
+    try {
+      const result = await reconcileConversationTurnAfterStreamTerminal(
+        conversationId,
+        () => true,
+        () => {},
+        [0],
+        async () => idleConversation,
+        5,
+        false
+      );
+
+      expect(result).toBe(true);
+      expect(settled).toEqual([conversationId]);
+    } finally {
+      emitter.off('conversation.turn.settled', onSettled);
+    }
+  });
+
+  test('an exhausted reconciliation never announces conversation.turn.settled', async () => {
+    const settled: ConversationId[] = [];
+    const onSettled = (settledConversationId: ConversationId) => {
+      settled.push(settledConversationId);
+    };
+    emitter.on('conversation.turn.settled', onSettled);
+
+    try {
+      const result = await reconcileConversationTurnAfterStreamTerminal(
+        conversationId,
+        () => true,
+        () => {},
+        [0],
+        async () => busyConversation,
+        5,
+        false
+      );
+
+      expect(result).toBe(false);
+      expect(settled).toEqual([]);
+    } finally {
+      emitter.off('conversation.turn.settled', onSettled);
+    }
   });
 });

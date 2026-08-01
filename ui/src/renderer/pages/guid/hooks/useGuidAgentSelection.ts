@@ -21,7 +21,7 @@ import {
 import { getAgentModes, getFullAutoMode } from '@/renderer/utils/model/agentModes';
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import useSWR from 'swr';
-import { savePreferredMode, savePreferredModelId, getAgentKey as getAgentKeyUtil } from './agentSelectionUtils';
+import { savePreferredMode, getAgentKey as getAgentKeyUtil } from './agentSelectionUtils';
 import { usePresetResolver } from './usePresetResolver';
 import { useAgentAvailability } from './useAgentAvailability';
 import { useCustomAgentsLoader } from './useCustomAgentsLoader';
@@ -149,16 +149,12 @@ export const useGuidAgentSelection = ({
     });
   }, []);
 
-  // Wrap setSelectedAcpModel to also save preferred model to the agent's config
+  // Wrap setSelectedAcpModel: selection is per-conversation intent only.
+  // Deliberately NOT persisted as a global per-backend preference — a new
+  // session must initialize from the agent CLI's own local default config,
+  // and a model picked here applies only to the conversation being created.
   const setSelectedAcpModel = useCallback((model_id: React.SetStateAction<string | null>) => {
-    _setSelectedAcpModel((prev) => {
-      const newModelId = typeof model_id === 'function' ? model_id(prev) : model_id;
-      const agentKey = selectedAgentRef.current;
-      if (agentKey && agentKey !== 'gemini' && agentKey !== 'custom' && agentKey !== 'preset' && newModelId) {
-        void savePreferredModelId(agentKey, newModelId);
-      }
-      return newModelId;
-    });
+    _setSelectedAcpModel(model_id);
   }, []);
 
   const availableCustomAgentIds = useMemo(() => {
@@ -394,40 +390,40 @@ export const useGuidAgentSelection = ({
     return getEffectiveAgentType(selectedAgentInfo);
   }, [is_presetAgent, selectedAgent, selectedAgentInfo, getEffectiveAgentType, isMainAgentAvailable]);
 
-  // Reset selected ACP model when agent changes: prefer the preset preset's
-  // own configured model, then the backend's saved preference, then the
-  // handshake default.
+  // Reset selected ACP model when the agent SELECTION changes: prefer the
+  // preset's own configured model; otherwise leave the selection EMPTY so the
+  // created conversation follows the agent CLI's local default config. The
+  // selector still displays the handshake-advertised current model as its
+  // label, but only an explicit user pick puts a model id into the creation
+  // params — sending the cached handshake value would override a local
+  // default the user may have changed since the last session.
+  //
+  // Guarded on the actual selection key: metadata/preset SWR revalidation
+  // must NOT re-run the reset, or it would wipe a model the user already
+  // picked for the pending conversation.
+  const modelResetForAgentKeyRef = useRef<string | null>(null);
   useEffect(() => {
-    // For preset agents, resolve to the actual backend type for config lookup
-    const backend = is_presetAgent ? currentEffectiveAgentInfo.agent_type : selectedAgent;
+    if (modelResetForAgentKeyRef.current === selectedAgentKey) return;
 
     // A preset carries provider-qualified model preferences.
-    // It must win over the backend's global `preferredModelId`, otherwise the
-    // preset's chosen model is silently discarded in favour of whatever the
-    // ACP engine was last configured with globally. Mirrors the preset-record
     // Use the first display preference only; execution resolution remains server-side.
     if (is_presetAgent) {
-      const presetModel = presets.find(
-        (preset) => preset.preset_id === selectedAgentInfo?.preset_id,
-      )?.model_preferences?.[0];
-      if (presetModel?.model) {
-        _setSelectedAcpModel(presetModel.model);
+      const preset = presets.find((entry) => entry.preset_id === selectedAgentInfo?.preset_id);
+      if (!preset) {
+        // Preset catalog not loaded yet — reset now, but leave the guard
+        // unset so the preference is applied once presets arrive.
+        modelResetForAgentKeyRef.current = null;
+        _setSelectedAcpModel(null);
         return;
       }
-    }
-
-    const config = configService.get('acp.config');
-    const preferred = (config?.[backend as string] as Record<string, unknown>)?.preferredModelId as string | undefined;
-    if (preferred) {
-      _setSelectedAcpModel(preferred);
+      modelResetForAgentKeyRef.current = selectedAgentKey;
+      _setSelectedAcpModel(preset.model_preferences?.[0]?.model ?? null);
       return;
     }
 
-    const metadataAgents = availableAgentsData as unknown as AgentMetadata[] | undefined;
-    const matched = metadataAgents?.find((a) => (a.backend ?? a.agent_type) === backend);
-    const handshakeModels = matched?.handshake?.available_models as AcpModelInfo | undefined;
-    _setSelectedAcpModel(handshakeModels?.current_model_id ?? null);
-  }, [selectedAgentKey, availableAgentsData, is_presetAgent, currentEffectiveAgentInfo.agent_type, presets, selectedAgentInfo?.preset_id]);
+    modelResetForAgentKeyRef.current = selectedAgentKey;
+    _setSelectedAcpModel(null);
+  }, [selectedAgentKey, is_presetAgent, presets, selectedAgentInfo?.preset_id]);
 
   // Read preferred mode or fallback to legacy yoloMode config
   useEffect(() => {
@@ -526,11 +522,14 @@ export const useGuidAgentSelection = ({
 
     // Fallback: when the backend has not yet observed a session for codex
     // (e.g., first launch before any warmup), use the hardcoded default list
-    // so the Guid page shows a model selector immediately.
+    // so the Guid page shows a model selector immediately. current model is
+    // deliberately null — the real default lives in the user's local codex
+    // config, so the button shows the generic "default model" label instead
+    // of pretending a hardcoded entry is active.
     if (backend === 'codex' && DEFAULT_CODEX_MODELS.length > 0) {
       return {
-        current_model_id: DEFAULT_CODEX_MODELS[0].id,
-        current_model_label: DEFAULT_CODEX_MODELS[0].label,
+        current_model_id: null,
+        current_model_label: null,
         available_models: DEFAULT_CODEX_MODELS.map((m) => ({ id: m.id, label: m.label })),
       } satisfies AcpModelInfo;
     }

@@ -4308,6 +4308,8 @@ mod tests {
         expected_admission_epoch: i64,
         expected_active_operation_id: Option<&str>,
         reason: &str,
+        result_error_code: Option<&str>,
+        result_error_retryable: Option<bool>,
         completed_at: i64,
     ) -> Result<TurnLifecycleTransition, nomifun_db::DbError> {
         let mut state = state.lock().expect("test turn state");
@@ -4332,6 +4334,8 @@ mod tests {
         receipt.result_ok = Some(false);
         receipt.result_text = None;
         receipt.result_error = Some(reason.to_owned());
+        receipt.result_error_code = result_error_code.map(str::to_owned);
+        receipt.result_error_retryable = result_error_retryable;
         receipt.updated_at = completed_at;
         receipt.completed_at = Some(completed_at);
         state.status = Some("finished".to_owned());
@@ -5063,6 +5067,8 @@ mod tests {
             expected_admission_epoch: i64,
             expected_active_operation_id: Option<&str>,
             reason: &str,
+            result_error_code: Option<&str>,
+            result_error_retryable: Option<bool>,
             completed_at: TimestampMs,
         ) -> Result<TurnLifecycleTransition, nomifun_db::DbError> {
             test_finalize_cancelled_turn(
@@ -5072,6 +5078,8 @@ mod tests {
                 expected_admission_epoch,
                 expected_active_operation_id,
                 reason,
+                result_error_code,
+                result_error_retryable,
                 completed_at,
             )
         }

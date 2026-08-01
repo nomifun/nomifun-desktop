@@ -138,6 +138,10 @@
       "unknown_upstream": "上游"
     },
     "codes": {
+      "INTERRUPTED_BY_RESTART": {
+        "title": "任务因应用退出而中断",
+        "body": "应用在任务执行中途退出，本次任务未能完成。会话已恢复可用，可重新发送该请求。"
+      },
       "PROVIDER_UNAVAILABLE": {
         "title": "当前没有可用的模型",
         "body": "当前没有可用的模型供应商，请到「模型&Agent」添加并启用一个模型后重试。"
@@ -196,7 +200,7 @@
       },
       "USER_AGENT_HANDSHAKE_TIMEOUT": {
         "title": "Agent 握手超时",
-        "body": "所选 Agent 未在预期时间内完成启动握手。请确认它没有卡在启动或登录流程中，然后重试。"
+        "body": "所选 Agent 未在预期时间内完成启动握手。首次启动可能需要下载运行组件（数十 MB），请确认网络/代理可用后重试；重试会自动清理未完成的下载。"
       },
       "USER_AGENT_ACP_INIT_FAILED": {
         "title": "Agent 协议初始化失败",

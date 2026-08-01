@@ -1897,7 +1897,10 @@ impl AppServices {
         // Event bus is shared by every service that broadcasts WS events.
         // Constructed here (rather than inline in the returned struct) so the
         // requirement service + sink built below share the same bus.
-        let event_bus = Arc::new(BroadcastEventBus::new(256));
+        // 1024: shared by every domain incl. per-chunk terminal output; lag
+        // now also emits sync.resync-required, but a larger buffer keeps
+        // drops rare in the first place.
+        let event_bus = Arc::new(BroadcastEventBus::new(1024));
 
         // Requirement service + sink. Built before the agent factory because the
         // factory needs the sink to register the nomi native requirement tools.

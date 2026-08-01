@@ -50,6 +50,7 @@ pub(super) fn user_facing_message(err: &AppError) -> String {
     full.split_once(": ").map(|(_, rest)| rest.to_owned()).unwrap_or(full)
 }
 
+use super::bunx_recovery;
 use super::codex_sandbox;
 use super::mode_normalize::normalize_requested_mode;
 
@@ -359,6 +360,15 @@ impl AcpAgentManager {
                         );
                         process_guard.disarm();
                         let _ = unregister_agent_process(&params.data_dir, process.pid());
+                        // A `bun x` staging dir left half-installed by an earlier
+                        // aborted download fails every retry with the same
+                        // "could not determine executable to run" — purge it so
+                        // the next spawn reinstalls from the download cache.
+                        if bunx_recovery::stderr_indicates_wedged_bunx(&stderr)
+                            && let Some(pkg) = bunx_recovery::bunx_package_spec(&command_spec)
+                        {
+                            bunx_recovery::purge_bunx_cache(&params.data_dir, &pkg).await;
+                        }
                         return Err(AppError::from(AcpError::StartupCrash { exit_code, signal, stderr }));
                     }
                     Err(cleanup_error) => {
@@ -391,34 +401,63 @@ impl AcpAgentManager {
             res = &mut connect_fut => match res {
                 Ok(protocol) => protocol,
                 Err(error) => {
+                    let stderr_tail = process.peek_stderr_tail(64).await;
+                    let is_init_timeout = matches!(error, AcpError::InitTimeout { .. });
                     error!(
                         conversation_id = %params.conversation_id,
                         error = %ErrorChain(&error),
+                        stderr = %stderr_tail,
                         "Failed to establish ACP protocol connection"
                     );
+                    // On a handshake timeout the SDK error alone says nothing
+                    // about WHY the child stayed silent; its stderr usually
+                    // does (bun package download in progress, proxy/network
+                    // failures, config errors). Append the allowlist-filtered
+                    // extract so the user-facing 技术详情 becomes actionable.
+                    // The "initialize handshake timed out" prefix is preserved
+                    // — error classification keys on that substring.
+                    let app_error = if is_init_timeout {
+                        match super::stderr_error_extractor::extract_error_message(&stderr_tail) {
+                            Some(extract) => {
+                                AppError::BadGateway(format!("{error}; agent stderr: {extract}"))
+                            }
+                            None => AppError::from(error),
+                        }
+                    } else {
+                        AppError::from(error)
+                    };
                     let data_dir = params.data_dir.clone();
-                    return Err(
-                        process_guard
-                            .teardown_before_error(
-                                AppError::from(error),
-                                move |process| {
-                                    let data_dir = data_dir.clone();
-                                    async move {
-                                        let result = process
-                                            .kill(Duration::from_millis(ACP_KILL_GRACE_MS))
-                                            .await;
-                                        if result.is_ok() {
-                                            let _ = unregister_agent_process(
-                                                &data_dir,
-                                                process.pid(),
-                                            );
-                                        }
-                                        result
+                    let err = process_guard
+                        .teardown_before_error(
+                            app_error,
+                            move |process| {
+                                let data_dir = data_dir.clone();
+                                async move {
+                                    let result = process
+                                        .kill(Duration::from_millis(ACP_KILL_GRACE_MS))
+                                        .await;
+                                    if result.is_ok() {
+                                        let _ = unregister_agent_process(
+                                            &data_dir,
+                                            process.pid(),
+                                        );
                                     }
-                                },
-                            )
-                            .await,
-                    );
+                                    result
+                                }
+                            },
+                        )
+                        .await;
+                    // Killing `bun x` mid-install (the timeout path above) can
+                    // leave its staging dir wedged so every retry fails with
+                    // "could not determine executable to run". Purge it AFTER
+                    // the kill so the next spawn reinstalls from the intact
+                    // download cache instead of inheriting the wreck.
+                    if is_init_timeout
+                        && let Some(pkg) = bunx_recovery::bunx_package_spec(&command_spec)
+                    {
+                        bunx_recovery::purge_bunx_cache(&params.data_dir, &pkg).await;
+                    }
+                    return Err(err);
                 }
             },
         };
@@ -532,7 +571,10 @@ impl AcpAgentManager {
                 .read()
                 .await
                 .modes()
-                .map(|modes| modes.current_mode_id.to_string())
+                // Normalize the observed id too: `preload_persisted` seeds it
+                // from the DB verbatim, so a pre-bridge-swap codex row can
+                // still carry a legacy id ("full-access") here.
+                .map(|modes| normalize_requested_mode(&self.params.metadata, &modes.current_mode_id.to_string()))
                 .or(desired)
                 .unwrap_or_else(|| normalize_requested_mode(&self.params.metadata, "default")),
             initialized: self.session_id().await.is_some(),
@@ -598,15 +640,25 @@ impl AcpAgentManager {
 
     /// Set the model for the current session.
     ///
-    /// Mirrors `set_mode`: writes user intent into the aggregate's Desired
-    /// layer, then delegates to `reconcile_session` for the SDK call.
-    /// `reconcile_session` is the sole call-site of `protocol.set_model` —
-    /// it also handles the observed sync since the CLI does not emit a
-    /// CurrentModelUpdate notification after `session/set_model`.
+    /// Mirrors `set_mode`'s desired-layer write, but is NOT best-effort:
+    /// `PUT /model` is a direct user action with visible UI feedback, so a
+    /// switch that did not reach the CLI must fail the request instead of
+    /// returning 200 while the session silently keeps the old model. After
+    /// `reconcile_session` (the sole call-site of `protocol.set_model`, which
+    /// also syncs the observed layer on success) the observed model is the
+    /// postcondition: if it does not match the request, the SDK call failed
+    /// or was dropped, and the caller gets an error it can surface.
     pub(crate) async fn set_model(&self, model_id: &str) -> Result<(), AppError> {
         let session_id = self.session.read().await.session_id().map(ToOwned::to_owned);
+        // Reject before mutating intent: without an open session the switch
+        // can neither be applied nor verified, and leaving the desired layer
+        // dirty would make a later ensure_session apply a model the caller
+        // was already told failed.
+        let Some(sid) = session_id else {
+            return Err(AppError::BadRequest("No active session".into()));
+        };
 
-        {
+        let previous_desired = {
             let mut session = self.session.write().await;
             if !session.can_select_model(model_id) {
                 warn!(
@@ -618,20 +670,40 @@ impl AcpAgentManager {
                     "Model '{model_id}' is not available for this ACP session"
                 )));
             }
+            let previous = session.desired_model_id().cloned();
             session.set_desired_model(ModelId::new(model_id));
             self.commit_session_changes(&mut session).await;
-        }
+            previous
+        };
 
-        if let Some(sid) = session_id {
-            if let Err(e) = self.reconcile_session(&sid).await {
-                debug!(
-                    conversation_id = %self.params.conversation_id,
-                    error = %e,
-                    "set_model: reconcile failed; desired layer kept for next ensure_session"
-                );
+        let reconcile_result = self.reconcile_session(&sid).await;
+
+        let observed = self.session.read().await.observed_model().map(ToOwned::to_owned);
+        if reconcile_result.is_err() || observed.as_deref() != Some(model_id) {
+            // Roll the desired layer back so a failed switch is not silently
+            // re-applied by the next ensure_session pass — the caller was
+            // told it failed, and the UI restored the previous selection.
+            // Clear first: `set_desired_model` validates against advertised
+            // models and would no-op (leaving the FAILED model in place) if
+            // the previous value is no longer advertised.
+            {
+                let mut session = self.session.write().await;
+                session.clear_desired_model();
+                if let Some(prev) = &previous_desired {
+                    session.set_desired_model(prev.clone());
+                }
+                self.commit_session_changes(&mut session).await;
             }
-        } else {
-            return Err(AppError::BadRequest("No active session".into()));
+            reconcile_result?;
+            warn!(
+                conversation_id = %self.params.conversation_id,
+                model_id = %model_id,
+                observed = observed.as_deref().unwrap_or("<none>"),
+                "set_model: CLI did not apply the requested model"
+            );
+            return Err(AppError::BadGateway(format!(
+                "The agent did not apply model '{model_id}'"
+            )));
         }
         Ok(())
     }

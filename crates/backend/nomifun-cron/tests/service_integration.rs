@@ -2722,7 +2722,7 @@ async fn icron_service_create_job_forces_full_auto_mode_for_generated_crons() {
             .agent_config
             .as_ref()
             .and_then(|config| config.mode.as_deref()),
-        Some("full-access")
+        Some("agent-full-access")
     );
 
     let claude_jobs = svc

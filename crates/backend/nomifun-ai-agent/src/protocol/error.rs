@@ -241,6 +241,11 @@ impl AcpError {
     /// See ELECTRON-1HQ.
     /// `context` carries the session ID or method name for diagnostics.
     pub fn from_sdk(err: SdkError, context: &str) -> Self {
+        // Substitute the caller's context (method or session id) when the
+        // recognised not-found payload carries no usable sid of its own.
+        let sid_or_context = |sid: String| {
+            if sid.is_empty() { context.to_owned() } else { sid }
+        };
         match err.code {
             ErrorCode::AuthRequired => AcpError::AuthRequired,
             ErrorCode::ResourceNotFound => AcpError::SessionNotFound {
@@ -251,14 +256,18 @@ impl AcpError {
             },
             ErrorCode::InvalidParams => {
                 if let Some(sid) = extract_session_not_found(err.data.as_ref()) {
-                    AcpError::SessionNotFound { session_id: sid }
+                    AcpError::SessionNotFound {
+                        session_id: sid_or_context(sid),
+                    }
                 } else {
                     AcpError::InvalidParams { message: err.message }
                 }
             }
             ErrorCode::ParseError | ErrorCode::InvalidRequest | ErrorCode::InternalError => {
                 if let Some(sid) = extract_session_not_found(err.data.as_ref()) {
-                    AcpError::SessionNotFound { session_id: sid }
+                    AcpError::SessionNotFound {
+                        session_id: sid_or_context(sid),
+                    }
                 } else {
                     AcpError::AgentInternal {
                         message: err.message,
@@ -275,7 +284,9 @@ impl AcpError {
                         session_id: context.to_owned(),
                     }
                 } else if let Some(sid) = extract_session_not_found(err.data.as_ref()) {
-                    AcpError::SessionNotFound { session_id: sid }
+                    AcpError::SessionNotFound {
+                        session_id: sid_or_context(sid),
+                    }
                 } else {
                     AcpError::AgentInternal {
                         message: err.message,
@@ -288,9 +299,20 @@ impl AcpError {
     }
 }
 
-/// If `data` carries a `{"error": "Session not found: <sid>"}` payload
-/// (either as a JSON object or as a JSON-string-of-JSON, which is what
-/// OpenCode actually emits — see ELECTRON-1HQ), return the session id.
+/// If `data` carries a session-not-found payload, return the session id
+/// (or the empty string when the message shape doesn't include one — the
+/// caller substitutes its context id).
+///
+/// Two known shapes:
+/// - `{"error": "Session not found: <sid>"}` — either as a JSON object or as
+///   a JSON-string-of-JSON, which is what OpenCode actually emits (see
+///   ELECTRON-1HQ).
+/// - `{"details": "no rollout found for thread id <sid>"}` — what
+///   @agentclientprotocol/codex-acp (codex app-server) returns for a stale
+///   session id on `session/load`, wrapped in a generic -32603. Without this
+///   mapping every pre-bridge-swap codex conversation would surface an error
+///   on resume instead of falling back to `session/new`.
+///
 /// Returns `None` for any other shape so callers can fall through to
 /// the default `code`-based mapping.
 fn extract_session_not_found(data: Option<&serde_json::Value>) -> Option<String> {
@@ -300,10 +322,34 @@ fn extract_session_not_found(data: Option<&serde_json::Value>) -> Option<String>
         serde_json::Value::String(s) => serde_json::from_str(s).ok()?,
         _ => return None,
     };
-    let msg = obj.get("error")?.as_str()?;
-    let prefix = "Session not found: ";
-    let sid = msg.strip_prefix(prefix)?.trim();
-    if sid.is_empty() { None } else { Some(sid.to_owned()) }
+    if let Some(msg) = obj.get("error").and_then(|v| v.as_str()) {
+        let prefix = "Session not found: ";
+        if let Some(sid) = msg.strip_prefix(prefix) {
+            let sid = sid.trim();
+            if !sid.is_empty() {
+                return Some(sid.to_owned());
+            }
+        }
+    }
+    if let Some(details) = obj.get("details").and_then(|v| v.as_str()) {
+        let lower = details.to_ascii_lowercase();
+        // codex app-server misses: "no rollout found for thread id <sid>" /
+        // "no rollout found for conversation id <sid>"; plus the generic
+        // "session not found" phrasing and the "Session <sid> not found"
+        // word order some agents use.
+        let session_gone = lower.contains("no rollout found")
+            || lower.contains("session not found")
+            || (lower.starts_with("session ") && lower.contains("not found"));
+        if session_gone {
+            let sid = details
+                .rsplit_once("thread id ")
+                .or_else(|| details.rsplit_once("conversation id "))
+                .map(|(_, sid)| sid.trim().trim_end_matches(['.', ',']))
+                .unwrap_or("");
+            return Some(sid.to_owned());
+        }
+    }
+    None
 }
 
 /// Conversion from [`AcpError`] to [`AppError`] — the only way `AcpError`
@@ -569,6 +615,48 @@ mod tests {
             AcpError::SessionNotFound { session_id } => assert_eq!(session_id, "sess-ie"),
             other => panic!("expected SessionNotFound, got {other:?}"),
         }
+    }
+
+    /// @agentclientprotocol/codex-acp (codex app-server) reports a stale
+    /// session on `session/load` as `-32603 Internal` with
+    /// `data.details = "no rollout found for thread id <sid>"` (live wire
+    /// capture, 1.1.7). This must classify as SessionNotFound so
+    /// `open_session_resume` drops the stale sid and rebuilds via
+    /// `session/new` — otherwise every pre-bridge-swap codex conversation
+    /// errors on its first post-upgrade message.
+    #[test]
+    fn from_sdk_internal_with_no_rollout_found_details() {
+        let sdk_err = SdkError::internal_error().data(serde_json::json!({
+            "details": "no rollout found for thread id 019fb6f3-415e-7a43-850f-51201d113fd0"
+        }));
+        let acp = AcpError::from_sdk(sdk_err, "session/load");
+        match acp {
+            AcpError::SessionNotFound { session_id } => {
+                assert_eq!(session_id, "019fb6f3-415e-7a43-850f-51201d113fd0");
+            }
+            other => panic!("expected SessionNotFound, got {other:?}"),
+        }
+        // A details payload without a "thread id" tail substitutes the
+        // caller context so the Display keeps the rescue-matching prefix.
+        let sdk_err = SdkError::internal_error().data(serde_json::json!({
+            "details": "no rollout found"
+        }));
+        let acp = AcpError::from_sdk(sdk_err, "ses-ctx");
+        match acp {
+            AcpError::SessionNotFound { session_id } => assert_eq!(session_id, "ses-ctx"),
+            other => panic!("expected SessionNotFound, got {other:?}"),
+        }
+    }
+
+    /// Unrelated `details` payloads must NOT trigger the rescue —
+    /// genuine internal errors keep their classification.
+    #[test]
+    fn from_sdk_internal_with_unrelated_details_stays_internal() {
+        let sdk_err = SdkError::internal_error().data(serde_json::json!({
+            "details": "Claude Code process exited with code 1"
+        }));
+        let acp = AcpError::from_sdk(sdk_err, "ctx");
+        assert!(matches!(acp, AcpError::AgentInternal { .. }));
     }
 
     /// Unrelated `data` payloads must not trigger the rescue path —

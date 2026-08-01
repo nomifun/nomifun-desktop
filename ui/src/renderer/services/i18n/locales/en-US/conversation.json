@@ -138,6 +138,10 @@
       "unknown_upstream": "Upstream"
     },
     "codes": {
+      "INTERRUPTED_BY_RESTART": {
+        "title": "Task interrupted by app exit",
+        "body": "The app exited while this task was still running, so it could not finish. The conversation is available again — resend the request to retry."
+      },
       "PROVIDER_UNAVAILABLE": {
         "title": "No model available",
         "body": "No usable model provider is configured. Add and enable one in Models & Agent, then retry."
@@ -196,7 +200,7 @@
       },
       "USER_AGENT_HANDSHAKE_TIMEOUT": {
         "title": "Agent handshake timed out",
-        "body": "The selected agent did not finish its startup handshake in time. Check whether it is still starting or blocked, then retry."
+        "body": "The selected agent did not finish its startup handshake in time. The first launch may need to download the agent runtime (tens of MB) — check your network/proxy, then retry; retrying resumes cleanly."
       },
       "USER_AGENT_ACP_INIT_FAILED": {
         "title": "Agent protocol initialization failed",

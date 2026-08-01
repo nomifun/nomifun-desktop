@@ -33,6 +33,15 @@ const ERROR_KEYWORDS: &[&str] = &[
     "api key",
     "quota",
     "billing",
+    // `bun x` install-phase signatures. Builtin ACP agents spawn through
+    // `bun x <pkg>@<ver>`; when the initialize handshake times out these are
+    // the lines that tell the user the child was still DOWNLOADING the agent
+    // package (or hit a wedged staging dir), not hung for no reason.
+    "resolving dependencies",
+    "downloaded",
+    "could not determine executable",
+    "package not found",
+    "failed to resolve",
 ];
 
 const MAX_MESSAGE_CHARS: usize = 240;

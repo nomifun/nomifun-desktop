@@ -139,15 +139,14 @@ const CustomerServiceRosterPage: React.FC = () => {
             <Spin />
           </div>
         ) : agents.length === 0 ? (
-          <div className='flex flex-col items-center gap-14px rd-16px border border-dashed border-[var(--color-border-2)] bg-fill-1 px-20px py-52px text-center'>
+          <div className='flex flex-col items-center justify-center gap-14px px-24px py-64px text-center'>
             <span
-              className='flex items-center justify-center w-56px h-56px rd-16px text-[rgb(var(--primary-6))]'
+              className='flex items-center justify-center w-72px h-72px rounded-full text-[rgb(var(--primary-6))]'
               style={{
-                background: 'linear-gradient(150deg, rgba(var(--primary-5),0.16) 0%, rgba(var(--primary-6),0.28) 100%)',
-                border: '1px solid rgba(var(--primary-6),0.22)',
+                background: 'var(--color-fill-2)',
               }}
             >
-              <Headset theme='outline' size='28' fill='currentColor' className='block' style={{ lineHeight: 0 }} />
+              <Headset theme='outline' size='32' fill='currentColor' className='block' style={{ lineHeight: 0 }} />
             </span>
             <div className='flex flex-col gap-4px'>
               <span className='text-15px font-600 text-t-primary'>

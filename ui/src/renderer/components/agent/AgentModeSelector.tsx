@@ -8,6 +8,7 @@ import type { ConversationId } from '@/common/types/ids';
 import { ipcBridge } from '@/common';
 import { configService } from '@/common/config/configService';
 import type { AcpSessionConfigOption } from '@/common/types/platform/acpTypes';
+import { normalizeCodexMode } from '@/common/types/codex/codexModes';
 import { savePreferredMode } from '@/renderer/pages/guid/hooks/agentSelectionUtils';
 import { getAgentModes, supportsModeSwitch, type AgentModeOption } from '@/renderer/utils/model/agentModes';
 import { useLayoutContext } from '@/renderer/hooks/context/LayoutContext';
@@ -90,7 +91,7 @@ const AgentModeSelector: React.FC<AgentModeSelectorProps> = ({
   compact,
   showLogoInCompact = false,
   compactLabelType = 'mode',
-  initialMode,
+  initialMode: rawInitialMode,
   onModeSelect,
   compactLabelOverride,
   compactLeadingIcon,
@@ -102,6 +103,13 @@ const AgentModeSelector: React.FC<AgentModeSelectorProps> = ({
   beforeRuntimeSync,
   beforeRuntimeMutation,
 }) => {
+  // Fold codex's historical mode-id lineage (default/autoEdit/auto ->
+  // agent; full-access -> agent-full-access) BEFORE validating against the
+  // available-mode list. Conversations persisted before the bridge swap
+  // carry the old ids in extra.session_mode; without the fold they miss the
+  // list and the pill falls back to modes[0] = 'read-only' — displaying
+  // read-only for a session that actually runs at full access.
+  const initialMode = backend === 'codex' ? normalizeCodexMode(rawInitialMode) : rawInitialMode;
   const { t } = useTranslation();
   const layout = useLayoutContext();
   const isMobile = Boolean(layout?.isMobile);
