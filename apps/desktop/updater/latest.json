@@ -1,11 +1,19 @@
 {
   "version": "0.3.6",
   "notes": "## NomiFun v0.3.6\n\n- 修复数据库迁移编号冲突：将 connector credentials 清理迁移调整为 `023_drop_connector_credentials`，避免与 022 迁移碰撞，并补充数据库生命周期测试覆盖。\n- 修复 Terminal / Knowledge Base 残留链路问题，增强 terminal 任务恢复、输出增强、驱动层状态处理与中英文提示文案。\n- 强化 Knowledge MCP / stdio bridge 能力，补齐 knowledge stdio 命令、stdio 公共处理、gateway capability 与 service 层接口。\n- 优化 Requirement auto-work runner 与 prompt 逻辑，使自动工作流在 terminal / knowledge 场景下的上下文衔接更稳。\n- 补充 v0.3.5 多平台 updater 清单维护记录；本次 v0.3.6 首发仍以 Windows x64 包为主，其他平台可后续在对应原生构建机追加。\n\n## Windows 包\n\n- 本次 GitHub 首发发布 Windows x64 安装包及 Tauri 自动更新签名资产。\n- 安装包未包含 Authenticode 签名，手动下载时可能出现 SmartScreen 或未知发布者提示；自动更新仍使用 Tauri 签名校验。",
-  "pub_date": "2026-08-01T08:15:13.407Z",
+  "pub_date": "2026-08-01T08:37:11.728Z",
   "platforms": {
     "windows-x86_64": {
       "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSU2VhcGdMaWVxOHkxNmlIUytYNGwreldraFJFcGsvNjFqTmR5bEdZMmQzQkp2S0FzaDJHSW95ODZ6RDZONVk5QUtnb2JrTjJ2VXNHZWZoSVZNVmpVM2xhamJ6c1dOOXdNPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzg1NTcyMTEyCWZpbGU6Tm9taUZ1bl8wLjMuNl94NjQtc2V0dXAuZXhlClQ1SzJleTQ1NU0rQ0FBSkVDR3ZrNWhqWWRRZC9nR2diV2pYTHJMM3JBRzNwTmlEN0t6ei82eE5BQjB6bHJJTGkvUnVBYVZraTBxR2dJZmFNcjMrbEF3PT0K",
       "url": "https://github.com/nomifun/nomifun-tauri/releases/download/v0.3.6/NomiFun_0.3.6_x64-setup.exe"
+    },
+    "darwin-x86_64": {
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSU2VhcGdMaWVxODNZNW1KR3hZV2NFbmVvUWsxbU9SUFhQY01heEJiRUJ1SkdqYjZVNWpvNlozN09selFWQjBTT0drZ0xXOXcyZHFacEk3MDNBV0x6aVpBUEpWZmdzQVFjPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzg1NTczMzQwCWZpbGU6Tm9taUZ1bi5hcHAudGFyLmd6CjVnUUpxV3dKWlh3RXpHSU5Sd0lPa0NuVTZUbDdmQXZXSVVLd0ZJM1NyREtjdHd1OUtqZTRJc1Y2M3YvbmRJVjF1NjNsU1pkSjcvcTBZV1YycWlvdkRBPT0K",
+      "url": "https://github.com/nomifun/nomifun-tauri/releases/download/v0.3.6/NomiFun.app.tar.gz"
+    },
+    "darwin-aarch64": {
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSU2VhcGdMaWVxODNZNW1KR3hZV2NFbmVvUWsxbU9SUFhQY01heEJiRUJ1SkdqYjZVNWpvNlozN09selFWQjBTT0drZ0xXOXcyZHFacEk3MDNBV0x6aVpBUEpWZmdzQVFjPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzg1NTczMzQwCWZpbGU6Tm9taUZ1bi5hcHAudGFyLmd6CjVnUUpxV3dKWlh3RXpHSU5Sd0lPa0NuVTZUbDdmQXZXSVVLd0ZJM1NyREtjdHd1OUtqZTRJc1Y2M3YvbmRJVjF1NjNsU1pkSjcvcTBZV1YycWlvdkRBPT0K",
+      "url": "https://github.com/nomifun/nomifun-tauri/releases/download/v0.3.6/NomiFun.app.tar.gz"
     }
   }
 }
