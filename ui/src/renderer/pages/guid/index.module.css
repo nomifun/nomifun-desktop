@@ -648,6 +648,8 @@ button.guidResourceCard:focus-visible {
 }
 
 .entryStrip {
+  container-name: guid-entry-strip;
+  container-type: inline-size;
   display: flex;
   align-items: center;
   gap: 10px;
@@ -657,6 +659,81 @@ button.guidResourceCard:focus-visible {
   background: transparent;
   box-sizing: border-box;
   overflow: hidden;
+}
+
+@container guid-entry-strip (max-width: 560px) {
+  .entryStrip .entryButton,
+  .entryStrip .entryBackButton,
+  .entryStrip :global(.guid-entry-policy-btn) {
+    width: auto !important;
+    min-width: 34px !important;
+    max-width: 34px !important;
+    height: 34px !important;
+    justify-content: center !important;
+    padding: 0 !important;
+    border-radius: 12px !important;
+    flex: 0 1 auto !important;
+    overflow: hidden !important;
+    transition:
+      max-width 160ms ease,
+      padding 160ms ease,
+      background-color 150ms ease,
+      border-color 150ms ease,
+      color 150ms ease !important;
+  }
+
+  .entryStrip .entryButtonText,
+  .entryStrip :global(.guid-entry-policy-btn .sendbox-responsive-label) {
+    display: none !important;
+  }
+
+  .entryStrip .entryPersonaButton {
+    max-width: 34px;
+  }
+
+  .entryStrip .entryPersonaButton .entryDismiss {
+    display: none;
+  }
+}
+
+@media (hover: hover) and (pointer: fine) {
+  @container guid-entry-strip (max-width: 560px) {
+    .entryStrip {
+      overflow: visible;
+    }
+
+    .entryStrip .entryButton:hover,
+    .entryStrip .entryButton:focus-visible,
+    .entryStrip .entryButton:focus-within,
+    .entryStrip .entryBackButton:hover,
+    .entryStrip .entryBackButton:focus-visible,
+    .entryStrip :global(.guid-entry-policy-btn:hover),
+    .entryStrip :global(.guid-entry-policy-btn:focus-visible) {
+      width: auto !important;
+      min-width: 34px !important;
+      max-width: min(220px, 100%) !important;
+      padding: 0 11px !important;
+      justify-content: flex-start !important;
+      flex: 0 1 auto !important;
+      position: relative;
+      z-index: 2;
+    }
+
+    .entryStrip .entryButton:hover .entryButtonText,
+    .entryStrip .entryButton:focus-visible .entryButtonText,
+    .entryStrip .entryButton:focus-within .entryButtonText,
+    .entryStrip .entryBackButton:hover .entryButtonText,
+    .entryStrip .entryBackButton:focus-visible .entryButtonText,
+    .entryStrip :global(.guid-entry-policy-btn:hover .sendbox-responsive-label),
+    .entryStrip :global(.guid-entry-policy-btn:focus-visible .sendbox-responsive-label) {
+      display: inline-flex !important;
+    }
+
+    .entryStrip .entryPersonaButton:hover .entryDismiss,
+    .entryStrip .entryPersonaButton:focus-within .entryDismiss {
+      display: inline-flex;
+    }
+  }
 }
 
 .entryButton {
@@ -1367,6 +1444,89 @@ button.guidResourceCard:focus-visible {
   font-weight: 800;
 }
 
+/* Skill rows stay as one compact, two-line unit at every drawer width. Keep
+   these overrides after the shared card rules so the preset layout cannot
+   re-enable wrapping through the cascade. */
+.drawerSkillCard {
+  box-sizing: border-box;
+  grid-template-columns: 40px minmax(0, 1fr) 20px;
+  gap: 10px;
+  align-items: center;
+  min-height: 58px;
+  padding: 8px 12px;
+}
+
+.drawerSkillCard::before {
+  display: none;
+}
+
+.drawerSkillCard .drawerCardStatus {
+  position: static;
+  justify-self: end;
+  box-sizing: border-box;
+  width: 20px;
+  height: 20px;
+}
+
+.drawerSkillCard .drawerIconTile {
+  box-sizing: border-box;
+  width: 40px;
+  height: 40px;
+  border-radius: 10px;
+}
+
+.drawerSkillCard .drawerCardBody {
+  overflow: hidden;
+  padding-right: 0;
+}
+
+.drawerSkillTitleRow {
+  height: 20px;
+  flex-wrap: nowrap;
+  gap: 6px;
+  overflow: hidden;
+}
+
+.drawerSkillTitleRow .drawerCardTitle {
+  flex: 0 1 auto;
+  line-height: 20px;
+}
+
+.drawerSkillTitleRow .drawerBadge {
+  box-sizing: border-box;
+  flex: 0 0 auto;
+  height: 20px;
+  min-height: 20px;
+}
+
+.drawerSkillMetaRow {
+  height: 20px;
+  flex: 1 1 auto;
+  flex-wrap: nowrap;
+  gap: 5px;
+  min-width: 0;
+  margin-top: 0;
+  overflow: hidden;
+}
+
+.drawerSkillMetaRow .drawerTagChip {
+  box-sizing: border-box;
+  flex: 0 0 auto;
+  height: 20px;
+  min-height: 20px;
+}
+
+.drawerSkillDescription {
+  display: block;
+  height: 17px;
+  margin-top: 3px;
+  overflow: hidden;
+  line-height: 17px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  -webkit-line-clamp: 1;
+}
+
 .drawerCallAction {
   display: inline-flex;
   align-items: center;
@@ -1526,6 +1686,75 @@ button.guidResourceCard:focus-visible {
   flex: 0 1 auto;
 }
 
+.actionConfigGroupResponsive {
+  container-name: guid-action-config;
+  container-type: inline-size;
+  flex: 1 1 0;
+  justify-content: flex-end;
+  max-width: 100%;
+}
+
+@container guid-action-config (max-width: 440px) {
+  .actionConfigGroup :global(.sendbox-responsive-label),
+  .actionConfigGroup :global(.sendbox-responsive-chevron) {
+    display: none !important;
+  }
+
+  .actionConfigGroup :global(.guid-config-btn),
+  .actionConfigGroup :global(.agent-mode-compact-pill) {
+    width: auto !important;
+    min-width: 28px !important;
+    max-width: 28px !important;
+    height: 28px !important;
+    padding: 0 !important;
+    border-radius: 999px !important;
+    flex: 0 1 auto !important;
+    overflow: hidden !important;
+    transition:
+      max-width 160ms ease,
+      padding 160ms ease,
+      opacity 160ms ease !important;
+  }
+
+  .actionConfigGroup :global(.guid-config-btn .arco-btn-content),
+  .actionConfigGroup :global(.agent-mode-compact-pill .arco-btn-content) {
+    display: inline-flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+    width: 100% !important;
+    min-width: 0 !important;
+    overflow: visible !important;
+  }
+}
+
+@media (hover: hover) and (pointer: fine) {
+  @container guid-action-config (max-width: 440px) {
+    .actionConfigGroup :global(.guid-config-btn:hover),
+    .actionConfigGroup :global(.guid-config-btn:focus-visible),
+    .actionConfigGroup :global(.agent-mode-compact-pill:hover),
+    .actionConfigGroup :global(.agent-mode-compact-pill:focus-visible) {
+      width: auto !important;
+      min-width: 28px !important;
+      max-width: 200px !important;
+      padding: 0 10px !important;
+      flex: 0 1 auto !important;
+      position: relative;
+      z-index: 2;
+    }
+
+    .actionConfigGroup :global(.guid-config-btn:hover .sendbox-responsive-label),
+    .actionConfigGroup :global(.guid-config-btn:hover .sendbox-responsive-chevron),
+    .actionConfigGroup :global(.guid-config-btn:focus-visible .sendbox-responsive-label),
+    .actionConfigGroup :global(.guid-config-btn:focus-visible .sendbox-responsive-chevron),
+    .actionConfigGroup :global(.agent-mode-compact-pill:hover .sendbox-responsive-label),
+    .actionConfigGroup :global(.agent-mode-compact-pill:hover .sendbox-responsive-chevron),
+    .actionConfigGroup :global(.agent-mode-compact-pill:focus-visible .sendbox-responsive-label),
+    .actionConfigGroup :global(.agent-mode-compact-pill:focus-visible .sendbox-responsive-chevron) {
+      display: inline-flex !important;
+    }
+  }
+}
+
 /* 首页输入框右下「模型 / 模式」按钮：与对话框 .sendbox-tools/.sendbox-actions 同款 */
 .actionSubmit :global(.sendbox-model-btn),
 .actionSubmit :global(.sendbox-model-btn:hover),
@@ -1560,6 +1789,11 @@ button.guidResourceCard:focus-visible {
   flex-shrink: 0;
   margin-left: auto;
   min-width: 0;
+}
+
+.actionSubmitResponsive {
+  flex: 1 1 auto;
+  justify-content: flex-end;
 }
 
 .workspaceFootnote {

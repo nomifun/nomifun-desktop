@@ -317,9 +317,63 @@ bun run build:ui && bun run serve:web
 
 **Docker（自托管服务器）**
 
+官方镜像已发布到 Docker Hub：
+[`nomifun/nomifun-web`](https://hub.docker.com/repository/docker/nomifun/nomifun-web)。
+下面示例使用已发布的 `v0.3.4` tag；后续有新版本时，可按 Docker Hub 页面替换。
+
+```bash
+# 拉取并运行官方镜像。
+docker run -d \
+  --name nomifun-web \
+  --restart unless-stopped \
+  -p 8787:8787 \
+  -v nomifun-data:/data \
+  nomifun/nomifun-web:v0.3.4
+# 然后打开 http://<服务器IP>:8787 并创建首位管理员
+```
+
+无人值守或公网部署时，建议在端口可访问前预置首位管理员：
+
+```bash
+docker run -d \
+  --name nomifun-web \
+  --restart unless-stopped \
+  -p 8787:8787 \
+  -v nomifun-data:/data \
+  -e NOMIFUN_ADMIN_USERNAME=admin \
+  -e NOMIFUN_ADMIN_PASSWORD='change-me-to-something-strong' \
+  nomifun/nomifun-web:v0.3.4
+```
+
+Docker Compose 也可以直接使用官方镜像：
+
+```yaml
+services:
+  nomifun:
+    image: nomifun/nomifun-web:v0.3.4
+    restart: unless-stopped
+    ports:
+      - "8787:8787"
+    volumes:
+      - nomifun-data:/data
+    environment:
+      NOMIFUN_ADMIN_USERNAME: admin
+      NOMIFUN_ADMIN_PASSWORD: "change-me-to-something-strong"
+      # 当 NomiFun 位于 HTTPS 反向代理之后时设置为 "true"。
+      NOMIFUN_HTTPS: "false"
+
+volumes:
+  nomifun-data:
+```
+
+如果你想从当前仓库源码本地构建镜像：
+
 ```bash
 docker compose up -d --build
 # 然后打开 http://<服务器IP>:8787  —  配合自带的 Caddyfile 启用 TLS
+
+# 已有 ui/dist 和 target/release/nomifun-web 时的快路径：
+bun run docker:prebuilt -- --tag nomifun/nomifun-web:v0.3.4 --build-missing --sudo
 ```
 
 详见 [`docs/getting-started/installation.zh.md`](docs/getting-started/installation.zh.md) 与 [`docs/guides/web-server-deployment.zh.md`](docs/guides/web-server-deployment.zh.md)。

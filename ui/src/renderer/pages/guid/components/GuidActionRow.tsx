@@ -260,9 +260,12 @@ const GuidActionRow: React.FC<GuidActionRowProps> = ({
           )}
         </div>
       </div>
-      <div className={styles.actionSubmit}>
+      <div className={`${styles.actionSubmit} ${!isMobile ? styles.actionSubmitResponsive : ''}`}>
         {configOptionCount > 0 && (
-          <div className={styles.actionConfigGroup} data-mobile={isMobile ? 'true' : undefined}>
+          <div
+            className={`${styles.actionConfigGroup} ${!isMobile ? styles.actionConfigGroupResponsive : ''}`}
+            data-mobile={isMobile ? 'true' : undefined}
+          >
             {modelSelectorNode}
             {collaboratorSelectorNode}
 

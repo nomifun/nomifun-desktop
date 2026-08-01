@@ -373,6 +373,144 @@
   min-width: 0;
 }
 
+/* The composer action row owns the remaining width between the attachment
+ * button and send controls. Nomi's configuration group uses that real width as
+ * a query container, so it responds to split panes/sidebars as well as the
+ * outer window size. */
+.sendbox-actions {
+  flex: 1 1 auto;
+  min-width: 0;
+  justify-content: flex-end;
+}
+
+.sendbox-responsive-config-group {
+  container-name: sendbox-config;
+  container-type: inline-size;
+  flex: 1 1 0;
+  max-width: 100%;
+}
+
+.sendbox-responsive-config-group > * {
+  min-width: 0;
+  flex-shrink: 0;
+}
+
+/* The collaboration policy is intentionally an icon in the normal toolbar,
+ * but it participates in the same desktop hover-to-expand interaction. */
+.sendbox-responsive-config-group .nomi-sendbox-policy-btn {
+  width: auto !important;
+  min-width: 28px !important;
+  max-width: 28px !important;
+  height: 28px !important;
+  padding: 0 !important;
+  border-radius: 999px !important;
+  flex: 0 1 auto !important;
+  overflow: hidden !important;
+  transition:
+    max-width 160ms ease,
+    padding 160ms ease,
+    opacity 160ms ease !important;
+}
+
+.sendbox-responsive-config-group .nomi-sendbox-policy-btn .sendbox-responsive-label {
+  display: none !important;
+}
+
+/* When the remaining toolbar slot cannot fit the text pills, preserve every
+ * action in place and collapse all variable-width controls to their icons. */
+@container sendbox-config (max-width: 560px) {
+  .sendbox-responsive-config-group .sendbox-responsive-label,
+  .sendbox-responsive-config-group .sendbox-responsive-chevron {
+    display: none !important;
+  }
+
+  .sendbox-responsive-config-group .nomi-sendbox-model-btn,
+  .sendbox-responsive-config-group .nomi-sendbox-summon-btn,
+  .sendbox-responsive-config-group .nomi-sendbox-policy-btn,
+  .sendbox-actions .sendbox-responsive-config-group .agent-mode-compact-pill {
+    width: auto !important;
+    min-width: 28px !important;
+    max-width: 28px !important;
+    height: 28px !important;
+    padding: 0 !important;
+    border-radius: 999px !important;
+    flex: 0 1 auto !important;
+    overflow: hidden !important;
+    transition:
+      max-width 160ms ease,
+      padding 160ms ease,
+      opacity 160ms ease !important;
+  }
+
+  .sendbox-responsive-config-group .nomi-sendbox-model-btn .arco-btn-content,
+  .sendbox-responsive-config-group .nomi-sendbox-summon-btn .arco-btn-content,
+  .sendbox-responsive-config-group .nomi-sendbox-policy-btn .arco-btn-content,
+  .sendbox-responsive-config-group .agent-mode-compact-pill .arco-btn-content {
+    display: inline-flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+    width: 100% !important;
+    min-width: 0 !important;
+    overflow: visible !important;
+  }
+
+  .sendbox-responsive-config-group .nomi-sendbox-summon-btn .arco-btn-icon {
+    margin: 0 !important;
+  }
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .sendbox-responsive-config-group .nomi-sendbox-policy-btn:hover,
+  .sendbox-responsive-config-group .nomi-sendbox-policy-btn:focus-visible {
+    width: auto !important;
+    min-width: 28px !important;
+    max-width: 180px !important;
+    padding: 0 10px !important;
+    flex: 0 1 auto !important;
+    position: relative;
+    z-index: 2;
+  }
+
+  .sendbox-responsive-config-group .nomi-sendbox-policy-btn:hover .sendbox-responsive-label,
+  .sendbox-responsive-config-group .nomi-sendbox-policy-btn:focus-visible .sendbox-responsive-label {
+    display: inline-flex !important;
+  }
+
+  @container sendbox-config (max-width: 560px) {
+    .sendbox-responsive-config-group .nomi-sendbox-model-btn:hover,
+    .sendbox-responsive-config-group .nomi-sendbox-model-btn:focus-visible,
+    .sendbox-responsive-config-group .nomi-sendbox-summon-btn:hover,
+    .sendbox-responsive-config-group .nomi-sendbox-summon-btn:focus-visible,
+    .sendbox-responsive-config-group .nomi-sendbox-policy-btn:hover,
+    .sendbox-responsive-config-group .nomi-sendbox-policy-btn:focus-visible,
+    .sendbox-responsive-config-group .agent-mode-compact-pill:hover,
+    .sendbox-responsive-config-group .agent-mode-compact-pill:focus-visible {
+      width: auto !important;
+      min-width: 28px !important;
+      max-width: 200px !important;
+      padding: 0 10px !important;
+      flex: 0 1 auto !important;
+      position: relative;
+      z-index: 2;
+    }
+
+    .sendbox-responsive-config-group .nomi-sendbox-model-btn:hover .sendbox-responsive-label,
+    .sendbox-responsive-config-group .nomi-sendbox-model-btn:hover .sendbox-responsive-chevron,
+    .sendbox-responsive-config-group .nomi-sendbox-model-btn:focus-visible .sendbox-responsive-label,
+    .sendbox-responsive-config-group .nomi-sendbox-model-btn:focus-visible .sendbox-responsive-chevron,
+    .sendbox-responsive-config-group .nomi-sendbox-summon-btn:hover .sendbox-responsive-label,
+    .sendbox-responsive-config-group .nomi-sendbox-summon-btn:focus-visible .sendbox-responsive-label,
+    .sendbox-responsive-config-group .nomi-sendbox-policy-btn:hover .sendbox-responsive-label,
+    .sendbox-responsive-config-group .nomi-sendbox-policy-btn:focus-visible .sendbox-responsive-label,
+    .sendbox-responsive-config-group .agent-mode-compact-pill:hover .sendbox-responsive-label,
+    .sendbox-responsive-config-group .agent-mode-compact-pill:hover .sendbox-responsive-chevron,
+    .sendbox-responsive-config-group .agent-mode-compact-pill:focus-visible .sendbox-responsive-label,
+    .sendbox-responsive-config-group .agent-mode-compact-pill:focus-visible .sendbox-responsive-chevron {
+      display: inline-flex !important;
+    }
+  }
+}
+
 /* Circle / icon-only buttons must not shrink */
 .sendbox-tools .arco-btn-shape-circle {
   flex-shrink: 0 !important;

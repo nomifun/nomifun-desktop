@@ -10,9 +10,10 @@ NomiFun 有两种宿主模式，共享同一个 Rust 后端（参见
 - [Docker / Docker Compose](#docker--docker-compose) —— 同一个 Web 服务
   的容器化方案。
 
-> **官方预构建安装包尚未发布。** 桌面包、macOS 签名、updater 产物、Docker
-> 和 native Linux service 都可以本地构建；但还没有官方公开发布渠道。下面所有
-> 安装路径都需要从源码构建。当前打包说明见
+> **桌面与 native service 打包仍取决于发布渠道。** Web 服务可以从源码构建，
+> 也可以直接使用官方 Docker 镜像
+> [`nomifun/nomifun-web`](https://hub.docker.com/repository/docker/nomifun/nomifun-web)。
+> 当前打包说明见
 > [`../contributing/building-and-packaging.zh.md`](../contributing/building-and-packaging.zh.md)。
 
 ## 前置条件
@@ -185,11 +186,39 @@ nomifun-web \
 
 ## Docker / Docker Compose
 
-仓库附带一份多阶段 `Dockerfile` 与一份 `docker-compose.yml`，会构建出
-一个**无 GUI**镜像：在 `debian:bookworm-slim` 上的 SPA + `nomifun-web` +
-`bun`。
+官方 Docker Hub 镜像是
+[`nomifun/nomifun-web`](https://hub.docker.com/repository/docker/nomifun/nomifun-web)。
+它是一个**无 GUI**镜像：在 `debian:bookworm-slim` 上的 SPA + `nomifun-web` +
+`bun`。仓库也附带一份多阶段 `Dockerfile` 与一份 `docker-compose.yml`，
+用于从源码本地构建。下面示例使用已发布的 `v0.3.4` tag；后续有新版本时，
+可按 Docker Hub 页面替换。
 
-### 用 Compose 快速上手
+### 使用官方镜像快速上手
+
+```bash
+docker run -d \
+  --name nomifun-web \
+  --restart unless-stopped \
+  -p 8787:8787 \
+  -v nomifun-data:/data \
+  nomifun/nomifun-web:v0.3.4
+# 然后访问 http://<server-ip>:8787
+```
+
+如果要在服务可访问前关闭首次设置窗口，请预置首位管理员：
+
+```bash
+docker run -d \
+  --name nomifun-web \
+  --restart unless-stopped \
+  -p 8787:8787 \
+  -v nomifun-data:/data \
+  -e NOMIFUN_ADMIN_USERNAME=admin \
+  -e NOMIFUN_ADMIN_PASSWORD='change-me-to-something-strong' \
+  nomifun/nomifun-web:v0.3.4
+```
+
+### 用 Compose 从源码本地构建
 
 在仓库根目录：
 

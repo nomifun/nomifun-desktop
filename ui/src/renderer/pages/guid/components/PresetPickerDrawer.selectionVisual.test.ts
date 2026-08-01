@@ -42,5 +42,8 @@ describe('PresetPickerDrawer selection visual language', () => {
 
   test('does not add a redundant left selection rail to selected Skill cards', () => {
     expect(css.includes('.drawerCardSelected::before')).toBe(false);
+    const skillCard = classBlock('drawerSkillCard');
+    expect(skillCard.includes('grid-template-columns: 40px minmax(0, 1fr) 20px')).toBe(true);
+    expect(css.includes('.drawerSkillCard::before {\n  display: none;')).toBe(true);
   });
 });

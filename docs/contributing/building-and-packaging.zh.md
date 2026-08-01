@@ -15,7 +15,7 @@ Tauri 桌面包、updater 产物、Docker 镜像和 Linux systemd 部署文件�
 | Tauri 桌面包 | `bun run build` 为当前 OS 构建。 |
 | macOS Developer ID 签名 + 公证 | 已有 `bun run build:signed` 包装脚本；需要本机 Apple 签名配置。 |
 | Tauri updater 产物 | `bun run build:updater` 会生成 updater `.sig`；生产 endpoint/key 管理仍需发布配置。 |
-| Docker / Compose | 支持本地构建与 compose 运行；本文不承诺公开 registry 镜像。 |
+| Docker / Compose | 已提供官方 Docker Hub 镜像 [`nomifun/nomifun-web`](https://hub.docker.com/repository/docker/nomifun/nomifun-web)；本地镜像与 compose 构建仍受支持。 |
 | Native Linux + systemd | `packaging/linux/` 提供 unit 和说明。 |
 | Windows 签名 | 需要外部代码签名证书；仓库内未配置。 |
 
@@ -106,6 +106,10 @@ Windows 仍需要代码签名证书。
 见 [`apps/desktop/updater/README.md`](../../apps/desktop/updater/README.md)。
 
 ## Docker
+
+已发布的运行时镜像：
+[`nomifun/nomifun-web`](https://hub.docker.com/repository/docker/nomifun/nomifun-web)。
+下面的命令会从当前 checkout 本地构建镜像。
 
 ```bash
 docker compose up -d --build

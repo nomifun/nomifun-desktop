@@ -405,26 +405,21 @@ const SummonControl: React.FC<{ conversationId: ConversationId }> = ({ conversat
 
   return (
     <>
-      <Tooltip
-        content={
-          summon ? t('conversation.summon.badgeTooltip', { name: summonedName }) : t('conversation.summon.buttonTooltip')
-        }
+      <Button
+        size='small'
+        shape='round'
+        type={summon ? 'primary' : 'secondary'}
+        status={summon ? 'success' : undefined}
+        icon={<EveryUser theme='outline' size='14' fill='currentColor' />}
+        onClick={() => setVisible(true)}
+        data-testid='summon-control-button'
+        className='nomi-sendbox-summon-btn'
+        aria-label={summon ? summonedName ?? undefined : t('conversation.summon.button')}
       >
-        <Button
-          size='small'
-          shape='round'
-          type={summon ? 'primary' : 'secondary'}
-          status={summon ? 'success' : undefined}
-          icon={<EveryUser theme='outline' size='14' fill='currentColor' />}
-          onClick={() => setVisible(true)}
-          data-testid='summon-control-button'
-          className='nomi-sendbox-summon-btn'
-        >
-          <span className='text-12px max-w-90px inline-block overflow-hidden text-ellipsis whitespace-nowrap align-middle'>
-            {summon ? summonedName : t('conversation.summon.button')}
-          </span>
-        </Button>
-      </Tooltip>
+        <span className='sendbox-responsive-label text-12px max-w-90px inline-block overflow-hidden text-ellipsis whitespace-nowrap align-middle'>
+          {summon ? summonedName : t('conversation.summon.button')}
+        </span>
+      </Button>
       <SummonDrawer
         visible={visible}
         onCancel={() => setVisible(false)}
